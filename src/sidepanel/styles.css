@@ -326,13 +326,7 @@ p {
   overflow-wrap: anywhere;
 }
 
-.thinking-group,
-.tool-group {
-  margin: 3px 0 8px;
-}
-
 .thinking-item,
-.tool-group,
 .activity {
   border: 0;
   border-radius: 0;
@@ -340,7 +334,6 @@ p {
 }
 
 .thinking-item summary,
-.tool-group > summary,
 .activity summary {
   display: flex;
   align-items: center;
@@ -353,7 +346,6 @@ p {
 }
 
 .thinking-item summary::-webkit-details-marker,
-.tool-group > summary::-webkit-details-marker,
 .activity summary::-webkit-details-marker {
   display: none;
 }
@@ -365,13 +357,6 @@ p {
   color: var(--foreground);
 }
 
-.tool-group-icon {
-  width: 14px;
-  height: 14px;
-  flex: 0 0 auto;
-  color: var(--foreground);
-}
-
 .thinking-status,
 .activity-status {
   margin-left: auto;
@@ -380,7 +365,6 @@ p {
 }
 
 .thinking-body,
-.tool-group-content,
 .activity-content {
   color: var(--muted-foreground);
   font-size: 11px;

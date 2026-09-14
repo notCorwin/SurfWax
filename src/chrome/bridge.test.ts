@@ -239,6 +239,38 @@ describe("ChromeBridge", () => {
     expect(fake.sendCommand).toHaveBeenCalledTimes(2);
   });
 
+  it("serializes Chrome calls and drops queued work after abort", async () => {
+    const fake = fakeChrome();
+    const started = deferred<void>();
+    const release = deferred<void>();
+    let active = 0;
+    let maximumActive = 0;
+    const serial = vi.fn(async (id: string) => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      if (id === "first") {
+        started.resolve();
+        await release.promise;
+      }
+      active -= 1;
+      return id;
+    });
+    (fake.chromeApi.tabs as { serial?: typeof serial }).serial = serial;
+    const bridge = new ChromeBridge({ chromeApi: fake.chromeApi as never });
+
+    const first = bridge.execute({ operation: "call", path: "tabs.serial", args: ["first"] });
+    await started.promise;
+    const controller = new AbortController();
+    const second = bridge.execute({ operation: "call", path: "tabs.serial", args: ["second"] }, controller.signal);
+    controller.abort();
+
+    await expect(second).rejects.toMatchObject({ name: "AbortError" });
+    expect(serial).toHaveBeenCalledTimes(1);
+    release.resolve();
+    await expect(first).resolves.toEqual({ ok: true, value: "first" });
+    expect(maximumActive).toBe(1);
+  });
+
   it("makes repeated explicit attaches idempotent", async () => {
     const fake = fakeChrome();
     const bridge = new ChromeBridge({ chromeApi: fake.chromeApi as never });

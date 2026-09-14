@@ -1,5 +1,6 @@
 import type { ChromeToolInput, ChromeToolOutput, JsonValue } from "../types";
 import { HandleStore, resolveHandles, serializeError, serializeValue } from "./serializer";
+import type { UserScriptRegistry } from "../userscripts/registry";
 
 type ChromeEvent = {
   addListener(listener: (...args: unknown[]) => void): void;
@@ -24,6 +25,7 @@ type ChromeRuntime = typeof chrome & {
 
 export type ChromeBridgeOptions = {
   chromeApi?: ChromeRuntime;
+  userScripts?: UserScriptRegistry;
 };
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -86,9 +88,11 @@ export class ChromeBridge {
   readonly handles = new HandleStore();
 
   private readonly chromeApi: ChromeRuntime;
+  private readonly userScripts?: UserScriptRegistry;
   private readonly debuggerSessions = new Map<number, DebuggerSession>();
   private readonly pendingAttaches = new Map<number, Promise<DebuggerSession>>();
   private readonly pendingWaits = new Set<() => void>();
+  private pendingExecutions?: Promise<void>;
   private readonly debuggerDetachEvent?: ChromeEvent;
   private readonly handleDebuggerDetach = (...args: unknown[]): void => {
     const source = args[0];
@@ -107,6 +111,7 @@ export class ChromeBridge {
 
   constructor(options: ChromeBridgeOptions = {}) {
     this.chromeApi = options.chromeApi ?? (globalThis.chrome as ChromeRuntime);
+    this.userScripts = options.userScripts;
     if (!this.chromeApi) throw new Error("Chrome extension APIs are unavailable");
 
     this.debuggerDetachEvent = (this.chromeApi as { debugger?: DebuggerApi }).debugger?.onDetach;
@@ -114,6 +119,19 @@ export class ChromeBridge {
   }
 
   async execute(input: ChromeToolInput, signal?: AbortSignal): Promise<ChromeToolOutput> {
+    const previous = this.pendingExecutions;
+    const task = previous
+      ? previous.then(() => this.executeNow(input, signal))
+      : this.executeNow(input, signal);
+    const tail = task.then(() => undefined, () => undefined);
+    this.pendingExecutions = tail;
+    void tail.then(() => {
+      if (this.pendingExecutions === tail) this.pendingExecutions = undefined;
+    });
+    return previous ? this.abortable(task, signal) : task;
+  }
+
+  private async executeNow(input: ChromeToolInput, signal?: AbortSignal): Promise<ChromeToolOutput> {
     if (this.disposed) return this.failure("BridgeDisposedError", "Chrome bridge has been disposed");
     try {
       throwIfAborted(signal);
@@ -192,18 +210,24 @@ export class ChromeBridge {
 
   private async call(input: Extract<ChromeToolInput, { operation: "call" }>, signal?: AbortSignal): Promise<unknown> {
     if (!input.path) throw new Error("call requires path");
+    const args = normalizeArguments(input.args, this.handles);
+    throwIfAborted(signal);
+
+    if (!input.receiver && this.userScripts) {
+      const managed = await this.userScripts.handleAgentCall(input.path, args, signal);
+      if (managed.handled) return managed.value;
+    }
+
     const receiver = input.receiver ? this.handles.resolve(input.receiver) : this.chromeApi;
     const { owner, value } = resolvePath(receiver, input.path);
     if (typeof value !== "function") throw new Error(`Chrome API path is not callable: ${input.path}`);
-    const args = normalizeArguments(input.args, this.handles);
-    throwIfAborted(signal);
 
     if (input.callbackMode === "callback") {
       return this.callWithCallback(owner, value, args, signal);
     }
 
     const result = value.apply(owner, args);
-    return result && typeof result.then === "function" ? await result : result;
+    return result && typeof result.then === "function" ? await this.abortable(result, signal) : result;
   }
 
   private callWithCallback(
@@ -314,6 +338,31 @@ export class ChromeBridge {
   private assertActive(signal?: AbortSignal): void {
     throwIfAborted(signal);
     if (this.disposed) throw new Error("Chrome bridge has been disposed");
+  }
+
+  private abortable<T>(value: PromiseLike<T>, signal?: AbortSignal): Promise<T> {
+    if (!signal) return Promise.resolve(value);
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        reject(new DOMException("Operation aborted", "AbortError"));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      Promise.resolve(value).then((result) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        resolve(result);
+      }, (error) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      });
+      if (signal.aborted) onAbort();
+    });
   }
 
   private async attachSession(

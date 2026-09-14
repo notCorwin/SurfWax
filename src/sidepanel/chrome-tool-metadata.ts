@@ -1,14 +1,19 @@
 import {
   DirectChatTransport,
   type Agent,
+  type ChatTransport,
   type ProviderMetadata,
+  readUIMessageStream,
+  type UIMessage,
   type UIMessageChunk,
 } from "ai";
+import type { EventLogger, ConversationMessage } from "../logging";
 import { parseChromeToolInput } from "../chrome/tool";
 import type { ChromeToolMeta, ChromeToolInput, JsonValue } from "../types";
 
 export const CHROME_TOOL_METADATA_PROVIDER = "side-agent-runtime";
 export const CHROME_TOOL_METADATA_KEY = "chromeToolMeta";
+type SidePanelUIMessage = UIMessage<any, never, any>;
 
 type ChromeToolMetadataObject = Record<string, JsonValue>;
 
@@ -146,19 +151,130 @@ export function enrichChromeToolStream(
   );
 }
 
-export function createChromeChatTransport(agent: Agent<any, any, any, any>) {
-  const direct = new DirectChatTransport({
-    agent,
-    onError: (error) => error instanceof Error ? error.message : String(error),
-  });
+function createRunId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `run-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
+function trackChatStream(
+  stream: ReadableStream<UIMessageChunk>,
+  logger: EventLogger | undefined,
+  runId: string,
+): ReadableStream<UIMessageChunk> {
+  if (!logger) return stream;
+
+  const [clientStream, logStream] = stream.tee();
+  const responseStream = readUIMessageStream<SidePanelUIMessage>({ stream: logStream as ReadableStream<UIMessageChunk> });
+  const responseReader = responseStream.getReader();
+  let responseMessage: SidePanelUIMessage | undefined;
+  const responseTask = (async () => {
+    try {
+      while (true) {
+        const next = await responseReader.read();
+        if (next.done) break;
+        responseMessage = next.value;
+      }
+    } catch {
+      // The client stream still owns the visible error; retain the last valid snapshot.
+    } finally {
+      responseReader.releaseLock();
+    }
+  })();
+  const clientReader = clientStream.getReader();
+  let text = "";
+  let reasoning = "";
+  let closed = false;
+
+  const finish = async (event: string, payload: unknown) => {
+    if (closed) return;
+    closed = true;
+    await responseTask;
+    if (responseMessage) await logger.appendMessage(responseMessage as ConversationMessage, runId);
+    logger.record({ category: "conversation", type: event, runId, content: payload });
+    if (responseMessage) {
+      logger.record({
+        category: "conversation",
+        type: event === "stream.cancelled" ? "conversation.aborted" : "conversation.finished",
+        runId,
+        content: { messageId: responseMessage.id },
+        ...(event === "stream.cancelled" ? { abort: { reason: "stream-aborted" } } : {}),
+      });
+    }
+    logger.endRun(runId);
+  };
+
+  return new ReadableStream<UIMessageChunk>({
+    async pull(controller) {
+      try {
+        const next = await clientReader.read();
+        if (next.done) {
+          await finish("stream.finished", { text, reasoning });
+          controller.close();
+          return;
+        }
+
+        const chunk = next.value;
+        if (chunk.type === "text-delta") text += chunk.delta;
+        if (chunk.type === "reasoning-delta") reasoning += chunk.delta;
+        controller.enqueue(chunk);
+      } catch (error) {
+        await finish("stream.failed", { error, text, reasoning });
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      await Promise.all([clientReader.cancel(reason), responseReader.cancel(reason)]);
+      await finish("stream.cancelled", { reason, text, reasoning });
+    },
+  });
+}
+
+export function createChromeChatTransport(agent: Agent<any, any, any, any>, logger?: EventLogger) {
   return {
-    sendMessages: async (options: Parameters<typeof direct.sendMessages>[0]) => (
-      enrichChromeToolStream(await direct.sendMessages(options))
-    ),
-    reconnectToStream: async (options: Parameters<typeof direct.reconnectToStream>[0]) => {
-      const stream = await direct.reconnectToStream(options);
-      return stream ? enrichChromeToolStream(stream) : null;
+    sendMessages: async (options: Parameters<ChatTransport<SidePanelUIMessage>["sendMessages"]>[0]) => {
+      const runId = createRunId();
+      logger?.beginRun(runId);
+      try {
+        let messages = options.messages;
+        if (logger) {
+          const existing = await logger.messages();
+          const latestUserMessage = [...options.messages].reverse().find((message) => message.role === "user");
+          if (options.trigger === "submit-message" && latestUserMessage) {
+            const previous = existing.find((message) => message.id === latestUserMessage.id);
+            if (!previous || JSON.stringify(previous) !== JSON.stringify(latestUserMessage)) {
+              await logger.appendMessage(latestUserMessage as ConversationMessage, runId);
+            }
+          }
+
+          const canonical = await logger.messages();
+          if (options.trigger === "regenerate-message" && options.messageId) {
+            const messageIndex = canonical.findIndex((message) => message.id === options.messageId);
+            messages = (messageIndex >= 0 ? canonical.slice(0, messageIndex) : canonical) as SidePanelUIMessage[];
+          } else {
+            messages = canonical as SidePanelUIMessage[];
+          }
+          await logger.appendContext(messages.map((message) => message.id), runId);
+          logger.record({
+            category: "conversation",
+            type: "conversation.submitted",
+            runId,
+            content: { chatId: options.chatId, messageId: options.messageId, trigger: options.trigger, message: latestUserMessage },
+          });
+        }
+
+        const direct = new DirectChatTransport<any, any, any, any, SidePanelUIMessage>({
+          agent,
+          onError: (error) => error instanceof Error ? error.message : String(error),
+        });
+        const stream = await direct.sendMessages({ ...options, messages });
+        return trackChatStream(enrichChromeToolStream(stream), logger, runId);
+      } catch (error) {
+        logger?.record({ category: "conversation", type: "conversation.failed", runId, content: { error }, error, level: "error" });
+        logger?.endRun(runId);
+        throw error;
+      }
+    },
+    reconnectToStream: async (_options: Parameters<ChatTransport<SidePanelUIMessage>["reconnectToStream"]>[0]) => {
+      return null;
     },
   };
 }

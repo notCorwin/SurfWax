@@ -207,6 +207,46 @@ test("clears the composer after sending a message", async () => {
   }
 });
 
+test("rebuilds the chat and context from the canonical event log", async () => {
+  const { context, page, userDataDirectory } = await openExtension();
+
+  try {
+    await context.route("https://provider.test/v1/chat/completions", async (route) => {
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "cache-control": "no-cache",
+          "content-type": "text/event-stream",
+        },
+        body: textResponse("本地日志已记录。"),
+      });
+    });
+
+    await configureProvider(context, page);
+    await page.getByTestId("composer-input").fill("记录这次运行");
+    await page.getByTestId("composer-input").press("Enter");
+    await expect(page.locator(".markdown-body").last()).toContainText("本地日志已记录。");
+
+    const [optionsPage] = await Promise.all([
+      context.waitForEvent("page"),
+      page.getByTestId("open-settings").click(),
+    ]);
+    await optionsPage.waitForLoadState("domcontentloaded");
+    await optionsPage.getByTestId("event-log-refresh").click();
+    const eventLog = optionsPage.getByTestId("event-log");
+    await expect(eventLog).toContainText("conversation.submitted");
+    await expect(eventLog).toContainText("记录这次运行");
+    await optionsPage.close();
+
+    await page.reload();
+    await expect(page.locator('[data-role="user"]').last()).toContainText("记录这次运行");
+    await expect(page.locator(".markdown-body").last()).toContainText("本地日志已记录。");
+  } finally {
+    await context.close();
+    await rm(userDataDirectory, { recursive: true, force: true });
+  }
+});
+
 test("keeps the composer draft responsive before any assistant output", async () => {
   const { context, page, userDataDirectory } = await openExtension();
 
@@ -420,7 +460,7 @@ test("supports a second user message after a tool response", async () => {
   }
 });
 
-test("recovers after a provider error and can send a later message", async () => {
+test("retries a transient provider error and can send a later message", async () => {
   const { context, page, userDataDirectory } = await openExtension();
   let requestCount = 0;
 
@@ -443,8 +483,8 @@ test("recovers after a provider error and can send a later message", async () =>
           "content-type": "text/event-stream",
         },
         body: requestCount === 1
-          ? toolCallResponse("failed-turn")
-          : textResponse("The later task completed."),
+          ? toolCallResponse("transient-error")
+          : textResponse(requestCount === 3 ? "The first task recovered." : "The later task completed."),
       });
     });
 
@@ -453,13 +493,14 @@ test("recovers after a provider error and can send a later message", async () =>
     await composer.fill("first task");
     await composer.press("Enter");
     await expect(page.getByTestId("chrome-tool-call")).toHaveCount(2);
-    await expect(page.getByText("synthetic provider failure")).toBeVisible();
+    await expect(page.locator(".markdown-body").last()).toContainText("The first task recovered.");
 
     await composer.fill("later task");
     await composer.press("Enter");
     await expect(page.locator("[data-role=\"user\"]").last()).toContainText("later task");
     await expect(page.locator(".markdown-body").last()).toContainText("The later task completed.");
-    expect(requestCount).toBe(3);
+    await expect(page.locator(".markdown-body").last()).toContainText("The later task completed.");
+    expect(requestCount).toBe(4);
   } finally {
     await context.close();
     await rm(userDataDirectory, { recursive: true, force: true });

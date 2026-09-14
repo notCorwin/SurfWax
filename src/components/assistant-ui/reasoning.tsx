@@ -1,7 +1,6 @@
 "use client";
 
 import type {
-  ReasoningGroupComponent,
   ReasoningMessagePartComponent,
 } from "@assistant-ui/react";
 import { BrainIcon } from "lucide-react";
@@ -29,9 +28,3 @@ const ReasoningImpl: ReasoningMessagePartComponent = ({ status }) => {
 };
 
 export const Reasoning = memo(ReasoningImpl);
-
-export const ReasoningGroup: ReasoningGroupComponent = ({ children }) => (
-  <div className="thinking-group" data-slot="aui_reasoning-group">
-    {children}
-  </div>
-);

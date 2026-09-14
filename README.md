@@ -9,14 +9,14 @@
 - 可使用 chrome.scripting.executeScript 或 CDP Runtime.evaluate 执行页面脚本。
 - Side Panel 与扩展选项页均支持 User Scripts 的创建、编辑、启用、禁用、删除和测试。
 - User Scripts 支持 MAIN/USER_SCRIPT 执行世界、内联代码和扩展内文件 source；不提供 GM.* 兼容层。
-- 审计日志追加写入本地 IndexedDB，记录对话、模型、工具、用户脚本和错误事件；凭据字段会脱敏。
-- 对话只存在于当前 Side Panel 内存生命周期；关闭面板会取消 Agent、清理 handles 和 Debugger sessions，并丢弃聊天状态。
+- 唯一的 canonical event log 追加写入本地 IndexedDB，记录完整的对话、模型、工具、请求、用户脚本和系统事件；UI、LLM context 和恢复会话都从它重建，不脱敏网页内容。
+- Side Panel 重新打开后从事件日志恢复对话；关闭面板会立即取消当前模型请求、停止后续工具调用、清理 handles 和 Debugger sessions，但已经发生的副作用和事件不会回滚或丢失。
 - 模型配置在用户点击保存后写入当前浏览器的 chrome.storage.local。
 - 不设置 Agent 步数、工具次数、消息长度、工具输出大小或任务时长上限；用户停止或关闭面板时用 AbortController 取消。
 
 ## 安装开发版
 
-要求 Chrome 135+、Node.js 和 npm：
+要求 Chrome 138+、Node.js 和 npm：
 
 ~~~sh
 npm ci
@@ -79,7 +79,7 @@ Manifest V3 不暴露 chrome.tabs.executeScript：扩展文件或函数注入使
 
 ## 日志
 
-选项页的“本地审计日志”支持按分类/关键词查看、导出 JSONL 和清空。日志用于本地审计和调试，不会回灌给 Agent，也不会用来恢复聊天。日志存储不可用时，运行时仍使用内存日志后备实现。
+选项页的“本地事件日志”支持按分类/关键词查看、导出 JSONL 和清空。日志本身就是 Agent 的对话与上下文来源；日志存储不可用时，运行时使用内存后备实现。
 
 ## 验证
 
@@ -99,7 +99,7 @@ GitHub Autobuild 会运行同样的检查和 Playwright 测试，并发布 side-
 
 ## 平台边界
 
-扩展权限、host_permissions、受保护页面、Chrome 策略、Debugger 支持的 CDP domain、User Scripts 开关、Provider 的 CORS/限流/上下文窗口和浏览器资源限制仍由平台控制。项目不提供后端、原生 helper、权限审批 UI 或对话持久化。
+扩展权限、host_permissions、受保护页面、Chrome 策略、Debugger 支持的 CDP domain、User Scripts 开关、Provider 的 CORS/限流/上下文窗口和浏览器资源限制仍由平台控制。项目不提供后端、原生 helper、权限审批 UI、代码沙箱或 capability layer；Agent 不受应用层步数、工具次数、消息长度、工具输出大小和任务时长上限限制。
 
 ## 获取帮助与贡献
 

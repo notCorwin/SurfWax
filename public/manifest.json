@@ -3,7 +3,7 @@
   "name": "Side Agent Runtime",
   "version": "0.1.0",
   "description": "A side-panel AI agent with a dynamic Chrome API bridge.",
-  "minimum_chrome_version": "125",
+  "minimum_chrome_version": "138",
   "action": {
     "default_title": "Open Side Agent"
   },

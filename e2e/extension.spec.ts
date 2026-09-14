@@ -72,7 +72,7 @@ test("loads the MV3 side panel and can use Chrome debugger from an extension pag
 
     const manifest = await extensionPage.evaluate(() => chrome.runtime.getManifest());
     expect(manifest.manifest_version).toBe(3);
-    expect(manifest.minimum_chrome_version).toBe("125");
+    expect(manifest.minimum_chrome_version).toBe("138");
     expect(manifest.options_page).toBe("options.html");
     const desktopPermissions = [
       "declarativeContent",
@@ -101,7 +101,7 @@ test("loads the MV3 side panel and can use Chrome debugger from an extension pag
       "unlimitedStorage",
       "webAuthenticationProxy",
     ];
-    expect(manifest.permissions).toEqual(expect.arrayContaining(["debugger", ...desktopPermissions]));
+    expect(manifest.permissions).toEqual(expect.arrayContaining(["debugger", "userScripts", ...desktopPermissions]));
     expect(manifest.permissions).not.toContain("webRequestBlocking");
 
     const permissionAndApiState = await extensionPage.evaluate(async () => {
@@ -175,6 +175,11 @@ test("loads the MV3 side panel and can use Chrome debugger from an extension pag
     ]);
     await optionsPage.waitForLoadState("domcontentloaded");
     await expect(optionsPage.locator("h1")).toHaveText("模型设置");
+    await expect(optionsPage.getByTestId("user-scripts-panel")).toBeVisible();
+    const userScriptsAvailable = await optionsPage.evaluate(() => typeof chrome.userScripts !== "undefined");
+    await expect(optionsPage.getByText("当前浏览器未开放 chrome.userScripts。", { exact: false }))
+      .toHaveCount(userScriptsAvailable ? 0 : 1);
+    await expect(optionsPage.getByTestId("event-log")).toBeVisible();
     const configInputs = optionsPage.getByTestId("options-card").locator("input");
     await expect(configInputs).toHaveCount(3);
     await configInputs.nth(0).fill("https://provider.test/v1");

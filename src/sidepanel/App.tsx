@@ -1,7 +1,10 @@
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
+import type { UIMessage } from "ai";
 import { SettingsIcon } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
+import { UserScriptsPanel } from "../userscripts/UserScriptsPanel";
 import { ChromeToolCall } from "./ChromeToolCall";
 import { useSidePanelSession } from "./useSidePanelSession";
 import { useSidePanelRuntime } from "./useSidePanelRuntime";
@@ -21,11 +24,12 @@ function openSettings(): void {
 
 export function App() {
   const session = useSidePanelSession();
+  const eventLogger = useMemo(() => new EventLogger(), []);
 
   return (
-    <SidePanelLayout modelLabel={session.modelLabel}>
+    <SidePanelLayout modelLabel={session.modelLabel} logger={eventLogger}>
       {session.configured ? (
-        <ConfiguredChat key={session.chatKey} config={session.config} />
+        <ConfiguredChat key={session.chatKey} config={session.config} logger={eventLogger} />
       ) : (
         <div className="empty-state" data-testid="config-required-state">
           <div className="empty-icon">⌘</div>
@@ -44,9 +48,11 @@ export function App() {
 
 function SidePanelLayout({
   modelLabel,
+  logger,
   children,
 }: {
   modelLabel: string;
+  logger: EventLogger;
   children: ReactNode;
 }) {
   return (
@@ -68,6 +74,8 @@ function SidePanelLayout({
         </button>
       </header>
 
+      <UserScriptsPanel logger={logger} mode="sidepanel" />
+
       <section className="chat-scroll" data-testid="chat-scroll" aria-live="polite">
         {children}
       </section>
@@ -75,8 +83,35 @@ function SidePanelLayout({
   );
 }
 
-function ConfiguredChat({ config }: { config: ModelConfig }) {
-  const runtime = useSidePanelRuntime(config, welcomeSuggestions);
+function ConfiguredChat({ config, logger }: { config: ModelConfig; logger: EventLogger }) {
+  const [messages, setMessages] = useState<UIMessage[] | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void logger.messages().then((stored) => {
+      if (active) setMessages(stored as UIMessage[]);
+    }).catch(() => {
+      if (active) setMessages([]);
+    });
+    return () => {
+      active = false;
+    };
+  }, [logger]);
+
+  if (!messages) return <div className="empty-state" data-testid="conversation-loading">正在恢复对话…</div>;
+  return <ConfiguredChatRuntime config={config} logger={logger} messages={messages} />;
+}
+
+function ConfiguredChatRuntime({
+  config,
+  logger,
+  messages,
+}: {
+  config: ModelConfig;
+  logger: EventLogger;
+  messages: UIMessage[];
+}) {
+  const runtime = useSidePanelRuntime(config, welcomeSuggestions, logger, messages);
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>

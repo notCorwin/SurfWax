@@ -1,14 +1,16 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../components/ui/card";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
+import { EventLogger, getLogStore, type LogCategory, type LogEvent } from "../logging";
 import type { PersistedModelConfig } from "../sidepanel/config";
 import {
   isCompleteModelConfig,
   loadModelConfig,
   saveModelConfig,
 } from "../sidepanel/config";
+import { UserScriptsPanel } from "../userscripts/UserScriptsPanel";
 import "../styles.css";
 import "./styles.css";
 
@@ -29,6 +31,7 @@ export function OptionsApp() {
   const [ready, setReady] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [message, setMessage] = useState("");
+  const eventLogger = useMemo(() => new EventLogger(), []);
 
   useEffect(() => {
     let active = true;
@@ -128,6 +131,122 @@ export function OptionsApp() {
           {message && <p className={`save-message ${saveState}`} role="status">{message}</p>}
         </form>
       </Card>
+      <UserScriptsPanel logger={eventLogger} mode="options" />
+      <EventLogViewer logger={eventLogger} />
     </main>
+  );
+}
+
+function formatEvent(event: LogEvent): string {
+  try {
+    return JSON.stringify(event, null, 2) ?? String(event);
+  } catch {
+    return String(event);
+  }
+}
+
+function EventLogViewer({ logger }: { logger: EventLogger }) {
+  const store = useMemo(() => getLogStore(), []);
+  const [events, setEvents] = useState<LogEvent[]>([]);
+  const [category, setCategory] = useState<LogCategory | "">("");
+  const [search, setSearch] = useState("");
+  const [beforeId, setBeforeId] = useState<number | undefined>();
+  const [hasMore, setHasMore] = useState(false);
+  const [status, setStatus] = useState("");
+
+  const load = useCallback(async (cursor?: number, append = false) => {
+    try {
+      const result = await store.list({
+        limit: 101,
+        beforeId: cursor,
+        search,
+        ...(category ? { category } : {}),
+      });
+      setHasMore(result.length > 100);
+      setEvents((current) => append ? [...current, ...result.slice(0, 100)] : result.slice(0, 100));
+      setStatus("");
+    } catch (error) {
+      setStatus(`日志读取失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }, [category, search, store]);
+
+  useEffect(() => {
+    setBeforeId(undefined);
+    void load();
+  }, [load]);
+
+  const exportLogs = async () => {
+    const all = (await store.all()).sort((left, right) => left.id - right.id);
+    const content = all.map((event) => JSON.stringify(event)).join("\n");
+    const url = URL.createObjectURL(new Blob([content], { type: "application/x-ndjson" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `side-agent-runtime-${new Date().toISOString().replaceAll(":", "-")}.jsonl`;
+    link.click();
+    URL.revokeObjectURL(url);
+    logger.record({ category: "system", type: "logs.exported", content: { count: all.length } });
+    setStatus(`已导出 ${all.length} 条日志`);
+  };
+
+  const clearLogs = async () => {
+    if (!window.confirm("确定清空全部本地事件日志吗？此操作不可恢复。")) return;
+    try {
+      await store.clear();
+      setEvents([]);
+      setBeforeId(undefined);
+      setHasMore(false);
+      setStatus("日志已清空");
+    } catch (error) {
+      setStatus(`日志清空失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  const loadMore = () => {
+    const cursor = events.at(-1)?.id;
+    if (cursor === undefined) return;
+    setBeforeId(cursor);
+    void load(cursor, true);
+  };
+
+  return (
+    <section className="event-log" data-testid="event-log">
+      <div className="event-log-header">
+        <div>
+          <h2>本地事件日志</h2>
+          <p>事件日志是对话、模型上下文和恢复会话的唯一来源，保存在本地 IndexedDB。</p>
+        </div>
+        <div className="event-log-actions">
+          <button type="button" className="secondary-button" data-testid="event-log-refresh" onClick={() => void load()}>刷新</button>
+          <button type="button" className="secondary-button" data-testid="event-log-export" onClick={() => void exportLogs()}>导出 JSONL</button>
+          <button type="button" className="text-button danger" data-testid="event-log-clear" onClick={() => void clearLogs()}>清空</button>
+        </div>
+      </div>
+      <div className="event-log-filters">
+        <select aria-label="日志分类" value={category} onChange={(event) => setCategory(event.target.value as LogCategory | "")}>
+          <option value="">全部分类</option>
+          <option value="conversation">conversation</option>
+          <option value="model">model</option>
+          <option value="tool">tool</option>
+          <option value="request">request</option>
+          <option value="userscript">userscript</option>
+          <option value="system">system</option>
+        </select>
+        <input aria-label="搜索日志" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索事件或正文" />
+      </div>
+      <div className="event-log-rows">
+        {events.length === 0 ? <p className="event-log-empty">暂无日志。</p> : events.map((event) => (
+          <details className="event-log-row" key={event.id}>
+            <summary>
+              <span>{event.category}</span>
+              <strong>{event.type}</strong>
+              <time>{event.timestamp}</time>
+            </summary>
+            <pre>{formatEvent(event)}</pre>
+          </details>
+        ))}
+      </div>
+      {hasMore && <button type="button" className="secondary-button" onClick={loadMore}>加载更早日志</button>}
+      {status && <p className="event-log-status" role="status">{status}</p>}
+    </section>
   );
 }
