@@ -1,20 +1,60 @@
-import { describe, expect, it } from "vitest";
-import { EventLogger, rebuildConversation, type LogEvent } from "./logging";
+import { describe, expect, it, vi } from "vitest";
+import { EventLogger, rebuildConversation, upgradeEventStore, type LogEvent } from "./logging";
 
-function memoryStore() {
+function memoryStore(onBatch?: (size: number) => void) {
   const events: LogEvent[] = [];
+  let nextId = 1;
+  const append = async (event: Omit<LogEvent, "id">) => {
+    const stored = { ...event, id: nextId++ };
+    events.push(stored);
+    return stored;
+  };
   return {
-    async append(event: Omit<LogEvent, "id">) {
-      const stored = { ...event, id: events.length + 1 };
-      events.push(stored);
-      return stored;
+    append,
+    async appendMany(batch: readonly Omit<LogEvent, "id">[]) {
+      onBatch?.(batch.length);
+      return Promise.all(batch.map(append));
     },
     async all() { return [...events]; },
+    async byTypes(types: readonly string[], conversationId?: string) {
+      return events.filter((event) => types.includes(event.type) && (!conversationId || event.conversationId === conversationId));
+    },
+    async byRunTypes(runIds: readonly string[], types: readonly string[]) {
+      return events.filter((event) => event.runId && runIds.includes(event.runId) && types.includes(event.type));
+    },
+    async conversation(conversationId: string) { return events.filter((event) => event.conversationId === conversationId); },
+    async deleteConversation(conversationId: string) {
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        if (events[index]!.conversationId === conversationId) events.splice(index, 1);
+      }
+    },
     async clear() { events.length = 0; },
   };
 }
 
 describe("canonical event log", () => {
+  it("upgrades the existing event store without deleting legacy records", () => {
+    const legacyRecords = [{ id: 1, type: "legacy" }];
+    const createIndex = vi.fn();
+    const store = { indexNames: { contains: () => false }, createIndex };
+    const db = {
+      objectStoreNames: { contains: () => true },
+      createObjectStore: vi.fn(),
+      deleteObjectStore: vi.fn(() => { legacyRecords.length = 0; }),
+    };
+    const transaction = { objectStore: vi.fn(() => store) };
+
+    upgradeEventStore(db as unknown as IDBDatabase, transaction as unknown as IDBTransaction);
+
+    expect(transaction.objectStore).toHaveBeenCalledWith("events");
+    expect(createIndex).toHaveBeenCalledWith("conversationId", "conversationId");
+    expect(createIndex).toHaveBeenCalledWith("type", "type");
+    expect(createIndex).toHaveBeenCalledWith("conversationType", ["conversationId", "type"]);
+    expect(createIndex).toHaveBeenCalledWith("runType", ["runId", "type"]);
+    expect(db.deleteObjectStore).not.toHaveBeenCalled();
+    expect(legacyRecords).toHaveLength(1);
+  });
+
   it("writes required fields in order without redacting content", async () => {
     const store = memoryStore();
     const logger = new EventLogger({ store, now: () => new Date("2026-01-01T00:00:00.000Z") });
@@ -74,5 +114,56 @@ describe("canonical event log", () => {
     await logger.flush();
     await logger.clear();
     expect(await store.all()).toEqual([]);
+  });
+
+  it("batches fire-and-forget events without dropping or reordering them", async () => {
+    const batches: number[] = [];
+    const store = memoryStore((size) => batches.push(size));
+    const logger = new EventLogger({ store });
+
+    for (let index = 0; index < 100; index += 1) {
+      logger.record({ type: "conversation.stream.chunk", content: { index } });
+    }
+    await logger.flush();
+
+    expect(batches).toEqual([100]);
+    expect((await store.all()).map((event) => event.content)).toEqual(
+      Array.from({ length: 100 }, (_, index) => ({ index })),
+    );
+  });
+
+  it("skips completed stream chunks during restore but retains interrupted replay data", async () => {
+    const store = memoryStore();
+    const logger = new EventLogger({ store });
+    await logger.appendMessage("one", { id: "u1", role: "user", parts: [] });
+    logger.record({ type: "conversation.stream.chunk", conversationId: "one", runId: "done", content: { delta: "complete" } });
+    await logger.append({ type: "conversation.finished", conversationId: "one", runId: "done" });
+
+    expect(await logger.restorationEvents("one")).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "conversation.stream.chunk" })]),
+    );
+
+    logger.record({ type: "conversation.stream.chunk", conversationId: "one", runId: "stopped", content: { delta: "partial" } });
+    await logger.append({ type: "conversation.aborted", conversationId: "one", runId: "stopped" });
+    expect(await logger.restorationEvents("one")).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "conversation.stream.chunk", runId: "stopped" })]),
+    );
+  });
+
+  it("physically deletes only one conversation and retains an unscoped audit event", async () => {
+    const store = memoryStore();
+    const logger = new EventLogger({ store });
+    await logger.append({ type: "conversation.created", conversationId: "one", content: { title: "One" } });
+    await logger.appendMessage("one", { id: "u1", role: "user", parts: [] });
+    await logger.append({ type: "conversation.created", conversationId: "two", content: { title: "Two" } });
+    await logger.appendMessage("two", { id: "u2", role: "user", parts: [] });
+
+    await logger.deleteConversation("one");
+
+    expect(await logger.conversation("one")).toEqual([]);
+    expect(await logger.messages("two")).toMatchObject([{ id: "u2" }]);
+    const audit = (await logger.all()).find((event) => event.type === "conversation.deleted");
+    expect(audit).toMatchObject({ content: { conversationId: "one" } });
+    expect(audit).not.toHaveProperty("conversationId");
   });
 });

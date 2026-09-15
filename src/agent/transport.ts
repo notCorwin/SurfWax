@@ -7,6 +7,7 @@ import {
   type UIMessageChunk,
 } from "ai";
 import type { ConversationMessage, EventLogger } from "../logging";
+import { claimConversationRun } from "./coordinator";
 
 type SidePanelMessage = UIMessage<any, never, any>;
 
@@ -17,16 +18,19 @@ function runId(): string {
 function logStream(
   stream: ReadableStream<UIMessageChunk>,
   logger: EventLogger,
+  conversationId: string,
   currentRunId: string,
+  parentId: string | null,
+  signal: AbortSignal,
+  release: () => void,
 ): ReadableStream<UIMessageChunk> {
   const [clientStream, eventStream] = stream.tee();
   const snapshots = readUIMessageStream<SidePanelMessage>({ stream: eventStream });
   const snapshotReader = snapshots.getReader();
   const clientReader = clientStream.getReader();
   let response: SidePanelMessage | undefined;
-  let text = "";
-  let reasoning = "";
   let closed = false;
+  let aborting = false;
 
   const snapshotTask = (async () => {
     try {
@@ -42,17 +46,28 @@ function logStream(
 
   const finish = async (type: "conversation.finished" | "conversation.failed" | "conversation.aborted", detail?: unknown) => {
     if (closed) return;
+    if (aborting && type === "conversation.finished") type = "conversation.aborted";
     closed = true;
     await snapshotTask;
-    if (response) await logger.appendMessage(response as ConversationMessage, currentRunId);
-    await logger.append({
-      type,
-      runId: currentRunId,
-      content: response ? { messageId: response.id } : { text, reasoning },
-      ...(type === "conversation.failed" ? { error: detail } : {}),
-      ...(type === "conversation.aborted" ? { abort: { reason: detail ?? "stream-aborted" } } : {}),
-    });
-    logger.endRun(currentRunId);
+    try {
+      if (type === "conversation.finished" && response) {
+        await logger.appendMessage(conversationId, response as ConversationMessage, {
+          runId: currentRunId,
+          parentId,
+        });
+      }
+      await logger.append({
+        type,
+        conversationId,
+        runId: currentRunId,
+        content: response ? { messageId: response.id } : null,
+        ...(type === "conversation.failed" ? { error: detail } : {}),
+        ...(type === "conversation.aborted" ? { abort: { reason: detail ?? "stream-aborted" } } : {}),
+      });
+    } finally {
+      logger.endRun(conversationId, currentRunId);
+      release();
+    }
   };
 
   return new ReadableStream<UIMessageChunk>({
@@ -60,28 +75,35 @@ function logStream(
       try {
         const next = await clientReader.read();
         if (next.done) {
-          await finish("conversation.finished");
+          await finish(signal.aborted ? "conversation.aborted" : "conversation.finished", signal.reason);
           controller.close();
           return;
         }
-        if (next.value.type === "text-delta") text += next.value.delta;
-        if (next.value.type === "reasoning-delta") reasoning += next.value.delta;
+        logger.record({
+          type: "conversation.stream.chunk",
+          conversationId,
+          runId: currentRunId,
+          content: next.value,
+        });
         controller.enqueue(next.value);
       } catch (error) {
-        await finish("conversation.failed", error);
+        const aborted = error instanceof Error && error.name === "AbortError";
+        await finish(aborted ? "conversation.aborted" : "conversation.failed", error);
         controller.error(error);
       }
     },
     async cancel(reason) {
+      aborting = true;
       await Promise.allSettled([clientReader.cancel(reason), snapshotReader.cancel(reason)]);
       await finish("conversation.aborted", reason);
     },
   });
 }
 
-export function createChatTransport(agent: Agent<any, any, any, any>, logger: EventLogger) {
+export function createChatTransport(agent: Agent<any, any, any, any>, logger: EventLogger, conversationId: string) {
   const direct = new DirectChatTransport<any, any, any, any, SidePanelMessage>({
     agent,
+    generateMessageId: () => globalThis.crypto.randomUUID(),
     onError: (error) => error instanceof Error ? error.message : String(error),
   });
 
@@ -89,24 +111,45 @@ export function createChatTransport(agent: Agent<any, any, any, any>, logger: Ev
     sendMessages: async (options: Parameters<ChatTransport<SidePanelMessage>["sendMessages"]>[0]) => {
       if (options.trigger !== "submit-message") throw new Error(`Unsupported message trigger: ${options.trigger}`);
       const currentRunId = runId();
-      logger.beginRun(currentRunId);
+      const lease = await claimConversationRun(conversationId, options.abortSignal);
+      logger.beginRun(conversationId, currentRunId);
 
       try {
-        const existing = await logger.messages();
         const userMessage = [...options.messages].reverse().find((message) => message.role === "user");
-        if (userMessage && !existing.some((message) => message.id === userMessage.id)) {
-          await logger.appendMessage(userMessage as ConversationMessage, currentRunId);
+        const existing = await logger.repository(conversationId);
+        if (userMessage && !existing.messages.some(({ message }) => message.id === userMessage.id)) {
+          const index = options.messages.findIndex((message) => message.id === userMessage.id);
+          await logger.appendMessage(conversationId, userMessage as ConversationMessage, {
+            runId: currentRunId,
+            parentId: index > 0 ? options.messages[index - 1]!.id : null,
+          });
         }
-        const messages = await logger.messages() as SidePanelMessage[];
         await logger.append({
           type: "conversation.submitted",
+          conversationId,
           runId: currentRunId,
           content: { chatId: options.chatId, messageId: userMessage?.id ?? null },
         });
-        return logStream(await direct.sendMessages({ ...options, messages }), logger, currentRunId);
+        return logStream(
+          await direct.sendMessages({ ...options, abortSignal: lease.signal, messages: options.messages }),
+          logger,
+          conversationId,
+          currentRunId,
+          userMessage?.id ?? null,
+          lease.signal,
+          lease.finish,
+        );
       } catch (error) {
-        await logger.append({ type: "conversation.failed", runId: currentRunId, content: null, error });
-        logger.endRun(currentRunId);
+        const aborted = error instanceof Error && error.name === "AbortError";
+        await logger.append({
+          type: aborted ? "conversation.aborted" : "conversation.failed",
+          conversationId,
+          runId: currentRunId,
+          content: null,
+          ...(aborted ? { abort: { reason: error.message } } : { error }),
+        });
+        logger.endRun(conversationId, currentRunId);
+        lease.finish();
         throw error;
       }
     },

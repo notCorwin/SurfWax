@@ -49,6 +49,7 @@ function waitForRetry(delayMs: number, signal?: AbortSignal, sleep = (ms: number
 
 export function createRetryingFetch(options: {
   logger?: EventLogger;
+  conversationId?: string;
   fetch?: typeof globalThis.fetch;
   random?: () => number;
   sleep?: (ms: number) => Promise<void>;
@@ -72,6 +73,7 @@ export function createRetryingFetch(options: {
         if (!retryableStatus(response.status)) {
           options.logger?.record({
             type: "request.completed",
+            conversationId: options.conversationId,
             content: { url, method, status: response.status, retries },
             latencyMs: Math.max(0, now() - startedAt),
           });
@@ -82,6 +84,7 @@ export function createRetryingFetch(options: {
         const delayMs = retryDelay(retries, random);
         options.logger?.record({
           type: "request.retry",
+          conversationId: options.conversationId,
           content: { url, method, status: response.status },
           retry: { attempt: retries, status: response.status, delayMs },
           latencyMs: Math.max(0, now() - startedAt),
@@ -92,6 +95,7 @@ export function createRetryingFetch(options: {
         if (isAbortError(error, signal)) {
           options.logger?.record({
             type: "request.aborted",
+            conversationId: options.conversationId,
             content: { url, method },
             abort: { reason: error instanceof Error ? error.message : String(error) },
             latencyMs: Math.max(0, now() - startedAt),
@@ -102,6 +106,7 @@ export function createRetryingFetch(options: {
         if (!isNetworkError(error)) {
           options.logger?.record({
             type: "request.failed",
+            conversationId: options.conversationId,
             content: { url, method, error },
             error,
             latencyMs: Math.max(0, now() - startedAt),
@@ -113,6 +118,7 @@ export function createRetryingFetch(options: {
         const delayMs = retryDelay(retries, random);
         options.logger?.record({
           type: "request.retry",
+          conversationId: options.conversationId,
           content: { url, method, error },
           retry: { attempt: retries, delayMs },
           latencyMs: Math.max(0, now() - startedAt),
@@ -123,7 +129,7 @@ export function createRetryingFetch(options: {
   };
 }
 
-export function createModel(config: ModelConfig, logger?: EventLogger): LanguageModel {
+export function createModel(config: ModelConfig, logger?: EventLogger, conversationId?: string): LanguageModel {
   if (!config.baseURL.trim()) throw new Error("Model base URL is required");
   if (!config.apiKey.trim()) throw new Error("Model API key is required");
   if (!config.model.trim()) throw new Error("Model id is required");
@@ -132,7 +138,7 @@ export function createModel(config: ModelConfig, logger?: EventLogger): Language
     name: "side-agent-provider",
     baseURL: config.baseURL.replace(/\/+$/, ""),
     apiKey: config.apiKey,
-    fetch: createRetryingFetch({ logger }),
+    fetch: createRetryingFetch({ logger, conversationId }),
   });
 
   return provider.languageModel(config.model);

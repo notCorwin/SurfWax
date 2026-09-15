@@ -57,7 +57,9 @@ function queuedToolResponse(firstCode: string, secondCode: string): string[] {
   ];
 }
 
-async function startProvider(responses: string[][], delayMs = 0): Promise<{
+type MockResponse = string[] | { status: number; error: string };
+
+async function startProvider(responses: MockResponse[], delayMs = 0): Promise<{
   baseURL: string;
   origin: string;
   requests: any[];
@@ -95,6 +97,11 @@ async function startProvider(responses: string[][], delayMs = 0): Promise<{
       if (!parts) {
         response.writeHead(500, { "content-type": "application/json" });
         response.end(JSON.stringify({ error: { message: "No mock response remains" } }));
+        return;
+      }
+      if (!Array.isArray(parts)) {
+        response.writeHead(parts.status, { "access-control-allow-origin": "*", "content-type": "application/json" });
+        response.end(JSON.stringify({ error: { message: parts.error } }));
         return;
       }
       response.writeHead(200, SSE_HEADERS);
@@ -180,7 +187,7 @@ async function enableUserScripts(context: BrowserContext, extensionId: string, e
 
 async function readEvents(page: Page): Promise<any[]> {
   return page.evaluate(() => new Promise((resolveEvents, reject) => {
-    const request = indexedDB.open("side-agent-runtime", 3);
+    const request = indexedDB.open("side-agent-runtime");
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
       const transaction = request.result.transaction("events", "readonly");
@@ -232,7 +239,7 @@ try { cdp = await chrome.debugger.sendCommand({ tabId: tab.id }, "Runtime.evalua
 finally { await chrome.debugger.detach({ tabId: tab.id }); }
 return { extensionTitle: document.title, version: chrome.runtime.getManifest().version, scriptCount: scripts.length, user: userResult[0]?.result, main: mainResult.result, cdp: cdp.result.value };
 `;
-  responses.push(toolResponse(code), textResponse("META_OK"));
+  responses.push(toolResponse(code), textResponse("META_OK"), textResponse("工具测试"));
   const opened = await openExtension();
   try {
     await enableUserScripts(opened.context, opened.extensionId, opened.page);
@@ -253,7 +260,7 @@ return { extensionTitle: document.title, version: chrome.runtime.getManifest().v
     await expect.poll(() => target.evaluate(() => ({ main: document.documentElement.dataset.main, user: document.documentElement.dataset.user })))
       .toEqual({ main: "yes", user: "yes" });
 
-    expect(provider.requests).toHaveLength(2);
+    await expect.poll(() => provider.requests.length).toBe(3);
     expect(provider.requests[0].tools).toHaveLength(1);
     expect(provider.requests[0].tools[0]).toMatchObject({
       type: "function",
@@ -263,6 +270,7 @@ return { extensionTitle: document.title, version: chrome.runtime.getManifest().v
     const tool = events.find((event) => event.type === "tool.finished");
     expect(tool).toMatchObject({ toolCallId: "call-chrome-e2e", input: { code: expect.any(String) }, latencyMs: expect.any(Number) });
     expect(tool.output).toMatchObject({ user: "USER_OK", main: "MAIN_OK", cdp: "Side Agent Target" });
+    expect(events.filter((event) => /^(model|request|tool)\./.test(event.type)).every((event) => typeof event.conversationId === "string")).toBe(true);
     expect(events.filter((event) => event.type === "conversation.message")).toHaveLength(2);
 
     await opened.page.reload();
@@ -285,16 +293,19 @@ test("streams complete Markdown without blocking draft input", async () => {
     "| A | B |\n| - | - |\n| 1 | 2 |\n\nInline $x^2$ and block:\n\n$$y=x+1$$\n\n",
     "```javascript\nconst answer = 42;\n```\n\nFootnote[^1].\n\n[^1]: note\n\nFINAL_MARKER",
   ].join("");
-  const parts = [chunk({ role: "assistant", content: "" }), ...[...markdown].map((content) => chunk({ content })), chunk({}, "stop"), "data: [DONE]\n\n"];
-  const provider = await startProvider([parts], 2);
+  const parts = [chunk({ role: "assistant", content: "LONG_RUNNING_LINE\n\n".repeat(100) }), ...[...markdown].map((content) => chunk({ content })), chunk({}, "stop"), "data: [DONE]\n\n"];
+  const provider = await startProvider([parts, textResponse("Markdown 测试")], 2);
   const opened = await openExtension();
   try {
+    await opened.page.setViewportSize({ width: 430, height: 1000 });
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     const composer = opened.page.getByTestId("composer-input");
     await composer.fill("stream markdown");
     await composer.press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toHaveAttribute("data-status", "running");
+    await opened.page.getByTestId("thread-viewport").evaluate((viewport) => { viewport.scrollTop = 0; });
+    await expect(composer).toBeInViewport();
 
     const draft = "responsive-draft-".repeat(40);
     const started = Date.now();
@@ -310,14 +321,220 @@ test("streams complete Markdown without blocking draft input", async () => {
     await expect(rendered.locator("pre code")).toContainText("const answer = 42");
     await expect(rendered.locator(".katex")).not.toHaveCount(0);
     await expect(rendered.locator("sup")).not.toHaveCount(0);
+    await opened.page.getByTestId("thread-viewport").evaluate((viewport) => { viewport.scrollTop = 0; });
+    await expect(composer).toBeInViewport();
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
 
-test("closing the panel aborts an active model stream", async () => {
+test("keeps jump-to-bottom usable while a long response is streaming", async () => {
+  const parts = [
+    chunk({ role: "assistant", content: "SCROLL_LINE\n\n".repeat(400) }),
+    ...Array.from({ length: 500 }, (_, index) => chunk({ content: index % 40 === 0 ? `\nline ${index}\n` : "." })),
+    chunk({ content: "FINAL_SCROLL_MARKER" }),
+    chunk({}, "stop"),
+    "data: [DONE]\n\n",
+  ];
+  const provider = await startProvider([parts, textResponse("滚动测试")], 3);
+  const opened = await openExtension();
+  try {
+    await opened.page.setViewportSize({ width: 430, height: 850 });
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("stream a long response");
+    await composer.press("Enter");
+
+    const viewport = opened.page.getByTestId("thread-viewport");
+    const remaining = () => viewport.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop);
+    await expect.poll(remaining).toBeLessThanOrEqual(1);
+    const box = await viewport.boundingBox();
+    if (!box) throw new Error("thread viewport has no bounding box");
+    await opened.page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await opened.page.mouse.wheel(0, -1_200);
+    await expect.poll(remaining).toBeGreaterThan(500);
+
+    const jump = opened.page.getByRole("button", { name: "滚动到底部" });
+    await expect(jump).toBeVisible();
+    await expect(jump).toBeEnabled();
+    await jump.click();
+    await expect.poll(remaining).toBeLessThanOrEqual(1);
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FINAL_SCROLL_MARKER");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("stress profile: dense stream and long canonical log stay interactive", async () => {
+  const parts = [
+    chunk({ role: "assistant", content: "# Stress\n\n" }),
+    ...Array.from({ length: 1_500 }, (_, index) => chunk({
+      content: index % 25 === 0
+        ? `\n\n- row ${index} with **bold** and $x_${index}^2$\n\n`
+        : `token-${index} `,
+    })),
+    chunk({ content: "STREAM_STRESS_DONE" }),
+    chunk({}, "stop"),
+    "data: [DONE]\n\n",
+  ];
+  const provider = await startProvider([parts, textResponse("压力测试")]);
+  const opened = await openExtension();
+  try {
+    await opened.page.setViewportSize({ width: 430, height: 850 });
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.evaluate(() => {
+      const metrics = { frameGaps: [] as number[], longTasks: [] as number[], running: true };
+      (globalThis as typeof globalThis & { __stressMetrics?: typeof metrics }).__stressMetrics = metrics;
+      if (PerformanceObserver.supportedEntryTypes.includes("longtask")) {
+        new PerformanceObserver((list) => {
+          metrics.longTasks.push(...list.getEntries().map((entry) => entry.duration));
+        }).observe({ type: "longtask", buffered: true });
+      }
+      let previous = performance.now();
+      const frame = (now: number) => {
+        if (!metrics.running) return;
+        metrics.frameGaps.push(now - previous);
+        previous = now;
+        requestAnimationFrame(frame);
+      };
+      requestAnimationFrame(frame);
+    });
+
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("stress the streaming renderer");
+    await composer.press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toHaveAttribute("data-status", "running");
+    const inputStarted = Date.now();
+    await composer.pressSequentially("responsive-typing-".repeat(12));
+    const inputMs = Date.now() - inputStarted;
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_STRESS_DONE");
+    const metrics = await opened.page.evaluate(() => {
+      const state = (globalThis as typeof globalThis & { __stressMetrics?: { frameGaps: number[]; longTasks: number[]; running: boolean } }).__stressMetrics;
+      if (!state) return { maxFrameGap: 0, maxLongTask: 0, longTaskCount: 0 };
+      state.running = false;
+      return {
+        maxFrameGap: Math.max(0, ...state.frameGaps),
+        maxLongTask: Math.max(0, ...state.longTasks),
+        longTaskCount: state.longTasks.length,
+      };
+    });
+    const events = await readEvents(opened.page);
+    const conversationId = events.find((event) => event.type === "conversation.created")?.conversationId;
+    if (!conversationId) throw new Error("stress conversation was not created");
+    const streamEvents = events.filter((event) => event.type === "conversation.stream.chunk").length;
+
+    await opened.page.evaluate(async ({ id }) => {
+      const db = await new Promise<IDBDatabase>((resolveDb, reject) => {
+        const request = indexedDB.open("side-agent-runtime");
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolveDb(request.result);
+      });
+      const transaction = db.transaction("events", "readwrite");
+      const store = transaction.objectStore("events");
+      const timestamp = new Date().toISOString();
+      for (let index = 0; index < 100_000; index += 1) {
+        store.add({
+          type: "conversation.stream.chunk",
+          timestamp,
+          conversationId: id,
+          runId: "completed-stress-run",
+          content: { type: "text-delta", id: "stress", delta: "x" },
+        });
+      }
+      let parentId: string | null = null;
+      for (let index = 0; index < 500; index += 1) {
+        const userId = `stress-user-${index}`;
+        const assistantId = `stress-assistant-${index}`;
+        store.add({
+          type: "conversation.message",
+          timestamp,
+          conversationId: id,
+          parentId,
+          content: { id: userId, role: "user", parts: [{ type: "text", text: `Question ${index}` }] },
+        });
+        store.add({
+          type: "conversation.message",
+          timestamp,
+          conversationId: id,
+          parentId: userId,
+          content: {
+            id: assistantId,
+            role: "assistant",
+            parts: [{ type: "text", text: `## Answer ${index}\n\n${"Paragraph with **formatting** and $x^2$.\n\n".repeat(8)}HISTORY_MARKER_${index}` }],
+          },
+        });
+        parentId = assistantId;
+      }
+      await new Promise<void>((resolveTransaction, reject) => {
+        transaction.oncomplete = () => resolveTransaction();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error);
+      });
+      db.close();
+    }, { id: conversationId });
+
+    const reloadStarted = Date.now();
+    await opened.page.reload();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("HISTORY_MARKER_499");
+    const reloadMs = Date.now() - reloadStarted;
+    const restoredComposer = opened.page.getByTestId("composer-input");
+    const restoredInputStarted = Date.now();
+    await restoredComposer.pressSequentially("after-reload");
+    const restoredInputMs = Date.now() - restoredInputStarted;
+    const dom = await opened.page.evaluate(() => ({
+      elements: document.querySelectorAll("*").length,
+      messages: document.querySelectorAll('[data-role="user"], [data-role="assistant"]').length,
+    }));
+    await opened.page.evaluate(() => {
+      const state = { gaps: [] as number[], running: true };
+      (globalThis as typeof globalThis & { __scrollStress?: typeof state }).__scrollStress = state;
+      let previous = performance.now();
+      const frame = (now: number) => {
+        if (!state.running) return;
+        state.gaps.push(now - previous);
+        previous = now;
+        requestAnimationFrame(frame);
+      };
+      requestAnimationFrame(frame);
+    });
+    const viewport = opened.page.getByTestId("thread-viewport");
+    const box = await viewport.boundingBox();
+    if (!box) throw new Error("stress viewport has no bounding box");
+    await opened.page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    for (let index = 0; index < 30; index += 1) {
+      await opened.page.mouse.wheel(0, -1_000);
+      await opened.page.waitForTimeout(16);
+    }
+    const scrollMaxFrameGap = await opened.page.evaluate(() => {
+      const state = (globalThis as typeof globalThis & { __scrollStress?: { gaps: number[]; running: boolean } }).__scrollStress;
+      if (!state) return 0;
+      state.running = false;
+      return Math.max(0, ...state.gaps);
+    });
+    const jump = opened.page.getByRole("button", { name: "滚动到底部" });
+    await expect(jump).toBeVisible();
+    await jump.click();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("HISTORY_MARKER_499");
+    console.log("stress metrics", { inputMs, restoredInputMs, reloadMs, scrollMaxFrameGap, streamEvents, ...dom, ...metrics });
+
+    expect(streamEvents).toBeGreaterThanOrEqual(1_500);
+    expect(inputMs).toBeLessThan(500);
+    expect(restoredInputMs).toBeLessThan(250);
+    expect(reloadMs).toBeLessThan(2_000);
+    expect(dom.messages).toBeLessThan(50);
+    expect(dom.elements).toBeLessThan(1_000);
+    expect(metrics.maxFrameGap).toBeLessThan(35);
+    expect(scrollMaxFrameGap).toBeLessThan(100);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("closing the panel restores the interrupted response and continues only on request", async () => {
   const parts = [chunk({ role: "assistant", content: "STREAM_STARTED" }), ...Array.from({ length: 500 }, () => chunk({ content: "." }))];
-  const provider = await startProvider([parts], 20);
+  const provider = await startProvider([parts, textResponse("CONTINUED"), textResponse("恢复后的标题")], 20);
   const opened = await openExtension();
   try {
     const options = await configure(opened.context, opened.page, provider.baseURL);
@@ -327,6 +544,112 @@ test("closing the panel aborts an active model stream", async () => {
     await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_STARTED");
     await opened.page.close();
     await expect.poll(() => provider.stats.abortedResponses).toBe(1);
+
+    const resumed = await opened.context.newPage();
+    await resumed.goto(`chrome-extension://${opened.extensionId}/sidepanel.html`);
+    await expect(resumed.getByTestId("interrupted-message")).toBeVisible();
+    await expect(resumed.locator(".markdown-body").last()).toContainText("STREAM_STARTED");
+    await resumed.getByTestId("continue-interrupted").click();
+    await expect(resumed.locator('[data-role="user"]').last()).toContainText("继续上一次被中断的工作");
+    await expect(resumed.locator(".markdown-body").last()).toContainText("CONTINUED");
+    await expect(resumed.getByTestId("conversation-menu")).toContainText("恢复后的标题");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("creates, titles, switches, reloads and permanently deletes local conversations", async () => {
+  const provider = await startProvider([
+    textResponse("FIRST_REPLY"),
+    textResponse("第一标题"),
+    textResponse("SECOND_REPLY"),
+    textResponse("第二标题"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("first conversation");
+    await composer.press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FIRST_REPLY");
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("第一标题");
+    expect(provider.requests[1]).toMatchObject({ model: "test-model" });
+    expect(provider.requests[1].tools).toBeUndefined();
+
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-new").click();
+    await composer.fill("second conversation");
+    await composer.press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("SECOND_REPLY");
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("第二标题");
+
+    await opened.page.getByTestId("conversation-menu").click();
+    await expect(opened.page.locator(".conversation-item")).toHaveCount(2);
+    await opened.page.locator(".conversation-item", { hasText: "第一标题" }).locator(".conversation-select").click();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FIRST_REPLY");
+    await opened.page.reload();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FIRST_REPLY");
+
+    await opened.page.getByTestId("conversation-menu").click();
+    opened.page.once("dialog", (dialog) => dialog.accept());
+    await opened.page.locator(".conversation-item", { hasText: "第二标题" }).locator(".conversation-delete").click();
+    await expect(opened.page.locator(".conversation-item")).toHaveCount(1);
+    const events = await readEvents(opened.page);
+    expect(events.filter((event) => event.type === "conversation.created")).toHaveLength(1);
+    expect(events.some((event) => event.type === "conversation.deleted" && event.content.conversationId)).toBe(true);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("keeps the default title after an unrecoverable title request failure", async () => {
+  const provider = await startProvider([textResponse("BODY_REPLY"), { status: 400, error: "bad title request" }]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("title should fail");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("BODY_REPLY");
+    await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "model.title.failed")).toBe(true);
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("新对话");
+    await expect(opened.page.getByTestId("composer-input")).toBeEnabled();
+    const requestCount = provider.requests.length;
+    await opened.page.reload();
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("新对话");
+    await opened.page.waitForTimeout(200);
+    expect(provider.requests).toHaveLength(requestCount);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("keeps a running conversation alive when only switching threads", async () => {
+  const slowReply = [
+    chunk({ role: "assistant", content: "STREAM_RUNNING" }),
+    ...Array.from({ length: 30 }, () => chunk({ content: "." })),
+    chunk({ content: "BACKGROUND_DONE" }),
+    chunk({}, "stop"),
+    "data: [DONE]\n\n",
+  ];
+  const provider = await startProvider([slowReply, textResponse("后台标题")], 10);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("keep running in background");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_RUNNING");
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-new").click();
+    await expect.poll(() => provider.requests.length).toBe(2);
+    expect(provider.stats.abortedResponses).toBe(0);
+
+    await opened.page.getByTestId("conversation-menu").click();
+    await expect(opened.page.locator(".conversation-item")).toHaveCount(1);
+    await opened.page.locator(".conversation-item", { hasText: "后台标题" }).locator(".conversation-select").click();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("BACKGROUND_DONE");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }

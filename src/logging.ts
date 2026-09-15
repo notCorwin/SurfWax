@@ -5,7 +5,9 @@ export type LogEvent = {
   type: string;
   timestamp: string;
   content: JsonValue;
+  conversationId?: string;
   runId?: string;
+  parentId?: string | null;
   stopReason?: JsonValue;
   usage?: JsonValue;
   providerMetadata?: JsonValue;
@@ -21,7 +23,9 @@ export type LogEvent = {
 export type LogRecord = {
   type: string;
   content?: unknown;
+  conversationId?: string;
   runId?: string;
+  parentId?: string | null;
   toolCallId?: string;
   stopReason?: unknown;
   usage?: unknown;
@@ -43,14 +47,50 @@ export type ConversationMessage = {
 
 type EventStore = {
   append(event: Omit<LogEvent, "id">): Promise<LogEvent>;
+  appendMany?(events: readonly Omit<LogEvent, "id">[]): Promise<LogEvent[]>;
   all(): Promise<LogEvent[]>;
+  byTypes?(types: readonly string[], conversationId?: string): Promise<LogEvent[]>;
+  byRunTypes?(runIds: readonly string[], types: readonly string[]): Promise<LogEvent[]>;
+  conversation?(conversationId: string): Promise<LogEvent[]>;
+  deleteConversation?(conversationId: string): Promise<void>;
   clear(): Promise<void>;
 };
 
 const DB_NAME = "side-agent-runtime";
-const DB_VERSION = 3;
+const DB_VERSION = 6;
 const EVENT_STORE = "events";
-const LEGACY_EVENT_STORE = "audit-events";
+const CONVERSATION_INDEX = "conversationId";
+const TYPE_INDEX = "type";
+const CONVERSATION_TYPE_INDEX = "conversationType";
+const RUN_TYPE_INDEX = "runType";
+const SUMMARY_EVENT_TYPES = [
+  "conversation.created",
+  "conversation.selected",
+  "conversation.title.updated",
+  "conversation.archived",
+  "conversation.unarchived",
+  "conversation.submitted",
+  "conversation.finished",
+  "conversation.failed",
+  "conversation.aborted",
+  "model.title.started",
+  "model.title.finished",
+  "model.title.failed",
+  "model.title.aborted",
+] as const;
+const RUN_EVENT_TYPES = ["conversation.submitted", "conversation.finished", "conversation.failed", "conversation.aborted"] as const;
+
+export function upgradeEventStore(db: IDBDatabase, transaction: IDBTransaction): void {
+  const store = db.objectStoreNames.contains(EVENT_STORE)
+    ? transaction.objectStore(EVENT_STORE)
+    : db.createObjectStore(EVENT_STORE, { keyPath: "id", autoIncrement: true });
+  if (!store.indexNames.contains(CONVERSATION_INDEX)) store.createIndex(CONVERSATION_INDEX, CONVERSATION_INDEX);
+  if (!store.indexNames.contains(TYPE_INDEX)) store.createIndex(TYPE_INDEX, TYPE_INDEX);
+  if (!store.indexNames.contains(CONVERSATION_TYPE_INDEX)) {
+    store.createIndex(CONVERSATION_TYPE_INDEX, [CONVERSATION_INDEX, TYPE_INDEX]);
+  }
+  if (!store.indexNames.contains(RUN_TYPE_INDEX)) store.createIndex(RUN_TYPE_INDEX, ["runId", TYPE_INDEX]);
+}
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -76,12 +116,7 @@ class IndexedDbEventStore implements EventStore {
 
     this.dbPromise = new Promise((resolve, reject) => {
       const request = indexedDB.open(DB_NAME, DB_VERSION);
-      request.onupgradeneeded = () => {
-        const db = request.result;
-        if (db.objectStoreNames.contains(EVENT_STORE)) db.deleteObjectStore(EVENT_STORE);
-        if (db.objectStoreNames.contains(LEGACY_EVENT_STORE)) db.deleteObjectStore(LEGACY_EVENT_STORE);
-        db.createObjectStore(EVENT_STORE, { keyPath: "id", autoIncrement: true });
-      };
+      request.onupgradeneeded = () => upgradeEventStore(request.result, request.transaction!);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error ?? new Error("IndexedDB open failed"));
     });
@@ -89,11 +124,17 @@ class IndexedDbEventStore implements EventStore {
   }
 
   async append(event: Omit<LogEvent, "id">): Promise<LogEvent> {
+    return (await this.appendMany([event]))[0]!;
+  }
+
+  async appendMany(events: readonly Omit<LogEvent, "id">[]): Promise<LogEvent[]> {
     const db = await this.open();
     const transaction = db.transaction(EVENT_STORE, "readwrite");
-    const id = await requestResult<IDBValidKey>(transaction.objectStore(EVENT_STORE).add(event));
-    await transactionDone(transaction);
-    return { ...event, id: Number(id) };
+    const done = transactionDone(transaction);
+    const store = transaction.objectStore(EVENT_STORE);
+    const ids = await Promise.all(events.map((event) => requestResult<IDBValidKey>(store.add(event))));
+    await done;
+    return events.map((event, index) => ({ ...event, id: Number(ids[index]) }));
   }
 
   async all(): Promise<LogEvent[]> {
@@ -102,6 +143,46 @@ class IndexedDbEventStore implements EventStore {
     const events = await requestResult<LogEvent[]>(transaction.objectStore(EVENT_STORE).getAll());
     await transactionDone(transaction);
     return events.sort((left, right) => left.id - right.id);
+  }
+
+  async byTypes(types: readonly string[], conversationId?: string): Promise<LogEvent[]> {
+    const db = await this.open();
+    const transaction = db.transaction(EVENT_STORE, "readonly");
+    const done = transactionDone(transaction);
+    const index = transaction.objectStore(EVENT_STORE).index(conversationId ? CONVERSATION_TYPE_INDEX : TYPE_INDEX);
+    const batches = await Promise.all(types.map((type) => requestResult<LogEvent[]>(
+      index.getAll(IDBKeyRange.only(conversationId ? [conversationId, type] : type)),
+    )));
+    await done;
+    return batches.flat().sort((left, right) => left.id - right.id);
+  }
+
+  async byRunTypes(runIds: readonly string[], types: readonly string[]): Promise<LogEvent[]> {
+    const db = await this.open();
+    const transaction = db.transaction(EVENT_STORE, "readonly");
+    const done = transactionDone(transaction);
+    const index = transaction.objectStore(EVENT_STORE).index(RUN_TYPE_INDEX);
+    const batches = await Promise.all(runIds.flatMap((runId) => types.map((type) =>
+      requestResult<LogEvent[]>(index.getAll(IDBKeyRange.only([runId, type]))))));
+    await done;
+    return batches.flat().sort((left, right) => left.id - right.id);
+  }
+
+  async conversation(conversationId: string): Promise<LogEvent[]> {
+    const db = await this.open();
+    const transaction = db.transaction(EVENT_STORE, "readonly");
+    const events = await requestResult<LogEvent[]>(transaction.objectStore(EVENT_STORE).index(CONVERSATION_INDEX).getAll(conversationId));
+    await transactionDone(transaction);
+    return events.sort((left, right) => left.id - right.id);
+  }
+
+  async deleteConversation(conversationId: string): Promise<void> {
+    const db = await this.open();
+    const transaction = db.transaction(EVENT_STORE, "readwrite");
+    const store = transaction.objectStore(EVENT_STORE);
+    const keys = await requestResult<IDBValidKey[]>(store.index(CONVERSATION_INDEX).getAllKeys(conversationId));
+    for (const key of keys) store.delete(key);
+    await transactionDone(transaction);
   }
 
   async clear(): Promise<void> {
@@ -160,15 +241,15 @@ export function toLogValue(value: unknown, active = new WeakSet<object>()): Json
   }
 }
 
-function restoreLogValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(restoreLogValue);
+export function fromLogValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(fromLogValue);
   if (!value || typeof value !== "object") return value;
   const record = value as Record<string, unknown>;
   if (record.$type === "undefined" && record.value === null && Object.keys(record).length === 2) return undefined;
-  return Object.fromEntries(Object.entries(record).map(([key, item]) => [key, restoreLogValue(item)]));
+  return Object.fromEntries(Object.entries(record).map(([key, item]) => [key, fromLogValue(item)]));
 }
 
-function isConversationMessage(value: unknown): value is ConversationMessage {
+export function isConversationMessage(value: unknown): value is ConversationMessage {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const message = value as Partial<ConversationMessage>;
   return typeof message.id === "string"
@@ -179,15 +260,81 @@ function isConversationMessage(value: unknown): value is ConversationMessage {
 export function rebuildConversation(events: readonly LogEvent[]): ConversationMessage[] {
   return events.flatMap((event) => {
     if (event.type !== "conversation.message") return [];
-    const message = restoreLogValue(event.content);
+    const message = fromLogValue(event.content);
     return isConversationMessage(message) ? [message] : [];
   });
 }
 
+export type ConversationSummary = {
+  id: string;
+  title: string;
+  status: "regular" | "archived";
+  runStatus: "idle" | "running" | "interrupted";
+  createdAt: string;
+  lastMessageAt: string;
+};
+
+export function rebuildConversationList(events: readonly LogEvent[]): ConversationSummary[] {
+  const conversations = new Map<string, ConversationSummary>();
+  for (const event of events) {
+    if (!event.conversationId) continue;
+    if (event.type === "conversation.created") {
+      const content = fromLogValue(event.content) as { title?: unknown };
+      conversations.set(event.conversationId, {
+        id: event.conversationId,
+        title: typeof content?.title === "string" && content.title.trim() ? content.title : "新对话",
+        status: "regular",
+        runStatus: "idle",
+        createdAt: event.timestamp,
+        lastMessageAt: event.timestamp,
+      });
+      continue;
+    }
+    const conversation = conversations.get(event.conversationId);
+    if (!conversation) continue;
+    if (event.type !== "conversation.selected") conversation.lastMessageAt = event.timestamp;
+    if (event.type === "conversation.title.updated") {
+      const content = fromLogValue(event.content) as { title?: unknown };
+      if (typeof content?.title === "string" && content.title.trim()) conversation.title = content.title.trim();
+    }
+    if (event.type === "conversation.archived") conversation.status = "archived";
+    if (event.type === "conversation.unarchived") conversation.status = "regular";
+    if (event.type === "conversation.submitted") conversation.runStatus = "running";
+    if (event.type === "conversation.finished") conversation.runStatus = "idle";
+    if (event.type === "conversation.aborted" || event.type === "conversation.failed") conversation.runStatus = "interrupted";
+  }
+  return [...conversations.values()].sort((left, right) => right.lastMessageAt.localeCompare(left.lastMessageAt));
+}
+
+export function selectedConversationId(events: readonly LogEvent[]): string | undefined {
+  const ids = new Set(rebuildConversationList(events).map(({ id }) => id));
+  return [...events].reverse().find((event) => event.type === "conversation.selected" && event.conversationId && ids.has(event.conversationId))?.conversationId;
+}
+
+export type ConversationRepository = {
+  headId: string | null;
+  messages: Array<{ parentId: string | null; message: ConversationMessage }>;
+};
+
+export function rebuildConversationRepository(events: readonly LogEvent[]): ConversationRepository {
+  const stored = new Map<string, { id: number; parentId: string | null; message: ConversationMessage }>();
+  for (const event of events) {
+    if (event.type !== "conversation.message") continue;
+    const message = fromLogValue(event.content);
+    if (!isConversationMessage(message)) continue;
+    stored.set(message.id, { id: event.id, parentId: event.parentId ?? null, message });
+  }
+  const messages = [...stored.values()].sort((left, right) => left.id - right.id).map(({ parentId, message }) => ({ parentId, message }));
+  return { headId: messages.at(-1)?.message.id ?? null, messages };
+}
+
 export class EventLogger {
   private pending: Promise<unknown> = Promise.resolve();
-  private activeRunId?: string;
+  private buffered: Omit<LogEvent, "id">[] = [];
+  private bufferTimer: ReturnType<typeof setTimeout> | undefined;
+  private activeRuns = new Map<string, string>();
   private accepting = true;
+  private listeners = new Set<(event: LogEvent) => void>();
 
   constructor(private readonly options: {
     store?: EventStore;
@@ -195,21 +342,22 @@ export class EventLogger {
     onError?: (error: unknown) => void;
   } = {}) {}
 
-  beginRun(runId: string): void {
-    this.activeRunId = runId;
+  beginRun(conversationId: string, runId: string): void {
+    this.activeRuns.set(conversationId, runId);
   }
 
-  endRun(runId?: string): void {
-    if (!runId || this.activeRunId === runId) this.activeRunId = undefined;
+  endRun(conversationId: string, runId?: string): void {
+    if (!runId || this.activeRuns.get(conversationId) === runId) this.activeRuns.delete(conversationId);
   }
 
-  append(record: LogRecord): Promise<LogEvent | undefined> {
-    if (!this.accepting) return Promise.resolve(undefined);
-    const event: Omit<LogEvent, "id"> = {
+  private event(record: LogRecord): Omit<LogEvent, "id"> {
+    return {
       timestamp: (this.options.now?.() ?? new Date()).toISOString(),
       type: record.type,
       content: toLogValue(record.content ?? null),
-      ...(record.runId ?? this.activeRunId ? { runId: record.runId ?? this.activeRunId } : {}),
+      ...(record.conversationId ? { conversationId: record.conversationId } : {}),
+      ...(record.parentId !== undefined ? { parentId: record.parentId } : {}),
+      ...(record.runId ?? (record.conversationId ? this.activeRuns.get(record.conversationId) : undefined) ? { runId: record.runId ?? this.activeRuns.get(record.conversationId!) } : {}),
       ...(record.stopReason !== undefined ? { stopReason: toLogValue(record.stopReason) } : {}),
       ...(record.usage !== undefined ? { usage: toLogValue(record.usage) } : {}),
       ...(record.providerMetadata !== undefined ? { providerMetadata: toLogValue(record.providerMetadata) } : {}),
@@ -221,7 +369,17 @@ export class EventLogger {
       ...(record.abort !== undefined ? { abort: toLogValue(record.abort) } : {}),
       ...(record.latencyMs !== undefined ? { latencyMs: record.latencyMs } : {}),
     };
-    const task = this.pending.then(() => (this.options.store ?? getEventStore()).append(event));
+  }
+
+  private enqueue(events: readonly Omit<LogEvent, "id">[]): Promise<LogEvent[]> {
+    const task = this.pending.then(async () => {
+      const store = this.options.store ?? getEventStore();
+      const stored: LogEvent[] = [];
+      if (store.appendMany) stored.push(...await store.appendMany(events));
+      else for (const event of events) stored.push(await store.append(event));
+      for (const event of stored) for (const listener of this.listeners) listener(event);
+      return stored;
+    });
     this.pending = task.catch((error) => {
       this.options.onError?.(error);
       throw error;
@@ -229,25 +387,130 @@ export class EventLogger {
     return task;
   }
 
-  record(record: LogRecord): void {
-    if (!this.accepting) return;
-    void this.append(record).catch((error) => {
+  private flushBuffer(): void {
+    if (this.bufferTimer !== undefined) clearTimeout(this.bufferTimer);
+    this.bufferTimer = undefined;
+    if (this.buffered.length === 0) return;
+    const events = this.buffered;
+    this.buffered = [];
+    void this.enqueue(events).catch((error) => {
       console.error("Side Agent event log write failed", error);
     });
   }
 
-  async appendMessage(message: ConversationMessage, runId?: string): Promise<void> {
-    await this.append({ type: "conversation.message", runId, content: message });
+  append(record: LogRecord): Promise<LogEvent | undefined> {
+    if (!this.accepting) return Promise.resolve(undefined);
+    this.flushBuffer();
+    return this.enqueue([this.event(record)]).then(([event]) => event);
   }
 
-  async messages(): Promise<ConversationMessage[]> {
+  record(record: LogRecord): void {
+    if (!this.accepting) return;
+    this.buffered.push(this.event(record));
+    this.bufferTimer ??= setTimeout(() => this.flushBuffer(), 16);
+  }
+
+  async appendMessage(conversationId: string, message: ConversationMessage, options?: { runId?: string; parentId?: string | null }): Promise<void>;
+  async appendMessage(message: ConversationMessage, runId?: string): Promise<void>;
+  async appendMessage(
+    conversationOrMessage: string | ConversationMessage,
+    messageOrRunId: ConversationMessage | string | undefined,
+    options: { runId?: string; parentId?: string | null } = {},
+  ): Promise<void> {
+    const legacy = typeof conversationOrMessage !== "string";
+    const message = (legacy ? conversationOrMessage : messageOrRunId) as ConversationMessage;
+    await this.append({
+      type: "conversation.message",
+      ...(legacy ? {} : { conversationId: conversationOrMessage }),
+      runId: legacy && typeof messageOrRunId === "string" ? messageOrRunId : options.runId,
+      parentId: options.parentId,
+      content: message,
+    });
+  }
+
+  async repository(conversationId: string): Promise<ConversationRepository> {
+    return rebuildConversationRepository(await this.eventsByTypes(["conversation.message"], conversationId));
+  }
+
+  private async eventsByTypes(types: readonly string[], conversationId?: string): Promise<LogEvent[]> {
     await this.flush();
-    return rebuildConversation(await (this.options.store ?? getEventStore()).all());
+    const store = this.options.store ?? getEventStore();
+    if (store.byTypes) return store.byTypes(types, conversationId);
+    const events = conversationId && store.conversation
+      ? await store.conversation(conversationId)
+      : await store.all();
+    return events.filter((event) => types.includes(event.type) && (!conversationId || event.conversationId === conversationId));
+  }
+
+  summaryEvents(conversationId?: string): Promise<LogEvent[]> {
+    return this.eventsByTypes(SUMMARY_EVENT_TYPES, conversationId);
+  }
+
+  private async eventsByRunTypes(runIds: readonly string[], types: readonly string[]): Promise<LogEvent[]> {
+    await this.flush();
+    const store = this.options.store ?? getEventStore();
+    if (store.byRunTypes) return store.byRunTypes(runIds, types);
+    const events = await store.all();
+    return events.filter((event) => event.runId && runIds.includes(event.runId) && types.includes(event.type));
+  }
+
+  async restorationEvents(conversationId: string): Promise<LogEvent[]> {
+    const lifecycle = await this.eventsByTypes([...RUN_EVENT_TYPES, "conversation.message"], conversationId);
+    const completed = new Set(lifecycle.filter((event) => event.type === "conversation.finished" && event.runId).map((event) => event.runId));
+    const interrupted = [...new Set(lifecycle
+      .filter((event) => (event.type === "conversation.failed" || event.type === "conversation.aborted")
+        && event.runId
+        && !completed.has(event.runId))
+      .map((event) => event.runId!))];
+    if (interrupted.length === 0) return lifecycle;
+    const replay = await this.eventsByRunTypes(interrupted, [
+      "conversation.stream.chunk",
+      "tool.started",
+      "tool.finished",
+      "tool.failed",
+    ]);
+    return [...lifecycle, ...replay].sort((left, right) => left.id - right.id);
+  }
+
+  async messages(conversationId?: string): Promise<ConversationMessage[]> {
+    if (conversationId) return (await this.repository(conversationId)).messages.map(({ message }) => message);
+    return rebuildConversation(await this.all());
   }
 
   async all(): Promise<LogEvent[]> {
     await this.flush();
     return (this.options.store ?? getEventStore()).all();
+  }
+
+  async conversation(conversationId: string): Promise<LogEvent[]> {
+    await this.flush();
+    const store = this.options.store ?? getEventStore();
+    return store.conversation
+      ? store.conversation(conversationId)
+      : (await store.all()).filter((event) => event.conversationId === conversationId);
+  }
+
+  async deleteConversation(conversationId: string): Promise<void> {
+    await this.flush();
+    const store = this.options.store ?? getEventStore();
+    if (!store.deleteConversation) throw new Error("Event store cannot delete one conversation");
+    await store.deleteConversation(conversationId);
+    await this.append({ type: "conversation.deleted", content: { conversationId } });
+  }
+
+  async recoverDanglingRuns(): Promise<void> {
+    const events = await this.eventsByTypes(RUN_EVENT_TYPES);
+    const terminal = new Set(events.filter((event) => event.runId && ["conversation.finished", "conversation.failed", "conversation.aborted"].includes(event.type)).map((event) => event.runId));
+    for (const event of events) {
+      if (event.type !== "conversation.submitted" || !event.runId || !event.conversationId || terminal.has(event.runId)) continue;
+      await this.append({
+        type: "conversation.aborted",
+        conversationId: event.conversationId,
+        runId: event.runId,
+        content: null,
+        abort: { reason: "Side Panel 在运行完成前关闭。" },
+      });
+    }
   }
 
   async clear(): Promise<void> {
@@ -257,10 +520,16 @@ export class EventLogger {
 
   stop(): void {
     this.accepting = false;
-    this.activeRunId = undefined;
+    this.activeRuns.clear();
+  }
+
+  subscribe(listener: (event: LogEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
 
   async flush(): Promise<void> {
+    this.flushBuffer();
     await this.pending;
   }
 }

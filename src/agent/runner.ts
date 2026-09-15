@@ -20,6 +20,7 @@ export type CreateAgentOptions = {
   languageModel?: LanguageModel;
   instructions?: string;
   logger?: EventLogger;
+  conversationId?: string;
 };
 
 type ChromeAgentTools = { chrome: ReturnType<typeof createChromeTool> };
@@ -27,26 +28,30 @@ type ChromeAgentTools = { chrome: ReturnType<typeof createChromeTool> };
 export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, ChromeAgentTools> {
   const logger = options.logger;
   return new ToolLoopAgent<never, ChromeAgentTools>({
-    model: options.languageModel ?? createModel(options.model, logger),
+    model: options.languageModel ?? createModel(options.model, logger, options.conversationId),
     instructions: options.instructions ?? DEFAULT_INSTRUCTIONS,
     tools: { chrome: createChromeTool(options.executor) },
     ...(logger ? {
       onStart: (event) => logger.record({
         type: "model.started",
+        conversationId: options.conversationId,
         content: { callId: event.callId, operationId: event.operationId, provider: event.provider, modelId: event.modelId },
       }),
       onStepStart: (event) => logger.record({
         type: "model.step.started",
+        conversationId: options.conversationId,
         content: { callId: event.callId, stepNumber: event.stepNumber, provider: event.provider, modelId: event.modelId },
       }),
       onToolExecutionStart: (event) => logger.record({
         type: "tool.started",
+        conversationId: options.conversationId,
         content: { callId: event.callId, toolName: event.toolCall.toolName },
         toolCallId: event.toolCall.toolCallId,
         input: event.toolCall.input,
       }),
       onToolExecutionEnd: (event) => logger.record({
         type: event.toolOutput.type === "tool-error" ? "tool.failed" : "tool.finished",
+        conversationId: options.conversationId,
         content: { callId: event.callId, toolName: event.toolCall.toolName, toolExecutionMs: event.toolExecutionMs },
         toolCallId: event.toolCall.toolCallId,
         input: event.toolCall.input,
@@ -55,6 +60,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, C
       }),
       onStepEnd: (event) => logger.record({
         type: "model.step.finished",
+        conversationId: options.conversationId,
         content: { callId: event.callId, stepNumber: event.stepNumber, text: event.text, reasoning: event.reasoning, toolCalls: event.toolCalls, toolResults: event.toolResults },
         stopReason: event.finishReason,
         usage: event.usage,
@@ -63,6 +69,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, C
       }),
       onEnd: (event) => logger.record({
         type: "model.finished",
+        conversationId: options.conversationId,
         content: { callId: event.callId, stepNumber: event.stepNumber, text: event.text, reasoning: event.reasoning, content: event.content, toolCalls: event.toolCalls, toolResults: event.toolResults },
         stopReason: event.finishReason,
         usage: event.usage,

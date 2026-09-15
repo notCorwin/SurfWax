@@ -1,49 +1,70 @@
-import type { AssistantRuntime } from "@assistant-ui/react";
+import { useAuiState, useRemoteThreadListRuntime, type AssistantRuntime } from "@assistant-ui/react";
 import { useChatRuntime } from "@assistant-ui/ai-sdk";
-import type { UIMessage } from "ai";
 import { useEffect, useMemo } from "react";
+import { abortAllConversationWork } from "../agent/coordinator";
 import { createAgent } from "../agent/runner";
 import { createChatTransport } from "../agent/transport";
 import { ChromeExecutor } from "../chrome/executor";
+import { createConversationAdapter } from "../conversations";
 import type { EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
 
-type SidePanelMessage = UIMessage<any, never, any>;
 type CloseableRuntime = { thread: Pick<AssistantRuntime["thread"], "cancelRun"> };
-type DisposableExecutor = Pick<ChromeExecutor, "dispose">;
 
-export function createSidePanelCloser(
-  runtime: CloseableRuntime,
-  executor: DisposableExecutor,
-  logger?: EventLogger,
-): () => void {
+export function createSidePanelCloser(runtime: CloseableRuntime, logger?: EventLogger): () => void {
   let closed = false;
   return () => {
     if (closed) return;
     closed = true;
+    abortAllConversationWork();
     runtime.thread.cancelRun();
-    executor.dispose();
     logger?.record({ type: "sidepanel.closed", content: null });
     void logger?.flush();
   };
 }
 
+function useConversationRuntime(config: ModelConfig, logger: EventLogger): AssistantRuntime {
+  const conversationId = useAuiState((state) => state.threadListItem.remoteId ?? state.threadListItem.id);
+  const executor = useMemo(() => new ChromeExecutor({ logger }), [logger]);
+  const agent = useMemo(
+    () => createAgent({ model: config, executor, logger, conversationId }),
+    [config, conversationId, executor, logger],
+  );
+  const transport = useMemo(
+    () => createChatTransport(agent, logger, conversationId),
+    [agent, conversationId, logger],
+  );
+  const runtime = useChatRuntime({ id: conversationId, transport });
+
+  useEffect(() => {
+    const dispose = () => executor.dispose();
+    globalThis.addEventListener("pagehide", dispose);
+    return () => {
+      globalThis.removeEventListener("pagehide", dispose);
+      executor.dispose();
+    };
+  }, [executor]);
+
+  return runtime;
+}
+
 export function useSidePanelRuntime(
   config: ModelConfig,
   logger: EventLogger,
-  initialMessages: SidePanelMessage[] = [],
+  initialThreadId?: string,
 ): AssistantRuntime {
-  const executor = useMemo(() => new ChromeExecutor({ logger }), [logger]);
-  const agent = useMemo(() => createAgent({ model: config, executor, logger }), [config, executor, logger]);
-  const transport = useMemo(() => createChatTransport(agent, logger), [agent, logger]);
-  const runtime = useChatRuntime<SidePanelMessage>({
-    id: "side-agent-runtime",
-    messages: initialMessages,
-    transport,
+  const adapter = useMemo(() => createConversationAdapter(logger, config), [config, logger]);
+  const runtime = useRemoteThreadListRuntime({
+    adapter,
+    initialThreadId,
+    runtimeHook: () => useConversationRuntime(config, logger),
+    onThreadIdChange: (conversationId) => {
+      if (conversationId) logger.record({ type: "conversation.selected", conversationId, content: null });
+    },
   });
 
   useEffect(() => {
-    const close = createSidePanelCloser(runtime, executor, logger);
+    const close = createSidePanelCloser(runtime, logger);
     const clear = (message: unknown, _sender: chrome.runtime.MessageSender, respond: (response: unknown) => void) => {
       if (!message || typeof message !== "object" || (message as { type?: unknown }).type !== "side-agent:clear-log") return false;
       close();
@@ -64,7 +85,7 @@ export function useSidePanelRuntime(
       chrome.runtime.onMessage.removeListener(clear);
       close();
     };
-  }, [executor, logger, runtime]);
+  }, [logger, runtime]);
 
   return runtime;
 }

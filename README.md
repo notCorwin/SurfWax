@@ -12,7 +12,7 @@ Side Agent Runtime 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。
 
 - **一个工具覆盖浏览器能力**：Chrome 新增 API 或 CDP Domain 时，无需为 Harness 增加专用工具。
 - **纯浏览器扩展**：没有守护进程、远程执行器或中间服务；模型请求从扩展直接发送到配置的 Provider。
-- **可恢复的完整会话**：IndexedDB 中的 append-only event log 是 UI、模型上下文和会话恢复的唯一事实来源。
+- **可恢复的本地多对话**：IndexedDB 中的 append-only event log 是对话列表、UI、模型上下文和中断恢复的唯一事实来源。
 - **持久 User Scripts**：Agent 可通过原生 `chrome.userScripts` 查看、注册、更新、运行和删除脚本；Harness 保存注册快照，并在扩展启动或更新后恢复。
 - **不中断的 Agent 循环**：工具调用严格串行，不设应用级步骤上限、执行超时或输出上限，直到模型自然结束或用户中止。
 - **可中止的无限重试**：网络错误、408、429 和可恢复的 5xx 使用带 jitter 的指数退避，单次等待最多 10 秒。
@@ -43,6 +43,16 @@ npm run build
 ```
 
 然后按上面的 Chrome 步骤加载生成的 `dist/` 目录。修改源码后重新运行 `npm run build`，再在 `chrome://extensions` 中重新加载扩展。
+
+### 开发时热更新
+
+开发扩展时不需要反复构建：
+
+```sh
+npm run dev
+```
+
+首次运行后，按上面的 Chrome 步骤加载 Vite 提示的 `dist/` 目录，并保持该终端运行。修改 Side Panel、设置页或样式后会通过 HMR 原地更新并保留页面状态；修改后台 Service Worker 或 Manifest 时会自动重新加载扩展。开发服务器固定使用 `localhost:5173`，端口已被占用时会直接报错，避免页面代码与 HMR WebSocket 误连到不同的 Vite 实例。
 
 ## 首次配置
 
@@ -98,11 +108,13 @@ npm run build
 
 Side Panel 关闭时，Harness 会立即中止当前模型请求，阻止排队的工具调用启动，并尽力取消执行中的工具和 detach 自己创建的调试会话。已经发生的浏览器副作用不会回滚。
 
+重新打开 Side Panel 后，已生成的文本、推理和工具结果会从事件流恢复并标记为“回复已中断”。只有最新的中断回复提供“继续”按钮；继续时会先要求 Agent 根据已有工具结果确认当前状态，不会自动重放浏览器操作。标题栏的对话按钮可新建、切换和永久删除单条本地对话；仅切换对话不会停止后台运行中的回复。
+
 ## 数据与隐私
 
 事件日志会记录完整对话、模型 stop reason、usage、provider metadata、工具输入/输出/错误，以及请求 retry、abort 和 latency；网页内容不会脱敏。Side Panel 从日志恢复历史，并将历史作为后续模型上下文。
 
-设置页的“清空对话与日志”会永久删除本地事件日志，但保留模型配置。版本 0.2.0 的数据迁移会清空旧日志和旧 User Script 数据。扩展声明广泛的 Chrome 权限和 `<all_urls>` host access，以便 `chrome()` 使用浏览器允许的最大能力范围。
+设置页的“清空对话与日志”会永久删除新旧本地事件日志，但保留模型配置。旧版没有 `conversationId` 的事件会原样保留在数据库中，但不会出现在新版对话列表；升级不会删除事件表。扩展声明广泛的 Chrome 权限和 `<all_urls>` host access，以便 `chrome()` 使用浏览器允许的最大能力范围。
 
 ## 架构
 
@@ -126,7 +138,7 @@ npm run test:e2e   # 构建并运行真实扩展 Playwright 测试
 git diff --check
 ```
 
-`npm run test:e2e` 会启动带扩展的 Playwright Chromium，并使用本地 OpenAI-compatible SSE mock 验证工具执行、日志恢复、User Scripts、流式 Markdown 和关闭中止行为。CI 在每次推送到 `master` 时运行同一套检查，并更新 Autobuild 压缩包和 SHA-256 校验文件。
+`npm run test:e2e` 会启动带扩展的 Playwright Chromium，并使用本地 OpenAI-compatible SSE mock 验证工具执行、多对话切换、标题、日志与中断恢复、User Scripts、流式 Markdown 和关闭中止行为。CI 在每次推送到 `master` 时运行同一套检查，并更新 Autobuild 压缩包和 SHA-256 校验文件。
 
 实现或评审改动前，请先阅读 [AGENTS.md](AGENTS.md) 中的项目要求。
 
