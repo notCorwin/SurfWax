@@ -152,7 +152,7 @@ export const Thread: FC = () => {
         <div ref={contentRef} className="mx-auto w-full max-w-(--thread-max-width) px-1 pt-3 pb-10">
           <div style={{ paddingTop, paddingBottom }}>
             {items.map((item) => (
-              <div key={item.key} data-index={item.index} ref={virtualizer.measureElement} className="flex flex-col gap-4">
+              <div key={item.key} data-index={item.index} ref={virtualizer.measureElement} className="conversation-turn flex flex-col">
                 {turns[item.index]!.messageIds.map((messageId) => (
                   <ThreadPrimitive.Unstable_MessageById
                     key={messageId}
@@ -184,8 +184,8 @@ const AssistantMessage: FC = () => {
   const interrupted = useAuiState((state) => state.message.metadata.custom?.interrupted === true);
   const latest = useAuiState((state) => state.thread.messages.at(-1)?.id === state.message.id);
   return (
-    <MessagePrimitive.Root data-role="assistant" aria-live={latest ? "polite" : undefined} className="assistant-message min-w-0 px-2 pb-2 text-sm leading-relaxed">
-      <div className="assistant-message-content flex flex-col gap-3 wrap-break-word">
+    <MessagePrimitive.Root data-role="assistant" aria-live={latest ? "polite" : undefined} className="assistant-message min-w-0 px-2 text-sm">
+      <div className="assistant-message-content flex flex-col wrap-break-word">
         <MessagePrimitive.Parts>
           {({ part }) => {
             if (part.type === "text") return <MarkdownText />;

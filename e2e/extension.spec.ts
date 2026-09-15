@@ -252,6 +252,8 @@ return { extensionTitle: document.title, version: chrome.runtime.getManifest().v
     await composer.fill("exercise every browser context");
     await composer.press("Enter");
     await expect(opened.page.locator(".activity")).toHaveCount(1);
+    await expect(opened.page.locator(".activity summary")).toContainText("已运行 chrome");
+    await expect(opened.page.locator(".activity")).not.toHaveAttribute("open", "");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("META_OK");
     await opened.page.locator(".activity summary").click();
     await expect(opened.page.locator(".activity")).toContainText("USER_OK");
@@ -298,6 +300,7 @@ test("streams complete Markdown without blocking draft input", async () => {
   const opened = await openExtension();
   try {
     await opened.page.setViewportSize({ width: 430, height: 1000 });
+    await opened.page.emulateMedia({ colorScheme: "dark" });
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     const composer = opened.page.getByTestId("composer-input");
@@ -321,6 +324,21 @@ test("streams complete Markdown without blocking draft input", async () => {
     await expect(rendered.locator("pre code")).toContainText("const answer = 42");
     await expect(rendered.locator(".katex")).not.toHaveCount(0);
     await expect(rendered.locator("sup")).not.toHaveCount(0);
+    expect(await rendered.evaluate((element) => {
+      const root = document.querySelector<HTMLElement>('[data-testid="thread-root"]');
+      const flow = element.querySelector<HTMLElement>(".markdown-flow");
+      const firstBlock = flow?.firstElementChild;
+      const content = element.closest<HTMLElement>(".assistant-message-content");
+      const turn = element.closest<HTMLElement>(".conversation-turn");
+      if (!root || !firstBlock || !content || !turn) throw new Error("transcript layout is incomplete");
+      return {
+        background: getComputedStyle(root).backgroundColor,
+        variable: getComputedStyle(root).getPropertyValue("--transcript-block-gap").trim(),
+        markdownGap: getComputedStyle(firstBlock).marginBottom,
+        partGap: getComputedStyle(content).rowGap,
+        turnGap: getComputedStyle(turn).rowGap,
+      };
+    })).toEqual({ background: "rgb(24, 24, 24)", variable: "1.25rem", markdownGap: "20px", partGap: "20px", turnGap: "20px" });
     await opened.page.getByTestId("thread-viewport").evaluate((viewport) => { viewport.scrollTop = 0; });
     await expect(composer).toBeInViewport();
   } finally {

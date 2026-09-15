@@ -201,21 +201,29 @@ p {
 
 [data-testid="thread-root"] {
   --thread-max-width: 44rem;
+  --transcript-block-gap: 1.25rem;
+  --transcript-line-height: 1.6;
+}
+
+.conversation-turn,
+.assistant-message-content {
+  gap: var(--transcript-block-gap);
+}
+
+.conversation-turn {
+  padding-bottom: var(--transcript-block-gap);
 }
 
 .assistant-message {
   max-width: 100%;
   overflow-wrap: anywhere;
+  line-height: var(--transcript-line-height);
 }
 
 [data-role="user"],
 [data-role="assistant"] {
   content-visibility: auto;
   contain-intrinsic-size: auto 120px;
-}
-
-.assistant-message-content {
-  gap: 4px;
 }
 
 .interrupted-message {
@@ -234,12 +242,12 @@ p {
   color: var(--foreground);
 }
 
-.markdown-body > div > :first-child {
-  margin-top: 0;
+.markdown-flow > :not(:last-child) {
+  margin-block: 0 var(--transcript-block-gap);
 }
 
-.markdown-body > div > :last-child {
-  margin-bottom: 0;
+.markdown-flow > :last-child {
+  margin-block: 0;
 }
 
 .markdown-body pre {
@@ -260,12 +268,14 @@ p {
 .activity summary {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 9px;
   cursor: pointer;
   list-style: none;
-  padding: 2px 4px;
-  line-height: 1.2;
-  font-size: 11px;
+  color: var(--muted-foreground);
+  padding: 0 4px;
+  line-height: var(--transcript-line-height);
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .thinking-item summary::-webkit-details-marker,
@@ -275,21 +285,14 @@ p {
 
 .thinking-item summary svg,
 .activity summary svg {
-  width: 12px;
-  height: 12px;
-}
-
-.thinking-item summary span:last-child,
-.activity summary span:last-child {
-  margin-left: auto;
-  color: var(--muted-foreground);
-  font-size: 10px;
+  width: 16px;
+  height: 16px;
 }
 
 .thinking-body,
 .activity-content {
   color: var(--muted-foreground);
-  padding: 4px 6px 5px;
+  padding: var(--transcript-block-gap) 4px 0 29px;
   font-size: 11px;
   line-height: 1.35;
 }

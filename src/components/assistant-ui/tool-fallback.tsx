@@ -16,11 +16,10 @@ export const ToolFallback: ToolCallMessagePartComponent = (part) => {
   const failed = part.status.type === "incomplete" || part.isError;
   const status = running ? "running" : failed ? "error" : "complete";
   return (
-    <details className="activity" data-status={status} open={running || failed}>
+    <details className="activity" data-status={status} open={failed}>
       <summary>
         <WrenchIcon aria-hidden="true" />
-        <span>{part.toolName}</span>
-        <span>{status}</span>
+        <span>{running ? "正在运行" : failed ? "运行失败" : "已运行"} {part.toolName}</span>
       </summary>
       <div className="activity-content">
         <strong>输入</strong>

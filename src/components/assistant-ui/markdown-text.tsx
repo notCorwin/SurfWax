@@ -14,6 +14,7 @@ const SMOOTH: SmoothOptions = { minCommitMs: 16 };
 const MarkdownTextImpl = () => (
   <StreamdownTextPrimitive
     containerClassName="markdown-body"
+    className="markdown-flow"
     plugins={PLUGINS}
     preprocess={normalizeMathDelimiters}
     controls

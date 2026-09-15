@@ -17,8 +17,7 @@ const ReasoningImpl: ReasoningMessagePartComponent = ({ status }) => {
     >
       <summary>
         <BrainIcon className="thinking-mark" aria-hidden="true" />
-        <span>Thinking</span>
-        <span className="thinking-status">{running ? "running" : "complete"}</span>
+        <span>{running ? "正在思考" : "已思考"}</span>
       </summary>
       <div className="thinking-body" aria-busy={running}>
         <MarkdownText />
