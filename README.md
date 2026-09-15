@@ -1,31 +1,78 @@
 # Side Agent Runtime
 
-Side Agent Runtime 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。它只向模型提供一个浏览器元工具 `chrome({ code })`；代码在当前 Side Panel 的扩展上下文中作为异步 JavaScript 执行，可直接使用 Web API、Chrome Extension API、原生 User Scripts API 和 CDP。
+[![Autobuild Release](https://github.com/notCorwin/side-agent-runtime/actions/workflows/autobuild.yml/badge.svg)](https://github.com/notCorwin/side-agent-runtime/actions/workflows/autobuild.yml)
+[![Chrome 138+](https://img.shields.io/badge/Chrome-138%2B-4285F4?logo=googlechrome&logoColor=white)](https://www.google.com/chrome/)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue)](public/manifest.json)
+
+Side Agent Runtime 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。它使用 Vercel AI SDK v7 和 Assistant UI，直接连接用户配置的 OpenAI-compatible Provider，并只向模型提供一个浏览器元工具：`chrome({ code })`。
+
+模型通过这一个“浏览器 Bash”执行异步 JavaScript，可以访问 Web API、Chrome Extension API、网页 `MAIN` world、原生 `USER_SCRIPT` world 和原始 CDP。Harness 不维护按 API 拆分的工具列表，也不增加权限审批、额外沙箱或 capability layer；实际能力边界由 Chrome、Manifest 权限、浏览器策略和目标页面决定。
+
+## 为什么使用它
+
+- **一个工具覆盖浏览器能力**：Chrome 新增 API 或 CDP Domain 时，无需为 Harness 增加专用工具。
+- **纯浏览器扩展**：没有守护进程、远程执行器或中间服务；模型请求从扩展直接发送到配置的 Provider。
+- **可恢复的完整会话**：IndexedDB 中的 append-only event log 是 UI、模型上下文和会话恢复的唯一事实来源。
+- **持久 User Scripts**：Agent 可通过原生 `chrome.userScripts` 查看、注册、更新、运行和删除脚本；Harness 保存注册快照，并在扩展启动或更新后恢复。
+- **不中断的 Agent 循环**：工具调用严格串行，不设应用级步骤上限、执行超时或输出上限，直到模型自然结束或用户中止。
+- **可中止的无限重试**：网络错误、408、429 和可恢复的 5xx 使用带 jitter 的指数退避，单次等待最多 10 秒。
+- **流畅的富文本输出**：逐 Token 流式显示 CommonMark、GFM、脚注、LaTeX、表格、任务列表、代码高亮等内容，同时保持输入框响应。
 
 ## 安装
 
-需要 Node.js、npm 和 Chrome 138+：
+### 安装 Autobuild
+
+从 [Autobuild Release](https://github.com/notCorwin/side-agent-runtime/releases/tag/autobuild) 下载并解压 `side-agent-runtime-autobuild.zip`，然后：
+
+1. 打开 `chrome://extensions`。
+2. 开启右上角的“开发者模式”。
+3. 点击“加载已解压的扩展程序”。
+4. 选择包含 `manifest.json` 的解压目录。
+
+发布页同时提供 `.sha256` 校验文件。
+
+### 从源码构建
+
+需要 Chrome 138+、Node.js 22（CI 基准版本）和 npm：
 
 ```sh
+git clone https://github.com/notCorwin/side-agent-runtime.git
+cd side-agent-runtime
 npm ci
 npm run build
 ```
 
-在 `chrome://extensions` 开启开发者模式，选择“加载已解压的扩展程序”并选中 `dist/`。点击扩展图标打开 Side Panel；在设置页填写 OpenAI-compatible Base URL、Model ID 和 API Key。使用 `chrome.userScripts` 前，还需要在扩展详情页开启 “Allow User Scripts”。
+然后按上面的 Chrome 步骤加载生成的 `dist/` 目录。修改源码后重新运行 `npm run build`，再在 `chrome://extensions` 中重新加载扩展。
 
-## 唯一工具
+## 首次配置
 
-工具输入只有一个 `code` 字段。代码是异步函数体，因此需要显式 `return` 结果，调用严格串行执行。
+1. 点击扩展图标打开 Side Panel。
+2. 点击标题栏中的设置按钮。
+3. 填写 Provider 的 **Base URL**、**Model ID** 和 **API Key**。Base URL 应包含 Provider 要求的 API 前缀，例如 `https://provider.example/v1`。
+4. 保存配置并返回 Side Panel。
+5. 如需使用持久 User Scripts，在扩展详情页开启 **Allow User Scripts**。
 
-查询标签页：
+模型配置只保存在当前扩展的 `chrome.storage.local` 中。Provider 必须支持 OpenAI-compatible Chat Completions、流式响应和 tool calling，并允许扩展发起跨域请求。
+
+## 使用
+
+直接用自然语言描述浏览器任务，例如：
+
+```text
+列出当前窗口中的全部标签页，并返回标题和 URL。
+```
+
+模型会生成一个 `chrome({ code })` 调用。工具输入只有 `code` 字段；代码是异步函数体，必须显式 `return` 需要返回给模型的值。
+
+### Chrome Extension API
 
 ```json
 {
-  "code": "return await chrome.tabs.query({ active: true, currentWindow: true });"
+  "code": "return await chrome.tabs.query({ currentWindow: true });"
 }
 ```
 
-使用页面 MAIN world：
+### 页面 MAIN world
 
 ```json
 {
@@ -33,7 +80,7 @@ npm run build
 }
 ```
 
-直接使用 CDP：
+### 原始 CDP
 
 ```json
 {
@@ -41,7 +88,7 @@ npm run build
 }
 ```
 
-注册原生 User Script：
+### 持久 User Script
 
 ```json
 {
@@ -49,33 +96,55 @@ npm run build
 }
 ```
 
-Harness 不提供结构化 Chrome RPC、独立 CDP 工具、权限审批、额外沙箱、capability layer 或 Greasemonkey 兼容层。能力边界来自 Chrome 本身、Manifest 权限、浏览器策略和目标页面。
+Side Panel 关闭时，Harness 会立即中止当前模型请求，阻止排队的工具调用启动，并尽力取消执行中的工具和 detach 自己创建的调试会话。已经发生的浏览器副作用不会回滚。
 
-## 数据与恢复
+## 数据与隐私
 
-IndexedDB 中的 append-only event log 是唯一事实来源。每条事件都有 `id`、`type`、`timestamp` 和 `content`；模型、工具与请求事件还记录对应的 stop reason、usage、provider metadata、tool call ID、输入、输出、错误、retry、abort 和 latency。聊天 UI、恢复会话和下一次模型上下文只从按序的 `conversation.message` 事件重建。
+事件日志会记录完整对话、模型 stop reason、usage、provider metadata、工具输入/输出/错误，以及请求 retry、abort 和 latency；网页内容不会脱敏。Side Panel 从日志恢复历史，并将历史作为后续模型上下文。
 
-用户消息只追加一次，模型消息在成功、失败或中止时保存最终快照。设置页只保留 BYOK 配置和“清空对话与日志”；日志存储失败会直接显示致命错误，不使用内存后备。
+设置页的“清空对话与日志”会永久删除本地事件日志，但保留模型配置。版本 0.2.0 的数据迁移会清空旧日志和旧 User Script 数据。扩展声明广泛的 Chrome 权限和 `<all_urls>` host access，以便 `chrome()` 使用浏览器允许的最大能力范围。
 
-Side Panel 关闭时会中止模型请求、阻止排队工具继续启动，并尽力结束工具执行和 detach 本扩展创建的调试会话。已经发生的浏览器副作用不会回滚。
+## 架构
 
-User Scripts 完全通过 `chrome.userScripts` 管理。Harness 在每次工具调用后保存当前注册快照，并在后台启动或更新后重新注册。升级到 0.2.0 时会清空旧日志和旧 User Script 数据，但保留 BYOK 模型配置。
+| 部分 | 职责 |
+| --- | --- |
+| `src/sidepanel/` | Side Panel 会话、配置加载、恢复和关闭生命周期 |
+| `src/agent/` | OpenAI-compatible 模型、无限重试、Agent 循环和流式 transport |
+| `src/chrome/` | 单一 `chrome()` 工具及串行 JavaScript/CDP 执行器 |
+| `src/logging.ts` | IndexedDB canonical event log 与对话重建 |
+| `src/userscripts/` | 原生 User Script 快照、迁移和恢复 |
+| `src/options/` | BYOK 设置和日志清理 |
 
-## 重试与流式 UI
+系统 prompt、工具 schema 和历史消息前缀保持稳定；新上下文只追加到日志，以提高兼容 Provider 的 prompt cache hit rate。
 
-网络错误、408、429 和可恢复的 5xx 使用带 jitter 的指数退避，单次等待最高 10 秒，不设最大重试次数；不可恢复错误立即结束，用户中止立即生效。
-
-聊天界面使用 Assistant UI 与 AI SDK v7 直接集成。模型 Token 持续流入，Markdown 显示按 animation frame 平滑提交并缓存 renderer，支持 CommonMark、GFM、脚注、LaTeX、表格、任务列表、删除线、引用、链接和语法高亮。用户消息显示为气泡，模型消息全宽显示。
-
-## 验证
+## 开发与验证
 
 ```sh
-npm run check
-npm test
-npm run test:e2e
+npm run check      # TypeScript 检查并构建
+npm test           # Vitest 单元测试
+npm run test:e2e   # 构建并运行真实扩展 Playwright 测试
 git diff --check
 ```
 
-GitHub Autobuild 会执行检查和 Playwright 测试，并生成扩展压缩包与 SHA-256 校验文件。
+`npm run test:e2e` 会启动带扩展的 Playwright Chromium，并使用本地 OpenAI-compatible SSE mock 验证工具执行、日志恢复、User Scripts、流式 Markdown 和关闭中止行为。CI 在每次推送到 `master` 时运行同一套检查，并更新 Autobuild 压缩包和 SHA-256 校验文件。
 
-维护者：[notCorwin](https://github.com/notCorwin)。欢迎提交 [Issue](https://github.com/notCorwin/side-agent-runtime/issues) 和聚焦的 Pull Request。
+实现或评审改动前，请先阅读 [AGENTS.md](AGENTS.md) 中的项目要求。
+
+## 获取帮助
+
+- 缺陷与功能请求：[GitHub Issues](https://github.com/notCorwin/side-agent-runtime/issues)
+- 构建或测试失败：附上 Chrome、Node.js 版本、复现步骤和相关日志后提交 Issue
+- 项目行为与约束：[AGENTS.md](AGENTS.md)
+
+请勿在 Issue 中粘贴 API Key、私密网页内容或未经处理的完整事件日志。
+
+## 维护与贡献
+
+项目由 [notCorwin](https://github.com/notCorwin) 维护。欢迎提交聚焦、可验证的 Pull Request：
+
+1. Fork 仓库并从最新 `master` 创建分支。
+2. 保持单一 `chrome()` 元工具和 canonical event log 语义不变。
+3. 为非平凡行为添加最小覆盖，并运行上面的完整验证命令。
+4. 不要提交 `dist/`、测试报告或本地密钥。
+
+仓库目前没有 `LICENSE` 文件；除非维护者另行授权，否则不应假定获得任何使用、修改或分发许可。
