@@ -1,19 +1,18 @@
 import { EventLogger } from "./logging";
-import { UserScriptRegistry } from "./userscripts/registry";
+import { restoreUserScripts } from "./userscripts/persistence";
 
 const eventLogger = new EventLogger();
-const userScripts = new UserScriptRegistry({ logger: eventLogger });
 
-function restoreUserScripts(): void {
-  void userScripts.restore().catch((error) => {
-    eventLogger.record({ category: "userscript", type: "userscript.restore-failed", level: "error", content: error, error });
+function restore(): void {
+  void restoreUserScripts({ logger: eventLogger }).catch((error) => {
+    eventLogger.record({ type: "userscript.restore-failed", content: null, error });
   });
 }
 
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
-  restoreUserScripts();
+  restore();
 });
 
-chrome.runtime.onStartup.addListener(restoreUserScripts);
+chrome.runtime.onStartup.addListener(() => restore());
 void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });

@@ -1,338 +1,357 @@
-import { test, expect, chromium } from "@playwright/test";
-import { mkdtemp } from "node:fs/promises";
+import { chromium, expect, test, type BrowserContext, type Page } from "@playwright/test";
+import { once } from "node:events";
+import { mkdtemp, rm } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
-type ColorScheme = "light" | "dark";
+const SSE_HEADERS = {
+  "access-control-allow-origin": "*",
+  "cache-control": "no-cache",
+  "content-type": "text/event-stream",
+};
 
-function assertNeutralColors(colors: string[]) {
-  for (const color of colors) {
-    const match = color.match(/rgba?\(([^)]+)\)/);
-    if (!match) continue;
-    const channels = match[1]
-      .split(",")
-      .slice(0, 3)
-      .map((channel) => Number.parseFloat(channel.trim()));
-    expect(channels.every((channel) => channel === channels[0])).toBe(true);
-  }
+function chunk(delta: object, finishReason: string | null = null): string {
+  return `data: ${JSON.stringify({
+    id: "chatcmpl-side-agent-e2e",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "test-model",
+    choices: [{ index: 0, delta, finish_reason: finishReason }],
+  })}\n\n`;
 }
 
-test("loads the MV3 side panel and can use Chrome debugger from an extension page", async () => {
-  const extensionPath = resolve(process.cwd(), "dist");
+function textResponse(text: string): string[] {
+  return [chunk({ role: "assistant", content: text }), chunk({}, "stop"), "data: [DONE]\n\n"];
+}
+
+function toolResponse(code: string): string[] {
+  return [
+    chunk({
+      role: "assistant",
+      tool_calls: [{
+        index: 0,
+        id: "call-chrome-e2e",
+        type: "function",
+        function: { name: "chrome", arguments: JSON.stringify({ code }) },
+      }],
+    }),
+    chunk({}, "tool_calls"),
+    "data: [DONE]\n\n",
+  ];
+}
+
+function queuedToolResponse(firstCode: string, secondCode: string): string[] {
+  return [
+    chunk({
+      role: "assistant",
+      tool_calls: [firstCode, secondCode].map((code, index) => ({
+        index,
+        id: `call-queued-${index}`,
+        type: "function",
+        function: { name: "chrome", arguments: JSON.stringify({ code }) },
+      })),
+    }),
+    chunk({}, "tool_calls"),
+    "data: [DONE]\n\n",
+  ];
+}
+
+async function startProvider(responses: string[][], delayMs = 0): Promise<{
+  baseURL: string;
+  origin: string;
+  requests: any[];
+  server: Server;
+  stats: { abortedResponses: number };
+}> {
+  const requests: any[] = [];
+  const stats = { abortedResponses: 0 };
+  const server = createServer((request, response) => {
+    if (request.method === "OPTIONS") {
+      response.writeHead(204, {
+        "access-control-allow-headers": "authorization, content-type",
+        "access-control-allow-methods": "POST, OPTIONS",
+        "access-control-allow-origin": "*",
+      });
+      response.end();
+      return;
+    }
+    if (request.method === "GET" && request.url === "/target") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end("<!doctype html><title>Side Agent Target</title><main>ready</main>");
+      return;
+    }
+    if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+      response.writeHead(404);
+      response.end();
+      return;
+    }
+
+    const body: Buffer[] = [];
+    request.on("data", (part) => body.push(part));
+    request.on("end", () => {
+      requests.push(JSON.parse(Buffer.concat(body).toString("utf8")));
+      const parts = responses.shift();
+      if (!parts) {
+        response.writeHead(500, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: { message: "No mock response remains" } }));
+        return;
+      }
+      response.writeHead(200, SSE_HEADERS);
+      response.on("close", () => {
+        if (!response.writableEnded) stats.abortedResponses += 1;
+      });
+      let index = 0;
+      const write = () => {
+        if (response.destroyed || index >= parts.length) {
+          if (!response.destroyed) response.end();
+          return;
+        }
+        response.write(parts[index]);
+        index += 1;
+        setTimeout(write, delayMs);
+      };
+      write();
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Provider server did not bind a TCP port");
+  const origin = `http://127.0.0.1:${address.port}`;
+  return { baseURL: `${origin}/v1`, origin, requests, server, stats };
+}
+
+async function closeServer(server: Server): Promise<void> {
+  if (!server.listening) return;
+  await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+}
+
+async function openExtension(): Promise<{
+  context: BrowserContext;
+  extensionId: string;
+  page: Page;
+  userDataDirectory: string;
+}> {
   const userDataDirectory = await mkdtemp(resolve(tmpdir(), "side-agent-e2e-"));
+  const extensionPath = resolve(process.cwd(), "dist");
   const context = await chromium.launchPersistentContext(userDataDirectory, {
     executablePath: chromium.executablePath(),
     headless: true,
-    args: [
-      `--disable-extensions-except=${extensionPath}`,
-      `--load-extension=${extensionPath}`,
-      "--no-sandbox",
-    ],
+    args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, "--no-sandbox"],
   });
+  let worker = context.serviceWorkers()[0];
+  if (!worker) worker = await context.waitForEvent("serviceworker");
+  const extensionId = new URL(worker.url()).hostname;
+  const page = await context.newPage();
+  await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
+  return { context, extensionId, page, userDataDirectory };
+}
 
+async function dispose(context: BrowserContext, directory: string, server?: Server): Promise<void> {
+  await context.close();
+  await rm(directory, { recursive: true, force: true });
+  if (server) await closeServer(server);
+}
+
+async function configure(context: BrowserContext, page: Page, baseURL: string): Promise<Page> {
+  const [options] = await Promise.all([context.waitForEvent("page"), page.getByTestId("open-settings").click()]);
+  await options.waitForLoadState("domcontentloaded");
+  const fields = options.getByTestId("options-card").locator("input");
+  await fields.nth(0).fill(baseURL);
+  await fields.nth(1).fill("test-model");
+  await fields.nth(2).fill("test-key");
+  await options.getByRole("button", { name: "保存配置" }).click();
+  await expect(options.getByRole("status")).toContainText("配置已保存");
+  await expect(page.getByTestId("composer-input")).toBeVisible();
+  return options;
+}
+
+async function enableUserScripts(context: BrowserContext, extensionId: string, extensionPage: Page): Promise<void> {
+  if (await extensionPage.evaluate(() => typeof chrome.userScripts === "object")) return;
+  const settings = await context.newPage();
+  await settings.goto(`chrome://extensions/?id=${extensionId}`);
+  const toggle = settings.locator("extensions-toggle-row#allow-user-scripts cr-toggle#crToggle");
+  await expect(toggle).toBeVisible();
+  if (await toggle.getAttribute("aria-pressed") !== "true") await toggle.click();
+  await expect.poll(() => extensionPage.evaluate(() => typeof chrome.userScripts)).toBe("object");
+  await settings.close();
+}
+
+async function readEvents(page: Page): Promise<any[]> {
+  return page.evaluate(() => new Promise((resolveEvents, reject) => {
+    const request = indexedDB.open("side-agent-runtime", 3);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const transaction = request.result.transaction("events", "readonly");
+      const all = transaction.objectStore("events").getAll();
+      all.onerror = () => reject(all.error);
+      all.onsuccess = () => resolveEvents(all.result);
+    };
+  }));
+}
+
+test("ships only the minimal MV3 Harness surface", async () => {
+  const opened = await openExtension();
   try {
-    let serviceWorker = context.serviceWorkers()[0];
-    if (!serviceWorker) serviceWorker = await context.waitForEvent("serviceworker");
-    const extensionId = new URL(serviceWorker.url()).hostname;
-    const extensionPage = await context.newPage();
-    await extensionPage.goto(`chrome-extension://${extensionId}/sidepanel.html`);
-    await expect(extensionPage.locator("h1")).toHaveText("Side Agent Runtime");
-    await expect(extensionPage.locator("[data-testid=app-eyebrow], .status-pill, .hint, .send-button, .clear-config-button")).toHaveCount(0);
-    await expect(extensionPage.getByTestId("open-settings")).toHaveAttribute("aria-label", "打开设置");
-    await expect.poll(() => extensionPage.getByTestId("open-settings").evaluate((button) => ({
-      text: button.textContent?.trim() ?? "",
-      hasIcon: Boolean(button.querySelector("svg")),
-    }))).toEqual({ text: "", hasIcon: true });
-    await expect.poll(() => extensionPage.getByTestId("open-settings").evaluate((button) => Boolean(button.closest(".app-header")))).toBe(true);
+    const manifest = await opened.page.evaluate(() => chrome.runtime.getManifest());
+    expect(manifest).toMatchObject({ manifest_version: 3, minimum_chrome_version: "138", version: "0.2.0" });
+    expect(manifest.permissions).toEqual(expect.arrayContaining(["debugger", "scripting", "userScripts"]));
+    await expect(opened.page.locator("h1")).toHaveText("Side Agent Runtime");
+    await expect(opened.page.getByTestId("config-required-state")).toBeVisible();
 
-    const layout = await extensionPage.evaluate(() => {
-      const shell = document.querySelector<HTMLElement>("[data-testid=sidepanel-shell]");
-      const chat = document.querySelector<HTMLElement>("[data-testid=chat-scroll]");
-      if (!shell || !chat) throw new Error("Side panel layout was not rendered");
-      return {
-        bodyHeight: document.body.clientHeight,
-        bodyScrollHeight: document.body.scrollHeight,
-        shellHeight: shell.clientHeight,
-        shellScrollHeight: shell.scrollHeight,
-        shellOverflowY: getComputedStyle(shell).overflowY,
-        chatOverflowY: getComputedStyle(chat).overflowY,
-      };
-    });
-    expect(layout.bodyScrollHeight).toBe(layout.bodyHeight);
-    expect(layout.shellScrollHeight).toBe(layout.shellHeight);
-    expect(layout.shellOverflowY).toBe("hidden");
-    expect(layout.chatOverflowY).toBe("hidden");
-
-    const mv3ScriptApis = await extensionPage.evaluate(() => ({
-      legacyTabsExecuteScript: typeof chrome.tabs.executeScript,
-      scriptingExecuteScript: typeof chrome.scripting.executeScript,
-    }));
-    expect(mv3ScriptApis.legacyTabsExecuteScript).toBe("undefined");
-    expect(mv3ScriptApis.scriptingExecuteScript).toBe("function");
-
-    const manifest = await extensionPage.evaluate(() => chrome.runtime.getManifest());
-    expect(manifest.manifest_version).toBe(3);
-    expect(manifest.minimum_chrome_version).toBe("138");
-    expect(manifest.options_page).toBe("options.html");
-    const desktopPermissions = [
-      "declarativeContent",
-      "declarativeNetRequestFeedback",
-      "desktopCapture",
-      "downloads.open",
-      "downloads.ui",
-      "favicon",
-      "fontSettings",
-      "gcm",
-      "geolocation",
-      "identity",
-      "identity.email",
-      "nativeMessaging",
-      "pageCapture",
-      "power",
-      "readingList",
-      "search",
-      "system.cpu",
-      "system.display",
-      "system.memory",
-      "system.storage",
-      "tabCapture",
-      "tabGroups",
-      "tts",
-      "unlimitedStorage",
-      "webAuthenticationProxy",
-    ];
-    expect(manifest.permissions).toEqual(expect.arrayContaining(["debugger", "userScripts", ...desktopPermissions]));
-    expect(manifest.permissions).not.toContain("webRequestBlocking");
-
-    const permissionAndApiState = await extensionPage.evaluate(async () => {
-      const granted = await chrome.permissions.getAll();
-      return {
-        grantedPermissions: granted.permissions,
-        apis: {
-          desktopCapture: typeof chrome.desktopCapture,
-          fontSettings: typeof chrome.fontSettings,
-          pageCapture: typeof chrome.pageCapture,
-          readingList: typeof chrome.readingList,
-          search: typeof chrome.search,
-          system: typeof chrome.system,
-          tabCapture: typeof chrome.tabCapture,
-          tabGroups: typeof chrome.tabGroups,
-          tts: typeof chrome.tts,
-          webAuthenticationProxy: typeof chrome.webAuthenticationProxy,
-        },
-      };
-    });
-    expect(permissionAndApiState.grantedPermissions).toEqual(expect.arrayContaining(desktopPermissions));
-    expect(permissionAndApiState.apis).toEqual({
-      desktopCapture: "object",
-      fontSettings: "object",
-      pageCapture: "object",
-      readingList: "object",
-      search: "object",
-      system: "object",
-      tabCapture: "object",
-      tabGroups: "object",
-      tts: "object",
-      webAuthenticationProxy: "object",
-    });
-
-    const desktopApiSmoke = await extensionPage.evaluate(async () => {
-      const [cpu, memory, displays, fonts, voices, readingList, tabGroups] = await Promise.all([
-        chrome.system.cpu.getInfo(),
-        chrome.system.memory.getInfo(),
-        chrome.system.display.getInfo(),
-        chrome.fontSettings.getFontList(),
-        chrome.tts.getVoices(),
-        chrome.readingList.query({}),
-        chrome.tabGroups.query({}),
-      ]);
-      return {
-        cpuProcessors: cpu.numOfProcessors,
-        memoryCapacity: memory.capacity,
-        displayCount: displays.length,
-        fontCount: fonts.length,
-        voiceCount: voices.length,
-        readingListCount: readingList.length,
-        tabGroupCount: tabGroups.length,
-      };
-    });
-    expect(desktopApiSmoke.cpuProcessors).toBeGreaterThan(0);
-    expect(desktopApiSmoke.memoryCapacity).toBeGreaterThan(0);
-    expect(desktopApiSmoke.displayCount).toBeGreaterThan(0);
-    expect(desktopApiSmoke.fontCount).toBeGreaterThan(0);
-    expect(desktopApiSmoke.voiceCount).toBeGreaterThanOrEqual(0);
-    expect(desktopApiSmoke.readingListCount).toBeGreaterThanOrEqual(0);
-    expect(desktopApiSmoke.tabGroupCount).toBeGreaterThanOrEqual(0);
-    await expect.poll(() => extensionPage.evaluate(() => chrome.sidePanel.getPanelBehavior()))
-      .toMatchObject({ openPanelOnActionClick: true });
-
-    await expect(extensionPage.locator(".config-card")).toHaveCount(0);
-    await expect(extensionPage.getByTestId("config-required-state")).toContainText("先完成模型配置");
-
-    const [optionsPage] = await Promise.all([
-      context.waitForEvent("page"),
-      extensionPage.getByTestId("open-settings").click(),
-    ]);
-    await optionsPage.waitForLoadState("domcontentloaded");
-    await expect(optionsPage.locator("h1")).toHaveText("模型设置");
-    await expect(optionsPage.getByTestId("user-scripts-panel")).toBeVisible();
-    const userScriptsAvailable = await optionsPage.evaluate(() => typeof chrome.userScripts !== "undefined");
-    await expect(optionsPage.getByText("当前浏览器未开放 chrome.userScripts。", { exact: false }))
-      .toHaveCount(userScriptsAvailable ? 0 : 1);
-    await expect(optionsPage.getByTestId("event-log")).toBeVisible();
-    const configInputs = optionsPage.getByTestId("options-card").locator("input");
-    await expect(configInputs).toHaveCount(3);
-    await configInputs.nth(0).fill("https://provider.test/v1");
-    await configInputs.nth(1).fill("deepseek/deepseek-v4-flash-0731:free");
-    await configInputs.nth(2).fill("test-key");
-    await optionsPage.getByRole("button", { name: "保存配置" }).click();
-    await expect(optionsPage.locator(".save-message.saved")).toBeVisible();
-    await expect(extensionPage.getByTestId("model-label")).toHaveText("Deepseek V4 Flash 0731");
-    await expect(extensionPage.getByTestId("composer-input")).toBeVisible();
-    const welcomeOptions = extensionPage.getByTestId("welcome-options");
-    await expect(welcomeOptions).toBeVisible();
-    await expect(welcomeOptions.getByRole("button")).toHaveCount(3);
-    await expect(welcomeOptions).toContainText("移除页面广告");
-    await expect(welcomeOptions).toContainText("添加深色模式");
-    await expect(welcomeOptions).toContainText("做最酷的事情");
-    await expect(extensionPage.getByText("可以开始了")).toHaveCount(0);
-    const welcomeLayout = await extensionPage.evaluate(() => {
-      const welcome = document.querySelector<HTMLElement>(".aui-thread-welcome-root");
-      const viewport = document.querySelector<HTMLElement>("[data-testid=thread-viewport]");
-      const footer = document.querySelector<HTMLElement>(".aui-thread-viewport-footer");
-      if (!welcome || !viewport || !footer) throw new Error("Welcome layout was not rendered");
-      const welcomeRect = welcome.getBoundingClientRect();
-      const viewportRect = viewport.getBoundingClientRect();
-      const footerRect = footer.getBoundingClientRect();
-      return {
-        welcomeCenter: welcomeRect.top + welcomeRect.height / 2,
-        contentCenter: (viewportRect.top + footerRect.top) / 2,
-      };
-    });
-    expect(Math.abs(welcomeLayout.welcomeCenter - welcomeLayout.contentCenter)).toBeLessThan(2);
-    await optionsPage.close();
-
-    const composer = extensionPage.getByTestId("composer-input");
-    await expect(extensionPage.getByTestId("thread-viewport")).toHaveCSS("overflow-y", "auto");
-    await composer.fill("first line");
-    await composer.press("Meta+Enter");
-    await expect(composer).toHaveValue("first line\n");
-    await composer.fill("enter submits");
-    await composer.press("Enter");
-    const userMessage = extensionPage.locator('[data-role="user"]').last();
-    await expect(userMessage).toContainText("enter submits");
-    await userMessage.hover();
-    const editButton = userMessage.getByTestId("edit-message-button");
-    await expect(editButton).toBeVisible();
-    await editButton.click();
-    await expect(extensionPage.getByTestId("user-edit-input")).toHaveValue("enter submits");
-    await extensionPage.getByRole("button", { name: "取消编辑" }).click();
-    await expect(extensionPage.locator('[data-role="user"]').last()).toContainText("enter submits");
-    expect(await composer.getAttribute("maxlength")).toBeNull();
-    await extensionPage.close();
-    const reopened = await context.newPage();
-    await reopened.goto(`chrome-extension://${extensionId}/sidepanel.html`);
-    await expect(reopened.getByTestId("composer-input")).toHaveValue("");
-    await expect(reopened.getByTestId("model-label")).toHaveText("Deepseek V4 Flash 0731");
-    await expect(reopened.locator(".config-card")).toHaveCount(0);
-    await expect(reopened.locator(".clear-config-button")).toHaveCount(0);
-
-    const target = await context.newPage();
-    await target.goto("data:text/html,<title>Side Agent E2E</title><main>ready</main>");
-    const debuggerResult = await reopened.evaluate(async (targetUrl) => {
-      const tabs = await chrome.tabs.query({ url: targetUrl });
-      const tab = tabs[0];
-      if (!tab?.id) throw new Error("Target tab was not found");
-
-      await chrome.debugger.attach({ tabId: tab.id }, "1.3");
-      try {
-        return await chrome.debugger.sendCommand({ tabId: tab.id }, "Runtime.evaluate", {
-          expression: "document.title",
-          returnByValue: true,
-        });
-      } finally {
-        await chrome.debugger.detach({ tabId: tab.id });
-      }
-    }, target.url());
-
-    expect(debuggerResult).toMatchObject({ result: { value: "Side Agent E2E" } });
+    const options = await configure(opened.context, opened.page, "https://provider.test/v1");
+    await expect(options.getByTestId("options-card").locator("input")).toHaveCount(3);
+    await expect(options.getByTestId("event-log-clear")).toBeVisible();
+    await expect(options.getByTestId("event-log")).toHaveCount(0);
+    await expect(options.getByTestId("user-scripts-panel")).toHaveCount(0);
+    await expect(opened.page.getByTestId("welcome-options")).toHaveCount(0);
+    await expect(opened.page.getByTestId("edit-message-button")).toHaveCount(0);
+    await expect(opened.page.getByTestId("model-label")).toHaveCount(0);
   } finally {
-    await context.close();
+    await dispose(opened.context, opened.userDataDirectory);
   }
 });
 
-test("follows the system color scheme with a grayscale palette", async () => {
-  const extensionPath = resolve(process.cwd(), "dist");
-  const userDataDirectory = await mkdtemp(resolve(tmpdir(), "side-agent-theme-e2e-"));
-  const context = await chromium.launchPersistentContext(userDataDirectory, {
-    executablePath: chromium.executablePath(),
-    headless: true,
-    colorScheme: "light",
-    args: [
-      `--disable-extensions-except=${extensionPath}`,
-      `--load-extension=${extensionPath}`,
-      "--no-sandbox",
-    ],
-  });
-
+test("executes the one chrome({ code }) tool across extension, MAIN, USER_SCRIPT and CDP, then restores and clears the log", async () => {
+  const responses: string[][] = [];
+  const provider = await startProvider(responses);
+  const targetUrl = `${provider.origin}/target`;
+  const code = `
+const [tab] = await chrome.tabs.query({ url: ${JSON.stringify(targetUrl)} });
+if (!tab?.id) throw new Error("target tab missing");
+await chrome.userScripts.unregister({ ids: ["e2e-script"] }).catch(() => undefined);
+await chrome.userScripts.register([{ id: "e2e-script", matches: [${JSON.stringify(`${provider.origin}/*`)}], js: [{ code: "document.documentElement.dataset.registered = 'yes'" }], world: "USER_SCRIPT" }]);
+await chrome.userScripts.update([{ id: "e2e-script", js: [{ code: "document.documentElement.dataset.updated = 'yes'" }] }]);
+const scripts = await chrome.userScripts.getScripts({ ids: ["e2e-script"] });
+const userResult = await chrome.userScripts.execute({ target: { tabId: tab.id }, world: "USER_SCRIPT", js: [{ code: "document.documentElement.dataset.user = 'yes'; 'USER_OK'" }] });
+const [mainResult] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: () => { document.documentElement.dataset.main = "yes"; return "MAIN_OK"; } });
+await chrome.debugger.attach({ tabId: tab.id }, "1.3");
+let cdp;
+try { cdp = await chrome.debugger.sendCommand({ tabId: tab.id }, "Runtime.evaluate", { expression: "document.title", returnByValue: true }); }
+finally { await chrome.debugger.detach({ tabId: tab.id }); }
+return { extensionTitle: document.title, version: chrome.runtime.getManifest().version, scriptCount: scripts.length, user: userResult[0]?.result, main: mainResult.result, cdp: cdp.result.value };
+`;
+  responses.push(toolResponse(code), textResponse("META_OK"));
+  const opened = await openExtension();
   try {
-    let serviceWorker = context.serviceWorkers()[0];
-    if (!serviceWorker) serviceWorker = await context.waitForEvent("serviceworker");
-    const extensionId = new URL(serviceWorker.url()).hostname;
-    const sidepanel = await context.newPage();
-    const optionsPage = await context.newPage();
-    await sidepanel.goto(`chrome-extension://${extensionId}/sidepanel.html`);
-    await optionsPage.goto(`chrome-extension://${extensionId}/options.html`);
-    await expect(sidepanel.getByTestId("config-required-state")).toBeVisible();
-    await expect(optionsPage.getByTestId("options-card")).toBeVisible();
+    await enableUserScripts(opened.context, opened.extensionId, opened.page);
+    const target = await opened.context.newPage();
+    await target.goto(targetUrl);
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
 
-    for (const colorScheme of ["light", "dark"] as const satisfies readonly ColorScheme[]) {
-      await sidepanel.emulateMedia({ colorScheme });
-      await optionsPage.emulateMedia({ colorScheme });
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("exercise every browser context");
+    await composer.press("Enter");
+    await expect(opened.page.locator(".activity")).toHaveCount(1);
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("META_OK");
+    await opened.page.locator(".activity summary").click();
+    await expect(opened.page.locator(".activity")).toContainText("USER_OK");
+    await expect(opened.page.locator(".activity")).toContainText("MAIN_OK");
+    await expect(opened.page.locator(".activity")).toContainText("Side Agent Target");
+    await expect.poll(() => target.evaluate(() => ({ main: document.documentElement.dataset.main, user: document.documentElement.dataset.user })))
+      .toEqual({ main: "yes", user: "yes" });
 
-      await expect.poll(() => sidepanel.evaluate(() => getComputedStyle(document.documentElement).colorScheme)).toBe(colorScheme);
-      await expect.poll(() => optionsPage.evaluate(() => getComputedStyle(document.documentElement).colorScheme)).toBe(colorScheme);
+    expect(provider.requests).toHaveLength(2);
+    expect(provider.requests[0].tools).toHaveLength(1);
+    expect(provider.requests[0].tools[0]).toMatchObject({
+      type: "function",
+      function: { name: "chrome", parameters: { type: "object", required: ["code"], additionalProperties: false } },
+    });
+    const events = await readEvents(opened.page);
+    const tool = events.find((event) => event.type === "tool.finished");
+    expect(tool).toMatchObject({ toolCallId: "call-chrome-e2e", input: { code: expect.any(String) }, latencyMs: expect.any(Number) });
+    expect(tool.output).toMatchObject({ user: "USER_OK", main: "MAIN_OK", cdp: "Side Agent Target" });
+    expect(events.filter((event) => event.type === "conversation.message")).toHaveLength(2);
 
-      const sidepanelTheme = await sidepanel.evaluate(() => {
-        const elements = [
-          document.body,
-          document.querySelector<HTMLElement>(".app-header"),
-          document.querySelector<HTMLElement>(".open-settings-button"),
-          document.querySelector<HTMLElement>(".empty-icon"),
-        ].filter((element): element is HTMLElement => Boolean(element));
-        const colors = elements.flatMap((element) => {
-          const styles = getComputedStyle(element);
-          return [styles.backgroundColor, styles.color, styles.borderTopColor, styles.borderBottomColor];
-        });
-        return {
-          bodyBackground: getComputedStyle(document.body).backgroundColor,
-          colors,
-        };
-      });
-      const optionsTheme = await optionsPage.evaluate(() => {
-        const elements = [
-          document.body,
-          document.querySelector<HTMLElement>(".options-card"),
-          document.querySelector<HTMLElement>(".options-card input"),
-          document.querySelector<HTMLElement>(".options-card button"),
-        ].filter((element): element is HTMLElement => Boolean(element));
-        const colors = elements.flatMap((element) => {
-          const styles = getComputedStyle(element);
-          return [styles.backgroundColor, styles.color, styles.borderTopColor, styles.borderBottomColor];
-        });
-        return {
-          bodyBackground: getComputedStyle(document.body).backgroundColor,
-          colors,
-        };
-      });
+    await opened.page.reload();
+    await expect(opened.page.locator('[data-role="user"]')).toContainText("exercise every browser context");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("META_OK");
 
-      const expectedBackground = colorScheme === "light" ? "rgb(255, 255, 255)" : "rgb(0, 0, 0)";
-      expect(sidepanelTheme.bodyBackground).toBe(expectedBackground);
-      expect(optionsTheme.bodyBackground).toBe(expectedBackground);
-      assertNeutralColors(sidepanelTheme.colors);
-      assertNeutralColors(optionsTheme.colors);
-    }
+    const clearOptions = await configure(opened.context, opened.page, provider.baseURL);
+    clearOptions.once("dialog", (dialog) => dialog.accept());
+    await clearOptions.getByTestId("event-log-clear").click();
+    await expect(clearOptions.getByRole("status")).toContainText("已清空");
+    await expect.poll(() => readEvents(clearOptions)).toEqual([]);
   } finally {
-    await context.close();
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("streams complete Markdown without blocking draft input", async () => {
+  const markdown = [
+    "# Heading\n\n> quote\n\n- [x] task\n\n~~strike~~ and [link](https://example.com).\n\n",
+    "| A | B |\n| - | - |\n| 1 | 2 |\n\nInline $x^2$ and block:\n\n$$y=x+1$$\n\n",
+    "```javascript\nconst answer = 42;\n```\n\nFootnote[^1].\n\n[^1]: note\n\nFINAL_MARKER",
+  ].join("");
+  const parts = [chunk({ role: "assistant", content: "" }), ...[...markdown].map((content) => chunk({ content })), chunk({}, "stop"), "data: [DONE]\n\n"];
+  const provider = await startProvider([parts], 2);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("stream markdown");
+    await composer.press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toHaveAttribute("data-status", "running");
+
+    const draft = "responsive-draft-".repeat(40);
+    const started = Date.now();
+    await composer.pressSequentially(draft);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    await expect(composer).toHaveValue(draft);
+    const rendered = opened.page.locator(".markdown-body").last();
+    await expect(rendered).toContainText("FINAL_MARKER");
+    await expect(rendered.locator("table")).toBeVisible();
+    await expect(rendered.locator('input[type="checkbox"]')).toBeChecked();
+    await expect(rendered.locator("del")).toHaveText("strike");
+    await expect(rendered.locator("blockquote")).toContainText("quote");
+    await expect(rendered.locator("pre code")).toContainText("const answer = 42");
+    await expect(rendered.locator(".katex")).not.toHaveCount(0);
+    await expect(rendered.locator("sup")).not.toHaveCount(0);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("closing the panel aborts an active model stream", async () => {
+  const parts = [chunk({ role: "assistant", content: "STREAM_STARTED" }), ...Array.from({ length: 500 }, () => chunk({ content: "." }))];
+  const provider = await startProvider([parts], 20);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("keep streaming");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_STARTED");
+    await opened.page.close();
+    await expect.poll(() => provider.stats.abortedResponses).toBe(1);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("closing the panel prevents a queued chrome call from starting", async () => {
+  const provider = await startProvider([queuedToolResponse(
+    "await new Promise(() => undefined);",
+    "await chrome.storage.local.set({ 'e2e-queued-tool-ran': true }); return true;",
+  )]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("queue two calls");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".activity")).toHaveCount(2);
+    await opened.page.close();
+
+    const probe = await opened.context.newPage();
+    await probe.goto(`chrome-extension://${opened.extensionId}/options.html`);
+    await expect.poll(() => probe.evaluate(async () => (await chrome.storage.local.get("e2e-queued-tool-ran"))["e2e-queued-tool-ran"]))
+      .toBeUndefined();
+    expect(provider.requests).toHaveLength(1);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });

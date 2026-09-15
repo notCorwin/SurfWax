@@ -1,23 +1,22 @@
 import { isLoopFinished, ToolLoopAgent } from "ai";
 import type { LanguageModel } from "ai";
 import { createChromeTool } from "../chrome/tool";
+import { ChromeExecutor } from "../chrome/executor";
 import type { EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
-import { ChromeBridge } from "../chrome/bridge";
 import { createModel } from "./model";
 
 export const DEFAULT_INSTRUCTIONS = [
   "You are a Chrome side-panel agent.",
-  "Use the chrome tool for all browser actions and inspect the available API when needed.",
-  "You may use raw Chrome APIs and CDP. Do not ask for application-level approval.",
-  "For user scripts use chrome.userScripts.register, update, unregister, getScripts, and execute through this same chrome tool. A registered script must include an id, matches, and a non-empty js array; choose world MAIN when it must share the page JavaScript global and USER_SCRIPT for the native user-script world.",
-  "This is Manifest V3: chrome.tabs.executeScript is not exposed. For packaged extension files or a real function use chrome.scripting.executeScript; for arbitrary source text in a tab use chrome.debugger CDP Runtime.evaluate instead.",
+  "Use the chrome tool for every browser action. Its code is the body of an async function running in the Side Panel extension realm; explicitly return the desired result.",
+  "The code can use Web APIs and every available chrome.* API directly, including chrome.userScripts, chrome.scripting, and chrome.debugger raw CDP. Do not ask for application-level approval.",
+  "Use native chrome.userScripts register, update, unregister, getScripts, execute, configureWorld, and resetWorldConfiguration as needed. Use MAIN to share the page JavaScript global and USER_SCRIPT for the native user-script world.",
   "Return concise progress updates after actions and do not claim an action succeeded until its tool result confirms it.",
 ].join(" ");
 
 export type CreateAgentOptions = {
   model: ModelConfig;
-  bridge: ChromeBridge;
+  executor: ChromeExecutor;
   languageModel?: LanguageModel;
   instructions?: string;
   logger?: EventLogger;
@@ -30,27 +29,23 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, C
   return new ToolLoopAgent<never, ChromeAgentTools>({
     model: options.languageModel ?? createModel(options.model, logger),
     instructions: options.instructions ?? DEFAULT_INSTRUCTIONS,
-    tools: { chrome: createChromeTool(options.bridge) },
+    tools: { chrome: createChromeTool(options.executor) },
     ...(logger ? {
       onStart: (event) => logger.record({
-        category: "model",
         type: "model.started",
         content: { callId: event.callId, operationId: event.operationId, provider: event.provider, modelId: event.modelId },
       }),
       onStepStart: (event) => logger.record({
-        category: "model",
         type: "model.step.started",
         content: { callId: event.callId, stepNumber: event.stepNumber, provider: event.provider, modelId: event.modelId },
       }),
       onToolExecutionStart: (event) => logger.record({
-        category: "tool",
         type: "tool.started",
         content: { callId: event.callId, toolName: event.toolCall.toolName },
         toolCallId: event.toolCall.toolCallId,
         input: event.toolCall.input,
       }),
       onToolExecutionEnd: (event) => logger.record({
-        category: "tool",
         type: event.toolOutput.type === "tool-error" ? "tool.failed" : "tool.finished",
         content: { callId: event.callId, toolName: event.toolCall.toolName, toolExecutionMs: event.toolExecutionMs },
         toolCallId: event.toolCall.toolCallId,
@@ -59,7 +54,6 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, C
         latencyMs: event.toolExecutionMs,
       }),
       onStepEnd: (event) => logger.record({
-        category: "model",
         type: "model.step.finished",
         content: { callId: event.callId, stepNumber: event.stepNumber, text: event.text, reasoning: event.reasoning, toolCalls: event.toolCalls, toolResults: event.toolResults },
         stopReason: event.finishReason,
@@ -68,7 +62,6 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, C
         latencyMs: event.performance?.stepTimeMs,
       }),
       onEnd: (event) => logger.record({
-        category: "model",
         type: "model.finished",
         content: { callId: event.callId, stepNumber: event.stepNumber, text: event.text, reasoning: event.reasoning, content: event.content, toolCalls: event.toolCalls, toolResults: event.toolResults },
         stopReason: event.finishReason,

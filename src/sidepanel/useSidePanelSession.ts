@@ -1,11 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ModelConfig } from "../types";
-import {
-  MODEL_CONFIG_STORAGE_KEY,
-  isCompleteModelConfig,
-  loadModelConfig,
-} from "./config";
-import { formatModelDisplayName } from "./model-label";
+import { MODEL_CONFIG_STORAGE_KEY, isCompleteModelConfig, loadModelConfig } from "./config";
 
 const EMPTY_CONFIG: ModelConfig = { baseURL: "", apiKey: "", model: "" };
 
@@ -18,11 +13,7 @@ export type SidePanelSession = {
   configReady: boolean;
   status: string;
   configured: boolean;
-  // Run lifetime invariant: one config => one chat mount => one ChromeBridge.
-  // A config change changes chatKey, which remounts the keyed chat;
-  // useSidePanelRuntime disposes the old bridge/agent on unmount or pagehide.
   chatKey: string;
-  modelLabel: string;
 };
 
 export function useSidePanelSession(): SidePanelSession {
@@ -32,33 +23,27 @@ export function useSidePanelSession(): SidePanelSession {
 
   useEffect(() => {
     let active = true;
-    const refreshConfig = async () => {
+    const refresh = async () => {
       try {
         const stored = await loadModelConfig(EMPTY_CONFIG);
         if (!active) return;
         setConfig(stored);
         setStatus("");
       } catch (error) {
-        if (!active) return;
-        setStatus(`配置读取失败：${errorText(error)}`);
+        if (active) setStatus(`配置读取失败：${errorText(error)}`);
       } finally {
         if (active) setConfigReady(true);
       }
     };
-    const handleStorageChange = (
-      changes: { [key: string]: chrome.storage.StorageChange },
-      areaName: string,
-    ) => {
-      if (areaName === "local" && changes[MODEL_CONFIG_STORAGE_KEY]) {
-        void refreshConfig();
-      }
+    const storageChanged = (changes: { [key: string]: chrome.storage.StorageChange }, area: string) => {
+      if (area === "local" && changes[MODEL_CONFIG_STORAGE_KEY]) void refresh();
     };
 
-    void refreshConfig();
-    chrome.storage.onChanged.addListener(handleStorageChange);
+    void refresh();
+    chrome.storage.onChanged.addListener(storageChanged);
     return () => {
       active = false;
-      chrome.storage.onChanged.removeListener(handleStorageChange);
+      chrome.storage.onChanged.removeListener(storageChanged);
     };
   }, []);
 
@@ -68,6 +53,5 @@ export function useSidePanelSession(): SidePanelSession {
     status,
     configured: configReady && isCompleteModelConfig(config),
     chatKey: `${config.baseURL}\u0000${config.model}`,
-    modelLabel: formatModelDisplayName(config.model),
   };
 }

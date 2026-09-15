@@ -1,58 +1,70 @@
 import type { AssistantRuntime } from "@assistant-ui/react";
-import { useChatRuntime } from "@assistant-ui/react-ai-sdk";
+import { useChatRuntime } from "@assistant-ui/ai-sdk";
 import type { UIMessage } from "ai";
 import { useEffect, useMemo } from "react";
 import { createAgent } from "../agent/runner";
-import { ChromeBridge } from "../chrome/bridge";
+import { createChatTransport } from "../agent/transport";
+import { ChromeExecutor } from "../chrome/executor";
 import type { EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
-import { createChromeChatTransport } from "./chrome-tool-metadata";
-import { UserScriptRegistry } from "../userscripts/registry";
 
-type SidePanelUIMessage = UIMessage<any, any, any>;
-
-type SidePanelRuntime = {
-  thread: Pick<AssistantRuntime["thread"], "cancelRun">;
-};
-type SidePanelBridge = Pick<ChromeBridge, "dispose">;
+type SidePanelMessage = UIMessage<any, never, any>;
+type CloseableRuntime = { thread: Pick<AssistantRuntime["thread"], "cancelRun"> };
+type DisposableExecutor = Pick<ChromeExecutor, "dispose">;
 
 export function createSidePanelCloser(
-  runtime: SidePanelRuntime,
-  bridge: SidePanelBridge,
+  runtime: CloseableRuntime,
+  executor: DisposableExecutor,
   logger?: EventLogger,
 ): () => void {
   let closed = false;
-
   return () => {
     if (closed) return;
     closed = true;
     runtime.thread.cancelRun();
-    bridge.dispose();
-    logger?.record({ category: "system", type: "sidepanel.closed", content: null });
+    executor.dispose();
+    logger?.record({ type: "sidepanel.closed", content: null });
     void logger?.flush();
   };
 }
 
 export function useSidePanelRuntime(
   config: ModelConfig,
-  suggestions: readonly { prompt: string }[],
-  logger?: EventLogger,
-  initialMessages: SidePanelUIMessage[] = [],
+  logger: EventLogger,
+  initialMessages: SidePanelMessage[] = [],
 ): AssistantRuntime {
-  const userScripts = useMemo(() => new UserScriptRegistry({ logger }), [logger]);
-  const bridge = useMemo(() => new ChromeBridge({ userScripts }), [userScripts]);
-  const agent = useMemo(() => createAgent({ model: config, bridge, logger }), [config, bridge, logger]);
-  const transport = useMemo(() => createChromeChatTransport(agent, logger), [agent, logger]);
-  const runtime = useChatRuntime<SidePanelUIMessage>({ id: "side-agent-runtime", messages: initialMessages, transport: transport as any, suggestions });
+  const executor = useMemo(() => new ChromeExecutor({ logger }), [logger]);
+  const agent = useMemo(() => createAgent({ model: config, executor, logger }), [config, executor, logger]);
+  const transport = useMemo(() => createChatTransport(agent, logger), [agent, logger]);
+  const runtime = useChatRuntime<SidePanelMessage>({
+    id: "side-agent-runtime",
+    messages: initialMessages,
+    transport,
+  });
 
   useEffect(() => {
-    const close = createSidePanelCloser(runtime, bridge, logger);
-    window.addEventListener("pagehide", close);
+    const close = createSidePanelCloser(runtime, executor, logger);
+    const clear = (message: unknown, _sender: chrome.runtime.MessageSender, respond: (response: unknown) => void) => {
+      if (!message || typeof message !== "object" || (message as { type?: unknown }).type !== "side-agent:clear-log") return false;
+      close();
+      logger.stop();
+      void logger.flush()
+        .then(() => logger.clear())
+        .then(() => {
+          respond({ ok: true });
+          globalThis.location.reload();
+        })
+        .catch((error) => respond({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+      return true;
+    };
+    globalThis.addEventListener("pagehide", close);
+    chrome.runtime.onMessage.addListener(clear);
     return () => {
-      window.removeEventListener("pagehide", close);
+      globalThis.removeEventListener("pagehide", close);
+      chrome.runtime.onMessage.removeListener(clear);
       close();
     };
-  }, [bridge, logger, runtime]);
+  }, [executor, logger, runtime]);
 
   return runtime;
 }

@@ -71,7 +71,6 @@ export function createRetryingFetch(options: {
         const response = await baseFetch(request ? request.clone() : input, init);
         if (!retryableStatus(response.status)) {
           options.logger?.record({
-            category: "request",
             type: "request.completed",
             content: { url, method, status: response.status, retries },
             latencyMs: Math.max(0, now() - startedAt),
@@ -82,7 +81,6 @@ export function createRetryingFetch(options: {
         retries += 1;
         const delayMs = retryDelay(retries, random);
         options.logger?.record({
-          category: "request",
           type: "request.retry",
           content: { url, method, status: response.status },
           retry: { attempt: retries, status: response.status, delayMs },
@@ -93,7 +91,6 @@ export function createRetryingFetch(options: {
       } catch (error) {
         if (isAbortError(error, signal)) {
           options.logger?.record({
-            category: "request",
             type: "request.aborted",
             content: { url, method },
             abort: { reason: error instanceof Error ? error.message : String(error) },
@@ -104,7 +101,6 @@ export function createRetryingFetch(options: {
 
         if (!isNetworkError(error)) {
           options.logger?.record({
-            category: "request",
             type: "request.failed",
             content: { url, method, error },
             error,
@@ -116,7 +112,6 @@ export function createRetryingFetch(options: {
         retries += 1;
         const delayMs = retryDelay(retries, random);
         options.logger?.record({
-          category: "request",
           type: "request.retry",
           content: { url, method, error },
           retry: { attempt: retries, delayMs },
@@ -137,7 +132,6 @@ export function createModel(config: ModelConfig, logger?: EventLogger): Language
     name: "side-agent-provider",
     baseURL: config.baseURL.replace(/\/+$/, ""),
     apiKey: config.apiKey,
-    headers: config.headers,
     fetch: createRetryingFetch({ logger }),
   });
 

@@ -1,108 +1,81 @@
 # Side Agent Runtime
 
-一个纯 Manifest V3 Chrome 扩展：在 Chrome Side Panel 中运行 Vercel AI SDK Agent，并通过一个动态 chrome 工具调用 Chrome 扩展 API、Chrome DevTools Protocol 和原生 User Scripts API。
+Side Agent Runtime 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。它只向模型提供一个浏览器元工具 `chrome({ code })`；代码在当前 Side Panel 的扩展上下文中作为异步 JavaScript 执行，可直接使用 Web API、Chrome Extension API、原生 User Scripts API 和 CDP。
 
-## 功能
+## 安装
 
-- 只向 Agent 暴露一个动态 chrome 工具，按需发现并调用浏览器能力。
-- 支持 describe、call、waitEvent 和 cdp 四种操作。
-- 可使用 chrome.scripting.executeScript 或 CDP Runtime.evaluate 执行页面脚本。
-- Side Panel 与扩展选项页均支持 User Scripts 的创建、编辑、启用、禁用、删除和测试。
-- User Scripts 支持 MAIN/USER_SCRIPT 执行世界、内联代码和扩展内文件 source；不提供 GM.* 兼容层。
-- 唯一的 canonical event log 追加写入本地 IndexedDB，记录完整的对话、模型、工具、请求、用户脚本和系统事件；UI、LLM context 和恢复会话都从它重建，不脱敏网页内容。
-- Side Panel 重新打开后从事件日志恢复对话；关闭面板会立即取消当前模型请求、停止后续工具调用、清理 handles 和 Debugger sessions，但已经发生的副作用和事件不会回滚或丢失。
-- 模型配置在用户点击保存后写入当前浏览器的 chrome.storage.local。
-- 不设置 Agent 步数、工具次数、消息长度、工具输出大小或任务时长上限；用户停止或关闭面板时用 AbortController 取消。
+需要 Node.js、npm 和 Chrome 138+：
 
-## 安装开发版
-
-要求 Chrome 138+、Node.js 和 npm：
-
-~~~sh
+```sh
 npm ci
 npm run build
-~~~
+```
 
-打开 chrome://extensions，开启“开发者模式”，选择“加载已解压的扩展程序”，然后选择 dist/。点击扩展 Action 图标打开 Side Panel。
+在 `chrome://extensions` 开启开发者模式，选择“加载已解压的扩展程序”并选中 `dist/`。点击扩展图标打开 Side Panel；在设置页填写 OpenAI-compatible Base URL、Model ID 和 API Key。使用 `chrome.userScripts` 前，还需要在扩展详情页开启 “Allow User Scripts”。
 
-点击 Side Panel 中的“打开设置”，或在扩展详情打开“扩展程序选项”，填写：
+## 唯一工具
 
-- OpenAI-compatible API Base URL，例如 https://api.openai.com/v1；
-- Model ID；
-- API Key。
+工具输入只有一个 `code` 字段。代码是异步函数体，因此需要显式 `return` 结果，调用严格串行执行。
 
-Chrome 138+ 还需要在扩展详情页开启 “Allow User Scripts”。
+查询标签页：
 
-开发时可运行：
-
-~~~sh
-npm run dev
-~~~
-
-## 动态 Chrome 工具
-
-Agent 使用同一个工具发现和操作 Chrome API：
-
-~~~json
+```json
 {
-  "operation": "call",
-  "path": "tabs.query",
-  "args": [{ "active": true, "currentWindow": true }]
+  "code": "return await chrome.tabs.query({ active: true, currentWindow: true });"
 }
-~~~
+```
 
-查看能力：
+使用页面 MAIN world：
 
-~~~json
+```json
 {
-  "operation": "describe",
-  "path": "tabs"
+  "code": "const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); return await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'MAIN', func: () => document.title });"
 }
-~~~
+```
 
-注册 User Script：
+直接使用 CDP：
 
-~~~json
+```json
 {
-  "operation": "call",
-  "path": "userScripts.register",
-  "args": [[{
-    "id": "page-helper",
-    "matches": ["<all_urls>"],
-    "js": [{ "code": "document.documentElement.dataset.agent = 'ready'" }],
-    "world": "MAIN"
-  }]]
+  "code": "const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); await chrome.debugger.attach({ tabId: tab.id }, '1.3'); try { return await chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.evaluate', { expression: 'document.title', returnByValue: true }); } finally { await chrome.debugger.detach({ tabId: tab.id }); }"
 }
-~~~
+```
 
-Manifest V3 不暴露 chrome.tabs.executeScript：扩展文件或函数注入使用 chrome.scripting.executeScript，任意字符串脚本使用 cdp 的 Runtime.evaluate。
+注册原生 User Script：
 
-## 日志
+```json
+{
+  "code": "await chrome.userScripts.register([{ id: 'page-helper', matches: ['<all_urls>'], js: [{ code: \"document.documentElement.dataset.agent = 'ready'\" }], world: 'MAIN' }]); return await chrome.userScripts.getScripts({ ids: ['page-helper'] });"
+}
+```
 
-选项页的“本地事件日志”支持按分类/关键词查看、导出 JSONL 和清空。日志本身就是 Agent 的对话与上下文来源；日志存储不可用时，运行时使用内存后备实现。
+Harness 不提供结构化 Chrome RPC、独立 CDP 工具、权限审批、额外沙箱、capability layer 或 Greasemonkey 兼容层。能力边界来自 Chrome 本身、Manifest 权限、浏览器策略和目标页面。
+
+## 数据与恢复
+
+IndexedDB 中的 append-only event log 是唯一事实来源。每条事件都有 `id`、`type`、`timestamp` 和 `content`；模型、工具与请求事件还记录对应的 stop reason、usage、provider metadata、tool call ID、输入、输出、错误、retry、abort 和 latency。聊天 UI、恢复会话和下一次模型上下文只从按序的 `conversation.message` 事件重建。
+
+用户消息只追加一次，模型消息在成功、失败或中止时保存最终快照。设置页只保留 BYOK 配置和“清空对话与日志”；日志存储失败会直接显示致命错误，不使用内存后备。
+
+Side Panel 关闭时会中止模型请求、阻止排队工具继续启动，并尽力结束工具执行和 detach 本扩展创建的调试会话。已经发生的浏览器副作用不会回滚。
+
+User Scripts 完全通过 `chrome.userScripts` 管理。Harness 在每次工具调用后保存当前注册快照，并在后台启动或更新后重新注册。升级到 0.2.0 时会清空旧日志和旧 User Script 数据，但保留 BYOK 模型配置。
+
+## 重试与流式 UI
+
+网络错误、408、429 和可恢复的 5xx 使用带 jitter 的指数退避，单次等待最高 10 秒，不设最大重试次数；不可恢复错误立即结束，用户中止立即生效。
+
+聊天界面使用 Assistant UI 与 AI SDK v7 直接集成。模型 Token 持续流入，Markdown 显示按 animation frame 平滑提交并缓存 renderer，支持 CommonMark、GFM、脚注、LaTeX、表格、任务列表、删除线、引用、链接和语法高亮。用户消息显示为气泡，模型消息全宽显示。
 
 ## 验证
 
-~~~sh
+```sh
 npm run check
 npm test
 npm run test:e2e
-~~~
+git diff --check
+```
 
-真实 OpenRouter E2E 测试通过环境变量提供 key，不要写入仓库：
-
-~~~sh
-OPENROUTER_API_KEY='your-key' npm run test:e2e -- e2e/openrouter.live.spec.ts
-~~~
-
-GitHub Autobuild 会运行同样的检查和 Playwright 测试，并发布 side-agent-runtime-autobuild.zip 及 SHA-256 校验文件。解压后仍需通过“加载已解压的扩展程序”安装；开发版不会从 GitHub Release 自动更新。
-
-## 平台边界
-
-扩展权限、host_permissions、受保护页面、Chrome 策略、Debugger 支持的 CDP domain、User Scripts 开关、Provider 的 CORS/限流/上下文窗口和浏览器资源限制仍由平台控制。项目不提供后端、原生 helper、权限审批 UI、代码沙箱或 capability layer；Agent 不受应用层步数、工具次数、消息长度、工具输出大小和任务时长上限限制。
-
-## 获取帮助与贡献
-
-问题反馈请附上 Chrome 版本、平台、扩展构建方式、复现步骤和相关日志分类；请移除 API key、Cookie、Authorization 和其他凭据。修改 public/manifest.json 时同时确认新增权限的必要性，并运行完整检查。
+GitHub Autobuild 会执行检查和 Playwright 测试，并生成扩展压缩包与 SHA-256 校验文件。
 
 维护者：[notCorwin](https://github.com/notCorwin)。欢迎提交 [Issue](https://github.com/notCorwin/side-agent-runtime/issues) 和聚焦的 Pull Request。

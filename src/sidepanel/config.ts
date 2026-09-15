@@ -4,7 +4,7 @@ export const MODEL_CONFIG_STORAGE_KEY = "side-agent:model-config";
 
 export type PersistedModelConfig = Pick<ModelConfig, "baseURL" | "apiKey" | "model">;
 
-export type StorageAreaLike = Pick<chrome.storage.StorageArea, "get" | "set" | "remove">;
+export type StorageAreaLike = Pick<chrome.storage.StorageArea, "get" | "set">;
 
 export function isCompleteModelConfig(config: PersistedModelConfig): boolean {
   return Boolean(config.baseURL.trim() && config.apiKey.trim() && config.model.trim());
@@ -46,9 +46,4 @@ export async function saveModelConfig(
       model: config.model.trim(),
     } satisfies PersistedModelConfig,
   });
-}
-
-export async function clearModelConfig(storage = getStorageArea()): Promise<void> {
-  if (!storage) throw new Error("Chrome storage is unavailable");
-  await storage.remove(MODEL_CONFIG_STORAGE_KEY);
 }

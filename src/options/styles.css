@@ -5,88 +5,42 @@ body {
 }
 
 .options-shell {
+  display: flex;
   width: min(620px, 100%);
   margin: 0 auto;
+  flex-direction: column;
+  gap: 22px;
   padding: 42px 24px;
 }
 
 .options-header {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
-  margin-bottom: 22px;
-}
-
-.options-eyebrow {
-  color: var(--muted-foreground);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.16em;
 }
 
 .options-header h1 {
+  margin: 0;
   font-size: 28px;
   letter-spacing: -0.04em;
 }
 
-.options-header > p:last-child {
+.options-header p,
+.options-status {
+  margin: 0;
   color: var(--muted-foreground);
   font-size: 13px;
   line-height: 1.5;
 }
 
-.options-card {
-  padding: 0;
-  background: var(--card);
+[data-slot="card"] form {
+  display: contents;
 }
 
-.options-card form {
-  display: grid;
-}
-
-.options-card-header {
-  border-bottom: 1px solid var(--border);
-}
-
-.options-card-content {
-  display: grid;
-  gap: 16px;
-  padding-top: 24px;
-}
-
-.options-field {
-  display: grid;
-  gap: 7px;
-}
-
-.options-field label {
-  color: var(--muted-foreground);
-}
-
-.options-field input {
-  background: var(--background);
-}
-
-.options-actions {
+[data-slot="card-footer"] {
   justify-content: flex-end;
-  gap: 10px;
-  padding-top: 22px;
 }
 
-.save-button {
-  min-width: 92px;
-}
-
-.save-message {
-  padding: 0 24px 22px;
-  color: var(--muted-foreground);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.save-message.saved {
-  color: var(--foreground);
-}
-
-.save-message.error {
+.options-status[data-state="error"] {
   color: var(--destructive);
 }

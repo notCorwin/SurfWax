@@ -1,84 +1,78 @@
 import { describe, expect, it } from "vitest";
-import { EventLogger, MemoryLogStore, rebuildConversation } from "./logging";
+import { EventLogger, rebuildConversation, type LogEvent } from "./logging";
+
+function memoryStore() {
+  const events: LogEvent[] = [];
+  return {
+    async append(event: Omit<LogEvent, "id">) {
+      const stored = { ...event, id: events.length + 1 };
+      events.push(stored);
+      return stored;
+    },
+    async all() { return [...events]; },
+    async clear() { events.length = 0; },
+  };
+}
 
 describe("canonical event log", () => {
-  it("keeps complete content and explicit model/tool fields", async () => {
-    const store = new MemoryLogStore();
-    const logger = new EventLogger({
-      store,
-      now: () => new Date("2026-01-01T00:00:00.000Z"),
-    });
+  it("writes required fields in order without redacting content", async () => {
+    const store = memoryStore();
+    const logger = new EventLogger({ store, now: () => new Date("2026-01-01T00:00:00.000Z") });
     const circular: Record<string, unknown> = {};
     circular.self = circular;
 
-    logger.record({
-      category: "tool",
+    await logger.append({
       type: "tool.finished",
       toolCallId: "call-1",
-      input: { operation: "call", path: "tabs.query" },
-      output: { title: "page", body: "sk-live-example" },
-      content: { scriptCode: "document.body.dataset.ready = 'yes';", circular },
+      input: { code: "return document.body.innerText" },
+      output: { body: "sk-live-example" },
+      content: { circular },
     });
-    logger.record({
-      category: "model",
+    await logger.append({
       type: "model.finished",
       content: { text: "done" },
       stopReason: "stop",
-      usage: { inputTokens: 1, outputTokens: 2 },
+      usage: { inputTokens: 1 },
       providerMetadata: { provider: "test" },
     });
-    await logger.flush();
 
-    const events = await store.all();
-    expect(events[0]).toMatchObject({
-      id: 1,
-      type: "tool.finished",
-      timestamp: "2026-01-01T00:00:00.000Z",
-      toolCallId: "call-1",
-      input: { operation: "call", path: "tabs.query" },
-      output: { body: "sk-live-example" },
-      content: { scriptCode: "document.body.dataset.ready = 'yes';" },
-    });
-    expect(JSON.stringify(events)).toContain("sk-live-example");
-    expect(events[1]).toMatchObject({
-      stopReason: "stop",
-      usage: { inputTokens: 1, outputTokens: 2 },
-      providerMetadata: { provider: "test" },
-    });
-  });
-
-  it("rebuilds the active conversation from append-only message and context events", async () => {
-    const store = new MemoryLogStore();
-    const logger = new EventLogger({ store });
-    await logger.appendMessage({ id: "u1", role: "user", parts: [{ type: "text", text: "old" }] });
-    await logger.appendMessage({ id: "a1", role: "assistant", parts: [{ type: "text", text: "old answer" }] });
-    await logger.appendContext(["u1", "a1"]);
-    await logger.appendMessage({ id: "u1", role: "user", parts: [{ type: "text", text: "edited" }] });
-    await logger.appendContext(["u1"]);
-    await logger.appendMessage({ id: "a2", role: "assistant", parts: [{ type: "text", text: "new answer" }] });
-
-    expect(await logger.messages()).toEqual([
-      { id: "u1", role: "user", parts: [{ type: "text", text: "edited" }] },
-      { id: "a2", role: "assistant", parts: [{ type: "text", text: "new answer" }] },
+    expect(await store.all()).toMatchObject([
+      {
+        id: 1,
+        type: "tool.finished",
+        timestamp: "2026-01-01T00:00:00.000Z",
+        toolCallId: "call-1",
+        input: { code: "return document.body.innerText" },
+        output: { body: "sk-live-example" },
+      },
+      { id: 2, stopReason: "stop", usage: { inputTokens: 1 }, providerMetadata: { provider: "test" } },
     ]);
-    expect(rebuildConversation(await store.all())).toHaveLength(2);
+    expect(JSON.stringify(await store.all())).toContain("sk-live-example");
   });
 
-  it("restores optional UI message fields after log serialization", async () => {
-    const store = new MemoryLogStore();
+  it("rebuilds messages only from the append-only conversation events and clears them", async () => {
+    const store = memoryStore();
     const logger = new EventLogger({ store });
-    await logger.appendMessage({
-      id: "assistant-1",
-      role: "assistant",
-      metadata: undefined,
-      parts: [{ type: "text", text: "done", providerMetadata: undefined }],
-    });
+    await logger.appendMessage({ id: "u1", role: "user", parts: [{ type: "text", text: "one" }] });
+    await logger.append({ type: "request.completed", content: { status: 200 } });
+    await logger.appendMessage({ id: "a1", role: "assistant", parts: [{ type: "text", text: "two" }], metadata: undefined });
 
-    expect(await logger.messages()).toEqual([{
-      id: "assistant-1",
-      role: "assistant",
-      metadata: undefined,
-      parts: [{ type: "text", text: "done", providerMetadata: undefined }],
-    }]);
+    expect(rebuildConversation(await store.all())).toEqual([
+      { id: "u1", role: "user", parts: [{ type: "text", text: "one" }] },
+      { id: "a1", role: "assistant", parts: [{ type: "text", text: "two" }], metadata: undefined },
+    ]);
+    await logger.clear();
+    expect(await logger.messages()).toEqual([]);
+  });
+
+  it("does not accept late events after a session is stopped for clearing", async () => {
+    const store = memoryStore();
+    const logger = new EventLogger({ store });
+    logger.record({ type: "sidepanel.closed", content: null });
+    logger.stop();
+    logger.record({ type: "userscript.snapshot", content: { count: 1 } });
+    await logger.flush();
+    await logger.clear();
+    expect(await store.all()).toEqual([]);
   });
 });
