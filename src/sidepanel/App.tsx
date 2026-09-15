@@ -5,7 +5,7 @@ import { ConversationMenu } from "../components/assistant-ui/thread-list";
 import { Thread } from "../components/assistant-ui/thread";
 import { Button } from "../components/ui/button";
 import { generateConversationTitle } from "../conversations";
-import { EventLogger, rebuildConversationList, selectedConversationId } from "../logging";
+import { EventLogger, rebuildConversationList } from "../logging";
 import type { ModelConfig } from "../types";
 import { useSidePanelRuntime } from "./useSidePanelRuntime";
 import { useSidePanelSession } from "./useSidePanelSession";
@@ -73,9 +73,9 @@ function ConfiguredChat({ config, logger, onError }: { config: ModelConfig; logg
 
   useEffect(() => {
     let active = true;
-    void logger.recoverDanglingRuns().then(() => logger.summaryEvents()).then((events) => {
+    void logger.recoverDanglingRuns().then(() => {
       if (!active) return;
-      setInitialThreadId(selectedConversationId(events) ?? rebuildConversationList(events)[0]?.id ?? null);
+      setInitialThreadId(null);
     }).catch((error) => {
       if (active) onError(errorText(error));
     });

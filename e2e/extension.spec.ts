@@ -282,6 +282,10 @@ return { extensionTitle: document.title, version: chrome.runtime.getManifest().v
     expect(events.filter((event) => event.type === "conversation.message")).toHaveLength(2);
 
     await opened.page.reload();
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("新对话");
+    await expect(opened.page.locator('[data-role="user"]')).toHaveCount(0);
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-item", { hasText: "工具测试" }).locator(".conversation-select").click();
     await expect(opened.page.locator('[data-role="user"]')).toContainText("exercise every browser context");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("META_OK");
 
@@ -502,6 +506,9 @@ test("stress profile: dense stream and long canonical log stay interactive", asy
 
     const reloadStarted = Date.now();
     await opened.page.reload();
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("新对话");
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-item", { hasText: "压力测试" }).locator(".conversation-select").click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("HISTORY_MARKER_499");
     const reloadMs = Date.now() - reloadStarted;
     const restoredComposer = opened.page.getByTestId("composer-input");
@@ -576,6 +583,9 @@ test("closing the panel restores the interrupted response and continues only on 
 
     const resumed = await opened.context.newPage();
     await resumed.goto(`chrome-extension://${opened.extensionId}/sidepanel.html`);
+    await expect(resumed.getByTestId("conversation-menu")).toContainText("新对话");
+    await resumed.getByTestId("conversation-menu").click();
+    await resumed.locator(".conversation-item").first().locator(".conversation-select").click();
     await expect(resumed.getByTestId("interrupted-message")).toBeVisible();
     await expect(resumed.locator(".markdown-body").last()).toContainText("STREAM_STARTED");
     await resumed.getByTestId("continue-interrupted").click();
@@ -587,7 +597,7 @@ test("closing the panel restores the interrupted response and continues only on 
   }
 });
 
-test("creates, titles, switches, reloads and permanently deletes local conversations", async () => {
+test("creates, titles, switches, starts fresh on reload and permanently deletes local conversations", async () => {
   const provider = await startProvider([
     textResponse("FIRST_REPLY"),
     textResponse("第一标题"),
@@ -618,6 +628,11 @@ test("creates, titles, switches, reloads and permanently deletes local conversat
     await opened.page.locator(".conversation-item", { hasText: "第一标题" }).locator(".conversation-select").click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FIRST_REPLY");
     await opened.page.reload();
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("新对话");
+    await expect(opened.page.locator(".markdown-body")).toHaveCount(0);
+
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-item", { hasText: "第一标题" }).locator(".conversation-select").click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FIRST_REPLY");
 
     await opened.page.getByTestId("conversation-menu").click();
@@ -647,6 +662,7 @@ test("keeps the default title after an unrecoverable title request failure", asy
     const requestCount = provider.requests.length;
     await opened.page.reload();
     await expect(opened.page.getByTestId("conversation-menu")).toContainText("新对话");
+    await expect(opened.page.locator(".markdown-body")).toHaveCount(0);
     await opened.page.waitForTimeout(200);
     expect(provider.requests).toHaveLength(requestCount);
   } finally {
