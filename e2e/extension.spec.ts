@@ -367,6 +367,7 @@ test("keeps jump-to-bottom usable while a long response is streaming", async () 
 
     const viewport = opened.page.getByTestId("thread-viewport");
     const remaining = () => viewport.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop);
+    await expect.poll(() => viewport.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(1_200);
     await expect.poll(remaining).toBeLessThanOrEqual(1);
     const box = await viewport.boundingBox();
     if (!box) throw new Error("thread viewport has no bounding box");
