@@ -90,45 +90,35 @@ jobs:
           repository="$GITHUB_REPOSITORY"
           tag="autobuild"
 
+          current_sha="$(gh api "repos/$repository/git/ref/heads/master" --jq '.object.sha')"
+          test "$current_sha" = "$GITHUB_SHA"
+
           if gh release view "$tag" --repo "$repository" >/dev/null 2>&1; then
-            current_sha="$(gh api "repos/$repository/git/ref/heads/master" --jq '.object.sha')"
-            test "$current_sha" = "$GITHUB_SHA"
-            gh release upload "$tag" \
-              --repo "$repository" \
-              --clobber \
-              "$ARCHIVE" \
-              "$CHECKSUM"
-
-            verify_dir="$RUNNER_TEMP/autobuild-release-verify"
-            mkdir -p "$verify_dir"
-            gh release download "$tag" \
-              --repo "$repository" \
-              --pattern "$(basename "$ARCHIVE")" \
-              --pattern "$(basename "$CHECKSUM")" \
-              --dir "$verify_dir" \
-              --clobber
-            (cd "$verify_dir" && sha256sum -c "$(basename "$CHECKSUM")")
-
-            current_sha="$(gh api "repos/$repository/git/ref/heads/master" --jq '.object.sha')"
-            test "$current_sha" = "$GITHUB_SHA"
-            git push origin "$GITHUB_SHA:refs/tags/$tag" --force
-            gh release edit "$tag" \
-              --repo "$repository" \
-              --target "$GITHUB_SHA" \
-              --title "Autobuild" \
-              --notes-file "$RUNNER_TEMP/autobuild-release-notes.md"
-            final_sha="$(gh api "repos/$repository/git/ref/tags/$tag" --jq '.object.sha')"
-            test "$final_sha" = "$GITHUB_SHA"
+            gh release delete "$tag" --repo "$repository" --cleanup-tag --yes
           else
             gh api --method DELETE "repos/$repository/git/refs/tags/$tag" >/dev/null 2>&1 || true
-            gh release create "$tag" \
-              --repo "$repository" \
-              --target "$GITHUB_SHA" \
-              --title "Autobuild" \
-              --notes-file "$RUNNER_TEMP/autobuild-release-notes.md" \
-              "$ARCHIVE" \
-              "$CHECKSUM"
           fi
+
+          gh release create "$tag" \
+            --repo "$repository" \
+            --target "$GITHUB_SHA" \
+            --title "Autobuild" \
+            --notes-file "$RUNNER_TEMP/autobuild-release-notes.md" \
+            --latest \
+            "$ARCHIVE" \
+            "$CHECKSUM"
+
+          verify_dir="$RUNNER_TEMP/autobuild-release-verify"
+          mkdir -p "$verify_dir"
+          gh release download "$tag" \
+            --repo "$repository" \
+            --pattern "$(basename "$ARCHIVE")" \
+            --pattern "$(basename "$CHECKSUM")" \
+            --dir "$verify_dir"
+          (cd "$verify_dir" && sha256sum -c "$(basename "$CHECKSUM")")
+
+          final_sha="$(gh api "repos/$repository/git/ref/tags/$tag" --jq '.object.sha')"
+          test "$final_sha" = "$GITHUB_SHA"
 
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
