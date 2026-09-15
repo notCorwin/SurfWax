@@ -29,6 +29,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, C
   const logger = options.logger;
   return new ToolLoopAgent<never, ChromeAgentTools>({
     model: options.languageModel ?? createModel(options.model, logger, options.conversationId),
+    reasoning: "minimal",
     instructions: options.instructions ?? DEFAULT_INSTRUCTIONS,
     tools: { chrome: createChromeTool(options.executor) },
     ...(logger ? {

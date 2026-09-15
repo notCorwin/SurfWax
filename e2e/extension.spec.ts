@@ -263,6 +263,7 @@ return { extensionTitle: document.title, version: chrome.runtime.getManifest().v
       .toEqual({ main: "yes", user: "yes" });
 
     await expect.poll(() => provider.requests.length).toBe(3);
+    expect(provider.requests[0].reasoning_effort).toBe("minimal");
     expect(provider.requests[0].tools).toHaveLength(1);
     expect(provider.requests[0].tools[0]).toMatchObject({
       type: "function",

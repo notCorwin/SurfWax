@@ -15,7 +15,8 @@ describe("createAgent", () => {
     let step = 0;
     const executor = { execute: vi.fn(async () => [{ id: 1, title: "test" }]) } as unknown as ChromeExecutor;
     const model = new MockLanguageModelV4({
-      doStream: async () => {
+      doStream: async (options) => {
+        expect(options.reasoning).toBe("minimal");
         step += 1;
         const chunks = step > 25
           ? [

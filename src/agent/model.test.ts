@@ -55,4 +55,51 @@ describe("createRetryingFetch", () => {
     expect(response.status).toBe(200);
     expect(bodies).toEqual(["{}", "{}"]);
   });
+
+  it("uses and remembers the lowest reasoning effort accepted by the endpoint", async () => {
+    const efforts: unknown[] = [];
+    const fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const body = await (input as Request).json() as { reasoning_effort?: unknown };
+      efforts.push(body.reasoning_effort);
+      return body.reasoning_effort === "minimal"
+        ? new Response('{"error":"Unsupported value: minimal is not supported. Supported reasoning_effort values: low, medium, high"}', { status: 400 })
+        : new Response("ok");
+    });
+    const retryingFetch = createRetryingFetch({ fetch });
+    const request = () => new Request("https://provider.test/v1/chat/completions", {
+      method: "POST",
+      body: JSON.stringify({ reasoning_effort: "minimal" }),
+    });
+
+    expect((await retryingFetch(request())).status).toBe(200);
+    expect((await retryingFetch(request())).status).toBe(200);
+    expect(efforts).toEqual(["minimal", "low", "low"]);
+  });
+
+  it("removes an unsupported reasoning parameter without hiding unrelated errors", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const body = await (input as Request).json() as Record<string, unknown>;
+      bodies.push(body);
+      return "reasoning_effort" in body
+        ? new Response('{"error":"Unknown parameter reasoning_effort"}', { status: 400 })
+        : new Response("ok");
+    });
+    const retryingFetch = createRetryingFetch({ fetch });
+    const request = new Request("https://provider.test/v1/chat/completions", {
+      method: "POST",
+      body: JSON.stringify({ reasoning_effort: "minimal", messages: [] }),
+    });
+
+    expect((await retryingFetch(request)).status).toBe(200);
+    expect(bodies).toEqual([
+      { reasoning_effort: "minimal", messages: [] },
+      { messages: [] },
+    ]);
+
+    const unrelatedFetch = vi.fn(async () => new Response('{"error":"bad messages"}', { status: 400 }));
+    const unrelated = await createRetryingFetch({ fetch: unrelatedFetch })(request);
+    expect(unrelated.status).toBe(400);
+    expect(unrelatedFetch).toHaveBeenCalledOnce();
+  });
 });
