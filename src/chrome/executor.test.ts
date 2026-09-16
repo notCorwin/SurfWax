@@ -9,7 +9,7 @@ function fakeChrome(responses: Array<object | (() => Promise<object>)> = []) {
   };
   const calls: string[] = [];
   const debuggerApi = {
-    getTargets: vi.fn(async () => [{ id: "target-1", type: "page", title: "Side Agent Runtime", url: "chrome-extension://id/sidepanel.html#test", attached: false }]),
+    getTargets: vi.fn(async () => [{ id: "target-1", type: "page", title: "Surf Wax", url: "chrome-extension://id/sidepanel.html#test", attached: false }]),
     attach: vi.fn(async (_debuggee: unknown, _version: string) => { calls.push("attach"); }),
     detach: vi.fn(async (_debuggee: unknown) => { calls.push("detach"); }),
     sendCommand: vi.fn(async (_debuggee: unknown, _method: string, _params?: { expression?: string }) => {
@@ -64,8 +64,8 @@ describe("ChromeExecutor", () => {
   it("finds and attaches to the current target again for every call", async () => {
     const fake = fakeChrome([{ result: { value: 1 } }, { result: { value: 2 } }]);
     fake.debuggerApi.getTargets
-      .mockResolvedValueOnce([{ id: "target-1", type: "page", title: "Side Agent Runtime", url: "chrome-extension://id/sidepanel.html#test", attached: false }])
-      .mockResolvedValueOnce([{ id: "target-2", type: "page", title: "Side Agent Runtime", url: "chrome-extension://id/sidepanel.html#test", attached: false }]);
+      .mockResolvedValueOnce([{ id: "target-1", type: "page", title: "Surf Wax", url: "chrome-extension://id/sidepanel.html#test", attached: false }])
+      .mockResolvedValueOnce([{ id: "target-2", type: "page", title: "Surf Wax", url: "chrome-extension://id/sidepanel.html#test", attached: false }]);
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
 
     await expect(executor.execute({ code: "return 1" })).resolves.toBe(1);

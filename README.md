@@ -1,10 +1,10 @@
-# Side Agent Runtime
+# Surf Wax
 
-[![Autobuild Release](https://github.com/notCorwin/side-agent-runtime/actions/workflows/autobuild.yml/badge.svg)](https://github.com/notCorwin/side-agent-runtime/actions/workflows/autobuild.yml)
+[![Autobuild Release](https://github.com/notCorwin/SurfWax/actions/workflows/autobuild.yml/badge.svg)](https://github.com/notCorwin/SurfWax/actions/workflows/autobuild.yml)
 [![Chrome 138+](https://img.shields.io/badge/Chrome-138%2B-4285F4?logo=googlechrome&logoColor=white)](https://www.google.com/chrome/)
 [![Version](https://img.shields.io/badge/version-0.2.0-blue)](public/manifest.json)
 
-Side Agent Runtime 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。它使用 Vercel AI SDK v7 和 Assistant UI，直接连接用户配置的 OpenAI-compatible Provider，并只向模型提供一个浏览器元工具：`chrome({ code })`。
+Surf Wax 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。它使用 Vercel AI SDK v7 和 Assistant UI，直接连接用户配置的 OpenAI-compatible Provider，并只向模型提供一个浏览器元工具：`chrome({ code })`。
 
 模型通过这一个“浏览器 Bash”执行异步 JavaScript，可以访问 Web API、Chrome Extension API、网页 `MAIN` world、原生 `USER_SCRIPT` world 和原始 CDP。Harness 不维护按 API 拆分的工具列表，也不增加权限审批、额外沙箱或 capability layer；实际能力边界由 Chrome、Manifest 权限、浏览器策略和目标页面决定。
 
@@ -22,7 +22,7 @@ Side Agent Runtime 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。
 
 ### 安装 Autobuild
 
-从 [Autobuild Release](https://github.com/notCorwin/side-agent-runtime/releases/tag/autobuild) 下载并解压 `side-agent-runtime-autobuild.zip`，然后：
+从 [Autobuild Release](https://github.com/notCorwin/SurfWax/releases/tag/autobuild) 下载并解压 `surf-wax-autobuild.zip`，然后：
 
 1. 打开 `chrome://extensions`。
 2. 开启右上角的“开发者模式”。
@@ -36,8 +36,8 @@ Side Agent Runtime 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。
 需要 Chrome 138+、Node.js 22（CI 基准版本）和 npm：
 
 ```sh
-git clone https://github.com/notCorwin/side-agent-runtime.git
-cd side-agent-runtime
+git clone https://github.com/notCorwin/SurfWax.git
+cd SurfWax
 npm ci
 npm run build
 ```
@@ -144,7 +144,7 @@ git diff --check
 
 ## 获取帮助
 
-- 缺陷与功能请求：[GitHub Issues](https://github.com/notCorwin/side-agent-runtime/issues)
+- 缺陷与功能请求：[GitHub Issues](https://github.com/notCorwin/SurfWax/issues)
 - 构建或测试失败：附上 Chrome、Node.js 版本、复现步骤和相关日志后提交 Issue
 - 项目行为与约束：[AGENTS.md](AGENTS.md)
 

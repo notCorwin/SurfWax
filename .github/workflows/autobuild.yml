@@ -58,7 +58,7 @@ jobs:
           test -f dist/sidepanel.html
           test -f dist/options.html
 
-          archive="$RUNNER_TEMP/side-agent-runtime-autobuild.zip"
+          archive="$RUNNER_TEMP/surf-wax-autobuild.zip"
           (cd dist && zip -qr "$archive" . -x '*.DS_Store')
           (cd "$(dirname "$archive")" && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
 
@@ -73,11 +73,11 @@ jobs:
 
           Install:
 
-          1. Download \`side-agent-runtime-autobuild.zip\` and extract it.
+          1. Download \`surf-wax-autobuild.zip\` and extract it.
           2. Open \`chrome://extensions\` and enable Developer mode.
           3. Choose **Load unpacked** and select the extracted directory containing \`manifest.json\`.
 
-          The SHA-256 checksum is available in \`side-agent-runtime-autobuild.zip.sha256\`.
+          The SHA-256 checksum is available in \`surf-wax-autobuild.zip.sha256\`.
           EOF
 
       - name: Replace Autobuild release

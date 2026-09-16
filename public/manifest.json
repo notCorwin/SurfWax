@@ -1,11 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "Side Agent Runtime",
+  "name": "Surf Wax",
   "version": "0.2.0",
   "description": "A side-panel AI agent with one JavaScript browser meta-tool.",
   "minimum_chrome_version": "138",
   "action": {
-    "default_title": "Open Side Agent"
+    "default_title": "Open Surf Wax"
   },
   "background": {
     "service_worker": "background.js",

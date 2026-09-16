@@ -207,9 +207,9 @@ test("ships only the minimal MV3 Harness surface", async () => {
   const opened = await openExtension();
   try {
     const manifest = await opened.page.evaluate(() => chrome.runtime.getManifest());
-    expect(manifest).toMatchObject({ manifest_version: 3, minimum_chrome_version: "138", version: "0.2.0" });
+    expect(manifest).toMatchObject({ name: "Surf Wax", manifest_version: 3, minimum_chrome_version: "138", version: "0.2.0" });
     expect(manifest.permissions).toEqual(expect.arrayContaining(["debugger", "scripting", "userScripts"]));
-    await expect(opened.page.locator("h1")).toHaveText("Side Agent Runtime");
+    await expect(opened.page.locator("h1")).toHaveText("Surf Wax");
     await expect(opened.page.getByTestId("config-required-state")).toBeVisible();
 
     const options = await configure(opened.context, opened.page, "https://provider.test/v1");

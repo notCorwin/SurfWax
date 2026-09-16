@@ -40,7 +40,7 @@ export function App() {
   if (fatal) {
     return (
       <main className="app-shell" data-testid="sidepanel-shell">
-        <header className="app-header"><h1>Side Agent Runtime</h1><SettingsButton /></header>
+        <header className="app-header"><h1>Surf Wax</h1><SettingsButton /></header>
         <section className="chat-scroll">
           <div className="empty-state" role="alert" data-testid="fatal-log-error">
             <h2>事件日志不可用</h2><p>{fatal}</p>
@@ -56,7 +56,7 @@ export function App() {
 
   return (
     <main className="app-shell" data-testid="sidepanel-shell">
-      <header className="app-header"><h1>Side Agent Runtime</h1><SettingsButton /></header>
+      <header className="app-header"><h1>Surf Wax</h1><SettingsButton /></header>
       <section className="chat-scroll">
         <div className="empty-state" data-testid="config-required-state">
           <h2>{session.configReady ? "先完成模型配置" : "正在读取配置…"}</h2>
@@ -85,7 +85,7 @@ function ConfiguredChat({ config, logger, onError }: { config: ModelConfig; logg
   if (initialThreadId === undefined) {
     return (
       <main className="app-shell" data-testid="sidepanel-shell">
-        <header className="app-header"><h1>Side Agent Runtime</h1><SettingsButton /></header>
+        <header className="app-header"><h1>Surf Wax</h1><SettingsButton /></header>
         <section className="chat-scroll"><div className="empty-state" data-testid="conversation-loading">正在恢复对话…</div></section>
       </main>
     );
