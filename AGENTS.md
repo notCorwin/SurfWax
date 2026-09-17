@@ -34,6 +34,11 @@ Chrome 138+ Side Panel Agent Harness Manifest V3 Extension
 
 10. 默认选择可用的最低的思考程度。
 
+11. 当上下文可用百分比不足 20%时，自动压缩上下文。
+
+    1. 上下文大小数据来自 BYOK 在 Models.dev 的模糊匹配；也可以手动设置。
+
+
 ## UI/UX：
 
 1. 套最新版本 Assistant UI 的模板。
