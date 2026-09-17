@@ -1476,7 +1476,7 @@ test("closing the panel prevents a queued chrome call from starting", async () =
   const provider = await startProvider(responses);
   const targetUrl = `${provider.origin}/target`;
   responses.push(queuedToolResponse(
-    `const [tab] = await chrome.tabs.query({ url: ${JSON.stringify(targetUrl)} }); await chrome.debugger.attach({ tabId: tab.id }, '1.3'); await new Promise(() => undefined);`,
+    `const [tab] = await chrome.tabs.query({ url: ${JSON.stringify(targetUrl)} }); await chrome.debugger.attach({ tabId: tab.id }, '1.3'); await new Promise((resolve) => setTimeout(resolve, 60_000));`,
     "await chrome.storage.local.set({ 'e2e-queued-tool-ran': true }); return true;",
   ));
   const opened = await openExtension();
@@ -1491,13 +1491,13 @@ test("closing the panel prevents a queued chrome call from starting", async () =
     await expect(opened.page.locator(".activity[data-status]").first().locator("summary")).toContainText("正在执行命令…");
     const runningLabel = opened.page.locator(".activity[data-status]").first().locator("summary span");
     await expect(runningLabel).toHaveClass(/shimmer/);
-    expect(await runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationPlayState)).toBe("running");
+    await expect.poll(() => runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationPlayState)).toBe("running");
     await opened.page.emulateMedia({ colorScheme: "dark" });
-    expect(await runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationPlayState)).toBe("running");
+    await expect.poll(() => runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationPlayState)).toBe("running");
     await opened.page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
-    expect(await runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationPlayState)).toBe("paused");
+    await expect.poll(() => runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationPlayState)).toBe("paused");
     await opened.page.emulateMedia({ colorScheme: "light", reducedMotion: "no-preference" });
-    expect(await runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationPlayState)).toBe("running");
+    await expect.poll(() => runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationPlayState)).toBe("running");
     await expect.poll(() => opened.page.evaluate(async (url) => {
       const [tab] = await chrome.tabs.query({ url });
       try { await chrome.debugger.attach({ tabId: tab.id! }, "1.3"); await chrome.debugger.detach({ tabId: tab.id! }); return false; }
