@@ -781,13 +781,14 @@ test("streams complete Markdown without blocking draft input", async () => {
       return {
         code: border('[data-streamdown="code-block"]'),
         codeBody: border('[data-streamdown="code-block-body"]'),
+        codeBodyPaddingLeft: getComputedStyle(find('[data-streamdown="code-block-body"]')).paddingLeft,
         pre: border('[data-streamdown="code-block-body"] pre'),
         actions: border('[data-streamdown="code-block-actions"]'),
         table: border('[data-streamdown="table-wrapper"]'),
         tableBody: border('[data-streamdown="table-wrapper"] > :last-child'),
         striped: getComputedStyle(find('[data-streamdown="table-body"] tr:nth-child(2)')).backgroundColor,
       };
-    })).toEqual({ code: "1px", codeBody: "0px", pre: "0px", actions: "0px", table: "1px", tableBody: "0px", striped: "rgb(36, 36, 36)" });
+    })).toEqual({ code: "1px", codeBody: "0px", codeBodyPaddingLeft: "0px", pre: "0px", actions: "0px", table: "1px", tableBody: "0px", striped: "rgb(36, 36, 36)" });
     const copy = rendered.getByRole("button", { name: "Copy Code" });
     await expect(copy).toBeEnabled();
     await copy.click();

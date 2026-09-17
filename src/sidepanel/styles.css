@@ -271,6 +271,10 @@ p {
   border: 0;
 }
 
+.markdown-body [data-streamdown="code-block-body"] {
+  padding-inline: 0;
+}
+
 .markdown-body [data-streamdown="table-body"] tr:nth-child(even) {
   background: var(--muted);
 }
