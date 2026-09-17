@@ -34,7 +34,13 @@ function useConversationRuntime(config: ModelConfig, logger: EventLogger): Assis
     () => createChatTransport(agent, logger, conversationId),
     [agent, conversationId, logger],
   );
-  const runtime = useChatRuntime({ id: conversationId, transport });
+  const runtime = useChatRuntime({
+    id: conversationId,
+    transport,
+    unstable_onBranchChange: ({ headId }) => {
+      void logger.append({ type: "conversation.branch.selected", conversationId, content: { headId } });
+    },
+  });
 
   useEffect(() => {
     const dispose = () => executor.dispose();

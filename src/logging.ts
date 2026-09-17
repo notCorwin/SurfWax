@@ -316,16 +316,35 @@ export type ConversationRepository = {
   messages: Array<{ parentId: string | null; message: ConversationMessage }>;
 };
 
+export function selectedHeadId(
+  events: readonly LogEvent[],
+  stored: Map<string, { eventId: number }>,
+): string | null {
+  const latest = [...stored].reduce<{ id: string | null; eventId: number }>(
+    (head, [id, item]) => item.eventId > head.eventId ? { id, eventId: item.eventId } : head,
+    { id: null, eventId: -1 },
+  );
+  for (const event of events) {
+    if (event.type !== "conversation.branch.selected") continue;
+    const content = fromLogValue(event.content) as { headId?: unknown };
+    if (typeof content?.headId === "string" && stored.has(content.headId) && event.id > latest.eventId) {
+      latest.id = content.headId;
+      latest.eventId = event.id;
+    }
+  }
+  return latest.id;
+}
+
 export function rebuildConversationRepository(events: readonly LogEvent[]): ConversationRepository {
-  const stored = new Map<string, { id: number; parentId: string | null; message: ConversationMessage }>();
+  const stored = new Map<string, { eventId: number; parentId: string | null; message: ConversationMessage }>();
   for (const event of events) {
     if (event.type !== "conversation.message") continue;
     const message = fromLogValue(event.content);
     if (!isConversationMessage(message)) continue;
-    stored.set(message.id, { id: event.id, parentId: event.parentId ?? null, message });
+    stored.set(message.id, { eventId: event.id, parentId: event.parentId ?? null, message });
   }
-  const messages = [...stored.values()].sort((left, right) => left.id - right.id).map(({ parentId, message }) => ({ parentId, message }));
-  return { headId: messages.at(-1)?.message.id ?? null, messages };
+  const messages = [...stored.values()].sort((left, right) => left.eventId - right.eventId).map(({ parentId, message }) => ({ parentId, message }));
+  return { headId: selectedHeadId(events, stored), messages };
 }
 
 export class EventLogger {
@@ -455,7 +474,7 @@ export class EventLogger {
   }
 
   async restorationEvents(conversationId: string): Promise<LogEvent[]> {
-    const lifecycle = await this.eventsByTypes([...RUN_EVENT_TYPES, "conversation.message"], conversationId);
+    const lifecycle = await this.eventsByTypes([...RUN_EVENT_TYPES, "conversation.message", "conversation.branch.selected"], conversationId);
     const completed = new Set(lifecycle.filter((event) => event.type === "conversation.finished" && event.runId).map((event) => event.runId));
     const interrupted = [...new Set(lifecycle
       .filter((event) => (event.type === "conversation.failed" || event.type === "conversation.aborted")

@@ -32,6 +32,7 @@ function logStream(
   let response: SidePanelMessage | undefined;
   let closed = false;
   let aborting = false;
+  let streamError: string | undefined;
 
   const snapshotTask = (async () => {
     try {
@@ -47,6 +48,10 @@ function logStream(
 
   const finish = async (type: "conversation.finished" | "conversation.failed" | "conversation.aborted", detail?: unknown) => {
     if (closed) return;
+    if (streamError) {
+      type = "conversation.failed";
+      detail = streamError;
+    }
     if (aborting && type === "conversation.finished") type = "conversation.aborted";
     closed = true;
     await snapshotTask;
@@ -86,6 +91,7 @@ function logStream(
           runId: currentRunId,
           content: next.value,
         });
+        if (next.value.type === "error") streamError = next.value.errorText;
         controller.enqueue(next.value);
       } catch (error) {
         const aborted = error instanceof Error && error.name === "AbortError";
@@ -110,7 +116,9 @@ export function createChatTransport(agent: Agent<any, any, any, any>, logger: Ev
 
   return {
     sendMessages: async (options: Parameters<ChatTransport<SidePanelMessage>["sendMessages"]>[0]) => {
-      if (options.trigger !== "submit-message") throw new Error(`Unsupported message trigger: ${options.trigger}`);
+      if (options.trigger !== "submit-message" && options.trigger !== "regenerate-message") {
+        throw new Error(`Unsupported message trigger: ${options.trigger}`);
+      }
       const currentRunId = runId();
       const lease = await claimConversationRun(conversationId, options.abortSignal);
       const releaseGuard = await guardActivePage(lease.signal).catch(() => () => undefined);

@@ -14,6 +14,7 @@ import {
   fromLogValue,
   isConversationMessage,
   rebuildConversationList,
+  selectedHeadId,
   type ConversationMessage,
   type ConversationRepository,
   type ConversationSummary,
@@ -158,7 +159,7 @@ async function replayRun(events: readonly LogEvent[], terminal: LogEvent): Promi
   });
   let message: ConversationMessage | undefined;
   for await (const snapshot of readUIMessageStream({ stream })) message = snapshot as ConversationMessage;
-  return message ? normalizeInterruptedMessage(message, events, terminal.runId) : undefined;
+  return message?.parts.length ? normalizeInterruptedMessage(message, events, terminal.runId) : undefined;
 }
 
 export async function restoreConversationRepository(events: readonly LogEvent[]): Promise<ConversationRepository> {
@@ -191,7 +192,7 @@ export async function restoreConversationRepository(events: readonly LogEvent[])
     });
   }
   const messages = [...stored.values()].sort((left, right) => left.eventId - right.eventId).map(({ parentId, message }) => ({ parentId, message }));
-  return { headId: messages.at(-1)?.message.id ?? null, messages };
+  return { headId: selectedHeadId(events, stored), messages };
 }
 
 function formattedHistory<TMessage, TStorageFormat extends Record<string, unknown>>(
@@ -218,9 +219,11 @@ function formattedHistory<TMessage, TStorageFormat extends Record<string, unknow
     async append(item) {
       const remoteId = await initialize();
       const id = format.getId(item.message);
+      const encoded = { id, ...format.encode(item) } as unknown as ConversationMessage;
+      if (encoded.role === "assistant" && encoded.parts.length === 0) return;
       const repository = await logger.repository(remoteId);
       if (repository.messages.some(({ message }) => message.id === id)) return;
-      await logger.appendMessage(remoteId, { id, ...format.encode(item) } as unknown as ConversationMessage, { parentId: item.parentId });
+      await logger.appendMessage(remoteId, encoded, { parentId: item.parentId });
     },
     async update(item, localMessageId) {
       const remoteId = await initialize();

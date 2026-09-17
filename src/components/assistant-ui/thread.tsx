@@ -1,6 +1,9 @@
 "use client";
 
 import {
+  ActionBarPrimitive,
+  BranchPickerPrimitive,
+  ComposerPrimitive,
   ErrorPrimitive,
   MessagePrimitive,
   ThreadPrimitive,
@@ -8,7 +11,7 @@ import {
   useAuiState,
 } from "@assistant-ui/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ArrowDownIcon } from "lucide-react";
+import { ArrowDownIcon, ChevronLeftIcon, ChevronRightIcon, PencilIcon, RotateCcwIcon } from "lucide-react";
 import {
   type ComponentProps,
   type FC,
@@ -209,17 +212,59 @@ const AssistantMessage: FC = () => {
           </ErrorPrimitive.Root>
         </MessagePrimitive.Error>
       </div>
+      <div className="flex items-center gap-2 pt-1 text-xs text-muted-foreground">
+        <ActionBarPrimitive.Root hideWhenRunning>
+          <ActionBarPrimitive.Reload type="button" data-testid="replay-message-button" className="rounded px-1 py-0.5 hover:bg-muted" aria-label="重新生成回复" title="重新生成回复">
+            <RotateCcwIcon className="size-3.5" aria-hidden="true" />
+          </ActionBarPrimitive.Reload>
+        </ActionBarPrimitive.Root>
+        <MessageBranches />
+      </div>
     </MessagePrimitive.Root>
   );
 };
 
-const UserMessage: FC = () => (
-  <MessagePrimitive.Root data-role="user" className="ml-auto max-w-[94%] text-sm leading-relaxed">
-    <div className="rounded-xl border border-primary/40 bg-primary/15 px-3 py-2 wrap-break-word">
-      <MessagePrimitive.Parts />
-    </div>
-  </MessagePrimitive.Root>
+const MessageBranches: FC = () => (
+  <BranchPickerPrimitive.Root hideWhenSingleBranch className="flex items-center gap-1" aria-label="消息分支">
+    <BranchPickerPrimitive.Previous type="button" className="rounded p-0.5 hover:bg-muted disabled:opacity-40" aria-label="上一个分支" title="上一个分支">
+      <ChevronLeftIcon className="size-3.5" aria-hidden="true" />
+    </BranchPickerPrimitive.Previous>
+    <span><BranchPickerPrimitive.Number /> / <BranchPickerPrimitive.Count /></span>
+    <BranchPickerPrimitive.Next type="button" className="rounded p-0.5 hover:bg-muted disabled:opacity-40" aria-label="下一个分支" title="下一个分支">
+      <ChevronRightIcon className="size-3.5" aria-hidden="true" />
+    </BranchPickerPrimitive.Next>
+  </BranchPickerPrimitive.Root>
 );
+
+const UserMessage: FC = () => {
+  const editing = useAuiState((state) => state.message.composer.isEditing);
+  const running = useAuiState((state) => state.thread.isRunning);
+  return (
+    <MessagePrimitive.Root data-role="user" className="ml-auto max-w-[94%] text-sm leading-relaxed">
+      {editing ? (
+        <ComposerPrimitive.Root className="rounded-xl border border-primary/40 bg-primary/15 p-2">
+          <ComposerPrimitive.Input data-testid="edit-message-input" autoFocus rows={2} className="min-h-14 w-full resize-y bg-transparent px-1 outline-none" aria-label="编辑消息" />
+          <div className="mt-2 flex justify-end gap-2">
+            <ComposerPrimitive.Cancel type="button" className="rounded px-2 py-1 hover:bg-muted">取消</ComposerPrimitive.Cancel>
+            <ComposerPrimitive.Send type="submit" className="rounded bg-primary px-2 py-1 text-primary-foreground disabled:opacity-50">保存并重新生成</ComposerPrimitive.Send>
+          </div>
+        </ComposerPrimitive.Root>
+      ) : (
+        <div className="rounded-xl border border-primary/40 bg-primary/15 px-3 py-2 wrap-break-word">
+          <MessagePrimitive.Parts />
+        </div>
+      )}
+      <div className="flex items-center justify-end gap-2 pt-1 text-xs text-muted-foreground">
+        {!editing && !running && <ActionBarPrimitive.Root>
+          <ActionBarPrimitive.Edit type="button" data-testid="edit-message-button" className="rounded px-1 py-0.5 hover:bg-muted" aria-label="编辑消息" title="编辑消息">
+            <PencilIcon className="size-3.5" aria-hidden="true" />
+          </ActionBarPrimitive.Edit>
+        </ActionBarPrimitive.Root>}
+        <MessageBranches />
+      </div>
+    </MessagePrimitive.Root>
+  );
+};
 
 const MESSAGE_COMPONENTS: MessageComponents = { UserMessage, AssistantMessage };
 

@@ -69,4 +69,21 @@ describe("conversation restoration", () => {
     ]));
     expect(assistant.parts).not.toEqual(expect.arrayContaining([expect.objectContaining({ toolCallId: "partial" })]));
   });
+
+  it("restores the selected branch until a newer message advances the head", async () => {
+    const messages = [
+      event(1, "conversation.message", { content: toLogValue({ id: "u1", role: "user", parts: [] }) }),
+      event(2, "conversation.message", { parentId: "u1", content: toLogValue({ id: "a1", role: "assistant", parts: [] }) }),
+      event(3, "conversation.message", { parentId: "u1", content: toLogValue({ id: "a2", role: "assistant", parts: [] }) }),
+    ];
+    const selected = event(4, "conversation.branch.selected", { content: toLogValue({ headId: "a1" }) });
+    expect((await restoreConversationRepository([...messages, selected])).headId).toBe("a1");
+    expect((await restoreConversationRepository([...messages, selected, event(5, "conversation.message", {
+      parentId: "a1",
+      content: toLogValue({ id: "u2", role: "user", parts: [] }),
+    })])).headId).toBe("u2");
+    expect((await restoreConversationRepository([...messages, event(4, "conversation.branch.selected", {
+      content: toLogValue({ headId: "missing" }),
+    })])).headId).toBe("a2");
+  });
 });

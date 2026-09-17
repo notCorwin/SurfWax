@@ -529,6 +529,7 @@ test("keeps jump-to-bottom usable while a long response is streaming", async () 
     const viewport = opened.page.getByTestId("thread-viewport");
     const remaining = () => viewport.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop);
     await expect.poll(() => viewport.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(1_200);
+    await expect(opened.page.getByTestId("edit-message-button")).toHaveCount(0);
     await expect.poll(remaining).toBeLessThanOrEqual(1);
     const box = await viewport.boundingBox();
     if (!box) throw new Error("thread viewport has no bounding box");
@@ -794,6 +795,91 @@ test("creates, titles, switches, starts fresh on reload and permanently deletes 
     const events = await readEvents(opened.page);
     expect(events.filter((event) => event.type === "conversation.created")).toHaveLength(1);
     expect(events.some((event) => event.type === "conversation.deleted" && event.content.conversationId)).toBe(true);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("edits user messages, regenerates replies and restores the selected branch", async () => {
+  const provider = await startProvider([
+    textResponse("ORIGINAL_REPLY"),
+    textResponse("分支测试"),
+    textResponse("REGENERATED_REPLY"),
+    textResponse("EDITED_REPLY"),
+    textResponse("FOLLOWUP_REPLY"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("original question");
+    await composer.press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("ORIGINAL_REPLY");
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("分支测试");
+
+    await opened.page.getByTestId("replay-message-button").click();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("REGENERATED_REPLY");
+    await opened.page.getByRole("button", { name: "上一个分支" }).last().click();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("ORIGINAL_REPLY");
+    await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "conversation.branch.selected")).toBe(true);
+
+    await opened.page.reload();
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-item", { hasText: "分支测试" }).locator(".conversation-select").click();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("ORIGINAL_REPLY");
+
+    await opened.page.getByTestId("edit-message-button").click();
+    await opened.page.getByTestId("edit-message-input").fill("cancelled edit");
+    await opened.page.getByRole("button", { name: "取消" }).click();
+    await expect(opened.page.getByTestId("edit-message-input")).toHaveCount(0);
+    expect(provider.requests).toHaveLength(3);
+    await opened.page.getByTestId("edit-message-button").click();
+    await opened.page.getByTestId("edit-message-input").fill("edited question");
+    await opened.page.getByRole("button", { name: "保存并重新生成" }).click();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("EDITED_REPLY");
+    await composer.fill("follow up");
+    await composer.press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FOLLOWUP_REPLY");
+    const recordedMessages = JSON.stringify((await readEvents(opened.page)).filter((event) => event.type === "conversation.message").map((event) => event.content));
+    for (const text of ["original question", "edited question", "ORIGINAL_REPLY", "REGENERATED_REPLY", "EDITED_REPLY", "FOLLOWUP_REPLY"]) {
+      expect(recordedMessages).toContain(text);
+    }
+    expect(provider.requests.at(-1).messages.map((message: any) => message.content)).toEqual(expect.arrayContaining(["edited question", "follow up"]));
+    expect(JSON.stringify(provider.requests.at(-1).messages)).not.toContain("original question");
+
+    await opened.page.getByRole("button", { name: "上一个分支" }).first().click();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("ORIGINAL_REPLY");
+    await opened.page.reload();
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-item", { hasText: "分支测试" }).locator(".conversation-select").click();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("ORIGINAL_REPLY");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("keeps the original reply after a failed regeneration", async () => {
+  const provider = await startProvider([
+    textResponse("ORIGINAL_REPLY"),
+    textResponse("失败重试测试"),
+    { status: 400, error: "regeneration rejected" },
+  ]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("initial question");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("ORIGINAL_REPLY");
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("失败重试测试");
+    await opened.page.getByTestId("replay-message-button").click();
+    await expect.poll(() => provider.requests.length).toBe(3);
+    await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "conversation.failed")).toBe(true);
+    await opened.page.reload();
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-item", { hasText: "失败重试测试" }).locator(".conversation-select").click();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("ORIGINAL_REPLY");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
