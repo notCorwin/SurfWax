@@ -2,16 +2,25 @@
 
 import { ComposerPrimitive, useAui, useAuiState, type AssistantState } from "@assistant-ui/react";
 import { ArrowUpIcon, SquareIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent } from "react";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { reasoningSettingsFor, type ReasoningEffort } from "@/agent/reasoning";
+import type { ModelConfig } from "@/types";
 
 const MIN_HEIGHT = 48;
 const MAX_HEIGHT = 128;
 const composerText = (state: AssistantState) => state.composer.text;
 const threadRunning = (state: AssistantState) => state.thread.isRunning;
 const composerDisabled = (state: AssistantState) => state.thread.isDisabled || Boolean(state.composer.dictation?.inputDisabled);
+const EFFORT_LABELS: Record<ReasoningEffort, string> = {
+  none: "关闭", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "极高", max: "最高",
+};
 
-export function LocalComposer() {
+export function LocalComposer({ config }: { config: ModelConfig }) {
+  const settings = reasoningSettingsFor(config);
+  const reasoning = useSyncExternalStore(settings.subscribe, settings.snapshot);
+  const model = config.model;
   const aui = useAui();
   const externalText = useAuiState(composerText);
   const isRunning = useAuiState(threadRunning);
@@ -96,7 +105,26 @@ export function LocalComposer() {
           onCompositionStart={() => { composing.current = true; }}
           onCompositionEnd={() => { composing.current = false; }}
         />
-        <div className="flex justify-end">
+        <div className="flex min-w-0 items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-1">
+            <span data-testid="composer-model" className="min-w-0 truncate px-2 text-xs text-muted-foreground" title={model}>
+              {(model.split("/").at(-1) ?? model).split(/[-_\s]+/).filter(Boolean).map((part) =>
+                /^(gpt|glm|api)$/i.test(part) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1),
+              ).join(" ")}
+            </span>
+            <Select value={reasoning.selected ?? undefined} disabled={!reasoning.ready || isRunning || !reasoning.choices.length}
+              onValueChange={(value) => settings.select(value as ReasoningEffort)}>
+              <SelectTrigger data-testid="reasoning-effort" size="sm" aria-label="思考强度"
+                className="h-7 max-w-24 gap-1 border-transparent bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:bg-accent hover:text-foreground dark:bg-transparent dark:hover:bg-accent">
+                <SelectValue placeholder="默认" />
+              </SelectTrigger>
+              <SelectContent position="popper" align="start">
+                <SelectGroup>
+                  {reasoning.choices.map((effort) => <SelectItem key={effort} value={effort}>{EFFORT_LABELS[effort]}</SelectItem>)}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </div>
           {isRunning ? (
             <ComposerPrimitive.Cancel asChild>
               <Button type="button" size="icon-sm" className="rounded-full" aria-label="停止生成" title="停止生成">

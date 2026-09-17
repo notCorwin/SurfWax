@@ -64,7 +64,7 @@ function queuedToolResponse(firstCode: string, secondCode: string): string[] {
 
 type MockResponse = string[] | { status: number; error: string };
 
-async function startProvider(responses: MockResponse[], delayMs = 0, summaryText?: string): Promise<{
+async function startProvider(responses: MockResponse[], delayMs = 0, summaryText?: string, supportedEfforts = ["minimal", "low", "medium", "high", "xhigh"]): Promise<{
   baseURL: string;
   origin: string;
   requests: any[];
@@ -81,6 +81,11 @@ async function startProvider(responses: MockResponse[], delayMs = 0, summaryText
         "access-control-allow-origin": "*",
       });
       response.end();
+      return;
+    }
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.writeHead(200, { "access-control-allow-origin": "*", "content-type": "application/json" });
+      response.end(JSON.stringify({ data: [{ id: "test-model", reasoning: { supported_efforts: supportedEfforts } }] }));
       return;
     }
     if (request.method === "GET" && request.url === "/target") {
@@ -248,6 +253,21 @@ async function warnsOnLeave(page: Page): Promise<boolean> {
   });
 }
 
+test("shows the configured model at the bottom left of the composer", async () => {
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, "https://example.com/v1");
+    await expect(opened.page.getByTestId("composer-model")).toHaveText("Test Model");
+    await options.getByLabel("Model ID").fill("google/gemini-3.8-flash");
+    await options.getByRole("button", { name: "保存配置" }).click();
+    await expect(opened.page.getByTestId("composer-model")).toHaveText("Gemini 3.8 Flash");
+    await expect(opened.page.getByTestId("composer-model")).toHaveAttribute("title", "google/gemini-3.8-flash");
+    await options.close();
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory);
+  }
+});
+
 test("shows inline settings errors and returns keyboard focus after closing conversations", async () => {
   const opened = await openExtension();
   try {
@@ -295,6 +315,45 @@ test("shows inline settings errors and returns keyboard focus after closing conv
     expect(leavePrompts).toBe(0);
   } finally {
     await dispose(opened.context, opened.userDataDirectory);
+  }
+});
+
+test("selects, locks and restores reasoning effort across conversations", async () => {
+  const provider = await startProvider([
+    textResponse("FIRST_EFFORT_REPLY"), textResponse("第一档位标题"),
+    textResponse("SECOND_EFFORT_REPLY"), textResponse("第二档位标题"),
+  ], 40, undefined, ["none", "low", "high"]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    const effort = opened.page.getByTestId("reasoning-effort");
+    await expect(effort).toHaveText("关闭");
+    await effort.click();
+    await expect(opened.page.getByRole("option")).toHaveText(["关闭", "低", "高"]);
+    await opened.page.getByRole("option", { name: "高" }).click();
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("first effort");
+    await composer.press("Enter");
+    await expect(effort).toBeDisabled();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FIRST_EFFORT_REPLY");
+    await expect(effort).toBeEnabled();
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("第一档位标题");
+    expect(provider.requests.filter((request) => request.tools)[0].reasoning_effort).toBe("high");
+
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-new").click();
+    await expect(effort).toHaveText("高");
+    await effort.click();
+    await opened.page.getByRole("option", { name: "低", exact: true }).click();
+    await composer.fill("second effort");
+    await composer.press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("SECOND_EFFORT_REPLY");
+    expect(provider.requests.filter((request) => request.tools)[1].reasoning_effort).toBe("low");
+    await opened.page.reload();
+    await expect(effort).toHaveText("低");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
 

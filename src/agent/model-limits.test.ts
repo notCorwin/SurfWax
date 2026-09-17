@@ -18,6 +18,15 @@ describe("models.dev limit matching", () => {
     expect(inputBudget(matchModel(catalog, "https://api.openai.com/v1", "gpt-5")!)).toBe(272_000);
   });
 
+  it("uses effort metadata only from an exact endpoint and model", () => {
+    const models = {
+      openai: { api: "https://api.openai.com/v1", models: { "gpt-5": { limit: { context: 1000 }, reasoning_options: [{ type: "effort", values: ["none", "low"] }] } } },
+    };
+    expect(matchModel(models, "https://api.openai.com/v1", "gpt-5")?.reasoningEfforts).toEqual(["none", "low"]);
+    expect(matchModel(models, "https://proxy.test/v1", "gpt-5")?.reasoningEfforts).toBeUndefined();
+    expect(matchModel(models, "https://api.openai.com/v1", "gpt-5-x")?.reasoningEfforts).toBeUndefined();
+  });
+
   it("lets a manual window win and reuses cached data while offline", async () => {
     let cache: unknown;
     const storage = {

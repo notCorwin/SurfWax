@@ -66,6 +66,8 @@ Side Panel 标题栏的脚本按钮会打开独立的用户脚本标签页，可
 
 模型配置只保存在当前扩展的 `chrome.storage.local` 中。Provider 必须支持 OpenAI-compatible Chat Completions、流式响应和 tool calling，并允许扩展发起跨域请求。
 
+聊天框中模型名旁可选择思考强度，默认使用已知的最低档；若端点未公开档位，则从 `none` 开始，在真实请求被明确拒绝时逐步调整。选择按 Base URL 和 Model ID 保存在本地；端点不支持该参数时使用端点默认值。
+
 ## 使用
 
 直接用自然语言描述浏览器任务，例如：

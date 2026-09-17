@@ -187,7 +187,7 @@ function ConfiguredRuntime({ config, logger, initialThreadId }: { config: ModelC
         <Header conversation />
         {guardWarning && <p role="status">{guardWarning}</p>}
         {contextStatus && <p role="status" data-testid="context-status">{contextStatus}</p>}
-        <section id="chat-content" tabIndex={-1} className="chat-scroll" data-testid="chat-scroll"><Thread /></section>
+        <section id="chat-content" tabIndex={-1} className="chat-scroll" data-testid="chat-scroll"><Thread config={config} /></section>
       </main>
     </AssistantRuntimeProvider>
   );

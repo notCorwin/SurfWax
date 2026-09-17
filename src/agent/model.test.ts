@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { EventLogger, type LogEvent } from "../logging";
 import { createRetryingFetch } from "./model";
+import { ReasoningSettings } from "./reasoning";
 
 function loggerWithEvents() {
   const events: LogEvent[] = [];
@@ -101,5 +102,32 @@ describe("createRetryingFetch", () => {
     const unrelated = await createRetryingFetch({ fetch: unrelatedFetch })(request);
     expect(unrelated.status).toBe(400);
     expect(unrelatedFetch).toHaveBeenCalledOnce();
+    const mixedError = vi.fn(async () => new Response('{"error":"Invalid messages; reasoning_effort was accepted"}', { status: 400 }));
+    expect((await createRetryingFetch({ fetch: mixedError })(request)).status).toBe(400);
+    expect(mixedError).toHaveBeenCalledOnce();
+  });
+
+  it("starts at none, learns only from explicit rejection, and logs the effective effort", async () => {
+    const attempts: Array<unknown> = [];
+    const settings = new ReasoningSettings({ baseURL: "https://provider.test/v1", model: "test-model", apiKey: "key" }, {
+      fetch: vi.fn(async () => new Response("missing", { status: 404 })),
+      modelLimit: async () => undefined,
+    });
+    const { events, logger } = loggerWithEvents();
+    const fetch = createRetryingFetch({ reasoningSettings: settings, logger, fetch: vi.fn(async (input: RequestInfo | URL) => {
+      const body = await (input as Request).json() as { reasoning_effort?: string };
+      attempts.push(body.reasoning_effort);
+      return body.reasoning_effort === "none"
+        ? new Response('{"error":"Unsupported value: none is not supported. Supported reasoning_effort values: low, high"}', { status: 400 })
+        : new Response("ok");
+    }) });
+    const request = () => new Request("https://provider.test/v1/chat/completions", { method: "POST", body: JSON.stringify({ reasoning_effort: "minimal" }) });
+    expect((await fetch(request())).status).toBe(200);
+    expect((await fetch(request())).status).toBe(200);
+    expect(attempts).toEqual(["none", "low", "low"]);
+    expect(settings.snapshot()).toMatchObject({ selected: "low", choices: ["low", "high"] });
+    await logger.flush();
+    expect(events.find((event) => event.type === "request.retry")?.content).toMatchObject({ rejectedReasoningEffort: "none", reasoningEffort: "low" });
+    expect(events.find((event) => event.type === "request.completed")?.content).toMatchObject({ reasoningEffort: "low" });
   });
 });

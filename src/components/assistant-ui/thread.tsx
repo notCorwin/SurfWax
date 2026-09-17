@@ -27,6 +27,7 @@ import { LocalComposer } from "./local-composer";
 import { MarkdownText } from "./markdown-text";
 import { Reasoning } from "./reasoning";
 import { ToolFallback } from "./tool-fallback";
+import type { ModelConfig } from "@/types";
 
 const ESTIMATED_TURN_HEIGHT = 200;
 const AT_BOTTOM_THRESHOLD = 4;
@@ -56,7 +57,7 @@ function buildTurns(messages: readonly MessageRow[]): Turn[] {
   return turns;
 }
 
-export const Thread: FC = () => {
+export const Thread: FC<{ config: ModelConfig }> = ({ config }) => {
   const messages = useMessageRows();
   const isRunning = useAuiState((state) => state.thread.isRunning);
   const turns = useMemo(() => buildTurns(messages), [messages]);
@@ -174,7 +175,7 @@ export const Thread: FC = () => {
             <ArrowDownIcon data-icon="icon" aria-hidden="true" />
           </Button>
         )}
-        <LocalComposer />
+        <LocalComposer config={config} />
       </div>
     </ThreadPrimitive.Root>
   );

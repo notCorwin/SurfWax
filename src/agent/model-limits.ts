@@ -11,13 +11,14 @@ export type ModelLimit = {
   input?: number;
   output?: number;
   source: "models.dev" | "manual";
+  reasoningEfforts?: string[];
 };
 
 type Catalog = Record<string, {
   id?: string;
   name?: string;
   api?: string;
-  models?: Record<string, { name?: string; limit?: { context?: number; input?: number; output?: number } }>;
+  models?: Record<string, { name?: string; reasoning?: boolean; reasoning_options?: Array<{ type?: string; values?: string[] }>; limit?: { context?: number; input?: number; output?: number } }>;
 }>;
 
 type CachedLimit = { key: string; fetchedAt: number; match: ModelLimit };
@@ -76,6 +77,10 @@ export function matchModel(catalog: Catalog, baseURL: string, modelId: string): 
             context: limit.context,
             ...(validLimit(limit.input) ? { input: limit.input } : {}),
             ...(validLimit(limit.output) ? { output: limit.output } : {}),
+            ...(host === providerHost && id.toLowerCase() === requested
+              ? { reasoningEfforts: details.reasoning_options?.find((option) => option.type === "effort")?.values
+                ?? (details.reasoning === false || details.reasoning_options ? [] : undefined) }
+              : {}),
             source: "models.dev",
           },
         };
