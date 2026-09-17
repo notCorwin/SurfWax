@@ -32,6 +32,8 @@ Chrome 138+ Side Panel Agent Harness Manifest V3 Extension
 
 9. 在不改变语义的前提下最大化 Prompt Cache Hit Percent：保持 system prompt、tool schema 和历史上下文前缀稳定，采用 append-only context，避免无必要地修改、重排或重新序列化历史内容；兼容 Provider 特有的 prompt caching 机制。
 
+10. 默认选择可用的最低的思考程度。
+
 ## UI/UX：
 
 1. 套最新版本 Assistant UI 的模板。
@@ -42,6 +44,11 @@ Chrome 138+ Side Panel Agent Harness Manifest V3 Extension
 6. 可复制的代码块。
 7. 1 倍行间距，1.5 倍段间距。
 
-### 多对话管理
+## 交互体验
 
-1. 
+1. 支持用户消息的编辑、重试与分支
+1. 会话重命名、归档与搜索
+1. 当前会话未结束时无法切换会话（提示用户）
+1. 工具的错误或被中断也作为工具结果返回。
+1. 增加一个标签页，专门用于管理与此扩展相关的用户脚本。
+1. 智能体运行时，在它连接的网页上增加防用户点击的透明层，防止用户操作影响工作。

@@ -14,9 +14,9 @@ export function parseChromeToolInput(input: unknown): ChromeToolInput {
 export function createChromeTool(executor: ChromeExecutor) {
   return dynamicTool({
     description: [
-      "The only browser tool. Execute JavaScript as the body of an async function in the current Side Panel extension realm.",
-      "The code can use Web APIs and every available chrome.* Extension API, including chrome.userScripts, chrome.scripting, and chrome.debugger/CDP.",
-      "Return the desired value explicitly. Calls run sequentially with no application timeout, output limit, approval, sandbox, or capability layer. Non-JSON results return a reference; inspect it in later calls with globalThis.__surfWaxResults.get(id), and delete it when done.",
+      "The browser automation tool for the browser controlled by the user. Execute JavaScript as the body of an async function in the current Side Panel extension realm.",
+      "Use Web APIs and the available chrome.* Extension APIs needed for the user's request, including chrome.userScripts, chrome.scripting, and chrome.debugger/CDP.",
+      "Return the desired value explicitly. Calls run sequentially. Non-JSON results return a reference; inspect it in later calls with globalThis.__surfWaxResults.get(id), and delete it when done.",
     ].join(" "),
     inputSchema: chromeToolInputSchema,
     needsApproval: false,
