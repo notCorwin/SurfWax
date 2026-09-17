@@ -289,6 +289,7 @@ test("shows inline settings errors and returns keyboard focus after closing conv
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(options.locator("#base-url-error")).toHaveText("请输入 Base URL");
     await expect(options.locator("#base-url")).toBeFocused();
+    expect(await options.locator("#base-url").evaluate((input) => getComputedStyle(input).outlineStyle)).toBe("none");
     await expect(options.locator("#base-url")).toHaveAttribute("aria-invalid", "true");
     await options.setViewportSize({ width: 320, height: 720 });
     expect(await options.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -1180,6 +1181,7 @@ test("searches saved messages, renames, archives and restores conversations", as
     await opened.page.getByTestId("conversation-menu").click();
     const search = opened.page.getByRole("searchbox", { name: "搜索会话" });
     await search.fill("unique saved message");
+    expect(await search.evaluate((input) => getComputedStyle(input).outlineStyle)).toBe("solid");
     await expect(opened.page.locator(".conversation-item")).toHaveCount(1);
     await search.fill("not found");
     await expect(opened.page.getByText("没有找到匹配的会话")).toBeVisible();
@@ -1361,6 +1363,21 @@ test("edits user messages, regenerates replies and restores the selected branch"
     await expect(opened.page.locator(".markdown-body").last()).toContainText("ORIGINAL_REPLY");
 
     await opened.page.getByTestId("edit-message-button").click();
+    await opened.page.setViewportSize({ width: 320, height: 720 });
+    await opened.page.getByTestId("edit-message-input").fill("long-edit-text-".repeat(40));
+    for (const colorScheme of ["light", "dark"] as const) {
+      await opened.page.emulateMedia({ colorScheme });
+      expect(await opened.page.getByTestId("edit-message-input").evaluate((input) => {
+        const editor = input.closest("form")!;
+        return {
+          outline: getComputedStyle(input).outlineStyle,
+          resize: getComputedStyle(input).resize,
+          focused: editor.matches(":focus-within"),
+          capped: input.clientHeight <= 128 && input.scrollHeight > input.clientHeight,
+          overflow: document.documentElement.scrollWidth > innerWidth,
+        };
+      })).toEqual({ outline: "none", resize: "none", focused: true, capped: true, overflow: false });
+    }
     await opened.page.getByTestId("edit-message-input").fill("cancelled edit");
     await opened.page.getByRole("button", { name: "取消" }).click();
     await expect(opened.page.getByTestId("edit-message-input")).toHaveCount(0);

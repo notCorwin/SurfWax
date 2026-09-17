@@ -310,11 +310,11 @@ const AssistantMessage: FC = () => {
 };
 
 const MessageBranches: FC = () => (
-  <BranchPickerPrimitive.Root hideWhenSingleBranch className="flex items-center gap-1" aria-label="消息分支">
+  <BranchPickerPrimitive.Root hideWhenSingleBranch className="flex items-center gap-0.5 tabular-nums" aria-label="消息分支">
     <BranchPickerPrimitive.Previous type="button" className="inline-flex size-7 items-center justify-center rounded hover:bg-muted disabled:opacity-40" aria-label="上一个分支" title="上一个分支">
       <ChevronLeftIcon className="size-3.5" aria-hidden="true" />
     </BranchPickerPrimitive.Previous>
-    <span><BranchPickerPrimitive.Number /> / <BranchPickerPrimitive.Count /></span>
+    <span className="min-w-8 text-center"><BranchPickerPrimitive.Number /> / <BranchPickerPrimitive.Count /></span>
     <BranchPickerPrimitive.Next type="button" className="inline-flex size-7 items-center justify-center rounded hover:bg-muted disabled:opacity-40" aria-label="下一个分支" title="下一个分支">
       <ChevronRightIcon className="size-3.5" aria-hidden="true" />
     </BranchPickerPrimitive.Next>
@@ -327,11 +327,11 @@ const UserMessage: FC = () => {
   return (
     <MessagePrimitive.Root data-role="user" className="ml-auto max-w-[94%] text-sm leading-relaxed">
       {editing ? (
-        <ComposerPrimitive.Root className="rounded-xl border border-primary/40 bg-primary/15 p-2">
-          <ComposerPrimitive.Input data-testid="edit-message-input" autoFocus rows={2} className="min-h-14 w-full resize-y bg-transparent px-1 outline-none" aria-label="编辑消息" />
-          <div className="mt-2 flex justify-end gap-2">
-            <ComposerPrimitive.Cancel type="button" className="min-h-7 rounded px-2 hover:bg-muted">取消</ComposerPrimitive.Cancel>
-            <ComposerPrimitive.Send type="submit" className="min-h-7 rounded bg-primary px-2 text-primary-foreground disabled:opacity-50">保存并重新生成</ComposerPrimitive.Send>
+        <ComposerPrimitive.Root className="rounded-xl border border-border/70 bg-muted/30 p-2 shadow-sm focus-within:border-ring">
+          <ComposerPrimitive.Input data-testid="edit-message-input" autoFocus rows={2} className="min-h-14 max-h-32 w-full resize-none overflow-y-auto border-0 bg-transparent px-2 py-1 text-sm leading-relaxed outline-none" aria-label="编辑消息" />
+          <div className="mt-2 flex justify-end gap-1">
+            <ComposerPrimitive.Cancel type="button" className="inline-flex min-h-8 items-center rounded-md px-3 text-xs text-muted-foreground hover:bg-muted hover:text-foreground">取消</ComposerPrimitive.Cancel>
+            <ComposerPrimitive.Send type="submit" className="inline-flex min-h-8 items-center rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50">保存并重新生成</ComposerPrimitive.Send>
           </div>
         </ComposerPrimitive.Root>
       ) : (

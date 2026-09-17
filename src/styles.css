@@ -107,9 +107,11 @@ button:not(:disabled),
   cursor: pointer;
 }
 
-:is(button, input, textarea, select, summary, a, [role="button"]):focus-visible {
-  outline: 1px solid var(--ring);
-  outline-offset: 2px;
+@layer base {
+  :is(button, input, textarea, select, summary, a, [role="button"]):focus-visible {
+    outline: 1px solid var(--ring);
+    outline-offset: 2px;
+  }
 }
 
 [data-slot="select-trigger"]:focus-visible { border-color: transparent; box-shadow: none; }
