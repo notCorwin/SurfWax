@@ -56,6 +56,20 @@ body {
 }
 
 .options-shell :is(p, summary) { overflow-wrap: anywhere; }
-.options-shell summary { cursor: pointer; }
+.advanced-settings summary {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+  list-style: none;
+  color: var(--muted-foreground);
+  padding: 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.advanced-settings summary::-webkit-details-marker { display: none; }
+.advanced-settings summary svg { width: 16px; height: 16px; flex: none; }
 
 details[open] [data-slot="field"] { margin-top: 12px; }
