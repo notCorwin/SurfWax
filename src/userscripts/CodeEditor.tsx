@@ -1,8 +1,31 @@
 import { useEffect, useRef } from "react";
 import { Compartment } from "@codemirror/state";
-import { javascript } from "@codemirror/lang-javascript";
+import { javascript, javascriptLanguage } from "@codemirror/lang-javascript";
+import { cssLanguage } from "@codemirror/lang-css";
+import { LanguageSupport } from "@codemirror/language";
+import { parseMixed } from "@lezer/common";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { basicSetup, EditorView } from "codemirror";
+
+const javascriptSupport = javascript();
+const mixedJavaScript = new LanguageSupport(javascriptLanguage.configure({
+  wrap: parseMixed((node, input) => {
+    if (node.name !== "String" && node.name !== "TemplateString") return null;
+    const equals = node.node.prevSibling;
+    const definition = equals?.prevSibling;
+    if (node.node.parent?.name !== "VariableDeclaration" || equals?.name !== "Equals" || definition?.name !== "VariableDefinition"
+      || !/^CSS(?:_|$)/i.test(input.read(definition.from, definition.to))) return null;
+    const interpolations = node.node.getChildren("Interpolation");
+    const overlay: { from: number; to: number }[] = [];
+    let from = node.from + 1;
+    for (const interpolation of interpolations) {
+      if (from < interpolation.from) overlay.push({ from, to: interpolation.from });
+      from = interpolation.to;
+    }
+    if (from < node.to - 1) overlay.push({ from, to: node.to - 1 });
+    return { parser: cssLanguage.parser, overlay };
+  }),
+}), javascriptSupport.support);
 
 export function CodeEditor({ value, onChange, invalid, errorId }: { value: string; onChange: (value: string) => void; invalid: boolean; errorId?: string }) {
   const host = useRef<HTMLDivElement>(null);
@@ -19,7 +42,7 @@ export function CodeEditor({ value, onChange, invalid, errorId }: { value: strin
       parent: host.current!,
       extensions: [
         basicSetup,
-        javascript(),
+        mixedJavaScript,
         EditorView.lineWrapping,
         EditorView.contentAttributes.of({ "aria-labelledby": "script-code-label" }),
         theme.of(media.matches ? oneDark : []),
