@@ -1,6 +1,7 @@
 "use client";
 
 import type { ToolCallMessagePartComponent } from "@assistant-ui/react";
+import { getPartialJsonObjectMeta } from "assistant-stream/utils";
 import { WrenchIcon } from "lucide-react";
 
 function format(value: unknown): string {
@@ -16,8 +17,8 @@ export const ToolFallback: ToolCallMessagePartComponent = (part) => {
   const failed = part.status.type === "incomplete" || part.isError;
   const status = running ? "running" : failed ? "error" : "complete";
   const label = running
-    ? part.argsText.trimEnd().endsWith("}") ? "运行命令中" : "正在输入命令"
-    : failed ? "命令执行失败" : "调用了命令";
+    ? getPartialJsonObjectMeta(part.args as Record<symbol, unknown>)?.state === "partial" ? "正在输入命令…" : "正在执行命令…"
+    : failed ? "命令执行失败" : "命令执行完成";
   return (
     <details className="activity" data-status={status} open={failed}>
       <summary>

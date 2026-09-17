@@ -435,13 +435,37 @@ test("groups adjacent commands without hiding their details", async () => {
     await opened.page.getByTestId("composer-input").fill("run two commands");
     await opened.page.getByTestId("composer-input").press("Enter");
     const group = opened.page.locator(".command-group");
-    await expect(group.locator(":scope > summary")).toHaveText("调用了2次命令");
+    await expect(group.locator(":scope > summary")).toHaveText("共2次命令调用");
     await expect(group.locator(".activity")).toHaveCount(2);
     await expect(group).not.toHaveAttribute("open", "");
     await group.locator(":scope > summary").click();
     await group.locator(".activity summary").first().click();
     await expect(group).toContainText("FIRST_RESULT");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("完成");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("distinguishes streaming command input from command execution", async () => {
+  const input = JSON.stringify({ code: 'return await new Promise((resolve) => setTimeout(() => resolve("PHASE_OK"), 800));' });
+  const provider = await startProvider([[
+    chunk({ role: "assistant", tool_calls: [{ index: 0, id: "call-phase", type: "function", function: { name: "chrome", arguments: input.slice(0, 25) } }] }),
+    chunk({ tool_calls: [{ index: 0, function: { arguments: input.slice(25) } }] }),
+    chunk({}, "tool_calls"),
+    "data: [DONE]\n\n",
+  ], textResponse("PHASE_DONE")], 300);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("run a staged command");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    const label = opened.page.locator(".activity[data-status] summary span").first();
+    await expect(label).toHaveText("正在输入命令…");
+    await expect(label).toHaveText("正在执行命令…");
+    await expect(label).toHaveText("命令执行完成");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("PHASE_DONE");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -479,7 +503,7 @@ return { extensionTitle: document.title, version: chrome.runtime.getManifest().v
     await composer.fill("exercise every browser context");
     await composer.press("Enter");
     await expect(opened.page.locator(".activity")).toHaveCount(1);
-    await expect(opened.page.locator(".activity summary")).toContainText("调用了命令");
+    await expect(opened.page.locator(".activity summary")).toContainText("命令执行完成");
     await expect(opened.page.locator(".activity summary span")).not.toHaveClass(/shimmer/);
     await expect(opened.page.locator(".activity")).not.toHaveAttribute("open", "");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("META_OK");
@@ -1184,7 +1208,7 @@ test("closing the panel prevents a queued chrome call from starting", async () =
     await opened.page.getByTestId("composer-input").fill("queue two calls");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".activity[data-status]")).toHaveCount(2);
-    await expect(opened.page.locator(".activity[data-status]").first().locator("summary")).toContainText("运行命令中");
+    await expect(opened.page.locator(".activity[data-status]").first().locator("summary")).toContainText("正在执行命令…");
     const runningLabel = opened.page.locator(".activity[data-status]").first().locator("summary span");
     await expect(runningLabel).toHaveClass(/shimmer/);
     expect(await runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationPlayState)).toBe("running");

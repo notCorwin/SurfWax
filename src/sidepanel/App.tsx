@@ -102,8 +102,8 @@ export function App() {
       <Header />
       <section id="chat-content" tabIndex={-1} className="chat-scroll">
         <div className="empty-state" data-testid="config-required-state">
-          <h2>{session.configReady ? "先完成模型配置" : "正在读取配置…"}</h2>
-          <p>{session.configReady ? "打开设置页填写 Base URL、Model ID 和 API Key。" : "正在检查本地模型配置。"}</p>
+          <h2>{session.configReady ? "先完成模型配置" : "正在准备对话…"}</h2>
+          <p>{session.configReady ? "打开设置页填写 Base URL、Model ID 和 API Key。" : "正在读取模型配置…"}</p>
           {session.status && <p role="status">{session.status}</p>}
         </div>
       </section>

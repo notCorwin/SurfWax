@@ -195,7 +195,7 @@ const AssistantMessage: FC = () => {
           {({ part, children }) => {
             if (part.type === "group-command") return part.indices.length === 1 ? children : (
               <details className="activity command-group" open={part.status.type === "incomplete"}>
-                <summary><WrenchIcon aria-hidden="true" /><span>调用了{part.indices.length}次命令</span></summary>
+                <summary><WrenchIcon aria-hidden="true" /><span>共{part.indices.length}次命令调用</span></summary>
                 <div className="command-group-content">{children}</div>
               </details>
             );
