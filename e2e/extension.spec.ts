@@ -223,6 +223,11 @@ async function configure(context: BrowserContext, page: Page, baseURL: string, c
   return options;
 }
 
+async function startNewConversation(page: Page): Promise<void> {
+  if (await page.locator(".conversation-dialog").isVisible()) await page.keyboard.press("Escape");
+  await page.getByTestId("new-conversation").click();
+}
+
 async function enableUserScripts(context: BrowserContext, extensionId: string, extensionPage: Page): Promise<void> {
   if (await extensionPage.evaluate(() => typeof chrome.userScripts === "object")) return;
   const settings = await context.newPage();
@@ -303,6 +308,7 @@ test("shows inline settings errors and returns keyboard focus after closing conv
     await options.getByLabel("API Key").fill("test-key");
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(opened.page.getByTestId("conversation-menu")).toBeVisible();
+    await expect(opened.page.locator(".app-header").getByTestId("new-conversation")).toBeVisible();
     expect(await warnsOnLeave(options)).toBe(false);
     await options.getByLabel("Model ID").fill("another-model");
     expect(await warnsOnLeave(options)).toBe(true);
@@ -355,7 +361,7 @@ test("selects, locks and restores reasoning effort across conversations", async 
     expect(provider.requests.filter((request) => request.tools)[0].reasoning_effort).toBe("high");
 
     await opened.page.getByTestId("conversation-menu").click();
-    await opened.page.locator(".conversation-new").click();
+    await startNewConversation(opened.page);
     await expect(effort).toHaveText("高");
     await effort.click();
     await opened.page.getByRole("option", { name: "低", exact: true }).click();
@@ -627,7 +633,7 @@ test("compacts model context while retaining the complete conversation log", asy
     await expect(opened.page.locator(".markdown-body").last()).toContainText("COMPACTED_REPLY");
     await expect(opened.page.getByTestId("context-status")).toContainText("压缩摘要");
     await opened.page.getByTestId("conversation-menu").click();
-    await opened.page.locator(".conversation-new").click();
+    await startNewConversation(opened.page);
     await expect(opened.page.getByTestId("context-status")).toHaveCount(0);
 
     const events = await readEvents(opened.page);
@@ -659,11 +665,11 @@ test("keeps late context events in their original conversation", async () => {
     await composer.press("Enter");
     await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "context.compaction.started")).toBe(true);
     await opened.page.getByTestId("conversation-menu").click();
-    await opened.page.locator(".conversation-new").click();
+    await startNewConversation(opened.page);
     await expect(opened.page.locator(".conversation-notice")).toContainText("当前会话尚未结束");
     await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "context.compacted")).toBe(true);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("LATE_COMPACTION_REPLY");
-    await opened.page.locator(".conversation-new").click();
+    await startNewConversation(opened.page);
     await expect(opened.page.getByTestId("context-status")).toHaveCount(0);
     await expect(opened.page.locator(".markdown-body")).toHaveCount(0);
   } finally {
@@ -1138,7 +1144,7 @@ test("creates, titles, switches, starts fresh on reload and permanently deletes 
     expect(provider.requests[1].tools).toBeUndefined();
 
     await opened.page.getByTestId("conversation-menu").click();
-    await opened.page.locator(".conversation-new").click();
+    await startNewConversation(opened.page);
     await composer.fill("second conversation");
     await composer.press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("SECOND_REPLY");
@@ -1229,19 +1235,21 @@ test("blocks leaving a running conversation without aborting it", async () => {
     await composer.press("Enter");
     await expect(opened.page.getByTestId("conversation-menu")).toContainText("第一标题");
     await opened.page.getByTestId("conversation-menu").click();
-    await opened.page.locator(".conversation-new").click();
+    await startNewConversation(opened.page);
     await composer.fill("second task");
     await composer.press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_RUNNING");
     await opened.page.getByTestId("conversation-menu").click();
-    await opened.page.locator(".conversation-new").click();
+    await startNewConversation(opened.page);
     await expect(opened.page.locator(".conversation-notice")).toContainText("当前会话尚未结束");
+    await opened.page.getByTestId("conversation-menu").click();
     await opened.page.locator(".conversation-item", { hasText: "第一标题" }).locator(".conversation-select").click();
-    await expect(opened.page.locator(".conversation-notice")).toContainText("当前会话尚未结束");
+    await expect(opened.page.locator(".conversation-dialog .conversation-notice")).toContainText("当前会话尚未结束");
     await opened.page.locator(".conversation-item[data-active] .conversation-action").last().click();
-    await expect(opened.page.locator(".conversation-notice")).toContainText("当前会话尚未结束");
+    await expect(opened.page.locator(".conversation-dialog .conversation-notice")).toContainText("当前会话尚未结束");
     await opened.page.locator(".conversation-item[data-active] .conversation-delete").click();
     await expect(opened.page.locator(".conversation-dialog")).toBeVisible();
+    await expect(opened.page.locator(".conversation-dialog").getByTestId("new-conversation")).toHaveCount(0);
     await expect(opened.page.locator(".conversation-item")).toHaveCount(2);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_DONE");
     expect(provider.stats.abortedResponses).toBe(0);
@@ -1290,7 +1298,7 @@ test("resets conversation UI while retaining only each conversation's own draft"
     await composer.press("Enter");
     await expect(opened.page.getByTestId("conversation-menu")).toContainText("第一标题");
     await opened.page.getByTestId("conversation-menu").click();
-    await opened.page.locator(".conversation-new").click();
+    await startNewConversation(opened.page);
     await composer.fill("second conversation");
     await composer.press("Enter");
     await expect(opened.page.getByTestId("conversation-menu")).toContainText("第二标题");
@@ -1307,7 +1315,7 @@ test("resets conversation UI while retaining only each conversation's own draft"
     await expect(opened.page.getByText("旧会话警告")).toBeVisible();
 
     await opened.page.getByTestId("conversation-menu").click();
-    await opened.page.locator(".conversation-new").click();
+    await startNewConversation(opened.page);
     await expect(opened.page.getByRole("button", { name: "滚动到底部" })).toHaveCount(0);
     await expect(opened.page.locator(".markdown-body")).toHaveCount(0);
     await expect(composer).toHaveValue("");
@@ -1473,12 +1481,12 @@ test("keeps a running conversation alive when a switch is blocked", async () => 
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_RUNNING");
     await opened.page.getByTestId("conversation-menu").click();
-    await opened.page.locator(".conversation-new").click();
+    await startNewConversation(opened.page);
     await expect(opened.page.locator(".conversation-notice")).toContainText("当前会话尚未结束");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("BACKGROUND_DONE");
     await expect.poll(() => provider.requests.length).toBe(2);
     expect(provider.stats.abortedResponses).toBe(0);
-    await opened.page.locator(".conversation-new").click();
+    await startNewConversation(opened.page);
     await opened.page.getByTestId("conversation-menu").click();
     await expect(opened.page.locator(".conversation-item")).toHaveCount(1);
     await opened.page.locator(".conversation-item", { hasText: "后台标题" }).locator(".conversation-select").click();

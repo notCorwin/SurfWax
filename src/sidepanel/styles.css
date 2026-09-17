@@ -50,7 +50,6 @@ p {
 }
 
 .conversation-trigger svg,
-.conversation-new svg,
 .conversation-action svg,
 .conversation-delete svg {
   width: 15px;
@@ -97,7 +96,6 @@ p {
   min-height: 32px;
 }
 
-.conversation-new,
 .conversation-select,
 .conversation-action,
 .conversation-delete {
@@ -106,18 +104,6 @@ p {
   color: inherit;
 }
 
-.conversation-new {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  padding: 9px 10px;
-  text-align: left;
-}
-
-.conversation-new:hover,
 .conversation-item:hover,
 .conversation-item[data-active] {
   background: var(--accent);

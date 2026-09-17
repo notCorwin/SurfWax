@@ -1,7 +1,7 @@
 "use client";
 
 import { ThreadListItemPrimitive, ThreadListPrimitive, useAui, useAuiState } from "@assistant-ui/react";
-import { ArchiveIcon, MenuIcon, MessageSquarePlusIcon, PencilIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
+import { ArchiveIcon, MenuIcon, PencilIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type FC, type MouseEvent } from "react";
 import { fromLogValue, isConversationMessage, type EventLogger, type LogEvent } from "../../logging";
 import { Button } from "../ui/button";
@@ -93,13 +93,6 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
           <input type="search" aria-label="搜索会话" placeholder="搜索标题或消息…" value={query} onChange={(event) => setQuery(event.target.value)} className="conversation-search" />
           {warning && <p role="status" className="conversation-notice">{warning}</p>}
           {searchError && <p role="alert" className="conversation-notice">搜索记录读取失败：{searchError}</p>}
-          <ThreadListPrimitive.New className="conversation-new" onClick={(event) => {
-            if (running) { event.preventDefault(); warn(); return; }
-            close();
-          }}>
-            <MessageSquarePlusIcon aria-hidden="true" />
-            新对话
-          </ThreadListPrimitive.New>
           <div className="conversation-items">
             {regularCount > 0 && <h2 className="conversation-section-title">当前会话</h2>}
             <ThreadListPrimitive.Items>

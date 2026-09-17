@@ -1,9 +1,9 @@
-import { AssistantRuntimeProvider, useAui, useAuiState } from "@assistant-ui/react";
-import { CodeXmlIcon, SettingsIcon } from "lucide-react";
+import { AssistantRuntimeProvider, ThreadListPrimitive, useAui, useAuiState } from "@assistant-ui/react";
+import { CodeXmlIcon, MessageSquarePlusIcon, SettingsIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ConversationMenu } from "../components/assistant-ui/thread-list";
 import { Thread } from "../components/assistant-ui/thread";
-import { Button } from "../components/ui/button";
+import { Button, buttonVariants } from "../components/ui/button";
 import { generateConversationTitle } from "../conversations";
 import { EventLogger, rebuildConversationList } from "../logging";
 import type { ModelConfig } from "../types";
@@ -39,6 +39,21 @@ function ScriptsButton() {
   </Button>;
 }
 
+function NewConversationButton({ setWarning }: { setWarning: (message: string) => void }) {
+  const running = useAuiState((state) => state.thread.isRunning);
+  useEffect(() => { if (!running) setWarning(""); }, [running, setWarning]);
+  return <ThreadListPrimitive.New
+    className={buttonVariants({ variant: "ghost", size: "icon-sm" })}
+    aria-label="新对话"
+    title="新对话"
+    data-testid="new-conversation"
+    onClick={(event) => {
+      if (running) { event.preventDefault(); setWarning("当前会话尚未结束，请等待完成或先停止运行。"); }
+      else setWarning("");
+    }}
+  ><MessageSquarePlusIcon aria-hidden="true" /></ThreadListPrimitive.New>;
+}
+
 function UserScriptsNotice() {
   const [enabled, setEnabled] = useState<boolean | null>(null);
   useEffect(() => {
@@ -69,10 +84,11 @@ function UserScriptsNotice() {
 }
 
 function Header({ conversation = false, logger }: { conversation?: boolean; logger?: EventLogger }) {
+  const [warning, setWarning] = useState("");
   return <><a className="skip-link" href="#chat-content">跳转到内容</a><header className="app-header">
     {conversation && logger ? <ConversationMenu logger={logger} /> : <h1>Surf Wax</h1>}
-    <div className="flex gap-2"><ScriptsButton /><SettingsButton /></div>
-  </header><UserScriptsNotice /></>;
+    <div className="flex gap-2">{conversation && <NewConversationButton setWarning={setWarning} />}<ScriptsButton /><SettingsButton /></div>
+  </header>{warning && <p role="status" className="conversation-notice">{warning}</p>}<UserScriptsNotice /></>;
 }
 
 export function App() {
