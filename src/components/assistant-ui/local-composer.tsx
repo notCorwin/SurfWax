@@ -17,7 +17,7 @@ const EFFORT_LABELS: Record<ReasoningEffort, string> = {
   none: "关闭", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "极高", max: "最高",
 };
 
-export function LocalComposer({ config }: { config: ModelConfig }) {
+export function LocalComposer({ config, draft, onDraftChange }: { config: ModelConfig; draft?: string; onDraftChange: (value: string) => void }) {
   const settings = reasoningSettingsFor(config);
   const reasoning = useSyncExternalStore(settings.subscribe, settings.snapshot);
   const model = config.model;
@@ -28,7 +28,8 @@ export function LocalComposer({ config }: { config: ModelConfig }) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const composing = useRef(false);
   const resizeFrame = useRef<number | null>(null);
-  const [hasText, setHasText] = useState(() => Boolean(externalText.trim()));
+  const [hasText, setHasText] = useState(() => Boolean((draft ?? externalText).trim()));
+  const previousExternalText = useRef(externalText);
 
   const resize = useCallback(() => {
     if (resizeFrame.current !== null) return;
@@ -43,12 +44,15 @@ export function LocalComposer({ config }: { config: ModelConfig }) {
   }, []);
 
   useEffect(() => {
+    if (previousExternalText.current === externalText) return;
+    previousExternalText.current = externalText;
     const input = inputRef.current;
     if (!input || input.value === externalText) return;
     input.value = externalText;
+    onDraftChange(externalText);
     setHasText(Boolean(externalText.trim()));
     resize();
-  }, [externalText, resize]);
+  }, [externalText, onDraftChange, resize]);
 
   useEffect(() => () => {
     if (resizeFrame.current !== null) cancelAnimationFrame(resizeFrame.current);
@@ -61,9 +65,10 @@ export function LocalComposer({ config }: { config: ModelConfig }) {
     aui.composer.setText(value);
     aui.composer.send();
     input.value = "";
+    onDraftChange("");
     setHasText(false);
     resize();
-  }, [aui, isDisabled, isRunning, resize]);
+  }, [aui, isDisabled, isRunning, onDraftChange, resize]);
 
   const keyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== "Enter" || event.nativeEvent.isComposing || composing.current || event.shiftKey) return;
@@ -73,12 +78,13 @@ export function LocalComposer({ config }: { config: ModelConfig }) {
       const start = event.currentTarget.selectionStart ?? event.currentTarget.value.length;
       const end = event.currentTarget.selectionEnd ?? start;
       event.currentTarget.setRangeText("\n", start, end, "end");
+      onDraftChange(event.currentTarget.value);
       setHasText(Boolean(event.currentTarget.value.trim()));
       resize();
       return;
     }
     submit();
-  }, [resize, submit]);
+  }, [onDraftChange, resize, submit]);
 
   return (
     <ComposerPrimitive.Root className="relative flex w-full flex-col" onSubmit={(event: FormEvent<HTMLFormElement>) => {
@@ -89,7 +95,7 @@ export function LocalComposer({ config }: { config: ModelConfig }) {
         <textarea
           ref={inputRef}
           data-testid="composer-input"
-          defaultValue={externalText}
+          defaultValue={draft ?? externalText}
           placeholder="描述要执行的浏览器任务…"
           className="min-h-12 max-h-32 w-full resize-none overflow-y-hidden bg-transparent px-2 py-1 text-sm leading-relaxed outline-none placeholder:text-muted-foreground"
           rows={2}
@@ -98,6 +104,7 @@ export function LocalComposer({ config }: { config: ModelConfig }) {
           enterKeyHint="send"
           aria-label="消息输入"
           onChange={(event) => {
+            onDraftChange(event.target.value);
             setHasText(Boolean(event.target.value.trim()));
             resize();
           }}

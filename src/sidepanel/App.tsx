@@ -1,6 +1,6 @@
-import { AssistantRuntimeProvider, useAui } from "@assistant-ui/react";
+import { AssistantRuntimeProvider, useAui, useAuiState } from "@assistant-ui/react";
 import { CodeXmlIcon, SettingsIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ConversationMenu } from "../components/assistant-ui/thread-list";
 import { Thread } from "../components/assistant-ui/thread";
 import { Button } from "../components/ui/button";
@@ -162,6 +162,27 @@ function ReloadConversationList({ logger, config }: { logger: EventLogger; confi
 
 function ConfiguredRuntime({ config, logger, initialThreadId }: { config: ModelConfig; logger: EventLogger; initialThreadId?: string }) {
   const runtime = useSidePanelRuntime(config, logger, initialThreadId);
+  return (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <ConfiguredConversation config={config} logger={logger} />
+    </AssistantRuntimeProvider>
+  );
+}
+
+function ConfiguredConversation({ config, logger }: { config: ModelConfig; logger: EventLogger }) {
+  const threadId = useAuiState((state) => state.threads.mainThreadId);
+  const drafts = useRef(new Map<string, string>());
+  return (
+    <main className="app-shell" data-testid="sidepanel-shell">
+      <ReloadConversationList logger={logger} config={config} />
+      <Header conversation />
+      <ConversationView key={threadId} config={config} logger={logger} threadId={threadId} drafts={drafts.current} />
+    </main>
+  );
+}
+
+function ConversationView({ config, logger, threadId, drafts }: { config: ModelConfig; logger: EventLogger; threadId: string; drafts: Map<string, string> }) {
+  const conversationId = useAuiState((state) => state.threadListItem.remoteId ?? state.threadListItem.id);
   const [guardWarning, setGuardWarning] = useState("");
   const [contextStatus, setContextStatus] = useState("");
   useEffect(() => {
@@ -172,23 +193,25 @@ function ConfiguredRuntime({ config, logger, initialThreadId }: { config: ModelC
     return () => chrome.runtime.onMessage.removeListener(onMessage);
   }, []);
   useEffect(() => logger.subscribe((event) => {
+    if (event.conversationId !== conversationId) return;
     if (event.type === "context.compacted" || event.type === "context.checkpoint.applied") {
       setContextStatus("模型正在使用压缩摘要；完整对话仍保留在记录中。");
     } else if (event.type === "context.limit.unavailable") {
       setContextStatus("无法取得模型上下文窗口；自动压缩暂不可用，可在设置中手动指定。");
     } else if (event.type === "context.compaction.failed") {
       setContextStatus("上下文压缩失败；请检查模型响应或设置中的窗口大小。");
-    } else if (event.type === "conversation.selected") setContextStatus("");
-  }), [logger]);
+    }
+  }), [conversationId, logger]);
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <main className="app-shell" data-testid="sidepanel-shell">
-        <ReloadConversationList logger={logger} config={config} />
-        <Header conversation />
-        {guardWarning && <p role="status">{guardWarning}</p>}
-        {contextStatus && <p role="status" data-testid="context-status">{contextStatus}</p>}
-        <section id="chat-content" tabIndex={-1} className="chat-scroll" data-testid="chat-scroll"><Thread config={config} /></section>
-      </main>
-    </AssistantRuntimeProvider>
+    <>
+      {guardWarning && <p role="status">{guardWarning}</p>}
+      {contextStatus && <p role="status" data-testid="context-status">{contextStatus}</p>}
+      <section id="chat-content" tabIndex={-1} className="chat-scroll" data-testid="chat-scroll">
+        <Thread config={config} draft={drafts.get(threadId)} onDraftChange={(value) => {
+          if (value) drafts.set(threadId, value);
+          else drafts.delete(threadId);
+        }} />
+      </section>
+    </>
   );
 }

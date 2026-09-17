@@ -64,7 +64,7 @@ function queuedToolResponse(firstCode: string, secondCode: string): string[] {
 
 type MockResponse = string[] | { status: number; error: string };
 
-async function startProvider(responses: MockResponse[], delayMs = 0, summaryText?: string, supportedEfforts = ["minimal", "low", "medium", "high", "xhigh"]): Promise<{
+async function startProvider(responses: MockResponse[], delayMs = 0, summaryText?: string, supportedEfforts = ["minimal", "low", "medium", "high", "xhigh"], summaryDelayMs = 0): Promise<{
   baseURL: string;
   origin: string;
   requests: any[];
@@ -132,10 +132,12 @@ async function startProvider(responses: MockResponse[], delayMs = 0, summaryText
       const requestBody = JSON.parse(Buffer.concat(body).toString("utf8"));
       requests.push(requestBody);
       if (summaryText && requestBody.stream !== true) {
-        response.writeHead(200, { "access-control-allow-origin": "*", "content-type": "application/json" });
-        response.end(JSON.stringify({ id: "summary", object: "chat.completion", created: 1, model: "test-model",
-          choices: [{ index: 0, message: { role: "assistant", content: summaryText }, finish_reason: "stop" }],
-          usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 } }));
+        setTimeout(() => {
+          response.writeHead(200, { "access-control-allow-origin": "*", "content-type": "application/json" });
+          response.end(JSON.stringify({ id: "summary", object: "chat.completion", created: 1, model: "test-model",
+            choices: [{ index: 0, message: { role: "assistant", content: summaryText }, finish_reason: "stop" }],
+            usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 } }));
+        }, summaryDelayMs);
         return;
       }
       const parts = responses.shift();
@@ -567,6 +569,9 @@ test("compacts model context while retaining the complete conversation log", asy
     await composer.press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("COMPACTED_REPLY");
     await expect(opened.page.getByTestId("context-status")).toContainText("压缩摘要");
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-new").click();
+    await expect(opened.page.getByTestId("context-status")).toHaveCount(0);
 
     const events = await readEvents(opened.page);
     expect(events.some((event) => event.type === "context.compacted")).toBe(true);
@@ -574,6 +579,33 @@ test("compacts model context while retaining the complete conversation log", asy
     const finalRequest = provider.requests.find((request) => request.stream === true && JSON.stringify(request.messages).includes("continue"));
     expect(JSON.stringify(finalRequest?.messages)).toContain("The previous page observations have been recorded.");
     expect(JSON.stringify(finalRequest?.messages)).not.toContain("OLD_CONTEXT_MARKER");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("keeps late context events in their original conversation", async () => {
+  const provider = await startProvider([
+    textResponse("OLD_CONTEXT_MARKER " + "page observation ".repeat(1_300)),
+    textResponse("旧对话标题"),
+    textResponse("LATE_COMPACTION_REPLY"),
+  ], 0, "Earlier page observations have been recorded.", ["minimal"], 800);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL, 8_000);
+    await options.close();
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("first request");
+    await composer.press("Enter");
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("旧对话标题");
+    await composer.fill("continue");
+    await composer.press("Enter");
+    await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "context.compaction.started")).toBe(true);
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-new").click();
+    await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "context.compacted")).toBe(true);
+    await expect(opened.page.getByTestId("context-status")).toHaveCount(0);
+    await expect(opened.page.locator(".markdown-body")).toHaveCount(0);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -1048,6 +1080,63 @@ test("creates, titles, switches, starts fresh on reload and permanently deletes 
     const events = await readEvents(opened.page);
     expect(events.filter((event) => event.type === "conversation.created")).toHaveLength(1);
     expect(events.some((event) => event.type === "conversation.deleted" && event.content.conversationId)).toBe(true);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("resets conversation UI while retaining only each conversation's own draft", async () => {
+  const provider = await startProvider([
+    textResponse("LONG_REPLY\n\n".repeat(300)), textResponse("第一标题"),
+    textResponse("SECOND_REPLY"), textResponse("第二标题"),
+  ]);
+  const opened = await openExtension();
+  try {
+    await opened.page.setViewportSize({ width: 430, height: 700 });
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("first conversation");
+    await composer.press("Enter");
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("第一标题");
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-new").click();
+    await composer.fill("second conversation");
+    await composer.press("Enter");
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("第二标题");
+
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-item", { hasText: "第一标题" }).locator(".conversation-select").click();
+    await expect(opened.page.locator(".markdown-body")).toContainText("LONG_REPLY");
+    const viewport = opened.page.getByTestId("thread-viewport");
+    await expect.poll(() => viewport.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(500);
+    await viewport.evaluate((element) => { element.scrollTop = 0; });
+    await expect(opened.page.getByRole("button", { name: "滚动到底部" })).toBeVisible();
+    await composer.fill("first unsent draft");
+    await opened.context.serviceWorkers()[0]!.evaluate(() => chrome.runtime.sendMessage({ type: "surf-wax:guard-warning", detail: "旧会话警告" }));
+    await expect(opened.page.getByText("旧会话警告")).toBeVisible();
+
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-new").click();
+    await expect(opened.page.getByRole("button", { name: "滚动到底部" })).toHaveCount(0);
+    await expect(opened.page.locator(".markdown-body")).toHaveCount(0);
+    await expect(composer).toHaveValue("");
+    await expect(opened.page.getByText("旧会话警告")).toHaveCount(0);
+    await expect(viewport).toHaveJSProperty("scrollTop", 0);
+
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-item", { hasText: "第二标题" }).locator(".conversation-select").click();
+    await expect(composer).toHaveValue("");
+    await composer.fill("second unsent draft");
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-item", { hasText: "第一标题" }).locator(".conversation-select").click();
+    await expect(composer).toHaveValue("first unsent draft");
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-item", { hasText: "第二标题" }).locator(".conversation-select").click();
+    await expect(composer).toHaveValue("second unsent draft");
+    const events = JSON.stringify(await readEvents(opened.page));
+    expect(events).not.toContain("first unsent draft");
+    expect(events).not.toContain("second unsent draft");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
