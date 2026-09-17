@@ -137,7 +137,7 @@ describe("ChromeExecutor", () => {
 
   it("keeps the execution result when a user-script snapshot fails", async () => {
     const fake = fakeChrome([{ result: { value: { kind: "value", value: 42 } } }]);
-    fake.chromeApi.userScripts.getScripts.mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("snapshot failed"));
+    fake.chromeApi.userScripts.getScripts.mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("snapshot failed"));
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
     await expect(executor.execute({ code: "return 42" })).resolves.toBe(42);
     expect(fake.debuggerApi.detach).toHaveBeenCalledWith({ targetId: "target-1" });

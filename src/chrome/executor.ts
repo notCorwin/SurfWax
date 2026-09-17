@@ -38,13 +38,50 @@ function expressionFor(code: string): string {
     const __nativeChrome = globalThis.chrome;
     const __bridge = globalThis[${JSON.stringify(BRIDGE_KEY)}];
     const __state = globalThis[${JSON.stringify(STATE_KEY)}];
+    const __guard = globalThis.__surfWaxGuard;
+    const __mark = async (tabId) => { if (Number.isInteger(tabId)) await __guard?.mark(tabId); };
+    const __pageApi = (name) => new Proxy(__nativeChrome[name], {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver);
+        if (typeof value !== "function") return value;
+        if (name === "tabs" && property === "connect") return (...args) => {
+          void __mark(args[0]);
+          return Reflect.apply(value, target, args);
+        };
+        if (name === "tabs" && !["update", "create", "reload", "goBack", "goForward", "sendMessage", "move", "remove", "discard", "duplicate", "group", "ungroup", "highlight", "captureVisibleTab"].includes(property)) return value;
+        return async (...args) => {
+          if (name === "scripting" || name === "userScripts" && property === "execute") await __mark(args[0]?.target?.tabId);
+          if (name === "pageCapture" && property === "saveAsMHTML") await __mark(args[0]?.tabId);
+          if (name === "tabs" && property !== "captureVisibleTab") await __mark(args[0]);
+          if (name === "tabs" && property === "captureVisibleTab") {
+            const [active] = await __nativeChrome.tabs.query({ active: true, ...(Number.isInteger(args[0]) ? { windowId: args[0] } : { currentWindow: true }) });
+            await __mark(active?.id);
+          }
+          const result = name === "userScripts" && ["register", "update", "unregister", "configureWorld", "resetWorldConfiguration"].includes(property)
+            ? await __bridge.call("userScripts", [property, ...args]) : await Reflect.apply(value, target, args);
+          if (name === "tabs" && property === "create") await __mark(result?.id);
+          if (name === "tabs" && property === "update" && !Number.isInteger(args[0])) await __mark(result?.id);
+          return result;
+        };
+      }
+    });
     const __debugger = new Proxy(__nativeChrome.debugger, {
       get(target, property, receiver) {
         if (property === "onEvent" || property === "onDetach") return __bridge[property];
         const value = Reflect.get(target, property, receiver);
         return typeof value === "function" ? (...args) => {
           if (property !== "detach" && (__state.run.aborted || __state.lifetime.aborted)) throw new DOMException("Operation aborted", "AbortError");
-          return __bridge.call(property, args).then(async (result) => {
+          return (async () => {
+            if (property === "attach" || property === "sendCommand") {
+              let tabId = args[0]?.tabId;
+              if (!Number.isInteger(tabId) && args[0]?.targetId) {
+                const targets = await __nativeChrome.debugger.getTargets();
+                tabId = targets.find((item) => item.id === args[0].targetId)?.tabId;
+              }
+              await __mark(tabId);
+            }
+            return __bridge.call(property, args);
+          })().then(async (result) => {
             if (property !== "detach" && (__state.run.aborted || __state.lifetime.aborted)) {
               if (property === "attach") await __bridge.call("detach", [args[0]]).catch(() => undefined);
               throw new DOMException("Operation aborted", "AbortError");
@@ -56,7 +93,9 @@ function expressionFor(code: string): string {
     });
     const chrome = new Proxy(__nativeChrome, {
       get(target, property, receiver) {
-        return property === "debugger" ? __debugger : Reflect.get(target, property, receiver);
+        return property === "debugger" ? __debugger
+          : ["scripting", "userScripts", "tabs", "pageCapture"].includes(property) && target[property] ? __pageApi(property)
+          : Reflect.get(target, property, receiver);
       }
     });
     const result = await (async () => {
@@ -160,7 +199,12 @@ export class ChromeExecutor {
       onDetach: event("onDetach"),
       call: (method: string, args: unknown[]) => {
         if (this.disposed) return Promise.reject(abortError());
-        if (!this.port) return Reflect.apply((this.chromeApi.debugger as any)[method], this.chromeApi.debugger, args);
+        if (!this.port) {
+          if (method === "userScripts") return Reflect.apply((this.chromeApi.userScripts as any)[args[0] as string], this.chromeApi.userScripts, args.slice(1));
+          if (method === "restoreUserScripts") return restoreUserScripts({ chromeApi: this.chromeApi, logger: this.logger });
+          if (method === "snapshotUserScripts") return snapshotUserScripts({ chromeApi: this.chromeApi, logger: this.logger });
+          return Reflect.apply((this.chromeApi.debugger as any)[method], this.chromeApi.debugger, args);
+        }
         return new Promise((resolve, reject) => {
           const id = globalThis.crypto.randomUUID();
           pending.set(id, { resolve, reject });
@@ -192,11 +236,10 @@ export class ChromeExecutor {
     this.activeDebuggee = undefined;
     for (const debuggee of sessions) void this.chromeApi.debugger.detach(debuggee).catch(() => undefined);
     this.port?.disconnect();
-    void snapshotUserScripts({ chromeApi: this.chromeApi, logger: this.logger }).catch(() => undefined);
   }
 
   private async initialize(): Promise<void> {
-    this.initialized ??= restoreUserScripts({ chromeApi: this.chromeApi, logger: this.logger }).then(() => undefined);
+    this.initialized ??= (this.bridge.call as (method: string, args: unknown[]) => Promise<unknown>)("restoreUserScripts", []).then(() => undefined);
     return this.initialized;
   }
 
@@ -254,7 +297,7 @@ export class ChromeExecutor {
       }
       if (this.activeDebuggee === debuggee) this.activeDebuggee = undefined;
       try {
-        await snapshotUserScripts({ chromeApi: this.chromeApi, logger: this.logger });
+        await (this.bridge.call as (method: string, args: unknown[]) => Promise<unknown>)("snapshotUserScripts", []);
       } catch (error) {
         this.logger?.record({ type: "userscript.snapshot-failed", content: null, error });
       }

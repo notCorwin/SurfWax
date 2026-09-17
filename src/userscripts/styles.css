@@ -1,0 +1,6 @@
+.scripts-shell { width: min(900px, 100%); gap: 16px; }
+.scripts-actions, .scripts-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.scripts-shell textarea { min-height: 300px; resize: vertical; font: 13px/1.5 ui-monospace, monospace; }
+.scripts-shell textarea, .scripts-shell select, .scripts-shell pre { width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: var(--background); color: var(--foreground); }
+.scripts-shell pre { overflow: auto; }
+.scripts-shell [role="alert"] { color: var(--destructive); }

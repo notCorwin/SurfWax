@@ -42,5 +42,6 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    rollupOptions: { input: { userscripts: resolve(projectRoot, "userscripts.html") } },
   },
 });

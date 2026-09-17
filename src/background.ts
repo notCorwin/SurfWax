@@ -1,8 +1,10 @@
 import { EventLogger } from "./logging";
-import { restoreUserScripts } from "./userscripts/persistence";
+import { callUserScripts, restoreUserScripts, serializeUserScripts, snapshotUserScripts, USER_SCRIPTS_ERROR_KEY } from "./userscripts/persistence";
 
 const eventLogger = new EventLogger();
 const guardedTabs = new Map<number, Set<chrome.runtime.Port>>();
+const bypassedTabs = new Map<number, number>();
+const guardUpdates = new Map<number, Promise<void>>();
 
 function installPageGuard(): void {
   if (document.getElementById("__surf-wax-page-guard")) return;
@@ -23,41 +25,85 @@ function removePageGuard(): void {
   document.getElementById("__surf-wax-page-guard")?.remove();
 }
 
-async function updatePageGuard(tabId: number, enabled: boolean): Promise<void> {
-  try {
-    await chrome.scripting.executeScript({ target: { tabId }, func: enabled ? installPageGuard : removePageGuard });
-  } catch { /* Chrome does not allow injection into every page. */ }
-  if (enabled && !guardedTabs.has(tabId)) void updatePageGuard(tabId, false);
+async function updatePageGuard(tabId: number): Promise<void> {
+  const task = (guardUpdates.get(tabId) ?? Promise.resolve()).catch(() => undefined).then(async () => {
+    const enabled = guardedTabs.has(tabId) && !bypassedTabs.has(tabId);
+    try {
+      await chrome.scripting.executeScript({ target: { tabId }, func: enabled ? installPageGuard : removePageGuard });
+    } catch (error) {
+      if (enabled) throw error;
+    }
+  });
+  guardUpdates.set(tabId, task);
+  try { await task; }
+  finally { if (guardUpdates.get(tabId) === task) guardUpdates.delete(tabId); }
+}
+
+async function bypassPageGuard(tabId: number, enabled: boolean): Promise<void> {
+  const count = (bypassedTabs.get(tabId) ?? 0) + (enabled ? 1 : -1);
+  if (count > 0) bypassedTabs.set(tabId, count);
+  else bypassedTabs.delete(tabId);
+  if (guardedTabs.has(tabId)) await updatePageGuard(tabId).catch(() => undefined);
 }
 
 chrome.tabs.onUpdated.addListener((tabId, change) => {
-  if (change.status === "complete" && guardedTabs.has(tabId)) void updatePageGuard(tabId, true);
+  if (change.status === "complete" && guardedTabs.has(tabId)) void updatePageGuard(tabId).catch((error) => {
+    eventLogger.record({ type: "page-guard.failed", content: { tabId }, error });
+    void chrome.runtime.sendMessage({ type: "surf-wax:guard-warning", detail: `标签页 ${tabId} 无法防止点击：${String(error)}` }).catch(() => undefined);
+  });
 });
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "surf-wax-page-guard") return;
-  let tabId: number | undefined;
-  port.onMessage.addListener((message: { tabId?: unknown }) => {
-    if (tabId !== undefined || !Number.isInteger(message?.tabId)) return;
-    tabId = message.tabId as number;
+  const held = new Set<number>();
+  const reply = (message: object) => { try { port.postMessage(message); } catch { /* The panel has closed. */ } };
+  port.onMessage.addListener((message: { tabId?: unknown; id?: string }) => {
+    if (!Number.isInteger(message?.tabId)) return;
+    const tabId = message.tabId as number;
+    if (held.has(tabId)) {
+      reply({ id: message.id, ready: true });
+      return;
+    }
+    held.add(tabId);
     const holders = guardedTabs.get(tabId) ?? new Set<chrome.runtime.Port>();
     holders.add(port);
     guardedTabs.set(tabId, holders);
-    void updatePageGuard(tabId, true).then(() => port.postMessage({ ready: true })).catch(() => undefined);
+    void updatePageGuard(tabId).then(
+      () => reply({ id: message.id, ready: true }),
+      (error) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        eventLogger.record({ type: "page-guard.failed", content: { tabId }, error });
+        reply({ id: message.id, error: detail });
+        void chrome.runtime.sendMessage({ type: "surf-wax:guard-warning", detail: `标签页 ${tabId} 无法防止点击：${detail}` }).catch(() => undefined);
+      },
+    );
   });
   port.onDisconnect.addListener(() => {
-    if (tabId === undefined) return;
-    const holders = guardedTabs.get(tabId);
-    holders?.delete(port);
-    if (holders?.size) return;
-    guardedTabs.delete(tabId);
-    void updatePageGuard(tabId, false);
+    for (const tabId of held) {
+      const holders = guardedTabs.get(tabId);
+      holders?.delete(port);
+      if (holders?.size) continue;
+      guardedTabs.delete(tabId);
+      void updatePageGuard(tabId);
+    }
   });
 });
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "surf-wax-debugger") return;
   const sessions = new Map<string, chrome.debugger.Debuggee>();
+  const pointerGestures = new Set<number>();
+  const gestureTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  const endGesture = async (tabId: number) => {
+    if (!pointerGestures.delete(tabId)) return;
+    clearTimeout(gestureTimers.get(tabId));
+    gestureTimers.delete(tabId);
+    await bypassPageGuard(tabId, false).catch(() => undefined);
+  };
+  const keepGesture = (tabId: number) => {
+    clearTimeout(gestureTimers.get(tabId));
+    gestureTimers.set(tabId, setTimeout(() => void endGesture(tabId), 10_000));
+  };
   let closed = false;
   const key = (debuggee: chrome.debugger.Debuggee) => debuggee.targetId
     ? `target:${debuggee.targetId}` : debuggee.tabId !== undefined ? `tab:${debuggee.tabId}` : `extension:${debuggee.extensionId}`;
@@ -81,10 +127,39 @@ chrome.runtime.onConnect.addListener((port) => {
       } else if (method === "detach") {
         await chrome.debugger.detach(args[0]);
         sessions.delete(key(args[0]));
+      } else if (method === "userScripts") {
+        result = await callUserScripts(args[0], args.slice(1), { logger: eventLogger });
+      } else if (method === "restoreUserScripts") {
+        result = await restoreQueued();
+      } else if (method === "snapshotUserScripts") {
+        result = await serializeUserScripts(() => snapshotUserScripts({ logger: eventLogger }));
+      } else if (method === "endPointerGestures") {
+        await Promise.all([...pointerGestures].map((tabId) => endGesture(tabId)));
       } else {
         const native = (chrome.debugger as unknown as Record<string, (...params: any[]) => Promise<unknown>>)[method];
         if (typeof native !== "function") throw new Error(`Unknown chrome.debugger method: ${method}`);
-        result = await native.apply(chrome.debugger, args);
+        const debuggee = args[0] as chrome.debugger.Debuggee;
+        const target = debuggee?.targetId ? (await chrome.debugger.getTargets()).find((item) => item.id === debuggee.targetId) : undefined;
+        const tabId = debuggee?.tabId ?? target?.tabId;
+        const command = args[1] as string;
+        const input = method === "sendCommand" && ["Input.dispatchMouseEvent", "Input.dispatchTouchEvent", "Input.dispatchDragEvent", "Input.emulateTouchFromMouseEvent"].includes(command) && Number.isInteger(tabId);
+        const type = (args[2] as { type?: string } | undefined)?.type;
+        const start = input && (type === "mousePressed" || type === "touchStart");
+        const end = input && (type === "mouseReleased" || type === "touchEnd" || type === "touchCancel");
+        const temporary = input && !start && !end && !pointerGestures.has(tabId!);
+        if ((start && !pointerGestures.has(tabId!)) || temporary) {
+          await bypassPageGuard(tabId!, true);
+          if (start) pointerGestures.add(tabId!);
+        }
+        if (input && pointerGestures.has(tabId!)) keepGesture(tabId!);
+        let succeeded = false;
+        try {
+          result = await native.apply(chrome.debugger, args);
+          succeeded = true;
+        } finally {
+          if (temporary) await bypassPageGuard(tabId!, false).catch(() => undefined);
+          if (input && (end || (start && !succeeded))) await endGesture(tabId!);
+        }
       }
       if (!closed) port.postMessage({ id, result });
     } catch (error) {
@@ -96,15 +171,36 @@ chrome.runtime.onConnect.addListener((port) => {
     chrome.debugger.onEvent.removeListener(onEvent);
     chrome.debugger.onDetach.removeListener(onDetach);
     for (const debuggee of sessions.values()) void chrome.debugger.detach(debuggee).catch(() => undefined);
+    for (const tabId of pointerGestures) void endGesture(tabId);
     sessions.clear();
   });
 });
 
 function restore(): void {
-  void restoreUserScripts({ logger: eventLogger }).catch((error) => {
-    eventLogger.record({ type: "userscript.restore-failed", content: null, error });
-  });
+  void restoreQueued().catch(() => undefined);
 }
+
+async function restoreQueued(): Promise<boolean> {
+  try {
+    const restored = await serializeUserScripts(() => restoreUserScripts({ logger: eventLogger }));
+    if (restored) await chrome.storage.local.remove(USER_SCRIPTS_ERROR_KEY);
+    return restored;
+  } catch (error) {
+    eventLogger.record({ type: "userscript.restore-failed", content: null, error });
+    await chrome.storage.local.set({ [USER_SCRIPTS_ERROR_KEY]: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
+}
+
+chrome.runtime.onMessage.addListener((message: { type?: string; method?: string; args?: unknown[] }, _sender, respond) => {
+  if (message?.type !== "surf-wax:user-scripts") return false;
+  const task = message.method === "restore" ? restoreQueued() : callUserScripts(message.method ?? "", message.args ?? [], { logger: eventLogger });
+  void task.then(
+    (result) => respond({ ok: true, result }),
+    (error) => respond({ ok: false, error: error instanceof Error ? error.message : String(error) }),
+  );
+  return true;
+});
 
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });

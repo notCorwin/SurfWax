@@ -62,6 +62,8 @@ npm run dev
 4. 保存配置并返回 Side Panel。
 5. 如需使用持久 User Scripts，在扩展详情页开启 **Allow User Scripts**。
 
+Side Panel 标题栏的脚本按钮会打开独立的用户脚本标签页，可查看 Chrome 开关与恢复状态，并新建、编辑、运行或删除脚本。运行时需从列表中明确选择目标网页标签页。脚本定义使用 Chrome 原生 `RegisteredUserScript` JSON 格式。
+
 模型配置只保存在当前扩展的 `chrome.storage.local` 中。Provider 必须支持 OpenAI-compatible Chat Completions、流式响应和 tool calling，并允许扩展发起跨域请求。
 
 ## 使用
@@ -111,6 +113,8 @@ npm run dev
 ```
 
 Side Panel 关闭时，Harness 会立即中止当前模型请求，阻止排队的工具调用启动，并尽力取消执行中的工具和 detach 自己创建的调试会话。已经发生的浏览器副作用不会回滚。
+
+智能体运行时，已连接或操作的网页会覆盖防点击层；导航后会重装，结束或中止时移除。通过 CDP 注入鼠标或触摸手势时，防点击层会短暂透传，以便智能体操作页面。Chrome 不允许脚本注入的页面会在面板显示提示。
 
 重新打开 Side Panel 后，已生成的文本、推理和工具结果会从事件流恢复并标记为“回复已中断”。只有最新的中断回复提供“继续”按钮；继续时会先要求 Agent 根据已有工具结果确认当前状态，不会自动重放浏览器操作。标题栏的对话按钮可新建、切换和永久删除单条本地对话；仅切换对话不会停止后台运行中的回复。
 

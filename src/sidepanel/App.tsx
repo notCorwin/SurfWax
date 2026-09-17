@@ -1,5 +1,5 @@
 import { AssistantRuntimeProvider, useAui } from "@assistant-ui/react";
-import { SettingsIcon } from "lucide-react";
+import { CodeXmlIcon, SettingsIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { ConversationMenu } from "../components/assistant-ui/thread-list";
 import { Thread } from "../components/assistant-ui/thread";
@@ -32,6 +32,13 @@ function SettingsButton() {
   );
 }
 
+function ScriptsButton() {
+  return <Button type="button" variant="outline" size="icon-sm" aria-label="管理用户脚本" title="管理用户脚本" data-testid="open-user-scripts"
+    onClick={() => void chrome.tabs.create({ url: chrome.runtime.getURL("userscripts.html") })}>
+    <CodeXmlIcon aria-hidden="true" />
+  </Button>;
+}
+
 export function App() {
   const session = useSidePanelSession();
   const [fatal, setFatal] = useState("");
@@ -40,7 +47,7 @@ export function App() {
   if (fatal) {
     return (
       <main className="app-shell" data-testid="sidepanel-shell">
-        <header className="app-header"><h1>Surf Wax</h1><SettingsButton /></header>
+        <header className="app-header"><h1>Surf Wax</h1><div className="flex gap-2"><ScriptsButton /><SettingsButton /></div></header>
         <section className="chat-scroll">
           <div className="empty-state" role="alert" data-testid="fatal-log-error">
             <h2>事件日志不可用</h2><p>{fatal}</p>
@@ -56,7 +63,7 @@ export function App() {
 
   return (
     <main className="app-shell" data-testid="sidepanel-shell">
-      <header className="app-header"><h1>Surf Wax</h1><SettingsButton /></header>
+      <header className="app-header"><h1>Surf Wax</h1><div className="flex gap-2"><ScriptsButton /><SettingsButton /></div></header>
       <section className="chat-scroll">
         <div className="empty-state" data-testid="config-required-state">
           <h2>{session.configReady ? "先完成模型配置" : "正在读取配置…"}</h2>
@@ -85,7 +92,7 @@ function ConfiguredChat({ config, logger, onError }: { config: ModelConfig; logg
   if (initialThreadId === undefined) {
     return (
       <main className="app-shell" data-testid="sidepanel-shell">
-        <header className="app-header"><h1>Surf Wax</h1><SettingsButton /></header>
+        <header className="app-header"><h1>Surf Wax</h1><div className="flex gap-2"><ScriptsButton /><SettingsButton /></div></header>
         <section className="chat-scroll"><div className="empty-state" data-testid="conversation-loading">正在恢复对话…</div></section>
       </main>
     );
@@ -119,14 +126,23 @@ function ReloadConversationList({ logger, config }: { logger: EventLogger; confi
 
 function ConfiguredRuntime({ config, logger, initialThreadId }: { config: ModelConfig; logger: EventLogger; initialThreadId?: string }) {
   const runtime = useSidePanelRuntime(config, logger, initialThreadId);
+  const [guardWarning, setGuardWarning] = useState("");
+  useEffect(() => {
+    const onMessage = (message: { type?: string; detail?: string }) => {
+      if (message?.type === "surf-wax:guard-warning") setGuardWarning(message.detail ?? "网页无法防止点击");
+    };
+    chrome.runtime.onMessage.addListener(onMessage);
+    return () => chrome.runtime.onMessage.removeListener(onMessage);
+  }, []);
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <main className="app-shell" data-testid="sidepanel-shell">
         <ReloadConversationList logger={logger} config={config} />
         <header className="app-header">
           <ConversationMenu />
-          <SettingsButton />
+          <div className="flex gap-2"><ScriptsButton /><SettingsButton /></div>
         </header>
+        {guardWarning && <p role="status">{guardWarning}</p>}
         <section className="chat-scroll" data-testid="chat-scroll"><Thread /></section>
       </main>
     </AssistantRuntimeProvider>

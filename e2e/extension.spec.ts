@@ -891,3 +891,129 @@ test("closing the panel prevents a queued chrome call from starting", async () =
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
+
+test("guards every touched tab while CDP pointer input still reaches the page", async () => {
+  const responses: string[][] = [];
+  const provider = await startProvider(responses);
+  const targetUrl = `${provider.origin}/target`;
+  const otherUrl = `${provider.origin}/complex-next`;
+  responses.push(toolResponse(`
+const [tab] = await chrome.tabs.query({ url: ${JSON.stringify(otherUrl)} });
+await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => {
+  const button = document.createElement('button');
+  button.textContent = 'CDP target';
+  button.style.cssText = 'position:fixed;left:20px;top:20px;width:120px;height:40px';
+  button.onclick = () => { document.documentElement.dataset.cdpClicks = String(Number(document.documentElement.dataset.cdpClicks || 0) + 1); };
+  document.body.append(button);
+} });
+await chrome.debugger.attach({ tabId: tab.id }, '1.3');
+try {
+  await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: 40, y: 40, button: 'left', clickCount: 1 });
+  await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: 40, y: 40, button: 'left', clickCount: 1 });
+} finally { await chrome.debugger.detach({ tabId: tab.id }); }
+await new Promise((resolve) => setTimeout(resolve, 1200));
+return true;
+`), textResponse("MULTI_GUARD_OK"), textResponse("页面防护"));
+  const opened = await openExtension();
+  try {
+    const first = await opened.context.newPage();
+    await first.goto(targetUrl);
+    const second = await opened.context.newPage();
+    await second.goto(otherUrl);
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await first.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("operate on another tab");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(first.locator("#__surf-wax-page-guard")).toBeAttached();
+    await expect(second.locator("#__surf-wax-page-guard")).toBeAttached();
+    await expect.poll(() => second.evaluate(() => document.documentElement.dataset.cdpClicks)).toBe("1");
+    await second.mouse.click(40, 40);
+    expect(await second.evaluate(() => document.documentElement.dataset.cdpClicks)).toBe("1");
+    await second.goto(otherUrl);
+    await expect(second.locator("#__surf-wax-page-guard")).toBeAttached();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("MULTI_GUARD_OK");
+    await expect(first.locator("#__surf-wax-page-guard")).toHaveCount(0);
+    await expect(second.locator("#__surf-wax-page-guard")).toHaveCount(0);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("shows a warning for a Chrome page that cannot be guarded without stopping the agent", async () => {
+  const provider = await startProvider([
+    toolResponse("return chrome.runtime.getManifest().name;"), textResponse("CHROME_PAGE_OK"), textResponse("防护提示"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    const restricted = await opened.context.newPage();
+    await restricted.goto("chrome://extensions/");
+    await restricted.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("inspect Chrome");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.getByRole("status")).toContainText("无法防止点击");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("CHROME_PAGE_OK");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("manages, restores, runs and deletes scripts in a separate Chrome tab", async () => {
+  const provider = await startProvider([]);
+  const opened = await openExtension();
+  try {
+    const [disabledManager] = await Promise.all([
+      opened.context.waitForEvent("page"), opened.page.getByTestId("open-user-scripts").click(),
+    ]);
+    await expect(disabledManager.getByRole("status")).toContainText("Allow User Scripts");
+    await disabledManager.close();
+    await enableUserScripts(opened.context, opened.extensionId, opened.page);
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    const [manager] = await Promise.all([
+      opened.context.waitForEvent("page"), opened.page.getByTestId("open-user-scripts").click(),
+    ]);
+    await manager.waitForLoadState("domcontentloaded");
+    await expect(manager.getByTestId("user-scripts-panel")).toBeVisible();
+    const definition = manager.locator("#script-definition");
+    const script = { id: "managed", matches: [`${provider.origin}/*`], js: [{ code: "document.documentElement.dataset.managed = 'first'; 'RUN_OK'" }], world: "USER_SCRIPT" };
+    await definition.fill(JSON.stringify(script));
+    await manager.getByRole("button", { name: "保存" }).click();
+    await expect(manager.getByLabel("已保存脚本").getByRole("button", { name: /managed · 已注册/ })).toBeVisible();
+    expect((await manager.evaluate(async () => chrome.storage.local.get("side-agent:user-scripts")))["side-agent:user-scripts"]).toHaveLength(1);
+    await definition.fill(JSON.stringify({ ...script, js: [{ code: "document.documentElement.dataset.managed = 'updated'; 'RUN_OK'" }] }));
+    await manager.getByRole("button", { name: "保存" }).click();
+    const settings = await opened.context.newPage();
+    await settings.goto(`chrome://extensions/?id=${opened.extensionId}`);
+    const toggle = settings.locator("extensions-toggle-row#allow-user-scripts cr-toggle#crToggle");
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-pressed", "false");
+    await manager.reload();
+    await expect(manager.getByRole("status")).toContainText("Allow User Scripts");
+    expect((await manager.evaluate(async () => chrome.storage.local.get("side-agent:user-scripts")))["side-agent:user-scripts"]).toHaveLength(1);
+    await toggle.click();
+    await expect(toggle).toHaveAttribute("aria-pressed", "true");
+    await manager.reload();
+    await expect(manager.getByLabel("已保存脚本").getByRole("button", { name: /managed · 已注册/ })).toBeVisible();
+    await settings.close();
+    await manager.getByLabel("已保存脚本").getByRole("button", { name: /managed · 已注册/ }).click();
+    const targetId = await manager.evaluate(async (url) => (await chrome.tabs.query({ url }))[0]?.id, `${provider.origin}/target`);
+    await manager.locator("#script-target").selectOption(String(targetId));
+    await manager.getByRole("button", { name: "运行脚本" }).click();
+    await expect.poll(() => target.evaluate(() => document.documentElement.dataset.managed)).toBe("updated");
+    await manager.evaluate(async () => chrome.userScripts.unregister({ ids: ["managed"] }));
+    await manager.getByRole("button", { name: "刷新状态" }).click();
+    await expect.poll(() => manager.evaluate(async () => (await chrome.userScripts.getScripts({ ids: ["managed"] })).length)).toBe(1);
+    manager.once("dialog", (dialog) => dialog.accept());
+    await manager.getByRole("button", { name: "删除" }).click();
+    await expect(manager.getByLabel("已保存脚本").getByRole("button", { name: "managed" })).toHaveCount(0);
+    await manager.evaluate(async () => chrome.storage.local.set({ "side-agent:user-scripts": { legacy: "unreadable" } }));
+    await manager.getByRole("button", { name: "刷新状态" }).click();
+    await expect(manager.getByRole("alert").first()).toContainText("原始数据已保留");
+    expect((await manager.evaluate(async () => chrome.storage.local.get("side-agent:user-scripts")))["side-agent:user-scripts"]).toEqual({ legacy: "unreadable" });
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
