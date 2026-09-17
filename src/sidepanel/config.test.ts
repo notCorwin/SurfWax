@@ -38,4 +38,11 @@ describe("model config persistence", () => {
     await expect(loadModelConfig({ baseURL: "fallback", model: "fallback", apiKey: "fallback" }, storage))
       .resolves.toEqual({ baseURL: "https://provider.test/v1", model: "model-id", apiKey: "secret-key" });
   });
+
+  it("persists an optional manual context window", async () => {
+    const storage = memoryStorage();
+    const config = { baseURL: "https://provider.test/v1", model: "test", apiKey: "key", contextWindowOverride: 8192 };
+    await saveModelConfig(config, storage);
+    await expect(loadModelConfig(config, storage)).resolves.toEqual(config);
+  });
 });

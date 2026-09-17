@@ -64,7 +64,7 @@ function queuedToolResponse(firstCode: string, secondCode: string): string[] {
 
 type MockResponse = string[] | { status: number; error: string };
 
-async function startProvider(responses: MockResponse[], delayMs = 0): Promise<{
+async function startProvider(responses: MockResponse[], delayMs = 0, summaryText?: string): Promise<{
   baseURL: string;
   origin: string;
   requests: any[];
@@ -124,7 +124,15 @@ async function startProvider(responses: MockResponse[], delayMs = 0): Promise<{
     const body: Buffer[] = [];
     request.on("data", (part) => body.push(part));
     request.on("end", () => {
-      requests.push(JSON.parse(Buffer.concat(body).toString("utf8")));
+      const requestBody = JSON.parse(Buffer.concat(body).toString("utf8"));
+      requests.push(requestBody);
+      if (summaryText && requestBody.stream !== true) {
+        response.writeHead(200, { "access-control-allow-origin": "*", "content-type": "application/json" });
+        response.end(JSON.stringify({ id: "summary", object: "chat.completion", created: 1, model: "test-model",
+          choices: [{ index: 0, message: { role: "assistant", content: summaryText }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 } }));
+        return;
+      }
       const parts = responses.shift();
       if (!parts) {
         response.writeHead(500, { "content-type": "application/json" });
@@ -193,13 +201,15 @@ async function dispose(context: BrowserContext, directory: string, server?: Serv
   if (server) await closeServer(server);
 }
 
-async function configure(context: BrowserContext, page: Page, baseURL: string): Promise<Page> {
+async function configure(context: BrowserContext, page: Page, baseURL: string, contextWindow = 1_000_000): Promise<Page> {
   const [options] = await Promise.all([context.waitForEvent("page"), page.getByTestId("open-settings").click()]);
   await options.waitForLoadState("domcontentloaded");
   const fields = options.getByTestId("options-card").locator("input");
   await fields.nth(0).fill(baseURL);
   await fields.nth(1).fill("test-model");
   await fields.nth(2).fill("test-key");
+  await options.getByText("高级设置：手动指定上下文窗口").click();
+  await fields.nth(3).fill(String(contextWindow));
   await options.getByRole("button", { name: "保存配置" }).click();
   await expect(options.getByRole("status")).toContainText("配置已保存");
   await expect(page.getByTestId("composer-input")).toBeVisible();
@@ -240,7 +250,7 @@ test("ships only the minimal MV3 Harness surface", async () => {
     await expect(opened.page.getByTestId("config-required-state")).toBeVisible();
 
     const options = await configure(opened.context, opened.page, "https://provider.test/v1");
-    await expect(options.getByTestId("options-card").locator("input")).toHaveCount(3);
+    await expect(options.getByTestId("options-card").locator("input")).toHaveCount(4);
     await expect(options.getByTestId("event-log-clear")).toBeVisible();
     await expect(options.getByTestId("event-log")).toHaveCount(0);
     await expect(options.getByTestId("user-scripts-panel")).toHaveCount(0);
@@ -321,6 +331,39 @@ return { extensionTitle: document.title, version: chrome.runtime.getManifest().v
     await clearOptions.getByTestId("event-log-clear").click();
     await expect(clearOptions.getByRole("status")).toContainText("已清空");
     await expect.poll(() => readEvents(clearOptions)).toEqual([]);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("compacts model context while retaining the complete conversation log", async () => {
+  const oldReply = "OLD_CONTEXT_MARKER " + "page observation ".repeat(1_300);
+  const provider = await startProvider([
+    textResponse(oldReply),
+    textResponse("压缩测试"),
+    textResponse("COMPACTED_REPLY"),
+  ], 0, "The previous page observations have been recorded.");
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL, 8_000);
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("first request");
+    await composer.press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("OLD_CONTEXT_MARKER");
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("压缩测试");
+
+    await options.close();
+    await composer.fill("continue");
+    await composer.press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("COMPACTED_REPLY");
+    await expect(opened.page.getByTestId("context-status")).toContainText("压缩摘要");
+
+    const events = await readEvents(opened.page);
+    expect(events.some((event) => event.type === "context.compacted")).toBe(true);
+    expect(JSON.stringify(events.filter((event) => event.type === "conversation.message"))).toContain("OLD_CONTEXT_MARKER");
+    const finalRequest = provider.requests.find((request) => request.stream === true && JSON.stringify(request.messages).includes("continue"));
+    expect(JSON.stringify(finalRequest?.messages)).toContain("The previous page observations have been recorded.");
+    expect(JSON.stringify(finalRequest?.messages)).not.toContain("OLD_CONTEXT_MARKER");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }

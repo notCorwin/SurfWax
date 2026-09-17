@@ -107,13 +107,7 @@ function logStream(
   });
 }
 
-export function createChatTransport(agent: Agent<any, any, any, any>, logger: EventLogger, conversationId: string) {
-  const direct = new DirectChatTransport<any, any, any, any, SidePanelMessage>({
-    agent,
-    generateMessageId: () => globalThis.crypto.randomUUID(),
-    onError: (error) => error instanceof Error ? error.message : String(error),
-  });
-
+export function createChatTransport(agent: (signal: AbortSignal, branchIds: string[]) => Agent<any, any, any, any>, logger: EventLogger, conversationId: string) {
   return {
     sendMessages: async (options: Parameters<ChatTransport<SidePanelMessage>["sendMessages"]>[0]) => {
       if (options.trigger !== "submit-message" && options.trigger !== "regenerate-message") {
@@ -140,6 +134,11 @@ export function createChatTransport(agent: Agent<any, any, any, any>, logger: Ev
           conversationId,
           runId: currentRunId,
           content: { chatId: options.chatId, messageId: userMessage?.id ?? null },
+        });
+        const direct = new DirectChatTransport<any, any, any, any, SidePanelMessage>({
+          agent: agent(lease.signal, options.messages.map((message) => message.id)),
+          generateMessageId: () => globalThis.crypto.randomUUID(),
+          onError: (error) => error instanceof Error ? error.message : String(error),
         });
         return logStream(
           await direct.sendMessages({ ...options, abortSignal: lease.signal, messages: options.messages }),

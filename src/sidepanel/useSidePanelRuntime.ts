@@ -3,6 +3,8 @@ import { useChatRuntime } from "@assistant-ui/ai-sdk";
 import { useEffect, useMemo } from "react";
 import { abortAllConversationWork } from "../agent/coordinator";
 import { createAgent } from "../agent/runner";
+import { ContextCompactor } from "../agent/compaction";
+import { createModel } from "../agent/model";
 import { createChatTransport } from "../agent/transport";
 import { ChromeExecutor } from "../chrome/executor";
 import { createConversationAdapter } from "../conversations";
@@ -26,13 +28,13 @@ export function createSidePanelCloser(runtime: CloseableRuntime, logger?: EventL
 function useConversationRuntime(config: ModelConfig, logger: EventLogger): AssistantRuntime {
   const conversationId = useAuiState((state) => state.threadListItem.remoteId ?? state.threadListItem.id);
   const executor = useMemo(() => new ChromeExecutor({ logger }), [logger]);
-  const agent = useMemo(
-    () => createAgent({ model: config, executor, logger, conversationId }),
-    [config, conversationId, executor, logger],
-  );
   const transport = useMemo(
-    () => createChatTransport(agent, logger, conversationId),
-    [agent, conversationId, logger],
+    () => createChatTransport((signal, branchIds) => {
+      const languageModel = createModel(config, logger, conversationId);
+      return createAgent({ model: config, languageModel, executor, logger, conversationId,
+        compactor: new ContextCompactor({ model: config, languageModel, logger, conversationId, branchIds, signal }) });
+    }, logger, conversationId),
+    [config, conversationId, executor, logger],
   );
   const runtime = useChatRuntime({
     id: conversationId,

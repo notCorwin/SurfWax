@@ -5,6 +5,7 @@ import { ChromeExecutor } from "../chrome/executor";
 import type { EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
 import { createModel } from "./model";
+import type { ContextCompactor } from "./compaction";
 
 export const DEFAULT_INSTRUCTIONS = [
   "You are a Chrome side-panel agent helping the user automate the browser they control.",
@@ -22,6 +23,7 @@ export type CreateAgentOptions = {
   instructions?: string;
   logger?: EventLogger;
   conversationId?: string;
+  compactor?: ContextCompactor;
 };
 
 type ChromeAgentTools = { chrome: ReturnType<typeof createChromeTool> };
@@ -33,6 +35,9 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, C
     reasoning: "minimal",
     instructions: options.instructions ?? DEFAULT_INSTRUCTIONS,
     tools: { chrome: createChromeTool(options.executor) },
+    ...(options.compactor ? { prepareStep: async ({ messages, stepNumber }) => ({
+      messages: await options.compactor!.prepare(messages, stepNumber) ?? messages,
+    }) } : {}),
     ...(logger ? {
       onStart: (event) => logger.record({
         type: "model.started",
@@ -60,15 +65,18 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, C
         ...(event.toolOutput.type === "tool-error" ? { error: event.toolOutput.error } : { output: event.toolOutput.output }),
         latencyMs: event.toolExecutionMs,
       }),
-      onStepEnd: (event) => logger.record({
-        type: "model.step.finished",
-        conversationId: options.conversationId,
-        content: { callId: event.callId, stepNumber: event.stepNumber, text: event.text, reasoning: event.reasoning, toolCalls: event.toolCalls, toolResults: event.toolResults },
-        stopReason: event.finishReason,
-        usage: event.usage,
-        providerMetadata: event.providerMetadata,
-        latencyMs: event.performance?.stepTimeMs,
-      }),
+      onStepEnd: (event) => {
+        options.compactor?.recordUsage(event.usage.inputTokens);
+        logger.record({
+          type: "model.step.finished",
+          conversationId: options.conversationId,
+          content: { callId: event.callId, stepNumber: event.stepNumber, text: event.text, reasoning: event.reasoning, toolCalls: event.toolCalls, toolResults: event.toolResults },
+          stopReason: event.finishReason,
+          usage: event.usage,
+          providerMetadata: event.providerMetadata,
+          latencyMs: event.performance?.stepTimeMs,
+        });
+      },
       onEnd: (event) => logger.record({
         type: "model.finished",
         conversationId: options.conversationId,

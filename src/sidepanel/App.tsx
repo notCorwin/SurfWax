@@ -163,6 +163,7 @@ function ReloadConversationList({ logger, config }: { logger: EventLogger; confi
 function ConfiguredRuntime({ config, logger, initialThreadId }: { config: ModelConfig; logger: EventLogger; initialThreadId?: string }) {
   const runtime = useSidePanelRuntime(config, logger, initialThreadId);
   const [guardWarning, setGuardWarning] = useState("");
+  const [contextStatus, setContextStatus] = useState("");
   useEffect(() => {
     const onMessage = (message: { type?: string; detail?: string }) => {
       if (message?.type === "surf-wax:guard-warning") setGuardWarning(message.detail ?? "网页无法防止点击");
@@ -170,12 +171,22 @@ function ConfiguredRuntime({ config, logger, initialThreadId }: { config: ModelC
     chrome.runtime.onMessage.addListener(onMessage);
     return () => chrome.runtime.onMessage.removeListener(onMessage);
   }, []);
+  useEffect(() => logger.subscribe((event) => {
+    if (event.type === "context.compacted" || event.type === "context.checkpoint.applied") {
+      setContextStatus("模型正在使用压缩摘要；完整对话仍保留在记录中。");
+    } else if (event.type === "context.limit.unavailable") {
+      setContextStatus("无法取得模型上下文窗口；自动压缩暂不可用，可在设置中手动指定。");
+    } else if (event.type === "context.compaction.failed") {
+      setContextStatus("上下文压缩失败；请检查模型响应或设置中的窗口大小。");
+    } else if (event.type === "conversation.selected") setContextStatus("");
+  }), [logger]);
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <main className="app-shell" data-testid="sidepanel-shell">
         <ReloadConversationList logger={logger} config={config} />
         <Header conversation />
         {guardWarning && <p role="status">{guardWarning}</p>}
+        {contextStatus && <p role="status" data-testid="context-status">{contextStatus}</p>}
         <section className="chat-scroll" data-testid="chat-scroll"><Thread /></section>
       </main>
     </AssistantRuntimeProvider>

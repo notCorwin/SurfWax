@@ -52,6 +52,6 @@ export function useSidePanelSession(): SidePanelSession {
     configReady,
     status,
     configured: configReady && isCompleteModelConfig(config),
-    chatKey: `${config.baseURL}\u0000${config.model}`,
+    chatKey: `${config.baseURL}\u0000${config.model}\u0000${config.contextWindowOverride ?? ""}`,
   };
 }

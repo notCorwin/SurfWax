@@ -44,3 +44,11 @@ body {
 .options-status[data-state="error"] {
   color: var(--destructive);
 }
+
+.model-limit-match {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+details[open] [data-slot="field"] { margin-top: 12px; }

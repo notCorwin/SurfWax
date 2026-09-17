@@ -9,4 +9,5 @@ export type ModelConfig = {
   baseURL: string;
   apiKey: string;
   model: string;
+  contextWindowOverride?: number;
 };

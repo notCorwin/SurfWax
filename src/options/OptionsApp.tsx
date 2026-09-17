@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../components/ui/card";
 import { Field, FieldGroup, FieldLabel } from "../components/ui/field";
 import { Input } from "../components/ui/input";
 import { EventLogger } from "../logging";
+import { resolveModelLimit, type ModelLimit } from "../agent/model-limits";
 import type { PersistedModelConfig } from "../sidepanel/config";
 import { isCompleteModelConfig, loadModelConfig, saveModelConfig } from "../sidepanel/config";
 import "../styles.css";
@@ -21,6 +22,8 @@ export function OptionsApp() {
   const [ready, setReady] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState("");
+  const [matchedLimit, setMatchedLimit] = useState<ModelLimit>();
+  const matchingKey = useRef("");
   const logger = useMemo(() => new EventLogger({ onError: (error) => {
     setStatus("error");
     setMessage(`事件日志不可用：${errorText(error)}`);
@@ -29,7 +32,14 @@ export function OptionsApp() {
   useEffect(() => {
     let active = true;
     void loadModelConfig(EMPTY_CONFIG).then((stored) => {
-      if (active) setConfig(stored);
+      if (!active) return;
+      setConfig(stored);
+      matchingKey.current = `${stored.baseURL}\u0000${stored.model}`;
+      if (isCompleteModelConfig(stored)) {
+        void resolveModelLimit({ ...stored, contextWindowOverride: undefined }).then((limit) => {
+          if (active && matchingKey.current === `${stored.baseURL}\u0000${stored.model}`) setMatchedLimit(limit);
+        }).catch(() => undefined);
+      }
     }).catch((error) => {
       if (!active) return;
       setStatus("error");
@@ -43,7 +53,11 @@ export function OptionsApp() {
   }, []);
 
   const update = (field: keyof PersistedModelConfig, value: string) => {
-    setConfig((current) => ({ ...current, [field]: value }));
+    setConfig((current) => ({ ...current, [field]: field === "contextWindowOverride" ? (value ? Number(value) : undefined) : value }));
+    if (field === "baseURL" || field === "model") {
+      matchingKey.current = "";
+      setMatchedLimit(undefined);
+    }
     setStatus("idle");
     setMessage("");
   };
@@ -55,6 +69,11 @@ export function OptionsApp() {
       setMessage("请完整填写 Base URL、Model ID 和 API Key");
       return;
     }
+    if (config.contextWindowOverride !== undefined && (!Number.isSafeInteger(config.contextWindowOverride) || config.contextWindowOverride <= 0)) {
+      setStatus("error");
+      setMessage("上下文窗口必须是正整数 token 数");
+      return;
+    }
 
     setStatus("saving");
     setMessage("");
@@ -62,6 +81,10 @@ export function OptionsApp() {
       await saveModelConfig(config);
       setStatus("saved");
       setMessage("配置已保存，Side Panel 会立即使用新配置");
+      matchingKey.current = `${config.baseURL}\u0000${config.model}`;
+      void resolveModelLimit({ ...config, contextWindowOverride: undefined }).then((limit) => {
+        if (matchingKey.current === `${config.baseURL}\u0000${config.model}`) setMatchedLimit(limit);
+      }).catch(() => undefined);
     } catch (error) {
       setStatus("error");
       setMessage(`配置保存失败：${errorText(error)}`);
@@ -112,6 +135,22 @@ export function OptionsApp() {
                 <FieldLabel htmlFor="api-key">API Key</FieldLabel>
                 <Input id="api-key" type="password" required value={config.apiKey} disabled={busy} onChange={(event) => update("apiKey", event.target.value)} />
               </Field>
+              <Field>
+                <FieldLabel>上下文窗口自动匹配</FieldLabel>
+                <p data-testid="model-limit-match" className="model-limit-match">
+                  {matchedLimit ? `${matchedLimit.provider}/${matchedLimit.model} · ${matchedLimit.context.toLocaleString()} tokens`
+                    : "尚无匹配结果；可在下方手动设置窗口大小。"}
+                </p>
+                {config.contextWindowOverride && <p className="model-limit-match">当前生效：手动指定 {config.contextWindowOverride.toLocaleString()} tokens</p>}
+              </Field>
+              <details>
+                <summary>高级设置：手动指定上下文窗口</summary>
+                <Field data-disabled={busy || undefined}>
+                  <FieldLabel htmlFor="context-window">窗口大小（tokens）</FieldLabel>
+                  <Input id="context-window" type="number" min="1" step="1" value={config.contextWindowOverride ?? ""} disabled={busy}
+                    onChange={(event) => update("contextWindowOverride", event.target.value)} />
+                </Field>
+              </details>
             </FieldGroup>
           </CardContent>
           <CardFooter>

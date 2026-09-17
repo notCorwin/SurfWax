@@ -2,7 +2,7 @@ import type { ModelConfig } from "../types";
 
 export const MODEL_CONFIG_STORAGE_KEY = "side-agent:model-config";
 
-export type PersistedModelConfig = Pick<ModelConfig, "baseURL" | "apiKey" | "model">;
+export type PersistedModelConfig = ModelConfig;
 
 export type StorageAreaLike = Pick<chrome.storage.StorageArea, "get" | "set">;
 
@@ -30,6 +30,8 @@ export async function loadModelConfig(
     baseURL: typeof candidate.baseURL === "string" ? candidate.baseURL : fallback.baseURL,
     apiKey: typeof candidate.apiKey === "string" ? candidate.apiKey : fallback.apiKey,
     model: typeof candidate.model === "string" ? candidate.model : fallback.model,
+    ...(Number.isSafeInteger(candidate.contextWindowOverride) && Number(candidate.contextWindowOverride) > 0
+      ? { contextWindowOverride: Number(candidate.contextWindowOverride) } : {}),
   };
 }
 
@@ -44,6 +46,7 @@ export async function saveModelConfig(
       baseURL: config.baseURL.trim(),
       apiKey: config.apiKey,
       model: config.model.trim(),
+      ...(config.contextWindowOverride ? { contextWindowOverride: config.contextWindowOverride } : {}),
     } satisfies PersistedModelConfig,
   });
 }
