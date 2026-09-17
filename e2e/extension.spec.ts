@@ -30,13 +30,13 @@ function textResponse(text: string): string[] {
   return [chunk({ role: "assistant", content: text }), chunk({}, "stop"), "data: [DONE]\n\n"];
 }
 
-function toolResponse(code: string): string[] {
+function toolResponse(code: string, id = "call-chrome-e2e"): string[] {
   return [
     chunk({
       role: "assistant",
       tool_calls: [{
         index: 0,
-        id: "call-chrome-e2e",
+        id,
         type: "function",
         function: { name: "chrome", arguments: JSON.stringify({ code }) },
       }],
@@ -86,6 +86,33 @@ async function startProvider(responses: MockResponse[], delayMs = 0): Promise<{
     if (request.method === "GET" && request.url === "/target") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end("<!doctype html><title>Side Agent Target</title><main>ready</main>");
+      return;
+    }
+    if (request.method === "GET" && request.url === "/complex") {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Server is not listening");
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(`<!doctype html><title>Before Navigation</title><iframe src="/same-frame"></iframe><iframe src="http://localhost:${address.port}/frame"></iframe>`);
+      return;
+    }
+    if (request.method === "GET" && request.url === "/same-frame") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end("<!doctype html><title>Same Process Frame</title><main>same origin</main>");
+      return;
+    }
+    if (request.method === "GET" && request.url === "/frame") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end("<!doctype html><title>Cross Origin Frame</title><main>frame ready</main>");
+      return;
+    }
+    if (request.method === "GET" && request.url === "/worker.js") {
+      response.writeHead(200, { "content-type": "text/javascript; charset=utf-8" });
+      response.end("self.workerMarker = 'WORKER_READY';");
+      return;
+    }
+    if (request.method === "GET" && request.url === "/complex-next") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end("<!doctype html><title>After Navigation</title><main>new document</main>");
       return;
     }
     if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
@@ -294,6 +321,85 @@ return { extensionTitle: document.title, version: chrome.runtime.getManifest().v
     await clearOptions.getByTestId("event-log-clear").click();
     await expect(clearOptions.getByRole("status")).toContainText("已清空");
     await expect.poll(() => readEvents(clearOptions)).toEqual([]);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("keeps CDP sessions and events across calls, reaches iframe and worker, navigates, and inspects a result reference", async () => {
+  const responses: string[][] = [];
+  const provider = await startProvider(responses);
+  const origin = provider.origin;
+  responses.push(
+    toolResponse(`
+const target = (await chrome.debugger.getTargets()).find(item => item.url === ${JSON.stringify(`${origin}/complex`)});
+if (!target?.tabId) throw new Error('target tab missing');
+const debuggee = { tabId: target.tabId };
+await chrome.debugger.attach(debuggee, '1.3');
+const state = globalThis.__e2eCdp = { debuggee, events: [] };
+state.listener = (source, method, params) => {
+  if (source.tabId === target.tabId && (method === 'Target.attachedToTarget' || method === 'Runtime.executionContextCreated')) state.events.push({ method, params });
+};
+chrome.debugger.onEvent.addListener(state.listener);
+await chrome.debugger.sendCommand(debuggee, 'Runtime.enable');
+await chrome.debugger.sendCommand(debuggee, 'Page.enable');
+await chrome.debugger.sendCommand(debuggee, 'Target.setAutoAttach', {
+  autoAttach: true, waitForDebuggerOnStart: false, flatten: true,
+  filter: [{ type: 'iframe', exclude: false }, { type: 'worker', exclude: false }]
+});
+return { tabId: target.tabId, attached: true };`, "call-cdp-1"),
+    toolResponse(`
+const state = globalThis.__e2eCdp;
+await chrome.debugger.sendCommand(state.debuggee, 'Runtime.evaluate', { expression: "globalThis.worker = new Worker('/worker.js')" });
+for (let attempt = 0; attempt < 50 && state.events.filter(event => event.method === 'Target.attachedToTarget').length < 2; attempt++) await new Promise(resolve => setTimeout(resolve, 100));
+const sessions = state.events.filter(event => event.method === 'Target.attachedToTarget').map(event => event.params);
+const frame = sessions.find(event => event.targetInfo.type === 'iframe');
+const worker = sessions.find(event => event.targetInfo.type === 'worker');
+if (!frame || !worker) throw new Error('Missing iframe or worker flat session: ' + JSON.stringify(sessions.map(item => item.targetInfo.type)));
+const frameResult = await chrome.debugger.sendCommand({ ...state.debuggee, sessionId: frame.sessionId }, 'Runtime.evaluate', { expression: 'document.title', returnByValue: true });
+const workerResult = await chrome.debugger.sendCommand({ ...state.debuggee, sessionId: worker.sessionId }, 'Runtime.evaluate', { expression: 'self.workerMarker', returnByValue: true });
+const tree = await chrome.debugger.sendCommand(state.debuggee, 'Page.getFrameTree');
+const sameFrame = tree.frameTree.childFrames.find(item => item.frame.url.endsWith('/same-frame'));
+const sameContext = state.events.find(event => event.method === 'Runtime.executionContextCreated' && event.params.context.auxData?.frameId === sameFrame?.frame.id && event.params.context.auxData?.isDefault);
+if (!sameContext) throw new Error('Missing same-process execution context');
+const sameResult = await chrome.debugger.sendCommand(state.debuggee, 'Runtime.evaluate', { contextId: sameContext.params.context.id, expression: 'document.title', returnByValue: true });
+await chrome.tabs.update(state.debuggee.tabId, { url: ${JSON.stringify(`${origin}/complex-next`)} });
+return { frame: frameResult.result.value, sameFrame: sameResult.result.value, worker: workerResult.result.value, events: state.events.length };`, "call-cdp-2"),
+    toolResponse(`
+const state = globalThis.__e2eCdp;
+for (let attempt = 0; attempt < 50; attempt++) {
+  const tab = await chrome.tabs.get(state.debuggee.tabId);
+  if (tab.status === 'complete' && tab.url === ${JSON.stringify(`${origin}/complex-next`)}) break;
+  await new Promise(resolve => setTimeout(resolve, 100));
+}
+const result = await chrome.debugger.sendCommand(state.debuggee, 'Runtime.evaluate', { expression: 'document.title', returnByValue: true });
+chrome.debugger.onEvent.removeListener(state.listener);
+await chrome.debugger.detach(state.debuggee);
+delete globalThis.__e2eCdp;
+return { title: result.result.value };`, "call-cdp-3"),
+    toolResponse("return new Map([['answer', 42], ['kind', 'inspectable']]);", "call-cdp-4"),
+    toolResponse(`
+const [id, value] = [...globalThis.__surfWaxResults.entries()].at(-1);
+const result = { entries: [...value.entries()], id };
+globalThis.__surfWaxResults.delete(id);
+return result;`, "call-cdp-5"),
+    textResponse("COMPLEX_OK"), textResponse("复杂浏览器任务"),
+  );
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${origin}/complex`);
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("execute a cross-context browser workflow");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("COMPLEX_OK");
+    const outputs = (await readEvents(opened.page)).filter((event) => event.type === "tool.finished").map((event) => event.output);
+    expect(outputs).toHaveLength(5);
+    expect(outputs[1]).toMatchObject({ frame: "Cross Origin Frame", sameFrame: "Same Process Frame", worker: "WORKER_READY" });
+    expect(outputs[2]).toMatchObject({ title: "After Navigation" });
+    expect(outputs[3]).toMatchObject({ $ref: expect.any(String), access: expect.stringContaining("__surfWaxResults.get") });
+    expect(outputs[4]).toMatchObject({ entries: [["answer", 42], ["kind", "inspectable"]], id: outputs[3].$ref });
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -701,10 +807,13 @@ test("keeps a running conversation alive when only switching threads", async () 
 });
 
 test("closing the panel prevents a queued chrome call from starting", async () => {
-  const provider = await startProvider([queuedToolResponse(
-    "await new Promise(() => undefined);",
+  const responses: string[][] = [];
+  const provider = await startProvider(responses);
+  const targetUrl = `${provider.origin}/target`;
+  responses.push(queuedToolResponse(
+    `const [tab] = await chrome.tabs.query({ url: ${JSON.stringify(targetUrl)} }); await chrome.debugger.attach({ tabId: tab.id }, '1.3'); await new Promise(() => undefined);`,
     "await chrome.storage.local.set({ 'e2e-queued-tool-ran': true }); return true;",
-  )]);
+  ));
   const opened = await openExtension();
   try {
     const options = await configure(opened.context, opened.page, provider.baseURL);
@@ -723,3 +832,15 @@ test("closing the panel prevents a queued chrome call from starting", async () =
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
+    const target = await opened.context.newPage();
+    await target.goto(targetUrl);
+    await expect.poll(() => opened.page.evaluate(async (url) => {
+      const [tab] = await chrome.tabs.query({ url });
+      try { await chrome.debugger.attach({ tabId: tab.id! }, "1.3"); await chrome.debugger.detach({ tabId: tab.id! }); return false; }
+      catch { return true; }
+    }, targetUrl)).toBe(true);
+    await expect.poll(() => probe.evaluate(async (url) => {
+      const [tab] = await chrome.tabs.query({ url });
+      try { await chrome.debugger.attach({ tabId: tab.id! }, "1.3"); await chrome.debugger.detach({ tabId: tab.id! }); return true; }
+      catch { return false; }
+    }, targetUrl)).toBe(true);

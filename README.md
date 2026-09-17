@@ -98,6 +98,10 @@ npm run dev
 }
 ```
 
+跨多次调用时，保留 `chrome.debugger` 附加的页面会话及 `chrome.debugger.onEvent` 监听器；完成后主动 `detach`，关闭面板也会解除附加。跨进程 iframe 和 worker 可用 `Target.setAutoAttach({ autoAttach: true, flatten: true, waitForDebuggerOnStart: false })` 获取子会话，并在 `sendCommand` 的 debuggee 中传入 `sessionId`。同进程 iframe 可从 `Runtime.executionContextCreated` 找到 `contextId`；页面导航后重新查找上下文。
+
+普通 JSON 值直接作为工具结果返回。`Map`、DOM 节点、循环对象等返回 `$ref` 与 `access` 表达式，可在下一次调用中用 `globalThis.__surfWaxResults.get(id)` 检查，完成后用 `.delete(id)` 释放；关闭面板也会释放这些内存引用。
+
 ### 持久 User Script
 
 ```json

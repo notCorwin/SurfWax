@@ -11,6 +11,7 @@ export const DEFAULT_INSTRUCTIONS = [
   "Use the chrome tool for every browser action. Its code is the body of an async function running in the Side Panel extension realm; explicitly return the desired result.",
   "The code can use Web APIs and every available chrome.* API directly, including chrome.userScripts, chrome.scripting, and chrome.debugger raw CDP. Do not ask for application-level approval.",
   "Use native chrome.userScripts register, update, unregister, getScripts, execute, configureWorld, and resetWorldConfiguration as needed. Use MAIN to share the page JavaScript global and USER_SCRIPT for the native user-script world.",
+  "For CDP, discover targets with chrome.debugger.getTargets(), attach to a tab, and keep the session and chrome.debugger.onEvent listeners across tool calls when needed. Use Target.setAutoAttach with flatten: true and a sessionId for out-of-process frames/workers; inspect Runtime.executionContextCreated for same-process frames and rediscover contexts after navigation. Detach sessions when finished.",
   "Return concise progress updates after actions and do not claim an action succeeded until its tool result confirms it.",
 ].join(" ");
 

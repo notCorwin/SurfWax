@@ -38,7 +38,7 @@ function fakeChrome(responses: Array<object | (() => Promise<object>)> = []) {
 
 describe("ChromeExecutor", () => {
   it("runs code in the exact Side Panel target and returns by-value results", async () => {
-    const fake = fakeChrome([{ result: { type: "object", value: { title: "test", tabs: 2 } } }]);
+    const fake = fakeChrome([{ result: { type: "object", value: { kind: "value", value: { title: "test", tabs: 2 } } } }]);
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
 
     await expect(executor.execute({ code: "return { title: document.title, tabs: (await chrome.tabs.query({})).length };" }))
@@ -51,14 +51,17 @@ describe("ChromeExecutor", () => {
     expect(String(fake.debuggerApi.sendCommand.mock.calls[0][2]?.expression)).toContain("const chrome = new Proxy");
   });
 
-  it("propagates JavaScript exceptions and preserves non-JSON RemoteObject descriptors", async () => {
+  it("propagates JavaScript exceptions and returns inspectable references", async () => {
     const fake = fakeChrome([
       { exceptionDetails: { text: "Uncaught", exception: { description: "Error: boom" } }, result: { type: "object" } },
-      { result: { type: "bigint", unserializableValue: "1n", description: "1n" } },
+      { result: { value: { kind: "reference", id: "ref-1", type: "bigint", preview: "1" } } },
     ]);
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
     await expect(executor.execute({ code: "throw new Error('boom')" })).rejects.toThrow("Error: boom");
-    await expect(executor.execute({ code: "return 1n" })).resolves.toEqual({ type: "bigint", unserializableValue: "1n", description: "1n" });
+    await expect(executor.execute({ code: "return 1n" })).resolves.toEqual({
+      $ref: "ref-1", type: "bigint", preview: "1", access: 'globalThis.__surfWaxResults.get("ref-1")',
+    });
+    expect(String(fake.debuggerApi.sendCommand.mock.calls[1][2]?.expression)).toContain("__surfWaxResults");
   });
 
   it("finds and attaches to the current target again for every call", async () => {
@@ -87,7 +90,7 @@ describe("ChromeExecutor", () => {
     executor.dispose();
     finish({ result: { value: "first" } });
 
-    await expect(running).resolves.toBe("first");
+    await expect(running).rejects.toMatchObject({ name: "AbortError" });
     await expect(queued).rejects.toThrow("disposed");
     expect(fake.debuggerApi.sendCommand).toHaveBeenCalledTimes(1);
   });
@@ -101,5 +104,61 @@ describe("ChromeExecutor", () => {
     controller.abort();
     await expect(running).rejects.toMatchObject({ name: "AbortError" });
     expect(fake.debuggerApi.detach).toHaveBeenCalledWith({ targetId: "target-1" });
+  });
+
+  it("does not attach after target discovery is aborted", async () => {
+    const fake = fakeChrome();
+    let finish!: (targets: chrome.debugger.TargetInfo[]) => void;
+    fake.debuggerApi.getTargets.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    const controller = new AbortController();
+    const running = executor.execute({ code: "return 1" }, controller.signal);
+    await vi.waitFor(() => expect(fake.debuggerApi.getTargets).toHaveBeenCalled());
+    controller.abort();
+    finish([{ id: "target-1", type: "page", title: "Surf Wax", url: "chrome-extension://id/sidepanel.html#test", attached: false }]);
+    await expect(running).rejects.toMatchObject({ name: "AbortError" });
+    expect(fake.debuggerApi.attach).not.toHaveBeenCalled();
+  });
+
+  it("detaches when aborted during attach and never evaluates", async () => {
+    const fake = fakeChrome();
+    let finish!: () => void;
+    fake.debuggerApi.attach.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    const controller = new AbortController();
+    const running = executor.execute({ code: "return 1" }, controller.signal);
+    await vi.waitFor(() => expect(fake.debuggerApi.attach).toHaveBeenCalled());
+    controller.abort();
+    finish();
+    await expect(running).rejects.toMatchObject({ name: "AbortError" });
+    expect(fake.debuggerApi.sendCommand).not.toHaveBeenCalled();
+    expect(fake.debuggerApi.detach).toHaveBeenCalledWith({ targetId: "target-1" });
+  });
+
+  it("keeps the execution result when a user-script snapshot fails", async () => {
+    const fake = fakeChrome([{ result: { value: { kind: "value", value: 42 } } }]);
+    fake.chromeApi.userScripts.getScripts.mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("snapshot failed"));
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    await expect(executor.execute({ code: "return 42" })).resolves.toBe(42);
+    expect(fake.debuggerApi.detach).toHaveBeenCalledWith({ targetId: "target-1" });
+  });
+
+  it("routes agent debugger calls through a panel-owned background port", async () => {
+    const fake = fakeChrome();
+    let receive!: (message: unknown) => void;
+    const port = {
+      onMessage: { addListener: vi.fn((listener) => { receive = listener; }) },
+      onDisconnect: { addListener: vi.fn() },
+      postMessage: vi.fn((message: { id: string }) => receive({ id: message.id })),
+      disconnect: vi.fn(),
+    };
+    (fake.chromeApi as any).runtime = { connect: vi.fn(() => port) };
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    const bridge = (globalThis as Record<string, any>).__surfWaxDebugger;
+    await bridge.call("attach", [{ tabId: 15 }, "1.3"]);
+    expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({ method: "attach", args: [{ tabId: 15 }, "1.3"] }));
+    expect(fake.debuggerApi.attach).not.toHaveBeenCalled();
+    executor.dispose();
+    expect(port.disconnect).toHaveBeenCalled();
   });
 });

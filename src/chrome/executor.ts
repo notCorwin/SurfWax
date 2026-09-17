@@ -12,7 +12,9 @@ type DebuggerApi = {
 };
 type ExecutorChrome = typeof chrome & { debugger: DebuggerApi };
 
-const TRACK_DEBUGGER_KEY = "__sideAgentRuntimeTrackDebugger";
+const BRIDGE_KEY = "__surfWaxDebugger";
+const RESULTS_KEY = "__surfWaxResults";
+const STATE_KEY = "__surfWaxExecutionState";
 
 function abortError(): DOMException {
   return new DOMException("Operation aborted", "AbortError");
@@ -20,12 +22,6 @@ function abortError(): DOMException {
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw abortError();
-}
-
-function debuggeeKey(debuggee: Debuggee): string {
-  if (debuggee.targetId) return `target:${debuggee.targetId}`;
-  if (debuggee.tabId !== undefined) return `tab:${debuggee.tabId}`;
-  return `extension:${debuggee.extensionId ?? ""}`;
 }
 
 export function ensureSidePanelInstanceUrl(): string {
@@ -40,21 +36,22 @@ export function ensureSidePanelInstanceUrl(): string {
 function expressionFor(code: string): string {
   return `(async () => {
     const __nativeChrome = globalThis.chrome;
-    const __trackDebugger = globalThis[${JSON.stringify(TRACK_DEBUGGER_KEY)}];
+    const __bridge = globalThis[${JSON.stringify(BRIDGE_KEY)}];
+    const __state = globalThis[${JSON.stringify(STATE_KEY)}];
     const __debugger = new Proxy(__nativeChrome.debugger, {
       get(target, property, receiver) {
+        if (property === "onEvent" || property === "onDetach") return __bridge[property];
         const value = Reflect.get(target, property, receiver);
-        if (property === "attach") return async (debuggee, version) => {
-          const result = await value.call(target, debuggee, version);
-          __trackDebugger?.(debuggee, true);
-          return result;
-        };
-        if (property === "detach") return async (debuggee) => {
-          const result = await value.call(target, debuggee);
-          __trackDebugger?.(debuggee, false);
-          return result;
-        };
-        return typeof value === "function" ? value.bind(target) : value;
+        return typeof value === "function" ? (...args) => {
+          if (property !== "detach" && (__state.run.aborted || __state.lifetime.aborted)) throw new DOMException("Operation aborted", "AbortError");
+          return __bridge.call(property, args).then(async (result) => {
+            if (property !== "detach" && (__state.run.aborted || __state.lifetime.aborted)) {
+              if (property === "attach") await __bridge.call("detach", [args[0]]).catch(() => undefined);
+              throw new DOMException("Operation aborted", "AbortError");
+            }
+            return result;
+          });
+        } : value;
       }
     });
     const chrome = new Proxy(__nativeChrome, {
@@ -62,9 +59,37 @@ function expressionFor(code: string): string {
         return property === "debugger" ? __debugger : Reflect.get(target, property, receiver);
       }
     });
-    return await (async () => {
+    const result = await (async () => {
 ${code}
     })();
+    const seen = new WeakSet();
+    const transferable = (value) => {
+      if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+      if (typeof value === "number") return Number.isFinite(value);
+      if (typeof value !== "object" || seen.has(value)) return false;
+      const isArray = Array.isArray(value);
+      const prototype = Object.getPrototypeOf(value);
+      if (!isArray && prototype !== Object.prototype && prototype !== null) return false;
+      seen.add(value);
+      const keys = Reflect.ownKeys(value);
+      const valid = (!isArray || keys.length === value.length + 1) && keys.every((key) => {
+        if (isArray && key === "length") return true;
+        if (typeof key !== "string" || (isArray && (!Object.hasOwn(value, key) || !/^(0|[1-9]\\d*)$/.test(key)))) return false;
+        const property = Object.getOwnPropertyDescriptor(value, key);
+        return property?.enumerable && "value" in property && transferable(property.value);
+      });
+      seen.delete(value);
+      return valid;
+    };
+    try {
+      if (transferable(result)) return { kind: "value", value: result };
+    } catch { /* A getter can throw; keep the original value available for inspection. */ }
+    const values = globalThis[${JSON.stringify(RESULTS_KEY)}] ??= new Map();
+    const id = crypto.randomUUID();
+    values.set(id, result);
+    let preview;
+    try { preview = String(result); } catch { preview = "[unprintable value]"; }
+    return { kind: "reference", id, type: typeof result, preview };
   })()`;
 }
 
@@ -79,30 +104,75 @@ function evaluationError(response: any): Error | undefined {
 function evaluationValue(response: any): unknown {
   const remote = response?.result;
   if (!remote || typeof remote !== "object") return remote;
-  return Object.prototype.hasOwnProperty.call(remote, "value") ? remote.value : remote;
+  const result = remote.value;
+  if (result?.kind === "value") return result.value;
+  if (result?.kind === "reference") return {
+    $ref: result.id,
+    type: result.type,
+    preview: result.preview,
+    access: `globalThis.${RESULTS_KEY}.get(${JSON.stringify(result.id)})`,
+  };
+  return Object.prototype.hasOwnProperty.call(remote, "value") ? result : remote;
 }
 
 export class ChromeExecutor {
   private readonly chromeApi: ExecutorChrome;
   private readonly targetUrl: string;
   private readonly logger?: EventLogger;
-  private readonly trackedDebuggees = new Map<string, Debuggee>();
+  private readonly port?: chrome.runtime.Port;
+  private readonly bridge: Record<string, unknown>;
+  private readonly lifetime = { aborted: false };
   private tail: Promise<void> = Promise.resolve();
   private initialized?: Promise<void>;
   private activeDebuggee?: Debuggee;
   private disposed = false;
-  private readonly trackDebugger = (debuggee: Debuggee, attached: boolean): void => {
-    const key = debuggeeKey(debuggee);
-    if (attached) this.trackedDebuggees.set(key, { ...debuggee });
-    else this.trackedDebuggees.delete(key);
-  };
 
   constructor(options: { chromeApi?: ExecutorChrome; targetUrl?: string; logger?: EventLogger } = {}) {
     this.chromeApi = options.chromeApi ?? globalThis.chrome as ExecutorChrome;
     this.targetUrl = options.targetUrl ?? ensureSidePanelInstanceUrl();
     this.logger = options.logger;
     if (!this.chromeApi?.debugger) throw new Error("Chrome extension debugger API is unavailable");
-    (globalThis as Record<string, unknown>)[TRACK_DEBUGGER_KEY] = this.trackDebugger;
+    this.port = this.chromeApi.runtime?.connect?.({ name: "surf-wax-debugger" });
+    const pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason: Error) => void }>();
+    const listeners = { onEvent: new Set<(...args: any[]) => void>(), onDetach: new Set<(...args: any[]) => void>() };
+    const event = (name: keyof typeof listeners) => ({
+      addListener: (listener: (...args: any[]) => void) => listeners[name].add(listener),
+      removeListener: (listener: (...args: any[]) => void) => listeners[name].delete(listener),
+      hasListener: (listener: (...args: any[]) => void) => listeners[name].has(listener),
+      hasListeners: () => listeners[name].size > 0,
+    });
+    this.port?.onMessage.addListener((message: { id?: string; event?: keyof typeof listeners; args?: any[]; result?: unknown; error?: string }) => {
+      if (message.event && listeners[message.event]) {
+        for (const listener of listeners[message.event]) listener(...(message.args ?? []));
+      } else if (message.id) {
+        const request = pending.get(message.id);
+        pending.delete(message.id);
+        if (message.error) request?.reject(new Error(message.error));
+        else request?.resolve(message.result);
+      }
+    });
+    this.port?.onDisconnect.addListener(() => {
+      for (const request of pending.values()) request.reject(abortError());
+      pending.clear();
+    });
+    this.bridge = {
+      onEvent: event("onEvent"),
+      onDetach: event("onDetach"),
+      call: (method: string, args: unknown[]) => {
+        if (this.disposed) return Promise.reject(abortError());
+        if (!this.port) return Reflect.apply((this.chromeApi.debugger as any)[method], this.chromeApi.debugger, args);
+        return new Promise((resolve, reject) => {
+          const id = globalThis.crypto.randomUUID();
+          pending.set(id, { resolve, reject });
+          try { this.port!.postMessage({ id, method, args }); }
+          catch (error) {
+            pending.delete(id);
+            reject(error);
+          }
+        });
+      },
+    };
+    (globalThis as Record<string, unknown>)[BRIDGE_KEY] = this.bridge;
   }
 
   execute(input: ChromeToolInput, signal?: AbortSignal): Promise<unknown> {
@@ -114,13 +184,14 @@ export class ChromeExecutor {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    if ((globalThis as Record<string, unknown>)[TRACK_DEBUGGER_KEY] === this.trackDebugger) {
-      delete (globalThis as Record<string, unknown>)[TRACK_DEBUGGER_KEY];
+    this.lifetime.aborted = true;
+    if ((globalThis as Record<string, unknown>)[BRIDGE_KEY] === this.bridge) {
+      delete (globalThis as Record<string, unknown>)[BRIDGE_KEY];
     }
-    const sessions = [this.activeDebuggee, ...this.trackedDebuggees.values()].filter((item): item is Debuggee => Boolean(item));
+    const sessions = [this.activeDebuggee].filter((item): item is Debuggee => Boolean(item));
     this.activeDebuggee = undefined;
-    this.trackedDebuggees.clear();
     for (const debuggee of sessions) void this.chromeApi.debugger.detach(debuggee).catch(() => undefined);
+    this.port?.disconnect();
     void snapshotUserScripts({ chromeApi: this.chromeApi, logger: this.logger }).catch(() => undefined);
   }
 
@@ -136,21 +207,29 @@ export class ChromeExecutor {
     throwIfAborted(signal);
 
     const targets = await this.chromeApi.debugger.getTargets();
+    if (this.disposed) throw abortError();
+    throwIfAborted(signal);
     const target = targets.find((candidate) => candidate.url === this.targetUrl && candidate.id);
     if (!target?.id) throw new Error(`Side Panel DevTools target not found: ${this.targetUrl}`);
     const debuggee: Debuggee = { targetId: target.id };
-    await this.chromeApi.debugger.attach(debuggee, "1.3");
-    this.activeDebuggee = debuggee;
-
+    let attached = false;
+    const state = { lifetime: this.lifetime, run: { aborted: false } };
     let rejectAbort: ((error: DOMException) => void) | undefined;
     const aborted = new Promise<never>((_, reject) => { rejectAbort = reject; });
     const onAbort = () => {
-      void this.chromeApi.debugger.detach(debuggee).catch(() => undefined);
+      state.run.aborted = true;
+      if (attached) void this.chromeApi.debugger.detach(debuggee).catch(() => undefined);
       rejectAbort?.(abortError());
     };
     try {
-      signal?.addEventListener("abort", onAbort, { once: true });
       throwIfAborted(signal);
+      await this.chromeApi.debugger.attach(debuggee, "1.3");
+      attached = true;
+      this.activeDebuggee = debuggee;
+      if (this.disposed) throw abortError();
+      throwIfAborted(signal);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      (globalThis as Record<string, unknown>)[STATE_KEY] = state;
       const evaluation = this.chromeApi.debugger.sendCommand(debuggee, "Runtime.evaluate", {
         expression: expressionFor(input.code),
         awaitPromise: true,
@@ -160,15 +239,25 @@ export class ChromeExecutor {
       const response = signal
         ? await Promise.race([evaluation, aborted])
         : await evaluation;
+      if (this.disposed) throw abortError();
       throwIfAborted(signal);
       const error = evaluationError(response);
       if (error) throw error;
       return evaluationValue(response);
     } finally {
       signal?.removeEventListener("abort", onAbort);
-      await snapshotUserScripts({ chromeApi: this.chromeApi, logger: this.logger });
-      await this.chromeApi.debugger.detach(debuggee).catch(() => undefined);
+      if ((globalThis as Record<string, unknown>)[STATE_KEY] === state) delete (globalThis as Record<string, unknown>)[STATE_KEY];
+      if (attached) {
+        try {
+          await this.chromeApi.debugger.detach(debuggee);
+        } catch { /* Closing the target may already have detached it. */ }
+      }
       if (this.activeDebuggee === debuggee) this.activeDebuggee = undefined;
+      try {
+        await snapshotUserScripts({ chromeApi: this.chromeApi, logger: this.logger });
+      } catch (error) {
+        this.logger?.record({ type: "userscript.snapshot-failed", content: null, error });
+      }
     }
   }
 }

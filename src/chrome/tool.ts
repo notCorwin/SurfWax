@@ -16,7 +16,7 @@ export function createChromeTool(executor: ChromeExecutor) {
     description: [
       "The only browser tool. Execute JavaScript as the body of an async function in the current Side Panel extension realm.",
       "The code can use Web APIs and every available chrome.* Extension API, including chrome.userScripts, chrome.scripting, and chrome.debugger/CDP.",
-      "Return the desired value explicitly. Calls run sequentially with no application timeout, output limit, approval, sandbox, or capability layer.",
+      "Return the desired value explicitly. Calls run sequentially with no application timeout, output limit, approval, sandbox, or capability layer. Non-JSON results return a reference; inspect it in later calls with globalThis.__surfWaxResults.get(id), and delete it when done.",
     ].join(" "),
     inputSchema: chromeToolInputSchema,
     needsApproval: false,
