@@ -35,6 +35,7 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
   const [index, setIndex] = useState(() => new Map<string, string>());
   const [warning, setWarning] = useState("");
   const [searchError, setSearchError] = useState("");
+  const requestSearchIndex = useRef<() => void>(() => undefined);
   const close = () => dialog.current?.close();
   const warn = () => setWarning("当前会话尚未结束，请等待完成或先停止运行。");
 
@@ -44,8 +45,10 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
     if (!open) return;
     let active = true;
     let revision = 0;
+    let requested = false;
     // ponytail: scan saved messages on menu open; add a persistent search index only if this becomes slow.
     const refresh = () => {
+      requested = true;
       const current = ++revision;
       void logger.messageEvents().then((events) => {
         if (active && current === revision) { setIndex(buildMessageSearchIndex(events)); setSearchError(""); }
@@ -53,12 +56,15 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
         if (active && current === revision) setSearchError(error instanceof Error ? error.message : String(error));
       });
     };
-    refresh();
+    requestSearchIndex.current = () => { if (!requested) refresh(); };
+    const prefetch = setTimeout(() => requestSearchIndex.current(), 500);
     const unsubscribe = logger.subscribe((event) => {
       if (event.type === "conversation.message" || event.type === "conversation.deleted") refresh();
     });
-    return () => { active = false; unsubscribe(); };
+    return () => { active = false; clearTimeout(prefetch); requestSearchIndex.current = () => undefined; unsubscribe(); };
   }, [logger, open]);
+
+  useEffect(() => { if (open && query.trim()) requestSearchIndex.current(); }, [open, query]);
 
   const needle = query.trim().toLocaleLowerCase();
   const matches = useCallback((item: { id: string; remoteId?: string; title?: string }) => !needle
@@ -74,7 +80,7 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
         <MenuIcon aria-hidden="true" />
         <span>{title}</span>
       </Button>
-      <dialog ref={dialog} className="conversation-dialog" aria-label="对话列表" onClose={() => { setOpen(false); setWarning(""); trigger.current?.focus(); }} onClick={(event) => {
+      <dialog ref={dialog} className="conversation-dialog" aria-label="对话列表" onClose={() => { setOpen(false); setWarning(""); setQuery(""); setIndex(new Map()); trigger.current?.focus(); }} onClick={(event) => {
         if (event.target === event.currentTarget) close();
       }}>
         {open && <ThreadListPrimitive.Root className="conversation-drawer">
