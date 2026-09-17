@@ -60,5 +60,4 @@ Chrome 138+ Side Panel Agent Harness Manifest V3 Extension
 
 ## 开发要求
 
-1. 主动提交所做的更改，没有明确提示时不要推送。
-2. 提交后直接在 Chrome 中刷新扩展，再打开侧边栏。
+1. 主动提交并推送所做的更改。
