@@ -2,6 +2,58 @@ import { EventLogger } from "./logging";
 import { restoreUserScripts } from "./userscripts/persistence";
 
 const eventLogger = new EventLogger();
+const guardedTabs = new Map<number, Set<chrome.runtime.Port>>();
+
+function installPageGuard(): void {
+  if (document.getElementById("__surf-wax-page-guard")) return;
+  const overlay = document.createElement("div");
+  overlay.id = "__surf-wax-page-guard";
+  overlay.setAttribute("aria-hidden", "true");
+  overlay.style.cssText = "all:initial!important;position:fixed!important;inset:0!important;z-index:2147483647!important;background:transparent!important;pointer-events:auto!important;cursor:wait!important";
+  for (const type of ["pointerdown", "pointerup", "mousedown", "mouseup", "click", "dblclick", "auxclick", "contextmenu", "touchstart", "touchend", "wheel"]) {
+    overlay.addEventListener(type, (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    }, { passive: false });
+  }
+  document.documentElement.appendChild(overlay);
+}
+
+function removePageGuard(): void {
+  document.getElementById("__surf-wax-page-guard")?.remove();
+}
+
+async function updatePageGuard(tabId: number, enabled: boolean): Promise<void> {
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, func: enabled ? installPageGuard : removePageGuard });
+  } catch { /* Chrome does not allow injection into every page. */ }
+  if (enabled && !guardedTabs.has(tabId)) void updatePageGuard(tabId, false);
+}
+
+chrome.tabs.onUpdated.addListener((tabId, change) => {
+  if (change.status === "complete" && guardedTabs.has(tabId)) void updatePageGuard(tabId, true);
+});
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "surf-wax-page-guard") return;
+  let tabId: number | undefined;
+  port.onMessage.addListener((message: { tabId?: unknown }) => {
+    if (tabId !== undefined || !Number.isInteger(message?.tabId)) return;
+    tabId = message.tabId as number;
+    const holders = guardedTabs.get(tabId) ?? new Set<chrome.runtime.Port>();
+    holders.add(port);
+    guardedTabs.set(tabId, holders);
+    void updatePageGuard(tabId, true).then(() => port.postMessage({ ready: true })).catch(() => undefined);
+  });
+  port.onDisconnect.addListener(() => {
+    if (tabId === undefined) return;
+    const holders = guardedTabs.get(tabId);
+    holders?.delete(port);
+    if (holders?.size) return;
+    guardedTabs.delete(tabId);
+    void updatePageGuard(tabId, false);
+  });
+});
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "surf-wax-debugger") return;

@@ -8,6 +8,7 @@ import {
 } from "ai";
 import type { ConversationMessage, EventLogger } from "../logging";
 import { claimConversationRun } from "./coordinator";
+import { guardActivePage } from "../chrome/page-guard";
 
 type SidePanelMessage = UIMessage<any, never, any>;
 
@@ -112,9 +113,11 @@ export function createChatTransport(agent: Agent<any, any, any, any>, logger: Ev
       if (options.trigger !== "submit-message") throw new Error(`Unsupported message trigger: ${options.trigger}`);
       const currentRunId = runId();
       const lease = await claimConversationRun(conversationId, options.abortSignal);
-      logger.beginRun(conversationId, currentRunId);
+      const releaseGuard = await guardActivePage(lease.signal).catch(() => () => undefined);
+      const release = () => { releaseGuard(); lease.finish(); };
 
       try {
+        logger.beginRun(conversationId, currentRunId);
         const userMessage = [...options.messages].reverse().find((message) => message.role === "user");
         const existing = await logger.repository(conversationId);
         if (userMessage && !existing.messages.some(({ message }) => message.id === userMessage.id)) {
@@ -137,19 +140,22 @@ export function createChatTransport(agent: Agent<any, any, any, any>, logger: Ev
           currentRunId,
           userMessage?.id ?? null,
           lease.signal,
-          lease.finish,
+          release,
         );
       } catch (error) {
         const aborted = error instanceof Error && error.name === "AbortError";
-        await logger.append({
-          type: aborted ? "conversation.aborted" : "conversation.failed",
-          conversationId,
-          runId: currentRunId,
-          content: null,
-          ...(aborted ? { abort: { reason: error.message } } : { error }),
-        });
-        logger.endRun(conversationId, currentRunId);
-        lease.finish();
+        try {
+          await logger.append({
+            type: aborted ? "conversation.aborted" : "conversation.failed",
+            conversationId,
+            runId: currentRunId,
+            content: null,
+            ...(aborted ? { abort: { reason: error.message } } : { error }),
+          });
+        } finally {
+          logger.endRun(conversationId, currentRunId);
+          release();
+        }
         throw error;
       }
     },

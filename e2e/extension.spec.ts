@@ -326,6 +326,52 @@ return { extensionTitle: document.title, version: chrome.runtime.getManifest().v
   }
 });
 
+test("blocks page clicks while the agent runs and removes the guard after navigation and panel close", async () => {
+  const responses: string[][] = [
+    toolResponse("await new Promise((resolve) => setTimeout(resolve, 2500)); return true;"),
+    textResponse("GUARD_DONE"),
+    textResponse("点击防护"),
+  ];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("test page guard");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    const guard = target.locator("#__surf-wax-page-guard");
+    await expect(guard).toBeAttached();
+    expect(await guard.evaluate((element) => getComputedStyle(element).pointerEvents)).toBe("auto");
+    await target.goto(`${provider.origin}/complex-next`);
+    await expect(guard).toBeAttached();
+    await target.evaluate(() => {
+      const button = document.createElement("button");
+      button.textContent = "page action";
+      button.style.cssText = "position:fixed;left:20px;top:20px;width:120px;height:40px";
+      button.onclick = () => { document.documentElement.dataset.clicks = String(Number(document.documentElement.dataset.clicks || 0) + 1); };
+      document.body.append(button);
+    });
+    await target.mouse.click(40, 40);
+    expect(await target.evaluate(() => document.documentElement.dataset.clicks)).toBeUndefined();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("GUARD_DONE");
+    await expect(guard).toHaveCount(0);
+    await target.mouse.click(40, 40);
+    expect(await target.evaluate(() => document.documentElement.dataset.clicks)).toBe("1");
+
+    responses.push(toolResponse("await new Promise(() => undefined);"));
+    await opened.page.getByTestId("composer-input").fill("run until panel closes");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(guard).toBeAttached();
+    await opened.page.close();
+    await expect(guard).toHaveCount(0);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
 test("keeps CDP sessions and events across calls, reaches iframe and worker, navigates, and inspects a result reference", async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);
