@@ -277,6 +277,7 @@ test("shows inline settings errors and returns keyboard focus after closing conv
       opened.context.waitForEvent("page"), opened.page.getByTestId("open-settings").click(),
     ]);
     const disclosure = options.locator(".advanced-settings");
+    await expect(disclosure.locator("summary")).toBeVisible();
     expect(await options.evaluate(() => {
       const summary = getComputedStyle(document.querySelector(".advanced-settings summary")!);
       const label = getComputedStyle(document.querySelector('[data-slot="field-label"]')!);
