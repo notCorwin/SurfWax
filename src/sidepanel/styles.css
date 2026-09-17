@@ -45,7 +45,7 @@ p {
 
 .conversation-trigger {
   min-width: 0;
-  max-width: calc(100% - 44px);
+  flex-shrink: 1;
   justify-content: flex-start;
 }
 

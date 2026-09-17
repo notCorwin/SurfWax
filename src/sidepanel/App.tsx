@@ -20,7 +20,7 @@ function SettingsButton() {
   return (
     <Button
       type="button"
-      variant="outline"
+      variant="ghost"
       size="icon-sm"
       data-testid="open-settings"
       aria-label="打开设置"
@@ -33,7 +33,7 @@ function SettingsButton() {
 }
 
 function ScriptsButton() {
-  return <Button type="button" variant="outline" size="icon-sm" aria-label="管理用户脚本" title="管理用户脚本" data-testid="open-user-scripts"
+  return <Button type="button" variant="ghost" size="icon-sm" aria-label="管理用户脚本" title="管理用户脚本" data-testid="open-user-scripts"
     onClick={() => void chrome.tabs.create({ url: chrome.runtime.getURL("userscripts.html") })}>
     <CodeXmlIcon aria-hidden="true" />
   </Button>;

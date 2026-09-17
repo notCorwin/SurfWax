@@ -17,7 +17,7 @@ export const ConversationMenu: FC = () => {
 
   return (
     <>
-      <Button ref={trigger} type="button" variant="outline" className="conversation-trigger" data-testid="conversation-menu" onClick={() => dialog.current?.showModal()}>
+      <Button ref={trigger} type="button" variant="ghost" className="conversation-trigger" data-testid="conversation-menu" onClick={() => dialog.current?.showModal()}>
         <MenuIcon aria-hidden="true" />
         <span>{title}</span>
       </Button>
