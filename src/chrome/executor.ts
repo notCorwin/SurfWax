@@ -14,6 +14,7 @@ type ExecutorChrome = typeof chrome & { debugger: DebuggerApi };
 
 const BRIDGE_KEY = "__surfWaxDebugger";
 const RESULTS_KEY = "__surfWaxResults";
+const RESULT_READER_KEY = "__surfWaxResult";
 const STATE_KEY = "__surfWaxExecutionState";
 
 function abortError(): DOMException {
@@ -101,6 +102,12 @@ function expressionFor(code: string): string {
     const result = await (async () => {
 ${code}
     })();
+    ${resultEnvelope()}
+  })()`;
+}
+
+function resultEnvelope(): string {
+  return `
     const seen = new WeakSet();
     const transferable = (value) => {
       if (value === null || typeof value === "string" || typeof value === "boolean") return true;
@@ -129,6 +136,15 @@ ${code}
     let preview;
     try { preview = String(result); } catch { preview = "[unprintable value]"; }
     return { kind: "reference", id, type: typeof result, preview };
+  `;
+}
+
+function pageExpressionFor(code: string): string {
+  return `(async () => {
+    const result = await (async () => {
+${code}
+    })();
+    ${resultEnvelope()}
   })()`;
 }
 
@@ -140,7 +156,7 @@ function evaluationError(response: any): Error | undefined {
   return new Error(typeof description === "string" ? description : typeof value === "string" ? value : details.text || "JavaScript execution failed");
 }
 
-function evaluationValue(response: any): unknown {
+function evaluationValue(response: any, scope: "panel" | "page" = "panel"): unknown {
   const remote = response?.result;
   if (!remote || typeof remote !== "object") return remote;
   const result = remote.value;
@@ -150,6 +166,7 @@ function evaluationValue(response: any): unknown {
     type: result.type,
     preview: result.preview,
     access: `globalThis.${RESULTS_KEY}.get(${JSON.stringify(result.id)})`,
+    scope,
   };
   return Object.prototype.hasOwnProperty.call(remote, "value") ? result : remote;
 }
@@ -217,6 +234,8 @@ export class ChromeExecutor {
       },
     };
     (globalThis as Record<string, unknown>)[BRIDGE_KEY] = this.bridge;
+    (globalThis as Record<string, unknown>)[RESULT_READER_KEY] = (id: number) => this.logger?.result(id)
+      ?? Promise.reject(new Error("Tool result log is unavailable"));
   }
 
   execute(input: ChromeToolInput, signal?: AbortSignal): Promise<unknown> {
@@ -231,6 +250,7 @@ export class ChromeExecutor {
     this.lifetime.aborted = true;
     if ((globalThis as Record<string, unknown>)[BRIDGE_KEY] === this.bridge) {
       delete (globalThis as Record<string, unknown>)[BRIDGE_KEY];
+      delete (globalThis as Record<string, unknown>)[RESULT_READER_KEY];
     }
     const sessions = [this.activeDebuggee].filter((item): item is Debuggee => Boolean(item));
     this.activeDebuggee = undefined;
@@ -249,12 +269,48 @@ export class ChromeExecutor {
     await this.initialize();
     throwIfAborted(signal);
 
+    if (input.tabId !== undefined) {
+      await (globalThis as Record<string, any>).__surfWaxGuard?.mark(input.tabId);
+      throwIfAborted(signal);
+      if (this.chromeApi.userScripts?.execute) {
+        const result = await this.awaitAbort(
+          this.chromeApi.userScripts.execute({
+            target: { tabId: input.tabId },
+            world: input.world ?? "MAIN",
+            js: [{ code: pageExpressionFor(input.code) }],
+            injectImmediately: true,
+          }),
+          signal,
+        );
+        throwIfAborted(signal);
+        const first = result[0];
+        if (!first) throw new Error(`No injection result for tab ${input.tabId}`);
+        if (first.error) throw new Error(first.error);
+        return evaluationValue({ result: { value: first.result } }, "page");
+      }
+      if (input.world === "USER_SCRIPT") throw new Error("Allow User Scripts is unavailable; USER_SCRIPT execution requires Chrome userScripts.execute");
+      return this.evaluate({ tabId: input.tabId }, pageExpressionFor(input.code), signal, "page");
+    }
+
     const targets = await this.chromeApi.debugger.getTargets();
     if (this.disposed) throw abortError();
     throwIfAborted(signal);
     const target = targets.find((candidate) => candidate.url === this.targetUrl && candidate.id);
     if (!target?.id) throw new Error(`Side Panel DevTools target not found: ${this.targetUrl}`);
-    const debuggee: Debuggee = { targetId: target.id };
+    return this.evaluate({ targetId: target.id }, expressionFor(input.code), signal, "panel");
+  }
+
+  private async awaitAbort<T>(task: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (!signal) return task;
+    throwIfAborted(signal);
+    return new Promise<T>((resolve, reject) => {
+      const abort = () => reject(abortError());
+      signal.addEventListener("abort", abort, { once: true });
+      void task.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+    });
+  }
+
+  private async evaluate(debuggee: Debuggee, expression: string, signal?: AbortSignal, scope: "panel" | "page" = "panel"): Promise<unknown> {
     let attached = false;
     const state = { lifetime: this.lifetime, run: { aborted: false } };
     let rejectAbort: ((error: DOMException) => void) | undefined;
@@ -274,7 +330,7 @@ export class ChromeExecutor {
       signal?.addEventListener("abort", onAbort, { once: true });
       (globalThis as Record<string, unknown>)[STATE_KEY] = state;
       const evaluation = this.chromeApi.debugger.sendCommand(debuggee, "Runtime.evaluate", {
-        expression: expressionFor(input.code),
+        expression,
         awaitPromise: true,
         returnByValue: true,
         userGesture: true,
@@ -286,7 +342,7 @@ export class ChromeExecutor {
       throwIfAborted(signal);
       const error = evaluationError(response);
       if (error) throw error;
-      return evaluationValue(response);
+      return evaluationValue(response, scope);
     } finally {
       signal?.removeEventListener("abort", onAbort);
       if ((globalThis as Record<string, unknown>)[STATE_KEY] === state) delete (globalThis as Record<string, unknown>)[STATE_KEY];

@@ -30,7 +30,7 @@ function textResponse(text: string): string[] {
   return [chunk({ role: "assistant", content: text }), chunk({}, "stop"), "data: [DONE]\n\n"];
 }
 
-function toolResponse(code: string, id = "call-chrome-e2e"): string[] {
+function toolResponse(code: string | { code: string; tabId?: number; world?: "MAIN" | "USER_SCRIPT" }, id = "call-chrome-e2e"): string[] {
   return [
     chunk({
       role: "assistant",
@@ -38,7 +38,7 @@ function toolResponse(code: string, id = "call-chrome-e2e"): string[] {
         index: 0,
         id,
         type: "function",
-        function: { name: "chrome", arguments: JSON.stringify({ code }) },
+        function: { name: "chrome", arguments: JSON.stringify(typeof code === "string" ? { code } : code) },
       }],
     }),
     chunk({}, "tool_calls"),
@@ -259,6 +259,50 @@ test("ships only the minimal MV3 Harness surface", async () => {
     await expect(opened.page.getByTestId("model-label")).toHaveCount(0);
   } finally {
     await dispose(opened.context, opened.userDataDirectory);
+  }
+});
+
+test("targets page worlds and keeps large tool output out of model history", async () => {
+  const responses: string[][] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    await enableUserScripts(opened.context, opened.extensionId, opened.page);
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/target`);
+    expect(tab?.id).toBeDefined();
+    responses.push(
+      toolResponse({ tabId: tab.id, code: "return document.title" }, "call-main"),
+      toolResponse({ tabId: tab.id, world: "USER_SCRIPT", code: "return await Promise.resolve(document.title + ' USER')" }, "call-user"),
+      toolResponse("return 'LARGE_START' + 'zx'.repeat(6000)", "call-large"),
+      textResponse("DONE_COMPACT"),
+      textResponse("引用测试"),
+    );
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("inspect page contexts and a large result");
+    await composer.press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("DONE_COMPACT");
+    await expect.poll(() => provider.requests.filter((request) => request.tools).length).toBeGreaterThanOrEqual(4);
+    const requests = provider.requests.filter((request) => request.tools);
+    expect(JSON.stringify(requests[1].messages)).toContain("Side Agent Target");
+    expect(JSON.stringify(requests[2].messages)).toContain("Side Agent Target USER");
+    const fourthPrompt = JSON.stringify(requests[3].messages);
+    expect(fourthPrompt).toContain("$ref");
+    expect(fourthPrompt).not.toContain("zx".repeat(200));
+    const events = await readEvents(opened.page);
+    const data = events.find((event) => event.type === "tool.result.data");
+    expect(data.output).toBe("LARGE_START" + "zx".repeat(6000));
+    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-large")?.output.$ref).toBe(data.id);
+    await opened.page.reload();
+    await expect.poll(() => opened.page.evaluate(async (id) => {
+      const read = (globalThis as any).__surfWaxResult;
+      return typeof read === "function" ? (await read(id)).slice(0, 11) : null;
+    }, data.id)).toBe("LARGE_START");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
 

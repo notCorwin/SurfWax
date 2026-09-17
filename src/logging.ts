@@ -47,6 +47,7 @@ export type ConversationMessage = {
 
 type EventStore = {
   append(event: Omit<LogEvent, "id">): Promise<LogEvent>;
+  get?(id: number): Promise<LogEvent | undefined>;
   appendMany?(events: readonly Omit<LogEvent, "id">[]): Promise<LogEvent[]>;
   all(): Promise<LogEvent[]>;
   byTypes?(types: readonly string[], conversationId?: string): Promise<LogEvent[]>;
@@ -125,6 +126,14 @@ class IndexedDbEventStore implements EventStore {
 
   async append(event: Omit<LogEvent, "id">): Promise<LogEvent> {
     return (await this.appendMany([event]))[0]!;
+  }
+
+  async get(id: number): Promise<LogEvent | undefined> {
+    const db = await this.open();
+    const transaction = db.transaction(EVENT_STORE, "readonly");
+    const event = await requestResult<LogEvent | undefined>(transaction.objectStore(EVENT_STORE).get(id));
+    await transactionDone(transaction);
+    return event;
   }
 
   async appendMany(events: readonly Omit<LogEvent, "id">[]): Promise<LogEvent[]> {
@@ -499,6 +508,15 @@ export class EventLogger {
   async all(): Promise<LogEvent[]> {
     await this.flush();
     return (this.options.store ?? getEventStore()).all();
+  }
+
+  async result(id: number): Promise<unknown> {
+    if (!Number.isSafeInteger(id) || id < 1) throw new Error("Invalid result event ID");
+    await this.flush();
+    const store = this.options.store ?? getEventStore();
+    const event = store.get ? await store.get(id) : (await store.all()).find((item) => item.id === id);
+    if (event?.type !== "tool.result.data") throw new Error(`Tool result ${id} is unavailable`);
+    return fromLogValue(event.output);
   }
 
   async conversation(conversationId: string): Promise<LogEvent[]> {

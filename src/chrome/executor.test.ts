@@ -59,9 +59,56 @@ describe("ChromeExecutor", () => {
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
     await expect(executor.execute({ code: "throw new Error('boom')" })).rejects.toThrow("Error: boom");
     await expect(executor.execute({ code: "return 1n" })).resolves.toEqual({
-      $ref: "ref-1", type: "bigint", preview: "1", access: 'globalThis.__surfWaxResults.get("ref-1")',
+      $ref: "ref-1", type: "bigint", preview: "1", access: 'globalThis.__surfWaxResults.get("ref-1")', scope: "panel",
     });
     expect(String(fake.debuggerApi.sendCommand.mock.calls[1][2]?.expression)).toContain("__surfWaxResults");
+  });
+
+  it("runs a page async body in MAIN by default and USER_SCRIPT when requested", async () => {
+    const fake = fakeChrome();
+    const execute = vi.fn(async (injection: chrome.userScripts.UserScriptInjection) => [{
+      frameId: 0, documentId: "doc", result: { kind: "value", value: injection.world },
+    }]);
+    (fake.chromeApi.userScripts as any).execute = execute;
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    await expect(executor.execute({ tabId: 5, code: "return document.title" })).resolves.toBe("MAIN");
+    await expect(executor.execute({ tabId: 5, world: "USER_SCRIPT", code: "return await Promise.resolve(document.title)" })).resolves.toBe("USER_SCRIPT");
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute.mock.calls[0][0]).toMatchObject({ target: { tabId: 5 }, world: "MAIN", injectImmediately: true });
+    expect(execute.mock.calls[0][0].js[0]?.code).toContain("return document.title");
+    expect(execute.mock.calls[1][0].world).toBe("USER_SCRIPT");
+    expect(fake.debuggerApi.attach).not.toHaveBeenCalled();
+    executor.dispose();
+  });
+
+  it("uses CDP only when native page execution is unavailable and never replays failures", async () => {
+    const fake = fakeChrome([{ result: { value: { kind: "value", value: "CDP" } } }]);
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    await expect(executor.execute({ tabId: 8, code: "return document.title" })).resolves.toBe("CDP");
+    expect(fake.debuggerApi.attach).toHaveBeenCalledWith({ tabId: 8 }, "1.3");
+    expect(String(fake.debuggerApi.sendCommand.mock.calls[0][2]?.expression)).toContain("return document.title");
+    await expect(executor.execute({ tabId: 8, world: "USER_SCRIPT", code: "return 1" })).rejects.toThrow("USER_SCRIPT execution requires");
+    expect(fake.debuggerApi.sendCommand).toHaveBeenCalledTimes(1);
+    (fake.chromeApi.userScripts as any).execute = vi.fn(async () => [{ frameId: 0, documentId: "doc", error: "page failed" }]);
+    await expect(executor.execute({ tabId: 8, code: "throw Error('page failed')" })).rejects.toThrow("page failed");
+    expect(fake.debuggerApi.sendCommand).toHaveBeenCalledTimes(1);
+    executor.dispose();
+  });
+
+  it("aborts a pending native page result without starting queued calls", async () => {
+    const fake = fakeChrome();
+    const execute = vi.fn(() => new Promise<chrome.userScripts.InjectionResult[]>(() => undefined));
+    (fake.chromeApi.userScripts as any).execute = execute;
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    const controller = new AbortController();
+    const running = executor.execute({ tabId: 7, code: "await new Promise(() => {})" }, controller.signal);
+    const queued = executor.execute({ tabId: 7, code: "return 2" }, controller.signal);
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+    controller.abort();
+    await expect(running).rejects.toMatchObject({ name: "AbortError" });
+    await expect(queued).rejects.toMatchObject({ name: "AbortError" });
+    expect(execute).toHaveBeenCalledTimes(1);
+    executor.dispose();
   });
 
   it("finds and attaches to the current target again for every call", async () => {

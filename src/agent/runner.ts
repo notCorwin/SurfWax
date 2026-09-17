@@ -9,11 +9,10 @@ import type { ContextCompactor } from "./compaction";
 
 export const DEFAULT_INSTRUCTIONS = [
   "You are a Chrome side-panel agent helping the user automate the browser they control.",
-  "Use the chrome tool for every browser action. Its code is the body of an async function running in the Side Panel extension realm; explicitly return the desired result.",
-  "Use the Web APIs and chrome.* Extension APIs needed for the user's request, including chrome.userScripts, chrome.scripting, and chrome.debugger/CDP.",
-  "Use native chrome.userScripts register, update, unregister, getScripts, execute, configureWorld, and resetWorldConfiguration as needed. Use MAIN to share the page JavaScript global and USER_SCRIPT for the native user-script world.",
-  "For CDP, discover targets with chrome.debugger.getTargets(), attach to a tab, and keep the session and chrome.debugger.onEvent listeners across tool calls when needed. Use Target.setAutoAttach with flatten: true and a sessionId for out-of-process frames/workers; inspect Runtime.executionContextCreated for same-process frames and rediscover contexts after navigation. Detach sessions when finished.",
-  "Treat the user's request as authorization for ordinary browser automation in their browser; do not ask for separate Harness approval. Return concise progress updates after actions and do not claim an action succeeded until its tool result confirms it.",
+  "Use the single chrome tool for browser actions. Return values explicitly and select only needed page data.",
+  "Extension example: chrome({code:'return await chrome.tabs.query({active:true})'}). Page example: chrome({tabId:1,code:'return document.title'}). User-script world: chrome({tabId:1,world:'USER_SCRIPT',code:'return document.title'}).",
+  "Large result example: chrome({code:'return (await globalThis.__surfWaxResult(42)).slice(0,10)'}) using the returned event ID. Other references may only last until the page or panel closes.",
+  "For advanced browser tasks, call native chrome.* APIs and CDP from the extension realm. Confirm results before claiming success.",
 ].join(" ");
 
 export type CreateAgentOptions = {
@@ -34,7 +33,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, C
     model: options.languageModel ?? createModel(options.model, logger, options.conversationId),
     reasoning: "minimal",
     instructions: options.instructions ?? DEFAULT_INSTRUCTIONS,
-    tools: { chrome: createChromeTool(options.executor) },
+    tools: { chrome: createChromeTool(options.executor, { logger, conversationId: options.conversationId }) },
     ...(options.compactor ? { prepareStep: async ({ messages, stepNumber }) => ({
       messages: await options.compactor!.prepare(messages, stepNumber) ?? messages,
     }) } : {}),

@@ -4,7 +4,7 @@
 [![Chrome 138+](https://img.shields.io/badge/Chrome-138%2B-4285F4?logo=googlechrome&logoColor=white)](https://www.google.com/chrome/)
 [![Version](https://img.shields.io/badge/version-0.2.0-blue)](public/manifest.json)
 
-Surf Wax 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。它使用 Vercel AI SDK v7 和 Assistant UI，直接连接用户配置的 OpenAI-compatible Provider，并只向模型提供一个浏览器元工具：`chrome({ code })`。
+Surf Wax 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。它使用 Vercel AI SDK v7 和 Assistant UI，直接连接用户配置的 OpenAI-compatible Provider，并只向模型提供一个浏览器元工具：`chrome({ code, tabId?, world? })`。
 
 模型通过这一个“浏览器 Bash”执行异步 JavaScript，可以访问 Web API、Chrome Extension API、网页 `MAIN` world、原生 `USER_SCRIPT` world 和原始 CDP。Harness 不维护按 API 拆分的工具列表，也不增加权限审批、额外沙箱或 capability layer；实际能力边界由 Chrome、Manifest 权限、浏览器策略和目标页面决定。
 
@@ -74,7 +74,7 @@ Side Panel 标题栏的脚本按钮会打开独立的用户脚本标签页，可
 列出当前窗口中的全部标签页，并返回标题和 URL。
 ```
 
-模型会生成一个 `chrome({ code })` 调用。工具输入只有 `code` 字段；代码是异步函数体，必须显式 `return` 需要返回给模型的值。
+模型会生成一个 `chrome({ code, tabId?, world? })` 调用。代码是异步函数体，必须显式 `return` 需要返回给模型的值。不填 `tabId` 时在 Side Panel 扩展上下文执行；填写后默认在目标网页的 `MAIN` world 执行，或指定 `USER_SCRIPT`。
 
 ### Chrome Extension API
 
@@ -88,9 +88,22 @@ Side Panel 标题栏的脚本按钮会打开独立的用户脚本标签页，可
 
 ```json
 {
-  "code": "const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); return await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'MAIN', func: () => document.title });"
+  "tabId": 123,
+  "code": "return document.title;"
 }
 ```
+
+### 页面 USER_SCRIPT world
+
+```json
+{
+  "tabId": 123,
+  "world": "USER_SCRIPT",
+  "code": "return document.title;"
+}
+```
+
+页面目标优先通过原生 `chrome.userScripts.execute` 执行；该接口不可用时，`MAIN` 使用 CDP，`USER_SCRIPT` 返回明确错误。脚本执行失败不会自动换通道重试。
 
 ### 原始 CDP
 
@@ -102,7 +115,7 @@ Side Panel 标题栏的脚本按钮会打开独立的用户脚本标签页，可
 
 跨多次调用时，保留 `chrome.debugger` 附加的页面会话及 `chrome.debugger.onEvent` 监听器；完成后主动 `detach`，关闭面板也会解除附加。跨进程 iframe 和 worker 可用 `Target.setAutoAttach({ autoAttach: true, flatten: true, waitForDebuggerOnStart: false })` 获取子会话，并在 `sendCommand` 的 debuggee 中传入 `sessionId`。同进程 iframe 可从 `Runtime.executionContextCreated` 找到 `contextId`；页面导航后重新查找上下文。
 
-普通 JSON 值直接作为工具结果返回。`Map`、DOM 节点、循环对象等返回 `$ref` 与 `access` 表达式，可在下一次调用中用 `globalThis.__surfWaxResults.get(id)` 检查，完成后用 `.delete(id)` 释放；关闭面板也会释放这些内存引用。
+不超过 8 KiB 的 JSON 值直接返回。更大的结果先完整写入事件日志，再返回事件 ID、大小和预览；可在后续扩展上下文调用中用 `await globalThis.__surfWaxResult(id)` 读取，并只 `return` 所需字段或片段。此引用关闭面板后仍可读取，删除所属对话时失效。`Map`、DOM 节点、循环对象等返回临时 `$ref` 与 `access` 表达式，可用 `globalThis.__surfWaxResults.get(id)` 检查；面板或目标页面关闭后可能失效。
 
 ### 持久 User Script
 
