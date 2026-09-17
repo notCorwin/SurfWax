@@ -739,7 +739,7 @@ return result;`, "call-cdp-5"),
 test("streams complete Markdown without blocking draft input", async () => {
   const markdown = [
     "# Heading\n\n> quote\n\n- [x] task\n\n~~strike~~ and [link](https://example.com).\n\n",
-    "| A | B |\n| - | - |\n| 1 | 2 |\n\nInline $x^2$ and block:\n\n$$y=x+1$$\n\n",
+    "| A | B |\n| - | - |\n| 1 | 2 |\n| 3 | 4 |\n\nInline $x^2$ and block:\n\n$$y=x+1$$\n\n",
     "```javascript\nconst answer = 42;\n```\n\nFootnote[^1].\n\n[^1]: note\n\nFINAL_MARKER",
   ].join("");
   const parts = [chunk({ role: "assistant", content: "LONG_RUNNING_LINE\n\n".repeat(100) }), ...[...markdown].map((content) => chunk({ content })), chunk({}, "stop"), "data: [DONE]\n\n"];
@@ -771,6 +771,27 @@ test("streams complete Markdown without blocking draft input", async () => {
     await expect(rendered.locator("pre code")).toContainText("const answer = 42");
     await expect(rendered.locator(".katex")).not.toHaveCount(0);
     await expect(rendered.locator("sup")).not.toHaveCount(0);
+    expect(await rendered.evaluate((element) => {
+      const find = (selector: string) => {
+        const node = element.querySelector<HTMLElement>(selector);
+        if (!node) throw new Error(`Missing ${selector}`);
+        return node;
+      };
+      const border = (selector: string) => getComputedStyle(find(selector)).borderTopWidth;
+      return {
+        code: border('[data-streamdown="code-block"]'),
+        codeBody: border('[data-streamdown="code-block-body"]'),
+        pre: border('[data-streamdown="code-block-body"] pre'),
+        actions: border('[data-streamdown="code-block-actions"]'),
+        table: border('[data-streamdown="table-wrapper"]'),
+        tableBody: border('[data-streamdown="table-wrapper"] > :last-child'),
+        striped: getComputedStyle(find('[data-streamdown="table-body"] tr:nth-child(2)')).backgroundColor,
+      };
+    })).toEqual({ code: "1px", codeBody: "0px", pre: "0px", actions: "0px", table: "1px", tableBody: "0px", striped: "rgb(36, 36, 36)" });
+    const copy = rendered.getByRole("button", { name: "Copy Code" });
+    await expect(copy).toBeEnabled();
+    await copy.click();
+    await expect(rendered.locator('output[aria-live="polite"]')).toHaveText("Copied");
     expect(await rendered.evaluate((element) => {
       const root = document.querySelector<HTMLElement>('[data-testid="thread-root"]');
       const flow = element.querySelector<HTMLElement>(".markdown-flow");
