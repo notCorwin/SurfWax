@@ -30,6 +30,7 @@ import { LocalComposer } from "./local-composer";
 import { MarkdownText } from "./markdown-text";
 import { Reasoning } from "./reasoning";
 import { ToolFallback } from "./tool-fallback";
+import { workLabel } from "./work-time";
 import type { ModelConfig } from "@/types";
 import type { EventLogger, LogEvent } from "@/logging";
 
@@ -56,10 +57,6 @@ export function completedWork(events: readonly LogEvent[]): Map<string, number> 
     }
   }
   return completed;
-}
-
-function workLabel(seconds: number): string {
-  return `工作了${Math.floor(seconds / 60)}分${String(seconds % 60).padStart(2, "0")}秒`;
 }
 
 function useMessageRows(): readonly MessageRow[] {

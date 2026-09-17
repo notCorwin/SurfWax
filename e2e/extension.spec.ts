@@ -467,7 +467,7 @@ test("shows live work, then folds it under elapsed time while keeping the final 
     await expect(opened.page.locator(".activity[data-status=running]")).toBeVisible();
     await expect(opened.page.getByTestId("work-summary")).toHaveCount(0);
     const work = opened.page.getByTestId("work-summary");
-    await expect(work.locator(":scope > summary")).toHaveText(/^工作了\d+分\d{2}秒$/);
+    await expect(work.locator(":scope > summary")).toHaveText(/^工作了\d+ 秒$/);
     await expect(work).not.toHaveAttribute("open", "");
     await expect(work.locator(".activity")).toBeHidden();
     await expect(work).toContainText("PROGRESS_TEXT");
@@ -480,7 +480,7 @@ test("shows live work, then folds it under elapsed time while keeping the final 
     const submitted = events.find((event) => event.type === "conversation.submitted");
     const finished = events.find((event) => event.type === "conversation.finished" && event.runId === submitted?.runId);
     const seconds = Math.floor((Date.parse(finished.timestamp) - Date.parse(submitted.timestamp)) / 1000);
-    await expect(work.locator(":scope > summary")).toHaveText(`工作了${Math.floor(seconds / 60)}分${String(seconds % 60).padStart(2, "0")}秒`);
+    await expect(work.locator(":scope > summary")).toHaveText(`工作了${seconds} 秒`);
     await work.locator(":scope > summary").click();
     await expect(work).toContainText("WORK_RESULT");
     await opened.page.reload();
