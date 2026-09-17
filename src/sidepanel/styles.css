@@ -210,6 +210,7 @@ p {
 
 [data-testid="thread-root"] {
   --thread-max-width: 44rem;
+  --transcript-item-gap: 0.5rem;
   --transcript-block-gap: 1.25rem;
   --transcript-line-height: 1.6;
 }
@@ -264,6 +265,14 @@ p {
 
 .markdown-flow > :last-child {
   margin-block: 0;
+}
+
+.markdown-body [data-streamdown="list-item"] {
+  padding-block: 0;
+}
+
+.markdown-body [data-streamdown="list-item"] + [data-streamdown="list-item"] {
+  margin-block-start: var(--transcript-item-gap);
 }
 
 .markdown-body pre {
@@ -330,7 +339,11 @@ p {
 }
 
 .command-group-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--transcript-item-gap);
   padding-left: 16px;
+  padding-top: var(--transcript-item-gap);
 }
 
 .activity-content strong {
