@@ -423,6 +423,30 @@ test("targets page worlds and keeps large tool output out of model history", asy
   }
 });
 
+test("groups adjacent commands without hiding their details", async () => {
+  const provider = await startProvider([
+    queuedToolResponse("return 'FIRST_RESULT'", "return 'SECOND_RESULT'"),
+    textResponse("完成"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("run two commands");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    const group = opened.page.locator(".command-group");
+    await expect(group.locator(":scope > summary")).toHaveText("调用了2次命令");
+    await expect(group.locator(".activity")).toHaveCount(2);
+    await expect(group).not.toHaveAttribute("open", "");
+    await group.locator(":scope > summary").click();
+    await group.locator(".activity summary").first().click();
+    await expect(group).toContainText("FIRST_RESULT");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("完成");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
 test("executes the one chrome({ code }) tool across extension, MAIN, USER_SCRIPT and CDP, then restores and clears the log", async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);

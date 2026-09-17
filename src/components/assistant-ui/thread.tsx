@@ -7,11 +7,12 @@ import {
   ErrorPrimitive,
   MessagePrimitive,
   ThreadPrimitive,
+  groupPartByType,
   useAui,
   useAuiState,
 } from "@assistant-ui/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ArrowDownIcon, ChevronLeftIcon, ChevronRightIcon, PencilIcon, RotateCcwIcon } from "lucide-react";
+import { ArrowDownIcon, ChevronLeftIcon, ChevronRightIcon, PencilIcon, RotateCcwIcon, WrenchIcon } from "lucide-react";
 import {
   type ComponentProps,
   type FC,
@@ -190,14 +191,20 @@ const AssistantMessage: FC = () => {
   return (
     <MessagePrimitive.Root data-role="assistant" aria-live={latest ? "polite" : undefined} className="assistant-message min-w-0 px-2 text-sm">
       <div className="assistant-message-content flex flex-col wrap-break-word">
-        <MessagePrimitive.Parts>
-          {({ part }) => {
+        <MessagePrimitive.GroupedParts groupBy={groupPartByType({ "tool-call": ["group-command"] })}>
+          {({ part, children }) => {
+            if (part.type === "group-command") return part.indices.length === 1 ? children : (
+              <details className="activity command-group" open={part.status.type === "incomplete"}>
+                <summary><WrenchIcon aria-hidden="true" /><span>调用了{part.indices.length}次命令</span></summary>
+                <div className="command-group-content">{children}</div>
+              </details>
+            );
             if (part.type === "text") return <MarkdownText />;
             if (part.type === "reasoning") return <Reasoning {...part} />;
             if (part.type === "tool-call") return part.toolUI ?? <ToolFallback {...part} />;
             return null;
           }}
-        </MessagePrimitive.Parts>
+        </MessagePrimitive.GroupedParts>
         {interrupted && (
           <div className="interrupted-message" data-testid="interrupted-message">
             <span>回复已中断</span>

@@ -310,6 +310,10 @@ p {
   color: var(--destructive);
 }
 
+.command-group-content {
+  padding-left: 16px;
+}
+
 .activity-content strong {
   display: block;
   margin: 5px 0 4px;
