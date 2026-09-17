@@ -62,7 +62,7 @@ npm run dev
 4. 保存配置并返回 Side Panel。
 5. 如需使用持久 User Scripts，在扩展详情页开启 **Allow User Scripts**。
 
-Side Panel 标题栏的脚本按钮会打开独立的用户脚本页面。页面内的“脚本管理”页签可搜索、启用或停用脚本；“脚本编辑”页签用于填写脚本 ID、网站匹配规则和 JavaScript 代码。编辑器会高亮 `CSS_*` 静态字符串中的 CSS，保存时自动格式化 JavaScript 和静态 CSS。停用的脚本可继续编辑，且不会在扩展重启后自行启用。新脚本的网站范围需要明确填写。高级编辑入口保留 Chrome 原生 `RegisteredUserScript` JSON 格式及全部字段。
+Side Panel 标题栏的脚本按钮会打开独立的用户脚本页面。列表可搜索、多选、批量启停/删除、导入和导出；点击脚本进入全屏编辑，也可复制为新脚本。导入先预览，同名脚本逐项选择是否覆盖；导入/导出文件仅包含 Chrome 原生 `RegisteredUserScript[]` JSON，不包含启停状态。编辑器会高亮 `CSS_*` 静态字符串中的 CSS，保存时自动格式化 JavaScript 和静态 CSS。停用的脚本可继续编辑，且不会在扩展重启后自行启用。新脚本的网站范围需要明确填写。高级编辑入口保留 Chrome 原生 `RegisteredUserScript` JSON 格式及全部字段。
 
 模型配置只保存在当前扩展的 `chrome.storage.local` 中。Provider 必须支持 OpenAI-compatible Chat Completions、流式响应和 tool calling，并允许扩展发起跨域请求。
 
