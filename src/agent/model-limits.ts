@@ -97,7 +97,7 @@ export function resolveModelLimit(
     if (validLimit(config.contextWindowOverride)) {
       return { provider: "manual", model: config.model, context: config.contextWindowOverride, source: "manual" } as ModelLimit;
     }
-    const cached = storage ? (await storage.get(CACHE_KEY).catch(() => ({})))[CACHE_KEY] as CachedLimit | undefined : undefined;
+    const cached = storage ? (await storage.get(CACHE_KEY).catch(() => ({ [CACHE_KEY]: undefined })))[CACHE_KEY] as CachedLimit | undefined : undefined;
     const validCache = cached?.key === key && validLimit(cached.match?.context) ? cached : undefined;
     if (validCache && (options.now ?? Date.now)() - validCache.fetchedAt < REFRESH_MS) return validCache.match;
     try {
@@ -107,7 +107,7 @@ export function resolveModelLimit(
       });
       if (!response.ok) throw new Error(`models.dev HTTP ${response.status}`);
       const match = matchModel(await response.json() as Catalog, config.baseURL, config.model);
-      if (match && storage) await storage.set({ [CACHE_KEY]: { key, fetchedAt: (options.now ?? Date)(), match } satisfies CachedLimit }).catch(() => undefined);
+      if (match && storage) await storage.set({ [CACHE_KEY]: { key, fetchedAt: (options.now ?? Date.now)(), match } satisfies CachedLimit }).catch(() => undefined);
       return match ?? validCache?.match;
     } catch (error) {
       if (options.signal?.aborted) throw error;
