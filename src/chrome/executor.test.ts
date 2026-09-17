@@ -36,6 +36,19 @@ function fakeChrome(responses: Array<object | (() => Promise<object>)> = []) {
   return { calls, debuggerApi, chromeApi };
 }
 
+function fakePort(onPost: (message: { id: string; method: string }, reply: (message: object) => void, drop: () => void) => void = (message, reply) => reply({ id: message.id })) {
+  let receive!: (message: object) => void;
+  let disconnected!: () => void;
+  const drop = () => disconnected();
+  const port = {
+    onMessage: { addListener: vi.fn((listener) => { receive = listener; }) },
+    onDisconnect: { addListener: vi.fn((listener) => { disconnected = listener; }) },
+    postMessage: vi.fn((message: { id: string; method: string }) => onPost(message, receive, drop)),
+    disconnect: vi.fn(drop),
+  };
+  return { port, drop };
+}
+
 describe("ChromeExecutor", () => {
   it("runs code in the exact Side Panel target and returns by-value results", async () => {
     const fake = fakeChrome([{ result: { type: "object", value: { kind: "value", value: { title: "test", tabs: 2 } } } }]);
@@ -192,20 +205,88 @@ describe("ChromeExecutor", () => {
 
   it("routes agent debugger calls through a panel-owned background port", async () => {
     const fake = fakeChrome();
-    let receive!: (message: unknown) => void;
-    const port = {
-      onMessage: { addListener: vi.fn((listener) => { receive = listener; }) },
-      onDisconnect: { addListener: vi.fn() },
-      postMessage: vi.fn((message: { id: string }) => receive({ id: message.id })),
-      disconnect: vi.fn(),
-    };
+    const { port } = fakePort();
     (fake.chromeApi as any).runtime = { connect: vi.fn(() => port) };
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    expect((fake.chromeApi as any).runtime.connect).not.toHaveBeenCalled();
     const bridge = (globalThis as Record<string, any>).__surfWaxDebugger;
     await bridge.call("attach", [{ tabId: 15 }, "1.3"]);
     expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({ method: "attach", args: [{ tabId: 15 }, "1.3"] }));
     expect(fake.debuggerApi.attach).not.toHaveBeenCalled();
     executor.dispose();
     expect(port.disconnect).toHaveBeenCalled();
+  });
+
+  it("reconnects after an idle background port disconnects", async () => {
+    const fake = fakeChrome();
+    const first = fakePort();
+    const second = fakePort();
+    const connect = vi.fn().mockReturnValueOnce(first.port).mockReturnValueOnce(second.port);
+    (fake.chromeApi as any).runtime = { connect };
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    const bridge = (globalThis as Record<string, any>).__surfWaxDebugger;
+    await bridge.call("getTargets", []);
+    first.drop();
+    await bridge.call("getTargets", []);
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(first.port.postMessage).toHaveBeenCalledTimes(1);
+    expect(second.port.postMessage).toHaveBeenCalledTimes(1);
+    executor.dispose();
+    await expect(bridge.call("getTargets", [])).rejects.toMatchObject({ name: "AbortError" });
+    expect(connect).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries only a disconnected user-script restoration before first page execution", async () => {
+    const fake = fakeChrome();
+    const execute = vi.fn(async () => [{ frameId: 0, documentId: "doc", result: { kind: "value", value: "READY" } }]);
+    (fake.chromeApi.userScripts as any).execute = execute;
+    const first = fakePort((_message, _reply, drop) => drop());
+    const second = fakePort();
+    const connect = vi.fn().mockReturnValueOnce(first.port).mockReturnValueOnce(second.port);
+    (fake.chromeApi as any).runtime = { connect };
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    await expect(executor.execute({ tabId: 5, code: "return document.title" })).resolves.toBe("READY");
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(first.port.postMessage.mock.calls[0][0].method).toBe("restoreUserScripts");
+    expect(second.port.postMessage.mock.calls[0][0].method).toBe("restoreUserScripts");
+    expect(execute).toHaveBeenCalledTimes(1);
+    executor.dispose();
+  });
+
+  it("does not replay a command whose port disconnects while it is pending", async () => {
+    const fake = fakeChrome();
+    const first = fakePort(() => undefined);
+    const second = fakePort();
+    const connect = vi.fn().mockReturnValueOnce(first.port).mockReturnValueOnce(second.port);
+    (fake.chromeApi as any).runtime = { connect };
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    const bridge = (globalThis as Record<string, any>).__surfWaxDebugger;
+    const running = bridge.call("attach", [{ tabId: 15 }, "1.3"]);
+    first.drop();
+    await expect(running).rejects.toThrow("Debugger bridge disconnected");
+    expect(connect).toHaveBeenCalledTimes(1);
+    await bridge.call("getTargets", []);
+    expect(first.port.postMessage).toHaveBeenCalledTimes(1);
+    expect(second.port.postMessage).toHaveBeenCalledTimes(1);
+    executor.dispose();
+  });
+
+  it("does not cache a failed restoration", async () => {
+    const fake = fakeChrome();
+    const execute = vi.fn(async () => [{ frameId: 0, documentId: "doc", result: { kind: "value", value: "READY" } }]);
+    (fake.chromeApi.userScripts as any).execute = execute;
+    let first = true;
+    const { port } = fakePort((message, reply) => {
+      if (first) {
+        first = false;
+        reply({ id: message.id, error: "restore failed" });
+      } else reply({ id: message.id });
+    });
+    (fake.chromeApi as any).runtime = { connect: vi.fn(() => port) };
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    await expect(executor.execute({ tabId: 5, code: "return document.title" })).rejects.toThrow("restore failed");
+    await expect(executor.execute({ tabId: 5, code: "return document.title" })).resolves.toBe("READY");
+    expect(execute).toHaveBeenCalledTimes(1);
+    executor.dispose();
   });
 });

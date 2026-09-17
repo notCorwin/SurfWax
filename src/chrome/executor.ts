@@ -175,7 +175,7 @@ export class ChromeExecutor {
   private readonly chromeApi: ExecutorChrome;
   private readonly targetUrl: string;
   private readonly logger?: EventLogger;
-  private readonly port?: chrome.runtime.Port;
+  private port?: chrome.runtime.Port;
   private readonly bridge: Record<string, unknown>;
   private readonly lifetime = { aborted: false };
   private tail: Promise<void> = Promise.resolve();
@@ -188,7 +188,6 @@ export class ChromeExecutor {
     this.targetUrl = options.targetUrl ?? ensureSidePanelInstanceUrl();
     this.logger = options.logger;
     if (!this.chromeApi?.debugger) throw new Error("Chrome extension debugger API is unavailable");
-    this.port = this.chromeApi.runtime?.connect?.({ name: "surf-wax-debugger" });
     const pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason: Error) => void }>();
     const listeners = { onEvent: new Set<(...args: any[]) => void>(), onDetach: new Set<(...args: any[]) => void>() };
     const event = (name: keyof typeof listeners) => ({
@@ -197,26 +196,37 @@ export class ChromeExecutor {
       hasListener: (listener: (...args: any[]) => void) => listeners[name].has(listener),
       hasListeners: () => listeners[name].size > 0,
     });
-    this.port?.onMessage.addListener((message: { id?: string; event?: keyof typeof listeners; args?: any[]; result?: unknown; error?: string }) => {
-      if (message.event && listeners[message.event]) {
-        for (const listener of listeners[message.event]) listener(...(message.args ?? []));
-      } else if (message.id) {
-        const request = pending.get(message.id);
-        pending.delete(message.id);
-        if (message.error) request?.reject(new Error(message.error));
-        else request?.resolve(message.result);
-      }
-    });
-    this.port?.onDisconnect.addListener(() => {
-      for (const request of pending.values()) request.reject(abortError());
+    const disconnect = (port: chrome.runtime.Port, error: Error) => {
+      if (this.port !== port) return;
+      this.port = undefined;
+      for (const request of pending.values()) request.reject(this.disposed ? abortError() : error);
       pending.clear();
-    });
+    };
+    const connect = () => {
+      const port = this.chromeApi.runtime?.connect?.({ name: "surf-wax-debugger" });
+      if (!port) return undefined;
+      this.port = port;
+      port.onMessage.addListener((message: { id?: string; event?: keyof typeof listeners; args?: any[]; result?: unknown; error?: string }) => {
+        if (this.port !== port) return;
+        if (message.event && listeners[message.event]) {
+          for (const listener of listeners[message.event]) listener(...(message.args ?? []));
+        } else if (message.id) {
+          const request = pending.get(message.id);
+          pending.delete(message.id);
+          if (message.error) request?.reject(new Error(message.error));
+          else request?.resolve(message.result);
+        }
+      });
+      port.onDisconnect.addListener(() => disconnect(port, new Error("Debugger bridge disconnected")));
+      return port;
+    };
     this.bridge = {
       onEvent: event("onEvent"),
       onDetach: event("onDetach"),
-      call: (method: string, args: unknown[]) => {
-        if (this.disposed) return Promise.reject(abortError());
-        if (!this.port) {
+      call: async (method: string, args: unknown[]) => {
+        if (this.disposed) throw abortError();
+        const port = this.port ?? connect();
+        if (!port) {
           if (method === "userScripts") return Reflect.apply((this.chromeApi.userScripts as any)[args[0] as string], this.chromeApi.userScripts, args.slice(1));
           if (method === "restoreUserScripts") return restoreUserScripts({ chromeApi: this.chromeApi, logger: this.logger });
           if (method === "snapshotUserScripts") return snapshotUserScripts({ chromeApi: this.chromeApi, logger: this.logger });
@@ -225,9 +235,10 @@ export class ChromeExecutor {
         return new Promise((resolve, reject) => {
           const id = globalThis.crypto.randomUUID();
           pending.set(id, { resolve, reject });
-          try { this.port!.postMessage({ id, method, args }); }
+          try { port.postMessage({ id, method, args }); }
           catch (error) {
-            pending.delete(id);
+            disconnect(port, error instanceof Error ? error : new Error(String(error)));
+            try { port.disconnect(); } catch { /* The extension context may already be gone. */ }
             reject(error);
           }
         });
@@ -259,7 +270,17 @@ export class ChromeExecutor {
   }
 
   private async initialize(): Promise<void> {
-    this.initialized ??= (this.bridge.call as (method: string, args: unknown[]) => Promise<unknown>)("restoreUserScripts", []).then(() => undefined);
+    this.initialized ??= (async () => {
+      const call = this.bridge.call as (method: string, args: unknown[]) => Promise<unknown>;
+      try { await call("restoreUserScripts", []); }
+      catch (error) {
+        if (this.port || this.disposed || !this.chromeApi.runtime?.connect) throw error;
+        await call("restoreUserScripts", []);
+      }
+    })().catch((error) => {
+      this.initialized = undefined;
+      throw error;
+    });
     return this.initialized;
   }
 
