@@ -12,7 +12,7 @@ import {
   useAuiState,
 } from "@assistant-ui/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ArrowDownIcon, ChevronLeftIcon, ChevronRightIcon, PencilIcon, RotateCcwIcon, WrenchIcon } from "lucide-react";
+import { ArrowDownIcon, ChevronLeftIcon, ChevronRightIcon, ClockIcon, PencilIcon, RotateCcwIcon, WrenchIcon } from "lucide-react";
 import {
   type ComponentProps,
   type FC,
@@ -205,11 +205,11 @@ export const Thread: FC<{ config: ModelConfig; logger: EventLogger; conversation
                 {duration === undefined || !finalMessageId ? assistantIds.map((messageId) => (
                   <ThreadPrimitive.Unstable_MessageById key={messageId} messageId={messageId} components={MESSAGE_COMPONENTS} />
                 )) : <>
-                  <details className="work-summary" data-testid="work-summary" onToggle={(event) => {
+                  <details className="work-summary thinking-item px-2" data-testid="work-summary" onToggle={(event) => {
                     const row = event.currentTarget.closest<HTMLElement>(".conversation-turn");
                     if (row) virtualizer.measureElement(row);
                   }}>
-                    <summary>{workLabel(duration)}</summary>
+                    <summary><ClockIcon aria-hidden="true" /><span>{workLabel(duration)}</span></summary>
                     <div className="work-summary-content">
                       {assistantIds.map((messageId) => <WorkViewContext.Provider key={messageId} value={{ mode: "process", finalMessageId }}>
                         <ThreadPrimitive.Unstable_MessageById messageId={messageId} components={MESSAGE_COMPONENTS} />

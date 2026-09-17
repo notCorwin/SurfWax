@@ -223,14 +223,6 @@ p {
   padding-bottom: var(--transcript-block-gap);
 }
 
-.work-summary > summary {
-  cursor: pointer;
-  color: var(--muted-foreground);
-  font-size: 12px;
-  list-style-position: inside;
-  padding: 4px 8px;
-}
-
 .work-summary-content {
   display: flex;
   flex-direction: column;
