@@ -65,8 +65,8 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
     || (item.title ?? "新对话").toLocaleLowerCase().includes(needle)
     || (index.get(item.remoteId ?? item.id) ?? "").includes(needle), [index, needle]);
   const visible = (ids: readonly string[]) => ids.filter((id) => matches(aui.threads.item({ id }).getState())).length;
-  const regularCount = visible(threadIds);
-  const archivedCount = visible(archivedIds);
+  const regularCount = open ? visible(threadIds) : 0;
+  const archivedCount = open ? visible(archivedIds) : 0;
 
   return (
     <>
@@ -77,7 +77,7 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
       <dialog ref={dialog} className="conversation-dialog" aria-label="对话列表" onClose={() => { setOpen(false); setWarning(""); trigger.current?.focus(); }} onClick={(event) => {
         if (event.target === event.currentTarget) close();
       }}>
-        <ThreadListPrimitive.Root className="conversation-drawer">
+        {open && <ThreadListPrimitive.Root className="conversation-drawer">
           <header>
             <strong>对话</strong>
             <Button type="button" variant="ghost" size="icon-sm" aria-label="关闭对话列表" title="关闭" onClick={close}>
@@ -105,7 +105,7 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
             </ThreadListPrimitive.Items>
             {regularCount + archivedCount === 0 && <p className="conversation-empty">{needle ? "没有找到匹配的会话" : "暂无已保存的会话"}</p>}
           </div>
-        </ThreadListPrimitive.Root>
+        </ThreadListPrimitive.Root>}
       </dialog>
     </>
   );
