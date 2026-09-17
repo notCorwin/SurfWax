@@ -202,7 +202,10 @@ p {
   color: var(--muted-foreground);
 }
 
-.conversation-action:hover { background: var(--accent); }
+.conversation-action:hover {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 10%, transparent);
+}
 
 .conversation-dialog :is(button, input):focus-visible {
   outline: 2px solid var(--ring);
