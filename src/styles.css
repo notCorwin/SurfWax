@@ -105,3 +105,51 @@ button:not(:disabled),
 [role="button"]:not(:disabled) {
   cursor: pointer;
 }
+
+:is(button, input, textarea, select, summary, a, [role="button"]):focus-visible {
+  outline: 1px solid var(--ring);
+  outline-offset: 2px;
+}
+
+[data-slot="select-trigger"]:focus-visible { border-color: transparent; box-shadow: none; }
+[data-slot="select-content"] { border-color: transparent; }
+
+button,
+input,
+textarea,
+select,
+summary,
+[href],
+[role="button"] {
+  touch-action: manipulation;
+}
+
+.skip-link {
+  position: fixed;
+  z-index: 100;
+  top: 8px;
+  left: 8px;
+  transform: translateY(-160%);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  padding: 8px 12px;
+}
+
+.skip-link:focus-visible { transform: translateY(0); }
+
+.field-error {
+  margin: 0;
+  color: var(--destructive);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

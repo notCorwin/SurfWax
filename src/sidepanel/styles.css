@@ -23,7 +23,7 @@ p {
   flex-direction: column;
   gap: 12px;
   overflow: hidden;
-  padding: 15px;
+  padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
 }
 
 .app-header {
@@ -38,6 +38,10 @@ p {
   font-size: 18px;
   letter-spacing: -0.03em;
 }
+
+.app-header > :first-child { min-width: 0; }
+
+.app-shell [data-testid="composer-input"]:focus-visible { outline-color: transparent; }
 
 .conversation-trigger {
   min-width: 0;
@@ -82,6 +86,7 @@ p {
   flex-direction: column;
   gap: 8px;
   padding: 12px;
+  overscroll-behavior: contain;
 }
 
 .conversation-drawer > header {
@@ -119,6 +124,7 @@ p {
 .conversation-items {
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .conversation-item {
@@ -155,6 +161,9 @@ p {
 .conversation-select small[data-status="interrupted"] {
   color: var(--destructive);
 }
+
+.app-shell [role="status"],
+.app-shell [role="alert"] { overflow-wrap: anywhere; }
 
 .conversation-delete {
   display: grid;

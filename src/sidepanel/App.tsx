@@ -69,7 +69,7 @@ function UserScriptsNotice() {
 }
 
 function Header({ conversation = false }: { conversation?: boolean }) {
-  return <><header className="app-header">
+  return <><a className="skip-link" href="#chat-content">跳转到内容</a><header className="app-header">
     {conversation ? <ConversationMenu /> : <h1>Surf Wax</h1>}
     <div className="flex gap-2"><ScriptsButton /><SettingsButton /></div>
   </header><UserScriptsNotice /></>;
@@ -84,7 +84,7 @@ export function App() {
     return (
       <main className="app-shell" data-testid="sidepanel-shell">
         <Header />
-        <section className="chat-scroll">
+        <section id="chat-content" tabIndex={-1} className="chat-scroll">
           <div className="empty-state" role="alert" data-testid="fatal-log-error">
             <h2>事件日志不可用</h2><p>{fatal}</p>
           </div>
@@ -100,7 +100,7 @@ export function App() {
   return (
     <main className="app-shell" data-testid="sidepanel-shell">
       <Header />
-      <section className="chat-scroll">
+      <section id="chat-content" tabIndex={-1} className="chat-scroll">
         <div className="empty-state" data-testid="config-required-state">
           <h2>{session.configReady ? "先完成模型配置" : "正在读取配置…"}</h2>
           <p>{session.configReady ? "打开设置页填写 Base URL、Model ID 和 API Key。" : "正在检查本地模型配置。"}</p>
@@ -129,7 +129,7 @@ function ConfiguredChat({ config, logger, onError }: { config: ModelConfig; logg
     return (
       <main className="app-shell" data-testid="sidepanel-shell">
         <Header />
-        <section className="chat-scroll"><div className="empty-state" data-testid="conversation-loading">正在恢复对话…</div></section>
+        <section id="chat-content" tabIndex={-1} className="chat-scroll"><div className="empty-state" data-testid="conversation-loading">正在恢复对话…</div></section>
       </main>
     );
   }
@@ -187,7 +187,7 @@ function ConfiguredRuntime({ config, logger, initialThreadId }: { config: ModelC
         <Header conversation />
         {guardWarning && <p role="status">{guardWarning}</p>}
         {contextStatus && <p role="status" data-testid="context-status">{contextStatus}</p>}
-        <section className="chat-scroll" data-testid="chat-scroll"><Thread /></section>
+        <section id="chat-content" tabIndex={-1} className="chat-scroll" data-testid="chat-scroll"><Thread /></section>
       </main>
     </AssistantRuntimeProvider>
   );

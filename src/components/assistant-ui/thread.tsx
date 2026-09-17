@@ -214,7 +214,7 @@ const AssistantMessage: FC = () => {
       </div>
       <div className="flex items-center gap-2 pt-1 text-xs text-muted-foreground">
         <ActionBarPrimitive.Root hideWhenRunning>
-          <ActionBarPrimitive.Reload type="button" data-testid="replay-message-button" className="rounded px-1 py-0.5 hover:bg-muted" aria-label="重新生成回复" title="重新生成回复">
+          <ActionBarPrimitive.Reload type="button" data-testid="replay-message-button" className="inline-flex size-7 items-center justify-center rounded hover:bg-muted" aria-label="重新生成回复" title="重新生成回复">
             <RotateCcwIcon className="size-3.5" aria-hidden="true" />
           </ActionBarPrimitive.Reload>
         </ActionBarPrimitive.Root>
@@ -226,11 +226,11 @@ const AssistantMessage: FC = () => {
 
 const MessageBranches: FC = () => (
   <BranchPickerPrimitive.Root hideWhenSingleBranch className="flex items-center gap-1" aria-label="消息分支">
-    <BranchPickerPrimitive.Previous type="button" className="rounded p-0.5 hover:bg-muted disabled:opacity-40" aria-label="上一个分支" title="上一个分支">
+    <BranchPickerPrimitive.Previous type="button" className="inline-flex size-7 items-center justify-center rounded hover:bg-muted disabled:opacity-40" aria-label="上一个分支" title="上一个分支">
       <ChevronLeftIcon className="size-3.5" aria-hidden="true" />
     </BranchPickerPrimitive.Previous>
     <span><BranchPickerPrimitive.Number /> / <BranchPickerPrimitive.Count /></span>
-    <BranchPickerPrimitive.Next type="button" className="rounded p-0.5 hover:bg-muted disabled:opacity-40" aria-label="下一个分支" title="下一个分支">
+    <BranchPickerPrimitive.Next type="button" className="inline-flex size-7 items-center justify-center rounded hover:bg-muted disabled:opacity-40" aria-label="下一个分支" title="下一个分支">
       <ChevronRightIcon className="size-3.5" aria-hidden="true" />
     </BranchPickerPrimitive.Next>
   </BranchPickerPrimitive.Root>
@@ -245,8 +245,8 @@ const UserMessage: FC = () => {
         <ComposerPrimitive.Root className="rounded-xl border border-primary/40 bg-primary/15 p-2">
           <ComposerPrimitive.Input data-testid="edit-message-input" autoFocus rows={2} className="min-h-14 w-full resize-y bg-transparent px-1 outline-none" aria-label="编辑消息" />
           <div className="mt-2 flex justify-end gap-2">
-            <ComposerPrimitive.Cancel type="button" className="rounded px-2 py-1 hover:bg-muted">取消</ComposerPrimitive.Cancel>
-            <ComposerPrimitive.Send type="submit" className="rounded bg-primary px-2 py-1 text-primary-foreground disabled:opacity-50">保存并重新生成</ComposerPrimitive.Send>
+            <ComposerPrimitive.Cancel type="button" className="min-h-7 rounded px-2 hover:bg-muted">取消</ComposerPrimitive.Cancel>
+            <ComposerPrimitive.Send type="submit" className="min-h-7 rounded bg-primary px-2 text-primary-foreground disabled:opacity-50">保存并重新生成</ComposerPrimitive.Send>
           </div>
         </ComposerPrimitive.Root>
       ) : (
@@ -256,7 +256,7 @@ const UserMessage: FC = () => {
       )}
       <div className="flex items-center justify-end gap-2 pt-1 text-xs text-muted-foreground">
         {!editing && !running && <ActionBarPrimitive.Root>
-          <ActionBarPrimitive.Edit type="button" data-testid="edit-message-button" className="rounded px-1 py-0.5 hover:bg-muted" aria-label="编辑消息" title="编辑消息">
+          <ActionBarPrimitive.Edit type="button" data-testid="edit-message-button" className="inline-flex size-7 items-center justify-center rounded hover:bg-muted" aria-label="编辑消息" title="编辑消息">
             <PencilIcon className="size-3.5" aria-hidden="true" />
           </ActionBarPrimitive.Edit>
         </ActionBarPrimitive.Root>}

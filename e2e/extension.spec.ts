@@ -240,6 +240,46 @@ async function readEvents(page: Page): Promise<any[]> {
   }));
 }
 
+test("shows inline settings errors and returns keyboard focus after closing conversations", async () => {
+  const opened = await openExtension();
+  try {
+    const [options] = await Promise.all([
+      opened.context.waitForEvent("page"), opened.page.getByTestId("open-settings").click(),
+    ]);
+    await options.getByRole("button", { name: "保存配置" }).click();
+    await expect(options.locator("#base-url-error")).toHaveText("请输入 Base URL");
+    await expect(options.locator("#base-url")).toBeFocused();
+    await expect(options.locator("#base-url")).toHaveAttribute("aria-invalid", "true");
+    await options.setViewportSize({ width: 320, height: 720 });
+    expect(await options.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await options.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+    expect(await options.evaluate(() => getComputedStyle(document.documentElement).colorScheme)).toBe("dark");
+    await options.getByRole("link", { name: "跳转到配置" }).focus();
+    await options.keyboard.press("Enter");
+    await expect(options.locator("#options-content")).toBeFocused();
+    await options.getByLabel("Base URL").fill("https://provider.test/v1");
+    await options.getByLabel("Model ID").fill("test-model");
+    await options.getByLabel("API Key").fill("test-key");
+    await options.getByRole("button", { name: "保存配置" }).click();
+    await expect(opened.page.getByTestId("conversation-menu")).toBeVisible();
+    await opened.page.setViewportSize({ width: 320, height: 720 });
+    expect(await opened.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await opened.page.getByRole("link", { name: "跳转到内容" }).focus();
+    await opened.page.keyboard.press("Enter");
+    await expect(opened.page.locator("#chat-content")).toBeFocused();
+    const trigger = opened.page.getByTestId("conversation-menu");
+    await trigger.focus();
+    await trigger.press("Enter");
+    await expect(opened.page.getByRole("dialog", { name: "对话列表" })).toBeVisible();
+    await opened.page.keyboard.press("Escape");
+    await expect(trigger).toBeFocused();
+    await opened.page.setViewportSize({ width: 1440, height: 900 });
+    expect(await opened.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory);
+  }
+});
+
 test("ships only the minimal MV3 Harness surface", async () => {
   const opened = await openExtension();
   try {
@@ -1160,6 +1200,9 @@ test("manages, restores, runs and deletes scripts in a separate Chrome tab", asy
     await expect(manager.getByLabel("已保存脚本").getByRole("button", { name: /managed · 已注册/ })).toBeVisible();
     expect((await manager.evaluate(async () => chrome.storage.local.get("side-agent:user-scripts")))["side-agent:user-scripts"]).toHaveLength(1);
     await definition.fill(JSON.stringify({ ...script, js: [{ code: "document.documentElement.dataset.managed = 'updated'; 'RUN_OK'" }] }));
+    manager.once("dialog", (dialog) => dialog.dismiss());
+    await manager.getByRole("button", { name: "新建脚本" }).click();
+    await expect(definition).toHaveValue(/updated/);
     await manager.getByRole("button", { name: "保存" }).click();
     const settings = await opened.context.newPage();
     await settings.goto(`chrome://extensions/?id=${opened.extensionId}`);

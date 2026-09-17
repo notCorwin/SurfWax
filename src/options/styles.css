@@ -10,7 +10,11 @@ body {
   margin: 0 auto;
   flex-direction: column;
   gap: 22px;
-  padding: 42px 24px;
+  padding: max(24px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+}
+
+@media (min-width: 700px) {
+  .options-shell { padding-top: 42px; }
 }
 
 .options-header {
@@ -50,5 +54,8 @@ body {
   color: var(--muted-foreground);
   font-size: 13px;
 }
+
+.options-shell :is(p, summary) { overflow-wrap: anywhere; }
+.options-shell summary { cursor: pointer; }
 
 details[open] [data-slot="field"] { margin-top: 12px; }

@@ -11,16 +11,17 @@ import { Button } from "../ui/button";
 
 export const ConversationMenu: FC = () => {
   const dialog = useRef<HTMLDialogElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
   const title = useAuiState((state) => state.threadListItem.title || "新对话");
   const close = () => dialog.current?.close();
 
   return (
     <>
-      <Button type="button" variant="outline" className="conversation-trigger" data-testid="conversation-menu" onClick={() => dialog.current?.showModal()}>
+      <Button ref={trigger} type="button" variant="outline" className="conversation-trigger" data-testid="conversation-menu" onClick={() => dialog.current?.showModal()}>
         <MenuIcon aria-hidden="true" />
         <span>{title}</span>
       </Button>
-      <dialog ref={dialog} className="conversation-dialog" aria-label="对话列表" onClick={(event) => {
+      <dialog ref={dialog} className="conversation-dialog" aria-label="对话列表" onClose={() => trigger.current?.focus()} onClick={(event) => {
         if (event.target === event.currentTarget) close();
       }}>
         <ThreadListPrimitive.Root className="conversation-drawer">
