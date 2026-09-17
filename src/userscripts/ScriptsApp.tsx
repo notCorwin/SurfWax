@@ -39,8 +39,11 @@ export function ScriptsApp() {
   const busy = action !== null;
 
   useEffect(() => {
-    if (draft === savedDraft.current) return;
-    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    const warn = (event: BeforeUnloadEvent) => {
+      if (draft === savedDraft.current) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, [draft]);

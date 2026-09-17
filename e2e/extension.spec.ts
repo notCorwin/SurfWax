@@ -240,6 +240,14 @@ async function readEvents(page: Page): Promise<any[]> {
   }));
 }
 
+async function warnsOnLeave(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+}
+
 test("shows inline settings errors and returns keyboard focus after closing conversations", async () => {
   const opened = await openExtension();
   try {
@@ -262,6 +270,12 @@ test("shows inline settings errors and returns keyboard focus after closing conv
     await options.getByLabel("API Key").fill("test-key");
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(opened.page.getByTestId("conversation-menu")).toBeVisible();
+    expect(await warnsOnLeave(options)).toBe(false);
+    await options.getByLabel("Model ID").fill("another-model");
+    expect(await warnsOnLeave(options)).toBe(true);
+    await options.getByRole("button", { name: "保存配置" }).click();
+    await expect(options.getByRole("status")).toContainText("配置已保存");
+    expect(await warnsOnLeave(options)).toBe(false);
     await opened.page.setViewportSize({ width: 320, height: 720 });
     expect(await opened.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await opened.page.getByRole("link", { name: "跳转到内容" }).focus();
@@ -275,6 +289,10 @@ test("shows inline settings errors and returns keyboard focus after closing conv
     await expect(trigger).toBeFocused();
     await opened.page.setViewportSize({ width: 1440, height: 900 });
     expect(await opened.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    let leavePrompts = 0;
+    options.on("dialog", (dialog) => { leavePrompts += 1; void dialog.dismiss(); });
+    await options.reload();
+    expect(leavePrompts).toBe(0);
   } finally {
     await dispose(opened.context, opened.userDataDirectory);
   }
@@ -1198,12 +1216,16 @@ test("manages, restores, runs and deletes scripts in a separate Chrome tab", asy
     await definition.fill(JSON.stringify(script));
     await manager.getByRole("button", { name: "保存" }).click();
     await expect(manager.getByLabel("已保存脚本").getByRole("button", { name: /managed · 已注册/ })).toBeVisible();
+    expect(await warnsOnLeave(manager)).toBe(false);
     expect((await manager.evaluate(async () => chrome.storage.local.get("side-agent:user-scripts")))["side-agent:user-scripts"]).toHaveLength(1);
     await definition.fill(JSON.stringify({ ...script, js: [{ code: "document.documentElement.dataset.managed = 'updated'; 'RUN_OK'" }] }));
+    expect(await warnsOnLeave(manager)).toBe(true);
     manager.once("dialog", (dialog) => dialog.dismiss());
     await manager.getByRole("button", { name: "新建脚本" }).click();
     await expect(definition).toHaveValue(/updated/);
     await manager.getByRole("button", { name: "保存" }).click();
+    await expect(manager.getByRole("status")).toContainText("脚本已保存");
+    expect(await warnsOnLeave(manager)).toBe(false);
     const settings = await opened.context.newPage();
     await settings.goto(`chrome://extensions/?id=${opened.extensionId}`);
     const toggle = settings.locator("extensions-toggle-row#allow-user-scripts cr-toggle#crToggle");

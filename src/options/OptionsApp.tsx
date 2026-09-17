@@ -57,8 +57,11 @@ export function OptionsApp() {
   }, []);
 
   useEffect(() => {
-    if (JSON.stringify(config) === savedConfig.current) return;
-    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    const warn = (event: BeforeUnloadEvent) => {
+      if (JSON.stringify(config) === savedConfig.current) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, [config]);
