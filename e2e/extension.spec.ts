@@ -284,7 +284,7 @@ return { extensionTitle: document.title, version: chrome.runtime.getManifest().v
     await composer.fill("exercise every browser context");
     await composer.press("Enter");
     await expect(opened.page.locator(".activity")).toHaveCount(1);
-    await expect(opened.page.locator(".activity summary")).toContainText("已运行 chrome");
+    await expect(opened.page.locator(".activity summary")).toContainText("调用了命令");
     await expect(opened.page.locator(".activity")).not.toHaveAttribute("open", "");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("META_OK");
     await opened.page.locator(".activity summary").click();
@@ -823,6 +823,7 @@ test("closing the panel prevents a queued chrome call from starting", async () =
     await opened.page.getByTestId("composer-input").fill("queue two calls");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".activity")).toHaveCount(2);
+    await expect(opened.page.locator(".activity").first().locator("summary")).toContainText("运行命令中");
     await expect.poll(() => opened.page.evaluate(async (url) => {
       const [tab] = await chrome.tabs.query({ url });
       try { await chrome.debugger.attach({ tabId: tab.id! }, "1.3"); await chrome.debugger.detach({ tabId: tab.id! }); return false; }
