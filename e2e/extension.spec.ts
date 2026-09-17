@@ -276,6 +276,15 @@ test("shows inline settings errors and returns keyboard focus after closing conv
     const [options] = await Promise.all([
       opened.context.waitForEvent("page"), opened.page.getByTestId("open-settings").click(),
     ]);
+    const disclosure = options.locator(".advanced-settings");
+    expect(await options.evaluate(() => {
+      const summary = getComputedStyle(document.querySelector(".advanced-settings summary")!);
+      const label = getComputedStyle(document.querySelector('[data-slot="field-label"]')!);
+      return [summary.color, summary.fontSize, summary.fontWeight, summary.lineHeight].join("|")
+        === [label.color, label.fontSize, label.fontWeight, label.lineHeight].join("|");
+    })).toBe(true);
+    await disclosure.locator("summary").click();
+    await expect(disclosure).toHaveAttribute("open", "");
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(options.locator("#base-url-error")).toHaveText("请输入 Base URL");
     await expect(options.locator("#base-url")).toBeFocused();

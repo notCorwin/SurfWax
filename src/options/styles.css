@@ -59,17 +59,16 @@ body {
 .advanced-settings summary {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   cursor: pointer;
   list-style: none;
-  color: var(--muted-foreground);
-  padding: 0 4px;
   font-size: 14px;
-  font-weight: 600;
-  line-height: 1.6;
+  font-weight: 500;
+  line-height: 1.375;
 }
 
 .advanced-settings summary::-webkit-details-marker { display: none; }
-.advanced-settings summary svg { width: 16px; height: 16px; flex: none; }
+.advanced-settings summary svg { width: 14px; height: 14px; flex: none; }
+.advanced-settings[open] summary svg { transform: rotate(90deg); }
 
 details[open] [data-slot="field"] { margin-top: 12px; }

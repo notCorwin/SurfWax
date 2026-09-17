@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { LoaderCircleIcon, Settings2Icon } from "lucide-react";
+import { ChevronRightIcon, LoaderCircleIcon } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../components/ui/card";
 import { Field, FieldGroup, FieldLabel } from "../components/ui/field";
@@ -177,7 +177,7 @@ export function OptionsApp() {
                 {config.contextWindowOverride && <p className="model-limit-match">当前生效：手动指定 {config.contextWindowOverride.toLocaleString()} tokens</p>}
               </Field>
               <details className="advanced-settings">
-                <summary><Settings2Icon aria-hidden="true" /><span>高级设置：手动指定上下文窗口</span></summary>
+                <summary><ChevronRightIcon aria-hidden="true" /><span>高级设置：手动指定上下文窗口</span></summary>
                 <Field data-disabled={busy || undefined}>
                   <FieldLabel htmlFor="context-window">窗口大小（tokens）</FieldLabel>
                   <Input id="context-window" name="contextWindowOverride" type="number" min="1" step="1" aria-invalid={!!fieldErrors.contextWindowOverride} aria-describedby={fieldErrors.contextWindowOverride ? "context-window-error" : undefined} value={config.contextWindowOverride ?? ""} disabled={busy}
