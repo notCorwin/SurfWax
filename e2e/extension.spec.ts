@@ -480,6 +480,7 @@ return { extensionTitle: document.title, version: chrome.runtime.getManifest().v
     await composer.press("Enter");
     await expect(opened.page.locator(".activity")).toHaveCount(1);
     await expect(opened.page.locator(".activity summary")).toContainText("调用了命令");
+    await expect(opened.page.locator(".activity summary span")).not.toHaveClass(/shimmer/);
     await expect(opened.page.locator(".activity")).not.toHaveAttribute("open", "");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("META_OK");
     await opened.page.locator(".activity summary").click();
@@ -1182,8 +1183,17 @@ test("closing the panel prevents a queued chrome call from starting", async () =
     await options.close();
     await opened.page.getByTestId("composer-input").fill("queue two calls");
     await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.locator(".activity")).toHaveCount(2);
-    await expect(opened.page.locator(".activity").first().locator("summary")).toContainText("运行命令中");
+    await expect(opened.page.locator(".activity[data-status]")).toHaveCount(2);
+    await expect(opened.page.locator(".activity[data-status]").first().locator("summary")).toContainText("运行命令中");
+    const runningLabel = opened.page.locator(".activity[data-status]").first().locator("summary span");
+    await expect(runningLabel).toHaveClass(/shimmer/);
+    expect(await runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationPlayState)).toBe("running");
+    await opened.page.emulateMedia({ colorScheme: "dark" });
+    expect(await runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationPlayState)).toBe("running");
+    await opened.page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+    expect(await runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationPlayState)).toBe("paused");
+    await opened.page.emulateMedia({ colorScheme: "light", reducedMotion: "no-preference" });
+    expect(await runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationPlayState)).toBe("running");
     await expect.poll(() => opened.page.evaluate(async (url) => {
       const [tab] = await chrome.tabs.query({ url });
       try { await chrome.debugger.attach({ tabId: tab.id! }, "1.3"); await chrome.debugger.detach({ tabId: tab.id! }); return false; }
