@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { LoaderCircleIcon } from "lucide-react";
 import { Button } from "../components/ui/button";
-import { USER_SCRIPTS_ERROR_KEY, USER_SCRIPTS_LEGACY_KEY, USER_SCRIPTS_STORAGE_KEY } from "./persistence";
+import { CodeEditor } from "./CodeEditor";
+import { USER_SCRIPTS_DISABLED_KEY, USER_SCRIPTS_ERROR_KEY, USER_SCRIPTS_LEGACY_KEY, USER_SCRIPTS_STORAGE_KEY } from "./persistence";
 import "../styles.css";
 import "../options/styles.css";
 import "./styles.css";
@@ -20,6 +21,13 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+async function formatJavaScript(code: string): Promise<string> {
+  const [{ format }, babel, estree] = await Promise.all([
+    import("prettier/standalone"), import("prettier/plugins/babel"), import("prettier/plugins/estree"),
+  ]);
+  return (await format(code, { parser: "babel", plugins: [babel, estree], printWidth: 100 })).trimEnd();
+}
+
 function parseScript(text: string): Script | null {
   try { return JSON.parse(text) as Script; }
   catch { return null; }
@@ -32,6 +40,7 @@ function editableAsForm(script: Script | null): script is Script & { matches: st
 
 export function ScriptsApp() {
   const [scripts, setScripts] = useState<Script[]>([]);
+  const [disabledIds, setDisabledIds] = useState<string[]>([]);
   const [available, setAvailable] = useState<boolean | null>(null);
   const [registered, setRegistered] = useState<string[]>([]);
   const [error, setError] = useState("");
@@ -46,10 +55,11 @@ export function ScriptsApp() {
   const [mode, setMode] = useState<"form" | "json">("form");
   const [draft, setDraft] = useState(JSON.stringify(TEMPLATE, null, 2));
   const savedDraft = useRef(JSON.stringify(TEMPLATE, null, 2));
+  const draftRevision = useRef(0);
   const [tabs, setTabs] = useState<chrome.tabs.Tab[]>([]);
   const [target, setTarget] = useState("");
   const [result, setResult] = useState("");
-  const [action, setAction] = useState<"saving" | "running" | "deleting" | "refreshing" | null>(null);
+  const [action, setAction] = useState<"saving" | "running" | "deleting" | "refreshing" | "toggling" | "formatting" | null>(null);
   const busy = action !== null;
   const parsed = parseScript(draft);
   const formReady = editableAsForm(parsed);
@@ -69,11 +79,15 @@ export function ScriptsApp() {
   const loadTabs = async () => setTabs((await chrome.tabs.query({})).filter((tab) => tab.id && /^https?:|^file:/.test(tab.url ?? "")));
 
   const refresh = async (reconcile = true) => {
-    const stored = await chrome.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_ERROR_KEY, USER_SCRIPTS_LEGACY_KEY]);
+    const stored = await chrome.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY, USER_SCRIPTS_ERROR_KEY, USER_SCRIPTS_LEGACY_KEY]);
     setRestoreError(String(stored[USER_SCRIPTS_ERROR_KEY] ?? ""));
     setLegacy(stored[USER_SCRIPTS_LEGACY_KEY]);
     const saved = stored[USER_SCRIPTS_STORAGE_KEY];
-    setScripts(Array.isArray(saved) ? saved : []);
+    const activeScripts: Script[] = Array.isArray(saved) ? saved : [];
+    const disabledScripts: Script[] = Array.isArray(stored[USER_SCRIPTS_DISABLED_KEY]) ? stored[USER_SCRIPTS_DISABLED_KEY] : [];
+    const inactive = disabledScripts.filter((script) => !activeScripts.some((item) => item.id === script.id));
+    setScripts([...activeScripts, ...inactive]);
+    setDisabledIds(inactive.map((script) => script.id));
     await loadTabs();
     try {
       if (!chrome.userScripts) throw new Error("Allow User Scripts 尚未开启");
@@ -95,7 +109,7 @@ export function ScriptsApp() {
   useEffect(() => {
     void refresh();
     const onChanged = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
-      if (area === "local" && (changes[USER_SCRIPTS_STORAGE_KEY] || changes[USER_SCRIPTS_ERROR_KEY] || changes[USER_SCRIPTS_LEGACY_KEY])) void refresh(false);
+      if (area === "local" && (changes[USER_SCRIPTS_STORAGE_KEY] || changes[USER_SCRIPTS_DISABLED_KEY] || changes[USER_SCRIPTS_ERROR_KEY] || changes[USER_SCRIPTS_LEGACY_KEY])) void refresh(false);
     };
     chrome.storage.onChanged.addListener(onChanged);
     return () => chrome.storage.onChanged.removeListener(onChanged);
@@ -103,6 +117,7 @@ export function ScriptsApp() {
 
   const choose = (script?: Script, force = false) => {
     if (!force && dirty && !confirm("当前脚本有未保存的修改，确定放弃吗？")) return;
+    const revision = ++draftRevision.current;
     const nextDraft = JSON.stringify(script ?? TEMPLATE, null, 2);
     setSelected(script?.id ?? "");
     setDraft(nextDraft);
@@ -113,10 +128,19 @@ export function ScriptsApp() {
     setFieldErrors({});
     setTargetError("");
     if (!force) setMessage("");
+    if (script && editableAsForm(script) && script.js[0].code.trim()) {
+      void formatJavaScript(script.js[0].code).then((code) => {
+        if (draftRevision.current !== revision) return;
+        const formatted = JSON.stringify({ ...script, js: [{ ...script.js[0], code }] }, null, 2);
+        savedDraft.current = formatted;
+        setDraft(formatted);
+      }).catch(() => undefined);
+    }
   };
 
   const updateField = (field: Field, value: string) => {
     if (!formReady) return;
+    draftRevision.current += 1;
     const next: Script = { ...parsed };
     if (field === "id") next.id = value;
     if (field === "matches") next.matches = value.split("\n");
@@ -146,7 +170,7 @@ export function ScriptsApp() {
       if (!script.js[0].code.trim()) errors.code = "请输入 JavaScript 代码。";
       if (Object.keys(errors).length) {
         setFieldErrors(errors);
-        document.getElementById(`script-${Object.keys(errors)[0]}`)?.focus();
+        (Object.keys(errors)[0] === "code" ? document.querySelector<HTMLElement>("#script-code .cm-content") : document.getElementById(`script-${Object.keys(errors)[0]}`))?.focus();
         return;
       }
       script = { ...script, id: script.id.trim(), matches };
@@ -164,11 +188,16 @@ export function ScriptsApp() {
     setAction("saving");
     setMessage("正在保存脚本…");
     try {
+      let formatWarning = "";
+      if (mode === "form" && editableAsForm(script)) {
+        try { script = { ...script, js: [{ ...script.js[0], code: await formatJavaScript(script.js[0].code) }] }; }
+        catch (cause) { formatWarning = errorText(cause).split("\n")[0]; }
+      }
       if (selected) await call("replace", script);
       else await call("register", [script]);
       choose(script, true);
       await refresh();
-      setMessage("脚本已保存");
+      setMessage(formatWarning ? `脚本已保存，但代码未格式化：${formatWarning}` : "脚本已保存");
     } catch (cause) { setError(errorText(cause)); }
     finally { setAction(null); }
   };
@@ -179,11 +208,35 @@ export function ScriptsApp() {
     setError("");
     setMessage("正在删除脚本…");
     try {
-      await call("unregister", { ids: [selected] });
+      await call("delete", { id: selected });
       choose(undefined, true);
       await refresh();
       setMessage("脚本已删除");
     } catch (cause) { setError(errorText(cause)); }
+    finally { setAction(null); }
+  };
+
+  const toggle = async (id: string, enable: boolean) => {
+    setAction("toggling");
+    setError("");
+    setMessage(enable ? "正在启用脚本…" : "正在停用脚本…");
+    try {
+      await call("setEnabled", { id, enabled: enable });
+      await refresh(false);
+      setMessage(enable ? "脚本已启用" : "脚本已停用");
+    } catch (cause) { setError(errorText(cause)); }
+    finally { setAction(null); }
+  };
+
+  const formatNow = async () => {
+    if (!formReady || !parsed.js[0].code.trim()) return;
+    setAction("formatting");
+    setFieldErrors({});
+    setMessage("正在格式化代码…");
+    try {
+      updateField("code", await formatJavaScript(parsed.js[0].code));
+      setMessage("代码已格式化");
+    } catch (cause) { setFieldErrors({ code: `格式化失败：${errorText(cause).split("\n")[0]}` }); }
     finally { setAction(null); }
   };
 
@@ -196,12 +249,12 @@ export function ScriptsApp() {
     const script = parseScript(draft);
     if (!script || !Array.isArray(script.js) || !script.js.length) {
       setDraftError("当前编辑内容缺少有效的 js 代码源。");
-      document.getElementById(mode === "form" ? "script-code" : "script-definition")?.focus();
+      (mode === "form" ? document.querySelector<HTMLElement>("#script-code .cm-content") : document.getElementById("script-definition"))?.focus();
       return;
     }
     if (mode === "form" && editableAsForm(script) && !script.js[0].code.trim()) {
       setFieldErrors({ code: "请输入 JavaScript 代码。" });
-      document.getElementById("script-code")?.focus();
+      document.querySelector<HTMLElement>("#script-code .cm-content")?.focus();
       return;
     }
     if (!target || !Number.isInteger(Number(target))) {
@@ -241,11 +294,14 @@ export function ScriptsApp() {
         <div className="scripts-sidebar-heading"><h2>已保存脚本 <span>{scripts.length}</span></h2><Button type="button" variant="outline" disabled={busy} onClick={() => choose()}>新建脚本</Button></div>
         {scripts.length > 0 && <><label htmlFor="script-search">搜索脚本</label><input id="script-search" type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索 ID 或网站…" /></>}
         <div className="scripts-list" aria-label="已保存脚本">
-          {visibleScripts.map((script) => <button className="script-item" type="button" aria-pressed={selected === script.id} disabled={busy} key={script.id} onClick={() => choose(script)}>
-            <span className="script-item-title">{script.id}</span>
-            <span className="script-item-sites">{Array.isArray(script.matches) ? script.matches.join(", ") : "未设置网站"}</span>
-            <span className="script-item-status">{registered.includes(script.id) ? "● 已注册" : "○ 待恢复"}</span>
-          </button>)}
+          {visibleScripts.map((script) => <div className="script-row" key={script.id}>
+            <button className="script-item" type="button" aria-pressed={selected === script.id} disabled={busy} onClick={() => choose(script)}>
+              <span className="script-item-title">{script.id}</span>
+              <span className="script-item-sites">{Array.isArray(script.matches) ? script.matches.join(", ") : "未设置网站"}</span>
+              <span className="script-item-status">{disabledIds.includes(script.id) ? "○ 已停用" : registered.includes(script.id) ? "● 已注册" : "○ 待恢复"}</span>
+            </button>
+            <Button type="button" variant="outline" size="sm" disabled={busy || !available} aria-label={`${disabledIds.includes(script.id) ? "启用" : "停用"} ${script.id}`} onClick={() => void toggle(script.id, disabledIds.includes(script.id))}>{disabledIds.includes(script.id) ? "启用" : "停用"}</Button>
+          </div>)}
           {!scripts.length && <p className="scripts-empty">还没有脚本。点击“新建脚本”开始。</p>}
           {scripts.length > 0 && !visibleScripts.length && <p className="scripts-empty">没有匹配的脚本。</p>}
         </div>
@@ -254,13 +310,13 @@ export function ScriptsApp() {
       <div className="scripts-main">
         <section className="scripts-editor" aria-labelledby="scripts-editor-title">
           <div className="scripts-section-heading"><div><h2 id="scripts-editor-title">{selected || "新建脚本"}</h2><p>{dirty ? "有未保存的修改" : selected ? "已保存" : "填写后保存，脚本将在匹配的网站自动运行"}</p></div>
-            <Button type="button" variant="outline" disabled={busy || (mode === "json" && !formReady)} onClick={() => { setMode(mode === "form" ? "json" : "form"); setDraftError(""); }}>{mode === "form" ? "JSON 高级编辑" : "返回表单"}</Button>
+            <Button type="button" variant="outline" disabled={busy || (mode === "json" && !formReady)} onClick={() => { draftRevision.current += 1; setMode(mode === "form" ? "json" : "form"); setDraftError(""); }}>{mode === "form" ? "JSON 高级编辑" : "返回表单"}</Button>
           </div>
           {mode === "form" && formReady ? <div className="scripts-fields">
             <div className="scripts-field"><label htmlFor="script-id">脚本 ID</label><p>用于识别脚本，保存后不可更改。</p><input id="script-id" name="scriptId" value={parsed.id} disabled={!!selected || busy} aria-invalid={!!fieldErrors.id} aria-describedby={fieldErrors.id ? "script-id-error" : undefined} onChange={(event) => updateField("id", event.target.value)} placeholder="例如：page-helper" />{fieldErrors.id && <p id="script-id-error" className="field-error" role="alert">{fieldErrors.id}</p>}</div>
             <div className="scripts-field"><label htmlFor="script-matches">运行于哪些网站</label><p>每行一条 Chrome 网站匹配规则，例如 https://example.com/*</p><textarea id="script-matches" name="scriptMatches" spellCheck={false} value={parsed.matches.join("\n")} aria-invalid={!!fieldErrors.matches} aria-describedby={fieldErrors.matches ? "script-matches-error" : undefined} onChange={(event) => updateField("matches", event.target.value)} placeholder="https://example.com/*" />{fieldErrors.matches && <p id="script-matches-error" className="field-error" role="alert">{fieldErrors.matches}</p>}</div>
-            <div className="scripts-field"><label htmlFor="script-code">JavaScript 代码</label><textarea id="script-code" name="scriptCode" spellCheck={false} value={parsed.js[0].code} aria-invalid={!!fieldErrors.code} aria-describedby={fieldErrors.code ? "script-code-error" : undefined} onChange={(event) => updateField("code", event.target.value)} placeholder="// 在匹配的网站运行…" />{fieldErrors.code && <p id="script-code-error" className="field-error" role="alert">{fieldErrors.code}</p>}</div>
-          </div> : <div className="scripts-field"><label htmlFor="script-definition">完整脚本定义（JSON）</label><p>{formReady ? "可编辑 world、runAt 等高级字段；返回表单时会保留这些字段。" : "此脚本包含多个代码源、文件源或不完整字段，请在此编辑完整定义。"}</p><textarea id="script-definition" name="scriptDefinition" spellCheck={false} aria-invalid={!!draftError} aria-describedby={draftError ? "script-definition-error" : undefined} value={draft} onChange={(event) => { setDraft(event.target.value); setDraftError(""); setResult(""); setMessage(""); }} /></div>}
+            <div className="scripts-field"><div className="scripts-code-heading"><label id="script-code-label">JavaScript 代码</label><Button type="button" variant="outline" size="sm" disabled={busy || !parsed.js[0].code.trim()} onClick={() => void formatNow()}>{action === "formatting" && <LoaderCircleIcon className="animate-spin" aria-hidden="true" />}格式化代码</Button></div><p>语法高亮；保存时也会自动格式化。</p><CodeEditor value={parsed.js[0].code} onChange={(value) => updateField("code", value)} invalid={!!fieldErrors.code} errorId={fieldErrors.code ? "script-code-error" : undefined} />{fieldErrors.code && <p id="script-code-error" className="field-error" role="alert">{fieldErrors.code}</p>}</div>
+          </div> : <div className="scripts-field"><label htmlFor="script-definition">完整脚本定义（JSON）</label><p>{formReady ? "可编辑 world、runAt 等高级字段；返回表单时会保留这些字段。" : "此脚本包含多个代码源、文件源或不完整字段，请在此编辑完整定义。"}</p><textarea id="script-definition" name="scriptDefinition" spellCheck={false} aria-invalid={!!draftError} aria-describedby={draftError ? "script-definition-error" : undefined} value={draft} onChange={(event) => { draftRevision.current += 1; setDraft(event.target.value); setDraftError(""); setResult(""); setMessage(""); }} /></div>}
           {draftError && <p id="script-definition-error" className="field-error" role="alert">{draftError}</p>}
           <div className="scripts-actions"><Button type="button" disabled={busy || !available} onClick={() => void save()}>{action === "saving" && <LoaderCircleIcon className="animate-spin" aria-hidden="true" />}保存</Button><Button type="button" variant="destructive" disabled={busy || !available || !selected} onClick={() => void remove()}>{action === "deleting" && <LoaderCircleIcon className="animate-spin" aria-hidden="true" />}删除</Button></div>
         </section>

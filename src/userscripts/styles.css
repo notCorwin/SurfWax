@@ -13,7 +13,9 @@
 .scripts-sidebar input, .scripts-field input, .scripts-run select { min-height: 40px; }
 .scripts-shell textarea { resize: vertical; font: 13px/1.5 ui-monospace, monospace; }
 .scripts-list { display: flex; flex-direction: column; gap: 6px; max-height: min(60vh, 650px); overflow: auto; }
-.script-item { display: flex; flex-direction: column; gap: 4px; width: 100%; border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; background: var(--background); color: var(--foreground); text-align: left; }
+.script-row { display: flex; align-items: flex-start; gap: 6px; min-width: 0; }
+.script-row [data-slot="button"] { flex: none; margin-top: 2px; }
+.script-item { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 4px; border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px; background: var(--background); color: var(--foreground); text-align: left; }
 .script-item:hover { background: var(--accent); }
 .script-item[aria-pressed="true"] { border-color: var(--ring); background: var(--accent); }
 .script-item-title { font-weight: 600; overflow-wrap: anywhere; }
@@ -29,8 +31,16 @@
 .scripts-section-heading [data-slot="button"] { flex: none; }
 .scripts-section-heading p, .scripts-field > p, .scripts-run > p { margin: 4px 0 0; color: var(--muted-foreground); font-size: 13px; line-height: 1.5; }
 .scripts-field textarea#script-matches { min-height: 84px; }
-.scripts-field textarea#script-code { min-height: 260px; }
 .scripts-field textarea#script-definition { min-height: 370px; }
+.scripts-code-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.scripts-code-heading [data-slot="button"] { flex: none; }
+.scripts-code-editor { overflow: hidden; border: 1px solid var(--input); border-radius: 8px; }
+.scripts-code-editor:focus-within { outline: 1px solid var(--ring); outline-offset: 2px; }
+.scripts-code-editor:has(.cm-content[aria-invalid="true"]) { border-color: var(--destructive); }
+.scripts-code-editor .cm-editor { min-height: 260px; font: 13px/1.5 ui-monospace, monospace; }
+.scripts-code-editor .cm-scroller { min-height: 260px; max-height: 70vh; overflow: auto; }
+.scripts-code-editor .cm-content { min-height: 260px; font-family: inherit; }
+.scripts-code-editor .cm-editor.cm-focused { outline: none; }
 .scripts-actions { display: flex; gap: 8px; }
 .scripts-run { gap: 12px; }
 .scripts-run > p { margin: 0; }

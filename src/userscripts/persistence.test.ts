@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { callUserScripts, restoreUserScripts, snapshotUserScripts, USER_SCRIPTS_DATA_KEY, USER_SCRIPTS_LEGACY_KEY, USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_WORLDS_KEY } from "./persistence";
+import { callUserScripts, restoreUserScripts, snapshotUserScripts, USER_SCRIPTS_DATA_KEY, USER_SCRIPTS_DISABLED_KEY, USER_SCRIPTS_LEGACY_KEY, USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_WORLDS_KEY } from "./persistence";
 
 function fakeChrome(options: { available?: boolean; stored?: Record<string, unknown>; registered?: chrome.userScripts.RegisteredUserScript[] } = {}) {
   const stored = { ...(options.stored ?? {}) };
@@ -83,5 +83,40 @@ describe("user script persistence", () => {
     expect(fake.api.configureWorld).toHaveBeenCalledWith(world);
     expect(fake.api.register).toHaveBeenCalledWith([script]);
     expect(fake.stored[USER_SCRIPTS_WORLDS_KEY]).toEqual([world]);
+  });
+
+  it("keeps disabled definitions through snapshots, edits and restarts", async () => {
+    const script = { id: "saved", matches: ["<all_urls>"], js: [{ code: "1" }] };
+    const fake = fakeChrome({ registered: [script], stored: { [USER_SCRIPTS_STORAGE_KEY]: [script] } });
+    const options = { chromeApi: fake.chromeApi as never };
+    await callUserScripts("setEnabled", [{ id: script.id, enabled: false }], options);
+    expect(await fake.api.getScripts()).toEqual([]);
+    expect(fake.stored[USER_SCRIPTS_STORAGE_KEY]).toEqual([]);
+    expect(fake.stored[USER_SCRIPTS_DISABLED_KEY]).toEqual([script]);
+    await fake.api.register([script]);
+    fake.stored[USER_SCRIPTS_STORAGE_KEY] = [script];
+    await restoreUserScripts(options);
+    expect(await fake.api.getScripts()).toEqual([]);
+    expect(fake.stored[USER_SCRIPTS_STORAGE_KEY]).toEqual([]);
+    const edited = { ...script, js: [{ code: "2" }] };
+    await callUserScripts("replace", [edited], options);
+    expect(fake.stored[USER_SCRIPTS_DISABLED_KEY]).toEqual([edited]);
+    expect(await fake.api.getScripts()).toEqual([]);
+    await callUserScripts("setEnabled", [{ id: script.id, enabled: true }], options);
+    expect(await fake.api.getScripts()).toEqual([edited]);
+    expect(fake.stored[USER_SCRIPTS_DISABLED_KEY]).toEqual([]);
+    await callUserScripts("setEnabled", [{ id: script.id, enabled: false }], options);
+    await callUserScripts("delete", [{ id: script.id }], options);
+    expect(fake.stored[USER_SCRIPTS_DISABLED_KEY]).toEqual([]);
+    expect(fake.stored[USER_SCRIPTS_STORAGE_KEY]).toEqual([]);
+  });
+
+  it("keeps an active script if Chrome refuses to disable it", async () => {
+    const script = { id: "saved", matches: ["<all_urls>"], js: [{ code: "1" }] };
+    const fake = fakeChrome({ registered: [script], stored: { [USER_SCRIPTS_STORAGE_KEY]: [script] } });
+    fake.api.unregister.mockRejectedValueOnce(new Error("Chrome refused"));
+    await expect(callUserScripts("setEnabled", [{ id: script.id, enabled: false }], { chromeApi: fake.chromeApi as never })).rejects.toThrow("Chrome refused");
+    expect(await fake.api.getScripts()).toEqual([script]);
+    expect(fake.stored[USER_SCRIPTS_DISABLED_KEY]).toEqual([]);
   });
 });
