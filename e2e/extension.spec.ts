@@ -816,15 +816,27 @@ test("closing the panel prevents a queued chrome call from starting", async () =
   ));
   const opened = await openExtension();
   try {
+    const target = await opened.context.newPage();
+    await target.goto(targetUrl);
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     await opened.page.getByTestId("composer-input").fill("queue two calls");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".activity")).toHaveCount(2);
+    await expect.poll(() => opened.page.evaluate(async (url) => {
+      const [tab] = await chrome.tabs.query({ url });
+      try { await chrome.debugger.attach({ tabId: tab.id! }, "1.3"); await chrome.debugger.detach({ tabId: tab.id! }); return false; }
+      catch { return true; }
+    }, targetUrl)).toBe(true);
     await opened.page.close();
 
     const probe = await opened.context.newPage();
     await probe.goto(`chrome-extension://${opened.extensionId}/options.html`);
+    await expect.poll(() => probe.evaluate(async (url) => {
+      const [tab] = await chrome.tabs.query({ url });
+      try { await chrome.debugger.attach({ tabId: tab.id! }, "1.3"); await chrome.debugger.detach({ tabId: tab.id! }); return true; }
+      catch { return false; }
+    }, targetUrl)).toBe(true);
     await expect.poll(() => probe.evaluate(async () => (await chrome.storage.local.get("e2e-queued-tool-ran"))["e2e-queued-tool-ran"]))
       .toBeUndefined();
     expect(provider.requests).toHaveLength(1);
@@ -832,15 +844,3 @@ test("closing the panel prevents a queued chrome call from starting", async () =
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
-    const target = await opened.context.newPage();
-    await target.goto(targetUrl);
-    await expect.poll(() => opened.page.evaluate(async (url) => {
-      const [tab] = await chrome.tabs.query({ url });
-      try { await chrome.debugger.attach({ tabId: tab.id! }, "1.3"); await chrome.debugger.detach({ tabId: tab.id! }); return false; }
-      catch { return true; }
-    }, targetUrl)).toBe(true);
-    await expect.poll(() => probe.evaluate(async (url) => {
-      const [tab] = await chrome.tabs.query({ url });
-      try { await chrome.debugger.attach({ tabId: tab.id! }, "1.3"); await chrome.debugger.detach({ tabId: tab.id! }); return true; }
-      catch { return false; }
-    }, targetUrl)).toBe(true);
