@@ -223,6 +223,21 @@ p {
   padding-bottom: var(--transcript-block-gap);
 }
 
+.work-summary > summary {
+  cursor: pointer;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  list-style-position: inside;
+  padding: 4px 8px;
+}
+
+.work-summary-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--transcript-block-gap);
+  padding-top: 8px;
+}
+
 .assistant-message {
   max-width: 100%;
   overflow-wrap: anywhere;

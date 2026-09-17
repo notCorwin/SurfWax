@@ -16,7 +16,9 @@ import { ArrowDownIcon, ChevronLeftIcon, ChevronRightIcon, PencilIcon, RotateCcw
 import {
   type ComponentProps,
   type FC,
+  createContext,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -29,13 +31,36 @@ import { MarkdownText } from "./markdown-text";
 import { Reasoning } from "./reasoning";
 import { ToolFallback } from "./tool-fallback";
 import type { ModelConfig } from "@/types";
+import type { EventLogger, LogEvent } from "@/logging";
 
 const ESTIMATED_TURN_HEIGHT = 200;
 const AT_BOTTOM_THRESHOLD = 4;
 
 type MessageComponents = ComponentProps<typeof ThreadPrimitive.Unstable_MessageById>["components"];
 type MessageRow = { id: string; role: "user" | "assistant" | "system" };
-type Turn = { id: string; messageIds: string[] };
+type Turn = { id: string; messageIds: string[]; assistantIds: string[] };
+type WorkView = { mode: "process" | "final"; finalMessageId: string };
+const WorkViewContext = createContext<WorkView | null>(null);
+
+export function completedWork(events: readonly LogEvent[]): Map<string, number> {
+  const started = new Map<string, number>();
+  const completed = new Map<string, number>();
+  for (const event of events) {
+    if (!event.runId) continue;
+    if (event.type === "conversation.submitted") started.set(event.runId, Date.parse(event.timestamp));
+    if (event.type !== "conversation.finished") continue;
+    const messageId = (event.content as { messageId?: unknown } | null)?.messageId;
+    const start = started.get(event.runId);
+    if (typeof messageId === "string" && start !== undefined && Number.isFinite(start)) {
+      completed.set(messageId, Math.max(0, Math.floor((Date.parse(event.timestamp) - start) / 1000)));
+    }
+  }
+  return completed;
+}
+
+function workLabel(seconds: number): string {
+  return `工作了${Math.floor(seconds / 60)}分${String(seconds % 60).padStart(2, "0")}秒`;
+}
 
 function useMessageRows(): readonly MessageRow[] {
   const previous = useRef<readonly MessageRow[]>([]);
@@ -52,16 +77,31 @@ function buildTurns(messages: readonly MessageRow[]): Turn[] {
   const turns: Turn[] = [];
   for (const { id, role } of messages) {
     const last = turns.at(-1);
-    if (role === "user" || !last) turns.push({ id, messageIds: [id] });
-    else last.messageIds.push(id);
+    if (role === "user" || !last) turns.push({ id, messageIds: [id], assistantIds: role === "assistant" ? [id] : [] });
+    else {
+      last.messageIds.push(id);
+      if (role === "assistant") last.assistantIds.push(id);
+    }
   }
   return turns;
 }
 
-export const Thread: FC<{ config: ModelConfig; draft?: string; onDraftChange: (value: string) => void }> = ({ config, draft, onDraftChange }) => {
+export const Thread: FC<{ config: ModelConfig; logger: EventLogger; conversationId: string; draft?: string; onDraftChange: (value: string) => void }> = ({ config, logger, conversationId, draft, onDraftChange }) => {
   const messages = useMessageRows();
   const isRunning = useAuiState((state) => state.thread.isRunning);
   const turns = useMemo(() => buildTurns(messages), [messages]);
+  const [completed, setCompleted] = useState(() => new Map<string, number>());
+  useEffect(() => {
+    let active = true;
+    const refresh = () => void logger.summaryEvents(conversationId).then((events) => {
+      if (active) setCompleted(completedWork(events));
+    }).catch(() => undefined);
+    const unsubscribe = logger.subscribe((event) => {
+      if (event.conversationId === conversationId && event.type === "conversation.finished") refresh();
+    });
+    refresh();
+    return () => { active = false; unsubscribe(); };
+  }, [logger, conversationId]);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
   const stickyRef = useRef(true);
@@ -156,17 +196,35 @@ export const Thread: FC<{ config: ModelConfig; draft?: string; onDraftChange: (v
       <div ref={scrollerRef} data-testid="thread-viewport" className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain">
         <div ref={contentRef} className="mx-auto w-full max-w-(--thread-max-width) px-1 pt-3 pb-10">
           <div style={{ paddingTop, paddingBottom }}>
-            {items.map((item) => (
-              <div key={item.key} data-index={item.index} ref={virtualizer.measureElement} className="conversation-turn flex flex-col">
-                {turns[item.index]!.messageIds.map((messageId) => (
-                  <ThreadPrimitive.Unstable_MessageById
-                    key={messageId}
-                    messageId={messageId}
-                    components={MESSAGE_COMPONENTS}
-                  />
+            {items.map((item) => {
+              const turn = turns[item.index]!;
+              const assistantIds = turn.assistantIds;
+              const finalMessageId = assistantIds.at(-1);
+              const duration = finalMessageId === undefined ? undefined : completed.get(finalMessageId);
+              return <div key={item.key} data-index={item.index} ref={virtualizer.measureElement} className="conversation-turn flex flex-col">
+                {turn.messageIds.filter((id) => !assistantIds.includes(id)).map((messageId) => (
+                  <ThreadPrimitive.Unstable_MessageById key={messageId} messageId={messageId} components={MESSAGE_COMPONENTS} />
                 ))}
-              </div>
-            ))}
+                {duration === undefined || !finalMessageId ? assistantIds.map((messageId) => (
+                  <ThreadPrimitive.Unstable_MessageById key={messageId} messageId={messageId} components={MESSAGE_COMPONENTS} />
+                )) : <>
+                  <details className="work-summary" data-testid="work-summary" onToggle={(event) => {
+                    const row = event.currentTarget.closest<HTMLElement>(".conversation-turn");
+                    if (row) virtualizer.measureElement(row);
+                  }}>
+                    <summary>{workLabel(duration)}</summary>
+                    <div className="work-summary-content">
+                      {assistantIds.map((messageId) => <WorkViewContext.Provider key={messageId} value={{ mode: "process", finalMessageId }}>
+                        <ThreadPrimitive.Unstable_MessageById messageId={messageId} components={MESSAGE_COMPONENTS} />
+                      </WorkViewContext.Provider>)}
+                    </div>
+                  </details>
+                  <WorkViewContext.Provider value={{ mode: "final", finalMessageId }}>
+                    <ThreadPrimitive.Unstable_MessageById messageId={finalMessageId} components={MESSAGE_COMPONENTS} />
+                  </WorkViewContext.Provider>
+                </>}
+              </div>;
+            })}
           </div>
         </div>
       </div>
@@ -186,13 +244,35 @@ export const CONTINUE_INTERRUPTED_TEXT = "继续上一次被中断的工作。�
 
 const AssistantMessage: FC = () => {
   const aui = useAui();
+  const workView = useContext(WorkViewContext);
+  const parts = useAuiState((state) => state.message.parts);
+  const messageId = useAuiState((state) => state.message.id);
   const interrupted = useAuiState((state) => state.message.metadata.custom?.interrupted === true);
   const latest = useAuiState((state) => state.thread.messages.at(-1)?.id === state.message.id);
+  const lastAnswerStart = (() => {
+    if (messageId !== workView?.finalMessageId) return parts.length;
+    let index = parts.length;
+    while (index > 0 && parts[index - 1]?.type === "text") index--;
+    return index;
+  })();
+  const groupBy = useMemo(() => {
+    const commandGroup = groupPartByType({ "tool-call": ["group-command"] });
+    if (!workView) return commandGroup;
+    const indices = new Map(parts.map((part, index) => [part, index]));
+    return (part: typeof parts[number], context: Parameters<typeof commandGroup>[1]) => [
+      (indices.get(part) ?? 0) >= lastAnswerStart ? "group-final" : "group-process",
+      ...commandGroup(part, context),
+    ] as const;
+  }, [parts, workView?.mode, workView?.finalMessageId, lastAnswerStart]);
+  if (workView?.mode === "process" && messageId === workView.finalMessageId && lastAnswerStart === 0) return null;
+  if (workView?.mode === "final" && lastAnswerStart === parts.length) return null;
   return (
     <MessagePrimitive.Root data-role="assistant" aria-live={latest ? "polite" : undefined} className="assistant-message min-w-0 px-2 text-sm">
       <div className="assistant-message-content flex flex-col wrap-break-word">
-        <MessagePrimitive.GroupedParts groupBy={groupPartByType({ "tool-call": ["group-command"] })}>
+        <MessagePrimitive.GroupedParts groupBy={groupBy}>
           {({ part, children }) => {
+            if (part.type === "group-process") return workView?.mode === "process" ? children : null;
+            if (part.type === "group-final") return workView?.mode === "final" ? children : null;
             if (part.type === "group-command") return part.indices.length === 1 ? children : (
               <details className="activity command-group" open={part.status.type === "incomplete"}>
                 <summary><WrenchIcon aria-hidden="true" /><span>共{part.indices.length}次命令调用</span></summary>
@@ -205,7 +285,7 @@ const AssistantMessage: FC = () => {
             return null;
           }}
         </MessagePrimitive.GroupedParts>
-        {interrupted && (
+        {interrupted && workView?.mode !== "final" && (
           <div className="interrupted-message" data-testid="interrupted-message">
             <span>回复已中断</span>
             {latest && <Button type="button" variant="outline" size="sm" data-testid="continue-interrupted" onClick={() => aui.thread.append({
@@ -214,20 +294,20 @@ const AssistantMessage: FC = () => {
             })}>继续</Button>}
           </div>
         )}
-        <MessagePrimitive.Error>
+        {workView?.mode !== "process" && <MessagePrimitive.Error>
           <ErrorPrimitive.Root className="rounded-md border border-destructive bg-destructive/10 p-2 text-xs text-destructive">
             <ErrorPrimitive.Message />
           </ErrorPrimitive.Root>
-        </MessagePrimitive.Error>
+        </MessagePrimitive.Error>}
       </div>
-      <div className="flex items-center gap-2 pt-1 text-xs text-muted-foreground">
+      {workView?.mode !== "process" && <div className="flex items-center gap-2 pt-1 text-xs text-muted-foreground">
         <ActionBarPrimitive.Root hideWhenRunning>
           <ActionBarPrimitive.Reload type="button" data-testid="replay-message-button" className="inline-flex size-7 items-center justify-center rounded hover:bg-muted" aria-label="重新生成回复" title="重新生成回复">
             <RotateCcwIcon className="size-3.5" aria-hidden="true" />
           </ActionBarPrimitive.Reload>
         </ActionBarPrimitive.Root>
         <MessageBranches />
-      </div>
+      </div>}
     </MessagePrimitive.Root>
   );
 };

@@ -207,7 +207,7 @@ function ConversationView({ config, logger, threadId, drafts }: { config: ModelC
       {guardWarning && <p role="status">{guardWarning}</p>}
       {contextStatus && <p role="status" data-testid="context-status">{contextStatus}</p>}
       <section id="chat-content" tabIndex={-1} className="chat-scroll" data-testid="chat-scroll">
-        <Thread config={config} draft={drafts.get(threadId)} onDraftChange={(value) => {
+        <Thread config={config} logger={logger} conversationId={conversationId} draft={drafts.get(threadId)} onDraftChange={(value) => {
           if (value) drafts.set(threadId, value);
           else drafts.delete(threadId);
         }} />

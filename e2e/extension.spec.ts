@@ -437,6 +437,9 @@ test("groups adjacent commands without hiding their details", async () => {
     await opened.page.getByTestId("composer-input").fill("run two commands");
     await opened.page.getByTestId("composer-input").press("Enter");
     const group = opened.page.locator(".command-group");
+    const work = opened.page.getByTestId("work-summary");
+    await expect(work).toHaveCount(1);
+    await work.locator(":scope > summary").click();
     await expect(group.locator(":scope > summary")).toHaveText("共2次命令调用");
     await expect(group.locator(".activity")).toHaveCount(2);
     await expect(group).not.toHaveAttribute("open", "");
@@ -444,6 +447,48 @@ test("groups adjacent commands without hiding their details", async () => {
     await group.locator(".activity summary").first().click();
     await expect(group).toContainText("FIRST_RESULT");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("完成");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("shows live work, then folds it under elapsed time while keeping the final reply visible after restore", async () => {
+  const provider = await startProvider([
+    [chunk({ role: "assistant", content: "PROGRESS_TEXT" }), ...toolResponse("await new Promise((resolve) => setTimeout(resolve, 300)); return 'WORK_RESULT'")],
+    textResponse("FINAL_REPLY"),
+    textResponse("工作摘要标题"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("do the work");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".activity[data-status=running]")).toBeVisible();
+    await expect(opened.page.getByTestId("work-summary")).toHaveCount(0);
+    const work = opened.page.getByTestId("work-summary");
+    await expect(work.locator(":scope > summary")).toHaveText(/^工作了\d+分\d{2}秒$/);
+    await expect(work).not.toHaveAttribute("open", "");
+    await expect(work.locator(".activity")).toBeHidden();
+    await expect(work).toContainText("PROGRESS_TEXT");
+    await expect(work).not.toContainText("FINAL_REPLY");
+    await expect(work.locator(".markdown-body")).toBeHidden();
+    await expect(opened.page.locator(".conversation-turn").last().locator(".markdown-body").last()).toContainText("FINAL_REPLY");
+    await expect(work.locator(".markdown-body")).toContainText("PROGRESS_TEXT");
+    await expect(opened.page.locator('[data-role="user"]').last()).toContainText("do the work");
+    const events = await readEvents(opened.page);
+    const submitted = events.find((event) => event.type === "conversation.submitted");
+    const finished = events.find((event) => event.type === "conversation.finished" && event.runId === submitted?.runId);
+    const seconds = Math.floor((Date.parse(finished.timestamp) - Date.parse(submitted.timestamp)) / 1000);
+    await expect(work.locator(":scope > summary")).toHaveText(`工作了${Math.floor(seconds / 60)}分${String(seconds % 60).padStart(2, "0")}秒`);
+    await work.locator(":scope > summary").click();
+    await expect(work).toContainText("WORK_RESULT");
+    await opened.page.reload();
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-item", { hasText: "工作摘要标题" }).locator(".conversation-select").click();
+    await expect(opened.page.getByTestId("work-summary")).toHaveCount(1);
+    await expect(opened.page.getByTestId("work-summary")).not.toHaveAttribute("open", "");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FINAL_REPLY");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -509,6 +554,7 @@ return { extensionTitle: document.title, version: chrome.runtime.getManifest().v
     await expect(opened.page.locator(".activity summary span")).not.toHaveClass(/shimmer/);
     await expect(opened.page.locator(".activity")).not.toHaveAttribute("open", "");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("META_OK");
+    await opened.page.getByTestId("work-summary").locator(":scope > summary").click();
     await opened.page.locator(".activity summary").click();
     await expect(opened.page.locator(".activity")).toContainText("USER_OK");
     await expect(opened.page.locator(".activity")).toContainText("MAIN_OK");
@@ -1047,6 +1093,7 @@ test("closing the panel restores the interrupted response and continues only on 
     await resumed.getByTestId("conversation-menu").click();
     await resumed.locator(".conversation-item").first().locator(".conversation-select").click();
     await expect(resumed.getByTestId("interrupted-message")).toBeVisible();
+    await expect(resumed.getByTestId("work-summary")).toHaveCount(0);
     await expect(resumed.locator(".markdown-body").last()).toContainText("STREAM_STARTED");
     await resumed.getByTestId("continue-interrupted").click();
     await expect(resumed.locator('[data-role="user"]').last()).toContainText("继续上一次被中断的工作");
@@ -1186,6 +1233,7 @@ test("edits user messages, regenerates replies and restores the selected branch"
     await expect(opened.page.locator(".markdown-body").last()).toContainText("REGENERATED_REPLY");
     await opened.page.getByRole("button", { name: "上一个分支" }).last().click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("ORIGINAL_REPLY");
+    await expect(opened.page.getByTestId("work-summary")).toHaveCount(1);
     await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "conversation.branch.selected")).toBe(true);
 
     await opened.page.reload();
