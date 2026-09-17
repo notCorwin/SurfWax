@@ -953,7 +953,7 @@ test("shows a warning for a Chrome page that cannot be guarded without stopping 
     await restricted.bringToFront();
     await opened.page.getByTestId("composer-input").fill("inspect Chrome");
     await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.getByRole("status")).toContainText("无法防止点击");
+    await expect(opened.page.getByRole("status").filter({ hasText: "无法防止点击" })).toBeVisible();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("CHROME_PAGE_OK");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
@@ -964,12 +964,15 @@ test("manages, restores, runs and deletes scripts in a separate Chrome tab", asy
   const provider = await startProvider([]);
   const opened = await openExtension();
   try {
+    await expect(opened.page.getByTestId("user-scripts-disabled")).toContainText("Allow User Scripts");
     const [disabledManager] = await Promise.all([
       opened.context.waitForEvent("page"), opened.page.getByTestId("open-user-scripts").click(),
     ]);
     await expect(disabledManager.getByRole("status")).toContainText("Allow User Scripts");
     await disabledManager.close();
     await enableUserScripts(opened.context, opened.extensionId, opened.page);
+    await opened.page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(opened.page.getByTestId("user-scripts-disabled")).toHaveCount(0);
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/target`);
     const [manager] = await Promise.all([
@@ -990,11 +993,15 @@ test("manages, restores, runs and deletes scripts in a separate Chrome tab", asy
     const toggle = settings.locator("extensions-toggle-row#allow-user-scripts cr-toggle#crToggle");
     await toggle.click();
     await expect(toggle).toHaveAttribute("aria-pressed", "false");
+    await opened.page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(opened.page.getByTestId("user-scripts-disabled")).toBeVisible();
     await manager.reload();
     await expect(manager.getByRole("status")).toContainText("Allow User Scripts");
     expect((await manager.evaluate(async () => chrome.storage.local.get("side-agent:user-scripts")))["side-agent:user-scripts"]).toHaveLength(1);
     await toggle.click();
     await expect(toggle).toHaveAttribute("aria-pressed", "true");
+    await opened.page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(opened.page.getByTestId("user-scripts-disabled")).toHaveCount(0);
     await manager.reload();
     await expect(manager.getByLabel("已保存脚本").getByRole("button", { name: /managed · 已注册/ })).toBeVisible();
     await settings.close();

@@ -39,6 +39,42 @@ function ScriptsButton() {
   </Button>;
 }
 
+function UserScriptsNotice() {
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  useEffect(() => {
+    let active = true;
+    const check = () => {
+      if (!chrome.userScripts) { setEnabled(false); return; }
+      void Promise.resolve().then(() => chrome.userScripts.getScripts()).then(
+        () => { if (active) setEnabled(true); },
+        () => { if (active) setEnabled(false); },
+      );
+    };
+    check();
+    window.addEventListener("focus", check);
+    document.addEventListener("visibilitychange", check);
+    chrome.tabs.onActivated.addListener(check);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", check);
+      document.removeEventListener("visibilitychange", check);
+      chrome.tabs.onActivated.removeListener(check);
+    };
+  }, []);
+  if (enabled !== false) return null;
+  return <p role="status" data-testid="user-scripts-disabled" className="user-scripts-notice">
+    尚未开启 Allow User Scripts。请在 Surf Wax 扩展详情中开启。{' '}
+    <button type="button" onClick={() => void chrome.tabs.create({ url: `chrome://extensions/?id=${chrome.runtime.id}` })}>打开扩展详情</button>
+  </p>;
+}
+
+function Header({ conversation = false }: { conversation?: boolean }) {
+  return <><header className="app-header">
+    {conversation ? <ConversationMenu /> : <h1>Surf Wax</h1>}
+    <div className="flex gap-2"><ScriptsButton /><SettingsButton /></div>
+  </header><UserScriptsNotice /></>;
+}
+
 export function App() {
   const session = useSidePanelSession();
   const [fatal, setFatal] = useState("");
@@ -47,7 +83,7 @@ export function App() {
   if (fatal) {
     return (
       <main className="app-shell" data-testid="sidepanel-shell">
-        <header className="app-header"><h1>Surf Wax</h1><div className="flex gap-2"><ScriptsButton /><SettingsButton /></div></header>
+        <Header />
         <section className="chat-scroll">
           <div className="empty-state" role="alert" data-testid="fatal-log-error">
             <h2>事件日志不可用</h2><p>{fatal}</p>
@@ -63,7 +99,7 @@ export function App() {
 
   return (
     <main className="app-shell" data-testid="sidepanel-shell">
-      <header className="app-header"><h1>Surf Wax</h1><div className="flex gap-2"><ScriptsButton /><SettingsButton /></div></header>
+      <Header />
       <section className="chat-scroll">
         <div className="empty-state" data-testid="config-required-state">
           <h2>{session.configReady ? "先完成模型配置" : "正在读取配置…"}</h2>
@@ -92,7 +128,7 @@ function ConfiguredChat({ config, logger, onError }: { config: ModelConfig; logg
   if (initialThreadId === undefined) {
     return (
       <main className="app-shell" data-testid="sidepanel-shell">
-        <header className="app-header"><h1>Surf Wax</h1><div className="flex gap-2"><ScriptsButton /><SettingsButton /></div></header>
+        <Header />
         <section className="chat-scroll"><div className="empty-state" data-testid="conversation-loading">正在恢复对话…</div></section>
       </main>
     );
@@ -138,10 +174,7 @@ function ConfiguredRuntime({ config, logger, initialThreadId }: { config: ModelC
     <AssistantRuntimeProvider runtime={runtime}>
       <main className="app-shell" data-testid="sidepanel-shell">
         <ReloadConversationList logger={logger} config={config} />
-        <header className="app-header">
-          <ConversationMenu />
-          <div className="flex gap-2"><ScriptsButton /><SettingsButton /></div>
-        </header>
+        <Header conversation />
         {guardWarning && <p role="status">{guardWarning}</p>}
         <section className="chat-scroll" data-testid="chat-scroll"><Thread /></section>
       </main>
