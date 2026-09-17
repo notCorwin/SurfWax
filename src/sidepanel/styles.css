@@ -51,6 +51,7 @@ p {
 
 .conversation-trigger svg,
 .conversation-new svg,
+.conversation-action svg,
 .conversation-delete svg {
   width: 15px;
   height: 15px;
@@ -98,6 +99,7 @@ p {
 
 .conversation-new,
 .conversation-select,
+.conversation-action,
 .conversation-delete {
   border: 0;
   background: transparent;
@@ -126,6 +128,44 @@ p {
   overflow-y: auto;
   overscroll-behavior: contain;
 }
+
+.conversation-search,
+.conversation-rename input {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+  color: var(--foreground);
+  padding: 8px 10px;
+  font-size: 14px;
+}
+
+.conversation-search { width: 100%; }
+
+.conversation-section-title {
+  margin: 8px 10px 4px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.conversation-empty,
+.conversation-notice {
+  margin: 4px 10px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.conversation-rename {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+}
+
+.conversation-rename input { flex: 1; }
+.conversation-rename small { flex-basis: 100%; color: var(--destructive); }
 
 .conversation-item {
   display: flex;
@@ -165,6 +205,7 @@ p {
 .app-shell [role="status"],
 .app-shell [role="alert"] { overflow-wrap: anywhere; }
 
+.conversation-action,
 .conversation-delete {
   display: grid;
   width: 32px;
@@ -173,6 +214,13 @@ p {
   place-items: center;
   border-radius: 7px;
   color: var(--muted-foreground);
+}
+
+.conversation-action:hover { background: var(--accent); }
+
+.conversation-dialog :is(button, input):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .conversation-delete:hover {

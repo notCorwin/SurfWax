@@ -474,6 +474,10 @@ export class EventLogger {
     return this.eventsByTypes(SUMMARY_EVENT_TYPES, conversationId);
   }
 
+  messageEvents(): Promise<LogEvent[]> {
+    return this.eventsByTypes(["conversation.message"]);
+  }
+
   private async eventsByRunTypes(runIds: readonly string[], types: readonly string[]): Promise<LogEvent[]> {
     await this.flush();
     const store = this.options.store ?? getEventStore();

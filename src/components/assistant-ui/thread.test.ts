@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { workLabel } from "./work-time";
+import { buildMessageSearchIndex } from "./thread-list";
+import { toLogValue, type LogEvent } from "../../logging";
 
 describe("workLabel", () => {
   it.each([
@@ -15,4 +17,21 @@ describe("workLabel", () => {
   ])("formats %i seconds as %s", (seconds, expected) => {
     expect(workLabel(seconds)).toBe(expected);
   });
+});
+
+it("indexes saved message text without tool input or superseded edits", () => {
+  const make = (id: number, conversationId: string, message: unknown): LogEvent => ({
+    id, conversationId, type: "conversation.message", timestamp: new Date(id * 1000).toISOString(), content: toLogValue(message),
+  });
+  const index = buildMessageSearchIndex([
+    make(1, "first", { id: "u1", role: "user", parts: [{ type: "text", text: "Old phrase" }] }),
+    make(2, "first", { id: "u1", role: "user", parts: [{ type: "text", text: "New phrase" }] }),
+    make(3, "first", { id: "a1", role: "assistant", parts: [{ type: "text", text: "Final Answer" }, { type: "dynamic-tool", input: "SECRET TOOL INPUT" }] }),
+    make(4, "second", { id: "u2", role: "user", parts: [{ type: "text", text: "Other topic" }] }),
+  ]);
+  expect(index.get("first")).toContain("new phrase");
+  expect(index.get("first")).toContain("final answer");
+  expect(index.get("first")).not.toContain("old phrase");
+  expect(index.get("first")).not.toContain("secret tool input");
+  expect(index.get("second")).toBe("other topic");
 });

@@ -659,7 +659,10 @@ test("keeps late context events in their original conversation", async () => {
     await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "context.compaction.started")).toBe(true);
     await opened.page.getByTestId("conversation-menu").click();
     await opened.page.locator(".conversation-new").click();
+    await expect(opened.page.locator(".conversation-notice")).toContainText("当前会话尚未结束");
     await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "context.compacted")).toBe(true);
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("LATE_COMPACTION_REPLY");
+    await opened.page.locator(".conversation-new").click();
     await expect(opened.page.getByTestId("context-status")).toHaveCount(0);
     await expect(opened.page.locator(".markdown-body")).toHaveCount(0);
   } finally {
@@ -1164,6 +1167,112 @@ test("creates, titles, switches, starts fresh on reload and permanently deletes 
   }
 });
 
+test("searches saved messages, renames, archives and restores conversations", async () => {
+  const provider = await startProvider([textResponse("FIRST_REPLY"), textResponse("第一标题")]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("unique saved message");
+    await composer.press("Enter");
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("第一标题");
+    await opened.page.getByTestId("conversation-menu").click();
+    const search = opened.page.getByRole("searchbox", { name: "搜索会话" });
+    await search.fill("unique saved message");
+    await expect(opened.page.locator(".conversation-item")).toHaveCount(1);
+    await search.fill("not found");
+    await expect(opened.page.getByText("没有找到匹配的会话")).toBeVisible();
+    await search.fill("");
+
+    await opened.page.getByRole("button", { name: "重命名 第一标题" }).click();
+    const name = opened.page.getByRole("textbox", { name: "会话名称" });
+    await name.fill("  ");
+    await name.press("Enter");
+    await expect(opened.page.getByText("请输入会话名称")).toBeVisible();
+    await name.fill("取消的标题");
+    await name.press("Escape");
+    await expect(opened.page.locator(".conversation-item")).toContainText("第一标题");
+    await opened.page.getByRole("button", { name: "重命名 第一标题" }).click();
+    await name.fill("手动命名");
+    await name.press("Enter");
+    await expect(opened.page.locator(".conversation-item")).toContainText("手动命名");
+    await opened.page.getByRole("button", { name: "归档 手动命名" }).click();
+    await expect(opened.page.getByText("已归档", { exact: true })).toBeVisible();
+    await search.fill("手动命名");
+    await expect(opened.page.locator(".conversation-item")).toHaveCount(1);
+    await opened.page.getByRole("button", { name: "关闭对话列表" }).click();
+    await opened.page.reload();
+    await opened.page.getByTestId("conversation-menu").click();
+    await expect(opened.page.getByText("已归档", { exact: true })).toBeVisible();
+    await opened.page.getByRole("searchbox", { name: "搜索会话" }).fill("unique saved message");
+    await expect(opened.page.locator(".conversation-item")).toContainText("手动命名");
+    await opened.page.getByRole("button", { name: "恢复 手动命名" }).click();
+    await expect(opened.page.getByText("已归档", { exact: true })).toHaveCount(0);
+    await expect(opened.page.locator(".conversation-item")).toContainText("手动命名");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("blocks leaving a running conversation without aborting it", async () => {
+  const slowReply = [chunk({ role: "assistant", content: "STREAM_RUNNING" }), ...Array.from({ length: 100 }, () => chunk({ content: "." })), chunk({ content: "STREAM_DONE" }), chunk({}, "stop"), "data: [DONE]\n\n"];
+  const provider = await startProvider([textResponse("FIRST_REPLY"), textResponse("第一标题"), slowReply, textResponse("第二标题")], 20);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("first task");
+    await composer.press("Enter");
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("第一标题");
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-new").click();
+    await composer.fill("second task");
+    await composer.press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_RUNNING");
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-new").click();
+    await expect(opened.page.locator(".conversation-notice")).toContainText("当前会话尚未结束");
+    await opened.page.locator(".conversation-item", { hasText: "第一标题" }).locator(".conversation-select").click();
+    await expect(opened.page.locator(".conversation-notice")).toContainText("当前会话尚未结束");
+    await opened.page.locator(".conversation-item[data-active] .conversation-action").last().click();
+    await expect(opened.page.locator(".conversation-notice")).toContainText("当前会话尚未结束");
+    await opened.page.locator(".conversation-item[data-active] .conversation-delete").click();
+    await expect(opened.page.locator(".conversation-dialog")).toBeVisible();
+    await expect(opened.page.locator(".conversation-item")).toHaveCount(2);
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_DONE");
+    expect(provider.stats.abortedResponses).toBe(0);
+    await opened.page.locator(".conversation-item", { hasText: "第一标题" }).locator(".conversation-select").click();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FIRST_REPLY");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("manual renaming wins over an in-flight automatic title", async () => {
+  const slowTitle = [chunk({ role: "assistant", content: "自动标题" }), ...Array.from({ length: 60 }, () => chunk({ content: "。" })), chunk({}, "stop"), "data: [DONE]\n\n"];
+  const provider = await startProvider([textResponse("REPLY"), slowTitle], 20);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("title race");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("REPLY");
+    await expect.poll(() => provider.requests.length).toBeGreaterThanOrEqual(2);
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-item .conversation-action").first().click();
+    await opened.page.getByRole("textbox", { name: "会话名称" }).fill("用户指定标题");
+    await opened.page.getByRole("textbox", { name: "会话名称" }).press("Enter");
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("用户指定标题");
+    await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "model.title.finished")).toBe(true);
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("用户指定标题");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
 test("resets conversation UI while retaining only each conversation's own draft", async () => {
   const provider = await startProvider([
     textResponse("LONG_REPLY\n\n".repeat(300)), textResponse("第一标题"),
@@ -1330,7 +1439,7 @@ test("keeps the default title after an unrecoverable title request failure", asy
   }
 });
 
-test("keeps a running conversation alive when only switching threads", async () => {
+test("keeps a running conversation alive when a switch is blocked", async () => {
   const slowReply = [
     chunk({ role: "assistant", content: "STREAM_RUNNING" }),
     ...Array.from({ length: 30 }, () => chunk({ content: "." })),
@@ -1348,9 +1457,11 @@ test("keeps a running conversation alive when only switching threads", async () 
     await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_RUNNING");
     await opened.page.getByTestId("conversation-menu").click();
     await opened.page.locator(".conversation-new").click();
+    await expect(opened.page.locator(".conversation-notice")).toContainText("当前会话尚未结束");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("BACKGROUND_DONE");
     await expect.poll(() => provider.requests.length).toBe(2);
     expect(provider.stats.abortedResponses).toBe(0);
-
+    await opened.page.locator(".conversation-new").click();
     await opened.page.getByTestId("conversation-menu").click();
     await expect(opened.page.locator(".conversation-item")).toHaveCount(1);
     await opened.page.locator(".conversation-item", { hasText: "后台标题" }).locator(".conversation-select").click();

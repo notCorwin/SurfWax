@@ -68,9 +68,9 @@ function UserScriptsNotice() {
   </p>;
 }
 
-function Header({ conversation = false }: { conversation?: boolean }) {
+function Header({ conversation = false, logger }: { conversation?: boolean; logger?: EventLogger }) {
   return <><a className="skip-link" href="#chat-content">跳转到内容</a><header className="app-header">
-    {conversation ? <ConversationMenu /> : <h1>Surf Wax</h1>}
+    {conversation && logger ? <ConversationMenu logger={logger} /> : <h1>Surf Wax</h1>}
     <div className="flex gap-2"><ScriptsButton /><SettingsButton /></div>
   </header><UserScriptsNotice /></>;
 }
@@ -175,7 +175,7 @@ function ConfiguredConversation({ config, logger }: { config: ModelConfig; logge
   return (
     <main className="app-shell" data-testid="sidepanel-shell">
       <ReloadConversationList logger={logger} config={config} />
-      <Header conversation />
+      <Header conversation logger={logger} />
       <ConversationView key={threadId} config={config} logger={logger} threadId={threadId} drafts={drafts.current} />
     </main>
   );

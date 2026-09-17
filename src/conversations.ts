@@ -96,7 +96,9 @@ export function generateConversationTitle(logger: EventLogger, config: ModelConf
         usage: await result.usage,
         providerMetadata: await result.providerMetadata,
       });
-      await logger.append({ type: "conversation.title.updated", conversationId, content: { title } });
+      const manuallyNamed = (await logger.summaryEvents(conversationId)).some((event) =>
+        event.type === "conversation.title.updated" && (fromLogValue(event.content) as { source?: string }).source === "manual");
+      if (!manuallyNamed) await logger.append({ type: "conversation.title.updated", conversationId, content: { title } });
       return title;
     } catch (error) {
       const aborted = abortController.signal.aborted;
@@ -264,7 +266,7 @@ export function createConversationAdapter(logger: EventLogger, config: ModelConf
       return { remoteId: threadId };
     },
     async rename(remoteId, title) {
-      await logger.append({ type: "conversation.title.updated", conversationId: remoteId, content: { title: title.trim() || "新对话" } });
+      await logger.append({ type: "conversation.title.updated", conversationId: remoteId, content: { title: title.trim() || "新对话", source: "manual" } });
     },
     async archive(remoteId) {
       await logger.append({ type: "conversation.archived", conversationId: remoteId, content: null });
