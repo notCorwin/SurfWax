@@ -96,6 +96,18 @@ body {
   color: var(--foreground);
 }
 
+.app-error-shell { display: flex; min-height: 0; height: 100%; flex-direction: column; }
+.app-error-shell > main { flex: 1; min-height: 0; }
+.app-error-notice { flex: none; min-width: 0; max-width: 100%; padding: 8px 10px; border: 1px solid var(--destructive); border-radius: var(--radius); background: var(--background); color: var(--destructive); font-size: 12px; }
+.app-error-notice[role="status"] { border-color: var(--border); color: var(--foreground); }
+.app-error-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; overflow-wrap: anywhere; }
+.app-error-heading button { flex: none; border: 0; background: none; color: inherit; cursor: pointer; text-decoration: underline; }
+.app-error-notice details { margin-top: 4px; color: var(--foreground); }
+.app-error-notice summary { width: fit-content; cursor: pointer; }
+.app-error-detail { max-height: min(160px, 30vh); overflow: auto; margin-top: 4px; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.app-error-fallback { min-height: 100vh; padding: 16px; overflow: auto; }
+.app-error-fallback > button { margin-top: 12px; }
+
 button,
 input,
 textarea {

@@ -5,6 +5,7 @@ import { ArchiveIcon, MenuIcon, PencilIcon, RotateCcwIcon, Trash2Icon, XIcon } f
 import { useCallback, useEffect, useRef, useState, type FC, type MouseEvent } from "react";
 import { fromLogValue, isConversationMessage, type EventLogger, type LogEvent } from "../../logging";
 import { Button } from "../ui/button";
+import { ErrorNotice } from "../ui/error-notice";
 
 export function buildMessageSearchIndex(events: readonly LogEvent[]): Map<string, string> {
   const messages = new Map<string, Map<string, string>>();
@@ -34,7 +35,7 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
   const [query, setQuery] = useState("");
   const [index, setIndex] = useState(() => new Map<string, string>());
   const [warning, setWarning] = useState("");
-  const [searchError, setSearchError] = useState("");
+  const [searchError, setSearchError] = useState<unknown>();
   const requestSearchIndex = useRef<() => void>(() => undefined);
   const close = () => dialog.current?.close();
   const warn = () => setWarning("当前会话尚未结束，请等待完成或先停止运行。");
@@ -51,9 +52,9 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
       requested = true;
       const current = ++revision;
       void logger.messageEvents().then((events) => {
-        if (active && current === revision) { setIndex(buildMessageSearchIndex(events)); setSearchError(""); }
+        if (active && current === revision) { setIndex(buildMessageSearchIndex(events)); setSearchError(undefined); }
       }).catch((error) => {
-        if (active && current === revision) setSearchError(error instanceof Error ? error.message : String(error));
+        if (active && current === revision) setSearchError(error);
       });
     };
     requestSearchIndex.current = () => { if (!requested) refresh(); };
@@ -92,7 +93,7 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
           </header>
           <input type="search" aria-label="搜索会话" placeholder="搜索标题或消息…" value={query} onChange={(event) => setQuery(event.target.value)} className="conversation-search" />
           {warning && <p role="status" className="conversation-notice">{warning}</p>}
-          {searchError && <p role="alert" className="conversation-notice">搜索记录读取失败：{searchError}</p>}
+          {searchError !== undefined && <ErrorNotice summary="搜索记录读取失败。" error={searchError} />}
           <div className="conversation-items">
             {regularCount > 0 && <h2 className="conversation-section-title">当前会话</h2>}
             <ThreadListPrimitive.Items>

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ConversationMenu } from "../components/assistant-ui/thread-list";
 import { Thread } from "../components/assistant-ui/thread";
 import { Button, buttonVariants } from "../components/ui/button";
+import { ErrorNotice } from "../components/ui/error-notice";
 import { generateConversationTitle } from "../conversations";
 import { EventLogger, rebuildConversationList } from "../logging";
 import type { ModelConfig } from "../types";
@@ -11,10 +12,6 @@ import { useSidePanelRuntime } from "./useSidePanelRuntime";
 import { useSidePanelSession } from "./useSidePanelSession";
 import "../styles.css";
 import "./styles.css";
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 function SettingsButton() {
   return (
@@ -93,16 +90,16 @@ function Header({ conversation = false, logger }: { conversation?: boolean; logg
 
 export function App() {
   const session = useSidePanelSession();
-  const [fatal, setFatal] = useState("");
-  const logger = useMemo(() => new EventLogger({ onError: (error) => setFatal(errorText(error)) }), []);
+  const [fatal, setFatal] = useState<unknown>();
+  const logger = useMemo(() => new EventLogger({ onError: setFatal }), []);
 
-  if (fatal) {
+  if (fatal !== undefined) {
     return (
       <main className="app-shell" data-testid="sidepanel-shell">
         <Header />
         <section id="chat-content" tabIndex={-1} className="chat-scroll">
-          <div className="empty-state" role="alert" data-testid="fatal-log-error">
-            <h2>事件日志不可用</h2><p>{fatal}</p>
+          <div className="empty-state" data-testid="fatal-log-error">
+            <ErrorNotice summary="事件日志不可用；请检查存储并重新打开侧栏。" error={fatal} />
           </div>
         </section>
       </main>
@@ -120,14 +117,14 @@ export function App() {
         <div className="empty-state" data-testid="config-required-state">
           <h2>{session.configReady ? "先完成模型配置" : "正在准备对话…"}</h2>
           <p>{session.configReady ? "打开设置页填写 Base URL、Model ID 和 API Key。" : "正在读取模型配置…"}</p>
-          {session.status && <p role="status">{session.status}</p>}
+          {session.error !== undefined && <ErrorNotice summary="配置读取失败；请打开设置页重试。" error={session.error} />}
         </div>
       </section>
     </main>
   );
 }
 
-function ConfiguredChat({ config, logger, onError }: { config: ModelConfig; logger: EventLogger; onError: (message: string) => void }) {
+function ConfiguredChat({ config, logger, onError }: { config: ModelConfig; logger: EventLogger; onError: (error: unknown) => void }) {
   const [initialThreadId, setInitialThreadId] = useState<string | null>();
 
   useEffect(() => {
@@ -136,7 +133,7 @@ function ConfiguredChat({ config, logger, onError }: { config: ModelConfig; logg
       if (!active) return;
       setInitialThreadId(null);
     }).catch((error) => {
-      if (active) onError(errorText(error));
+      if (active) onError(error);
     });
     return () => { active = false; };
   }, [logger, onError]);
@@ -200,10 +197,12 @@ function ConfiguredConversation({ config, logger }: { config: ModelConfig; logge
 function ConversationView({ config, logger, threadId, drafts }: { config: ModelConfig; logger: EventLogger; threadId: string; drafts: Map<string, string> }) {
   const conversationId = useAuiState((state) => state.threadListItem.remoteId ?? state.threadListItem.id);
   const [guardWarning, setGuardWarning] = useState("");
-  const [contextStatus, setContextStatus] = useState("");
+  const [contextStatus, setContextStatus] = useState<{ message: string; error: boolean }>();
   useEffect(() => {
-    const onMessage = (message: { type?: string; detail?: string }) => {
-      if (message?.type === "surf-wax:guard-warning") setGuardWarning(message.detail ?? "网页无法防止点击");
+    const onMessage = (message: { type?: string; tabId?: number }) => {
+      if (message?.type === "surf-wax:guard-warning") setGuardWarning(
+        Number.isInteger(message.tabId) ? `标签页 ${message.tabId} 无法启用防点击保护；智能体仍可继续运行。` : "当前标签页无法启用防点击保护；智能体仍可继续运行。",
+      );
     };
     chrome.runtime.onMessage.addListener(onMessage);
     return () => chrome.runtime.onMessage.removeListener(onMessage);
@@ -211,17 +210,19 @@ function ConversationView({ config, logger, threadId, drafts }: { config: ModelC
   useEffect(() => logger.subscribe((event) => {
     if (event.conversationId !== conversationId) return;
     if (event.type === "context.compacted" || event.type === "context.checkpoint.applied") {
-      setContextStatus("模型正在使用压缩摘要；完整对话仍保留在记录中。");
+      setContextStatus({ message: "模型正在使用压缩摘要；完整对话仍保留在记录中。", error: false });
     } else if (event.type === "context.limit.unavailable") {
-      setContextStatus("无法取得模型上下文窗口；自动压缩暂不可用，可在设置中手动指定。");
+      setContextStatus({ message: "无法取得模型上下文窗口；自动压缩暂不可用，可在设置中手动指定。", error: true });
     } else if (event.type === "context.compaction.failed") {
-      setContextStatus("上下文压缩失败；请检查模型响应或设置中的窗口大小。");
+      setContextStatus({ message: "上下文压缩失败；请检查模型响应或设置中的窗口大小。", error: true });
     }
   }), [conversationId, logger]);
   return (
     <>
-      {guardWarning && <p role="status">{guardWarning}</p>}
-      {contextStatus && <p role="status" data-testid="context-status">{contextStatus}</p>}
+      {guardWarning && <ErrorNotice role="status" summary={guardWarning} />}
+      {contextStatus && (contextStatus.error
+        ? <ErrorNotice testId="context-status" summary={contextStatus.message} />
+        : <p role="status" data-testid="context-status">{contextStatus.message}</p>)}
       <section id="chat-content" tabIndex={-1} className="chat-scroll" data-testid="chat-scroll">
         <Thread config={config} logger={logger} conversationId={conversationId} draft={drafts.get(threadId)} onDraftChange={(value) => {
           if (value) drafts.set(threadId, value);

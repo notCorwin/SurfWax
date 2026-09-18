@@ -4,6 +4,7 @@ import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../components/ui/card";
 import { Field, FieldGroup, FieldLabel } from "../components/ui/field";
 import { Input } from "../components/ui/input";
+import { ErrorNotice } from "../components/ui/error-notice";
 import { EventLogger } from "../logging";
 import { resolveModelLimit, type ModelLimit } from "../agent/model-limits";
 import type { PersistedModelConfig } from "../sidepanel/config";
@@ -14,23 +15,22 @@ import "./styles.css";
 const EMPTY_CONFIG: PersistedModelConfig = { baseURL: "", apiKey: "", model: "" };
 type Status = "idle" | "saving" | "clearing" | "saved" | "error";
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 export function OptionsApp() {
   const [config, setConfig] = useState(EMPTY_CONFIG);
   const [ready, setReady] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState("");
+  const [errorDetail, setErrorDetail] = useState<unknown>();
   const [matchedLimit, setMatchedLimit] = useState<ModelLimit>();
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<keyof PersistedModelConfig, string>>>({});
   const savedConfig = useRef(JSON.stringify(EMPTY_CONFIG));
   const matchingKey = useRef("");
-  const logger = useMemo(() => new EventLogger({ onError: (error) => {
+  const fail = (summary: string, error: unknown) => {
     setStatus("error");
-    setMessage(`事件日志不可用：${errorText(error)}`);
-  } }), []);
+    setMessage(summary);
+    setErrorDetail(error);
+  };
+  const logger = useMemo(() => new EventLogger({ onError: (error) => fail("事件日志不可用。", error) }), []);
 
   useEffect(() => {
     let active = true;
@@ -46,8 +46,7 @@ export function OptionsApp() {
       }
     }).catch((error) => {
       if (!active) return;
-      setStatus("error");
-      setMessage(`配置读取失败：${errorText(error)}`);
+      fail("配置读取失败。", error);
     }).finally(() => {
       if (active) setReady(true);
     });
@@ -75,6 +74,7 @@ export function OptionsApp() {
     }
     setStatus("idle");
     setMessage("");
+    setErrorDetail(undefined);
   };
 
   const save = async (event: FormEvent<HTMLFormElement>) => {
@@ -96,6 +96,7 @@ export function OptionsApp() {
     if (Object.keys(errors).length) {
       setStatus("error");
       setMessage("请检查标出的字段");
+      setErrorDetail(undefined);
       if (errors.contextWindowOverride) document.getElementById("context-window")?.closest("details")?.setAttribute("open", "");
       document.getElementById(({ baseURL: "base-url", model: "model-id", apiKey: "api-key", contextWindowOverride: "context-window" })[
         Object.keys(errors)[0] as keyof PersistedModelConfig
@@ -115,8 +116,7 @@ export function OptionsApp() {
         if (matchingKey.current === `${config.baseURL}\u0000${config.model}`) setMatchedLimit(limit);
       }).catch(() => undefined);
     } catch (error) {
-      setStatus("error");
-      setMessage(`配置保存失败：${errorText(error)}`);
+      fail("配置保存失败。", error);
     }
   };
 
@@ -130,8 +130,7 @@ export function OptionsApp() {
       setStatus("saved");
       setMessage("对话与事件日志已清空");
     } catch (error) {
-      setStatus("error");
-      setMessage(`日志清空失败：${errorText(error)}`);
+      fail("日志清空失败。", error);
     }
   };
 
@@ -209,7 +208,9 @@ export function OptionsApp() {
         </CardFooter>
       </Card>
 
-      {message && <p className="options-status" data-state={status} role={status === "error" ? "alert" : "status"}>{message}</p>}
+      {message && (status === "error" && errorDetail !== undefined
+        ? <ErrorNotice summary={message} error={errorDetail} />
+        : <p className="options-status" data-state={status} role={status === "error" ? "alert" : "status"}>{message}</p>)}
     </main>
   );
 }

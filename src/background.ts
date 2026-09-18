@@ -9,7 +9,7 @@ const guardUpdates = new Map<number, Promise<void>>();
 function warnPageGuard(tabId: number, error: unknown): string {
   eventLogger.record({ type: "page-guard.failed", content: { tabId }, error });
   const detail = `标签页 ${tabId} 无法启用防点击保护；智能体仍可继续运行。`;
-  void chrome.runtime.sendMessage({ type: "surf-wax:guard-warning", detail }).catch(() => undefined);
+  void chrome.runtime.sendMessage({ type: "surf-wax:guard-warning", tabId }).catch(() => undefined);
   return detail;
 }
 

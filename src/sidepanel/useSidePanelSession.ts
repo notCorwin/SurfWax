@@ -4,14 +4,10 @@ import { MODEL_CONFIG_STORAGE_KEY, isCompleteModelConfig, loadModelConfig } from
 
 const EMPTY_CONFIG: ModelConfig = { baseURL: "", apiKey: "", model: "" };
 
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 export type SidePanelSession = {
   config: ModelConfig;
   configReady: boolean;
-  status: string;
+  error?: unknown;
   configured: boolean;
   chatKey: string;
 };
@@ -19,7 +15,7 @@ export type SidePanelSession = {
 export function useSidePanelSession(): SidePanelSession {
   const [config, setConfig] = useState<ModelConfig>(EMPTY_CONFIG);
   const [configReady, setConfigReady] = useState(false);
-  const [status, setStatus] = useState("");
+  const [error, setError] = useState<unknown>();
 
   useEffect(() => {
     let active = true;
@@ -28,9 +24,9 @@ export function useSidePanelSession(): SidePanelSession {
         const stored = await loadModelConfig(EMPTY_CONFIG);
         if (!active) return;
         setConfig(stored);
-        setStatus("");
-      } catch (error) {
-        if (active) setStatus(`配置读取失败：${errorText(error)}`);
+        setError(undefined);
+      } catch (cause) {
+        if (active) setError(cause);
       } finally {
         if (active) setConfigReady(true);
       }
@@ -50,7 +46,7 @@ export function useSidePanelSession(): SidePanelSession {
   return {
     config,
     configReady,
-    status,
+    error,
     configured: configReady && isCompleteModelConfig(config),
     chatKey: `${config.baseURL}\u0000${config.model}\u0000${config.contextWindowOverride ?? ""}`,
   };

@@ -1311,15 +1311,15 @@ test("resets conversation UI while retaining only each conversation's own draft"
     await viewport.evaluate((element) => { element.scrollTop = 0; });
     await expect(opened.page.getByRole("button", { name: "滚动到底部" })).toBeVisible();
     await composer.fill("first unsent draft");
-    await opened.context.serviceWorkers()[0]!.evaluate(() => chrome.runtime.sendMessage({ type: "surf-wax:guard-warning", detail: "旧会话警告" }));
-    await expect(opened.page.getByText("旧会话警告")).toBeVisible();
+    await opened.context.serviceWorkers()[0]!.evaluate(() => chrome.runtime.sendMessage({ type: "surf-wax:guard-warning", tabId: 1 }));
+    await expect(opened.page.getByText("标签页 1 无法启用防点击保护；智能体仍可继续运行。")).toBeVisible();
 
     await opened.page.getByTestId("conversation-menu").click();
     await startNewConversation(opened.page);
     await expect(opened.page.getByRole("button", { name: "滚动到底部" })).toHaveCount(0);
     await expect(opened.page.locator(".markdown-body")).toHaveCount(0);
     await expect(composer).toHaveValue("");
-    await expect(opened.page.getByText("旧会话警告")).toHaveCount(0);
+    await expect(opened.page.getByText("标签页 1 无法启用防点击保护；智能体仍可继续运行。")).toHaveCount(0);
     await expect(viewport).toHaveJSProperty("scrollTop", 0);
 
     await opened.page.getByTestId("conversation-menu").click();
@@ -1634,6 +1634,136 @@ test("keeps the composer usable when a long data URL cannot be guarded", async (
     expect(await composer.evaluate((element) => element.getBoundingClientRect().bottom <= innerHeight)).toBe(true);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("contains long unhandled errors in all three extension views", async () => {
+  const provider = await startProvider([]);
+  const opened = await openExtension();
+  try {
+    await opened.page.setViewportSize({ width: 360, height: 700 });
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    const [scripts] = await Promise.all([
+      opened.context.waitForEvent("page"), opened.page.getByTestId("open-user-scripts").click(),
+    ]);
+    for (const page of [opened.page, options, scripts]) {
+      await page.setViewportSize({ width: 360, height: 700 });
+      await page.evaluate(() => {
+        const error = new Error("LONG_ERROR_".repeat(2000));
+        window.dispatchEvent(new ErrorEvent("error", { error, message: error.message }));
+      });
+      const notice = page.getByRole("alert").filter({ hasText: "发生未处理的错误" });
+      await expect(notice).toBeVisible();
+      await expect(notice.getByText("错误详情")).toBeVisible();
+      await expect(notice.locator(".app-error-detail")).toBeHidden();
+      await notice.getByText("错误详情").click();
+      await expect(notice.locator(".app-error-detail")).toContainText("LONG_ERROR_");
+      expect(await notice.locator(".app-error-detail").evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+      await notice.getByRole("button", { name: "关闭错误提示" }).click();
+      await expect(notice).toHaveCount(0);
+    }
+    await expect(opened.page.getByTestId("composer-input")).toBeVisible();
+    await expect(options.getByRole("button", { name: "保存配置" })).toBeVisible();
+    await expect(scripts.getByTestId("user-scripts-panel")).toBeVisible();
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("shows a compact model request error while keeping its full detail", async () => {
+  const detail = "PROVIDER_ERROR_".repeat(1000);
+  const provider = await startProvider([{ status: 400, error: detail }]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("request fails");
+    await composer.press("Enter");
+    const notice = opened.page.locator(".app-error-notice").filter({ hasText: "模型请求失败" });
+    await expect(notice).toBeVisible();
+    await expect(notice.locator(".app-error-detail")).toBeHidden();
+    await notice.getByText("错误详情").click();
+    await expect(notice.locator(".app-error-detail")).toContainText("PROVIDER_ERROR_");
+    await expect(composer).toBeVisible();
+    const events = await readEvents(opened.page);
+    expect(JSON.stringify(events)).toContain("PROVIDER_ERROR_");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("contains a long conversation search error inside the menu", async () => {
+  const provider = await startProvider([]);
+  const opened = await openExtension();
+  try {
+    await opened.page.setViewportSize({ width: 360, height: 700 });
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.evaluate(() => {
+      const original = IDBDatabase.prototype.transaction;
+      IDBDatabase.prototype.transaction = function (names, mode, options) {
+        if (names === "events" && mode === "readonly") throw new Error("SEARCH_ERROR_".repeat(2000));
+        return original.call(this, names, mode, options);
+      };
+    });
+    await opened.page.getByTestId("conversation-menu").click();
+    const dialog = opened.page.locator(".conversation-dialog");
+    const notice = dialog.locator(".app-error-notice");
+    await expect(notice).toContainText("搜索记录读取失败");
+    await expect(dialog.getByRole("button", { name: "关闭对话列表" })).toBeVisible();
+    await notice.getByText("错误详情").click();
+    await expect(notice.locator(".app-error-detail")).toContainText("SEARCH_ERROR_");
+    expect(await notice.locator(".app-error-detail").evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+    await expect(dialog.getByRole("searchbox")).toBeVisible();
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("shows a bounded diagnostic when the canonical event log fails", async () => {
+  const provider = await startProvider([]);
+  const opened = await openExtension();
+  try {
+    await opened.page.setViewportSize({ width: 360, height: 700 });
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.evaluate(() => {
+      const original = IDBDatabase.prototype.transaction;
+      IDBDatabase.prototype.transaction = function (names, mode, options) {
+        if (names === "events" && mode === "readwrite") throw new Error("LOG_ERROR_".repeat(2000));
+        return original.call(this, names, mode, options);
+      };
+    });
+    await opened.page.getByTestId("composer-input").fill("trigger log write");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    const notice = opened.page.getByTestId("fatal-log-error").locator(".app-error-notice");
+    await expect(notice).toContainText("事件日志不可用");
+    await expect(opened.page.getByTestId("open-settings")).toBeVisible();
+    await notice.getByText("错误详情").click();
+    await expect(notice.locator(".app-error-detail")).toContainText("LOG_ERROR_");
+    expect(await notice.locator(".app-error-detail").evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("contains a long user script restore error without hiding the manager", async () => {
+  const opened = await openExtension();
+  try {
+    const [scripts] = await Promise.all([
+      opened.context.waitForEvent("page"), opened.page.getByTestId("open-user-scripts").click(),
+    ]);
+    await scripts.setViewportSize({ width: 360, height: 700 });
+    await scripts.evaluate(() => chrome.storage.local.set({ "side-agent:user-scripts-error": "SCRIPT_ERROR_".repeat(2000) }));
+    const notice = scripts.locator(".app-error-notice").filter({ hasText: "用户脚本恢复失败" });
+    await expect(notice).toBeVisible();
+    await notice.getByText("错误详情").click();
+    await expect(notice.locator(".app-error-detail")).toContainText("SCRIPT_ERROR_");
+    expect(await notice.locator(".app-error-detail").evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+    await expect(scripts.getByRole("heading", { name: /已保存脚本/ })).toBeVisible();
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory);
   }
 });
 

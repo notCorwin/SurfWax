@@ -26,6 +26,7 @@ import {
   useState,
 } from "react";
 import { Button } from "@/components/ui/button";
+import { ErrorNotice } from "@/components/ui/error-notice";
 import { LocalComposer } from "./local-composer";
 import { MarkdownText } from "./markdown-text";
 import { Reasoning } from "./reasoning";
@@ -292,8 +293,8 @@ const AssistantMessage: FC = () => {
           </div>
         )}
         {workView?.mode !== "process" && <MessagePrimitive.Error>
-          <ErrorPrimitive.Root className="rounded-md border border-destructive bg-destructive/10 p-2 text-xs text-destructive">
-            <ErrorPrimitive.Message />
+          <ErrorPrimitive.Root>
+            <ErrorNotice role="none" summary="模型请求失败。" details={<ErrorPrimitive.Message />} />
           </ErrorPrimitive.Root>
         </MessagePrimitive.Error>}
       </div>
