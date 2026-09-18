@@ -90,7 +90,7 @@ export function OptionsApp() {
   };
 
   const updateJev = (field: keyof PersistedJevConfig, value: string) => {
-    setJevConfig((current) => ({ ...current, [field]: value }));
+    setJevConfig((current) => ({ ...current, [field]: field === "threshold" ? Number(value) : value }));
     setJevFieldErrors((current) => ({ ...current, [field]: undefined }));
     setStatus("idle");
     setMessage("");
@@ -123,6 +123,10 @@ export function OptionsApp() {
       }
       if (!jevConfig.model.trim()) jevErrors.model = "请输入 Jev Model ID";
     }
+    if (!Number.isFinite(jevConfig.threshold) || jevConfig.threshold < 0.01 || jevConfig.threshold > 0.99
+      || Math.abs(jevConfig.threshold * 100 - Math.round(jevConfig.threshold * 100)) > 1e-8) {
+      jevErrors.threshold = "请输入 0.01 到 0.99 之间、精确到百分位的数值";
+    }
     setFieldErrors(errors);
     setJevFieldErrors(jevErrors);
     if (Object.keys(errors).length || Object.keys(jevErrors).length) {
@@ -135,7 +139,7 @@ export function OptionsApp() {
       const firstErrorId = firstMainError
         ? ({ baseURL: "base-url", model: "model-id", apiKey: "api-key", contextWindowOverride: "context-window" }[firstMainError])
         : firstJevError
-          ? ({ baseURL: "jev-base-url", model: "jev-model-id", apiKey: "jev-api-key" }[firstJevError])
+          ? ({ baseURL: "jev-base-url", model: "jev-model-id", apiKey: "jev-api-key", threshold: "jev-threshold" }[firstJevError])
           : undefined;
       if (firstErrorId) document.getElementById(firstErrorId)?.focus();
       return;
@@ -236,7 +240,7 @@ export function OptionsApp() {
         <form noValidate onSubmit={(event) => void save(event)}>
           <CardHeader>
             <CardTitle>Jev 消息选择压缩（可选）</CardTitle>
-            <CardDescription>填写 API Key 后，自动压缩会优先逐条选择要保留的消息；清空 API Key 即停用，并回退到 LLM 摘要。</CardDescription>
+            <CardDescription>上下文达到阈值时可选择 Jev 重选；清空 API Key 即停用 Jev。</CardDescription>
           </CardHeader>
           <CardContent>
             <FieldGroup>
@@ -254,6 +258,11 @@ export function OptionsApp() {
                 <FieldLabel htmlFor="jev-api-key">Jev API Key</FieldLabel>
                 <Input id="jev-api-key" name="jevApiKey" type="password" autoComplete="off" aria-invalid={!!jevFieldErrors.apiKey} aria-describedby={jevFieldErrors.apiKey ? "jev-api-key-error" : undefined} value={jevConfig.apiKey} disabled={busy} onChange={(event) => updateJev("apiKey", event.target.value)} />
                 {jevFieldErrors.apiKey && <p id="jev-api-key-error" className="field-error" role="alert">{jevFieldErrors.apiKey}</p>}
+              </Field>
+              <Field data-disabled={busy || undefined}>
+                <FieldLabel htmlFor="jev-threshold">最低保留评分</FieldLabel>
+                <Input id="jev-threshold" name="jevThreshold" type="number" min="0.01" max="0.99" step="0.01" aria-invalid={!!jevFieldErrors.threshold} aria-describedby={jevFieldErrors.threshold ? "jev-threshold-error" : undefined} value={jevConfig.threshold} disabled={busy} onChange={(event) => updateJev("threshold", event.target.value)} />
+                {jevFieldErrors.threshold && <p id="jev-threshold-error" className="field-error" role="alert">{jevFieldErrors.threshold}</p>}
               </Field>
             </FieldGroup>
           </CardContent>

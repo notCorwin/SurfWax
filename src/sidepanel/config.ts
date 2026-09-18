@@ -6,6 +6,7 @@ export const DEFAULT_JEV_CONFIG: JevConfig = {
   baseURL: "https://api.typesafe.ai",
   apiKey: "",
   model: "jev-latest",
+  threshold: 0.5,
 };
 
 export type PersistedModelConfig = ModelConfig;
@@ -77,6 +78,10 @@ export async function loadJevConfig(
     baseURL: typeof candidate.baseURL === "string" ? candidate.baseURL : fallback.baseURL,
     apiKey: typeof candidate.apiKey === "string" ? candidate.apiKey : fallback.apiKey,
     model: typeof candidate.model === "string" ? candidate.model : fallback.model,
+    threshold: typeof candidate.threshold === "number" && Number.isInteger(Math.round(candidate.threshold * 100))
+      && candidate.threshold >= 0.01 && candidate.threshold <= 0.99
+      && Math.abs(candidate.threshold * 100 - Math.round(candidate.threshold * 100)) < 1e-8
+      ? candidate.threshold : fallback.threshold,
   };
 }
 
@@ -91,6 +96,7 @@ export async function saveJevConfig(
       baseURL: config.baseURL.trim(),
       apiKey: config.apiKey,
       model: config.model.trim(),
+      threshold: config.threshold,
     } satisfies PersistedJevConfig,
   });
 }

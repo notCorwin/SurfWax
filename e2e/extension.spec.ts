@@ -68,10 +68,12 @@ async function startProvider(responses: MockResponse[], delayMs = 0, summaryText
   baseURL: string;
   origin: string;
   requests: any[];
+  jevRequests: any[];
   server: Server;
   stats: { abortedResponses: number };
 }> {
   const requests: any[] = [];
+  const jevRequests: any[] = [];
   const stats = { abortedResponses: 0 };
   const server = createServer((request, response) => {
     if (request.method === "OPTIONS") {
@@ -118,6 +120,19 @@ async function startProvider(responses: MockResponse[], delayMs = 0, summaryText
     if (request.method === "GET" && request.url === "/complex-next") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end("<!doctype html><title>After Navigation</title><main>new document</main>");
+      return;
+    }
+    if (request.method === "POST" && request.url === "/v1/systemone") {
+      const body: Buffer[] = [];
+      request.on("data", (part) => body.push(part));
+      request.on("end", () => {
+        const payload = JSON.parse(Buffer.concat(body).toString("utf8"));
+        jevRequests.push(payload);
+        response.writeHead(200, { "access-control-allow-origin": "*", "content-type": "application/json" });
+        response.end(JSON.stringify({ model: "jev-test", answers: Object.fromEntries(
+          Object.keys(payload.questions).map((key) => [key, { type: "noul", noul: 0.1 }]),
+        ), usage: { input_tokens: 100, output_tokens: 1 } }));
+      });
       return;
     }
     if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
@@ -173,7 +188,7 @@ async function startProvider(responses: MockResponse[], delayMs = 0, summaryText
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Provider server did not bind a TCP port");
   const origin = `http://127.0.0.1:${address.port}`;
-  return { baseURL: `${origin}/v1`, origin, requests, server, stats };
+  return { baseURL: `${origin}/v1`, origin, requests, jevRequests, server, stats };
 }
 
 async function closeServer(server: Server): Promise<void> {
@@ -282,12 +297,14 @@ test("saves and disables the optional Jev selector configuration", async () => {
     await options.getByLabel("Jev Base URL").fill("https://jev.example/v1");
     await options.getByLabel("Jev Model ID").fill("jev-test");
     await options.getByLabel("Jev API Key").fill("jev-key");
+    await options.getByLabel("最低保留评分").fill("0.81");
     await options.getByRole("button", { name: "保存 Jev 配置" }).click();
     await expect(options.getByRole("status")).toContainText("配置已保存");
     await expect.poll(() => options.evaluate(async () => (await chrome.storage.local.get("side-agent:jev-config"))["side-agent:jev-config"])).toEqual({
       baseURL: "https://jev.example/v1",
       model: "jev-test",
       apiKey: "jev-key",
+      threshold: 0.81,
     });
     await expect(opened.page.getByTestId("composer-input")).toBeVisible();
 
@@ -298,6 +315,7 @@ test("saves and disables the optional Jev selector configuration", async () => {
       baseURL: "https://jev.example/v1",
       model: "jev-test",
       apiKey: "",
+      threshold: 0.81,
     });
     await expect(opened.page.getByTestId("composer-input")).toBeVisible();
   } finally {
@@ -641,8 +659,8 @@ return { extensionTitle: document.title, version: chrome.runtime.getManifest().v
   }
 });
 
-test("compacts model context while retaining the complete conversation log", async () => {
-  const oldReply = "OLD_CONTEXT_MARKER " + "page observation ".repeat(1_300);
+test("asks after a completed turn and summarizes the complete context on request", async () => {
+  const oldReply = "OLD_CONTEXT_MARKER " + "page observation ".repeat(900);
   const provider = await startProvider([
     textResponse(oldReply),
     textResponse("压缩测试"),
@@ -656,12 +674,16 @@ test("compacts model context while retaining the complete conversation log", asy
     await composer.press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("OLD_CONTEXT_MARKER");
     await expect(opened.page.getByTestId("conversation-menu")).toContainText("压缩测试");
+    await expect(opened.page.getByTestId("context-choice")).toBeVisible();
+    await expect(composer).toBeDisabled();
 
     await options.close();
+    await opened.page.getByTestId("context-choice").getByRole("button", { name: "LLM 摘要" }).click();
+    await expect(opened.page.getByTestId("context-choice")).toHaveCount(0);
     await composer.fill("continue");
     await composer.press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("COMPACTED_REPLY");
-    await expect(opened.page.getByTestId("context-status")).toContainText("压缩摘要");
+    await expect(opened.page.getByTestId("context-status")).toContainText("历史上下文已被压缩成摘要");
     await opened.page.getByTestId("conversation-menu").click();
     await startNewConversation(opened.page);
     await expect(opened.page.getByTestId("context-status")).toHaveCount(0);
@@ -677,9 +699,9 @@ test("compacts model context while retaining the complete conversation log", asy
   }
 });
 
-test("keeps late context events in their original conversation", async () => {
+test("restores a pending context choice after reopening the panel", async () => {
   const provider = await startProvider([
-    textResponse("OLD_CONTEXT_MARKER " + "page observation ".repeat(1_300)),
+    textResponse("OLD_CONTEXT_MARKER " + "page observation ".repeat(900)),
     textResponse("旧对话标题"),
     textResponse("LATE_COMPACTION_REPLY"),
   ], 0, "Earlier page observations have been recorded.", ["minimal"], 800);
@@ -691,17 +713,67 @@ test("keeps late context events in their original conversation", async () => {
     await composer.fill("first request");
     await composer.press("Enter");
     await expect(opened.page.getByTestId("conversation-menu")).toContainText("旧对话标题");
+    await expect(opened.page.getByTestId("context-choice")).toBeVisible();
+    await opened.page.reload();
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-item", { hasText: "旧对话标题" }).locator(".conversation-select").click();
+    await expect(opened.page.getByTestId("context-choice")).toBeVisible();
+    await opened.page.getByTestId("context-choice").getByRole("button", { name: "LLM 摘要" }).click();
+    await expect(opened.page.getByTestId("context-status")).toContainText("历史上下文已被压缩成摘要");
     await composer.fill("continue");
     await composer.press("Enter");
-    await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "context.compaction.started")).toBe(true);
-    await opened.page.getByTestId("conversation-menu").click();
-    await startNewConversation(opened.page);
-    await expect(opened.page.locator(".conversation-notice")).toContainText("当前会话尚未结束");
-    await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "context.compacted")).toBe(true);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("LATE_COMPACTION_REPLY");
-    await startNewConversation(opened.page);
-    await expect(opened.page.getByTestId("context-status")).toHaveCount(0);
-    await expect(opened.page.locator(".markdown-body")).toHaveCount(0);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("Jev selection creates a child conversation and keeps the source intact", async () => {
+  const provider = await startProvider([
+    textResponse("OLD_CONTEXT_MARKER " + "page observation ".repeat(900)),
+    textResponse("来源会话标题"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL, 8_000);
+    await options.getByLabel("Jev Base URL").fill(provider.origin);
+    await options.getByLabel("Jev Model ID").fill("jev-test");
+    await options.getByLabel("Jev API Key").fill("jev-key");
+    await options.getByRole("button", { name: "保存 Jev 配置" }).click();
+    await expect(options.getByRole("status")).toContainText("配置已保存");
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("Keep this user request");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.getByTestId("context-choice")).toBeVisible();
+    await opened.page.getByTestId("context-choice").getByRole("button", { name: "Jev 重选" }).click();
+    await expect(opened.page.getByTestId("context-choice")).toHaveCount(0);
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("· Jev");
+    await expect(opened.page.locator('[data-role="user"]')).toContainText("Keep this user request");
+    await expect(opened.page.getByText("OLD_CONTEXT_MARKER")).toHaveCount(0);
+    expect(provider.jevRequests).toHaveLength(1);
+    expect(JSON.stringify(provider.jevRequests[0].state)).toContain("OLD_CONTEXT_MARKER");
+    const events = await readEvents(opened.page);
+    const child = events.find((event) => event.type === "conversation.created" && event.content?.parentConversationId);
+    expect(child).toBeTruthy();
+    expect(events.some((event) => event.conversationId === child?.content?.parentConversationId && event.type === "conversation.message"
+      && JSON.stringify(event.content).includes("OLD_CONTEXT_MARKER"))).toBe(true);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("offers a choice immediately after the provider rejects an oversized context", async () => {
+  const provider = await startProvider([{ status: 400, error: "maximum context length exceeded" }]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL, 8_000);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("overflow request");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.getByTestId("context-choice")).toBeVisible();
+    await expect(opened.page.getByTestId("composer-input")).toBeDisabled();
+    expect((await readEvents(opened.page)).some((event) => event.type === "context.choice.required"
+      && event.content?.reason === "provider-overflow")).toBe(true);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }

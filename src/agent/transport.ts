@@ -9,6 +9,7 @@ import {
 import type { ConversationMessage, EventLogger } from "../logging";
 import { claimConversationRun } from "./coordinator";
 import { guardActivePage } from "../chrome/page-guard";
+import { pendingContextChoice } from "./compaction";
 
 type SidePanelMessage = UIMessage<any, never, any>;
 
@@ -112,6 +113,9 @@ export function createChatTransport(agent: (signal: AbortSignal, branchIds: stri
     sendMessages: async (options: Parameters<ChatTransport<SidePanelMessage>["sendMessages"]>[0]) => {
       if (options.trigger !== "submit-message" && options.trigger !== "regenerate-message") {
         throw new Error(`Unsupported message trigger: ${options.trigger}`);
+      }
+      if (pendingContextChoice(await logger.conversation(conversationId), options.messages.map((message) => message.id))) {
+        throw new Error("请先选择 Jev 重选或 LLM 摘要，再继续发送消息。");
       }
       const currentRunId = runId();
       const lease = await claimConversationRun(conversationId, options.abortSignal);

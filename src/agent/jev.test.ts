@@ -1,87 +1,54 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ModelMessage } from "ai";
-import { JEV_MAX_BATCH_MESSAGES, JEV_MESSAGE_PREVIEW_CHARS, JevSelector } from "./jev";
+import { JEV_MAX_BATCH_MESSAGES, JevSelector } from "./jev";
 
-const config = { baseURL: "https://api.typesafe.ai", apiKey: "secret", model: "jev-latest" };
-
-function candidates(count: number, text = "message") {
-  return Array.from({ length: count }, (_, index) => ({
-    index,
-    message: { role: "user", content: `${text} ${index}` } as ModelMessage,
-  }));
-}
+const config = { baseURL: "https://api.typesafe.ai", apiKey: "secret", model: "jev-latest", threshold: 0.5 };
+const context: ModelMessage[] = [{ role: "user", content: "The whole conversation, including all constraints" }];
+const candidates = (count: number) => Array.from({ length: count }, (_, index) => ({
+  index, message: { role: "assistant", content: `message ${index}` } as ModelMessage,
+}));
 
 describe("Jev selector", () => {
-  it("sends typed Noul questions in bounded batches and returns probabilities", async () => {
-    const calls: Array<{ request: any; options: any }> = [];
-    const systemOne = vi.fn(async (request: any, options: any) => {
-      calls.push({ request, options });
-      return {
-        model: "jev-1.13.0",
-        answers: Object.fromEntries(Object.keys(request.questions).map((key) => [key, { type: "noul", noul: key === "m0" ? 0.9 : 0.1 }])),
-        usage: { input_tokens: 10, output_tokens: 0 },
-      };
+  it("scores up to 255 messages together and repeats the same full context in every batch", async () => {
+    const requests: any[] = [];
+    const systemOne = vi.fn(async (request: any) => {
+      requests.push(request);
+      return { model: "jev-1", answers: Object.fromEntries(Object.keys(request.questions).map((key) => [key, { noul: 0.75 }])),
+        usage: { input_tokens: 10, output_tokens: 0 } };
     });
-    const selector = new JevSelector(config, { client: { systemOne } as any });
-    const input = candidates(JEV_MAX_BATCH_MESSAGES + 1);
-
-    const result = await selector.score("Continue the browser task", input, new AbortController().signal);
-
+    const result = await new JevSelector(config, { client: { systemOne } as any })
+      .score(context, candidates(JEV_MAX_BATCH_MESSAGES + 1), new AbortController().signal);
     expect(systemOne).toHaveBeenCalledTimes(2);
-    expect(calls[0]?.request.state.messages).toHaveLength(JEV_MAX_BATCH_MESSAGES);
-    expect(calls[0]?.request.questions.m0).toMatchObject({ type: "noul" });
-    expect(result.model).toBe("jev-1.13.0");
-    expect(result.usage).toEqual({ input_tokens: 20, output_tokens: 0 });
-    expect(result.probabilities.get(0)).toBe(0.9);
-    expect(result.probabilities.get(JEV_MAX_BATCH_MESSAGES)).toBe(0.1);
+    expect(Object.keys(requests[0].questions)).toHaveLength(JEV_MAX_BATCH_MESSAGES);
+    expect(requests[0].state).toEqual(requests[1].state);
+    expect(requests[0].state.conversation).toContain("all constraints");
+    expect(result.probabilities.size).toBe(JEV_MAX_BATCH_MESSAGES + 1);
+    expect(result.usage.input_tokens).toBe(20);
   });
 
-  it("keeps both ends of a long message preview", async () => {
-    const systemOne = vi.fn(async (request: any) => ({
-      model: "jev-latest",
-      answers: Object.fromEntries(Object.keys(request.questions).map((key) => [key, { type: "noul", noul: 0.5 }])),
-      usage: { input_tokens: 1, output_tokens: 0 },
-    }));
-    const selector = new JevSelector(config, { client: { systemOne } as any });
-    const long = "START-" + "a".repeat(2_500) + "b".repeat(2_500) + "-END";
-
-    await selector.score("task", [{ index: 0, message: { role: "user", content: long } }], new AbortController().signal);
-
-    const content = systemOne.mock.calls[0]?.[0].state.messages[0].content as string;
-    expect(content.length).toBeLessThanOrEqual(JEV_MESSAGE_PREVIEW_CHARS + "\n[…truncated…]\n".length);
-    expect(content.startsWith("START-")).toBe(true);
-    expect(content.endsWith("-END")).toBe(true);
-    expect(content).toContain("[…truncated…]");
+  it("rejects missing or invalid probabilities instead of dropping messages", async () => {
+    const invalid = [undefined, Number.NaN, -0.1, 1.1];
+    for (const value of invalid) {
+      const systemOne = vi.fn(async () => ({ model: "jev-1", answers: value === undefined ? {} : { m0: { noul: value } },
+        usage: { input_tokens: 1, output_tokens: 0 } }));
+      await expect(new JevSelector(config, { client: { systemOne } as any })
+        .score(context, candidates(1), new AbortController().signal)).rejects.toThrow("invalid score");
+    }
   });
 
-  it("posts the System One request through the SDK", async () => {
-    const fetch = vi.fn(async (input: string | Request, init?: RequestInit) => {
+  it("uses the SDK request and honors abort", async () => {
+    const fetch = vi.fn(async (input: Request | string, init?: RequestInit) => {
       expect(typeof input === "string" ? input : input.url).toBe("https://api.typesafe.ai/v1/systemone");
-      const requestBody = init?.body ?? (typeof input === "string" ? undefined : await input.clone().text());
-      const body = JSON.parse(String(requestBody)) as { model: string; state: { task: string }; questions: Record<string, { type: string }> };
-      expect(body.model).toBe("jev-latest");
-      expect(body.state.task).toBe("task");
-      expect(body.questions.m0).toMatchObject({ type: "noul" });
-      return new Response(JSON.stringify({ model: "jev-latest", answers: { m0: { type: "noul", noul: 0.75 } }, usage: { input_tokens: 2, output_tokens: 1 } }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
+      const body = JSON.parse(String(init?.body ?? (typeof input === "string" ? "" : await input.clone().text())));
+      expect(body.questions.m0.type).toBe("noul");
+      return new Response(JSON.stringify({ model: "jev-latest", answers: { m0: { type: "noul", noul: 0.75 } },
+        usage: { input_tokens: 2, output_tokens: 1 } }), { status: 200, headers: { "content-type": "application/json" } });
     });
     const selector = new JevSelector(config, { fetch: fetch as typeof globalThis.fetch });
-
-    await expect(selector.score("task", candidates(1), new AbortController().signal)).resolves.toMatchObject({
-      probabilities: new Map([[0, 0.75]]),
-    });
+    expect((await selector.score(context, candidates(1), new AbortController().signal)).probabilities.get(0)).toBe(0.75);
+    const aborted = new AbortController();
+    aborted.abort();
+    await expect(selector.score(context, candidates(1), aborted.signal)).rejects.toMatchObject({ name: "AbortError" });
     expect(fetch).toHaveBeenCalledTimes(1);
-  });
-
-  it("honors abort before making a request", async () => {
-    const systemOne = vi.fn();
-    const selector = new JevSelector(config, { client: { systemOne } as any });
-    const controller = new AbortController();
-    controller.abort();
-
-    await expect(selector.score("task", candidates(1), controller.signal)).rejects.toMatchObject({ name: "AbortError" });
-    expect(systemOne).not.toHaveBeenCalled();
   });
 });

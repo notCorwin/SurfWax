@@ -62,15 +62,22 @@ describe("Jev config persistence", () => {
 
   it("saves and loads Jev independently", async () => {
     const storage = memoryStorage(JEV_CONFIG_STORAGE_KEY);
-    const config = { baseURL: " https://jev.example/v1/ ", model: " jev-test ", apiKey: "jev-secret" };
+    const config = { baseURL: " https://jev.example/v1/ ", model: " jev-test ", apiKey: "jev-secret", threshold: 0.81 };
 
     await saveJevConfig(config, storage);
     await expect(loadJevConfig(DEFAULT_JEV_CONFIG, storage)).resolves.toEqual({
       baseURL: "https://jev.example/v1/",
       model: "jev-test",
       apiKey: "jev-secret",
+      threshold: 0.81,
     });
     await saveJevConfig({ ...config, apiKey: "" }, storage);
     expect(isCompleteJevConfig(await loadJevConfig(DEFAULT_JEV_CONFIG, storage))).toBe(false);
+  });
+
+  it("adds the default threshold to an older stored config", async () => {
+    const storage = memoryStorage(JEV_CONFIG_STORAGE_KEY);
+    storage.value = { baseURL: "https://api.typesafe.ai", model: "jev-latest", apiKey: "old-key" };
+    expect((await loadJevConfig(DEFAULT_JEV_CONFIG, storage)).threshold).toBe(0.5);
   });
 });

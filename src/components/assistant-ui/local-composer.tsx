@@ -17,7 +17,7 @@ const EFFORT_LABELS: Record<ReasoningEffort, string> = {
   none: "关闭", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "极高", max: "最高",
 };
 
-export function LocalComposer({ config, draft, onDraftChange }: { config: ModelConfig; draft?: string; onDraftChange: (value: string) => void }) {
+export function LocalComposer({ config, blocked, draft, onDraftChange }: { config: ModelConfig; blocked?: boolean; draft?: string; onDraftChange: (value: string) => void }) {
   const settings = reasoningSettingsFor(config);
   const reasoning = useSyncExternalStore(settings.subscribe, settings.snapshot);
   const model = config.model;
@@ -61,14 +61,14 @@ export function LocalComposer({ config, draft, onDraftChange }: { config: ModelC
   const submit = useCallback(() => {
     const input = inputRef.current;
     const value = input?.value ?? "";
-    if (!input || !value.trim() || isDisabled || isRunning) return;
+    if (!input || !value.trim() || isDisabled || isRunning || blocked) return;
     aui.composer.setText(value);
     aui.composer.send();
     input.value = "";
     onDraftChange("");
     setHasText(false);
     resize();
-  }, [aui, isDisabled, isRunning, onDraftChange, resize]);
+  }, [aui, blocked, isDisabled, isRunning, onDraftChange, resize]);
 
   const keyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== "Enter" || event.nativeEvent.isComposing || composing.current || event.shiftKey) return;
@@ -99,7 +99,7 @@ export function LocalComposer({ config, draft, onDraftChange }: { config: ModelC
           placeholder="描述要执行的浏览器任务…"
           className="min-h-12 max-h-32 w-full resize-none overflow-y-hidden bg-transparent px-2 py-1 text-sm leading-relaxed outline-none placeholder:text-muted-foreground"
           rows={2}
-          disabled={isDisabled}
+          disabled={isDisabled || blocked}
           autoFocus
           enterKeyHint="send"
           aria-label="消息输入"
@@ -139,7 +139,7 @@ export function LocalComposer({ config, draft, onDraftChange }: { config: ModelC
               </Button>
             </ComposerPrimitive.Cancel>
           ) : (
-            <Button type="button" size="icon-sm" className="rounded-full" disabled={!hasText || isDisabled} aria-label="发送消息" title="发送消息" onClick={submit}>
+            <Button type="button" size="icon-sm" className="rounded-full" disabled={!hasText || isDisabled || blocked} aria-label="发送消息" title="发送消息" onClick={submit}>
               <ArrowUpIcon aria-hidden="true" />
             </Button>
           )}

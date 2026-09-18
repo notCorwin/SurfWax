@@ -9,7 +9,7 @@ import { createChatTransport } from "../agent/transport";
 import { ChromeExecutor } from "../chrome/executor";
 import { createConversationAdapter } from "../conversations";
 import type { EventLogger } from "../logging";
-import type { JevConfig, ModelConfig } from "../types";
+import type { ModelConfig } from "../types";
 
 type CloseableRuntime = { thread: Pick<AssistantRuntime["thread"], "cancelRun"> };
 
@@ -25,16 +25,16 @@ export function createSidePanelCloser(runtime: CloseableRuntime, logger?: EventL
   };
 }
 
-function useConversationRuntime(config: ModelConfig, jevConfig: JevConfig | undefined, logger: EventLogger): AssistantRuntime {
+function useConversationRuntime(config: ModelConfig, logger: EventLogger): AssistantRuntime {
   const conversationId = useAuiState((state) => state.threadListItem.remoteId ?? state.threadListItem.id);
   const executor = useMemo(() => new ChromeExecutor({ logger }), [logger]);
   const transport = useMemo(
     () => createChatTransport((signal, branchIds) => {
       const languageModel = createModel(config, logger, conversationId);
       return createAgent({ model: config, languageModel, executor, logger, conversationId,
-        compactor: new ContextCompactor({ model: config, jevConfig, languageModel, logger, conversationId, branchIds, signal }) });
+        compactor: new ContextCompactor({ model: config, logger, conversationId, branchIds, signal }) });
     }, logger, conversationId),
-    [config, conversationId, executor, jevConfig, logger],
+    [config, conversationId, executor, logger],
   );
   const runtime = useChatRuntime({
     id: conversationId,
@@ -60,13 +60,12 @@ export function useSidePanelRuntime(
   config: ModelConfig,
   logger: EventLogger,
   initialThreadId?: string,
-  jevConfig?: JevConfig,
 ): AssistantRuntime {
   const adapter = useMemo(() => createConversationAdapter(logger, config), [config, logger]);
   const runtime = useRemoteThreadListRuntime({
     adapter,
     initialThreadId,
-    runtimeHook: () => useConversationRuntime(config, jevConfig, logger),
+    runtimeHook: () => useConversationRuntime(config, logger),
     onThreadIdChange: (conversationId) => {
       if (conversationId) logger.record({ type: "conversation.selected", conversationId, content: null });
     },

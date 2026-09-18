@@ -197,6 +197,20 @@ export async function restoreConversationRepository(events: readonly LogEvent[])
   return { headId: selectedHeadId(events, stored), messages };
 }
 
+export async function activeConversationMessages(logger: EventLogger, conversationId: string): Promise<ConversationMessage[]> {
+  const repository = await restoreConversationRepository(await logger.restorationEvents(conversationId));
+  const byId = new Map(repository.messages.map((item) => [item.message.id, item]));
+  const messages: ConversationMessage[] = [];
+  let id = repository.headId;
+  while (id) {
+    const item = byId.get(id);
+    if (!item) break;
+    messages.unshift(item.message);
+    id = item.parentId;
+  }
+  return messages;
+}
+
 function formattedHistory<TMessage, TStorageFormat extends Record<string, unknown>>(
   format: MessageFormatAdapter<TMessage, TStorageFormat>,
   logger: EventLogger,

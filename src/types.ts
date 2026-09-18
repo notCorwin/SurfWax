@@ -18,4 +18,5 @@ export type JevConfig = {
   baseURL: string;
   apiKey: string;
   model: string;
+  threshold: number;
 };

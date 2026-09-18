@@ -84,7 +84,7 @@ function buildTurns(messages: readonly MessageRow[]): Turn[] {
   return turns;
 }
 
-export const Thread: FC<{ config: ModelConfig; logger: EventLogger; conversationId: string; draft?: string; onDraftChange: (value: string) => void }> = ({ config, logger, conversationId, draft, onDraftChange }) => {
+export const Thread: FC<{ config: ModelConfig; logger: EventLogger; conversationId: string; contextBlocked?: boolean; draft?: string; onDraftChange: (value: string) => void }> = ({ config, logger, conversationId, contextBlocked, draft, onDraftChange }) => {
   const messages = useMessageRows();
   const isRunning = useAuiState((state) => state.thread.isRunning);
   const turns = useMemo(() => buildTurns(messages), [messages]);
@@ -232,7 +232,7 @@ export const Thread: FC<{ config: ModelConfig; logger: EventLogger; conversation
             <ArrowDownIcon data-icon="icon" aria-hidden="true" />
           </Button>
         )}
-        <LocalComposer config={config} draft={draft} onDraftChange={onDraftChange} />
+        <LocalComposer config={config} blocked={contextBlocked} draft={draft} onDraftChange={onDraftChange} />
       </div>
     </ThreadPrimitive.Root>
   );
