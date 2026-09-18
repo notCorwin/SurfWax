@@ -492,7 +492,7 @@ test("targets page worlds and keeps large tool output out of model history", asy
 
 test("groups adjacent commands without hiding their details", async () => {
   const provider = await startProvider([
-    queuedToolResponse("return 'FIRST_RESULT'", "return 'SECOND_RESULT'"),
+    queuedToolResponse("return 'FIRST_RESULT'", "await new Promise((resolve) => setTimeout(resolve, 800)); return 'SECOND_RESULT'"),
     textResponse("完成"),
   ]);
   const opened = await openExtension();
@@ -503,15 +503,44 @@ test("groups adjacent commands without hiding their details", async () => {
     await opened.page.getByTestId("composer-input").press("Enter");
     const group = opened.page.locator(".command-group");
     const work = opened.page.getByTestId("work-summary");
+    await expect(opened.page.locator(".activity[data-status=running]")).toHaveCount(1);
+    await expect(group).toHaveCount(0);
+    await expect(opened.page.locator(".activity[data-status]")).toHaveCount(2);
     await expect(work).toHaveCount(1);
     await work.locator(":scope > summary").click();
-    await expect(group.locator(":scope > summary")).toHaveText("共2次命令调用");
+    await expect(group.locator(":scope > summary")).toHaveText("共 2 次命令调用");
     await expect(group.locator(".activity")).toHaveCount(2);
     await expect(group).not.toHaveAttribute("open", "");
     await group.locator(":scope > summary").click();
     await group.locator(".activity summary").first().click();
     await expect(group).toContainText("FIRST_RESULT");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("完成");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("shows the command count after an interrupted group settles", async () => {
+  const provider = await startProvider([
+    queuedToolResponse(
+      "await new Promise((resolve) => setTimeout(resolve, 60_000)); return 'TOO_LATE'",
+      "return 'NEVER_STARTED'",
+    ),
+  ]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("interrupt two commands");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".activity[data-status=running]")).toHaveCount(2);
+    await expect(opened.page.locator(".command-group")).toHaveCount(0);
+    await opened.page.getByRole("button", { name: "停止生成" }).click();
+    const group = opened.page.locator(".command-group");
+    await expect(group.locator(":scope > summary")).toHaveText("共 2 次命令调用");
+    await group.locator(":scope > summary").click();
+    await expect(group.locator(".activity[data-status]")).toHaveCount(2);
+    await expect(group.locator(".activity[data-status=running]")).toHaveCount(0);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -532,7 +561,7 @@ test("shows live work, then folds it under elapsed time while keeping the final 
     await expect(opened.page.locator(".activity[data-status=running]")).toBeVisible();
     await expect(opened.page.getByTestId("work-summary")).toHaveCount(0);
     const work = opened.page.getByTestId("work-summary");
-    await expect(work.locator(":scope > summary")).toHaveText(/^工作了\d+ 秒$/);
+    await expect(work.locator(":scope > summary")).toHaveText(/^工作了 \d+ 秒$/);
     await expect(work).not.toHaveAttribute("open", "");
     await expect(work.locator(".activity")).toBeHidden();
     await expect(work).toContainText("PROGRESS_TEXT");
@@ -545,7 +574,7 @@ test("shows live work, then folds it under elapsed time while keeping the final 
     const submitted = events.find((event) => event.type === "conversation.submitted");
     const finished = events.find((event) => event.type === "conversation.finished" && event.runId === submitted?.runId);
     const seconds = Math.floor((Date.parse(finished.timestamp) - Date.parse(submitted.timestamp)) / 1000);
-    await expect(work.locator(":scope > summary")).toHaveText(`工作了${seconds} 秒`);
+    await expect(work.locator(":scope > summary")).toHaveText(`工作了 ${seconds} 秒`);
     await work.locator(":scope > summary").click();
     await expect(work).toContainText("WORK_RESULT");
     await opened.page.reload();
