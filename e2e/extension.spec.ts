@@ -936,7 +936,7 @@ return result;`, "call-cdp-5"),
 test("streams complete Markdown without blocking draft input", async () => {
   const markdown = [
     "# Heading\n\n> quote\n\n- [x] task\n\n~~strike~~ and [link](https://example.com).\n\n",
-    "| A | B |\n| - | - |\n| 1 | 2 |\n| 3 | 4 |\n\nInline $x^2$ and block:\n\n$$y=x+1$$\n\n",
+    "| 搜索引擎 | 公司/国家 | 国际内容 | 中文内容 | 隐私功能 |\n| - | - | - | - | - |\n| Google | 美国 Google | ★★★ 最强 | ★★ 充足 | 一般 |\n| Bing 必应 | 美国 微软 | ★★ 仅次于 Google | ★★★ 丰富 | 一般 |\n\nInline $x^2$ and block:\n\n$$y=x+1$$\n\n",
     "```javascript\nconst answer = 42;\n```\n\nFootnote[^1].\n\n[^1]: note\n\nFINAL_MARKER",
   ].join("");
   const parts = [chunk({ role: "assistant", content: "LONG_RUNNING_LINE\n\n".repeat(100) }), ...[...markdown].map((content) => chunk({ content })), chunk({}, "stop"), "data: [DONE]\n\n"];
@@ -986,6 +986,40 @@ test("streams complete Markdown without blocking draft input", async () => {
         striped: getComputedStyle(find('[data-streamdown="table-body"] tr:nth-child(2)')).backgroundColor,
       };
     })).toEqual({ code: "1px", codeBody: "0px", codeBodyPaddingLeft: "0px", pre: "0px", actions: "0px", table: "1px", tableBody: "0px", striped: "rgb(36, 36, 36)" });
+    const tableScroll = rendered.locator('[data-streamdown="table-wrapper"] > :last-child');
+    for (const colorScheme of ["dark", "light"] as const) {
+      await opened.page.emulateMedia({ colorScheme });
+      for (const width of [430, 900]) {
+        await opened.page.setViewportSize({ width, height: 1000 });
+        const layout = await tableScroll.evaluate((scroll) => {
+          const table = scroll.querySelector("table")!;
+          const row = table.querySelector("tbody tr")!;
+          const cells = [...row.querySelectorAll("td")];
+          return {
+            scrollWidth: scroll.scrollWidth,
+            clientWidth: scroll.clientWidth,
+            rowHeight: row.getBoundingClientRect().height,
+            minCellWidth: Math.min(...cells.map((cell) => cell.getBoundingClientRect().width)),
+          };
+        });
+        expect(layout.scrollWidth).toBeGreaterThan(layout.clientWidth);
+        expect(layout.minCellWidth).toBeGreaterThanOrEqual(144);
+        expect(layout.rowHeight).toBeLessThan(90);
+        await tableScroll.evaluate((scroll) => { scroll.scrollLeft = scroll.scrollWidth; });
+        expect(await tableScroll.evaluate((scroll) => scroll.scrollLeft)).toBeGreaterThan(0);
+        expect(await opened.page.getByTestId("thread-viewport").evaluate((viewport) => viewport.scrollWidth)).toBeLessThanOrEqual(width);
+        await expect(composer).toBeInViewport();
+      }
+    }
+    await opened.page.setViewportSize({ width: 430, height: 1000 });
+    await rendered.locator('[data-streamdown="table-wrapper"] button').last().focus();
+    await opened.page.keyboard.press("Tab");
+    await expect(tableScroll).toBeFocused();
+    expect(await tableScroll.evaluate((scroll) => getComputedStyle(scroll).outlineWidth)).toBe("2px");
+    await tableScroll.evaluate((scroll) => { scroll.scrollLeft = 0; });
+    await opened.page.keyboard.press("ArrowRight");
+    await expect.poll(() => tableScroll.evaluate((scroll) => scroll.scrollLeft)).toBeGreaterThan(0);
+    await opened.page.emulateMedia({ colorScheme: "dark" });
     const copy = rendered.getByRole("button", { name: "Copy Code" });
     await expect(copy).toBeEnabled();
     await copy.click();
