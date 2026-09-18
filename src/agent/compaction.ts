@@ -1,18 +1,31 @@
 import { generateText, type LanguageModel, type ModelMessage } from "ai";
 import { fromLogValue, type EventLogger, type LogEvent } from "../logging";
-import type { ModelConfig } from "../types";
+import type { JevConfig, ModelConfig } from "../types";
+import { JevSelector, previewMessage, type JevSelectionScorer } from "./jev";
 import { inputBudget, resolveModelLimit, type ModelLimit } from "./model-limits";
 
 const SUMMARY_PREFIX = "Earlier conversation summary:\n";
 const SUMMARY_INSTRUCTIONS = "Summarize the conversation evidence faithfully for continuing the browser task. Preserve the user's goal, constraints, decisions, page and tab identities, browser side effects, tool results, errors, unresolved work, and exact values needed later. Do not invent facts. Return only the concise summary.";
 
-type Checkpoint = {
+type SummaryCheckpoint = {
+  strategy?: "summary";
   branchIds: string[];
   sourceCount: number;
   sourceDigest: string;
   summary: string;
   reusable: boolean;
 };
+
+type SelectionCheckpoint = {
+  strategy: "jev-selection";
+  branchIds: string[];
+  sourceCount: number;
+  sourceDigest: string;
+  selectedIndexes: number[];
+  reusable: boolean;
+};
+
+type Checkpoint = SummaryCheckpoint | SelectionCheckpoint;
 
 function estimate(messages: readonly ModelMessage[]): number {
   return 1024 + Math.ceil(new TextEncoder().encode(JSON.stringify(messages)).length / 3);
@@ -27,9 +40,12 @@ async function digest(messages: readonly ModelMessage[]): Promise<string> {
 function checkpointOf(event: LogEvent): Checkpoint | undefined {
   if (event.type !== "context.compacted") return undefined;
   const value = fromLogValue(event.content) as Partial<Checkpoint>;
-  return Array.isArray(value?.branchIds) && typeof value.sourceCount === "number"
-    && typeof value.sourceDigest === "string" && typeof value.summary === "string"
-    && typeof value.reusable === "boolean" ? value as Checkpoint : undefined;
+  if (!Array.isArray(value?.branchIds) || typeof value.sourceCount !== "number"
+    || typeof value.sourceDigest !== "string" || typeof value.reusable !== "boolean") return undefined;
+  if (typeof (value as Partial<SummaryCheckpoint>).summary === "string") return value as SummaryCheckpoint;
+  return value.strategy === "jev-selection" && Array.isArray(value.selectedIndexes)
+    && value.selectedIndexes.every((index) => Number.isSafeInteger(index) && index >= 0)
+    ? value as SelectionCheckpoint : undefined;
 }
 
 function isBranchPrefix(prefix: readonly string[], branch: readonly string[]): boolean {
@@ -49,6 +65,14 @@ function summaryMessage(summary: string): ModelMessage {
   return { role: "user", content: SUMMARY_PREFIX + summary };
 }
 
+function applyCheckpoint(checkpoint: Checkpoint, messages: readonly ModelMessage[]): ModelMessage[] {
+  if (checkpoint.strategy === "jev-selection") {
+    const selected = new Set(checkpoint.selectedIndexes);
+    return messages.filter((_, index) => index >= checkpoint.sourceCount || selected.has(index));
+  }
+  return [summaryMessage(checkpoint.summary), ...messages.slice(checkpoint.sourceCount)];
+}
+
 function lastRole(messages: readonly ModelMessage[], role: ModelMessage["role"]): number {
   for (let index = messages.length - 1; index >= 0; index -= 1) if (messages[index]?.role === role) return index;
   return -1;
@@ -60,22 +84,100 @@ function splitSource(source: string, chunkSize: number): string[] {
   return chunks;
 }
 
+function toolCallIds(message: ModelMessage): string[] {
+  if (!Array.isArray(message.content)) return [];
+  return message.content.flatMap((part) => {
+    if (!part || typeof part !== "object") return [];
+    const id = (part as { toolCallId?: unknown }).toolCallId;
+    return typeof id === "string" ? [id] : [];
+  });
+}
+
+function withToolPairs(messages: readonly ModelMessage[], selected: Set<number>): Set<number> {
+  const indexesByToolCall = new Map<string, number[]>();
+  messages.forEach((message, index) => {
+    for (const id of toolCallIds(message)) {
+      const indexes = indexesByToolCall.get(id) ?? [];
+      indexes.push(index);
+      indexesByToolCall.set(id, indexes);
+    }
+  });
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const index of [...selected]) {
+      for (const id of toolCallIds(messages[index]!)) {
+        for (const pairedIndex of indexesByToolCall.get(id) ?? []) {
+          if (selected.has(pairedIndex)) continue;
+          selected.add(pairedIndex);
+          changed = true;
+        }
+      }
+    }
+  }
+  return selected;
+}
+
+function selectByProbability(
+  messages: readonly ModelMessage[],
+  start: number,
+  cut: number,
+  probabilities: Map<number, number>,
+  target: number,
+): { messages: ModelMessage[]; selectedIndexes: number[] } | undefined {
+  const selected = new Set<number>();
+  for (let index = 0; index < messages.length; index += 1) {
+    if (index < start || index >= cut || messages[index]?.role === "system") selected.add(index);
+  }
+  withToolPairs(messages, selected);
+  const mandatory = messages.filter((_, index) => selected.has(index));
+  if (estimate(mandatory) >= target) return undefined;
+
+  const ranked = [...probabilities.entries()]
+    .filter(([index, probability]) => index >= start && index < cut && probability >= 0.5 && messages[index]?.role !== "system")
+    .sort(([leftIndex, leftProbability], [rightIndex, rightProbability]) => rightProbability - leftProbability || rightIndex - leftIndex);
+  for (const [index] of ranked) {
+    const candidate = new Set(selected);
+    candidate.add(index);
+    withToolPairs(messages, candidate);
+    const next = messages.filter((_, itemIndex) => candidate.has(itemIndex));
+    if (estimate(next) < target) {
+      selected.clear();
+      candidate.forEach((itemIndex) => selected.add(itemIndex));
+    }
+  }
+
+  const compacted = messages.filter((_, index) => selected.has(index));
+  if (estimate(compacted) >= estimate(messages)) return undefined;
+  return {
+    messages: compacted,
+    selectedIndexes: [...selected].filter((index) => index < cut).sort((left, right) => left - right),
+  };
+}
+
 export class ContextCompactor {
   private scale = 1;
   private lastEstimate = 0;
   private warned = false;
   private events?: LogEvent[];
   private limitPromise?: Promise<ModelLimit | undefined>;
+  private readonly jevSelector?: JevSelectionScorer;
 
   constructor(private options: {
     model: ModelConfig;
+    jevConfig?: JevConfig;
+    jevSelector?: JevSelectionScorer;
     languageModel: LanguageModel;
     logger: EventLogger;
     conversationId: string;
     branchIds: string[];
     signal: AbortSignal;
     limit?: ModelLimit;
-  }) {}
+  }) {
+    this.jevSelector = options.jevSelector ?? (options.jevConfig?.baseURL.trim() && options.jevConfig.apiKey.trim() && options.jevConfig.model.trim()
+      ? new JevSelector(options.jevConfig, { logger: options.logger, conversationId: options.conversationId })
+      : undefined);
+  }
 
   recordUsage(inputTokens: number | undefined): void {
     if (inputTokens && this.lastEstimate) this.scale = Math.max(0.5, Math.min(8, inputTokens / this.lastEstimate));
@@ -99,8 +201,8 @@ export class ContextCompactor {
       this.events ??= await logger.conversation(conversationId);
       applied = await reusableCheckpoint(this.events, this.options.branchIds, rawMessages);
       if (applied) {
-        messages = [summaryMessage(applied.summary), ...rawMessages.slice(applied.sourceCount)];
-        logger.record({ type: "context.checkpoint.applied", conversationId, content: { sourceCount: applied.sourceCount, model: model.model } });
+        messages = applyCheckpoint(applied, rawMessages);
+        logger.record({ type: "context.checkpoint.applied", conversationId, content: { sourceCount: applied.sourceCount, strategy: applied.strategy ?? "summary", model: model.model } });
       }
     }
     this.lastEstimate = estimate(messages);
@@ -124,6 +226,61 @@ export class ContextCompactor {
     }
     const source = messages.slice(start, cut);
     if (source.length === 0) return messages === rawMessages ? undefined : messages;
+
+    if (this.jevSelector && !applied && start === 0 && cut > 0) {
+      const candidates = source.flatMap((message, index) => message.role === "system" ? [] : [{ index, message }]);
+      if (candidates.length > 0) {
+        await logger.append({ type: "context.compaction.started", conversationId,
+          content: { strategy: "jev-selection", stepNumber, limit, estimatedInputTokens: Math.ceil(this.lastEstimate * this.scale), candidateCount: candidates.length } });
+        try {
+          const lastUser = lastRole(messages, "user");
+          const task = lastUser >= 0 ? previewMessage(messages[lastUser]!) : "Continue the browser task.";
+          const scores = await this.jevSelector.score(task, candidates, signal);
+          const selection = selectByProbability(messages, start, cut, scores.probabilities, Math.floor(budget / this.scale));
+          if (selection) {
+            await logger.append({
+              type: "model.compaction.selection.finished", conversationId,
+              content: {
+                strategy: "jev-selection",
+                model: scores.model,
+                batches: scores.batches,
+                candidateCount: candidates.length,
+                selectedCount: selection.selectedIndexes.length,
+                probabilities: Object.fromEntries(scores.probabilities),
+              },
+              stopReason: "decision",
+              usage: scores.usage,
+              providerMetadata: { provider: "typesafe", model: scores.model },
+            });
+            const checkpoint: SelectionCheckpoint = {
+              strategy: "jev-selection",
+              branchIds: this.options.branchIds,
+              sourceCount: cut,
+              sourceDigest: await digest(rawMessages.slice(0, cut)),
+              selectedIndexes: selection.selectedIndexes,
+              reusable: stepNumber === 0,
+            };
+            await logger.append({ type: "context.compacted", conversationId,
+              content: { ...checkpoint, stepNumber, limit, inputBudget: budget, jevUsage: scores.usage, jevModel: scores.model } });
+            this.lastEstimate = estimate(selection.messages);
+            return selection.messages;
+          }
+          await logger.append({ type: "context.compaction.fallback", conversationId,
+            content: { strategy: "jev-selection", reason: "selection-did-not-fit", stepNumber, limit } });
+        } catch (error) {
+          if (signal.aborted) {
+            await logger.append({ type: "context.compaction.aborted", conversationId,
+              content: { strategy: "jev-selection", stepNumber, limit }, abort: { reason: signal.reason } });
+            throw error;
+          }
+          await logger.append({ type: "context.compaction.jev.failed", conversationId,
+            content: { strategy: "jev-selection", stepNumber, limit }, error });
+          await logger.append({ type: "context.compaction.fallback", conversationId,
+            content: { strategy: "jev-selection", reason: "jev-request-failed", stepNumber, limit } });
+        }
+      }
+    }
+
     await logger.append({ type: "context.compaction.started", conversationId, content: { stepNumber, limit, estimatedInputTokens: Math.ceil(this.lastEstimate * this.scale) } });
     try {
       const maxOutputTokens = Math.max(128, Math.min(2048, Math.floor(budget / 10)));

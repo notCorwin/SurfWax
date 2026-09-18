@@ -7,7 +7,7 @@ import { Button, buttonVariants } from "../components/ui/button";
 import { ErrorNotice } from "../components/ui/error-notice";
 import { generateConversationTitle } from "../conversations";
 import { EventLogger, rebuildConversationList } from "../logging";
-import type { ModelConfig } from "../types";
+import type { JevConfig, ModelConfig } from "../types";
 import { useSidePanelRuntime } from "./useSidePanelRuntime";
 import { useSidePanelSession } from "./useSidePanelSession";
 import "../styles.css";
@@ -107,7 +107,7 @@ export function App() {
   }
 
   if (session.configured) {
-    return <ConfiguredChat key={session.chatKey} config={session.config} logger={logger} onError={setFatal} />;
+    return <ConfiguredChat key={session.chatKey} config={session.config} jevConfig={session.jevConfigured ? session.jevConfig : undefined} logger={logger} onError={setFatal} />;
   }
 
   return (
@@ -124,7 +124,7 @@ export function App() {
   );
 }
 
-function ConfiguredChat({ config, logger, onError }: { config: ModelConfig; logger: EventLogger; onError: (error: unknown) => void }) {
+function ConfiguredChat({ config, jevConfig, logger, onError }: { config: ModelConfig; jevConfig?: JevConfig; logger: EventLogger; onError: (error: unknown) => void }) {
   const [initialThreadId, setInitialThreadId] = useState<string | null>();
 
   useEffect(() => {
@@ -146,7 +146,7 @@ function ConfiguredChat({ config, logger, onError }: { config: ModelConfig; logg
       </main>
     );
   }
-  return <ConfiguredRuntime config={config} logger={logger} initialThreadId={initialThreadId ?? undefined} />;
+  return <ConfiguredRuntime config={config} jevConfig={jevConfig} logger={logger} initialThreadId={initialThreadId ?? undefined} />;
 }
 
 function ReloadConversationList({ logger, config }: { logger: EventLogger; config: ModelConfig }) {
@@ -173,8 +173,8 @@ function ReloadConversationList({ logger, config }: { logger: EventLogger; confi
   return null;
 }
 
-function ConfiguredRuntime({ config, logger, initialThreadId }: { config: ModelConfig; logger: EventLogger; initialThreadId?: string }) {
-  const runtime = useSidePanelRuntime(config, logger, initialThreadId);
+function ConfiguredRuntime({ config, jevConfig, logger, initialThreadId }: { config: ModelConfig; jevConfig?: JevConfig; logger: EventLogger; initialThreadId?: string }) {
+  const runtime = useSidePanelRuntime(config, logger, initialThreadId, jevConfig);
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <ConfiguredConversation config={config} logger={logger} />
@@ -210,7 +210,7 @@ function ConversationView({ config, logger, threadId, drafts }: { config: ModelC
   useEffect(() => logger.subscribe((event) => {
     if (event.conversationId !== conversationId) return;
     if (event.type === "context.compacted" || event.type === "context.checkpoint.applied") {
-      setContextStatus({ message: "模型正在使用压缩摘要；完整对话仍保留在记录中。", error: false });
+      setContextStatus({ message: "模型正在使用保留消息或压缩摘要；完整对话仍保留在记录中。", error: false });
     } else if (event.type === "context.limit.unavailable") {
       setContextStatus({ message: "无法取得模型上下文窗口；自动压缩暂不可用，可在设置中手动指定。", error: true });
     } else if (event.type === "context.compaction.failed") {

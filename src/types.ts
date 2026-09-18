@@ -13,3 +13,9 @@ export type ModelConfig = {
   model: string;
   contextWindowOverride?: number;
 };
+
+export type JevConfig = {
+  baseURL: string;
+  apiKey: string;
+  model: string;
+};

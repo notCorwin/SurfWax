@@ -1,19 +1,30 @@
 import { useEffect, useState } from "react";
-import type { ModelConfig } from "../types";
-import { MODEL_CONFIG_STORAGE_KEY, isCompleteModelConfig, loadModelConfig } from "./config";
+import type { JevConfig, ModelConfig } from "../types";
+import {
+  DEFAULT_JEV_CONFIG,
+  JEV_CONFIG_STORAGE_KEY,
+  MODEL_CONFIG_STORAGE_KEY,
+  isCompleteJevConfig,
+  isCompleteModelConfig,
+  loadJevConfig,
+  loadModelConfig,
+} from "./config";
 
 const EMPTY_CONFIG: ModelConfig = { baseURL: "", apiKey: "", model: "" };
 
 export type SidePanelSession = {
   config: ModelConfig;
+  jevConfig: JevConfig;
   configReady: boolean;
   error?: unknown;
   configured: boolean;
+  jevConfigured: boolean;
   chatKey: string;
 };
 
 export function useSidePanelSession(): SidePanelSession {
   const [config, setConfig] = useState<ModelConfig>(EMPTY_CONFIG);
+  const [jevConfig, setJevConfig] = useState<JevConfig>(DEFAULT_JEV_CONFIG);
   const [configReady, setConfigReady] = useState(false);
   const [error, setError] = useState<unknown>();
 
@@ -21,9 +32,13 @@ export function useSidePanelSession(): SidePanelSession {
     let active = true;
     const refresh = async () => {
       try {
-        const stored = await loadModelConfig(EMPTY_CONFIG);
+        const [stored, storedJev] = await Promise.all([
+          loadModelConfig(EMPTY_CONFIG),
+          loadJevConfig(),
+        ]);
         if (!active) return;
         setConfig(stored);
+        setJevConfig(storedJev);
         setError(undefined);
       } catch (cause) {
         if (active) setError(cause);
@@ -32,7 +47,7 @@ export function useSidePanelSession(): SidePanelSession {
       }
     };
     const storageChanged = (changes: { [key: string]: chrome.storage.StorageChange }, area: string) => {
-      if (area === "local" && changes[MODEL_CONFIG_STORAGE_KEY]) void refresh();
+      if (area === "local" && (changes[MODEL_CONFIG_STORAGE_KEY] || changes[JEV_CONFIG_STORAGE_KEY])) void refresh();
     };
 
     void refresh();
@@ -45,9 +60,11 @@ export function useSidePanelSession(): SidePanelSession {
 
   return {
     config,
+    jevConfig,
     configReady,
     error,
     configured: configReady && isCompleteModelConfig(config),
-    chatKey: `${config.baseURL}\u0000${config.model}\u0000${config.contextWindowOverride ?? ""}`,
+    jevConfigured: configReady && isCompleteJevConfig(jevConfig),
+    chatKey: `${config.baseURL}\u0000${config.model}\u0000${config.contextWindowOverride ?? ""}\u0000${jevConfig.baseURL}\u0000${jevConfig.model}\u0000${jevConfig.apiKey}`,
   };
 }

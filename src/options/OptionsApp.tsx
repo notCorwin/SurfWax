@@ -7,23 +7,34 @@ import { Input } from "../components/ui/input";
 import { ErrorNotice } from "../components/ui/error-notice";
 import { EventLogger } from "../logging";
 import { resolveModelLimit, type ModelLimit } from "../agent/model-limits";
-import type { PersistedModelConfig } from "../sidepanel/config";
-import { isCompleteModelConfig, loadModelConfig, saveModelConfig } from "../sidepanel/config";
+import type { JevConfig } from "../types";
+import type { PersistedJevConfig, PersistedModelConfig } from "../sidepanel/config";
+import {
+  DEFAULT_JEV_CONFIG,
+  isCompleteModelConfig,
+  loadJevConfig,
+  loadModelConfig,
+  saveJevConfig,
+  saveModelConfig,
+} from "../sidepanel/config";
 import "../styles.css";
 import "./styles.css";
 
 const EMPTY_CONFIG: PersistedModelConfig = { baseURL: "", apiKey: "", model: "" };
+const EMPTY_JEV_CONFIG: PersistedJevConfig = DEFAULT_JEV_CONFIG;
 type Status = "idle" | "saving" | "clearing" | "saved" | "error";
 
 export function OptionsApp() {
   const [config, setConfig] = useState(EMPTY_CONFIG);
+  const [jevConfig, setJevConfig] = useState<JevConfig>(EMPTY_JEV_CONFIG);
   const [ready, setReady] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState("");
   const [errorDetail, setErrorDetail] = useState<unknown>();
   const [matchedLimit, setMatchedLimit] = useState<ModelLimit>();
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<keyof PersistedModelConfig, string>>>({});
-  const savedConfig = useRef(JSON.stringify(EMPTY_CONFIG));
+  const [jevFieldErrors, setJevFieldErrors] = useState<Partial<Record<keyof PersistedJevConfig, string>>>({});
+  const savedConfig = useRef(JSON.stringify({ config: EMPTY_CONFIG, jevConfig: EMPTY_JEV_CONFIG }));
   const matchingKey = useRef("");
   const fail = (summary: string, error: unknown) => {
     setStatus("error");
@@ -34,10 +45,11 @@ export function OptionsApp() {
 
   useEffect(() => {
     let active = true;
-    void loadModelConfig(EMPTY_CONFIG).then((stored) => {
+    void Promise.all([loadModelConfig(EMPTY_CONFIG), loadJevConfig(EMPTY_JEV_CONFIG)]).then(([stored, storedJev]) => {
       if (!active) return;
       setConfig(stored);
-      savedConfig.current = JSON.stringify(stored);
+      setJevConfig(storedJev);
+      savedConfig.current = JSON.stringify({ config: stored, jevConfig: storedJev });
       matchingKey.current = `${stored.baseURL}\u0000${stored.model}`;
       if (isCompleteModelConfig(stored)) {
         void resolveModelLimit({ ...stored, contextWindowOverride: undefined }).then((limit) => {
@@ -57,13 +69,13 @@ export function OptionsApp() {
 
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
-      if (JSON.stringify(config) === savedConfig.current) return;
+      if (JSON.stringify({ config, jevConfig }) === savedConfig.current) return;
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [config]);
+  }, [config, jevConfig]);
 
   const update = (field: keyof PersistedModelConfig, value: string) => {
     setConfig((current) => ({ ...current, [field]: field === "contextWindowOverride" ? (value ? Number(value) : undefined) : value }));
@@ -72,6 +84,14 @@ export function OptionsApp() {
       matchingKey.current = "";
       setMatchedLimit(undefined);
     }
+    setStatus("idle");
+    setMessage("");
+    setErrorDetail(undefined);
+  };
+
+  const updateJev = (field: keyof PersistedJevConfig, value: string) => {
+    setJevConfig((current) => ({ ...current, [field]: value }));
+    setJevFieldErrors((current) => ({ ...current, [field]: undefined }));
     setStatus("idle");
     setMessage("");
     setErrorDetail(undefined);
@@ -92,23 +112,40 @@ export function OptionsApp() {
     if (config.contextWindowOverride !== undefined && (!Number.isSafeInteger(config.contextWindowOverride) || config.contextWindowOverride <= 0)) {
       errors.contextWindowOverride = "请输入正整数 token 数";
     }
+    const jevErrors: Partial<Record<keyof PersistedJevConfig, string>> = {};
+    if (jevConfig.apiKey.trim()) {
+      if (!jevConfig.baseURL.trim()) jevErrors.baseURL = "请输入 Jev Base URL";
+      else {
+        try {
+          const url = new URL(jevConfig.baseURL);
+          if (url.protocol !== "http:" && url.protocol !== "https:") jevErrors.baseURL = "请输入有效的 Jev HTTP 或 HTTPS 地址";
+        } catch { jevErrors.baseURL = "请输入有效的 Jev 网址"; }
+      }
+      if (!jevConfig.model.trim()) jevErrors.model = "请输入 Jev Model ID";
+    }
     setFieldErrors(errors);
-    if (Object.keys(errors).length) {
+    setJevFieldErrors(jevErrors);
+    if (Object.keys(errors).length || Object.keys(jevErrors).length) {
       setStatus("error");
       setMessage("请检查标出的字段");
       setErrorDetail(undefined);
       if (errors.contextWindowOverride) document.getElementById("context-window")?.closest("details")?.setAttribute("open", "");
-      document.getElementById(({ baseURL: "base-url", model: "model-id", apiKey: "api-key", contextWindowOverride: "context-window" })[
-        Object.keys(errors)[0] as keyof PersistedModelConfig
-      ])?.focus();
+      const firstMainError = Object.keys(errors)[0] as keyof PersistedModelConfig | undefined;
+      const firstJevError = Object.keys(jevErrors)[0] as keyof PersistedJevConfig | undefined;
+      const firstErrorId = firstMainError
+        ? ({ baseURL: "base-url", model: "model-id", apiKey: "api-key", contextWindowOverride: "context-window" }[firstMainError])
+        : firstJevError
+          ? ({ baseURL: "jev-base-url", model: "jev-model-id", apiKey: "jev-api-key" }[firstJevError])
+          : undefined;
+      if (firstErrorId) document.getElementById(firstErrorId)?.focus();
       return;
     }
 
     setStatus("saving");
     setMessage("正在保存配置…");
     try {
-      await saveModelConfig(config);
-      savedConfig.current = JSON.stringify(config);
+      await Promise.all([saveModelConfig(config), saveJevConfig(jevConfig)]);
+      savedConfig.current = JSON.stringify({ config, jevConfig });
       setStatus("saved");
       setMessage("配置已保存，Side Panel 会立即使用新配置");
       matchingKey.current = `${config.baseURL}\u0000${config.model}`;
@@ -190,6 +227,40 @@ export function OptionsApp() {
             <Button type="submit" disabled={busy} aria-busy={status === "saving"}>
               {status === "saving" && <LoaderCircleIcon className="animate-spin" aria-hidden="true" />}
               保存配置
+            </Button>
+          </CardFooter>
+        </form>
+      </Card>
+
+      <Card data-testid="jev-config-card">
+        <form noValidate onSubmit={(event) => void save(event)}>
+          <CardHeader>
+            <CardTitle>Jev 消息选择压缩（可选）</CardTitle>
+            <CardDescription>填写 API Key 后，自动压缩会优先逐条选择要保留的消息；清空 API Key 即停用，并回退到 LLM 摘要。</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <FieldGroup>
+              <Field data-disabled={busy || undefined}>
+                <FieldLabel htmlFor="jev-base-url">Jev Base URL</FieldLabel>
+                <Input id="jev-base-url" name="jevBaseURL" type="url" autoComplete="url" aria-invalid={!!jevFieldErrors.baseURL} aria-describedby={jevFieldErrors.baseURL ? "jev-base-url-error" : undefined} value={jevConfig.baseURL} disabled={busy} onChange={(event) => updateJev("baseURL", event.target.value)} />
+                {jevFieldErrors.baseURL && <p id="jev-base-url-error" className="field-error" role="alert">{jevFieldErrors.baseURL}</p>}
+              </Field>
+              <Field data-disabled={busy || undefined}>
+                <FieldLabel htmlFor="jev-model-id">Jev Model ID</FieldLabel>
+                <Input id="jev-model-id" name="jevModel" autoComplete="off" aria-invalid={!!jevFieldErrors.model} aria-describedby={jevFieldErrors.model ? "jev-model-id-error" : undefined} value={jevConfig.model} disabled={busy} onChange={(event) => updateJev("model", event.target.value)} />
+                {jevFieldErrors.model && <p id="jev-model-id-error" className="field-error" role="alert">{jevFieldErrors.model}</p>}
+              </Field>
+              <Field data-disabled={busy || undefined}>
+                <FieldLabel htmlFor="jev-api-key">Jev API Key</FieldLabel>
+                <Input id="jev-api-key" name="jevApiKey" type="password" autoComplete="off" aria-invalid={!!jevFieldErrors.apiKey} aria-describedby={jevFieldErrors.apiKey ? "jev-api-key-error" : undefined} value={jevConfig.apiKey} disabled={busy} onChange={(event) => updateJev("apiKey", event.target.value)} />
+                {jevFieldErrors.apiKey && <p id="jev-api-key-error" className="field-error" role="alert">{jevFieldErrors.apiKey}</p>}
+              </Field>
+            </FieldGroup>
+          </CardContent>
+          <CardFooter>
+            <Button type="submit" disabled={busy} aria-busy={status === "saving"}>
+              {status === "saving" && <LoaderCircleIcon className="animate-spin" aria-hidden="true" />}
+              保存 Jev 配置
             </Button>
           </CardFooter>
         </form>

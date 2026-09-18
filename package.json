@@ -16,6 +16,7 @@
     "@assistant-ui/ai-sdk": "^0.0.5",
     "@assistant-ui/react": "^0.15.19",
     "@assistant-ui/react-streamdown": "^0.3.15",
+    "@typesafe-ai/sdk": "^0.6.0",
     "@codemirror/lang-css": "^6.3.1",
     "@codemirror/lang-javascript": "^6.2.5",
     "@codemirror/state": "^6.7.5",

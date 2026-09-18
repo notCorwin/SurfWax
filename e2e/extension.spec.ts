@@ -265,11 +265,41 @@ test("shows the configured model at the bottom left of the composer", async () =
   try {
     const options = await configure(opened.context, opened.page, "https://example.com/v1");
     await expect(opened.page.getByTestId("composer-model")).toHaveText("Test Model");
-    await options.getByLabel("Model ID").fill("google/gemini-3.8-flash");
+    await options.getByLabel("Model ID", { exact: true }).fill("google/gemini-3.8-flash");
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(opened.page.getByTestId("composer-model")).toHaveText("Gemini 3.8 Flash");
     await expect(opened.page.getByTestId("composer-model")).toHaveAttribute("title", "google/gemini-3.8-flash");
     await options.close();
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory);
+  }
+});
+
+test("saves and disables the optional Jev selector configuration", async () => {
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, "https://provider.test/v1");
+    await options.getByLabel("Jev Base URL").fill("https://jev.example/v1");
+    await options.getByLabel("Jev Model ID").fill("jev-test");
+    await options.getByLabel("Jev API Key").fill("jev-key");
+    await options.getByRole("button", { name: "保存 Jev 配置" }).click();
+    await expect(options.getByRole("status")).toContainText("配置已保存");
+    await expect.poll(() => options.evaluate(async () => (await chrome.storage.local.get("side-agent:jev-config"))["side-agent:jev-config"])).toEqual({
+      baseURL: "https://jev.example/v1",
+      model: "jev-test",
+      apiKey: "jev-key",
+    });
+    await expect(opened.page.getByTestId("composer-input")).toBeVisible();
+
+    await options.getByLabel("Jev API Key").fill("");
+    await options.getByRole("button", { name: "保存 Jev 配置" }).click();
+    await expect(options.getByRole("status")).toContainText("配置已保存");
+    await expect.poll(() => options.evaluate(async () => (await chrome.storage.local.get("side-agent:jev-config"))["side-agent:jev-config"])).toEqual({
+      baseURL: "https://jev.example/v1",
+      model: "jev-test",
+      apiKey: "",
+    });
+    await expect(opened.page.getByTestId("composer-input")).toBeVisible();
   } finally {
     await dispose(opened.context, opened.userDataDirectory);
   }
@@ -303,14 +333,14 @@ test("shows inline settings errors and returns keyboard focus after closing conv
     await options.getByRole("link", { name: "跳转到配置" }).focus();
     await options.keyboard.press("Enter");
     await expect(options.locator("#options-content")).toBeFocused();
-    await options.getByLabel("Base URL").fill("https://provider.test/v1");
-    await options.getByLabel("Model ID").fill("test-model");
-    await options.getByLabel("API Key").fill("test-key");
+    await options.getByLabel("Base URL", { exact: true }).fill("https://provider.test/v1");
+    await options.getByLabel("Model ID", { exact: true }).fill("test-model");
+    await options.getByLabel("API Key", { exact: true }).fill("test-key");
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(opened.page.getByTestId("conversation-menu")).toBeVisible();
     await expect(opened.page.locator(".app-header").getByTestId("new-conversation")).toBeVisible();
     expect(await warnsOnLeave(options)).toBe(false);
-    await options.getByLabel("Model ID").fill("another-model");
+    await options.getByLabel("Model ID", { exact: true }).fill("another-model");
     expect(await warnsOnLeave(options)).toBe(true);
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(options.getByRole("status")).toContainText("配置已保存");
