@@ -333,17 +333,17 @@ p {
   max-width: 100%;
 }
 
-.markdown-body [data-streamdown="table-wrapper"] > :last-child:focus-visible {
+:is(.markdown-body, [data-streamdown="table-fullscreen"]) [data-streamdown="table-wrapper"] > :last-child:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: -2px;
 }
 
-.markdown-body [data-streamdown="table"] {
+:is(.markdown-body, [data-streamdown="table-fullscreen"]) [data-streamdown="table"] {
   width: max-content;
   min-width: 100%;
 }
 
-.markdown-body [data-streamdown="table"] :is(th, td) {
+:is(.markdown-body, [data-streamdown="table-fullscreen"]) [data-streamdown="table"] :is(th, td) {
   min-width: 9rem;
   max-width: 18rem;
   padding: 0.5rem 0.75rem;
@@ -352,7 +352,7 @@ p {
   word-break: normal;
 }
 
-.markdown-body [data-streamdown="table-body"] tr:nth-child(even) {
+:is(.markdown-body, [data-streamdown="table-fullscreen"]) [data-streamdown="table-body"] tr:nth-child(even) {
   background: var(--muted);
 }
 

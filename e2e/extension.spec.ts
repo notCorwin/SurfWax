@@ -1020,6 +1020,25 @@ test("streams complete Markdown without blocking draft input", async () => {
     await opened.page.keyboard.press("ArrowRight");
     await expect.poll(() => tableScroll.evaluate((scroll) => scroll.scrollLeft)).toBeGreaterThan(0);
     await opened.page.emulateMedia({ colorScheme: "dark" });
+    await rendered.locator('[data-streamdown="table-wrapper"] button').last().click();
+    const fullscreen = opened.page.locator('[data-streamdown="table-fullscreen"]');
+    await expect(fullscreen).toBeVisible();
+    for (const width of [430, 900]) {
+      await opened.page.setViewportSize({ width, height: 1000 });
+      const layout = await fullscreen.locator('[data-streamdown="table"] tbody tr').first().evaluate((row) => ({
+        height: row.getBoundingClientRect().height,
+        minCellWidth: Math.min(...[...row.querySelectorAll("td")].map((cell) => cell.getBoundingClientRect().width)),
+      }));
+      expect(layout.minCellWidth).toBeGreaterThanOrEqual(144);
+      expect(layout.height).toBeLessThan(90);
+    }
+    await opened.page.setViewportSize({ width: 430, height: 1000 });
+    const fullscreenScroll = fullscreen.locator('[data-streamdown="table-wrapper"] > :last-child');
+    expect(await fullscreenScroll.evaluate((scroll) => scroll.scrollWidth)).toBeGreaterThan(await fullscreenScroll.evaluate((scroll) => scroll.clientWidth));
+    await fullscreenScroll.evaluate((scroll) => { scroll.scrollLeft = scroll.scrollWidth; });
+    expect(await fullscreenScroll.evaluate((scroll) => scroll.scrollLeft)).toBeGreaterThan(0);
+    await fullscreen.locator("button").last().click();
+    await expect(fullscreen).toHaveCount(0);
     const copy = rendered.getByRole("button", { name: "Copy Code" });
     await expect(copy).toBeEnabled();
     await copy.click();
