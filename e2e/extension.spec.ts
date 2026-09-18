@@ -1606,8 +1606,32 @@ test("shows a warning for a Chrome page that cannot be guarded without stopping 
     await restricted.bringToFront();
     await opened.page.getByTestId("composer-input").fill("inspect Chrome");
     await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.getByRole("status").filter({ hasText: "无法防止点击" })).toBeVisible();
+    await expect(opened.page.getByRole("status").filter({ hasText: "无法启用防点击保护" })).toBeVisible();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("CHROME_PAGE_OK");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("keeps the composer usable when a long data URL cannot be guarded", async () => {
+  const provider = await startProvider([textResponse("DATA_PAGE_OK"), textResponse("数据页")]);
+  const opened = await openExtension();
+  try {
+    await opened.page.setViewportSize({ width: 360, height: 700 });
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    const dataPage = await opened.context.newPage();
+    await dataPage.goto(`data:text/html,${encodeURIComponent(`<title>学生成绩表示例表格</title><p>${"成绩".repeat(2000)}</p>`)}`);
+    await dataPage.bringToFront();
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("inspect data page");
+    await composer.press("Enter");
+    const warning = opened.page.getByRole("status").filter({ hasText: "无法启用防点击保护" });
+    await expect(warning).toHaveText(/标签页 \d+ 无法启用防点击保护；智能体仍可继续运行。/);
+    expect((await warning.textContent())!.length).toBeLessThan(80);
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("DATA_PAGE_OK");
+    await expect(composer).toBeVisible();
+    expect(await composer.evaluate((element) => element.getBoundingClientRect().bottom <= innerHeight)).toBe(true);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }

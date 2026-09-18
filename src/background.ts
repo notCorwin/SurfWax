@@ -6,6 +6,13 @@ const guardedTabs = new Map<number, Set<chrome.runtime.Port>>();
 const bypassedTabs = new Map<number, number>();
 const guardUpdates = new Map<number, Promise<void>>();
 
+function warnPageGuard(tabId: number, error: unknown): string {
+  eventLogger.record({ type: "page-guard.failed", content: { tabId }, error });
+  const detail = `标签页 ${tabId} 无法启用防点击保护；智能体仍可继续运行。`;
+  void chrome.runtime.sendMessage({ type: "surf-wax:guard-warning", detail }).catch(() => undefined);
+  return detail;
+}
+
 function installPageGuard(): void {
   if (document.getElementById("__surf-wax-page-guard")) return;
   const overlay = document.createElement("div");
@@ -48,8 +55,7 @@ async function bypassPageGuard(tabId: number, enabled: boolean): Promise<void> {
 
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (change.status === "complete" && guardedTabs.has(tabId)) void updatePageGuard(tabId).catch((error) => {
-    eventLogger.record({ type: "page-guard.failed", content: { tabId }, error });
-    void chrome.runtime.sendMessage({ type: "surf-wax:guard-warning", detail: `标签页 ${tabId} 无法防止点击：${String(error)}` }).catch(() => undefined);
+    warnPageGuard(tabId, error);
   });
 });
 
@@ -71,10 +77,7 @@ chrome.runtime.onConnect.addListener((port) => {
     void updatePageGuard(tabId).then(
       () => reply({ id: message.id, ready: true }),
       (error) => {
-        const detail = error instanceof Error ? error.message : String(error);
-        eventLogger.record({ type: "page-guard.failed", content: { tabId }, error });
-        reply({ id: message.id, error: detail });
-        void chrome.runtime.sendMessage({ type: "surf-wax:guard-warning", detail: `标签页 ${tabId} 无法防止点击：${detail}` }).catch(() => undefined);
+        reply({ id: message.id, error: warnPageGuard(tabId, error) });
       },
     );
   });
