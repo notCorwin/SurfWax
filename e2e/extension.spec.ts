@@ -625,6 +625,27 @@ test("ships only the minimal MV3 Harness surface", async () => {
   }
 });
 
+test("opens the real side panel through the extension action", async () => {
+  const provider = await startProvider([]);
+  const opened = await openExtension();
+  try {
+    await opened.page.close();
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    const browserSession = await opened.context.browser()!.newBrowserCDPSession();
+    const { targetInfos } = await browserSession.send("Target.getTargets", {
+      filter: [{ type: "tab", exclude: false }, { exclude: true }],
+    });
+    const tab = targetInfos.find((info) => info.type === "tab" && info.url === target.url());
+    expect(tab).toBeDefined();
+    await browserSession.send("Extensions.triggerAction", { id: opened.extensionId, targetId: tab!.targetId });
+    await expect.poll(async () => (await browserSession.send("Target.getTargets")).targetInfos
+      .some((info) => info.url === `chrome-extension://${opened.extensionId}/sidepanel.html`)).toBe(true);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
 test("targets page worlds and keeps large tool output out of model history", async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);

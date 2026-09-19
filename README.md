@@ -46,13 +46,22 @@ npm run build
 
 ### 开发时热更新
 
-开发扩展时不需要反复构建：
+开发扩展时只需一条命令：
 
 ```sh
 npm run dev
 ```
 
-首次运行后，按上面的 Chrome 步骤加载 Vite 提示的 `dist/` 目录，并保持该终端运行。修改 Side Panel、设置页或样式后会通过 HMR 原地更新并保留页面状态；修改后台 Service Worker 或 Manifest 时会自动重新加载扩展。开发服务器固定使用 `localhost:5173`，端口已被占用时会直接报错，避免页面代码与 HMR WebSocket 误连到不同的 Vite 实例。
+该命令会启动 Vite、加载专用的 Playwright Chromium、打开测试网页和真实 Side Panel。修改 Side Panel、设置页或样式后会通过 HMR 原地更新并保留页面状态；修改后台 Service Worker 或 Manifest 时会自动重新加载扩展并恢复 Side Panel。模型配置、对话和 User Scripts 保存在 Git 忽略的 `.dev/chromium-profile/` 中，删除该目录即可重置开发环境。
+
+可在命令后指定启动网页；只启动 Vite/CRXJS 时使用 `npm run dev:vite`：
+
+```sh
+npm run dev -- https://example.com
+npm run dev:vite
+```
+
+开发服务器固定使用 `localhost:5173`，端口已被占用时会直接报错。若本机尚未安装 Playwright Chromium，先运行 `npx playwright install chromium`。
 
 ## 首次配置
 
