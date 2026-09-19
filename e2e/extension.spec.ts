@@ -235,7 +235,7 @@ async function configure(context: BrowserContext, page: Page, baseURL: string, c
   await fields.nth(0).fill(baseURL);
   await fields.nth(1).fill("test-model");
   await fields.nth(2).fill("test-key");
-  await options.getByText("高级设置：手动指定上下文窗口").click();
+  await options.getByText("高级设置", { exact: true }).click();
   await fields.nth(3).fill(String(contextWindow));
   await options.getByRole("button", { name: "保存配置" }).click();
   await expect(options.getByRole("status")).toContainText("配置已保存");
@@ -299,11 +299,19 @@ test("saves and disables the optional Jev selector configuration", async () => {
   const opened = await openExtension();
   try {
     const options = await configure(opened.context, opened.page, "https://provider.test/v1");
-    await options.getByLabel("Jev Base URL").fill("https://jev.example/v1");
+    await expect(options.getByRole("group", { name: "上下文窗口" })).toBeVisible();
+    await expect(options.getByRole("group", { name: "Jev 消息选择压缩（可选）" })).toBeVisible();
+    await options.getByLabel("Jev Base URL").fill("not-a-url");
     await options.getByLabel("Jev Model ID").fill("jev-test");
     await options.getByLabel("Jev API Key").fill("jev-key");
     await options.getByLabel("最低保留评分").fill("0.81");
-    await options.getByRole("button", { name: "保存 Jev 配置" }).click();
+    await options.getByText("高级设置", { exact: true }).click();
+    await options.getByRole("button", { name: "保存配置" }).click();
+    await expect(options.locator(".advanced-settings")).toHaveAttribute("open", "");
+    await expect(options.locator("#jev-base-url-error")).toHaveText("请输入有效的 Jev 网址");
+    await expect(options.locator("#jev-base-url")).toBeFocused();
+    await options.getByLabel("Jev Base URL").fill("https://jev.example/v1");
+    await options.getByRole("button", { name: "保存配置" }).click();
     await expect(options.getByRole("status")).toContainText("配置已保存");
     await expect.poll(() => options.evaluate(async () => (await chrome.storage.local.get("side-agent:jev-config"))["side-agent:jev-config"])).toEqual({
       baseURL: "https://jev.example/v1",
@@ -314,7 +322,7 @@ test("saves and disables the optional Jev selector configuration", async () => {
     await expect(opened.page.getByTestId("composer-input")).toBeVisible();
 
     await options.getByLabel("Jev API Key").fill("");
-    await options.getByRole("button", { name: "保存 Jev 配置" }).click();
+    await options.getByRole("button", { name: "保存配置" }).click();
     await expect(options.getByRole("status")).toContainText("配置已保存");
     await expect.poll(() => options.evaluate(async () => (await chrome.storage.local.get("side-agent:jev-config"))["side-agent:jev-config"])).toEqual({
       baseURL: "https://jev.example/v1",
@@ -782,7 +790,7 @@ test("Jev selection creates a child conversation and keeps the source intact", a
     await options.getByLabel("Jev Base URL").fill(provider.origin);
     await options.getByLabel("Jev Model ID").fill("jev-test");
     await options.getByLabel("Jev API Key").fill("jev-key");
-    await options.getByRole("button", { name: "保存 Jev 配置" }).click();
+    await options.getByRole("button", { name: "保存配置" }).click();
     await expect(options.getByRole("status")).toContainText("配置已保存");
     await options.close();
     await opened.page.getByTestId("composer-input").fill("Keep this user request");

@@ -71,4 +71,16 @@ body {
 .advanced-settings summary svg { width: 14px; height: 14px; flex: none; }
 .advanced-settings[open] summary svg { transform: rotate(90deg); }
 
-details[open] [data-slot="field"] { margin-top: 12px; }
+.advanced-settings-content {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  margin-top: 20px;
+}
+
+.advanced-settings-content [data-slot="field-set"] {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}

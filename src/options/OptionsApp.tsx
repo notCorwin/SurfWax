@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { ChevronRightIcon, LoaderCircleIcon } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../components/ui/card";
-import { Field, FieldGroup, FieldLabel } from "../components/ui/field";
+import { Field, FieldDescription, FieldGroup, FieldLabel, FieldLegend, FieldSet } from "../components/ui/field";
 import { Input } from "../components/ui/input";
 import { ErrorNotice } from "../components/ui/error-notice";
 import { EventLogger } from "../logging";
@@ -133,7 +133,6 @@ export function OptionsApp() {
       setStatus("error");
       setMessage("请检查标出的字段");
       setErrorDetail(undefined);
-      if (errors.contextWindowOverride) document.getElementById("context-window")?.closest("details")?.setAttribute("open", "");
       const firstMainError = Object.keys(errors)[0] as keyof PersistedModelConfig | undefined;
       const firstJevError = Object.keys(jevErrors)[0] as keyof PersistedJevConfig | undefined;
       const firstErrorId = firstMainError
@@ -141,7 +140,11 @@ export function OptionsApp() {
         : firstJevError
           ? ({ baseURL: "jev-base-url", model: "jev-model-id", apiKey: "jev-api-key", threshold: "jev-threshold" }[firstJevError])
           : undefined;
-      if (firstErrorId) document.getElementById(firstErrorId)?.focus();
+      if (firstErrorId) {
+        const field = document.getElementById(firstErrorId);
+        field?.closest("details")?.setAttribute("open", "");
+        field?.focus();
+      }
       return;
     }
 
@@ -217,13 +220,42 @@ export function OptionsApp() {
                 {config.contextWindowOverride && <p className="model-limit-match">当前生效：手动指定 {config.contextWindowOverride.toLocaleString()} tokens</p>}
               </Field>
               <details className="advanced-settings">
-                <summary><ChevronRightIcon aria-hidden="true" /><span>高级设置：手动指定上下文窗口</span></summary>
-                <Field data-disabled={busy || undefined}>
-                  <FieldLabel htmlFor="context-window">窗口大小（tokens）</FieldLabel>
-                  <Input id="context-window" name="contextWindowOverride" type="number" min="1" step="1" aria-invalid={!!fieldErrors.contextWindowOverride} aria-describedby={fieldErrors.contextWindowOverride ? "context-window-error" : undefined} value={config.contextWindowOverride ?? ""} disabled={busy}
-                    onChange={(event) => update("contextWindowOverride", event.target.value)} />
-                  {fieldErrors.contextWindowOverride && <p id="context-window-error" className="field-error" role="alert">{fieldErrors.contextWindowOverride}</p>}
-                </Field>
+                <summary><ChevronRightIcon aria-hidden="true" /><span>高级设置</span></summary>
+                <div className="advanced-settings-content">
+                  <FieldSet>
+                    <FieldLegend>上下文窗口</FieldLegend>
+                    <Field data-disabled={busy || undefined}>
+                      <FieldLabel htmlFor="context-window">窗口大小（tokens）</FieldLabel>
+                      <Input id="context-window" name="contextWindowOverride" type="number" min="1" step="1" aria-invalid={!!fieldErrors.contextWindowOverride} aria-describedby={fieldErrors.contextWindowOverride ? "context-window-error" : undefined} value={config.contextWindowOverride ?? ""} disabled={busy}
+                        onChange={(event) => update("contextWindowOverride", event.target.value)} />
+                      {fieldErrors.contextWindowOverride && <p id="context-window-error" className="field-error" role="alert">{fieldErrors.contextWindowOverride}</p>}
+                    </Field>
+                  </FieldSet>
+                  <FieldSet>
+                    <FieldLegend>Jev 消息选择压缩（可选）</FieldLegend>
+                    <FieldDescription>上下文达到阈值时可选择 Jev 重选；清空 API Key 即停用 Jev。</FieldDescription>
+                    <Field data-disabled={busy || undefined}>
+                      <FieldLabel htmlFor="jev-base-url">Jev Base URL</FieldLabel>
+                      <Input id="jev-base-url" name="jevBaseURL" type="url" autoComplete="url" aria-invalid={!!jevFieldErrors.baseURL} aria-describedby={jevFieldErrors.baseURL ? "jev-base-url-error" : undefined} value={jevConfig.baseURL} disabled={busy} onChange={(event) => updateJev("baseURL", event.target.value)} />
+                      {jevFieldErrors.baseURL && <p id="jev-base-url-error" className="field-error" role="alert">{jevFieldErrors.baseURL}</p>}
+                    </Field>
+                    <Field data-disabled={busy || undefined}>
+                      <FieldLabel htmlFor="jev-model-id">Jev Model ID</FieldLabel>
+                      <Input id="jev-model-id" name="jevModel" autoComplete="off" aria-invalid={!!jevFieldErrors.model} aria-describedby={jevFieldErrors.model ? "jev-model-id-error" : undefined} value={jevConfig.model} disabled={busy} onChange={(event) => updateJev("model", event.target.value)} />
+                      {jevFieldErrors.model && <p id="jev-model-id-error" className="field-error" role="alert">{jevFieldErrors.model}</p>}
+                    </Field>
+                    <Field data-disabled={busy || undefined}>
+                      <FieldLabel htmlFor="jev-api-key">Jev API Key</FieldLabel>
+                      <Input id="jev-api-key" name="jevApiKey" type="password" autoComplete="off" aria-invalid={!!jevFieldErrors.apiKey} aria-describedby={jevFieldErrors.apiKey ? "jev-api-key-error" : undefined} value={jevConfig.apiKey} disabled={busy} onChange={(event) => updateJev("apiKey", event.target.value)} />
+                      {jevFieldErrors.apiKey && <p id="jev-api-key-error" className="field-error" role="alert">{jevFieldErrors.apiKey}</p>}
+                    </Field>
+                    <Field data-disabled={busy || undefined}>
+                      <FieldLabel htmlFor="jev-threshold">最低保留评分</FieldLabel>
+                      <Input id="jev-threshold" name="jevThreshold" type="number" min="0.01" max="0.99" step="0.01" aria-invalid={!!jevFieldErrors.threshold} aria-describedby={jevFieldErrors.threshold ? "jev-threshold-error" : undefined} value={jevConfig.threshold} disabled={busy} onChange={(event) => updateJev("threshold", event.target.value)} />
+                      {jevFieldErrors.threshold && <p id="jev-threshold-error" className="field-error" role="alert">{jevFieldErrors.threshold}</p>}
+                    </Field>
+                  </FieldSet>
+                </div>
               </details>
             </FieldGroup>
           </CardContent>
@@ -231,45 +263,6 @@ export function OptionsApp() {
             <Button type="submit" disabled={busy} aria-busy={status === "saving"}>
               {status === "saving" && <LoaderCircleIcon className="animate-spin" aria-hidden="true" />}
               保存配置
-            </Button>
-          </CardFooter>
-        </form>
-      </Card>
-
-      <Card data-testid="jev-config-card">
-        <form noValidate onSubmit={(event) => void save(event)}>
-          <CardHeader>
-            <CardTitle>Jev 消息选择压缩（可选）</CardTitle>
-            <CardDescription>上下文达到阈值时可选择 Jev 重选；清空 API Key 即停用 Jev。</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <FieldGroup>
-              <Field data-disabled={busy || undefined}>
-                <FieldLabel htmlFor="jev-base-url">Jev Base URL</FieldLabel>
-                <Input id="jev-base-url" name="jevBaseURL" type="url" autoComplete="url" aria-invalid={!!jevFieldErrors.baseURL} aria-describedby={jevFieldErrors.baseURL ? "jev-base-url-error" : undefined} value={jevConfig.baseURL} disabled={busy} onChange={(event) => updateJev("baseURL", event.target.value)} />
-                {jevFieldErrors.baseURL && <p id="jev-base-url-error" className="field-error" role="alert">{jevFieldErrors.baseURL}</p>}
-              </Field>
-              <Field data-disabled={busy || undefined}>
-                <FieldLabel htmlFor="jev-model-id">Jev Model ID</FieldLabel>
-                <Input id="jev-model-id" name="jevModel" autoComplete="off" aria-invalid={!!jevFieldErrors.model} aria-describedby={jevFieldErrors.model ? "jev-model-id-error" : undefined} value={jevConfig.model} disabled={busy} onChange={(event) => updateJev("model", event.target.value)} />
-                {jevFieldErrors.model && <p id="jev-model-id-error" className="field-error" role="alert">{jevFieldErrors.model}</p>}
-              </Field>
-              <Field data-disabled={busy || undefined}>
-                <FieldLabel htmlFor="jev-api-key">Jev API Key</FieldLabel>
-                <Input id="jev-api-key" name="jevApiKey" type="password" autoComplete="off" aria-invalid={!!jevFieldErrors.apiKey} aria-describedby={jevFieldErrors.apiKey ? "jev-api-key-error" : undefined} value={jevConfig.apiKey} disabled={busy} onChange={(event) => updateJev("apiKey", event.target.value)} />
-                {jevFieldErrors.apiKey && <p id="jev-api-key-error" className="field-error" role="alert">{jevFieldErrors.apiKey}</p>}
-              </Field>
-              <Field data-disabled={busy || undefined}>
-                <FieldLabel htmlFor="jev-threshold">最低保留评分</FieldLabel>
-                <Input id="jev-threshold" name="jevThreshold" type="number" min="0.01" max="0.99" step="0.01" aria-invalid={!!jevFieldErrors.threshold} aria-describedby={jevFieldErrors.threshold ? "jev-threshold-error" : undefined} value={jevConfig.threshold} disabled={busy} onChange={(event) => updateJev("threshold", event.target.value)} />
-                {jevFieldErrors.threshold && <p id="jev-threshold-error" className="field-error" role="alert">{jevFieldErrors.threshold}</p>}
-              </Field>
-            </FieldGroup>
-          </CardContent>
-          <CardFooter>
-            <Button type="submit" disabled={busy} aria-busy={status === "saving"}>
-              {status === "saving" && <LoaderCircleIcon className="animate-spin" aria-hidden="true" />}
-              保存 Jev 配置
             </Button>
           </CardFooter>
         </form>
