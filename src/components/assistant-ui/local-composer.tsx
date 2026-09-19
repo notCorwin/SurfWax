@@ -456,20 +456,19 @@ export function LocalComposer({ config, logger, conversationId, blocked, draft, 
             </Select>
             <ContextIndicator config={config} logger={logger} conversationId={conversationId} />
           </div>
-          <div className="flex items-center gap-1">
-          {isRunning && (
+          {isRunning && !hasText ? (
             <ComposerPrimitive.Cancel asChild>
               <Button type="button" size="icon-sm" className="rounded-full" aria-label="停止生成" title="停止生成">
                 <SquareIcon aria-hidden="true" />
               </Button>
             </ComposerPrimitive.Cancel>
+          ) : (
+            <Button type="button" size="icon-sm" className="rounded-full" disabled={!hasText || isDisabled || blocked}
+              aria-label={isRunning || followups.messages.length > 0 ? "排队消息" : "发送消息"}
+              title={isRunning || followups.messages.length > 0 ? "加入 Follow-up 队列" : "发送消息"} onClick={submit}>
+              <ArrowUpIcon aria-hidden="true" />
+            </Button>
           )}
-          <Button type="button" size="icon-sm" className="rounded-full" disabled={!hasText || isDisabled || blocked}
-            aria-label={isRunning || followups.messages.length > 0 ? "排队消息" : "发送消息"}
-            title={isRunning || followups.messages.length > 0 ? "加入 Follow-up 队列" : "发送消息"} onClick={submit}>
-            <ArrowUpIcon aria-hidden="true" />
-          </Button>
-          </div>
         </div>
       </div>
     </ComposerPrimitive.Root>

@@ -1435,11 +1435,15 @@ test("queues multiple follow-up messages while running and dispatches them in FI
     await composer.fill("initial request");
     await composer.press("Enter");
     await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
+    await expect(opened.page.getByRole("button", { name: "排队消息" })).toHaveCount(0);
     await nameCurrentConversation(opened.page, "Follow-up FIFO");
     await expect(composer).toBeEnabled();
 
     await composer.fill("second request");
-    await composer.press("Enter");
+    await expect(opened.page.getByRole("button", { name: "停止生成" })).toHaveCount(0);
+    await opened.page.getByRole("button", { name: "排队消息" }).click();
+    await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
+    await expect(opened.page.getByRole("button", { name: "排队消息" })).toHaveCount(0);
     await composer.fill("third request");
     await composer.press("Enter");
     await expect(opened.page.getByTestId("followup-item")).toHaveText([/second request/, /third request/]);
