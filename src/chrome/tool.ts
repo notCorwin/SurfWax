@@ -7,7 +7,7 @@ import { ChromeExecutor } from "./executor";
 export const chromeToolInputSchema = z.object({
   code: z.string().min(1),
   target: z.object({
-    kind: z.enum(["auto", "extension", "service-worker", "page", "offscreen", "devtools", "native"]),
+    kind: z.enum(["auto", "extension", "service-worker", "page", "offscreen", "devtools"]),
     tabId: z.number().int().nonnegative().optional(),
     frameId: z.number().int().nonnegative().optional(),
     documentId: z.string().min(1).optional(),
@@ -77,7 +77,7 @@ export function createChromeTool(executor: ChromeExecutor, options: { logger?: E
   return dynamicTool({
     description: [
       "Run an async JavaScript function body; explicitly return the result. Calls are globally sequential.",
-      "Set target.kind to extension, page, service-worker, offscreen, devtools, or native; auto selects only when unambiguous.",
+      "Set target.kind to extension, page, service-worker, offscreen, or devtools; auto selects only when unambiguous.",
       "Page targets accept tabId, frameId/documentId and MAIN, ISOLATED, or USER_SCRIPT. In the extension target, await chrome.capabilities() to inspect live availability.",
       "Large JSON results return a durable event reference: inspect selected parts with await globalThis.__surfWaxResult(id) in a later extension-realm call.",
     ].join(" "),

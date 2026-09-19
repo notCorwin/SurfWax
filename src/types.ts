@@ -2,7 +2,7 @@ export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
 export type ChromeTarget = {
-  kind: "auto" | "extension" | "service-worker" | "page" | "offscreen" | "devtools" | "native";
+  kind: "auto" | "extension" | "service-worker" | "page" | "offscreen" | "devtools";
   tabId?: number;
   frameId?: number;
   documentId?: string;

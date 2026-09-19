@@ -4,18 +4,16 @@ import tailwindcss from "@tailwindcss/vite";
 import { crx } from "@crxjs/vite-plugin";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import storeManifest from "./manifests/store.json" with { type: "json" };
-import enhancedManifest from "./manifests/enhanced.json" with { type: "json" };
+import manifest from "./manifests/store.json" with { type: "json" };
 
 const projectRoot = fileURLToPath(new URL(".", import.meta.url));
 
-export default defineConfig(({ mode }) => {
-  const manifest = mode === "enhanced" ? enhancedManifest : storeManifest;
-  const devManifest = {
-    ...manifest,
-    background: { ...manifest.background, service_worker: "src/background.ts" },
-  };
-  return ({
+const devManifest = {
+  ...manifest,
+  background: { ...manifest.background, service_worker: "src/background.ts" },
+};
+
+export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
@@ -47,5 +45,4 @@ export default defineConfig(({ mode }) => {
       devtools: resolve(projectRoot, "devtools.html"),
     } },
   },
-  });
 });

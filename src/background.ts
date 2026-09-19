@@ -1,5 +1,5 @@
 import { EventLogger } from "./logging";
-import { collectCapabilities, nativeHostStatus } from "./chrome/capabilities";
+import { collectCapabilities } from "./chrome/capabilities";
 import { callUserScripts, restoreUserScripts, serializeUserScripts, snapshotUserScripts, USER_SCRIPTS_ERROR_KEY } from "./userscripts/persistence";
 
 const eventLogger = new EventLogger();
@@ -109,49 +109,6 @@ chrome.runtime.onConnect.addListener((port) => {
     gestureTimers.set(tabId, setTimeout(() => void endGesture(tabId), 10_000));
   };
   let closed = false;
-  let nativePort: chrome.runtime.Port | undefined;
-  const nativePending = new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
-  const connectNative = () => {
-    if (nativePort) return nativePort;
-    const connected = chrome.runtime.connectNative("com.surfwax.host");
-    nativePort = connected;
-    connected.onMessage.addListener((message: { id?: string; event?: string; value?: unknown; result?: unknown; error?: string }) => {
-      if (!message.id) return;
-      if (message.event) {
-        eventLogger.record({ type: "native.event", content: { requestId: message.id, event: message.event, value: message.value } });
-        if (message.event === "data") port.postMessage({ event: "nativeData", args: [message.id, message.value] });
-        return;
-      }
-      const pending = nativePending.get(message.id);
-      nativePending.delete(message.id);
-      if (message.error) pending?.reject(new Error(`Native code execution failed: ${message.error}`));
-      else pending?.resolve(message.result);
-    });
-    connected.onDisconnect.addListener(() => {
-      const error = new Error(chrome.runtime.lastError?.message || "Native host disconnected");
-      nativePort = undefined;
-      for (const pending of nativePending.values()) pending.reject(error);
-      nativePending.clear();
-    });
-    return connected;
-  };
-  const callNative = (code: string, requestId: string) => new Promise((resolve, reject) => {
-    nativePending.set(requestId, { resolve, reject });
-    try { connectNative().postMessage({ id: requestId, operation: "execute", code }); }
-    catch (error) {
-      nativePending.delete(requestId);
-      reject(error);
-    }
-  });
-  const probeNative = async () => {
-    const id = crypto.randomUUID();
-    try {
-      if (await callNative("return true", id) !== true) throw new Error("Native Host returned an invalid probe response.");
-      return nativeHostStatus();
-    } catch (error) {
-      return nativeHostStatus(error, chrome.runtime.id);
-    }
-  };
   const key = (debuggee: chrome.debugger.Debuggee) => debuggee.targetId
     ? `target:${debuggee.targetId}` : debuggee.tabId !== undefined ? `tab:${debuggee.tabId}` : `extension:${debuggee.extensionId}`;
   const onEvent = (source: chrome.debugger.Debuggee, method: string, params?: object) => {
@@ -183,11 +140,7 @@ chrome.runtime.onConnect.addListener((port) => {
       } else if (method === "endPointerGestures") {
         await Promise.all([...pointerGestures].map((tabId) => endGesture(tabId)));
       } else if (method === "capabilities") {
-        result = await collectCapabilities(chrome, { native: await probeNative() });
-      } else if (method === "native") {
-        result = await callNative(String(args[0] ?? ""), String(args[1] ?? crypto.randomUUID()));
-      } else if (method === "nativeCancel") {
-        nativePort?.postMessage({ id: String(args[0]), operation: "cancel" });
+        result = await collectCapabilities(chrome);
       } else if (method === "extensionCall") {
         const [namespace, property, callArgs = []] = args as [string, string, unknown[]];
         const api = (chrome as unknown as Record<string, Record<string, unknown>>)[namespace];
@@ -230,8 +183,6 @@ chrome.runtime.onConnect.addListener((port) => {
     chrome.debugger.onEvent.removeListener(onEvent);
     chrome.debugger.onDetach.removeListener(onDetach);
     for (const debuggee of sessions.values()) void chrome.debugger.detach(debuggee).catch(() => undefined);
-    nativePort?.disconnect();
-    nativePort = undefined;
     for (const tabId of pointerGestures) void endGesture(tabId);
     sessions.clear();
   });

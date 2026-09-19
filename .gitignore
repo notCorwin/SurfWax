@@ -8,5 +8,3 @@ coverage/
 .env.*
 !.env.example
 .DS_Store
-native/surfwax-native-host
-native/surfwax-native-host.cmd

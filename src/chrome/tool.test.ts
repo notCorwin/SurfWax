@@ -9,7 +9,7 @@ describe("chrome tool input", () => {
     expect(parseChromeToolInput({ code: "return 1", tabId: 5, world: "USER_SCRIPT" }).world).toBe("USER_SCRIPT");
     expect(parseChromeToolInput({ code: "return document.title", target: { kind: "page", tabId: 5, frameId: 2, world: "ISOLATED" }, timeoutMs: 5000 }))
       .toEqual({ code: "return document.title", target: { kind: "page", tabId: 5, frameId: 2, world: "ISOLATED" }, timeoutMs: 5000 });
-    expect(() => parseChromeToolInput({ code: "return 1", target: { kind: "native", world: "MAIN" } })).toThrow();
+    expect(() => parseChromeToolInput({ code: "return 1", target: { kind: "native" } })).toThrow();
     expect(() => parseChromeToolInput({ code: "return 1", target: { kind: "page", tabId: 1 }, tabId: 1 })).toThrow();
     expect(() => parseChromeToolInput({ code: "" })).toThrow();
     expect(() => parseChromeToolInput({ code: "return 1", world: "MAIN" })).toThrow();

@@ -6,7 +6,7 @@
 
 Surf Wax 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。它使用 Vercel AI SDK v7 和 Assistant UI，直接连接用户配置的 OpenAI-compatible Provider，并只向模型提供一个浏览器元工具：`chrome({ code, target?, timeoutMs? })`。
 
-模型通过这一个“浏览器 Bash”执行异步 JavaScript。能力路由器可进入扩展页面、网页 `MAIN` / `ISOLATED` / `USER_SCRIPT`、Offscreen、DevTools、Service Worker 调试目标及可选的本机宿主，并保留原始 CDP。实际能力边界由运行时能力报告说明。
+模型通过这一个“浏览器 Bash”执行异步 JavaScript。能力路由器可进入扩展页面、网页 `MAIN` / `ISOLATED` / `USER_SCRIPT`、Offscreen、DevTools 和 Service Worker 调试目标，并保留原始 CDP。实际能力边界由运行时能力报告说明。
 
 ## 为什么使用它
 
@@ -44,8 +44,6 @@ npm run build
 
 然后按上面的 Chrome 步骤加载生成的 `dist/` 目录。修改源码后重新运行 `npm run build`，再在 `chrome://extensions` 中重新加载扩展。
 
-`npm run build:all` 同时生成 `dist/store/` 和 `dist/enhanced/`。增强版需执行 `npm run native:install -- <扩展 ID>` 安装 Native Messaging 宿主；安装器会把当前 Node.js 的绝对路径写入启动器，因此切换或删除 Node.js 后需要重新运行。
-
 ### 开发时热更新
 
 开发扩展时不需要反复构建：
@@ -78,7 +76,7 @@ Side Panel 标题栏的脚本按钮会打开独立的用户脚本页面。列表
 列出当前窗口中的全部标签页，并返回标题和 URL。
 ```
 
-模型会生成一个 `chrome({ code, target?, timeoutMs? })` 调用。代码是异步函数体，必须显式 `return`。`target.kind` 支持 `extension`、`page`、`service-worker`、`offscreen`、`devtools`、`native` 和 `auto`；旧版顶层 `tabId/world` 仍可用于恢复历史对话。
+模型会生成一个 `chrome({ code, target?, timeoutMs? })` 调用。代码是异步函数体，必须显式 `return`。`target.kind` 支持 `extension`、`page`、`service-worker`、`offscreen`、`devtools` 和 `auto`；旧版顶层 `tabId/world` 仍可用于恢复历史对话。
 
 实时检查能力：
 

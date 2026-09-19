@@ -219,20 +219,6 @@ describe("ChromeExecutor", () => {
     expect(port.disconnect).toHaveBeenCalled();
   });
 
-  it("keeps browser APIs out of the native host and preserves native code errors", async () => {
-    const fake = fakeChrome();
-    const { port } = fakePort((message, reply) => reply(message.method === "native"
-      ? { id: message.id, error: "Native code execution failed: Error: bad command" }
-      : { id: message.id }));
-    (fake.chromeApi as any).runtime = { connect: vi.fn(() => port) };
-    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
-
-    await expect(executor.execute({ code: "return chrome.runtime.id", target: { kind: "native" } }))
-      .rejects.toThrow("chrome.* is unavailable in the Native Host");
-    await expect(executor.execute({ code: "throw new Error('bad command')", target: { kind: "native" } }))
-      .rejects.toThrow("Native code execution failed: Error: bad command");
-  });
-
   it("reconnects after an idle background port disconnects", async () => {
     const fake = fakeChrome();
     const first = fakePort();

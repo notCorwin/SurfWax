@@ -339,18 +339,6 @@ export class ChromeExecutor {
     const target = this.normalizeTarget(input);
     this.logger?.record({ type: "tool.route", conversationId: context.conversationId, content: { target } });
 
-    if (target.kind === "native") {
-      if (/\b(?:globalThis\.)?chrome\b/.test(input.code)) {
-        throw new Error("chrome.* is unavailable in the Native Host. Retry this code with target.kind 'extension'; use the Native Host only through native.fs, native.exec, native.execFile, native.spawn, native.os, native.path, native.process, or fetch.");
-      }
-      const id = globalThis.crypto.randomUUID();
-      const abort = () => void (this.bridge.call as (method: string, args: unknown[]) => Promise<unknown>)("nativeCancel", [id]).catch(() => undefined);
-      signal?.addEventListener("abort", abort, { once: true });
-      try { return await this.awaitAbort((this.bridge.call as any)("native", [input.code, id]), signal); }
-      catch (error) { throw this.actionableError(error, target); }
-      finally { signal?.removeEventListener("abort", abort); }
-    }
-
     if (target.kind === "page") {
       if (!Number.isInteger(target.tabId) && !target.targetId) throw new Error("A page target requires tabId or targetId. Query chrome.tabs or chrome.debugger.getTargets first.");
       if (Number.isInteger(target.tabId)) await (globalThis as Record<string, any>).__surfWaxGuard?.mark(target.tabId);
@@ -409,7 +397,7 @@ export class ChromeExecutor {
     if (target.kind !== "auto") return target;
     if (target.tabId !== undefined || target.targetId !== undefined) return { ...target, kind: "page", world: target.world ?? "MAIN" };
     if (/\b(?:chrome\.|__surfWaxResult\b)/.test(input.code) || !/\b(?:document|window|location|navigator)\b/.test(input.code)) return { kind: "extension" };
-    throw new Error("Automatic target selection is ambiguous. Retry with target.kind set to extension, page, service-worker, offscreen, devtools, or native.");
+    throw new Error("Automatic target selection is ambiguous. Retry with target.kind set to extension, page, service-worker, offscreen, or devtools.");
   }
 
   private async bridgeDebuggee(debuggee: Debuggee): Promise<void> {
@@ -483,14 +471,6 @@ export class ChromeExecutor {
     if (!target?.id) throw new Error("The extension Service Worker is not currently exposed as a debuggable target.");
     try { return await this.evaluate({ targetId: target.id }, pageExpressionFor(code), signal, "service-worker"); }
     catch (error) { throw new Error(`Service Worker execution is unavailable in this browser session: ${error instanceof Error ? error.message : String(error)}. Desktop builds may launch Chrome with --silent-debugger-extension-api.`); }
-  }
-
-  private actionableError(error: unknown, target: ChromeTarget): Error {
-    const message = error instanceof Error ? error.message : String(error);
-    if (target.kind === "native" && !message.startsWith("Native code execution failed:")) {
-      return new Error(`Native Host connection failed: ${message}. Run chrome.capabilities() from target.kind 'extension' for the exact cause and recovery step.`);
-    }
-    return error instanceof Error ? error : new Error(message);
   }
 
   private async awaitAbort<T>(task: Promise<T>, signal?: AbortSignal): Promise<T> {
