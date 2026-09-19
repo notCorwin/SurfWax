@@ -124,7 +124,7 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       const pending = nativePending.get(message.id);
       nativePending.delete(message.id);
-      if (message.error) pending?.reject(new Error(message.error));
+      if (message.error) pending?.reject(new Error(`Native code execution failed: ${message.error}`));
       else pending?.resolve(message.result);
     });
     connected.onDisconnect.addListener(() => {

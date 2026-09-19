@@ -340,6 +340,9 @@ export class ChromeExecutor {
     this.logger?.record({ type: "tool.route", conversationId: context.conversationId, content: { target } });
 
     if (target.kind === "native") {
+      if (/\b(?:globalThis\.)?chrome\b/.test(input.code)) {
+        throw new Error("chrome.* is unavailable in the Native Host. Retry this code with target.kind 'extension'; use the Native Host only through native.fs, native.exec, native.execFile, native.spawn, native.os, native.path, native.process, or fetch.");
+      }
       const id = globalThis.crypto.randomUUID();
       const abort = () => void (this.bridge.call as (method: string, args: unknown[]) => Promise<unknown>)("nativeCancel", [id]).catch(() => undefined);
       signal?.addEventListener("abort", abort, { once: true });
@@ -484,7 +487,9 @@ export class ChromeExecutor {
 
   private actionableError(error: unknown, target: ChromeTarget): Error {
     const message = error instanceof Error ? error.message : String(error);
-    if (target.kind === "native") return new Error(`Native host unavailable: ${message}. Install it with node native/install.mjs <extension-id>, then retry.`);
+    if (target.kind === "native" && !message.startsWith("Native code execution failed:")) {
+      return new Error(`Native Host connection failed: ${message}. Run chrome.capabilities() from target.kind 'extension' for the exact cause and recovery step.`);
+    }
     return error instanceof Error ? error : new Error(message);
   }
 
