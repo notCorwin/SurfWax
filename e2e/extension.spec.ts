@@ -1501,7 +1501,7 @@ test("streams complete Markdown without blocking draft input", async () => {
 
 test("queues multiple follow-up messages while running and dispatches them in FIFO order", async () => {
   const provider = await startProvider([
-    streamingTextResponse(["FIRST_RUNNING", ...Array.from({ length: 12 }, () => "."), " FIRST_DONE"]),
+    streamingTextResponse(["FIRST_RUNNING", ...Array.from({ length: 80 }, () => "."), " FIRST_DONE"]),
     textResponse("SECOND_DONE"),
     textResponse("THIRD_DONE"),
   ], 120);
