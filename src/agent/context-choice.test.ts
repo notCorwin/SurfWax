@@ -43,7 +43,7 @@ describe("Jev context workflow", () => {
   it("shows the minimum temporary threshold and forks only after selection is final", async () => {
     const { logger, events } = fixture();
     const model = { baseURL: "https://provider.test/v1", model: "test", apiKey: "key", contextWindowOverride: 6_000 };
-    const jev = { baseURL: "https://jev.test", model: "jev", apiKey: "key", threshold: 0.5 };
+    const jev = { provider: "typesafe" as const, baseURL: "https://jev.test", model: "jev", apiKey: "key", threshold: 0.5 };
     await logger.append({ type: "conversation.created", conversationId: "parent", content: { title: "Parent" } });
     const items = [
       message("u1", "user", "Keep the original constraint"),
@@ -61,6 +61,8 @@ describe("Jev context workflow", () => {
     expect(score).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(score.mock.calls[0]?.[0])).toContain("original constraint");
     expect(proposal.minimumRaisedThreshold).toBe(0.81);
+    expect(events.find((event) => event.type === "model.compaction.selection.finished")?.providerMetadata)
+      .toEqual({ provider: "typesafe", model: "jev" });
     expect(events.filter((event) => event.type === "conversation.created")).toHaveLength(1);
 
     const child = await forkSelection(logger, "parent", proposal, proposal.minimumRaisedThreshold);
@@ -73,7 +75,7 @@ describe("Jev context workflow", () => {
   it("does not offer a temporary threshold when retained user messages alone exceed 30%", async () => {
     const { logger, events } = fixture();
     const model = { baseURL: "https://provider.test/v1", model: "test", apiKey: "key", contextWindowOverride: 6_000 };
-    const jev = { baseURL: "https://jev.test", model: "jev", apiKey: "key", threshold: 0.5 };
+    const jev = { provider: "typesafe" as const, baseURL: "https://jev.test", model: "jev", apiKey: "key", threshold: 0.5 };
     await logger.append({ type: "conversation.created", conversationId: "parent", content: { title: "Parent" } });
     await logger.appendMessage("parent", message("u1", "user", "Important constraint ".repeat(400)), { parentId: null });
     await logger.appendMessage("parent", message("a1", "assistant", "Stale data ".repeat(100)), { parentId: "u1" });

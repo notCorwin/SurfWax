@@ -5,7 +5,7 @@ import { abortAllConversationWork } from "../agent/coordinator";
 import { createAgent } from "../agent/runner";
 import { ContextCompactor } from "../agent/compaction";
 import { createModel } from "../agent/model";
-import { createChatTransport } from "../agent/transport";
+import { createChatTransport, type SidePanelMessage } from "../agent/transport";
 import { ChromeExecutor } from "../chrome/executor";
 import { createConversationAdapter } from "../conversations";
 import type { EventLogger } from "../logging";
@@ -36,7 +36,7 @@ function useConversationRuntime(config: ModelConfig, logger: EventLogger): Assis
     }, logger, conversationId),
     [config, conversationId, executor, logger],
   );
-  const runtime = useChatRuntime({
+  const runtime = useChatRuntime<SidePanelMessage>({
     id: conversationId,
     transport,
     unstable_onBranchChange: ({ headId }) => {

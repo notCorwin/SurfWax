@@ -1,8 +1,10 @@
 import type { JevConfig, ModelConfig } from "../types";
+import { isJevProvider } from "../jev-providers";
 
 export const MODEL_CONFIG_STORAGE_KEY = "side-agent:model-config";
 export const JEV_CONFIG_STORAGE_KEY = "side-agent:jev-config";
 export const DEFAULT_JEV_CONFIG: JevConfig = {
+  provider: "typesafe",
   baseURL: "https://api.typesafe.ai",
   apiKey: "",
   model: "jev-latest",
@@ -19,7 +21,7 @@ export function isCompleteModelConfig(config: PersistedModelConfig): boolean {
 }
 
 export function isCompleteJevConfig(config: PersistedJevConfig): boolean {
-  return Boolean(config.baseURL.trim() && config.apiKey.trim() && config.model.trim());
+  return Boolean(isJevProvider(config.provider) && config.baseURL.trim() && config.apiKey.trim() && config.model.trim());
 }
 
 function getStorageArea(): StorageAreaLike | null {
@@ -75,6 +77,7 @@ export async function loadJevConfig(
 
   const candidate = value as Partial<Record<keyof PersistedJevConfig, unknown>>;
   return {
+    provider: isJevProvider(candidate.provider) ? candidate.provider : fallback.provider,
     baseURL: typeof candidate.baseURL === "string" ? candidate.baseURL : fallback.baseURL,
     apiKey: typeof candidate.apiKey === "string" ? candidate.apiKey : fallback.apiKey,
     model: typeof candidate.model === "string" ? candidate.model : fallback.model,
@@ -93,6 +96,7 @@ export async function saveJevConfig(
 
   await storage.set({
     [JEV_CONFIG_STORAGE_KEY]: {
+      provider: config.provider,
       baseURL: config.baseURL.trim(),
       apiKey: config.apiKey,
       model: config.model.trim(),

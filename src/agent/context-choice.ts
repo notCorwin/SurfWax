@@ -114,7 +114,7 @@ export async function proposeJevSelection(options: {
     await logger.append({ type: "model.compaction.selection.finished", conversationId,
       content: { model: scores.model, batches: scores.batches, probabilities: Object.fromEntries(scores.probabilities),
         threshold: jev.threshold, estimatedInputTokens: estimated, minimumRaisedThreshold },
-      stopReason: "decision", usage: scores.usage, providerMetadata: { provider: "typesafe", model: scores.model } });
+      stopReason: "decision", usage: scores.usage, providerMetadata: { provider: jev.provider, model: scores.model } });
     return { source, scores, selected, estimated, threshold: jev.threshold, minimumRaisedThreshold,
       limit: pressure.limit.context, inputThreshold: pressure.threshold };
   } catch (error) {

@@ -317,6 +317,11 @@ test("saves and disables the optional Jev selector configuration", async () => {
     const options = await configure(opened.context, opened.page, "https://provider.test/v1");
     await expect(options.getByRole("group", { name: "上下文窗口" })).toBeVisible();
     await expect(options.getByRole("group", { name: "Jev 消息选择压缩（可选）" })).toBeVisible();
+    await options.getByLabel("Jev 平台").focus();
+    await options.getByLabel("Jev 平台").press("Enter");
+    await options.getByRole("option", { name: "OpenRouter" }).press("Enter");
+    await expect(options.getByLabel("Jev Base URL")).toHaveValue("https://openrouter.ai/api");
+    await expect(options.getByLabel("Jev Model ID")).toHaveValue("typesafe/jev-1.13");
     await options.getByLabel("Jev Base URL").fill("not-a-url");
     await options.getByLabel("Jev Model ID").fill("jev-test");
     await options.getByLabel("Jev API Key").fill("jev-key");
@@ -330,6 +335,7 @@ test("saves and disables the optional Jev selector configuration", async () => {
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(options.getByRole("status")).toContainText("配置已保存");
     await expect.poll(() => options.evaluate(async () => (await chrome.storage.local.get("side-agent:jev-config"))["side-agent:jev-config"])).toEqual({
+      provider: "openrouter",
       baseURL: "https://jev.example/v1",
       model: "jev-test",
       apiKey: "jev-key",
@@ -341,6 +347,7 @@ test("saves and disables the optional Jev selector configuration", async () => {
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(options.getByRole("status")).toContainText("配置已保存");
     await expect.poll(() => options.evaluate(async () => (await chrome.storage.local.get("side-agent:jev-config"))["side-agent:jev-config"])).toEqual({
+      provider: "openrouter",
       baseURL: "https://jev.example/v1",
       model: "jev-test",
       apiKey: "",

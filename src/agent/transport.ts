@@ -11,7 +11,7 @@ import { claimConversationRun } from "./coordinator";
 import { guardActivePage } from "../chrome/page-guard";
 import { pendingContextChoice } from "./compaction";
 
-type SidePanelMessage = UIMessage<any, never, any>;
+export type SidePanelMessage = UIMessage<any, never, any>;
 
 function runId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `run-${Date.now()}-${Math.random().toString(36).slice(2)}`;

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { JEV_PROVIDERS, JEV_PROVIDER_PRESETS } from "../jev-providers";
 import {
   DEFAULT_JEV_CONFIG,
   JEV_CONFIG_STORAGE_KEY,
@@ -53,6 +54,15 @@ describe("model config persistence", () => {
 });
 
 describe("Jev config persistence", () => {
+  it("defines valid editable defaults for every Jev platform", () => {
+    expect(JEV_PROVIDERS).toHaveLength(9);
+    for (const provider of JEV_PROVIDERS) {
+      expect(JEV_PROVIDER_PRESETS[provider].label).toBeTruthy();
+      expect(JEV_PROVIDER_PRESETS[provider].model).toBeTruthy();
+      if (JEV_PROVIDER_PRESETS[provider].baseURL) expect(() => new URL(JEV_PROVIDER_PRESETS[provider].baseURL)).not.toThrow();
+    }
+  });
+
   it("uses the default endpoint and disables Jev when the API key is empty", async () => {
     const storage = memoryStorage(JEV_CONFIG_STORAGE_KEY);
     await expect(loadJevConfig(DEFAULT_JEV_CONFIG, storage)).resolves.toEqual(DEFAULT_JEV_CONFIG);
@@ -62,10 +72,11 @@ describe("Jev config persistence", () => {
 
   it("saves and loads Jev independently", async () => {
     const storage = memoryStorage(JEV_CONFIG_STORAGE_KEY);
-    const config = { baseURL: " https://jev.example/v1/ ", model: " jev-test ", apiKey: "jev-secret", threshold: 0.81 };
+    const config = { provider: "openrouter" as const, baseURL: " https://jev.example/v1/ ", model: " jev-test ", apiKey: "jev-secret", threshold: 0.81 };
 
     await saveJevConfig(config, storage);
     await expect(loadJevConfig(DEFAULT_JEV_CONFIG, storage)).resolves.toEqual({
+      provider: "openrouter",
       baseURL: "https://jev.example/v1/",
       model: "jev-test",
       apiKey: "jev-secret",
@@ -75,9 +86,9 @@ describe("Jev config persistence", () => {
     expect(isCompleteJevConfig(await loadJevConfig(DEFAULT_JEV_CONFIG, storage))).toBe(false);
   });
 
-  it("adds the default threshold to an older stored config", async () => {
+  it("adds the default provider and threshold to an older stored config", async () => {
     const storage = memoryStorage(JEV_CONFIG_STORAGE_KEY);
     storage.value = { baseURL: "https://api.typesafe.ai", model: "jev-latest", apiKey: "old-key" };
-    expect((await loadJevConfig(DEFAULT_JEV_CONFIG, storage)).threshold).toBe(0.5);
+    expect(await loadJevConfig(DEFAULT_JEV_CONFIG, storage)).toMatchObject({ provider: "typesafe", threshold: 0.5 });
   });
 });

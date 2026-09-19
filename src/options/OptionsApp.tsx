@@ -4,10 +4,12 @@ import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../components/ui/card";
 import { Field, FieldDescription, FieldGroup, FieldLabel, FieldLegend, FieldSet } from "../components/ui/field";
 import { Input } from "../components/ui/input";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { ErrorNotice } from "../components/ui/error-notice";
 import { EventLogger } from "../logging";
 import { resolveModelLimit, type ModelLimit } from "../agent/model-limits";
-import type { JevConfig } from "../types";
+import { JEV_PROVIDERS, JEV_PROVIDER_PRESETS } from "../jev-providers";
+import type { JevConfig, JevProvider } from "../types";
 import type { PersistedJevConfig, PersistedModelConfig } from "../sidepanel/config";
 import {
   DEFAULT_JEV_CONFIG,
@@ -89,9 +91,18 @@ export function OptionsApp() {
     setErrorDetail(undefined);
   };
 
-  const updateJev = (field: keyof PersistedJevConfig, value: string) => {
+  const updateJev = (field: Exclude<keyof PersistedJevConfig, "provider">, value: string) => {
     setJevConfig((current) => ({ ...current, [field]: field === "threshold" ? Number(value) : value }));
     setJevFieldErrors((current) => ({ ...current, [field]: undefined }));
+    setStatus("idle");
+    setMessage("");
+    setErrorDetail(undefined);
+  };
+
+  const changeJevProvider = (provider: JevProvider) => {
+    const preset = JEV_PROVIDER_PRESETS[provider];
+    setJevConfig((current) => ({ ...current, provider, baseURL: preset.baseURL, model: preset.model }));
+    setJevFieldErrors({});
     setStatus("idle");
     setMessage("");
     setErrorDetail(undefined);
@@ -138,7 +149,7 @@ export function OptionsApp() {
       const firstErrorId = firstMainError
         ? ({ baseURL: "base-url", model: "model-id", apiKey: "api-key", contextWindowOverride: "context-window" }[firstMainError])
         : firstJevError
-          ? ({ baseURL: "jev-base-url", model: "jev-model-id", apiKey: "jev-api-key", threshold: "jev-threshold" }[firstJevError])
+          ? ({ provider: "jev-provider", baseURL: "jev-base-url", model: "jev-model-id", apiKey: "jev-api-key", threshold: "jev-threshold" }[firstJevError])
           : undefined;
       if (firstErrorId) {
         const field = document.getElementById(firstErrorId);
@@ -235,21 +246,35 @@ export function OptionsApp() {
                     <FieldLegend>Jev 消息选择压缩（可选）</FieldLegend>
                     <FieldDescription>上下文达到阈值时可选择 Jev 重选；清空 API Key 即停用 Jev。</FieldDescription>
                     <Field data-disabled={busy || undefined}>
+                      <FieldLabel htmlFor="jev-provider">Jev 平台</FieldLabel>
+                      <Select value={jevConfig.provider} disabled={busy} onValueChange={(value) => changeJevProvider(value as JevProvider)}>
+                        <SelectTrigger id="jev-provider" aria-label="Jev 平台" className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent position="popper">
+                          <SelectGroup>
+                            {JEV_PROVIDERS.map((provider) => <SelectItem key={provider} value={provider}>{JEV_PROVIDER_PRESETS[provider].label}</SelectItem>)}
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
+                      <FieldDescription>{JEV_PROVIDER_PRESETS[jevConfig.provider].description}</FieldDescription>
+                    </Field>
+                    <Field data-disabled={busy || undefined} data-invalid={!!jevFieldErrors.baseURL || undefined}>
                       <FieldLabel htmlFor="jev-base-url">Jev Base URL</FieldLabel>
-                      <Input id="jev-base-url" name="jevBaseURL" type="url" autoComplete="url" aria-invalid={!!jevFieldErrors.baseURL} aria-describedby={jevFieldErrors.baseURL ? "jev-base-url-error" : undefined} value={jevConfig.baseURL} disabled={busy} onChange={(event) => updateJev("baseURL", event.target.value)} />
+                      <Input id="jev-base-url" name="jevBaseURL" type="url" autoComplete="url" placeholder={JEV_PROVIDER_PRESETS[jevConfig.provider].placeholder} aria-invalid={!!jevFieldErrors.baseURL} aria-describedby={jevFieldErrors.baseURL ? "jev-base-url-error" : undefined} value={jevConfig.baseURL} disabled={busy} onChange={(event) => updateJev("baseURL", event.target.value)} />
                       {jevFieldErrors.baseURL && <p id="jev-base-url-error" className="field-error" role="alert">{jevFieldErrors.baseURL}</p>}
                     </Field>
-                    <Field data-disabled={busy || undefined}>
+                    <Field data-disabled={busy || undefined} data-invalid={!!jevFieldErrors.model || undefined}>
                       <FieldLabel htmlFor="jev-model-id">Jev Model ID</FieldLabel>
                       <Input id="jev-model-id" name="jevModel" autoComplete="off" aria-invalid={!!jevFieldErrors.model} aria-describedby={jevFieldErrors.model ? "jev-model-id-error" : undefined} value={jevConfig.model} disabled={busy} onChange={(event) => updateJev("model", event.target.value)} />
                       {jevFieldErrors.model && <p id="jev-model-id-error" className="field-error" role="alert">{jevFieldErrors.model}</p>}
                     </Field>
-                    <Field data-disabled={busy || undefined}>
+                    <Field data-disabled={busy || undefined} data-invalid={!!jevFieldErrors.apiKey || undefined}>
                       <FieldLabel htmlFor="jev-api-key">Jev API Key</FieldLabel>
                       <Input id="jev-api-key" name="jevApiKey" type="password" autoComplete="off" aria-invalid={!!jevFieldErrors.apiKey} aria-describedby={jevFieldErrors.apiKey ? "jev-api-key-error" : undefined} value={jevConfig.apiKey} disabled={busy} onChange={(event) => updateJev("apiKey", event.target.value)} />
                       {jevFieldErrors.apiKey && <p id="jev-api-key-error" className="field-error" role="alert">{jevFieldErrors.apiKey}</p>}
                     </Field>
-                    <Field data-disabled={busy || undefined}>
+                    <Field data-disabled={busy || undefined} data-invalid={!!jevFieldErrors.threshold || undefined}>
                       <FieldLabel htmlFor="jev-threshold">最低保留评分</FieldLabel>
                       <Input id="jev-threshold" name="jevThreshold" type="number" min="0.01" max="0.99" step="0.01" aria-invalid={!!jevFieldErrors.threshold} aria-describedby={jevFieldErrors.threshold ? "jev-threshold-error" : undefined} value={jevConfig.threshold} disabled={busy} onChange={(event) => updateJev("threshold", event.target.value)} />
                       {jevFieldErrors.threshold && <p id="jev-threshold-error" className="field-error" role="alert">{jevFieldErrors.threshold}</p>}
