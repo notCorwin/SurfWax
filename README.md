@@ -68,6 +68,8 @@ Side Panel 标题栏的脚本按钮会打开独立的用户脚本页面。列表
 
 聊天框中模型名旁可选择思考强度，默认使用已知的最低档；若端点未公开档位，则从 `none` 开始，在真实请求被明确拒绝时逐步调整。选择按 Base URL 和 Model ID 保存在本地；端点不支持该参数时使用端点默认值。
 
+高级设置中的 Jev 消息选择支持 TypeSafe AI、Vercel AI Gateway、OpenRouter、Cloudflare Workers AI、LiteLLM Proxy、Opper、AI/ML API，以及自定义 System One 或 Decisions 端点。切换平台会填入默认地址和模型，Base URL 与 Model ID 仍可修改；清空 Jev API Key 即停用。Netlify AI Gateway 仅在 Netlify Functions 中自动注入 Jev 凭证和端点，因此属于部署环境兼容能力，不作为浏览器扩展的内置选项。
+
 ## 使用
 
 直接用自然语言描述浏览器任务，例如：
