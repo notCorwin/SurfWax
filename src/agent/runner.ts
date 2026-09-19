@@ -54,6 +54,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         conversationId: options.conversationId,
         content: { callId: event.callId, stepNumber: event.stepNumber, provider: event.provider, modelId: event.modelId },
       }),
+      onLanguageModelCallStart: (event) => options.compactor?.recordPrompt(event),
       onToolExecutionStart: (event) => logger.record({
         type: "tool.started",
         conversationId: options.conversationId,
@@ -71,7 +72,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         latencyMs: event.toolExecutionMs,
       }),
       onStepEnd: (event) => {
-        options.compactor?.recordUsage(event.usage.inputTokens);
+        options.compactor?.recordUsage(event.usage.inputTokens, event.stepNumber);
         logger.record({
           type: "model.step.finished",
           conversationId: options.conversationId,

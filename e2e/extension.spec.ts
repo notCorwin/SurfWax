@@ -27,8 +27,20 @@ function chunk(delta: object, finishReason: string | null = null): string {
   })}\n\n`;
 }
 
-function textResponse(text: string): string[] {
-  return [chunk({ role: "assistant", content: text }), chunk({}, "stop"), "data: [DONE]\n\n"];
+function usageChunk(promptTokens: number, completionTokens: number): string {
+  return `data: ${JSON.stringify({
+    id: "chatcmpl-side-agent-e2e",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "test-model",
+    choices: [],
+    usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens },
+  })}\n\n`;
+}
+
+function textResponse(text: string, usage?: { promptTokens: number; completionTokens: number }): string[] {
+  return [chunk({ role: "assistant", content: text }), chunk({}, "stop"),
+    ...(usage ? [usageChunk(usage.promptTokens, usage.completionTokens)] : []), "data: [DONE]\n\n"];
 }
 
 function streamingTextResponse(parts: string[]): string[] {
@@ -1040,6 +1052,32 @@ test("updates context usage during a streamed reply and shows structured details
     await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_COMPLETE");
     await expect(opened.page.getByRole("button", { name: "发送消息" })).toBeVisible();
+    await options.close();
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("anchors context usage to provider-reported input tokens", async () => {
+  const provider = await startProvider([
+    textResponse("USAGE_ANCHOR_REPLY", { promptTokens: 40_000, completionTokens: 10 }),
+    textResponse("用量测试"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL, 100_000);
+    const indicator = opened.page.getByTestId("context-indicator");
+    await expect(indicator).toHaveAttribute("data-state", "ready");
+
+    await opened.page.getByTestId("composer-input").fill("measure provider usage");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("USAGE_ANCHOR_REPLY");
+    await expect(opened.page.getByRole("button", { name: "发送消息" })).toBeVisible();
+    await expect.poll(async () => Number(await indicator.getAttribute("data-used-percent")))
+      .toBeGreaterThanOrEqual(40);
+
+    await indicator.focus();
+    await expect(opened.page.getByTestId("context-used")).toContainText(/4\d,\d{3} tokens/);
     await options.close();
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
 import type { ModelMessage } from "ai";
 import type { EventLogger, LogEvent } from "../logging";
-import { ContextCompactor, contextPressure, effectiveContext, pendingContextChoice, summarizeContext } from "./compaction";
+import { ContextCompactor, contextPressure, effectiveContext, estimateInput, pendingContextChoice, summarizeContext } from "./compaction";
 
 function fixture() {
   const events: LogEvent[] = [];
@@ -31,13 +31,44 @@ function fixture() {
 }
 
 describe("context choices and summary", () => {
-  it("never compacts during an agent step and records calibrated usage", async () => {
+  it("anchors estimates to the complete prompt and provider usage", async () => {
     const { events, logger, model, raw } = fixture();
     const compactor = new ContextCompactor({ model, logger, conversationId: "one", branchIds: ["u", "a"], signal: new AbortController().signal });
     expect(await compactor.prepare(raw, 0)).toBeUndefined();
-    compactor.recordUsage(7_000);
+    compactor.recordPrompt({ instructions: "system", messages: raw, tools: [{ name: "page", inputSchema: { type: "object" } }] });
+    const promptCalibration = events.at(-1)!;
+    expect(promptCalibration.type).toBe("context.estimate.calibrated");
+    expect((promptCalibration.content as any).promptEstimate).toBeGreaterThan((promptCalibration.content as any).baseEstimate);
+
+    compactor.recordUsage(7_000, 0);
     expect(events.some((event) => event.type === "context.compacted")).toBe(false);
-    expect(events.some((event) => event.type === "context.estimate.calibrated")).toBe(true);
+    await expect(contextPressure({ raw, branchIds: ["u", "a"], events, model }))
+      .resolves.toMatchObject({ estimated: 7_000 });
+
+    const extended = [...raw, { role: "user", content: "next" } as ModelMessage];
+    await expect(contextPressure({ raw: extended, branchIds: ["u", "a", "next"], events, model }))
+      .resolves.toMatchObject({ estimated: 7_000 + estimateInput(extended) - estimateInput(raw) });
+  });
+
+  it("ignores legacy, unrelated, and pre-compaction calibrations", async () => {
+    const { events, logger, languageModel, model, raw } = fixture();
+    events.push({ id: 1, type: "context.estimate.calibrated", timestamp: "2026-01-01", content: { scale: 8 } });
+    await expect(contextPressure({ raw, branchIds: ["u", "a"], events, model }))
+      .resolves.toMatchObject({ estimated: estimateInput(raw) });
+
+    events.push({ id: 2, type: "context.estimate.calibrated", timestamp: "2026-01-01", content: {
+      branchIds: ["other"], contextVersion: 0, baseEstimate: 1, promptEstimate: 50_000, inputTokens: 50_000,
+    } });
+    await expect(contextPressure({ raw, branchIds: ["u", "a"], events, model }))
+      .resolves.toMatchObject({ estimated: estimateInput(raw) });
+
+    await summarizeContext({ raw, branchIds: ["u", "a"], uiCount: 2, model, languageModel, logger,
+      conversationId: "one", signal: new AbortController().signal });
+    events.push({ id: events.length + 1, type: "context.estimate.calibrated", timestamp: "2026-01-01", content: {
+      branchIds: ["u", "a"], contextVersion: 0, baseEstimate: 1, promptEstimate: 50_000, inputTokens: 50_000,
+    } });
+    await expect(contextPressure({ raw, branchIds: ["u", "a"], events, model }))
+      .resolves.toMatchObject({ estimated: estimateInput([{ role: "user", content: "Earlier conversation summary:\nKeep the user's constraints." }]) });
   });
 
   it("summarizes the complete effective history once, then replaces the entire old prefix", async () => {
