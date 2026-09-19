@@ -1,6 +1,7 @@
 import { chromium, expect, test, type BrowserContext, type Page } from "@playwright/test";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -30,7 +31,7 @@ function textResponse(text: string): string[] {
   return [chunk({ role: "assistant", content: text }), chunk({}, "stop"), "data: [DONE]\n\n"];
 }
 
-function toolResponse(code: string | { code: string; tabId?: number; world?: "MAIN" | "USER_SCRIPT" }, id = "call-chrome-e2e"): string[] {
+function toolResponse(code: string | { code: string; tabId?: number; world?: "MAIN" | "USER_SCRIPT"; target?: { kind: string; tabId?: number; world?: string } }, id = "call-chrome-e2e"): string[] {
   return [
     chunk({
       role: "assistant",
@@ -204,8 +205,12 @@ async function openExtension(): Promise<{
 }> {
   const userDataDirectory = await mkdtemp(resolve(tmpdir(), "side-agent-e2e-"));
   const extensionPath = resolve(process.cwd(), "dist");
+  const bundledChromium = chromium.executablePath();
+  const systemChrome = process.platform === "darwin" ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    : process.platform === "win32" ? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+    : "/usr/bin/google-chrome";
   const context = await chromium.launchPersistentContext(userDataDirectory, {
-    executablePath: chromium.executablePath(),
+    executablePath: existsSync(bundledChromium) ? bundledChromium : systemChrome,
     headless: true,
     args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, "--no-sandbox"],
   });
@@ -457,8 +462,8 @@ test("targets page worlds and keeps large tool output out of model history", asy
     const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/target`);
     expect(tab?.id).toBeDefined();
     responses.push(
-      toolResponse({ tabId: tab.id, code: "return document.title" }, "call-main"),
-      toolResponse({ tabId: tab.id, world: "USER_SCRIPT", code: "return await Promise.resolve(document.title + ' USER')" }, "call-user"),
+      toolResponse({ code: "return document.title", target: { kind: "page", tabId: tab.id, world: "MAIN" } }, "call-main"),
+      toolResponse({ code: "return await Promise.resolve(document.title + ' USER')", target: { kind: "page", tabId: tab.id, world: "USER_SCRIPT" } }, "call-user"),
       toolResponse("return 'LARGE_START' + 'zx'.repeat(6000)", "call-large"),
       textResponse("DONE_COMPACT"),
       textResponse("引用测试"),
@@ -926,7 +931,7 @@ return result;`, "call-cdp-5"),
     expect(outputs).toHaveLength(5);
     expect(outputs[1]).toMatchObject({ frame: "Cross Origin Frame", sameFrame: "Same Process Frame", worker: "WORKER_READY" });
     expect(outputs[2]).toMatchObject({ title: "After Navigation" });
-    expect(outputs[3]).toMatchObject({ $ref: expect.any(String), access: expect.stringContaining("__surfWaxResults.get") });
+    expect(outputs[3]).toMatchObject({ $ref: expect.any(String), ref: expect.any(String), access: expect.stringContaining("__surfWaxObject") });
     expect(outputs[4]).toMatchObject({ entries: [["answer", 42], ["kind", "inspectable"]], id: outputs[3].$ref });
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);

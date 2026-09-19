@@ -5,7 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build --mode store",
+    "build:store": "vite build --mode store --outDir dist/store",
+    "build:enhanced": "vite build --mode enhanced --outDir dist/enhanced",
+    "build:all": "npm run build:store && npm run build:enhanced",
+    "native:install": "node native/install.mjs",
     "check": "tsc --noEmit && vite build",
     "test": "vitest run",
     "test:watch": "vitest",

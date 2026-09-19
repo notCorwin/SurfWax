@@ -53,7 +53,6 @@
     "identity.email",
     "idle",
     "management",
-    "nativeMessaging",
     "notifications",
     "offscreen",
     "pageCapture",
@@ -82,5 +81,8 @@
     "webRequest",
     "windows"
   ],
-  "host_permissions": ["<all_urls>"]
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "devtools_page": "devtools.html"
 }

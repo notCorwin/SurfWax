@@ -514,13 +514,23 @@ export class EventLogger {
     return (this.options.store ?? getEventStore()).all();
   }
 
-  async result(id: number): Promise<unknown> {
+  async result(id: number, selection: { path?: Array<string | number>; offset?: number; limit?: number } = {}): Promise<unknown> {
     if (!Number.isSafeInteger(id) || id < 1) throw new Error("Invalid result event ID");
     await this.flush();
     const store = this.options.store ?? getEventStore();
     const event = store.get ? await store.get(id) : (await store.all()).find((item) => item.id === id);
     if (event?.type !== "tool.result.data") throw new Error(`Tool result ${id} is unavailable`);
-    return fromLogValue(event.output);
+    let value = fromLogValue(event.output);
+    for (const part of selection.path ?? []) {
+      if (value === null || typeof value !== "object" && typeof value !== "string") throw new Error(`Tool result ${id} has no path ${selection.path?.join(".")}`);
+      value = (value as any)[part];
+    }
+    if (selection.offset !== undefined || selection.limit !== undefined) {
+      if (!Array.isArray(value) && typeof value !== "string") throw new Error("offset/limit requires an array or string result");
+      const offset = Math.max(0, selection.offset ?? 0);
+      value = value.slice(offset, selection.limit === undefined ? undefined : offset + Math.max(0, selection.limit));
+    }
+    return value;
   }
 
   async conversation(conversationId: string): Promise<LogEvent[]> {

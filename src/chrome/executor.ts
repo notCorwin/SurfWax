@@ -1,5 +1,5 @@
 import type { EventLogger } from "../logging";
-import type { ChromeToolInput } from "../types";
+import type { ChromeTarget, ChromeToolInput } from "../types";
 import { restoreUserScripts, snapshotUserScripts } from "../userscripts/persistence";
 
 type Debuggee = chrome.debugger.Debuggee;
@@ -94,7 +94,18 @@ function expressionFor(code: string): string {
     });
     const chrome = new Proxy(__nativeChrome, {
       get(target, property, receiver) {
-        return property === "debugger" ? __debugger
+        return property === "capabilities" ? async () => {
+          const report = await __bridge.call("capabilities", []);
+          report.web = {
+            languageModel: "LanguageModel" in globalThis,
+            summarizer: "Summarizer" in globalThis,
+            translator: "Translator" in globalThis,
+            languageDetector: "LanguageDetector" in globalThis,
+            webMcp: Boolean(document.modelContext),
+          };
+          return report;
+        }
+          : property === "debugger" ? __debugger
           : ["scripting", "userScripts", "tabs", "pageCapture"].includes(property) && target[property] ? __pageApi(property)
           : Reflect.get(target, property, receiver);
       }
@@ -108,6 +119,11 @@ ${code}
 
 function resultEnvelope(): string {
   return `
+    globalThis.__surfWaxObject ??= (id) => {
+      const values = globalThis[${JSON.stringify(RESULTS_KEY)}];
+      if (!values?.has(id)) throw new Error("Object reference expired with its execution context or document");
+      return values.get(id);
+    };
     const seen = new WeakSet();
     const transferable = (value) => {
       if (value === null || typeof value === "string" || typeof value === "boolean") return true;
@@ -156,16 +172,20 @@ function evaluationError(response: any): Error | undefined {
   return new Error(typeof description === "string" ? description : typeof value === "string" ? value : details.text || "JavaScript execution failed");
 }
 
-function evaluationValue(response: any, scope: "panel" | "page" = "panel"): unknown {
+function evaluationValue(response: any, scope = "extension"): unknown {
   const remote = response?.result;
   if (!remote || typeof remote !== "object") return remote;
   const result = remote.value;
   if (result?.kind === "value") return result.value;
   if (result?.kind === "reference") return {
     $ref: result.id,
+    ref: result.id,
     type: result.type,
     preview: result.preview,
-    access: `globalThis.${RESULTS_KEY}.get(${JSON.stringify(result.id)})`,
+    access: `globalThis.__surfWaxObject(${JSON.stringify(result.id)})`,
+    host: scope,
+    contextId: scope,
+    expiresAt: null,
     scope,
   };
   return Object.prototype.hasOwnProperty.call(remote, "value") ? result : remote;
@@ -181,6 +201,7 @@ export class ChromeExecutor {
   private tail: Promise<void> = Promise.resolve();
   private initialized?: Promise<void>;
   private activeDebuggee?: Debuggee;
+  private readonly bridgedDebuggees = new Set<string>();
   private disposed = false;
 
   constructor(options: { chromeApi?: ExecutorChrome; targetUrl?: string; logger?: EventLogger } = {}) {
@@ -245,14 +266,39 @@ export class ChromeExecutor {
       },
     };
     (globalThis as Record<string, unknown>)[BRIDGE_KEY] = this.bridge;
-    (globalThis as Record<string, unknown>)[RESULT_READER_KEY] = (id: number) => this.logger?.result(id)
+    (globalThis as Record<string, unknown>)[RESULT_READER_KEY] = (id: number, selection?: { path?: Array<string | number>; offset?: number; limit?: number }) => this.logger?.result(id, selection)
       ?? Promise.reject(new Error("Tool result log is unavailable"));
   }
 
-  execute(input: ChromeToolInput, signal?: AbortSignal): Promise<unknown> {
-    const task = this.tail.then(() => this.executeNow(input, signal));
+  execute(input: ChromeToolInput, signal?: AbortSignal, context: { conversationId?: string } = {}): Promise<unknown> {
+    const task = this.tail.then(() => this.executeTimed(input, signal, context));
     this.tail = task.then(() => undefined, () => undefined);
     return task;
+  }
+
+  private async executeTimed(input: ChromeToolInput, signal?: AbortSignal, context: { conversationId?: string } = {}): Promise<unknown> {
+    const timeout = input.timeoutMs ? new AbortController() : undefined;
+    const timer = timeout ? setTimeout(() => timeout.abort(new DOMException(`Operation timed out after ${input.timeoutMs}ms`, "TimeoutError")), input.timeoutMs) : undefined;
+    const combined = timeout ? signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal : signal;
+    try { return await this.executeNow(input, combined, context); }
+    catch (error) {
+      this.recordExecutionFailure(error, input, context);
+      throw error;
+    }
+    finally { if (timer !== undefined) clearTimeout(timer); }
+  }
+
+  private recordExecutionFailure(error: unknown, input: ChromeToolInput, context: { conversationId?: string }): void {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/user gesture|user activation|permission|not allowed|denied/i.test(message)) {
+      this.logger?.record({
+        type: "interaction.required",
+        conversationId: context.conversationId,
+        content: { message, target: input.target ?? (input.tabId !== undefined ? { kind: "page", tabId: input.tabId } : { kind: "extension" }), action: "Complete the browser prompt or required user gesture, then continue this conversation." },
+      });
+    } else if (/unavailable|not exposed|not installed|not currently|requires/i.test(message)) {
+      this.logger?.record({ type: "capability.unavailable", conversationId: context.conversationId, content: { message, target: input.target ?? null } });
+    }
   }
 
   dispose(): void {
@@ -284,20 +330,36 @@ export class ChromeExecutor {
     return this.initialized;
   }
 
-  private async executeNow(input: ChromeToolInput, signal?: AbortSignal): Promise<unknown> {
+  private async executeNow(input: ChromeToolInput, signal?: AbortSignal, context: { conversationId?: string } = {}): Promise<unknown> {
     if (this.disposed) throw new Error("Chrome executor has been disposed");
     throwIfAborted(signal);
     await this.initialize();
     throwIfAborted(signal);
 
-    if (input.tabId !== undefined) {
-      await (globalThis as Record<string, any>).__surfWaxGuard?.mark(input.tabId);
+    const target = this.normalizeTarget(input);
+    this.logger?.record({ type: "tool.route", conversationId: context.conversationId, content: { target } });
+
+    if (target.kind === "native") {
+      const id = globalThis.crypto.randomUUID();
+      const abort = () => void (this.bridge.call as (method: string, args: unknown[]) => Promise<unknown>)("nativeCancel", [id]).catch(() => undefined);
+      signal?.addEventListener("abort", abort, { once: true });
+      try { return await this.awaitAbort((this.bridge.call as any)("native", [input.code, id]), signal); }
+      catch (error) { throw this.actionableError(error, target); }
+      finally { signal?.removeEventListener("abort", abort); }
+    }
+
+    if (target.kind === "page") {
+      if (!Number.isInteger(target.tabId) && !target.targetId) throw new Error("A page target requires tabId or targetId. Query chrome.tabs or chrome.debugger.getTargets first.");
+      if (Number.isInteger(target.tabId)) await (globalThis as Record<string, any>).__surfWaxGuard?.mark(target.tabId);
       throwIfAborted(signal);
-      if (this.chromeApi.userScripts?.execute) {
+      if (target.tabId !== undefined && target.world !== "ISOLATED" && this.chromeApi.userScripts?.execute) {
+        const targetSpec = target.documentId
+          ? { tabId: target.tabId!, documentIds: [target.documentId] }
+          : target.frameId !== undefined ? { tabId: target.tabId!, frameIds: [target.frameId] } : { tabId: target.tabId! };
         const result = await this.awaitAbort(
           this.chromeApi.userScripts.execute({
-            target: { tabId: input.tabId },
-            world: input.world ?? "MAIN",
+            target: targetSpec,
+            world: target.world ?? "MAIN",
             js: [{ code: pageExpressionFor(input.code) }],
             injectImmediately: true,
           }),
@@ -305,20 +367,125 @@ export class ChromeExecutor {
         );
         throwIfAborted(signal);
         const first = result[0];
-        if (!first) throw new Error(`No injection result for tab ${input.tabId}`);
+        if (!first) throw new Error(`No injection result for tab ${target.tabId}`);
         if (first.error) throw new Error(first.error);
-        return evaluationValue({ result: { value: first.result } }, "page");
+        const value = evaluationValue({ result: { value: first.result } }, "page") as any;
+        if (value?.ref && first.documentId) value.documentId = first.documentId;
+        return value;
       }
-      if (input.world === "USER_SCRIPT") throw new Error("Allow User Scripts is unavailable; USER_SCRIPT execution requires Chrome userScripts.execute");
-      return this.evaluate({ tabId: input.tabId }, pageExpressionFor(input.code), signal, "page");
+      if (target.world === "USER_SCRIPT") throw new Error("Chrome User Scripts is disabled. Enable Allow User Scripts on the extension details page and reload the side panel.");
+      if (target.world === "ISOLATED") return this.evaluateIsolated(target, input.code, signal);
+      if (target.targetId) return this.evaluateCdpPage(target, input.code, signal);
+      return this.evaluate({ tabId: target.tabId }, pageExpressionFor(input.code), signal, "page");
+    }
+
+    if (target.kind === "offscreen") {
+      await this.ensureOffscreen();
+      return this.evaluateHostTarget("offscreen.html", input.code, signal, "offscreen", target.targetId);
+    }
+
+    if (target.kind === "devtools") {
+      return this.evaluateHostTarget("devtools.html", input.code, signal, "devtools", target.targetId);
+    }
+
+    if (target.kind === "service-worker") {
+      return this.evaluateWorker(input.code, signal, target.targetId);
     }
 
     const targets = await this.chromeApi.debugger.getTargets();
     if (this.disposed) throw abortError();
     throwIfAborted(signal);
-    const target = targets.find((candidate) => candidate.url === this.targetUrl && candidate.id);
-    if (!target?.id) throw new Error(`Side Panel DevTools target not found: ${this.targetUrl}`);
-    return this.evaluate({ targetId: target.id }, expressionFor(input.code), signal, "panel");
+    const panelTarget = targets.find((candidate) => candidate.url === this.targetUrl && candidate.id);
+    if (!panelTarget?.id) throw new Error(`Side Panel DevTools target not found: ${this.targetUrl}`);
+    return this.evaluate({ targetId: panelTarget.id }, expressionFor(input.code), signal, "extension");
+  }
+
+  private normalizeTarget(input: ChromeToolInput): ChromeTarget {
+    if (input.tabId !== undefined) return { kind: "page", tabId: input.tabId, world: input.world ?? "MAIN" };
+    const target = input.target ?? { kind: "extension" as const };
+    if (target.kind !== "auto") return target;
+    if (target.tabId !== undefined || target.targetId !== undefined) return { ...target, kind: "page", world: target.world ?? "MAIN" };
+    if (/\b(?:chrome\.|__surfWaxResult\b)/.test(input.code) || !/\b(?:document|window|location|navigator)\b/.test(input.code)) return { kind: "extension" };
+    throw new Error("Automatic target selection is ambiguous. Retry with target.kind set to extension, page, service-worker, offscreen, devtools, or native.");
+  }
+
+  private async bridgeDebuggee(debuggee: Debuggee): Promise<void> {
+    const key = JSON.stringify(debuggee);
+    if (this.bridgedDebuggees.has(key)) return;
+    await (this.bridge.call as any)("attach", [debuggee, "1.3"]);
+    this.bridgedDebuggees.add(key);
+    await (this.bridge.call as any)("sendCommand", [debuggee, "Target.setAutoAttach", {
+      autoAttach: true,
+      waitForDebuggerOnStart: false,
+      flatten: true,
+      filter: [{ type: "iframe", exclude: false }, { type: "worker", exclude: false }, { type: "shared_worker", exclude: false }],
+    }]).catch(() => undefined);
+  }
+
+  private async bridgeCommand(debuggee: Debuggee, method: string, params?: object): Promise<any> {
+    await this.bridgeDebuggee(debuggee);
+    return (this.bridge.call as any)("sendCommand", [debuggee, method, params]);
+  }
+
+  private async evaluateIsolated(target: ChromeTarget, code: string, signal?: AbortSignal): Promise<unknown> {
+    if (target.documentId) throw new Error("ISOLATED execution cannot resolve documentId directly. Use frameId, targetId/sessionId, or USER_SCRIPT.");
+    const debuggee: Debuggee = target.targetId
+      ? { targetId: target.targetId, ...(target.sessionId ? { sessionId: target.sessionId } : {}) } as Debuggee
+      : { tabId: target.tabId! };
+    throwIfAborted(signal);
+    const tree = await this.bridgeCommand(debuggee, "Page.getFrameTree");
+    const rootFrameId = tree?.frameTree?.frame?.id;
+    if (target.frameId !== undefined && target.frameId !== 0) {
+      throw new Error("ISOLATED execution for a non-root Chrome frameId requires a CDP targetId/sessionId. Discover it with Target.setAutoAttach and retry.");
+    }
+    if (!rootFrameId) throw new Error("CDP did not return a root frame for the page target.");
+    const world = await this.bridgeCommand(debuggee, "Page.createIsolatedWorld", { frameId: rootFrameId, worldName: "surf-wax", grantUniveralAccess: true });
+    const response = await this.bridgeCommand(debuggee, "Runtime.evaluate", {
+      expression: pageExpressionFor(code), contextId: world.executionContextId, awaitPromise: true, returnByValue: true, userGesture: true,
+    });
+    throwIfAborted(signal);
+    const error = evaluationError(response);
+    if (error) throw error;
+    return evaluationValue(response, "page");
+  }
+
+  private async evaluateCdpPage(target: ChromeTarget, code: string, signal?: AbortSignal): Promise<unknown> {
+    const debuggee = { ...(target.targetId ? { targetId: target.targetId } : { tabId: target.tabId }), ...(target.sessionId ? { sessionId: target.sessionId } : {}) } as Debuggee;
+    const response = await this.bridgeCommand(debuggee, "Runtime.evaluate", {
+      expression: pageExpressionFor(code), awaitPromise: true, returnByValue: true, userGesture: true,
+    });
+    throwIfAborted(signal);
+    const error = evaluationError(response);
+    if (error) throw error;
+    return evaluationValue(response, "page");
+  }
+
+  private async ensureOffscreen(): Promise<void> {
+    if (!this.chromeApi.offscreen) throw new Error("The offscreen API is unavailable in this Chrome version.");
+    const contexts = await this.chromeApi.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"], documentUrls: [this.chromeApi.runtime.getURL("offscreen.html")] });
+    if (contexts.length) return;
+    await this.chromeApi.offscreen.createDocument({ url: "offscreen.html", reasons: ["DOM_PARSER"], justification: "Run browser-agent Web APIs that require a document." });
+  }
+
+  private async evaluateHostTarget(path: string, code: string, signal: AbortSignal | undefined, kind: string, targetId?: string): Promise<unknown> {
+    const url = this.chromeApi.runtime.getURL(path);
+    const targets = await this.chromeApi.debugger.getTargets();
+    const target = targetId ? targets.find((item) => item.id === targetId) : targets.find((item) => item.url.startsWith(url));
+    if (!target?.id) throw new Error(`${kind} host is unavailable. ${kind === "devtools" ? "Open DevTools for a tab and retry." : "Reload the extension and retry."}`);
+    return this.evaluate({ targetId: target.id }, pageExpressionFor(code), signal, kind);
+  }
+
+  private async evaluateWorker(code: string, signal?: AbortSignal, targetId?: string): Promise<unknown> {
+    const target = (await this.chromeApi.debugger.getTargets()).find((item) => targetId ? item.id === targetId : item.type === "worker" && item.url.includes("background"));
+    if (!target?.id) throw new Error("The extension Service Worker is not currently exposed as a debuggable target.");
+    try { return await this.evaluate({ targetId: target.id }, pageExpressionFor(code), signal, "service-worker"); }
+    catch (error) { throw new Error(`Service Worker execution is unavailable in this browser session: ${error instanceof Error ? error.message : String(error)}. Desktop builds may launch Chrome with --silent-debugger-extension-api.`); }
+  }
+
+  private actionableError(error: unknown, target: ChromeTarget): Error {
+    const message = error instanceof Error ? error.message : String(error);
+    if (target.kind === "native") return new Error(`Native host unavailable: ${message}. Install it with node native/install.mjs <extension-id>, then retry.`);
+    return error instanceof Error ? error : new Error(message);
   }
 
   private async awaitAbort<T>(task: Promise<T>, signal?: AbortSignal): Promise<T> {
@@ -331,7 +498,7 @@ export class ChromeExecutor {
     });
   }
 
-  private async evaluate(debuggee: Debuggee, expression: string, signal?: AbortSignal, scope: "panel" | "page" = "panel"): Promise<unknown> {
+  private async evaluate(debuggee: Debuggee, expression: string, signal?: AbortSignal, scope = "extension"): Promise<unknown> {
     let attached = false;
     const state = { lifetime: this.lifetime, run: { aborted: false } };
     let rejectAbort: ((error: DOMException) => void) | undefined;

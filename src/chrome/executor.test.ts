@@ -71,8 +71,8 @@ describe("ChromeExecutor", () => {
     ]);
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
     await expect(executor.execute({ code: "throw new Error('boom')" })).rejects.toThrow("Error: boom");
-    await expect(executor.execute({ code: "return 1n" })).resolves.toEqual({
-      $ref: "ref-1", type: "bigint", preview: "1", access: 'globalThis.__surfWaxResults.get("ref-1")', scope: "panel",
+    await expect(executor.execute({ code: "return 1n" })).resolves.toMatchObject({
+      $ref: "ref-1", ref: "ref-1", type: "bigint", preview: "1", access: 'globalThis.__surfWaxObject("ref-1")', scope: "extension", host: "extension",
     });
     expect(String(fake.debuggerApi.sendCommand.mock.calls[1][2]?.expression)).toContain("__surfWaxResults");
   });
@@ -86,10 +86,12 @@ describe("ChromeExecutor", () => {
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
     await expect(executor.execute({ tabId: 5, code: "return document.title" })).resolves.toBe("MAIN");
     await expect(executor.execute({ tabId: 5, world: "USER_SCRIPT", code: "return await Promise.resolve(document.title)" })).resolves.toBe("USER_SCRIPT");
-    expect(execute).toHaveBeenCalledTimes(2);
+    await expect(executor.execute({ code: "return document.title", target: { kind: "page", tabId: 5, frameId: 2, world: "MAIN" } })).resolves.toBe("MAIN");
+    expect(execute).toHaveBeenCalledTimes(3);
     expect(execute.mock.calls[0][0]).toMatchObject({ target: { tabId: 5 }, world: "MAIN", injectImmediately: true });
     expect(execute.mock.calls[0][0].js[0]?.code).toContain("return document.title");
     expect(execute.mock.calls[1][0].world).toBe("USER_SCRIPT");
+    expect(execute.mock.calls[2][0].target).toEqual({ tabId: 5, frameIds: [2] });
     expect(fake.debuggerApi.attach).not.toHaveBeenCalled();
     executor.dispose();
   });
@@ -100,7 +102,7 @@ describe("ChromeExecutor", () => {
     await expect(executor.execute({ tabId: 8, code: "return document.title" })).resolves.toBe("CDP");
     expect(fake.debuggerApi.attach).toHaveBeenCalledWith({ tabId: 8 }, "1.3");
     expect(String(fake.debuggerApi.sendCommand.mock.calls[0][2]?.expression)).toContain("return document.title");
-    await expect(executor.execute({ tabId: 8, world: "USER_SCRIPT", code: "return 1" })).rejects.toThrow("USER_SCRIPT execution requires");
+    await expect(executor.execute({ tabId: 8, world: "USER_SCRIPT", code: "return 1" })).rejects.toThrow("Allow User Scripts");
     expect(fake.debuggerApi.sendCommand).toHaveBeenCalledTimes(1);
     (fake.chromeApi.userScripts as any).execute = vi.fn(async () => [{ frameId: 0, documentId: "doc", error: "page failed" }]);
     await expect(executor.execute({ tabId: 8, code: "throw Error('page failed')" })).rejects.toThrow("page failed");
