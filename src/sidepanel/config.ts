@@ -1,4 +1,4 @@
-import type { JevConfig, ModelConfig } from "../types";
+import type { JevConfig, ModelConfig, ModelTransport } from "../types";
 import { isJevProvider } from "../jev-providers";
 
 export const MODEL_CONFIG_STORAGE_KEY = "side-agent:model-config";
@@ -11,13 +11,19 @@ export const DEFAULT_JEV_CONFIG: JevConfig = {
   threshold: 0.5,
 };
 
-export type PersistedModelConfig = ModelConfig;
+export type ModelProfile = ModelConfig & { providerId: string; transport: ModelTransport };
+export type PersistedModelConfig = { selectedProviderId: string; profiles: Record<string, ModelProfile> };
 export type PersistedJevConfig = JevConfig;
+export const EMPTY_MODEL_CONFIG: PersistedModelConfig = { selectedProviderId: "", profiles: {} };
 
 export type StorageAreaLike = Pick<chrome.storage.StorageArea, "get" | "set">;
 
-export function isCompleteModelConfig(config: PersistedModelConfig): boolean {
-  return Boolean(config.baseURL.trim() && config.apiKey.trim() && config.model.trim());
+export function isCompleteModelConfig(config: ModelConfig | undefined): boolean {
+  return Boolean(config?.apiKey.trim() && config.model.trim() && (config.transport === "gateway" || config.baseURL.trim()));
+}
+
+export function selectedModelConfig(config: PersistedModelConfig): ModelProfile | undefined {
+  return config.profiles[config.selectedProviderId];
 }
 
 export function isCompleteJevConfig(config: PersistedJevConfig): boolean {
@@ -30,7 +36,7 @@ function getStorageArea(): StorageAreaLike | null {
 }
 
 export async function loadModelConfig(
-  fallback: PersistedModelConfig,
+  fallback: PersistedModelConfig = EMPTY_MODEL_CONFIG,
   storage = getStorageArea(),
 ): Promise<PersistedModelConfig> {
   if (!storage) return fallback;
@@ -39,14 +45,36 @@ export async function loadModelConfig(
   const value = stored[MODEL_CONFIG_STORAGE_KEY];
   if (!value || typeof value !== "object") return fallback;
 
-  const candidate = value as Partial<Record<keyof PersistedModelConfig, unknown>>;
-  return {
-    baseURL: typeof candidate.baseURL === "string" ? candidate.baseURL : fallback.baseURL,
-    apiKey: typeof candidate.apiKey === "string" ? candidate.apiKey : fallback.apiKey,
-    model: typeof candidate.model === "string" ? candidate.model : fallback.model,
-    ...(Number.isSafeInteger(candidate.contextWindowOverride) && Number(candidate.contextWindowOverride) > 0
-      ? { contextWindowOverride: Number(candidate.contextWindowOverride) } : {}),
-  };
+  const candidate = value as Record<string, unknown>;
+  if (candidate.profiles && typeof candidate.profiles === "object" && !Array.isArray(candidate.profiles)) {
+    const profiles = Object.fromEntries(Object.entries(candidate.profiles).flatMap(([providerId, raw]) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+      const profile = raw as Record<string, unknown>;
+      const transport = profile.transport === "gateway" ? "gateway" : "openai-compatible";
+      return [[providerId, {
+        providerId,
+        transport,
+        baseURL: typeof profile.baseURL === "string" ? profile.baseURL : "",
+        apiKey: typeof profile.apiKey === "string" ? profile.apiKey : "",
+        model: typeof profile.model === "string" ? profile.model : "",
+        ...(Number.isSafeInteger(profile.contextWindowOverride) && Number(profile.contextWindowOverride) > 0
+          ? { contextWindowOverride: Number(profile.contextWindowOverride) } : {}),
+      } satisfies ModelProfile]];
+    }));
+    return { selectedProviderId: typeof candidate.selectedProviderId === "string" ? candidate.selectedProviderId : "", profiles };
+  }
+
+  const legacy = candidate as Partial<Record<keyof ModelConfig, unknown>>;
+  if (typeof legacy.baseURL !== "string" && typeof legacy.apiKey !== "string" && typeof legacy.model !== "string") return fallback;
+  return { selectedProviderId: "custom", profiles: { custom: {
+    providerId: "custom",
+    transport: "openai-compatible",
+    baseURL: typeof legacy.baseURL === "string" ? legacy.baseURL : "",
+    apiKey: typeof legacy.apiKey === "string" ? legacy.apiKey : "",
+    model: typeof legacy.model === "string" ? legacy.model : "",
+    ...(Number.isSafeInteger(legacy.contextWindowOverride) && Number(legacy.contextWindowOverride) > 0
+      ? { contextWindowOverride: Number(legacy.contextWindowOverride) } : {}),
+  } } };
 }
 
 export async function saveModelConfig(
@@ -57,10 +85,15 @@ export async function saveModelConfig(
 
   await storage.set({
     [MODEL_CONFIG_STORAGE_KEY]: {
-      baseURL: config.baseURL.trim(),
-      apiKey: config.apiKey,
-      model: config.model.trim(),
-      ...(config.contextWindowOverride ? { contextWindowOverride: config.contextWindowOverride } : {}),
+      selectedProviderId: config.selectedProviderId,
+      profiles: Object.fromEntries(Object.entries(config.profiles).map(([providerId, profile]) => [providerId, {
+        providerId,
+        transport: profile.transport,
+        baseURL: profile.baseURL.trim(),
+        apiKey: profile.apiKey,
+        model: profile.model.trim(),
+        ...(profile.contextWindowOverride ? { contextWindowOverride: profile.contextWindowOverride } : {}),
+      }])),
     } satisfies PersistedModelConfig,
   });
 }

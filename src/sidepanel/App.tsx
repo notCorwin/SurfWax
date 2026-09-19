@@ -118,7 +118,7 @@ export function App() {
       <section id="chat-content" tabIndex={-1} className="chat-scroll">
         <div className="empty-state" data-testid="config-required-state">
           <h2>{session.configReady ? "先完成模型配置" : "正在准备对话…"}</h2>
-          <p>{session.configReady ? "打开设置页填写 Base URL、Model ID 和 API Key。" : "正在读取模型配置…"}</p>
+          <p>{session.configReady ? "打开设置页选择 Provider，并填写 Model ID 和 API Key。" : "正在读取模型配置…"}</p>
           {session.error !== undefined && <ErrorNotice summary="配置读取失败；请打开设置页重试。" error={session.error} />}
         </div>
       </section>

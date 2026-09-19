@@ -1,4 +1,5 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { createGateway } from "@ai-sdk/gateway";
 import type { LanguageModel } from "ai";
 import type { EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
@@ -195,15 +196,20 @@ export function createRetryingFetch(options: {
 }
 
 export function createModel(config: ModelConfig, logger?: EventLogger, conversationId?: string): LanguageModel {
-  if (!config.baseURL.trim()) throw new Error("Model base URL is required");
+  if (config.transport !== "gateway" && !config.baseURL.trim()) throw new Error("Model base URL is required");
   if (!config.apiKey.trim()) throw new Error("Model API key is required");
   if (!config.model.trim()) throw new Error("Model id is required");
+
+  const retryingFetch = createRetryingFetch({ logger, conversationId, reasoningSettings: reasoningSettingsFor(config) });
+  if (config.transport === "gateway") {
+    return createGateway({ apiKey: config.apiKey, fetch: retryingFetch }).languageModel(config.model);
+  }
 
   const provider = createOpenAICompatible({
     name: "side-agent-provider",
     baseURL: config.baseURL.replace(/\/+$/, ""),
     apiKey: config.apiKey,
-    fetch: createRetryingFetch({ logger, conversationId, reasoningSettings: reasoningSettingsFor(config) }),
+    fetch: retryingFetch,
   });
 
   return provider.languageModel(config.model);

@@ -27,11 +27,15 @@ export type PageToolInput = {
 };
 
 export type ModelConfig = {
+  providerId?: string;
+  transport?: ModelTransport;
   baseURL: string;
   apiKey: string;
   model: string;
   contextWindowOverride?: number;
 };
+
+export type ModelTransport = "gateway" | "openai-compatible";
 
 export type JevConfig = {
   provider: JevProvider;

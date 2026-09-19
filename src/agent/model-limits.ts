@@ -1,8 +1,10 @@
 import type { ModelConfig } from "../types";
 
 const CACHE_KEY = "side-agent:model-limit";
+const CATALOG_CACHE_KEY = "side-agent:model-catalog";
 const CATALOG_URL = "https://models.dev/api.json";
 const REFRESH_MS = 24 * 60 * 60 * 1000;
+const VERCEL_GATEWAY_URL = "https://ai-gateway.vercel.sh/v4/ai";
 
 export type ModelLimit = {
   provider: string;
@@ -14,15 +16,33 @@ export type ModelLimit = {
   reasoningEfforts?: string[];
 };
 
-type Catalog = Record<string, {
+export type ModelCatalog = Record<string, {
   id?: string;
   name?: string;
   api?: string;
-  models?: Record<string, { name?: string; reasoning?: boolean; reasoning_options?: Array<{ type?: string; values?: string[] }>; limit?: { context?: number; input?: number; output?: number } }>;
+  npm?: string;
+  models?: Record<string, {
+    id?: string;
+    name?: string;
+    tool_call?: boolean;
+    modalities?: { output?: string[] };
+    reasoning?: boolean;
+    reasoning_options?: Array<{ type?: string; values?: string[] }>;
+    limit?: { context?: number; input?: number; output?: number };
+  }>;
 }>;
 
 type CachedLimit = { key: string; fetchedAt: number; match: ModelLimit };
-type Storage = Pick<chrome.storage.StorageArea, "get" | "set">;
+type CachedCatalog = { fetchedAt: number; catalog: ModelCatalog };
+type Storage = { get(key: string): Promise<Record<string, unknown>>; set(items: Record<string, unknown>): Promise<void> };
+
+export type ModelProviderPreset = {
+  id: string;
+  name: string;
+  baseURL: string;
+  transport: "gateway" | "openai-compatible";
+  models: Array<{ id: string; name: string }>;
+};
 
 function validLimit(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) > 0;
@@ -50,14 +70,15 @@ function distance(left: string, right: string): number {
   return row[right.length]!;
 }
 
-export function matchModel(catalog: Catalog, baseURL: string, modelId: string): ModelLimit | undefined {
+export function matchModel(catalog: ModelCatalog, baseURL: string, modelId: string, selectedProviderId?: string): ModelLimit | undefined {
   const requested = modelId.toLowerCase();
   const requestedName = normalize(modelId.split("/").at(-1) ?? modelId);
   const host = hostname(baseURL);
   let best: { score: number; match: ModelLimit } | undefined;
   for (const [providerId, provider] of Object.entries(catalog)) {
     const providerHost = hostname(provider.api ?? "");
-    const providerMatch = Boolean(host && (host === providerHost || host.includes(providerId.replace(/-/g, ""))));
+    const providerMatch = selectedProviderId === providerId
+      || Boolean(host && (host === providerHost || host.includes(providerId.replace(/-/g, ""))));
     for (const [id, details] of Object.entries(provider.models ?? {})) {
       const limit = details.limit;
       if (!validLimit(limit?.context)) continue;
@@ -77,7 +98,7 @@ export function matchModel(catalog: Catalog, baseURL: string, modelId: string): 
             context: limit.context,
             ...(validLimit(limit.input) ? { input: limit.input } : {}),
             ...(validLimit(limit.output) ? { output: limit.output } : {}),
-            ...(host === providerHost && id.toLowerCase() === requested
+            ...((selectedProviderId === providerId || host === providerHost) && id.toLowerCase() === requested
               ? { reasoningEfforts: details.reasoning_options?.find((option) => option.type === "effort")?.values
                 ?? (details.reasoning === false || details.reasoning_options ? [] : undefined) }
               : {}),
@@ -88,6 +109,96 @@ export function matchModel(catalog: Catalog, baseURL: string, modelId: string): 
     }
   }
   return best?.match;
+}
+
+function normalizeCatalog(value: unknown): ModelCatalog {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Models.dev returned an invalid catalog");
+  return Object.fromEntries(Object.entries(value).flatMap(([providerId, rawProvider]) => {
+    if (!rawProvider || typeof rawProvider !== "object" || Array.isArray(rawProvider)) return [];
+    const provider = rawProvider as Record<string, unknown>;
+    const rawModels = provider.models && typeof provider.models === "object" && !Array.isArray(provider.models)
+      ? provider.models as Record<string, unknown> : {};
+    const models = Object.fromEntries(Object.entries(rawModels).flatMap(([modelId, rawModel]) => {
+      if (!rawModel || typeof rawModel !== "object" || Array.isArray(rawModel)) return [];
+      const model = rawModel as Record<string, unknown>;
+      const limit = model.limit && typeof model.limit === "object" ? model.limit as Record<string, unknown> : undefined;
+      const modalities = model.modalities && typeof model.modalities === "object" ? model.modalities as Record<string, unknown> : undefined;
+      const reasoningOptions = Array.isArray(model.reasoning_options)
+        ? model.reasoning_options.flatMap((option) => {
+          if (!option || typeof option !== "object" || Array.isArray(option)) return [];
+          const record = option as Record<string, unknown>;
+          return [{ type: String(record.type ?? ""), values: Array.isArray(record.values)
+            ? record.values.filter((item): item is string => typeof item === "string") : [] }];
+        })
+        : undefined;
+      return [[modelId, {
+        ...(typeof model.id === "string" ? { id: model.id } : {}),
+        ...(typeof model.name === "string" ? { name: model.name } : {}),
+        ...(typeof model.tool_call === "boolean" ? { tool_call: model.tool_call } : {}),
+        ...(modalities && Array.isArray(modalities.output) ? { modalities: { output: modalities.output.filter((item): item is string => typeof item === "string") } } : {}),
+        ...(typeof model.reasoning === "boolean" ? { reasoning: model.reasoning } : {}),
+        ...(reasoningOptions ? { reasoning_options: reasoningOptions } : {}),
+        ...(limit ? { limit: {
+          ...(validLimit(limit.context) ? { context: Number(limit.context) } : {}),
+          ...(validLimit(limit.input) ? { input: Number(limit.input) } : {}),
+          ...(validLimit(limit.output) ? { output: Number(limit.output) } : {}),
+        } } : {}),
+      }]];
+    }));
+    return [[providerId, {
+      ...(typeof provider.id === "string" ? { id: provider.id } : {}),
+      ...(typeof provider.name === "string" ? { name: provider.name } : {}),
+      ...(typeof provider.api === "string" ? { api: provider.api } : {}),
+      ...(typeof provider.npm === "string" ? { npm: provider.npm } : {}),
+      models,
+    }]];
+  }));
+}
+
+export function modelProviderPresets(catalog: ModelCatalog): ModelProviderPreset[] {
+  return Object.entries(catalog).flatMap(([id, provider]) => {
+    const gateway = id === "vercel" && provider.npm === "@ai-sdk/gateway";
+    const compatible = provider.npm === "@ai-sdk/openai-compatible"
+      && typeof provider.api === "string" && /^https?:\/\/[^$]+$/i.test(provider.api);
+    if (!gateway && !compatible) return [];
+    const models = Object.entries(provider.models ?? {}).filter(([, model]) =>
+      model.tool_call === true && (model.modalities?.output?.includes("text") ?? true),
+    ).map(([modelId, model]) => ({ id: model.id ?? modelId, name: model.name ?? modelId }))
+      .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+    return [{ id, name: provider.name ?? id, baseURL: gateway ? VERCEL_GATEWAY_URL : provider.api!,
+      transport: gateway ? "gateway" as const : "openai-compatible" as const, models }];
+  }).sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+}
+
+const catalogPending = new Map<string, Promise<ModelCatalog>>();
+
+export function loadModelCatalog(
+  options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal } = {},
+): Promise<ModelCatalog> {
+  const storage = options.storage ?? (typeof chrome !== "undefined" ? chrome.storage?.local : undefined);
+  const task = async () => {
+    const cached = storage ? (await storage.get(CATALOG_CACHE_KEY).catch(() => ({ [CATALOG_CACHE_KEY]: undefined })))[CATALOG_CACHE_KEY] as CachedCatalog | undefined : undefined;
+    if (cached?.catalog && (options.now ?? Date.now)() - cached.fetchedAt < REFRESH_MS) return cached.catalog;
+    try {
+      const timeout = AbortSignal.timeout(10_000);
+      const response = await (options.fetch ?? fetch)(CATALOG_URL, {
+        signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
+      });
+      if (!response.ok) throw new Error(`models.dev HTTP ${response.status}`);
+      const catalog = normalizeCatalog(await response.json());
+      if (storage) await storage.set({ [CATALOG_CACHE_KEY]: { fetchedAt: (options.now ?? Date.now)(), catalog } satisfies CachedCatalog }).catch(() => undefined);
+      return catalog;
+    } catch (error) {
+      if (options.signal?.aborted || !cached?.catalog) throw error;
+      return cached.catalog;
+    }
+  };
+  if (options.signal || options.fetch || options.storage || options.now) return task();
+  const existing = catalogPending.get(CATALOG_URL);
+  if (existing) return existing;
+  const result = task().finally(() => catalogPending.delete(CATALOG_URL));
+  catalogPending.set(CATALOG_URL, result);
+  return result;
 }
 
 const pending = new Map<string, Promise<ModelLimit | undefined>>();
@@ -106,12 +217,8 @@ export function resolveModelLimit(
     const validCache = cached?.key === key && validLimit(cached.match?.context) ? cached : undefined;
     if (validCache && (options.now ?? Date.now)() - validCache.fetchedAt < REFRESH_MS) return validCache.match;
     try {
-      const timeout = AbortSignal.timeout(10_000);
-      const response = await (options.fetch ?? fetch)(CATALOG_URL, {
-        signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
-      });
-      if (!response.ok) throw new Error(`models.dev HTTP ${response.status}`);
-      const match = matchModel(await response.json() as Catalog, config.baseURL, config.model);
+      const catalog = await loadModelCatalog(options);
+      const match = matchModel(catalog, config.baseURL, config.model, config.providerId);
       if (match && storage) await storage.set({ [CACHE_KEY]: { key, fetchedAt: (options.now ?? Date.now)(), match } satisfies CachedLimit }).catch(() => undefined);
       return match ?? validCache?.match;
     } catch (error) {

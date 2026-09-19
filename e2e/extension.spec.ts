@@ -247,12 +247,12 @@ async function dispose(context: BrowserContext, directory: string, server?: Serv
 async function configure(context: BrowserContext, page: Page, baseURL: string, contextWindow = 1_000_000): Promise<Page> {
   const [options] = await Promise.all([context.waitForEvent("page"), page.getByTestId("open-settings").click()]);
   await options.waitForLoadState("domcontentloaded");
-  const fields = options.getByTestId("options-card").locator("input");
-  await fields.nth(0).fill(baseURL);
-  await fields.nth(1).fill("test-model");
-  await fields.nth(2).fill("test-key");
+  await options.getByLabel("Provider", { exact: true }).fill("custom");
+  await options.getByLabel("Base URL", { exact: true }).fill(baseURL);
+  await options.getByLabel("Model ID", { exact: true }).fill("test-model");
+  await options.getByLabel("API Key", { exact: true }).fill("test-key");
   await options.getByText("高级设置", { exact: true }).click();
-  await fields.nth(3).fill(String(contextWindow));
+  await options.getByLabel("窗口大小（tokens）").fill(String(contextWindow));
   await options.getByRole("button", { name: "保存配置" }).click();
   await expect(options.getByRole("status")).toContainText("配置已保存");
   await expect(page.getByTestId("composer-input")).toBeVisible();
@@ -306,6 +306,42 @@ test("shows the configured model at the bottom left of the composer", async () =
     await expect(opened.page.getByTestId("composer-model")).toHaveText("Gemini 3.8 Flash");
     await expect(opened.page.getByTestId("composer-model")).toHaveAttribute("title", "google/gemini-3.8-flash");
     await options.close();
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory);
+  }
+});
+
+test("restores independent credentials and models when switching Providers", async () => {
+  const opened = await openExtension();
+  try {
+    await opened.page.evaluate(() => chrome.storage.local.set({ "side-agent:model-catalog": { fetchedAt: Date.now(), catalog: {
+      vercel: { name: "Vercel AI Gateway", npm: "@ai-sdk/gateway", models: {
+        "openai/gpt-test": { name: "GPT Test", tool_call: true, modalities: { output: ["text"] }, limit: { context: 100_000 } },
+      } },
+    } } }));
+    const [options] = await Promise.all([opened.context.waitForEvent("page"), opened.page.getByTestId("open-settings").click()]);
+    await options.waitForLoadState("domcontentloaded");
+
+    await options.getByLabel("Provider", { exact: true }).fill("vercel");
+    await expect(options.getByText("https://ai-gateway.vercel.sh/v4/ai", { exact: true })).toBeVisible();
+    await options.getByLabel("Model ID", { exact: true }).fill("openai/gpt-test");
+    await options.getByLabel("API Key", { exact: true }).fill("vercel-key");
+    await options.getByRole("button", { name: "保存配置" }).click();
+
+    await options.getByLabel("Provider", { exact: true }).fill("custom");
+    await options.getByLabel("Base URL", { exact: true }).fill("https://custom.test/v1");
+    await options.getByLabel("Model ID", { exact: true }).fill("custom-model");
+    await options.getByLabel("API Key", { exact: true }).fill("custom-key");
+    await options.getByRole("button", { name: "保存配置" }).click();
+
+    await options.getByLabel("Provider", { exact: true }).fill("vercel");
+    await expect(options.getByLabel("Model ID", { exact: true })).toHaveValue("openai/gpt-test");
+    await expect(options.getByLabel("API Key", { exact: true })).toHaveValue("vercel-key");
+    await expect.poll(() => options.evaluate(async () => (await chrome.storage.local.get("side-agent:model-config"))["side-agent:model-config"]))
+      .toMatchObject({ profiles: {
+        vercel: { apiKey: "vercel-key", model: "openai/gpt-test", transport: "gateway" },
+        custom: { apiKey: "custom-key", model: "custom-model", baseURL: "https://custom.test/v1" },
+      } });
   } finally {
     await dispose(opened.context, opened.userDataDirectory);
   }
@@ -375,6 +411,9 @@ test("shows inline settings errors and returns keyboard focus after closing conv
     })).toBe(true);
     await disclosure.locator("summary").click();
     await expect(disclosure).toHaveAttribute("open", "");
+    await options.getByRole("button", { name: "保存配置" }).click();
+    await expect(options.locator("#provider-id-error")).toHaveText("请选择 Provider");
+    await options.getByLabel("Provider", { exact: true }).fill("custom");
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(options.locator("#base-url-error")).toHaveText("请输入 Base URL");
     await expect(options.locator("#base-url")).toBeFocused();
@@ -470,7 +509,7 @@ test("ships only the minimal MV3 Harness surface", async () => {
     await expect(opened.page.getByTestId("config-required-state")).toBeVisible();
 
     const options = await configure(opened.context, opened.page, "https://provider.test/v1");
-    await expect(options.getByTestId("options-card").locator("input")).toHaveCount(8);
+    await expect(options.getByTestId("options-card").locator("input")).toHaveCount(9);
     await expect(options.getByTestId("event-log-clear")).toBeVisible();
     await expect(options.getByTestId("event-log")).toHaveCount(0);
     await expect(options.getByTestId("user-scripts-panel")).toHaveCount(0);

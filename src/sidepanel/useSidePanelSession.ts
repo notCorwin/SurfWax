@@ -2,12 +2,14 @@ import { useEffect, useState } from "react";
 import type { JevConfig, ModelConfig } from "../types";
 import {
   DEFAULT_JEV_CONFIG,
+  EMPTY_MODEL_CONFIG,
   JEV_CONFIG_STORAGE_KEY,
   MODEL_CONFIG_STORAGE_KEY,
   isCompleteJevConfig,
   isCompleteModelConfig,
   loadJevConfig,
   loadModelConfig,
+  selectedModelConfig,
 } from "./config";
 
 const EMPTY_CONFIG: ModelConfig = { baseURL: "", apiKey: "", model: "" };
@@ -23,7 +25,7 @@ export type SidePanelSession = {
 };
 
 export function useSidePanelSession(): SidePanelSession {
-  const [config, setConfig] = useState<ModelConfig>(EMPTY_CONFIG);
+  const [modelSettings, setModelSettings] = useState(EMPTY_MODEL_CONFIG);
   const [jevConfig, setJevConfig] = useState<JevConfig>(DEFAULT_JEV_CONFIG);
   const [configReady, setConfigReady] = useState(false);
   const [error, setError] = useState<unknown>();
@@ -33,11 +35,11 @@ export function useSidePanelSession(): SidePanelSession {
     const refresh = async () => {
       try {
         const [stored, storedJev] = await Promise.all([
-          loadModelConfig(EMPTY_CONFIG),
+          loadModelConfig(),
           loadJevConfig(),
         ]);
         if (!active) return;
-        setConfig(stored);
+        setModelSettings(stored);
         setJevConfig(storedJev);
         setError(undefined);
       } catch (cause) {
@@ -58,13 +60,14 @@ export function useSidePanelSession(): SidePanelSession {
     };
   }, []);
 
+  const config = selectedModelConfig(modelSettings) ?? EMPTY_CONFIG;
   return {
     config,
     jevConfig,
     configReady,
     error,
-    configured: configReady && isCompleteModelConfig(config),
+    configured: configReady && Boolean(modelSettings.selectedProviderId) && isCompleteModelConfig(config),
     jevConfigured: configReady && isCompleteJevConfig(jevConfig),
-    chatKey: `${config.baseURL}\u0000${config.model}\u0000${config.contextWindowOverride ?? ""}\u0000${jevConfig.baseURL}\u0000${jevConfig.model}\u0000${jevConfig.apiKey}`,
+    chatKey: `${config.providerId ?? ""}\u0000${config.baseURL}\u0000${config.model}\u0000${config.contextWindowOverride ?? ""}\u0000${jevConfig.baseURL}\u0000${jevConfig.model}\u0000${jevConfig.apiKey}`,
   };
 }

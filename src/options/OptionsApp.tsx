@@ -7,37 +7,47 @@ import { Input } from "../components/ui/input";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { ErrorNotice } from "../components/ui/error-notice";
 import { EventLogger } from "../logging";
-import { resolveModelLimit, type ModelLimit } from "../agent/model-limits";
+import { loadModelCatalog, modelProviderPresets, resolveModelLimit, type ModelLimit, type ModelProviderPreset } from "../agent/model-limits";
 import { JEV_PROVIDERS, JEV_PROVIDER_PRESETS } from "../jev-providers";
 import type { JevConfig, JevProvider } from "../types";
-import type { PersistedJevConfig, PersistedModelConfig } from "../sidepanel/config";
+import type { ModelProfile, PersistedJevConfig } from "../sidepanel/config";
 import {
   DEFAULT_JEV_CONFIG,
+  EMPTY_MODEL_CONFIG,
   isCompleteModelConfig,
   loadJevConfig,
   loadModelConfig,
   saveJevConfig,
   saveModelConfig,
+  selectedModelConfig,
 } from "../sidepanel/config";
 import "../styles.css";
 import "./styles.css";
 
-const EMPTY_CONFIG: PersistedModelConfig = { baseURL: "", apiKey: "", model: "" };
 const EMPTY_JEV_CONFIG: PersistedJevConfig = DEFAULT_JEV_CONFIG;
 type Status = "idle" | "saving" | "clearing" | "saved" | "error";
+type ModelField = "providerId" | "baseURL" | "model" | "apiKey" | "contextWindowOverride";
 
 export function OptionsApp() {
-  const [config, setConfig] = useState(EMPTY_CONFIG);
+  const [modelSettings, setModelSettings] = useState(EMPTY_MODEL_CONFIG);
+  const [providers, setProviders] = useState<ModelProviderPreset[]>([]);
+  const [providerInput, setProviderInput] = useState("");
+  const [catalogError, setCatalogError] = useState<unknown>();
   const [jevConfig, setJevConfig] = useState<JevConfig>(EMPTY_JEV_CONFIG);
   const [ready, setReady] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState("");
   const [errorDetail, setErrorDetail] = useState<unknown>();
   const [matchedLimit, setMatchedLimit] = useState<ModelLimit>();
-  const [fieldErrors, setFieldErrors] = useState<Partial<Record<keyof PersistedModelConfig, string>>>({});
+  const [fieldErrors, setFieldErrors] = useState<Partial<Record<ModelField, string>>>({});
   const [jevFieldErrors, setJevFieldErrors] = useState<Partial<Record<keyof PersistedJevConfig, string>>>({});
-  const savedConfig = useRef(JSON.stringify({ config: EMPTY_CONFIG, jevConfig: EMPTY_JEV_CONFIG }));
+  const savedConfig = useRef(JSON.stringify({ modelSettings: EMPTY_MODEL_CONFIG, jevConfig: EMPTY_JEV_CONFIG, providerInput: "" }));
   const matchingKey = useRef("");
+  const storedProfile = selectedModelConfig(modelSettings);
+  const selectedProvider = providers.find((provider) => provider.id === modelSettings.selectedProviderId);
+  const config = storedProfile && selectedProvider
+    ? { ...storedProfile, baseURL: selectedProvider.baseURL, transport: selectedProvider.transport }
+    : storedProfile;
   const fail = (summary: string, error: unknown) => {
     setStatus("error");
     setMessage(summary);
@@ -47,15 +57,24 @@ export function OptionsApp() {
 
   useEffect(() => {
     let active = true;
-    void Promise.all([loadModelConfig(EMPTY_CONFIG), loadJevConfig(EMPTY_JEV_CONFIG)]).then(([stored, storedJev]) => {
+    void Promise.all([
+      loadModelConfig(),
+      loadJevConfig(EMPTY_JEV_CONFIG),
+      loadModelCatalog().then(modelProviderPresets).catch((error) => { setCatalogError(error); return []; }),
+    ]).then(([stored, storedJev, catalogProviders]) => {
       if (!active) return;
-      setConfig(stored);
+      setModelSettings(stored);
+      setProviderInput(stored.selectedProviderId);
+      setProviders(catalogProviders);
       setJevConfig(storedJev);
-      savedConfig.current = JSON.stringify({ config: stored, jevConfig: storedJev });
-      matchingKey.current = `${stored.baseURL}\u0000${stored.model}`;
-      if (isCompleteModelConfig(stored)) {
-        void resolveModelLimit({ ...stored, contextWindowOverride: undefined }).then((limit) => {
-          if (active && matchingKey.current === `${stored.baseURL}\u0000${stored.model}`) setMatchedLimit(limit);
+      savedConfig.current = JSON.stringify({ modelSettings: stored, jevConfig: storedJev, providerInput: stored.selectedProviderId });
+      const selected = selectedModelConfig(stored);
+      const preset = catalogProviders.find((provider) => provider.id === stored.selectedProviderId);
+      const effective = selected && preset ? { ...selected, baseURL: preset.baseURL, transport: preset.transport } : selected;
+      matchingKey.current = effective ? `${effective.baseURL}\u0000${effective.model}` : "";
+      if (effective && isCompleteModelConfig(effective)) {
+        void resolveModelLimit({ ...effective, contextWindowOverride: undefined }).then((limit) => {
+          if (active && matchingKey.current === `${effective.baseURL}\u0000${effective.model}`) setMatchedLimit(limit);
         }).catch(() => undefined);
       }
     }).catch((error) => {
@@ -71,21 +90,45 @@ export function OptionsApp() {
 
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
-      if (JSON.stringify({ config, jevConfig }) === savedConfig.current) return;
+      if (JSON.stringify({ modelSettings, jevConfig, providerInput }) === savedConfig.current) return;
       event.preventDefault();
       event.returnValue = "";
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [config, jevConfig]);
+  }, [modelSettings, jevConfig, providerInput]);
 
-  const update = (field: keyof PersistedModelConfig, value: string) => {
-    setConfig((current) => ({ ...current, [field]: field === "contextWindowOverride" ? (value ? Number(value) : undefined) : value }));
+  const update = (field: Exclude<ModelField, "providerId">, value: string) => {
+    if (!config) return;
+    setModelSettings((current) => ({ ...current, profiles: { ...current.profiles, [config.providerId]: {
+      ...config, [field]: field === "contextWindowOverride" ? (value ? Number(value) : undefined) : value,
+    } } }));
     setFieldErrors((current) => ({ ...current, [field]: undefined }));
     if (field === "baseURL" || field === "model") {
       matchingKey.current = "";
       setMatchedLimit(undefined);
     }
+    setStatus("idle");
+    setMessage("");
+    setErrorDetail(undefined);
+  };
+
+  const changeProvider = (value: string) => {
+    setProviderInput(value);
+    const preset = providers.find((provider) => provider.id === value);
+    if (value !== "custom" && !preset) return;
+    setModelSettings((current) => ({
+      selectedProviderId: value,
+      profiles: current.profiles[value] ? current.profiles : { ...current.profiles, [value]: {
+        providerId: value,
+        transport: preset?.transport ?? "openai-compatible",
+        baseURL: preset?.baseURL ?? "",
+        apiKey: "",
+        model: "",
+      } satisfies ModelProfile },
+    }));
+    setFieldErrors({});
+    setMatchedLimit(undefined);
     setStatus("idle");
     setMessage("");
     setErrorDetail(undefined);
@@ -110,17 +153,18 @@ export function OptionsApp() {
 
   const save = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const errors: Partial<Record<keyof PersistedModelConfig, string>> = {};
-    if (!config.baseURL.trim()) errors.baseURL = "请输入 Base URL";
-    else {
+    const errors: Partial<Record<ModelField, string>> = {};
+    if (!modelSettings.selectedProviderId || providerInput !== modelSettings.selectedProviderId) errors.providerId = "请选择 Provider";
+    if (config && config.transport !== "gateway" && !config.baseURL.trim()) errors.baseURL = "请输入 Base URL";
+    else if (config?.transport !== "gateway") {
       try {
-        const url = new URL(config.baseURL);
+        const url = new URL(config?.baseURL ?? "");
         if (url.protocol !== "http:" && url.protocol !== "https:") errors.baseURL = "请输入 HTTP 或 HTTPS 地址";
       } catch { errors.baseURL = "请输入有效的网址"; }
     }
-    if (!config.model.trim()) errors.model = "请输入 Model ID";
-    if (!config.apiKey.trim()) errors.apiKey = "请输入 API Key";
-    if (config.contextWindowOverride !== undefined && (!Number.isSafeInteger(config.contextWindowOverride) || config.contextWindowOverride <= 0)) {
+    if (!config?.model.trim()) errors.model = "请输入 Model ID";
+    if (!config?.apiKey.trim()) errors.apiKey = "请输入 API Key";
+    if (config?.contextWindowOverride !== undefined && (!Number.isSafeInteger(config.contextWindowOverride) || config.contextWindowOverride <= 0)) {
       errors.contextWindowOverride = "请输入正整数 token 数";
     }
     const jevErrors: Partial<Record<keyof PersistedJevConfig, string>> = {};
@@ -144,10 +188,10 @@ export function OptionsApp() {
       setStatus("error");
       setMessage("请检查标出的字段");
       setErrorDetail(undefined);
-      const firstMainError = Object.keys(errors)[0] as keyof PersistedModelConfig | undefined;
+      const firstMainError = Object.keys(errors)[0] as ModelField | undefined;
       const firstJevError = Object.keys(jevErrors)[0] as keyof PersistedJevConfig | undefined;
       const firstErrorId = firstMainError
-        ? ({ baseURL: "base-url", model: "model-id", apiKey: "api-key", contextWindowOverride: "context-window" }[firstMainError])
+        ? ({ providerId: "provider-id", baseURL: "base-url", model: "model-id", apiKey: "api-key", contextWindowOverride: "context-window" }[firstMainError])
         : firstJevError
           ? ({ provider: "jev-provider", baseURL: "jev-base-url", model: "jev-model-id", apiKey: "jev-api-key", threshold: "jev-threshold" }[firstJevError])
           : undefined;
@@ -162,14 +206,20 @@ export function OptionsApp() {
     setStatus("saving");
     setMessage("正在保存配置…");
     try {
-      await Promise.all([saveModelConfig(config), saveJevConfig(jevConfig)]);
-      savedConfig.current = JSON.stringify({ config, jevConfig });
+      const savedModelSettings = { ...modelSettings, profiles: { ...modelSettings.profiles,
+        ...(config ? { [config.providerId]: config } : {}),
+      } };
+      await Promise.all([saveModelConfig(savedModelSettings), saveJevConfig(jevConfig)]);
+      setModelSettings(savedModelSettings);
+      savedConfig.current = JSON.stringify({ modelSettings: savedModelSettings, jevConfig, providerInput });
       setStatus("saved");
       setMessage("配置已保存，Side Panel 会立即使用新配置");
-      matchingKey.current = `${config.baseURL}\u0000${config.model}`;
-      void resolveModelLimit({ ...config, contextWindowOverride: undefined }).then((limit) => {
-        if (matchingKey.current === `${config.baseURL}\u0000${config.model}`) setMatchedLimit(limit);
-      }).catch(() => undefined);
+      if (config) {
+        matchingKey.current = `${config.baseURL}\u0000${config.model}`;
+        void resolveModelLimit({ ...config, contextWindowOverride: undefined }).then((limit) => {
+          if (matchingKey.current === `${config.baseURL}\u0000${config.model}`) setMatchedLimit(limit);
+        }).catch(() => undefined);
+      }
     } catch (error) {
       fail("配置保存失败。", error);
     }
@@ -196,7 +246,7 @@ export function OptionsApp() {
       <a className="skip-link" href="#options-content">跳转到配置</a>
       <header className="options-header">
         <h1>模型设置</h1>
-        <p>配置 OpenAI-compatible Provider，并管理本地 canonical event log。</p>
+        <p>选择 Models.dev Provider 或配置自定义 Endpoint，并管理本地 canonical event log。</p>
       </header>
 
       <Card id="options-content" tabIndex={-1} data-testid="options-card">
@@ -207,37 +257,59 @@ export function OptionsApp() {
           </CardHeader>
           <CardContent>
             <FieldGroup>
-              <Field data-disabled={busy || undefined}>
-                <FieldLabel htmlFor="base-url">Base URL</FieldLabel>
-                <Input id="base-url" name="baseURL" type="url" autoComplete="url" aria-invalid={!!fieldErrors.baseURL} aria-describedby={fieldErrors.baseURL ? "base-url-error" : undefined} value={config.baseURL} disabled={busy} onChange={(event) => update("baseURL", event.target.value)} />
-                {fieldErrors.baseURL && <p id="base-url-error" className="field-error" role="alert">{fieldErrors.baseURL}</p>}
+              <Field data-disabled={busy || undefined} data-invalid={!!fieldErrors.providerId || undefined}>
+                <FieldLabel htmlFor="provider-id">Provider</FieldLabel>
+                <Input id="provider-id" name="providerId" list="provider-options" autoComplete="off" spellCheck={false} placeholder="搜索或选择 Provider…"
+                  aria-invalid={!!fieldErrors.providerId} aria-describedby={fieldErrors.providerId ? "provider-id-error" : "provider-description"}
+                  value={providerInput} disabled={busy} onChange={(event) => changeProvider(event.target.value)} />
+                <datalist id="provider-options">
+                  <option value="custom" label="自定义 Endpoint" />
+                  {providers.map((provider) => <option key={provider.id} value={provider.id} label={provider.name} />)}
+                </datalist>
+                <FieldDescription id="provider-description">
+                  {catalogError ? "Models.dev 暂时不可用；仍可选择 custom 使用自定义 Endpoint。" : "Provider 与模型目录来自 Models.dev；每个 Provider 独立保存配置。"}
+                </FieldDescription>
+                {fieldErrors.providerId && <p id="provider-id-error" className="field-error" role="alert">{fieldErrors.providerId}</p>}
               </Field>
-              <Field data-disabled={busy || undefined}>
-                <FieldLabel htmlFor="model-id">Model ID</FieldLabel>
-                <Input id="model-id" name="model" autoComplete="off" aria-invalid={!!fieldErrors.model} aria-describedby={fieldErrors.model ? "model-id-error" : undefined} value={config.model} disabled={busy} onChange={(event) => update("model", event.target.value)} />
-                {fieldErrors.model && <p id="model-id-error" className="field-error" role="alert">{fieldErrors.model}</p>}
-              </Field>
-              <Field data-disabled={busy || undefined}>
-                <FieldLabel htmlFor="api-key">API Key</FieldLabel>
-                <Input id="api-key" name="apiKey" type="password" autoComplete="off" aria-invalid={!!fieldErrors.apiKey} aria-describedby={fieldErrors.apiKey ? "api-key-error" : undefined} value={config.apiKey} disabled={busy} onChange={(event) => update("apiKey", event.target.value)} />
-                {fieldErrors.apiKey && <p id="api-key-error" className="field-error" role="alert">{fieldErrors.apiKey}</p>}
-              </Field>
-              <Field>
-                <FieldLabel>上下文窗口自动匹配</FieldLabel>
-                <p data-testid="model-limit-match" className="model-limit-match">
-                  {matchedLimit ? `${matchedLimit.provider}/${matchedLimit.model} · ${matchedLimit.context.toLocaleString()} tokens`
-                    : "尚无匹配结果；可在下方手动设置窗口大小。"}
-                </p>
-                {config.contextWindowOverride && <p className="model-limit-match">当前生效：手动指定 {config.contextWindowOverride.toLocaleString()} tokens</p>}
-              </Field>
+              {config && <>
+                {modelSettings.selectedProviderId === "custom" ? <Field data-disabled={busy || undefined} data-invalid={!!fieldErrors.baseURL || undefined}>
+                  <FieldLabel htmlFor="base-url">Base URL</FieldLabel>
+                  <Input id="base-url" name="baseURL" type="url" autoComplete="url" aria-invalid={!!fieldErrors.baseURL} aria-describedby={fieldErrors.baseURL ? "base-url-error" : undefined} value={config.baseURL} disabled={busy} onChange={(event) => update("baseURL", event.target.value)} />
+                  {fieldErrors.baseURL && <p id="base-url-error" className="field-error" role="alert">{fieldErrors.baseURL}</p>}
+                </Field> : <Field>
+                  <FieldLabel>Endpoint</FieldLabel>
+                  <p className="model-limit-match">{config.baseURL}</p>
+                </Field>}
+                <Field data-disabled={busy || undefined} data-invalid={!!fieldErrors.model || undefined}>
+                  <FieldLabel htmlFor="model-id">Model ID</FieldLabel>
+                  <Input id="model-id" name="model" list="model-options" autoComplete="off" spellCheck={false} aria-invalid={!!fieldErrors.model} aria-describedby={fieldErrors.model ? "model-id-error" : undefined} value={config.model} disabled={busy} onChange={(event) => update("model", event.target.value)} />
+                  <datalist id="model-options">
+                    {selectedProvider?.models.map((model) => <option key={model.id} value={model.id} label={model.name} />)}
+                  </datalist>
+                  {fieldErrors.model && <p id="model-id-error" className="field-error" role="alert">{fieldErrors.model}</p>}
+                </Field>
+                <Field data-disabled={busy || undefined} data-invalid={!!fieldErrors.apiKey || undefined}>
+                  <FieldLabel htmlFor="api-key">API Key</FieldLabel>
+                  <Input id="api-key" name="apiKey" type="password" autoComplete="off" aria-invalid={!!fieldErrors.apiKey} aria-describedby={fieldErrors.apiKey ? "api-key-error" : undefined} value={config.apiKey} disabled={busy} onChange={(event) => update("apiKey", event.target.value)} />
+                  {fieldErrors.apiKey && <p id="api-key-error" className="field-error" role="alert">{fieldErrors.apiKey}</p>}
+                </Field>
+                <Field>
+                  <FieldLabel>上下文窗口自动匹配</FieldLabel>
+                  <p data-testid="model-limit-match" className="model-limit-match">
+                    {matchedLimit ? `${matchedLimit.provider}/${matchedLimit.model} · ${matchedLimit.context.toLocaleString()} tokens`
+                      : "尚无匹配结果；可在下方手动设置窗口大小。"}
+                  </p>
+                  {config.contextWindowOverride && <p className="model-limit-match">当前生效：手动指定 {config.contextWindowOverride.toLocaleString()} tokens</p>}
+                </Field>
+              </>}
               <details className="advanced-settings">
                 <summary><ChevronRightIcon aria-hidden="true" /><span>高级设置</span></summary>
                 <div className="advanced-settings-content">
                   <FieldSet>
                     <FieldLegend>上下文窗口</FieldLegend>
-                    <Field data-disabled={busy || undefined}>
+                    <Field data-disabled={busy || !config || undefined} data-invalid={!!fieldErrors.contextWindowOverride || undefined}>
                       <FieldLabel htmlFor="context-window">窗口大小（tokens）</FieldLabel>
-                      <Input id="context-window" name="contextWindowOverride" type="number" min="1" step="1" aria-invalid={!!fieldErrors.contextWindowOverride} aria-describedby={fieldErrors.contextWindowOverride ? "context-window-error" : undefined} value={config.contextWindowOverride ?? ""} disabled={busy}
+                      <Input id="context-window" name="contextWindowOverride" type="number" min="1" step="1" aria-invalid={!!fieldErrors.contextWindowOverride} aria-describedby={fieldErrors.contextWindowOverride ? "context-window-error" : undefined} value={config?.contextWindowOverride ?? ""} disabled={busy || !config}
                         onChange={(event) => update("contextWindowOverride", event.target.value)} />
                       {fieldErrors.contextWindowOverride && <p id="context-window-error" className="field-error" role="alert">{fieldErrors.contextWindowOverride}</p>}
                     </Field>

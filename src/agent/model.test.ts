@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { EventLogger, type LogEvent } from "../logging";
-import { createRetryingFetch } from "./model";
+import { createModel, createRetryingFetch } from "./model";
 import { ReasoningSettings } from "./reasoning";
 
 function loggerWithEvents() {
@@ -14,6 +14,13 @@ function loggerWithEvents() {
 }
 
 describe("createRetryingFetch", () => {
+  it("creates gateway and OpenAI-compatible models through their native providers", () => {
+    expect((createModel({ providerId: "vercel", transport: "gateway", baseURL: "", apiKey: "key", model: "openai/gpt-5" }) as unknown as { provider: string }).provider)
+      .toContain("gateway");
+    expect((createModel({ providerId: "custom", transport: "openai-compatible", baseURL: "https://provider.test/v1", apiKey: "key", model: "test" }) as unknown as { provider: string }).provider)
+      .toContain("side-agent-provider");
+  });
+
   it("retries recoverable responses without a ceiling and records latency", async () => {
     let attempts = 0;
     const sleep = vi.fn(async (_delay: number) => undefined);

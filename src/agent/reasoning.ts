@@ -120,7 +120,7 @@ export class ReasoningSettings {
     }
     const baseURL = this.config.baseURL.trim().replace(/\/+$/, "");
     const fetcher = this.options.fetch ?? globalThis.fetch.bind(globalThis);
-    const endpoint = await fetcher(`${baseURL}/models`, {
+    const endpoint = this.config.transport === "gateway" ? undefined : await fetcher(`${baseURL}/models`, {
         headers: { Authorization: `Bearer ${this.config.apiKey}` },
         signal: AbortSignal.timeout(5_000),
       }).then((response) => response.ok ? response.json() : undefined).then((body) => endpointEfforts(body, this.config.model)).catch(() => undefined);
