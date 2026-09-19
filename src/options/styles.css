@@ -55,6 +55,85 @@ body {
   font-size: 13px;
 }
 
+.search-combobox {
+  position: relative;
+}
+
+.search-combobox [data-slot="input"] {
+  padding-right: 42px;
+}
+
+.search-combobox-trigger {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+
+.search-combobox-content {
+  z-index: 50;
+  width: min(32rem, calc(100vw - 32px));
+  max-height: min(360px, var(--radix-popover-content-available-height));
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: var(--shadow-md);
+}
+
+.search-combobox-option {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.search-combobox-option:is(:hover, :focus-visible) {
+  outline: none;
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.search-combobox-option > svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.search-combobox-option-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.search-combobox-option-text :is(strong, small) {
+  overflow-wrap: anywhere;
+}
+
+.search-combobox-option-text strong {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.search-combobox-option-text small,
+.search-combobox-empty {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.search-combobox-empty {
+  margin: 0;
+  padding: 14px 12px;
+}
+
 .options-shell :is(p, summary) { overflow-wrap: anywhere; }
 .advanced-settings summary {
   display: flex;

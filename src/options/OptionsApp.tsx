@@ -6,6 +6,7 @@ import { Field, FieldDescription, FieldGroup, FieldLabel, FieldLegend, FieldSet 
 import { Input } from "../components/ui/input";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { ErrorNotice } from "../components/ui/error-notice";
+import { SearchCombobox, type SearchComboboxOption } from "./SearchCombobox";
 import { EventLogger } from "../logging";
 import { loadModelCatalog, modelProviderPresets, resolveModelLimit, type ModelLimit, type ModelProviderPreset } from "../agent/model-limits";
 import { JEV_PROVIDERS, JEV_PROVIDER_PRESETS } from "../jev-providers";
@@ -45,6 +46,11 @@ export function OptionsApp() {
   const matchingKey = useRef("");
   const storedProfile = selectedModelConfig(modelSettings);
   const selectedProvider = providers.find((provider) => provider.id === modelSettings.selectedProviderId);
+  const providerOptions = useMemo<SearchComboboxOption[]>(() => [
+    { value: "custom", label: "自定义 Endpoint" },
+    ...providers.filter((provider) => provider.id === "vercel").map((provider) => ({ value: provider.id, label: provider.name })),
+    ...providers.filter((provider) => provider.id !== "vercel").map((provider) => ({ value: provider.id, label: provider.name })),
+  ], [providers]);
   const config = storedProfile && selectedProvider
     ? { ...storedProfile, baseURL: selectedProvider.baseURL, transport: selectedProvider.transport }
     : storedProfile;
@@ -259,15 +265,13 @@ export function OptionsApp() {
             <FieldGroup>
               <Field data-disabled={busy || undefined} data-invalid={!!fieldErrors.providerId || undefined}>
                 <FieldLabel htmlFor="provider-id">Provider</FieldLabel>
-                <Input id="provider-id" name="providerId" list="provider-options" autoComplete="off" spellCheck={false} placeholder="搜索或选择 Provider…"
-                  aria-invalid={!!fieldErrors.providerId} aria-describedby={fieldErrors.providerId ? "provider-id-error" : "provider-description"}
-                  value={providerInput} disabled={busy} onChange={(event) => changeProvider(event.target.value)} />
-                <datalist id="provider-options">
-                  <option value="custom" label="自定义 Endpoint" />
-                  {providers.map((provider) => <option key={provider.id} value={provider.id} label={provider.name} />)}
-                </datalist>
+                <SearchCombobox id="provider-id" name="providerId" options={providerOptions} value={providerInput}
+                  onValueChange={changeProvider} disabled={busy} placeholder="搜索或选择 Provider…"
+                  aria-invalid={!!fieldErrors.providerId} aria-describedby={fieldErrors.providerId ? "provider-id-error" : "provider-description"} />
                 <FieldDescription id="provider-description">
-                  {catalogError ? "Models.dev 暂时不可用；仍可选择 custom 使用自定义 Endpoint。" : "Provider 与模型目录来自 Models.dev；每个 Provider 独立保存配置。"}
+                  {!ready ? "正在加载 Models.dev Provider 目录…" : catalogError
+                    ? "Models.dev 暂时不可用；仍可选择 custom 使用自定义 Endpoint。"
+                    : `已载入 ${providers.length.toLocaleString()} 个内置 Provider；每个 Provider 独立保存配置。`}
                 </FieldDescription>
                 {fieldErrors.providerId && <p id="provider-id-error" className="field-error" role="alert">{fieldErrors.providerId}</p>}
               </Field>
@@ -282,10 +286,10 @@ export function OptionsApp() {
                 </Field>}
                 <Field data-disabled={busy || undefined} data-invalid={!!fieldErrors.model || undefined}>
                   <FieldLabel htmlFor="model-id">Model ID</FieldLabel>
-                  <Input id="model-id" name="model" list="model-options" autoComplete="off" spellCheck={false} aria-invalid={!!fieldErrors.model} aria-describedby={fieldErrors.model ? "model-id-error" : undefined} value={config.model} disabled={busy} onChange={(event) => update("model", event.target.value)} />
-                  <datalist id="model-options">
-                    {selectedProvider?.models.map((model) => <option key={model.id} value={model.id} label={model.name} />)}
-                  </datalist>
+                  <SearchCombobox id="model-id" name="model" allowCustom
+                    options={selectedProvider?.models.map((model) => ({ value: model.id, label: model.name })) ?? []}
+                    value={config.model} disabled={busy} onValueChange={(value) => update("model", value)}
+                    aria-invalid={!!fieldErrors.model} aria-describedby={fieldErrors.model ? "model-id-error" : undefined} />
                   {fieldErrors.model && <p id="model-id-error" className="field-error" role="alert">{fieldErrors.model}</p>}
                 </Field>
                 <Field data-disabled={busy || undefined} data-invalid={!!fieldErrors.apiKey || undefined}>

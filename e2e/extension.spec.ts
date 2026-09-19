@@ -244,10 +244,17 @@ async function dispose(context: BrowserContext, directory: string, server?: Serv
   if (server) await closeServer(server);
 }
 
+async function selectProvider(options: Page, query: string, optionName: string | RegExp): Promise<void> {
+  const input = options.getByLabel("Provider", { exact: true });
+  await input.click();
+  await input.fill(query);
+  await options.getByRole("option", { name: optionName }).click();
+}
+
 async function configure(context: BrowserContext, page: Page, baseURL: string, contextWindow = 1_000_000): Promise<Page> {
   const [options] = await Promise.all([context.waitForEvent("page"), page.getByTestId("open-settings").click()]);
   await options.waitForLoadState("domcontentloaded");
-  await options.getByLabel("Provider", { exact: true }).fill("custom");
+  await selectProvider(options, "custom", /自定义 Endpoint.*custom/);
   await options.getByLabel("Base URL", { exact: true }).fill(baseURL);
   await options.getByLabel("Model ID", { exact: true }).fill("test-model");
   await options.getByLabel("API Key", { exact: true }).fill("test-key");
@@ -322,19 +329,30 @@ test("restores independent credentials and models when switching Providers", asy
     const [options] = await Promise.all([opened.context.waitForEvent("page"), opened.page.getByTestId("open-settings").click()]);
     await options.waitForLoadState("domcontentloaded");
 
-    await options.getByLabel("Provider", { exact: true }).fill("vercel");
+    await expect(options.getByText("已载入 1 个内置 Provider；每个 Provider 独立保存配置。")).toBeVisible();
+    await options.getByLabel("Provider", { exact: true }).click();
+    await expect(options.getByRole("option", { name: /自定义 Endpoint.*custom/ })).toBeVisible();
+    await expect(options.getByRole("option", { name: /Vercel AI Gateway.*vercel/ })).toBeVisible();
+    await options.getByLabel("Provider", { exact: true }).fill("Gateway");
+    await options.getByRole("option", { name: /Vercel AI Gateway.*vercel/ }).click();
+    await expect(options.getByLabel("Provider", { exact: true })).toHaveValue("Vercel AI Gateway (vercel)");
     await expect(options.getByText("https://ai-gateway.vercel.sh/v4/ai", { exact: true })).toBeVisible();
-    await options.getByLabel("Model ID", { exact: true }).fill("openai/gpt-test");
+    await options.getByLabel("Model ID", { exact: true }).fill("GPT Test");
+    await options.getByRole("option", { name: /GPT Test.*openai\/gpt-test/ }).click();
     await options.getByLabel("API Key", { exact: true }).fill("vercel-key");
     await options.getByRole("button", { name: "保存配置" }).click();
 
-    await options.getByLabel("Provider", { exact: true }).fill("custom");
+    await selectProvider(options, "custom", /自定义 Endpoint.*custom/);
     await options.getByLabel("Base URL", { exact: true }).fill("https://custom.test/v1");
     await options.getByLabel("Model ID", { exact: true }).fill("custom-model");
     await options.getByLabel("API Key", { exact: true }).fill("custom-key");
     await options.getByRole("button", { name: "保存配置" }).click();
 
-    await options.getByLabel("Provider", { exact: true }).fill("vercel");
+    const providerInput = options.getByLabel("Provider", { exact: true });
+    await providerInput.click();
+    await providerInput.fill("vercel");
+    await providerInput.press("ArrowDown");
+    await options.getByRole("option", { name: /Vercel AI Gateway.*vercel/ }).press("Enter");
     await expect(options.getByLabel("Model ID", { exact: true })).toHaveValue("openai/gpt-test");
     await expect(options.getByLabel("API Key", { exact: true })).toHaveValue("vercel-key");
     await expect.poll(() => options.evaluate(async () => (await chrome.storage.local.get("side-agent:model-config"))["side-agent:model-config"]))
@@ -342,6 +360,20 @@ test("restores independent credentials and models when switching Providers", asy
         vercel: { apiKey: "vercel-key", model: "openai/gpt-test", transport: "gateway" },
         custom: { apiKey: "custom-key", model: "custom-model", baseURL: "https://custom.test/v1" },
       } });
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory);
+  }
+});
+
+test("keeps custom Endpoint available when the Models.dev catalog fails", async () => {
+  const opened = await openExtension();
+  try {
+    await opened.context.route("https://models.dev/api.json", (route) => route.fulfill({ status: 503, body: "unavailable" }));
+    const [options] = await Promise.all([opened.context.waitForEvent("page"), opened.page.getByTestId("open-settings").click()]);
+    await options.waitForLoadState("domcontentloaded");
+    await expect(options.getByText("Models.dev 暂时不可用；仍可选择 custom 使用自定义 Endpoint。")).toBeVisible();
+    await selectProvider(options, "custom", /自定义 Endpoint.*custom/);
+    await expect(options.getByLabel("Base URL", { exact: true })).toBeVisible();
   } finally {
     await dispose(opened.context, opened.userDataDirectory);
   }
@@ -413,7 +445,7 @@ test("shows inline settings errors and returns keyboard focus after closing conv
     await expect(disclosure).toHaveAttribute("open", "");
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(options.locator("#provider-id-error")).toHaveText("请选择 Provider");
-    await options.getByLabel("Provider", { exact: true }).fill("custom");
+    await selectProvider(options, "custom", /自定义 Endpoint.*custom/);
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(options.locator("#base-url-error")).toHaveText("请输入 Base URL");
     await expect(options.locator("#base-url")).toBeFocused();
