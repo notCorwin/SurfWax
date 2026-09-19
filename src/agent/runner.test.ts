@@ -17,6 +17,7 @@ describe("createAgent", () => {
     const model = new MockLanguageModelV4({
       doStream: async (options) => {
         expect(options.reasoning).toBe("minimal");
+        expect((options.tools as any[]).map((tool) => tool.name)).toEqual(["chrome", "page"]);
         step += 1;
         const chunks = step > 25
           ? [

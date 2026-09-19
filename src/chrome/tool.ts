@@ -1,7 +1,7 @@
 import { dynamicTool } from "ai";
 import { z } from "zod";
 import type { EventLogger } from "../logging";
-import type { ChromeToolInput } from "../types";
+import type { ChromeToolInput, PageToolInput } from "../types";
 import { ChromeExecutor } from "./executor";
 
 export const chromeToolInputSchema = z.object({
@@ -42,7 +42,7 @@ function previewOf(value: unknown): string {
   return String(value).slice(0, 160);
 }
 
-export async function compactChromeResult(
+export async function compactToolResult(
   value: unknown,
   options: { logger?: EventLogger; conversationId?: string; toolCallId?: string },
 ): Promise<unknown> {
@@ -83,8 +83,34 @@ export function createChromeTool(executor: ChromeExecutor, options: { logger?: E
     ].join(" "),
     inputSchema: chromeToolInputSchema,
     needsApproval: false,
-    execute: async (input, { abortSignal, toolCallId }) => compactChromeResult(
-      await executor.execute(parseChromeToolInput(input), abortSignal, { conversationId: options.conversationId }),
+    execute: async (input, { abortSignal, toolCallId }) => compactToolResult(
+      await executor.execute(parseChromeToolInput(input), abortSignal, { conversationId: options.conversationId, toolCallId }),
+      { ...options, toolCallId },
+    ),
+  });
+}
+
+export const pageToolInputSchema = z.object({
+  code: z.string().min(1),
+  tabId: z.number().int().nonnegative().optional(),
+  timeoutMs: z.number().int().positive().max(300_000).optional(),
+}).strict();
+
+export function parsePageToolInput(input: unknown): PageToolInput {
+  return pageToolInputSchema.parse(input);
+}
+
+export function createPageTool(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string } = {}) {
+  return dynamicTool({
+    description: [
+      "Run an async JavaScript function body with a Playwright-style page object; explicitly return the result.",
+      "Use page.snapshot() for compact semantic refs, then page.getByRole/getByText/getByLabel or page.ref to locate elements.",
+      "Locator actions auto-wait and calls are globally sequential with chrome(). Omit tabId to use the active tab.",
+    ].join(" "),
+    inputSchema: pageToolInputSchema,
+    needsApproval: false,
+    execute: async (input, { abortSignal, toolCallId }) => compactToolResult(
+      await executor.executePage(parsePageToolInput(input), abortSignal, { conversationId: options.conversationId, toolCallId }),
       { ...options, toolCallId },
     ),
   });

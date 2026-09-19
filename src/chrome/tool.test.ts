@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EventLogger, type LogEvent } from "../logging";
-import { compactChromeResult, parseChromeToolInput } from "./tool";
+import { compactToolResult, parseChromeToolInput, parsePageToolInput } from "./tool";
 
 describe("chrome tool input", () => {
   it("accepts optional page targets without allowing a world alone", () => {
@@ -27,7 +27,7 @@ describe("chrome tool input", () => {
     };
     const logger = new EventLogger({ store });
     const large = Array.from({ length: 1500 }, (_, index) => ({ index, text: "网页内容" }));
-    const result = await compactChromeResult(large, { logger, conversationId: "one", toolCallId: "call-1" }) as Record<string, unknown>;
+    const result = await compactToolResult(large, { logger, conversationId: "one", toolCallId: "call-1" }) as Record<string, unknown>;
     expect(result).toMatchObject({ $ref: 1, type: "array", preview: "Array(1500)", access: "await globalThis.__surfWaxResult(1, {path?, offset?, limit?})" });
     expect(JSON.stringify(result).length).toBeLessThan(200);
     expect(events[0]).toMatchObject({ type: "tool.result.data", conversationId: "one", toolCallId: "call-1", output: large });
@@ -35,6 +35,12 @@ describe("chrome tool input", () => {
     expect(await logger.result(1, { offset: 2, limit: 2 })).toEqual(large.slice(2, 4));
     await logger.deleteConversation("one");
     await expect(logger.result(1)).rejects.toThrow("unavailable");
-    expect(await compactChromeResult("small", { logger, conversationId: "one" })).toBe("small");
+    expect(await compactToolResult("small", { logger, conversationId: "one" })).toBe("small");
+  });
+
+  it("validates the page meta-tool input", () => {
+    expect(parsePageToolInput({ code: "return await page.snapshot()" })).toEqual({ code: "return await page.snapshot()" });
+    expect(parsePageToolInput({ tabId: 7, code: "return page.url()", timeoutMs: 5000 }).tabId).toBe(7);
+    expect(() => parsePageToolInput({ code: "", operation: "click" })).toThrow();
   });
 });

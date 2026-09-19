@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Surf Wax",
   "version": "0.2.0",
-  "description": "A side-panel AI agent with one JavaScript browser meta-tool.",
+  "description": "A side-panel AI agent with raw Chrome and semantic page meta-tools.",
   "minimum_chrome_version": "138",
   "icons": {
     "16": "icons/icon-16.png",

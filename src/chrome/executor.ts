@@ -1,8 +1,9 @@
 import type { EventLogger } from "../logging";
-import type { ChromeTarget, ChromeToolInput } from "../types";
+import type { ChromeTarget, ChromeToolInput, PageToolInput } from "../types";
 import { restoreUserScripts, snapshotUserScripts } from "../userscripts/persistence";
+import { AutomationRuntime } from "./automation";
 
-type Debuggee = chrome.debugger.Debuggee;
+type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
 type DebuggerTarget = chrome.debugger.TargetInfo;
 type DebuggerApi = {
   getTargets(): Promise<DebuggerTarget[]>;
@@ -16,6 +17,8 @@ const BRIDGE_KEY = "__surfWaxDebugger";
 const RESULTS_KEY = "__surfWaxResults";
 const RESULT_READER_KEY = "__surfWaxResult";
 const STATE_KEY = "__surfWaxExecutionState";
+const PAGE_KEY = "__surfWaxPage";
+type ExecutionContext = { conversationId?: string; toolCallId?: string };
 
 function abortError(): DOMException {
   return new DOMException("Operation aborted", "AbortError");
@@ -164,6 +167,16 @@ ${code}
   })()`;
 }
 
+function automationExpressionFor(code: string, tabId?: number): string {
+  return `(async () => {
+    const page = await globalThis[${JSON.stringify(PAGE_KEY)}].create(${tabId === undefined ? "undefined" : tabId});
+    const result = await (async () => {
+${code}
+    })();
+    ${resultEnvelope()}
+  })()`;
+}
+
 function evaluationError(response: any): Error | undefined {
   const details = response?.exceptionDetails;
   if (!details) return undefined;
@@ -197,6 +210,7 @@ export class ChromeExecutor {
   private readonly logger?: EventLogger;
   private port?: chrome.runtime.Port;
   private readonly bridge: Record<string, unknown>;
+  private readonly automation: AutomationRuntime;
   private readonly lifetime = { aborted: false };
   private tail: Promise<void> = Promise.resolve();
   private initialized?: Promise<void>;
@@ -220,6 +234,7 @@ export class ChromeExecutor {
     const disconnect = (port: chrome.runtime.Port, error: Error) => {
       if (this.port !== port) return;
       this.port = undefined;
+      this.bridgedDebuggees.clear();
       for (const request of pending.values()) request.reject(this.disposed ? abortError() : error);
       pending.clear();
     };
@@ -265,18 +280,40 @@ export class ChromeExecutor {
         });
       },
     };
+    this.automation = new AutomationRuntime({
+      chromeApi: this.chromeApi,
+      command: (debuggee, method, params) => this.bridgeCommand(debuggee, method, params),
+      detach: async (debuggee) => {
+        await (this.bridge.call as any)("detach", [debuggee]);
+        this.bridgedDebuggees.delete(JSON.stringify(debuggee));
+      },
+      mark: async (tabId) => (globalThis as Record<string, any>).__surfWaxGuard?.mark(tabId),
+      logger: this.logger,
+    });
+    listeners.onEvent.add((source, method, params) => this.automation.handleEvent(source, method, params));
+    listeners.onDetach.add((source) => {
+      this.bridgedDebuggees.delete(JSON.stringify(source));
+      this.automation.handleDetach(source);
+    });
     (globalThis as Record<string, unknown>)[BRIDGE_KEY] = this.bridge;
+    (globalThis as Record<string, unknown>)[PAGE_KEY] = { create: (tabId?: number) => this.automation.createPage(tabId) };
     (globalThis as Record<string, unknown>)[RESULT_READER_KEY] = (id: number, selection?: { path?: Array<string | number>; offset?: number; limit?: number }) => this.logger?.result(id, selection)
       ?? Promise.reject(new Error("Tool result log is unavailable"));
   }
 
-  execute(input: ChromeToolInput, signal?: AbortSignal, context: { conversationId?: string } = {}): Promise<unknown> {
+  execute(input: ChromeToolInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
     const task = this.tail.then(() => this.executeTimed(input, signal, context));
     this.tail = task.then(() => undefined, () => undefined);
     return task;
   }
 
-  private async executeTimed(input: ChromeToolInput, signal?: AbortSignal, context: { conversationId?: string } = {}): Promise<unknown> {
+  executePage(input: PageToolInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+    const task = this.tail.then(() => this.executePageTimed(input, signal, context));
+    this.tail = task.then(() => undefined, () => undefined);
+    return task;
+  }
+
+  private async executeTimed(input: ChromeToolInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
     const timeout = input.timeoutMs ? new AbortController() : undefined;
     const timer = timeout ? setTimeout(() => timeout.abort(new DOMException(`Operation timed out after ${input.timeoutMs}ms`, "TimeoutError")), input.timeoutMs) : undefined;
     const combined = timeout ? signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal : signal;
@@ -288,16 +325,39 @@ export class ChromeExecutor {
     finally { if (timer !== undefined) clearTimeout(timer); }
   }
 
-  private recordExecutionFailure(error: unknown, input: ChromeToolInput, context: { conversationId?: string }): void {
+  private async executePageTimed(input: PageToolInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+    const timeout = input.timeoutMs ? new AbortController() : undefined;
+    const timer = timeout ? setTimeout(() => timeout.abort(new DOMException(`Operation timed out after ${input.timeoutMs}ms`, "TimeoutError")), input.timeoutMs) : undefined;
+    const combined = timeout ? signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal : signal;
+    try {
+      if (this.disposed) throw new Error("Chrome executor has been disposed");
+      throwIfAborted(combined);
+      await this.initialize();
+      const targets = await this.chromeApi.debugger.getTargets();
+      const panelTarget = targets.find((candidate) => candidate.url === this.targetUrl && candidate.id);
+      if (!panelTarget?.id) throw new Error(`Side Panel DevTools target not found: ${this.targetUrl}`);
+      this.automation.setContext({ ...context, signal: combined });
+      return await this.evaluate({ targetId: panelTarget.id }, automationExpressionFor(input.code, input.tabId), combined, "extension");
+    } catch (error) {
+      if (combined?.aborted) await this.automation.abortSessions();
+      this.recordExecutionFailure(error, input, context);
+      throw error;
+    } finally {
+      this.automation.clearContext();
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  private recordExecutionFailure(error: unknown, input: ChromeToolInput | PageToolInput, context: ExecutionContext): void {
     const message = error instanceof Error ? error.message : String(error);
     if (/user gesture|user activation|permission|not allowed|denied/i.test(message)) {
       this.logger?.record({
         type: "interaction.required",
         conversationId: context.conversationId,
-        content: { message, target: input.target ?? (input.tabId !== undefined ? { kind: "page", tabId: input.tabId } : { kind: "extension" }), action: "Complete the browser prompt or required user gesture, then continue this conversation." },
+        content: { message, target: "target" in input ? input.target ?? (input.tabId !== undefined ? { kind: "page", tabId: input.tabId } : { kind: "extension" }) : { kind: "page", tabId: input.tabId }, action: "Complete the browser prompt or required user gesture, then continue this conversation." },
       });
     } else if (/unavailable|not exposed|not installed|not currently|requires/i.test(message)) {
-      this.logger?.record({ type: "capability.unavailable", conversationId: context.conversationId, content: { message, target: input.target ?? null } });
+      this.logger?.record({ type: "capability.unavailable", conversationId: context.conversationId, content: { message, target: "target" in input ? input.target ?? null : { kind: "page", tabId: input.tabId } } });
     }
   }
 
@@ -308,7 +368,9 @@ export class ChromeExecutor {
     if ((globalThis as Record<string, unknown>)[BRIDGE_KEY] === this.bridge) {
       delete (globalThis as Record<string, unknown>)[BRIDGE_KEY];
       delete (globalThis as Record<string, unknown>)[RESULT_READER_KEY];
+      delete (globalThis as Record<string, unknown>)[PAGE_KEY];
     }
+    this.automation.dispose();
     const sessions = [this.activeDebuggee].filter((item): item is Debuggee => Boolean(item));
     this.activeDebuggee = undefined;
     for (const debuggee of sessions) void this.chromeApi.debugger.detach(debuggee).catch(() => undefined);
@@ -330,7 +392,7 @@ export class ChromeExecutor {
     return this.initialized;
   }
 
-  private async executeNow(input: ChromeToolInput, signal?: AbortSignal, context: { conversationId?: string } = {}): Promise<unknown> {
+  private async executeNow(input: ChromeToolInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
     if (this.disposed) throw new Error("Chrome executor has been disposed");
     throwIfAborted(signal);
     await this.initialize();
@@ -403,6 +465,10 @@ export class ChromeExecutor {
   private async bridgeDebuggee(debuggee: Debuggee): Promise<void> {
     const key = JSON.stringify(debuggee);
     if (this.bridgedDebuggees.has(key)) return;
+    if (debuggee.sessionId) {
+      this.bridgedDebuggees.add(key);
+      return;
+    }
     await (this.bridge.call as any)("attach", [debuggee, "1.3"]);
     this.bridgedDebuggees.add(key);
     await (this.bridge.call as any)("sendCommand", [debuggee, "Target.setAutoAttach", {

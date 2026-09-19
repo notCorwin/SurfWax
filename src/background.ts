@@ -125,7 +125,7 @@ chrome.runtime.onConnect.addListener((port) => {
     try {
       let result: unknown;
       if (method === "attach") {
-        await chrome.debugger.attach(args[0], args[1]);
+        if (!sessions.has(key(args[0]))) await chrome.debugger.attach(args[0], args[1]);
         if (closed) await chrome.debugger.detach(args[0]);
         else sessions.set(key(args[0]), args[0]);
       } else if (method === "detach") {

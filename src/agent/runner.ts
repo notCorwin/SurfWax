@@ -1,6 +1,6 @@
 import { isLoopFinished, ToolLoopAgent } from "ai";
 import type { LanguageModel } from "ai";
-import { createChromeTool } from "../chrome/tool";
+import { createChromeTool, createPageTool } from "../chrome/tool";
 import { ChromeExecutor } from "../chrome/executor";
 import type { EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
@@ -9,7 +9,8 @@ import type { ContextCompactor } from "./compaction";
 
 export const DEFAULT_INSTRUCTIONS = [
   "You are a Chrome side-panel agent helping the user automate the browser they control.",
-  "Use the single chrome tool for browser actions. Return values explicitly and select only needed page data.",
+  "Use page for normal web-page observation and interaction; use chrome for extension APIs, arbitrary browser JavaScript, User Scripts, and raw CDP. Return values explicitly and select only needed page data.",
+  "Page example: page({code:'const s=await page.snapshot(); await page.getByRole(\"button\",{name:\"Sign in\"}).click(); return s'}). Page locators auto-wait and are strict; prefer semantic locators and snapshot refs over CSS.",
   "Extension example: chrome({code:'return await chrome.tabs.query({active:true})',target:{kind:'extension'}}). Page example: chrome({code:'return document.title',target:{kind:'page',tabId:1,world:'MAIN'}}).",
   "Use MAIN, ISOLATED, or USER_SCRIPT for page worlds.",
   "Inspect live availability with chrome({target:{kind:'extension'},code:'return await chrome.capabilities()'}); unavailable hosts return an actionable reason.",
@@ -27,15 +28,18 @@ export type CreateAgentOptions = {
   compactor?: ContextCompactor;
 };
 
-type ChromeAgentTools = { chrome: ReturnType<typeof createChromeTool> };
+type BrowserAgentTools = { chrome: ReturnType<typeof createChromeTool>; page: ReturnType<typeof createPageTool> };
 
-export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, ChromeAgentTools> {
+export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, BrowserAgentTools> {
   const logger = options.logger;
-  return new ToolLoopAgent<never, ChromeAgentTools>({
+  return new ToolLoopAgent<never, BrowserAgentTools>({
     model: options.languageModel ?? createModel(options.model, logger, options.conversationId),
     reasoning: "minimal",
     instructions: options.instructions ?? DEFAULT_INSTRUCTIONS,
-    tools: { chrome: createChromeTool(options.executor, { logger, conversationId: options.conversationId }) },
+    tools: {
+      chrome: createChromeTool(options.executor, { logger, conversationId: options.conversationId }),
+      page: createPageTool(options.executor, { logger, conversationId: options.conversationId }),
+    },
     ...(options.compactor ? { prepareStep: async ({ messages, stepNumber }) => ({
       messages: await options.compactor!.prepare(messages, stepNumber) ?? messages,
     }) } : {}),

@@ -4,13 +4,13 @@
 [![Chrome 138+](https://img.shields.io/badge/Chrome-138%2B-4285F4?logo=googlechrome&logoColor=white)](https://www.google.com/chrome/)
 [![Version](https://img.shields.io/badge/version-0.2.0-blue)](manifests/store.json)
 
-Surf Wax 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。它使用 Vercel AI SDK v7 和 Assistant UI，直接连接用户配置的 OpenAI-compatible Provider，并只向模型提供一个浏览器元工具：`chrome({ code, target?, timeoutMs? })`。
+Surf Wax 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。它使用 Vercel AI SDK v7 和 Assistant UI，直接连接用户配置的 OpenAI-compatible Provider，并向模型提供两个互补的浏览器元工具：`chrome({ code, target?, timeoutMs? })` 与 `page({ tabId?, code, timeoutMs? })`。
 
-模型通过这一个“浏览器 Bash”执行异步 JavaScript。能力路由器可进入扩展页面、网页 `MAIN` / `ISOLATED` / `USER_SCRIPT`、Offscreen、DevTools 和 Service Worker 调试目标，并保留原始 CDP。实际能力边界由运行时能力报告说明。
+`chrome()` 是原始“浏览器 Bash”，可进入扩展页面、网页 `MAIN` / `ISOLATED` / `USER_SCRIPT`、Offscreen、DevTools 和 Service Worker 调试目标，并保留原始 CDP。`page()` 提供语义定位器、自动等待和网页工作流。实际能力边界由运行时能力报告说明。
 
 ## 为什么使用它
 
-- **一个工具覆盖浏览器能力**：Chrome 新增 API 或 CDP Domain 时，无需为 Harness 增加专用工具。
+- **两个稳定元工具覆盖浏览器能力**：语义网页操作使用 `page()`，新增 Chrome API 或 CDP Domain 仍可直接通过 `chrome()` 使用，无需增加专用工具。
 - **纯浏览器扩展**：没有守护进程、远程执行器或中间服务；模型请求从扩展直接发送到配置的 Provider。
 - **可恢复的本地多对话**：IndexedDB 中的 append-only event log 是对话列表、UI、模型上下文和中断恢复的唯一事实来源。
 - **持久 User Scripts**：Agent 可通过原生 `chrome.userScripts` 查看、注册、更新、运行和删除脚本；Harness 保存注册快照，并在扩展启动或更新后恢复。
@@ -76,7 +76,7 @@ Side Panel 标题栏的脚本按钮会打开独立的用户脚本页面。列表
 列出当前窗口中的全部标签页，并返回标题和 URL。
 ```
 
-模型会生成一个 `chrome({ code, target?, timeoutMs? })` 调用。代码是异步函数体，必须显式 `return`。`target.kind` 支持 `extension`、`page`、`service-worker`、`offscreen`、`devtools` 和 `auto`；旧版顶层 `tabId/world` 仍可用于恢复历史对话。
+模型会根据任务生成 `page()` 或 `chrome()` 调用。两者的 `code` 都是异步函数体，必须显式 `return`。`chrome()` 的 `target.kind` 支持 `extension`、`page`、`service-worker`、`offscreen`、`devtools` 和 `auto`；旧版顶层 `tabId/world` 仍可用于恢复历史对话。
 
 实时检查能力：
 
@@ -138,6 +138,20 @@ Side Panel 标题栏的脚本按钮会打开独立的用户脚本页面。列表
 
 Side Panel 关闭时，Harness 会立即中止当前模型请求，阻止排队的工具调用启动，并尽力取消执行中的工具和 detach 自己创建的调试会话。已经发生的浏览器副作用不会回滚。
 
+### 语义网页自动化
+
+日常网页操作使用第二个元工具 `page()`。它提供语义快照、严格 Locator、自动等待和真实 CDP 输入；同一次调用可以完成多个动作，动作后默认只返回页面状态差异：
+
+```json
+{
+  "code": "const before = await page.snapshot(); await page.getByLabel('邮箱').fill('me@example.com'); await page.getByRole('button', { name: '登录' }).click(); return await page.getByText('欢迎回来').waitFor();"
+}
+```
+
+支持 `getByRole/Text/Label/Placeholder/AltText/Title/TestId`、CSS `locator()`、`frameLocator()`、导航与 dialog/popup/download 事件，以及点击、填写、键盘、选择、勾选、拖拽和文件上传等 Locator 工作流。`setInputFiles` 只接收 `{ name, mimeType?, text | base64 | url }`，不读取本机路径。定位器没有独立超时，统一服从 `page({ timeoutMs })` 或用户中止。
+
+`chrome()` 继续负责 Chrome Extension API、任意页面 JavaScript、User Script 与原始 CDP。两者共用同一串行队列、页面防点击层、Abort 生命周期和事件日志；扩展不依赖 Native Messaging 或生产环境 Playwright。
+
 智能体运行时，已连接或操作的网页会覆盖防点击层；导航后会重装，结束或中止时移除。通过 CDP 注入鼠标或触摸手势时，防点击层会短暂透传，以便智能体操作页面。Chrome 不允许脚本注入的页面会在面板显示提示。
 
 重新打开 Side Panel 后，已生成的文本、推理和工具结果会从事件流恢复并标记为“回复已中断”。只有最新的中断回复提供“继续”按钮；继续时会先要求 Agent 根据已有工具结果确认当前状态，不会自动重放浏览器操作。标题栏的对话按钮可新建、切换和永久删除单条本地对话；仅切换对话不会停止后台运行中的回复。
@@ -154,7 +168,7 @@ Side Panel 关闭时，Harness 会立即中止当前模型请求，阻止排队�
 | --- | --- |
 | `src/sidepanel/` | Side Panel 会话、配置加载、恢复和关闭生命周期 |
 | `src/agent/` | OpenAI-compatible 模型、无限重试、Agent 循环和流式 transport |
-| `src/chrome/` | 单一 `chrome()` 工具及串行 JavaScript/CDP 执行器 |
+| `src/chrome/` | `chrome()`/`page()` 双元工具、语义 Locator 与共享串行 JavaScript/CDP 执行器 |
 | `src/logging.ts` | IndexedDB canonical event log 与对话重建 |
 | `src/userscripts/` | 原生 User Script 快照、迁移和恢复 |
 | `src/options/` | BYOK 设置和日志清理 |
@@ -187,7 +201,7 @@ git diff --check
 项目由 [notCorwin](https://github.com/notCorwin) 维护。欢迎提交聚焦、可验证的 Pull Request：
 
 1. Fork 仓库并从最新 `master` 创建分支。
-2. 保持单一 `chrome()` 元工具和 canonical event log 语义不变。
+2. 保持 `chrome()`/`page()` 双元工具和 canonical event log 语义不变。
 3. 为非平凡行为添加最小覆盖，并运行上面的完整验证命令。
 4. 不要提交 `dist/`、测试报告或本地密钥。
 

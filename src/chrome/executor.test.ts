@@ -64,6 +64,29 @@ describe("ChromeExecutor", () => {
     expect(String(fake.debuggerApi.sendCommand.mock.calls[0][2]?.expression)).toContain("const chrome = new Proxy");
   });
 
+  it("exposes page() as a second meta-tool execution realm", async () => {
+    const fake = fakeChrome([{ result: { value: { kind: "value", value: "done" } } }]);
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    await expect(executor.executePage({ tabId: 7, code: "await page.getByRole('button', {name: 'Go'}).click(); return 'done';" })).resolves.toBe("done");
+    const expression = String(fake.debuggerApi.sendCommand.mock.calls[0][2]?.expression);
+    expect(expression).toContain("__surfWaxPage");
+    expect(expression).toContain("getByRole");
+  });
+
+  it("serializes page() and chrome() through the same queue", async () => {
+    let finish!: (value: object) => void;
+    const first = new Promise<object>((resolve) => { finish = resolve; });
+    const fake = fakeChrome([() => first, { result: { value: { kind: "value", value: "chrome" } } }]);
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    const page = executor.executePage({ code: "return 'page'" });
+    const chrome = executor.execute({ code: "return 'chrome'" });
+    await vi.waitFor(() => expect(fake.debuggerApi.sendCommand).toHaveBeenCalledTimes(1));
+    finish({ result: { value: { kind: "value", value: "page" } } });
+    await expect(page).resolves.toBe("page");
+    await expect(chrome).resolves.toBe("chrome");
+    expect(fake.debuggerApi.sendCommand).toHaveBeenCalledTimes(2);
+  });
+
   it("propagates JavaScript exceptions and returns inspectable references", async () => {
     const fake = fakeChrome([
       { exceptionDetails: { text: "Uncaught", exception: { description: "Error: boom" } }, result: { type: "object" } },

@@ -47,6 +47,17 @@ function toolResponse(code: string | { code: string; tabId?: number; world?: "MA
   ];
 }
 
+function pageResponse(code: string, tabId: number, id = "call-page-e2e"): string[] {
+  return [
+    chunk({
+      role: "assistant",
+      tool_calls: [{ index: 0, id, type: "function", function: { name: "page", arguments: JSON.stringify({ code, tabId }) } }],
+    }),
+    chunk({}, "tool_calls"),
+    "data: [DONE]\n\n",
+  ];
+}
+
 function queuedToolResponse(firstCode: string, secondCode: string): string[] {
   return [
     chunk({
@@ -96,6 +107,11 @@ async function startProvider(responses: MockResponse[], delayMs = 0, summaryText
       response.end("<!doctype html><title>Side Agent Target</title><main>ready</main>");
       return;
     }
+    if (request.method === "GET" && request.url === "/automation") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(`<!doctype html><title>Automation Target</title><label>Email <input type="email"></label><button onclick="document.querySelector('output').textContent='Welcome '+document.querySelector('input').value">Sign in</button><output></output>`);
+      return;
+    }
     if (request.method === "GET" && request.url === "/complex") {
       const address = server.address();
       if (!address || typeof address === "string") throw new Error("Server is not listening");
@@ -110,7 +126,7 @@ async function startProvider(responses: MockResponse[], delayMs = 0, summaryText
     }
     if (request.method === "GET" && request.url === "/frame") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end("<!doctype html><title>Cross Origin Frame</title><main>frame ready</main>");
+      response.end("<!doctype html><title>Cross Origin Frame</title><main>frame ready <button onclick=\"document.body.dataset.clicked='yes'\">Frame action</button></main>");
       return;
     }
     if (request.method === "GET" && request.url === "/worker.js") {
@@ -503,6 +519,67 @@ test("targets page worlds and keeps large tool output out of model history", asy
   }
 });
 
+test("runs semantic page locators with auto-wait, trusted input, snapshots and action logs", async () => {
+  const responses: string[][] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/automation`);
+    const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/automation`);
+    expect(tab?.id).toBeDefined();
+    responses.push(
+      pageResponse(`
+const before = await page.snapshot();
+await page.getByLabel('Email').fill('me@example.com');
+await page.getByRole('button', { name: 'Sign in' }).click();
+return { before: before.snapshot, value: await page.getByLabel('Email').inputValue(), welcome: await page.getByText('Welcome me@example.com').innerText() };
+`, tab.id!),
+      textResponse("PAGE_AUTOMATION_OK"),
+      textResponse("页面自动化"),
+    );
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("use semantic page automation");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("PAGE_AUTOMATION_OK");
+    const events = await readEvents(opened.page);
+    const result = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-page-e2e")?.output;
+    expect(result).toMatchObject({ before: expect.stringContaining("[ref=e"), value: "me@example.com", welcome: "Welcome me@example.com" });
+    await expect.poll(() => target.locator("output").textContent()).toBe("Welcome me@example.com");
+    expect(events.some((event) => event.type === "automation.action.finished" && event.toolCallId === "call-page-e2e")).toBe(true);
+    expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).toEqual(["chrome", "page"]);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("uses frameLocator inside a cross-origin iframe", async () => {
+  const responses: string[][] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/complex`);
+    const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/complex`);
+    responses.push(
+      pageResponse("await page.frameLocator('iframe[src*=localhost]').getByRole('button', {name:'Frame action'}).click(); return 'FRAME_OK';", tab.id!, "call-page-frame"),
+      textResponse("FRAME_AUTOMATION_OK"),
+      textResponse("跨域框架"),
+    );
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("click inside the cross-origin frame");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FRAME_AUTOMATION_OK", { timeout: 10_000 });
+    await expect.poll(() => target.frames().find((frame) => frame.url().includes("localhost"))?.locator("body").getAttribute("data-clicked")).toBe("yes");
+    const events = await readEvents(opened.page);
+    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-page-frame")?.output).toBe("FRAME_OK");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
 test("groups adjacent commands without hiding their details", async () => {
   const provider = await startProvider([
     queuedToolResponse("return 'FIRST_RESULT'", "return 'SECOND_RESULT'"),
@@ -625,7 +702,7 @@ test("distinguishes streaming command input from command execution", async () =>
   }
 });
 
-test("executes the one chrome({ code }) tool across extension, MAIN, USER_SCRIPT and CDP, then restores and clears the log", async () => {
+test("executes chrome({ code }) across extension, MAIN, USER_SCRIPT and CDP, then restores and clears the log", async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);
   const targetUrl = `${provider.origin}/target`;
@@ -671,10 +748,14 @@ return { extensionTitle: document.title, version: chrome.runtime.getManifest().v
 
     await expect.poll(() => provider.requests.length).toBe(3);
     expect(provider.requests[0].reasoning_effort).toBe("minimal");
-    expect(provider.requests[0].tools).toHaveLength(1);
+    expect(provider.requests[0].tools).toHaveLength(2);
     expect(provider.requests[0].tools[0]).toMatchObject({
       type: "function",
       function: { name: "chrome", parameters: { type: "object", required: ["code"], additionalProperties: false } },
+    });
+    expect(provider.requests[0].tools[1]).toMatchObject({
+      type: "function",
+      function: { name: "page", parameters: { type: "object", required: ["code"], additionalProperties: false } },
     });
     const events = await readEvents(opened.page);
     const tool = events.find((event) => event.type === "tool.finished");

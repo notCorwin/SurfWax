@@ -20,6 +20,12 @@ export type ChromeToolInput = {
   world?: "MAIN" | "USER_SCRIPT";
 };
 
+export type PageToolInput = {
+  code: string;
+  tabId?: number;
+  timeoutMs?: number;
+};
+
 export type ModelConfig = {
   baseURL: string;
   apiKey: string;
