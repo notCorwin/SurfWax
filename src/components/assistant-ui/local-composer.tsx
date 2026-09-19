@@ -4,14 +4,16 @@ import { ComposerPrimitive, useAui, useAuiState, type AssistantState } from "@as
 import { cn } from "cn";
 import { ArrowUpIcon, SquareIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent } from "react";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { activeContext } from "@/agent/context-choice";
+import { modelMessages } from "@/agent/context-choice";
 import { contextPressure } from "@/agent/compaction";
-import { contextUsedPercent, inputBudget, type ModelLimit } from "@/agent/model-limits";
+import { contextUsedPercent, inputBudget, resolveModelLimit, type ModelLimit } from "@/agent/model-limits";
 import { reasoningSettingsFor, type ReasoningEffort } from "@/agent/reasoning";
-import type { EventLogger } from "@/logging";
+import type { ConversationMessage, EventLogger } from "@/logging";
 import type { ModelConfig } from "@/types";
 
 const MIN_HEIGHT = 48;
@@ -39,21 +41,41 @@ type ContextUsage = { state: "loading" | "unavailable" } | {
 };
 
 function ContextIndicator({ config, logger, conversationId }: { config: ModelConfig; logger: EventLogger; conversationId: string }) {
+  const aui = useAui();
   const [usage, setUsage] = useState<ContextUsage>({ state: "loading" });
 
   useEffect(() => {
     let active = true;
     let version = 0;
+    let frame: number | undefined;
+    let messages = aui.thread.getState().messages;
     const controller = new AbortController();
-    const refresh = async () => {
+    const limit = resolveModelLimit(config, { signal: controller.signal });
+    let events = logger.conversation(conversationId);
+    setUsage({ state: "loading" });
+
+    const refresh = async (currentMessages = messages) => {
       const current = ++version;
       try {
-        const context = await activeContext(logger, conversationId);
+        const [resolvedLimit, currentEvents] = await Promise.all([limit, events]);
+        if (!resolvedLimit) {
+          if (active && current === version) setUsage({ state: "unavailable" });
+          return;
+        }
+        const ui = currentMessages.map(({ id, role, parts, metadata }) => ({
+          id,
+          role,
+          parts: [...parts],
+          metadata,
+        })) as ConversationMessage[];
+        const branchIds = ui.map(({ id }) => id);
+        const raw = await modelMessages(ui);
         const pressure = await contextPressure({
-          raw: context.raw,
-          branchIds: context.branchIds,
-          events: context.events,
+          raw,
+          branchIds,
+          events: currentEvents,
           model: config,
+          limit: resolvedLimit,
           signal: controller.signal,
         });
         if (!active || current !== version) return;
@@ -68,21 +90,41 @@ function ContextIndicator({ config, logger, conversationId }: { config: ModelCon
         if (active && current === version) setUsage({ state: "unavailable" });
       }
     };
-    const unsubscribe = logger.subscribe((event) => {
-      if (event.conversationId === conversationId && CONTEXT_USAGE_EVENTS.has(event.type)) void refresh();
+
+    const schedule = () => {
+      if (frame !== undefined) return;
+      frame = requestAnimationFrame(() => {
+        frame = undefined;
+        void refresh();
+      });
+    };
+    const unsubscribeRuntime = aui.subscribe(() => {
+      const next = aui.thread.getState().messages;
+      if (next === messages) return;
+      messages = next;
+      schedule();
     });
-    void refresh();
+    const unsubscribe = logger.subscribe((event) => {
+      if (event.conversationId !== conversationId || !CONTEXT_USAGE_EVENTS.has(event.type)) return;
+      events = logger.conversation(conversationId);
+      schedule();
+    });
+    schedule();
     return () => {
       active = false;
       controller.abort();
+      if (frame !== undefined) cancelAnimationFrame(frame);
+      unsubscribeRuntime();
       unsubscribe();
     };
-  }, [config, conversationId, logger]);
+  }, [aui, config, conversationId, logger]);
 
   const label = usage.state === "ready"
     ? `上下文已使用约 ${usage.usedPercent}% · ${usage.estimated.toLocaleString("zh-CN")} / ${usage.budget.toLocaleString("zh-CN")} tokens · ${usage.limit.source === "manual" ? "手动设置" : "Models.dev"}`
     : usage.state === "loading" ? "正在估算上下文…" : "无法取得上下文窗口；可在设置中手动指定";
   const usedPercent = usage.state === "ready" ? usage.usedPercent : 0;
+  const source = usage.state === "ready" ? usage.limit.source === "manual" ? "手动设置" : "Models.dev" : undefined;
+  const remaining = usage.state === "ready" ? Math.max(0, usage.budget - usage.estimated) : 0;
 
   return (
     <Tooltip>
@@ -110,7 +152,32 @@ function ContextIndicator({ config, logger, conversationId }: { config: ModelCon
           </svg>
         </span>
       </TooltipTrigger>
-      <TooltipContent side="top" className="max-w-64"><p>{label}</p></TooltipContent>
+      <TooltipContent side="top" sideOffset={8} collisionPadding={8} className="w-64 max-w-[calc(100vw-1rem)]">
+        <div data-testid="context-detail" className="flex flex-col gap-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex flex-col gap-1">
+              <p className="text-muted-foreground">上下文用量</p>
+              <p className={cn("text-xl font-semibold tracking-tight", (usage.state === "unavailable" || usage.state === "ready" && usage.usedPercent >= 80) && "text-destructive")}>
+                {usage.state === "ready" ? `约 ${usage.usedPercent}%` : usage.state === "loading" ? "估算中" : "不可用"}
+              </p>
+            </div>
+            {source && <Badge variant={usage.state === "ready" && usage.usedPercent >= 80 ? "destructive" : "secondary"}>{source}</Badge>}
+          </div>
+          {usage.state === "ready" ? <>
+            <Progress data-testid="context-detail-progress" aria-label="上下文用量详情" value={usage.usedPercent} className="h-1.5" />
+            <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
+              <dt className="text-muted-foreground">已用</dt>
+              <dd data-testid="context-used" className="text-right font-medium tabular-nums">{usage.estimated.toLocaleString("zh-CN")} tokens</dd>
+              <dt className="text-muted-foreground">剩余</dt>
+              <dd data-testid="context-remaining" className="text-right font-medium tabular-nums">{remaining.toLocaleString("zh-CN")} tokens</dd>
+              <dt className="text-muted-foreground">输入预算</dt>
+              <dd className="text-right font-medium tabular-nums">{usage.budget.toLocaleString("zh-CN")} tokens</dd>
+            </dl>
+          </> : <p className="leading-relaxed text-muted-foreground">
+            {usage.state === "loading" ? "正在根据当前对话估算…" : "无法取得上下文窗口，可在设置中手动指定。"}
+          </p>}
+        </div>
+      </TooltipContent>
     </Tooltip>
   );
 }

@@ -31,6 +31,14 @@ function textResponse(text: string): string[] {
   return [chunk({ role: "assistant", content: text }), chunk({}, "stop"), "data: [DONE]\n\n"];
 }
 
+function streamingTextResponse(parts: string[]): string[] {
+  return [
+    ...parts.map((content, index) => chunk({ ...(index === 0 ? { role: "assistant" } : {}), content })),
+    chunk({}, "stop"),
+    "data: [DONE]\n\n",
+  ];
+}
+
 function toolResponse(code: string | { code: string; tabId?: number; world?: "MAIN" | "USER_SCRIPT"; target?: { kind: string; tabId?: number; world?: string } }, id = "call-chrome-e2e"): string[] {
   return [
     chunk({
@@ -904,6 +912,46 @@ test("asks after a completed turn and summarizes the complete context on request
     const finalRequest = provider.requests.find((request) => request.stream === true && JSON.stringify(request.messages).includes("continue"));
     expect(JSON.stringify(finalRequest?.messages)).toContain("The previous page observations have been recorded.");
     expect(JSON.stringify(finalRequest?.messages)).not.toContain("OLD_CONTEXT_MARKER");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("updates context usage during a streamed reply and shows structured details", async () => {
+  const provider = await startProvider([
+    streamingTextResponse(["LIVE_CONTEXT_MARKER " + "page state ".repeat(2_000), " STREAM_COMPLETE"]),
+    textResponse("实时上下文测试"),
+  ], 700);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL, 100_000);
+    const indicator = opened.page.getByTestId("context-indicator");
+    await expect(indicator).toHaveAttribute("data-state", "ready");
+    const initial = Number(await indicator.getAttribute("data-used-percent"));
+
+    await opened.page.setViewportSize({ width: 320, height: 720 });
+    await opened.page.emulateMedia({ colorScheme: "dark" });
+    await indicator.focus();
+    const tooltip = opened.page.getByRole("tooltip");
+    await expect(tooltip).toContainText("上下文用量");
+    await expect(tooltip).toContainText("已用");
+    await expect(tooltip).toContainText("剩余");
+    await expect(tooltip).toContainText("输入预算");
+    await expect(opened.page.getByTestId("context-detail-progress")).toHaveAttribute("aria-valuenow", String(initial));
+    const box = await tooltip.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(320);
+
+    await opened.page.getByTestId("composer-input").fill("stream context now");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("LIVE_CONTEXT_MARKER");
+    await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
+    await expect.poll(async () => Number(await indicator.getAttribute("data-used-percent"))).toBeGreaterThan(initial);
+    await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_COMPLETE");
+    await expect(opened.page.getByRole("button", { name: "发送消息" })).toBeVisible();
+    await options.close();
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
