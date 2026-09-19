@@ -447,7 +447,7 @@ test("ships only the minimal MV3 Harness surface", async () => {
     await expect(opened.page.getByTestId("config-required-state")).toBeVisible();
 
     const options = await configure(opened.context, opened.page, "https://provider.test/v1");
-    await expect(options.getByTestId("options-card").locator("input")).toHaveCount(4);
+    await expect(options.getByTestId("options-card").locator("input")).toHaveCount(8);
     await expect(options.getByTestId("event-log-clear")).toBeVisible();
     await expect(options.getByTestId("event-log")).toHaveCount(0);
     await expect(options.getByTestId("user-scripts-panel")).toHaveCount(0);
