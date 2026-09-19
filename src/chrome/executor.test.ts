@@ -242,8 +242,12 @@ describe("ChromeExecutor", () => {
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
     expect((fake.chromeApi as any).runtime.connect).not.toHaveBeenCalled();
     const bridge = (globalThis as Record<string, any>).__surfWaxDebugger;
+    await expect(bridge.call("attach", [{}, "1.3"])).rejects.toThrow("verify the queried tab or target exists");
+    expect(port.postMessage).not.toHaveBeenCalled();
     await bridge.call("attach", [{ tabId: 15 }, "1.3"]);
-    expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({ method: "attach", args: [{ tabId: 15 }, "1.3"] }));
+    await bridge.call("attach", [{ targetId: "target-1" }, "1.3"]);
+    expect(port.postMessage).toHaveBeenNthCalledWith(1, expect.objectContaining({ method: "attach", args: [{ tabId: 15 }, "1.3"] }));
+    expect(port.postMessage).toHaveBeenNthCalledWith(2, expect.objectContaining({ method: "attach", args: [{ targetId: "target-1" }, "1.3"] }));
     expect(fake.debuggerApi.attach).not.toHaveBeenCalled();
     executor.dispose();
     expect(port.disconnect).toHaveBeenCalled();

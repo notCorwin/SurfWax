@@ -1,5 +1,6 @@
 import { EventLogger } from "./logging";
 import { collectCapabilities } from "./chrome/capabilities";
+import { requireDebuggee } from "./chrome/debuggee";
 import { callUserScripts, restoreUserScripts, serializeUserScripts, snapshotUserScripts, USER_SCRIPTS_ERROR_KEY } from "./userscripts/persistence";
 
 const eventLogger = new EventLogger();
@@ -125,10 +126,12 @@ chrome.runtime.onConnect.addListener((port) => {
     try {
       let result: unknown;
       if (method === "attach") {
+        requireDebuggee(args[0], method);
         if (!sessions.has(key(args[0]))) await chrome.debugger.attach(args[0], args[1]);
         if (closed) await chrome.debugger.detach(args[0]);
         else sessions.set(key(args[0]), args[0]);
       } else if (method === "detach") {
+        requireDebuggee(args[0], method);
         await chrome.debugger.detach(args[0]);
         sessions.delete(key(args[0]));
       } else if (method === "userScripts") {
@@ -150,6 +153,7 @@ chrome.runtime.onConnect.addListener((port) => {
       } else {
         const native = (chrome.debugger as unknown as Record<string, (...params: any[]) => Promise<unknown>>)[method];
         if (typeof native !== "function") throw new Error(`Unknown chrome.debugger method: ${method}`);
+        if (method !== "getTargets") requireDebuggee(args[0], method);
         const debuggee = args[0] as chrome.debugger.Debuggee;
         const target = debuggee?.targetId ? (await chrome.debugger.getTargets()).find((item) => item.id === debuggee.targetId) : undefined;
         const tabId = debuggee?.tabId ?? target?.tabId;

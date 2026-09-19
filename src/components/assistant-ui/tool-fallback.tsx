@@ -23,7 +23,7 @@ export const ToolFallback: ToolCallMessagePartComponent = (part) => {
     <details className="activity" data-status={status} open={failed}>
       <summary>
         <WrenchIcon aria-hidden="true" />
-        <span className={running ? "shimmer text-foreground/65" : undefined}>{label}</span>
+        <span key={label} className={running ? "shimmer text-foreground/65" : undefined}>{label}</span>
       </summary>
       <div className="activity-content">
         <strong>输入</strong>

@@ -850,6 +850,33 @@ test("distinguishes streaming command input from command execution", async () =>
   }
 });
 
+test("closes an invalid debugger call and lets the agent recover", async () => {
+  const provider = await startProvider([
+    toolResponse('await new Promise((resolve) => setTimeout(resolve, 500)); await chrome.debugger.attach({}, "1.3");', "call-invalid-debuggee"),
+    textResponse("RECOVERED_AFTER_DEBUGGER_ERROR"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("recover from an invalid debugger target");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    const activity = opened.page.locator(".activity[data-status]").first();
+    await expect(activity.locator("summary span")).toHaveText("正在执行命令…");
+    await expect(activity).toHaveAttribute("data-status", "error");
+    await expect(activity.locator("summary span")).toHaveText("命令执行失败");
+    await expect(opened.page.locator(".activity[data-status=running]")).toHaveCount(0);
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("RECOVERED_AFTER_DEBUGGER_ERROR");
+    await expect.poll(() => provider.requests.filter((request) => request.tools).length).toBe(2);
+    expect(JSON.stringify(provider.requests.filter((request) => request.tools)[1].messages))
+      .toContain("verify the queried tab or target exists");
+    const events = await readEvents(opened.page);
+    expect(events.some((event) => event.type === "tool.failed" && event.toolCallId === "call-invalid-debuggee")).toBe(true);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
 test("executes chrome({ code }) across extension, MAIN, USER_SCRIPT and CDP, then restores and clears the log", async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);

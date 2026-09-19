@@ -2,6 +2,7 @@ import type { EventLogger } from "../logging";
 import type { ChromeTarget, ChromeToolInput, PageToolInput } from "../types";
 import { restoreUserScripts, snapshotUserScripts } from "../userscripts/persistence";
 import { AutomationRuntime } from "./automation";
+import { requireDebuggee } from "./debuggee";
 
 type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
 type DebuggerTarget = chrome.debugger.TargetInfo;
@@ -261,6 +262,7 @@ export class ChromeExecutor {
       onDetach: event("onDetach"),
       call: async (method: string, args: unknown[]) => {
         if (this.disposed) throw abortError();
+        if (["attach", "detach", "sendCommand"].includes(method)) requireDebuggee(args[0], method);
         const port = this.port ?? connect();
         if (!port) {
           if (method === "userScripts") return Reflect.apply((this.chromeApi.userScripts as any)[args[0] as string], this.chromeApi.userScripts, args.slice(1));
