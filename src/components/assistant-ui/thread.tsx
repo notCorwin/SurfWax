@@ -245,6 +245,7 @@ const AssistantMessage: FC = () => {
   const workView = useContext(WorkViewContext);
   const parts = useAuiState((state) => state.message.parts);
   const messageId = useAuiState((state) => state.message.id);
+  const messageRunning = useAuiState((state) => state.message.status?.type === "running");
   const interrupted = useAuiState((state) => state.message.metadata.custom?.interrupted === true);
   const latest = useAuiState((state) => state.thread.messages.at(-1)?.id === state.message.id);
   const lastAnswerStart = (() => {
@@ -271,7 +272,7 @@ const AssistantMessage: FC = () => {
           {({ part, children }) => {
             if (part.type === "group-process") return workView?.mode === "process" ? children : null;
             if (part.type === "group-final") return workView?.mode === "final" ? children : null;
-            if (part.type === "group-command") return part.indices.length === 1 || part.status.type === "running" ? children : (
+            if (part.type === "group-command") return part.indices.length === 1 || messageRunning ? children : (
               <details className="activity command-group" open={part.status.type === "incomplete"}>
                 <summary><WrenchIcon aria-hidden="true" /><span>共 {part.indices.length} 次命令调用</span></summary>
                 <div className="command-group-content">{children}</div>

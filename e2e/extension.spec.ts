@@ -497,9 +497,9 @@ test("targets page worlds and keeps large tool output out of model history", asy
 
 test("groups adjacent commands without hiding their details", async () => {
   const provider = await startProvider([
-    queuedToolResponse("return 'FIRST_RESULT'", "await new Promise((resolve) => setTimeout(resolve, 800)); return 'SECOND_RESULT'"),
+    queuedToolResponse("return 'FIRST_RESULT'", "return 'SECOND_RESULT'"),
     textResponse("完成"),
-  ]);
+  ], 500);
   const opened = await openExtension();
   try {
     const options = await configure(opened.context, opened.page, provider.baseURL);
@@ -508,7 +508,7 @@ test("groups adjacent commands without hiding their details", async () => {
     await opened.page.getByTestId("composer-input").press("Enter");
     const group = opened.page.locator(".command-group");
     const work = opened.page.getByTestId("work-summary");
-    await expect(opened.page.locator(".activity[data-status=running]")).toHaveCount(1);
+    await expect(opened.page.locator(".activity[data-status=complete]")).toHaveCount(2);
     await expect(group).toHaveCount(0);
     await expect(opened.page.locator(".activity[data-status]")).toHaveCount(2);
     await expect(work).toHaveCount(1);
