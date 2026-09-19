@@ -48,7 +48,10 @@ function ContextIndicator({ config, logger, conversationId }: { config: ModelCon
     let active = true;
     let version = 0;
     let frame: number | undefined;
-    let messages = aui.thread.getState().messages;
+    let idle: number | undefined;
+    const initialThread = aui.thread.getState();
+    let messages = initialThread.messages;
+    let loading = initialThread.isLoading;
     const controller = new AbortController();
     const limit = resolveModelLimit(config, { signal: controller.signal });
     let events = logger.conversation(conversationId);
@@ -91,29 +94,43 @@ function ContextIndicator({ config, logger, conversationId }: { config: ModelCon
       }
     };
 
-    const schedule = () => {
-      if (frame !== undefined) return;
-      frame = requestAnimationFrame(() => {
-        frame = undefined;
-        void refresh();
-      });
+    const schedule = (immediate = aui.thread.getState().isRunning) => {
+      const run = () => void refresh();
+      if (immediate) {
+        if (idle !== undefined) cancelIdleCallback(idle);
+        idle = undefined;
+        if (frame === undefined) frame = requestAnimationFrame(() => {
+          frame = undefined;
+          run();
+        });
+        return;
+      }
+      if (idle !== undefined) cancelIdleCallback(idle);
+      idle = requestIdleCallback(() => {
+        idle = undefined;
+        run();
+      }, { timeout: 1_000 });
     };
     const unsubscribeRuntime = aui.subscribe(() => {
-      const next = aui.thread.getState().messages;
-      if (next === messages) return;
-      messages = next;
-      schedule();
+      const thread = aui.thread.getState();
+      const changed = thread.messages !== messages;
+      const loaded = loading && !thread.isLoading;
+      messages = thread.messages;
+      loading = thread.isLoading;
+      if (loading || !changed && !loaded) return;
+      schedule(thread.isRunning);
     });
     const unsubscribe = logger.subscribe((event) => {
       if (event.conversationId !== conversationId || !CONTEXT_USAGE_EVENTS.has(event.type)) return;
       events = logger.conversation(conversationId);
       schedule();
     });
-    schedule();
+    if (!loading) schedule();
     return () => {
       active = false;
       controller.abort();
       if (frame !== undefined) cancelAnimationFrame(frame);
+      if (idle !== undefined) cancelIdleCallback(idle);
       unsubscribeRuntime();
       unsubscribe();
     };
