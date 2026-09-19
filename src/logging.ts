@@ -80,6 +80,7 @@ const SUMMARY_EVENT_TYPES = [
   "model.title.aborted",
 ] as const;
 const RUN_EVENT_TYPES = ["conversation.submitted", "conversation.finished", "conversation.failed", "conversation.aborted"] as const;
+const CONTEXT_EVENT_TYPES = ["context.compacted", "context.estimate.calibrated"] as const;
 
 export function upgradeEventStore(db: IDBDatabase, transaction: IDBTransaction): void {
   const store = db.objectStoreNames.contains(EVENT_STORE)
@@ -472,6 +473,10 @@ export class EventLogger {
 
   summaryEvents(conversationId?: string): Promise<LogEvent[]> {
     return this.eventsByTypes(SUMMARY_EVENT_TYPES, conversationId);
+  }
+
+  contextEvents(conversationId: string): Promise<LogEvent[]> {
+    return this.eventsByTypes(CONTEXT_EVENT_TYPES, conversationId);
   }
 
   messageEvents(): Promise<LogEvent[]> {

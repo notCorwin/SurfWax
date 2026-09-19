@@ -56,7 +56,7 @@ function ContextIndicator({ config, logger, conversationId }: { config: ModelCon
     let loading = initialThread.isLoading;
     const controller = new AbortController();
     const limit = resolveModelLimit(config, { signal: controller.signal });
-    let events = logger.conversation(conversationId);
+    let events: ReturnType<EventLogger["contextEvents"]> | undefined;
     setUsage({ state: "loading" });
 
     const refresh = async () => {
@@ -70,7 +70,7 @@ function ContextIndicator({ config, logger, conversationId }: { config: ModelCon
           const current = version;
           const currentMessages = messages;
           try {
-            const [resolvedLimit, currentEvents] = await Promise.all([limit, events]);
+            const [resolvedLimit, currentEvents] = await Promise.all([limit, events ??= logger.contextEvents(conversationId)]);
             if (!resolvedLimit) {
               if (active && current === version) setUsage({ state: "unavailable" });
               continue;
@@ -136,7 +136,7 @@ function ContextIndicator({ config, logger, conversationId }: { config: ModelCon
     });
     const unsubscribe = logger.subscribe((event) => {
       if (event.conversationId !== conversationId || !CONTEXT_USAGE_EVENTS.has(event.type)) return;
-      events = logger.conversation(conversationId);
+      events = logger.contextEvents(conversationId);
       schedule();
     });
     if (!loading) schedule();
