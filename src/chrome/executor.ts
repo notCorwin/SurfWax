@@ -340,10 +340,15 @@ export class ChromeExecutor {
       return await this.evaluate({ targetId: panelTarget.id }, automationExpressionFor(input.code, input.tabId), combined, "extension");
     } catch (error) {
       if (combined?.aborted) await this.automation.abortSessions();
-      this.recordExecutionFailure(error, input, context);
-      throw error;
+      const failure = timeout?.signal.aborted && !signal?.aborted
+        ? error instanceof Error && /^AutomationError\[(?:timeout|intercepted)\]/.test(error.message)
+          ? error
+          : new Error(`AutomationError[timeout]: ${JSON.stringify({ timeoutMs: input.timeoutMs })}`)
+        : error;
+      this.recordExecutionFailure(failure, input, context);
+      throw failure;
     } finally {
-      this.automation.clearContext();
+      await this.automation.clearContext();
       if (timer !== undefined) clearTimeout(timer);
     }
   }

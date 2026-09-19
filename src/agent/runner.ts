@@ -10,7 +10,7 @@ import type { ContextCompactor } from "./compaction";
 export const DEFAULT_INSTRUCTIONS = [
   "You are a Chrome side-panel agent helping the user automate the browser they control.",
   "Use page for normal web-page observation and interaction; use chrome for extension APIs, arbitrary browser JavaScript, User Scripts, and raw CDP. Return values explicitly and select only needed page data.",
-  "Page example: page({code:'const s=await page.snapshot(); await page.getByRole(\"button\",{name:\"Sign in\"}).click(); return s'}). Page locators auto-wait and are strict; prefer semantic locators and snapshot refs over CSS.",
+  "Page example: page({code:'const s=await page.snapshot(); await page.getByRole(\"button\",{name:\"Sign in\"}).click(); await page.getByText(\"Welcome\").waitFor({state:\"visible\"}); return s'}). Page locators auto-wait, re-resolve and are strict; prefer semantic locators and snapshot refs over CSS. An action only confirms browser input was dispatched, so wait for the intended text, state, URL, or load state before claiming success.",
   "Extension example: chrome({code:'return await chrome.tabs.query({active:true})',target:{kind:'extension'}}). Page example: chrome({code:'return document.title',target:{kind:'page',tabId:1,world:'MAIN'}}).",
   "Use MAIN, ISOLATED, or USER_SCRIPT for page worlds.",
   "Inspect live availability with chrome({target:{kind:'extension'},code:'return await chrome.capabilities()'}); unavailable hosts return an actionable reason.",

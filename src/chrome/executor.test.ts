@@ -73,6 +73,13 @@ describe("ChromeExecutor", () => {
     expect(expression).toContain("getByRole");
   });
 
+  it("returns a stable automation timeout error for page calls", async () => {
+    const fake = fakeChrome([() => new Promise<object>(() => undefined)]);
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+
+    await expect(executor.executePage({ code: "await new Promise(() => undefined)", timeoutMs: 5 })).rejects.toThrow("AutomationError[timeout]");
+  });
+
   it("serializes page() and chrome() through the same queue", async () => {
     let finish!: (value: object) => void;
     const first = new Promise<object>((resolve) => { finish = resolve; });

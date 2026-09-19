@@ -10,15 +10,26 @@ function event<T extends (...args: any[]) => void>() {
   };
 }
 
-function harness(metadata: object[] = [{ role: "button", name: "Sign in", tag: "button", text: "Sign in" }]) {
+function harness(
+  metadata: object[] | undefined = [{ role: "button", name: "Sign in", tag: "button", text: "Sign in" }],
+  states: object[] = [{ connected: true, x: 10, y: 12, visible: true, stable: true, enabled: true, editable: true, receivesEvents: true, checked: false }],
+) {
+  metadata ??= [{ role: "button", name: "Sign in", tag: "button", text: "Sign in" }];
   const calls: Array<{ method: string; params?: any }> = [];
   const tabsCreated = event<(tab: chrome.tabs.Tab) => void>();
   const downloadsCreated = event<(item: chrome.downloads.DownloadItem) => void>();
   const command = vi.fn(async (_debuggee: chrome.debugger.Debuggee, method: string, params?: any) => {
     calls.push({ method, params });
     if (method === "Accessibility.getFullAXTree") return { nodes: [
-      { nodeId: "root", role: { value: "RootWebArea" }, name: { value: "Test" }, childIds: ["button"] },
-      { nodeId: "button", parentId: "root", backendDOMNodeId: 7, role: { value: "button" }, name: { value: "Sign in" }, properties: [{ name: "focusable", value: { value: true } }] },
+      { nodeId: "root", role: { value: "RootWebArea" }, name: { value: "Test" }, childIds: metadata.map((_, index) => `node-${index}`) },
+      ...metadata.map((item: any, index) => ({
+        nodeId: `node-${index}`,
+        parentId: "root",
+        backendDOMNodeId: 7 + index,
+        role: { value: item.role },
+        name: { value: item.name },
+        properties: [{ name: "focusable", value: { value: true } }],
+      })),
     ] };
     if (method === "Runtime.evaluate") {
       if (params.returnByValue === false) return { result: { objectId: "node-1" } };
@@ -26,7 +37,7 @@ function harness(metadata: object[] = [{ role: "button", name: "Sign in", tag: "
       if (params.expression.includes("({url:")) return { result: { value: { url: "https://example.test/", title: "Test" } } };
       return { result: { value: true } };
     }
-    if (method === "Runtime.callFunctionOn") return { result: { value: { x: 10, y: 12, visible: true, stable: true, enabled: true, editable: true, receivesEvents: true, checked: false } } };
+    if (method === "Runtime.callFunctionOn") return { result: { value: states.length > 1 ? states.shift() : states[0] } };
     if (method === "DOM.resolveNode") return { object: { objectId: "node-1" } };
     return {};
   });
@@ -70,12 +81,56 @@ describe("AutomationRuntime", () => {
     expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent").map(({ params }) => params.type)).toEqual(["mousePressed", "mouseReleased"]);
   });
 
+  it("re-resolves a locator when a framework replaces the node during actionability", async () => {
+    const blocked = { connected: false, x: 0, y: 0, visible: false, stable: false, enabled: false, editable: false, receivesEvents: false, checked: false };
+    const ready = { connected: true, x: 10, y: 12, visible: true, stable: true, enabled: true, editable: true, receivesEvents: true, checked: false };
+    const { runtime, calls } = harness(undefined, [blocked, ready]);
+    const page = await runtime.createPage(3);
+
+    await page.getByRole("button", { name: "Sign in" }).click();
+
+    expect(calls.filter(({ method }) => method === "DOM.resolveNode").length).toBeGreaterThanOrEqual(2);
+    expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent").map(({ params }) => params.type)).toEqual(["mousePressed", "mouseReleased"]);
+  });
+
+  it("waits for explicit locator states", async () => {
+    const disabled = { connected: true, x: 10, y: 12, visible: true, stable: true, enabled: false, editable: false, receivesEvents: true, checked: false };
+    const enabled = { ...disabled, enabled: true };
+    const { runtime, calls } = harness(undefined, [disabled, enabled]);
+    const page = await runtime.createPage(3);
+
+    await page.getByRole("button", { name: "Sign in" }).waitFor({ state: "enabled" });
+
+    expect(calls.filter(({ method }) => method === "Runtime.callFunctionOn")).toHaveLength(2);
+  });
+
+  it("reports semantic updates by node identity instead of collapsing line sets", async () => {
+    const metadata = [{ role: "button", name: "Save", tag: "button", text: "Save" }];
+    const { runtime } = harness(metadata);
+    const page = await runtime.createPage(3);
+    await page.snapshot();
+    metadata[0] = { role: "button", name: "Continue", tag: "button", text: "Continue" };
+
+    await expect(page.locator("button").click()).resolves.toMatchObject({
+      changes: { updated: [{ before: expect.stringContaining('button "Save"'), after: expect.stringContaining('button "Continue"') }] },
+    });
+  });
+
   it("invalidates snapshot refs after main-document navigation", async () => {
     const { runtime } = harness();
     const page = await runtime.createPage(3);
     await page.snapshot();
     runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "new-root" } });
     await expect(page.ref("e1").click()).rejects.toThrow("stale-ref");
+  });
+
+  it("refuses to heal a detached snapshot ref to a similar element", async () => {
+    const detached = { connected: false, x: 0, y: 0, visible: false, stable: false, enabled: false, editable: false, receivesEvents: false, checked: false };
+    const { runtime } = harness(undefined, [detached]);
+    const page = await runtime.createPage(3);
+    await page.snapshot();
+
+    await expect(page.ref("e1").click()).rejects.toThrow("AutomationError[detached]");
   });
 
   it("aborts pending locators and detaches the automation session", async () => {
@@ -109,9 +164,25 @@ describe("AutomationRuntime", () => {
     expect(command).toHaveBeenCalledWith({ tabId: 3 }, "Page.handleJavaScriptDialog", { accept: true, promptText: "Grace" });
   });
 
+  it("correlates downloads from the active CDP tab instead of global download events", async () => {
+    const { runtime } = harness();
+    const page = await runtime.createPage(3);
+    const pending = page.waitForEvent("download");
+    runtime.handleEvent({ tabId: 3 }, "Page.downloadWillBegin", { guid: "download-1", url: "https://example.test/file", suggestedFilename: "file.txt" });
+
+    await expect(pending).resolves.toMatchObject({ guid: "download-1", suggestedFilename: "file.txt" });
+  });
+
   it("rejects local file paths at the page tool boundary", async () => {
     const { runtime } = harness();
     const page = await runtime.createPage(3);
     await expect(page.locator("input[type=file]").setInputFiles({ name: "secret.txt", path: "/tmp/secret.txt" })).rejects.toThrow("local paths");
+  });
+
+  it("routes canvas-only pages to the raw browser fallback", async () => {
+    const { runtime } = harness([]);
+    const page = await runtime.createPage(3);
+
+    await expect(page.snapshot()).rejects.toThrow("AutomationError[unsupported]");
   });
 });

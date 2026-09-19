@@ -120,11 +120,32 @@ async function startProvider(responses: MockResponse[], delayMs = 0, summaryText
       response.end(`<!doctype html><title>Automation Target</title><label>Email <input type="email"></label><button onclick="document.querySelector('output').textContent='Welcome '+document.querySelector('input').value">Sign in</button><output></output>`);
       return;
     }
+    if (request.method === "GET" && request.url === "/automation-dynamic") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(`<!doctype html><title>Dynamic Automation</title>
+        <button id="dynamic" disabled onclick="advance(this)">Delayed action</button><output>0</output><shadow-action></shadow-action>
+        <script>
+          let hits = 0;
+          function advance(button) {
+            document.querySelector('output').textContent = String(++hits);
+            const next = button.cloneNode(true); next.disabled = true; button.replaceWith(next);
+            setTimeout(() => { next.disabled = false; }, 1);
+          }
+          customElements.define('shadow-action', class extends HTMLElement {
+            connectedCallback() {
+              const root = this.attachShadow({mode:'open'}); const button = document.createElement('button'); button.textContent = 'Shadow action';
+              button.onclick = () => { this.dataset.clicked = 'yes'; }; root.append(button);
+            }
+          });
+          setTimeout(() => { document.querySelector('#dynamic').disabled = false; }, 20);
+        </script>`);
+      return;
+    }
     if (request.method === "GET" && request.url === "/complex") {
       const address = server.address();
       if (!address || typeof address === "string") throw new Error("Server is not listening");
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      response.end(`<!doctype html><title>Before Navigation</title><iframe src="/same-frame"></iframe><iframe src="http://localhost:${address.port}/frame"></iframe>`);
+      response.end(`<!doctype html><title>Before Navigation</title><style>iframe[src*=localhost]{transform:translate(24px,12px) scale(.8);transform-origin:0 0}</style><iframe src="/same-frame"></iframe><iframe src="http://localhost:${address.port}/frame"></iframe>`);
       return;
     }
     if (request.method === "GET" && request.url === "/same-frame") {
@@ -670,6 +691,38 @@ test("uses frameLocator inside a cross-origin iframe", async () => {
     await expect.poll(() => target.frames().find((frame) => frame.url().includes("localhost"))?.locator("body").getAttribute("data-clicked")).toBe("yes");
     const events = await readEvents(opened.page);
     expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-page-frame")?.output).toBe("FRAME_OK");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("re-resolves replaced nodes and uses browser semantics through open shadow DOM", async () => {
+  const responses: string[][] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/automation-dynamic`);
+    const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/automation-dynamic`);
+    responses.push(
+      pageResponse(`
+const action = page.getByRole('button', {name:'Delayed action'});
+for (let index = 0; index < 50; index += 1) await action.click();
+await page.getByText('50', {exact:true}).waitFor({state:'visible'});
+await page.getByRole('button', {name:'Shadow action'}).click();
+return {count: await page.getByText('50', {exact:true}).innerText(), shadow: await page.locator('shadow-action').getAttribute('data-clicked')};
+`, tab.id!, "call-page-dynamic"),
+      textResponse("DYNAMIC_AUTOMATION_OK"),
+      textResponse("动态页面自动化"),
+    );
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("exercise dynamic semantic automation");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(target.locator("output")).toHaveText("50", { timeout: 30_000 });
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("DYNAMIC_AUTOMATION_OK", { timeout: 30_000 });
+    const events = await readEvents(opened.page);
+    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-page-dynamic")?.output).toEqual({ count: "50", shadow: "yes" });
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }

@@ -150,7 +150,9 @@ Side Panel 关闭时，Harness 会立即中止当前模型请求，阻止排队�
 }
 ```
 
-支持 `getByRole/Text/Label/Placeholder/AltText/Title/TestId`、CSS `locator()`、`frameLocator()`、导航与 dialog/popup/download 事件，以及点击、填写、键盘、选择、勾选、拖拽和文件上传等 Locator 工作流。`setInputFiles` 只接收 `{ name, mimeType?, text | base64 | url }`，不读取本机路径。定位器没有独立超时，统一服从 `page({ timeoutMs })` 或用户中止。
+支持 `getByRole/Text/Label/Placeholder/AltText/Title/TestId`、CSS `locator()`、`frameLocator()`、导航与 dialog/popup/download 事件，以及点击、填写、键盘、选择、勾选、拖拽和文件上传等 Locator 工作流。语义定位使用 Chrome Accessibility tree，动作等待期间会重新解析 Locator；snapshot ref 绑定当前文档，节点或文档失效后会拒绝误操作。`setInputFiles` 只接收 `{ name, mimeType?, text | base64 | url }`，不读取本机路径。定位器没有独立超时，统一服从 `page({ timeoutMs })` 或用户中止。
+
+动作成功只表示浏览器输入已经发送，不代表业务流程完成。应继续使用 `locator.waitFor({ state: "attached" | "detached" | "visible" | "hidden" | "enabled" | "editable" | "checked" })`、`page.waitForURL()` 或 `page.waitForLoadState("domcontentloaded" | "load")` 验证后置条件。动作返回的页面变化是即时观察结果，不等待通用的网络静默状态。
 
 `chrome()` 继续负责 Chrome Extension API、任意页面 JavaScript、User Script 与原始 CDP。两者共用同一串行队列、页面防点击层、Abort 生命周期和事件日志；扩展不依赖 Native Messaging 或生产环境 Playwright。
 

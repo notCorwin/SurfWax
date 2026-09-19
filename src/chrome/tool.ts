@@ -105,7 +105,8 @@ export function createPageTool(executor: ChromeExecutor, options: { logger?: Eve
     description: [
       "Run an async JavaScript function body with a Playwright-style page object; explicitly return the result.",
       "Use page.snapshot() for compact semantic refs, then page.getByRole/getByText/getByLabel or page.ref to locate elements.",
-      "Locator actions auto-wait and calls are globally sequential with chrome(). Omit tabId to use the active tab.",
+      "Locator actions re-resolve and auto-wait; after an action, explicitly wait for the intended locator state, URL, or load state before claiming success.",
+      "Calls are globally sequential with chrome(). Omit tabId to use the active tab.",
     ].join(" "),
     inputSchema: pageToolInputSchema,
     needsApproval: false,

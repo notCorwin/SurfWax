@@ -11,7 +11,9 @@ type Query = {
   exact?: boolean;
 };
 type LocatorSpec = { queries: Query[]; index?: number; ref?: string; hasText?: string; has?: LocatorSpec };
+type WaitState = "attached" | "detached" | "visible" | "hidden" | "enabled" | "editable" | "checked";
 type RefRecord = { backendNodeId: number; frameId?: string; debuggee: Debuggee; role: string; name: string; generation: number };
+type SnapshotLine = { id: string; line: string };
 type Session = {
   tabId: number;
   debuggee: Debuggee;
@@ -21,8 +23,36 @@ type Session = {
   refs: Map<string, RefRecord>;
   refsByNode: Map<string, string>;
   frames: Map<string, Debuggee>;
-  lastSnapshot?: string[];
+  frameReady: Map<string, Promise<void>>;
+  frameParents: Map<string, string | undefined>;
+  lifecycle: Set<string>;
+  rootFrameId?: string;
+  lastSnapshot?: SnapshotLine[];
 };
+
+type Candidate = { role: string; name: string; tag?: string; text?: string; ref?: string; backendNodeId?: number; debuggee?: Debuggee };
+type ElementState = {
+  x: number;
+  y: number;
+  visible: boolean;
+  stable: boolean;
+  enabled: boolean;
+  editable: boolean;
+  receivesEvents: boolean;
+  checked: boolean;
+  connected: boolean;
+};
+
+class AutomationError extends Error {
+  constructor(readonly code: string, readonly detail: Record<string, unknown>) {
+    super(`AutomationError[${code}]: ${JSON.stringify(detail)}`);
+    this.name = "AutomationError";
+  }
+}
+
+function automationError(code: string, detail: Record<string, unknown>): AutomationError {
+  return new AutomationError(code, detail);
+}
 
 const INTERACTIVE_ROLES = new Set([
   "button", "checkbox", "combobox", "gridcell", "link", "listbox", "menuitem", "menuitemcheckbox",
@@ -35,7 +65,7 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata) {
     A: el.hasAttribute("href") ? "link" : "generic", BUTTON: "button", SELECT: "combobox", TEXTAREA: "textbox",
     OPTION: "option", IMG: "img", SUMMARY: "button", FORM: "form", TABLE: "table", TR: "row", TD: "cell", TH: "columnheader",
     H1: "heading", H2: "heading", H3: "heading", H4: "heading", H5: "heading", H6: "heading", NAV: "navigation", MAIN: "main",
-    ARTICLE: "article", UL: "list", OL: "list", LI: "listitem", DIALOG: "dialog", PROGRESS: "progressbar",
+    ARTICLE: "article", ASIDE: "complementary", FOOTER: "contentinfo", HEADER: "banner", UL: "list", OL: "list", LI: "listitem", DIALOG: "dialog", PROGRESS: "progressbar",
   }[el.tagName] || (el.tagName === "INPUT" ? ({ checkbox: "checkbox", radio: "radio", range: "slider", number: "spinbutton", search: "searchbox", button: "button", submit: "button", reset: "button" }[el.type] || "textbox") : "generic"));
   const nameOf = el => normalize(el.getAttribute("aria-label") || (() => {
     const ids = el.getAttribute("aria-labelledby");
@@ -47,10 +77,11 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata) {
     return out;
   };
   const all = root => roots(root).flatMap(item => [...(item.querySelectorAll?.("*") || [])]);
+  const visibleText = el => normalize(el.innerText === undefined ? el.textContent : el.innerText);
   const matches = (el, query) => {
     const equal = (actual, expected) => query.exact ? normalize(actual) === normalize(expected) : normalize(actual).toLowerCase().includes(normalize(expected).toLowerCase());
     if (query.kind === "role") return roleOf(el) === query.value && (!query.name || equal(nameOf(el), query.name));
-    if (query.kind === "text") return equal(el.textContent, query.value) && ![...el.children].some(child => equal(child.textContent, query.value));
+    if (query.kind === "text") return equal(visibleText(el), query.value) && ![...el.children].some(child => equal(visibleText(child), query.value));
     if (query.kind === "label") {
       const labelledBy = el.getAttribute("aria-labelledby");
       const label = el.getAttribute("aria-label") || (labelledBy ? labelledBy.split(/\s+/).map(id => document.getElementById(id)?.textContent || "").join(" ") : "") || (el.labels ? [...el.labels].map(item => item.textContent).join(" ") : "");
@@ -73,14 +104,14 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata) {
         current = found.map(frame => { try { return frame.contentDocument; } catch { return null; } }).filter(Boolean);
       } else current = found;
     }
-    if (locator.hasText) current = current.filter(el => normalize(el.textContent).toLowerCase().includes(normalize(locator.hasText).toLowerCase()));
+    if (locator.hasText) current = current.filter(el => visibleText(el).toLowerCase().includes(normalize(locator.hasText).toLowerCase()));
     if (locator.has) current = current.filter(el => resolve(el, locator.has).length > 0);
     if (locator.index !== undefined) current = current.at(locator.index < 0 ? current.length + locator.index : locator.index) ? [current.at(locator.index < 0 ? current.length + locator.index : locator.index)] : [];
     return [...new Set(current)];
   };
   const result = resolve(document, spec);
   if (!metadata) return result[0] || null;
-  return result.map(el => ({ role: roleOf(el), name: nameOf(el), tag: el.tagName.toLowerCase(), text: normalize(el.textContent).slice(0, 120) }));
+  return result.map(el => ({ role: roleOf(el), name: nameOf(el), tag: el.tagName.toLowerCase(), text: visibleText(el).slice(0, 120) }));
 }`;
 
 function abortError(): DOMException {
@@ -88,7 +119,7 @@ function abortError(): DOMException {
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw abortError();
+  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : abortError();
 }
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -96,7 +127,7 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
   throwIfAborted(signal);
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, ms);
-    const abort = () => { clearTimeout(timer); reject(abortError()); };
+    const abort = () => { clearTimeout(timer); reject(signal.reason instanceof Error ? signal.reason : abortError()); };
     signal.addEventListener("abort", abort, { once: true });
   });
 }
@@ -114,6 +145,20 @@ export class AutomationRuntime {
   private readonly objectDebuggees = new Map<string, Debuggee>();
   private context: RunContext = {};
   private readonly waiters = new Map<number, Map<string, Set<Waiter>>>();
+  private lastWait?: { locator: LocatorSpec; state?: ElementState; matches?: number; candidates?: Candidate[]; documentId: number; reason: string };
+
+  private waitDiagnostic() { return this.lastWait; }
+
+  private recordAttempt(session: Session, locator: LocatorSpec, attempt: number, reason: string, candidates: Candidate[], state?: ElementState): void {
+    const summary = candidates.slice(0, 5).map(({ role, name, tag, text, ref }) => ({ role, name, tag, text, ref }));
+    this.lastWait = { locator, matches: candidates.length, candidates: summary, state, documentId: session.generation, reason };
+    this.options.logger?.record({
+      type: "automation.action.attempt",
+      conversationId: this.context.conversationId,
+      toolCallId: this.context.toolCallId,
+      content: { attempt, reason, candidateCount: candidates.length, candidates: summary, documentId: session.generation, locator },
+    });
+  }
 
   constructor(private readonly options: {
     chromeApi: typeof chrome;
@@ -124,7 +169,16 @@ export class AutomationRuntime {
   }) {}
 
   setContext(context: RunContext): void { this.context = context; }
-  clearContext(): void { this.context = {}; }
+  async clearContext(): Promise<void> {
+    this.context = {};
+    const debuggees = new Map<string, Debuggee>();
+    for (const session of this.sessions.values()) {
+      debuggees.set(JSON.stringify(session.debuggee), session.debuggee);
+      for (const debuggee of session.frames.values()) debuggees.set(JSON.stringify(debuggee), debuggee);
+    }
+    await Promise.all([...debuggees.values()].map((debuggee) => this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup: "surf-wax-automation" }).catch(() => undefined)));
+    this.objectDebuggees.clear();
+  }
 
   async createPage(tabId?: number): Promise<PageFacade> {
     const resolved = tabId ?? (await this.options.chromeApi.tabs.query({ active: true, currentWindow: true }))[0]?.id;
@@ -140,17 +194,57 @@ export class AutomationRuntime {
     if (method === "Target.attachedToTarget" && params?.targetInfo?.type === "iframe" && session) {
       const debuggee = { tabId, sessionId: params.sessionId } as Debuggee;
       session.frames.set(params.targetInfo.targetId, debuggee);
-      for (const domain of ["Page", "Runtime", "DOM", "Accessibility"]) void this.options.command(debuggee, `${domain}.enable`, {}).catch(() => undefined);
+      const ready = (async () => {
+        for (const domain of ["Page", "Runtime", "DOM", "Accessibility"]) await this.options.command(debuggee, `${domain}.enable`, {});
+        await this.options.command(debuggee, "Page.setLifecycleEventsEnabled", { enabled: true });
+      })();
+      void ready.catch(() => undefined);
+      session.frameReady.set(params.sessionId, ready);
     }
-    if (method === "Page.frameNavigated" && params?.frame?.id && session) session.frames.set(params.frame.id, source);
-    if (method === "Page.frameNavigated" && !source.sessionId && !params?.frame?.parentId && session) {
-      session.generation += 1;
-      session.refs.clear();
-      session.refsByNode.clear();
-      session.lastSnapshot = undefined;
+    if (method === "Page.frameAttached" && params?.frameId && session) {
+      session.frames.set(params.frameId, source);
+      session.frameParents.set(params.frameId, params.parentFrameId);
     }
-    const kind = method === "Page.javascriptDialogOpening" ? "dialog" : undefined;
+    if (method === "Page.frameNavigated" && params?.frame?.id && session) {
+      session.frames.set(params.frame.id, source);
+      session.frameParents.set(params.frame.id, params.frame.parentId);
+      if (!params.frame.parentId) session.rootFrameId = params.frame.id;
+      this.invalidate(session);
+    }
+    if ((method === "Page.navigatedWithinDocument" || method === "DOM.documentUpdated" || method === "Runtime.executionContextsCleared") && session) {
+      this.invalidate(session);
+    }
+    if (method === "Page.frameDetached" && params?.frameId && session) {
+      session.frames.delete(params.frameId);
+      session.frameParents.delete(params.frameId);
+      this.invalidate(session);
+    }
+    if (method === "Target.detachedFromTarget" && params?.sessionId && session) {
+      session.frameReady.delete(params.sessionId);
+      for (const [frameId, debuggee] of session.frames) {
+        if (debuggee.sessionId === params.sessionId) {
+          session.frames.delete(frameId);
+          session.frameParents.delete(frameId);
+        }
+      }
+      this.invalidate(session);
+    }
+    if (session && method === "Page.lifecycleEvent" && params?.name) session.lifecycle.add(params.name);
+    if (session && method === "Page.domContentEventFired") session.lifecycle.add("DOMContentLoaded");
+    if (session && method === "Page.loadEventFired") session.lifecycle.add("load");
+    if (session && method === "Page.frameStartedLoading" && params?.frameId === session.rootFrameId) {
+      session.lifecycle.clear();
+    }
+    const kind = method === "Page.javascriptDialogOpening" ? "dialog" : method === "Page.downloadWillBegin" ? "download" : undefined;
     if (kind) this.resolveWaiters(tabId!, kind, params);
+  }
+
+  private invalidate(session: Session): void {
+    session.generation += 1;
+    session.refs.clear();
+    session.refsByNode.clear();
+    session.lastSnapshot = undefined;
+    this.objectDebuggees.clear();
   }
 
   handleDetach(source: Debuggee): void {
@@ -163,7 +257,10 @@ export class AutomationRuntime {
     this.objectDebuggees.clear();
     for (const events of this.waiters.values()) for (const waiters of events.values()) for (const waiter of waiters) waiter.reject(abortError());
     this.waiters.clear();
-    await Promise.all(sessions.map((session) => this.options.detach(session.debuggee).catch(() => undefined)));
+    await Promise.all(sessions.map(async (session) => {
+      await this.options.command(session.debuggee, "Input.cancelDragging", {}).catch(() => undefined);
+      await this.options.detach(session.debuggee).catch(() => undefined);
+    }));
   }
 
   dispose(): void { void this.abortSessions(); }
@@ -176,7 +273,7 @@ export class AutomationRuntime {
       const session = await this.session(tabId);
       const captured = await this.captureSnapshot(session);
       session.lastSnapshot = captured.lines;
-      return { url: captured.url, title: captured.title, snapshot: captured.lines.join("\n") };
+      return { url: captured.url, title: captured.title, documentId: session.generation, snapshot: captured.lines.map(({ line }) => line).join("\n") };
     });
   }
 
@@ -184,7 +281,7 @@ export class AutomationRuntime {
     const session = await this.session(tabId);
     return this.action(tabId, method, null, async () => {
       const result = await this.options.command(session.debuggee, method, params);
-      if (result?.errorText) throw new Error(result.errorText);
+      if (result?.errorText) throw automationError("navigation-interrupted", { method, errorText: result.errorText, url: (params as { url?: string } | undefined)?.url });
       await this.waitForReady(session);
       return { result, ...(await this.afterAction(session)) };
     });
@@ -213,17 +310,27 @@ export class AutomationRuntime {
     while (!await test()) await delay(50, this.context.signal);
   }
 
+  async waitForLoadState(tabId: number, state: "domcontentloaded" | "load" = "load"): Promise<void> {
+    const session = await this.session(tabId);
+    const lifecycle = state === "domcontentloaded" ? "DOMContentLoaded" : "load";
+    await this.waitUntil(async () => {
+      if (session.lifecycle.has(lifecycle)) return true;
+      const ready = await this.pageValue(tabId, "document.readyState").catch(() => undefined);
+      return state === "domcontentloaded" ? ready === "interactive" || ready === "complete" : ready === "complete";
+    });
+  }
+
   waitForEvent(tabId: number, kind: "dialog" | "popup" | "download"): Promise<any> {
     throwIfAborted(this.context.signal);
-    if (kind === "download" || kind === "popup") return new Promise((resolve, reject) => {
+    if (kind === "popup") return new Promise((resolve, reject) => {
       const signal = this.context.signal;
-      const event = kind === "download" ? this.options.chromeApi.downloads.onCreated : this.options.chromeApi.tabs.onCreated;
+      const event = this.options.chromeApi.tabs.onCreated;
       const cleanup = () => { signal?.removeEventListener("abort", abort); event.removeListener(created as never); };
       const abort = () => { cleanup(); reject(abortError()); };
-      const created = (item: chrome.downloads.DownloadItem | chrome.tabs.Tab) => {
-        if (kind === "popup" && (item as chrome.tabs.Tab).openerTabId !== tabId) return;
+      const created = (item: chrome.tabs.Tab) => {
+        if (item.openerTabId !== tabId) return;
         cleanup();
-        resolve(kind === "popup" ? new PageFacade(this, (item as chrome.tabs.Tab).id!) : item);
+        resolve(new PageFacade(this, item.id!));
       };
       signal?.addEventListener("abort", abort, { once: true });
       event.addListener(created as never);
@@ -260,31 +367,40 @@ export class AutomationRuntime {
     const session = await this.session(tabId);
     return this.action(tabId, operation, spec, async () => {
       if (operation === "count") return (await this.resolveMetadata(session, spec)).length;
-      if (operation === "waitFor") { await this.resolveOne(session, spec); return this.afterAction(session); }
+      if (operation === "waitFor") {
+        await this.waitForLocatorState(session, spec, ((args[0] as { state?: WaitState } | undefined)?.state ?? "visible"));
+        return this.afterAction(session);
+      }
       if (["isVisible", "isEnabled", "isChecked"].includes(operation)) {
         const matches = await this.resolveMetadata(session, spec);
         if (!matches.length) return false;
-        if (matches.length > 1) throw new Error(`AutomationError[strict-mode]: locator matched ${matches.length} elements: ${JSON.stringify(matches.slice(0, 10))}`);
-        const objectId = await this.resolveOne(session, spec);
+        this.assertStrict(spec, matches);
+        const objectId = await this.resolveOnce(session, spec);
+        if (!objectId) return false;
         const state = await this.elementState(this.objectSession(session, objectId), objectId);
         return operation === "isVisible" ? state.visible : operation === "isEnabled" ? state.enabled : state.checked;
       }
-      const objectId = await this.resolveOne(session, spec);
-      const targetSession = this.objectSession(session, objectId);
       if (["textContent", "innerText", "inputValue", "getAttribute"].includes(operation)) {
+        const objectId = await this.resolveOne(session, spec);
+        const targetSession = this.objectSession(session, objectId);
         const property = operation === "inputValue" ? "value" : operation;
         return this.callOn(targetSession, objectId, `function(name){ return name === "getAttribute" ? this.getAttribute(arguments[1]) : this[name]; }`, [property, args[0]]);
       }
       if (operation === "evaluate") {
+        const objectId = await this.resolveOne(session, spec);
+        const targetSession = this.objectSession(session, objectId);
         const source = typeof args[0] === "function" ? String(args[0]) : String(args[0]);
         return this.callOn(targetSession, objectId, `function(arg){ return (${source})(this,arg); }`, [args[1]]);
       }
       if (operation === "scrollIntoViewIfNeeded") {
+        const { objectId, targetSession } = await this.waitActionableLocator(session, spec, false, false, true, false);
         const node = await this.describe(targetSession, objectId);
         await this.options.command(targetSession.debuggee, "DOM.scrollIntoViewIfNeeded", { backendNodeId: node.backendNodeId });
         return this.afterAction(session);
       }
       if (operation === "focus" || operation === "blur") {
+        const objectId = await this.resolveOne(session, spec);
+        const targetSession = this.objectSession(session, objectId);
         if (operation === "focus") {
           const node = await this.describe(targetSession, objectId);
           await this.options.command(targetSession.debuggee, "DOM.focus", { backendNodeId: node.backendNodeId });
@@ -292,27 +408,28 @@ export class AutomationRuntime {
         return this.afterAction(session);
       }
       if (operation === "fill" || operation === "clear") {
-        await this.waitActionable(targetSession, objectId, true, false);
+        const { objectId, targetSession } = await this.waitActionableLocator(session, spec, true, false);
         const value = operation === "clear" ? "" : String(args[0] ?? "");
-        await this.callOn(targetSession, objectId, `function(value){
-          this.focus();
-          if (this.isContentEditable) { this.textContent = value; }
-          else { const proto = Object.getPrototypeOf(this); const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set; setter ? setter.call(this, value) : this.value = value; }
-          this.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
-          this.dispatchEvent(new Event("change", { bubbles: true }));
-        }`, [value]);
+        const node = await this.describe(targetSession, objectId);
+        await this.options.command(targetSession.debuggee, "DOM.focus", { backendNodeId: node.backendNodeId });
+        await this.options.command(targetSession.debuggee, "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "a", code: "KeyA", commands: ["selectAll"] });
+        await this.options.command(targetSession.debuggee, "Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA" });
+        await this.options.command(targetSession.debuggee, "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Backspace", code: "Backspace" });
+        await this.options.command(targetSession.debuggee, "Input.dispatchKeyEvent", { type: "keyUp", key: "Backspace", code: "Backspace" });
+        if (value) await this.options.command(targetSession.debuggee, "Input.insertText", { text: value });
         return this.afterAction(session);
       }
       if (operation === "press" || operation === "pressSequentially") {
-        await this.waitActionable(targetSession, objectId, true, false);
-        await this.callOn(targetSession, objectId, "function(){ this.focus(); }");
+        const { objectId, targetSession } = await this.waitActionableLocator(session, spec, operation === "pressSequentially", false, false, operation === "pressSequentially");
+        const node = await this.describe(targetSession, objectId);
+        await this.options.command(targetSession.debuggee, "DOM.focus", { backendNodeId: node.backendNodeId });
         if (operation === "pressSequentially") {
           for (const character of String(args[0] ?? "")) await this.options.command(targetSession.debuggee, "Input.insertText", { text: character });
         } else await this.press(targetSession, String(args[0] ?? ""));
         return this.afterAction(session);
       }
       if (operation === "selectOption") {
-        await this.waitActionable(targetSession, objectId, false, false);
+        const { objectId, targetSession } = await this.waitActionableLocator(session, spec, false, false);
         const values = Array.isArray(args[0]) ? args[0].map(String) : [String(args[0])];
         const selected = await this.callOn(targetSession, objectId, `function(values){
           for (const option of this.options) option.selected = values.includes(option.value) || values.includes(option.label);
@@ -322,6 +439,8 @@ export class AutomationRuntime {
         return { selected, ...(await this.afterAction(session)) };
       }
       if (operation === "setInputFiles") {
+        const objectId = await this.resolveOne(session, spec);
+        const targetSession = this.objectSession(session, objectId);
         const requested = Array.isArray(args[0]) ? args[0] : [args[0]];
         for (const file of requested as any[]) {
           if (!file || typeof file !== "object" || typeof file.name !== "string" || !("text" in file || "base64" in file || "url" in file) || "path" in file) {
@@ -349,117 +468,193 @@ export class AutomationRuntime {
         return this.afterAction(session);
       }
       if (operation === "check" || operation === "uncheck") {
+        const { objectId, targetSession } = await this.waitActionableLocator(session, spec, false, true);
         const desired = operation === "check";
         const checked = await this.callOn(targetSession, objectId, "function(){ return Boolean(this.checked); }");
-        if (checked !== desired) await this.pointer(targetSession, objectId, "click");
-        const actual = await this.callOn(targetSession, objectId, "function(){ return Boolean(this.checked); }");
-        if (actual !== desired) throw new Error(`AutomationError[state-mismatch]: element did not become ${desired ? "checked" : "unchecked"}`);
+        if (checked !== desired) await this.pointer(session, spec, "click");
+        await this.waitForLocatorState(session, spec, "checked", desired);
         return this.afterAction(session);
       }
       if (operation === "dragTo") {
         const target = args[0] as LocatorFacade;
-        const targetId = await this.resolveOne(session, target.spec);
-        const dragSession = this.objectSession(session, targetId);
-        if (JSON.stringify(targetSession.debuggee) !== JSON.stringify(dragSession.debuggee)) throw new Error("dragTo requires both elements to be in the same frame.");
-        const from = await this.waitActionable(targetSession, objectId, false, true);
-        const to = await this.waitActionable(dragSession, targetId, false, true);
-        await this.options.command(targetSession.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", x: from.x, y: from.y });
-        await this.options.command(targetSession.debuggee, "Input.dispatchMouseEvent", { type: "mousePressed", x: from.x, y: from.y, button: "left", clickCount: 1 });
-        await this.options.command(targetSession.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", x: to.x, y: to.y, button: "left" });
-        await this.options.command(targetSession.debuggee, "Input.dispatchMouseEvent", { type: "mouseReleased", x: to.x, y: to.y, button: "left", clickCount: 1 });
+        const from = await this.waitActionableLocator(session, spec, false, true, true, false);
+        const to = await this.waitActionableLocator(session, target.spec, false, true, true, false);
+        const start = await this.toRootPoint(session, from.targetSession, from.state);
+        const end = await this.toRootPoint(session, to.targetSession, to.state);
+        await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", ...start });
+        await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mousePressed", ...start, button: "left", clickCount: 1 });
+        await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", ...end, button: "left" });
+        await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseReleased", ...end, button: "left", clickCount: 1 });
         return this.afterAction(session);
       }
       if (["click", "dblclick", "hover"].includes(operation)) {
-        await this.pointer(targetSession, objectId, operation);
+        await this.pointer(session, spec, operation);
         return this.afterAction(session);
       }
-      throw new Error(`Unsupported locator operation: ${operation}`);
+      throw automationError("unsupported", { operation, locator: spec });
     });
   }
 
   private async session(tabId: number): Promise<Session> {
     let session = this.sessions.get(tabId);
     if (!session) {
-      session = { tabId, debuggee: { tabId }, generation: 0, nextRef: 1, refs: new Map(), refsByNode: new Map(), frames: new Map() };
+      session = {
+        tabId,
+        debuggee: { tabId },
+        generation: 0,
+        nextRef: 1,
+        refs: new Map(),
+        refsByNode: new Map(),
+        frames: new Map(),
+        frameReady: new Map(),
+        frameParents: new Map(),
+        lifecycle: new Set(),
+      };
       this.sessions.set(tabId, session);
     }
     await this.options.mark(tabId);
     session.ready ??= (async () => {
       for (const domain of ["Page", "Runtime", "DOM", "Accessibility"]) await this.options.command(session!.debuggee, `${domain}.enable`, {});
+      await this.options.command(session!.debuggee, "Page.setLifecycleEventsEnabled", { enabled: true });
       await this.options.command(session!.debuggee, "Target.setAutoAttach", { autoAttach: true, flatten: true, waitForDebuggerOnStart: false });
+      const tree = await this.options.command(session!.debuggee, "Page.getFrameTree", {});
+      const add = (item: any, parentId?: string) => {
+        const frameId = item?.frame?.id;
+        if (!frameId) return;
+        session!.frames.set(frameId, session!.debuggee);
+        session!.frameParents.set(frameId, parentId);
+        if (!parentId) session!.rootFrameId = frameId;
+        for (const child of item.childFrames ?? []) add(child, frameId);
+      };
+      add(tree?.frameTree);
     })().catch((error) => { session!.ready = undefined; throw error; });
     await session.ready;
     return session;
   }
 
-  private async resolveMetadata(session: Session, spec: LocatorSpec): Promise<any[]> {
+  private async resolveMetadata(session: Session, spec: LocatorSpec): Promise<Candidate[]> {
     if (spec.ref) {
       const ref = session.refs.get(spec.ref);
-      if (!ref || ref.generation !== session.generation) throw new Error(`AutomationError[stale-ref]: ${spec.ref} belongs to an expired document; take a new snapshot.`);
+      if (!ref || ref.generation !== session.generation) throw automationError("stale-ref", { ref: spec.ref, reason: "expired-document" });
       try {
         await this.options.command(ref.debuggee, "DOM.resolveNode", { backendNodeId: ref.backendNodeId });
         return [{ role: ref.role, name: ref.name, ref: spec.ref }];
       } catch {
-        const healed = await this.evaluateIn(ref.debuggee, `(${RESOLVER_SOURCE})(${JSON.stringify({ queries: [{ kind: "role", value: ref.role, name: ref.name, exact: true }] })}, true)`) as any[];
-        if (healed.length !== 1) throw new Error(`AutomationError[stale-ref]: ${spec.ref} could not be uniquely restored.`);
-        return healed;
+        throw automationError("detached", { ref: spec.ref, reason: "node-removed" });
       }
     }
     const scoped = await this.locatorScope(session, spec);
-    return await this.evaluateIn(scoped.debuggee, `(${RESOLVER_SOURCE})(${JSON.stringify(scoped.spec)}, true)`) as any[];
+    if (this.usesNativeAccessibility(scoped.spec)) return this.resolveAccessibility(scoped.debuggee, scoped.spec);
+    return await this.evaluateIn(scoped.debuggee, `(${RESOLVER_SOURCE})(${JSON.stringify(scoped.spec)}, true)`) as Candidate[];
   }
 
   private async resolveOne(session: Session, spec: LocatorSpec): Promise<string> {
-    if (spec.ref) {
-      const ref = session.refs.get(spec.ref);
-      if (!ref || ref.generation !== session.generation) throw new Error(`AutomationError[stale-ref]: ${spec.ref} belongs to an expired document; take a new snapshot.`);
-      try {
-        const resolved = await this.options.command(ref.debuggee, "DOM.resolveNode", { backendNodeId: ref.backendNodeId, objectGroup: "surf-wax-automation" });
-        if (resolved.object?.objectId) {
-          this.objectDebuggees.set(resolved.object.objectId, ref.debuggee);
-          return resolved.object.objectId;
-        }
-      } catch { /* Fall through to the unique semantic fingerprint. */ }
-      const objectId = await this.resolveDirect(ref.debuggee, { queries: [{ kind: "role", value: ref.role, name: ref.name, exact: true }] });
-      this.objectDebuggees.set(objectId, ref.debuggee);
-      return objectId;
-    }
-    const scoped = await this.locatorScope(session, spec);
+    let attempt = 0;
     while (true) {
       throwIfAborted(this.context.signal);
-      const matches = await this.evaluateIn(scoped.debuggee, `(${RESOLVER_SOURCE})(${JSON.stringify(scoped.spec)}, true)`) as any[];
-      if (matches.length > 1) throw new Error(`AutomationError[strict-mode]: locator matched ${matches.length} elements: ${JSON.stringify(matches)}`);
-      if (matches.length === 1) {
-        const response = await this.options.command(scoped.debuggee, "Runtime.evaluate", {
-          expression: `(${RESOLVER_SOURCE})(${JSON.stringify(scoped.spec)}, false)`, returnByValue: false, objectGroup: "surf-wax-automation",
-        });
-        if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
-        if (response.result?.objectId) {
-          this.objectDebuggees.set(response.result.objectId, scoped.debuggee);
-          return response.result.objectId;
-        }
-      }
+      let candidates: Candidate[] = [];
+      const resolved = await this.resolveOnce(session, spec, (matches) => { candidates = matches; });
+      this.recordAttempt(session, spec, ++attempt, resolved ? "resolved" : "no-candidate", candidates);
+      if (resolved) return resolved;
       await delay(50, this.context.signal);
     }
   }
 
+  private async resolveOnce(session: Session, spec: LocatorSpec, observe?: (matches: Candidate[]) => void): Promise<string | undefined> {
+    if (spec.ref) {
+      const ref = session.refs.get(spec.ref);
+      if (!ref || ref.generation !== session.generation) throw automationError("stale-ref", { ref: spec.ref, reason: "expired-document" });
+      observe?.([{ role: ref.role, name: ref.name, ref: spec.ref }]);
+      try {
+        const response = await this.options.command(ref.debuggee, "DOM.resolveNode", { backendNodeId: ref.backendNodeId, objectGroup: "surf-wax-automation" });
+        if (!response.object?.objectId) throw new Error("missing objectId");
+        this.objectDebuggees.set(response.object.objectId, ref.debuggee);
+        return response.object.objectId;
+      } catch {
+        throw automationError("detached", { ref: spec.ref, reason: "node-removed" });
+      }
+    }
+    const scoped = await this.locatorScope(session, spec);
+    if (this.usesNativeAccessibility(scoped.spec)) {
+      const matches = await this.resolveAccessibility(scoped.debuggee, scoped.spec);
+      observe?.(matches);
+      this.assertStrict(spec, matches);
+      const match = matches[0];
+      if (!match?.backendNodeId) return undefined;
+      try {
+        const response = await this.options.command(scoped.debuggee, "DOM.resolveNode", { backendNodeId: match.backendNodeId, objectGroup: "surf-wax-automation" });
+        if (!response.object?.objectId) return undefined;
+        this.objectDebuggees.set(response.object.objectId, scoped.debuggee);
+        return response.object.objectId;
+      } catch { return undefined; }
+    }
+    const matches = await this.evaluateIn(scoped.debuggee, `(${RESOLVER_SOURCE})(${JSON.stringify(scoped.spec)}, true)`) as Candidate[];
+    observe?.(matches);
+    this.assertStrict(spec, matches);
+    if (!matches.length) return undefined;
+    const response = await this.options.command(scoped.debuggee, "Runtime.evaluate", {
+      expression: `(${RESOLVER_SOURCE})(${JSON.stringify(scoped.spec)}, false)`, returnByValue: false, objectGroup: "surf-wax-automation",
+    });
+    if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+    if (!response.result?.objectId) return undefined;
+    this.objectDebuggees.set(response.result.objectId, scoped.debuggee);
+    return response.result.objectId;
+  }
+
+  private assertStrict(spec: LocatorSpec, matches: Candidate[]): void {
+    if (matches.length <= 1) return;
+    throw automationError("strict-mode", { locator: spec, count: matches.length, candidates: matches.slice(0, 10) });
+  }
+
+  private usesNativeAccessibility(spec: LocatorSpec): boolean {
+    return !spec.has && !spec.hasText && spec.queries.length === 1 && ["role", "label"].includes(spec.queries[0]!.kind);
+  }
+
+  private async resolveAccessibility(debuggee: Debuggee, spec: LocatorSpec): Promise<Candidate[]> {
+    const query = spec.queries[0]!;
+    const tree = await this.options.command(debuggee, "Accessibility.getFullAXTree", {});
+    const controls = new Set(["button", "checkbox", "combobox", "listbox", "option", "radio", "searchbox", "slider", "spinbutton", "switch", "textbox"]);
+    const normalize = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
+    const equal = (actual: string, expected: string) => query.exact ? actual === expected : actual.toLocaleLowerCase().includes(expected.toLocaleLowerCase());
+    let matches = (tree.nodes ?? []).flatMap((node: any): Candidate[] => {
+      if (node.ignored || !node.backendDOMNodeId) return [];
+      const role = axValue(node.role);
+      const name = normalize(axValue(node.name));
+      const expected = normalize(query.kind === "role" ? query.name ?? "" : query.value);
+      if (query.kind === "role" && (role !== query.value || expected && !equal(name, expected))) return [];
+      if (query.kind === "label" && (!controls.has(role) || !equal(name, expected))) return [];
+      return [{ role, name, backendNodeId: node.backendDOMNodeId, debuggee }];
+    });
+    if (spec.index !== undefined) {
+      const index = spec.index < 0 ? matches.length + spec.index : spec.index;
+      matches = matches[index] ? [matches[index]!] : [];
+    }
+    return matches;
+  }
+
   private async locatorScope(session: Session, spec: LocatorSpec): Promise<{ debuggee: Debuggee; spec: LocatorSpec }> {
-    const frameIndex = spec.queries.findIndex((query) => query.kind === "frame");
-    if (frameIndex < 0) return { debuggee: session.debuggee, spec };
-    const frame = spec.queries[frameIndex]!;
-    const ownerSpec: LocatorSpec = { queries: [...spec.queries.slice(0, frameIndex), { ...frame, kind: "css" }] };
-    const ownerId = await this.resolveDirect(session.debuggee, ownerSpec);
-    const owner = (await this.options.command(session.debuggee, "DOM.describeNode", { objectId: ownerId })).node;
-    const child = owner?.frameId ? session.frames.get(owner.frameId) : undefined;
-    if (!child?.sessionId) return { debuggee: session.debuggee, spec };
-    return { debuggee: child, spec: { ...spec, queries: spec.queries.slice(frameIndex + 1) } };
+    let debuggee = session.debuggee;
+    let scoped = spec;
+    while (true) {
+      const frameIndex = scoped.queries.findIndex((query) => query.kind === "frame");
+      if (frameIndex < 0) return { debuggee, spec: scoped };
+      const frame = scoped.queries[frameIndex]!;
+      const ownerSpec: LocatorSpec = { queries: [...scoped.queries.slice(0, frameIndex), { ...frame, kind: "css" }] };
+      const ownerId = await this.resolveDirect(debuggee, ownerSpec);
+      const owner = (await this.options.command(debuggee, "DOM.describeNode", { objectId: ownerId })).node;
+      const child = owner?.frameId ? session.frames.get(owner.frameId) : undefined;
+      if (!child?.sessionId) return { debuggee, spec: scoped };
+      await session.frameReady.get(child.sessionId);
+      debuggee = child;
+      scoped = { ...scoped, queries: scoped.queries.slice(frameIndex + 1) };
+    }
   }
 
   private async resolveDirect(debuggee: Debuggee, spec: LocatorSpec): Promise<string> {
     while (true) {
       throwIfAborted(this.context.signal);
       const matches = await this.evaluateIn(debuggee, `(${RESOLVER_SOURCE})(${JSON.stringify(spec)}, true)`) as any[];
-      if (matches.length > 1) throw new Error(`AutomationError[strict-mode]: frame locator matched ${matches.length} elements: ${JSON.stringify(matches.slice(0, 10))}`);
+      if (matches.length > 1) throw automationError("strict-mode", { locator: spec, count: matches.length, candidates: matches.slice(0, 10) });
       if (matches.length === 1) {
         const response = await this.options.command(debuggee, "Runtime.evaluate", { expression: `(${RESOLVER_SOURCE})(${JSON.stringify(spec)}, false)`, returnByValue: false, objectGroup: "surf-wax-automation" });
         if (response.result?.objectId) return response.result.objectId;
@@ -491,30 +686,101 @@ export class AutomationRuntime {
     return response.result?.value;
   }
 
-  private async elementState(session: Session, objectId: string): Promise<any> {
+  private async elementState(session: Session, objectId: string): Promise<ElementState> {
     return this.callOn(session, objectId, `async function(){
+      if (!this.isConnected) return { connected: false, x: 0, y: 0, visible: false, stable: false, enabled: false, editable: false, receivesEvents: false, checked: false };
       this.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
       const first = this.getBoundingClientRect(); await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame); const rect = this.getBoundingClientRect();
-      const style = getComputedStyle(this); const x = rect.left + rect.width / 2; const y = rect.top + rect.height / 2;
+      const style = getComputedStyle(this); let x = rect.left + rect.width / 2; let y = rect.top + rect.height / 2;
       const guard = document.getElementById("__surf-wax-page-guard"); const pointerEvents = guard?.style.getPropertyValue("pointer-events"); const pointerPriority = guard?.style.getPropertyPriority("pointer-events");
       if (guard) guard.style.setProperty("pointer-events", "none", "important");
-      const hit = document.elementFromPoint(x, y);
+      let hit = this.ownerDocument.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      while (hit?.shadowRoot) { const nested = hit.shadowRoot.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); if (!nested || nested === hit) break; hit = nested; }
       if (guard) guard.style.setProperty("pointer-events", pointerEvents || "auto", pointerPriority || "important");
-      return { x, y, visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none", stable: first.x === rect.x && first.y === rect.y && first.width === rect.width && first.height === rect.height, enabled: !this.disabled && this.getAttribute("aria-disabled") !== "true", editable: !this.readOnly && this.getAttribute("aria-readonly") !== "true", receivesEvents: Boolean(hit && (hit === this || this.contains(hit))), checked: Boolean(this.checked) };
+      let view = this.ownerDocument.defaultView;
+      while (view?.frameElement) { const frame = view.frameElement.getBoundingClientRect(); x += frame.left; y += frame.top; view = view.parent; }
+      const disabled = Boolean(this.disabled || this.closest("fieldset:disabled") || this.closest('[aria-disabled="true"]'));
+      const editable = !disabled && !this.readOnly && this.getAttribute("aria-readonly") !== "true" && (this.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(this.tagName));
+      return { connected: true, x, y, visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none", stable: first.x === rect.x && first.y === rect.y && first.width === rect.width && first.height === rect.height, enabled: !disabled, editable, receivesEvents: Boolean(hit && (hit === this || this.contains(hit))), checked: Boolean(this.checked) };
     }`);
   }
 
-  private async waitActionable(session: Session, objectId: string, editable: boolean, pointer: boolean): Promise<any> {
+  private async waitForLocatorState(session: Session, spec: LocatorSpec, state: WaitState, checked = true): Promise<void> {
+    let attempt = 0;
     while (true) {
       throwIfAborted(this.context.signal);
-      const state = await this.elementState(session, objectId);
-      if (state.visible && state.stable && state.enabled && (!editable || state.editable) && (!pointer || state.receivesEvents)) return state;
+      let matches: Candidate[];
+      try { matches = await this.resolveMetadata(session, spec); }
+      catch (error) {
+        if (error instanceof AutomationError && error.code === "detached" && (state === "detached" || state === "hidden")) return;
+        throw error;
+      }
+      this.assertStrict(spec, matches);
+      attempt += 1;
+      if (!matches.length) {
+        this.recordAttempt(session, spec, attempt, "no-candidate", matches);
+        if (state === "detached" || state === "hidden") return;
+        await delay(50, this.context.signal);
+        continue;
+      }
+      if (state === "attached") { this.recordAttempt(session, spec, attempt, "attached", matches); return; }
+      const objectId = await this.resolveOnce(session, spec);
+      if (!objectId) { await delay(50, this.context.signal); continue; }
+      const value = await this.elementState(this.objectSession(session, objectId), objectId).catch(() => undefined);
+      this.recordAttempt(session, spec, attempt, value?.connected ? `checking-${state}` : "detached", matches, value);
+      if (!value?.connected) {
+        if (state === "detached" || state === "hidden") return;
+      } else if (state === "visible" && value.visible || state === "hidden" && !value.visible || state === "enabled" && value.enabled || state === "editable" && value.editable || state === "checked" && value.checked === checked) return;
       await delay(50, this.context.signal);
     }
   }
 
-  private async pointer(session: Session, objectId: string, operation: string): Promise<void> {
-    const state = await this.waitActionable(session, objectId, false, true);
+  private async waitActionableLocator(session: Session, spec: LocatorSpec, editable: boolean, pointer: boolean, stable = pointer, enabled = true): Promise<{ objectId: string; targetSession: Session; state: ElementState }> {
+    let attempt = 0;
+    while (true) {
+      throwIfAborted(this.context.signal);
+      let candidates: Candidate[] = [];
+      const objectId = await this.resolveOnce(session, spec, (matches) => { candidates = matches; });
+      attempt += 1;
+      if (!objectId) { this.recordAttempt(session, spec, attempt, "no-candidate", candidates); await delay(50, this.context.signal); continue; }
+      const targetSession = this.objectSession(session, objectId);
+      const state = await this.elementState(targetSession, objectId).catch((error) => {
+        if (spec.ref) throw automationError("detached", { ref: spec.ref, reason: error instanceof Error ? error.message : String(error) });
+        return undefined;
+      });
+      const reason = !state?.connected ? "detached" : !state.visible ? "not-visible" : stable && !state.stable ? "not-stable" : enabled && !state.enabled ? "disabled" : editable && !state.editable ? "not-editable" : pointer && !state.receivesEvents ? "intercepted" : "actionable";
+      this.recordAttempt(session, spec, attempt, reason, candidates, state);
+      if (spec.ref && !state?.connected) throw automationError("detached", { ref: spec.ref, reason: "node-removed" });
+      if (state?.connected && state.visible && (!stable || state.stable) && (!enabled || state.enabled) && (!editable || state.editable) && (!pointer || state.receivesEvents)) return { objectId, targetSession, state };
+      await delay(50, this.context.signal);
+    }
+  }
+
+  private async toRootPoint(session: Session, targetSession: Session, state: ElementState): Promise<{ x: number; y: number }> {
+    let x = state.x;
+    let y = state.y;
+    let debuggee = targetSession.debuggee;
+    while (debuggee.sessionId) {
+      const frameId = [...session.frames].find(([, item]) => item.sessionId === debuggee.sessionId)?.[0];
+      if (!frameId) throw automationError("frame-detached", { sessionId: debuggee.sessionId });
+      const parentId = session.frameParents.get(frameId);
+      const parent = parentId ? session.frames.get(parentId) ?? session.debuggee : session.debuggee;
+      const owner = await this.options.command(parent, "DOM.getFrameOwner", { frameId });
+      const model = await this.options.command(parent, "DOM.getBoxModel", { backendNodeId: owner.backendNodeId });
+      const size = await this.evaluateIn(debuggee, "({width:innerWidth,height:innerHeight})") as { width: number; height: number };
+      const quad = model?.model?.content as number[] | undefined;
+      if (!quad?.length || !size.width || !size.height) throw automationError("frame-detached", { frameId, reason: "missing-frame-geometry" });
+      const u = x / size.width; const v = y / size.height;
+      x = quad[0]! + u * (quad[2]! - quad[0]!) + v * (quad[6]! - quad[0]!);
+      y = quad[1]! + u * (quad[3]! - quad[1]!) + v * (quad[7]! - quad[1]!);
+      debuggee = parent;
+    }
+    return { x, y };
+  }
+
+  private async pointer(session: Session, spec: LocatorSpec, operation: string): Promise<void> {
+    const target = await this.waitActionableLocator(session, spec, false, true, true, operation !== "hover");
+    const state = await this.toRootPoint(session, target.targetSession, target.state);
     if (operation === "hover") {
       await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", x: state.x, y: state.y });
       return;
@@ -529,8 +795,11 @@ export class AutomationRuntime {
   private async press(session: Session, chord: string): Promise<void> {
     const parts = chord.split("+"); const key = parts.pop() || "";
     const modifiers = parts.reduce((mask, part) => mask | (/alt/i.test(part) ? 1 : /control/i.test(part) ? 2 : /meta/i.test(part) ? 4 : /shift/i.test(part) ? 8 : 0), 0);
-    await this.options.command(session.debuggee, "Input.dispatchKeyEvent", { type: "keyDown", key, code: key, modifiers });
-    await this.options.command(session.debuggee, "Input.dispatchKeyEvent", { type: "keyUp", key, code: key, modifiers });
+    const codes: Record<string, string> = { Enter: "Enter", Tab: "Tab", Escape: "Escape", Backspace: "Backspace", Delete: "Delete", ArrowUp: "ArrowUp", ArrowDown: "ArrowDown", ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight", Home: "Home", End: "End", PageUp: "PageUp", PageDown: "PageDown", Space: "Space" };
+    const code = codes[key] ?? (key.length === 1 && /[a-z]/i.test(key) ? `Key${key.toUpperCase()}` : key.length === 1 && /\d/.test(key) ? `Digit${key}` : key);
+    const text = key.length === 1 && modifiers === 0 ? key : undefined;
+    await this.options.command(session.debuggee, "Input.dispatchKeyEvent", { type: "rawKeyDown", key: key === "Space" ? " " : key, code, modifiers, ...(text ? { text } : {}) });
+    await this.options.command(session.debuggee, "Input.dispatchKeyEvent", { type: "keyUp", key: key === "Space" ? " " : key, code, modifiers });
   }
 
   private async waitForReady(session: Session): Promise<void> {
@@ -541,66 +810,101 @@ export class AutomationRuntime {
     }
   }
 
-  private async settle(session: Session): Promise<void> {
-    try { await this.pageValue(session.tabId, `new Promise(resolve => { let version=0,last=-1,quiet=0; const observer=new MutationObserver(()=>version++); observer.observe(document,{subtree:true,childList:true,attributes:true,characterData:true}); const tick=()=>requestAnimationFrame(()=>{quiet=version===last?quiet+1:0;last=version;if(quiet>=2){observer.disconnect();resolve(true);}else tick();});tick();})`); }
-    catch { await this.waitForReady(session); }
-  }
-
-  private async captureSnapshot(session: Session): Promise<{ url: string; title: string; lines: string[] }> {
-    const debuggees = [session.debuggee, ...new Map([...session.frames.values()].filter((debuggee) => debuggee.sessionId).map((debuggee) => [debuggee.sessionId!, debuggee])).values()];
-    const [trees, info] = await Promise.all([
-      Promise.all(debuggees.map(async (debuggee) => ({ debuggee, tree: await this.options.command(debuggee, "Accessibility.getFullAXTree", {}) }))),
-      this.pageValue(session.tabId, "({url:location.href,title:document.title})") as Promise<{ url: string; title: string }>,
-    ]);
-    const lines: string[] = [];
-    const render = (nodes: any[], debuggee: Debuggee, frameLabel?: string) => {
-      const byId = new Map(nodes.map((node) => [node.nodeId, node]));
-      if (frameLabel) lines.push(`- iframe [frame=${frameLabel}]`);
-      const visit = (node: any, depth: number) => {
-      if (!node || node.ignored) { for (const child of node?.childIds ?? []) visit(byId.get(child), depth); return; }
-      const role = axValue(node.role); const name = axValue(node.name); const value = axValue(node.value);
-      if (role && role !== "none" && role !== "generic" && role !== "InlineTextBox") {
-        let ref = "";
-        if (node.backendDOMNodeId && (INTERACTIVE_ROLES.has(role) || node.properties?.some((property: any) => property.name === "focusable" && property.value?.value))) {
-          const key = `${node.frameId ?? "root"}:${node.backendDOMNodeId}`;
-          ref = session.refsByNode.get(key) ?? `e${session.nextRef++}`;
-          session.refsByNode.set(key, ref);
-          session.refs.set(ref, { backendNodeId: node.backendDOMNodeId, frameId: node.frameId, debuggee, role, name, generation: session.generation });
-        }
-        const properties = Object.fromEntries((node.properties ?? []).map((property: any) => [property.name, property.value?.value]));
-        const state = ["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly"].filter((key) => properties[key] !== undefined).map((key) => `${key}=${properties[key]}`).join(" ");
-        lines.push(`${"  ".repeat(depth)}- ${role}${name ? ` ${quote(name)}` : ""}${ref ? ` [ref=${ref}]` : ""}${state ? ` [${state}]` : ""}${value && value !== name ? `: ${value}` : ""}`);
-        depth += 1;
-      }
-      for (const child of node.childIds ?? []) visit(byId.get(child), depth);
+  private async captureSnapshot(session: Session): Promise<{ url: string; title: string; lines: SnapshotLine[] }> {
+    while (true) {
+      throwIfAborted(this.context.signal);
+      const generation = session.generation;
+      const depthOf = (frameId: string) => { let depth = 0; let current = session.frameParents.get(frameId); while (current) { depth += 1; current = session.frameParents.get(current); } return depth; };
+      const childFrames = [...session.frames]
+        .filter(([, debuggee]) => debuggee.sessionId)
+        .map(([frameId, debuggee]) => ({ frameId, debuggee, depth: depthOf(frameId) }))
+        .filter((item, index, all) => all.findIndex((other) => other.debuggee.sessionId === item.debuggee.sessionId) === index)
+        .sort((left, right) => left.depth - right.depth);
+      const debuggees = [{ debuggee: session.debuggee, frameId: undefined as string | undefined, depth: 0 }, ...childFrames];
+      const [trees, info] = await Promise.all([
+        Promise.all(debuggees.map(async (item) => ({ ...item, tree: await this.options.command(item.debuggee, "Accessibility.getFullAXTree", {}) }))),
+        this.pageValue(session.tabId, "({url:location.href,title:document.title})") as Promise<{ url: string; title: string }>,
+      ]);
+      if (generation !== session.generation) { await delay(0, this.context.signal); continue; }
+      const lines: SnapshotLine[] = [];
+      const render = (nodes: any[], debuggee: Debuggee, frameLabel?: string, frameDepth = 0) => {
+        const byId = new Map(nodes.map((node) => [node.nodeId, node]));
+        const scope = debuggee.sessionId ?? session.rootFrameId ?? "root";
+        if (frameLabel) lines.push({ id: `${scope}:frame`, line: `${"  ".repeat(frameDepth)}- iframe [frame=${frameLabel}]` });
+        const visit = (node: any, depth: number) => {
+          if (!node || node.ignored) { for (const child of node?.childIds ?? []) visit(byId.get(child), depth); return; }
+          const role = axValue(node.role); const name = axValue(node.name); const value = axValue(node.value);
+          if (role && role !== "none" && role !== "generic" && role !== "InlineTextBox") {
+            let ref = "";
+            const identity = `${scope}:${node.backendDOMNodeId ?? node.nodeId}`;
+            if (node.backendDOMNodeId && (INTERACTIVE_ROLES.has(role) || node.properties?.some((property: any) => property.name === "focusable" && property.value?.value))) {
+              ref = session.refsByNode.get(identity) ?? `e${session.nextRef++}`;
+              session.refsByNode.set(identity, ref);
+              session.refs.set(ref, { backendNodeId: node.backendDOMNodeId, frameId: node.frameId, debuggee, role, name, generation });
+            }
+            const properties = Object.fromEntries((node.properties ?? []).map((property: any) => [property.name, property.value?.value]));
+            const state = ["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly"].filter((key) => properties[key] !== undefined).map((key) => `${key}=${properties[key]}`).join(" ");
+            lines.push({ id: identity, line: `${"  ".repeat(depth)}- ${role}${name ? ` ${quote(name)}` : ""}${ref ? ` [ref=${ref}]` : ""}${state ? ` [${state}]` : ""}${value && value !== name ? `: ${value}` : ""}` });
+            depth += 1;
+          }
+          for (const child of node.childIds ?? []) visit(byId.get(child), depth);
+        };
+        const root = nodes.find((node) => !node.parentId) ?? nodes[0];
+        visit(root, frameLabel ? frameDepth + 1 : 0);
       };
-      const root = nodes.find((node) => !node.parentId) ?? nodes[0];
-      visit(root, frameLabel ? 1 : 0);
-    };
-    for (const { debuggee, tree } of trees) render(tree.nodes ?? [], debuggee, debuggee.sessionId);
-    return { ...info, lines };
+      for (const { debuggee, frameId, depth, tree } of trees) render(tree.nodes ?? [], debuggee, frameId, depth);
+      if (lines.length <= 1 && await this.pageValue(session.tabId, "Boolean(document.querySelector('canvas'))")) {
+        throw automationError("unsupported", { reason: "page-has-no-semantic-content", fallback: "Use chrome() with screenshots or raw CDP." });
+      }
+      if (generation === session.generation) return { ...info, lines };
+    }
   }
 
   private async afterAction(session: Session): Promise<Record<string, unknown>> {
-    await this.settle(session);
+    if (!session.lastSnapshot) {
+      const info = await this.pageValue(session.tabId, "({url:location.href,title:document.title})") as { url: string; title: string };
+      return { performed: true, ...info, documentId: session.generation };
+    }
     const captured = await this.captureSnapshot(session);
     const previous = session.lastSnapshot;
     session.lastSnapshot = captured.lines;
-    if (!previous) return { url: captured.url, title: captured.title, snapshot: captured.lines.join("\n") };
-    const before = new Set(previous); const after = new Set(captured.lines);
-    return { url: captured.url, title: captured.title, changes: { added: captured.lines.filter((line) => !before.has(line)), removed: previous.filter((line) => !after.has(line)) } };
+    const before = new Map(previous.map((item) => [item.id, item.line]));
+    const after = new Map(captured.lines.map((item) => [item.id, item.line]));
+    return {
+      performed: true,
+      url: captured.url,
+      title: captured.title,
+      documentId: session.generation,
+      changes: {
+        added: captured.lines.filter(({ id }) => !before.has(id)).map(({ line }) => line),
+        removed: previous.filter(({ id }) => !after.has(id)).map(({ line }) => line),
+        updated: captured.lines.flatMap(({ id, line }) => before.has(id) && before.get(id) !== line ? [{ before: before.get(id), after: line }] : []),
+      },
+    };
   }
 
   private async action<T>(tabId: number, operation: string, locator: LocatorSpec | null, run: () => Promise<T>): Promise<T> {
     const startedAt = performance.now();
+    this.lastWait = undefined;
     this.options.logger?.record({ type: "automation.action.started", conversationId: this.context.conversationId, toolCallId: this.context.toolCallId, content: { tabId, operation, locator } });
     try {
       const result = await run();
       this.options.logger?.record({ type: "automation.action.finished", conversationId: this.context.conversationId, toolCallId: this.context.toolCallId, content: { tabId, operation, locator }, output: result, latencyMs: performance.now() - startedAt });
       return result;
     } catch (error) {
-      this.options.logger?.record({ type: "automation.action.failed", conversationId: this.context.conversationId, toolCallId: this.context.toolCallId, content: { tabId, operation, locator }, error, latencyMs: performance.now() - startedAt });
-      throw error;
+      const lastWait = this.waitDiagnostic();
+      const failure = error instanceof Error && error.name === "TimeoutError"
+        ? automationError(lastWait?.state?.receivesEvents === false ? "intercepted" : "timeout", { operation, locator, lastObservation: lastWait ?? null })
+        : error;
+      this.options.logger?.record({
+        type: "automation.action.failed",
+        conversationId: this.context.conversationId,
+        toolCallId: this.context.toolCallId,
+        content: { tabId, operation, locator, ...(failure instanceof AutomationError ? { diagnostic: { code: failure.code, ...failure.detail } } : {}) },
+        error: failure,
+        latencyMs: performance.now() - startedAt,
+      });
+      throw failure;
     }
   }
 }
@@ -625,7 +929,7 @@ export class PageFacade {
   url() { return this.runtime.pageValue(this.tabId, "location.href"); }
   title() { return this.runtime.pageValue(this.tabId, "document.title"); }
   waitForURL(value: string | RegExp) { return this.runtime.waitUntil(() => this.url().then((url) => typeof value === "string" ? String(url).includes(value) : value.test(String(url)))); }
-  waitForLoadState() { return this.runtime.waitUntil(() => this.runtime.pageValue(this.tabId, "document.readyState !== 'loading'") as Promise<boolean>); }
+  waitForLoadState(state: "domcontentloaded" | "load" = "load") { return this.runtime.waitForLoadState(this.tabId, state); }
   waitForEvent(kind: "dialog" | "popup" | "download") { return this.runtime.waitForEvent(this.tabId, kind); }
   evaluate(fn: ((arg?: unknown) => unknown) | string, arg?: unknown) { return this.runtime.pageValue(this.tabId, `(${typeof fn === "function" ? String(fn) : fn})(${JSON.stringify(arg)})`); }
 }
@@ -647,7 +951,7 @@ export class LocatorFacade {
   last() { return this.nth(-1); }
   nth(index: number) { return new LocatorFacade(this.runtime, this.tabId, { ...this.spec, index }); }
   count() { return this.run("count"); }
-  waitFor() { return this.run("waitFor"); }
+  waitFor(options: { state?: WaitState } = {}) { return this.run("waitFor", options); }
   click() { return this.run("click"); }
   dblclick() { return this.run("dblclick"); }
   hover() { return this.run("hover"); }
