@@ -49,6 +49,8 @@ function ContextIndicator({ config, logger, conversationId }: { config: ModelCon
     let version = 0;
     let frame: number | undefined;
     let idle: number | undefined;
+    let calculating = false;
+    let pending = false;
     const initialThread = aui.thread.getState();
     let messages = initialThread.messages;
     let loading = initialThread.isLoading;
@@ -57,40 +59,52 @@ function ContextIndicator({ config, logger, conversationId }: { config: ModelCon
     let events = logger.conversation(conversationId);
     setUsage({ state: "loading" });
 
-    const refresh = async (currentMessages = messages) => {
-      const current = ++version;
+    const refresh = async () => {
+      version += 1;
+      pending = true;
+      if (calculating) return;
+      calculating = true;
       try {
-        const [resolvedLimit, currentEvents] = await Promise.all([limit, events]);
-        if (!resolvedLimit) {
-          if (active && current === version) setUsage({ state: "unavailable" });
-          return;
+        while (active && pending) {
+          pending = false;
+          const current = version;
+          const currentMessages = messages;
+          try {
+            const [resolvedLimit, currentEvents] = await Promise.all([limit, events]);
+            if (!resolvedLimit) {
+              if (active && current === version) setUsage({ state: "unavailable" });
+              continue;
+            }
+            const ui = currentMessages.map(({ id, role, parts, metadata }) => ({
+              id,
+              role,
+              parts: [...parts],
+              metadata,
+            })) as ConversationMessage[];
+            const branchIds = ui.map(({ id }) => id);
+            const raw = await modelMessages(ui);
+            const pressure = await contextPressure({
+              raw,
+              branchIds,
+              events: currentEvents,
+              model: config,
+              limit: resolvedLimit,
+              signal: controller.signal,
+            });
+            if (!active || current !== version) continue;
+            setUsage(pressure ? {
+              state: "ready",
+              estimated: pressure.estimated,
+              budget: inputBudget(pressure.limit),
+              limit: pressure.limit,
+              usedPercent: contextUsedPercent(pressure.estimated, pressure.limit),
+            } : { state: "unavailable" });
+          } catch {
+            if (active && current === version) setUsage({ state: "unavailable" });
+          }
         }
-        const ui = currentMessages.map(({ id, role, parts, metadata }) => ({
-          id,
-          role,
-          parts: [...parts],
-          metadata,
-        })) as ConversationMessage[];
-        const branchIds = ui.map(({ id }) => id);
-        const raw = await modelMessages(ui);
-        const pressure = await contextPressure({
-          raw,
-          branchIds,
-          events: currentEvents,
-          model: config,
-          limit: resolvedLimit,
-          signal: controller.signal,
-        });
-        if (!active || current !== version) return;
-        setUsage(pressure ? {
-          state: "ready",
-          estimated: pressure.estimated,
-          budget: inputBudget(pressure.limit),
-          limit: pressure.limit,
-          usedPercent: contextUsedPercent(pressure.estimated, pressure.limit),
-        } : { state: "unavailable" });
-      } catch {
-        if (active && current === version) setUsage({ state: "unavailable" });
+      } finally {
+        calculating = false;
       }
     };
 
