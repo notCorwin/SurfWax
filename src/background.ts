@@ -1,5 +1,5 @@
 import { EventLogger } from "./logging";
-import { collectCapabilities } from "./chrome/capabilities";
+import { collectCapabilities, nativeHostStatus } from "./chrome/capabilities";
 import { callUserScripts, restoreUserScripts, serializeUserScripts, snapshotUserScripts, USER_SCRIPTS_ERROR_KEY } from "./userscripts/persistence";
 
 const eventLogger = new EventLogger();
@@ -143,10 +143,14 @@ chrome.runtime.onConnect.addListener((port) => {
       reject(error);
     }
   });
-  const nativeAvailable = async () => {
+  const probeNative = async () => {
     const id = crypto.randomUUID();
-    try { return await callNative("return true", id) === true; }
-    catch { return false; }
+    try {
+      if (await callNative("return true", id) !== true) throw new Error("Native Host returned an invalid probe response.");
+      return nativeHostStatus();
+    } catch (error) {
+      return nativeHostStatus(error, chrome.runtime.id);
+    }
   };
   const key = (debuggee: chrome.debugger.Debuggee) => debuggee.targetId
     ? `target:${debuggee.targetId}` : debuggee.tabId !== undefined ? `tab:${debuggee.tabId}` : `extension:${debuggee.extensionId}`;
@@ -179,7 +183,7 @@ chrome.runtime.onConnect.addListener((port) => {
       } else if (method === "endPointerGestures") {
         await Promise.all([...pointerGestures].map((tabId) => endGesture(tabId)));
       } else if (method === "capabilities") {
-        result = await collectCapabilities(chrome, { nativeAvailable: await nativeAvailable() });
+        result = await collectCapabilities(chrome, { native: await probeNative() });
       } else if (method === "native") {
         result = await callNative(String(args[0] ?? ""), String(args[1] ?? crypto.randomUUID()));
       } else if (method === "nativeCancel") {

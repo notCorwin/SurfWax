@@ -11,12 +11,20 @@ if (!/^[a-p]{32}$/.test(extensionId ?? "")) {
   process.exit(1);
 }
 
-const host = resolve(dirname(fileURLToPath(import.meta.url)), platform() === "win32" ? "host.cmd" : "host.mjs");
-if (platform() !== "win32") await chmod(host, 0o755);
+const nativeDirectory = dirname(fileURLToPath(import.meta.url));
+const hostScript = resolve(nativeDirectory, "host.mjs");
+const launcher = resolve(nativeDirectory, platform() === "win32" ? "surfwax-native-host.cmd" : "surfwax-native-host");
+if (platform() === "win32") {
+  await writeFile(launcher, `@echo off\r\n"${process.execPath}" "${hostScript}"\r\n`);
+} else {
+  const quote = (value) => `'${value.replaceAll("'", `'\\''`)}'`;
+  await writeFile(launcher, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(hostScript)}\n`);
+  await chmod(launcher, 0o755);
+}
 const manifest = JSON.stringify({
   name: "com.surfwax.host",
   description: "Surf Wax desktop capability host",
-  path: host,
+  path: launcher,
   type: "stdio",
   allowed_origins: [`chrome-extension://${extensionId}/`],
 }, null, 2);

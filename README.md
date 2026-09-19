@@ -44,7 +44,7 @@ npm run build
 
 然后按上面的 Chrome 步骤加载生成的 `dist/` 目录。修改源码后重新运行 `npm run build`，再在 `chrome://extensions` 中重新加载扩展。
 
-`npm run build:all` 同时生成 `dist/store/` 和 `dist/enhanced/`。增强版需执行 `npm run native:install -- <扩展 ID>` 安装 Native Messaging 宿主。
+`npm run build:all` 同时生成 `dist/store/` 和 `dist/enhanced/`。增强版需执行 `npm run native:install -- <扩展 ID>` 安装 Native Messaging 宿主；安装器会把当前 Node.js 的绝对路径写入启动器，因此切换或删除 Node.js 后需要重新运行。
 
 ### 开发时热更新
 

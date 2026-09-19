@@ -11,7 +11,7 @@ export type CapabilityStatus = {
 };
 
 export type CapabilityReport = {
-  browser: { version?: number; platform?: string };
+  browser: { version?: number; platform?: string; extensionId?: string };
   permissions: { permissions: string[]; origins: string[] };
   hosts: Record<"extension" | "serviceWorker" | "pageMain" | "pageIsolated" | "userScript" | "offscreen" | "devtools" | "native", CapabilityStatus>;
   cdp: { available: boolean; domains: readonly string[] };
@@ -19,6 +19,36 @@ export type CapabilityReport = {
   manifest: Record<string, CapabilityStatus>;
   web: { languageModel: boolean; summarizer: boolean; translator: boolean; languageDetector: boolean; webMcp: boolean };
 };
+
+export function nativeHostStatus(error?: unknown, extensionId?: string): CapabilityStatus {
+  if (!error) return { available: true };
+  const detail = error instanceof Error ? error.message : String(error);
+  if (/permission to use native messaging/i.test(detail)) return {
+    available: false,
+    reason: "This is the store build; its manifest does not declare nativeMessaging.",
+    action: "Install and load the enhanced build.",
+  };
+  if (/host not found/i.test(detail)) return {
+    available: false,
+    reason: `The Native Host manifest is not installed. Chrome reported: ${detail}`,
+    action: `Run npm run native:install -- ${extensionId || "<extension ID>"}, then restart Chrome.`,
+  };
+  if (/forbidden/i.test(detail)) return {
+    available: false,
+    reason: `The installed Native Host does not allow this extension ID. Chrome reported: ${detail}`,
+    action: `Re-run npm run native:install -- ${extensionId || "<extension ID>"}, then restart Chrome.`,
+  };
+  if (/failed to start|exited|communication with the native messaging host/i.test(detail)) return {
+    available: false,
+    reason: `Chrome found the Native Host but could not run it. Chrome reported: ${detail}`,
+    action: "Re-run the Native Host installer so its launcher records the current Node.js absolute path, then restart Chrome.",
+  };
+  return {
+    available: false,
+    reason: `Native Host connection failed. Chrome reported: ${detail}`,
+    action: "Check the Native Host manifest path and launcher, then retry.",
+  };
+}
 
 const EXTENSION_APIS = [
   "runtime", "extension", "permissions", "management", "alarms", "scripting", "userScripts", "dom", "offscreen", "i18n",
@@ -31,7 +61,7 @@ const EXTENSION_APIS = [
 ] as const;
 
 export async function collectCapabilities(chromeApi: typeof chrome, options: {
-  nativeAvailable?: boolean;
+  native?: CapabilityStatus;
   contexts?: chrome.runtime.ExtensionContext[];
 } = {}): Promise<CapabilityReport> {
   const [rawPermissions, platform] = await Promise.all([
@@ -47,7 +77,7 @@ export async function collectCapabilities(chromeApi: typeof chrome, options: {
   const apiValue = (path: string) => path.split(".").reduce<unknown>((value, part) => (value as Record<string, unknown> | undefined)?.[part], chromeApi);
   const manifest = chromeApi.runtime.getManifest() as chrome.runtime.ManifestV3 & Record<string, unknown>;
   return {
-    browser: { version, platform: platform?.os },
+    browser: { version, platform: platform?.os, extensionId: chromeApi.runtime.id },
     permissions: { permissions: permissions.permissions ?? [], origins: permissions.origins ?? [] },
     hosts: {
       extension: { available: true },
@@ -68,11 +98,7 @@ export async function collectCapabilities(chromeApi: typeof chrome, options: {
         reason: "No DevTools extension page is open.",
         action: "Open DevTools for a tab and retry.",
       },
-      native: options.nativeAvailable ? { available: true } : {
-        available: false,
-        reason: "The Surf Wax native host is not installed or this is the store build.",
-        action: "Install the desktop host for this extension ID.",
-      },
+      native: options.native ?? nativeHostStatus(new Error("Native Host status was not probed.")),
     },
     cdp: { available: Boolean(chromeApi.debugger), domains: CDP_DOMAINS },
     extensionApis: Object.fromEntries(EXTENSION_APIS.map((name) => [name, apiValue(name)
