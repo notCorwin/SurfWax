@@ -232,7 +232,7 @@ export const Thread: FC<{ config: ModelConfig; logger: EventLogger; conversation
             <ArrowDownIcon data-icon="icon" aria-hidden="true" />
           </Button>
         )}
-        <LocalComposer config={config} blocked={contextBlocked} draft={draft} onDraftChange={onDraftChange} />
+        <LocalComposer config={config} logger={logger} conversationId={conversationId} blocked={contextBlocked} draft={draft} onDraftChange={onDraftChange} />
       </div>
     </ThreadPrimitive.Root>
   );

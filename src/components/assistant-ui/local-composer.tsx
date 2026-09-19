@@ -1,11 +1,17 @@
 "use client";
 
 import { ComposerPrimitive, useAui, useAuiState, type AssistantState } from "@assistant-ui/react";
+import { cn } from "cn";
 import { ArrowUpIcon, SquareIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { activeContext } from "@/agent/context-choice";
+import { contextPressure } from "@/agent/compaction";
+import { contextUsedPercent, inputBudget, type ModelLimit } from "@/agent/model-limits";
 import { reasoningSettingsFor, type ReasoningEffort } from "@/agent/reasoning";
+import type { EventLogger } from "@/logging";
 import type { ModelConfig } from "@/types";
 
 const MIN_HEIGHT = 48;
@@ -16,8 +22,107 @@ const composerDisabled = (state: AssistantState) => state.thread.isDisabled || B
 const EFFORT_LABELS: Record<ReasoningEffort, string> = {
   none: "关闭", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "极高", max: "最高",
 };
+const CONTEXT_USAGE_EVENTS = new Set([
+  "conversation.message",
+  "conversation.branch.selected",
+  "context.compacted",
+  "context.checkpoint.applied",
+  "context.selection.applied",
+  "context.estimate.calibrated",
+]);
+type ContextUsage = { state: "loading" | "unavailable" } | {
+  state: "ready";
+  estimated: number;
+  budget: number;
+  limit: ModelLimit;
+  usedPercent: number;
+};
 
-export function LocalComposer({ config, blocked, draft, onDraftChange }: { config: ModelConfig; blocked?: boolean; draft?: string; onDraftChange: (value: string) => void }) {
+function ContextIndicator({ config, logger, conversationId }: { config: ModelConfig; logger: EventLogger; conversationId: string }) {
+  const [usage, setUsage] = useState<ContextUsage>({ state: "loading" });
+
+  useEffect(() => {
+    let active = true;
+    let version = 0;
+    const controller = new AbortController();
+    const refresh = async () => {
+      const current = ++version;
+      try {
+        const context = await activeContext(logger, conversationId);
+        const pressure = await contextPressure({
+          raw: context.raw,
+          branchIds: context.branchIds,
+          events: context.events,
+          model: config,
+          signal: controller.signal,
+        });
+        if (!active || current !== version) return;
+        setUsage(pressure ? {
+          state: "ready",
+          estimated: pressure.estimated,
+          budget: inputBudget(pressure.limit),
+          limit: pressure.limit,
+          usedPercent: contextUsedPercent(pressure.estimated, pressure.limit),
+        } : { state: "unavailable" });
+      } catch {
+        if (active && current === version) setUsage({ state: "unavailable" });
+      }
+    };
+    const unsubscribe = logger.subscribe((event) => {
+      if (event.conversationId === conversationId && CONTEXT_USAGE_EVENTS.has(event.type)) void refresh();
+    });
+    void refresh();
+    return () => {
+      active = false;
+      controller.abort();
+      unsubscribe();
+    };
+  }, [config, conversationId, logger]);
+
+  const label = usage.state === "ready"
+    ? `上下文已使用约 ${usage.usedPercent}% · ${usage.estimated.toLocaleString("zh-CN")} / ${usage.budget.toLocaleString("zh-CN")} tokens · ${usage.limit.source === "manual" ? "手动设置" : "Models.dev"}`
+    : usage.state === "loading" ? "正在估算上下文…" : "无法取得上下文窗口；可在设置中手动指定";
+  const usedPercent = usage.state === "ready" ? usage.usedPercent : 0;
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          data-testid="context-indicator"
+          data-state={usage.state}
+          data-used-percent={usage.state === "ready" ? usage.usedPercent : undefined}
+          tabIndex={0}
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={usage.state === "ready" ? usage.usedPercent : undefined}
+          aria-label={label}
+          className={cn(
+            "flex size-7 shrink-0 items-center justify-center rounded-md outline-none focus-visible:ring-1 focus-visible:ring-ring",
+            usage.state === "ready" && usage.usedPercent < 80 ? "text-foreground" : "text-muted-foreground",
+            usage.state === "ready" && usage.usedPercent >= 80 && "text-destructive",
+          )}
+        >
+          <svg viewBox="0 0 20 20" className="size-3.5 -rotate-90" aria-hidden="true">
+            <circle cx="10" cy="10" r="7" pathLength="100" fill="none" stroke="currentColor" strokeOpacity="0.2" strokeWidth="3" />
+            {usage.state === "ready" && <circle cx="10" cy="10" r="7" pathLength="100" fill="none" stroke="currentColor" strokeWidth="3"
+              strokeLinecap="round" strokeDasharray="100" strokeDashoffset={100 - usedPercent} />}
+          </svg>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="top" className="max-w-64"><p>{label}</p></TooltipContent>
+    </Tooltip>
+  );
+}
+
+export function LocalComposer({ config, logger, conversationId, blocked, draft, onDraftChange }: {
+  config: ModelConfig;
+  logger: EventLogger;
+  conversationId: string;
+  blocked?: boolean;
+  draft?: string;
+  onDraftChange: (value: string) => void;
+}) {
   const settings = reasoningSettingsFor(config);
   const reasoning = useSyncExternalStore(settings.subscribe, settings.snapshot);
   const model = config.model;
@@ -131,6 +236,7 @@ export function LocalComposer({ config, blocked, draft, onDraftChange }: { confi
                 </SelectGroup>
               </SelectContent>
             </Select>
+            <ContextIndicator config={config} logger={logger} conversationId={conversationId} />
           </div>
           {isRunning ? (
             <ComposerPrimitive.Cancel asChild>

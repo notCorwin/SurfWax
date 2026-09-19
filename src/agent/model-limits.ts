@@ -130,3 +130,7 @@ export function resolveModelLimit(
 export function inputBudget(limit: ModelLimit): number {
   return Math.min(limit.input ?? Number.POSITIVE_INFINITY, limit.context - Math.min(limit.output ?? 4096, Math.floor(limit.context / 5)));
 }
+
+export function contextUsedPercent(estimated: number, limit: ModelLimit): number {
+  return Math.max(0, Math.min(100, Math.round(estimated / inputBudget(limit) * 100)));
+}

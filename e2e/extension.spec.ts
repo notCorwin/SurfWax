@@ -704,16 +704,25 @@ test("asks after a completed turn and summarizes the complete context on request
   try {
     const options = await configure(opened.context, opened.page, provider.baseURL, 8_000);
     const composer = opened.page.getByTestId("composer-input");
+    const contextIndicator = opened.page.getByTestId("context-indicator");
+    await expect(contextIndicator).toHaveAttribute("data-state", "ready");
+    await expect(contextIndicator).toHaveAttribute("aria-label", /上下文已使用约 \d+% · [\d,]+ \/ 6,400 tokens · 手动设置/);
+    await contextIndicator.focus();
+    await expect(opened.page.getByRole("tooltip")).toContainText("手动设置");
     await composer.fill("first request");
     await composer.press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("OLD_CONTEXT_MARKER");
     await expect(opened.page.getByTestId("conversation-menu")).toContainText("压缩测试");
     await expect(opened.page.getByTestId("context-choice")).toBeVisible();
+    await expect.poll(async () => Number(await contextIndicator.getAttribute("data-used-percent"))).toBeGreaterThanOrEqual(80);
+    await expect(contextIndicator).toHaveClass(/text-destructive/);
     await expect(composer).toBeDisabled();
 
     await options.close();
     await opened.page.getByTestId("context-choice").getByRole("button", { name: "LLM 摘要" }).click();
     await expect(opened.page.getByTestId("context-choice")).toHaveCount(0);
+    await expect.poll(async () => Number(await contextIndicator.getAttribute("data-used-percent"))).toBeLessThan(80);
+    await expect(contextIndicator).not.toHaveClass(/text-destructive/);
     await composer.fill("continue");
     await composer.press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("COMPACTED_REPLY");

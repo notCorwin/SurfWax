@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { inputBudget, matchModel, resolveModelLimit } from "./model-limits";
+import { contextUsedPercent, inputBudget, matchModel, resolveModelLimit } from "./model-limits";
 
 const catalog = {
   openai: { api: "https://api.openai.com/v1", models: {
@@ -16,6 +16,8 @@ describe("models.dev limit matching", () => {
     expect(matchModel(catalog, "https://openrouter.ai/api/v1", "gpt-5")).toMatchObject({ provider: "openrouter", context: 100_000 });
     expect(matchModel(catalog, "https://api.openai.com/v1", "gpt-5-min")?.model).toBe("gpt-5-mini");
     expect(inputBudget(matchModel(catalog, "https://api.openai.com/v1", "gpt-5")!)).toBe(272_000);
+    expect(contextUsedPercent(136_000, matchModel(catalog, "https://api.openai.com/v1", "gpt-5")!)).toBe(50);
+    expect(contextUsedPercent(999_999, matchModel(catalog, "https://api.openai.com/v1", "gpt-5")!)).toBe(100);
   });
 
   it("uses effort metadata only from an exact endpoint and model", () => {
