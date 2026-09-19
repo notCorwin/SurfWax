@@ -27,7 +27,7 @@ import "./styles.css";
 
 const EMPTY_JEV_CONFIG: PersistedJevConfig = DEFAULT_JEV_CONFIG;
 type Status = "idle" | "saving" | "clearing" | "saved" | "error";
-type ModelField = "providerId" | "baseURL" | "model" | "apiKey" | "contextWindowOverride";
+type ModelField = "providerId" | "baseURL" | "model" | "apiKey" | "contextWindowOverride" | "imageInput";
 
 export function OptionsApp() {
   const [modelSettings, setModelSettings] = useState(EMPTY_MODEL_CONFIG);
@@ -131,6 +131,7 @@ export function OptionsApp() {
         baseURL: preset?.baseURL ?? "",
         apiKey: "",
         model: "",
+        imageInput: "auto",
       } satisfies ModelProfile },
     }));
     setFieldErrors({});
@@ -197,7 +198,7 @@ export function OptionsApp() {
       const firstMainError = Object.keys(errors)[0] as ModelField | undefined;
       const firstJevError = Object.keys(jevErrors)[0] as keyof PersistedJevConfig | undefined;
       const firstErrorId = firstMainError
-        ? ({ providerId: "provider-id", baseURL: "base-url", model: "model-id", apiKey: "api-key", contextWindowOverride: "context-window" }[firstMainError])
+        ? ({ providerId: "provider-id", baseURL: "base-url", model: "model-id", apiKey: "api-key", contextWindowOverride: "context-window", imageInput: "image-input" }[firstMainError])
         : firstJevError
           ? ({ provider: "jev-provider", baseURL: "jev-base-url", model: "jev-model-id", apiKey: "jev-api-key", threshold: "jev-threshold" }[firstJevError])
           : undefined;
@@ -316,6 +317,21 @@ export function OptionsApp() {
                       <Input id="context-window" name="contextWindowOverride" type="number" min="1" step="1" aria-invalid={!!fieldErrors.contextWindowOverride} aria-describedby={fieldErrors.contextWindowOverride ? "context-window-error" : undefined} value={config?.contextWindowOverride ?? ""} disabled={busy || !config}
                         onChange={(event) => update("contextWindowOverride", event.target.value)} />
                       {fieldErrors.contextWindowOverride && <p id="context-window-error" className="field-error" role="alert">{fieldErrors.contextWindowOverride}</p>}
+                    </Field>
+                  </FieldSet>
+                  <FieldSet>
+                    <FieldLegend>图片输入</FieldLegend>
+                    <Field data-disabled={busy || !config || undefined}>
+                      <FieldLabel htmlFor="image-input">视觉能力</FieldLabel>
+                      <Select value={config?.imageInput ?? "auto"} disabled={busy || !config} onValueChange={(value) => update("imageInput", value)}>
+                        <SelectTrigger id="image-input" aria-label="图片输入能力" className="w-full"><SelectValue /></SelectTrigger>
+                        <SelectContent position="popper"><SelectGroup>
+                          <SelectItem value="auto">自动检测</SelectItem>
+                          <SelectItem value="enabled">支持</SelectItem>
+                          <SelectItem value="disabled">不支持</SelectItem>
+                        </SelectGroup></SelectContent>
+                      </Select>
+                      <FieldDescription>自动模式读取模型目录；未知模型默认仅使用语义路径。</FieldDescription>
                     </Field>
                   </FieldSet>
                   <FieldSet>

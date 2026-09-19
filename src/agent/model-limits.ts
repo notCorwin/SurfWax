@@ -14,6 +14,7 @@ export type ModelLimit = {
   output?: number;
   source: "models.dev" | "manual";
   reasoningEfforts?: string[];
+  inputModalities?: string[];
 };
 
 export type ModelCatalog = Record<string, {
@@ -25,7 +26,7 @@ export type ModelCatalog = Record<string, {
     id?: string;
     name?: string;
     tool_call?: boolean;
-    modalities?: { output?: string[] };
+    modalities?: { input?: string[]; output?: string[] };
     reasoning?: boolean;
     reasoning_options?: Array<{ type?: string; values?: string[] }>;
     limit?: { context?: number; input?: number; output?: number };
@@ -99,8 +100,11 @@ export function matchModel(catalog: ModelCatalog, baseURL: string, modelId: stri
             ...(validLimit(limit.input) ? { input: limit.input } : {}),
             ...(validLimit(limit.output) ? { output: limit.output } : {}),
             ...((selectedProviderId === providerId || host === providerHost) && id.toLowerCase() === requested
-              ? { reasoningEfforts: details.reasoning_options?.find((option) => option.type === "effort")?.values
-                ?? (details.reasoning === false || details.reasoning_options ? [] : undefined) }
+              ? {
+                inputModalities: details.modalities?.input,
+                reasoningEfforts: details.reasoning_options?.find((option) => option.type === "effort")?.values
+                  ?? (details.reasoning === false || details.reasoning_options ? [] : undefined),
+              }
               : {}),
             source: "models.dev",
           },
@@ -135,7 +139,10 @@ function normalizeCatalog(value: unknown): ModelCatalog {
         ...(typeof model.id === "string" ? { id: model.id } : {}),
         ...(typeof model.name === "string" ? { name: model.name } : {}),
         ...(typeof model.tool_call === "boolean" ? { tool_call: model.tool_call } : {}),
-        ...(modalities && Array.isArray(modalities.output) ? { modalities: { output: modalities.output.filter((item): item is string => typeof item === "string") } } : {}),
+        ...(modalities ? { modalities: {
+          ...(Array.isArray(modalities.input) ? { input: modalities.input.filter((item): item is string => typeof item === "string") } : {}),
+          ...(Array.isArray(modalities.output) ? { output: modalities.output.filter((item): item is string => typeof item === "string") } : {}),
+        } } : {}),
         ...(typeof model.reasoning === "boolean" ? { reasoning: model.reasoning } : {}),
         ...(reasoningOptions ? { reasoning_options: reasoningOptions } : {}),
         ...(limit ? { limit: {
@@ -236,6 +243,12 @@ export function resolveModelLimit(
 
 export function inputBudget(limit: ModelLimit): number {
   return Math.min(limit.input ?? Number.POSITIVE_INFINITY, limit.context - Math.min(limit.output ?? 4096, Math.floor(limit.context / 5)));
+}
+
+export async function modelSupportsImages(config: ModelConfig, options: Parameters<typeof resolveModelLimit>[1] = {}): Promise<boolean> {
+  if (config.imageInput === "enabled") return true;
+  if (config.imageInput === "disabled") return false;
+  return (await resolveModelLimit({ ...config, contextWindowOverride: undefined }, options))?.inputModalities?.includes("image") ?? false;
 }
 
 export function contextUsedPercent(estimated: number, limit: ModelLimit): number {

@@ -1,20 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { EventLogger, type LogEvent } from "../logging";
-import { compactToolResult, parseChromeToolInput, parsePageToolInput } from "./tool";
+import { compactToolResult, parseBrowserToolInput, prepareBrowserMessages } from "./tool";
 
-describe("chrome tool input", () => {
-  it("accepts optional page targets without allowing a world alone", () => {
-    expect(parseChromeToolInput({ code: "return await chrome.tabs.query({});" })).toEqual({ code: "return await chrome.tabs.query({});" });
-    expect(parseChromeToolInput({ code: "return document.title", tabId: 5 })).toEqual({ code: "return document.title", tabId: 5 });
-    expect(parseChromeToolInput({ code: "return 1", tabId: 5, world: "USER_SCRIPT" }).world).toBe("USER_SCRIPT");
-    expect(parseChromeToolInput({ code: "return document.title", target: { kind: "page", tabId: 5, frameId: 2, world: "ISOLATED" }, timeoutMs: 5000 }))
-      .toEqual({ code: "return document.title", target: { kind: "page", tabId: 5, frameId: 2, world: "ISOLATED" }, timeoutMs: 5000 });
-    expect(() => parseChromeToolInput({ code: "return 1", target: { kind: "native" } })).toThrow();
-    expect(() => parseChromeToolInput({ code: "return 1", target: { kind: "page", tabId: 1 }, tabId: 1 })).toThrow();
-    expect(() => parseChromeToolInput({ code: "" })).toThrow();
-    expect(() => parseChromeToolInput({ code: "return 1", world: "MAIN" })).toThrow();
-    expect(() => parseChromeToolInput({ code: "return 1", tabId: -1 })).toThrow();
-    expect(() => parseChromeToolInput({ code: "return 1", operation: "call" })).toThrow();
+describe("browser tool input", () => {
+  it("validates the three modes and deterministic action schema", () => {
+    expect(parseBrowserToolInput({ mode: "observe", tabId: 5, detail: "auto" })).toEqual({ mode: "observe", tabId: 5, detail: "auto" });
+    expect(parseBrowserToolInput({ mode: "act", observationId: "o1", steps: [{ type: "fill", target: { by: "label", value: "Email" }, value: "a@b.test" }, { type: "expect", target: { ref: "e1" }, state: "visible" }] }).mode).toBe("act");
+    expect(parseBrowserToolInput({ mode: "run", code: "return await chrome.tabs.query({})" })).toEqual({ mode: "run", code: "return await chrome.tabs.query({})" });
+    expect(() => parseBrowserToolInput({ mode: "run", code: "" })).toThrow();
+    expect(() => parseBrowserToolInput({ mode: "act", steps: [] })).toThrow();
+    expect(() => parseBrowserToolInput({ mode: "act", steps: [{ type: "expect", target: { ref: "e1" } }] })).toThrow();
+    expect(() => parseBrowserToolInput({ mode: "act", steps: [{ type: "upload", target: { ref: "e1" }, files: [{ name: "x", text: "x", base64: "eA==" }] }] })).toThrow();
   });
 
   it("persists large output before returning a compact reference, then expires it on deletion", async () => {
@@ -28,8 +24,8 @@ describe("chrome tool input", () => {
     const logger = new EventLogger({ store });
     const large = Array.from({ length: 1500 }, (_, index) => ({ index, text: "网页内容" }));
     const result = await compactToolResult(large, { logger, conversationId: "one", toolCallId: "call-1" }) as Record<string, unknown>;
-    expect(result).toMatchObject({ $ref: 1, type: "array", preview: "Array(1500)", access: "await globalThis.__surfWaxResult(1, {path?, offset?, limit?})" });
-    expect(JSON.stringify(result).length).toBeLessThan(200);
+    expect(result).toMatchObject({ $ref: 1, type: "array", preview: "Array(1500)", access: "await browser.result(1, {path?, offset?, limit?})" });
+    expect(JSON.stringify(result).length).toBeLessThan(220);
     expect(events[0]).toMatchObject({ type: "tool.result.data", conversationId: "one", toolCallId: "call-1", output: large });
     expect((await logger.result(1) as typeof large).slice(0, 2)).toEqual(large.slice(0, 2));
     expect(await logger.result(1, { offset: 2, limit: 2 })).toEqual(large.slice(2, 4));
@@ -38,9 +34,11 @@ describe("chrome tool input", () => {
     expect(await compactToolResult("small", { logger, conversationId: "one" })).toBe("small");
   });
 
-  it("validates the page meta-tool input", () => {
-    expect(parsePageToolInput({ code: "return await page.snapshot()" })).toEqual({ code: "return await page.snapshot()" });
-    expect(parsePageToolInput({ tabId: 7, code: "return page.url()", timeoutMs: 5000 }).tabId).toBe(7);
-    expect(() => parsePageToolInput({ code: "", operation: "click" })).toThrow();
+  it("injects only the latest screenshot into the next model step", () => {
+    const messages = [{ role: "tool", content: [{ type: "tool-result", toolName: "browser", output: { type: "json", value: { observationId: "o1", screenshot: { mediaType: "image/jpeg", data: "abc" } } } }] }];
+    const prepared = prepareBrowserMessages(messages, 1);
+    expect(prepared[0].content[0].output.value.screenshot.data).toBe("[stored in canonical event log]");
+    expect(prepared[1]).toMatchObject({ role: "user", content: [{ type: "file", mediaType: "image/jpeg", data: { type: "data", data: "abc" } }] });
+    expect(prepareBrowserMessages(messages, 0)).toHaveLength(1);
   });
 });

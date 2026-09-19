@@ -31,14 +31,20 @@ function harness(
         properties: [{ name: "focusable", value: { value: true } }],
       })),
     ] };
+    if (method === "Accessibility.queryAXTree") return { nodes: metadata.map((item: any, index) => ({
+      nodeId: `node-${index}`, backendDOMNodeId: 7 + index, role: { value: item.role }, name: { value: item.name },
+    })) };
     if (method === "Runtime.evaluate") {
       if (params.returnByValue === false) return { result: { objectId: "node-1" } };
       if (params.expression.includes("metadata")) return { result: { value: metadata } };
       if (params.expression.includes("({url:")) return { result: { value: { url: "https://example.test/", title: "Test" } } };
+      if (params.expression.includes("({x:scrollX")) return { result: { value: { x: 0, y: 0, width: 100, height: 50, scale: 2 } } };
       return { result: { value: true } };
     }
     if (method === "Runtime.callFunctionOn") return { result: { value: states.length > 1 ? states.shift() : states[0] } };
     if (method === "DOM.resolveNode") return { object: { objectId: "node-1" } };
+    if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
+    if (method === "Page.captureScreenshot") return { data: btoa(String.fromCharCode(0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 0, 100, 0, 200, 3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0)) };
     return {};
   });
   const detach = vi.fn(async () => undefined);
@@ -73,11 +79,11 @@ describe("AutomationRuntime", () => {
     await expect(page.getByRole("button", { name: "Save" }).click()).rejects.toThrow("strict-mode");
   });
 
-  it("runs actionability checks, dispatches trusted input and returns a compact diff", async () => {
+  it("runs actionability checks and dispatches trusted input", async () => {
     const { runtime, calls } = harness();
     const page = await runtime.createPage(3);
     await page.snapshot();
-    await expect(page.getByRole("button", { name: "Sign in" }).click()).resolves.toMatchObject({ changes: { added: [], removed: [] } });
+    await expect(page.getByRole("button", { name: "Sign in" }).click()).resolves.toMatchObject({ performed: true });
     expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent").map(({ params }) => params.type)).toEqual(["mousePressed", "mouseReleased"]);
   });
 
@@ -108,10 +114,10 @@ describe("AutomationRuntime", () => {
     const metadata = [{ role: "button", name: "Save", tag: "button", text: "Save" }];
     const { runtime } = harness(metadata);
     const page = await runtime.createPage(3);
-    await page.snapshot();
+    const first = await page.observe("semantic");
     metadata[0] = { role: "button", name: "Continue", tag: "button", text: "Continue" };
 
-    await expect(page.locator("button").click()).resolves.toMatchObject({
+    await expect(page.observe("semantic", first.observationId as string)).resolves.toMatchObject({
       changes: { updated: [{ before: expect.stringContaining('button "Save"'), after: expect.stringContaining('button "Continue"') }] },
     });
   });
@@ -179,10 +185,27 @@ describe("AutomationRuntime", () => {
     await expect(page.locator("input[type=file]").setInputFiles({ name: "secret.txt", path: "/tmp/secret.txt" })).rejects.toThrow("local paths");
   });
 
-  it("routes canvas-only pages to the raw browser fallback", async () => {
-    const { runtime } = harness([]);
+  it("upgrades pages without actionable semantics to a screenshot", async () => {
+    const { runtime, calls } = harness([]);
     const page = await runtime.createPage(3);
 
-    await expect(page.snapshot()).rejects.toThrow("AutomationError[unsupported]");
+    await expect(page.observe()).resolves.toHaveProperty("screenshot");
+    expect(calls.some(({ method }) => method === "Page.captureScreenshot")).toBe(true);
+  });
+
+  it("maps screenshot pixels back to CSS viewport coordinates", async () => {
+    const { runtime, calls } = harness([]);
+    const page = await runtime.createPage(3);
+    const observation = await page.observe("visual");
+    await page.point(observation.observationId as string, 100, 50, "click");
+    expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent").at(-2)?.params).toMatchObject({ type: "mousePressed", x: 50, y: 25 });
+  });
+
+  it("rejects an act batch tied to an observation from an old document", async () => {
+    const { runtime } = harness();
+    const page = await runtime.createPage(3);
+    const observation = await page.observe("semantic");
+    runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "new-root" } });
+    await expect(page.ensureObservation(observation.observationId as string)).rejects.toThrow("stale-observation");
   });
 });

@@ -52,6 +52,10 @@ function streamingTextResponse(parts: string[]): string[] {
 }
 
 function toolResponse(code: string | { code: string; tabId?: number; world?: "MAIN" | "USER_SCRIPT"; target?: { kind: string; tabId?: number; world?: string } }, id = "call-chrome-e2e"): string[] {
+  const input = typeof code === "string" ? { mode: "run", code } : {
+    mode: "run",
+    code: `return await browser.runIn(${JSON.stringify(code.target ?? { kind: "page", tabId: code.tabId, world: code.world ?? "MAIN" })}, ${JSON.stringify(code.code)});`,
+  };
   return [
     chunk({
       role: "assistant",
@@ -59,7 +63,7 @@ function toolResponse(code: string | { code: string; tabId?: number; world?: "MA
         index: 0,
         id,
         type: "function",
-        function: { name: "chrome", arguments: JSON.stringify(typeof code === "string" ? { code } : code) },
+        function: { name: "browser", arguments: JSON.stringify(input) },
       }],
     }),
     chunk({}, "tool_calls"),
@@ -71,10 +75,17 @@ function pageResponse(code: string, tabId: number, id = "call-page-e2e"): string
   return [
     chunk({
       role: "assistant",
-      tool_calls: [{ index: 0, id, type: "function", function: { name: "page", arguments: JSON.stringify({ code, tabId }) } }],
+      tool_calls: [{ index: 0, id, type: "function", function: { name: "browser", arguments: JSON.stringify({ mode: "run", code: `const page = await browser.page(${tabId});\n${code}` }) } }],
     }),
     chunk({}, "tool_calls"),
     "data: [DONE]\n\n",
+  ];
+}
+
+function browserResponse(input: object, id: string): string[] {
+  return [
+    chunk({ role: "assistant", tool_calls: [{ index: 0, id, type: "function", function: { name: "browser", arguments: JSON.stringify(input) } }] }),
+    chunk({}, "tool_calls"), "data: [DONE]\n\n",
   ];
 }
 
@@ -86,7 +97,7 @@ function queuedToolResponse(firstCode: string, secondCode: string): string[] {
         index,
         id: `call-queued-${index}`,
         type: "function",
-        function: { name: "chrome", arguments: JSON.stringify({ code }) },
+        function: { name: "browser", arguments: JSON.stringify({ mode: "run", code }) },
       })),
     }),
     chunk({}, "tool_calls"),
@@ -94,7 +105,7 @@ function queuedToolResponse(firstCode: string, secondCode: string): string[] {
   ];
 }
 
-type MockResponse = string[] | { status: number; error: string };
+type MockResponse = string[] | { status: number; error: string } | ((request: any) => string[]);
 
 async function startProvider(responses: MockResponse[], delayMs = 0, summaryText?: string, supportedEfforts = ["minimal", "low", "medium", "high", "xhigh"], summaryDelayMs = 0): Promise<{
   baseURL: string;
@@ -130,6 +141,16 @@ async function startProvider(responses: MockResponse[], delayMs = 0, summaryText
     if (request.method === "GET" && request.url === "/automation") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end(`<!doctype html><title>Automation Target</title><label>Email <input type="email"></label><button onclick="document.querySelector('output').textContent='Welcome '+document.querySelector('input').value">Sign in</button><output></output>`);
+      return;
+    }
+    if (request.method === "GET" && request.url === "/visual") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end("<!doctype html><title>Visual Target</title><style>button{position:fixed;left:20px;top:20px;width:100px;height:50px}</style><canvas width=200 height=100></canvas><button aria-hidden=true onclick=\"document.body.dataset.clicked='yes'\">Visual action</button>");
+      return;
+    }
+    if (request.method === "GET" && request.url === "/performance") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end("<!doctype html><title>Performance Target</title><button onclick=\"document.querySelector('output').value=String(Number(document.querySelector('output').value)+1)\">Increment</button><output>0</output>");
       return;
     }
     if (request.method === "GET" && request.url === "/automation-dynamic") {
@@ -213,12 +234,13 @@ async function startProvider(responses: MockResponse[], delayMs = 0, summaryText
         }, summaryDelayMs);
         return;
       }
-      const parts = responses.shift();
-      if (!parts) {
+      const queued = responses.shift();
+      if (!queued) {
         response.writeHead(500, { "content-type": "application/json" });
         response.end(JSON.stringify({ error: { message: "No mock response remains" } }));
         return;
       }
+      const parts = typeof queued === "function" ? queued(requestBody) : queued;
       if (!Array.isArray(parts)) {
         response.writeHead(parts.status, { "access-control-allow-origin": "*", "content-type": "application/json" });
         response.end(JSON.stringify({ error: { message: parts.error } }));
@@ -647,7 +669,7 @@ test("targets page worlds and keeps large tool output out of model history", asy
   }
 });
 
-test("runs semantic page locators with auto-wait, trusted input, snapshots and action logs", async () => {
+test("runs the semantic observe/act DSL with trusted input and explicit completion", async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -657,12 +679,12 @@ test("runs semantic page locators with auto-wait, trusted input, snapshots and a
     const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/automation`);
     expect(tab?.id).toBeDefined();
     responses.push(
-      pageResponse(`
-const before = await page.snapshot();
-await page.getByLabel('Email').fill('me@example.com');
-await page.getByRole('button', { name: 'Sign in' }).click();
-return { before: before.snapshot, value: await page.getByLabel('Email').inputValue(), welcome: await page.getByText('Welcome me@example.com').innerText() };
-`, tab.id!),
+      browserResponse({ mode: "observe", tabId: tab.id, detail: "semantic" }, "call-browser-observe"),
+      browserResponse({ mode: "act", tabId: tab.id, steps: [
+        { type: "fill", target: { by: "label", value: "Email" }, value: "me@example.com" },
+        { type: "click", target: { by: "role", value: "button", name: "Sign in" } },
+        { type: "expect", target: { by: "text", value: "Welcome me@example.com", exact: true }, state: "visible" },
+      ] }, "call-browser-act"),
       textResponse("PAGE_AUTOMATION_OK"),
       textResponse("页面自动化"),
     );
@@ -672,14 +694,75 @@ return { before: before.snapshot, value: await page.getByLabel('Email').inputVal
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("PAGE_AUTOMATION_OK");
     const events = await readEvents(opened.page);
-    const result = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-page-e2e")?.output;
-    expect(result).toMatchObject({ before: expect.stringContaining("[ref=e"), value: "me@example.com", welcome: "Welcome me@example.com" });
+    const observation = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-browser-observe")?.output;
+    const result = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-browser-act")?.output;
+    expect(observation).toMatchObject({ observationId: expect.any(String), snapshot: expect.stringContaining("[ref=e") });
+    expect(result).toMatchObject({ ok: true, completed: [{ type: "fill" }, { type: "click" }, { type: "expect" }] });
     await expect.poll(() => target.locator("output").textContent()).toBe("Welcome me@example.com");
-    expect(events.some((event) => event.type === "automation.action.finished" && event.toolCallId === "call-page-e2e")).toBe(true);
-    expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).toEqual(["chrome", "page"]);
+    expect(events.some((event) => event.type === "automation.action.finished" && event.toolCallId === "call-browser-act")).toBe(true);
+    expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).toEqual(["browser"]);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
+});
+
+test("injects a visual observation and clicks screenshot coordinates", async () => {
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/visual`);
+    const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/visual`);
+    responses.push(
+      browserResponse({ mode: "observe", tabId: tab.id, detail: "visual" }, "call-visual-observe"),
+      (request) => {
+        const serialized = JSON.stringify(request.messages);
+        const marker = serialized.indexOf("observationId");
+        const observationId = marker < 0 ? undefined : /[0-9a-f]{8}-[0-9a-f-]{27,}/i.exec(serialized.slice(marker))?.[0];
+        if (!observationId) throw new Error("Visual observation id was not returned to the model");
+        return browserResponse({ mode: "act", tabId: tab.id, steps: [
+          { type: "click", target: { point: { observationId, x: 50, y: 40 } } },
+          { type: "expect", target: { by: "css", value: "body[data-clicked=yes]" }, state: "attached" },
+        ] }, "call-visual-act");
+      },
+      textResponse("VISUAL_OK"), textResponse("视觉自动化"),
+    );
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.getByLabel("图片输入能力").click();
+    await options.getByRole("option", { name: "支持", exact: true }).click();
+    await options.getByRole("button", { name: "保存配置" }).click();
+    await expect(options.getByRole("status")).toContainText("配置已保存");
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("use visual automation");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect.poll(() => provider.requests.length).toBeGreaterThanOrEqual(2);
+    const observation = (await readEvents(opened.page)).find((event) => event.type === "tool.finished" && event.toolCallId === "call-visual-observe")?.output;
+    expect(observation?.screenshot?.mediaType).toBe("image/jpeg");
+    expect(JSON.stringify(provider.requests[1])).toContain("image_url");
+    expect(observation.observationId).toEqual(expect.any(String));
+    await expect.poll(() => target.locator("body").getAttribute("data-clicked")).toBe("yes");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("keeps 100 semantic locate-and-action operations at p95 <= 100ms", async () => {
+  const responses: string[][] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/performance`);
+    const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/performance`);
+    responses.push(browserResponse({ mode: "act", tabId: tab.id, steps: Array.from({ length: 100 }, () => ({ type: "click", target: { by: "role", value: "button", name: "Increment" } })) }, "call-performance"), textResponse("PERFORMANCE_OK"), textResponse("性能"));
+    const options = await configure(opened.context, opened.page, provider.baseURL); await options.close();
+    await opened.page.getByTestId("composer-input").fill("benchmark semantic actions"); await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(target.locator("output")).toHaveText("100", { timeout: 30_000 });
+    const latencies = (await readEvents(opened.page)).filter((event) => event.type === "automation.action.finished" && event.toolCallId === "call-performance").map((event) => event.latencyMs);
+    expect(latencies).toHaveLength(100);
+    expect(p95(latencies)).toBeLessThanOrEqual(100);
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
 test("uses frameLocator inside a cross-origin iframe", async () => {
@@ -839,9 +922,9 @@ test("shows live work, then folds it under elapsed time while keeping the final 
 });
 
 test("distinguishes streaming command input from command execution", async () => {
-  const input = JSON.stringify({ code: 'return await new Promise((resolve) => setTimeout(() => resolve("PHASE_OK"), 800));' });
+  const input = JSON.stringify({ mode: "run", code: 'return await new Promise((resolve) => setTimeout(() => resolve("PHASE_OK"), 800));' });
   const provider = await startProvider([[
-    chunk({ role: "assistant", tool_calls: [{ index: 0, id: "call-phase", type: "function", function: { name: "chrome", arguments: input.slice(0, 25) } }] }),
+    chunk({ role: "assistant", tool_calls: [{ index: 0, id: "call-phase", type: "function", function: { name: "browser", arguments: input.slice(0, 25) } }] }),
     chunk({ tool_calls: [{ index: 0, function: { arguments: input.slice(25) } }] }),
     chunk({}, "tool_calls"),
     "data: [DONE]\n\n",
@@ -862,7 +945,7 @@ test("distinguishes streaming command input from command execution", async () =>
   }
 });
 
-test("closes an invalid debugger call and lets the agent recover", async () => {
+test("returns a structured invalid debugger result and lets the agent recover", async () => {
   const provider = await startProvider([
     toolResponse('await new Promise((resolve) => setTimeout(resolve, 500)); await chrome.debugger.attach({}, "1.3");', "call-invalid-debuggee"),
     textResponse("RECOVERED_AFTER_DEBUGGER_ERROR"),
@@ -875,21 +958,20 @@ test("closes an invalid debugger call and lets the agent recover", async () => {
     await opened.page.getByTestId("composer-input").press("Enter");
     const activity = opened.page.locator(".activity[data-status]").first();
     await expect(activity.locator("summary span")).toHaveText("正在执行命令…");
-    await expect(activity).toHaveAttribute("data-status", "error");
-    await expect(activity.locator("summary span")).toHaveText("命令执行失败");
+    await expect(activity).toHaveAttribute("data-status", "complete");
+    await expect(activity.locator("summary span")).toHaveText("命令执行完成");
     await expect(opened.page.locator(".activity[data-status=running]")).toHaveCount(0);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("RECOVERED_AFTER_DEBUGGER_ERROR");
     await expect.poll(() => provider.requests.filter((request) => request.tools).length).toBe(2);
-    expect(JSON.stringify(provider.requests.filter((request) => request.tools)[1].messages))
-      .toContain("verify the queried tab or target exists");
     const events = await readEvents(opened.page);
-    expect(events.some((event) => event.type === "tool.failed" && event.toolCallId === "call-invalid-debuggee")).toBe(true);
+    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-invalid-debuggee")?.output)
+      .toMatchObject({ ok: false, error: { code: "execution-failed" } });
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
 
-test("executes chrome({ code }) across extension, MAIN, USER_SCRIPT and CDP, then restores and clears the log", async () => {
+test("executes browser run across extension, MAIN, USER_SCRIPT and CDP, then restores and clears the log", async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);
   const targetUrl = `${provider.origin}/target`;
@@ -935,18 +1017,14 @@ return { extensionTitle: document.title, version: chrome.runtime.getManifest().v
 
     await expect.poll(() => provider.requests.length).toBe(3);
     expect(provider.requests[0].reasoning_effort).toBe("minimal");
-    expect(provider.requests[0].tools).toHaveLength(2);
+    expect(provider.requests[0].tools).toHaveLength(1);
     expect(provider.requests[0].tools[0]).toMatchObject({
       type: "function",
-      function: { name: "chrome", parameters: { type: "object", required: ["code"], additionalProperties: false } },
-    });
-    expect(provider.requests[0].tools[1]).toMatchObject({
-      type: "function",
-      function: { name: "page", parameters: { type: "object", required: ["code"], additionalProperties: false } },
+      function: { name: "browser", parameters: { oneOf: expect.any(Array) } },
     });
     const events = await readEvents(opened.page);
     const tool = events.find((event) => event.type === "tool.finished");
-    expect(tool).toMatchObject({ toolCallId: "call-chrome-e2e", input: { code: expect.any(String) }, latencyMs: expect.any(Number) });
+    expect(tool).toMatchObject({ toolCallId: "call-chrome-e2e", input: { mode: "run", code: expect.any(String) }, latencyMs: expect.any(Number) });
     expect(tool.output).toMatchObject({ user: "USER_OK", main: "MAIN_OK", cdp: "Side Agent Target" });
     expect(events.filter((event) => /^(model|request|tool)\./.test(event.type)).every((event) => typeof event.conversationId === "string")).toBe(true);
     expect(events.filter((event) => event.type === "conversation.message")).toHaveLength(2);
@@ -1499,7 +1577,8 @@ test("sends a selected follow-up immediately, closes interrupted tools and keeps
     expect(JSON.stringify(agentRequests[2].messages)).toContain("later request");
     const events = await readEvents(opened.page);
     expect(events.some((event) => event.type === "conversation.aborted")).toBe(true);
-    expect(events.some((event) => event.type === "tool.failed" && event.toolCallId === "call-followup-interrupted")).toBe(true);
+    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-followup-interrupted")?.output)
+      .toMatchObject({ ok: false, error: { code: "aborted" } });
     expect(events.some((event) => event.type === "conversation.followup.removed")).toBe(true);
     expect(events.find((event) => event.type === "conversation.followup.dispatched" && event.content.mode === "immediate")).toBeTruthy();
   } finally {
@@ -1509,7 +1588,7 @@ test("sends a selected follow-up immediately, closes interrupted tools and keeps
 
 test("keeps paused follow-ups after stop and panel reload until the user resumes them", async () => {
   const provider = await startProvider([
-    streamingTextResponse(["WORKING", ...Array.from({ length: 20 }, () => ".")]),
+    streamingTextResponse(["WORKING", ...Array.from({ length: 80 }, () => ".")]),
     textResponse("RESUMED_DONE"),
   ], 120);
   const opened = await openExtension();

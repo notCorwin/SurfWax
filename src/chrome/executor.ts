@@ -1,5 +1,5 @@
 import type { EventLogger } from "../logging";
-import type { ChromeTarget, ChromeToolInput, PageToolInput } from "../types";
+import type { BrowserInput, BrowserSelector, BrowserStep, BrowserTarget, ChromeTarget, ChromeToolInput } from "../types";
 import { restoreUserScripts, snapshotUserScripts } from "../userscripts/persistence";
 import { AutomationRuntime } from "./automation";
 import { requireDebuggee } from "./debuggee";
@@ -19,7 +19,8 @@ const RESULTS_KEY = "__surfWaxResults";
 const RESULT_READER_KEY = "__surfWaxResult";
 const STATE_KEY = "__surfWaxExecutionState";
 const PAGE_KEY = "__surfWaxPage";
-type ExecutionContext = { conversationId?: string; toolCallId?: string };
+const BROWSER_KEY = "__surfWaxBrowser";
+type ExecutionContext = { conversationId?: string; toolCallId?: string; visualEnabled?: boolean };
 
 function abortError(): DOMException {
   return new DOMException("Operation aborted", "AbortError");
@@ -44,6 +45,7 @@ function expressionFor(code: string): string {
     const __bridge = globalThis[${JSON.stringify(BRIDGE_KEY)}];
     const __state = globalThis[${JSON.stringify(STATE_KEY)}];
     const __guard = globalThis.__surfWaxGuard;
+    const browser = globalThis[${JSON.stringify(BROWSER_KEY)}];
     const __mark = async (tabId) => { if (Number.isInteger(tabId)) await __guard?.mark(tabId); };
     const __pageApi = (name) => new Proxy(__nativeChrome[name], {
       get(target, property, receiver) {
@@ -218,6 +220,8 @@ export class ChromeExecutor {
   private activeDebuggee?: Debuggee;
   private readonly bridgedDebuggees = new Set<string>();
   private disposed = false;
+  private activeSignal?: AbortSignal;
+  private activeContext: ExecutionContext = {};
 
   constructor(options: { chromeApi?: ExecutorChrome; targetUrl?: string; logger?: EventLogger } = {}) {
     this.chromeApi = options.chromeApi ?? globalThis.chrome as ExecutorChrome;
@@ -299,6 +303,15 @@ export class ChromeExecutor {
     });
     (globalThis as Record<string, unknown>)[BRIDGE_KEY] = this.bridge;
     (globalThis as Record<string, unknown>)[PAGE_KEY] = { create: (tabId?: number) => this.automation.createPage(tabId) };
+    (globalThis as Record<string, unknown>)[BROWSER_KEY] = {
+      page: (tabId?: number) => this.automation.createPage(tabId),
+      runIn: (target: ChromeTarget, code: string) => this.executeNow({ target, code }, this.activeSignal, this.activeContext),
+      cdp: (debuggee: Debuggee) => ({
+        send: (method: string, params?: object) => this.bridgeCommand(debuggee, method, params),
+        detach: () => (this.bridge.call as any)("detach", [debuggee]),
+      }),
+      result: (id: number, selection?: { path?: Array<string | number>; offset?: number; limit?: number }) => this.logger?.result(id, selection),
+    };
     (globalThis as Record<string, unknown>)[RESULT_READER_KEY] = (id: number, selection?: { path?: Array<string | number>; offset?: number; limit?: number }) => this.logger?.result(id, selection)
       ?? Promise.reject(new Error("Tool result log is unavailable"));
   }
@@ -309,10 +322,15 @@ export class ChromeExecutor {
     return task;
   }
 
-  executePage(input: PageToolInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
-    const task = this.tail.then(() => this.executePageTimed(input, signal, context));
+  executeBrowser(input: BrowserInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+    const task = this.tail.then(() => this.executeBrowserTimed(input, signal, context));
     this.tail = task.then(() => undefined, () => undefined);
     return task;
+  }
+
+  /** Internal compatibility path for restored tests/conversations; it is not model-visible. */
+  executePage(input: { code: string; tabId?: number; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+    return this.executeBrowser({ mode: "run", code: `const page = await browser.page(${input.tabId === undefined ? "undefined" : input.tabId});\n${input.code}`, timeoutMs: input.timeoutMs }, signal, context);
   }
 
   private async executeTimed(input: ChromeToolInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
@@ -327,7 +345,7 @@ export class ChromeExecutor {
     finally { if (timer !== undefined) clearTimeout(timer); }
   }
 
-  private async executePageTimed(input: PageToolInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+  private async executeBrowserTimed(input: BrowserInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
     const timeout = input.timeoutMs ? new AbortController() : undefined;
     const timer = timeout ? setTimeout(() => timeout.abort(new DOMException(`Operation timed out after ${input.timeoutMs}ms`, "TimeoutError")), input.timeoutMs) : undefined;
     const combined = timeout ? signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal : signal;
@@ -335,36 +353,122 @@ export class ChromeExecutor {
       if (this.disposed) throw new Error("Chrome executor has been disposed");
       throwIfAborted(combined);
       await this.initialize();
-      const targets = await this.chromeApi.debugger.getTargets();
-      const panelTarget = targets.find((candidate) => candidate.url === this.targetUrl && candidate.id);
-      if (!panelTarget?.id) throw new Error(`Side Panel DevTools target not found: ${this.targetUrl}`);
       this.automation.setContext({ ...context, signal: combined });
-      return await this.evaluate({ targetId: panelTarget.id }, automationExpressionFor(input.code, input.tabId), combined, "extension");
+      this.activeSignal = combined;
+      this.activeContext = context;
+      if (input.mode === "run") return await this.executeNow({ code: input.code, target: { kind: "extension" }, timeoutMs: input.timeoutMs }, combined, context);
+      const page = await this.automation.createPage(input.tabId);
+      if (input.mode === "observe") {
+        if (input.detail === "visual" && !context.visualEnabled) throw new Error("AutomationError[visual-unavailable]: Image input is disabled or unsupported by the selected model");
+        const result = await page.observe(input.detail === "visual" || input.detail === "auto" && context.visualEnabled ? input.detail : "semantic", input.since);
+        if (!context.visualEnabled && (result as any).screenshot) throw new Error("AutomationError[visual-unavailable]: Image input is disabled or unsupported by the selected model");
+        return !context.visualEnabled && (input.detail ?? "auto") === "auto" && !String((result as any).snapshot).includes("[ref=")
+          ? { ...result, visual: { available: false, error: { code: "visual-unavailable", message: "Image input is disabled, unsupported, or unknown for the selected model" } } }
+          : result;
+      }
+      if (input.observationId) await page.ensureObservation(input.observationId);
+      return await this.executeSteps(page, input.steps, input.observationId, context.visualEnabled ?? false);
     } catch (error) {
       if (combined?.aborted) await this.automation.abortSessions();
-      const failure = timeout?.signal.aborted && !signal?.aborted
-        ? error instanceof Error && /^AutomationError\[(?:timeout|intercepted)\]/.test(error.message)
-          ? error
-          : new Error(`AutomationError[timeout]: ${JSON.stringify({ timeoutMs: input.timeoutMs })}`)
-        : error;
+      const failure = timeout?.signal.aborted && !signal?.aborted ? new Error(`AutomationError[timeout]: ${JSON.stringify({ timeoutMs: input.timeoutMs })}`) : error;
       this.recordExecutionFailure(failure, input, context);
-      throw failure;
+      return { ok: false, error: this.structuredError(failure), completed: [], failed: null, notRun: input.mode === "act" ? input.steps : [] };
     } finally {
+      this.activeSignal = undefined;
+      this.activeContext = {};
       await this.automation.clearContext();
       if (timer !== undefined) clearTimeout(timer);
     }
   }
 
-  private recordExecutionFailure(error: unknown, input: ChromeToolInput | PageToolInput, context: ExecutionContext): void {
+  private async executeSteps(page: any, steps: BrowserStep[], observationId: string | undefined, visualEnabled: boolean): Promise<unknown> {
+    const startedAt = performance.now();
+    const completed: Array<{ index: number; type: BrowserStep["type"]; result: unknown }> = [];
+    for (let index = 0; index < steps.length; index += 1) {
+      const step = steps[index]!;
+      try {
+        completed.push({ index, type: step.type, result: await this.executeStep(page, step, observationId) });
+      } catch (error) {
+        if (this.activeSignal?.aborted) await this.automation.abortSessions();
+        let observation: unknown;
+        if (!this.activeSignal?.aborted) try { observation = await page.observe(visualEnabled ? "auto" : "semantic"); } catch { /* Preserve the original failure. */ }
+        return { ok: false, completed, failed: { index, step, error: this.structuredError(error) }, notRun: steps.slice(index + 1), elapsedMs: performance.now() - startedAt, ...(observation ? { observation } : {}) };
+      }
+    }
+    return { ok: true, completed, elapsedMs: performance.now() - startedAt };
+  }
+
+  private locator(page: any, target: BrowserTarget): any {
+    if ("point" in target) return target;
+    if ("ref" in target) return page.ref(target.ref);
+    const selector = target as BrowserSelector;
+    let scope = selector.frame ? page.frameLocator(selector.frame.value) : page;
+    const options = { exact: selector.exact };
+    let locator = selector.by === "role" ? scope.getByRole(selector.value, { ...options, name: selector.name })
+      : selector.by === "text" ? scope.getByText(selector.value, options)
+      : selector.by === "label" ? scope.getByLabel(selector.value, options)
+      : selector.by === "placeholder" ? scope.getByPlaceholder(selector.value, options)
+      : selector.by === "alt" ? scope.getByAltText(selector.value, options)
+      : selector.by === "title" ? scope.getByTitle(selector.value, options)
+      : selector.by === "testId" ? scope.getByTestId(selector.value)
+      : scope.locator(selector.value);
+    if (selector.index !== undefined) locator = locator.nth(selector.index);
+    return locator;
+  }
+
+  private async executeStep(page: any, step: BrowserStep, defaultObservationId?: string): Promise<unknown> {
+    if (step.type === "goto") return page.goto(step.url);
+    if (step.type === "press" || step.type === "insertText") {
+      const subject = step.target ? this.locator(page, step.target) : page;
+      return step.type === "press" ? subject.press(step.key) : step.target ? subject.pressSequentially(step.text) : page.insertText(step.text);
+    }
+    if (step.type === "expect") {
+      if (step.url) await page.waitForURL(step.url);
+      if (!step.target) return { matched: true };
+      const target = this.locator(page, step.target);
+      if (step.state) await target.waitFor({ state: step.state });
+      if (step.text !== undefined && !String(await target.innerText()).includes(step.text)) throw new Error(`AutomationError[expectation-failed]: Expected text ${JSON.stringify(step.text)}`);
+      if (step.value !== undefined && await target.inputValue() !== step.value) throw new Error(`AutomationError[expectation-failed]: Expected value ${JSON.stringify(step.value)}`);
+      return { matched: true };
+    }
+    if (step.type === "drag") return this.locator(page, step.from).dragTo(this.locator(page, step.to));
+    const target = this.locator(page, step.target);
+    if ("point" in step.target && ["click", "doubleClick", "hover"].includes(step.type)) {
+      const point = step.target.point;
+      return page.point(point.observationId || defaultObservationId, point.x, point.y, step.type === "doubleClick" ? "dblclick" : step.type);
+    }
+    if (step.type === "click") return target.click();
+    if (step.type === "doubleClick") return target.dblclick();
+    if (step.type === "hover") return target.hover();
+    if (step.type === "fill") return target.fill(step.value);
+    if (step.type === "clear") return target.clear();
+    if (step.type === "select") return target.selectOption(step.values);
+    if (step.type === "check") return step.checked === false ? target.uncheck() : target.check();
+    if (step.type === "upload") return target.setInputFiles(step.files);
+    throw new Error(`AutomationError[unsupported]: ${JSON.stringify({ step })}`);
+  }
+
+  private structuredError(error: unknown): { code: string; message: string; detail?: unknown } {
     const message = error instanceof Error ? error.message : String(error);
+    const match = /^AutomationError\[([^\]]+)\]:\s*(.*)$/.exec(message);
+    if (!match) return { code: error instanceof DOMException && error.name === "AbortError" ? "aborted" : error instanceof DOMException && error.name === "TimeoutError" ? "timeout" : "execution-failed", message };
+    let detail: unknown;
+    try { detail = JSON.parse(match[2]!); } catch { detail = match[2]; }
+    return { code: match[1]!, message, detail };
+  }
+
+  private recordExecutionFailure(error: unknown, input: ChromeToolInput | BrowserInput, context: ExecutionContext): void {
+    const message = error instanceof Error ? error.message : String(error);
+    const target = "mode" in input ? { kind: input.mode, tabId: "tabId" in input ? input.tabId : undefined }
+      : input.target ?? (input.tabId !== undefined ? { kind: "page", tabId: input.tabId } : { kind: "extension" });
     if (/user gesture|user activation|permission|not allowed|denied/i.test(message)) {
       this.logger?.record({
         type: "interaction.required",
         conversationId: context.conversationId,
-        content: { message, target: "target" in input ? input.target ?? (input.tabId !== undefined ? { kind: "page", tabId: input.tabId } : { kind: "extension" }) : { kind: "page", tabId: input.tabId }, action: "Complete the browser prompt or required user gesture, then continue this conversation." },
+        content: { message, target, action: "Complete the browser prompt or required user gesture, then continue this conversation." },
       });
     } else if (/unavailable|not exposed|not installed|not currently|requires/i.test(message)) {
-      this.logger?.record({ type: "capability.unavailable", conversationId: context.conversationId, content: { message, target: "target" in input ? input.target ?? null : { kind: "page", tabId: input.tabId } } });
+      this.logger?.record({ type: "capability.unavailable", conversationId: context.conversationId, content: { message, target } });
     }
   }
 
@@ -376,6 +480,7 @@ export class ChromeExecutor {
       delete (globalThis as Record<string, unknown>)[BRIDGE_KEY];
       delete (globalThis as Record<string, unknown>)[RESULT_READER_KEY];
       delete (globalThis as Record<string, unknown>)[PAGE_KEY];
+      delete (globalThis as Record<string, unknown>)[BROWSER_KEY];
     }
     this.automation.dispose();
     const sessions = [this.activeDebuggee].filter((item): item is Debuggee => Boolean(item));

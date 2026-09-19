@@ -57,6 +57,7 @@ export async function loadModelConfig(
         baseURL: typeof profile.baseURL === "string" ? profile.baseURL : "",
         apiKey: typeof profile.apiKey === "string" ? profile.apiKey : "",
         model: typeof profile.model === "string" ? profile.model : "",
+        imageInput: profile.imageInput === "enabled" || profile.imageInput === "disabled" ? profile.imageInput : "auto",
         ...(Number.isSafeInteger(profile.contextWindowOverride) && Number(profile.contextWindowOverride) > 0
           ? { contextWindowOverride: Number(profile.contextWindowOverride) } : {}),
       } satisfies ModelProfile]];
@@ -72,6 +73,7 @@ export async function loadModelConfig(
     baseURL: typeof legacy.baseURL === "string" ? legacy.baseURL : "",
     apiKey: typeof legacy.apiKey === "string" ? legacy.apiKey : "",
     model: typeof legacy.model === "string" ? legacy.model : "",
+    imageInput: legacy.imageInput === "enabled" || legacy.imageInput === "disabled" ? legacy.imageInput : "auto",
     ...(Number.isSafeInteger(legacy.contextWindowOverride) && Number(legacy.contextWindowOverride) > 0
       ? { contextWindowOverride: Number(legacy.contextWindowOverride) } : {}),
   } } };
@@ -92,6 +94,7 @@ export async function saveModelConfig(
         baseURL: profile.baseURL.trim(),
         apiKey: profile.apiKey,
         model: profile.model.trim(),
+        imageInput: profile.imageInput ?? "auto",
         ...(profile.contextWindowOverride ? { contextWindowOverride: profile.contextWindowOverride } : {}),
       }])),
     } satisfies PersistedModelConfig,

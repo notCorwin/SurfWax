@@ -49,6 +49,12 @@ jobs:
           current_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/master" --jq '.object.sha')"
           test "$current_sha" = "$GITHUB_SHA"
 
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run extension E2E and performance checks
+        run: npm run test:e2e
+
       - name: Package extension
         shell: bash
         run: |
@@ -119,12 +125,6 @@ jobs:
 
           final_sha="$(gh api "repos/$repository/git/ref/tags/$tag" --jq '.object.sha')"
           test "$final_sha" = "$GITHUB_SHA"
-
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
-
-      - name: Run extension E2E
-        run: npm run test:e2e
 
       - name: Upload Playwright diagnostics
         if: ${{ !cancelled() && failure() }}

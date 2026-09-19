@@ -1,21 +1,19 @@
 import { isLoopFinished, ToolLoopAgent } from "ai";
 import type { LanguageModel } from "ai";
-import { createChromeTool, createPageTool } from "../chrome/tool";
+import { createBrowserTool, prepareBrowserMessages } from "../chrome/tool";
 import { ChromeExecutor } from "../chrome/executor";
 import type { EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
 import { createModel } from "./model";
+import { modelSupportsImages } from "./model-limits";
 import type { ContextCompactor } from "./compaction";
 
 export const DEFAULT_INSTRUCTIONS = [
   "You are a Chrome side-panel agent helping the user automate the browser they control.",
-  "Use page for normal web-page observation and interaction; use chrome for extension APIs, arbitrary browser JavaScript, User Scripts, and raw CDP. Return values explicitly and select only needed page data.",
-  "Page example: page({code:'const s=await page.snapshot(); await page.getByRole(\"button\",{name:\"Sign in\"}).click(); await page.getByText(\"Welcome\").waitFor({state:\"visible\"}); return s'}). Page locators auto-wait, re-resolve and are strict; prefer semantic locators and snapshot refs over CSS. An action only confirms browser input was dispatched, so wait for the intended text, state, URL, or load state before claiming success.",
-  "Extension example: chrome({code:'return await chrome.tabs.query({active:true})',target:{kind:'extension'}}). Page example: chrome({code:'return document.title',target:{kind:'page',tabId:1,world:'MAIN'}}).",
-  "Use MAIN, ISOLATED, or USER_SCRIPT for page worlds.",
-  "Inspect live availability with chrome({target:{kind:'extension'},code:'return await chrome.capabilities()'}); unavailable hosts return an actionable reason.",
-  "Large result example: chrome({code:'return (await globalThis.__surfWaxResult(42)).slice(0,10)'}) using the returned event ID. Other references may only last until the page or panel closes.",
-  "For advanced browser tasks, call native chrome.* APIs and CDP from the extension realm. Confirm results before claiming success.",
+  "Use the single browser tool. Prefer mode=observe followed by mode=act with semantic refs or role/label/text locators.",
+  "Put related actions in one act.steps batch and include expect as the explicit completion condition. A successful click only means browser input was sent.",
+  "Use mode=run only when the DSL cannot express the task. Its code can use the full proxied chrome API, browser.page(tabId?), browser.runIn(target, code), browser.cdp(debuggee), and browser.result(id). Return values explicitly.",
+  "Visual point actions must use the observationId from the screenshot observation. Stale document, viewport, or scale coordinates are rejected.",
 ].join(" ");
 
 export type CreateAgentOptions = {
@@ -28,7 +26,7 @@ export type CreateAgentOptions = {
   compactor?: ContextCompactor;
 };
 
-type BrowserAgentTools = { chrome: ReturnType<typeof createChromeTool>; page: ReturnType<typeof createPageTool> };
+type BrowserAgentTools = { browser: ReturnType<typeof createBrowserTool> };
 
 export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, BrowserAgentTools> {
   const logger = options.logger;
@@ -37,12 +35,11 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     reasoning: "minimal",
     instructions: options.instructions ?? DEFAULT_INSTRUCTIONS,
     tools: {
-      chrome: createChromeTool(options.executor, { logger, conversationId: options.conversationId }),
-      page: createPageTool(options.executor, { logger, conversationId: options.conversationId }),
+      browser: createBrowserTool(options.executor, { logger, conversationId: options.conversationId, visualEnabled: () => modelSupportsImages(options.model) }),
     },
-    ...(options.compactor ? { prepareStep: async ({ messages, stepNumber }) => ({
-      messages: await options.compactor!.prepare(messages, stepNumber) ?? messages,
-    }) } : {}),
+    prepareStep: async ({ messages, stepNumber }) => ({
+      messages: prepareBrowserMessages(await options.compactor?.prepare(messages, stepNumber) ?? messages, stepNumber),
+    }),
     ...(logger ? {
       onStart: (event) => logger.record({
         type: "model.started",

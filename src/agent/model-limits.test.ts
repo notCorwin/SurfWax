@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { contextUsedPercent, inputBudget, loadModelCatalog, matchModel, modelProviderPresets, resolveModelLimit } from "./model-limits";
+import { contextUsedPercent, inputBudget, loadModelCatalog, matchModel, modelProviderPresets, modelSupportsImages, resolveModelLimit } from "./model-limits";
 
 const catalog = {
   openai: { api: "https://api.openai.com/v1", models: {
@@ -55,6 +55,17 @@ describe("models.dev limit matching", () => {
     expect(matchModel(models, "https://proxy.test/v1", "gpt-5")?.reasoningEfforts).toBeUndefined();
     expect(matchModel(models, "https://proxy.test/v1", "gpt-5", "openai")?.reasoningEfforts).toEqual(["none", "low"]);
     expect(matchModel(models, "https://api.openai.com/v1", "gpt-5-x")?.reasoningEfforts).toBeUndefined();
+  });
+
+  it("detects image input only from exact catalog metadata or a manual override", async () => {
+    const imageCatalog = { openai: { api: "https://api.openai.com/v1", models: { "gpt-5": { limit: { context: 1000 }, modalities: { input: ["text", "image"], output: ["text"] } } } } };
+    const storage = { async get() { return {}; }, async set() {} };
+    const fetch = vi.fn(async () => new Response(JSON.stringify(imageCatalog)));
+    const config = { baseURL: "https://api.openai.com/v1", apiKey: "secret", model: "gpt-5" };
+    await expect(modelSupportsImages(config, { storage, fetch })).resolves.toBe(true);
+    await expect(modelSupportsImages({ ...config, imageInput: "disabled" }, { storage, fetch })).resolves.toBe(false);
+    await expect(modelSupportsImages({ ...config, imageInput: "enabled" }, { storage, fetch })).resolves.toBe(true);
+    expect(matchModel(imageCatalog, "https://proxy.test/v1", "gpt-5")?.inputModalities).toBeUndefined();
   });
 
   it("lets a manual window win and reuses cached data while offline", async () => {

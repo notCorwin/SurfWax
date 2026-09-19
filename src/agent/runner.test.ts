@@ -13,11 +13,11 @@ function usage() {
 describe("createAgent", () => {
   it("continues beyond twenty tool calls until natural completion", async () => {
     let step = 0;
-    const executor = { execute: vi.fn(async () => [{ id: 1, title: "test" }]) } as unknown as ChromeExecutor;
+    const executor = { executeBrowser: vi.fn(async () => [{ id: 1, title: "test" }]) } as unknown as ChromeExecutor;
     const model = new MockLanguageModelV4({
       doStream: async (options) => {
         expect(options.reasoning).toBe("minimal");
-        expect((options.tools as any[]).map((tool) => tool.name)).toEqual(["chrome", "page"]);
+        expect((options.tools as any[]).map((tool) => tool.name)).toEqual(["browser"]);
         step += 1;
         const chunks = step > 25
           ? [
@@ -29,7 +29,7 @@ describe("createAgent", () => {
           ]
           : [
             { type: "stream-start" as const, warnings: [] },
-            { type: "tool-call" as const, toolCallId: `call-${step}`, toolName: "chrome", dynamic: true, input: JSON.stringify({ code: "return await chrome.tabs.query({});" }) },
+            { type: "tool-call" as const, toolCallId: `call-${step}`, toolName: "browser", dynamic: true, input: JSON.stringify({ mode: "run", code: "return await chrome.tabs.query({});" }) },
             { type: "finish" as const, finishReason: { unified: "tool-calls" as const, raw: "tool_calls" }, usage: usage() },
           ];
         return { stream: simulateReadableStream({ chunks: chunks as any[] }) };
@@ -46,7 +46,7 @@ describe("createAgent", () => {
 
     expect(step).toBe(26);
     expect(toolResults).toBe(25);
-    expect(executor.execute).toHaveBeenCalledTimes(25);
+    expect(executor.executeBrowser).toHaveBeenCalledTimes(25);
     expect(await result.finishReason).toBe("stop");
   });
 });

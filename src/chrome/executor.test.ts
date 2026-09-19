@@ -69,7 +69,7 @@ describe("ChromeExecutor", () => {
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
     await expect(executor.executePage({ tabId: 7, code: "await page.getByRole('button', {name: 'Go'}).click(); return 'done';" })).resolves.toBe("done");
     const expression = String(fake.debuggerApi.sendCommand.mock.calls[0][2]?.expression);
-    expect(expression).toContain("__surfWaxPage");
+    expect(expression).toContain("__surfWaxBrowser");
     expect(expression).toContain("getByRole");
   });
 
@@ -77,7 +77,7 @@ describe("ChromeExecutor", () => {
     const fake = fakeChrome([() => new Promise<object>(() => undefined)]);
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
 
-    await expect(executor.executePage({ code: "await new Promise(() => undefined)", timeoutMs: 5 })).rejects.toThrow("AutomationError[timeout]");
+    await expect(executor.executePage({ code: "await new Promise(() => undefined)", timeoutMs: 5 })).resolves.toMatchObject({ ok: false, error: { code: "timeout" } });
   });
 
   it("serializes page() and chrome() through the same queue", async () => {

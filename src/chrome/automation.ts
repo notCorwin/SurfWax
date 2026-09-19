@@ -14,6 +14,16 @@ type LocatorSpec = { queries: Query[]; index?: number; ref?: string; hasText?: s
 type WaitState = "attached" | "detached" | "visible" | "hidden" | "enabled" | "editable" | "checked";
 type RefRecord = { backendNodeId: number; frameId?: string; debuggee: Debuggee; role: string; name: string; generation: number };
 type SnapshotLine = { id: string; line: string };
+type ObservationRecord = {
+  observationId: string;
+  tabId: number;
+  documentId: number;
+  url: string;
+  title: string;
+  lines: SnapshotLine[];
+  viewport: { x: number; y: number; width: number; height: number; scale: number };
+  image?: { width: number; height: number; scale: number };
+};
 type Session = {
   tabId: number;
   debuggee: Debuggee;
@@ -140,12 +150,28 @@ function quote(value: string): string {
   return JSON.stringify(value.replace(/\s+/g, " ").trim());
 }
 
+function jpegSize(base64: string): { width: number; height: number } | undefined {
+  const binary = atob(base64);
+  for (let offset = 2; offset + 8 < binary.length;) {
+    if (binary.charCodeAt(offset) !== 0xff) { offset += 1; continue; }
+    const marker = binary.charCodeAt(offset + 1);
+    const length = binary.charCodeAt(offset + 2) * 256 + binary.charCodeAt(offset + 3);
+    if (marker >= 0xc0 && marker <= 0xc3) return {
+      height: binary.charCodeAt(offset + 5) * 256 + binary.charCodeAt(offset + 6),
+      width: binary.charCodeAt(offset + 7) * 256 + binary.charCodeAt(offset + 8),
+    };
+    offset += Math.max(2, length + 2);
+  }
+}
+
 export class AutomationRuntime {
   private readonly sessions = new Map<number, Session>();
   private readonly objectDebuggees = new Map<string, Debuggee>();
   private context: RunContext = {};
   private readonly waiters = new Map<number, Map<string, Set<Waiter>>>();
   private lastWait?: { locator: LocatorSpec; state?: ElementState; matches?: number; candidates?: Candidate[]; documentId: number; reason: string };
+  private readonly observations = new Map<string, ObservationRecord>();
+  private readonly axRoots = new Map<string, number>();
 
   private waitDiagnostic() { return this.lastWait; }
 
@@ -182,7 +208,7 @@ export class AutomationRuntime {
 
   async createPage(tabId?: number): Promise<PageFacade> {
     const resolved = tabId ?? (await this.options.chromeApi.tabs.query({ active: true, currentWindow: true }))[0]?.id;
-    if (!Number.isInteger(resolved)) throw new Error("page() could not find an active tab; pass tabId explicitly.");
+    if (!Number.isInteger(resolved)) throw new Error("browser.page() could not find an active tab; pass tabId explicitly.");
     await this.session(resolved!);
     return new PageFacade(this, resolved!);
   }
@@ -245,6 +271,7 @@ export class AutomationRuntime {
     session.refsByNode.clear();
     session.lastSnapshot = undefined;
     this.objectDebuggees.clear();
+    this.axRoots.clear();
   }
 
   handleDetach(source: Debuggee): void {
@@ -255,6 +282,8 @@ export class AutomationRuntime {
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
     this.objectDebuggees.clear();
+    this.observations.clear();
+    this.axRoots.clear();
     for (const events of this.waiters.values()) for (const waiters of events.values()) for (const waiter of waiters) waiter.reject(abortError());
     this.waiters.clear();
     await Promise.all(sessions.map(async (session) => {
@@ -274,6 +303,89 @@ export class AutomationRuntime {
       const captured = await this.captureSnapshot(session);
       session.lastSnapshot = captured.lines;
       return { url: captured.url, title: captured.title, documentId: session.generation, snapshot: captured.lines.map(({ line }) => line).join("\n") };
+    });
+  }
+
+  async observe(tabId: number, detail: "auto" | "semantic" | "visual" = "auto", since?: string): Promise<Record<string, unknown>> {
+    return this.action(tabId, "observe", null, async () => {
+      const session = await this.session(tabId);
+      const captured = await this.captureSnapshot(session);
+      const viewport = await this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})") as ObservationRecord["viewport"];
+      const observationId = globalThis.crypto.randomUUID();
+      const previous = since ? this.observations.get(since) : undefined;
+      if (since && (!previous || previous.tabId !== tabId || previous.documentId !== session.generation)) {
+        throw automationError("stale-observation", { observationId: since, reason: "expired-document" });
+      }
+      const record: ObservationRecord = { observationId, tabId, documentId: session.generation, ...captured, viewport };
+      session.lastSnapshot = captured.lines;
+      const before = new Map(previous?.lines.map((item) => [item.id, item.line]));
+      const after = new Map(captured.lines.map((item) => [item.id, item.line]));
+      const changes = previous ? {
+        added: captured.lines.filter(({ id }) => !before.has(id)).map(({ line }) => line),
+        removed: previous.lines.filter(({ id }) => !after.has(id)).map(({ line }) => line),
+        updated: captured.lines.flatMap(({ id, line }) => before.has(id) && before.get(id) !== line ? [{ before: before.get(id), after: line }] : []),
+      } : undefined;
+      const result: Record<string, unknown> = {
+        observationId, documentId: session.generation, url: captured.url, title: captured.title, viewport,
+        snapshot: captured.lines.map(({ line }) => line).join("\n"), ...(changes ? { changes } : {}),
+      };
+      if (detail === "visual" || detail === "auto" && !captured.lines.some(({ line }) => line.includes("[ref="))) {
+        const screenshot = await this.options.command(session.debuggee, "Page.captureScreenshot", {
+          format: "jpeg", quality: 70, fromSurface: true, captureBeyondViewport: false,
+        });
+        const size = typeof screenshot.data === "string" ? jpegSize(screenshot.data) : undefined;
+        const image = { width: size?.width ?? viewport.width, height: size?.height ?? viewport.height, scale: size?.width && viewport.width ? size.width / viewport.width : 1 };
+        record.image = image;
+        result.screenshot = { mediaType: "image/jpeg", data: screenshot.data, ...image };
+      }
+      this.observations.set(observationId, record);
+      while (this.observations.size > 32) this.observations.delete(this.observations.keys().next().value!);
+      return result;
+    });
+  }
+
+  async point(tabId: number, observationId: string, x: number, y: number, operation: "click" | "dblclick" | "hover"): Promise<Record<string, unknown>> {
+    const session = await this.session(tabId);
+    return this.action(tabId, operation, null, async () => {
+      const observation = this.observations.get(observationId);
+      if (!observation || observation.tabId !== tabId || observation.documentId !== session.generation) {
+        throw automationError("stale-observation", { observationId, reason: "expired-document" });
+      }
+      const viewport = await this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})") as ObservationRecord["viewport"];
+      if (viewport.x !== observation.viewport.x || viewport.y !== observation.viewport.y || viewport.width !== observation.viewport.width || viewport.height !== observation.viewport.height || viewport.scale !== observation.viewport.scale) {
+        throw automationError("stale-observation", { observationId, reason: "viewport-changed", before: observation.viewport, after: viewport });
+      }
+      const scale = observation.image?.scale ?? 1;
+      const cssX = x / scale; const cssY = y / scale;
+      if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > (observation.image?.width ?? viewport.width) || y > (observation.image?.height ?? viewport.height)) {
+        throw automationError("invalid-point", { observationId, x, y, viewport });
+      }
+      await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", x: cssX, y: cssY });
+      if (operation !== "hover") {
+        const count = operation === "dblclick" ? 2 : 1;
+        for (let clickCount = 1; clickCount <= count; clickCount += 1) {
+          await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mousePressed", x: cssX, y: cssY, button: "left", clickCount });
+          await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseReleased", x: cssX, y: cssY, button: "left", clickCount });
+        }
+      }
+      return this.afterAction(session);
+    });
+  }
+
+  async ensureObservation(tabId: number, observationId: string): Promise<void> {
+    const session = await this.session(tabId);
+    const observation = this.observations.get(observationId);
+    if (!observation || observation.tabId !== tabId || observation.documentId !== session.generation) {
+      throw automationError("stale-observation", { observationId, reason: "expired-document" });
+    }
+  }
+
+  async keyboard(tabId: number, operation: "press" | "insertText", value: string): Promise<Record<string, unknown>> {
+    const session = await this.session(tabId);
+    return this.action(tabId, operation, null, async () => {
+      if (operation === "press") await this.press(session, value);
+      else await this.options.command(session.debuggee, "Input.insertText", { text: value });
+      return this.afterAction(session);
     });
   }
 
@@ -540,7 +652,8 @@ export class AutomationRuntime {
         await this.options.command(ref.debuggee, "DOM.resolveNode", { backendNodeId: ref.backendNodeId });
         return [{ role: ref.role, name: ref.name, ref: spec.ref }];
       } catch {
-        throw automationError("detached", { ref: spec.ref, reason: "node-removed" });
+        const rebound = await this.rebindRef(session, spec.ref, ref);
+        return [{ role: rebound.role, name: rebound.name, ref: spec.ref }];
       }
     }
     const scoped = await this.locatorScope(session, spec);
@@ -571,7 +684,11 @@ export class AutomationRuntime {
         this.objectDebuggees.set(response.object.objectId, ref.debuggee);
         return response.object.objectId;
       } catch {
-        throw automationError("detached", { ref: spec.ref, reason: "node-removed" });
+        const rebound = await this.rebindRef(session, spec.ref, ref);
+        const response = await this.options.command(rebound.debuggee, "DOM.resolveNode", { backendNodeId: rebound.backendNodeId, objectGroup: "surf-wax-automation" });
+        if (!response.object?.objectId) throw automationError("detached", { ref: spec.ref, reason: "node-removed" });
+        this.objectDebuggees.set(response.object.objectId, rebound.debuggee);
+        return response.object.objectId;
       }
     }
     const scoped = await this.locatorScope(session, spec);
@@ -612,7 +729,16 @@ export class AutomationRuntime {
 
   private async resolveAccessibility(debuggee: Debuggee, spec: LocatorSpec): Promise<Candidate[]> {
     const query = spec.queries[0]!;
-    const tree = await this.options.command(debuggee, "Accessibility.getFullAXTree", {});
+    const key = JSON.stringify(debuggee);
+    let nodeId = this.axRoots.get(key);
+    if (nodeId === undefined) {
+      nodeId = (await this.options.command(debuggee, "DOM.getDocument", { depth: 0 })).root?.nodeId;
+      if (nodeId === undefined) throw automationError("detached", { reason: "missing-document-root" });
+      this.axRoots.set(key, nodeId);
+    }
+    const tree = await this.options.command(debuggee, "Accessibility.queryAXTree", query.kind === "role"
+      ? { nodeId, role: query.value, ...(query.name ? { accessibleName: query.name } : {}) }
+      : { nodeId, accessibleName: query.value });
     const controls = new Set(["button", "checkbox", "combobox", "listbox", "option", "radio", "searchbox", "slider", "spinbutton", "switch", "textbox"]);
     const normalize = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
     const equal = (actual: string, expected: string) => query.exact ? actual === expected : actual.toLocaleLowerCase().includes(expected.toLocaleLowerCase());
@@ -630,6 +756,17 @@ export class AutomationRuntime {
       matches = matches[index] ? [matches[index]!] : [];
     }
     return matches;
+  }
+
+  private async rebindRef(session: Session, id: string, ref: RefRecord): Promise<RefRecord> {
+    if (ref.generation !== session.generation) throw automationError("stale-ref", { ref: id, reason: "expired-document" });
+    const matches = await this.resolveAccessibility(ref.debuggee, { queries: [{ kind: "role", value: ref.role, name: ref.name, exact: true }] });
+    if (matches.length !== 1 || !matches[0]?.backendNodeId) {
+      throw automationError(matches.length > 1 ? "ambiguous-ref" : "detached", { ref: id, role: ref.role, name: ref.name, candidates: matches.slice(0, 10) });
+    }
+    const rebound = { ...ref, backendNodeId: matches[0].backendNodeId };
+    session.refs.set(id, rebound);
+    return rebound;
   }
 
   private async locatorScope(session: Session, spec: LocatorSpec): Promise<{ debuggee: Debuggee; spec: LocatorSpec }> {
@@ -844,7 +981,10 @@ export class AutomationRuntime {
             }
             const properties = Object.fromEntries((node.properties ?? []).map((property: any) => [property.name, property.value?.value]));
             const state = ["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly"].filter((key) => properties[key] !== undefined).map((key) => `${key}=${properties[key]}`).join(" ");
-            lines.push({ id: identity, line: `${"  ".repeat(depth)}- ${role}${name ? ` ${quote(name)}` : ""}${ref ? ` [ref=${ref}]` : ""}${state ? ` [${state}]` : ""}${value && value !== name ? `: ${value}` : ""}` });
+            const actions = !ref ? "" : ["textbox", "searchbox", "spinbutton"].includes(role) ? "click,fill,clear,press,insertText"
+              : ["checkbox", "radio", "switch"].includes(role) ? "click,check"
+              : ["combobox", "listbox"].includes(role) ? "click,select" : "click,doubleClick,hover";
+            lines.push({ id: identity, line: `${"  ".repeat(depth)}- ${role}${name ? ` ${quote(name)}` : ""}${ref ? ` [ref=${ref}] [actions=${actions}]` : ""}${state ? ` [${state}]` : ""}${value && value !== name ? `: ${value}` : ""}` });
             depth += 1;
           }
           for (const child of node.childIds ?? []) visit(byId.get(child), depth);
@@ -853,34 +993,13 @@ export class AutomationRuntime {
         visit(root, frameLabel ? frameDepth + 1 : 0);
       };
       for (const { debuggee, frameId, depth, tree } of trees) render(tree.nodes ?? [], debuggee, frameId, depth);
-      if (lines.length <= 1 && await this.pageValue(session.tabId, "Boolean(document.querySelector('canvas'))")) {
-        throw automationError("unsupported", { reason: "page-has-no-semantic-content", fallback: "Use chrome() with screenshots or raw CDP." });
-      }
       if (generation === session.generation) return { ...info, lines };
     }
   }
 
   private async afterAction(session: Session): Promise<Record<string, unknown>> {
-    if (!session.lastSnapshot) {
-      const info = await this.pageValue(session.tabId, "({url:location.href,title:document.title})") as { url: string; title: string };
-      return { performed: true, ...info, documentId: session.generation };
-    }
-    const captured = await this.captureSnapshot(session);
-    const previous = session.lastSnapshot;
-    session.lastSnapshot = captured.lines;
-    const before = new Map(previous.map((item) => [item.id, item.line]));
-    const after = new Map(captured.lines.map((item) => [item.id, item.line]));
-    return {
-      performed: true,
-      url: captured.url,
-      title: captured.title,
-      documentId: session.generation,
-      changes: {
-        added: captured.lines.filter(({ id }) => !before.has(id)).map(({ line }) => line),
-        removed: previous.filter(({ id }) => !after.has(id)).map(({ line }) => line),
-        updated: captured.lines.flatMap(({ id, line }) => before.has(id) && before.get(id) !== line ? [{ before: before.get(id), after: line }] : []),
-      },
-    };
+    const info = await this.pageValue(session.tabId, "({url:location.href,title:document.title})") as { url: string; title: string };
+    return { performed: true, ...info, documentId: session.generation };
   }
 
   private async action<T>(tabId: number, operation: string, locator: LocatorSpec | null, run: () => Promise<T>): Promise<T> {
@@ -912,6 +1031,11 @@ export class AutomationRuntime {
 export class PageFacade {
   constructor(private readonly runtime: AutomationRuntime, readonly tabId: number) {}
   snapshot() { return this.runtime.snapshot(this.tabId); }
+  observe(detail: "auto" | "semantic" | "visual" = "auto", since?: string) { return this.runtime.observe(this.tabId, detail, since); }
+  ensureObservation(observationId: string) { return this.runtime.ensureObservation(this.tabId, observationId); }
+  point(observationId: string, x: number, y: number, operation: "click" | "dblclick" | "hover") { return this.runtime.point(this.tabId, observationId, x, y, operation); }
+  press(key: string) { return this.runtime.keyboard(this.tabId, "press", key); }
+  insertText(text: string) { return this.runtime.keyboard(this.tabId, "insertText", text); }
   ref(ref: string) { return this.runtime.ref(this.tabId, ref); }
   locator(value: string) { return this.runtime.locator(this.tabId, { kind: "css", value }); }
   getByRole(value: string, options: { name?: string; exact?: boolean } = {}) { return this.runtime.locator(this.tabId, { kind: "role", value, ...options }); }
