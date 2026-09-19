@@ -2,7 +2,7 @@
 
 import { ComposerPrimitive, useAui, useAuiState, type AssistantState } from "@assistant-ui/react";
 import { cn } from "cn";
-import { ArrowUpIcon, SquareIcon } from "lucide-react";
+import { ArrowUpIcon, ForwardIcon, SquareIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { modelMessages } from "@/agent/context-choice";
 import { contextPressure } from "@/agent/compaction";
+import { canAutoDispatchFollowup, FOLLOWUP_EVENT_TYPES, rebuildFollowups, type FollowupMessage } from "@/agent/followups";
 import { contextUsedPercent, inputBudget, resolveModelLimit, type ModelLimit } from "@/agent/model-limits";
 import { reasoningSettingsFor, type ReasoningEffort } from "@/agent/reasoning";
 import type { ConversationMessage, EventLogger } from "@/logging";
@@ -39,6 +40,40 @@ type ContextUsage = { state: "loading" | "unavailable" } | {
   limit: ModelLimit;
   usedPercent: number;
 };
+
+const FOLLOWUP_LIFECYCLE_EVENTS = new Set<string>([
+  ...FOLLOWUP_EVENT_TYPES,
+  "conversation.submitted",
+  "conversation.finished",
+  "conversation.failed",
+  "conversation.aborted",
+]);
+
+function useFollowups(logger: EventLogger, conversationId: string) {
+  const [state, setState] = useState<{ ready: boolean; messages: FollowupMessage[]; autoDispatch: boolean }>({
+    ready: false,
+    messages: [],
+    autoDispatch: false,
+  });
+
+  useEffect(() => {
+    let active = true;
+    let version = 0;
+    const refresh = async () => {
+      const current = ++version;
+      const events = await logger.followupEvents(conversationId);
+      if (!active || current !== version) return;
+      setState({ ready: true, messages: rebuildFollowups(events), autoDispatch: canAutoDispatchFollowup(events) });
+    };
+    const unsubscribe = logger.subscribe((event) => {
+      if (event.conversationId === conversationId && FOLLOWUP_LIFECYCLE_EVENTS.has(event.type)) void refresh();
+    });
+    void refresh();
+    return () => { active = false; unsubscribe(); };
+  }, [conversationId, logger]);
+
+  return state;
+}
 
 function ContextIndicator({ config, logger, conversationId }: { config: ModelConfig; logger: EventLogger; conversationId: string }) {
   const aui = useAui();
@@ -228,9 +263,13 @@ export function LocalComposer({ config, logger, conversationId, blocked, draft, 
   const externalText = useAuiState(composerText);
   const isRunning = useAuiState(threadRunning);
   const isDisabled = useAuiState(composerDisabled);
+  const followups = useFollowups(logger, conversationId);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const composing = useRef(false);
   const resizeFrame = useRef<number | null>(null);
+  const dispatching = useRef<string | undefined>(undefined);
+  const [immediateId, setImmediateId] = useState<string>();
+  const [resumeQueue, setResumeQueue] = useState(false);
   const [hasText, setHasText] = useState(() => Boolean((draft ?? externalText).trim()));
   const previousExternalText = useRef(externalText);
 
@@ -261,17 +300,83 @@ export function LocalComposer({ config, logger, conversationId, blocked, draft, 
     if (resizeFrame.current !== null) cancelAnimationFrame(resizeFrame.current);
   }, []);
 
-  const submit = useCallback(() => {
+  const clearInput = useCallback(() => {
     const input = inputRef.current;
-    const value = input?.value ?? "";
-    if (!input || !value.trim() || isDisabled || isRunning || blocked) return;
-    aui.composer.setText(value);
-    aui.composer.send();
+    if (!input) return;
     input.value = "";
     onDraftChange("");
     setHasText(false);
     resize();
-  }, [aui, blocked, isDisabled, isRunning, onDraftChange, resize]);
+  }, [onDraftChange, resize]);
+
+  const dispatchFollowup = useCallback((message: FollowupMessage, mode: "followup" | "immediate") => {
+    if (dispatching.current || blocked) return;
+    dispatching.current = message.id;
+    aui.thread.append({
+      role: "user",
+      content: [{ type: "text", text: message.text }],
+      createdAt: new Date(),
+      metadata: { custom: { followupId: message.id, followupMode: mode } },
+    });
+  }, [aui, blocked]);
+
+  useEffect(() => {
+    if (!dispatching.current) return;
+    if (!followups.messages.some(({ id }) => id === dispatching.current)) dispatching.current = undefined;
+  }, [followups.messages]);
+
+  useEffect(() => {
+    if (isRunning || blocked || !immediateId) return;
+    const message = followups.messages.find(({ id }) => id === immediateId);
+    setImmediateId(undefined);
+    if (message) dispatchFollowup(message, "immediate");
+  }, [blocked, dispatchFollowup, followups.messages, immediateId, isRunning]);
+
+  useEffect(() => {
+    if (!followups.ready || isRunning || blocked || immediateId || dispatching.current || followups.messages.length === 0) return;
+    if (!followups.autoDispatch && !resumeQueue) return;
+    setResumeQueue(false);
+    dispatchFollowup(followups.messages[0]!, "followup");
+  }, [blocked, dispatchFollowup, followups, immediateId, isRunning, resumeQueue]);
+
+  const submit = useCallback(() => {
+    const input = inputRef.current;
+    const value = input?.value ?? "";
+    if (!input || !value.trim() || isDisabled || blocked) return;
+    if (followups.ready && !isRunning && followups.messages.length === 0) {
+      aui.composer.setText(value);
+      aui.composer.send();
+      clearInput();
+      return;
+    }
+    const queued = {
+      id: globalThis.crypto.randomUUID(),
+      text: value,
+      createdAt: new Date().toISOString(),
+    };
+    clearInput();
+    void logger.append({
+      type: "conversation.followup.queued",
+      conversationId,
+      content: queued,
+    }).then(() => {
+      if (!followups.ready || !isRunning) setResumeQueue(true);
+    }).catch(() => undefined);
+  }, [aui, blocked, clearInput, conversationId, followups.messages.length, followups.ready, isDisabled, isRunning, logger]);
+
+  const sendImmediately = useCallback((message: FollowupMessage) => {
+    if (blocked || dispatching.current) return;
+    if (isRunning) {
+      setImmediateId(message.id);
+      aui.thread.cancelRun();
+    } else {
+      dispatchFollowup(message, "immediate");
+    }
+  }, [aui, blocked, dispatchFollowup, isRunning]);
+
+  const removeFollowup = useCallback((id: string) => {
+    void logger.append({ type: "conversation.followup.removed", conversationId, content: { id } }).catch(() => undefined);
+  }, [conversationId, logger]);
 
   const keyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== "Enter" || event.nativeEvent.isComposing || composing.current || event.shiftKey) return;
@@ -294,6 +399,21 @@ export function LocalComposer({ config, logger, conversationId, blocked, draft, 
       event.preventDefault();
       submit();
     }}>
+      {followups.messages.length > 0 && <div className="mb-2 flex flex-col gap-1" role="list" aria-label="等待发送的消息" data-testid="followup-queue">
+        {followups.messages.map((message, index) => <div key={message.id} role="listitem" data-testid="followup-item"
+          className="flex min-w-0 items-center gap-2 rounded-lg border border-border/70 bg-muted/50 px-2 py-1.5 text-xs">
+          <span className="shrink-0 text-muted-foreground">{index + 1}</span>
+          <span className="min-w-0 flex-1 truncate" title={message.text}>{message.text}</span>
+          <Button type="button" variant="ghost" size="icon-xs" disabled={Boolean(immediateId) || Boolean(dispatching.current) || blocked}
+            aria-label="立即发送" title="中断当前工作并立即发送" onClick={() => sendImmediately(message)}>
+            <ForwardIcon aria-hidden="true" />
+          </Button>
+          <Button type="button" variant="ghost" size="icon-xs" disabled={immediateId === message.id || dispatching.current === message.id}
+            aria-label="移除排队消息" title="移除" onClick={() => removeFollowup(message.id)}>
+            <XIcon aria-hidden="true" />
+          </Button>
+        </div>)}
+      </div>}
       <div className="flex w-full flex-col gap-2 rounded-xl border border-border/70 bg-muted/30 p-2 shadow-sm focus-within:border-ring">
         <textarea
           ref={inputRef}
@@ -336,17 +456,20 @@ export function LocalComposer({ config, logger, conversationId, blocked, draft, 
             </Select>
             <ContextIndicator config={config} logger={logger} conversationId={conversationId} />
           </div>
-          {isRunning ? (
+          <div className="flex items-center gap-1">
+          {isRunning && (
             <ComposerPrimitive.Cancel asChild>
               <Button type="button" size="icon-sm" className="rounded-full" aria-label="停止生成" title="停止生成">
                 <SquareIcon aria-hidden="true" />
               </Button>
             </ComposerPrimitive.Cancel>
-          ) : (
-            <Button type="button" size="icon-sm" className="rounded-full" disabled={!hasText || isDisabled || blocked} aria-label="发送消息" title="发送消息" onClick={submit}>
-              <ArrowUpIcon aria-hidden="true" />
-            </Button>
           )}
+          <Button type="button" size="icon-sm" className="rounded-full" disabled={!hasText || isDisabled || blocked}
+            aria-label={isRunning || followups.messages.length > 0 ? "排队消息" : "发送消息"}
+            title={isRunning || followups.messages.length > 0 ? "加入 Follow-up 队列" : "发送消息"} onClick={submit}>
+            <ArrowUpIcon aria-hidden="true" />
+          </Button>
+          </div>
         </div>
       </div>
     </ComposerPrimitive.Root>

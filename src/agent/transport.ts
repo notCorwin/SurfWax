@@ -13,6 +13,16 @@ import { pendingContextChoice } from "./compaction";
 
 export type SidePanelMessage = UIMessage<any, never, any>;
 
+export function followupDispatch(message: SidePanelMessage | undefined): { id: string; mode: "followup" | "immediate" } | undefined {
+  const metadata = message?.metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return undefined;
+  const custom = (metadata as { custom?: unknown }).custom;
+  if (!custom || typeof custom !== "object" || Array.isArray(custom)) return undefined;
+  const id = (custom as { followupId?: unknown }).followupId;
+  const mode = (custom as { followupMode?: unknown }).followupMode;
+  return typeof id === "string" && (mode === "followup" || mode === "immediate") ? { id, mode } : undefined;
+}
+
 function runId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `run-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
@@ -133,6 +143,13 @@ export function createChatTransport(agent: (signal: AbortSignal, branchIds: stri
             parentId: index > 0 ? options.messages[index - 1]!.id : null,
           });
         }
+        const dispatched = followupDispatch(userMessage);
+        if (dispatched) await logger.append({
+          type: "conversation.followup.dispatched",
+          conversationId,
+          runId: currentRunId,
+          content: dispatched,
+        });
         await logger.append({
           type: "conversation.submitted",
           conversationId,

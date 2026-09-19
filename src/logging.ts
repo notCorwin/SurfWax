@@ -74,12 +74,20 @@ const SUMMARY_EVENT_TYPES = [
   "conversation.finished",
   "conversation.failed",
   "conversation.aborted",
+  "conversation.followup.queued",
+  "conversation.followup.dispatched",
+  "conversation.followup.removed",
   "model.title.started",
   "model.title.finished",
   "model.title.failed",
   "model.title.aborted",
 ] as const;
 const RUN_EVENT_TYPES = ["conversation.submitted", "conversation.finished", "conversation.failed", "conversation.aborted"] as const;
+const FOLLOWUP_EVENT_TYPES = [
+  "conversation.followup.queued",
+  "conversation.followup.dispatched",
+  "conversation.followup.removed",
+] as const;
 const CONTEXT_EVENT_TYPES = ["context.compacted", "context.estimate.calibrated"] as const;
 
 export function upgradeEventStore(db: IDBDatabase, transaction: IDBTransaction): void {
@@ -477,6 +485,10 @@ export class EventLogger {
 
   contextEvents(conversationId: string): Promise<LogEvent[]> {
     return this.eventsByTypes(CONTEXT_EVENT_TYPES, conversationId);
+  }
+
+  followupEvents(conversationId: string): Promise<LogEvent[]> {
+    return this.eventsByTypes([...FOLLOWUP_EVENT_TYPES, ...RUN_EVENT_TYPES], conversationId);
   }
 
   messageEvents(): Promise<LogEvent[]> {

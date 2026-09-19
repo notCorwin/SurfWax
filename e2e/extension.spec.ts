@@ -279,6 +279,15 @@ async function startNewConversation(page: Page): Promise<void> {
   await page.getByTestId("new-conversation").click();
 }
 
+async function nameCurrentConversation(page: Page, title: string): Promise<void> {
+  await page.getByTestId("conversation-menu").click();
+  await page.getByRole("button", { name: /^重命名 / }).first().click();
+  await page.getByRole("textbox", { name: "会话名称" }).fill(title);
+  await page.getByRole("textbox", { name: "会话名称" }).press("Enter");
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("conversation-menu")).toContainText(title);
+}
+
 async function enableUserScripts(context: BrowserContext, extensionId: string, extensionPage: Page): Promise<void> {
   if (await extensionPage.evaluate(() => typeof chrome.userScripts === "object")) return;
   const settings = await context.newPage();
@@ -1289,6 +1298,124 @@ test("streams complete Markdown without blocking draft input", async () => {
     })).toEqual({ background: "rgb(24, 24, 24)", variable: "1.25rem", markdownGap: "20px", partGap: "20px", turnGap: "20px" });
     await opened.page.getByTestId("thread-viewport").evaluate((viewport) => { viewport.scrollTop = 0; });
     await expect(composer).toBeInViewport();
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("queues multiple follow-up messages while running and dispatches them in FIFO order", async () => {
+  const provider = await startProvider([
+    streamingTextResponse(["FIRST_RUNNING", ...Array.from({ length: 12 }, () => "."), " FIRST_DONE"]),
+    textResponse("SECOND_DONE"),
+    textResponse("THIRD_DONE"),
+  ], 120);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("initial request");
+    await composer.press("Enter");
+    await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
+    await nameCurrentConversation(opened.page, "Follow-up FIFO");
+    await expect(composer).toBeEnabled();
+
+    await composer.fill("second request");
+    await composer.press("Enter");
+    await composer.fill("third request");
+    await composer.press("Enter");
+    await expect(opened.page.getByTestId("followup-item")).toHaveText([/second request/, /third request/]);
+
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("THIRD_DONE", { timeout: 15_000 });
+    await expect(opened.page.getByTestId("followup-queue")).toHaveCount(0);
+    await expect.poll(() => provider.requests.filter((request) => request.tools).length).toBe(3);
+    const agentRequests = provider.requests.filter((request) => request.tools);
+    expect(JSON.stringify(agentRequests[1].messages)).toContain("second request");
+    expect(JSON.stringify(agentRequests[2].messages)).toContain("third request");
+    expect(JSON.stringify(agentRequests[2].messages).indexOf("second request"))
+      .toBeLessThan(JSON.stringify(agentRequests[2].messages).indexOf("third request"));
+    const events = await readEvents(opened.page);
+    expect(events.filter((event) => event.type === "conversation.followup.queued")).toHaveLength(2);
+    expect(events.filter((event) => event.type === "conversation.followup.dispatched").map((event) => event.content.mode))
+      .toEqual(["followup", "followup"]);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("sends a selected follow-up immediately, closes interrupted tools and keeps the remaining queue", async () => {
+  const provider = await startProvider([
+    toolResponse("await new Promise((resolve) => setTimeout(resolve, 60_000)); return 'TOO_LATE'", "call-followup-interrupted"),
+    textResponse("URGENT_DONE"),
+    textResponse("Follow-up immediate"),
+    textResponse("LATER_DONE"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("long running request");
+    await composer.press("Enter");
+    await expect(opened.page.locator(".activity[data-status=running]")).toBeVisible();
+    await nameCurrentConversation(opened.page, "Follow-up immediate");
+    for (const message of ["later request", "urgent request", "remove request"]) {
+      await composer.fill(message);
+      await composer.press("Enter");
+    }
+    const queue = opened.page.getByTestId("followup-queue");
+    await expect(queue.getByTestId("followup-item")).toHaveCount(3);
+    await queue.getByTestId("followup-item").filter({ hasText: "remove request" }).getByRole("button", { name: "移除排队消息" }).click();
+    await expect(queue).not.toContainText("remove request");
+    await queue.getByTestId("followup-item").filter({ hasText: "urgent request" }).getByRole("button", { name: "立即发送" }).click();
+
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("LATER_DONE", { timeout: 15_000 });
+    await expect(queue).toHaveCount(0);
+    await expect.poll(() => provider.requests.filter((request) => request.tools).length).toBe(3);
+    const agentRequests = provider.requests.filter((request) => request.tools);
+    expect(JSON.stringify(agentRequests[1].messages)).toContain("urgent request");
+    expect(JSON.stringify(agentRequests[2].messages)).toContain("later request");
+    const events = await readEvents(opened.page);
+    expect(events.some((event) => event.type === "conversation.aborted")).toBe(true);
+    expect(events.some((event) => event.type === "tool.failed" && event.toolCallId === "call-followup-interrupted")).toBe(true);
+    expect(events.some((event) => event.type === "conversation.followup.removed")).toBe(true);
+    expect(events.find((event) => event.type === "conversation.followup.dispatched" && event.content.mode === "immediate")).toBeTruthy();
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("keeps paused follow-ups after stop and panel reload until the user resumes them", async () => {
+  const provider = await startProvider([
+    streamingTextResponse(["WORKING", ...Array.from({ length: 20 }, () => ".")]),
+    textResponse("RESUMED_DONE"),
+  ], 120);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("long request");
+    await composer.press("Enter");
+    await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
+    await nameCurrentConversation(opened.page, "Paused follow-up");
+    await composer.fill("saved request");
+    await composer.press("Enter");
+    await expect(opened.page.getByTestId("followup-queue")).toContainText("saved request");
+
+    await opened.page.getByRole("button", { name: "停止生成" }).click();
+    await expect(opened.page.getByRole("button", { name: "停止生成" })).toHaveCount(0);
+    await opened.page.reload();
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-item", { hasText: "Paused follow-up" }).locator(".conversation-select").click();
+    const queue = opened.page.getByTestId("followup-queue");
+    await expect(queue).toContainText("saved request");
+    await opened.page.waitForTimeout(500);
+    expect(provider.requests.filter((request) => request.tools)).toHaveLength(1);
+
+    await queue.getByRole("button", { name: "立即发送" }).click();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("RESUMED_DONE", { timeout: 15_000 });
+    await expect(queue).toHaveCount(0);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
