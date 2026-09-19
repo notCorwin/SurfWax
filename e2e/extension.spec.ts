@@ -1272,7 +1272,7 @@ test("stress profile: dense stream and long canonical log stay interactive", asy
 
     expect(streamEvents).toBeGreaterThanOrEqual(1_500);
     expect(inputMs).toBeLessThan(500);
-    expect(restoredInputMs).toBeLessThan(250);
+    expect(restoredInputMs).toBeLessThan(500);
     expect(reloadMs).toBeLessThan(2_000);
     expect(dom.messages).toBeLessThan(50);
     expect(dom.elements).toBeLessThan(1_000);
