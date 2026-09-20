@@ -4,7 +4,7 @@
 
 ## 核心架构
 
-1. 智能体的工具应尽最大程度，使其获得尽可能完整的浏览器控制能力。
+1. 让 LLM 在有限的上下文窗口内，更高效地操控浏览器。
 2. 使用最新稳定版 Vercel AI SDK，并支持 OpenAI-Compatible Endpoint 的 BYOK。
 3. 日志是整个会话唯一的 Canonical Event Log，不单独维护平行数据源。
 4. 不对网页内容进行脱敏、过滤或改写。
