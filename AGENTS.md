@@ -5,17 +5,14 @@
 ## 核心架构
 
 1. 智能体的工具应尽最大程度，使其获得尽可能完整的浏览器控制能力。
-
 2. 使用最新稳定版 Vercel AI SDK，并支持 OpenAI-Compatible Endpoint 的 BYOK。
-4. 日志是整个会话唯一的 Canonical Event Log，不单独维护平行数据源。
-
+3. 日志是整个会话唯一的 Canonical Event Log，不单独维护平行数据源。
 4. 不对网页内容进行脱敏、过滤或改写。
 
 ## 请求与执行生命周期
 
 1. 对**可恢复**错误自动无限重试，直到请求成功或用户主动中断。单次退避时间最高为 10 秒。
 2. Side Panel 关闭时，立即 Abort 当前模型请求和工具调用。
-
 
 ## LLM Context
 
@@ -33,19 +30,17 @@
 8. 侧边栏 UI 更新 Response 时按 Animation Frame 合并，避免每个 Token 都触发独立渲染。
 9. 用户消息使用消息气泡。Assistant 回复不使用气泡背景，正文直接占据消息区域可用宽度。
 
-
 ## 会话与交互
 
 1. 用户消息支持编辑、重试和分支。
-
 2. 会话支持重命名、归档和搜索。
 3. 会话运行时禁止切换到其他会话。
 4. 工具调用无论成功、失败还是被中断，都必须生成对应的 Tool Result。
 5. 提供独立的 User Scripts 管理标签页，用于查看和管理由本扩展维护的持久化脚本。
 6. 智能体正在操作某个网页时，在对应页面覆盖透明的 Interaction Blocker，阻止用户点击、输入等操作干扰智能体当前任务；不影响智能体自身的页面操作。
 
-
 ## 开发约定
 
 1. 完成有效修改后，主动创建 Git Commit 并 Push 到当前远程分支。
 2. GitHub Actions 的结果可作为参考。
+3. 测试日志保存在 `../.dev/chromium-profile/Default/IndexedDB`。
