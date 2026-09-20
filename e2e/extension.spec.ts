@@ -1,4 +1,4 @@
-import { chromium, expect, test, type BrowserContext, type Page } from "@playwright/test";
+import { chromium, expect, test, type BrowserContext, type CDPSession, type Page } from "@playwright/test";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -54,7 +54,8 @@ function streamingTextResponse(parts: string[]): string[] {
 function toolResponse(code: string | { code: string; tabId?: number; world?: "MAIN" | "USER_SCRIPT"; target?: { kind: string; tabId?: number; world?: string } }, id = "call-chrome-e2e"): string[] {
   const input = typeof code === "string" ? { mode: "run", code } : {
     mode: "run",
-    code: `return await browser.runIn(${JSON.stringify(code.target ?? { kind: "page", tabId: code.tabId, world: code.world ?? "MAIN" })}, ${JSON.stringify(code.code)});`,
+    target: code.target ?? { kind: "page", tabId: code.tabId, world: code.world ?? "MAIN" },
+    code: code.code,
   };
   return [
     chunk({
@@ -367,6 +368,38 @@ async function readEvents(page: Page): Promise<any[]> {
   }));
 }
 
+async function attachTarget(browserSession: CDPSession, targetId: string) {
+  const { sessionId } = await browserSession.send("Target.attachToTarget", { targetId, flatten: false });
+  let requestId = 0;
+  const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
+  const receive = ({ sessionId: incoming, message }: { sessionId: string; message: string }) => {
+    if (incoming !== sessionId) return;
+    const response = JSON.parse(message);
+    const request = pending.get(response.id);
+    if (!request) return;
+    pending.delete(response.id);
+    if (response.error) request.reject(new Error(response.error.message));
+    else request.resolve(response.result);
+  };
+  browserSession.on("Target.receivedMessageFromTarget", receive);
+  const send = <T = any>(method: string, params: object = {}) => new Promise<T>((resolveSend, rejectSend) => {
+    const id = ++requestId;
+    pending.set(id, { resolve: resolveSend, reject: rejectSend });
+    void browserSession.send("Target.sendMessageToTarget", { sessionId, message: JSON.stringify({ id, method, params }) }).catch(rejectSend);
+  });
+  return {
+    async evaluate<T>(expression: string): Promise<T> {
+      const response = await send<any>("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+      if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description ?? response.exceptionDetails.text);
+      return response.result.value as T;
+    },
+    async close() {
+      browserSession.off("Target.receivedMessageFromTarget", receive);
+      await browserSession.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
+    },
+  };
+}
+
 async function warnsOnLeave(page: Page): Promise<boolean> {
   return page.evaluate(() => {
     const event = new Event("beforeunload", { cancelable: true });
@@ -646,6 +679,93 @@ test("opens the real side panel through the extension action", async () => {
   }
 });
 
+test("uses a large observation from the real side panel before acting on its ref", async () => {
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  let panel: Awaited<ReturnType<typeof attachTarget>> | undefined;
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    await target.evaluate(() => {
+      document.body.innerHTML = '<button id="exact">Run exact action</button>';
+      document.querySelector("#exact")!.addEventListener("click", () => { document.body.dataset.clicked = "yes"; });
+      for (let index = 0; index < 350; index += 1) {
+        const button = document.createElement("button");
+        button.textContent = `Filler action ${String(index).padStart(3, "0")} with a deliberately long accessible name`;
+        document.body.append(button);
+      }
+    });
+    const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/target`);
+    expect(tab?.id).toBeDefined();
+
+    responses.push(
+      browserResponse({ mode: "observe", tabId: tab.id, detail: "semantic" }, "call-large-observe"),
+      (request) => {
+        const message = request.messages.findLast((entry: any) => entry.role === "tool");
+        const ref = JSON.parse(message.content).$ref;
+        return browserResponse({ mode: "result", id: ref, path: ["snapshot"], offset: 0, limit: 4000 }, "call-read-snapshot");
+      },
+      (request) => {
+        const message = request.messages.findLast((entry: any) => entry.role === "tool");
+        const snapshot = message.content;
+        const ref = /button "Run exact action" \[ref=(e\d+)\]/.exec(snapshot)?.[1];
+        if (!ref) throw new Error("The selected snapshot did not contain the target ref");
+        return browserResponse({ mode: "act", tabId: tab.id, steps: [
+          { type: "click", target: { ref } },
+          { type: "expect", target: { by: "css", value: "body[data-clicked=yes]" }, state: "attached" },
+        ] }, "call-act-from-ref");
+      },
+      textResponse("REAL_SIDE_PANEL_OK"),
+      textResponse("真实侧边栏"),
+    );
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.close();
+
+    const browserSession = await opened.context.browser()!.newBrowserCDPSession();
+    const { targetInfos } = await browserSession.send("Target.getTargets", { filter: [{ type: "tab", exclude: false }, { exclude: true }] });
+    const tabTarget = targetInfos.find((info) => info.type === "tab" && info.url === target.url());
+    expect(tabTarget).toBeDefined();
+    await browserSession.send("Extensions.triggerAction", { id: opened.extensionId, targetId: tabTarget!.targetId });
+    let sidePanelTargetId: string | undefined;
+    await expect.poll(async () => {
+      const targets = await browserSession.send("Target.getTargets");
+      sidePanelTargetId = targets.targetInfos.find((info) => info.url.startsWith(`chrome-extension://${opened.extensionId}/sidepanel.html`))?.targetId;
+      return Boolean(sidePanelTargetId);
+    }).toBe(true);
+    panel = await attachTarget(browserSession, sidePanelTargetId!);
+    await expect.poll(() => panel!.evaluate<boolean>('Boolean(document.querySelector("[data-testid=composer-input]"))')).toBe(true);
+    await panel.evaluate(`(async () => {
+      const input = document.querySelector('[data-testid=composer-input]');
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, 'observe the large page and use its exact ref');
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: input.value }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      input.closest('form').requestSubmit();
+    })()`);
+    await expect.poll(() => panel!.evaluate<string>('Array.from(document.querySelectorAll(".markdown-body")).at(-1)?.textContent || ""')).toContain("REAL_SIDE_PANEL_OK");
+    await expect.poll(() => target.locator("body").getAttribute("data-clicked")).toBe("yes");
+
+    const events = await panel.evaluate<any[]>(`new Promise((resolve, reject) => {
+      const request = indexedDB.open('side-agent-runtime');
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const all = request.result.transaction('events', 'readonly').objectStore('events').getAll();
+        all.onerror = () => reject(all.error); all.onsuccess = () => resolve(all.result);
+      };
+    })`);
+    const data = events.filter((event) => event.type === "tool.result.data");
+    expect(data).toHaveLength(1);
+    expect(data[0].output.snapshot.length).toBeGreaterThan(9_000);
+    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-large-observe")?.output).toMatchObject({ $ref: data[0].id });
+    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-read-snapshot")?.output).toContain('button "Run exact action" [ref=');
+    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-act-from-ref")?.output).toMatchObject({ ok: true });
+  } finally {
+    await panel?.close();
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
 test("targets page worlds and selects large tool output without creating another reference", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
@@ -663,7 +783,7 @@ test("targets page worlds and selects large tool output without creating another
       (request) => {
         const message = request.messages.findLast((entry: any) => entry.role === "tool");
         const ref = JSON.parse(message.content).$ref;
-        return toolResponse(`return await browser.result(${ref}, { path: "snapshot", offset: 0, limit: 11 });`, "call-select-large");
+        return browserResponse({ mode: "result", id: ref, path: ["snapshot"], offset: 0, limit: 11 }, "call-select-large");
       },
       textResponse("DONE_COMPACT"),
       textResponse("引用测试"),
@@ -698,7 +818,7 @@ test("targets page worlds and selects large tool output without creating another
   }
 });
 
-test("repairs stringified semantic actions and accepts a page facade in runIn", async () => {
+test("repairs stringified semantic actions and runs in an explicit page target", async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -714,7 +834,7 @@ test("repairs stringified semantic actions and accepts a page facade in runIn", 
         { type: "click", target: { by: "role", value: "button", name: "Sign in" } },
         { type: "expect", target: { by: "text", value: "Welcome me@example.com", exact: true }, state: "visible" },
       ]) }, "call-browser-act"),
-      pageResponse("return await browser.runIn(page, \"return document.title\");", tab.id!, "call-page-facade"),
+      toolResponse({ code: "return document.title;", target: { kind: "page", tabId: tab.id, world: "MAIN" } }, "call-page-target"),
       textResponse("PAGE_AUTOMATION_OK"),
       textResponse("页面自动化"),
     );
@@ -726,10 +846,10 @@ test("repairs stringified semantic actions and accepts a page facade in runIn", 
     const events = await readEvents(opened.page);
     const observation = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-browser-observe")?.output;
     const result = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-browser-act")?.output;
-    const pageFacadeResult = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-page-facade")?.output;
+    const pageTargetResult = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-page-target")?.output;
     expect(observation).toMatchObject({ observationId: expect.any(String), snapshot: expect.stringContaining("[ref=e") });
     expect(result).toMatchObject({ ok: true, completed: [{ type: "fill" }, { type: "click" }, { type: "expect" }] });
-    expect(pageFacadeResult).toBe("Automation Target");
+    expect(pageTargetResult).toBe("Automation Target");
     expect(events.find((event) => event.type === "tool.input.repaired" && event.toolCallId === "call-browser-act")).toMatchObject({
       input: { steps: expect.any(String) },
       output: { steps: expect.any(Array) },

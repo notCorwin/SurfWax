@@ -62,7 +62,14 @@ export type BrowserInput = {
 } | {
   mode: "run";
   code: string;
+  target?: ChromeTarget;
   timeoutMs?: number;
+} | {
+  mode: "result";
+  id: number;
+  path?: string | Array<string | number>;
+  offset?: number;
+  limit?: number;
 };
 
 export type ModelConfig = {

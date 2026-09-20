@@ -13,6 +13,7 @@ function event<T extends (...args: any[]) => void>() {
 function harness(
   metadata: object[] | undefined = [{ role: "button", name: "Sign in", tag: "button", text: "Sign in" }],
   states: object[] = [{ connected: true, x: 10, y: 12, visible: true, stable: true, enabled: true, editable: true, receivesEvents: true, checked: false }],
+  logger?: { record: ReturnType<typeof vi.fn> },
 ) {
   metadata ??= [{ role: "button", name: "Sign in", tag: "button", text: "Sign in" }];
   const calls: Array<{ method: string; params?: any }> = [];
@@ -53,6 +54,7 @@ function harness(
     command,
     detach,
     mark: vi.fn(async () => undefined),
+    logger: logger as never,
   });
   return { runtime, calls, command, detach, tabsCreated };
 }
@@ -149,6 +151,30 @@ describe("AutomationRuntime", () => {
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     await runtime.abortSessions();
     expect(detach).toHaveBeenCalledWith({ tabId: 3 });
+  });
+
+  it("returns timeout diagnostics while throttling repeated locator attempts", async () => {
+    vi.useFakeTimers();
+    try {
+      const logger = { record: vi.fn() };
+      const { runtime } = harness([], undefined, logger);
+      const controller = new AbortController();
+      runtime.setContext({ signal: controller.signal });
+      const page = await runtime.createPage(3);
+      const pending = page.getByText("missing").click();
+      const rejected = expect(pending).rejects.toThrow(/AutomationError\[timeout\].*lastObservation/);
+      setTimeout(() => controller.abort(new DOMException("timed out", "TimeoutError")), 2_200);
+      await vi.advanceTimersByTimeAsync(2_200);
+
+      await rejected;
+      const attempts = logger.record.mock.calls.map(([event]) => event).filter((event) => event.type === "automation.action.attempt");
+      expect(attempts).toHaveLength(3);
+      expect(attempts.map((event) => event.content.attempt)).toEqual([1, 21, 41]);
+      expect(logger.record.mock.calls.map(([event]) => event).find((event) => event.type === "automation.action.failed")?.content.diagnostic)
+        .toMatchObject({ code: "timeout", lastObservation: { reason: "no-candidate", attempt: 44 } });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("returns a Page handle for popups opened by the current tab", async () => {

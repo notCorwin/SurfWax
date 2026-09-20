@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { EventLogger, type LogEvent } from "../logging";
 import { USER_SCRIPTS_DATA_KEY, USER_SCRIPTS_STORAGE_KEY } from "../userscripts/persistence";
 import { ChromeExecutor } from "./executor";
 
@@ -132,12 +133,40 @@ describe("ChromeExecutor", () => {
     await expect(executor.execute({ tabId: 5, code: "return document.title" })).resolves.toBe("MAIN");
     await expect(executor.execute({ tabId: 5, world: "USER_SCRIPT", code: "return await Promise.resolve(document.title)" })).resolves.toBe("USER_SCRIPT");
     await expect(executor.execute({ code: "return document.title", target: { kind: "page", tabId: 5, frameId: 2, world: "MAIN" } })).resolves.toBe("MAIN");
-    expect(execute).toHaveBeenCalledTimes(3);
+    await expect(executor.executeBrowser({ mode: "run", target: { kind: "page", tabId: 5 }, code: "return document.title" })).resolves.toBe("MAIN");
+    expect(execute).toHaveBeenCalledTimes(4);
     expect(execute.mock.calls[0][0]).toMatchObject({ target: { tabId: 5 }, world: "MAIN", injectImmediately: true });
     expect(execute.mock.calls[0][0].js[0]?.code).toContain("return document.title");
     expect(execute.mock.calls[1][0].world).toBe("USER_SCRIPT");
     expect(execute.mock.calls[2][0].target).toEqual({ tabId: 5, frameIds: [2] });
     expect(fake.debuggerApi.attach).not.toHaveBeenCalled();
+    executor.dispose();
+  });
+
+  it("reads canonical tool results without entering a Chrome execution context", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: {
+      async append(event: Omit<LogEvent, "id">) { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; },
+      async all() { return [...events]; }, async clear() { events.length = 0; },
+    } });
+    const saved = await logger.append({ type: "tool.result.data", content: null, output: { observation: { snapshot: "abcdef" } } });
+    const fake = fakeChrome();
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test", logger });
+
+    await expect(executor.executeBrowser({ mode: "result", id: saved!.id, path: ["observation", "snapshot"], offset: 1, limit: 3 })).resolves.toBe("bcd");
+    expect(fake.debuggerApi.getTargets).not.toHaveBeenCalled();
+    executor.dispose();
+  });
+
+  it("applies the default ten-second timeout to act batches", async () => {
+    const fake = fakeChrome();
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    const timer = vi.spyOn(globalThis, "setTimeout");
+    await executor.executeBrowser({ mode: "act", tabId: 5, steps: [{ type: "unsupported" } as never] });
+    expect(timer.mock.calls.some(([, delay]) => delay === 10_000)).toBe(true);
+    await executor.executeBrowser({ mode: "act", tabId: 5, timeoutMs: 37, steps: [{ type: "unsupported" } as never] });
+    expect(timer.mock.calls.some(([, delay]) => delay === 37)).toBe(true);
+    timer.mockRestore();
     executor.dispose();
   });
 

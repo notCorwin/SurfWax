@@ -5,6 +5,11 @@ import type { BrowserInput } from "../types";
 import { ChromeExecutor } from "./executor";
 
 const timeout = z.number().int().positive().optional();
+const chromeTarget = z.object({
+  kind: z.enum(["auto", "extension", "service-worker", "page", "offscreen", "devtools"]),
+  tabId: z.number().int().nonnegative().optional(), frameId: z.number().int().nonnegative().optional(), documentId: z.string().min(1).optional(),
+  world: z.enum(["MAIN", "ISOLATED", "USER_SCRIPT"]).optional(), targetId: z.string().min(1).optional(), sessionId: z.string().min(1).optional(),
+}).strict();
 const selector = z.object({
   by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testId", "css"]), value: z.string().min(1),
   name: z.string().optional(), exact: z.boolean().optional(), index: z.number().int().optional(),
@@ -33,7 +38,8 @@ const step = z.discriminatedUnion("type", [
 export const browserToolInputSchema = z.discriminatedUnion("mode", [
   z.object({ mode: z.literal("observe"), tabId: z.number().int().nonnegative().optional(), detail: z.enum(["auto", "semantic", "visual"]).optional(), since: z.string().min(1).optional(), timeoutMs: timeout }).strict(),
   z.object({ mode: z.literal("act"), tabId: z.number().int().nonnegative().optional(), observationId: z.string().min(1).optional(), steps: z.array(step).min(1), timeoutMs: timeout }).strict(),
-  z.object({ mode: z.literal("run"), code: z.string().min(1), timeoutMs: timeout }).strict(),
+  z.object({ mode: z.literal("run"), code: z.string().min(1), target: chromeTarget.optional(), timeoutMs: timeout }).strict(),
+  z.object({ mode: z.literal("result"), id: z.number().int().positive(), path: z.union([z.string(), z.array(z.union([z.string(), z.number().int()]))]).optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().nonnegative().optional() }).strict(),
 ]);
 
 export function parseBrowserToolInput(input: unknown): BrowserInput { return browserToolInputSchema.parse(input) as BrowserInput; }
@@ -60,6 +66,21 @@ function hasScreenshot(value: unknown): boolean {
   return Boolean(value && typeof value === "object" && ("screenshot" in value && (value as any).screenshot?.data || Object.values(value).some(hasScreenshot)));
 }
 
+function valueAt(value: unknown, path: readonly (string | number)[]): unknown {
+  return path.reduce<unknown>((current, part) => current !== null && typeof current === "object" ? (current as any)[part] : undefined, value);
+}
+
+function readablePathOf(value: unknown): Array<string | number> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const preferred = [["snapshot"], ["observation", "snapshot"], ["text"], ["html"]] as const;
+  for (const path of preferred) {
+    const selected = valueAt(value, path);
+    if (typeof selected === "string" || Array.isArray(selected)) return [...path];
+  }
+  const key = Object.keys(value).find((candidate) => typeof (value as Record<string, unknown>)[candidate] === "string" || Array.isArray((value as Record<string, unknown>)[candidate]));
+  return key ? [key] : undefined;
+}
+
 export async function compactToolResult(value: unknown, options: { logger?: EventLogger; conversationId?: string; toolCallId?: string }): Promise<unknown> {
   if (value && typeof value === "object" && "$ref" in value && "access" in value && "scope" in value) return value;
   let serialized: string | undefined;
@@ -70,23 +91,21 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
   const event = await options.logger.append({ type: "tool.result.data", conversationId: options.conversationId, toolCallId: options.toolCallId, content: { bytes }, output: value });
   if (!event) throw new Error("Could not save large tool result");
   const keys = value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).slice(0, 16) : undefined;
-  const readableKey = keys && ["text", "snapshot", "html", ...keys].find((key, index, all) => all.indexOf(key) === index
-    && (typeof (value as Record<string, unknown>)[key] === "string" || Array.isArray((value as Record<string, unknown>)[key])));
-  const access = typeof value === "string" ? `await browser.result(${event.id}, { offset: 0, limit: 4000 })`
-    : Array.isArray(value) ? `await browser.result(${event.id}, { offset: 0, limit: 50 })`
-    : readableKey ? `await browser.result(${event.id}, { path: [${JSON.stringify(readableKey)}], offset: 0, limit: 4000 })`
-    : keys?.[0] ? `await browser.result(${event.id}, { path: [${JSON.stringify(keys[0])}] })`
-    : `await browser.result(${event.id})`;
+  const path = readablePathOf(value);
+  const selected = path ? valueAt(value, path) : value;
+  const access = JSON.stringify({ mode: "result", id: event.id, ...(path ? { path } : {}),
+    ...(typeof selected === "string" ? { offset: 0, limit: 4000 } : Array.isArray(selected) ? { offset: 0, limit: 50 } : {}) });
   return { $ref: event.id, ref: event.id, type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value, bytes, preview: previewOf(value), ...(keys ? { keys } : {}), access, host: "log", contextId: options.conversationId ?? "global", expiresAt: null, scope: "extension" };
 }
 
 export function createBrowserTool(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string; visualEnabled?: () => Promise<boolean> } = {}) {
   return dynamicTool({
-    description: "Control Chrome. Prefer observe then act for semantic refs, strict locators, real input, waits, and structured recovery. act.steps must be a JSON array, never a string. run executes in the extension realm and every run must explicitly return a value. For page DOM use (await browser.page(tabId)).evaluate(...); use browser.runIn(target, code) for an explicit ChromeTarget or a page returned by browser.page. Large $ref results must be selected and reduced inside one run with the exact access example before returning. An action only confirms input was sent, so use expect for the intended outcome.",
+    description: "Control Chrome. Prefer observe then act with semantic refs or role/label/text locators. Read large $ref output with mode=result and its exact access input before acting; never guess locators without page content. act.steps must be a JSON array and defaults to a 10 second timeout. run executes code in the explicit target (extension by default) and must return a value. An action only confirms input was sent, so use expect for the intended outcome.",
     inputSchema: browserToolInputSchema, needsApproval: false,
     execute: async (input, { abortSignal, toolCallId }) => {
       const parsed = parseBrowserToolInput(input);
-      return compactToolResult(await executor.executeBrowser(parsed, abortSignal, { conversationId: options.conversationId, toolCallId, visualEnabled: parsed.mode === "run" ? false : await options.visualEnabled?.() ?? false }), { ...options, toolCallId });
+      const result = await executor.executeBrowser(parsed, abortSignal, { conversationId: options.conversationId, toolCallId, visualEnabled: parsed.mode === "observe" ? await options.visualEnabled?.() ?? false : false });
+      return parsed.mode === "result" ? result : compactToolResult(result, { ...options, toolCallId });
     },
   });
 }

@@ -352,8 +352,13 @@ export class ChromeExecutor {
   }
 
   private async executeBrowserTimed(input: BrowserInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
-    const timeout = input.timeoutMs ? new AbortController() : undefined;
-    const timer = timeout ? setTimeout(() => timeout.abort(new DOMException(`Operation timed out after ${input.timeoutMs}ms`, "TimeoutError")), input.timeoutMs) : undefined;
+    if (input.mode === "result") {
+      if (!this.logger) throw new Error("Tool result log is unavailable");
+      return this.logger.result(input.id, { path: input.path, offset: input.offset, limit: input.limit });
+    }
+    const timeoutMs = input.timeoutMs ?? (input.mode === "act" ? 10_000 : undefined);
+    const timeout = timeoutMs ? new AbortController() : undefined;
+    const timer = timeout ? setTimeout(() => timeout.abort(new DOMException(`Operation timed out after ${timeoutMs}ms`, "TimeoutError")), timeoutMs) : undefined;
     const combined = timeout ? signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal : signal;
     try {
       if (this.disposed) throw new Error("Chrome executor has been disposed");
@@ -362,7 +367,7 @@ export class ChromeExecutor {
       this.automation.setContext({ ...context, signal: combined });
       this.activeSignal = combined;
       this.activeContext = context;
-      if (input.mode === "run") return await this.executeNow({ code: input.code, target: { kind: "extension" }, timeoutMs: input.timeoutMs }, combined, context);
+      if (input.mode === "run") return await this.executeNow({ code: input.code, target: input.target ?? { kind: "extension" }, timeoutMs }, combined, context);
       const page = await this.automation.createPage(input.tabId);
       if (input.mode === "observe") {
         if (input.detail === "visual" && !context.visualEnabled) throw new Error("AutomationError[visual-unavailable]: Image input is disabled or unsupported by the selected model");
@@ -376,7 +381,7 @@ export class ChromeExecutor {
       return await this.executeSteps(page, input.steps, input.observationId, context.visualEnabled ?? false);
     } catch (error) {
       if (combined?.aborted) await this.automation.abortSessions();
-      const failure = timeout?.signal.aborted && !signal?.aborted ? new Error(`AutomationError[timeout]: ${JSON.stringify({ timeoutMs: input.timeoutMs })}`) : error;
+      const failure = timeout?.signal.aborted && !signal?.aborted ? new Error(`AutomationError[timeout]: ${JSON.stringify({ timeoutMs })}`) : error;
       this.recordExecutionFailure(failure, input, context);
       return { ok: false, error: this.structuredError(failure), completed: [], failed: null, notRun: input.mode === "act" ? input.steps : [] };
     } finally {
@@ -523,6 +528,11 @@ export class ChromeExecutor {
       if (!Number.isInteger(target.tabId) && !target.targetId) throw new Error("A page target requires tabId or targetId. Query chrome.tabs or chrome.debugger.getTargets first.");
       if (Number.isInteger(target.tabId)) await (globalThis as Record<string, any>).__surfWaxGuard?.mark(target.tabId);
       throwIfAborted(signal);
+      if (target.tabId !== undefined && target.frameId === undefined && target.documentId === undefined && !target.targetId && !target.sessionId
+        && (target.world === undefined || target.world === "MAIN") && this.automation.hasSession(target.tabId)) {
+        const value = await this.awaitAbort(this.automation.pageValue(target.tabId, pageExpressionFor(input.code)), signal);
+        return evaluationValue({ result: { value } }, "page");
+      }
       if (target.tabId !== undefined && target.world !== "ISOLATED" && this.chromeApi.userScripts?.execute) {
         const targetSpec = target.documentId
           ? { tabId: target.tabId!, documentIds: [target.documentId] }

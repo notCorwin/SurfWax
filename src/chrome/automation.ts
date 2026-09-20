@@ -128,8 +128,13 @@ function abortError(): DOMException {
   return new DOMException("Operation aborted", "AbortError");
 }
 
+function signalError(signal: AbortSignal): unknown {
+  const reason = signal.reason;
+  return reason && typeof reason === "object" && typeof reason.name === "string" ? reason : abortError();
+}
+
 function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : abortError();
+  if (signal?.aborted) throw signalError(signal);
 }
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
@@ -137,7 +142,7 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
   throwIfAborted(signal);
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, ms);
-    const abort = () => { clearTimeout(timer); reject(signal.reason instanceof Error ? signal.reason : abortError()); };
+    const abort = () => { clearTimeout(timer); reject(signalError(signal)); };
     signal.addEventListener("abort", abort, { once: true });
   });
 }
@@ -169,7 +174,8 @@ export class AutomationRuntime {
   private readonly objectDebuggees = new Map<string, Debuggee>();
   private context: RunContext = {};
   private readonly waiters = new Map<number, Map<string, Set<Waiter>>>();
-  private lastWait?: { locator: LocatorSpec; state?: ElementState; matches?: number; candidates?: Candidate[]; documentId: number; reason: string };
+  private lastWait?: { locator: LocatorSpec; state?: ElementState; matches?: number; candidates?: Candidate[]; documentId: number; reason: string; attempt: number };
+  private lastAttemptLog?: { reason: string; at: number };
   private readonly observations = new Map<string, ObservationRecord>();
   private readonly axRoots = new Map<string, number>();
 
@@ -177,7 +183,10 @@ export class AutomationRuntime {
 
   private recordAttempt(session: Session, locator: LocatorSpec, attempt: number, reason: string, candidates: Candidate[], state?: ElementState): void {
     const summary = candidates.slice(0, 5).map(({ role, name, tag, text, ref }) => ({ role, name, tag, text, ref }));
-    this.lastWait = { locator, matches: candidates.length, candidates: summary, state, documentId: session.generation, reason };
+    this.lastWait = { locator, matches: candidates.length, candidates: summary, state, documentId: session.generation, reason, attempt };
+    const now = performance.now();
+    if (attempt !== 1 && this.lastAttemptLog?.reason === reason && now - this.lastAttemptLog.at < 1_000) return;
+    this.lastAttemptLog = { reason, at: now };
     this.options.logger?.record({
       type: "automation.action.attempt",
       conversationId: this.context.conversationId,
@@ -195,6 +204,7 @@ export class AutomationRuntime {
   }) {}
 
   setContext(context: RunContext): void { this.context = context; }
+  hasSession(tabId: number): boolean { return this.sessions.has(tabId); }
   async clearContext(): Promise<void> {
     this.context = {};
     const debuggees = new Map<string, Debuggee>();
@@ -1005,6 +1015,7 @@ export class AutomationRuntime {
   private async action<T>(tabId: number, operation: string, locator: LocatorSpec | null, run: () => Promise<T>): Promise<T> {
     const startedAt = performance.now();
     this.lastWait = undefined;
+    this.lastAttemptLog = undefined;
     this.options.logger?.record({ type: "automation.action.started", conversationId: this.context.conversationId, toolCallId: this.context.toolCallId, content: { tabId, operation, locator } });
     try {
       const result = await run();
@@ -1012,7 +1023,7 @@ export class AutomationRuntime {
       return result;
     } catch (error) {
       const lastWait = this.waitDiagnostic();
-      const failure = error instanceof Error && error.name === "TimeoutError"
+      const failure = error && typeof error === "object" && (error as { name?: string }).name === "TimeoutError"
         ? automationError(lastWait?.state?.receivesEvents === false ? "intercepted" : "timeout", { operation, locator, lastObservation: lastWait ?? null })
         : error;
       this.options.logger?.record({

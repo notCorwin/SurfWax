@@ -112,11 +112,12 @@ Side Panel 标题栏的脚本按钮会打开独立的用户脚本页面。列表
 ```json
 {
   "mode": "run",
-  "code": "return await browser.runIn({ kind: 'page', tabId: 123, world: 'MAIN' }, 'return document.title');"
+  "target": { "kind": "page", "tabId": 123, "world": "MAIN" },
+  "code": "return document.title;"
 }
 ```
 
-`run` 默认运行在扩展上下文；页面 DOM 优先使用 `const page = await browser.page(tabId); return await page.evaluate(...)`。`browser.runIn(target, code)` 同时接受正式的 ChromeTarget 和 `browser.page(tabId)` 返回的 PageFacade；所有 `run` 代码都必须显式 `return`。
+`run` 默认运行在扩展上下文；页面、service worker、offscreen 和 devtools 脚本通过 `target` 直接选择执行上下文。所有 `run` 代码都必须显式 `return`。
 
 页面目标优先通过原生 `chrome.userScripts.execute` 执行；该接口不可用时，`MAIN` 使用 CDP，`USER_SCRIPT` 返回明确错误。脚本执行失败不会自动换通道重试。
 
@@ -130,7 +131,7 @@ Side Panel 标题栏的脚本按钮会打开独立的用户脚本页面。列表
 
 跨多次调用时，保留 `chrome.debugger` 附加的页面会话及 `chrome.debugger.onEvent` 监听器；完成后主动 `detach`，关闭面板也会解除附加。跨进程 iframe 和 worker 可用 `Target.setAutoAttach({ autoAttach: true, flatten: true, waitForDebuggerOnStart: false })` 获取子会话，并在 `sendCommand` 的 debuggee 中传入 `sessionId`。同进程 iframe 可从 `Runtime.executionContextCreated` 找到 `contextId`；页面导航后重新查找上下文。
 
-不超过 8 KiB 的 JSON 值直接返回。更大的结果先完整写入事件日志，再返回事件 ID、大小、可用顶层键和可复制的读取示例；可在后续 `run` 中用 `await browser.result(id, { path: "snapshot", offset: 0, limit: 4000 })` 或数组路径读取，并只 `return` 所需字段或片段。此引用关闭面板后仍可读取，删除所属对话时失效。
+不超过 8 KiB 的 JSON 值直接返回。更大的结果先完整写入事件日志，再返回事件 ID、大小、可用顶层键和可直接提交的 `mode: "result"` 读取输入；`path` 可选嵌套字段，`offset` / `limit` 用于字符串或数组分页。此模式直接读取 Canonical Event Log，不进入页面或 Side Panel 执行上下文，也不会为读取结果再生成引用。引用关闭面板后仍可读取，删除所属对话时失效。
 
 ### 持久 User Script
 

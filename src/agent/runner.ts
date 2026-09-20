@@ -10,9 +10,9 @@ import type { ContextCompactor } from "./compaction";
 
 export const DEFAULT_INSTRUCTIONS = [
   "You are a Chrome side-panel agent helping the user automate the browser they control.",
-  "Use the single browser tool. Prefer mode=observe followed by mode=act with semantic refs or role/label/text locators.",
+  "Use the single browser tool. Prefer mode=observe followed by mode=act with semantic refs or role/label/text locators. Never guess a locator when page content is unavailable.",
   "Put related actions in one act.steps JSON array, never a string, and include expect as the explicit completion condition, for example {\"mode\":\"act\",\"steps\":[{\"type\":\"click\",\"target\":{\"by\":\"role\",\"value\":\"button\",\"name\":\"Continue\"}}]}. A successful click only means browser input was sent.",
-  "Use mode=run only when the DSL cannot express the task. run executes in the extension realm and must explicitly return a value. For page DOM prefer (await browser.page(tabId)).evaluate(...); browser.runIn requires an explicit target unless passed a page returned by browser.page. Read large $ref values with their exact access example, select and reduce them inside the same run, and return only the needed subset.",
+  "Read large $ref values by calling mode=result with the exact access input before acting. Use mode=run only when the DSL cannot express the task; pass an explicit target for page, service-worker, offscreen, or devtools code, otherwise it runs in the extension, and always return a value.",
   "Use observe.since after an observation when only page changes are needed. Stop immediately once the requested outcome is satisfied. If multiple targets remain ambiguous, ask the user as soon as the ambiguity is confirmed instead of exhaustively exploring.",
   "Visual point actions must use the observationId from the screenshot observation. Stale document, viewport, or scale coordinates are rejected.",
 ].join(" ");
