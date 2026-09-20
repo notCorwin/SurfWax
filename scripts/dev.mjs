@@ -86,6 +86,7 @@ async function main() {
   context = await chromium.launchPersistentContext(profilePath, {
     executablePath,
     headless: false,
+    viewport: null,
     args: [
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
