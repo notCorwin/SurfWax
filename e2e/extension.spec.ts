@@ -646,8 +646,8 @@ test("opens the real side panel through the extension action", async () => {
   }
 });
 
-test("targets page worlds and keeps large tool output out of model history", async () => {
-  const responses: string[][] = [];
+test("targets page worlds and selects large tool output without creating another reference", async () => {
+  const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
   try {
@@ -659,7 +659,12 @@ test("targets page worlds and keeps large tool output out of model history", asy
     responses.push(
       toolResponse({ code: "return document.title", target: { kind: "page", tabId: tab.id, world: "MAIN" } }, "call-main"),
       toolResponse({ code: "return await Promise.resolve(document.title + ' USER')", target: { kind: "page", tabId: tab.id, world: "USER_SCRIPT" } }, "call-user"),
-      toolResponse("return 'LARGE_START' + 'zx'.repeat(6000)", "call-large"),
+      toolResponse("return { url: 'https://example.com', snapshot: 'LARGE_START' + 'zx'.repeat(6000) }", "call-large"),
+      (request) => {
+        const message = request.messages.findLast((entry: any) => entry.role === "tool");
+        const ref = JSON.parse(message.content).$ref;
+        return toolResponse(`return await browser.result(${ref}, { path: "snapshot", offset: 0, limit: 11 });`, "call-select-large");
+      },
       textResponse("DONE_COMPACT"),
       textResponse("引用测试"),
     );
@@ -669,28 +674,31 @@ test("targets page worlds and keeps large tool output out of model history", asy
     await composer.fill("inspect page contexts and a large result");
     await composer.press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("DONE_COMPACT");
-    await expect.poll(() => provider.requests.filter((request) => request.tools).length).toBeGreaterThanOrEqual(4);
+    await expect.poll(() => provider.requests.filter((request) => request.tools).length).toBeGreaterThanOrEqual(5);
     const requests = provider.requests.filter((request) => request.tools);
     expect(JSON.stringify(requests[1].messages)).toContain("Side Agent Target");
     expect(JSON.stringify(requests[2].messages)).toContain("Side Agent Target USER");
     const fourthPrompt = JSON.stringify(requests[3].messages);
     expect(fourthPrompt).toContain("$ref");
     expect(fourthPrompt).not.toContain("zx".repeat(200));
+    expect(JSON.stringify(requests[4].messages)).toContain("LARGE_START");
     const events = await readEvents(opened.page);
     const data = events.find((event) => event.type === "tool.result.data");
-    expect(data.output).toBe("LARGE_START" + "zx".repeat(6000));
+    expect(data.output).toEqual({ url: "https://example.com", snapshot: "LARGE_START" + "zx".repeat(6000) });
     expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-large")?.output.$ref).toBe(data.id);
+    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-select-large")?.output).toBe("LARGE_START");
+    expect(events.filter((event) => event.type === "tool.result.data")).toHaveLength(1);
     await opened.page.reload();
     await expect.poll(() => opened.page.evaluate(async (id) => {
       const read = (globalThis as any).__surfWaxResult;
-      return typeof read === "function" ? (await read(id)).slice(0, 11) : null;
+      return typeof read === "function" ? (await read(id)).snapshot.slice(0, 11) : null;
     }, data.id)).toBe("LARGE_START");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
 
-test("runs the semantic observe/act DSL with trusted input and explicit completion", async () => {
+test("repairs stringified semantic actions and accepts a page facade in runIn", async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -701,11 +709,12 @@ test("runs the semantic observe/act DSL with trusted input and explicit completi
     expect(tab?.id).toBeDefined();
     responses.push(
       browserResponse({ mode: "observe", tabId: tab.id, detail: "semantic" }, "call-browser-observe"),
-      browserResponse({ mode: "act", tabId: tab.id, steps: [
+      browserResponse({ mode: "act", tabId: tab.id, steps: JSON.stringify([
         { type: "fill", target: { by: "label", value: "Email" }, value: "me@example.com" },
         { type: "click", target: { by: "role", value: "button", name: "Sign in" } },
         { type: "expect", target: { by: "text", value: "Welcome me@example.com", exact: true }, state: "visible" },
-      ] }, "call-browser-act"),
+      ]) }, "call-browser-act"),
+      pageResponse("return await browser.runIn(page, \"return document.title\");", tab.id!, "call-page-facade"),
       textResponse("PAGE_AUTOMATION_OK"),
       textResponse("页面自动化"),
     );
@@ -717,11 +726,18 @@ test("runs the semantic observe/act DSL with trusted input and explicit completi
     const events = await readEvents(opened.page);
     const observation = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-browser-observe")?.output;
     const result = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-browser-act")?.output;
+    const pageFacadeResult = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-page-facade")?.output;
     expect(observation).toMatchObject({ observationId: expect.any(String), snapshot: expect.stringContaining("[ref=e") });
     expect(result).toMatchObject({ ok: true, completed: [{ type: "fill" }, { type: "click" }, { type: "expect" }] });
+    expect(pageFacadeResult).toBe("Automation Target");
+    expect(events.find((event) => event.type === "tool.input.repaired" && event.toolCallId === "call-browser-act")).toMatchObject({
+      input: { steps: expect.any(String) },
+      output: { steps: expect.any(Array) },
+    });
     await expect.poll(() => target.locator("output").textContent()).toBe("Welcome me@example.com");
     expect(events.some((event) => event.type === "automation.action.finished" && event.toolCallId === "call-browser-act")).toBe(true);
     expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).toEqual(["browser"]);
+    expect(provider.requests.filter((request) => request.tools)).toHaveLength(4);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }

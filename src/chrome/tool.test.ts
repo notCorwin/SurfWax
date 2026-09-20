@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EventLogger, type LogEvent } from "../logging";
-import { compactToolResult, parseBrowserToolInput, prepareBrowserMessages } from "./tool";
+import { compactToolResult, parseBrowserToolInput, prepareBrowserMessages, repairBrowserToolCall } from "./tool";
 
 describe("browser tool input", () => {
   it("validates the three modes and deterministic action schema", () => {
@@ -11,6 +11,15 @@ describe("browser tool input", () => {
     expect(() => parseBrowserToolInput({ mode: "act", steps: [] })).toThrow();
     expect(() => parseBrowserToolInput({ mode: "act", steps: [{ type: "expect", target: { ref: "e1" } }] })).toThrow();
     expect(() => parseBrowserToolInput({ mode: "act", steps: [{ type: "upload", target: { ref: "e1" }, files: [{ name: "x", text: "x", base64: "eA==" }] }] })).toThrow();
+  });
+
+  it("repairs only stringified act steps before strict validation", () => {
+    const repaired = repairBrowserToolCall({ toolName: "browser", input: JSON.stringify({ mode: "act", steps: JSON.stringify([{ type: "goto", url: "https://example.com" }]) }) });
+    expect(parseBrowserToolInput(JSON.parse(repaired!.input))).toEqual({ mode: "act", steps: [{ type: "goto", url: "https://example.com" }] });
+    expect(repairBrowserToolCall({ toolName: "browser", input: JSON.stringify({ mode: "act", steps: "not json" }) })).toBeNull();
+    expect(repairBrowserToolCall({ toolName: "browser", input: JSON.stringify({ mode: "act", steps: JSON.stringify({ type: "goto" }) }) })).toBeNull();
+    expect(repairBrowserToolCall({ toolName: "other", input: JSON.stringify({ mode: "act", steps: "[]" }) })).toBeNull();
+    expect(() => parseBrowserToolInput(JSON.parse(repairBrowserToolCall({ toolName: "browser", input: JSON.stringify({ mode: "act", steps: JSON.stringify([{ type: "goto", url: "invalid" }]) }) })!.input))).toThrow();
   });
 
   it("persists large output before returning a compact reference, then expires it on deletion", async () => {
@@ -24,7 +33,7 @@ describe("browser tool input", () => {
     const logger = new EventLogger({ store });
     const large = Array.from({ length: 1500 }, (_, index) => ({ index, text: "网页内容" }));
     const result = await compactToolResult(large, { logger, conversationId: "one", toolCallId: "call-1" }) as Record<string, unknown>;
-    expect(result).toMatchObject({ $ref: 1, type: "array", preview: "Array(1500)", access: "await browser.result(1, {path?, offset?, limit?})" });
+    expect(result).toMatchObject({ $ref: 1, type: "array", preview: "Array(1500)", access: "await browser.result(1, { offset: 0, limit: 50 })" });
     expect(JSON.stringify(result).length).toBeLessThan(220);
     expect(events[0]).toMatchObject({ type: "tool.result.data", conversationId: "one", toolCallId: "call-1", output: large });
     expect((await logger.result(1) as typeof large).slice(0, 2)).toEqual(large.slice(0, 2));
@@ -32,6 +41,19 @@ describe("browser tool input", () => {
     await logger.deleteConversation("one");
     await expect(logger.result(1)).rejects.toThrow("unavailable");
     expect(await compactToolResult("small", { logger, conversationId: "one" })).toBe("small");
+  });
+
+  it("describes selectable object results with real keys and a bounded access example", async () => {
+    const events: LogEvent[] = [];
+    const store = {
+      async append(event: Omit<LogEvent, "id">) { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; },
+      async all() { return [...events]; }, async clear() { events.length = 0; },
+    };
+    const logger = new EventLogger({ store });
+    const result = await compactToolResult({ url: "https://example.com", snapshot: "page".repeat(3000) }, { logger }) as Record<string, unknown>;
+    expect(result).toMatchObject({ keys: ["url", "snapshot"], access: 'await browser.result(1, { path: ["snapshot"], offset: 0, limit: 4000 })' });
+    expect(await logger.result(1, { path: "snapshot", offset: 4, limit: 4 })).toBe("page");
+    await expect(logger.result(1, { limit: 4 })).rejects.toThrow('path: ["url"]');
   });
 
   it("injects only the latest screenshot into the next model step", () => {

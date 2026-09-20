@@ -1,6 +1,6 @@
 import { isLoopFinished, ToolLoopAgent } from "ai";
 import type { LanguageModel } from "ai";
-import { createBrowserTool, prepareBrowserMessages } from "../chrome/tool";
+import { createBrowserTool, prepareBrowserMessages, repairBrowserToolCall } from "../chrome/tool";
 import { ChromeExecutor } from "../chrome/executor";
 import type { EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
@@ -11,8 +11,9 @@ import type { ContextCompactor } from "./compaction";
 export const DEFAULT_INSTRUCTIONS = [
   "You are a Chrome side-panel agent helping the user automate the browser they control.",
   "Use the single browser tool. Prefer mode=observe followed by mode=act with semantic refs or role/label/text locators.",
-  "Put related actions in one act.steps batch and include expect as the explicit completion condition. A successful click only means browser input was sent.",
-  "Use mode=run only when the DSL cannot express the task. Its code can use the full proxied chrome API, browser.page(tabId?), browser.runIn(target, code), browser.cdp(debuggee), and browser.result(id). Return values explicitly.",
+  "Put related actions in one act.steps JSON array, never a string, and include expect as the explicit completion condition, for example {\"mode\":\"act\",\"steps\":[{\"type\":\"click\",\"target\":{\"by\":\"role\",\"value\":\"button\",\"name\":\"Continue\"}}]}. A successful click only means browser input was sent.",
+  "Use mode=run only when the DSL cannot express the task. run executes in the extension realm and must explicitly return a value. For page DOM prefer (await browser.page(tabId)).evaluate(...); browser.runIn requires an explicit target unless passed a page returned by browser.page. Read large $ref values with their exact access example, select and reduce them inside the same run, and return only the needed subset.",
+  "Use observe.since after an observation when only page changes are needed. Stop immediately once the requested outcome is satisfied. If multiple targets remain ambiguous, ask the user as soon as the ambiguity is confirmed instead of exhaustively exploring.",
   "Visual point actions must use the observationId from the screenshot observation. Stale document, viewport, or scale coordinates are rejected.",
 ].join(" ");
 
@@ -40,6 +41,15 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     prepareStep: async ({ messages, stepNumber }) => ({
       messages: prepareBrowserMessages(await options.compactor?.prepare(messages, stepNumber) ?? messages, stepNumber),
     }),
+    repairToolCall: async ({ toolCall }) => {
+      const repaired = repairBrowserToolCall(toolCall);
+      if (repaired) logger?.record({
+        type: "tool.input.repaired", conversationId: options.conversationId, toolCallId: toolCall.toolCallId,
+        content: { toolName: toolCall.toolName, repair: "stringified-act-steps" },
+        input: JSON.parse(toolCall.input), output: JSON.parse(repaired.input),
+      });
+      return repaired;
+    },
     ...(logger ? {
       onStart: (event) => logger.record({
         type: "model.started",

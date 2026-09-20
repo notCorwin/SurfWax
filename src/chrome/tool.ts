@@ -38,6 +38,17 @@ export const browserToolInputSchema = z.discriminatedUnion("mode", [
 
 export function parseBrowserToolInput(input: unknown): BrowserInput { return browserToolInputSchema.parse(input) as BrowserInput; }
 
+export function repairBrowserToolCall<T extends { toolName: string; input: string }>(toolCall: T): T | null {
+  if (toolCall.toolName !== "browser") return null;
+  try {
+    const input = JSON.parse(toolCall.input);
+    if (input?.mode !== "act" || typeof input.steps !== "string") return null;
+    const steps = JSON.parse(input.steps);
+    if (!Array.isArray(steps)) return null;
+    return { ...toolCall, input: JSON.stringify({ ...input, steps }) };
+  } catch { return null; }
+}
+
 const LARGE_RESULT_BYTES = 8 * 1024;
 function previewOf(value: unknown): string {
   if (typeof value === "string") return value.slice(0, 160);
@@ -58,12 +69,20 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
   if (bytes <= LARGE_RESULT_BYTES) return value;
   const event = await options.logger.append({ type: "tool.result.data", conversationId: options.conversationId, toolCallId: options.toolCallId, content: { bytes }, output: value });
   if (!event) throw new Error("Could not save large tool result");
-  return { $ref: event.id, ref: event.id, type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value, bytes, preview: previewOf(value), access: `await browser.result(${event.id}, {path?, offset?, limit?})`, host: "log", contextId: options.conversationId ?? "global", expiresAt: null, scope: "extension" };
+  const keys = value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).slice(0, 16) : undefined;
+  const readableKey = keys && ["text", "snapshot", "html", ...keys].find((key, index, all) => all.indexOf(key) === index
+    && (typeof (value as Record<string, unknown>)[key] === "string" || Array.isArray((value as Record<string, unknown>)[key])));
+  const access = typeof value === "string" ? `await browser.result(${event.id}, { offset: 0, limit: 4000 })`
+    : Array.isArray(value) ? `await browser.result(${event.id}, { offset: 0, limit: 50 })`
+    : readableKey ? `await browser.result(${event.id}, { path: [${JSON.stringify(readableKey)}], offset: 0, limit: 4000 })`
+    : keys?.[0] ? `await browser.result(${event.id}, { path: [${JSON.stringify(keys[0])}] })`
+    : `await browser.result(${event.id})`;
+  return { $ref: event.id, ref: event.id, type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value, bytes, preview: previewOf(value), ...(keys ? { keys } : {}), access, host: "log", contextId: options.conversationId ?? "global", expiresAt: null, scope: "extension" };
 }
 
 export function createBrowserTool(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string; visualEnabled?: () => Promise<boolean> } = {}) {
   return dynamicTool({
-    description: "Control Chrome. Prefer observe then act for semantic refs, strict locators, real input, waits, and structured recovery. Use run only when the DSL cannot express the task; run exposes browser.page(tabId?), browser.runIn(target, code), browser.cdp(debuggee), browser.result(id), and the complete proxied chrome API. An action only confirms input was sent, so use expect for the intended outcome.",
+    description: "Control Chrome. Prefer observe then act for semantic refs, strict locators, real input, waits, and structured recovery. act.steps must be a JSON array, never a string. run executes in the extension realm and every run must explicitly return a value. For page DOM use (await browser.page(tabId)).evaluate(...); use browser.runIn(target, code) for an explicit ChromeTarget or a page returned by browser.page. Large $ref results must be selected and reduced inside one run with the exact access example before returning. An action only confirms input was sent, so use expect for the intended outcome.",
     inputSchema: browserToolInputSchema, needsApproval: false,
     execute: async (input, { abortSignal, toolCallId }) => {
       const parsed = parseBrowserToolInput(input);

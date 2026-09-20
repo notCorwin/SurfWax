@@ -305,14 +305,20 @@ export class ChromeExecutor {
     (globalThis as Record<string, unknown>)[PAGE_KEY] = { create: (tabId?: number) => this.automation.createPage(tabId) };
     (globalThis as Record<string, unknown>)[BROWSER_KEY] = {
       page: (tabId?: number) => this.automation.createPage(tabId),
-      runIn: (target: ChromeTarget, code: string) => this.executeNow({ target, code }, this.activeSignal, this.activeContext),
+      runIn: async (target: ChromeTarget | { tabId: number }, code: string) => {
+        if (target && typeof target === "object" && !("kind" in target) && Number.isInteger(target.tabId)) {
+          const value = await this.awaitAbort(this.automation.pageValue(target.tabId, pageExpressionFor(code)), this.activeSignal);
+          return evaluationValue({ result: { value } }, "page");
+        }
+        return this.executeNow({ target: target as ChromeTarget, code }, this.activeSignal, this.activeContext);
+      },
       cdp: (debuggee: Debuggee) => ({
         send: (method: string, params?: object) => this.bridgeCommand(debuggee, method, params),
         detach: () => (this.bridge.call as any)("detach", [debuggee]),
       }),
-      result: (id: number, selection?: { path?: Array<string | number>; offset?: number; limit?: number }) => this.logger?.result(id, selection),
+      result: (id: number, selection?: { path?: string | Array<string | number>; offset?: number; limit?: number }) => this.logger?.result(id, selection),
     };
-    (globalThis as Record<string, unknown>)[RESULT_READER_KEY] = (id: number, selection?: { path?: Array<string | number>; offset?: number; limit?: number }) => this.logger?.result(id, selection)
+    (globalThis as Record<string, unknown>)[RESULT_READER_KEY] = (id: number, selection?: { path?: string | Array<string | number>; offset?: number; limit?: number }) => this.logger?.result(id, selection)
       ?? Promise.reject(new Error("Tool result log is unavailable"));
   }
 

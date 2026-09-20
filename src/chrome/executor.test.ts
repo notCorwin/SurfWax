@@ -73,6 +73,21 @@ describe("ChromeExecutor", () => {
     expect(expression).toContain("getByRole");
   });
 
+  it("runs PageFacade-like targets through the existing page session", async () => {
+    const fake = fakeChrome([
+      { result: { value: { kind: "value", value: null } } },
+      ...Array.from({ length: 8 }, () => ({})),
+      { result: { value: { kind: "value", value: "Automation Target" } } },
+    ]);
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    await executor.execute({ code: "return null" });
+
+    await expect((globalThis as any).__surfWaxBrowser.runIn({ tabId: 7 }, "return document.title"))
+      .resolves.toBe("Automation Target");
+    expect(fake.debuggerApi.attach.mock.calls.filter(([debuggee]) => (debuggee as any).tabId === 7)).toHaveLength(1);
+    expect(String(fake.debuggerApi.sendCommand.mock.calls.at(-1)?.[2]?.expression)).toContain("return document.title");
+  });
+
   it("returns a stable automation timeout error for page calls", async () => {
     const fake = fakeChrome([() => new Promise<object>(() => undefined)]);
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });

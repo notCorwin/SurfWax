@@ -11,6 +11,32 @@ function usage() {
 }
 
 describe("createAgent", () => {
+  it("repairs stringified act steps without adding a model turn", async () => {
+    let step = 0;
+    const executor = { executeBrowser: vi.fn(async () => ({ ok: true })) } as unknown as ChromeExecutor;
+    const model = new MockLanguageModelV4({
+      doStream: async () => {
+        step += 1;
+        return { stream: simulateReadableStream({ chunks: step === 1 ? [
+          { type: "stream-start" as const, warnings: [] },
+          { type: "tool-call" as const, toolCallId: "call-1", toolName: "browser", dynamic: true, input: JSON.stringify({ mode: "act", steps: JSON.stringify([{ type: "goto", url: "https://example.com" }]) }) },
+          { type: "finish" as const, finishReason: { unified: "tool-calls" as const, raw: "tool_calls" }, usage: usage() },
+        ] : [
+          { type: "stream-start" as const, warnings: [] },
+          { type: "text-start" as const, id: "text" }, { type: "text-delta" as const, id: "text", delta: "done" }, { type: "text-end" as const, id: "text" },
+          { type: "finish" as const, finishReason: { unified: "stop" as const, raw: "stop" }, usage: usage() },
+        ] as any[] }) };
+      },
+    });
+    const result = await createAgent({ model: { baseURL: "https://example.com/v1", apiKey: "key", model: "test" }, languageModel: model, executor }).stream({ prompt: [{ role: "user", content: "go" }] });
+    for await (const _ of result.stream) {
+      // Consume the stream so the agent can execute the repaired tool call.
+    }
+    expect(step).toBe(2);
+    expect(executor.executeBrowser).toHaveBeenCalledWith({ mode: "act", steps: [{ type: "goto", url: "https://example.com" }] }, undefined, expect.any(Object));
+    expect(await result.text).toBe("done");
+  });
+
   it("continues beyond twenty tool calls until natural completion", async () => {
     let step = 0;
     const executor = { executeBrowser: vi.fn(async () => [{ id: 1, title: "test" }]) } as unknown as ChromeExecutor;
