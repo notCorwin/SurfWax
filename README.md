@@ -57,7 +57,7 @@ npm run dev
 可在命令后指定启动网页；只启动 Vite/CRXJS 时使用 `npm run dev:vite`：
 
 ```sh
-npm run dev -- https://example.com
+npm run dev -- https://polymarket.com/zh
 npm run dev:vite
 ```
 
