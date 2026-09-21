@@ -27,20 +27,25 @@ function chunk(delta: object, finishReason: string | null = null): string {
   })}\n\n`;
 }
 
-function usageChunk(promptTokens: number, completionTokens: number): string {
+function usageChunk(promptTokens: number, completionTokens: number, cachedTokens = 0): string {
   return `data: ${JSON.stringify({
     id: "chatcmpl-side-agent-e2e",
     object: "chat.completion.chunk",
     created: 1,
     model: "test-model",
     choices: [],
-    usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens },
+    usage: {
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: promptTokens + completionTokens,
+      prompt_tokens_details: { cached_tokens: cachedTokens },
+    },
   })}\n\n`;
 }
 
-function textResponse(text: string, usage?: { promptTokens: number; completionTokens: number }): string[] {
+function textResponse(text: string, usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number }): string[] {
   return [chunk({ role: "assistant", content: text }), chunk({}, "stop"),
-    ...(usage ? [usageChunk(usage.promptTokens, usage.completionTokens)] : []), "data: [DONE]\n\n"];
+    ...(usage ? [usageChunk(usage.promptTokens, usage.completionTokens, usage.cachedTokens)] : []), "data: [DONE]\n\n"];
 }
 
 function streamingTextResponse(parts: string[]): string[] {
@@ -1270,9 +1275,9 @@ test("updates context usage during a streamed reply and shows structured details
     await indicator.focus();
     const tooltip = opened.page.getByRole("tooltip");
     await expect(tooltip).toContainText("上下文用量");
-    await expect(tooltip).toContainText("已用");
-    await expect(tooltip).toContainText("剩余");
-    await expect(tooltip).toContainText("输入预算");
+    await expect(tooltip).toContainText("输入");
+    await expect(tooltip).toContainText("输出");
+    await expect(tooltip).toContainText("缓存命中");
     await expect(opened.page.getByTestId("context-detail-progress")).toHaveAttribute("aria-valuenow", String(initial));
     const box = await tooltip.boundingBox();
     expect(box).not.toBeNull();
@@ -1295,8 +1300,9 @@ test("updates context usage during a streamed reply and shows structured details
 
 test("anchors context usage to provider-reported input tokens", async () => {
   const provider = await startProvider([
-    textResponse("USAGE_ANCHOR_REPLY", { promptTokens: 40_000, completionTokens: 10 }),
+    textResponse("USAGE_ANCHOR_REPLY", { promptTokens: 40_000, completionTokens: 10, cachedTokens: 15_000 }),
     textResponse("用量测试"),
+    textResponse("SECOND_USAGE_REPLY", { promptTokens: 20_000, completionTokens: 5, cachedTokens: 7_000 }),
   ]);
   const opened = await openExtension();
   try {
@@ -1312,7 +1318,18 @@ test("anchors context usage to provider-reported input tokens", async () => {
       .toBeGreaterThanOrEqual(40);
 
     await indicator.focus();
-    await expect(opened.page.getByTestId("context-used")).toContainText(/4\d,\d{3} tokens/);
+    await expect(opened.page.getByTestId("context-input")).toContainText("40,000 tokens");
+    await expect(opened.page.getByTestId("context-output")).toContainText("10 tokens");
+    await expect(opened.page.getByTestId("context-cache-read")).toContainText("15,000 tokens");
+
+    await opened.page.getByTestId("composer-input").fill("measure cumulative usage");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("SECOND_USAGE_REPLY");
+    await expect(opened.page.getByRole("button", { name: "发送消息" })).toBeVisible();
+    await indicator.focus();
+    await expect(opened.page.getByTestId("context-input")).toContainText("60,000 tokens");
+    await expect(opened.page.getByTestId("context-output")).toContainText("15 tokens");
+    await expect(opened.page.getByTestId("context-cache-read")).toContainText("22,000 tokens");
     await options.close();
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);

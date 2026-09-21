@@ -14,7 +14,7 @@ import { contextPressure } from "@/agent/compaction";
 import { canAutoDispatchFollowup, FOLLOWUP_EVENT_TYPES, rebuildFollowups, type FollowupMessage } from "@/agent/followups";
 import { contextUsedPercent, inputBudget, resolveModelLimit, type ModelLimit } from "@/agent/model-limits";
 import { reasoningSettingsFor, type ReasoningEffort } from "@/agent/reasoning";
-import type { ConversationMessage, EventLogger } from "@/logging";
+import { fromLogValue, type ConversationMessage, type EventLogger, type LogEvent } from "@/logging";
 import type { ModelConfig } from "@/types";
 
 const MIN_HEIGHT = 48;
@@ -40,6 +40,22 @@ type ContextUsage = { state: "loading" | "unavailable" } | {
   limit: ModelLimit;
   usedPercent: number;
 };
+type TokenUsage = { input: number; output: number; cacheRead: number };
+
+function sumTokenUsage(events: readonly LogEvent[]): TokenUsage {
+  const total: TokenUsage = { input: 0, output: 0, cacheRead: 0 };
+  for (const event of events) {
+    const usage = fromLogValue(event.usage) as {
+      inputTokens?: unknown;
+      outputTokens?: unknown;
+      inputTokenDetails?: { cacheReadTokens?: unknown };
+    } | undefined;
+    if (typeof usage?.inputTokens === "number") total.input += usage.inputTokens;
+    if (typeof usage?.outputTokens === "number") total.output += usage.outputTokens;
+    if (typeof usage?.inputTokenDetails?.cacheReadTokens === "number") total.cacheRead += usage.inputTokenDetails.cacheReadTokens;
+  }
+  return total;
+}
 
 const FOLLOWUP_LIFECYCLE_EVENTS = new Set<string>([
   ...FOLLOWUP_EVENT_TYPES,
@@ -78,6 +94,20 @@ function useFollowups(logger: EventLogger, conversationId: string) {
 function ContextIndicator({ config, logger, conversationId }: { config: ModelConfig; logger: EventLogger; conversationId: string }) {
   const aui = useAui();
   const [usage, setUsage] = useState<ContextUsage>({ state: "loading" });
+  const [tokens, setTokens] = useState<TokenUsage>({ input: 0, output: 0, cacheRead: 0 });
+
+  useEffect(() => {
+    let active = true;
+    const refresh = async () => {
+      const events = await logger.modelUsageEvents(conversationId);
+      if (active) setTokens(sumTokenUsage(events));
+    };
+    const unsubscribe = logger.subscribe((event) => {
+      if (event.conversationId === conversationId && event.type === "model.finished") void refresh();
+    });
+    void refresh();
+    return () => { active = false; unsubscribe(); };
+  }, [conversationId, logger]);
 
   useEffect(() => {
     let active = true;
@@ -190,7 +220,6 @@ function ContextIndicator({ config, logger, conversationId }: { config: ModelCon
     : usage.state === "loading" ? "正在估算上下文…" : "无法取得上下文窗口；可在设置中手动指定";
   const usedPercent = usage.state === "ready" ? usage.usedPercent : 0;
   const source = usage.state === "ready" ? usage.limit.source === "manual" ? "手动设置" : "Models.dev" : undefined;
-  const remaining = usage.state === "ready" ? Math.max(0, usage.budget - usage.estimated) : 0;
 
   return (
     <Tooltip>
@@ -232,12 +261,12 @@ function ContextIndicator({ config, logger, conversationId }: { config: ModelCon
           {usage.state === "ready" ? <>
             <Progress data-testid="context-detail-progress" aria-label="上下文用量详情" value={usage.usedPercent} className="h-1.5" />
             <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
-              <dt className="text-muted-foreground">已用</dt>
-              <dd data-testid="context-used" className="text-right font-medium tabular-nums">{usage.estimated.toLocaleString("zh-CN")} tokens</dd>
-              <dt className="text-muted-foreground">剩余</dt>
-              <dd data-testid="context-remaining" className="text-right font-medium tabular-nums">{remaining.toLocaleString("zh-CN")} tokens</dd>
-              <dt className="text-muted-foreground">输入预算</dt>
-              <dd className="text-right font-medium tabular-nums">{usage.budget.toLocaleString("zh-CN")} tokens</dd>
+              <dt className="text-muted-foreground">输入</dt>
+              <dd data-testid="context-input" className="text-right font-medium tabular-nums">{tokens.input.toLocaleString("zh-CN")} tokens</dd>
+              <dt className="text-muted-foreground">输出</dt>
+              <dd data-testid="context-output" className="text-right font-medium tabular-nums">{tokens.output.toLocaleString("zh-CN")} tokens</dd>
+              <dt className="text-muted-foreground">缓存命中</dt>
+              <dd data-testid="context-cache-read" className="text-right font-medium tabular-nums">{tokens.cacheRead.toLocaleString("zh-CN")} tokens</dd>
             </dl>
           </> : <p className="leading-relaxed text-muted-foreground">
             {usage.state === "loading" ? "正在根据当前对话估算…" : "无法取得上下文窗口，可在设置中手动指定。"}

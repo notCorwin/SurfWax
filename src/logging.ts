@@ -487,6 +487,10 @@ export class EventLogger {
     return this.eventsByTypes(CONTEXT_EVENT_TYPES, conversationId);
   }
 
+  modelUsageEvents(conversationId: string): Promise<LogEvent[]> {
+    return this.eventsByTypes(["model.finished"], conversationId);
+  }
+
   followupEvents(conversationId: string): Promise<LogEvent[]> {
     return this.eventsByTypes([...FOLLOWUP_EVENT_TYPES, ...RUN_EVENT_TYPES], conversationId);
   }
