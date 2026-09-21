@@ -1292,13 +1292,15 @@ test("updates context usage during a streamed reply and shows structured details
     await expect(opened.page.locator(".markdown-body").last()).toContainText("LIVE_CONTEXT_MARKER");
     await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
     await indicator.focus();
-    await expect(opened.page.getByTestId("context-input")).toContainText(/^约 [1-9][\d,]* tokens$/);
-    await expect(opened.page.getByTestId("context-output")).toContainText(/^约 [1-9][\d,]* tokens$/);
+    await expect(opened.page.getByTestId("context-input")).toHaveText("0 tokens");
+    await expect(opened.page.getByTestId("context-output")).toHaveText("0 tokens");
     await expect(opened.page.getByTestId("context-cache-read")).toContainText("0 tokens");
     await expect.poll(async () => Number(await indicator.getAttribute("data-used-percent"))).toBeGreaterThan(initial);
     await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_COMPLETE");
+    await expect(opened.page.getByTestId("context-token-usage")).toHaveAttribute("data-animating", "true");
     await expect(opened.page.getByRole("button", { name: "发送消息" })).toBeVisible();
+    await expect(opened.page.getByTestId("context-token-usage")).toHaveAttribute("data-animating", "false");
     await expect(opened.page.getByTestId("context-input")).toHaveText("2,000 tokens");
     await expect(opened.page.getByTestId("context-output")).toHaveText("800 tokens");
     await expect(opened.page.getByTestId("context-cache-read")).toHaveText("500 tokens");
@@ -1791,9 +1793,6 @@ test("keeps paused follow-ups after stop and panel reload until the user resumes
 
     await opened.page.getByRole("button", { name: "停止生成" }).click();
     await expect(opened.page.getByRole("button", { name: "停止生成" })).toHaveCount(0);
-    await opened.page.getByTestId("context-indicator").focus();
-    await expect(opened.page.getByTestId("context-input")).not.toContainText("约");
-    await expect(opened.page.getByTestId("context-output")).not.toContainText("约");
     await opened.page.reload();
     await opened.page.getByTestId("conversation-menu").click();
     await opened.page.locator(".conversation-item", { hasText: "Paused follow-up" }).locator(".conversation-select").click();
