@@ -41,6 +41,7 @@ type ContextUsage = { state: "loading" | "unavailable" } | {
   usedPercent: number;
 };
 type TokenUsage = { input: number; output: number; cacheRead: number };
+type TokenDisplay = TokenUsage & { estimating: boolean };
 
 function sumTokenUsage(events: readonly LogEvent[]): TokenUsage {
   const total: TokenUsage = { input: 0, output: 0, cacheRead: 0 };
@@ -94,19 +95,72 @@ function useFollowups(logger: EventLogger, conversationId: string) {
 function ContextIndicator({ config, logger, conversationId }: { config: ModelConfig; logger: EventLogger; conversationId: string }) {
   const aui = useAui();
   const [usage, setUsage] = useState<ContextUsage>({ state: "loading" });
-  const [tokens, setTokens] = useState<TokenUsage>({ input: 0, output: 0, cacheRead: 0 });
+  const usageRef = useRef(usage);
+  const [tokens, setTokens] = useState<TokenDisplay>({ input: 0, output: 0, cacheRead: 0, estimating: false });
+  usageRef.current = usage;
 
   useEffect(() => {
     let active = true;
+    let confirmed: TokenUsage = { input: 0, output: 0, cacheRead: 0 };
+    let estimating = false;
+    let estimatedInput = 0;
+    let outputBytes = 0;
+    let frame: number | undefined;
+    const encoder = new TextEncoder();
+    const publish = () => {
+      frame = undefined;
+      if (!active) return;
+      setTokens({
+        input: confirmed.input + (estimating ? estimatedInput : 0),
+        output: confirmed.output + (estimating ? Math.ceil(outputBytes / 3) : 0),
+        cacheRead: confirmed.cacheRead,
+        estimating,
+      });
+    };
+    const schedule = () => { frame ??= requestAnimationFrame(publish); };
     const refresh = async () => {
       const events = await logger.modelUsageEvents(conversationId);
-      if (active) setTokens(sumTokenUsage(events));
+      if (!active) return;
+      confirmed = sumTokenUsage(events);
+      schedule();
     };
     const unsubscribe = logger.subscribe((event) => {
-      if (event.conversationId === conversationId && event.type === "model.finished") void refresh();
+      if (event.conversationId !== conversationId) return;
+      if (event.type === "model.step.started") {
+        estimating = true;
+        estimatedInput = usageRef.current.state === "ready" ? usageRef.current.estimated : 0;
+        outputBytes = 0;
+        schedule();
+        return;
+      }
+      if (event.type === "conversation.stream.chunk" && estimating) {
+        const chunk = fromLogValue(event.content) as { type?: unknown; delta?: unknown };
+        if ((chunk.type === "text-delta" || chunk.type === "reasoning-delta") && typeof chunk.delta === "string") {
+          outputBytes += encoder.encode(chunk.delta).length;
+          schedule();
+        }
+        return;
+      }
+      if (event.type === "model.step.finished") {
+        estimating = false;
+        estimatedInput = 0;
+        outputBytes = 0;
+        void refresh();
+        return;
+      }
+      if (event.type === "conversation.finished" || event.type === "conversation.failed" || event.type === "conversation.aborted") {
+        estimating = false;
+        estimatedInput = 0;
+        outputBytes = 0;
+        schedule();
+      }
     });
     void refresh();
-    return () => { active = false; unsubscribe(); };
+    return () => {
+      active = false;
+      if (frame !== undefined) cancelAnimationFrame(frame);
+      unsubscribe();
+    };
   }, [conversationId, logger]);
 
   useEffect(() => {
@@ -262,9 +316,9 @@ function ContextIndicator({ config, logger, conversationId }: { config: ModelCon
             <Progress data-testid="context-detail-progress" aria-label="上下文用量详情" value={usage.usedPercent} className="h-1.5" />
             <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
               <dt className="text-muted-foreground">输入</dt>
-              <dd data-testid="context-input" className="text-right font-medium tabular-nums">{tokens.input.toLocaleString("zh-CN")} tokens</dd>
+              <dd data-testid="context-input" className="text-right font-medium tabular-nums">{tokens.estimating && "约 "}{tokens.input.toLocaleString("zh-CN")} tokens</dd>
               <dt className="text-muted-foreground">输出</dt>
-              <dd data-testid="context-output" className="text-right font-medium tabular-nums">{tokens.output.toLocaleString("zh-CN")} tokens</dd>
+              <dd data-testid="context-output" className="text-right font-medium tabular-nums">{tokens.estimating && "约 "}{tokens.output.toLocaleString("zh-CN")} tokens</dd>
               <dt className="text-muted-foreground">缓存命中</dt>
               <dd data-testid="context-cache-read" className="text-right font-medium tabular-nums">{tokens.cacheRead.toLocaleString("zh-CN")} tokens</dd>
             </dl>

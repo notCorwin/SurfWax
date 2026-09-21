@@ -48,15 +48,16 @@ function textResponse(text: string, usage?: { promptTokens: number; completionTo
     ...(usage ? [usageChunk(usage.promptTokens, usage.completionTokens, usage.cachedTokens)] : []), "data: [DONE]\n\n"];
 }
 
-function streamingTextResponse(parts: string[]): string[] {
+function streamingTextResponse(parts: string[], usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number }): string[] {
   return [
     ...parts.map((content, index) => chunk({ ...(index === 0 ? { role: "assistant" } : {}), content })),
     chunk({}, "stop"),
+    ...(usage ? [usageChunk(usage.promptTokens, usage.completionTokens, usage.cachedTokens)] : []),
     "data: [DONE]\n\n",
   ];
 }
 
-function toolResponse(code: string | { code: string; tabId?: number; world?: "MAIN" | "USER_SCRIPT"; target?: { kind: string; tabId?: number; world?: string } }, id = "call-chrome-e2e"): string[] {
+function toolResponse(code: string | { code: string; tabId?: number; world?: "MAIN" | "USER_SCRIPT"; target?: { kind: string; tabId?: number; world?: string } }, id = "call-chrome-e2e", usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number }): string[] {
   const input = typeof code === "string" ? { mode: "run", code } : {
     mode: "run",
     target: code.target ?? { kind: "page", tabId: code.tabId, world: code.world ?? "MAIN" },
@@ -73,6 +74,7 @@ function toolResponse(code: string | { code: string; tabId?: number; world?: "MA
       }],
     }),
     chunk({}, "tool_calls"),
+    ...(usage ? [usageChunk(usage.promptTokens, usage.completionTokens, usage.cachedTokens)] : []),
     "data: [DONE]\n\n",
   ];
 }
@@ -1260,7 +1262,8 @@ test("asks after a completed turn and summarizes the complete context on request
 
 test("updates context usage during a streamed reply and shows structured details", async () => {
   const provider = await startProvider([
-    streamingTextResponse(["LIVE_CONTEXT_MARKER " + "page state ".repeat(2_000), " STREAM_COMPLETE"]),
+    streamingTextResponse(["LIVE_CONTEXT_MARKER " + "page state ".repeat(2_000), " STREAM_COMPLETE"],
+      { promptTokens: 2_000, completionTokens: 800, cachedTokens: 500 }),
     textResponse("实时上下文测试"),
   ], 700);
   const opened = await openExtension();
@@ -1288,10 +1291,17 @@ test("updates context usage during a streamed reply and shows structured details
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("LIVE_CONTEXT_MARKER");
     await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
+    await indicator.focus();
+    await expect(opened.page.getByTestId("context-input")).toContainText(/^约 [1-9][\d,]* tokens$/);
+    await expect(opened.page.getByTestId("context-output")).toContainText(/^约 [1-9][\d,]* tokens$/);
+    await expect(opened.page.getByTestId("context-cache-read")).toContainText("0 tokens");
     await expect.poll(async () => Number(await indicator.getAttribute("data-used-percent"))).toBeGreaterThan(initial);
     await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_COMPLETE");
     await expect(opened.page.getByRole("button", { name: "发送消息" })).toBeVisible();
+    await expect(opened.page.getByTestId("context-input")).toHaveText("2,000 tokens");
+    await expect(opened.page.getByTestId("context-output")).toHaveText("800 tokens");
+    await expect(opened.page.getByTestId("context-cache-read")).toHaveText("500 tokens");
     await options.close();
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
@@ -1300,7 +1310,8 @@ test("updates context usage during a streamed reply and shows structured details
 
 test("anchors context usage to provider-reported input tokens", async () => {
   const provider = await startProvider([
-    textResponse("USAGE_ANCHOR_REPLY", { promptTokens: 40_000, completionTokens: 10, cachedTokens: 15_000 }),
+    toolResponse("return true", "call-usage-e2e", { promptTokens: 10_000, completionTokens: 5, cachedTokens: 3_000 }),
+    textResponse("USAGE_ANCHOR_REPLY", { promptTokens: 30_000, completionTokens: 5, cachedTokens: 12_000 }),
     textResponse("用量测试"),
     textResponse("SECOND_USAGE_REPLY", { promptTokens: 20_000, completionTokens: 5, cachedTokens: 7_000 }),
   ]);
@@ -1315,7 +1326,7 @@ test("anchors context usage to provider-reported input tokens", async () => {
     await expect(opened.page.locator(".markdown-body").last()).toContainText("USAGE_ANCHOR_REPLY");
     await expect(opened.page.getByRole("button", { name: "发送消息" })).toBeVisible();
     await expect.poll(async () => Number(await indicator.getAttribute("data-used-percent")))
-      .toBeGreaterThanOrEqual(40);
+      .toBeGreaterThanOrEqual(10);
 
     await indicator.focus();
     await expect(opened.page.getByTestId("context-input")).toContainText("40,000 tokens");
@@ -1780,6 +1791,9 @@ test("keeps paused follow-ups after stop and panel reload until the user resumes
 
     await opened.page.getByRole("button", { name: "停止生成" }).click();
     await expect(opened.page.getByRole("button", { name: "停止生成" })).toHaveCount(0);
+    await opened.page.getByTestId("context-indicator").focus();
+    await expect(opened.page.getByTestId("context-input")).not.toContainText("约");
+    await expect(opened.page.getByTestId("context-output")).not.toContainText("约");
     await opened.page.reload();
     await opened.page.getByTestId("conversation-menu").click();
     await opened.page.locator(".conversation-item", { hasText: "Paused follow-up" }).locator(".conversation-select").click();

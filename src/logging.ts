@@ -488,7 +488,7 @@ export class EventLogger {
   }
 
   modelUsageEvents(conversationId: string): Promise<LogEvent[]> {
-    return this.eventsByTypes(["model.finished"], conversationId);
+    return this.eventsByTypes(["model.step.finished"], conversationId);
   }
 
   followupEvents(conversationId: string): Promise<LogEvent[]> {
