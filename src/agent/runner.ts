@@ -4,9 +4,9 @@ import { createBrowserTool, prepareBrowserMessages, repairBrowserToolCall } from
 import { ChromeExecutor } from "../chrome/executor";
 import type { EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
-import { createModel } from "./model";
 import { modelSupportsImages } from "./model-limits";
 import type { ContextCompactor } from "./compaction";
+import type { ReasoningEffort } from "./reasoning";
 
 export const DEFAULT_INSTRUCTIONS = [
   "You are a Chrome side-panel agent helping the user automate the browser they control.",
@@ -20,7 +20,8 @@ export const DEFAULT_INSTRUCTIONS = [
 export type CreateAgentOptions = {
   model: ModelConfig;
   executor: ChromeExecutor;
-  languageModel?: LanguageModel;
+  languageModel: LanguageModel;
+  reasoning?: ReasoningEffort;
   instructions?: string;
   logger?: EventLogger;
   conversationId?: string;
@@ -32,8 +33,8 @@ type BrowserAgentTools = { browser: ReturnType<typeof createBrowserTool> };
 export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, BrowserAgentTools> {
   const logger = options.logger;
   return new ToolLoopAgent<never, BrowserAgentTools>({
-    model: options.languageModel ?? createModel(options.model, logger, options.conversationId),
-    reasoning: "minimal",
+    model: options.languageModel,
+    reasoning: options.reasoning === "max" ? "xhigh" : options.reasoning ?? "minimal",
     instructions: options.instructions ?? DEFAULT_INSTRUCTIONS,
     tools: {
       browser: createBrowserTool(options.executor, { logger, conversationId: options.conversationId, visualEnabled: () => modelSupportsImages(options.model) }),

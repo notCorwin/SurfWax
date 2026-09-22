@@ -469,8 +469,44 @@ test("restores independent credentials and models when switching Providers", asy
     await expect(options.getByLabel("API Key", { exact: true })).toHaveValue("vercel-key");
     await expect.poll(() => options.evaluate(async () => (await chrome.storage.local.get("side-agent:model-config"))["side-agent:model-config"]))
       .toMatchObject({ profiles: {
-        vercel: { apiKey: "vercel-key", model: "openai/gpt-test", transport: "gateway" },
-        custom: { apiKey: "custom-key", model: "custom-model", baseURL: "https://custom.test/v1" },
+        vercel: { providerSettings: { apiKey: "vercel-key" }, model: "openai/gpt-test", sdk: "@ai-sdk/gateway" },
+        custom: { providerSettings: { apiKey: "custom-key" }, model: "custom-model", baseURL: "https://custom.test/v1", sdk: "@ai-sdk/openai-compatible" },
+      } });
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory);
+  }
+});
+
+test("persists multi-field credentials and interpolates template Endpoints", async () => {
+  const opened = await openExtension();
+  try {
+    await opened.page.evaluate(() => chrome.storage.local.set({ "side-agent:model-catalog": { fetchedAt: Date.now(), catalog: {
+      bedrock: { name: "Amazon Bedrock", npm: "@ai-sdk/amazon-bedrock", models: {} },
+      template: { name: "Template Provider", npm: "@ai-sdk/openai-compatible", api: "https://api.example/${ACCOUNT}/v1", models: {} },
+    } } }));
+    const [options] = await Promise.all([opened.context.waitForEvent("page"), opened.page.getByTestId("open-settings").click()]);
+    await options.waitForLoadState("domcontentloaded");
+
+    await selectProvider(options, "bedrock", /Amazon Bedrock.*bedrock/);
+    await options.getByLabel("Model ID", { exact: true }).fill("anthropic.test");
+    await options.getByLabel("Region", { exact: true }).fill("us-east-1");
+    await options.getByLabel("Bearer Token", { exact: true }).fill("bedrock-token");
+    await options.getByRole("button", { name: "保存配置" }).click();
+
+    await selectProvider(options, "template", /Template Provider.*template/);
+    await options.getByLabel("Model ID", { exact: true }).fill("agent-model");
+    await options.getByLabel("API Key", { exact: true }).fill("template-key");
+    await options.getByLabel("ACCOUNT", { exact: true }).fill("tenant");
+    await expect(options.getByText("https://api.example/tenant/v1", { exact: true })).toBeVisible();
+    await options.getByRole("button", { name: "保存配置" }).click();
+
+    await selectProvider(options, "bedrock", /Amazon Bedrock.*bedrock/);
+    await expect(options.getByLabel("Region", { exact: true })).toHaveValue("us-east-1");
+    await expect(options.getByLabel("Bearer Token", { exact: true })).toHaveValue("bedrock-token");
+    await expect.poll(() => options.evaluate(async () => (await chrome.storage.local.get("side-agent:model-config"))["side-agent:model-config"]))
+      .toMatchObject({ profiles: {
+        bedrock: { providerSettings: { region: "us-east-1", apiKey: "bedrock-token" } },
+        template: { providerSettings: { apiKey: "template-key", ACCOUNT: "tenant" } },
       } });
   } finally {
     await dispose(opened.context, opened.userDataDirectory);

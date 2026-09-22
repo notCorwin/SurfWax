@@ -12,7 +12,7 @@ const catalog = {
 };
 
 describe("models.dev limit matching", () => {
-  it("lists only directly usable compatible providers and tool-capable text models", () => {
+  it("lists every known SDK provider and only tool-capable text models", () => {
     const providers = modelProviderPresets({
       vercel: { name: "Vercel AI Gateway", npm: "@ai-sdk/gateway", models: { "openai/gpt": { tool_call: true, modalities: { output: ["text"] } } } },
       compatible: { name: "Compatible", npm: "@ai-sdk/openai-compatible", api: "https://provider.test/v1", models: {
@@ -23,9 +23,10 @@ describe("models.dev limit matching", () => {
       template: { npm: "@ai-sdk/openai-compatible", api: "https://${ACCOUNT}.test/v1", models: {} },
       native: { npm: "@ai-sdk/openai", api: "https://api.openai.com/v1", models: {} },
     });
-    expect(providers.map(({ id }) => id)).toEqual(["compatible", "vercel"]);
+    expect(providers.map(({ id }) => id)).toEqual(["compatible", "native", "template", "vercel"]);
     expect(providers[0]?.models).toEqual([{ id: "agent", name: "Agent" }]);
-    expect(providers[1]).toMatchObject({ transport: "gateway", baseURL: "https://ai-gateway.vercel.sh/v4/ai" });
+    expect(providers[2]?.fields.map(({ key }) => key)).toEqual(["apiKey", "ACCOUNT"]);
+    expect(providers[3]).toMatchObject({ sdk: "@ai-sdk/gateway", baseURL: "https://ai-gateway.vercel.sh/v4/ai" });
   });
 
   it("caches the normalized catalog for a day and falls back to stale data offline", async () => {

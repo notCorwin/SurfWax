@@ -35,19 +35,19 @@ describe("model config persistence", () => {
   it("saves the three fields and loads them back", async () => {
     const storage = memoryStorage(MODEL_CONFIG_STORAGE_KEY);
     const config = { selectedProviderId: "custom", profiles: { custom: {
-      providerId: "custom", transport: "openai-compatible" as const, baseURL: " https://provider.test/v1 ", model: " model-id ", apiKey: "secret-key",
+      providerId: "custom", sdk: "@ai-sdk/openai-compatible" as const, providerSettings: { apiKey: "secret-key" }, baseURL: " https://provider.test/v1 ", model: " model-id ",
     } } };
 
     await saveModelConfig(config, storage);
     await expect(loadModelConfig(undefined, storage)).resolves.toEqual({ selectedProviderId: "custom", profiles: { custom: {
-      providerId: "custom", transport: "openai-compatible", baseURL: "https://provider.test/v1", model: "model-id", apiKey: "secret-key", imageInput: "auto",
+      providerId: "custom", sdk: "@ai-sdk/openai-compatible", providerSettings: { apiKey: "secret-key" }, baseURL: "https://provider.test/v1", model: "model-id", imageInput: "auto",
     } } });
   });
 
   it("persists an optional manual context window", async () => {
     const storage = memoryStorage(MODEL_CONFIG_STORAGE_KEY);
     const config = { selectedProviderId: "vercel", profiles: { vercel: {
-      providerId: "vercel", transport: "gateway" as const, baseURL: "https://ai-gateway.vercel.sh/v4/ai", model: "test", apiKey: "key", contextWindowOverride: 8192,
+      providerId: "vercel", sdk: "@ai-sdk/gateway" as const, providerSettings: { apiKey: "key" }, baseURL: "https://ai-gateway.vercel.sh/v4/ai", model: "test", contextWindowOverride: 8192,
     } } };
     await saveModelConfig(config, storage);
     await expect(loadModelConfig(undefined, storage)).resolves.toEqual({ selectedProviderId: "vercel", profiles: { vercel: { ...config.profiles.vercel, imageInput: "auto" } } });
@@ -58,15 +58,15 @@ describe("model config persistence", () => {
     storage.value = { baseURL: "https://provider.test/v1", model: "old", apiKey: "secret" };
     await expect(loadModelConfig(undefined, storage)).resolves.toMatchObject({
       selectedProviderId: "custom",
-      profiles: { custom: { providerId: "custom", transport: "openai-compatible", model: "old", apiKey: "secret" } },
+      profiles: { custom: { providerId: "custom", sdk: "@ai-sdk/openai-compatible", model: "old", providerSettings: { apiKey: "secret" } } },
     });
   });
 
   it("keeps credentials and model choices isolated by provider", async () => {
     const storage = memoryStorage(MODEL_CONFIG_STORAGE_KEY);
     const settings = { selectedProviderId: "vercel", profiles: {
-      vercel: { providerId: "vercel", transport: "gateway" as const, baseURL: "https://ai-gateway.vercel.sh/v4/ai", apiKey: "vercel-key", model: "openai/gpt" },
-      custom: { providerId: "custom", transport: "openai-compatible" as const, baseURL: "https://custom.test/v1", apiKey: "custom-key", model: "custom-model" },
+      vercel: { providerId: "vercel", sdk: "@ai-sdk/gateway" as const, providerSettings: { apiKey: "vercel-key" }, baseURL: "https://ai-gateway.vercel.sh/v4/ai", model: "openai/gpt" },
+      custom: { providerId: "custom", sdk: "@ai-sdk/openai-compatible" as const, providerSettings: { apiKey: "custom-key" }, baseURL: "https://custom.test/v1", model: "custom-model" },
     } };
     await saveModelConfig(settings, storage);
     await expect(loadModelConfig(undefined, storage)).resolves.toEqual({ selectedProviderId: "vercel", profiles: {

@@ -75,7 +75,7 @@ export function generateConversationTitle(logger: EventLogger, config: ModelConf
       const firstAssistant = repository.messages.find(({ message }) => message.role === "assistant")?.message;
       await logger.append({ type: "model.title.started", conversationId, content: null });
       const result = streamText({
-        model: createModel(config, logger, conversationId),
+        model: await createModel(config, logger, conversationId, { signal: abortController.signal }),
         maxRetries: 0,
         abortSignal: abortController.signal,
         prompt: [

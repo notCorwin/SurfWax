@@ -1,5 +1,6 @@
-import type { JevConfig, ModelConfig, ModelTransport } from "../types";
+import { isModelSdk, type JevConfig, type ModelConfig, type ModelSdk } from "../types";
 import { isJevProvider } from "../jev-providers";
+import { modelConfigErrors } from "../agent/model-sdks";
 
 export const MODEL_CONFIG_STORAGE_KEY = "side-agent:model-config";
 export const JEV_CONFIG_STORAGE_KEY = "side-agent:jev-config";
@@ -11,7 +12,7 @@ export const DEFAULT_JEV_CONFIG: JevConfig = {
   threshold: 0.5,
 };
 
-export type ModelProfile = ModelConfig & { providerId: string; transport: ModelTransport };
+export type ModelProfile = ModelConfig & { providerId: string; sdk: ModelSdk; providerSettings: Record<string, string> };
 export type PersistedModelConfig = { selectedProviderId: string; profiles: Record<string, ModelProfile> };
 export type PersistedJevConfig = JevConfig;
 export const EMPTY_MODEL_CONFIG: PersistedModelConfig = { selectedProviderId: "", profiles: {} };
@@ -19,7 +20,7 @@ export const EMPTY_MODEL_CONFIG: PersistedModelConfig = { selectedProviderId: ""
 export type StorageAreaLike = Pick<chrome.storage.StorageArea, "get" | "set">;
 
 export function isCompleteModelConfig(config: ModelConfig | undefined): boolean {
-  return Boolean(config?.apiKey.trim() && config.model.trim() && (config.transport === "gateway" || config.baseURL.trim()));
+  return Boolean(config && Object.keys(modelConfigErrors(config)).length === 0);
 }
 
 export function selectedModelConfig(config: PersistedModelConfig): ModelProfile | undefined {
@@ -50,12 +51,16 @@ export async function loadModelConfig(
     const profiles = Object.fromEntries(Object.entries(candidate.profiles).flatMap(([providerId, raw]) => {
       if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
       const profile = raw as Record<string, unknown>;
-      const transport = profile.transport === "gateway" ? "gateway" : "openai-compatible";
+      const sdk = isModelSdk(profile.sdk) ? profile.sdk : profile.transport === "gateway" ? "@ai-sdk/gateway" : "@ai-sdk/openai-compatible";
+      const rawSettings = profile.providerSettings && typeof profile.providerSettings === "object" && !Array.isArray(profile.providerSettings)
+        ? profile.providerSettings as Record<string, unknown> : {};
+      const providerSettings = Object.fromEntries(Object.entries(rawSettings).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+      if (!providerSettings.apiKey && typeof profile.apiKey === "string") providerSettings.apiKey = profile.apiKey;
       return [[providerId, {
         providerId,
-        transport,
+        sdk,
+        providerSettings,
         baseURL: typeof profile.baseURL === "string" ? profile.baseURL : "",
-        apiKey: typeof profile.apiKey === "string" ? profile.apiKey : "",
         model: typeof profile.model === "string" ? profile.model : "",
         imageInput: profile.imageInput === "enabled" || profile.imageInput === "disabled" ? profile.imageInput : "auto",
         ...(Number.isSafeInteger(profile.contextWindowOverride) && Number(profile.contextWindowOverride) > 0
@@ -69,9 +74,9 @@ export async function loadModelConfig(
   if (typeof legacy.baseURL !== "string" && typeof legacy.apiKey !== "string" && typeof legacy.model !== "string") return fallback;
   return { selectedProviderId: "custom", profiles: { custom: {
     providerId: "custom",
-    transport: "openai-compatible",
+    sdk: "@ai-sdk/openai-compatible",
+    providerSettings: { apiKey: typeof legacy.apiKey === "string" ? legacy.apiKey : "" },
     baseURL: typeof legacy.baseURL === "string" ? legacy.baseURL : "",
-    apiKey: typeof legacy.apiKey === "string" ? legacy.apiKey : "",
     model: typeof legacy.model === "string" ? legacy.model : "",
     imageInput: legacy.imageInput === "enabled" || legacy.imageInput === "disabled" ? legacy.imageInput : "auto",
     ...(Number.isSafeInteger(legacy.contextWindowOverride) && Number(legacy.contextWindowOverride) > 0
@@ -90,9 +95,9 @@ export async function saveModelConfig(
       selectedProviderId: config.selectedProviderId,
       profiles: Object.fromEntries(Object.entries(config.profiles).map(([providerId, profile]) => [providerId, {
         providerId,
-        transport: profile.transport,
+        sdk: profile.sdk,
+        providerSettings: Object.fromEntries(Object.entries(profile.providerSettings).map(([key, value]) => [key, value.trim()])),
         baseURL: profile.baseURL.trim(),
-        apiKey: profile.apiKey,
         model: profile.model.trim(),
         imageInput: profile.imageInput ?? "auto",
         ...(profile.contextWindowOverride ? { contextWindowOverride: profile.contextWindowOverride } : {}),

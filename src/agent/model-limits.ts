@@ -1,4 +1,5 @@
-import type { ModelConfig } from "../types";
+import { isModelSdk, type ModelConfig, type ModelSdk } from "../types";
+import { defaultBaseURL, providerSettingFields, type ProviderSettingField } from "./model-sdks";
 
 const CACHE_KEY = "side-agent:model-limit";
 const CATALOG_CACHE_KEY = "side-agent:model-catalog";
@@ -22,6 +23,8 @@ export type ModelCatalog = Record<string, {
   name?: string;
   api?: string;
   npm?: string;
+  env?: string[];
+  doc?: string;
   models?: Record<string, {
     id?: string;
     name?: string;
@@ -41,6 +44,11 @@ export type ModelProviderPreset = {
   id: string;
   name: string;
   baseURL: string;
+  sdk: ModelSdk;
+  env: string[];
+  doc?: string;
+  fields: ProviderSettingField[];
+  /** Legacy display/tests; request dispatch uses sdk. */
   transport: "gateway" | "openai-compatible";
   models: Array<{ id: string; name: string }>;
 };
@@ -157,6 +165,8 @@ function normalizeCatalog(value: unknown): ModelCatalog {
       ...(typeof provider.name === "string" ? { name: provider.name } : {}),
       ...(typeof provider.api === "string" ? { api: provider.api } : {}),
       ...(typeof provider.npm === "string" ? { npm: provider.npm } : {}),
+      ...(Array.isArray(provider.env) ? { env: provider.env.filter((item): item is string => typeof item === "string") } : {}),
+      ...(typeof provider.doc === "string" ? { doc: provider.doc } : {}),
       models,
     }]];
   }));
@@ -164,15 +174,15 @@ function normalizeCatalog(value: unknown): ModelCatalog {
 
 export function modelProviderPresets(catalog: ModelCatalog): ModelProviderPreset[] {
   return Object.entries(catalog).flatMap(([id, provider]) => {
-    const gateway = id === "vercel" && provider.npm === "@ai-sdk/gateway";
-    const compatible = provider.npm === "@ai-sdk/openai-compatible"
-      && typeof provider.api === "string" && /^https?:\/\/[^$]+$/i.test(provider.api);
-    if (!gateway && !compatible) return [];
+    if (!isModelSdk(provider.npm)) return [];
+    const gateway = provider.npm === "@ai-sdk/gateway";
     const models = Object.entries(provider.models ?? {}).filter(([, model]) =>
       model.tool_call === true && (model.modalities?.output?.includes("text") ?? true),
     ).map(([modelId, model]) => ({ id: model.id ?? modelId, name: model.name ?? modelId }))
       .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
-    return [{ id, name: provider.name ?? id, baseURL: gateway ? VERCEL_GATEWAY_URL : provider.api!,
+    const descriptor = { id, npm: provider.npm, api: provider.api, env: provider.env };
+    return [{ id, name: provider.name ?? id, baseURL: gateway ? VERCEL_GATEWAY_URL : provider.api ?? defaultBaseURL(provider.npm),
+      sdk: provider.npm, env: provider.env ?? [], doc: provider.doc, fields: providerSettingFields(descriptor),
       transport: gateway ? "gateway" as const : "openai-compatible" as const, models }];
   }).sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
 }

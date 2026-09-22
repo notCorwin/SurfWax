@@ -1,5 +1,6 @@
 import type { ModelConfig } from "../types";
 import { resolveModelLimit } from "./model-limits";
+import { resolvedBaseURL, sdkFor, settingsFor } from "./model-sdks";
 
 export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ReasoningEffort = typeof REASONING_EFFORTS[number];
@@ -118,10 +119,12 @@ export class ReasoningSettings {
       this.fieldUnsupported = stored.fieldUnsupported === true;
       this.rejected = new Set(efforts(stored.rejected) ?? []);
     }
-    const baseURL = this.config.baseURL.trim().replace(/\/+$/, "");
+    const baseURL = resolvedBaseURL(this.config);
     const fetcher = this.options.fetch ?? globalThis.fetch.bind(globalThis);
-    const endpoint = this.config.transport === "gateway" ? undefined : await fetcher(`${baseURL}/models`, {
-        headers: { Authorization: `Bearer ${this.config.apiKey}` },
+    const sdk = sdkFor(this.config);
+    const probesModels = sdk === "@ai-sdk/openai-compatible" || sdk === "@qvac/ai-sdk-provider" || sdk === "venice-ai-sdk-provider";
+    const endpoint = !probesModels ? undefined : await fetcher(`${baseURL}/models`, {
+        headers: { Authorization: `Bearer ${settingsFor(this.config).apiKey}` },
         signal: AbortSignal.timeout(5_000),
       }).then((response) => response.ok ? response.json() : undefined).then((body) => endpointEfforts(body, this.config.model)).catch(() => undefined);
     const catalog = endpoint === undefined
@@ -138,7 +141,7 @@ export class ReasoningSettings {
 const settings = new Map<string, ReasoningSettings>();
 
 export function reasoningSettingsFor(config: ModelConfig): ReasoningSettings {
-  const key = `${config.baseURL.trim().replace(/\/+$/, "")}\u0000${config.model.trim()}\u0000${config.apiKey}`;
+  const key = `${sdkFor(config)}\u0000${resolvedBaseURL(config)}\u0000${config.model.trim()}\u0000${settingsFor(config).apiKey}`;
   let current = settings.get(key);
   if (!current) {
     current = new ReasoningSettings(config);

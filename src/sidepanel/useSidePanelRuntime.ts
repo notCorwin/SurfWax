@@ -5,6 +5,7 @@ import { abortAllConversationWork } from "../agent/coordinator";
 import { createAgent } from "../agent/runner";
 import { ContextCompactor } from "../agent/compaction";
 import { createModel } from "../agent/model";
+import { reasoningSettingsFor } from "../agent/reasoning";
 import { createChatTransport, type SidePanelMessage } from "../agent/transport";
 import { ChromeExecutor } from "../chrome/executor";
 import { createConversationAdapter } from "../conversations";
@@ -29,9 +30,12 @@ function useConversationRuntime(config: ModelConfig, logger: EventLogger): Assis
   const conversationId = useAuiState((state) => state.threadListItem.remoteId ?? state.threadListItem.id);
   const executor = useMemo(() => new ChromeExecutor({ logger }), [logger]);
   const transport = useMemo(
-    () => createChatTransport((signal, branchIds) => {
-      const languageModel = createModel(config, logger, conversationId);
-      return createAgent({ model: config, languageModel, executor, logger, conversationId,
+    () => createChatTransport(async (signal, branchIds) => {
+      const reasoning = reasoningSettingsFor(config);
+      await reasoning.ready;
+      const languageModel = await createModel(config, logger, conversationId, { signal });
+      signal.throwIfAborted();
+      return createAgent({ model: config, languageModel, reasoning: reasoning.snapshot().selected ?? undefined, executor, logger, conversationId,
         compactor: new ContextCompactor({ model: config, logger, conversationId, branchIds, signal }) });
     }, logger, conversationId),
     [config, conversationId, executor, logger],

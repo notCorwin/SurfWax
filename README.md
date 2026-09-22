@@ -4,7 +4,7 @@
 [![Chrome 138+](https://img.shields.io/badge/Chrome-138%2B-4285F4?logo=googlechrome&logoColor=white)](https://www.google.com/chrome/)
 [![Version](https://img.shields.io/badge/version-0.2.0-blue)](manifests/store.json)
 
-Surf Wax 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。它使用 Vercel AI SDK v7 和 Assistant UI，直接连接用户配置的 OpenAI-compatible Provider，并只向模型提供一个 `browser` 工具。
+Surf Wax 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。它使用 Vercel AI SDK v7 和 Assistant UI，从扩展直接连接 Models.dev Provider 或用户配置的 OpenAI-compatible Endpoint，并只向模型提供一个 `browser` 工具。
 
 `browser` 默认以 `observe` / `act` JSON DSL 提供语义定位、自动等待、截图与真实输入；`run` 是 JavaScript 逃生舱，可访问完整 Chrome Extension API、页面对象、执行上下文和原始 CDP。
 
@@ -67,13 +67,17 @@ npm run dev:vite
 
 1. 点击扩展图标打开 Side Panel。
 2. 点击标题栏中的设置按钮。
-3. 填写 Provider 的 **Base URL**、**Model ID** 和 **API Key**。Base URL 应包含 Provider 要求的 API 前缀，例如 `https://provider.example/v1`。
+3. 选择 Models.dev Provider，填写 **Model ID** 和页面显示的凭据字段；自定义 Endpoint 需要填写 Base URL 与 API Key。
 4. 保存配置并返回 Side Panel。
 5. 如需使用持久 User Scripts，在扩展详情页开启 **Allow User Scripts**。
 
 Side Panel 标题栏的脚本按钮会打开独立的用户脚本页面。列表可搜索、多选、批量启停/删除、导入和导出；点击脚本进入全屏编辑，也可复制为新脚本。导入先预览，同名脚本逐项选择是否覆盖；导入/导出文件仅包含 Chrome 原生 `RegisteredUserScript[]` JSON，不包含启停状态。编辑器会高亮 `CSS_*` 静态字符串中的 CSS，保存时自动格式化 JavaScript 和静态 CSS。停用的脚本可继续编辑，且不会在扩展重启后自行启用。新脚本的网站范围需要明确填写。高级编辑入口保留 Chrome 原生 `RegisteredUserScript` JSON 格式及全部字段。
 
-模型配置只保存在当前扩展的 `chrome.storage.local` 中。Provider 必须支持 OpenAI-compatible Chat Completions、流式响应和 tool calling，并允许扩展发起跨域请求。
+模型配置只保存在当前扩展的 `chrome.storage.local` 中，并按 Provider 隔离。设置页支持普通 API Key，也支持 Bedrock、Azure、Vertex、Cloudflare、GitLab、Watsonx 和 SAP AI Core 等多字段凭据；Models.dev Endpoint 中的 `${VAR}` 会自动变成独立输入项并在请求前插值。
+
+当前 Registry 覆盖 2026-09-22 Models.dev 的 223 个 Provider、28 个 `npm` SDK 标识。兼容浏览器的 `@ai-sdk/*`、AIHubMix、OpenRouter、SaladCloud 与 Merge Gateway 按需加载原包；QVAC、Venice、Cloudflare AI Gateway、GitLab Duo、watsonx.ai 和 SAP AI Core 使用等价浏览器协议适配，不需要 Native Messaging、Node 服务或远程代理。未来出现的未知 SDK 会在加入 Registry 后才可执行。
+
+模型列表默认只推荐 Models.dev 中 `tool_call: true` 且输出文本的模型。Provider 没有符合条件的目录模型时仍可手填 Model ID；例如 Perplexity 当前会提示浏览器工具可能不可用。`/models` 能力探测只用于 OpenAI-compatible Endpoint，原生 SDK 使用 Models.dev 的 Provider/Model 元数据。
 
 聊天框中模型名旁可选择思考强度，默认使用已知的最低档；若端点未公开档位，则从 `none` 开始，在真实请求被明确拒绝时逐步调整。选择按 Base URL 和 Model ID 保存在本地；端点不支持该参数时使用端点默认值。
 
@@ -180,7 +184,7 @@ Side Panel 关闭时，Harness 会立即中止当前模型请求，阻止排队�
 | 部分 | 职责 |
 | --- | --- |
 | `src/sidepanel/` | Side Panel 会话、配置加载、恢复和关闭生命周期 |
-| `src/agent/` | OpenAI-compatible 模型、无限重试、Agent 循环和流式 transport |
+| `src/agent/` | Models.dev SDK Registry、浏览器协议适配、无限重试、Agent 循环和流式 transport |
 | `src/chrome/` | 单一 `browser` 工具、动作 DSL、语义/视觉观察与共享 JavaScript/CDP 执行器 |
 | `src/logging.ts` | IndexedDB canonical event log 与对话重建 |
 | `src/userscripts/` | 原生 User Script 快照、迁移和恢复 |
@@ -197,7 +201,7 @@ npm run test:e2e   # 构建并运行真实扩展 Playwright 测试
 git diff --check
 ```
 
-`npm run test:e2e` 会启动带扩展的 Playwright Chromium，并使用本地 OpenAI-compatible SSE mock 验证工具执行、多对话切换、标题、日志与中断恢复、User Scripts、流式 Markdown 和关闭中止行为。CI 在每次推送到 `master` 时运行同一套检查，并更新 Autobuild 压缩包和 SHA-256 校验文件。
+`npm run test:e2e` 会启动带扩展的 Playwright Chromium，并使用本地协议 mock 验证 Provider 配置、工具执行、多对话切换、标题、日志与中断恢复、User Scripts、流式 Markdown 和关闭中止行为。单元测试覆盖 28 个 SDK 工厂以及 Cloudflare、GitLab、Watsonx、SAP 的浏览器协议映射；CI 不需要真实收费 Provider 凭据。
 
 实现或评审改动前，请先阅读 [AGENTS.md](AGENTS.md) 中的项目要求。
 

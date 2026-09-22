@@ -12,7 +12,7 @@ import {
   selectedModelConfig,
 } from "./config";
 
-const EMPTY_CONFIG: ModelConfig = { baseURL: "", apiKey: "", model: "" };
+const EMPTY_CONFIG: ModelConfig = { sdk: "@ai-sdk/openai-compatible", providerSettings: {}, baseURL: "", model: "" };
 
 export type SidePanelSession = {
   config: ModelConfig;
@@ -68,6 +68,6 @@ export function useSidePanelSession(): SidePanelSession {
     error,
     configured: configReady && Boolean(modelSettings.selectedProviderId) && isCompleteModelConfig(config),
     jevConfigured: configReady && isCompleteJevConfig(jevConfig),
-    chatKey: `${config.providerId ?? ""}\u0000${config.baseURL}\u0000${config.model}\u0000${config.contextWindowOverride ?? ""}\u0000${jevConfig.baseURL}\u0000${jevConfig.model}\u0000${jevConfig.apiKey}`,
+    chatKey: `${config.providerId ?? ""}\u0000${config.sdk ?? ""}\u0000${config.baseURL}\u0000${JSON.stringify(config.providerSettings ?? {})}\u0000${config.model}\u0000${config.contextWindowOverride ?? ""}\u0000${jevConfig.baseURL}\u0000${jevConfig.model}\u0000${jevConfig.apiKey}`,
   };
 }

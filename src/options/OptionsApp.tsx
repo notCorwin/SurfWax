@@ -4,11 +4,13 @@ import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../components/ui/card";
 import { Field, FieldDescription, FieldGroup, FieldLabel, FieldLegend, FieldSet } from "../components/ui/field";
 import { Input } from "../components/ui/input";
+import { Textarea } from "../components/ui/textarea";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { ErrorNotice } from "../components/ui/error-notice";
 import { SearchCombobox, type SearchComboboxOption } from "./SearchCombobox";
 import { EventLogger } from "../logging";
 import { loadModelCatalog, modelProviderPresets, resolveModelLimit, type ModelLimit, type ModelProviderPreset } from "../agent/model-limits";
+import { modelConfigErrors, resolvedBaseURL, type ProviderSettingField } from "../agent/model-sdks";
 import { JEV_PROVIDERS, JEV_PROVIDER_PRESETS } from "../jev-providers";
 import type { JevConfig, JevProvider } from "../types";
 import type { ModelProfile, PersistedJevConfig } from "../sidepanel/config";
@@ -27,7 +29,7 @@ import "./styles.css";
 
 const EMPTY_JEV_CONFIG: PersistedJevConfig = DEFAULT_JEV_CONFIG;
 type Status = "idle" | "saving" | "clearing" | "saved" | "error";
-type ModelField = "providerId" | "baseURL" | "model" | "apiKey" | "contextWindowOverride" | "imageInput";
+type ModelField = "providerId" | "baseURL" | "model" | "contextWindowOverride" | "imageInput" | string;
 
 export function OptionsApp() {
   const [modelSettings, setModelSettings] = useState(EMPTY_MODEL_CONFIG);
@@ -52,8 +54,9 @@ export function OptionsApp() {
     ...providers.filter((provider) => provider.id !== "vercel").map((provider) => ({ value: provider.id, label: provider.name })),
   ], [providers]);
   const config = storedProfile && selectedProvider
-    ? { ...storedProfile, baseURL: selectedProvider.baseURL, transport: selectedProvider.transport }
+    ? { ...storedProfile, baseURL: selectedProvider.baseURL, sdk: selectedProvider.sdk }
     : storedProfile;
+  const settingFields: ProviderSettingField[] = selectedProvider?.fields ?? [{ key: "apiKey", label: "API Key", type: "password", required: true }];
   const fail = (summary: string, error: unknown) => {
     setStatus("error");
     setMessage(summary);
@@ -76,7 +79,7 @@ export function OptionsApp() {
       savedConfig.current = JSON.stringify({ modelSettings: stored, jevConfig: storedJev, providerInput: stored.selectedProviderId });
       const selected = selectedModelConfig(stored);
       const preset = catalogProviders.find((provider) => provider.id === stored.selectedProviderId);
-      const effective = selected && preset ? { ...selected, baseURL: preset.baseURL, transport: preset.transport } : selected;
+      const effective = selected && preset ? { ...selected, baseURL: preset.baseURL, sdk: preset.sdk } : selected;
       matchingKey.current = effective ? `${effective.baseURL}\u0000${effective.model}` : "";
       if (effective && isCompleteModelConfig(effective)) {
         void resolveModelLimit({ ...effective, contextWindowOverride: undefined }).then((limit) => {
@@ -119,6 +122,17 @@ export function OptionsApp() {
     setErrorDetail(undefined);
   };
 
+  const updateSetting = (key: string, value: string) => {
+    if (!config) return;
+    setModelSettings((current) => ({ ...current, profiles: { ...current.profiles, [config.providerId]: {
+      ...config, providerSettings: { ...config.providerSettings, [key]: value },
+    } } }));
+    setFieldErrors((current) => ({ ...current, [key]: undefined }));
+    setStatus("idle");
+    setMessage("");
+    setErrorDetail(undefined);
+  };
+
   const changeProvider = (value: string) => {
     setProviderInput(value);
     const preset = providers.find((provider) => provider.id === value);
@@ -127,9 +141,9 @@ export function OptionsApp() {
       selectedProviderId: value,
       profiles: current.profiles[value] ? current.profiles : { ...current.profiles, [value]: {
         providerId: value,
-        transport: preset?.transport ?? "openai-compatible",
+        sdk: preset?.sdk ?? "@ai-sdk/openai-compatible",
+        providerSettings: {},
         baseURL: preset?.baseURL ?? "",
-        apiKey: "",
         model: "",
         imageInput: "auto",
       } satisfies ModelProfile },
@@ -162,18 +176,7 @@ export function OptionsApp() {
     event.preventDefault();
     const errors: Partial<Record<ModelField, string>> = {};
     if (!modelSettings.selectedProviderId || providerInput !== modelSettings.selectedProviderId) errors.providerId = "请选择 Provider";
-    if (config && config.transport !== "gateway" && !config.baseURL.trim()) errors.baseURL = "请输入 Base URL";
-    else if (config?.transport !== "gateway") {
-      try {
-        const url = new URL(config?.baseURL ?? "");
-        if (url.protocol !== "http:" && url.protocol !== "https:") errors.baseURL = "请输入 HTTP 或 HTTPS 地址";
-      } catch { errors.baseURL = "请输入有效的网址"; }
-    }
-    if (!config?.model.trim()) errors.model = "请输入 Model ID";
-    if (!config?.apiKey.trim()) errors.apiKey = "请输入 API Key";
-    if (config?.contextWindowOverride !== undefined && (!Number.isSafeInteger(config.contextWindowOverride) || config.contextWindowOverride <= 0)) {
-      errors.contextWindowOverride = "请输入正整数 token 数";
-    }
+    if (config) Object.assign(errors, modelConfigErrors(config, settingFields));
     const jevErrors: Partial<Record<keyof PersistedJevConfig, string>> = {};
     if (jevConfig.apiKey.trim()) {
       if (!jevConfig.baseURL.trim()) jevErrors.baseURL = "请输入 Jev Base URL";
@@ -195,10 +198,11 @@ export function OptionsApp() {
       setStatus("error");
       setMessage("请检查标出的字段");
       setErrorDetail(undefined);
-      const firstMainError = Object.keys(errors)[0] as ModelField | undefined;
+      const firstMainError = ["providerId", "baseURL", "model", ...settingFields.map(({ key }) => key), "contextWindowOverride"]
+        .find((key) => errors[key]) as ModelField | undefined;
       const firstJevError = Object.keys(jevErrors)[0] as keyof PersistedJevConfig | undefined;
       const firstErrorId = firstMainError
-        ? ({ providerId: "provider-id", baseURL: "base-url", model: "model-id", apiKey: "api-key", contextWindowOverride: "context-window", imageInput: "image-input" }[firstMainError])
+        ? ({ providerId: "provider-id", baseURL: "base-url", model: "model-id", apiKey: "api-key", contextWindowOverride: "context-window", imageInput: "image-input" }[firstMainError] ?? `provider-setting-${firstMainError}`)
         : firstJevError
           ? ({ provider: "jev-provider", baseURL: "jev-base-url", model: "jev-model-id", apiKey: "jev-api-key", threshold: "jev-threshold" }[firstJevError])
           : undefined;
@@ -283,7 +287,7 @@ export function OptionsApp() {
                   {fieldErrors.baseURL && <p id="base-url-error" className="field-error" role="alert">{fieldErrors.baseURL}</p>}
                 </Field> : <Field>
                   <FieldLabel>Endpoint</FieldLabel>
-                  <p className="model-limit-match">{config.baseURL}</p>
+                  <p className="model-limit-match">{resolvedBaseURL(config) || "由 SDK 使用默认 Endpoint"}</p>
                 </Field>}
                 <Field data-disabled={busy || undefined} data-invalid={!!fieldErrors.model || undefined}>
                   <FieldLabel htmlFor="model-id">Model ID</FieldLabel>
@@ -292,12 +296,26 @@ export function OptionsApp() {
                     value={config.model} disabled={busy} onValueChange={(value) => update("model", value)}
                     aria-invalid={!!fieldErrors.model} aria-describedby={fieldErrors.model ? "model-id-error" : undefined} />
                   {fieldErrors.model && <p id="model-id-error" className="field-error" role="alert">{fieldErrors.model}</p>}
+                  {selectedProvider && selectedProvider.models.length === 0 && <FieldDescription>
+                    Models.dev 当前没有符合文本输出与 tool_call 条件的目录模型；可手填 Model ID，浏览器工具可能不可用。
+                  </FieldDescription>}
                 </Field>
-                <Field data-disabled={busy || undefined} data-invalid={!!fieldErrors.apiKey || undefined}>
-                  <FieldLabel htmlFor="api-key">API Key</FieldLabel>
-                  <Input id="api-key" name="apiKey" type="password" autoComplete="off" aria-invalid={!!fieldErrors.apiKey} aria-describedby={fieldErrors.apiKey ? "api-key-error" : undefined} value={config.apiKey} disabled={busy} onChange={(event) => update("apiKey", event.target.value)} />
-                  {fieldErrors.apiKey && <p id="api-key-error" className="field-error" role="alert">{fieldErrors.apiKey}</p>}
-                </Field>
+                {settingFields.map((item) => {
+                  const id = item.key === "apiKey" ? "api-key" : `provider-setting-${item.key}`;
+                  const errorId = `${id}-error`;
+                  const value = config.providerSettings[item.key] ?? "";
+                  return <Field key={item.key} data-disabled={busy || undefined} data-invalid={!!fieldErrors[item.key] || undefined}>
+                    <FieldLabel htmlFor={id}>{item.label}</FieldLabel>
+                    {item.type === "textarea"
+                      ? <Textarea id={id} name={item.key} autoComplete="off" placeholder={item.placeholder} aria-invalid={!!fieldErrors[item.key]}
+                        aria-describedby={fieldErrors[item.key] ? errorId : undefined} value={value} disabled={busy} onChange={(event) => updateSetting(item.key, event.target.value)} />
+                      : <Input id={id} name={item.key} type={item.type ?? "text"} autoComplete="off" placeholder={item.placeholder}
+                        aria-invalid={!!fieldErrors[item.key]} aria-describedby={fieldErrors[item.key] ? errorId : undefined} value={value} disabled={busy}
+                        onChange={(event) => updateSetting(item.key, event.target.value)} />}
+                    {item.description && <FieldDescription>{item.description}</FieldDescription>}
+                    {fieldErrors[item.key] && <p id={errorId} className="field-error" role="alert">{fieldErrors[item.key]}</p>}
+                  </Field>;
+                })}
                 <Field>
                   <FieldLabel>上下文窗口自动匹配</FieldLabel>
                   <p data-testid="model-limit-match" className="model-limit-match">

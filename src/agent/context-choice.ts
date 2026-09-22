@@ -153,7 +153,7 @@ export async function forkSelection(logger: EventLogger, conversationId: string,
 export async function applySummaryChoice(logger: EventLogger, conversationId: string, model: ModelConfig, signal: AbortSignal): Promise<void> {
   const source = await activeContext(logger, conversationId);
   await summarizeContext({ raw: source.raw, branchIds: source.branchIds, uiCount: source.ui.length,
-    model, languageModel: createModel(model, logger, conversationId), logger, conversationId, signal });
+    model, languageModel: await createModel(model, logger, conversationId, { signal }), logger, conversationId, signal });
   await logger.append({ type: "context.choice.resolved", conversationId,
     content: { branchIds: source.branchIds, action: "summary" } });
 }
