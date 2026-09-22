@@ -51,6 +51,39 @@ function fakePort(onPost: (message: { id: string; method: string }, reply: (mess
 }
 
 describe("ChromeExecutor", () => {
+  it("rebinds each run to the active tab and keeps that target stable within the run", async () => {
+    const fake = fakeChrome();
+    const tabs: chrome.tabs.Tab[] = [
+      { id: 41, windowId: 7, active: true, title: "First", url: "https://example.com/first" } as chrome.tabs.Tab,
+      { id: 42, windowId: 7, active: false, title: "Second", url: "https://example.com/second" } as chrome.tabs.Tab,
+    ];
+    Object.assign(fake.chromeApi, {
+      windows: {
+        getCurrent: vi.fn(async () => ({ id: 7, tabs })),
+        get: vi.fn(async () => ({ id: 7 })),
+      },
+      tabs: {
+        get: vi.fn(async (tabId: number) => tabs.find((tab) => tab.id === tabId)),
+        query: vi.fn(async ({ windowId, active }: chrome.tabs.QueryInfo) => tabs.filter((tab) => tab.windowId === windowId && (!active || tab.active))),
+      },
+    });
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+
+    await expect(executor.beginRun()).resolves.toMatchObject({ tabs: [
+      { index: 0, current: true, title: "First", url: "https://example.com/first" },
+      { index: 1, current: false, title: "Second", url: "https://example.com/second" },
+    ] });
+    tabs[0]!.active = false;
+    tabs[1]!.active = true;
+    expect((await executor.browserContext()).tabs[0]!.current).toBe(true);
+    expect((await executor.beginRun()).tabs[1]!.current).toBe(true);
+
+    tabs.splice(1, 1);
+    tabs[0]!.active = true;
+    expect((await executor.browserContext()).tabs[0]!.current).toBe(true);
+    executor.dispose();
+  });
+
   it("navigates the current tab and creates new tabs only in the current window", async () => {
     const fake = fakeChrome();
     let url = "https://example.com/before";

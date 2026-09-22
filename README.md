@@ -106,7 +106,7 @@ Side Panel 标题栏的脚本按钮会打开独立的用户脚本页面。列表
 
 `target` 可使用快照 ref、CSS、常见 Playwright locator 字符串，或结构化 role/text/label/placeholder/alt/title/testId/CSS locator。定位器继续自动等待、严格匹配并在 DOM 更新后重新解析。
 
-所有命令只操作打开 Side Panel 时所在的 Chrome 窗口。`goto` 导航当前目标标签页，`tab-new` 在该窗口中新建标签页；Surf Wax 不创建、连接或关闭独立 Chrome 窗口。标签页索引从 0 开始。
+所有命令只操作打开 Side Panel 时所在的 Chrome 窗口。每轮任务开始时，Surf Wax 会绑定当时的活动标签页，并向模型提供该窗口全部标签页的索引、标题和 URL；页面正文仍由模型按需调用 `snapshot` 或 `find` 获取。`goto` 导航当前目标标签页，`tab-new` 在该窗口中新建标签页；Surf Wax 不创建、连接或关闭独立 Chrome 窗口。标签页索引从 0 开始。
 
 仅当专用命令无法表达任务时使用 `run-code`，其输入为接收现有 Playwright 风格 `page` facade 的单个异步函数表达式；不再向模型暴露任意 Chrome Extension API、原始 CDP、任意执行上下文或大结果 `$ref`。
 

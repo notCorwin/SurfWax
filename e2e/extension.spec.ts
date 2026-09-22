@@ -1274,6 +1274,67 @@ test("executes run-code through the page facade, restores the conversation, and 
   }
 });
 
+test("binds each turn to the active tab and supplies all current-window tab metadata", async () => {
+  const provider = await startProvider([
+    commandResponse("eval", { func: "() => { document.documentElement.dataset.contextTurn = 'first'; return true; }" }, "call-context-first"),
+    textResponse("FIRST_CONTEXT_DONE"),
+    textResponse("标签页上下文"),
+    commandResponse("eval", { func: "() => { document.documentElement.dataset.contextTurn = 'second'; return true; }" }, "call-context-second"),
+    textResponse("SECOND_CONTEXT_DONE"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const firstUrl = `${provider.origin}/target`;
+    const secondUrl = `${provider.origin}/complex-next`;
+    const first = await opened.context.newPage();
+    await first.goto(firstUrl);
+    const second = await opened.context.newPage();
+    await second.goto(secondUrl);
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    const windowCount = await opened.page.evaluate(async () => (await chrome.windows.getAll()).length);
+    const composer = opened.page.getByTestId("composer-input");
+
+    await first.bringToFront();
+    await composer.fill("use the first active tab");
+    await composer.press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FIRST_CONTEXT_DONE");
+    await expect.poll(() => first.evaluate(() => document.documentElement.dataset.contextTurn)).toBe("first");
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("标签页上下文");
+
+    await second.bringToFront();
+    await composer.fill("now use the second active tab");
+    await composer.press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("SECOND_CONTEXT_DONE");
+    await expect.poll(() => second.evaluate(() => document.documentElement.dataset.contextTurn)).toBe("second");
+
+    const agentRequests = provider.requests.filter((request) => request.tools);
+    const firstRequest = agentRequests.find((request) => JSON.stringify(request.messages).includes("use the first active tab"));
+    const secondRequest = [...agentRequests].reverse().find((request: any) => JSON.stringify(request.messages).includes("now use the second active tab"));
+    const firstPrompt = JSON.stringify(firstRequest?.messages);
+    const secondPrompt = JSON.stringify(secondRequest?.messages);
+    for (const prompt of [firstPrompt, secondPrompt]) {
+      expect(prompt).toContain("<browser-context>");
+      expect(prompt).toContain(firstUrl);
+      expect(prompt).toContain(secondUrl);
+      expect(prompt).not.toContain('"type":"file"');
+    }
+    expect(firstPrompt).toContain('current\\\":true,\\\"title\\\":\\\"Side Agent Target');
+    expect(secondPrompt).toContain('current\\\":true,\\\"title\\\":\\\"After Navigation');
+    expect(await opened.page.evaluate(async () => (await chrome.windows.getAll()).length)).toBe(windowCount);
+
+    const events = await readEvents(opened.page);
+    const contexts = events.filter((event) => event.type === "browser.context.prepared");
+    expect(contexts.some((event) => event.content.stepNumber === 0
+      && event.content.tabs.some((tab: any) => tab.current && tab.url === firstUrl))).toBe(true);
+    expect(contexts.some((event) => event.content.stepNumber === 0
+      && event.content.tabs.some((tab: any) => tab.current && tab.url === secondUrl))).toBe(true);
+    expect(JSON.stringify(events.filter((event) => event.type === "conversation.message"))).not.toContain("<browser-context>");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
 test("asks after a completed turn and summarizes the complete context on request", async () => {
   const oldReply = "OLD_CONTEXT_MARKER " + "page observation ".repeat(900);
   const provider = await startProvider([

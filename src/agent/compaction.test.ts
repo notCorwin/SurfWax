@@ -35,9 +35,11 @@ describe("context choices and summary", () => {
     const { events, logger, model, raw } = fixture();
     const compactor = new ContextCompactor({ model, logger, conversationId: "one", branchIds: ["u", "a"], signal: new AbortController().signal });
     expect(await compactor.prepare(raw, 0)).toBeUndefined();
-    compactor.recordPrompt({ instructions: "system", messages: raw, tools: [{ name: "page", inputSchema: { type: "object" } }] });
+    const promptMessages = [...raw, { role: "user", content: "ephemeral browser context" } as ModelMessage];
+    compactor.recordPrompt({ instructions: "system", messages: promptMessages, tools: [{ name: "page", inputSchema: { type: "object" } }] });
     const promptCalibration = events.at(-1)!;
     expect(promptCalibration.type).toBe("context.estimate.calibrated");
+    expect((promptCalibration.content as any).baseEstimate).toBe(estimateInput(raw));
     expect((promptCalibration.content as any).promptEstimate).toBeGreaterThan((promptCalibration.content as any).baseEstimate);
 
     compactor.recordUsage(7_000, 0);

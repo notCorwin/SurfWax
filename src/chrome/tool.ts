@@ -150,7 +150,7 @@ function scrubScreenshots(value: unknown, found: Array<{ mediaType: string; data
   }));
 }
 
-export function prepareToolMessages(messages: any[], stepNumber: number): any[] {
+export function prepareToolMessages(messages: any[], stepNumber: number, browserContext?: string): any[] {
   const inject = stepNumber > 0 && messages.at(-1)?.role === "tool";
   const current: Array<{ mediaType: string; data: string }> = [];
   const prepared = messages.map((message, index) => message.role !== "tool" ? message : { ...message, content: message.content.map((part: any) => {
@@ -161,5 +161,9 @@ export function prepareToolMessages(messages: any[], stepNumber: number): any[] 
     return { ...part, output: { ...part.output, value } };
   }) });
   const screenshot = current.at(-1);
-  return screenshot ? [...prepared, { role: "user", content: [{ type: "file", mediaType: screenshot.mediaType, data: { type: "data", data: screenshot.data } }] }] : prepared;
+  const content = [
+    ...(browserContext ? [{ type: "text", text: browserContext }] : []),
+    ...(screenshot ? [{ type: "file", mediaType: screenshot.mediaType, data: { type: "data", data: screenshot.data } }] : []),
+  ];
+  return content.length ? [...prepared, { role: "user", content }] : prepared;
 }

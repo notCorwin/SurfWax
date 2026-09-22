@@ -30,6 +30,8 @@ function useConversationRuntime(config: ModelConfig, logger: EventLogger, execut
   const conversationId = useAuiState((state) => state.threadListItem.remoteId ?? state.threadListItem.id);
   const transport = useMemo(
     () => createChatTransport(async (signal, branchIds) => {
+      signal.throwIfAborted();
+      await executor.beginRun();
       const reasoning = reasoningSettingsFor(config);
       await reasoning.ready;
       const languageModel = await createModel(config, logger, conversationId, { signal });

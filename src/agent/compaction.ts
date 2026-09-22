@@ -151,6 +151,7 @@ export async function summarizeContext(options: {
 
 export class ContextCompactor {
   private calibration?: EstimateCalibration;
+  private baseEstimate?: number;
   private contextVersion = 0;
   private warned = false;
   private events?: LogEvent[];
@@ -165,7 +166,7 @@ export class ContextCompactor {
     this.calibration = {
       branchIds: this.options.branchIds,
       contextVersion: this.contextVersion,
-      baseEstimate: estimateInput(prompt.messages),
+      baseEstimate: this.baseEstimate ?? estimateInput(prompt.messages),
       promptEstimate: estimateValue({ instructions: prompt.instructions, messages: prompt.messages, tools: prompt.tools }),
     };
     this.options.logger.record({ type: "context.estimate.calibrated", conversationId: this.options.conversationId, content: this.calibration });
@@ -189,6 +190,7 @@ export class ContextCompactor {
     this.events ??= await logger.conversation(conversationId);
     const { checkpoint, messages } = await effectiveContext(this.events, branchIds, rawMessages);
     this.contextVersion = checkpoint?.eventId ?? 0;
+    this.baseEstimate = estimateInput(messages);
     return messages === rawMessages ? undefined : messages;
   }
 }

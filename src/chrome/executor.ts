@@ -23,6 +23,10 @@ const PAGE_KEY = "__surfWaxPage";
 const BROWSER_KEY = "__surfWaxBrowser";
 type ExecutionContext = { conversationId?: string; toolCallId?: string; visualEnabled?: boolean };
 type BrowserState = { windowId: number; tabId?: number; origins: Set<string> };
+export type BrowserContext = {
+  windowId: number;
+  tabs: Array<{ index: number; current: boolean; title?: string; url?: string }>;
+};
 type NetworkRecord = {
   requestId: string; method: string; url: string; requestHeaders: Record<string, string>; requestBody?: string;
   status?: number; statusText?: string; responseHeaders?: Record<string, string>; failed?: string; resourceType?: string;
@@ -582,6 +586,26 @@ export class ChromeExecutor {
     return locator;
   }
 
+  async beginRun(): Promise<BrowserContext> {
+    const previous = this.browserState;
+    const window = await this.chromeApi.windows.getCurrent({ populate: true });
+    if (!Number.isInteger(window.id)) throw new Error("CommandError[no-window]: Could not resolve the current Chrome window");
+    const selected = window.tabs?.find((tab) => tab.active) ?? window.tabs?.[0];
+    this.browserState = {
+      windowId: window.id!,
+      tabId: selected?.id,
+      origins: previous && previous.windowId === window.id ? previous.origins : new Set<string>(),
+    };
+    await this.rememberOrigin(this.browserState, selected?.url);
+    return this.browserContext();
+  }
+
+  async browserContext(): Promise<BrowserContext> {
+    const state = await this.currentBrowserState();
+    const tabs = await this.tabsOf(state);
+    return { windowId: state.windowId, tabs: tabs.map(({ index, current, title, url }) => ({ index, current, title, url })) };
+  }
+
   private async currentBrowserState(): Promise<BrowserState> {
     const existing = this.browserState;
     if (existing) {
@@ -600,6 +624,10 @@ export class ChromeExecutor {
 
   private async tabsOf(state: BrowserState): Promise<Array<{ index: number; current: boolean; id?: number; title?: string; url?: string }>> {
     const tabs = await this.chromeApi.tabs.query({ windowId: state.windowId });
+    if (state.tabId === undefined || !tabs.some((tab) => tab.id === state.tabId)) {
+      state.tabId = tabs.find((tab) => tab.active)?.id ?? tabs[0]?.id;
+      await this.rememberOrigin(state, tabs.find((tab) => tab.id === state.tabId)?.url);
+    }
     return tabs.map((tab, index) => ({ index, current: tab.id === state.tabId || !state.tabId && Boolean(tab.active), id: tab.id, title: tab.title, url: tab.url }));
   }
 

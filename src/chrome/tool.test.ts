@@ -38,10 +38,16 @@ describe("browser command tools", () => {
       { type: "tool-result", toolName: "browser", output: { type: "json", value: { screenshot: { mediaType: "image/jpeg", data: "old" } } } },
       { type: "tool-result", toolName: "screenshot", output: { type: "json", value: { screenshot: { mediaType: "image/png", data: "new" } } } },
     ] }];
-    const prepared = prepareToolMessages(messages, 1);
+    const prepared = prepareToolMessages(messages, 1, "tab context");
     expect(prepared[0].content[0].output.value.screenshot.data).toBe("[stored in canonical event log]");
     expect(prepared[0].content[1].output.value.screenshot.data).toBe("[stored in canonical event log]");
-    expect(prepared[1]).toMatchObject({ role: "user", content: [{ type: "file", mediaType: "image/png", data: { type: "data", data: "new" } }] });
+    expect(prepared[1]).toMatchObject({ role: "user", content: [
+      { type: "text", text: "tab context" },
+      { type: "file", mediaType: "image/png", data: { type: "data", data: "new" } },
+    ] });
     expect(prepareToolMessages(messages, 0)).toHaveLength(1);
+    expect(prepareToolMessages([], 0, "tab context")).toEqual([
+      { role: "user", content: [{ type: "text", text: "tab context" }] },
+    ]);
   });
 });

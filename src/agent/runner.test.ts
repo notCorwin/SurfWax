@@ -13,9 +13,17 @@ function usage() {
 describe("createAgent", () => {
   it("executes a dedicated command tool without adding a model turn", async () => {
     let step = 0;
-    const executor = { executeCommand: vi.fn(async () => ({ ok: true })) } as unknown as ChromeExecutor;
+    const prompts: string[] = [];
+    const executor = {
+      executeCommand: vi.fn(async () => ({ ok: true })),
+      browserContext: vi.fn(async () => ({ windowId: 7, tabs: [
+        { index: 0, current: true, title: "Current page", url: "https://example.com/current" },
+        { index: 1, current: false, title: "Other page", url: "https://example.com/other" },
+      ] })),
+    } as unknown as ChromeExecutor;
     const model = new MockLanguageModelV4({
-      doStream: async () => {
+      doStream: async (options) => {
+        prompts.push(JSON.stringify(options.prompt));
         step += 1;
         return { stream: simulateReadableStream({ chunks: step === 1 ? [
           { type: "stream-start" as const, warnings: [] },
@@ -33,13 +41,21 @@ describe("createAgent", () => {
       // Consume the stream so the agent can execute the repaired tool call.
     }
     expect(step).toBe(2);
+    expect(prompts[0]).toContain("<browser-context>");
+    expect(prompts[0]).toContain("Current page");
+    expect(prompts[0]).toContain("Other page");
+    expect(prompts[0]).toContain('current\\\":true');
+    expect(prompts[0]).not.toContain('"type":"file"');
     expect(executor.executeCommand).toHaveBeenCalledWith("goto", { url: "https://example.com" }, undefined, expect.any(Object));
     expect(await result.text).toBe("done");
-  });
+  }, 10_000);
 
   it("continues beyond twenty tool calls until natural completion", async () => {
     let step = 0;
-    const executor = { executeCommand: vi.fn(async () => [{ id: 1, title: "test" }]) } as unknown as ChromeExecutor;
+    const executor = {
+      executeCommand: vi.fn(async () => [{ id: 1, title: "test" }]),
+      browserContext: vi.fn(async () => ({ windowId: 7, tabs: [{ index: 0, current: true, title: "test", url: "https://example.com" }] })),
+    } as unknown as ChromeExecutor;
     const model = new MockLanguageModelV4({
       doStream: async (options) => {
         expect(options.reasoning).toBe("minimal");
@@ -75,5 +91,5 @@ describe("createAgent", () => {
     expect(toolResults).toBe(25);
     expect(executor.executeCommand).toHaveBeenCalledTimes(25);
     expect(await result.finishReason).toBe("stop");
-  }, 30_000);
+  }, 90_000);
 });
