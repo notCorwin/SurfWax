@@ -357,13 +357,15 @@ p {
 }
 
 .thinking-item,
-.activity {
+.activity,
+.process-trace {
   border: 0;
   background: transparent;
 }
 
 .thinking-item summary,
-.activity summary {
+.activity summary,
+.process-trace summary {
   display: flex;
   align-items: center;
   gap: 9px;
@@ -377,14 +379,17 @@ p {
 }
 
 .thinking-item summary::-webkit-details-marker,
-.activity summary::-webkit-details-marker {
+.activity summary::-webkit-details-marker,
+.process-trace summary::-webkit-details-marker {
   display: none;
 }
 
 .thinking-item summary svg,
-.activity summary svg {
+.activity summary svg,
+.process-trace summary svg {
   width: 16px;
   height: 16px;
+  flex: none;
 }
 
 .thinking-body,
@@ -395,11 +400,23 @@ p {
   line-height: 1.35;
 }
 
-.activity[data-status="error"] summary {
+.activity[data-status="error"] summary,
+.process-trace[data-status="error"] summary {
   color: var(--destructive);
 }
 
-.command-group-content {
+.process-trace > summary {
+  min-width: 0;
+}
+
+.process-trace > summary span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.process-trace-content {
   display: flex;
   flex-direction: column;
   gap: var(--transcript-item-gap);

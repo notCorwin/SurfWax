@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { workLabel } from "./work-time";
 import { buildMessageSearchIndex } from "./thread-list";
+import { processGroupSummary } from "./process-group";
 import { toLogValue, type LogEvent } from "../../logging";
 
 describe("workLabel", () => {
@@ -16,6 +17,41 @@ describe("workLabel", () => {
     [0, "工作了 0 秒"],
   ])("formats %i seconds as %s", (seconds, expected) => {
     expect(workLabel(seconds)).toBe(expected);
+  });
+});
+
+describe("processGroupSummary", () => {
+  const summary = (...parts: Array<{ type: string; status: { type: string }; args?: unknown; isError?: boolean }>) =>
+    processGroupSummary(parts, parts.map((_, index) => index));
+
+  it("shows the latest live phase", () => {
+    expect(summary({ type: "reasoning", status: { type: "running" } }).label).toBe("正在思考…");
+    expect(summary({ type: "tool-call", status: { type: "running" }, args: {} }).label).toBe("正在执行命令…");
+  });
+
+  it("summarizes completed reasoning and commands", () => {
+    expect(summary({ type: "reasoning", status: { type: "complete" } }).label).toBe("思考完成");
+    expect(summary(
+      { type: "tool-call", status: { type: "complete" } },
+      { type: "tool-call", status: { type: "complete" } },
+    ).label).toBe("已执行 2 次命令");
+    expect(summary(
+      { type: "reasoning", status: { type: "complete" } },
+      { type: "tool-call", status: { type: "complete" } },
+    ).label).toBe("已思考并执行 1 次命令");
+  });
+
+  it("reports failures across the whole group", () => {
+    expect(summary(
+      { type: "tool-call", status: { type: "incomplete" } },
+      { type: "tool-call", status: { type: "complete" } },
+    )).toMatchObject({ status: "error", label: "2 次命令中有失败" });
+    expect(processGroupSummary([
+      { type: "tool-call", status: { type: "requires-action" } },
+    ], [0], true)).toMatchObject({ status: "error", label: "1 次命令中有失败" });
+    expect(processGroupSummary([
+      { type: "reasoning", status: { type: "complete" } },
+    ], [0], true)).toMatchObject({ status: "complete", label: "思考完成" });
   });
 });
 

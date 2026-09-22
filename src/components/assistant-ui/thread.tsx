@@ -12,7 +12,7 @@ import {
   useAuiState,
 } from "@assistant-ui/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ArrowDownIcon, ChevronLeftIcon, ChevronRightIcon, ClockIcon, PencilIcon, RotateCcwIcon, WrenchIcon } from "lucide-react";
+import { ArrowDownIcon, BrainIcon, ChevronLeftIcon, ChevronRightIcon, ClockIcon, PencilIcon, RotateCcwIcon, WrenchIcon } from "lucide-react";
 import {
   type ComponentProps,
   type FC,
@@ -29,6 +29,7 @@ import { Button } from "@/components/ui/button";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { LocalComposer } from "./local-composer";
 import { MarkdownText } from "./markdown-text";
+import { processGroupSummary } from "./process-group";
 import { Reasoning } from "./reasoning";
 import { ToolFallback } from "./tool-fallback";
 import { workLabel } from "./work-time";
@@ -245,7 +246,8 @@ const AssistantMessage: FC = () => {
   const workView = useContext(WorkViewContext);
   const parts = useAuiState((state) => state.message.parts);
   const messageId = useAuiState((state) => state.message.id);
-  const messageRunning = useAuiState((state) => state.message.status?.type === "running");
+  const messageStatus = useAuiState((state) => state.message.status?.type);
+  const threadRunning = useAuiState((state) => state.thread.isRunning);
   const interrupted = useAuiState((state) => state.message.metadata.custom?.interrupted === true);
   const latest = useAuiState((state) => state.thread.messages.at(-1)?.id === state.message.id);
   const lastAnswerStart = (() => {
@@ -255,12 +257,12 @@ const AssistantMessage: FC = () => {
     return index;
   })();
   const groupBy = useMemo(() => {
-    const commandGroup = groupPartByType({ "tool-call": ["group-command"] });
-    if (!workView) return commandGroup;
+    const processGroup = groupPartByType({ reasoning: ["group-process-trace"], "tool-call": ["group-process-trace"] });
+    if (!workView) return processGroup;
     const indices = new Map(parts.map((part, index) => [part, index]));
-    return (part: typeof parts[number], context: Parameters<typeof commandGroup>[1]) => [
+    return (part: typeof parts[number], context: Parameters<typeof processGroup>[1]) => [
       (indices.get(part) ?? 0) >= lastAnswerStart ? "group-final" : "group-process",
-      ...commandGroup(part, context),
+      ...processGroup(part, context),
     ] as const;
   }, [parts, workView?.mode, workView?.finalMessageId, lastAnswerStart]);
   if (workView?.mode === "process" && messageId === workView.finalMessageId && lastAnswerStart === 0) return null;
@@ -272,12 +274,15 @@ const AssistantMessage: FC = () => {
           {({ part, children }) => {
             if (part.type === "group-process") return workView?.mode === "process" ? children : null;
             if (part.type === "group-final") return workView?.mode === "final" ? children : null;
-            if (part.type === "group-command") return part.indices.length === 1 || messageRunning ? children : (
-              <details className="activity command-group" open={part.status.type === "incomplete"}>
-                <summary><WrenchIcon aria-hidden="true" /><span>共 {part.indices.length} 次命令调用</span></summary>
-                <div className="command-group-content">{children}</div>
+            if (part.type === "group-process-trace") {
+              const summary = processGroupSummary(parts, part.indices,
+                interrupted || messageStatus === "incomplete" || messageStatus === "requires-action" && !threadRunning);
+              const Icon = summary.hasTools ? WrenchIcon : BrainIcon;
+              return <details className="process-trace" data-status={summary.status} data-testid="process-trace">
+                <summary><Icon aria-hidden="true" /><span key={summary.label} className={summary.status === "running" ? "shimmer text-foreground/65" : undefined}>{summary.label}</span></summary>
+                <div className="process-trace-content">{children}</div>
               </details>
-            );
+            }
             if (part.type === "text") return <MarkdownText />;
             if (part.type === "reasoning") return <Reasoning {...part} />;
             if (part.type === "tool-call") return part.toolUI ?? <ToolFallback {...part} />;

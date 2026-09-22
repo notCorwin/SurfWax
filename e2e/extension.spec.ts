@@ -1016,7 +1016,7 @@ return {count: await page.getByText('50', {exact:true}).innerText(), shadow: awa
   }
 });
 
-test("groups adjacent commands without hiding their details", async () => {
+test("collapses adjacent commands into one line without hiding their details", async () => {
   const provider = await startProvider([
     queuedToolResponse("return 'FIRST_RESULT'", "return 'SECOND_RESULT'"),
     textResponse("完成"),
@@ -1029,20 +1029,56 @@ test("groups adjacent commands without hiding their details", async () => {
     await options.close();
     await opened.page.getByTestId("composer-input").fill("run two commands");
     await opened.page.getByTestId("composer-input").press("Enter");
-    const group = opened.page.locator(".command-group");
+    const group = opened.page.getByTestId("process-trace");
     const work = opened.page.getByTestId("work-summary");
     await expect(opened.page.locator(".activity[data-status=complete]")).toHaveCount(2);
-    await expect(group).toHaveCount(0);
+    await expect(group).toHaveCount(1);
+    await expect(group.locator(":scope > summary")).toBeVisible();
+    await expect(group.locator(".activity").first()).toBeHidden();
     await expect(opened.page.locator(".activity[data-status]")).toHaveCount(2);
     await expect(work).toHaveCount(1);
     await work.locator(":scope > summary").click();
-    await expect(group.locator(":scope > summary")).toHaveText("共 2 次命令调用");
+    await expect(group.locator(":scope > summary")).toHaveText("已执行 2 次命令");
     await expect(group.locator(".activity")).toHaveCount(2);
     await expect(group).not.toHaveAttribute("open", "");
     await group.locator(":scope > summary").click();
     await group.locator(".activity summary").first().click();
     await expect(group).toContainText("FIRST_RESULT");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("完成");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("starts a new process line after assistant text", async () => {
+  const provider = await startProvider([
+    toolResponse("return 'FIRST_RESULT'", "call-before-text"),
+    [
+      chunk({ role: "assistant", content: "BETWEEN_PROCESS_GROUPS" }),
+      chunk({ tool_calls: [{ index: 0, id: "call-after-text", type: "function", function: { name: "run-code", arguments: JSON.stringify({ code: "async page => { return 'SECOND_RESULT'; }" }) } }] }),
+      chunk({}, "tool_calls"),
+      "data: [DONE]\n\n",
+    ],
+    textResponse("FINAL_AFTER_GROUPS"),
+    textResponse("分段过程记录"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("split process records around text");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FINAL_AFTER_GROUPS");
+    const work = opened.page.getByTestId("work-summary");
+    await work.locator(":scope > summary").click();
+    const groups = work.getByTestId("process-trace");
+    await expect(groups).toHaveCount(2);
+    await expect(groups.nth(0).locator(":scope > summary")).toHaveText("已执行 1 次命令");
+    await expect(groups.nth(1).locator(":scope > summary")).toHaveText("已执行 1 次命令");
+    await expect(work).toContainText("BETWEEN_PROCESS_GROUPS");
+    await expect(work).not.toContainText("FINAL_AFTER_GROUPS");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -1063,11 +1099,13 @@ test("shows the command count after an interrupted group settles", async () => {
     await options.close();
     await opened.page.getByTestId("composer-input").fill("interrupt two commands");
     await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.locator(".activity[data-status=running]")).toHaveCount(2);
-    await expect(opened.page.locator(".command-group")).toHaveCount(0);
+    const group = opened.page.getByTestId("process-trace");
+    await expect(group).toHaveCount(1);
+    await expect(group.locator(":scope > summary")).toContainText("正在执行命令…");
+    await expect(group.locator(".activity[data-status=running]")).toHaveCount(2);
+    await expect(group.locator(".activity[data-status=running]").first()).toBeHidden();
     await opened.page.getByRole("button", { name: "停止生成" }).click();
-    const group = opened.page.locator(".command-group");
-    await expect(group.locator(":scope > summary")).toHaveText("共 2 次命令调用");
+    await expect(group.locator(":scope > summary")).toHaveText("2 次命令中有失败");
     await group.locator(":scope > summary").click();
     await expect(group.locator(".activity[data-status]")).toHaveCount(2);
     await expect(group.locator(".activity[data-status=running]")).toHaveCount(0);
@@ -1090,7 +1128,8 @@ test("shows live work, then folds it under elapsed time while keeping the final 
     await options.close();
     await opened.page.getByTestId("composer-input").fill("do the work");
     await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.locator(".activity[data-status=running]")).toBeVisible();
+    await expect(opened.page.getByTestId("process-trace")).toBeVisible();
+    await expect(opened.page.getByTestId("process-trace").locator(":scope > summary")).toContainText("正在执行命令…");
     await expect(opened.page.getByTestId("work-summary")).toHaveCount(0);
     const work = opened.page.getByTestId("work-summary");
     await expect(work.locator(":scope > summary")).toHaveText(/^工作了 \d+ 秒$/);
@@ -1136,10 +1175,10 @@ test("distinguishes streaming command input from command execution", async () =>
     await options.close();
     await opened.page.getByTestId("composer-input").fill("run a staged command");
     await opened.page.getByTestId("composer-input").press("Enter");
-    const label = opened.page.locator(".activity[data-status] summary span").first();
+    const label = opened.page.getByTestId("process-trace").locator(":scope > summary span");
     await expect(label).toHaveText("正在输入命令…");
     await expect(label).toHaveText("正在执行命令…");
-    await expect(label).toHaveText("命令执行完成");
+    await expect(label).toHaveText("已执行 1 次命令");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("PHASE_DONE");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
@@ -1159,11 +1198,11 @@ test("returns a stable unsupported-in-extension error and lets the agent recover
     await options.close();
     await opened.page.getByTestId("composer-input").fill("recover from an unsupported extension command");
     await opened.page.getByTestId("composer-input").press("Enter");
-    const activity = opened.page.locator(".activity[data-status]").first();
-    await expect(activity.locator("summary span")).toHaveText("命令执行失败");
-    await expect(activity).toHaveAttribute("data-status", "error");
-    await expect(opened.page.locator(".activity[data-status=running]")).toHaveCount(0);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("RECOVERED_AFTER_DEBUGGER_ERROR");
+    const activity = opened.page.getByTestId("process-trace");
+    await expect(activity.locator(":scope > summary span")).toHaveText("1 次命令中有失败");
+    await expect(activity).toHaveAttribute("data-status", "error");
+    await expect(opened.page.locator(".process-trace[data-status=running]")).toHaveCount(0);
     await expect.poll(() => provider.requests.filter((request) => request.tools).length).toBe(2);
     const events = await readEvents(opened.page);
     expect(JSON.stringify(events.find((event) => event.type === "tool.failed" && event.toolCallId === "call-unsupported")?.error))
@@ -1189,14 +1228,16 @@ test("executes run-code through the page facade, restores the conversation, and 
     const composer = opened.page.getByTestId("composer-input");
     await composer.fill("exercise the page facade");
     await composer.press("Enter");
-    await expect(opened.page.locator(".activity")).toHaveCount(1);
-    await expect(opened.page.locator(".activity summary")).toContainText("命令执行完成");
-    await expect(opened.page.locator(".activity summary span")).not.toHaveClass(/shimmer/);
-    await expect(opened.page.locator(".activity")).not.toHaveAttribute("open", "");
+    const process = opened.page.getByTestId("process-trace");
+    await expect(process).toHaveCount(1);
+    await expect(process.locator(":scope > summary")).toContainText("已执行 1 次命令");
+    await expect(process.locator(":scope > summary span")).not.toHaveClass(/shimmer/);
+    await expect(process).not.toHaveAttribute("open", "");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("META_OK");
     await opened.page.getByTestId("work-summary").locator(":scope > summary").click();
-    await opened.page.locator(".activity summary").click();
-    await expect(opened.page.locator(".activity")).toContainText("Side Agent Target");
+    await process.locator(":scope > summary").click();
+    await process.locator(".activity summary").click();
+    await expect(process.locator(".activity")).toContainText("Side Agent Target");
 
     await expect.poll(() => provider.requests.length).toBe(3);
     expect(provider.requests[0].reasoning_effort).toBe("minimal");
@@ -1763,7 +1804,7 @@ test("sends a selected follow-up immediately, closes interrupted tools and keeps
     const composer = opened.page.getByTestId("composer-input");
     await composer.fill("long running request");
     await composer.press("Enter");
-    await expect(opened.page.locator(".activity[data-status=running]")).toBeVisible();
+    await expect(opened.page.locator(".process-trace[data-status=running]")).toBeVisible();
     await nameCurrentConversation(opened.page, "Follow-up immediate");
     for (const message of ["later request", "urgent request", "remove request"]) {
       await composer.fill(message);
@@ -2459,9 +2500,11 @@ test("closing the panel prevents a queued chrome call from starting", async () =
     await options.close();
     await opened.page.getByTestId("composer-input").fill("queue two calls");
     await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.locator(".activity[data-status]")).toHaveCount(2);
-    await expect(opened.page.locator(".activity[data-status]").first().locator("summary")).toContainText("正在执行命令…");
-    const runningLabel = opened.page.locator(".activity[data-status]").first().locator("summary span");
+    const process = opened.page.getByTestId("process-trace");
+    await expect(process).toHaveCount(1);
+    await expect(process.locator(".activity[data-status]")).toHaveCount(2);
+    await expect(process.locator(":scope > summary")).toContainText("正在执行命令…");
+    const runningLabel = process.locator(":scope > summary span");
     await expect(runningLabel).toHaveClass(/shimmer/);
     await expect.poll(() => runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationPlayState)).toBe("running");
     await opened.page.emulateMedia({ colorScheme: "dark" });
