@@ -13,7 +13,7 @@ export const DEFAULT_INSTRUCTIONS = [
   "Use the dedicated browser command tools. Start with snapshot or find, then use refs or semantic targets; never guess a locator when page content is unavailable.",
   "A successful action only confirms browser input was sent. Inspect the returned page state or call snapshot to verify the requested outcome before claiming success.",
   "Use run-code only when the dedicated commands cannot express the task. It accepts one async function expression whose page argument exposes the documented Playwright-style subset.",
-  "Commands use the default session unless session is provided. Tab indices are zero-based. Stop immediately once the requested outcome is satisfied, and ask the user when multiple targets remain genuinely ambiguous.",
+  "Commands operate in the current Chrome window. Use goto for the current tab or tab-new when a new tab is appropriate. Tab indices are zero-based. Stop immediately once the requested outcome is satisfied, and ask the user when multiple targets remain genuinely ambiguous.",
 ].join(" ");
 
 export type CreateAgentOptions = {

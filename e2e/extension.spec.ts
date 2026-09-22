@@ -884,6 +884,7 @@ test("uses dedicated snapshot, fill, and click tools", async () => {
     );
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
+    const windowCount = await opened.page.evaluate(async () => (await chrome.windows.getAll()).length);
     await opened.page.getByTestId("composer-input").fill("use semantic page automation");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("PAGE_AUTOMATION_OK");
@@ -894,8 +895,11 @@ test("uses dedicated snapshot, fill, and click tools", async () => {
     expect(verified).toMatchObject({ snapshot: expect.stringContaining("Welcome me@example.com") });
     await expect.poll(() => target.locator("output").textContent()).toBe("Welcome me@example.com");
     expect(events.some((event) => event.type === "automation.action.finished" && event.toolCallId === "call-click")).toBe(true);
-    expect(provider.requests[0].tools).toHaveLength(88);
-    expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).not.toContain("browser");
+    expect(provider.requests[0].tools).toHaveLength(80);
+    const toolNames = provider.requests[0].tools.map((tool: any) => tool.function.name);
+    expect(toolNames).not.toContain("browser");
+    expect(toolNames.filter((name: string) => ["open", "attach", "close", "detach", "show", "list", "close-all", "kill-all"].includes(name))).toEqual([]);
+    expect(await opened.page.evaluate(async () => (await chrome.windows.getAll()).length)).toBe(windowCount);
     expect(provider.requests.filter((request) => request.tools)).toHaveLength(5);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
@@ -1242,7 +1246,7 @@ test("executes run-code through the page facade, restores the conversation, and 
 
     await expect.poll(() => provider.requests.length).toBe(3);
     expect(provider.requests[0].reasoning_effort).toBe("minimal");
-    expect(provider.requests[0].tools).toHaveLength(88);
+    expect(provider.requests[0].tools).toHaveLength(80);
     expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).not.toContain("browser");
     expect(provider.requests[0].tools).toContainEqual(expect.objectContaining({ type: "function", function: expect.objectContaining({ name: "run-code" }) }));
     const events = await readEvents(opened.page);

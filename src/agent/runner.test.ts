@@ -43,7 +43,7 @@ describe("createAgent", () => {
     const model = new MockLanguageModelV4({
       doStream: async (options) => {
         expect(options.reasoning).toBe("minimal");
-        expect((options.tools as any[])).toHaveLength(88);
+        expect((options.tools as any[])).toHaveLength(80);
         expect((options.tools as any[]).map((tool) => tool.name)).not.toContain("browser");
         step += 1;
         const chunks = step > 25

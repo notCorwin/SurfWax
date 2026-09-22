@@ -4,20 +4,19 @@ import type { EventLogger } from "../logging";
 import type { ChromeExecutor } from "./executor";
 
 export const COMMAND_NAMES = [
-  "open", "attach", "close", "detach", "goto", "type", "click", "dblclick", "fill", "drag", "drop", "hover", "select", "upload", "check", "uncheck", "snapshot", "find", "eval", "dialog-accept", "dialog-dismiss", "resize", "delete-data",
+  "goto", "type", "click", "dblclick", "fill", "drag", "drop", "hover", "select", "upload", "check", "uncheck", "snapshot", "find", "eval", "dialog-accept", "dialog-dismiss", "resize", "delete-data",
   "go-back", "go-forward", "reload", "press", "keydown", "keyup", "mousemove", "mousedown", "mouseup", "mousewheel", "screenshot", "pdf",
   "tab-list", "tab-new", "tab-close", "tab-select", "state-save", "state-load", "cookie-list", "cookie-get", "cookie-set", "cookie-delete", "cookie-clear",
   "localstorage-list", "localstorage-get", "localstorage-set", "localstorage-delete", "localstorage-clear", "sessionstorage-list", "sessionstorage-get", "sessionstorage-set", "sessionstorage-delete", "sessionstorage-clear",
   "requests", "request", "request-headers", "request-body", "response-headers", "response-body", "route", "route-list", "unroute", "network-state-set", "console", "run-code",
-  "recording-start", "recording-stop", "tracing-start", "tracing-stop", "video-start", "video-stop", "video-chapter", "video-show-actions", "video-hide-actions", "show", "pause-at", "resume", "step-over", "generate-locator", "highlight",
-  "install", "install-browser", "list", "close-all", "kill-all",
+  "recording-start", "recording-stop", "tracing-start", "tracing-stop", "video-start", "video-stop", "video-chapter", "video-show-actions", "video-hide-actions", "pause-at", "resume", "step-over", "generate-locator", "highlight",
+  "install", "install-browser",
 ] as const;
 
 export type CommandName = typeof COMMAND_NAMES[number];
 
-const session = z.string().min(1).optional().describe("Named browser session; defaults to default");
 const timeoutMs = z.number().int().positive().max(300_000).optional();
-const common = { session, timeoutMs };
+const common = { timeoutMs };
 const button = z.enum(["left", "right", "middle"]).optional();
 const modifiers = z.array(z.enum(["Alt", "Control", "ControlOrMeta", "Meta", "Shift"])).optional();
 const targetObject = z.union([
@@ -37,10 +36,6 @@ const filename = z.string().min(1).optional();
 
 type Definition = { description: string; inputSchema: z.ZodTypeAny };
 const definitions: Record<CommandName, Definition> = {
-  open: { description: "Open a managed Chrome window, optionally at a URL.", inputSchema: z.object({ ...common, url: z.string().url().optional() }).strict() },
-  attach: { description: "Attach a named session to an existing Chrome window returned by list.", inputSchema: z.object({ ...common, name: z.string().min(1) }).strict() },
-  close: { description: "Close the current managed browser session.", inputSchema: empty() },
-  detach: { description: "Detach the session without closing its Chrome window.", inputSchema: empty() },
   goto: { description: "Navigate the current tab to a URL.", inputSchema: z.object({ ...common, url: z.string().url() }).strict() },
   type: { description: "Type text into the focused element.", inputSchema: z.object({ ...common, text: z.string(), submit: z.boolean().optional() }).strict() },
   click: { description: "Click a target from snapshot ref, CSS, locator expression, or structured locator.", inputSchema: z.object({ ...common, target: target(), button, modifiers }).strict() },
@@ -59,7 +54,7 @@ const definitions: Record<CommandName, Definition> = {
   "dialog-accept": { description: "Accept the active dialog, optionally with prompt text.", inputSchema: z.object({ ...common, prompt: z.string().optional() }).strict() },
   "dialog-dismiss": { description: "Dismiss the active dialog.", inputSchema: empty() },
   resize: { description: "Resize the current page viewport.", inputSchema: z.object({ ...common, width: z.number().int().positive(), height: z.number().int().positive() }).strict() },
-  "delete-data": { description: "Delete browsing data for origins visited by this session.", inputSchema: empty() },
+  "delete-data": { description: "Delete browsing data for origins visited in the current browser target.", inputSchema: empty() },
   "go-back": { description: "Navigate back.", inputSchema: empty() },
   "go-forward": { description: "Navigate forward.", inputSchema: empty() },
   reload: { description: "Reload the current page.", inputSchema: empty() },
@@ -72,7 +67,7 @@ const definitions: Record<CommandName, Definition> = {
   mousewheel: { description: "Scroll by viewport CSS deltas.", inputSchema: z.object({ ...common, dx: z.number().finite(), dy: z.number().finite() }).strict() },
   screenshot: { description: "Capture and download a viewport, full-page, or element screenshot.", inputSchema: z.object({ ...common, target: target(false), filename, type: z.enum(["png", "jpeg", "webp"]).optional(), fullPage: z.boolean().optional(), hires: z.boolean().optional() }).strict() },
   pdf: { description: "Print the current page to a downloaded PDF.", inputSchema: z.object({ ...common, filename }).strict() },
-  "tab-list": { description: "List tabs in the session window using zero-based indices.", inputSchema: empty() },
+  "tab-list": { description: "List tabs in the current Chrome window using zero-based indices.", inputSchema: empty() },
   "tab-new": { description: "Open and select a new tab.", inputSchema: z.object({ ...common, url: z.string().url().optional() }).strict() },
   "tab-close": { description: "Close a tab by zero-based index, or the current tab.", inputSchema: z.object({ ...common, index: index.optional() }).strict() },
   "tab-select": { description: "Select a tab by zero-based index.", inputSchema: z.object({ ...common, index }).strict() },
@@ -82,7 +77,7 @@ const definitions: Record<CommandName, Definition> = {
   "cookie-get": { description: "Get a cookie by name.", inputSchema: z.object({ ...common, name: z.string().min(1) }).strict() },
   "cookie-set": { description: "Set a cookie.", inputSchema: z.object({ ...common, name: z.string().min(1), value: z.string(), domain: z.string().optional(), path: z.string().optional(), expires: z.number().optional(), httpOnly: z.boolean().optional(), secure: z.boolean().optional(), sameSite: z.enum(["Strict", "Lax", "None"]).optional() }).strict() },
   "cookie-delete": { description: "Delete a cookie by name.", inputSchema: z.object({ ...common, name: z.string().min(1) }).strict() },
-  "cookie-clear": { description: "Clear cookies for session origins.", inputSchema: empty() },
+  "cookie-clear": { description: "Clear cookies for visited origins.", inputSchema: empty() },
   "localstorage-list": { description: "List localStorage entries for the current page.", inputSchema: empty() },
   "localstorage-get": { description: "Get a localStorage value.", inputSchema: z.object({ ...common, key: z.string() }).strict() },
   "localstorage-set": { description: "Set a localStorage value.", inputSchema: z.object({ ...common, key: z.string(), value: z.string() }).strict() },
@@ -102,7 +97,7 @@ const definitions: Record<CommandName, Definition> = {
   route: { description: "Fulfill or rewrite requests matching a URL glob.", inputSchema: z.object({ ...common, pattern: z.string().min(1), status: z.number().int().min(100).max(599).optional(), body: z.string().optional(), contentType: z.string().optional(), headers: z.record(z.string(), z.string()).optional(), removeHeaders: z.array(z.string()).optional() }).strict() },
   "route-list": { description: "List active network routes.", inputSchema: empty() },
   unroute: { description: "Remove one matching route or every route.", inputSchema: z.object({ ...common, pattern: z.string().optional() }).strict() },
-  "network-state-set": { description: "Set the current session online or offline.", inputSchema: z.object({ ...common, state: z.enum(["online", "offline"]) }).strict() },
+  "network-state-set": { description: "Set the current tab online or offline.", inputSchema: z.object({ ...common, state: z.enum(["online", "offline"]) }).strict() },
   console: { description: "List captured console messages at or above a level.", inputSchema: z.object({ ...common, minLevel: z.enum(["debug", "info", "warning", "error"]).optional(), clear: z.boolean().optional() }).strict() },
   "run-code": { description: "Run one async function expression receiving the current Playwright-style page facade.", inputSchema: z.object({ ...common, code: z.string().min(1) }).strict() },
   "recording-start": { description: "Start recording user page actions.", inputSchema: empty() },
@@ -114,7 +109,6 @@ const definitions: Record<CommandName, Definition> = {
   "video-chapter": { description: "Add a chapter card to the active screencast.", inputSchema: z.object({ ...common, title: z.string().min(1), description: z.string().optional(), durationMs: z.number().int().positive().max(30_000).optional() }).strict() },
   "video-show-actions": { description: "Annotate subsequent commands in the active screencast.", inputSchema: z.object({ ...common, durationMs: z.number().int().positive().optional(), position: z.enum(["top-left", "top", "top-right", "bottom-left", "bottom", "bottom-right"]).optional(), cursor: z.enum(["pointer", "none"]).optional() }).strict() },
   "video-hide-actions": { description: "Stop annotating screencast actions.", inputSchema: empty() },
-  show: { description: "Focus the session window and return its live tab dashboard.", inputSchema: empty() },
   "pause-at": { description: "Unavailable without a Playwright Test Runner process.", inputSchema: z.object({ ...common, location: z.string().min(1) }).strict() },
   resume: { description: "Unavailable without a Playwright Test Runner process.", inputSchema: empty() },
   "step-over": { description: "Unavailable without a Playwright Test Runner process.", inputSchema: empty() },
@@ -122,9 +116,6 @@ const definitions: Record<CommandName, Definition> = {
   highlight: { description: "Show or hide a non-interactive highlight around a target.", inputSchema: z.object({ ...common, target: target(false), style: z.string().optional(), hide: z.boolean().optional() }).strict() },
   install: { description: "Unavailable inside a Manifest V3 extension.", inputSchema: empty() },
   "install-browser": { description: "Unavailable inside a Manifest V3 extension.", inputSchema: z.object({ ...common, browser: z.string().optional() }).strict() },
-  list: { description: "List Surf Wax sessions and Chrome windows available to attach.", inputSchema: empty() },
-  "close-all": { description: "Close every Surf Wax-managed browser session.", inputSchema: empty() },
-  "kill-all": { description: "Force cleanup and close every Surf Wax-managed browser session.", inputSchema: empty() },
 };
 
 export function parseCommandInput(name: CommandName, input: unknown): Record<string, unknown> {

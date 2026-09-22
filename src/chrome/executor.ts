@@ -22,7 +22,7 @@ const STATE_KEY = "__surfWaxExecutionState";
 const PAGE_KEY = "__surfWaxPage";
 const BROWSER_KEY = "__surfWaxBrowser";
 type ExecutionContext = { conversationId?: string; toolCallId?: string; visualEnabled?: boolean };
-type CommandSession = { name: string; windowId: number; tabId?: number; owned: boolean; origins: Set<string> };
+type BrowserState = { windowId: number; tabId?: number; origins: Set<string> };
 type NetworkRecord = {
   requestId: string; method: string; url: string; requestHeaders: Record<string, string>; requestBody?: string;
   status?: number; statusText?: string; responseHeaders?: Record<string, string>; failed?: string; resourceType?: string;
@@ -274,7 +274,7 @@ export class ChromeExecutor {
   private disposed = false;
   private activeSignal?: AbortSignal;
   private activeContext: ExecutionContext = {};
-  private readonly commandSessions = new Map<string, CommandSession>();
+  private browserState?: BrowserState;
   private readonly network = new Map<number, NetworkRecord[]>();
   private readonly networkEnabled = new Set<number>();
   private readonly routes = new Map<number, RouteRule[]>();
@@ -439,50 +439,39 @@ export class ChromeExecutor {
   }
 
   private commandNeedsTimeout(name: CommandName): boolean {
-    return !["recording-start", "recording-stop", "tracing-start", "tracing-stop", "video-start", "video-stop", "video-chapter", "video-show-actions", "video-hide-actions", "list", "close-all", "kill-all"].includes(name);
+    return !["recording-start", "recording-stop", "tracing-start", "tracing-stop", "video-start", "video-stop", "video-chapter", "video-show-actions", "video-hide-actions"].includes(name);
   }
 
   private async executeCommandNow(name: CommandName, input: Record<string, any>): Promise<unknown> {
     throwIfAborted(this.activeSignal);
     if (["install", "install-browser", "pause-at", "resume", "step-over"].includes(name)) throw unsupported(name);
-    if (name === "open") return this.openSession(input.session ?? "default", input.url);
-    if (name === "attach") return this.attachSession(input.session ?? "default", input.name);
-    if (name === "list") return this.listSessions();
-    if (name === "close-all" || name === "kill-all") return this.closeAllSessions();
-
-    const session = await this.commandSession(input.session ?? "default");
-    if (name === "close") return this.closeSession(session);
-    if (name === "detach") return this.detachSession(session);
-    if (name === "show") {
-      await this.chromeApi.windows.update(session.windowId, { focused: true });
-      return this.sessionStatus(session);
-    }
-    if (name === "tab-list") return this.tabsOf(session);
+    const state = await this.currentBrowserState();
+    if (name === "tab-list") return this.tabsOf(state);
     if (name === "tab-new") {
-      const tab = await this.chromeApi.tabs.create({ windowId: session.windowId, active: true, ...(input.url ? { url: input.url } : {}) });
-      session.tabId = tab.id;
-      await this.rememberOrigin(session, tab.url);
-      return this.tabsOf(session);
+      const tab = await this.chromeApi.tabs.create({ windowId: state.windowId, active: true, ...(input.url ? { url: input.url } : {}) });
+      state.tabId = tab.id;
+      await this.rememberOrigin(state, tab.url);
+      return this.tabsOf(state);
     }
-    if (name === "tab-select") return this.selectTab(session, input.index);
-    if (name === "tab-close") return this.closeTab(session, input.index);
+    if (name === "tab-select") return this.selectTab(state, input.index);
+    if (name === "tab-close") return this.closeTab(state, input.index);
 
-    const page = await this.pageFor(session);
+    const page = await this.pageFor(state);
     const tabId = page.tabId;
     await this.annotateVideo(tabId, name, input);
-    if (name === "goto") return this.withPageStatus(session, await page.goto(input.url));
-    if (name === "go-back") return this.withPageStatus(session, await page.goBack());
-    if (name === "go-forward") return this.withPageStatus(session, await page.goForward());
-    if (name === "reload") return this.withPageStatus(session, await page.reload());
+    if (name === "goto") return this.withPageStatus(state, await page.goto(input.url));
+    if (name === "go-back") return this.withPageStatus(state, await page.goBack());
+    if (name === "go-forward") return this.withPageStatus(state, await page.goForward());
+    if (name === "reload") return this.withPageStatus(state, await page.reload());
     if (name === "type") {
       await page.insertText(input.text);
       if (input.submit) await page.press("Enter");
-      return this.withPageStatus(session, { performed: true });
+      return this.withPageStatus(state, { performed: true });
     }
-    if (name === "press") return this.withPageStatus(session, await page.press(input.key));
+    if (name === "press") return this.withPageStatus(state, await page.press(input.key));
     if (name === "keydown" || name === "keyup") {
       await this.bridgeCommand({ tabId }, "Input.dispatchKeyEvent", { type: name === "keydown" ? "rawKeyDown" : "keyUp", key: input.key, code: input.key });
-      return this.withPageStatus(session, { performed: true });
+      return this.withPageStatus(state, { performed: true });
     }
     if (["mousemove", "mousedown", "mouseup", "mousewheel"].includes(name)) {
       const params = name === "mousemove" ? { type: "mouseMoved", x: input.x, y: input.y }
@@ -490,10 +479,10 @@ export class ChromeExecutor {
         : name === "mouseup" ? { type: "mouseReleased", button: input.button ?? "left", clickCount: 1 }
         : { type: "mouseWheel", x: 0, y: 0, deltaX: input.dx, deltaY: input.dy };
       await this.bridgeCommand({ tabId }, "Input.dispatchMouseEvent", params);
-      return this.withPageStatus(session, { performed: true });
+      return this.withPageStatus(state, { performed: true });
     }
     if (["click", "dblclick", "hover", "fill", "drag", "drop", "select", "upload", "check", "uncheck"].includes(name)) {
-      return this.executeInteraction(name, input, page, session);
+      return this.executeInteraction(name, input, page, state);
     }
     if (name === "snapshot") {
       let result = await page.snapshot();
@@ -533,14 +522,14 @@ export class ChromeExecutor {
       await this.bridgeCommand({ tabId }, "Emulation.setDeviceMetricsOverride", { width: input.width, height: input.height, deviceScaleFactor: 1, mobile: false });
       return { width: input.width, height: input.height };
     }
-    if (name === "delete-data") return this.deleteSessionData(session);
-    if (name === "screenshot") return this.captureScreenshot(session, page, input);
+    if (name === "delete-data") return this.deleteBrowserData(state);
+    if (name === "screenshot") return this.captureScreenshot(page, input);
     if (name === "pdf") return this.capturePdf(tabId, input.filename);
-    if (name === "state-save") return this.saveState(session, page, input.filename ?? timestamped("storage-state", "json"));
-    if (name === "state-load") return this.loadState(session, page, input.filename);
+    if (name === "state-save") return this.saveState(state, page, input.filename ?? timestamped("storage-state", "json"));
+    if (name === "state-load") return this.loadState(state, page, input.filename);
     if (name.startsWith("localstorage-") || name.startsWith("sessionstorage-")) return this.storageCommand(name, page, input);
-    if (name.startsWith("cookie-")) return this.cookieCommand(name, session, page, input);
-    if (["requests", "request", "request-headers", "request-body", "response-headers", "response-body", "route", "route-list", "unroute", "network-state-set"].includes(name)) return this.networkCommand(name, session, tabId, input);
+    if (name.startsWith("cookie-")) return this.cookieCommand(name, state, page, input);
+    if (["requests", "request", "request-headers", "request-body", "response-headers", "response-body", "route", "route-list", "unroute", "network-state-set"].includes(name)) return this.networkCommand(name, tabId, input);
     if (name === "console") return this.consoleCommand(tabId, input);
     if (name === "run-code") return this.runPageCode(tabId, input.code);
     if (name === "recording-start" || name === "recording-stop") return this.recordingCommand(name, page);
@@ -551,8 +540,8 @@ export class ChromeExecutor {
     throw new Error(`CommandError[unsupported]: ${name}`);
   }
 
-  private async executeInteraction(name: string, input: Record<string, any>, page: any, session: CommandSession): Promise<unknown> {
-    if (name === "drag") return this.withPageStatus(session, await this.locatorFor(page, input.startTarget).dragTo(this.locatorFor(page, input.endTarget)));
+  private async executeInteraction(name: string, input: Record<string, any>, page: any, state: BrowserState): Promise<unknown> {
+    if (name === "drag") return this.withPageStatus(state, await this.locatorFor(page, input.startTarget).dragTo(this.locatorFor(page, input.endTarget)));
     const subject = this.locatorFor(page, input.target ?? "input[type=file]");
     let result: unknown;
     if (name === "click") result = await subject.click({ button: input.button, modifiers: input.modifiers });
@@ -572,7 +561,7 @@ export class ChromeExecutor {
         el.dispatchEvent(new DragEvent("drop", {bubbles:true, cancelable:true, dataTransfer:transfer}));
       }`, { files: normalized, data: input.data ?? {} });
     }
-    return this.withPageStatus(session, result);
+    return this.withPageStatus(state, result);
   }
 
   private locatorFor(page: any, raw: unknown): any {
@@ -593,136 +582,78 @@ export class ChromeExecutor {
     return locator;
   }
 
-  private async commandSession(name: string): Promise<CommandSession> {
-    const existing = this.commandSessions.get(name);
+  private async currentBrowserState(): Promise<BrowserState> {
+    const existing = this.browserState;
     if (existing) {
       const window = await this.chromeApi.windows.get(existing.windowId).catch(() => undefined);
       if (window) return existing;
-      this.commandSessions.delete(name);
+      this.browserState = undefined;
     }
     const window = await this.chromeApi.windows.getCurrent({ populate: true });
     if (!Number.isInteger(window.id)) throw new Error("CommandError[no-window]: Could not resolve the current Chrome window");
     const selected = window.tabs?.find((tab) => tab.active) ?? window.tabs?.[0];
-    const session = { name, windowId: window.id!, tabId: selected?.id, owned: false, origins: new Set<string>() };
-    this.commandSessions.set(name, session);
-    await this.rememberOrigin(session, selected?.url);
-    return session;
+    const state = { windowId: window.id!, tabId: selected?.id, origins: new Set<string>() };
+    this.browserState = state;
+    await this.rememberOrigin(state, selected?.url);
+    return state;
   }
 
-  private async openSession(name: string, url?: string): Promise<unknown> {
-    const previous = this.commandSessions.get(name);
-    if (previous?.owned) await this.chromeApi.windows.remove(previous.windowId).catch(() => undefined);
-    const window = await this.chromeApi.windows.create({ focused: true, ...(url ? { url } : {}) });
-    if (!window || !Number.isInteger(window.id)) throw new Error("CommandError[open-failed]: Chrome did not return a window id");
-    const selected = window.tabs?.find((tab) => tab.active) ?? window.tabs?.[0];
-    const session = { name, windowId: window.id!, tabId: selected?.id, owned: true, origins: new Set<string>() };
-    this.commandSessions.set(name, session);
-    await this.rememberOrigin(session, selected?.url ?? url);
-    return this.sessionStatus(session);
+  private async tabsOf(state: BrowserState): Promise<Array<{ index: number; current: boolean; id?: number; title?: string; url?: string }>> {
+    const tabs = await this.chromeApi.tabs.query({ windowId: state.windowId });
+    return tabs.map((tab, index) => ({ index, current: tab.id === state.tabId || !state.tabId && Boolean(tab.active), id: tab.id, title: tab.title, url: tab.url }));
   }
 
-  private async attachSession(sessionName: string, targetName: string): Promise<unknown> {
-    const match = /^chrome-(\d+)$/.exec(targetName);
-    if (!match) throw new Error(`CommandError[invalid-session-target]: Use a chrome-<windowId> name returned by list; received ${JSON.stringify(targetName)}`);
-    const windowId = Number(match[1]);
-    const window = await this.chromeApi.windows.get(windowId, { populate: true }).catch(() => undefined);
-    if (!window) throw new Error(`CommandError[window-unavailable]: ${targetName}`);
-    const selected = window.tabs?.find((tab) => tab.active) ?? window.tabs?.[0];
-    const session = { name: sessionName, windowId, tabId: selected?.id, owned: false, origins: new Set<string>() };
-    this.commandSessions.set(sessionName, session);
-    await this.rememberOrigin(session, selected?.url);
-    return this.sessionStatus(session);
-  }
-
-  private async closeSession(session: CommandSession): Promise<unknown> {
-    if (!session.owned) throw new Error("CommandError[attached-session]: detach an attached Chrome window instead of closing it");
-    await this.chromeApi.windows.remove(session.windowId);
-    this.commandSessions.delete(session.name);
-    return { closed: session.name };
-  }
-
-  private async detachSession(session: CommandSession): Promise<unknown> {
-    if (session.tabId !== undefined) await this.detachTabRuntime(session.tabId);
-    this.commandSessions.delete(session.name);
-    return { detached: session.name, windowId: session.windowId };
-  }
-
-  private async closeAllSessions(): Promise<unknown> {
-    const owned = [...this.commandSessions.values()].filter((session) => session.owned);
-    await Promise.all(owned.map((session) => this.chromeApi.windows.remove(session.windowId).catch(() => undefined)));
-    for (const session of [...this.commandSessions.values()]) if (session.tabId !== undefined) await this.detachTabRuntime(session.tabId);
-    this.commandSessions.clear();
-    return { closed: owned.map((session) => session.name) };
-  }
-
-  private async listSessions(): Promise<unknown> {
-    const windows = await this.chromeApi.windows.getAll({ populate: true });
-    return {
-      sessions: await Promise.all([...this.commandSessions.values()].map((session) => this.sessionStatus(session))),
-      available: windows.filter((window) => Number.isInteger(window.id)).map((window) => ({ name: `chrome-${window.id}`, windowId: window.id, focused: window.focused, tabs: window.tabs?.length ?? 0, url: window.tabs?.find((tab) => tab.active)?.url })),
-    };
-  }
-
-  private async sessionStatus(session: CommandSession): Promise<unknown> {
-    return { name: session.name, windowId: session.windowId, owned: session.owned, currentTabId: session.tabId, tabs: await this.tabsOf(session) };
-  }
-
-  private async tabsOf(session: CommandSession): Promise<Array<{ index: number; current: boolean; id?: number; title?: string; url?: string }>> {
-    const tabs = await this.chromeApi.tabs.query({ windowId: session.windowId });
-    return tabs.map((tab, index) => ({ index, current: tab.id === session.tabId || !session.tabId && Boolean(tab.active), id: tab.id, title: tab.title, url: tab.url }));
-  }
-
-  private async selectTab(session: CommandSession, index: number): Promise<unknown> {
-    const tabs = await this.chromeApi.tabs.query({ windowId: session.windowId });
+  private async selectTab(state: BrowserState, index: number): Promise<unknown> {
+    const tabs = await this.chromeApi.tabs.query({ windowId: state.windowId });
     const tab = tabs[index];
     if (!tab?.id) throw new Error(`CommandError[invalid-tab-index]: ${index}`);
     await this.chromeApi.tabs.update(tab.id, { active: true });
-    await this.chromeApi.windows.update(session.windowId, { focused: true });
-    session.tabId = tab.id;
-    await this.rememberOrigin(session, tab.url);
-    return this.tabsOf(session);
+    await this.chromeApi.windows.update(state.windowId, { focused: true });
+    state.tabId = tab.id;
+    await this.rememberOrigin(state, tab.url);
+    return this.tabsOf(state);
   }
 
-  private async closeTab(session: CommandSession, index?: number): Promise<unknown> {
-    const tabs = await this.chromeApi.tabs.query({ windowId: session.windowId });
-    const tab = index === undefined ? tabs.find((item) => item.id === session.tabId) ?? tabs.find((item) => item.active) : tabs[index];
+  private async closeTab(state: BrowserState, index?: number): Promise<unknown> {
+    const tabs = await this.chromeApi.tabs.query({ windowId: state.windowId });
+    const tab = index === undefined ? tabs.find((item) => item.id === state.tabId) ?? tabs.find((item) => item.active) : tabs[index];
     if (!tab?.id) throw new Error(`CommandError[invalid-tab-index]: ${String(index)}`);
     await this.chromeApi.tabs.remove(tab.id);
-    const remaining = await this.chromeApi.tabs.query({ windowId: session.windowId });
-    session.tabId = remaining.find((item) => item.active)?.id ?? remaining[0]?.id;
-    return this.tabsOf(session);
+    const remaining = await this.chromeApi.tabs.query({ windowId: state.windowId });
+    state.tabId = remaining.find((item) => item.active)?.id ?? remaining[0]?.id;
+    return this.tabsOf(state);
   }
 
-  private async pageFor(session: CommandSession): Promise<any> {
-    let tabId = session.tabId;
+  private async pageFor(state: BrowserState): Promise<any> {
+    let tabId = state.tabId;
     if (tabId !== undefined) {
       const tab = await this.chromeApi.tabs.get(tabId).catch(() => undefined);
-      if (!tab || tab.windowId !== session.windowId) tabId = undefined;
-      else await this.rememberOrigin(session, tab.url);
+      if (!tab || tab.windowId !== state.windowId) tabId = undefined;
+      else await this.rememberOrigin(state, tab.url);
     }
     if (tabId === undefined) {
-      const tabs = await this.chromeApi.tabs.query({ active: true, windowId: session.windowId });
+      const tabs = await this.chromeApi.tabs.query({ active: true, windowId: state.windowId });
       tabId = tabs[0]?.id;
     }
-    if (!Number.isInteger(tabId)) throw new Error("CommandError[no-tab]: The session has no controllable tab");
+    if (!Number.isInteger(tabId)) throw new Error("CommandError[no-tab]: The current Chrome window has no controllable tab");
     const resolvedTabId = tabId as number;
-    session.tabId = resolvedTabId;
+    state.tabId = resolvedTabId;
     const page = await this.automation.createPage(resolvedTabId);
     await this.enableObservation(resolvedTabId);
     const url = await page.url().catch(() => undefined);
-    await this.rememberOrigin(session, url === undefined ? undefined : String(url));
+    await this.rememberOrigin(state, url === undefined ? undefined : String(url));
     return page;
   }
 
-  private async rememberOrigin(session: CommandSession, url?: string): Promise<void> {
+  private async rememberOrigin(state: BrowserState, url?: string): Promise<void> {
     if (!url) return;
-    try { const parsed = new URL(url); if (["http:", "https:"].includes(parsed.protocol)) session.origins.add(parsed.origin); } catch { /* Internal pages have no clearable origin. */ }
+    try { const parsed = new URL(url); if (["http:", "https:"].includes(parsed.protocol)) state.origins.add(parsed.origin); } catch { /* Internal pages have no clearable origin. */ }
   }
 
-  private async withPageStatus(session: CommandSession, result: unknown): Promise<unknown> {
-    const page = await this.pageFor(session);
-    const status = { url: await page.url(), title: await page.title(), modal: session.tabId === undefined ? undefined : this.dialogs.get(session.tabId) };
-    const tabs = await this.tabsOf(session);
+  private async withPageStatus(state: BrowserState, result: unknown): Promise<unknown> {
+    const page = await this.pageFor(state);
+    const status = { url: await page.url(), title: await page.title(), modal: state.tabId === undefined ? undefined : this.dialogs.get(state.tabId) };
+    const tabs = await this.tabsOf(state);
     return { result, page: status, ...(tabs.length > 1 ? { tabs } : {}) };
   }
 
@@ -750,14 +681,14 @@ export class ChromeExecutor {
     }));
   }
 
-  private async captureScreenshot(session: CommandSession, page: any, input: Record<string, any>): Promise<unknown> {
+  private async captureScreenshot(page: any, input: Record<string, any>): Promise<unknown> {
     const format = input.type ?? (String(input.filename ?? "").match(/\.(jpe?g|webp)$/i)?.[1]?.replace("jpg", "jpeg") || "png");
     const observation = !input.target && !input.fullPage ? await page.observe("visual") : undefined;
     if (observation && format === "jpeg") {
       const screenshot = observation.screenshot;
       const filename = input.filename ?? timestamped("page", "jpg");
       const artifact = await this.downloadBase64(filename, screenshot.data, screenshot.mediaType);
-      return { ...observation, artifact, session: session.name };
+      return { ...observation, artifact };
     }
     const params: Record<string, unknown> = { format, fromSurface: true, captureBeyondViewport: Boolean(input.fullPage) };
     if (input.fullPage) {
@@ -771,7 +702,7 @@ export class ChromeExecutor {
     const mediaType = `image/${format}`;
     const filename = input.filename ?? timestamped("page", format === "jpeg" ? "jpg" : format);
     const artifact = await this.downloadBase64(filename, captured.data, mediaType);
-    return { ...(observation ? { observationId: observation.observationId, viewport: observation.viewport } : {}), artifact, screenshot: { mediaType, data: captured.data }, page: { url: await page.url(), title: await page.title() }, session: session.name };
+    return { ...(observation ? { observationId: observation.observationId, viewport: observation.viewport } : {}), artifact, screenshot: { mediaType, data: captured.data }, page: { url: await page.url(), title: await page.title() } };
   }
 
   private async capturePdf(tabId: number, requested?: string): Promise<unknown> {
@@ -790,7 +721,7 @@ export class ChromeExecutor {
     return page.evaluate(`() => { ${storage}.clear(); return true; }`);
   }
 
-  private async cookieCommand(name: string, session: CommandSession, page: any, input: Record<string, any>): Promise<unknown> {
+  private async cookieCommand(name: string, state: BrowserState, page: any, input: Record<string, any>): Promise<unknown> {
     const url = String(await page.url());
     if (name === "cookie-list") {
       const cookies = await this.chromeApi.cookies.getAll(input.domain ? { domain: input.domain } : { url });
@@ -803,39 +734,39 @@ export class ChromeExecutor {
       ...(input.secure === undefined ? {} : { secure: input.secure }), ...(input.sameSite ? { sameSite: input.sameSite.toLowerCase() as chrome.cookies.SameSiteStatus } : {}),
     });
     if (name === "cookie-delete") return this.chromeApi.cookies.remove({ url, name: input.name });
-    const cookies = (await Promise.all([...session.origins].map((origin) => this.chromeApi.cookies.getAll({ url: origin })))).flat();
+    const cookies = (await Promise.all([...state.origins].map((origin) => this.chromeApi.cookies.getAll({ url: origin })))).flat();
     await Promise.all(cookies.map((cookie) => this.chromeApi.cookies.remove({ url: `${cookie.secure ? "https" : "http"}://${cookie.domain.replace(/^\./, "")}${cookie.path}`, name: cookie.name, storeId: cookie.storeId }).catch(() => undefined)));
     return { cleared: cookies.length };
   }
 
-  private async deleteSessionData(session: CommandSession): Promise<unknown> {
-    const origins = [...session.origins];
+  private async deleteBrowserData(state: BrowserState): Promise<unknown> {
+    const origins = [...state.origins];
     if (origins.length) await this.chromeApi.browsingData.remove({ origins: origins as [string, ...string[]] }, { cache: true, cacheStorage: true, cookies: true, fileSystems: true, indexedDB: true, localStorage: true, serviceWorkers: true, webSQL: true });
     return { deletedOrigins: origins };
   }
 
-  private async saveState(session: CommandSession, page: any, filename: string): Promise<unknown> {
-    const cookies = (await Promise.all([...session.origins].map((origin) => this.chromeApi.cookies.getAll({ url: origin })))).flat();
+  private async saveState(state: BrowserState, page: any, filename: string): Promise<unknown> {
+    const cookies = (await Promise.all([...state.origins].map((origin) => this.chromeApi.cookies.getAll({ url: origin })))).flat();
     const origin = new URL(String(await page.url())).origin;
     const localStorage = await page.evaluate("() => Object.fromEntries(Object.entries(window.localStorage))");
-    const state = { cookies, origins: [{ origin, localStorage }] };
-    await this.chromeApi.storage.local.set({ [`side-agent:browser-state:${filename}`]: state });
-    return { state, artifact: await this.downloadText(filename, JSON.stringify(state, null, 2), "application/json") };
+    const savedState = { cookies, origins: [{ origin, localStorage }] };
+    await this.chromeApi.storage.local.set({ [`side-agent:browser-state:${filename}`]: savedState });
+    return { state: savedState, artifact: await this.downloadText(filename, JSON.stringify(savedState, null, 2), "application/json") };
   }
 
-  private async loadState(session: CommandSession, page: any, filename: string): Promise<unknown> {
+  private async loadState(state: BrowserState, page: any, filename: string): Promise<unknown> {
     const key = `side-agent:browser-state:${filename}`;
-    const state = (await this.chromeApi.storage.local.get(key))[key] as any;
-    if (!state) throw new Error(`CommandError[state-unavailable]: No saved state named ${JSON.stringify(filename)}`);
-    await Promise.all((state.cookies ?? []).map((cookie: chrome.cookies.Cookie) => this.chromeApi.cookies.set({
+    const savedState = (await this.chromeApi.storage.local.get(key))[key] as any;
+    if (!savedState) throw new Error(`CommandError[state-unavailable]: No saved state named ${JSON.stringify(filename)}`);
+    await Promise.all((savedState.cookies ?? []).map((cookie: chrome.cookies.Cookie) => this.chromeApi.cookies.set({
       url: `${cookie.secure ? "https" : "http"}://${cookie.domain.replace(/^\./, "")}${cookie.path}`, name: cookie.name, value: cookie.value,
       domain: cookie.domain, path: cookie.path, secure: cookie.secure, httpOnly: cookie.httpOnly, sameSite: cookie.sameSite, ...(cookie.expirationDate ? { expirationDate: cookie.expirationDate } : {}),
     })));
     const current = new URL(String(await page.url())).origin;
-    const saved = state.origins?.find((item: any) => item.origin === current);
+    const saved = savedState.origins?.find((item: any) => item.origin === current);
     if (saved) await page.evaluate("values => { localStorage.clear(); for (const [key,value] of Object.entries(values)) localStorage.setItem(key, String(value)); }", saved.localStorage);
-    session.origins.add(current);
-    return { loaded: filename, cookies: state.cookies?.length ?? 0, origin: current };
+    state.origins.add(current);
+    return { loaded: filename, cookies: savedState.cookies?.length ?? 0, origin: current };
   }
 
   private async enableObservation(tabId: number): Promise<void> {
@@ -905,7 +836,7 @@ export class ChromeExecutor {
     await this.bridgeCommand({ tabId }, "Fetch.continueRequest", { requestId: event.requestId, headers });
   }
 
-  private async networkCommand(name: string, _session: CommandSession, tabId: number, input: Record<string, any>): Promise<unknown> {
+  private async networkCommand(name: string, tabId: number, input: Record<string, any>): Promise<unknown> {
     if (name === "requests") {
       const records = this.network.get(tabId) ?? [];
       if (input.clear) { this.network.set(tabId, []); return { cleared: true }; }
@@ -1277,7 +1208,7 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     this.dialogs.clear();
     this.traceWaiters.clear();
     this.tracingTabs.clear();
-    this.commandSessions.clear();
+    this.browserState = undefined;
     this.disposed = true;
     if ((globalThis as Record<string, unknown>)[BRIDGE_KEY] === this.bridge) {
       delete (globalThis as Record<string, unknown>)[BRIDGE_KEY];

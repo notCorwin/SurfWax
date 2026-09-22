@@ -3,11 +3,11 @@ import { parseCommandTarget } from "./executor";
 import { COMMAND_NAMES, parseCommandInput, prepareToolMessages } from "./tool";
 
 describe("browser command tools", () => {
-  it("registers exactly the 88 documented commands without browser", () => {
-    expect(COMMAND_NAMES).toHaveLength(88);
-    expect(new Set(COMMAND_NAMES).size).toBe(88);
-    expect(COMMAND_NAMES).not.toContain("browser");
-    expect(COMMAND_NAMES).toEqual(expect.arrayContaining(["snapshot", "click", "run-code", "video-stop", "kill-all"]));
+  it("registers exactly the 80 current-window commands", () => {
+    expect(COMMAND_NAMES).toHaveLength(80);
+    expect(new Set(COMMAND_NAMES).size).toBe(80);
+    expect(COMMAND_NAMES).toEqual(expect.arrayContaining(["snapshot", "click", "run-code", "video-stop"]));
+    expect(COMMAND_NAMES.filter((name) => ["browser", "open", "attach", "close", "detach", "show", "list", "close-all", "kill-all"].includes(name))).toEqual([]);
   });
 
   it("strictly validates command-specific structured inputs", () => {
@@ -17,6 +17,7 @@ describe("browser command tools", () => {
     expect(parseCommandInput("request", { index: 1 })).toEqual({ index: 1 });
     expect(parseCommandInput("upload", { files: [{ name: "a.txt", text: "hello" }] })).toMatchObject({ files: [{ name: "a.txt" }] });
     expect(() => parseCommandInput("click", { target: "e1", extra: true })).toThrow();
+    expect(() => parseCommandInput("goto", { url: "https://example.com", session: "other" })).toThrow();
     expect(() => parseCommandInput("upload", { files: [{ name: "a.txt", text: "x", base64: "eA==" }] })).toThrow();
     expect(() => parseCommandInput("request", { index: 0 })).toThrow();
   });

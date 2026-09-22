@@ -51,6 +51,52 @@ function fakePort(onPost: (message: { id: string; method: string }, reply: (mess
 }
 
 describe("ChromeExecutor", () => {
+  it("navigates the current tab and creates new tabs only in the current window", async () => {
+    const fake = fakeChrome();
+    let url = "https://example.com/before";
+    const tabs: chrome.tabs.Tab[] = [{ id: 41, windowId: 7, active: true, title: "Current", url } as chrome.tabs.Tab];
+    const createWindow = vi.fn();
+    const removeWindow = vi.fn();
+    Object.assign(fake.chromeApi, {
+      windows: {
+        getCurrent: vi.fn(async () => ({ id: 7, tabs })),
+        get: vi.fn(async () => ({ id: 7 })),
+        update: vi.fn(async () => undefined),
+        create: createWindow,
+        remove: removeWindow,
+      },
+      tabs: {
+        get: vi.fn(async (tabId: number) => tabs.find((tab) => tab.id === tabId)),
+        query: vi.fn(async ({ windowId, active }: chrome.tabs.QueryInfo) => tabs.filter((tab) => tab.windowId === windowId && (!active || tab.active))),
+        create: vi.fn(async (options: chrome.tabs.CreateProperties) => {
+          const tab = { id: 42, windowId: options.windowId, active: true, title: "New", url: options.url } as chrome.tabs.Tab;
+          tabs.forEach((item) => { item.active = false; });
+          tabs.push(tab);
+          return tab;
+        }),
+      },
+    });
+    fake.debuggerApi.sendCommand.mockImplementation(async (_debuggee, method, params) => {
+      if (method === "Page.navigate") { url = String((params as { url?: string })?.url); tabs[0]!.url = url; return {}; }
+      if (method !== "Runtime.evaluate") return {};
+      const expression = String((params as { expression?: string })?.expression);
+      if (expression.includes("document.readyState")) return { result: { value: true } };
+      if (expression.includes("({url:location.href,title:document.title})")) return { result: { value: { url, title: "Current" } } };
+      if (expression.includes("location.href")) return { result: { value: url } };
+      if (expression.includes("document.title")) return { result: { value: "Current" } };
+      return { result: { value: null } };
+    });
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+
+    await expect(executor.executeCommand("goto", { url: "https://example.com/after" })).resolves.toMatchObject({ page: { url: "https://example.com/after" } });
+    await executor.executeCommand("tab-new", { url: "https://example.com/new" });
+
+    expect((fake.chromeApi as any).tabs.create).toHaveBeenCalledWith({ windowId: 7, active: true, url: "https://example.com/new" });
+    expect(createWindow).not.toHaveBeenCalled();
+    expect(removeWindow).not.toHaveBeenCalled();
+    executor.dispose();
+  });
+
   it("runs code in the exact Side Panel target and returns by-value results", async () => {
     const fake = fakeChrome([{ result: { type: "object", value: { kind: "value", value: { title: "test", tabs: 2 } } } }]);
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });

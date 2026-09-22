@@ -6,7 +6,7 @@
 
 Surf Wax 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。它使用 Vercel AI SDK v7 和 Assistant UI，从扩展直接连接 Models.dev Provider 或用户配置的 OpenAI-compatible Endpoint。
 
-模型通过 88 个独立、结构化命令工具操作 Chrome；常规流程是 `snapshot` / `find`、执行操作、再次验证。`run-code` 只提供现有 Playwright 风格 `page` facade，不向模型暴露任意 Chrome Extension API、执行上下文或原始 CDP。
+模型通过 80 个独立、结构化命令工具操作 Chrome；常规流程是 `snapshot` / `find`、执行操作、再次验证。`run-code` 只提供现有 Playwright 风格 `page` facade，不向模型暴露任意 Chrome Extension API、执行上下文或原始 CDP。
 
 ## 为什么使用它
 
@@ -91,7 +91,7 @@ Side Panel 标题栏的脚本按钮会打开独立的用户脚本页面。列表
 列出当前窗口中的全部标签页，并返回标题和 URL。
 ```
 
-模型使用 88 个独立命令 Tool，而不是一个多模式 `browser()`：通常先调用 `snapshot` 或 `find` 获取 ref，再调用 `click`、`fill`、`select` 等命令，并在操作后重新检查页面状态。完整命令表见 [TOOLS.md](./TOOLS.md)。旧 `browser`、`chrome`、`page` 调用只在历史对话中显示，不再注册给新请求。
+模型使用 80 个独立命令 Tool，而不是一个多模式 `browser()`：通常先调用 `snapshot` 或 `find` 获取 ref，再调用 `click`、`fill`、`select` 等命令，并在操作后重新检查页面状态。完整命令表见 [TOOLS.md](./TOOLS.md)。旧 `browser`、`chrome`、`page` 调用只在历史对话中显示，不再注册给新请求。
 
 ```jsonc
 // snapshot
@@ -106,7 +106,7 @@ Side Panel 标题栏的脚本按钮会打开独立的用户脚本页面。列表
 
 `target` 可使用快照 ref、CSS、常见 Playwright locator 字符串，或结构化 role/text/label/placeholder/alt/title/testId/CSS locator。定位器继续自动等待、严格匹配并在 DOM 更新后重新解析。
 
-窗口会话通过可选 `session` 参数区分；`open` 创建由 Surf Wax 管理的 Chrome 窗口，`list` 列出可由 `attach` 连接的 `chrome-<windowId>`。标签页索引从 0 开始。窗口仍共享当前 Chrome Profile。
+所有命令只操作打开 Side Panel 时所在的 Chrome 窗口。`goto` 导航当前目标标签页，`tab-new` 在该窗口中新建标签页；Surf Wax 不创建、连接或关闭独立 Chrome 窗口。标签页索引从 0 开始。
 
 仅当专用命令无法表达任务时使用 `run-code`，其输入为接收现有 Playwright 风格 `page` facade 的单个异步函数表达式；不再向模型暴露任意 Chrome Extension API、原始 CDP、任意执行上下文或大结果 `$ref`。
 
@@ -132,7 +132,7 @@ Side Panel 关闭时，Harness 会立即中止当前模型请求，阻止排队�
 | --- | --- |
 | `src/sidepanel/` | Side Panel 会话、配置加载、恢复和关闭生命周期 |
 | `src/agent/` | Models.dev SDK Registry、浏览器协议适配、无限重试、Agent 循环和流式 transport |
-| `src/chrome/` | 88 个命令工具、语义/视觉自动化与共享 Chrome/CDP 执行器 |
+| `src/chrome/` | 80 个命令工具、语义/视觉自动化与共享 Chrome/CDP 执行器 |
 | `src/logging.ts` | IndexedDB canonical event log 与对话重建 |
 | `src/userscripts/` | 原生 User Script 快照、迁移和恢复 |
 | `src/options/` | BYOK 设置和日志清理 |
