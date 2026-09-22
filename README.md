@@ -4,9 +4,9 @@
 [![Chrome 138+](https://img.shields.io/badge/Chrome-138%2B-4285F4?logo=googlechrome&logoColor=white)](https://www.google.com/chrome/)
 [![Version](https://img.shields.io/badge/version-0.2.0-blue)](manifests/store.json)
 
-Surf Wax 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。它使用 Vercel AI SDK v7 和 Assistant UI，从扩展直接连接 Models.dev Provider 或用户配置的 OpenAI-compatible Endpoint，并只向模型提供一个 `browser` 工具。
+Surf Wax 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。它使用 Vercel AI SDK v7 和 Assistant UI，从扩展直接连接 Models.dev Provider 或用户配置的 OpenAI-compatible Endpoint。
 
-`browser` 默认以 `observe` / `act` JSON DSL 提供语义定位、自动等待、截图与真实输入；`run` 是 JavaScript 逃生舱，可访问完整 Chrome Extension API、页面对象、执行上下文和原始 CDP。
+模型通过 88 个独立、结构化命令工具操作 Chrome；常规流程是 `snapshot` / `find`、执行操作、再次验证。`run-code` 只提供现有 Playwright 风格 `page` facade，不向模型暴露任意 Chrome Extension API、执行上下文或原始 CDP。
 
 ## 为什么使用它
 
@@ -91,83 +91,30 @@ Side Panel 标题栏的脚本按钮会打开独立的用户脚本页面。列表
 列出当前窗口中的全部标签页，并返回标题和 URL。
 ```
 
-模型通常先调用 `browser({ mode: "observe" })`，再用 `browser({ mode: "act", steps: [...] })` 操作。只有 DSL 无法表达时才使用 `mode: "run"`；其中 `code` 是异步函数体，必须显式 `return`。旧 `chrome` / `page` 调用会继续在历史对话中显示，但不再注册给新请求。
+模型使用 88 个独立命令 Tool，而不是一个多模式 `browser()`：通常先调用 `snapshot` 或 `find` 获取 ref，再调用 `click`、`fill`、`select` 等命令，并在操作后重新检查页面状态。完整命令表见 [TOOLS.md](./TOOLS.md)。旧 `browser`、`chrome`、`page` 调用只在历史对话中显示，不再注册给新请求。
 
-实时检查能力：
+```jsonc
+// snapshot
+{}
 
-```json
-{
-  "mode": "run",
-  "code": "return await chrome.capabilities()"
-}
+// fill
+{ "target": { "by": "label", "value": "邮箱" }, "text": "me@example.com" }
+
+// click
+{ "target": "getByRole('button', { name: '登录' })" }
 ```
 
-### Chrome Extension API
+`target` 可使用快照 ref、CSS、常见 Playwright locator 字符串，或结构化 role/text/label/placeholder/alt/title/testId/CSS locator。定位器继续自动等待、严格匹配并在 DOM 更新后重新解析。
 
-```json
-{
-  "mode": "run",
-  "code": "return await chrome.tabs.query({ currentWindow: true });"
-}
-```
+窗口会话通过可选 `session` 参数区分；`open` 创建由 Surf Wax 管理的 Chrome 窗口，`list` 列出可由 `attach` 连接的 `chrome-<windowId>`。标签页索引从 0 开始。窗口仍共享当前 Chrome Profile。
 
-### 任意执行上下文
+仅当专用命令无法表达任务时使用 `run-code`，其输入为接收现有 Playwright 风格 `page` facade 的单个异步函数表达式；不再向模型暴露任意 Chrome Extension API、原始 CDP、任意执行上下文或大结果 `$ref`。
 
-```json
-{
-  "mode": "run",
-  "target": { "kind": "page", "tabId": 123, "world": "MAIN" },
-  "code": "return document.title;"
-}
-```
-
-`run` 默认运行在扩展上下文；页面、service worker、offscreen 和 devtools 脚本通过 `target` 直接选择执行上下文。所有 `run` 代码都必须显式 `return`。
-
-页面目标优先通过原生 `chrome.userScripts.execute` 执行；该接口不可用时，`MAIN` 使用 CDP，`USER_SCRIPT` 返回明确错误。脚本执行失败不会自动换通道重试。
-
-### 原始 CDP
-
-```json
-{
-  "code": "const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); await chrome.debugger.attach({ tabId: tab.id }, '1.3'); try { return await chrome.debugger.sendCommand({ tabId: tab.id }, 'Runtime.evaluate', { expression: 'document.title', returnByValue: true }); } finally { await chrome.debugger.detach({ tabId: tab.id }); }"
-}
-```
-
-跨多次调用时，保留 `chrome.debugger` 附加的页面会话及 `chrome.debugger.onEvent` 监听器；完成后主动 `detach`，关闭面板也会解除附加。跨进程 iframe 和 worker 可用 `Target.setAutoAttach({ autoAttach: true, flatten: true, waitForDebuggerOnStart: false })` 获取子会话，并在 `sendCommand` 的 debuggee 中传入 `sessionId`。同进程 iframe 可从 `Runtime.executionContextCreated` 找到 `contextId`；页面导航后重新查找上下文。
-
-不超过 8 KiB 的 JSON 值直接返回。更大的结果先完整写入事件日志，再返回事件 ID、大小、可用顶层键和可直接提交的 `mode: "result"` 读取输入；`path` 可选嵌套字段，`offset` / `limit` 用于字符串或数组分页。此模式直接读取 Canonical Event Log，不进入页面或 Side Panel 执行上下文，也不会为读取结果再生成引用。引用关闭面板后仍可读取，删除所属对话时失效。
-
-### 持久 User Script
-
-```json
-{
-  "mode": "run",
-  "code": "await chrome.userScripts.register([{ id: 'page-helper', matches: ['<all_urls>'], js: [{ code: \"document.documentElement.dataset.agent = 'ready'\" }], world: 'MAIN' }]); return await chrome.userScripts.getScripts({ ids: ['page-helper'] });"
-}
-```
+截图会下载并作为图片提供给下一模型步骤；PDF、存储状态、Chrome Trace 和 WebM 视频保存到 Chrome 下载目录。上传与外部拖放使用包含 `text`、`base64` 或 `url` 的内存文件对象，不接受本机文件路径。
 
 Side Panel 关闭时，Harness 会立即中止当前模型请求，阻止排队的工具调用启动，并尽力取消执行中的工具和 detach 自己创建的调试会话。已经发生的浏览器副作用不会回滚。
 
-### 语义网页自动化
-
-日常网页操作使用 `observe` / `act`。观察返回当前文档的 `observationId`、稳定短 ref、角色、名称、状态、允许动作、viewport 和相对 `since` 的变化；语义不足或显式请求时附加 JPEG 截图：
-
-```json
-{
-  "mode": "act",
-  "steps": [
-    { "type": "fill", "target": { "by": "label", "value": "邮箱" }, "value": "me@example.com" },
-    { "type": "click", "target": { "by": "role", "value": "button", "name": "登录" } },
-    { "type": "expect", "target": { "by": "text", "value": "欢迎回来" }, "state": "visible" }
-  ]
-}
-```
-
-支持 role/text/label/placeholder/alt/title/testId/CSS、frame、ref 和截图 point 目标，以及导航、点击、填写、键盘、选择、勾选、拖拽、上传和 `expect`。语义定位使用 Chrome Accessibility tree；ref 仅在同文档存在唯一完全匹配节点时安全重绑。point 必须携带截图的 `observationId`，导航或 viewport/缩放变化后会被拒绝。
-
-动作成功只表示浏览器输入已经发送，不代表业务流程完成。应在同一批次加入 `expect`，验证目标元素状态、文本、值或 URL。批次首次失败后停止并返回已完成、失败、未执行步骤及刷新后的观察；已发生的副作用不会重放或回滚。
-
-`run` 继续提供完整 Chrome Extension API、任意页面 JavaScript、User Script 与原始 CDP。两层共用同一 CDP session、定位器、串行队列、页面防点击层、Abort 生命周期和事件日志；扩展不依赖 Native Messaging 或生产环境 Playwright。
+所有命令共用同一 CDP session、串行队列、页面防点击层、Abort 生命周期和事件日志；扩展不依赖 Native Messaging 或生产环境 Playwright。动作成功只表示输入已经发送，模型必须检查返回状态或重新调用 `snapshot` 验证业务结果。
 
 智能体运行时，已连接或操作的网页会覆盖防点击层；导航后会重装，结束或中止时移除。通过 CDP 注入鼠标或触摸手势时，防点击层会短暂透传，以便智能体操作页面。Chrome 不允许脚本注入的页面会在面板显示提示。
 
@@ -177,7 +124,7 @@ Side Panel 关闭时，Harness 会立即中止当前模型请求，阻止排队�
 
 事件日志会记录完整对话、模型 stop reason、usage、provider metadata、工具输入/输出/错误，以及请求 retry、abort 和 latency；网页内容不会脱敏。Side Panel 从日志恢复历史，并将历史作为后续模型上下文。
 
-设置页的“清空对话与日志”会永久删除新旧本地事件日志，但保留模型配置。旧版没有 `conversationId` 的事件会原样保留在数据库中，但不会出现在新版对话列表；升级不会删除事件表。扩展声明广泛的 Chrome 权限和 `<all_urls>` host access，以便 `browser.run` 使用浏览器允许的最大能力范围。
+设置页的“清空对话与日志”会永久删除新旧本地事件日志，但保留模型配置。旧版没有 `conversationId` 的事件会原样保留在数据库中，但不会出现在新版对话列表；升级不会删除事件表。扩展声明广泛的 Chrome 权限和 `<all_urls>` host access，以支持命令式浏览器自动化。
 
 ## 架构
 
@@ -185,7 +132,7 @@ Side Panel 关闭时，Harness 会立即中止当前模型请求，阻止排队�
 | --- | --- |
 | `src/sidepanel/` | Side Panel 会话、配置加载、恢复和关闭生命周期 |
 | `src/agent/` | Models.dev SDK Registry、浏览器协议适配、无限重试、Agent 循环和流式 transport |
-| `src/chrome/` | 单一 `browser` 工具、动作 DSL、语义/视觉观察与共享 JavaScript/CDP 执行器 |
+| `src/chrome/` | 88 个命令工具、语义/视觉自动化与共享 Chrome/CDP 执行器 |
 | `src/logging.ts` | IndexedDB canonical event log 与对话重建 |
 | `src/userscripts/` | 原生 User Script 快照、迁移和恢复 |
 | `src/options/` | BYOK 设置和日志清理 |
@@ -218,7 +165,7 @@ git diff --check
 项目由 [notCorwin](https://github.com/notCorwin) 维护。欢迎提交聚焦、可验证的 Pull Request：
 
 1. Fork 仓库并从最新 `master` 创建分支。
-2. 保持单一 `browser` 工具和 canonical event log 语义不变。
+2. 保持独立浏览器命令工具和 canonical event log 语义不变。
 3. 为非平凡行为添加最小覆盖，并运行上面的完整验证命令。
 4. 不要提交 `dist/`、测试报告或本地密钥。
 

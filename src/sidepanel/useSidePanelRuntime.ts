@@ -26,9 +26,8 @@ export function createSidePanelCloser(runtime: CloseableRuntime, logger?: EventL
   };
 }
 
-function useConversationRuntime(config: ModelConfig, logger: EventLogger): AssistantRuntime {
+function useConversationRuntime(config: ModelConfig, logger: EventLogger, executor: ChromeExecutor): AssistantRuntime {
   const conversationId = useAuiState((state) => state.threadListItem.remoteId ?? state.threadListItem.id);
-  const executor = useMemo(() => new ChromeExecutor({ logger }), [logger]);
   const transport = useMemo(
     () => createChatTransport(async (signal, branchIds) => {
       const reasoning = reasoningSettingsFor(config);
@@ -48,15 +47,6 @@ function useConversationRuntime(config: ModelConfig, logger: EventLogger): Assis
     },
   });
 
-  useEffect(() => {
-    const dispose = () => executor.dispose();
-    globalThis.addEventListener("pagehide", dispose);
-    return () => {
-      globalThis.removeEventListener("pagehide", dispose);
-      executor.dispose();
-    };
-  }, [executor]);
-
   return runtime;
 }
 
@@ -65,11 +55,12 @@ export function useSidePanelRuntime(
   logger: EventLogger,
   initialThreadId?: string,
 ): AssistantRuntime {
+  const executor = useMemo(() => new ChromeExecutor({ logger }), [logger]);
   const adapter = useMemo(() => createConversationAdapter(logger, config), [config, logger]);
   const runtime = useRemoteThreadListRuntime({
     adapter,
     initialThreadId,
-    runtimeHook: () => useConversationRuntime(config, logger),
+    runtimeHook: () => useConversationRuntime(config, logger, executor),
     onThreadIdChange: (conversationId) => {
       if (conversationId) logger.record({ type: "conversation.selected", conversationId, content: null });
     },
@@ -98,6 +89,8 @@ export function useSidePanelRuntime(
       close();
     };
   }, [logger, runtime]);
+
+  useEffect(() => () => executor.dispose(), [executor]);
 
   return runtime;
 }

@@ -610,7 +610,7 @@ export class AutomationRuntime {
         return this.afterAction(session);
       }
       if (["click", "dblclick", "hover"].includes(operation)) {
-        await this.pointer(session, spec, operation);
+        await this.pointer(session, spec, operation, args[0] as { button?: "left" | "right" | "middle"; modifiers?: string[] } | undefined);
         return this.afterAction(session);
       }
       throw automationError("unsupported", { operation, locator: spec });
@@ -925,17 +925,19 @@ export class AutomationRuntime {
     return { x, y };
   }
 
-  private async pointer(session: Session, spec: LocatorSpec, operation: string): Promise<void> {
+  private async pointer(session: Session, spec: LocatorSpec, operation: string, options: { button?: "left" | "right" | "middle"; modifiers?: string[] } = {}): Promise<void> {
     const target = await this.waitActionableLocator(session, spec, false, true, true, operation !== "hover");
     const state = await this.toRootPoint(session, target.targetSession, target.state);
     if (operation === "hover") {
       await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", x: state.x, y: state.y });
       return;
     }
+    const button = options.button ?? "left";
+    const modifiers = (options.modifiers ?? []).reduce((mask, part) => mask | (/alt/i.test(part) ? 1 : /control/i.test(part) ? 2 : /meta/i.test(part) ? 4 : /shift/i.test(part) ? 8 : 0), 0);
     const count = operation === "dblclick" ? 2 : 1;
     for (let clickCount = 1; clickCount <= count; clickCount += 1) {
-      await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mousePressed", x: state.x, y: state.y, button: "left", clickCount });
-      await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseReleased", x: state.x, y: state.y, button: "left", clickCount });
+      await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mousePressed", x: state.x, y: state.y, button, modifiers, clickCount });
+      await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseReleased", x: state.x, y: state.y, button, modifiers, clickCount });
     }
   }
 
@@ -1087,8 +1089,8 @@ export class LocatorFacade {
   nth(index: number) { return new LocatorFacade(this.runtime, this.tabId, { ...this.spec, index }); }
   count() { return this.run("count"); }
   waitFor(options: { state?: WaitState } = {}) { return this.run("waitFor", options); }
-  click() { return this.run("click"); }
-  dblclick() { return this.run("dblclick"); }
+  click(options?: { button?: "left" | "right" | "middle"; modifiers?: string[] }) { return this.run("click", options); }
+  dblclick(options?: { button?: "left" | "right" | "middle"; modifiers?: string[] }) { return this.run("dblclick", options); }
   hover() { return this.run("hover"); }
   fill(value: string) { return this.run("fill", value); }
   clear() { return this.run("clear"); }

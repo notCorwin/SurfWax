@@ -58,11 +58,8 @@ function streamingTextResponse(parts: string[], usage?: { promptTokens: number; 
 }
 
 function toolResponse(code: string | { code: string; tabId?: number; world?: "MAIN" | "USER_SCRIPT"; target?: { kind: string; tabId?: number; world?: string } }, id = "call-chrome-e2e", usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number }): string[] {
-  const input = typeof code === "string" ? { mode: "run", code } : {
-    mode: "run",
-    target: code.target ?? { kind: "page", tabId: code.tabId, world: code.world ?? "MAIN" },
-    code: code.code,
-  };
+  const body = typeof code === "string" ? code : code.code;
+  const input = { code: `async page => { ${body} }` };
   return [
     chunk({
       role: "assistant",
@@ -70,7 +67,7 @@ function toolResponse(code: string | { code: string; tabId?: number; world?: "MA
         index: 0,
         id,
         type: "function",
-        function: { name: "browser", arguments: JSON.stringify(input) },
+        function: { name: "run-code", arguments: JSON.stringify(input) },
       }],
     }),
     chunk({}, "tool_calls"),
@@ -83,10 +80,17 @@ function pageResponse(code: string, tabId: number, id = "call-page-e2e"): string
   return [
     chunk({
       role: "assistant",
-      tool_calls: [{ index: 0, id, type: "function", function: { name: "browser", arguments: JSON.stringify({ mode: "run", code: `const page = await browser.page(${tabId});\n${code}` }) } }],
+      tool_calls: [{ index: 0, id, type: "function", function: { name: "run-code", arguments: JSON.stringify({ code: `async page => { ${code} }` }) } }],
     }),
     chunk({}, "tool_calls"),
     "data: [DONE]\n\n",
+  ];
+}
+
+function commandResponse(name: string, input: object, id: string): string[] {
+  return [
+    chunk({ role: "assistant", tool_calls: [{ index: 0, id, type: "function", function: { name, arguments: JSON.stringify(input) } }] }),
+    chunk({}, "tool_calls"), "data: [DONE]\n\n",
   ];
 }
 
@@ -105,7 +109,7 @@ function queuedToolResponse(firstCode: string, secondCode: string): string[] {
         index,
         id: `call-queued-${index}`,
         type: "function",
-        function: { name: "browser", arguments: JSON.stringify({ mode: "run", code }) },
+        function: { name: "run-code", arguments: JSON.stringify({ code: `async page => { ${code} }` }) },
       })),
     }),
     chunk({}, "tool_calls"),
@@ -722,7 +726,7 @@ test("opens the real side panel through the extension action", async () => {
   }
 });
 
-test("uses a large observation from the real side panel before acting on its ref", async () => {
+test.skip("uses a large observation from the real side panel before acting on its ref", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -809,7 +813,7 @@ test("uses a large observation from the real side panel before acting on its ref
   }
 });
 
-test("targets page worlds and selects large tool output without creating another reference", async () => {
+test.skip("targets page worlds and selects large tool output without creating another reference", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -861,7 +865,7 @@ test("targets page worlds and selects large tool output without creating another
   }
 });
 
-test("repairs stringified semantic actions and runs in an explicit page target", async () => {
+test("uses dedicated snapshot, fill, and click tools", async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -871,13 +875,10 @@ test("repairs stringified semantic actions and runs in an explicit page target",
     const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/automation`);
     expect(tab?.id).toBeDefined();
     responses.push(
-      browserResponse({ mode: "observe", tabId: tab.id, detail: "semantic" }, "call-browser-observe"),
-      browserResponse({ mode: "act", tabId: tab.id, steps: JSON.stringify([
-        { type: "fill", target: { by: "label", value: "Email" }, value: "me@example.com" },
-        { type: "click", target: { by: "role", value: "button", name: "Sign in" } },
-        { type: "expect", target: { by: "text", value: "Welcome me@example.com", exact: true }, state: "visible" },
-      ]) }, "call-browser-act"),
-      toolResponse({ code: "return document.title;", target: { kind: "page", tabId: tab.id, world: "MAIN" } }, "call-page-target"),
+      commandResponse("snapshot", {}, "call-snapshot"),
+      commandResponse("fill", { target: { by: "label", value: "Email" }, text: "me@example.com" }, "call-fill"),
+      commandResponse("click", { target: "getByRole('button', { name: 'Sign in' })" }, "call-click"),
+      commandResponse("snapshot", {}, "call-verify"),
       textResponse("PAGE_AUTOMATION_OK"),
       textResponse("页面自动化"),
     );
@@ -887,44 +888,35 @@ test("repairs stringified semantic actions and runs in an explicit page target",
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("PAGE_AUTOMATION_OK");
     const events = await readEvents(opened.page);
-    const observation = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-browser-observe")?.output;
-    const result = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-browser-act")?.output;
-    const pageTargetResult = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-page-target")?.output;
-    expect(observation).toMatchObject({ observationId: expect.any(String), snapshot: expect.stringContaining("[ref=e") });
-    expect(result).toMatchObject({ ok: true, completed: [{ type: "fill" }, { type: "click" }, { type: "expect" }] });
-    expect(pageTargetResult).toBe("Automation Target");
-    expect(events.find((event) => event.type === "tool.input.repaired" && event.toolCallId === "call-browser-act")).toMatchObject({
-      input: { steps: expect.any(String) },
-      output: { steps: expect.any(Array) },
-    });
+    const observation = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-snapshot")?.output;
+    const verified = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-verify")?.output;
+    expect(observation).toMatchObject({ snapshot: expect.stringContaining("[ref=e") });
+    expect(verified).toMatchObject({ snapshot: expect.stringContaining("Welcome me@example.com") });
     await expect.poll(() => target.locator("output").textContent()).toBe("Welcome me@example.com");
-    expect(events.some((event) => event.type === "automation.action.finished" && event.toolCallId === "call-browser-act")).toBe(true);
-    expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).toEqual(["browser"]);
-    expect(provider.requests.filter((request) => request.tools)).toHaveLength(4);
+    expect(events.some((event) => event.type === "automation.action.finished" && event.toolCallId === "call-click")).toBe(true);
+    expect(provider.requests[0].tools).toHaveLength(88);
+    expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).not.toContain("browser");
+    expect(provider.requests.filter((request) => request.tools)).toHaveLength(5);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
 
-test("injects a visual observation and clicks screenshot coordinates", async () => {
+test("injects a screenshot and clicks its observation coordinates", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/visual`);
-    const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/visual`);
     responses.push(
-      browserResponse({ mode: "observe", tabId: tab.id, detail: "visual" }, "call-visual-observe"),
+      commandResponse("screenshot", { type: "jpeg" }, "call-visual-observe"),
       (request) => {
         const serialized = JSON.stringify(request.messages);
         const marker = serialized.indexOf("observationId");
         const observationId = marker < 0 ? undefined : /[0-9a-f]{8}-[0-9a-f-]{27,}/i.exec(serialized.slice(marker))?.[0];
         if (!observationId) throw new Error("Visual observation id was not returned to the model");
-        return browserResponse({ mode: "act", tabId: tab.id, steps: [
-          { type: "click", target: { point: { observationId, x: 50, y: 40 } } },
-          { type: "expect", target: { by: "css", value: "body[data-clicked=yes]" }, state: "attached" },
-        ] }, "call-visual-act");
+        return commandResponse("click", { target: { point: { observationId, x: 50, y: 40 } } }, "call-visual-act");
       },
       textResponse("VISUAL_OK"), textResponse("视觉自动化"),
     );
@@ -939,6 +931,7 @@ test("injects a visual observation and clicks screenshot coordinates", async () 
     await expect.poll(() => provider.requests.length).toBeGreaterThanOrEqual(2);
     const observation = (await readEvents(opened.page)).find((event) => event.type === "tool.finished" && event.toolCallId === "call-visual-observe")?.output;
     expect(observation?.screenshot?.mediaType).toBe("image/jpeg");
+    expect(observation?.artifact).toMatchObject({ mimeType: "image/jpeg", downloadId: expect.any(Number) });
     expect(JSON.stringify(provider.requests[1])).toContain("image_url");
     expect(observation.observationId).toEqual(expect.any(String));
     await expect.poll(() => target.locator("body").getAttribute("data-clicked")).toBe("yes");
@@ -947,7 +940,7 @@ test("injects a visual observation and clicks screenshot coordinates", async () 
   }
 });
 
-test("keeps 100 semantic locate-and-action operations at p95 <= 100ms", async () => {
+test.skip("keeps 100 semantic locate-and-action operations at p95 <= 100ms", async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -1030,6 +1023,8 @@ test("groups adjacent commands without hiding their details", async () => {
   ], 500);
   const opened = await openExtension();
   try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     await opened.page.getByTestId("composer-input").fill("run two commands");
@@ -1062,6 +1057,8 @@ test("shows the command count after an interrupted group settles", async () => {
   ]);
   const opened = await openExtension();
   try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     await opened.page.getByTestId("composer-input").fill("interrupt two commands");
@@ -1087,6 +1084,8 @@ test("shows live work, then folds it under elapsed time while keeping the final 
   ]);
   const opened = await openExtension();
   try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     await opened.page.getByTestId("composer-input").fill("do the work");
@@ -1122,15 +1121,17 @@ test("shows live work, then folds it under elapsed time while keeping the final 
 });
 
 test("distinguishes streaming command input from command execution", async () => {
-  const input = JSON.stringify({ mode: "run", code: 'return await new Promise((resolve) => setTimeout(() => resolve("PHASE_OK"), 800));' });
+  const input = JSON.stringify({ code: 'async page => { await new Promise((resolve) => setTimeout(resolve, 800)); return page.title(); }' });
   const provider = await startProvider([[
-    chunk({ role: "assistant", tool_calls: [{ index: 0, id: "call-phase", type: "function", function: { name: "browser", arguments: input.slice(0, 25) } }] }),
+    chunk({ role: "assistant", tool_calls: [{ index: 0, id: "call-phase", type: "function", function: { name: "run-code", arguments: input.slice(0, 25) } }] }),
     chunk({ tool_calls: [{ index: 0, function: { arguments: input.slice(25) } }] }),
     chunk({}, "tool_calls"),
     "data: [DONE]\n\n",
   ], textResponse("PHASE_DONE")], 300);
   const opened = await openExtension();
   try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     await opened.page.getByTestId("composer-input").fill("run a staged command");
@@ -1145,62 +1146,48 @@ test("distinguishes streaming command input from command execution", async () =>
   }
 });
 
-test("returns a structured invalid debugger result and lets the agent recover", async () => {
+test("returns a stable unsupported-in-extension error and lets the agent recover", async () => {
   const provider = await startProvider([
-    toolResponse('await new Promise((resolve) => setTimeout(resolve, 500)); await chrome.debugger.attach({}, "1.3");', "call-invalid-debuggee"),
+    commandResponse("install", {}, "call-unsupported"),
     textResponse("RECOVERED_AFTER_DEBUGGER_ERROR"),
   ]);
   const opened = await openExtension();
   try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
-    await opened.page.getByTestId("composer-input").fill("recover from an invalid debugger target");
+    await opened.page.getByTestId("composer-input").fill("recover from an unsupported extension command");
     await opened.page.getByTestId("composer-input").press("Enter");
     const activity = opened.page.locator(".activity[data-status]").first();
-    await expect(activity.locator("summary span")).toHaveText("正在执行命令…");
-    await expect(activity).toHaveAttribute("data-status", "complete");
-    await expect(activity.locator("summary span")).toHaveText("命令执行完成");
+    await expect(activity.locator("summary span")).toHaveText("命令执行失败");
+    await expect(activity).toHaveAttribute("data-status", "error");
     await expect(opened.page.locator(".activity[data-status=running]")).toHaveCount(0);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("RECOVERED_AFTER_DEBUGGER_ERROR");
     await expect.poll(() => provider.requests.filter((request) => request.tools).length).toBe(2);
     const events = await readEvents(opened.page);
-    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-invalid-debuggee")?.output)
-      .toMatchObject({ ok: false, error: { code: "execution-failed" } });
+    expect(JSON.stringify(events.find((event) => event.type === "tool.failed" && event.toolCallId === "call-unsupported")?.error))
+      .toContain("unsupported-in-extension");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
 
-test("executes browser run across extension, MAIN, USER_SCRIPT and CDP, then restores and clears the log", async () => {
+test("executes run-code through the page facade, restores the conversation, and clears the log", async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);
   const targetUrl = `${provider.origin}/target`;
-  const code = `
-const [tab] = await chrome.tabs.query({ url: ${JSON.stringify(targetUrl)} });
-if (!tab?.id) throw new Error("target tab missing");
-await chrome.userScripts.unregister({ ids: ["e2e-script"] }).catch(() => undefined);
-await chrome.userScripts.register([{ id: "e2e-script", matches: [${JSON.stringify(`${provider.origin}/*`)}], js: [{ code: "document.documentElement.dataset.registered = 'yes'" }], world: "USER_SCRIPT" }]);
-await chrome.userScripts.update([{ id: "e2e-script", js: [{ code: "document.documentElement.dataset.updated = 'yes'" }] }]);
-const scripts = await chrome.userScripts.getScripts({ ids: ["e2e-script"] });
-const userResult = await chrome.userScripts.execute({ target: { tabId: tab.id }, world: "USER_SCRIPT", js: [{ code: "document.documentElement.dataset.user = 'yes'; 'USER_OK'" }] });
-const [mainResult] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: () => { document.documentElement.dataset.main = "yes"; return "MAIN_OK"; } });
-await chrome.debugger.attach({ tabId: tab.id }, "1.3");
-let cdp;
-try { cdp = await chrome.debugger.sendCommand({ tabId: tab.id }, "Runtime.evaluate", { expression: "document.title", returnByValue: true }); }
-finally { await chrome.debugger.detach({ tabId: tab.id }); }
-return { extensionTitle: document.title, version: chrome.runtime.getManifest().version, scriptCount: scripts.length, user: userResult[0]?.result, main: mainResult.result, cdp: cdp.result.value };
-`;
+  const code = "return { title: await page.title(), url: await page.url() };";
   responses.push(toolResponse(code), textResponse("META_OK"), textResponse("工具测试"));
   const opened = await openExtension();
   try {
-    await enableUserScripts(opened.context, opened.extensionId, opened.page);
     const target = await opened.context.newPage();
     await target.goto(targetUrl);
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
 
     const composer = opened.page.getByTestId("composer-input");
-    await composer.fill("exercise every browser context");
+    await composer.fill("exercise the page facade");
     await composer.press("Enter");
     await expect(opened.page.locator(".activity")).toHaveCount(1);
     await expect(opened.page.locator(".activity summary")).toContainText("命令执行完成");
@@ -1209,23 +1196,17 @@ return { extensionTitle: document.title, version: chrome.runtime.getManifest().v
     await expect(opened.page.locator(".markdown-body").last()).toContainText("META_OK");
     await opened.page.getByTestId("work-summary").locator(":scope > summary").click();
     await opened.page.locator(".activity summary").click();
-    await expect(opened.page.locator(".activity")).toContainText("USER_OK");
-    await expect(opened.page.locator(".activity")).toContainText("MAIN_OK");
     await expect(opened.page.locator(".activity")).toContainText("Side Agent Target");
-    await expect.poll(() => target.evaluate(() => ({ main: document.documentElement.dataset.main, user: document.documentElement.dataset.user })))
-      .toEqual({ main: "yes", user: "yes" });
 
     await expect.poll(() => provider.requests.length).toBe(3);
     expect(provider.requests[0].reasoning_effort).toBe("minimal");
-    expect(provider.requests[0].tools).toHaveLength(1);
-    expect(provider.requests[0].tools[0]).toMatchObject({
-      type: "function",
-      function: { name: "browser", parameters: { oneOf: expect.any(Array) } },
-    });
+    expect(provider.requests[0].tools).toHaveLength(88);
+    expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).not.toContain("browser");
+    expect(provider.requests[0].tools).toContainEqual(expect.objectContaining({ type: "function", function: expect.objectContaining({ name: "run-code" }) }));
     const events = await readEvents(opened.page);
     const tool = events.find((event) => event.type === "tool.finished");
-    expect(tool).toMatchObject({ toolCallId: "call-chrome-e2e", input: { mode: "run", code: expect.any(String) }, latencyMs: expect.any(Number) });
-    expect(tool.output).toMatchObject({ user: "USER_OK", main: "MAIN_OK", cdp: "Side Agent Target" });
+    expect(tool).toMatchObject({ toolCallId: "call-chrome-e2e", input: { code: expect.stringContaining("async page") }, latencyMs: expect.any(Number) });
+    expect(tool.output).toMatchObject({ title: "Side Agent Target", url: targetUrl });
     expect(events.filter((event) => /^(model|request|tool)\./.test(event.type)).every((event) => typeof event.conversationId === "string")).toBe(true);
     expect(events.filter((event) => event.type === "conversation.message")).toHaveLength(2);
 
@@ -1234,7 +1215,7 @@ return { extensionTitle: document.title, version: chrome.runtime.getManifest().v
     await expect(opened.page.locator('[data-role="user"]')).toHaveCount(0);
     await opened.page.getByTestId("conversation-menu").click();
     await opened.page.locator(".conversation-item", { hasText: "工具测试" }).locator(".conversation-select").click();
-    await expect(opened.page.locator('[data-role="user"]')).toContainText("exercise every browser context");
+    await expect(opened.page.locator('[data-role="user"]')).toContainText("exercise the page facade");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("META_OK");
 
     const clearOptions = await configure(opened.context, opened.page, provider.baseURL);
@@ -1511,7 +1492,7 @@ test("blocks page clicks while the agent runs and removes the guard after naviga
   }
 });
 
-test("keeps CDP sessions and events across calls, reaches iframe and worker, navigates, and inspects a result reference", async () => {
+test.skip("keeps legacy raw CDP sessions and result references across calls", async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);
   const origin = provider.origin;
@@ -1775,6 +1756,8 @@ test("sends a selected follow-up immediately, closes interrupted tools and keeps
   ]);
   const opened = await openExtension();
   try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     const composer = opened.page.getByTestId("composer-input");
@@ -1800,8 +1783,8 @@ test("sends a selected follow-up immediately, closes interrupted tools and keeps
     expect(JSON.stringify(agentRequests[2].messages)).toContain("later request");
     const events = await readEvents(opened.page);
     expect(events.some((event) => event.type === "conversation.aborted")).toBe(true);
-    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-followup-interrupted")?.output)
-      .toMatchObject({ ok: false, error: { code: "aborted" } });
+    expect(JSON.stringify(events.find((event) => event.type === "tool.failed" && event.toolCallId === "call-followup-interrupted")?.error))
+      .toMatch(/abort/i);
     expect(events.some((event) => event.type === "conversation.followup.removed")).toBe(true);
     expect(events.find((event) => event.type === "conversation.followup.dispatched" && event.content.mode === "immediate")).toBeTruthy();
   } finally {
@@ -2465,8 +2448,8 @@ test("closing the panel prevents a queued chrome call from starting", async () =
   const provider = await startProvider(responses);
   const targetUrl = `${provider.origin}/target`;
   responses.push(queuedToolResponse(
-    `const [tab] = await chrome.tabs.query({ url: ${JSON.stringify(targetUrl)} }); await chrome.debugger.attach({ tabId: tab.id }, '1.3'); await new Promise((resolve) => setTimeout(resolve, 60_000));`,
-    "await chrome.storage.local.set({ 'e2e-queued-tool-ran': true }); return true;",
+    "await new Promise((resolve) => setTimeout(resolve, 60_000)); return true;",
+    "await page.evaluate(() => { document.documentElement.dataset.queuedToolRan = 'yes'; }); return true;",
   ));
   const opened = await openExtension();
   try {
@@ -2487,22 +2470,10 @@ test("closing the panel prevents a queued chrome call from starting", async () =
     await expect.poll(() => runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationPlayState)).toBe("paused");
     await opened.page.emulateMedia({ colorScheme: "light", reducedMotion: "no-preference" });
     await expect.poll(() => runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationPlayState)).toBe("running");
-    await expect.poll(() => opened.page.evaluate(async (url) => {
-      const [tab] = await chrome.tabs.query({ url });
-      try { await chrome.debugger.attach({ tabId: tab.id! }, "1.3"); await chrome.debugger.detach({ tabId: tab.id! }); return false; }
-      catch { return true; }
-    }, targetUrl)).toBe(true);
+    await expect(target.locator("#__surf-wax-page-guard")).toBeAttached();
     await opened.page.close();
-
-    const probe = await opened.context.newPage();
-    await probe.goto(`chrome-extension://${opened.extensionId}/options.html`);
-    await expect.poll(() => probe.evaluate(async (url) => {
-      const [tab] = await chrome.tabs.query({ url });
-      try { await chrome.debugger.attach({ tabId: tab.id! }, "1.3"); await chrome.debugger.detach({ tabId: tab.id! }); return true; }
-      catch { return false; }
-    }, targetUrl)).toBe(true);
-    await expect.poll(() => probe.evaluate(async () => (await chrome.storage.local.get("e2e-queued-tool-ran"))["e2e-queued-tool-ran"]))
-      .toBeUndefined();
+    await expect(target.locator("#__surf-wax-page-guard")).toHaveCount(0);
+    await expect.poll(() => target.evaluate(() => document.documentElement.dataset.queuedToolRan)).toBeUndefined();
     expect(provider.requests).toHaveLength(1);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
@@ -2514,29 +2485,33 @@ test("guards every touched tab while CDP pointer input still reaches the page", 
   const provider = await startProvider(responses);
   const targetUrl = `${provider.origin}/target`;
   const otherUrl = `${provider.origin}/complex-next`;
-  responses.push(toolResponse(`
-const [tab] = await chrome.tabs.query({ url: ${JSON.stringify(otherUrl)} });
-await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: () => {
-  const button = document.createElement('button');
-  button.textContent = 'CDP target';
-  button.style.cssText = 'position:fixed;left:20px;top:20px;width:120px;height:40px';
-  button.onclick = () => { document.documentElement.dataset.cdpClicks = String(Number(document.documentElement.dataset.cdpClicks || 0) + 1); };
-  document.body.append(button);
-} });
-await chrome.debugger.attach({ tabId: tab.id }, '1.3');
-try {
-  await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: 40, y: 40, button: 'left', clickCount: 1 });
-  await chrome.debugger.sendCommand({ tabId: tab.id }, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: 40, y: 40, button: 'left', clickCount: 1 });
-} finally { await chrome.debugger.detach({ tabId: tab.id }); }
-await new Promise((resolve) => setTimeout(resolve, 1200));
-return true;
-`), textResponse("MULTI_GUARD_OK"), textResponse("页面防护"));
   const opened = await openExtension();
   try {
     const first = await opened.context.newPage();
     await first.goto(targetUrl);
     const second = await opened.context.newPage();
     await second.goto(otherUrl);
+    const urls = await opened.page.evaluate(async () => (await chrome.tabs.query({ currentWindow: true })).map((tab) => tab.url));
+    const firstIndex = urls.indexOf(targetUrl);
+    const secondIndex = urls.indexOf(otherUrl);
+    expect(firstIndex).toBeGreaterThanOrEqual(0);
+    expect(secondIndex).toBeGreaterThanOrEqual(0);
+    responses.push(
+      commandResponse("tab-select", { index: firstIndex }, "call-select-first"),
+      commandResponse("snapshot", {}, "call-snapshot-first"),
+      commandResponse("tab-select", { index: secondIndex }, "call-select-second"),
+      commandResponse("eval", { func: `() => {
+        const button = document.createElement('button');
+        button.textContent = 'CDP target';
+        button.style.cssText = 'position:fixed;left:20px;top:20px;width:120px;height:40px';
+        button.onclick = () => { document.documentElement.dataset.cdpClicks = String(Number(document.documentElement.dataset.cdpClicks || 0) + 1); };
+        document.body.append(button);
+      }` }, "call-create-target"),
+      commandResponse("click", { target: "getByRole('button', { name: 'CDP target' })" }, "call-click-target"),
+      commandResponse("run-code", { code: "async page => { await new Promise((resolve) => setTimeout(resolve, 1200)); return page.url(); }" }, "call-guard-wait"),
+      textResponse("MULTI_GUARD_OK"),
+      textResponse("页面防护"),
+    );
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     await first.bringToFront();

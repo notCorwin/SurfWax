@@ -1,6 +1,6 @@
 import { isLoopFinished, ToolLoopAgent } from "ai";
 import type { LanguageModel } from "ai";
-import { createBrowserTool, prepareBrowserMessages, repairBrowserToolCall } from "../chrome/tool";
+import { createCommandTools, prepareToolMessages } from "../chrome/tool";
 import { ChromeExecutor } from "../chrome/executor";
 import type { EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
@@ -10,11 +10,10 @@ import type { ReasoningEffort } from "./reasoning";
 
 export const DEFAULT_INSTRUCTIONS = [
   "You are a Chrome side-panel agent helping the user automate the browser they control.",
-  "Use the single browser tool. Prefer mode=observe followed by mode=act with semantic refs or role/label/text locators. Never guess a locator when page content is unavailable.",
-  "Put related actions in one act.steps JSON array, never a string, and include expect as the explicit completion condition, for example {\"mode\":\"act\",\"steps\":[{\"type\":\"click\",\"target\":{\"by\":\"role\",\"value\":\"button\",\"name\":\"Continue\"}}]}. A successful click only means browser input was sent.",
-  "Read large $ref values by calling mode=result with the exact access input before acting. Use mode=run only when the DSL cannot express the task; pass an explicit target for page, service-worker, offscreen, or devtools code, otherwise it runs in the extension, and always return a value.",
-  "Use observe.since after an observation when only page changes are needed. Stop immediately once the requested outcome is satisfied. If multiple targets remain ambiguous, ask the user as soon as the ambiguity is confirmed instead of exhaustively exploring.",
-  "Visual point actions must use the observationId from the screenshot observation. Stale document, viewport, or scale coordinates are rejected.",
+  "Use the dedicated browser command tools. Start with snapshot or find, then use refs or semantic targets; never guess a locator when page content is unavailable.",
+  "A successful action only confirms browser input was sent. Inspect the returned page state or call snapshot to verify the requested outcome before claiming success.",
+  "Use run-code only when the dedicated commands cannot express the task. It accepts one async function expression whose page argument exposes the documented Playwright-style subset.",
+  "Commands use the default session unless session is provided. Tab indices are zero-based. Stop immediately once the requested outcome is satisfied, and ask the user when multiple targets remain genuinely ambiguous.",
 ].join(" ");
 
 export type CreateAgentOptions = {
@@ -28,7 +27,7 @@ export type CreateAgentOptions = {
   compactor?: ContextCompactor;
 };
 
-type BrowserAgentTools = { browser: ReturnType<typeof createBrowserTool> };
+type BrowserAgentTools = ReturnType<typeof createCommandTools>;
 
 export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, BrowserAgentTools> {
   const logger = options.logger;
@@ -36,21 +35,10 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     model: options.languageModel,
     reasoning: options.reasoning === "max" ? "xhigh" : options.reasoning ?? "minimal",
     instructions: options.instructions ?? DEFAULT_INSTRUCTIONS,
-    tools: {
-      browser: createBrowserTool(options.executor, { logger, conversationId: options.conversationId, visualEnabled: () => modelSupportsImages(options.model) }),
-    },
+    tools: createCommandTools(options.executor, { logger, conversationId: options.conversationId, visualEnabled: () => modelSupportsImages(options.model) }),
     prepareStep: async ({ messages, stepNumber }) => ({
-      messages: prepareBrowserMessages(await options.compactor?.prepare(messages, stepNumber) ?? messages, stepNumber),
+      messages: prepareToolMessages(await options.compactor?.prepare(messages, stepNumber) ?? messages, stepNumber),
     }),
-    repairToolCall: async ({ toolCall }) => {
-      const repaired = repairBrowserToolCall(toolCall);
-      if (repaired) logger?.record({
-        type: "tool.input.repaired", conversationId: options.conversationId, toolCallId: toolCall.toolCallId,
-        content: { toolName: toolCall.toolName, repair: "stringified-act-steps" },
-        input: JSON.parse(toolCall.input), output: JSON.parse(repaired.input),
-      });
-      return repaired;
-    },
     ...(logger ? {
       onStart: (event) => logger.record({
         type: "model.started",

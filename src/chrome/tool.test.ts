@@ -1,78 +1,46 @@
 import { describe, expect, it } from "vitest";
-import { EventLogger, type LogEvent } from "../logging";
-import { compactToolResult, parseBrowserToolInput, prepareBrowserMessages, repairBrowserToolCall } from "./tool";
+import { parseCommandTarget } from "./executor";
+import { COMMAND_NAMES, parseCommandInput, prepareToolMessages } from "./tool";
 
-describe("browser tool input", () => {
-  it("validates all modes and deterministic action schema", () => {
-    expect(parseBrowserToolInput({ mode: "observe", tabId: 5, detail: "auto" })).toEqual({ mode: "observe", tabId: 5, detail: "auto" });
-    expect(parseBrowserToolInput({ mode: "act", observationId: "o1", steps: [{ type: "fill", target: { by: "label", value: "Email" }, value: "a@b.test" }, { type: "expect", target: { ref: "e1" }, state: "visible" }] }).mode).toBe("act");
-    expect(parseBrowserToolInput({ mode: "run", code: "return await chrome.tabs.query({})" })).toEqual({ mode: "run", code: "return await chrome.tabs.query({})" });
-    expect(parseBrowserToolInput({ mode: "run", target: { kind: "page", tabId: 5, world: "MAIN" }, code: "return document.title" })).toMatchObject({ target: { kind: "page", tabId: 5, world: "MAIN" } });
-    expect(parseBrowserToolInput({ mode: "result", id: 2087, path: ["observation", "snapshot"], offset: 0, limit: 4000 })).toEqual({ mode: "result", id: 2087, path: ["observation", "snapshot"], offset: 0, limit: 4000 });
-    expect(() => parseBrowserToolInput({ mode: "run", code: "" })).toThrow();
-    expect(() => parseBrowserToolInput({ mode: "act", steps: [] })).toThrow();
-    expect(() => parseBrowserToolInput({ mode: "act", steps: [{ type: "expect", target: { ref: "e1" } }] })).toThrow();
-    expect(() => parseBrowserToolInput({ mode: "act", steps: [{ type: "upload", target: { ref: "e1" }, files: [{ name: "x", text: "x", base64: "eA==" }] }] })).toThrow();
+describe("browser command tools", () => {
+  it("registers exactly the 88 documented commands without browser", () => {
+    expect(COMMAND_NAMES).toHaveLength(88);
+    expect(new Set(COMMAND_NAMES).size).toBe(88);
+    expect(COMMAND_NAMES).not.toContain("browser");
+    expect(COMMAND_NAMES).toEqual(expect.arrayContaining(["snapshot", "click", "run-code", "video-stop", "kill-all"]));
   });
 
-  it("repairs only stringified act steps before strict validation", () => {
-    const repaired = repairBrowserToolCall({ toolName: "browser", input: JSON.stringify({ mode: "act", steps: JSON.stringify([{ type: "goto", url: "https://example.com" }]) }) });
-    expect(parseBrowserToolInput(JSON.parse(repaired!.input))).toEqual({ mode: "act", steps: [{ type: "goto", url: "https://example.com" }] });
-    expect(repairBrowserToolCall({ toolName: "browser", input: JSON.stringify({ mode: "act", steps: "not json" }) })).toBeNull();
-    expect(repairBrowserToolCall({ toolName: "browser", input: JSON.stringify({ mode: "act", steps: JSON.stringify({ type: "goto" }) }) })).toBeNull();
-    expect(repairBrowserToolCall({ toolName: "other", input: JSON.stringify({ mode: "act", steps: "[]" }) })).toBeNull();
-    expect(() => parseBrowserToolInput(JSON.parse(repairBrowserToolCall({ toolName: "browser", input: JSON.stringify({ mode: "act", steps: JSON.stringify([{ type: "goto", url: "invalid" }]) }) })!.input))).toThrow();
+  it("strictly validates command-specific structured inputs", () => {
+    expect(parseCommandInput("click", { target: "e15", button: "right", modifiers: ["Shift"] })).toEqual({ target: "e15", button: "right", modifiers: ["Shift"] });
+    expect(parseCommandInput("fill", { target: { by: "label", value: "Email" }, text: "a@b.test", submit: true })).toMatchObject({ text: "a@b.test" });
+    expect(parseCommandInput("tab-select", { index: 0 })).toEqual({ index: 0 });
+    expect(parseCommandInput("request", { index: 1 })).toEqual({ index: 1 });
+    expect(parseCommandInput("upload", { files: [{ name: "a.txt", text: "hello" }] })).toMatchObject({ files: [{ name: "a.txt" }] });
+    expect(() => parseCommandInput("click", { target: "e1", extra: true })).toThrow();
+    expect(() => parseCommandInput("upload", { files: [{ name: "a.txt", text: "x", base64: "eA==" }] })).toThrow();
+    expect(() => parseCommandInput("request", { index: 0 })).toThrow();
   });
 
-  it("persists large output before returning a compact reference, then expires it on deletion", async () => {
-    const events: LogEvent[] = [];
-    const store = {
-      async append(event: Omit<LogEvent, "id">) { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; },
-      async all() { return [...events]; },
-      async deleteConversation(id: string) { events.splice(0, events.length, ...events.filter((event) => event.conversationId !== id)); },
-      async clear() { events.length = 0; },
-    };
-    const logger = new EventLogger({ store });
-    const large = Array.from({ length: 1500 }, (_, index) => ({ index, text: "网页内容" }));
-    const result = await compactToolResult(large, { logger, conversationId: "one", toolCallId: "call-1" }) as Record<string, unknown>;
-    expect(result).toMatchObject({ $ref: 1, type: "array", preview: "Array(1500)", access: '{"mode":"result","id":1,"offset":0,"limit":50}' });
-    expect(JSON.stringify(result).length).toBeLessThan(220);
-    expect(events[0]).toMatchObject({ type: "tool.result.data", conversationId: "one", toolCallId: "call-1", output: large });
-    expect((await logger.result(1) as typeof large).slice(0, 2)).toEqual(large.slice(0, 2));
-    expect(await logger.result(1, { offset: 2, limit: 2 })).toEqual(large.slice(2, 4));
-    await logger.deleteConversation("one");
-    await expect(logger.result(1)).rejects.toThrow("unavailable");
-    expect(await compactToolResult("small", { logger, conversationId: "one" })).toBe("small");
+  it("accepts refs, CSS, documented locators, and structured targets", () => {
+    expect(parseCommandTarget("e15")).toEqual({ ref: "e15" });
+    expect(parseCommandTarget("#main > button")).toEqual({ by: "css", value: "#main > button" });
+    expect(parseCommandTarget("getByRole('button', { name: 'Submit', exact: true })")).toEqual({ by: "role", value: "button", name: "Submit", exact: true });
+    expect(parseCommandTarget('getByText("Login")')).toEqual({ by: "text", value: "Login" });
+    expect(parseCommandTarget('getByLabel("Email", { exact: false })')).toEqual({ by: "label", value: "Email", exact: false });
+    expect(parseCommandTarget({ by: "label", value: "Email" })).toEqual({ by: "label", value: "Email" });
+    expect(() => parseCommandTarget("getByUnknown('x')")).toThrow(/Unsupported locator expression/);
+    expect(() => parseCommandTarget("getByRole('button', { pressed: true })")).toThrow(/Unsupported locator expression/);
   });
 
-  it("describes selectable object results with real keys and a bounded access example", async () => {
-    const events: LogEvent[] = [];
-    const store = {
-      async append(event: Omit<LogEvent, "id">) { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; },
-      async all() { return [...events]; }, async clear() { events.length = 0; },
-    };
-    const logger = new EventLogger({ store });
-    const result = await compactToolResult({ url: "https://example.com", snapshot: "page".repeat(3000) }, { logger }) as Record<string, unknown>;
-    expect(result).toMatchObject({ keys: ["url", "snapshot"], access: '{"mode":"result","id":1,"path":["snapshot"],"offset":0,"limit":4000}' });
-    expect(await logger.result(1, { path: "snapshot", offset: 4, limit: 4 })).toBe("page");
-    await expect(logger.result(1, { limit: 4 })).rejects.toThrow('path: ["url"]');
-  });
-
-  it("points failed actions at the nested observation snapshot", async () => {
-    const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: {
-      async append(event: Omit<LogEvent, "id">) { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; },
-      async all() { return [...events]; }, async clear() { events.length = 0; },
-    } });
-    const result = await compactToolResult({ ok: false, completed: [], observation: { snapshot: "button".repeat(2000) } }, { logger }) as Record<string, unknown>;
-    expect(result.access).toBe('{"mode":"result","id":1,"path":["observation","snapshot"],"offset":0,"limit":4000}');
-  });
-
-  it("injects only the latest screenshot into the next model step", () => {
-    const messages = [{ role: "tool", content: [{ type: "tool-result", toolName: "browser", output: { type: "json", value: { observationId: "o1", screenshot: { mediaType: "image/jpeg", data: "abc" } } } }] }];
-    const prepared = prepareBrowserMessages(messages, 1);
+  it("injects only the latest screenshot and keeps historical browser results compatible", () => {
+    const messages = [{ role: "tool", content: [
+      { type: "tool-result", toolName: "browser", output: { type: "json", value: { screenshot: { mediaType: "image/jpeg", data: "old" } } } },
+      { type: "tool-result", toolName: "screenshot", output: { type: "json", value: { screenshot: { mediaType: "image/png", data: "new" } } } },
+    ] }];
+    const prepared = prepareToolMessages(messages, 1);
     expect(prepared[0].content[0].output.value.screenshot.data).toBe("[stored in canonical event log]");
-    expect(prepared[1]).toMatchObject({ role: "user", content: [{ type: "file", mediaType: "image/jpeg", data: { type: "data", data: "abc" } }] });
-    expect(prepareBrowserMessages(messages, 0)).toHaveLength(1);
+    expect(prepared[0].content[1].output.value.screenshot.data).toBe("[stored in canonical event log]");
+    expect(prepared[1]).toMatchObject({ role: "user", content: [{ type: "file", mediaType: "image/png", data: { type: "data", data: "new" } }] });
+    expect(prepareToolMessages(messages, 0)).toHaveLength(1);
   });
 });
