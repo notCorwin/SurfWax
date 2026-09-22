@@ -15,6 +15,7 @@ export type ChromeToolInput = {
   code: string;
   target?: ChromeTarget;
   timeoutMs?: number;
+  save?: boolean;
   /** Legacy page target fields kept so restored conversations remain executable. */
   tabId?: number;
   world?: "MAIN" | "USER_SCRIPT";
@@ -44,7 +45,7 @@ export type BrowserStep =
   | { type: "select"; target: BrowserTarget; values: string[] }
   | { type: "check"; target: BrowserTarget; checked?: boolean }
   | { type: "drag"; from: BrowserTarget; to: BrowserTarget }
-  | { type: "upload"; target: BrowserTarget; files: Array<{ name: string; mimeType?: string; text?: string; base64?: string; url?: string }> }
+  | { type: "upload"; target: BrowserTarget; files: Array<{ name: string; mimeType?: string; text?: string; base64?: string; url?: string; artifactId?: number }> }
   | { type: "expect"; target?: BrowserTarget; state?: "attached" | "detached" | "visible" | "hidden" | "enabled" | "editable" | "checked"; text?: string; value?: string; url?: string };
 
 export type BrowserInput = {

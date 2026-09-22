@@ -21,7 +21,8 @@ const RESULT_READER_KEY = "__surfWaxResult";
 const STATE_KEY = "__surfWaxExecutionState";
 const PAGE_KEY = "__surfWaxPage";
 const BROWSER_KEY = "__surfWaxBrowser";
-type ExecutionContext = { conversationId?: string; toolCallId?: string; visualEnabled?: boolean };
+type ExecutionContext = { conversationId?: string; toolCallId?: string; visualEnabled?: boolean; allowDownloads?: boolean };
+type ArtifactRef = { id: number; filename: string; mimeType: string; byteLength: number; saved: boolean; downloadId?: number };
 type BrowserState = { windowId: number; tabId?: number; origins: Set<string> };
 export type BrowserContext = {
   windowId: number;
@@ -82,6 +83,10 @@ function timestamped(prefix: string, extension: string): string {
   return `${prefix}-${new Date().toISOString().replace(/[:.]/g, "-")}.${extension}`;
 }
 
+function base64ByteLength(base64: string): number {
+  return Math.floor(base64.length * 3 / 4) - (base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0);
+}
+
 function globPattern(pattern: string): string {
   return pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\u0000/g, ".*");
 }
@@ -107,6 +112,10 @@ function expressionFor(code: string): string {
       get(target, property, receiver) {
         const value = Reflect.get(target, property, receiver);
         if (typeof value !== "function") return value;
+        if (name === "downloads" && property === "download") return (...args) => {
+          if (!__state.run.allowDownloads) throw new Error("CommandError[download-not-authorized]: Set save=true only when the user explicitly requested a local download.");
+          return Reflect.apply(value, target, args);
+        };
         if (name === "tabs" && property === "connect") return (...args) => {
           void __mark(args[0]);
           return Reflect.apply(value, target, args);
@@ -168,7 +177,7 @@ function expressionFor(code: string): string {
           return report;
         }
           : property === "debugger" ? __debugger
-          : ["scripting", "userScripts", "tabs", "pageCapture"].includes(property) && target[property] ? __pageApi(property)
+          : ["scripting", "userScripts", "tabs", "pageCapture", "downloads"].includes(property) && target[property] ? __pageApi(property)
           : Reflect.get(target, property, receiver);
       }
     });
@@ -449,6 +458,7 @@ export class ChromeExecutor {
   private async executeCommandNow(name: CommandName, input: Record<string, any>): Promise<unknown> {
     throwIfAborted(this.activeSignal);
     if (["install", "install-browser", "pause-at", "resume", "step-over"].includes(name)) throw unsupported(name);
+    if (name === "artifact-save") return this.saveArtifact(input.id, input.filename);
     const state = await this.currentBrowserState();
     if (name === "tab-list") return this.tabsOf(state);
     if (name === "tab-new") {
@@ -500,7 +510,7 @@ export class ChromeExecutor {
         const entries = await Promise.all(refs.map(async (ref) => [ref, await page.ref(ref).evaluate("el => { const r = el.getBoundingClientRect(); return {x:r.x,y:r.y,width:r.width,height:r.height}; }")]));
         result = { ...result, boxes: Object.fromEntries(entries) };
       }
-      if (input.filename) return { ...result, artifact: await this.downloadText(input.filename, result.snapshot, "text/yaml") };
+      if (input.filename || input.save) return { ...result, artifact: await this.storeText(input.filename ?? timestamped("snapshot", "yaml"), result.snapshot, "text/yaml", input.save) };
       return result;
     }
     if (name === "find") {
@@ -512,7 +522,7 @@ export class ChromeExecutor {
     }
     if (name === "eval") {
       const value = input.target ? await this.locatorFor(page, input.target).evaluate(input.func) : await page.evaluate(input.func);
-      if (input.filename) return { value: null, artifact: await this.downloadText(input.filename, typeof value === "string" ? value : JSON.stringify(value, null, 2), "application/json") };
+      if (input.filename || input.save) return { value: null, artifact: await this.storeText(input.filename ?? timestamped("evaluation", "json"), typeof value === "string" ? value : JSON.stringify(value, null, 2), "application/json", input.save) };
       return value;
     }
     if (name === "dialog-accept" || name === "dialog-dismiss") {
@@ -528,16 +538,16 @@ export class ChromeExecutor {
     }
     if (name === "delete-data") return this.deleteBrowserData(state);
     if (name === "screenshot") return this.captureScreenshot(page, input);
-    if (name === "pdf") return this.capturePdf(tabId, input.filename);
-    if (name === "state-save") return this.saveState(state, page, input.filename ?? timestamped("storage-state", "json"));
+    if (name === "pdf") return this.capturePdf(tabId, input.filename, input.save);
+    if (name === "state-save") return this.saveState(state, page, input.filename ?? timestamped("storage-state", "json"), input.save);
     if (name === "state-load") return this.loadState(state, page, input.filename);
     if (name.startsWith("localstorage-") || name.startsWith("sessionstorage-")) return this.storageCommand(name, page, input);
     if (name.startsWith("cookie-")) return this.cookieCommand(name, state, page, input);
     if (["requests", "request", "request-headers", "request-body", "response-headers", "response-body", "route", "route-list", "unroute", "network-state-set"].includes(name)) return this.networkCommand(name, tabId, input);
     if (name === "console") return this.consoleCommand(tabId, input);
-    if (name === "run-code") return this.runPageCode(tabId, input.code);
+    if (name === "run-code") return this.runPageCode(tabId, input.code, input.save);
     if (name === "recording-start" || name === "recording-stop") return this.recordingCommand(name, page);
-    if (name === "tracing-start" || name === "tracing-stop") return this.tracingCommand(name, tabId, input.filename);
+    if (name === "tracing-start" || name === "tracing-stop") return this.tracingCommand(name, tabId, input.filename, input.save);
     if (name.startsWith("video-")) return this.videoCommand(name, tabId, input);
     if (name === "generate-locator") return this.generateLocator(page, input.target);
     if (name === "highlight") return this.highlight(page, input);
@@ -553,7 +563,7 @@ export class ChromeExecutor {
     else if (name === "hover") result = await subject.hover();
     else if (name === "fill") { result = await subject.fill(input.text); if (input.submit) await subject.press("Enter"); }
     else if (name === "select") result = await subject.selectOption(input.values);
-    else if (name === "upload") result = await subject.setInputFiles(input.files);
+    else if (name === "upload") result = await subject.setInputFiles(await this.normalizeFiles(input.files));
     else if (name === "check") result = await subject.check();
     else if (name === "uncheck") result = await subject.uncheck();
     else if (name === "drop") {
@@ -685,20 +695,47 @@ export class ChromeExecutor {
     return { result, page: status, ...(tabs.length > 1 ? { tabs } : {}) };
   }
 
-  private async downloadBase64(filename: string, base64: string, mimeType: string): Promise<{ filename: string; mimeType: string; downloadId: number }> {
-    const downloadId = await this.chromeApi.downloads.download({ url: `data:${mimeType};base64,${base64}`, filename, saveAs: false });
-    return { filename, mimeType, downloadId };
+  private async storeArtifact(filename: string, base64: string, mimeType: string, save = false): Promise<ArtifactRef> {
+    if (!this.logger || !this.activeContext.conversationId) throw new Error("CommandError[artifact-log-unavailable]: The canonical event log is unavailable");
+    const byteLength = base64ByteLength(base64);
+    const event = await this.logger.append({
+      type: "tool.result.data",
+      conversationId: this.activeContext.conversationId,
+      toolCallId: this.activeContext.toolCallId,
+      content: { filename, mimeType, byteLength },
+      output: { filename, mimeType, base64 },
+    });
+    if (!event) throw new Error("CommandError[artifact-log-unavailable]: The canonical event log stopped accepting events");
+    const downloadId = save ? await this.chromeApi.downloads.download({ url: `data:${mimeType};base64,${base64}`, filename, saveAs: false }) : undefined;
+    return { id: event.id, filename, mimeType, byteLength, saved: save, ...(downloadId === undefined ? {} : { downloadId }) };
   }
 
-  private async downloadText(filename: string, text: string, mimeType: string): Promise<{ filename: string; mimeType: string; downloadId: number }> {
+  private async storeText(filename: string, text: string, mimeType: string, save = false): Promise<ArtifactRef> {
     const bytes = new TextEncoder().encode(text);
     let binary = "";
     for (const byte of bytes) binary += String.fromCharCode(byte);
-    return this.downloadBase64(filename, btoa(binary), mimeType);
+    return this.storeArtifact(filename, btoa(binary), mimeType, save);
+  }
+
+  private async saveArtifact(id: number, requested?: string): Promise<{ artifact: ArtifactRef }> {
+    if (!this.logger) throw new Error("CommandError[artifact-log-unavailable]: The canonical event log is unavailable");
+    const stored = await this.logger.result(id) as { filename?: unknown; mimeType?: unknown; base64?: unknown };
+    if (typeof stored?.base64 !== "string" || typeof stored.mimeType !== "string" || typeof stored.filename !== "string") {
+      throw new Error(`CommandError[invalid-artifact]: Artifact ${id} has no downloadable data`);
+    }
+    const filename = requested ?? stored.filename;
+    const downloadId = await this.chromeApi.downloads.download({ url: `data:${stored.mimeType};base64,${stored.base64}`, filename, saveAs: false });
+    return { artifact: { id, filename, mimeType: stored.mimeType, byteLength: base64ByteLength(stored.base64), saved: true, downloadId } };
   }
 
   private async normalizeFiles(files: any[]): Promise<any[]> {
     return Promise.all(files.map(async (file) => {
+      if (file.artifactId !== undefined) {
+        if (!this.logger) throw new Error("CommandError[artifact-log-unavailable]: The canonical event log is unavailable");
+        const stored = await this.logger.result(file.artifactId) as { mimeType?: unknown; base64?: unknown };
+        if (typeof stored?.base64 !== "string") throw new Error(`CommandError[invalid-artifact]: Artifact ${file.artifactId} has no file data`);
+        return { name: file.name, mimeType: file.mimeType || (typeof stored.mimeType === "string" ? stored.mimeType : "application/octet-stream"), base64: stored.base64 };
+      }
       if (!file.url) return file;
       const response = await fetch(file.url);
       if (!response.ok) throw new Error(`Could not fetch upload URL: ${response.status}`);
@@ -715,8 +752,8 @@ export class ChromeExecutor {
     if (observation && format === "jpeg") {
       const screenshot = observation.screenshot;
       const filename = input.filename ?? timestamped("page", "jpg");
-      const artifact = await this.downloadBase64(filename, screenshot.data, screenshot.mediaType);
-      return { ...observation, artifact };
+      const artifact = await this.storeArtifact(filename, screenshot.data, screenshot.mediaType, input.save);
+      return { ...observation, artifact, screenshot: { mediaType: screenshot.mediaType, artifactId: artifact.id, width: screenshot.width, height: screenshot.height, scale: screenshot.scale } };
     }
     const params: Record<string, unknown> = { format, fromSurface: true, captureBeyondViewport: Boolean(input.fullPage) };
     if (input.fullPage) {
@@ -729,14 +766,14 @@ export class ChromeExecutor {
     const captured = await this.bridgeCommand({ tabId: page.tabId }, "Page.captureScreenshot", params);
     const mediaType = `image/${format}`;
     const filename = input.filename ?? timestamped("page", format === "jpeg" ? "jpg" : format);
-    const artifact = await this.downloadBase64(filename, captured.data, mediaType);
-    return { ...(observation ? { observationId: observation.observationId, viewport: observation.viewport } : {}), artifact, screenshot: { mediaType, data: captured.data }, page: { url: await page.url(), title: await page.title() } };
+    const artifact = await this.storeArtifact(filename, captured.data, mediaType, input.save);
+    return { ...(observation ? { observationId: observation.observationId, viewport: observation.viewport } : {}), artifact, screenshot: { mediaType, artifactId: artifact.id }, page: { url: await page.url(), title: await page.title() } };
   }
 
-  private async capturePdf(tabId: number, requested?: string): Promise<unknown> {
+  private async capturePdf(tabId: number, requested?: string, save = false): Promise<unknown> {
     const result = await this.bridgeCommand({ tabId }, "Page.printToPDF", { printBackground: true, transferMode: "ReturnAsBase64" });
     const filename = requested ?? timestamped("page", "pdf");
-    return { artifact: await this.downloadBase64(filename, result.data, "application/pdf") };
+    return { artifact: await this.storeArtifact(filename, result.data, "application/pdf", save) };
   }
 
   private async storageCommand(name: string, page: any, input: Record<string, any>): Promise<unknown> {
@@ -773,13 +810,13 @@ export class ChromeExecutor {
     return { deletedOrigins: origins };
   }
 
-  private async saveState(state: BrowserState, page: any, filename: string): Promise<unknown> {
+  private async saveState(state: BrowserState, page: any, filename: string, save = false): Promise<unknown> {
     const cookies = (await Promise.all([...state.origins].map((origin) => this.chromeApi.cookies.getAll({ url: origin })))).flat();
     const origin = new URL(String(await page.url())).origin;
     const localStorage = await page.evaluate("() => Object.fromEntries(Object.entries(window.localStorage))");
     const savedState = { cookies, origins: [{ origin, localStorage }] };
     await this.chromeApi.storage.local.set({ [`side-agent:browser-state:${filename}`]: savedState });
-    return { state: savedState, artifact: await this.downloadText(filename, JSON.stringify(savedState, null, 2), "application/json") };
+    return { state: savedState, artifact: await this.storeText(filename, JSON.stringify(savedState, null, 2), "application/json", save) };
   }
 
   private async loadState(state: BrowserState, page: any, filename: string): Promise<unknown> {
@@ -908,7 +945,7 @@ export class ChromeExecutor {
       } catch (error) { body = { unavailable: error instanceof Error ? error.message : String(error) }; }
       value = name === "response-body" ? body : { ...record, responseBody: body };
     }
-    if (input.filename) return { artifact: await this.downloadText(input.filename, typeof value === "string" ? value : JSON.stringify(value, null, 2), "application/json") };
+    if (input.filename || input.save) return { artifact: await this.storeText(input.filename ?? timestamped(name, "json"), typeof value === "string" ? value : JSON.stringify(value, null, 2), "application/json", input.save) };
     return value;
   }
 
@@ -920,12 +957,12 @@ export class ChromeExecutor {
     return messages.filter((message) => (rank[message.level] ?? 1) >= minimum);
   }
 
-  private async runPageCode(tabId: number, code: string): Promise<unknown> {
+  private async runPageCode(tabId: number, code: string, save = false): Promise<unknown> {
     if (!/^\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/.test(code) && !/^\s*(?:async\s+)?function\b/.test(code)) {
       throw new Error("CommandError[invalid-code]: run-code requires one function expression receiving page");
     }
     return this.executeNow({ code: `const page = await browser.page(${tabId});
-return await (async (page, chrome, browser, globalThis, self, window, document, location, __surfWaxBrowser, __surfWaxDebugger, __surfWaxResult, __surfWaxResults) => (${code})(page))(page);`, target: { kind: "extension" } }, this.activeSignal, this.activeContext);
+return await (async (page, chrome, browser, globalThis, self, window, document, location, __surfWaxBrowser, __surfWaxDebugger, __surfWaxResult, __surfWaxResults) => (${code})(page))(page);`, target: { kind: "extension" }, save }, this.activeSignal, { ...this.activeContext, allowDownloads: save });
   }
 
   private async recordingCommand(name: string, page: any): Promise<unknown> {
@@ -952,7 +989,7 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     return { recording: false, actions, code };
   }
 
-  private async tracingCommand(name: string, tabId: number, requested?: string): Promise<unknown> {
+  private async tracingCommand(name: string, tabId: number, requested?: string, save = false): Promise<unknown> {
     if (name === "tracing-start") {
       if (this.tracingTabs.has(tabId)) throw new Error("CommandError[trace-active]: A trace is already recording");
       await this.bridgeCommand({ tabId }, "Tracing.start", { transferMode: "ReturnAsStream", categories: "-* ,devtools.timeline,blink.user_timing,loading,disabled-by-default-devtools.screenshot".replace("-* ,", "-*,") });
@@ -975,8 +1012,8 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     const filename = requested ?? timestamped("trace", "json");
     const networkName = filename.replace(/\.[^.]+$/, "") + ".network.json";
     return {
-      trace: await this.downloadText(filename, trace, "application/json"),
-      network: await this.downloadText(networkName, JSON.stringify(this.network.get(tabId) ?? [], null, 2), "application/json"),
+      trace: await this.storeText(filename, trace, "application/json", save),
+      network: await this.storeText(networkName, JSON.stringify(this.network.get(tabId) ?? [], null, 2), "application/json", save),
     };
   }
 
@@ -1002,7 +1039,7 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     const bytes = new Uint8Array(await blob.arrayBuffer());
     let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte);
     this.videoStates.delete(tabId);
-    return { artifact: await this.downloadBase64(state.filename, btoa(binary), "video/webm") };
+    return { artifact: await this.storeArtifact(state.filename, btoa(binary), "video/webm", input.save) };
   }
 
   private async startVideo(tabId: number, input: Record<string, any>): Promise<unknown> {
@@ -1194,7 +1231,7 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     if (step.type === "clear") return target.clear();
     if (step.type === "select") return target.selectOption(step.values);
     if (step.type === "check") return step.checked === false ? target.uncheck() : target.check();
-    if (step.type === "upload") return target.setInputFiles(step.files);
+    if (step.type === "upload") return target.setInputFiles(await this.normalizeFiles(step.files));
     throw new Error(`AutomationError[unsupported]: ${JSON.stringify({ step })}`);
   }
 
@@ -1329,7 +1366,7 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     throwIfAborted(signal);
     const panelTarget = targets.find((candidate) => candidate.url === this.targetUrl && candidate.id);
     if (!panelTarget?.id) throw new Error(`Side Panel DevTools target not found: ${this.targetUrl}`);
-    return this.evaluate({ targetId: panelTarget.id }, expressionFor(input.code), signal, "extension");
+    return this.evaluate({ targetId: panelTarget.id }, expressionFor(input.code), signal, "extension", input.save);
   }
 
   private normalizeTarget(input: ChromeToolInput): ChromeTarget {
@@ -1428,9 +1465,9 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     });
   }
 
-  private async evaluate(debuggee: Debuggee, expression: string, signal?: AbortSignal, scope = "extension"): Promise<unknown> {
+  private async evaluate(debuggee: Debuggee, expression: string, signal?: AbortSignal, scope = "extension", allowDownloads = false): Promise<unknown> {
     let attached = false;
-    const state = { lifetime: this.lifetime, run: { aborted: false } };
+    const state = { lifetime: this.lifetime, run: { aborted: false, allowDownloads } };
     let rejectAbort: ((error: DOMException) => void) | undefined;
     const aborted = new Promise<never>((_, reject) => { rejectAbort = reject; });
     const onAbort = () => {

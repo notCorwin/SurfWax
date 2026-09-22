@@ -15,6 +15,7 @@ export const DEFAULT_INSTRUCTIONS = [
   "A successful action only confirms browser input was sent. Inspect the returned page state or call snapshot to verify the requested outcome before claiming success.",
   "Use run-code only when the dedicated commands cannot express the task. It accepts one async function expression whose page argument exposes the documented Playwright-style subset.",
   "Commands operate in the current Chrome window. A browser-context message lists its open tabs; current=true marks the tab bound to this run. Use goto for that tab or tab-new when a new tab is appropriate. Tab indices are zero-based. Stop immediately once the requested outcome is satisfied, and ask the user when multiple targets remain genuinely ambiguous.",
+  "Generated artifacts stay in the conversation by default. Set save=true or call artifact-save only when the user explicitly asks to save, download, or export a local file; a filename alone is not permission to download.",
 ].join(" ");
 
 export type CreateAgentOptions = {
@@ -52,10 +53,11 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       const browserContext = await options.executor.browserContext();
       logger?.record({ type: "browser.context.prepared", conversationId: options.conversationId, content: { stepNumber, ...browserContext } });
       return {
-        messages: prepareToolMessages(
+        messages: await prepareToolMessages(
           await options.compactor?.prepare(messages, stepNumber) ?? messages,
           stepNumber,
           browserContextMessage(browserContext),
+          logger ? (id) => logger.result(id) : undefined,
         ),
       };
     },

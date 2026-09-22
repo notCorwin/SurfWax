@@ -155,12 +155,14 @@ describe("canonical event log", () => {
     const logger = new EventLogger({ store });
     await logger.append({ type: "conversation.created", conversationId: "one", content: { title: "One" } });
     await logger.appendMessage("one", { id: "u1", role: "user", parts: [] });
+    await logger.append({ type: "tool.result.data", conversationId: "one", content: { filename: "temporary.txt" }, output: { base64: "eA==" } });
     await logger.append({ type: "conversation.created", conversationId: "two", content: { title: "Two" } });
     await logger.appendMessage("two", { id: "u2", role: "user", parts: [] });
 
     await logger.deleteConversation("one");
 
     expect(await logger.conversation("one")).toEqual([]);
+    expect((await logger.all()).some((event) => event.type === "tool.result.data")).toBe(false);
     expect(await logger.messages("two")).toMatchObject([{ id: "u2" }]);
     const audit = (await logger.all()).find((event) => event.type === "conversation.deleted");
     expect(audit).toMatchObject({ content: { conversationId: "one" } });

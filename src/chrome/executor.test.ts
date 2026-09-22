@@ -33,6 +33,7 @@ function fakeChrome(responses: Array<object | (() => Promise<object>)> = []) {
       register: vi.fn(async () => undefined),
       unregister: vi.fn(async () => undefined),
     },
+    downloads: { download: vi.fn(async () => 17) },
   };
   return { calls, debuggerApi, chromeApi };
 }
@@ -235,6 +236,56 @@ describe("ChromeExecutor", () => {
     await expect(executor.executeBrowser({ mode: "result", id: saved!.id, path: ["observation", "snapshot"], offset: 1, limit: 3 })).resolves.toBe("bcd");
     expect(fake.debuggerApi.getTargets).not.toHaveBeenCalled();
     executor.dispose();
+  });
+
+  it("stores artifacts internally by default, saves explicitly, and reuses them for uploads", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: {
+      async append(event: Omit<LogEvent, "id">) { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; },
+      async all() { return [...events]; }, async clear() { events.length = 0; },
+    } });
+    const fake = fakeChrome();
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test", logger });
+    (executor as any).activeContext = { conversationId: "conversation", toolCallId: "call" };
+
+    const internal = await (executor as any).storeArtifact("internal.txt", "aGVsbG8=", "text/plain");
+    expect(internal).toMatchObject({ id: 1, filename: "internal.txt", byteLength: 5, saved: false });
+    expect(fake.chromeApi.downloads.download).not.toHaveBeenCalled();
+    expect(await (executor as any).normalizeFiles([{ name: "upload.txt", artifactId: internal.id }])).toEqual([
+      { name: "upload.txt", mimeType: "text/plain", base64: "aGVsbG8=" },
+    ]);
+
+    const saved = await (executor as any).storeArtifact("saved.txt", "eA==", "text/plain", true);
+    expect(saved).toMatchObject({ id: 2, filename: "saved.txt", byteLength: 1, saved: true, downloadId: 17 });
+    expect(fake.chromeApi.downloads.download).toHaveBeenCalledTimes(1);
+
+    await expect(executor.executeCommand("artifact-save", { id: internal.id }, undefined, { conversationId: "conversation" }))
+      .resolves.toMatchObject({ artifact: { id: 1, filename: "internal.txt", saved: true, downloadId: 17 } });
+    expect(fake.chromeApi.downloads.download).toHaveBeenCalledTimes(2);
+    executor.dispose();
+  });
+
+  it("guards raw downloads and passes through explicit save authority", async () => {
+    const fake = fakeChrome();
+    const previousChrome = Object.getOwnPropertyDescriptor(globalThis, "chrome");
+    Object.defineProperty(globalThis, "chrome", { configurable: true, value: fake.chromeApi });
+    fake.debuggerApi.sendCommand.mockImplementation(async (_debuggee, method, params) => {
+      if (method !== "Runtime.evaluate" || typeof params?.expression !== "string") return {};
+      return { result: { value: await (0, eval)(params.expression) } };
+    });
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+
+    try {
+      await expect(executor.execute({ code: "return chrome.downloads.download({url:'data:text/plain,x'})" }))
+        .rejects.toThrow("download-not-authorized");
+      expect(fake.chromeApi.downloads.download).not.toHaveBeenCalled();
+      await expect(executor.execute({ code: "return chrome.downloads.download({url:'data:text/plain,x'})", save: true })).resolves.toBe(17);
+      expect(fake.chromeApi.downloads.download).toHaveBeenCalledTimes(1);
+    } finally {
+      executor.dispose();
+      if (previousChrome) Object.defineProperty(globalThis, "chrome", previousChrome);
+      else delete (globalThis as any).chrome;
+    }
   });
 
   it("applies the default ten-second timeout to act batches", async () => {

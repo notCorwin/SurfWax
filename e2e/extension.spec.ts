@@ -895,7 +895,7 @@ test("uses dedicated snapshot, fill, and click tools", async () => {
     expect(verified).toMatchObject({ snapshot: expect.stringContaining("Welcome me@example.com") });
     await expect.poll(() => target.locator("output").textContent()).toBe("Welcome me@example.com");
     expect(events.some((event) => event.type === "automation.action.finished" && event.toolCallId === "call-click")).toBe(true);
-    expect(provider.requests[0].tools).toHaveLength(80);
+    expect(provider.requests[0].tools).toHaveLength(81);
     const toolNames = provider.requests[0].tools.map((tool: any) => tool.function.name);
     expect(toolNames).not.toContain("browser");
     expect(toolNames.filter((name: string) => ["open", "attach", "close", "detach", "show", "list", "close-all", "kill-all"].includes(name))).toEqual([]);
@@ -914,7 +914,7 @@ test("injects a screenshot and clicks its observation coordinates", async () => 
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/visual`);
     responses.push(
-      commandResponse("screenshot", { type: "jpeg" }, "call-visual-observe"),
+      commandResponse("screenshot", { type: "jpeg", filename: "internal-visual.jpg" }, "call-visual-observe"),
       (request) => {
         const serialized = JSON.stringify(request.messages);
         const marker = serialized.indexOf("observationId");
@@ -935,7 +935,10 @@ test("injects a screenshot and clicks its observation coordinates", async () => 
     await expect.poll(() => provider.requests.length).toBeGreaterThanOrEqual(2);
     const observation = (await readEvents(opened.page)).find((event) => event.type === "tool.finished" && event.toolCallId === "call-visual-observe")?.output;
     expect(observation?.screenshot?.mediaType).toBe("image/jpeg");
-    expect(observation?.artifact).toMatchObject({ mimeType: "image/jpeg", downloadId: expect.any(Number) });
+    expect(observation?.artifact).toMatchObject({ id: expect.any(Number), filename: "internal-visual.jpg", mimeType: "image/jpeg", byteLength: expect.any(Number), saved: false });
+    expect(observation?.artifact).not.toHaveProperty("downloadId");
+    expect(observation?.screenshot?.artifactId).toBe(observation?.artifact?.id);
+    expect(await opened.page.evaluate(async () => chrome.downloads.search({ filenameRegex: "internal-visual\\.jpg$" }))).toEqual([]);
     expect(JSON.stringify(provider.requests[1])).toContain("image_url");
     expect(observation.observationId).toEqual(expect.any(String));
     await expect.poll(() => target.locator("body").getAttribute("data-clicked")).toBe("yes");
@@ -1251,7 +1254,7 @@ test("executes run-code through the page facade, restores the conversation, and 
 
     await expect.poll(() => provider.requests.length).toBe(3);
     expect(provider.requests[0].reasoning_effort).toBe("minimal");
-    expect(provider.requests[0].tools).toHaveLength(80);
+    expect(provider.requests[0].tools).toHaveLength(81);
     expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).not.toContain("browser");
     expect(provider.requests[0].tools).toContainEqual(expect.objectContaining({ type: "function", function: expect.objectContaining({ name: "run-code" }) }));
     const events = await readEvents(opened.page);

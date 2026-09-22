@@ -9,7 +9,7 @@ export const COMMAND_NAMES = [
   "tab-list", "tab-new", "tab-close", "tab-select", "state-save", "state-load", "cookie-list", "cookie-get", "cookie-set", "cookie-delete", "cookie-clear",
   "localstorage-list", "localstorage-get", "localstorage-set", "localstorage-delete", "localstorage-clear", "sessionstorage-list", "sessionstorage-get", "sessionstorage-set", "sessionstorage-delete", "sessionstorage-clear",
   "requests", "request", "request-headers", "request-body", "response-headers", "response-body", "route", "route-list", "unroute", "network-state-set", "console", "run-code",
-  "recording-start", "recording-stop", "tracing-start", "tracing-stop", "video-start", "video-stop", "video-chapter", "video-show-actions", "video-hide-actions", "pause-at", "resume", "step-over", "generate-locator", "highlight",
+  "recording-start", "recording-stop", "tracing-start", "tracing-stop", "video-start", "video-stop", "video-chapter", "video-show-actions", "video-hide-actions", "artifact-save", "pause-at", "resume", "step-over", "generate-locator", "highlight",
   "install", "install-browser",
 ] as const;
 
@@ -17,6 +17,7 @@ export type CommandName = typeof COMMAND_NAMES[number];
 
 const timeoutMs = z.number().int().positive().max(300_000).optional();
 const common = { timeoutMs };
+const save = z.boolean().optional();
 const button = z.enum(["left", "right", "middle"]).optional();
 const modifiers = z.array(z.enum(["Alt", "Control", "ControlOrMeta", "Meta", "Shift"])).optional();
 const targetObject = z.union([
@@ -25,8 +26,8 @@ const targetObject = z.union([
   z.object({ point: z.object({ observationId: z.string().min(1), x: z.number().finite(), y: z.number().finite() }).strict() }).strict(),
 ]);
 export const commandTargetSchema = z.union([z.string().min(1), targetObject]);
-const file = z.object({ name: z.string().min(1), mimeType: z.string().min(1).optional(), text: z.string().optional(), base64: z.string().optional(), url: z.string().url().optional() }).strict()
-  .refine((value) => [value.text, value.base64, value.url].filter((item) => item !== undefined).length === 1, "Exactly one of text, base64, or url is required");
+const file = z.object({ name: z.string().min(1), mimeType: z.string().min(1).optional(), text: z.string().optional(), base64: z.string().optional(), url: z.string().url().optional(), artifactId: z.number().int().positive().optional() }).strict()
+  .refine((value) => [value.text, value.base64, value.url, value.artifactId].filter((item) => item !== undefined).length === 1, "Exactly one of text, base64, url, or artifactId is required");
 const files = z.array(file).min(1);
 const empty = () => z.object(common).strict();
 const target = (required = true) => required ? commandTargetSchema : commandTargetSchema.optional();
@@ -48,9 +49,9 @@ const definitions: Record<CommandName, Definition> = {
   upload: { description: "Upload one or more in-memory files to the active file input or chooser.", inputSchema: z.object({ ...common, files, target: target(false) }).strict() },
   check: { description: "Check a checkbox or radio target.", inputSchema: z.object({ ...common, target: target() }).strict() },
   uncheck: { description: "Uncheck a checkbox target.", inputSchema: z.object({ ...common, target: target() }).strict() },
-  snapshot: { description: "Capture an accessibility snapshot with stable element refs.", inputSchema: z.object({ ...common, target: target(false), depth: z.number().int().nonnegative().optional(), boxes: z.boolean().optional(), filename }).strict() },
+  snapshot: { description: "Capture an accessibility snapshot with stable element refs. filename stores an internal artifact; set save only when the user explicitly requested a local file.", inputSchema: z.object({ ...common, target: target(false), depth: z.number().int().nonnegative().optional(), boxes: z.boolean().optional(), filename, save }).strict() },
   find: { description: "Find matching text in a fresh accessibility snapshot.", inputSchema: z.object({ ...common, text: z.string().optional() }).strict() },
-  eval: { description: "Evaluate a JavaScript function in the page or on a target element.", inputSchema: z.object({ ...common, func: z.string().min(1), target: target(false), filename }).strict() },
+  eval: { description: "Evaluate a JavaScript function in the page or on a target element. filename stores an internal artifact; set save only when the user explicitly requested a local file.", inputSchema: z.object({ ...common, func: z.string().min(1), target: target(false), filename, save }).strict() },
   "dialog-accept": { description: "Accept the active dialog, optionally with prompt text.", inputSchema: z.object({ ...common, prompt: z.string().optional() }).strict() },
   "dialog-dismiss": { description: "Dismiss the active dialog.", inputSchema: empty() },
   resize: { description: "Resize the current page viewport.", inputSchema: z.object({ ...common, width: z.number().int().positive(), height: z.number().int().positive() }).strict() },
@@ -65,13 +66,13 @@ const definitions: Record<CommandName, Definition> = {
   mousedown: { description: "Press a mouse button.", inputSchema: z.object({ ...common, button }).strict() },
   mouseup: { description: "Release a mouse button.", inputSchema: z.object({ ...common, button }).strict() },
   mousewheel: { description: "Scroll by viewport CSS deltas.", inputSchema: z.object({ ...common, dx: z.number().finite(), dy: z.number().finite() }).strict() },
-  screenshot: { description: "Capture and download a viewport, full-page, or element screenshot.", inputSchema: z.object({ ...common, target: target(false), filename, type: z.enum(["png", "jpeg", "webp"]).optional(), fullPage: z.boolean().optional(), hires: z.boolean().optional() }).strict() },
-  pdf: { description: "Print the current page to a downloaded PDF.", inputSchema: z.object({ ...common, filename }).strict() },
+  screenshot: { description: "Capture a viewport, full-page, or element screenshot as an internal artifact. Set save only when the user explicitly requested a local file.", inputSchema: z.object({ ...common, target: target(false), filename, save, type: z.enum(["png", "jpeg", "webp"]).optional(), fullPage: z.boolean().optional(), hires: z.boolean().optional() }).strict() },
+  pdf: { description: "Print the current page to an internal PDF artifact. Set save only when the user explicitly requested a local file.", inputSchema: z.object({ ...common, filename, save }).strict() },
   "tab-list": { description: "List tabs in the current Chrome window using zero-based indices.", inputSchema: empty() },
   "tab-new": { description: "Open and select a new tab.", inputSchema: z.object({ ...common, url: z.string().url().optional() }).strict() },
   "tab-close": { description: "Close a tab by zero-based index, or the current tab.", inputSchema: z.object({ ...common, index: index.optional() }).strict() },
   "tab-select": { description: "Select a tab by zero-based index.", inputSchema: z.object({ ...common, index }).strict() },
-  "state-save": { description: "Save cookies and visited-origin localStorage, download JSON, and retain it by filename.", inputSchema: z.object({ ...common, filename }).strict() },
+  "state-save": { description: "Save cookies and visited-origin localStorage internally by filename. Set save only when the user explicitly requested a local JSON file.", inputSchema: z.object({ ...common, filename, save }).strict() },
   "state-load": { description: "Restore a previously saved named storage state.", inputSchema: z.object({ ...common, filename: z.string().min(1) }).strict() },
   "cookie-list": { description: "List cookies, optionally filtered by domain or path.", inputSchema: z.object({ ...common, domain: z.string().optional(), path: z.string().optional() }).strict() },
   "cookie-get": { description: "Get a cookie by name.", inputSchema: z.object({ ...common, name: z.string().min(1) }).strict() },
@@ -89,26 +90,27 @@ const definitions: Record<CommandName, Definition> = {
   "sessionstorage-delete": { description: "Delete a sessionStorage key.", inputSchema: z.object({ ...common, key: z.string() }).strict() },
   "sessionstorage-clear": { description: "Clear sessionStorage for the current page.", inputSchema: empty() },
   requests: { description: "List captured requests since navigation.", inputSchema: z.object({ ...common, static: z.boolean().optional(), filter: z.string().optional(), clear: z.boolean().optional() }).strict() },
-  request: { description: "Read full request and response details by one-based request index.", inputSchema: z.object({ ...common, index: requestIndex, filename }).strict() },
-  "request-headers": { description: "Read request headers by one-based request index.", inputSchema: z.object({ ...common, index: requestIndex, filename }).strict() },
-  "request-body": { description: "Read request body by one-based request index.", inputSchema: z.object({ ...common, index: requestIndex, filename }).strict() },
-  "response-headers": { description: "Read response headers by one-based request index.", inputSchema: z.object({ ...common, index: requestIndex, filename }).strict() },
-  "response-body": { description: "Read response body by one-based request index.", inputSchema: z.object({ ...common, index: requestIndex, filename }).strict() },
+  request: { description: "Read full request and response details by one-based request index. filename stores an internal artifact; save requires an explicit user request.", inputSchema: z.object({ ...common, index: requestIndex, filename, save }).strict() },
+  "request-headers": { description: "Read request headers by one-based request index. filename stores an internal artifact; save requires an explicit user request.", inputSchema: z.object({ ...common, index: requestIndex, filename, save }).strict() },
+  "request-body": { description: "Read request body by one-based request index. filename stores an internal artifact; save requires an explicit user request.", inputSchema: z.object({ ...common, index: requestIndex, filename, save }).strict() },
+  "response-headers": { description: "Read response headers by one-based request index. filename stores an internal artifact; save requires an explicit user request.", inputSchema: z.object({ ...common, index: requestIndex, filename, save }).strict() },
+  "response-body": { description: "Read response body by one-based request index. filename stores an internal artifact; save requires an explicit user request.", inputSchema: z.object({ ...common, index: requestIndex, filename, save }).strict() },
   route: { description: "Fulfill or rewrite requests matching a URL glob.", inputSchema: z.object({ ...common, pattern: z.string().min(1), status: z.number().int().min(100).max(599).optional(), body: z.string().optional(), contentType: z.string().optional(), headers: z.record(z.string(), z.string()).optional(), removeHeaders: z.array(z.string()).optional() }).strict() },
   "route-list": { description: "List active network routes.", inputSchema: empty() },
   unroute: { description: "Remove one matching route or every route.", inputSchema: z.object({ ...common, pattern: z.string().optional() }).strict() },
   "network-state-set": { description: "Set the current tab online or offline.", inputSchema: z.object({ ...common, state: z.enum(["online", "offline"]) }).strict() },
   console: { description: "List captured console messages at or above a level.", inputSchema: z.object({ ...common, minLevel: z.enum(["debug", "info", "warning", "error"]).optional(), clear: z.boolean().optional() }).strict() },
-  "run-code": { description: "Run one async function expression receiving the current Playwright-style page facade.", inputSchema: z.object({ ...common, code: z.string().min(1) }).strict() },
+  "run-code": { description: "Run one async function expression receiving the current Playwright-style page facade. Set save only when the user explicitly requested chrome.downloads.download().", inputSchema: z.object({ ...common, code: z.string().min(1), save }).strict() },
   "recording-start": { description: "Start recording user page actions.", inputSchema: empty() },
   "recording-stop": { description: "Stop recording and return generated Playwright-style code.", inputSchema: empty() },
   "tracing-start": { description: "Start a Chrome DevTools trace.", inputSchema: empty() },
-  "tracing-stop": { description: "Stop and download the active Chrome DevTools trace.", inputSchema: z.object({ ...common, filename }).strict() },
+  "tracing-stop": { description: "Stop and store the active Chrome DevTools trace internally. Set save only when the user explicitly requested local files.", inputSchema: z.object({ ...common, filename, save }).strict() },
   "video-start": { description: "Start a WebM screencast of the current tab.", inputSchema: z.object({ ...common, filename, width: z.number().int().positive().optional(), height: z.number().int().positive().optional() }).strict() },
-  "video-stop": { description: "Stop and download the active WebM screencast.", inputSchema: empty() },
+  "video-stop": { description: "Stop and store the active WebM screencast internally. Set save only when the user explicitly requested a local file.", inputSchema: z.object({ ...common, save }).strict() },
   "video-chapter": { description: "Add a chapter card to the active screencast.", inputSchema: z.object({ ...common, title: z.string().min(1), description: z.string().optional(), durationMs: z.number().int().positive().max(30_000).optional() }).strict() },
   "video-show-actions": { description: "Annotate subsequent commands in the active screencast.", inputSchema: z.object({ ...common, durationMs: z.number().int().positive().optional(), position: z.enum(["top-left", "top", "top-right", "bottom-left", "bottom", "bottom-right"]).optional(), cursor: z.enum(["pointer", "none"]).optional() }).strict() },
   "video-hide-actions": { description: "Stop annotating screencast actions.", inputSchema: empty() },
+  "artifact-save": { description: "Save an existing internal artifact to Downloads only when the user explicitly requested it.", inputSchema: z.object({ ...common, id: z.number().int().positive(), filename }).strict() },
   "pause-at": { description: "Unavailable without a Playwright Test Runner process.", inputSchema: z.object({ ...common, location: z.string().min(1) }).strict() },
   resume: { description: "Unavailable without a Playwright Test Runner process.", inputSchema: empty() },
   "step-over": { description: "Unavailable without a Playwright Test Runner process.", inputSchema: empty() },
@@ -138,29 +140,40 @@ export function createCommandTools(executor: ChromeExecutor, options: { logger?:
   })) as Record<CommandName, ReturnType<typeof dynamicTool>>;
 }
 
-function scrubScreenshots(value: unknown, found: Array<{ mediaType: string; data: string }>): unknown {
+type ScreenshotSource = { mediaType: string; data?: string; artifactId?: number };
+
+function scrubScreenshots(value: unknown, found: ScreenshotSource[]): unknown {
   if (Array.isArray(value)) return value.map((item) => scrubScreenshots(item, found));
   if (!value || typeof value !== "object") return value;
   return Object.fromEntries(Object.entries(value).map(([key, item]) => {
-    if (key === "screenshot" && item && typeof item === "object" && typeof (item as any).data === "string") {
-      found.push({ mediaType: (item as any).mediaType ?? "image/png", data: (item as any).data });
-      return [key, { ...(item as any), data: "[stored in canonical event log]" }];
+    if (key === "screenshot" && item && typeof item === "object") {
+      const screenshot = item as Record<string, unknown>;
+      if (typeof screenshot.data === "string") {
+        found.push({ mediaType: typeof screenshot.mediaType === "string" ? screenshot.mediaType : "image/png", data: screenshot.data });
+        return [key, { ...screenshot, data: "[stored in canonical event log]" }];
+      }
+      if (Number.isSafeInteger(screenshot.artifactId)) found.push({ mediaType: typeof screenshot.mediaType === "string" ? screenshot.mediaType : "image/png", artifactId: Number(screenshot.artifactId) });
     }
     return [key, scrubScreenshots(item, found)];
   }));
 }
 
-export function prepareToolMessages(messages: any[], stepNumber: number, browserContext?: string): any[] {
+export async function prepareToolMessages(messages: any[], stepNumber: number, browserContext?: string, readArtifact?: (id: number) => Promise<unknown>): Promise<any[]> {
   const inject = stepNumber > 0 && messages.at(-1)?.role === "tool";
-  const current: Array<{ mediaType: string; data: string }> = [];
+  const current: ScreenshotSource[] = [];
   const prepared = messages.map((message, index) => message.role !== "tool" ? message : { ...message, content: message.content.map((part: any) => {
     if (part.type !== "tool-result" || part.output?.type !== "json") return part;
-    const found: Array<{ mediaType: string; data: string }> = [];
+    const found: ScreenshotSource[] = [];
     const value = scrubScreenshots(part.output.value, found);
     if (inject && index === messages.length - 1) current.push(...found);
     return { ...part, output: { ...part.output, value } };
   }) });
-  const screenshot = current.at(-1);
+  const source = current.at(-1);
+  const stored = source?.artifactId !== undefined && readArtifact ? await readArtifact(source.artifactId) as { base64?: unknown; mimeType?: unknown } : undefined;
+  const screenshot = source && (source.data || typeof stored?.base64 === "string") ? {
+    mediaType: typeof stored?.mimeType === "string" ? stored.mimeType : source.mediaType,
+    data: source.data ?? stored!.base64 as string,
+  } : undefined;
   const content = [
     ...(browserContext ? [{ type: "text", text: browserContext }] : []),
     ...(screenshot ? [{ type: "file", mediaType: screenshot.mediaType, data: { type: "data", data: screenshot.data } }] : []),
