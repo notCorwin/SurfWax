@@ -1,4 +1,4 @@
-import { isLoopFinished, isStepCount, ToolLoopAgent } from "ai";
+import { isLoopFinished, ToolLoopAgent } from "ai";
 import type { LanguageModel } from "ai";
 import { CORE_TOOL_NAMES, createCommandTools, MODEL_COMMAND_NAMES, prepareToolMessages, repairCommandToolCall } from "../chrome/tool";
 import { ChromeExecutor } from "../chrome/executor";
@@ -99,7 +99,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       const modelLimit = await limit;
       const estimatedInput = options.compactor?.estimate(prepared) ?? estimateInput(prepared);
       const pressure = modelLimit && estimatedInput >= inputBudget(modelLimit) * 0.85 ? "context-budget" : undefined;
-      const guard = stepNumber >= 63 ? "step-limit" : pressure ?? stagnationReason(steps);
+      const guard = pressure ?? stagnationReason(steps);
       if (guard && guard !== loggedGuard) {
         loggedGuard = guard;
         logger?.record({ type: "agent.loop-guard.triggered", conversationId: options.conversationId, content: { stepNumber, reason: guard } });
@@ -182,7 +182,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         providerMetadata: event.providerMetadata,
       }),
     } : {}),
-    stopWhen: [isLoopFinished(), isStepCount(64)],
+    stopWhen: isLoopFinished(),
     // The provider fetch owns the unbounded retry policy; disable the SDK's finite retry loop.
     maxRetries: 0,
   });
