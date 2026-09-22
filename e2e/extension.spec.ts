@@ -457,6 +457,10 @@ test("restores independent credentials and models when switching Providers", asy
     await options.getByLabel("API Key", { exact: true }).fill("vercel-key");
     await options.getByRole("button", { name: "保存配置" }).click();
 
+    await expect.poll(() => options.evaluate(async () =>
+      ((await chrome.storage.local.get("side-agent:model-limit"))["side-agent:model-limit"] as any)?.match?.source)).toBe("models.dev");
+    await expect(options.getByTestId("model-limit-match")).toHaveCount(0);
+
     await selectProvider(options, "custom", /自定义 Endpoint.*custom/);
     await options.getByLabel("Base URL", { exact: true }).fill("https://custom.test/v1");
     await options.getByLabel("Model ID", { exact: true }).fill("custom-model");
@@ -530,53 +534,36 @@ test("keeps custom Endpoint available when the Models.dev catalog fails", async 
   }
 });
 
-test("saves and disables the optional Jev selector configuration", async () => {
+test("uses a global custom system prompt and hides disabled advanced settings", async () => {
+  const provider = await startProvider([textResponse("CUSTOM_PROMPT_OK"), textResponse("自定义提示词")]);
   const opened = await openExtension();
   try {
-    const options = await configure(opened.context, opened.page, "https://provider.test/v1");
+    const options = await configure(opened.context, opened.page, provider.baseURL);
     await expect(options.getByRole("group", { name: "上下文窗口" })).toBeVisible();
-    await expect(options.getByRole("group", { name: "Jev 消息选择压缩（可选）" })).toBeVisible();
-    await options.getByLabel("Jev 平台").focus();
-    await options.getByLabel("Jev 平台").press("Enter");
-    await options.getByRole("option", { name: "OpenRouter" }).press("Enter");
-    await expect(options.getByLabel("Jev Base URL")).toHaveValue("https://openrouter.ai/api");
-    await expect(options.getByLabel("Jev Model ID")).toHaveValue("typesafe/jev-1.13");
-    await options.getByLabel("Jev Base URL").fill("not-a-url");
-    await options.getByLabel("Jev Model ID").fill("jev-test");
-    await options.getByLabel("Jev API Key").fill("jev-key");
-    await options.getByLabel("最低保留评分").fill("0.81");
-    await options.getByText("高级设置", { exact: true }).click();
-    await options.getByRole("button", { name: "保存配置" }).click();
-    await expect(options.locator(".advanced-settings")).toHaveAttribute("open", "");
-    await expect(options.locator("#jev-base-url-error")).toHaveText("请输入有效的 Jev 网址");
-    await expect(options.locator("#jev-base-url")).toBeFocused();
-    await options.getByLabel("Jev Base URL").fill("https://jev.example/v1");
+    await expect(options.getByText("Jev", { exact: false })).toHaveCount(0);
+    await expect(options.getByTestId("model-limit-match")).toContainText("262,144 tokens");
+    await options.getByLabel("自定义系统提示词").fill("You are a custom browser agent.");
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(options.getByRole("status")).toContainText("配置已保存");
-    await expect.poll(() => options.evaluate(async () => (await chrome.storage.local.get("side-agent:jev-config"))["side-agent:jev-config"])).toEqual({
-      provider: "openrouter",
-      baseURL: "https://jev.example/v1",
-      model: "jev-test",
-      apiKey: "jev-key",
-      threshold: 0.81,
-    });
-    await expect(opened.page.getByTestId("composer-input")).toBeVisible();
+    await expect.poll(() => options.evaluate(async () =>
+      ((await chrome.storage.local.get("side-agent:model-config"))["side-agent:model-config"] as any)?.systemPrompt))
+      .toBe("You are a custom browser agent.");
+    await options.close();
 
-    await options.getByLabel("Jev API Key").fill("");
-    await options.getByRole("button", { name: "保存配置" }).click();
-    await expect(options.getByRole("status")).toContainText("配置已保存");
-    await expect.poll(() => options.evaluate(async () => (await chrome.storage.local.get("side-agent:jev-config"))["side-agent:jev-config"])).toEqual({
-      provider: "openrouter",
-      baseURL: "https://jev.example/v1",
-      model: "jev-test",
-      apiKey: "",
-      threshold: 0.81,
-    });
-    await expect(opened.page.getByTestId("composer-input")).toBeVisible();
+    await opened.page.getByTestId("composer-input").fill("use custom instructions");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("CUSTOM_PROMPT_OK");
+    const system = provider.requests[0].messages.find((message: any) => message.role === "system");
+    const user = provider.requests[0].messages.find((message: any) => message.role === "user");
+    expect(system?.content).toBe("You are a custom browser agent.");
+    expect(JSON.stringify(user)).toContain("Available tools:");
+    expect(JSON.stringify(user)).toContain("- goto: Navigate the current tab to a URL.");
+    await expect(opened.page.locator('[data-role="user"]')).not.toContainText("Available tools:");
   } finally {
-    await dispose(opened.context, opened.userDataDirectory);
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
+
 
 test("shows inline settings errors and returns keyboard focus after closing conversations", async () => {
   const opened = await openExtension();
@@ -694,7 +681,7 @@ test("ships only the minimal MV3 Harness surface", async () => {
     await expect(opened.page.getByTestId("config-required-state")).toBeVisible();
 
     const options = await configure(opened.context, opened.page, "https://provider.test/v1");
-    await expect(options.getByTestId("options-card").locator("input")).toHaveCount(9);
+    await expect(options.getByTestId("options-card").locator("input")).toHaveCount(5);
     await expect(options.getByTestId("event-log-clear")).toBeVisible();
     await expect(options.getByTestId("event-log")).toHaveCount(0);
     await expect(options.getByTestId("user-scripts-panel")).toHaveCount(0);
@@ -1504,35 +1491,31 @@ test("restores a pending context choice after reopening the panel", async () => 
   }
 });
 
-test("Jev selection creates a child conversation and keeps the source intact", async () => {
+test("ignores stored Jev configuration and offers only LLM summary", async () => {
   const provider = await startProvider([
     textResponse("OLD_CONTEXT_MARKER " + "page observation ".repeat(900)),
     textResponse("来源会话标题"),
-  ]);
+  ], 0, "Earlier page observations have been recorded.");
   const opened = await openExtension();
   try {
+    await opened.page.evaluate(() => chrome.storage.local.set({
+      "side-agent:jev-config": {
+        provider: "openrouter", baseURL: "https://jev.example", model: "jev-test", apiKey: "jev-key", threshold: 0.5,
+      },
+    }));
     const options = await configure(opened.context, opened.page, provider.baseURL, 8_000);
-    await options.getByLabel("Jev Base URL").fill(provider.origin);
-    await options.getByLabel("Jev Model ID").fill("jev-test");
-    await options.getByLabel("Jev API Key").fill("jev-key");
-    await options.getByRole("button", { name: "保存配置" }).click();
-    await expect(options.getByRole("status")).toContainText("配置已保存");
     await options.close();
     await opened.page.getByTestId("composer-input").fill("Keep this user request");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.getByTestId("context-choice")).toBeVisible();
-    await opened.page.getByTestId("context-choice").getByRole("button", { name: "Jev 重选" }).click();
+    const choice = opened.page.getByTestId("context-choice");
+    await expect(choice.getByText("Jev", { exact: false })).toHaveCount(0);
+    await expect(choice.getByRole("button")).toHaveCount(1);
+    await expect(choice.getByRole("button", { name: "LLM 摘要" })).toBeVisible();
+    expect(provider.jevRequests).toHaveLength(0);
+    await choice.getByRole("button", { name: "LLM 摘要" }).click();
     await expect(opened.page.getByTestId("context-choice")).toHaveCount(0);
-    await expect(opened.page.getByTestId("conversation-menu")).toContainText("· Jev");
-    await expect(opened.page.locator('[data-role="user"]')).toContainText("Keep this user request");
-    await expect(opened.page.getByText("OLD_CONTEXT_MARKER")).toHaveCount(0);
-    expect(provider.jevRequests).toHaveLength(1);
-    expect(JSON.stringify(provider.jevRequests[0].state)).toContain("OLD_CONTEXT_MARKER");
-    const events = await readEvents(opened.page);
-    const child = events.find((event) => event.type === "conversation.created" && event.content?.parentConversationId);
-    expect(child).toBeTruthy();
-    expect(events.some((event) => event.conversationId === child?.content?.parentConversationId && event.type === "conversation.message"
-      && JSON.stringify(event.content).includes("OLD_CONTEXT_MARKER"))).toBe(true);
+    await expect(opened.page.getByTestId("context-status")).toContainText("历史上下文已被压缩成摘要");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -2457,7 +2440,10 @@ test("edits user messages, regenerates replies and restores the selected branch"
     for (const text of ["original question", "edited question", "ORIGINAL_REPLY", "REGENERATED_REPLY", "EDITED_REPLY", "FOLLOWUP_REPLY"]) {
       expect(recordedMessages).toContain(text);
     }
-    expect(provider.requests.at(-1).messages.map((message: any) => message.content)).toEqual(expect.arrayContaining(["edited question", "follow up"]));
+    const promptTexts = provider.requests.at(-1).messages.flatMap((message: any) => typeof message.content === "string"
+      ? [message.content]
+      : message.content?.filter((part: any) => part.type === "text").map((part: any) => part.text) ?? []);
+    expect(promptTexts).toEqual(expect.arrayContaining(["edited question", "follow up"]));
     expect(JSON.stringify(provider.requests.at(-1).messages)).not.toContain("original question");
 
     await opened.page.getByRole("button", { name: "上一个分支" }).first().click();

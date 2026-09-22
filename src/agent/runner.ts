@@ -1,6 +1,6 @@
 import { isLoopFinished, ToolLoopAgent } from "ai";
 import type { LanguageModel } from "ai";
-import { createCommandTools, prepareToolMessages, repairCommandToolCall, TOOL_SUMMARY } from "../chrome/tool";
+import { createCommandTools, prepareToolMessages, repairCommandToolCall } from "../chrome/tool";
 import { ChromeExecutor } from "../chrome/executor";
 import type { BrowserContext } from "../chrome/executor";
 import type { EventLogger } from "../logging";
@@ -23,8 +23,7 @@ const BASE_INSTRUCTIONS = [
   "Generated artifacts stay in the conversation by default. Set save=true or call artifact-save only when the user explicitly asks to save, download, or export a local file; a filename alone is not permission to download.",
 ].join(" ");
 
-const TOOL_INSTRUCTIONS = `Available tools:\n${TOOL_SUMMARY}`;
-export const DEFAULT_INSTRUCTIONS = `${BASE_INSTRUCTIONS}\n\n${TOOL_INSTRUCTIONS}`;
+export const DEFAULT_INSTRUCTIONS = BASE_INSTRUCTIONS;
 
 export type CreateAgentOptions = {
   model: ModelConfig;
@@ -81,7 +80,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
   });
   const toolOrder = Object.keys(tools) as Array<keyof typeof tools>;
   const limit = resolveModelLimit(options.model).catch(() => undefined);
-  const instructions = options.instructions === undefined ? DEFAULT_INSTRUCTIONS : `${options.instructions}\n\n${TOOL_INSTRUCTIONS}`;
+  const instructions = options.instructions?.trim() ? options.instructions : DEFAULT_INSTRUCTIONS;
   let browserDigest: string | undefined;
   let loggedGuard: string | undefined;
   const loggedToolCalls = new Set<string>();

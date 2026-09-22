@@ -1,13 +1,9 @@
 import { useEffect, useState } from "react";
-import type { JevConfig, ModelConfig } from "../types";
+import type { ModelConfig } from "../types";
 import {
-  DEFAULT_JEV_CONFIG,
   EMPTY_MODEL_CONFIG,
-  JEV_CONFIG_STORAGE_KEY,
   MODEL_CONFIG_STORAGE_KEY,
-  isCompleteJevConfig,
   isCompleteModelConfig,
-  loadJevConfig,
   loadModelConfig,
   selectedModelConfig,
 } from "./config";
@@ -16,17 +12,15 @@ const EMPTY_CONFIG: ModelConfig = { sdk: "@ai-sdk/openai-compatible", providerSe
 
 export type SidePanelSession = {
   config: ModelConfig;
-  jevConfig: JevConfig;
+  systemPrompt?: string;
   configReady: boolean;
   error?: unknown;
   configured: boolean;
-  jevConfigured: boolean;
   chatKey: string;
 };
 
 export function useSidePanelSession(): SidePanelSession {
   const [modelSettings, setModelSettings] = useState(EMPTY_MODEL_CONFIG);
-  const [jevConfig, setJevConfig] = useState<JevConfig>(DEFAULT_JEV_CONFIG);
   const [configReady, setConfigReady] = useState(false);
   const [error, setError] = useState<unknown>();
 
@@ -34,13 +28,9 @@ export function useSidePanelSession(): SidePanelSession {
     let active = true;
     const refresh = async () => {
       try {
-        const [stored, storedJev] = await Promise.all([
-          loadModelConfig(),
-          loadJevConfig(),
-        ]);
+        const stored = await loadModelConfig();
         if (!active) return;
         setModelSettings(stored);
-        setJevConfig(storedJev);
         setError(undefined);
       } catch (cause) {
         if (active) setError(cause);
@@ -49,7 +39,7 @@ export function useSidePanelSession(): SidePanelSession {
       }
     };
     const storageChanged = (changes: { [key: string]: chrome.storage.StorageChange }, area: string) => {
-      if (area === "local" && (changes[MODEL_CONFIG_STORAGE_KEY] || changes[JEV_CONFIG_STORAGE_KEY])) void refresh();
+      if (area === "local" && changes[MODEL_CONFIG_STORAGE_KEY]) void refresh();
     };
 
     void refresh();
@@ -63,11 +53,10 @@ export function useSidePanelSession(): SidePanelSession {
   const config = selectedModelConfig(modelSettings) ?? EMPTY_CONFIG;
   return {
     config,
-    jevConfig,
+    systemPrompt: modelSettings.systemPrompt,
     configReady,
     error,
     configured: configReady && Boolean(modelSettings.selectedProviderId) && isCompleteModelConfig(config),
-    jevConfigured: configReady && isCompleteJevConfig(jevConfig),
-    chatKey: `${config.providerId ?? ""}\u0000${config.sdk ?? ""}\u0000${config.baseURL}\u0000${JSON.stringify(config.providerSettings ?? {})}\u0000${config.model}\u0000${config.contextWindowOverride ?? ""}\u0000${jevConfig.baseURL}\u0000${jevConfig.model}\u0000${jevConfig.apiKey}`,
+    chatKey: `${config.providerId ?? ""}\u0000${config.sdk ?? ""}\u0000${config.baseURL}\u0000${JSON.stringify(config.providerSettings ?? {})}\u0000${config.model}\u0000${config.contextWindowOverride ?? ""}\u0000${modelSettings.systemPrompt ?? ""}`,
   };
 }

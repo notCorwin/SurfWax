@@ -6,10 +6,10 @@ import { Thread } from "../components/assistant-ui/thread";
 import { Button, buttonVariants } from "../components/ui/button";
 import { ErrorNotice } from "../components/ui/error-notice";
 import { generateConversationTitle } from "../conversations";
-import { activeContext, applySummaryChoice, ensureContextChoice, forkSelection, proposeJevSelection, type SelectionProposal } from "../agent/context-choice";
+import { activeContext, applySummaryChoice, ensureContextChoice } from "../agent/context-choice";
 import { pendingContextChoice } from "../agent/compaction";
 import { EventLogger, rebuildConversationList } from "../logging";
-import type { JevConfig, ModelConfig } from "../types";
+import type { ModelConfig } from "../types";
 import { useSidePanelRuntime } from "./useSidePanelRuntime";
 import { useSidePanelSession } from "./useSidePanelSession";
 import "../styles.css";
@@ -109,7 +109,7 @@ export function App() {
   }
 
   if (session.configured) {
-    return <ConfiguredChat key={session.chatKey} config={session.config} jevConfig={session.jevConfigured ? session.jevConfig : undefined} logger={logger} onError={setFatal} />;
+    return <ConfiguredChat key={session.chatKey} config={session.config} systemPrompt={session.systemPrompt} logger={logger} onError={setFatal} />;
   }
 
   return (
@@ -126,7 +126,7 @@ export function App() {
   );
 }
 
-function ConfiguredChat({ config, jevConfig, logger, onError }: { config: ModelConfig; jevConfig?: JevConfig; logger: EventLogger; onError: (error: unknown) => void }) {
+function ConfiguredChat({ config, systemPrompt, logger, onError }: { config: ModelConfig; systemPrompt?: string; logger: EventLogger; onError: (error: unknown) => void }) {
   const [initialThreadId, setInitialThreadId] = useState<string | null>();
 
   useEffect(() => {
@@ -148,7 +148,7 @@ function ConfiguredChat({ config, jevConfig, logger, onError }: { config: ModelC
       </main>
     );
   }
-  return <ConfiguredRuntime config={config} jevConfig={jevConfig} logger={logger} initialThreadId={initialThreadId ?? undefined} />;
+  return <ConfiguredRuntime config={config} systemPrompt={systemPrompt} logger={logger} initialThreadId={initialThreadId ?? undefined} />;
 }
 
 function ReloadConversationList({ logger, config }: { logger: EventLogger; config: ModelConfig }) {
@@ -175,35 +175,33 @@ function ReloadConversationList({ logger, config }: { logger: EventLogger; confi
   return null;
 }
 
-function ConfiguredRuntime({ config, jevConfig, logger, initialThreadId }: { config: ModelConfig; jevConfig?: JevConfig; logger: EventLogger; initialThreadId?: string }) {
-  const runtime = useSidePanelRuntime(config, logger, initialThreadId);
+function ConfiguredRuntime({ config, systemPrompt, logger, initialThreadId }: { config: ModelConfig; systemPrompt?: string; logger: EventLogger; initialThreadId?: string }) {
+  const runtime = useSidePanelRuntime(config, systemPrompt, logger, initialThreadId);
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <ConfiguredConversation config={config} jevConfig={jevConfig} logger={logger} />
+      <ConfiguredConversation config={config} logger={logger} />
     </AssistantRuntimeProvider>
   );
 }
 
-function ConfiguredConversation({ config, jevConfig, logger }: { config: ModelConfig; jevConfig?: JevConfig; logger: EventLogger }) {
+function ConfiguredConversation({ config, logger }: { config: ModelConfig; logger: EventLogger }) {
   const threadId = useAuiState((state) => state.threads.mainThreadId);
   const drafts = useRef(new Map<string, string>());
   return (
     <main className="app-shell" data-testid="sidepanel-shell">
       <ReloadConversationList logger={logger} config={config} />
       <Header conversation logger={logger} />
-      <ConversationView key={threadId} config={config} jevConfig={jevConfig} logger={logger} threadId={threadId} drafts={drafts.current} />
+      <ConversationView key={threadId} config={config} logger={logger} threadId={threadId} drafts={drafts.current} />
     </main>
   );
 }
 
-function ConversationView({ config, jevConfig, logger, threadId, drafts }: { config: ModelConfig; jevConfig?: JevConfig; logger: EventLogger; threadId: string; drafts: Map<string, string> }) {
-  const aui = useAui();
+function ConversationView({ config, logger, threadId, drafts }: { config: ModelConfig; logger: EventLogger; threadId: string; drafts: Map<string, string> }) {
   const conversationId = useAuiState((state) => state.threadListItem.remoteId ?? state.threadListItem.id);
   const isRunning = useAuiState((state) => state.thread.isRunning);
   const [guardWarning, setGuardWarning] = useState("");
   const [contextStatus, setContextStatus] = useState<{ message: string; error: boolean }>();
   const [choicePending, setChoicePending] = useState(false);
-  const [proposal, setProposal] = useState<SelectionProposal>();
   const [choiceBusy, setChoiceBusy] = useState(false);
   const [choiceError, setChoiceError] = useState("");
   const refreshing = useRef(false);
@@ -266,15 +264,6 @@ function ConversationView({ config, jevConfig, logger, threadId, drafts }: { con
     catch (error) { if (!controller.signal.aborted) setChoiceError(error instanceof Error ? error.message : String(error)); }
     finally { choiceController.current = undefined; setChoiceBusy(false); }
   };
-  const commitSelection = async (choice: SelectionProposal, threshold?: number) => {
-    const childId = await forkSelection(logger, conversationId, choice, threshold);
-    setChoicePending(false);
-    setProposal(undefined);
-    await aui.threads.reload();
-    const ids = aui.threads.getState().threadIds;
-    const localId = ids.find((id) => aui.threads.item({ id }).getState().remoteId === childId) ?? childId;
-    aui.threads.switchToThread(localId);
-  };
   return (
     <>
       {guardWarning && <ErrorNotice role="status" summary={guardWarning} />}
@@ -282,26 +271,11 @@ function ConversationView({ config, jevConfig, logger, threadId, drafts }: { con
         ? <ErrorNotice testId="context-status" summary={contextStatus.message} />
         : <p role="status" data-testid="context-status">{contextStatus.message}</p>)}
       {choicePending && <section role="group" aria-label="上下文处理" data-testid="context-choice" className="conversation-notice">
-        <p>上下文已达到阈值。请选择 Jev 重选或 LLM 摘要后继续。</p>
-        {!jevConfig && <p>Jev 尚未配置。<button type="button" onClick={() => void chrome.runtime.openOptionsPage()}>打开设置</button></p>}
-        {proposal && proposal.estimated > proposal.inputThreshold && <p>
-          {proposal.minimumRaisedThreshold === undefined
-            ? "即使提高至 0.99，按当前估算仍无法达到上下文窗口的 30%；请改用摘要。"
-            : `按当前估算，临时最低保留评分至少提高到 ${proposal.minimumRaisedThreshold.toFixed(2)}，才能降至上下文窗口的 30%。`}
-        </p>}
+        <p>上下文已达到阈值。请生成 LLM 摘要后继续。</p>
         <div className="flex gap-2">
-          {jevConfig && !proposal && <Button type="button" disabled={choiceBusy} onClick={() => void runChoice(async (signal) => {
-            const next = await proposeJevSelection({ logger, conversationId, model: config, jev: jevConfig, signal });
-            if (next.estimated <= next.inputThreshold) await commitSelection(next);
-            else setProposal(next);
-          })}>Jev 重选</Button>}
-          {proposal?.minimumRaisedThreshold !== undefined && <Button type="button" disabled={choiceBusy} onClick={() => void runChoice(async () => {
-            await commitSelection(proposal, proposal.minimumRaisedThreshold);
-          })}>临时提高并创建新会话</Button>}
           <Button type="button" variant="outline" disabled={choiceBusy} onClick={() => void runChoice(async (signal) => {
             await applySummaryChoice(logger, conversationId, config, signal);
             setChoicePending(false);
-            setProposal(undefined);
           })}>LLM 摘要</Button>
         </div>
         {choiceBusy && <p role="status">正在处理上下文…</p>}

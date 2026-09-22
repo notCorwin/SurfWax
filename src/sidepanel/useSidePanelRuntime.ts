@@ -26,7 +26,7 @@ export function createSidePanelCloser(runtime: CloseableRuntime, logger?: EventL
   };
 }
 
-function useConversationRuntime(config: ModelConfig, logger: EventLogger, executor: ChromeExecutor): AssistantRuntime {
+function useConversationRuntime(config: ModelConfig, systemPrompt: string | undefined, logger: EventLogger, executor: ChromeExecutor): AssistantRuntime {
   const conversationId = useAuiState((state) => state.threadListItem.remoteId ?? state.threadListItem.id);
   const transport = useMemo(
     () => createChatTransport(async (signal, branchIds) => {
@@ -37,9 +37,10 @@ function useConversationRuntime(config: ModelConfig, logger: EventLogger, execut
       const languageModel = await createModel(config, logger, conversationId, { signal });
       signal.throwIfAborted();
       return createAgent({ model: config, languageModel, reasoning: reasoning.snapshot().selected ?? undefined, executor, logger, conversationId,
+        instructions: systemPrompt,
         compactor: new ContextCompactor({ model: config, logger, conversationId, branchIds, signal }) });
     }, logger, conversationId),
-    [config, conversationId, executor, logger],
+    [config, conversationId, executor, logger, systemPrompt],
   );
   const runtime = useChatRuntime<SidePanelMessage>({
     id: conversationId,
@@ -54,6 +55,7 @@ function useConversationRuntime(config: ModelConfig, logger: EventLogger, execut
 
 export function useSidePanelRuntime(
   config: ModelConfig,
+  systemPrompt: string | undefined,
   logger: EventLogger,
   initialThreadId?: string,
 ): AssistantRuntime {
@@ -62,7 +64,7 @@ export function useSidePanelRuntime(
   const runtime = useRemoteThreadListRuntime({
     adapter,
     initialThreadId,
-    runtimeHook: () => useConversationRuntime(config, logger, executor),
+    runtimeHook: () => useConversationRuntime(config, systemPrompt, logger, executor),
     onThreadIdChange: (conversationId) => {
       if (conversationId) logger.record({ type: "conversation.selected", conversationId, content: null });
     },

@@ -147,6 +147,7 @@ export const TOOL_SUMMARY = [
   `- act: ${ACT_DESCRIPTION}`,
   `- result: ${RESULT_DESCRIPTION}`,
 ].join("\n");
+const TOOL_CONTEXT = `Available tools:\n${TOOL_SUMMARY}`;
 
 export function parseCommandInput(name: CommandName, input: unknown): Record<string, unknown> {
   return definitions[name].inputSchema.parse(input) as Record<string, unknown>;
@@ -283,11 +284,19 @@ function scrubScreenshots(value: unknown, found: ScreenshotSource[]): unknown {
 export async function prepareToolMessages(messages: any[], stepNumber: number, browserContext?: string, readArtifact?: (id: number) => Promise<unknown>): Promise<any[]> {
   const inject = stepNumber > 0 && messages.at(-1)?.role === "tool";
   const current: ScreenshotSource[] = [];
-  const prepared = messages.map((message, index) => message.role !== "tool" || stepNumber > 0 && index !== messages.length - 1 ? message : { ...message, content: message.content.map((part: any) => {
+  const firstUser = messages.findIndex((message) => message.role === "user");
+  const withTools = firstUser < 0 ? messages : messages.map((message, index) => {
+    if (index !== firstUser) return message;
+    if (typeof message.content === "string") return message.content.includes(TOOL_CONTEXT)
+      ? message : { ...message, content: `${message.content}\n\n${TOOL_CONTEXT}` };
+    if (!Array.isArray(message.content) || message.content.some((part: any) => part.type === "text" && part.text === TOOL_CONTEXT)) return message;
+    return { ...message, content: [...message.content, { type: "text", text: TOOL_CONTEXT }] };
+  });
+  const prepared = withTools.map((message, index) => message.role !== "tool" || stepNumber > 0 && index !== withTools.length - 1 ? message : { ...message, content: message.content.map((part: any) => {
     if (part.type !== "tool-result" || part.output?.type !== "json") return part;
     const found: ScreenshotSource[] = [];
     const value = scrubScreenshots(part.output.value, found);
-    if (inject && index === messages.length - 1) current.push(...found);
+    if (inject && index === withTools.length - 1) current.push(...found);
     return { ...part, output: { ...part.output, value } };
   }) });
   const source = current.at(-1);

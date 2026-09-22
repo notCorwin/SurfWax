@@ -13,7 +13,7 @@ export const DEFAULT_JEV_CONFIG: JevConfig = {
 };
 
 export type ModelProfile = ModelConfig & { providerId: string; sdk: ModelSdk; providerSettings: Record<string, string> };
-export type PersistedModelConfig = { selectedProviderId: string; profiles: Record<string, ModelProfile> };
+export type PersistedModelConfig = { selectedProviderId: string; profiles: Record<string, ModelProfile>; systemPrompt?: string };
 export type PersistedJevConfig = JevConfig;
 export const EMPTY_MODEL_CONFIG: PersistedModelConfig = { selectedProviderId: "", profiles: {} };
 
@@ -67,7 +67,11 @@ export async function loadModelConfig(
           ? { contextWindowOverride: Number(profile.contextWindowOverride) } : {}),
       } satisfies ModelProfile]];
     }));
-    return { selectedProviderId: typeof candidate.selectedProviderId === "string" ? candidate.selectedProviderId : "", profiles };
+    return {
+      selectedProviderId: typeof candidate.selectedProviderId === "string" ? candidate.selectedProviderId : "",
+      profiles,
+      ...(typeof candidate.systemPrompt === "string" && candidate.systemPrompt.trim() ? { systemPrompt: candidate.systemPrompt } : {}),
+    };
   }
 
   const legacy = candidate as Partial<Record<keyof ModelConfig, unknown>>;
@@ -102,6 +106,7 @@ export async function saveModelConfig(
         imageInput: profile.imageInput ?? "auto",
         ...(profile.contextWindowOverride ? { contextWindowOverride: profile.contextWindowOverride } : {}),
       }])),
+      ...(config.systemPrompt?.trim() ? { systemPrompt: config.systemPrompt } : {}),
     } satisfies PersistedModelConfig,
   });
 }

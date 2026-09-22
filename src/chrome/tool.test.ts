@@ -22,6 +22,20 @@ describe("browser command tools", () => {
     for (const [name, tool] of Object.entries(tools)) expect(TOOL_SUMMARY).toContain(`- ${name}: ${tool.description}`);
   });
 
+  it("appends the tool catalog once to the first model-visible user message", async () => {
+    const stringMessages = [{ role: "user", content: "Do the task" }, { role: "assistant", content: "Working" }];
+    const first = await prepareToolMessages(stringMessages, 0);
+    expect(first[0].content).toBe(`Do the task\n\nAvailable tools:\n${TOOL_SUMMARY}`);
+    expect(await prepareToolMessages(first, 1)).toEqual(first);
+
+    const parts = await prepareToolMessages([{ role: "user", content: [{ type: "text", text: "Inspect this" }, { type: "file", data: "image" }] }], 0);
+    expect(parts[0].content).toEqual([
+      { type: "text", text: "Inspect this" },
+      { type: "file", data: "image" },
+      { type: "text", text: `Available tools:\n${TOOL_SUMMARY}` },
+    ]);
+  });
+
   it("repairs only lossless tool-name and stringified JSON mistakes", async () => {
     const tools = createCommandTools({} as ChromeExecutor);
     await expect(repairCommandToolCall({

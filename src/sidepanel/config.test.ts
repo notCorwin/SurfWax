@@ -73,6 +73,22 @@ describe("model config persistence", () => {
       vercel: { ...settings.profiles.vercel, imageInput: "auto" }, custom: { ...settings.profiles.custom, imageInput: "auto" },
     } });
   });
+
+  it("persists one global system prompt across provider profiles", async () => {
+    const storage = memoryStorage(MODEL_CONFIG_STORAGE_KEY);
+    const profiles = {
+      vercel: { providerId: "vercel", sdk: "@ai-sdk/gateway" as const, providerSettings: { apiKey: "vercel-key" }, baseURL: "https://ai-gateway.vercel.sh/v4/ai", model: "openai/gpt" },
+      custom: { providerId: "custom", sdk: "@ai-sdk/openai-compatible" as const, providerSettings: { apiKey: "custom-key" }, baseURL: "https://custom.test/v1", model: "custom-model" },
+    };
+    await saveModelConfig({ selectedProviderId: "vercel", profiles, systemPrompt: "  Preserve this prompt exactly.  " }, storage);
+    await expect(loadModelConfig(undefined, storage)).resolves.toMatchObject({
+      selectedProviderId: "vercel", systemPrompt: "  Preserve this prompt exactly.  ", profiles: { vercel: expect.any(Object), custom: expect.any(Object) },
+    });
+
+    await saveModelConfig({ selectedProviderId: "custom", profiles, systemPrompt: "   " }, storage);
+    expect(storage.value).not.toHaveProperty("systemPrompt");
+    await expect(loadModelConfig(undefined, storage)).resolves.not.toHaveProperty("systemPrompt");
+  });
 });
 
 describe("Jev config persistence", () => {
