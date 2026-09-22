@@ -1138,6 +1138,7 @@ test("shows live work, then folds it under elapsed time while keeping the final 
     await expect(opened.page.getByTestId("work-summary")).toHaveCount(0);
     const work = opened.page.getByTestId("work-summary");
     await expect(work.locator(":scope > summary")).toHaveText(/^工作了 \d+ 秒$/);
+    await expect(work.locator(":scope > summary svg")).toHaveCount(0);
     await expect(work).not.toHaveAttribute("open", "");
     await expect(work.locator(".activity")).toBeHidden();
     await expect(work).toContainText("PROGRESS_TEXT");

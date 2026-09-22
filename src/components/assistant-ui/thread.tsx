@@ -12,7 +12,7 @@ import {
   useAuiState,
 } from "@assistant-ui/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ArrowDownIcon, ChevronLeftIcon, ChevronRightIcon, ClockIcon, PencilIcon, RotateCcwIcon } from "lucide-react";
+import { ArrowDownIcon, ChevronLeftIcon, ChevronRightIcon, PencilIcon, RotateCcwIcon } from "lucide-react";
 import {
   type ComponentProps,
   type FC,
@@ -211,7 +211,7 @@ export const Thread: FC<{ config: ModelConfig; logger: EventLogger; conversation
                     const row = event.currentTarget.closest<HTMLElement>(".conversation-turn");
                     if (row) virtualizer.measureElement(row);
                   }}>
-                    <summary><ClockIcon aria-hidden="true" /><span>{workLabel(duration)}</span></summary>
+                    <summary><span>{workLabel(duration)}</span></summary>
                     <div className="work-summary-content">
                       {assistantIds.map((messageId) => <WorkViewContext.Provider key={messageId} value={{ mode: "process", finalMessageId }}>
                         <ThreadPrimitive.Unstable_MessageById messageId={messageId} components={MESSAGE_COMPONENTS} />
