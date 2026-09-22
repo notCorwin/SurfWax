@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { parseCommandTarget } from "./executor";
-import { COMMAND_NAMES, parseCommandInput, prepareToolMessages } from "./tool";
+import type { EventLogger } from "../logging";
+import { parseCommandTarget, type ChromeExecutor } from "./executor";
+import { COMMAND_NAMES, compactToolResult, CORE_TOOL_NAMES, createCommandTools, MODEL_COMMAND_NAMES, parseCommandInput, prepareToolMessages, repairCommandToolCall } from "./tool";
 
 describe("browser command tools", () => {
   it("registers exactly the 81 current-window commands", () => {
@@ -8,6 +9,37 @@ describe("browser command tools", () => {
     expect(new Set(COMMAND_NAMES).size).toBe(81);
     expect(COMMAND_NAMES).toEqual(expect.arrayContaining(["snapshot", "click", "run-code", "video-stop", "artifact-save"]));
     expect(COMMAND_NAMES.filter((name) => ["browser", "open", "attach", "close", "detach", "show", "list", "close-all", "kill-all"].includes(name))).toEqual([]);
+  });
+
+  it("exposes 22 stable core tools and defers advanced supported commands", () => {
+    const tools = createCommandTools({} as ChromeExecutor) as Record<string, any>;
+    expect(CORE_TOOL_NAMES).toHaveLength(22);
+    expect(MODEL_COMMAND_NAMES).toHaveLength(76);
+    expect(Object.keys(tools)).not.toEqual(expect.arrayContaining(["install", "install-browser", "pause-at", "resume", "step-over"]));
+    expect(tools["search-tools"].deferLoading).not.toBe(true);
+    expect(tools.eval.deferLoading).toBe(true);
+    expect(tools.snapshot.deferLoading).toBe(false);
+  });
+
+  it("repairs only lossless tool-name and stringified JSON mistakes", async () => {
+    const tools = createCommandTools({} as ChromeExecutor);
+    await expect(repairCommandToolCall({
+      toolCall: { toolCallId: "1", toolName: "TAB_LIST", input: JSON.stringify("{}") }, tools,
+    } as any)).resolves.toMatchObject({ toolName: "tab-list", input: "{}" });
+    await expect(repairCommandToolCall({
+      toolCall: { toolCallId: "2", toolName: "act", input: JSON.stringify({ steps: JSON.stringify([{ type: "goto", url: "https://example.com" }]) }) }, tools,
+    } as any)).resolves.toMatchObject({ toolName: "act", input: JSON.stringify({ steps: [{ type: "goto", url: "https://example.com" }] }) });
+  });
+
+  it("stores large non-visual results once and returns a useful reference", async () => {
+    const appended: any[] = [];
+    const logger = { append: async (event: any) => { appended.push(event); return { ...event, id: 9 }; } } as EventLogger;
+    const value = { snapshot: "x".repeat(9_000) };
+    await expect(compactToolResult(value, { logger, conversationId: "c", toolCallId: "t" })).resolves.toMatchObject({
+      $ref: 9, bytes: expect.any(Number), preview: "x".repeat(4000), access: { id: 9, path: ["snapshot"], offset: 0, limit: 4000 },
+    });
+    expect(appended).toHaveLength(1);
+    expect(appended[0].output).toBe(value);
   });
 
   it("strictly validates command-specific structured inputs", () => {
@@ -62,5 +94,7 @@ describe("browser command tools", () => {
     expect(prepared[1]).toMatchObject({ role: "user", content: [
       { type: "file", mediaType: "image/png", data: { type: "data", data: "image-7" } },
     ] });
+    const value = { snapshot: "x".repeat(9_000), screenshot: { mediaType: "image/png", artifactId: 7 } };
+    expect(await compactToolResult(value, { logger: { append: () => { throw new Error("must not compact visual results"); } } as unknown as EventLogger })).toBe(value);
   });
 });

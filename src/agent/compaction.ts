@@ -178,6 +178,14 @@ export class ContextCompactor {
     this.options.logger.record({ type: "context.estimate.calibrated", conversationId: this.options.conversationId, content: this.calibration });
   }
 
+  estimate(messages: readonly ModelMessage[]): number {
+    const current = estimateInput(messages);
+    const anchor = this.calibration?.inputTokens ?? this.calibration?.promptEstimate;
+    return Math.ceil(anchor && this.calibration?.baseEstimate
+      ? anchor + current - this.calibration.baseEstimate
+      : current);
+  }
+
   async prepare(rawMessages: ModelMessage[], stepNumber: number): Promise<ModelMessage[] | undefined> {
     const { model, logger, conversationId, signal, branchIds } = this.options;
     signal.throwIfAborted();

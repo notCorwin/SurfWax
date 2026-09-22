@@ -1,5 +1,5 @@
 import { isModelSdk, type ModelConfig, type ModelSdk } from "../types";
-import { defaultBaseURL, providerSettingFields, type ProviderSettingField } from "./model-sdks";
+import { defaultBaseURL, providerSettingFields, resolvedBaseURL, sdkFor, type ProviderSettingField } from "./model-sdks";
 
 const CACHE_KEY = "side-agent:model-limit";
 const CATALOG_CACHE_KEY = "side-agent:model-catalog";
@@ -13,7 +13,7 @@ export type ModelLimit = {
   context: number;
   input?: number;
   output?: number;
-  source: "models.dev" | "manual";
+  source: "models.dev" | "manual" | "estimated";
   reasoningEfforts?: string[];
   inputModalities?: string[];
 };
@@ -65,62 +65,35 @@ function normalize(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
-function distance(left: string, right: string): number {
-  const row = Array.from({ length: right.length + 1 }, (_, index) => index);
-  for (let i = 1; i <= left.length; i += 1) {
-    let previous = row[0]!;
-    row[0] = i;
-    for (let j = 1; j <= right.length; j += 1) {
-      const old = row[j]!;
-      row[j] = Math.min(row[j]! + 1, row[j - 1]! + 1, previous + Number(left[i - 1] !== right[j - 1]));
-      previous = old;
-    }
-  }
-  return row[right.length]!;
-}
-
 export function matchModel(catalog: ModelCatalog, baseURL: string, modelId: string, selectedProviderId?: string): ModelLimit | undefined {
   const requested = modelId.toLowerCase();
-  const requestedName = normalize(modelId.split("/").at(-1) ?? modelId);
+  const normalized = normalize(modelId);
   const host = hostname(baseURL);
-  let best: { score: number; match: ModelLimit } | undefined;
   for (const [providerId, provider] of Object.entries(catalog)) {
     const providerHost = hostname(provider.api ?? "");
-    const providerMatch = selectedProviderId === providerId
-      || Boolean(host && (host === providerHost || host.includes(providerId.replace(/-/g, ""))));
+    const providerMatch = selectedProviderId === providerId || Boolean(host && providerHost && host === providerHost);
+    if (!providerMatch) continue;
     for (const [id, details] of Object.entries(provider.models ?? {})) {
       const limit = details.limit;
       if (!validLimit(limit?.context)) continue;
-      const name = normalize(id.split("/").at(-1) ?? id);
-      const score = (id.toLowerCase() === requested ? 1_000_000 : 0)
-        + (normalize(id) === normalize(modelId) ? 100_000 : 0)
-        + (name === requestedName ? 10_000 : 0)
-        + (providerMatch ? 1_000 : 0)
-        - distance(requestedName, name) * 100
-        - Math.abs(name.length - requestedName.length);
-      if (!best || score > best.score || score === best.score && `${providerId}/${id}` < `${best.match.provider}/${best.match.model}`) {
-        best = {
-          score,
-          match: {
-            provider: providerId,
-            model: id,
-            context: limit.context,
-            ...(validLimit(limit.input) ? { input: limit.input } : {}),
-            ...(validLimit(limit.output) ? { output: limit.output } : {}),
-            ...((selectedProviderId === providerId || host === providerHost) && id.toLowerCase() === requested
-              ? {
-                inputModalities: details.modalities?.input,
-                reasoningEfforts: details.reasoning_options?.find((option) => option.type === "effort")?.values
-                  ?? (details.reasoning === false || details.reasoning_options ? [] : undefined),
-              }
-              : {}),
-            source: "models.dev",
-          },
-        };
-      }
+      const alias = typeof details.id === "string" ? details.id : undefined;
+      if (id.toLowerCase() !== requested && normalize(id) !== normalized && alias?.toLowerCase() !== requested && normalize(alias ?? "") !== normalized) continue;
+      return {
+        provider: providerId,
+        model: id,
+        context: limit.context,
+        ...(validLimit(limit.input) ? { input: limit.input } : {}),
+        ...(validLimit(limit.output) ? { output: limit.output } : {}),
+        ...(id.toLowerCase() === requested || alias?.toLowerCase() === requested ? {
+          inputModalities: details.modalities?.input,
+          reasoningEfforts: details.reasoning_options?.find((option) => option.type === "effort")?.values
+            ?? (details.reasoning === false || details.reasoning_options ? [] : undefined),
+        } : {}),
+        source: "models.dev",
+      };
     }
   }
-  return best?.match;
+  return undefined;
 }
 
 function normalizeCatalog(value: unknown): ModelCatalog {
@@ -224,7 +197,7 @@ export function resolveModelLimit(
   config: ModelConfig,
   options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal } = {},
 ): Promise<ModelLimit | undefined> {
-  const key = `${config.baseURL.trim()}\u0000${config.model.trim()}`;
+  const key = `${sdkFor(config)}\u0000${config.providerId ?? ""}\u0000${resolvedBaseURL(config)}\u0000${config.model.trim()}`;
   const storage = options.storage ?? (typeof chrome !== "undefined" ? chrome.storage?.local : undefined);
   const task = async () => {
     if (validLimit(config.contextWindowOverride)) {
@@ -235,12 +208,12 @@ export function resolveModelLimit(
     if (validCache && (options.now ?? Date.now)() - validCache.fetchedAt < REFRESH_MS) return validCache.match;
     try {
       const catalog = await loadModelCatalog(options);
-      const match = matchModel(catalog, config.baseURL, config.model, config.providerId);
+      const match = matchModel(catalog, resolvedBaseURL(config), config.model, config.providerId);
       if (match && storage) await storage.set({ [CACHE_KEY]: { key, fetchedAt: (options.now ?? Date.now)(), match } satisfies CachedLimit }).catch(() => undefined);
-      return match ?? validCache?.match;
+      return match ?? validCache?.match ?? { provider: "unknown", model: config.model, context: 262_144, source: "estimated" };
     } catch (error) {
       if (options.signal?.aborted) throw error;
-      return validCache?.match;
+      return validCache?.match ?? { provider: "unknown", model: config.model, context: 262_144, source: "estimated" };
     }
   };
   if (options.signal || options.fetch || options.storage || options.now) return task();

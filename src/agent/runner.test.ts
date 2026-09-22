@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV4, simulateReadableStream } from "ai/test";
 import type { ChromeExecutor } from "../chrome/executor";
-import { createAgent } from "./runner";
+import { createAgent, stagnationReason } from "./runner";
 
 function usage() {
   return {
@@ -11,6 +11,13 @@ function usage() {
 }
 
 describe("createAgent", () => {
+  it("detects repeated failures and read-only loops without stopping repeatable input", () => {
+    const step = (toolName: string, output: unknown) => ({ toolResults: [{ toolName, input: {}, output }] });
+    expect(stagnationReason([step("click", { ok: false, error: { code: "x" } }), step("click", { ok: false, error: { code: "x" } })])).toBe("repeated-failure");
+    expect(stagnationReason([step("snapshot", { text: "same" }), step("snapshot", { text: "same" }), step("snapshot", { text: "same" })])).toBe("repeated-read");
+    expect(stagnationReason([step("press", { ok: true }), step("press", { ok: true }), step("press", { ok: true })])).toBeUndefined();
+  });
+
   it("executes a dedicated command tool without adding a model turn", async () => {
     let step = 0;
     const prompts: string[] = [];
@@ -50,16 +57,42 @@ describe("createAgent", () => {
     expect(await result.text).toBe("done");
   }, 10_000);
 
-  it("continues beyond twenty tool calls until natural completion", async () => {
+  it("discovers an advanced tool only on the following step", async () => {
     let step = 0;
     const executor = {
-      executeCommand: vi.fn(async () => [{ id: 1, title: "test" }]),
+      executeCommand: vi.fn(async () => [{ name: "session" }]),
+      browserContext: vi.fn(async () => ({ windowId: 7, tabs: [{ index: 0, current: true, title: "test", url: "https://example.com" }] })),
+    } as unknown as ChromeExecutor;
+    const model = new MockLanguageModelV4({ doStream: async (options) => {
+      const names = (options.tools as any[]).map((tool) => tool.name);
+      step += 1;
+      if (step === 1) expect(names).not.toContain("cookie-list");
+      if (step === 2) expect(names).toContain("cookie-list");
+      const chunks = step === 1
+        ? [{ type: "stream-start", warnings: [] }, { type: "tool-call", toolCallId: "search", toolName: "search-tools", dynamic: false, input: JSON.stringify({ query: "cookie list" }) }, { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_calls" }, usage: usage() }]
+        : step === 2
+          ? [{ type: "stream-start", warnings: [] }, { type: "tool-call", toolCallId: "cookies", toolName: "cookie-list", dynamic: true, input: "{}" }, { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_calls" }, usage: usage() }]
+          : [{ type: "stream-start", warnings: [] }, { type: "text-start", id: "text" }, { type: "text-delta", id: "text", delta: "done" }, { type: "text-end", id: "text" }, { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: usage() }];
+      return { stream: simulateReadableStream({ chunks: chunks as any[] }) };
+    } });
+    const result = await createAgent({ model: { baseURL: "https://example.com/v1", model: "test" }, languageModel: model, executor }).stream({ prompt: "cookies" });
+    for await (const _ of result.stream) { /* consume */ }
+    expect(step).toBe(3);
+    expect(executor.executeCommand).toHaveBeenCalledWith("cookie-list", {}, undefined, expect.any(Object));
+  }, 10_000);
+
+  it("continues beyond twenty tool calls until natural completion", async () => {
+    let step = 0;
+    let toolResult = 0;
+    const executor = {
+      executeCommand: vi.fn(async () => [{ id: ++toolResult, title: "test" }]),
       browserContext: vi.fn(async () => ({ windowId: 7, tabs: [{ index: 0, current: true, title: "test", url: "https://example.com" }] })),
     } as unknown as ChromeExecutor;
     const model = new MockLanguageModelV4({
       doStream: async (options) => {
-        expect(options.reasoning).toBe("minimal");
-        expect((options.tools as any[])).toHaveLength(81);
+        expect(options.reasoning).toBeUndefined();
+        expect((options.tools as any[])).toHaveLength(22);
+        expect((options.tools as any[]).map((tool) => tool.name)).toEqual(expect.arrayContaining(["search-tools", "act", "result"]));
         expect((options.tools as any[]).map((tool) => tool.name)).not.toContain("browser");
         step += 1;
         const chunks = step > 25

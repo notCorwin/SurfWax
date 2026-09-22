@@ -38,7 +38,7 @@ export function endpointEfforts(catalog: unknown, modelId: string): ReasoningEff
 }
 
 export class ReasoningSettings {
-  private state: ReasoningState = { selected: "none", choices: REASONING_EFFORTS, source: "unknown", ready: false };
+  private state: ReasoningState = { selected: null, choices: REASONING_EFFORTS, source: "unknown", ready: false };
   private listeners = new Set<() => void>();
   private rejected = new Set<ReasoningEffort>();
   private manual = false;
@@ -65,7 +65,7 @@ export class ReasoningSettings {
   }
 
   private key(): string {
-    return `${this.config.baseURL.trim().replace(/\/+$/, "")}\u0000${this.config.model.trim()}`;
+    return `${sdkFor(this.config)}\u0000${this.config.providerId ?? ""}\u0000${resolvedBaseURL(this.config)}\u0000${this.config.model.trim()}`;
   }
 
   private storage(): Storage | undefined {
@@ -119,6 +119,12 @@ export class ReasoningSettings {
       this.fieldUnsupported = stored.fieldUnsupported === true;
       this.rejected = new Set(efforts(stored.rejected) ?? []);
     }
+    const initialChoices = this.fieldUnsupported ? [] : REASONING_EFFORTS.filter((effort) => !this.rejected.has(effort));
+    this.publish({ selected: this.fieldUnsupported ? null : manual ?? null, choices: initialChoices, source: "unknown", ready: true });
+    void this.discover().catch(() => undefined);
+  }
+
+  private async discover(): Promise<void> {
     const baseURL = resolvedBaseURL(this.config);
     const fetcher = this.options.fetch ?? globalThis.fetch.bind(globalThis);
     const sdk = sdkFor(this.config);
@@ -133,7 +139,10 @@ export class ReasoningSettings {
       : undefined;
     const source: ReasoningSource = endpoint !== undefined ? "endpoint" : catalog !== undefined ? "models.dev" : "unknown";
     const choices = this.fieldUnsupported ? [] : (endpoint ?? catalog ?? [...REASONING_EFFORTS]).filter((effort) => !this.rejected.has(effort));
-    const selected = choices.length ? (manual && choices.includes(manual) ? manual : choices[0]!) : null;
+    const manual = this.manual ? this.state.selected : null;
+    const selected = source === "unknown" && !manual ? null : choices.length ? (manual && choices.includes(manual) ? manual
+      : choices.includes("minimal") ? "minimal"
+        : choices.find((effort) => effort !== "none") ?? choices[0]!) : null;
     this.publish({ selected, choices, source, ready: true });
   }
 }
@@ -141,7 +150,7 @@ export class ReasoningSettings {
 const settings = new Map<string, ReasoningSettings>();
 
 export function reasoningSettingsFor(config: ModelConfig): ReasoningSettings {
-  const key = `${sdkFor(config)}\u0000${resolvedBaseURL(config)}\u0000${config.model.trim()}\u0000${settingsFor(config).apiKey}`;
+  const key = `${sdkFor(config)}\u0000${config.providerId ?? ""}\u0000${resolvedBaseURL(config)}\u0000${config.model.trim()}`;
   let current = settings.get(key);
   if (!current) {
     current = new ReasoningSettings(config);

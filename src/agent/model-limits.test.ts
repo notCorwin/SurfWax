@@ -40,9 +40,9 @@ describe("models.dev limit matching", () => {
       .resolves.toHaveProperty("openai");
   });
 
-  it("uses exact provider matches before fuzzy names and honors input limits", () => {
+  it("uses only exact provider/model matches and honors input limits", () => {
     expect(matchModel(catalog, "https://openrouter.ai/api/v1", "gpt-5")).toMatchObject({ provider: "openrouter", context: 100_000 });
-    expect(matchModel(catalog, "https://api.openai.com/v1", "gpt-5-min")?.model).toBe("gpt-5-mini");
+    expect(matchModel(catalog, "https://api.openai.com/v1", "gpt-5-min")).toBeUndefined();
     expect(inputBudget(matchModel(catalog, "https://api.openai.com/v1", "gpt-5")!)).toBe(272_000);
     expect(contextUsedPercent(136_000, matchModel(catalog, "https://api.openai.com/v1", "gpt-5")!)).toBe(50);
     expect(contextUsedPercent(999_999, matchModel(catalog, "https://api.openai.com/v1", "gpt-5")!)).toBe(100);
@@ -83,5 +83,15 @@ describe("models.dev limit matching", () => {
     await expect(resolveModelLimit({ ...config, contextWindowOverride: 42_000 }, { storage, fetch, now: () => 101 }))
       .resolves.toMatchObject({ context: 42_000, source: "manual" });
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses a conservative 256K estimate without inventing capabilities", async () => {
+    const storage = { async get() { return {}; }, async set() {} };
+    const estimated = await resolveModelLimit({ baseURL: "https://unknown.test/v1", model: "unknown" }, {
+      storage, fetch: vi.fn(async () => new Response(JSON.stringify(catalog))),
+    });
+    expect(estimated).toMatchObject({ context: 262_144, source: "estimated" });
+    expect(estimated).not.toHaveProperty("inputModalities");
+    expect(estimated).not.toHaveProperty("reasoningEfforts");
   });
 });

@@ -16,12 +16,28 @@ function isNetworkError(error: unknown): boolean {
 }
 
 function retryableStatus(status: number): boolean {
-  return status === 408 || status === 429 || status >= 500 && status <= 599;
+  return [408, 409, 425, 429, 500, 502, 503, 504].includes(status);
 }
 
 function retryDelay(attempt: number, random: () => number): number {
   const exponential = Math.min(MAX_RETRY_DELAY_MS, INITIAL_RETRY_DELAY_MS * 2 ** Math.min(attempt - 1, 6));
   return Math.min(MAX_RETRY_DELAY_MS, Math.round(exponential * (0.5 + random())));
+}
+
+function retryAfter(response: Response, now: () => number): number | undefined {
+  const value = response.headers.get("retry-after");
+  if (!value) return undefined;
+  const seconds = Number(value);
+  const delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - now();
+  return Number.isFinite(delay) ? Math.max(0, Math.min(MAX_RETRY_DELAY_MS, Math.round(delay))) : undefined;
+}
+
+async function responseDetails(response: Response): Promise<Record<string, unknown>> {
+  const headers = Object.fromEntries(response.headers.entries());
+  return {
+    responseBody: await response.clone().text().catch(() => ""), headers,
+    requestId: response.headers.get("x-request-id") ?? response.headers.get("request-id") ?? response.headers.get("cf-ray") ?? undefined,
+  };
 }
 
 function waitForRetry(delayMs: number, signal?: AbortSignal, sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))): Promise<void> {
@@ -110,6 +126,7 @@ export function createRetryingFetch(options: {
     const signal = originalRequest.signal;
     const startedAt = now();
     let retries = 0;
+    const typeErrors = new Map<string, number>();
 
     while (true) {
       try {
@@ -136,21 +153,23 @@ export function createRetryingFetch(options: {
         }
         if (!retryableStatus(response.status)) {
           if (response.ok && requestedReasoningEffort !== undefined && !options.reasoningSettings) supportedReasoningEffort = reasoningEffort;
+          const details = response.ok ? {} : await responseDetails(response);
           options.logger?.record({
             type: "request.completed",
             conversationId: options.conversationId,
-            content: { url, method, status: response.status, retries, reasoningEffort: reasoningEffort ?? "provider-default" },
+            content: { url, method, status: response.status, retries, reasoningEffort: reasoningEffort ?? "provider-default", ...details },
             latencyMs: Math.max(0, now() - startedAt),
           });
           return response;
         }
 
         retries += 1;
-        const delayMs = retryDelay(retries, random);
+        const delayMs = retryAfter(response, now) ?? retryDelay(retries, random);
+        const details = await responseDetails(response);
         options.logger?.record({
           type: "request.retry",
           conversationId: options.conversationId,
-          content: { url, method, status: response.status },
+          content: { url, method, status: response.status, ...details },
           retry: { attempt: retries, status: response.status, delayMs },
           latencyMs: Math.max(0, now() - startedAt),
         });
@@ -177,6 +196,19 @@ export function createRetryingFetch(options: {
             latencyMs: Math.max(0, now() - startedAt),
           });
           throw error;
+        }
+
+        const key = `${error instanceof Error ? error.name : typeof error}:${error instanceof Error ? error.message : String(error)}`;
+        const repeated = (typeErrors.get(key) ?? 0) + 1;
+        typeErrors.set(key, repeated);
+        const confirmedTransient = error instanceof Error && error.name === "NetworkError"
+          || typeof navigator !== "undefined" && navigator.onLine === false;
+        if (!confirmedTransient && error instanceof TypeError && repeated >= 3) {
+          const diagnostic = new Error(`Provider network request failed repeatedly; check the endpoint URL, CORS policy, Chrome host permissions, and provider configuration. Last error: ${error.message}`, { cause: error });
+          options.logger?.record({ type: "request.failed", conversationId: options.conversationId,
+            content: { url, method, attempts: repeated, diagnosis: "provider-network-or-cors", error: diagnostic }, error: diagnostic,
+            latencyMs: Math.max(0, now() - startedAt) });
+          throw diagnostic;
         }
 
         retries += 1;

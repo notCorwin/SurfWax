@@ -239,7 +239,15 @@ export function toLogValue(value: unknown, active = new WeakSet<object>()): Json
   active.add(value);
   try {
     if (value instanceof Error) {
-      return { $type: "error", name: value.name, message: value.message, stack: value.stack ?? null };
+      const details: Record<string, JsonValue> = { $type: "error", name: value.name, message: value.message, stack: value.stack ?? null };
+      for (const key of ["statusCode", "status", "responseBody", "responseText", "headers", "requestId", "data", "cause", "providerMetadata"]) {
+        try {
+          const item = (value as unknown as Record<string, unknown>)[key];
+          if (item !== undefined) details[key] = item instanceof Headers ? toLogValue(Object.fromEntries(item.entries()), active) : toLogValue(item, active);
+        } catch { /* Ignore throwing provider error getters. */ }
+      }
+      for (const [key, item] of Object.entries(value)) if (!(key in details)) details[key] = toLogValue(item, active);
+      return details;
     }
     if (value instanceof Date) return { $type: "date", value: Number.isNaN(value.getTime()) ? "Invalid Date" : value.toISOString() };
     if (value instanceof ArrayBuffer) return { $type: "array-buffer", byteLength: value.byteLength, base64: bytesToBase64(new Uint8Array(value)) };

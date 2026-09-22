@@ -1,6 +1,7 @@
-import { dynamicTool } from "ai";
+import { dynamicTool, toolSearch, type ToolCallRepairFunction } from "ai";
 import { z } from "zod";
 import type { EventLogger } from "../logging";
+import type { BrowserInput } from "../types";
 import type { ChromeExecutor } from "./executor";
 
 export const COMMAND_NAMES = [
@@ -14,6 +15,16 @@ export const COMMAND_NAMES = [
 ] as const;
 
 export type CommandName = typeof COMMAND_NAMES[number];
+
+export const UNAVAILABLE_COMMAND_NAMES = ["install", "install-browser", "pause-at", "resume", "step-over"] as const satisfies readonly CommandName[];
+export const CORE_TOOL_NAMES = [
+  "search-tools", "snapshot", "find", "goto", "go-back", "go-forward", "reload", "click", "fill", "type", "press", "select", "check", "uncheck",
+  "tab-list", "tab-new", "tab-select", "tab-close", "screenshot", "run-code", "act", "result",
+] as const;
+
+const unavailable = new Set<CommandName>(UNAVAILABLE_COMMAND_NAMES);
+export const MODEL_COMMAND_NAMES = COMMAND_NAMES.filter((name) => !unavailable.has(name));
+const core = new Set<string>(CORE_TOOL_NAMES);
 
 const timeoutMs = z.number().int().positive().max(300_000).optional();
 const common = { timeoutMs };
@@ -29,6 +40,30 @@ export const commandTargetSchema = z.union([z.string().min(1), targetObject]);
 const file = z.object({ name: z.string().min(1), mimeType: z.string().min(1).optional(), text: z.string().optional(), base64: z.string().optional(), url: z.string().url().optional(), artifactId: z.number().int().positive().optional() }).strict()
   .refine((value) => [value.text, value.base64, value.url, value.artifactId].filter((item) => item !== undefined).length === 1, "Exactly one of text, base64, url, or artifactId is required");
 const files = z.array(file).min(1);
+const browserStepSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("goto"), url: z.string().url() }).strict(),
+  ...(["click", "doubleClick", "hover"] as const).map((kind) => z.object({ type: z.literal(kind), target: targetObject }).strict()),
+  z.object({ type: z.literal("fill"), target: targetObject, value: z.string() }).strict(),
+  z.object({ type: z.literal("clear"), target: targetObject }).strict(),
+  z.object({ type: z.literal("press"), target: targetObject.optional(), key: z.string().min(1) }).strict(),
+  z.object({ type: z.literal("insertText"), target: targetObject.optional(), text: z.string() }).strict(),
+  z.object({ type: z.literal("select"), target: targetObject, values: z.array(z.string()).min(1) }).strict(),
+  z.object({ type: z.literal("check"), target: targetObject, checked: z.boolean().optional() }).strict(),
+  z.object({ type: z.literal("drag"), from: targetObject, to: targetObject }).strict(),
+  z.object({ type: z.literal("upload"), target: targetObject, files }).strict(),
+  z.object({
+    type: z.literal("expect"), target: targetObject.optional(),
+    state: z.enum(["attached", "detached", "visible", "hidden", "enabled", "editable", "checked"]).optional(),
+    text: z.string().optional(), value: z.string().optional(), url: z.string().optional(),
+  }).strict().refine((value) => Boolean(value.url || value.target && (value.state || value.text !== undefined || value.value !== undefined)), "expect requires url or a target condition"),
+]);
+export const actInputSchema = z.object({
+  observationId: z.string().min(1).optional(), steps: z.array(browserStepSchema).min(1).max(100), timeoutMs,
+}).strict();
+export const resultInputSchema = z.object({
+  id: z.number().int().positive(), path: z.union([z.string(), z.array(z.union([z.string(), z.number().int()]))]).optional(),
+  offset: z.number().int().nonnegative().optional(), limit: z.number().int().nonnegative().optional(),
+}).strict();
 const empty = () => z.object(common).strict();
 const target = (required = true) => required ? commandTargetSchema : commandTargetSchema.optional();
 const index = z.number().int().nonnegative();
@@ -124,21 +159,117 @@ export function parseCommandInput(name: CommandName, input: unknown): Record<str
   return definitions[name].inputSchema.parse(input) as Record<string, unknown>;
 }
 
+const LARGE_RESULT_BYTES = 8 * 1024;
+
+function hasScreenshot(value: unknown): boolean {
+  return Boolean(value && typeof value === "object" && ("screenshot" in value && (typeof (value as any).screenshot?.data === "string" || Number.isSafeInteger((value as any).screenshot?.artifactId)) || Object.values(value).some(hasScreenshot)));
+}
+
+function valueAt(value: unknown, path: readonly (string | number)[]): unknown {
+  return path.reduce<unknown>((current, part) => current !== null && typeof current === "object" ? (current as any)[part] : undefined, value);
+}
+
+function readablePathOf(value: unknown): Array<string | number> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  for (const path of [["snapshot"], ["observation", "snapshot"], ["text"], ["html"]] as const) {
+    const selected = valueAt(value, path);
+    if (typeof selected === "string" || Array.isArray(selected)) return [...path];
+  }
+  const key = Object.keys(value).find((candidate) => typeof (value as Record<string, unknown>)[candidate] === "string" || Array.isArray((value as Record<string, unknown>)[candidate]));
+  return key ? [key] : undefined;
+}
+
+function previewOf(value: unknown, path?: readonly (string | number)[]): unknown {
+  const selected = path ? valueAt(value, path) : value;
+  if (typeof selected === "string") return selected.slice(0, 4000);
+  if (Array.isArray(selected)) return selected.slice(0, 50);
+  if (selected && typeof selected === "object") return Object.fromEntries(Object.entries(selected).slice(0, 16));
+  return selected;
+}
+
+export async function compactToolResult(value: unknown, options: { logger?: EventLogger; conversationId?: string; toolCallId?: string }): Promise<unknown> {
+  if ((value && typeof value === "object" && "$ref" in value) || !options.logger || hasScreenshot(value)) return value;
+  let serialized: string | undefined;
+  try { serialized = JSON.stringify(value); } catch { return value; }
+  if (serialized === undefined) return value;
+  const bytes = new TextEncoder().encode(serialized).byteLength;
+  if (bytes <= LARGE_RESULT_BYTES) return value;
+  const event = await options.logger.append({ type: "tool.result.data", conversationId: options.conversationId, toolCallId: options.toolCallId, content: { bytes }, output: value });
+  if (!event) throw new Error("Could not save large tool result");
+  const path = readablePathOf(value);
+  const selected = path ? valueAt(value, path) : value;
+  const access = { id: event.id, ...(path ? { path } : {}), ...(typeof selected === "string" ? { offset: 0, limit: 4000 } : Array.isArray(selected) ? { offset: 0, limit: 50 } : {}) };
+  return { $ref: event.id, bytes, preview: previewOf(value, path), access, type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value };
+}
+
+function toolFailure(error: unknown): { ok: false; error: { code: string; message: string; retryable: boolean } } {
+  const message = error instanceof Error ? error.message : String(error);
+  const code = error instanceof DOMException && error.name === "AbortError" ? "aborted" : /(?:Command|Automation)Error\[([^\]]+)\]/.exec(message)?.[1] ?? "tool-error";
+  return { ok: false, error: { code, message, retryable: code === "timeout" } };
+}
+
 export function createCommandTools(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string; visualEnabled?: () => Promise<boolean> } = {}) {
-  return Object.fromEntries(COMMAND_NAMES.map((name) => {
+  const context = async (toolCallId: string) => ({
+    conversationId: options.conversationId, toolCallId, visualEnabled: await options.visualEnabled?.() ?? false,
+  });
+  const run = async (operation: () => Promise<unknown>, toolCallId: string, compact = true) => {
+    try {
+      const raw = await operation();
+      const result = raw && typeof raw === "object" && (raw as any).ok === false && (raw as any).error
+        ? { ...(raw as Record<string, unknown>), error: { ...(raw as any).error, retryable: (raw as any).error.retryable ?? (raw as any).error.code === "timeout" } }
+        : raw;
+      return compact ? compactToolResult(result, { ...options, toolCallId }) : result;
+    } catch (error) {
+      return toolFailure(error);
+    }
+  };
+  const commands = Object.fromEntries(MODEL_COMMAND_NAMES.map((name) => {
     const definition = definitions[name];
     return [name, dynamicTool({
       description: definition.description,
       inputSchema: definition.inputSchema,
       needsApproval: false,
-      execute: async (input, { abortSignal, toolCallId }) => executor.executeCommand(name, parseCommandInput(name, input), abortSignal, {
-        conversationId: options.conversationId,
-        toolCallId,
-        visualEnabled: await options.visualEnabled?.() ?? false,
-      }),
+      deferLoading: !core.has(name),
+      execute: async (input, { abortSignal, toolCallId }) => run(
+        async () => executor.executeCommand(name, parseCommandInput(name, input), abortSignal, await context(toolCallId)), toolCallId,
+      ),
     })];
-  })) as Record<CommandName, ReturnType<typeof dynamicTool>>;
+  }));
+  return {
+    "search-tools": toolSearch(),
+    ...commands,
+    act: dynamicTool({
+      description: "Execute 1-100 deterministic browser steps as one batch. Prefer a dedicated command for one action; use act for two or more related actions and include expect steps for outcomes.",
+      inputSchema: actInputSchema, needsApproval: false,
+      execute: async (input, { abortSignal, toolCallId }) => run(async () => executor.executeBrowser({ mode: "act", ...actInputSchema.parse(input) } as BrowserInput, abortSignal, await context(toolCallId)), toolCallId),
+    }),
+    result: dynamicTool({
+      description: "Read an exact slice or path from a large tool result stored in the canonical event log. Use the access object returned with $ref.",
+      inputSchema: resultInputSchema, needsApproval: false,
+      execute: async (input, { abortSignal, toolCallId }) => run(async () => executor.executeBrowser({ mode: "result", ...resultInputSchema.parse(input) } as BrowserInput, abortSignal, await context(toolCallId)), toolCallId, false),
+    }),
+  };
 }
+
+export const repairCommandToolCall: ToolCallRepairFunction<Record<string, ReturnType<typeof dynamicTool>>> = async ({ toolCall, tools }) => {
+  const normalize = (value: string) => value.toLowerCase().replace(/_/g, "-");
+  let toolName = toolCall.toolName;
+  if (!Object.hasOwn(tools, toolName)) {
+    const matches = Object.keys(tools).filter((name) => normalize(name) === normalize(toolName));
+    if (matches.length !== 1) return null;
+    toolName = matches[0]!;
+  }
+  let input: unknown;
+  try {
+    input = JSON.parse(toolCall.input);
+    if (typeof input === "string") input = JSON.parse(input);
+    if (toolName === "act" && input && typeof input === "object" && typeof (input as any).steps === "string") {
+      input = { ...(input as Record<string, unknown>), steps: JSON.parse((input as any).steps) };
+    }
+  } catch { return null; }
+  const repaired = JSON.stringify(input);
+  return toolName === toolCall.toolName && repaired === toolCall.input ? null : { ...toolCall, toolName, input: repaired };
+};
 
 type ScreenshotSource = { mediaType: string; data?: string; artifactId?: number };
 
@@ -161,7 +292,7 @@ function scrubScreenshots(value: unknown, found: ScreenshotSource[]): unknown {
 export async function prepareToolMessages(messages: any[], stepNumber: number, browserContext?: string, readArtifact?: (id: number) => Promise<unknown>): Promise<any[]> {
   const inject = stepNumber > 0 && messages.at(-1)?.role === "tool";
   const current: ScreenshotSource[] = [];
-  const prepared = messages.map((message, index) => message.role !== "tool" ? message : { ...message, content: message.content.map((part: any) => {
+  const prepared = messages.map((message, index) => message.role !== "tool" || stepNumber > 0 && index !== messages.length - 1 ? message : { ...message, content: message.content.map((part: any) => {
     if (part.type !== "tool-result" || part.output?.type !== "json") return part;
     const found: ScreenshotSource[] = [];
     const value = scrubScreenshots(part.output.value, found);

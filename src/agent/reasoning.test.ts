@@ -12,7 +12,7 @@ function storage() {
 }
 
 describe("reasoning settings", () => {
-  it("reads exact endpoint options ahead of Models.dev, including none", async () => {
+  it("becomes ready from local state, then applies exact endpoint options", async () => {
     const fetch = vi.fn(async () => new Response(JSON.stringify({ data: [
       { id: "other", reasoning: { supported_efforts: ["high"] } },
       { id: "test-model", reasoning: { supported_efforts: ["high", "none", "low"] } },
@@ -22,7 +22,8 @@ describe("reasoning settings", () => {
       modelLimit: async () => ({ provider: "provider", model: "test-model", context: 1000, source: "models.dev", reasoningEfforts: ["medium"] }),
     });
     await settings.ready;
-    expect(settings.snapshot()).toMatchObject({ selected: "none", choices: ["none", "low", "high"], source: "endpoint" });
+    expect(settings.snapshot()).toMatchObject({ selected: null, source: "unknown", ready: true });
+    await vi.waitFor(() => expect(settings.snapshot()).toMatchObject({ selected: "low", choices: ["none", "low", "high"], source: "endpoint" }));
     expect(endpointEfforts({ data: [{ id: "different", reasoning: { supported_efforts: ["high"] } }] }, "test-model")).toBeUndefined();
     expect(endpointEfforts({ data: [{ id: "test-model", reasoning: { supported_efforts: null, mandatory: true } }] }, "test-model"))
       .toEqual(["minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -37,7 +38,7 @@ describe("reasoning settings", () => {
     };
     const first = new ReasoningSettings(config, options);
     await first.ready;
-    expect(first.snapshot()).toMatchObject({ selected: "low", source: "models.dev" });
+    await vi.waitFor(() => expect(first.snapshot()).toMatchObject({ selected: "low", source: "models.dev" }));
     first.select("high");
     await vi.waitFor(async () => expect((await local.get("side-agent:reasoning-selections"))["side-agent:reasoning-selections"]).toBeTruthy());
     const restored = new ReasoningSettings(config, options);
@@ -45,20 +46,21 @@ describe("reasoning settings", () => {
     expect(restored.snapshot().selected).toBe("high");
     expect(restored.reject("high", ["low"])).toBe("low");
     expect(restored.snapshot().selected).toBe("low");
-    await vi.waitFor(async () => expect(((await local.get("side-agent:reasoning-selections"))["side-agent:reasoning-selections"] as Record<string, any>)["https://provider.test/v1\u0000test-model"].rejected).toContain("high"));
+    const key = "@ai-sdk/openai-compatible\u0000\u0000https://provider.test/v1\u0000test-model";
+    await vi.waitFor(async () => expect(((await local.get("side-agent:reasoning-selections"))["side-agent:reasoning-selections"] as Record<string, any>)[key].rejected).toContain("high"));
     const learned = new ReasoningSettings(config, options);
     await learned.ready;
-    expect(learned.snapshot()).toMatchObject({ selected: "low", choices: ["low"] });
+    await vi.waitFor(() => expect(learned.snapshot()).toMatchObject({ selected: "low", choices: ["low"] }));
   });
 
-  it("marks absent metadata as unknown and uses tentative lowest effort", async () => {
+  it("omits reasoning when metadata is unknown", async () => {
     const settings = new ReasoningSettings(config, {
       fetch: vi.fn(async () => new Response("not found", { status: 404 })),
       modelLimit: async () => undefined,
     });
     await settings.ready;
-    expect(settings.snapshot()).toMatchObject({ selected: "none", source: "unknown" });
-    expect(settings.reject("none")).toBe("minimal");
+    await vi.waitFor(() => expect(settings.snapshot()).toMatchObject({ selected: null, source: "unknown" }));
+    expect(settings.reject("minimal")).toBe("none");
     expect(settings.reject("minimal", undefined, true)).toBeNull();
     expect(settings.snapshot()).toMatchObject({ selected: null, choices: [] });
   });

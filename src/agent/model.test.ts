@@ -134,6 +134,24 @@ describe("createRetryingFetch", () => {
     expect(bodies).toEqual(["{}", "{}"]);
   });
 
+  it("honors capped Retry-After and fails fast for permanent statuses", async () => {
+    const sleep = vi.fn(async () => undefined);
+    const responses = [new Response("slow", { status: 429, headers: { "Retry-After": "30" } }), new Response("ok")];
+    expect((await createRetryingFetch({ fetch: vi.fn(async () => responses.shift()!), sleep })("https://provider.test")).status).toBe(200);
+    expect(sleep).toHaveBeenCalledWith(10_000);
+
+    const permanent = vi.fn(async () => new Response("unsupported", { status: 501 }));
+    expect((await createRetryingFetch({ fetch: permanent })("https://provider.test")).status).toBe(501);
+    expect(permanent).toHaveBeenCalledOnce();
+  });
+
+  it("surfaces repeated ambiguous TypeErrors with provider diagnostics", async () => {
+    const fetch = vi.fn(async () => { throw new TypeError("Failed to fetch"); });
+    await expect(createRetryingFetch({ fetch, sleep: async () => undefined })("https://provider.test"))
+      .rejects.toThrow(/CORS policy/);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
   it("uses and remembers the lowest reasoning effort accepted by the endpoint", async () => {
     const efforts: unknown[] = [];
     const fetch = vi.fn(async (input: RequestInfo | URL) => {
@@ -184,7 +202,7 @@ describe("createRetryingFetch", () => {
     expect(mixedError).toHaveBeenCalledOnce();
   });
 
-  it("starts at none, learns only from explicit rejection, and logs the effective effort", async () => {
+  it("uses the provider default when reasoning capability is unknown", async () => {
     const attempts: Array<unknown> = [];
     const settings = new ReasoningSettings({ baseURL: "https://provider.test/v1", model: "test-model", apiKey: "key" }, {
       fetch: vi.fn(async () => new Response("missing", { status: 404 })),
@@ -201,10 +219,10 @@ describe("createRetryingFetch", () => {
     const request = () => new Request("https://provider.test/v1/chat/completions", { method: "POST", body: JSON.stringify({ reasoning_effort: "minimal" }) });
     expect((await fetch(request())).status).toBe(200);
     expect((await fetch(request())).status).toBe(200);
-    expect(attempts).toEqual(["none", "low", "low"]);
-    expect(settings.snapshot()).toMatchObject({ selected: "low", choices: ["low", "high"] });
+    expect(attempts).toEqual([undefined, undefined]);
+    expect(settings.snapshot()).toMatchObject({ selected: null, source: "unknown" });
     await logger.flush();
-    expect(events.find((event) => event.type === "request.retry")?.content).toMatchObject({ rejectedReasoningEffort: "none", reasoningEffort: "low" });
-    expect(events.find((event) => event.type === "request.completed")?.content).toMatchObject({ reasoningEffort: "low" });
+    expect(events.find((event) => event.type === "request.retry")).toBeUndefined();
+    expect(events.find((event) => event.type === "request.completed")?.content).toMatchObject({ reasoningEffort: "provider-default" });
   });
 });

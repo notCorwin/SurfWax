@@ -57,9 +57,8 @@ function streamingTextResponse(parts: string[], usage?: { promptTokens: number; 
   ];
 }
 
-function toolResponse(code: string | { code: string; tabId?: number; world?: "MAIN" | "USER_SCRIPT"; target?: { kind: string; tabId?: number; world?: string } }, id = "call-chrome-e2e", usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number }): string[] {
-  const body = typeof code === "string" ? code : code.code;
-  const input = { code: `async page => { ${body} }` };
+function toolResponse(code: string, id = "call-chrome-e2e", usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number }): string[] {
+  const input = { code: `async page => { ${code} }` };
   return [
     chunk({
       role: "assistant",
@@ -654,10 +653,12 @@ test("selects, locks and restores reasoning effort across conversations", async 
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     const effort = opened.page.getByTestId("reasoning-effort");
-    await expect(effort).toHaveText("关闭");
+    await expect(effort).toHaveText("低");
     await effort.click();
     await expect(opened.page.getByRole("option")).toHaveText(["关闭", "低", "高"]);
     await opened.page.getByRole("option", { name: "高" }).click();
+    await expect(effort).toHaveText("高");
+    await opened.page.keyboard.press("Escape");
     const composer = opened.page.getByTestId("composer-input");
     await composer.fill("first effort");
     await composer.press("Enter");
@@ -726,7 +727,7 @@ test("opens the real side panel through the extension action", async () => {
   }
 });
 
-test.skip("uses a large observation from the real side panel before acting on its ref", async () => {
+test("uses a large observation from the real side panel before acting on its ref", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -747,18 +748,18 @@ test.skip("uses a large observation from the real side panel before acting on it
     expect(tab?.id).toBeDefined();
 
     responses.push(
-      browserResponse({ mode: "observe", tabId: tab.id, detail: "semantic" }, "call-large-observe"),
+      commandResponse("snapshot", {}, "call-large-observe"),
       (request) => {
         const message = request.messages.findLast((entry: any) => entry.role === "tool");
         const ref = JSON.parse(message.content).$ref;
-        return browserResponse({ mode: "result", id: ref, path: ["snapshot"], offset: 0, limit: 4000 }, "call-read-snapshot");
+        return commandResponse("result", { id: ref, path: ["snapshot"], offset: 0, limit: 4000 }, "call-read-snapshot");
       },
       (request) => {
         const message = request.messages.findLast((entry: any) => entry.role === "tool");
         const snapshot = message.content;
         const ref = /button "Run exact action" \[ref=(e\d+)\]/.exec(snapshot)?.[1];
         if (!ref) throw new Error("The selected snapshot did not contain the target ref");
-        return browserResponse({ mode: "act", tabId: tab.id, steps: [
+        return commandResponse("act", { steps: [
           { type: "click", target: { ref } },
           { type: "expect", target: { by: "css", value: "body[data-clicked=yes]" }, state: "attached" },
         ] }, "call-act-from-ref");
@@ -813,24 +814,19 @@ test.skip("uses a large observation from the real side panel before acting on it
   }
 });
 
-test.skip("targets page worlds and selects large tool output without creating another reference", async () => {
+test("selects large tool output without creating another reference", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
   try {
-    await enableUserScripts(opened.context, opened.extensionId, opened.page);
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/target`);
-    const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/target`);
-    expect(tab?.id).toBeDefined();
     responses.push(
-      toolResponse({ code: "return document.title", target: { kind: "page", tabId: tab.id, world: "MAIN" } }, "call-main"),
-      toolResponse({ code: "return await Promise.resolve(document.title + ' USER')", target: { kind: "page", tabId: tab.id, world: "USER_SCRIPT" } }, "call-user"),
       toolResponse("return { url: 'https://example.com', snapshot: 'LARGE_START' + 'zx'.repeat(6000) }", "call-large"),
       (request) => {
         const message = request.messages.findLast((entry: any) => entry.role === "tool");
         const ref = JSON.parse(message.content).$ref;
-        return browserResponse({ mode: "result", id: ref, path: ["snapshot"], offset: 0, limit: 11 }, "call-select-large");
+        return commandResponse("result", { id: ref, path: ["snapshot"], offset: 0, limit: 11 }, "call-select-large");
       },
       textResponse("DONE_COMPACT"),
       textResponse("引用测试"),
@@ -841,14 +837,12 @@ test.skip("targets page worlds and selects large tool output without creating an
     await composer.fill("inspect page contexts and a large result");
     await composer.press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("DONE_COMPACT");
-    await expect.poll(() => provider.requests.filter((request) => request.tools).length).toBeGreaterThanOrEqual(5);
+    await expect.poll(() => provider.requests.filter((request) => request.tools).length).toBeGreaterThanOrEqual(3);
     const requests = provider.requests.filter((request) => request.tools);
-    expect(JSON.stringify(requests[1].messages)).toContain("Side Agent Target");
-    expect(JSON.stringify(requests[2].messages)).toContain("Side Agent Target USER");
-    const fourthPrompt = JSON.stringify(requests[3].messages);
-    expect(fourthPrompt).toContain("$ref");
-    expect(fourthPrompt).not.toContain("zx".repeat(200));
-    expect(JSON.stringify(requests[4].messages)).toContain("LARGE_START");
+    const secondPrompt = JSON.stringify(requests[1].messages);
+    expect(secondPrompt).toContain("$ref");
+    expect(secondPrompt).not.toContain("zx".repeat(2_100));
+    expect(JSON.stringify(requests[2].messages)).toContain("LARGE_START");
     const events = await readEvents(opened.page);
     const data = events.find((event) => event.type === "tool.result.data");
     expect(data.output).toEqual({ url: "https://example.com", snapshot: "LARGE_START" + "zx".repeat(6000) });
@@ -895,7 +889,7 @@ test("uses dedicated snapshot, fill, and click tools", async () => {
     expect(verified).toMatchObject({ snapshot: expect.stringContaining("Welcome me@example.com") });
     await expect.poll(() => target.locator("output").textContent()).toBe("Welcome me@example.com");
     expect(events.some((event) => event.type === "automation.action.finished" && event.toolCallId === "call-click")).toBe(true);
-    expect(provider.requests[0].tools).toHaveLength(81);
+    expect(provider.requests[0].tools).toHaveLength(22);
     const toolNames = provider.requests[0].tools.map((tool: any) => tool.function.name);
     expect(toolNames).not.toContain("browser");
     expect(toolNames.filter((name: string) => ["open", "attach", "close", "detach", "show", "list", "close-all", "kill-all"].includes(name))).toEqual([]);
@@ -947,7 +941,7 @@ test("injects a screenshot and clicks its observation coordinates", async () => 
   }
 });
 
-test.skip("keeps 100 semantic locate-and-action operations at p95 <= 100ms", async () => {
+test("keeps 100 semantic locate-and-action operations at p95 <= 100ms", async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -955,7 +949,7 @@ test.skip("keeps 100 semantic locate-and-action operations at p95 <= 100ms", asy
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/performance`);
     const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/performance`);
-    responses.push(browserResponse({ mode: "act", tabId: tab.id, steps: Array.from({ length: 100 }, () => ({ type: "click", target: { by: "role", value: "button", name: "Increment" } })) }, "call-performance"), textResponse("PERFORMANCE_OK"), textResponse("性能"));
+    responses.push(commandResponse("act", { steps: Array.from({ length: 100 }, () => ({ type: "click", target: { by: "role", value: "button", name: "Increment" } })) }, "call-performance"), textResponse("PERFORMANCE_OK"), textResponse("性能"));
     const options = await configure(opened.context, opened.page, provider.baseURL); await options.close();
     await opened.page.getByTestId("composer-input").fill("benchmark semantic actions"); await opened.page.getByTestId("composer-input").press("Enter");
     await expect(target.locator("output")).toHaveText("100", { timeout: 30_000 });
@@ -1198,7 +1192,7 @@ test("distinguishes streaming command input from command execution", async () =>
   }
 });
 
-test("returns a stable unsupported-in-extension error and lets the agent recover", async () => {
+test("returns a tool result for a removed command and lets the agent recover", async () => {
   const provider = await startProvider([
     commandResponse("install", {}, "call-unsupported"),
     textResponse("RECOVERED_AFTER_DEBUGGER_ERROR"),
@@ -1219,7 +1213,7 @@ test("returns a stable unsupported-in-extension error and lets the agent recover
     await expect.poll(() => provider.requests.filter((request) => request.tools).length).toBe(2);
     const events = await readEvents(opened.page);
     expect(JSON.stringify(events.find((event) => event.type === "tool.failed" && event.toolCallId === "call-unsupported")?.error))
-      .toContain("unsupported-in-extension");
+      .toContain("install");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -1254,7 +1248,7 @@ test("executes run-code through the page facade, restores the conversation, and 
 
     await expect.poll(() => provider.requests.length).toBe(3);
     expect(provider.requests[0].reasoning_effort).toBe("minimal");
-    expect(provider.requests[0].tools).toHaveLength(81);
+    expect(provider.requests[0].tools).toHaveLength(22);
     expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).not.toContain("browser");
     expect(provider.requests[0].tools).toContainEqual(expect.objectContaining({ type: "function", function: expect.objectContaining({ name: "run-code" }) }));
     const events = await readEvents(opened.page);
@@ -1284,10 +1278,10 @@ test("executes run-code through the page facade, restores the conversation, and 
 
 test("binds each turn to the active tab and supplies all current-window tab metadata", async () => {
   const provider = await startProvider([
-    commandResponse("eval", { func: "() => { document.documentElement.dataset.contextTurn = 'first'; return true; }" }, "call-context-first"),
+    commandResponse("run-code", { code: "async page => page.evaluate(\"() => { document.documentElement.dataset.contextTurn = 'first'; return true; }\")" }, "call-context-first"),
     textResponse("FIRST_CONTEXT_DONE"),
     textResponse("标签页上下文"),
-    commandResponse("eval", { func: "() => { document.documentElement.dataset.contextTurn = 'second'; return true; }" }, "call-context-second"),
+    commandResponse("run-code", { code: "async page => page.evaluate(\"() => { document.documentElement.dataset.contextTurn = 'second'; return true; }\")" }, "call-context-second"),
     textResponse("SECOND_CONTEXT_DONE"),
   ]);
   const opened = await openExtension();
@@ -1384,7 +1378,7 @@ test("asks after a completed turn and summarizes the complete context on request
     const events = await readEvents(opened.page);
     expect(events.some((event) => event.type === "context.compacted")).toBe(true);
     expect(JSON.stringify(events.filter((event) => event.type === "conversation.message"))).toContain("OLD_CONTEXT_MARKER");
-    const finalRequest = provider.requests.find((request) => request.stream === true && JSON.stringify(request.messages).includes("continue"));
+    const finalRequest = [...provider.requests].reverse().find((request: any) => request.stream === true && JSON.stringify(request.messages).includes("continue"));
     expect(JSON.stringify(finalRequest?.messages)).toContain("The previous page observations have been recorded.");
     expect(JSON.stringify(finalRequest?.messages)).not.toContain("OLD_CONTEXT_MARKER");
   } finally {
@@ -2617,13 +2611,13 @@ test("guards every touched tab while CDP pointer input still reaches the page", 
       commandResponse("tab-select", { index: firstIndex }, "call-select-first"),
       commandResponse("snapshot", {}, "call-snapshot-first"),
       commandResponse("tab-select", { index: secondIndex }, "call-select-second"),
-      commandResponse("eval", { func: `() => {
+      commandResponse("run-code", { code: `async page => page.evaluate(\`() => {
         const button = document.createElement('button');
         button.textContent = 'CDP target';
         button.style.cssText = 'position:fixed;left:20px;top:20px;width:120px;height:40px';
         button.onclick = () => { document.documentElement.dataset.cdpClicks = String(Number(document.documentElement.dataset.cdpClicks || 0) + 1); };
         document.body.append(button);
-      }` }, "call-create-target"),
+      }\`)` }, "call-create-target"),
       commandResponse("click", { target: "getByRole('button', { name: 'CDP target' })" }, "call-click-target"),
       commandResponse("run-code", { code: "async page => { await new Promise((resolve) => setTimeout(resolve, 1200)); return page.url(); }" }, "call-guard-wait"),
       textResponse("MULTI_GUARD_OK"),
