@@ -371,7 +371,7 @@ p {
   cursor: pointer;
   list-style: none;
   color: var(--muted-foreground);
-  padding: 0 4px;
+  padding: 0;
   line-height: var(--transcript-line-height);
   font-size: 14px;
   font-weight: 600;
@@ -386,7 +386,7 @@ p {
 .thinking-body,
 .activity-content {
   color: var(--muted-foreground);
-  padding: var(--transcript-block-gap) 4px 0;
+  padding: var(--transcript-block-gap) 0 0;
   font-size: 11px;
   line-height: 1.35;
 }

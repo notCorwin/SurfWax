@@ -1139,6 +1139,10 @@ test("shows live work, then folds it under elapsed time while keeping the final 
     const work = opened.page.getByTestId("work-summary");
     await expect(work.locator(":scope > summary")).toHaveText(/^工作了 \d+ 秒$/);
     await expect(work.locator(":scope > summary svg")).toHaveCount(0);
+    const workLeft = await work.locator(":scope > summary span").evaluate((element) => element.getBoundingClientRect().left);
+    const answerLeft = await opened.page.locator(".conversation-turn").last().locator(".markdown-body").last()
+      .evaluate((element) => element.getBoundingClientRect().left);
+    expect(workLeft).toBe(answerLeft);
     await expect(work).not.toHaveAttribute("open", "");
     await expect(work.locator(".activity")).toBeHidden();
     await expect(work).toContainText("PROGRESS_TEXT");
