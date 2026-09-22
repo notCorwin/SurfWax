@@ -340,6 +340,18 @@ async function configure(context: BrowserContext, page: Page, baseURL: string, c
   return options;
 }
 
+async function themeColors(page: Page, selectors: string[]): Promise<{ colorScheme: string; colors: { background: string; foreground: string }[] }> {
+  return page.evaluate((targets) => ({
+    colorScheme: getComputedStyle(document.documentElement).colorScheme,
+    colors: targets.map((selector) => {
+      const element = document.querySelector<HTMLElement>(selector);
+      if (!element) throw new Error(`Missing theme target: ${selector}`);
+      const style = getComputedStyle(element);
+      return { background: style.backgroundColor, foreground: style.color };
+    }),
+  }), selectors);
+}
+
 async function startNewConversation(page: Page): Promise<void> {
   if (await page.locator(".conversation-dialog").isVisible()) await page.keyboard.press("Escape");
   await page.getByTestId("new-conversation").click();
@@ -690,6 +702,87 @@ test("ships only the minimal MV3 Harness surface", async () => {
     await expect(opened.page.getByTestId("model-label")).toHaveCount(0);
   } finally {
     await dispose(opened.context, opened.userDataDirectory);
+  }
+});
+
+test("follows the system color scheme across every visible extension surface without reloading", async () => {
+  const provider = await startProvider([
+    textResponse("```javascript\nconst theme = 'system';\n```\n\n$$x^2$$"), textResponse("主题测试"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const metadata = (page: Page) => page.evaluate(() => ({
+      colorScheme: document.querySelector('meta[name="color-scheme"]')?.getAttribute("content"),
+      themeColors: [...document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]')].map((meta) => [meta.media, meta.content]),
+    }));
+    const expectedMetadata = { colorScheme: "light dark", themeColors: [
+      ["(prefers-color-scheme: light)", "#ffffff"], ["(prefers-color-scheme: dark)", "#181818"],
+    ] };
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.getByLabel("Provider", { exact: true }).click();
+    await expect(options.locator(".search-combobox-content")).toBeVisible();
+    expect(await metadata(options)).toEqual(expectedMetadata);
+    const optionSnapshots: Record<string, Awaited<ReturnType<typeof themeColors>>> = {};
+    for (const colorScheme of ["light", "dark"] as const) {
+      await options.emulateMedia({ colorScheme });
+      await expect.poll(() => options.locator('[data-slot="input"]').first().evaluate((input) => getComputedStyle(input).color))
+        .toBe(colorScheme === "dark" ? "rgb(245, 245, 245)" : "rgb(23, 23, 23)");
+      optionSnapshots[colorScheme] = await themeColors(options, ["body", '[data-slot="card"]', '[data-slot="input"]', ".search-combobox-content"]);
+    }
+    expect(optionSnapshots.light).toEqual({ colorScheme: "light", colors: [
+      { background: "rgb(255, 255, 255)", foreground: "rgb(23, 23, 23)" },
+      { background: "rgb(255, 255, 255)", foreground: "rgb(23, 23, 23)" },
+      { background: "rgba(0, 0, 0, 0)", foreground: "rgb(23, 23, 23)" },
+      { background: "rgb(255, 255, 255)", foreground: "rgb(23, 23, 23)" },
+    ] });
+    expect(optionSnapshots.dark.colorScheme).toBe("dark");
+    expect(optionSnapshots.dark.colors.slice(0, 2)).toEqual([
+      { background: "rgb(24, 24, 24)", foreground: "rgb(245, 245, 245)" },
+      { background: "rgb(32, 32, 32)", foreground: "rgb(245, 245, 245)" },
+    ]);
+    expect(optionSnapshots.dark.colors[2]?.foreground).toBe("rgb(245, 245, 245)");
+    expect(optionSnapshots.dark.colors[2]?.background).not.toBe(optionSnapshots.light.colors[2]?.background);
+    expect(optionSnapshots.dark.colors[3]).toEqual({ background: "rgb(32, 32, 32)", foreground: "rgb(245, 245, 245)" });
+    await options.close();
+
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("show theme markdown");
+    await composer.press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("const theme");
+    await expect(opened.page.locator(".katex")).not.toHaveCount(0);
+    await opened.page.getByTestId("conversation-menu").click();
+    await expect(opened.page.locator(".conversation-dialog")).toBeVisible();
+    expect(await metadata(opened.page)).toEqual(expectedMetadata);
+    const sideSnapshots: Record<string, Awaited<ReturnType<typeof themeColors>>> = {};
+    for (const colorScheme of ["light", "dark"] as const) {
+      await opened.page.emulateMedia({ colorScheme });
+      sideSnapshots[colorScheme] = await themeColors(opened.page, ["body", '[data-testid="thread-root"]', ".conversation-dialog", '[data-streamdown="code-block"] pre', ".katex"]);
+    }
+    expect(sideSnapshots.light.colors.slice(0, 3)).toEqual(Array(3).fill({ background: "rgb(255, 255, 255)", foreground: "rgb(23, 23, 23)" }));
+    expect(sideSnapshots.dark.colors.slice(0, 3)).toEqual(Array(3).fill({ background: "rgb(24, 24, 24)", foreground: "rgb(245, 245, 245)" }));
+    expect(sideSnapshots.dark.colors[3]).not.toEqual(sideSnapshots.light.colors[3]);
+    expect(sideSnapshots.dark.colors[4]?.foreground).toBe("rgb(245, 245, 245)");
+    await opened.page.keyboard.press("Escape");
+
+    const [manager] = await Promise.all([opened.context.waitForEvent("page"), opened.page.getByTestId("open-user-scripts").click()]);
+    await manager.getByRole("button", { name: "新建脚本" }).click();
+    await expect(manager.locator("#script-code .cm-editor")).toBeVisible();
+    expect(await metadata(manager)).toEqual(expectedMetadata);
+    const managerSnapshots: Record<string, Awaited<ReturnType<typeof themeColors>>> = {};
+    for (const colorScheme of ["light", "dark"] as const) {
+      await manager.emulateMedia({ colorScheme });
+      await expect.poll(() => manager.locator('[data-slot="input"]').evaluate((input) => ({
+        colorScheme: getComputedStyle(document.documentElement).colorScheme, foreground: getComputedStyle(input).color,
+      }))).toEqual({ colorScheme, foreground: colorScheme === "dark" ? "rgb(245, 245, 245)" : "rgb(23, 23, 23)" });
+      managerSnapshots[colorScheme] = await themeColors(manager, ["body", '[data-slot="card"]', '[data-slot="input"]', "#script-code .cm-editor"]);
+    }
+    expect(managerSnapshots.light.colors.slice(0, 2)).toEqual(optionSnapshots.light.colors.slice(0, 2));
+    expect(managerSnapshots.dark.colors.slice(0, 2)).toEqual(optionSnapshots.dark.colors.slice(0, 2));
+    expect(managerSnapshots.dark.colors[2]).toEqual(optionSnapshots.dark.colors[2]);
+    expect(managerSnapshots.dark.colors[3]).not.toEqual(managerSnapshots.light.colors[3]);
+    await manager.close();
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
 
