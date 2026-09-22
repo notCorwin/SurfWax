@@ -1034,6 +1034,7 @@ test("collapses adjacent commands into one line without hiding their details", a
     await expect(opened.page.locator(".activity[data-status=complete]")).toHaveCount(2);
     await expect(group).toHaveCount(1);
     await expect(group.locator(":scope > summary")).toBeVisible();
+    await expect(group.locator("summary svg")).toHaveCount(0);
     await expect(group.locator(".activity").first()).toBeHidden();
     await expect(opened.page.locator(".activity[data-status]")).toHaveCount(2);
     await expect(work).toHaveCount(1);
@@ -1101,7 +1102,7 @@ test("shows the command count after an interrupted group settles", async () => {
     await opened.page.getByTestId("composer-input").press("Enter");
     const group = opened.page.getByTestId("process-trace");
     await expect(group).toHaveCount(1);
-    await expect(group.locator(":scope > summary")).toContainText("正在执行命令…");
+    await expect(group.locator(":scope > summary")).toContainText("正在执行命令");
     await expect(group.locator(".activity[data-status=running]")).toHaveCount(2);
     await expect(group.locator(".activity[data-status=running]").first()).toBeHidden();
     await opened.page.getByRole("button", { name: "停止生成" }).click();
@@ -1129,7 +1130,7 @@ test("shows live work, then folds it under elapsed time while keeping the final 
     await opened.page.getByTestId("composer-input").fill("do the work");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.getByTestId("process-trace")).toBeVisible();
-    await expect(opened.page.getByTestId("process-trace").locator(":scope > summary")).toContainText("正在执行命令…");
+    await expect(opened.page.getByTestId("process-trace").locator(":scope > summary")).toContainText("正在执行命令");
     await expect(opened.page.getByTestId("work-summary")).toHaveCount(0);
     const work = opened.page.getByTestId("work-summary");
     await expect(work.locator(":scope > summary")).toHaveText(/^工作了 \d+ 秒$/);
@@ -1176,8 +1177,8 @@ test("distinguishes streaming command input from command execution", async () =>
     await opened.page.getByTestId("composer-input").fill("run a staged command");
     await opened.page.getByTestId("composer-input").press("Enter");
     const label = opened.page.getByTestId("process-trace").locator(":scope > summary span");
-    await expect(label).toHaveText("正在输入命令…");
-    await expect(label).toHaveText("正在执行命令…");
+    await expect(label).toHaveText("正在输入命令");
+    await expect(label).toHaveText("正在执行命令");
     await expect(label).toHaveText("已执行 1 次命令");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("PHASE_DONE");
   } finally {
@@ -2503,7 +2504,7 @@ test("closing the panel prevents a queued chrome call from starting", async () =
     const process = opened.page.getByTestId("process-trace");
     await expect(process).toHaveCount(1);
     await expect(process.locator(".activity[data-status]")).toHaveCount(2);
-    await expect(process.locator(":scope > summary")).toContainText("正在执行命令…");
+    await expect(process.locator(":scope > summary")).toContainText("正在执行命令");
     const runningLabel = process.locator(":scope > summary span");
     await expect(runningLabel).toHaveClass(/shimmer/);
     await expect.poll(() => runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationPlayState)).toBe("running");

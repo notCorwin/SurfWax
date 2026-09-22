@@ -2,7 +2,6 @@
 
 import type { ToolCallMessagePartComponent } from "@assistant-ui/react";
 import { getPartialJsonObjectMeta } from "assistant-stream/utils";
-import { WrenchIcon } from "lucide-react";
 
 type ToolActivityPart = {
   readonly status: { readonly type: string };
@@ -16,7 +15,7 @@ export function toolActivity(part: ToolActivityPart): { status: "running" | "err
   return {
     status: running ? "running" : failed ? "error" : "complete",
     label: running
-      ? getPartialJsonObjectMeta(part.args as Record<symbol, unknown>)?.state === "partial" ? "正在输入命令…" : "正在执行命令…"
+      ? getPartialJsonObjectMeta(part.args as Record<symbol, unknown>)?.state === "partial" ? "正在输入命令" : "正在执行命令"
       : failed ? "命令执行失败" : "命令执行完成",
   };
 }
@@ -35,7 +34,6 @@ export const ToolFallback: ToolCallMessagePartComponent = (part) => {
   return (
     <details className="activity" data-status={status} open={status === "error"}>
       <summary>
-        <WrenchIcon aria-hidden="true" />
         <span key={label} className={running ? "shimmer text-foreground/65" : undefined}>{label}</span>
       </summary>
       <div className="activity-content">

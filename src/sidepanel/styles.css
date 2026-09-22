@@ -368,7 +368,6 @@ p {
 .process-trace summary {
   display: flex;
   align-items: center;
-  gap: 9px;
   cursor: pointer;
   list-style: none;
   color: var(--muted-foreground);
@@ -384,18 +383,10 @@ p {
   display: none;
 }
 
-.thinking-item summary svg,
-.activity summary svg,
-.process-trace summary svg {
-  width: 16px;
-  height: 16px;
-  flex: none;
-}
-
 .thinking-body,
 .activity-content {
   color: var(--muted-foreground);
-  padding: var(--transcript-block-gap) 4px 0 29px;
+  padding: var(--transcript-block-gap) 4px 0;
   font-size: 11px;
   line-height: 1.35;
 }

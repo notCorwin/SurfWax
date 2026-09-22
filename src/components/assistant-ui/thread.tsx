@@ -12,7 +12,7 @@ import {
   useAuiState,
 } from "@assistant-ui/react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { ArrowDownIcon, BrainIcon, ChevronLeftIcon, ChevronRightIcon, ClockIcon, PencilIcon, RotateCcwIcon, WrenchIcon } from "lucide-react";
+import { ArrowDownIcon, ChevronLeftIcon, ChevronRightIcon, ClockIcon, PencilIcon, RotateCcwIcon } from "lucide-react";
 import {
   type ComponentProps,
   type FC,
@@ -277,9 +277,8 @@ const AssistantMessage: FC = () => {
             if (part.type === "group-process-trace") {
               const summary = processGroupSummary(parts, part.indices,
                 interrupted || messageStatus === "incomplete" || messageStatus === "requires-action" && !threadRunning);
-              const Icon = summary.hasTools ? WrenchIcon : BrainIcon;
               return <details className="process-trace" data-status={summary.status} data-testid="process-trace">
-                <summary><Icon aria-hidden="true" /><span key={summary.label} className={summary.status === "running" ? "shimmer text-foreground/65" : undefined}>{summary.label}</span></summary>
+                <summary><span key={summary.label} className={summary.status === "running" ? "shimmer text-foreground/65" : undefined}>{summary.label}</span></summary>
                 <div className="process-trace-content">{children}</div>
               </details>
             }

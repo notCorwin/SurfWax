@@ -25,8 +25,8 @@ describe("processGroupSummary", () => {
     processGroupSummary(parts, parts.map((_, index) => index));
 
   it("shows the latest live phase", () => {
-    expect(summary({ type: "reasoning", status: { type: "running" } }).label).toBe("正在思考…");
-    expect(summary({ type: "tool-call", status: { type: "running" }, args: {} }).label).toBe("正在执行命令…");
+    expect(summary({ type: "reasoning", status: { type: "running" } }).label).toBe("正在思考");
+    expect(summary({ type: "tool-call", status: { type: "running" }, args: {} }).label).toBe("正在执行命令");
   });
 
   it("summarizes completed reasoning and commands", () => {
