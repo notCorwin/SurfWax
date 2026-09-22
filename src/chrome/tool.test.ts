@@ -1,24 +1,25 @@
 import { describe, expect, it } from "vitest";
 import type { EventLogger } from "../logging";
 import { parseCommandTarget, type ChromeExecutor } from "./executor";
-import { COMMAND_NAMES, compactToolResult, CORE_TOOL_NAMES, createCommandTools, MODEL_COMMAND_NAMES, parseCommandInput, prepareToolMessages, repairCommandToolCall } from "./tool";
+import { COMMAND_NAMES, compactToolResult, createCommandTools, parseCommandInput, prepareToolMessages, repairCommandToolCall, TOOL_SUMMARY } from "./tool";
 
 describe("browser command tools", () => {
-  it("registers exactly the 81 current-window commands", () => {
-    expect(COMMAND_NAMES).toHaveLength(81);
-    expect(new Set(COMMAND_NAMES).size).toBe(81);
+  it("registers exactly the 76 executable current-window commands", () => {
+    expect(COMMAND_NAMES).toHaveLength(76);
+    expect(new Set(COMMAND_NAMES).size).toBe(76);
     expect(COMMAND_NAMES).toEqual(expect.arrayContaining(["snapshot", "click", "run-code", "video-stop", "artifact-save"]));
+    for (const name of ["install", "install-browser", "pause-at", "resume", "step-over"]) expect(COMMAND_NAMES as readonly string[]).not.toContain(name);
     expect(COMMAND_NAMES.filter((name) => ["browser", "open", "attach", "close", "detach", "show", "list", "close-all", "kill-all"].includes(name))).toEqual([]);
   });
 
-  it("exposes 22 stable core tools and defers advanced supported commands", () => {
+  it("exposes all 78 tools in stable order without search or deferred loading", () => {
     const tools = createCommandTools({} as ChromeExecutor) as Record<string, any>;
-    expect(CORE_TOOL_NAMES).toHaveLength(22);
-    expect(MODEL_COMMAND_NAMES).toHaveLength(76);
-    expect(Object.keys(tools)).not.toEqual(expect.arrayContaining(["install", "install-browser", "pause-at", "resume", "step-over"]));
-    expect(tools["search-tools"].deferLoading).not.toBe(true);
-    expect(tools.eval.deferLoading).toBe(true);
-    expect(tools.snapshot.deferLoading).toBe(false);
+    expect(Object.keys(tools)).toEqual([...COMMAND_NAMES, "act", "result"]);
+    for (const name of ["install", "install-browser", "pause-at", "resume", "step-over"]) expect(tools).not.toHaveProperty(name);
+    expect(tools).not.toHaveProperty("search-tools");
+    expect(Object.values(tools).every((tool) => tool.deferLoading !== true)).toBe(true);
+    expect(TOOL_SUMMARY.split("\n")).toHaveLength(78);
+    for (const [name, tool] of Object.entries(tools)) expect(TOOL_SUMMARY).toContain(`- ${name}: ${tool.description}`);
   });
 
   it("repairs only lossless tool-name and stringified JSON mistakes", async () => {

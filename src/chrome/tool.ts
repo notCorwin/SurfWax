@@ -1,4 +1,4 @@
-import { dynamicTool, toolSearch, type ToolCallRepairFunction } from "ai";
+import { dynamicTool, type ToolCallRepairFunction } from "ai";
 import { z } from "zod";
 import type { EventLogger } from "../logging";
 import type { BrowserInput } from "../types";
@@ -10,21 +10,10 @@ export const COMMAND_NAMES = [
   "tab-list", "tab-new", "tab-close", "tab-select", "state-save", "state-load", "cookie-list", "cookie-get", "cookie-set", "cookie-delete", "cookie-clear",
   "localstorage-list", "localstorage-get", "localstorage-set", "localstorage-delete", "localstorage-clear", "sessionstorage-list", "sessionstorage-get", "sessionstorage-set", "sessionstorage-delete", "sessionstorage-clear",
   "requests", "request", "request-headers", "request-body", "response-headers", "response-body", "route", "route-list", "unroute", "network-state-set", "console", "run-code",
-  "recording-start", "recording-stop", "tracing-start", "tracing-stop", "video-start", "video-stop", "video-chapter", "video-show-actions", "video-hide-actions", "artifact-save", "pause-at", "resume", "step-over", "generate-locator", "highlight",
-  "install", "install-browser",
+  "recording-start", "recording-stop", "tracing-start", "tracing-stop", "video-start", "video-stop", "video-chapter", "video-show-actions", "video-hide-actions", "artifact-save", "generate-locator", "highlight",
 ] as const;
 
 export type CommandName = typeof COMMAND_NAMES[number];
-
-export const UNAVAILABLE_COMMAND_NAMES = ["install", "install-browser", "pause-at", "resume", "step-over"] as const satisfies readonly CommandName[];
-export const CORE_TOOL_NAMES = [
-  "search-tools", "snapshot", "find", "goto", "go-back", "go-forward", "reload", "click", "fill", "type", "press", "select", "check", "uncheck",
-  "tab-list", "tab-new", "tab-select", "tab-close", "screenshot", "run-code", "act", "result",
-] as const;
-
-const unavailable = new Set<CommandName>(UNAVAILABLE_COMMAND_NAMES);
-export const MODEL_COMMAND_NAMES = COMMAND_NAMES.filter((name) => !unavailable.has(name));
-const core = new Set<string>(CORE_TOOL_NAMES);
 
 const timeoutMs = z.number().int().positive().max(300_000).optional();
 const common = { timeoutMs };
@@ -146,14 +135,18 @@ const definitions: Record<CommandName, Definition> = {
   "video-show-actions": { description: "Annotate subsequent commands in the active screencast.", inputSchema: z.object({ ...common, durationMs: z.number().int().positive().optional(), position: z.enum(["top-left", "top", "top-right", "bottom-left", "bottom", "bottom-right"]).optional(), cursor: z.enum(["pointer", "none"]).optional() }).strict() },
   "video-hide-actions": { description: "Stop annotating screencast actions.", inputSchema: empty() },
   "artifact-save": { description: "Save an existing internal artifact to Downloads only when the user explicitly requested it.", inputSchema: z.object({ ...common, id: z.number().int().positive(), filename }).strict() },
-  "pause-at": { description: "Unavailable without a Playwright Test Runner process.", inputSchema: z.object({ ...common, location: z.string().min(1) }).strict() },
-  resume: { description: "Unavailable without a Playwright Test Runner process.", inputSchema: empty() },
-  "step-over": { description: "Unavailable without a Playwright Test Runner process.", inputSchema: empty() },
   "generate-locator": { description: "Generate a Playwright-style locator for a target.", inputSchema: z.object({ ...common, target: target() }).strict() },
   highlight: { description: "Show or hide a non-interactive highlight around a target.", inputSchema: z.object({ ...common, target: target(false), style: z.string().optional(), hide: z.boolean().optional() }).strict() },
-  install: { description: "Unavailable inside a Manifest V3 extension.", inputSchema: empty() },
-  "install-browser": { description: "Unavailable inside a Manifest V3 extension.", inputSchema: z.object({ ...common, browser: z.string().optional() }).strict() },
 };
+
+const ACT_DESCRIPTION = "Execute 1-100 deterministic browser steps as one batch. Prefer a dedicated command for one action; use act for two or more related actions and include expect steps for outcomes.";
+const RESULT_DESCRIPTION = "Read an exact slice or path from a large tool result stored in the canonical event log. Use the access object returned with $ref.";
+
+export const TOOL_SUMMARY = [
+  ...COMMAND_NAMES.map((name) => `- ${name}: ${definitions[name].description}`),
+  `- act: ${ACT_DESCRIPTION}`,
+  `- result: ${RESULT_DESCRIPTION}`,
+].join("\n");
 
 export function parseCommandInput(name: CommandName, input: unknown): Record<string, unknown> {
   return definitions[name].inputSchema.parse(input) as Record<string, unknown>;
@@ -223,28 +216,26 @@ export function createCommandTools(executor: ChromeExecutor, options: { logger?:
       return toolFailure(error);
     }
   };
-  const commands = Object.fromEntries(MODEL_COMMAND_NAMES.map((name) => {
+  const commands = Object.fromEntries(COMMAND_NAMES.map((name) => {
     const definition = definitions[name];
     return [name, dynamicTool({
       description: definition.description,
       inputSchema: definition.inputSchema,
       needsApproval: false,
-      deferLoading: !core.has(name),
       execute: async (input, { abortSignal, toolCallId }) => run(
         async () => executor.executeCommand(name, parseCommandInput(name, input), abortSignal, await context(toolCallId)), toolCallId,
       ),
     })];
   }));
   return {
-    "search-tools": toolSearch(),
     ...commands,
     act: dynamicTool({
-      description: "Execute 1-100 deterministic browser steps as one batch. Prefer a dedicated command for one action; use act for two or more related actions and include expect steps for outcomes.",
+      description: ACT_DESCRIPTION,
       inputSchema: actInputSchema, needsApproval: false,
       execute: async (input, { abortSignal, toolCallId }) => run(async () => executor.executeBrowser({ mode: "act", ...actInputSchema.parse(input) } as BrowserInput, abortSignal, await context(toolCallId)), toolCallId),
     }),
     result: dynamicTool({
-      description: "Read an exact slice or path from a large tool result stored in the canonical event log. Use the access object returned with $ref.",
+      description: RESULT_DESCRIPTION,
       inputSchema: resultInputSchema, needsApproval: false,
       execute: async (input, { abortSignal, toolCallId }) => run(async () => executor.executeBrowser({ mode: "result", ...resultInputSchema.parse(input) } as BrowserInput, abortSignal, await context(toolCallId)), toolCallId, false),
     }),

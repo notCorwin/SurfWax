@@ -889,7 +889,7 @@ test("uses dedicated snapshot, fill, and click tools", async () => {
     expect(verified).toMatchObject({ snapshot: expect.stringContaining("Welcome me@example.com") });
     await expect.poll(() => target.locator("output").textContent()).toBe("Welcome me@example.com");
     expect(events.some((event) => event.type === "automation.action.finished" && event.toolCallId === "call-click")).toBe(true);
-    expect(provider.requests[0].tools).toHaveLength(22);
+    expect(provider.requests[0].tools).toHaveLength(78);
     const toolNames = provider.requests[0].tools.map((tool: any) => tool.function.name);
     expect(toolNames).not.toContain("browser");
     expect(toolNames.filter((name: string) => ["open", "attach", "close", "detach", "show", "list", "close-all", "kill-all"].includes(name))).toEqual([]);
@@ -1248,7 +1248,7 @@ test("executes run-code through the page facade, restores the conversation, and 
 
     await expect.poll(() => provider.requests.length).toBe(3);
     expect(provider.requests[0].reasoning_effort).toBe("minimal");
-    expect(provider.requests[0].tools).toHaveLength(22);
+    expect(provider.requests[0].tools).toHaveLength(78);
     expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).not.toContain("browser");
     expect(provider.requests[0].tools).toContainEqual(expect.objectContaining({ type: "function", function: expect.objectContaining({ name: "run-code" }) }));
     const events = await readEvents(opened.page);

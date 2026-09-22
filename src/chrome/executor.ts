@@ -42,10 +42,6 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw abortError();
 }
 
-function unsupported(command: string): Error {
-  return new Error(`CommandError[unsupported-in-extension]: ${command} requires a Playwright CLI or test-runner process`);
-}
-
 function readQuoted(value: string): string {
   const trimmed = value.trim();
   if (trimmed.startsWith('"')) return JSON.parse(trimmed);
@@ -457,7 +453,6 @@ export class ChromeExecutor {
 
   private async executeCommandNow(name: CommandName, input: Record<string, any>): Promise<unknown> {
     throwIfAborted(this.activeSignal);
-    if (["install", "install-browser", "pause-at", "resume", "step-over"].includes(name)) throw unsupported(name);
     if (name === "artifact-save") return this.saveArtifact(input.id, input.filename);
     const state = await this.currentBrowserState();
     if (name === "tab-list") return this.tabsOf(state);
