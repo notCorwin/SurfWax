@@ -42,5 +42,5 @@
 ## 开发约定
 
 1. 完成有效修改后，主动创建 Git Commit 并 Push 到当前远程分支。
-2. GitHub Actions 的结果可作为参考。
+2. GitHub Actions 的结果可仅作为参考。
 3. 测试日志保存在 `../.dev/chromium-profile/Default/IndexedDB`。
