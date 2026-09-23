@@ -85,6 +85,38 @@ describe("ChromeExecutor", () => {
     executor.dispose();
   });
 
+  it("selects a tab without focusing the Chrome window", async () => {
+    const fake = fakeChrome();
+    const tabs: chrome.tabs.Tab[] = [
+      { id: 41, windowId: 7, active: true, title: "First" } as chrome.tabs.Tab,
+      { id: 42, windowId: 7, active: false, title: "Second" } as chrome.tabs.Tab,
+    ];
+    const updateWindow = vi.fn();
+    const updateTab = vi.fn(async (tabId: number) => {
+      tabs.forEach((tab) => { tab.active = tab.id === tabId; });
+    });
+    Object.assign(fake.chromeApi, {
+      windows: {
+        getCurrent: vi.fn(async () => ({ id: 7, focused: false, tabs })),
+        get: vi.fn(async () => ({ id: 7, focused: false })),
+        update: updateWindow,
+      },
+      tabs: {
+        query: vi.fn(async ({ windowId }: chrome.tabs.QueryInfo) => tabs.filter((tab) => tab.windowId === windowId)),
+        update: updateTab,
+      },
+    });
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+
+    await expect(executor.executeCommand("tab-select", { index: 1 })).resolves.toMatchObject([
+      { index: 0, current: false },
+      { index: 1, current: true },
+    ]);
+    expect(updateTab).toHaveBeenCalledWith(42, { active: true });
+    expect(updateWindow).not.toHaveBeenCalled();
+    executor.dispose();
+  });
+
   it("navigates the current tab and creates new tabs only in the current window", async () => {
     const fake = fakeChrome();
     let url = "https://example.com/before";

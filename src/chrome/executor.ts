@@ -641,7 +641,6 @@ export class ChromeExecutor {
     const tab = tabs[index];
     if (!tab?.id) throw new Error(`CommandError[invalid-tab-index]: ${index}`);
     await this.chromeApi.tabs.update(tab.id, { active: true });
-    await this.chromeApi.windows.update(state.windowId, { focused: true });
     state.tabId = tab.id;
     await this.rememberOrigin(state, tab.url);
     return this.tabsOf(state);
