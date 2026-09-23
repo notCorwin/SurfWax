@@ -49,7 +49,6 @@ p {
   justify-content: flex-start;
 }
 
-.conversation-trigger svg,
 .conversation-action svg,
 .conversation-delete svg {
   width: 15px;

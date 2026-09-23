@@ -2604,13 +2604,15 @@ test("resets conversation UI while retaining only each conversation's own draft"
 });
 
 test("edits user messages, regenerates replies and restores the selected branch", async () => {
+  const slowReply = streamingTextResponse(["BRANCH_RUNNING", ...Array.from({ length: 80 }, () => "."), "BRANCH_DONE"]);
   const provider = await startProvider([
     textResponse("ORIGINAL_REPLY"),
     textResponse("分支测试"),
     textResponse("REGENERATED_REPLY"),
     textResponse("EDITED_REPLY"),
     textResponse("FOLLOWUP_REPLY"),
-  ]);
+    slowReply,
+  ], 10);
   const opened = await openExtension();
   try {
     const options = await configure(opened.context, opened.page, provider.baseURL);
@@ -2676,6 +2678,13 @@ test("edits user messages, regenerates replies and restores the selected branch"
     await opened.page.getByTestId("conversation-menu").click();
     await opened.page.locator(".conversation-item", { hasText: "分支测试" }).locator(".conversation-select").click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("ORIGINAL_REPLY");
+    await expect(opened.page.getByLabel("消息分支").first()).toBeVisible();
+    await composer.fill("check branch visibility");
+    await composer.press("Enter");
+    await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
+    await expect(opened.page.getByLabel("消息分支")).toHaveCount(0);
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("BRANCH_DONE");
+    await expect(opened.page.getByLabel("消息分支").first()).toBeVisible();
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }

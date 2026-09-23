@@ -1,7 +1,7 @@
 "use client";
 
 import { ThreadListItemPrimitive, ThreadListPrimitive, useAui, useAuiState } from "@assistant-ui/react";
-import { ArchiveIcon, MenuIcon, PencilIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
+import { ArchiveIcon, PencilIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type FC, type MouseEvent } from "react";
 import { fromLogValue, isConversationMessage, type EventLogger, type LogEvent } from "../../logging";
 import { Button } from "../ui/button";
@@ -78,7 +78,6 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
   return (
     <>
       <Button ref={trigger} type="button" variant="ghost" className="conversation-trigger" data-testid="conversation-menu" onClick={() => { setOpen(true); dialog.current?.showModal(); }}>
-        <MenuIcon aria-hidden="true" />
         <span>{title}</span>
       </Button>
       <dialog ref={dialog} className="conversation-dialog" aria-label="对话列表" onClose={() => { setOpen(false); setWarning(""); setQuery(""); setIndex(new Map()); trigger.current?.focus(); }} onClick={(event) => {

@@ -315,8 +315,10 @@ const AssistantMessage: FC = () => {
   );
 };
 
-const MessageBranches: FC = () => (
-  <BranchPickerPrimitive.Root hideWhenSingleBranch className="flex items-center gap-0.5 tabular-nums" aria-label="消息分支">
+const MessageBranches: FC = () => {
+  const running = useAuiState((state) => state.thread.isRunning);
+  if (running) return null;
+  return <BranchPickerPrimitive.Root hideWhenSingleBranch className="flex items-center gap-0.5 tabular-nums" aria-label="消息分支">
     <BranchPickerPrimitive.Previous type="button" className="inline-flex size-7 items-center justify-center rounded hover:bg-muted disabled:opacity-40" aria-label="上一个分支" title="上一个分支">
       <ChevronLeftIcon className="size-3.5" aria-hidden="true" />
     </BranchPickerPrimitive.Previous>
@@ -324,8 +326,8 @@ const MessageBranches: FC = () => (
     <BranchPickerPrimitive.Next type="button" className="inline-flex size-7 items-center justify-center rounded hover:bg-muted disabled:opacity-40" aria-label="下一个分支" title="下一个分支">
       <ChevronRightIcon className="size-3.5" aria-hidden="true" />
     </BranchPickerPrimitive.Next>
-  </BranchPickerPrimitive.Root>
-);
+  </BranchPickerPrimitive.Root>;
+};
 
 const UserMessage: FC = () => {
   const editing = useAuiState((state) => state.message.composer.isEditing);
