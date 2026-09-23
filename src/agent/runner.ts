@@ -6,6 +6,7 @@ import type { BrowserContext } from "../chrome/executor";
 import type { EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
 import { inputBudget, modelSupportsImages, resolveModelLimit } from "./model-limits";
+import { sdkFor } from "./model-sdks";
 import { estimateInput, type ContextCompactor } from "./compaction";
 import type { ReasoningEffort } from "./reasoning";
 
@@ -107,6 +108,8 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         logger?.record({ type: "agent.loop-guard.triggered", conversationId: options.conversationId, content: { stepNumber, reason: guard } });
       }
       return {
+        ...(sdkFor(options.model) === "@ai-sdk/anthropic" && options.model.providerId !== "anthropic" && modelLimit?.output
+          ? { maxOutputTokens: modelLimit.output } : {}),
         messages: await prepareToolMessages(
           prepared,
           stepNumber,

@@ -93,6 +93,47 @@ it("keeps DeepSeek V4 reasoning_content on assistant messages across tool calls"
   expect(bodies[1].messages).toContainEqual(expect.objectContaining({ role: "tool", tool_call_id: "call" }));
 }, 20_000);
 
+it.each([
+  ["Moonshot Kimi", "moonshotai", "https://api.moonshot.ai/v1", "kimi-k3"],
+  ["Z.AI GLM", "zai", "https://api.z.ai/api/paas/v4", "glm-4.7"],
+  ["Alibaba Qwen", "alibaba", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "qwen3.8-max"],
+])("returns %s reasoning to the provider after a tool call", async (_name, providerId, baseURL, modelId) => {
+  const bodies: any[] = [];
+  const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    expect(request.url).toBe(`${baseURL}/chat/completions`);
+    bodies.push(await request.clone().json());
+    return new Response(JSON.stringify(bodies.length === 1
+      ? { ...openAIFirst, model: modelId, choices: [{ ...openAIFirst.choices[0], message: { ...openAIFirst.choices[0].message, reasoning_content: "plan" } }] }
+      : { ...openAIFinal, model: modelId }), { headers: { "Content-Type": "application/json" } });
+  });
+  const model = await createModel({ providerId, sdk: "@ai-sdk/openai-compatible", baseURL, apiKey: "key", model: modelId }, undefined, undefined, { fetch });
+  const agent = new ToolLoopAgent({ model, tools: { echo: tool({ description: "Echo a value.", inputSchema: z.object({ value: z.string() }), execute: async ({ value }) => ({ value }) }) } });
+  await expect(agent.generate({ prompt: "echo ok" })).resolves.toMatchObject({ text: "done" });
+  expect(bodies[1].messages).toContainEqual(expect.objectContaining({ role: "assistant", reasoning_content: "plan" }));
+  expect(bodies[1].messages).toContainEqual(expect.objectContaining({ role: "tool", tool_call_id: "call" }));
+}, 20_000);
+
+it("preserves MiniMax Anthropic thinking blocks through tool calls", async () => {
+  const bodies: any[] = [];
+  const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    expect(request.url).toBe("https://api.minimax.io/anthropic/v1/messages");
+    bodies.push(await request.clone().json());
+    return new Response(JSON.stringify({ type: "message", id: `msg-${bodies.length}`, model: "MiniMax-M3", role: "assistant",
+      content: bodies.length === 1
+        ? [{ type: "thinking", thinking: "plan", signature: "signature" }, { type: "tool_use", id: "call", name: "echo", input: { value: "ok" } }]
+        : [{ type: "text", text: "done" }],
+      stop_reason: bodies.length === 1 ? "tool_use" : "end_turn", stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } }),
+    { headers: { "Content-Type": "application/json" } });
+  });
+  const model = await createModel({ providerId: "minimax", sdk: "@ai-sdk/anthropic", baseURL: "https://api.minimax.io/anthropic/v1", apiKey: "key", model: "MiniMax-M3" }, undefined, undefined, { fetch });
+  const agent = new ToolLoopAgent({ model, tools: { echo: tool({ description: "Echo a value.", inputSchema: z.object({ value: z.string() }), execute: async ({ value }) => ({ value }) }) } });
+  await expect(agent.generate({ prompt: "echo ok" })).resolves.toMatchObject({ text: "done" });
+  expect(bodies[1].messages).toContainEqual(expect.objectContaining({ role: "assistant", content: expect.arrayContaining([expect.objectContaining({ type: "thinking", thinking: "plan", signature: "signature" })]) }));
+  expect(bodies[1].messages).toContainEqual(expect.objectContaining({ role: "user", content: expect.arrayContaining([expect.objectContaining({ type: "tool_result", tool_use_id: "call" })]) }));
+}, 20_000);
+
 const adapterConfigs: Array<{ name: string; config: ModelConfig }> = [
   { name: "Watsonx", config: { sdk: "watsonx-ai-provider", baseURL: "", model: "ibm/granite", providerSettings: { apiKey: "key", projectId: "project" } } },
   { name: "SAP", config: { sdk: "@jerome-benoit/sap-ai-provider-v2", baseURL: "", model: "test", providerSettings: {

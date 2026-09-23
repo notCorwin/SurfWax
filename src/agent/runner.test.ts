@@ -12,6 +12,26 @@ function usage() {
 }
 
 describe("createAgent", () => {
+  it("uses catalog output limits for Anthropic-compatible non-Claude providers", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ minimax: { api: "https://api.minimax.io/anthropic/v1", models: {
+      "MiniMax-M3": { limit: { context: 1_048_576, output: 524_288 } },
+    } } }))));
+    const executor = { browserContext: vi.fn(async () => ({ windowId: 7, tabs: [] })) } as unknown as ChromeExecutor;
+    const model = new MockLanguageModelV4({ doStream: async (options) => {
+      expect(options.maxOutputTokens).toBe(524_288);
+      return { stream: simulateReadableStream({ chunks: [
+        { type: "stream-start", warnings: [] },
+        { type: "text-start", id: "text" }, { type: "text-delta", id: "text", delta: "done" }, { type: "text-end", id: "text" },
+        { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: usage() },
+      ] as any[] }) };
+    } });
+    try {
+      const agent = createAgent({ model: { providerId: "minimax", sdk: "@ai-sdk/anthropic", baseURL: "https://api.minimax.io/anthropic/v1", model: "MiniMax-M3" }, languageModel: model, executor });
+      const result = await agent.stream({ prompt: "hello" });
+      await expect(result.text).resolves.toBe("done");
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("keeps the tool catalog out of the default instructions", () => {
     expect(DEFAULT_INSTRUCTIONS).not.toContain(TOOL_SUMMARY);
     expect(DEFAULT_INSTRUCTIONS).not.toContain("search-tools");
