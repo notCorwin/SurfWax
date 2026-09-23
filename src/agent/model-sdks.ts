@@ -19,7 +19,9 @@ export type ProviderDescriptor = {
 const API_KEY: ProviderSettingField = { key: "apiKey", label: "API Key", type: "password", required: true };
 const field = (key: string, label: string, options: Omit<ProviderSettingField, "key" | "label"> = {}): ProviderSettingField => ({ key, label, ...options });
 
-export function sdkFor(config: Pick<ModelConfig, "sdk" | "transport">): ModelSdk {
+export function sdkFor(config: Pick<ModelConfig, "providerId" | "sdk" | "transport" | "baseURL">): ModelSdk {
+  if (config.providerId === "deepseek" || config.sdk === "@ai-sdk/openai-compatible" && URL.canParse(config.baseURL)
+    && new URL(config.baseURL).hostname === "api.deepseek.com") return "@ai-sdk/deepseek";
   return config.sdk ?? (config.transport === "gateway" ? "@ai-sdk/gateway" : "@ai-sdk/openai-compatible");
 }
 
@@ -171,6 +173,6 @@ export function modelConfigErrors(config: ModelConfig, fields?: ProviderSettingF
 }
 
 export function isOpenAIShapedSdk(sdk: ModelSdk): boolean {
-  return sdk === "@ai-sdk/openai-compatible" || sdk === "@qvac/ai-sdk-provider" || sdk === "venice-ai-sdk-provider"
+  return sdk === "@ai-sdk/openai-compatible" || sdk === "@ai-sdk/deepseek" || sdk === "@qvac/ai-sdk-provider" || sdk === "venice-ai-sdk-provider"
     || sdk === "ai-gateway-provider" || sdk === "watsonx-ai-provider" || sdk === "gitlab-ai-provider";
 }

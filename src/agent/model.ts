@@ -238,6 +238,7 @@ async function loadSdk(sdk: ModelSdk, override?: ModuleLoader): Promise<Record<s
     case "@ai-sdk/cerebras": return import("@ai-sdk/cerebras");
     case "@ai-sdk/cohere": return import("@ai-sdk/cohere");
     case "@ai-sdk/deepinfra": return import("@ai-sdk/deepinfra");
+    case "@ai-sdk/deepseek": return import("@ai-sdk/deepseek");
     case "@ai-sdk/gateway": return import("@ai-sdk/gateway");
     case "@ai-sdk/google": return import("@ai-sdk/google");
     case "@ai-sdk/google-vertex": return import("@ai-sdk/google-vertex/edge");
@@ -432,6 +433,7 @@ export async function createModel(config: ModelConfig, logger?: EventLogger, con
     case "@ai-sdk/cerebras": model = module.createCerebras(common).languageModel(config.model); break;
     case "@ai-sdk/cohere": model = module.createCohere(common).languageModel(config.model); break;
     case "@ai-sdk/deepinfra": model = module.createDeepInfra(common).languageModel(config.model); break;
+    case "@ai-sdk/deepseek": model = module.createDeepSeek(common).languageModel(config.model); break;
     case "@ai-sdk/gateway": model = module.createGateway(common).languageModel(config.model); break;
     case "@ai-sdk/google": model = module.createGoogle(common).languageModel(config.model); break;
     case "@ai-sdk/google-vertex": model = module.createGoogleVertex({ ...common, project: settings.project, location: settings.location, googleCredentials: googleCredentials(config) }).languageModel(config.model); break;

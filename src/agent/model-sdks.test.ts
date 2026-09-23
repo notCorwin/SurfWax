@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MODEL_SDKS, type ModelConfig, type ModelSdk } from "../types";
 import { createModel } from "./model";
-import { modelConfigErrors, providerSettingFields, resolveEndpoint } from "./model-sdks";
+import { modelConfigErrors, providerSettingFields, resolveEndpoint, sdkFor } from "./model-sdks";
 import { modelProviderPresets } from "./model-limits";
 
 const serviceAccount = JSON.stringify({ client_email: "test@example.iam.gserviceaccount.com", private_key: "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----" });
@@ -27,8 +27,8 @@ function configFor(sdk: ModelSdk): ModelConfig {
 }
 
 describe("model SDK registry", () => {
-  it("contains all 28 Models.dev SDK identifiers and creates a language model for each", async () => {
-    expect(MODEL_SDKS).toHaveLength(28);
+  it("contains all supported SDK identifiers and creates a language model for each", async () => {
+    expect(MODEL_SDKS).toHaveLength(29);
     for (const sdk of MODEL_SDKS) {
       const model = await createModel(configFor(sdk));
       expect(model, sdk).toHaveProperty("specificationVersion");
@@ -41,6 +41,17 @@ describe("model SDK registry", () => {
     }]));
     Object.assign(catalog, { future: { npm: "future-sdk", models: {} } });
     expect(modelProviderPresets(catalog)).toHaveLength(223);
+  });
+
+  it("uses the DeepSeek SDK for catalog and saved OpenAI-compatible DeepSeek profiles", () => {
+    expect(modelProviderPresets({ deepseek: { npm: "@ai-sdk/openai-compatible", api: "https://api.deepseek.com", models: {} } })[0]?.sdk)
+      .toBe("@ai-sdk/deepseek");
+    expect(sdkFor({ providerId: "deepseek", sdk: "@ai-sdk/openai-compatible", baseURL: "https://api.deepseek.com" }))
+      .toBe("@ai-sdk/deepseek");
+    expect(sdkFor({ providerId: "custom", sdk: "@ai-sdk/openai-compatible", baseURL: "https://api.deepseek.com/v1" }))
+      .toBe("@ai-sdk/deepseek");
+    expect(sdkFor({ providerId: "custom", sdk: "@ai-sdk/openai-compatible", baseURL: "https://api.deepseek.com.evil.test" }))
+      .toBe("@ai-sdk/openai-compatible");
   });
 
   it("interpolates endpoint variables and derives their fields", () => {

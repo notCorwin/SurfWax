@@ -148,14 +148,15 @@ function normalizeCatalog(value: unknown): ModelCatalog {
 export function modelProviderPresets(catalog: ModelCatalog): ModelProviderPreset[] {
   return Object.entries(catalog).flatMap(([id, provider]) => {
     if (!isModelSdk(provider.npm)) return [];
+    const sdk = id === "deepseek" ? "@ai-sdk/deepseek" : provider.npm;
     const gateway = provider.npm === "@ai-sdk/gateway";
     const models = Object.entries(provider.models ?? {}).filter(([, model]) =>
       model.tool_call === true && (model.modalities?.output?.includes("text") ?? true),
     ).map(([modelId, model]) => ({ id: model.id ?? modelId, name: model.name ?? modelId }))
       .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
-    const descriptor = { id, npm: provider.npm, api: provider.api, env: provider.env };
-    return [{ id, name: provider.name ?? id, baseURL: gateway ? VERCEL_GATEWAY_URL : provider.api ?? defaultBaseURL(provider.npm),
-      sdk: provider.npm, env: provider.env ?? [], doc: provider.doc, fields: providerSettingFields(descriptor),
+    const descriptor = { id, npm: sdk, api: provider.api, env: provider.env };
+    return [{ id, name: provider.name ?? id, baseURL: gateway ? VERCEL_GATEWAY_URL : provider.api ?? defaultBaseURL(sdk),
+      sdk, env: provider.env ?? [], doc: provider.doc, fields: providerSettingFields(descriptor),
       transport: gateway ? "gateway" as const : "openai-compatible" as const, models }];
   }).sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
 }

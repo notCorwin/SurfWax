@@ -64,6 +64,35 @@ describe.each(contracts)("$name tool contract", ({ config, first, final, hasTool
   }, 20_000);
 });
 
+it("keeps DeepSeek V4 reasoning_content on assistant messages across tool calls", async () => {
+  const bodies: any[] = [];
+  const stream = (deltas: object[], finishReason: string) => new Response([
+    ...deltas.map((delta) => `data: ${JSON.stringify({ id: "one", object: "chat.completion.chunk", created: 1, model: "deepseek-flash", choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`),
+    `data: ${JSON.stringify({ id: "one", object: "chat.completion.chunk", created: 1, model: "deepseek-flash", choices: [{ index: 0, delta: {}, finish_reason: finishReason }] })}\n\n`,
+    "data: [DONE]\n\n",
+  ].join(""), { headers: { "Content-Type": "text/event-stream" } });
+  const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    expect(request.url).toBe("https://api.deepseek.com/chat/completions");
+    expect(request.headers.get("authorization")).toBe("Bearer key");
+    const body = await request.clone().json();
+    bodies.push(body);
+    if (bodies.length > 1 && body.messages.some((message: any) => message.role === "assistant" && !("reasoning_content" in message))) {
+      return new Response('{"error":{"message":"reasoning_content is required on assistant messages"}}', { status: 400 });
+    }
+    return bodies.length === 1
+      ? stream([{ role: "assistant", tool_calls: [{ index: 0, id: "call", type: "function", function: { name: "echo", arguments: '{"value":"ok"}' } }] }], "tool_calls")
+      : stream([{ role: "assistant", content: "done" }], "stop");
+  });
+  const model = await createModel({ providerId: "deepseek", sdk: "@ai-sdk/openai-compatible", baseURL: "https://api.deepseek.com", apiKey: "key", model: "deepseek-flash" }, undefined, undefined, { fetch });
+  const agent = new ToolLoopAgent({ model, tools: { echo: tool({ description: "Echo a value.", inputSchema: z.object({ value: z.string() }), execute: async ({ value }) => ({ value }) }) } });
+  const result = await agent.stream({ prompt: "echo ok" });
+  await expect(result.text).resolves.toBe("done");
+  expect(bodies).toHaveLength(2);
+  expect(bodies[1].messages).toContainEqual(expect.objectContaining({ role: "assistant", reasoning_content: "" }));
+  expect(bodies[1].messages).toContainEqual(expect.objectContaining({ role: "tool", tool_call_id: "call" }));
+}, 20_000);
+
 const adapterConfigs: Array<{ name: string; config: ModelConfig }> = [
   { name: "Watsonx", config: { sdk: "watsonx-ai-provider", baseURL: "", model: "ibm/granite", providerSettings: { apiKey: "key", projectId: "project" } } },
   { name: "SAP", config: { sdk: "@jerome-benoit/sap-ai-provider-v2", baseURL: "", model: "test", providerSettings: {

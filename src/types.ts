@@ -80,6 +80,7 @@ export const MODEL_SDKS = [
   "@ai-sdk/cerebras",
   "@ai-sdk/cohere",
   "@ai-sdk/deepinfra",
+  "@ai-sdk/deepseek",
   "@ai-sdk/gateway",
   "@ai-sdk/google",
   "@ai-sdk/google-vertex",
