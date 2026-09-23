@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { workLabel } from "./work-time";
 import { buildMessageSearchIndex } from "./thread-list";
-import { processGroupSummary, toolActivity, turnActivityPhase } from "./process-group";
+import { activityPhaseAt, processGroupSummary, toolActivity, turnActivityBoundary, turnActivityPhase } from "./process-group";
 import { toLogValue, type LogEvent } from "../../logging";
 
 describe("workLabel", () => {
@@ -62,8 +62,8 @@ describe("processGroupSummary", () => {
     expect(toolActivity(tool, "pending")).toEqual({ status: "running", label: "正在执行命令" });
     expect(processGroupSummary([{ ...tool, isError: true }], [0], false, "pending")).toEqual({ status: "running", label: "正在执行命令" });
     expect(toolActivity({ ...tool, isError: true }, "pending")).toEqual({ status: "running", label: "正在执行命令" });
-    expect(processGroupSummary([reasoning, tool], [0, 1], false, "spoken").label).toBe("已思考并执行 1 次命令");
-    expect(toolActivity(tool, "spoken").label).toBe("命令执行完成");
+    expect(processGroupSummary([reasoning, tool], [0, 1], false, "settled").label).toBe("已思考并执行 1 次命令");
+    expect(toolActivity(tool, "settled").label).toBe("命令执行完成");
   });
 
   it("stops the activity when a run ends without text", () => {
@@ -76,22 +76,46 @@ describe("processGroupSummary", () => {
   });
 });
 
-it("uses only current-turn assistant text to release completed labels", () => {
+it("settles an activity only after a later activity or nonempty text", () => {
   const messages = [
     { id: "u1", role: "user", parts: [{ type: "text", text: "Question" }] },
     { id: "a1", role: "assistant", parts: [{ type: "text", text: "Earlier answer" }] },
     { id: "u2", role: "user", parts: [{ type: "text", text: "Next question" }] },
-    { id: "a2", role: "assistant", parts: [{ type: "reasoning" }, { type: "text", text: " \n" }] },
-    { id: "a3", role: "assistant", parts: [{ type: "tool-call" }] },
+    { id: "a2", role: "assistant", parts: [
+      { type: "text", text: "Progress" }, { type: "reasoning" }, { type: "tool-call" }, { type: "tool-call" }, { type: "text", text: " \n" },
+    ] },
   ];
+  expect(turnActivityBoundary(messages, "a2")).toBe(3);
   expect(turnActivityPhase(messages, "a2", true)).toBe("pending");
-  expect(turnActivityPhase(messages, "a2", false, { type: "incomplete", reason: "cancelled" })).toBe("cancelled");
-  expect(turnActivityPhase(messages, "a2", false, { type: "requires-action" })).toBe("cancelled");
-  expect(turnActivityPhase(messages, "a2", false, { type: "incomplete", reason: "error" })).toBe("failed");
-  expect(turnActivityPhase(messages, "a2", false, { type: "complete" })).toBe("stopped");
-  messages[4]!.parts.push({ type: "text", text: "Progress" });
-  expect(turnActivityPhase(messages, "a2", true)).toBe("spoken");
-  expect(turnActivityPhase(messages, "a3", true)).toBe("spoken");
+  expect(activityPhaseAt(3, 1, "pending")).toBe("settled");
+  expect(activityPhaseAt(3, 2, "pending")).toBe("settled");
+  expect(activityPhaseAt(3, 3, "pending")).toBe("pending");
+  expect(activityPhaseAt(3, 2, "cancelled", "requires-action")).toBe("cancelled");
+  expect(activityPhaseAt(3, 2, "cancelled", "complete")).toBe("settled");
+  messages[3]!.parts.push({ type: "text", text: "Next progress" });
+  expect(turnActivityBoundary(messages, "a2")).toBe(5);
+  expect(activityPhaseAt(5, 3, "pending")).toBe("settled");
+  messages[3]!.parts.push({ type: "tool-call" });
+  expect(activityPhaseAt(turnActivityBoundary(messages, "a2"), 6, "pending")).toBe("pending");
+  messages.push({ id: "a3", role: "assistant", parts: [{ type: "text", text: "Later message" }] });
+  expect(turnActivityBoundary(messages, "a2")).toBe(Infinity);
+  expect(activityPhaseAt(Infinity, 6, "pending")).toBe("settled");
+});
+
+it("uses the current turn's terminal status when no later activity or text arrives", () => {
+  const messages: Array<{ id: string; role: string; parts: Array<{ type: string; text?: string }>; status: { type: string; reason?: string } }> = [
+    { id: "u", role: "user", parts: [{ type: "text", text: "Question" }], status: { type: "complete" } },
+    { id: "a", role: "assistant", parts: [{ type: "text", text: "Progress" }, { type: "tool-call" }], status: { type: "complete" } },
+  ];
+  expect(turnActivityPhase(messages, "a", false)).toBe("stopped");
+  messages[1]!.status = { type: "incomplete", reason: "error" };
+  expect(turnActivityPhase(messages, "a", false)).toBe("failed");
+  messages[1]!.status = { type: "incomplete", reason: "cancelled" };
+  expect(turnActivityPhase(messages, "a", false)).toBe("cancelled");
+  messages[1]!.status = { type: "requires-action" };
+  expect(turnActivityPhase(messages, "a", false)).toBe("cancelled");
+  messages.push({ id: "a2", role: "assistant", parts: [], status: { type: "incomplete", reason: "error" } });
+  expect(turnActivityPhase(messages, "a", false)).toBe("failed");
 });
 
 it("indexes saved message text without tool input or superseded edits", () => {

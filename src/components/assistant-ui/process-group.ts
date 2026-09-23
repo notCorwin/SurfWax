@@ -1,30 +1,48 @@
 import { createContext } from "react";
 import { getPartialJsonObjectMeta } from "assistant-stream/utils";
 
-export type ActivityPhase = "pending" | "spoken" | "cancelled" | "failed" | "stopped";
-export const ActivityPhaseContext = createContext<ActivityPhase>("spoken");
+export type ActivityPhase = "pending" | "settled" | "cancelled" | "failed" | "stopped";
+export const ActivityPhaseContext = createContext<ActivityPhase>("settled");
 
 type SpeechMessage = {
   readonly id: string;
   readonly role: string;
   readonly parts: readonly { readonly type: string; readonly text?: string }[];
+  readonly status?: { readonly type: string; readonly reason?: string };
+  readonly metadata?: { readonly custom?: { readonly interrupted?: boolean } };
 };
 
-export function turnActivityPhase(
-  messages: readonly SpeechMessage[], messageId: string, running: boolean,
-  status?: { readonly type: string; readonly reason?: string }, interrupted = false,
-): ActivityPhase {
+function activityEvent(part: SpeechMessage["parts"][number]): boolean {
+  return part.type === "reasoning" || part.type === "tool-call" || part.type === "text" && !!part.text?.trim();
+}
+
+export function turnActivityBoundary(messages: readonly SpeechMessage[], messageId: string): number {
   const index = messages.findIndex((message) => message.id === messageId);
-  if (index < 0) return "stopped";
-  let start = index;
-  while (start > 0 && messages[start - 1]?.role !== "user") start--;
+  if (index < 0) return -1;
   let end = index + 1;
   while (end < messages.length && messages[end]?.role !== "user") end++;
-  if (messages.slice(start, end).some((message) => message.role === "assistant"
-    && message.parts.some((part) => part.type === "text" && part.text?.trim()))) return "spoken";
+  if (messages.slice(index + 1, end).some((message) => message.role === "assistant" && message.parts.some(activityEvent))) return Infinity;
+  const parts = messages[index]!.parts;
+  for (let partIndex = parts.length - 1; partIndex >= 0; partIndex--) if (activityEvent(parts[partIndex]!)) return partIndex;
+  return -1;
+}
+
+export function turnActivityPhase(messages: readonly SpeechMessage[], messageId: string, running: boolean): ActivityPhase {
+  const index = messages.findIndex((message) => message.id === messageId);
+  if (index < 0) return "stopped";
+  let end = index + 1;
+  while (end < messages.length && messages[end]?.role !== "user") end++;
   if (running && end === messages.length) return "pending";
-  if (interrupted || status?.type === "requires-action" || status?.type === "incomplete" && status.reason === "cancelled") return "cancelled";
+  const turn = messages.slice(index, end).filter((message) => message.role === "assistant");
+  const status = turn.at(-1)?.status;
+  if (turn.some((message) => message.metadata?.custom?.interrupted) || status?.type === "requires-action"
+    || status?.type === "incomplete" && status.reason === "cancelled") return "cancelled";
   return status?.type === "incomplete" ? "failed" : "stopped";
+}
+
+export function activityPhaseAt(boundary: number, partIndex: number, turnPhase: ActivityPhase, status?: string): ActivityPhase {
+  if (turnPhase !== "pending" && turnPhase !== "settled" && (status === "running" || status === "requires-action")) return turnPhase;
+  return boundary > partIndex ? "settled" : turnPhase;
 }
 
 type ToolActivityPart = {
@@ -33,7 +51,7 @@ type ToolActivityPart = {
   readonly args: unknown;
 };
 
-export function toolActivity(part: ToolActivityPart, phase: ActivityPhase = "spoken"): { status: "running" | "error" | "complete"; label: string } {
+export function toolActivity(part: ToolActivityPart, phase: ActivityPhase = "settled"): { status: "running" | "error" | "complete"; label: string } {
   if (phase === "pending" && part.status.type !== "requires-action") return {
     status: "running",
     label: part.status.type === "running" && getPartialJsonObjectMeta(part.args as Record<symbol, unknown>)?.state === "partial"
@@ -59,11 +77,11 @@ type ProcessPart = {
   readonly args?: unknown;
 };
 
-export function processGroupSummary(parts: readonly ProcessPart[], indices: readonly number[], interrupted = false, phase: ActivityPhase = "spoken") {
+export function processGroupSummary(parts: readonly ProcessPart[], indices: readonly number[], interrupted = false, phase: ActivityPhase = "settled") {
   const grouped = indices.flatMap((index) => parts[index] ? [parts[index]!] : []);
   const tools = grouped.filter((part) => part.type === "tool-call");
   const latest = phase === "pending" ? grouped.at(-1)
-    : phase === "spoken" ? [...grouped].reverse().find((part) => part.status.type === "running" || part.status.type === "requires-action") : undefined;
+    : phase === "settled" ? [...grouped].reverse().find((part) => part.status.type === "running" || part.status.type === "requires-action") : undefined;
   if (latest?.status.type === "requires-action" && !interrupted) return { status: "running" as const, label: "等待操作" };
   if (latest && (phase === "pending" || !latest.isError && latest.status.type === "running")) {
     if (latest.type === "reasoning") return { status: "running" as const, label: "正在思考" };

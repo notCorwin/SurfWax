@@ -37,7 +37,7 @@ it("keeps completed activity labels live until text, then settles them", () => {
     createElement(Reasoning, { status: { type: "complete" } } as ComponentProps<typeof Reasoning>),
     createElement(ToolFallback, { status: { type: "complete" }, args: {}, argsText: "{}" } as ComponentProps<typeof ToolFallback>)));
   expect(render("pending")).toMatch(/正在思考.*正在执行命令/s);
-  expect(render("spoken")).toMatch(/思考完成.*命令执行完成/s);
+  expect(render("settled")).toMatch(/思考完成.*命令执行完成/s);
   expect(render("cancelled")).toMatch(/回复中断.*回复中断/s);
   expect(render("failed")).toMatch(/回复失败.*回复失败/s);
   expect(renderToStaticMarkup(createElement(ActivityPhaseContext.Provider, { value: "pending" },

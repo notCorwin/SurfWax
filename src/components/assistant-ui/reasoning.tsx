@@ -9,7 +9,7 @@ import { ActivityPhaseContext } from "./process-group";
 
 const ReasoningImpl: ReasoningMessagePartComponent = ({ status }) => {
   const phase = useContext(ActivityPhaseContext);
-  const running = phase === "pending" || phase === "spoken" && status.type === "running";
+  const running = phase === "pending" || phase === "settled" && status.type === "running";
   const label = phase === "cancelled" ? "回复中断" : phase === "failed" ? "回复失败" : phase === "stopped" ? "回复未生成"
     : running ? "正在思考" : status.type === "incomplete" ? "思考未完成" : "思考完成";
   return (

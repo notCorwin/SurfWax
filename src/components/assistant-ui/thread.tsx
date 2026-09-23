@@ -16,6 +16,7 @@ import { ArrowDownIcon, ChevronLeftIcon, ChevronRightIcon, PencilIcon, RotateCcw
 import {
   type ComponentProps,
   type FC,
+  type ReactNode,
   createContext,
   useCallback,
   useContext,
@@ -29,7 +30,7 @@ import { Button } from "@/components/ui/button";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { LocalComposer } from "./local-composer";
 import { MarkdownText } from "./markdown-text";
-import { ActivityPhaseContext, processGroupSummary, turnActivityPhase } from "./process-group";
+import { ActivityPhaseContext, activityPhaseAt, processGroupSummary, turnActivityBoundary, turnActivityPhase, type ActivityPhase } from "./process-group";
 import { Reasoning } from "./reasoning";
 import { ToolFallback } from "./tool-fallback";
 import { workLabel } from "./work-time";
@@ -241,6 +242,12 @@ export const Thread: FC<{ config: ModelConfig; logger: EventLogger; conversation
 
 export const CONTINUE_INTERRUPTED_TEXT = "继续上一次被中断的工作。不要重复已经完成的操作；先根据上面的工具结果确认当前状态。";
 
+const PartActivityPhase: FC<{ boundary: number; turnPhase: ActivityPhase; status: string; children: ReactNode }> = ({ boundary, turnPhase, status, children }) => {
+  const query = useAui().part.query;
+  const phase = activityPhaseAt(boundary, query && "index" in query ? query.index : -1, turnPhase, status);
+  return <ActivityPhaseContext.Provider value={phase}>{children}</ActivityPhaseContext.Provider>;
+};
+
 const AssistantMessage: FC = () => {
   const aui = useAui();
   const workView = useContext(WorkViewContext);
@@ -249,9 +256,8 @@ const AssistantMessage: FC = () => {
   const messageStatus = useAuiState((state) => state.message.status?.type);
   const threadRunning = useAuiState((state) => state.thread.isRunning);
   const interrupted = useAuiState((state) => state.message.metadata.custom?.interrupted === true);
-  const activityPhase = useAuiState((state) => turnActivityPhase(
-    state.thread.messages, state.message.id, state.thread.isRunning, state.message.status,
-    state.message.metadata.custom?.interrupted === true));
+  const activityBoundary = useAuiState((state) => turnActivityBoundary(state.thread.messages, state.message.id));
+  const turnPhase = useAuiState((state) => turnActivityPhase(state.thread.messages, state.message.id, state.thread.isRunning));
   const latest = useAuiState((state) => state.thread.messages.at(-1)?.id === state.message.id);
   const lastAnswerStart = (() => {
     if (messageId !== workView?.finalMessageId) return parts.length;
@@ -259,40 +265,42 @@ const AssistantMessage: FC = () => {
     while (index > 0 && parts[index - 1]?.type === "text") index--;
     return index;
   })();
+  const partIndices = useMemo(() => new Map(parts.map((part, index) => [part, index])), [parts]);
   const groupBy = useMemo(() => {
     const processGroup = groupPartByType({ reasoning: ["group-process-trace"], "tool-call": ["group-process-trace"] });
     if (!workView) return processGroup;
-    const indices = new Map(parts.map((part, index) => [part, index]));
     return (part: typeof parts[number], context: Parameters<typeof processGroup>[1]) => [
-      (indices.get(part) ?? 0) >= lastAnswerStart ? "group-final" : "group-process",
+      (partIndices.get(part) ?? 0) >= lastAnswerStart ? "group-final" : "group-process",
       ...processGroup(part, context),
     ] as const;
-  }, [parts, workView?.mode, workView?.finalMessageId, lastAnswerStart]);
+  }, [partIndices, workView?.mode, workView?.finalMessageId, lastAnswerStart]);
   if (workView?.mode === "process" && messageId === workView.finalMessageId && lastAnswerStart === 0) return null;
   if (workView?.mode === "final" && lastAnswerStart === parts.length) return null;
   return (
     <MessagePrimitive.Root data-role="assistant" aria-live={latest ? "polite" : undefined} className="assistant-message min-w-0 px-2 text-sm">
       <div className="assistant-message-content flex flex-col wrap-break-word">
-        <ActivityPhaseContext.Provider value={activityPhase}>
-          <MessagePrimitive.GroupedParts groupBy={groupBy}>
-            {({ part, children }) => {
-              if (part.type === "group-process") return workView?.mode === "process" ? children : null;
-              if (part.type === "group-final") return workView?.mode === "final" ? children : null;
-              if (part.type === "group-process-trace") {
-                const summary = processGroupSummary(parts, part.indices,
-                  interrupted || messageStatus === "incomplete" || messageStatus === "requires-action" && !threadRunning, activityPhase);
-                return <details className="process-trace" data-status={summary.status} data-testid="process-trace">
-                  <summary><span key={summary.label} className={summary.status === "running" ? "shimmer text-foreground/65" : undefined}>{summary.label}</span></summary>
-                  <div className="process-trace-content">{children}</div>
-                </details>;
-              }
-              if (part.type === "text") return <MarkdownText />;
-              if (part.type === "reasoning") return <Reasoning {...part} />;
-              if (part.type === "tool-call") return part.toolUI ?? <ToolFallback {...part} />;
-              return null;
-            }}
-          </MessagePrimitive.GroupedParts>
-        </ActivityPhaseContext.Provider>
+        <MessagePrimitive.GroupedParts groupBy={groupBy}>
+          {({ part, children }) => {
+            if (part.type === "group-process") return workView?.mode === "process" ? children : null;
+            if (part.type === "group-final") return workView?.mode === "final" ? children : null;
+            if (part.type === "group-process-trace") {
+              const phase = activityPhaseAt(activityBoundary, part.indices.at(-1) ?? -1, turnPhase);
+              const summary = processGroupSummary(parts, part.indices,
+                interrupted || messageStatus === "incomplete" || messageStatus === "requires-action" && !threadRunning, phase);
+              return <details className="process-trace" data-status={summary.status} data-testid="process-trace">
+                <summary><span key={summary.label} className={summary.status === "running" ? "shimmer text-foreground/65" : undefined}>{summary.label}</span></summary>
+                <div className="process-trace-content">{children}</div>
+              </details>;
+            }
+            if (part.type === "text") return <MarkdownText />;
+            if (part.type === "reasoning" || part.type === "tool-call") {
+              return <PartActivityPhase boundary={activityBoundary} turnPhase={turnPhase} status={part.status.type}>
+                {part.type === "reasoning" ? <Reasoning {...part} /> : part.toolUI ?? <ToolFallback {...part} />}
+              </PartActivityPhase>;
+            }
+            return null;
+          }}
+        </MessagePrimitive.GroupedParts>
         {interrupted && workView?.mode !== "final" && (
           <div className="interrupted-message" data-testid="interrupted-message">
             <span>回复已中断</span>

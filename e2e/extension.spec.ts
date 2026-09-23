@@ -1293,7 +1293,7 @@ test("starts a new process line after assistant text", async () => {
     const liveGroups = opened.page.getByTestId("process-trace");
     await expect(liveGroups).toHaveCount(2);
     await expect(liveGroups.nth(0).locator(":scope > summary")).toHaveText("已执行 1 次命令");
-    await expect(liveGroups.nth(1).locator(":scope > summary")).toHaveText("已执行 1 次命令");
+    await expect(liveGroups.nth(1).locator(":scope > summary")).toHaveText("正在执行命令");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FINAL_AFTER_GROUPS");
     const work = opened.page.getByTestId("work-summary");
     await work.locator(":scope > summary").click();
@@ -1303,6 +1303,41 @@ test("starts a new process line after assistant text", async () => {
     await expect(groups.nth(1).locator(":scope > summary")).toHaveText("已执行 1 次命令");
     await expect(work).toContainText("BETWEEN_PROCESS_GROUPS");
     await expect(work).not.toContainText("FINAL_AFTER_GROUPS");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("continues the latest activity after earlier progress text", async () => {
+  const provider = await startProvider([
+    [
+      chunk({ role: "assistant", content: "PROGRESS_BEFORE_ACTIVITIES" }),
+      chunk({ reasoning_content: "PLAN" }),
+      ...queuedToolResponse("return 'FIRST_RESULT'", "return 'SECOND_RESULT'"),
+    ],
+    { parts: textResponse("NEXT_PROGRESS_TEXT"), delayMs: 2500 },
+    textResponse("活动顺序测试"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("progress then think and run twice");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body", { hasText: "PROGRESS_BEFORE_ACTIVITIES" })).toHaveCount(1);
+    const group = opened.page.getByTestId("process-trace");
+    await expect(group.locator(".activity")).toHaveCount(2);
+    await expect(group.locator(":scope > summary")).toHaveText("正在执行命令");
+    await group.locator(":scope > summary").click();
+    await expect(group.getByTestId("reasoning-item").locator(":scope > summary")).toHaveText("思考完成");
+    await expect(group.locator(".activity").first().locator(":scope > summary")).toHaveText("命令执行完成");
+    await expect(group.locator(".activity").last().locator(":scope > summary")).toHaveText("正在执行命令");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("NEXT_PROGRESS_TEXT");
+    await opened.page.getByTestId("work-summary").locator(":scope > summary").click();
+    await expect(group.locator(":scope > summary")).toHaveText("已思考并执行 2 次命令");
+    await expect(group.locator(".activity").last().locator(":scope > summary")).toHaveText("命令执行完成");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -1351,6 +1386,9 @@ test("switches from reasoning to command while keeping completion labels for tex
     const group = opened.page.getByTestId("process-trace");
     await expect(group.locator(":scope > summary")).toHaveText("正在思考");
     await expect(group.locator(":scope > summary")).toHaveText("正在执行命令");
+    await group.locator(":scope > summary").click();
+    await expect(group.getByTestId("reasoning-item").locator(":scope > summary")).toHaveText("思考完成");
+    await expect(group.locator(".activity summary")).toHaveText("正在执行命令");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("ANSWER_AFTER_REASONING");
     await opened.page.getByTestId("work-summary").locator(":scope > summary").click();
     await expect(group.locator(":scope > summary")).toHaveText("已思考并执行 1 次命令");
