@@ -1084,6 +1084,33 @@ test("recovers a streamed DSML mousewheel call in the side panel", async () => {
   }
 });
 
+test("recovers the screenshot's streamed DSML eval in the side panel", async () => {
+  const func = "() => { const txt = document.body.innerText.replace(/\\s+/g,' '); const idx = txt.indexOf('知识点掌握度'); return JSON.stringify({around: txt.slice(idx, idx+500)}); }";
+  const dsml = `\n\n<｜DSML｜ calls><｜DSML｜ invoke name="eval"><｜DSML｜ parameter name="func" string="true">${func}</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>`;
+  const provider = await startProvider([
+    streamingTextResponse([dsml.slice(0, 4), dsml.slice(4, 39), dsml.slice(39)]),
+    textResponse("EVAL_OK"),
+    textResponse("读取页面"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    await target.evaluate(() => { document.body.textContent = "知识点掌握度 72%"; });
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("read the knowledge score");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("EVAL_OK");
+    await expect(opened.page.locator('[data-role="assistant"]').last()).not.toContainText("DSML");
+    const events = await readEvents(opened.page);
+    expect(events.filter((event) => event.type === "tool.finished" && event.content?.toolName === "eval")).toHaveLength(1);
+    expect(events.some((event) => event.type === "model.dsml.recovery" && event.content?.recovered === true)).toBe(true);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
 test("injects a screenshot and clicks its observation coordinates", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);

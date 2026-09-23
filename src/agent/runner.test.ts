@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV4, simulateReadableStream } from "ai/test";
 import type { ChromeExecutor } from "../chrome/executor";
 import { COMMAND_NAMES, TOOL_SUMMARY } from "../chrome/tool";
+import type { EventLogger, LogEvent } from "../logging";
+import { ContextCompactor } from "./compaction";
 import { createAgent, DEFAULT_INSTRUCTIONS, stagnationReason } from "./runner";
 
 function usage() {
@@ -122,6 +124,93 @@ describe("createAgent", () => {
     expect(parts.filter((part) => part.type === "tool-result")).toHaveLength(1);
     expect(await result.text).toBe("done");
     expect(record).toHaveBeenCalledWith(expect.objectContaining({ type: "model.dsml.recovery", content: { recovered: true, toolNames: ["mousewheel"] } }));
+  }, 10_000);
+
+  it("compacts during a run and executes the screenshot's split DSML eval", async () => {
+    const events: LogEvent[] = [];
+    const logger = {
+      record(record: Partial<LogEvent>) { events.push({ id: events.length + 1, timestamp: "2026-09-23", content: null, ...record } as LogEvent); },
+      async append(record: Partial<LogEvent>) {
+        const event = { id: events.length + 1, timestamp: "2026-09-23", content: null, ...record } as LogEvent;
+        events.push(event);
+        return event;
+      },
+      async conversation() { return [...events]; },
+      async result() { return undefined; },
+    } as unknown as EventLogger;
+    const config = { baseURL: "https://example.com/v1", model: "test", contextWindowOverride: 30_000 };
+    const signal = new AbortController().signal;
+    const compactor = new ContextCompactor({ model: config, logger, conversationId: "one", branchIds: ["user"], signal });
+    const executor = {
+      executeCommand: vi.fn(async (name: string) => name === "snapshot"
+        ? { ok: true, text: "page ".repeat(1_200) }
+        : { ok: true, value: "知识点掌握度" }),
+      browserContext: vi.fn(async () => ({ windowId: 7, tabs: [] })),
+    } as unknown as ChromeExecutor;
+    const func = "() => { const txt = document.body.innerText.replace(/\\s+/g,' '); const idx = txt.indexOf('知识点掌握度'); return JSON.stringify({around: txt.slice(idx, idx+500)}); }";
+    const dsml = `\n\n<｜DSML｜ calls><｜DSML｜ invoke name="eval"><｜DSML｜ parameter name="func" string="true">${func}</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>`;
+    let step = 0;
+    const largeUsage = { ...usage(), inputTokens: { total: 19_000, noCache: 19_000, cacheRead: 0, cacheWrite: 0 } };
+    const model = new MockLanguageModelV4({
+      doGenerate: async () => ({ content: [{ type: "text", text: "The user wants to inspect the current page." }],
+        finishReason: { unified: "stop", raw: "stop" }, usage: usage(), warnings: [] }) as any,
+      doStream: async (options) => {
+        expect((options.tools as any[]).map((tool) => tool.name)).toContain("eval");
+        step += 1;
+        if (step === 1) return { stream: simulateReadableStream({ chunks: [
+          { type: "stream-start", warnings: [] },
+          { type: "tool-call", toolCallId: "snapshot", toolName: "snapshot", dynamic: true, input: "{}" },
+          { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_calls" }, usage: largeUsage },
+        ] as any[] }) };
+        const answer = step === 2 ? dsml : "done";
+        return { stream: simulateReadableStream({ chunks: [
+          { type: "stream-start", warnings: [] }, { type: "text-start", id: "text" },
+          ...[answer.slice(0, 3), answer.slice(3, 37), answer.slice(37)].map((delta) => ({ type: "text-delta", id: "text", delta })),
+          { type: "text-end", id: "text" }, { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: usage() },
+        ] as any[] }) };
+      },
+    });
+    const result = await createAgent({ model: config, languageModel: model, executor, logger, conversationId: "one", compactor })
+      .stream({ prompt: [{ role: "user", content: `${"history ".repeat(7_200)}inspect the page` }] });
+    const parts = [];
+    for await (const part of result.stream) parts.push(part);
+    expect(step).toBe(3);
+    expect(executor.executeCommand).toHaveBeenCalledWith("eval", { func }, undefined, expect.any(Object));
+    expect(parts.filter((part) => part.type === "tool-result")).toHaveLength(2);
+    expect(parts.filter((part) => part.type === "text-delta").map((part) => part.text).join("")).not.toContain("DSML");
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "context.compacted", content: expect.objectContaining({ strategy: "run-summary", stepNumber: 1 }) }),
+      expect.objectContaining({ type: "model.dsml.recovery", content: { recovered: true, toolNames: ["eval"] } }),
+      expect.objectContaining({ type: "tool.finished" }),
+    ]));
+    expect(events.filter((event) => event.type === "context.compacted")).toHaveLength(1);
+    expect(await result.text).toBe("done");
+  }, 10_000);
+
+  it("logs repeated reads while keeping tools available", async () => {
+    const record = vi.fn();
+    const executor = {
+      executeCommand: vi.fn(async () => ({ ok: true, snapshot: "unchanged" })),
+      browserContext: vi.fn(async () => ({ windowId: 7, tabs: [] })),
+    } as unknown as ChromeExecutor;
+    let step = 0;
+    const model = new MockLanguageModelV4({ doStream: async (options) => {
+      expect((options.tools as any[]).map((tool) => tool.name)).toContain("eval");
+      const chunks = ++step <= 3
+        ? [{ type: "tool-call", toolCallId: `read-${step}`, toolName: "snapshot", dynamic: true, input: "{}" }]
+        : [{ type: "text-start", id: "text" }, { type: "text-delta", id: "text", delta: "done" }, { type: "text-end", id: "text" }];
+      return { stream: simulateReadableStream({ chunks: [
+        { type: "stream-start", warnings: [] }, ...chunks,
+        { type: "finish", finishReason: { unified: step <= 3 ? "tool-calls" : "stop", raw: step <= 3 ? "tool_calls" : "stop" }, usage: usage() },
+      ] as any[] }) };
+    } });
+    const result = await createAgent({ model: { baseURL: "https://example.com/v1", model: "test" }, languageModel: model,
+      executor, logger: { record } as any }).stream({ prompt: "inspect" });
+    for await (const _ of result.stream) { /* consume tool results */ }
+    expect(step).toBe(4);
+    expect(record).toHaveBeenCalledWith(expect.objectContaining({ type: "agent.loop-guard.triggered",
+      content: { stepNumber: 3, reason: "repeated-read" } }));
+    expect(await result.text).toBe("done");
   }, 10_000);
 
   it("exposes an advanced tool on the first step", async () => {

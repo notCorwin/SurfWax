@@ -125,22 +125,28 @@ export async function summarizeContext(options: {
   const { messages } = await effectiveContext(events, branchIds, raw);
   const limit = options.limit ?? await resolveModelLimit(options.model, { signal });
   if (!limit) throw new Error("无法取得模型上下文窗口；请手动设置窗口大小。");
-  const maxOutputTokens = Math.max(128, Math.min(2048, Math.floor(inputBudget(limit) / 10)));
-  const prompt = `Complete conversation:\n${JSON.stringify(messages)}`;
-  if (estimateInput([{ role: "system", content: SUMMARY_INSTRUCTIONS }, { role: "user", content: prompt }]) + maxOutputTokens > limit.context) {
-    throw new Error("完整历史超出摘要模型的上下文窗口；请换用更大窗口的模型。");
-  }
+  const summary = await generateSummary(messages, options.languageModel, logger, conversationId, signal, limit);
+  const checkpoint: SummaryCheckpoint = { strategy: "summary", branchIds, sourceCount: raw.length,
+    sourceUiCount: options.uiCount, sourceDigest: await digest(raw), summary };
+  await logger.append({ type: "context.compacted", conversationId, content: { ...checkpoint, limit } });
+  return summary;
+}
+
+async function generateSummary(messages: ModelMessage[], languageModel: LanguageModel, logger: EventLogger,
+  conversationId: string, signal: AbortSignal, limit: ModelLimit): Promise<string> {
   await logger.append({ type: "context.compaction.started", conversationId, content: { strategy: "summary", messageCount: messages.length, limit } });
   try {
-    const result = await generateText({ model: options.languageModel, maxRetries: 0, maxOutputTokens,
+    const maxOutputTokens = Math.max(128, Math.min(2048, Math.floor(inputBudget(limit) / 10)));
+    const prompt = `Complete conversation:\n${JSON.stringify(messages)}`;
+    if (estimateInput([{ role: "system", content: SUMMARY_INSTRUCTIONS }, { role: "user", content: prompt }]) + maxOutputTokens > limit.context) {
+      throw new Error("完整历史超出摘要模型的上下文窗口；请换用更大窗口的模型。");
+    }
+    const result = await generateText({ model: languageModel, maxRetries: 0, maxOutputTokens,
       reasoning: "minimal", abortSignal: signal, system: SUMMARY_INSTRUCTIONS, prompt });
     const summary = result.text.trim();
     if (!summary) throw new Error("Model returned an empty context summary");
     await logger.append({ type: "model.compaction.finished", conversationId,
       content: { text: summary }, stopReason: result.finishReason, usage: result.usage, providerMetadata: result.providerMetadata });
-    const checkpoint: SummaryCheckpoint = { strategy: "summary", branchIds, sourceCount: raw.length,
-      sourceUiCount: options.uiCount, sourceDigest: await digest(raw), summary };
-    await logger.append({ type: "context.compacted", conversationId, content: { ...checkpoint, limit } });
     return summary;
   } catch (error) {
     await logger.append({ type: signal.aborted ? "context.compaction.aborted" : "context.compaction.failed", conversationId,
@@ -149,12 +155,22 @@ export async function summarizeContext(options: {
   }
 }
 
+async function summarizeRunContext(messages: ModelMessage[], stepNumber: number, languageModel: LanguageModel,
+  logger: EventLogger, conversationId: string, signal: AbortSignal, limit: ModelLimit): Promise<string> {
+  const summary = await generateSummary(messages, languageModel, logger, conversationId, signal, limit);
+  await logger.append({ type: "context.compacted", conversationId, content: {
+    strategy: "run-summary", stepNumber, sourceCount: messages.length, sourceDigest: await digest(messages), summary, limit,
+  } });
+  return summary;
+}
+
 export class ContextCompactor {
   private calibration?: EstimateCalibration;
   private baseEstimate?: number;
   private contextVersion = 0;
   private warned = false;
   private events?: LogEvent[];
+  private compactedBaseEstimate?: number;
 
   constructor(private options: {
     model: ModelConfig; logger: EventLogger; conversationId: string;
@@ -186,6 +202,26 @@ export class ContextCompactor {
       : current);
   }
 
+  canCompact(messages: readonly ModelMessage[], limit: ModelLimit): boolean {
+    // ponytail: A tiny tail cannot offset fixed tool-schema tokens; summarize again after it grows by 10% of the input budget.
+    return this.compactedBaseEstimate === undefined
+      || estimateInput(messages) - this.compactedBaseEstimate >= inputBudget(limit) * 0.1;
+  }
+
+  async compact(raw: ModelMessage[], prepared: ModelMessage[], stepNumber: number,
+    languageModel: LanguageModel, limit: ModelLimit): Promise<ModelMessage[]> {
+    const { model, logger, conversationId, signal, branchIds } = this.options;
+    signal.throwIfAborted();
+    const summary = stepNumber === 0
+      ? await summarizeContext({ raw, branchIds, uiCount: branchIds.length, model, languageModel, logger, conversationId, signal, limit })
+      : await summarizeRunContext(prepared, stepNumber, languageModel, logger, conversationId, signal, limit);
+    const messages = [summaryMessage(summary)];
+    this.calibration = undefined;
+    this.baseEstimate = estimateInput(messages);
+    this.compactedBaseEstimate = this.baseEstimate;
+    return messages;
+  }
+
   async prepare(rawMessages: ModelMessage[], stepNumber: number): Promise<ModelMessage[] | undefined> {
     const { model, logger, conversationId, signal, branchIds } = this.options;
     signal.throwIfAborted();
@@ -199,6 +235,7 @@ export class ContextCompactor {
     const { checkpoint, messages } = await effectiveContext(this.events, branchIds, rawMessages);
     this.contextVersion = checkpoint?.eventId ?? 0;
     this.baseEstimate = estimateInput(messages);
+    this.compactedBaseEstimate = checkpoint ? this.baseEstimate : undefined;
     return messages === rawMessages ? undefined : messages;
   }
 }

@@ -203,7 +203,7 @@ export function resolveModelLimit(
   config: ModelConfig,
   options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal } = {},
 ): Promise<ModelLimit | undefined> {
-  const key = `${sdkFor(config)}\u0000${config.providerId ?? ""}\u0000${resolvedBaseURL(config)}\u0000${config.model.trim()}`;
+  const key = `${sdkFor(config)}\u0000${config.providerId ?? ""}\u0000${resolvedBaseURL(config)}\u0000${config.model.trim()}\u0000${config.contextWindowOverride ?? ""}`;
   const storage = options.storage ?? (typeof chrome !== "undefined" ? chrome.storage?.local : undefined);
   const task = async () => {
     if (validLimit(config.contextWindowOverride)) {

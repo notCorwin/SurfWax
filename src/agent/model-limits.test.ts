@@ -119,6 +119,15 @@ describe("models.dev limit matching", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps a manual window separate from a concurrent metadata lookup", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(catalog))));
+    try {
+      const config = { baseURL: "https://api.openai.com/v1", model: "gpt-5", contextWindowOverride: 30_000 };
+      const [, limit] = await Promise.all([modelSupportsImages(config), resolveModelLimit(config)]);
+      expect(limit).toMatchObject({ context: 30_000, source: "manual" });
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("uses a conservative 256K estimate without inventing capabilities", async () => {
     const storage = { async get() { return {}; }, async set() {} };
     const estimated = await resolveModelLimit({ baseURL: "https://unknown.test/v1", model: "unknown" }, {

@@ -95,7 +95,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     toolOrder,
     repairToolCall: repairCommandToolCall as any,
     prepareStep: async ({ messages, stepNumber, steps }) => {
-      const prepared = await options.compactor?.prepare(messages, stepNumber) ?? messages;
+      let prepared = await options.compactor?.prepare(messages, stepNumber) ?? messages;
       const browserContext = await options.executor.browserContext();
       const nextBrowserDigest = JSON.stringify(browserContext.tabs);
       const browserChanged = stepNumber === 0 || nextBrowserDigest !== browserDigest;
@@ -103,11 +103,16 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       if (browserChanged) logger?.record({ type: "browser.context.prepared", conversationId: options.conversationId, content: { stepNumber, ...browserContext } });
       const modelLimit = await limit;
       const estimatedInput = options.compactor?.estimate(prepared) ?? estimateInput(prepared);
-      const pressure = modelLimit && estimatedInput >= inputBudget(modelLimit) * 0.85 ? "context-budget" : undefined;
-      const guard = pressure ?? stagnationReason(steps);
+      const pressure = modelLimit && estimatedInput >= inputBudget(modelLimit) * 0.8
+        && (!options.compactor || options.compactor.canCompact(prepared, modelLimit));
+      const guard = pressure ? "context-budget" : stagnationReason(steps);
       if (guard && guard !== loggedGuard) {
         loggedGuard = guard;
         logger?.record({ type: "agent.loop-guard.triggered", conversationId: options.conversationId, content: { stepNumber, reason: guard } });
+      }
+      if (pressure) {
+        if (!options.compactor) throw new Error("上下文容量不足，无法在当前运行中压缩历史消息。");
+        prepared = await options.compactor.compact(messages, prepared, stepNumber, options.languageModel, modelLimit);
       }
       return {
         ...(sdkFor(options.model) === "@ai-sdk/anthropic" && options.model.providerId !== "anthropic" && modelLimit?.output
@@ -118,10 +123,6 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
           browserChanged ? browserContextMessage(browserContext) : undefined,
           logger ? (id) => logger.result(id) : undefined,
         ),
-        ...(guard ? {
-          activeTools: [] as [],
-          instructions: `${instructions} Internal control: tool use is now disabled because ${guard}. Give a concise status, completed work, blocker or remaining work, and the exact information needed to continue.`,
-        } : {}),
       };
     },
     ...(logger ? {

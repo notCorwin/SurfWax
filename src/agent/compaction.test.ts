@@ -98,6 +98,38 @@ describe("context choices and summary", () => {
       .rejects.toThrow("完整历史超出");
     expect(generate).not.toHaveBeenCalled();
     expect(events.some((event) => event.type === "context.compacted")).toBe(false);
+    expect(events.some((event) => event.type === "context.compaction.failed")).toBe(true);
+  });
+
+  it("reports a failed in-run summary without replacing the history", async () => {
+    const { events, logger, model, raw } = fixture();
+    const languageModel = new MockLanguageModelV4({ doGenerate: async () => { throw new Error("summary unavailable"); } });
+    const compactor = new ContextCompactor({ model, logger, conversationId: "one", branchIds: ["u", "a"], signal: new AbortController().signal });
+    await expect(compactor.compact(raw, raw, 1, languageModel,
+      { provider: "manual", model: "test", context: 20_000, source: "manual" })).rejects.toThrow("summary unavailable");
+    expect(events.some((event) => event.type === "context.compaction.failed")).toBe(true);
+    expect(events.some((event) => event.type === "context.compacted")).toBe(false);
+  });
+
+  it("aborts an in-run summary and records the interruption", async () => {
+    const { events, logger, model, raw } = fixture();
+    const controller = new AbortController();
+    const started = vi.fn();
+    const languageModel = new MockLanguageModelV4({ doGenerate: async ({ abortSignal }) => {
+      started();
+      return await new Promise((_, reject) => {
+        if (abortSignal?.aborted) reject(new DOMException("Aborted", "AbortError"));
+        else abortSignal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+      });
+    } });
+    const compactor = new ContextCompactor({ model, logger, conversationId: "one", branchIds: ["u", "a"], signal: controller.signal });
+    const task = compactor.compact(raw, raw, 1, languageModel,
+      { provider: "manual", model: "test", context: 20_000, source: "manual" });
+    await vi.waitFor(() => expect(started).toHaveBeenCalledOnce());
+    controller.abort();
+    await expect(task).rejects.toMatchObject({ name: "AbortError" });
+    expect(events.some((event) => event.type === "context.compaction.aborted")).toBe(true);
+    expect(events.some((event) => event.type === "context.compacted")).toBe(false);
   });
 
   it("restores a pending choice and clears it only for its branch", () => {
