@@ -1,4 +1,4 @@
-import { chromium, expect, test, type BrowserContext, type CDPSession, type Page } from "@playwright/test";
+import { chromium, expect, test, type BrowserContext, type CDPSession, type Locator, type Page } from "@playwright/test";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -350,6 +350,17 @@ async function themeColors(page: Page, selectors: string[]): Promise<{ colorSche
       return { background: style.backgroundColor, foreground: style.color };
     }),
   }), selectors);
+}
+
+async function expectThemeButton(locator: Locator, colorScheme: "light" | "dark", variant: "default" | "destructive") {
+  const expected = variant === "destructive"
+    ? colorScheme === "light" ? { background: "rgb(185, 28, 28)", foreground: "rgb(255, 255, 255)" } : { foreground: "rgb(255, 255, 255)" }
+    : colorScheme === "light" ? { background: "rgb(23, 23, 23)", foreground: "rgb(255, 255, 255)" }
+      : { background: "rgb(245, 245, 245)", foreground: "rgb(24, 24, 24)" };
+  await expect.poll(() => locator.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { background: style.backgroundColor, foreground: style.color, fontSize: style.fontSize, fontWeight: style.fontWeight };
+  })).toMatchObject({ ...expected, fontSize: "14px", fontWeight: "500" });
 }
 
 async function startNewConversation(page: Page): Promise<void> {
@@ -773,9 +784,14 @@ test("follows the system color scheme across every visible extension surface wit
     const optionSnapshots: Record<string, Awaited<ReturnType<typeof themeColors>>> = {};
     for (const colorScheme of ["light", "dark"] as const) {
       await options.emulateMedia({ colorScheme });
+      await options.mouse.move(0, 0);
+      await expect.poll(() => options.evaluate(() => getComputedStyle(document.documentElement).colorScheme)).toBe(colorScheme);
       await expect.poll(() => options.locator('[data-slot="input"]').first().evaluate((input) => getComputedStyle(input).color))
         .toBe(colorScheme === "dark" ? "rgb(245, 245, 245)" : "rgb(23, 23, 23)");
       optionSnapshots[colorScheme] = await themeColors(options, ["body", '[data-slot="card"]', '[data-slot="input"]', ".search-combobox-content"]);
+      await expectThemeButton(options.getByRole("button", { name: "保存配置" }), colorScheme, "default");
+      await expectThemeButton(options.getByTestId("event-log-clear"), colorScheme, "destructive");
+      expect(await options.locator('[data-slot="input"]').first().evaluate((input) => getComputedStyle(input).fontSize)).toBe("14px");
     }
     expect(optionSnapshots.light).toEqual({ colorScheme: "light", colors: [
       { background: "rgb(255, 255, 255)", foreground: "rgb(23, 23, 23)" },
@@ -804,7 +820,11 @@ test("follows the system color scheme across every visible extension surface wit
     const sideSnapshots: Record<string, Awaited<ReturnType<typeof themeColors>>> = {};
     for (const colorScheme of ["light", "dark"] as const) {
       await opened.page.emulateMedia({ colorScheme });
+      await opened.page.mouse.move(0, 0);
+      await expect.poll(() => opened.page.evaluate(() => getComputedStyle(document.documentElement).colorScheme)).toBe(colorScheme);
       sideSnapshots[colorScheme] = await themeColors(opened.page, ["body", '[data-testid="thread-root"]', ".conversation-dialog", '[data-streamdown="code-block"] pre', ".katex"]);
+      await expectThemeButton(opened.page.getByRole("button", { name: "发送消息" }), colorScheme, "default");
+      expect(await opened.page.getByTestId("composer-input").evaluate((input) => getComputedStyle(input).fontSize)).toBe("14px");
     }
     expect(sideSnapshots.light.colors.slice(0, 3)).toEqual(Array(3).fill({ background: "rgb(255, 255, 255)", foreground: "rgb(23, 23, 23)" }));
     expect(sideSnapshots.dark.colors.slice(0, 3)).toEqual(Array(3).fill({ background: "rgb(24, 24, 24)", foreground: "rgb(245, 245, 245)" }));
@@ -819,10 +839,15 @@ test("follows the system color scheme across every visible extension surface wit
     const managerSnapshots: Record<string, Awaited<ReturnType<typeof themeColors>>> = {};
     for (const colorScheme of ["light", "dark"] as const) {
       await manager.emulateMedia({ colorScheme });
+      await manager.mouse.move(0, 0);
+      await expect.poll(() => manager.evaluate(() => getComputedStyle(document.documentElement).colorScheme)).toBe(colorScheme);
       await expect.poll(() => manager.locator('[data-slot="input"]').evaluate((input) => ({
         colorScheme: getComputedStyle(document.documentElement).colorScheme, foreground: getComputedStyle(input).color,
       }))).toEqual({ colorScheme, foreground: colorScheme === "dark" ? "rgb(245, 245, 245)" : "rgb(23, 23, 23)" });
       managerSnapshots[colorScheme] = await themeColors(manager, ["body", '[data-slot="card"]', '[data-slot="input"]', "#script-code .cm-editor"]);
+      await expectThemeButton(manager.getByRole("button", { name: "保存", exact: true }), colorScheme, "default");
+      await expectThemeButton(manager.getByRole("button", { name: "删除", exact: true }), colorScheme, "destructive");
+      expect(await manager.locator('[data-slot="input"]').evaluate((input) => getComputedStyle(input).fontSize)).toBe("14px");
     }
     expect(managerSnapshots.light.colors.slice(0, 2)).toEqual(optionSnapshots.light.colors.slice(0, 2));
     expect(managerSnapshots.dark.colors.slice(0, 2)).toEqual(optionSnapshots.dark.colors.slice(0, 2));
@@ -3082,6 +3107,12 @@ test("manages, edits and deletes scripts in the native Chrome scripts workbench"
     await expect(manager.getByLabel("已保存脚本").getByText("已停用")).toBeVisible();
     await manager.getByLabel("已保存脚本").locator(".script-item").click();
     await manager.getByRole("button", { name: "删除" }).click();
+    for (const colorScheme of ["light", "dark"] as const) {
+      await manager.emulateMedia({ colorScheme });
+      await manager.mouse.move(0, 0);
+      await expect.poll(() => manager.evaluate(() => getComputedStyle(document.documentElement).colorScheme)).toBe(colorScheme);
+      await expectThemeButton(manager.getByRole("button", { name: "确认删除" }), colorScheme, "destructive");
+    }
     await manager.getByRole("button", { name: "确认删除" }).click();
     await expect(manager.getByLabel("已保存脚本").locator(".script-item")).toHaveCount(0);
     expect((await manager.evaluate(async () => chrome.storage.local.get("side-agent:user-scripts-disabled")))["side-agent:user-scripts-disabled"]).toEqual([]);

@@ -108,14 +108,6 @@ body {
 .app-error-fallback { min-height: 100vh; padding: 16px; overflow: auto; }
 .app-error-fallback > button { margin-top: 12px; }
 
-button,
-input,
-textarea,
-select {
-  font: inherit;
-  color: inherit;
-}
-
 button:not(:disabled),
 [role="button"]:not(:disabled) {
   cursor: pointer;
