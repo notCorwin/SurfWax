@@ -249,7 +249,9 @@ const AssistantMessage: FC = () => {
   const messageStatus = useAuiState((state) => state.message.status?.type);
   const threadRunning = useAuiState((state) => state.thread.isRunning);
   const interrupted = useAuiState((state) => state.message.metadata.custom?.interrupted === true);
-  const activityPhase = useAuiState((state) => turnActivityPhase(state.thread.messages, state.message.id, state.thread.isRunning));
+  const activityPhase = useAuiState((state) => turnActivityPhase(
+    state.thread.messages, state.message.id, state.thread.isRunning, state.message.status,
+    state.message.metadata.custom?.interrupted === true));
   const latest = useAuiState((state) => state.thread.messages.at(-1)?.id === state.message.id);
   const lastAnswerStart = (() => {
     if (messageId !== workView?.finalMessageId) return parts.length;
@@ -282,7 +284,7 @@ const AssistantMessage: FC = () => {
                 return <details className="process-trace" data-status={summary.status} data-testid="process-trace">
                   <summary><span key={summary.label} className={summary.status === "running" ? "shimmer text-foreground/65" : undefined}>{summary.label}</span></summary>
                   <div className="process-trace-content">{children}</div>
-                </details>
+                </details>;
               }
               if (part.type === "text") return <MarkdownText />;
               if (part.type === "reasoning") return <Reasoning {...part} />;

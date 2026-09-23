@@ -1308,7 +1308,7 @@ test("starts a new process line after assistant text", async () => {
   }
 });
 
-test("keeps completed activity pending until assistant text arrives", async () => {
+test("continues the command label until assistant text arrives", async () => {
   const provider = await startProvider([
     toolResponse("return 'DONE'"),
     { parts: textResponse("FINAL_AFTER_WAIT"), delayMs: 1500 },
@@ -1323,9 +1323,8 @@ test("keeps completed activity pending until assistant text arrives", async () =
     await opened.page.getByTestId("composer-input").fill("run then reply");
     await opened.page.getByTestId("composer-input").press("Enter");
     const group = opened.page.getByTestId("process-trace");
-    await expect(group.locator(":scope > summary")).toHaveText("正在准备回复");
-    await expect(group.locator(".activity summary")).toHaveText("正在准备回复");
-    await expect(opened.page.getByTestId("work-summary")).toHaveCount(0);
+    await expect(group.locator(":scope > summary")).toHaveText("正在执行命令");
+    await expect(group.locator(".activity summary")).toHaveText("正在执行命令");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FINAL_AFTER_WAIT");
     await opened.page.getByTestId("work-summary").locator(":scope > summary").click();
     await expect(group.locator(":scope > summary")).toHaveText("已执行 1 次命令");
@@ -1335,7 +1334,32 @@ test("keeps completed activity pending until assistant text arrives", async () =
   }
 });
 
-test("stops pending labels when a reply is interrupted before text", async () => {
+test("switches from reasoning to command while keeping completion labels for text", async () => {
+  const provider = await startProvider([
+    [chunk({ role: "assistant", reasoning_content: "PLAN" }), ...toolResponse("return 'DONE'")],
+    { parts: textResponse("ANSWER_AFTER_REASONING"), delayMs: 1500 },
+    textResponse("推理测试"),
+  ], 600);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("reason then run");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    const group = opened.page.getByTestId("process-trace");
+    await expect(group.locator(":scope > summary")).toHaveText("正在思考");
+    await expect(group.locator(":scope > summary")).toHaveText("正在执行命令");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("ANSWER_AFTER_REASONING");
+    await opened.page.getByTestId("work-summary").locator(":scope > summary").click();
+    await expect(group.locator(":scope > summary")).toHaveText("已思考并执行 1 次命令");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("stops continued activity when a reply is interrupted", async () => {
   const provider = await startProvider([
     queuedToolResponse(
       "await new Promise((resolve) => setTimeout(resolve, 60_000)); return 'TOO_LATE'",
@@ -1352,14 +1376,30 @@ test("stops pending labels when a reply is interrupted before text", async () =>
     await opened.page.getByTestId("composer-input").press("Enter");
     const group = opened.page.getByTestId("process-trace");
     await expect(group).toHaveCount(1);
-    await expect(group.locator(":scope > summary")).toHaveText("正在准备回复");
+    await expect(group.locator(":scope > summary")).toContainText("正在执行命令");
     await expect(group.locator(".activity[data-status=running]")).toHaveCount(2);
     await expect(group.locator(".activity[data-status=running]").first()).toBeHidden();
     await opened.page.getByRole("button", { name: "停止生成" }).click();
-    await expect(group.locator(":scope > summary")).toHaveText("回复未生成");
+    await expect(group.locator(":scope > summary")).toHaveText("回复中断");
     await group.locator(":scope > summary").click();
     await expect(group.locator(".activity[data-status]")).toHaveCount(2);
     await expect(group.locator(".activity[data-status=running]")).toHaveCount(0);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("stops continued activity when the model request fails", async () => {
+  const provider = await startProvider([toolResponse("return 'DONE'"), { status: 400, error: "fatal request" }]);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("run then fail");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.getByTestId("process-trace").locator(":scope > summary")).toHaveText("回复失败");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }

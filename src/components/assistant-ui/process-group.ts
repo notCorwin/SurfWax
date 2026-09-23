@@ -1,7 +1,7 @@
 import { createContext } from "react";
 import { getPartialJsonObjectMeta } from "assistant-stream/utils";
 
-export type ActivityPhase = "pending" | "spoken" | "stopped";
+export type ActivityPhase = "pending" | "spoken" | "cancelled" | "failed" | "stopped";
 export const ActivityPhaseContext = createContext<ActivityPhase>("spoken");
 
 type SpeechMessage = {
@@ -10,7 +10,10 @@ type SpeechMessage = {
   readonly parts: readonly { readonly type: string; readonly text?: string }[];
 };
 
-export function turnActivityPhase(messages: readonly SpeechMessage[], messageId: string, running: boolean): ActivityPhase {
+export function turnActivityPhase(
+  messages: readonly SpeechMessage[], messageId: string, running: boolean,
+  status?: { readonly type: string; readonly reason?: string }, interrupted = false,
+): ActivityPhase {
   const index = messages.findIndex((message) => message.id === messageId);
   if (index < 0) return "stopped";
   let start = index;
@@ -19,7 +22,9 @@ export function turnActivityPhase(messages: readonly SpeechMessage[], messageId:
   while (end < messages.length && messages[end]?.role !== "user") end++;
   if (messages.slice(start, end).some((message) => message.role === "assistant"
     && message.parts.some((part) => part.type === "text" && part.text?.trim()))) return "spoken";
-  return running && end === messages.length ? "pending" : "stopped";
+  if (running && end === messages.length) return "pending";
+  if (interrupted || status?.type === "requires-action" || status?.type === "incomplete" && status.reason === "cancelled") return "cancelled";
+  return status?.type === "incomplete" ? "failed" : "stopped";
 }
 
 type ToolActivityPart = {
@@ -29,14 +34,22 @@ type ToolActivityPart = {
 };
 
 export function toolActivity(part: ToolActivityPart, phase: ActivityPhase = "spoken"): { status: "running" | "error" | "complete"; label: string } {
-  const running = part.status.type === "running" && phase !== "stopped";
-  const failed = part.status.type === "incomplete" || part.isError || part.status.type === "running" && phase === "stopped";
-  return {
-    status: running || !failed && phase === "pending" ? "running" : failed ? "error" : "complete",
-    label: running
-      ? getPartialJsonObjectMeta(part.args as Record<symbol, unknown>)?.state === "partial" ? "正在输入命令" : "正在执行命令"
-      : failed ? "命令执行失败" : phase === "pending" ? "正在准备回复" : phase === "stopped" ? "回复未生成" : "命令执行完成",
+  if (phase === "pending" && part.status.type !== "requires-action") return {
+    status: "running",
+    label: part.status.type === "running" && getPartialJsonObjectMeta(part.args as Record<symbol, unknown>)?.state === "partial"
+      ? "正在输入命令" : "正在执行命令",
   };
+  if (part.status.type === "incomplete" || part.isError) return { status: "error", label: "命令执行失败" };
+  if (phase === "cancelled") return { status: "error", label: "回复中断" };
+  if (phase === "failed") return { status: "error", label: "回复失败" };
+  if (phase === "stopped") return { status: "complete", label: "回复未生成" };
+  if (part.status.type === "requires-action") return { status: "running", label: "等待操作" };
+  if (part.status.type === "running") return {
+    status: "running",
+    label: part.status.type === "running" && getPartialJsonObjectMeta(part.args as Record<symbol, unknown>)?.state === "partial"
+      ? "正在输入命令" : "正在执行命令",
+  };
+  return { status: "complete", label: "命令执行完成" };
 }
 
 type ProcessPart = {
@@ -49,21 +62,22 @@ type ProcessPart = {
 export function processGroupSummary(parts: readonly ProcessPart[], indices: readonly number[], interrupted = false, phase: ActivityPhase = "spoken") {
   const grouped = indices.flatMap((index) => parts[index] ? [parts[index]!] : []);
   const tools = grouped.filter((part) => part.type === "tool-call");
-  const active = [...grouped].reverse().find((part) => part.status.type === "running" || part.status.type === "requires-action");
-  if (phase !== "stopped" && active?.status.type === "requires-action" && !interrupted) return { status: "running" as const, label: "等待操作" };
-  if (phase !== "stopped" && active?.status.type === "running" && active.type === "reasoning") return { status: "running" as const, label: "正在思考" };
-  if (phase !== "stopped" && active?.status.type === "running" && active.type === "tool-call") {
-    const activity = toolActivity({ status: active.status, isError: active.isError, args: active.args });
-    return { status: "running" as const, label: activity.label };
+  const latest = phase === "pending" ? grouped.at(-1)
+    : phase === "spoken" ? [...grouped].reverse().find((part) => part.status.type === "running" || part.status.type === "requires-action") : undefined;
+  if (latest?.status.type === "requires-action" && !interrupted) return { status: "running" as const, label: "等待操作" };
+  if (latest && (phase === "pending" || !latest.isError && latest.status.type === "running")) {
+    if (latest.type === "reasoning") return { status: "running" as const, label: "正在思考" };
+    if (latest.type === "tool-call") return toolActivity({ status: latest.status, isError: latest.isError, args: latest.args }, phase);
   }
+  if (phase === "cancelled") return { status: "error" as const, label: "回复中断" };
+  if (phase === "failed") return { status: "error" as const, label: "回复失败" };
   const failed = grouped.some((part) => part.status.type === "incomplete" || part.isError
-    || (interrupted || phase === "stopped") && (part.status.type === "requires-action" || part.status.type === "running"));
+    || interrupted && part.status.type === "requires-action");
   if (failed) return {
     status: "error" as const,
     label: tools.length ? `${tools.length} 次命令中有失败` : "思考未完成",
   };
-  if (phase !== "spoken") return { status: phase === "pending" ? "running" as const : "complete" as const,
-    label: phase === "pending" ? "正在准备回复" : "回复未生成" };
+  if (phase === "stopped") return { status: "complete" as const, label: "回复未生成" };
   return {
     status: "complete" as const,
     label: tools.length ? `${grouped.some((part) => part.type === "reasoning") ? "已思考并" : "已"}执行 ${tools.length} 次命令` : "思考完成",

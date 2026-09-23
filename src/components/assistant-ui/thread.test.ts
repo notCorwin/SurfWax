@@ -54,18 +54,29 @@ describe("processGroupSummary", () => {
     ], [0], true)).toMatchObject({ status: "complete", label: "思考完成" });
   });
 
-  it("waits for assistant text before marking completed activity", () => {
-    const tools = [{ type: "tool-call", status: { type: "complete" }, args: {} }];
-    expect(processGroupSummary(tools, [0], false, "pending")).toEqual({ status: "running", label: "正在准备回复" });
-    expect(toolActivity(tools[0]!, "pending")).toEqual({ status: "running", label: "正在准备回复" });
-    expect(processGroupSummary(tools, [0], false, "spoken").label).toBe("已执行 1 次命令");
-    expect(toolActivity(tools[0]!, "spoken").label).toBe("命令执行完成");
-    expect(processGroupSummary(tools, [0], false, "stopped")).toEqual({ status: "complete", label: "回复未生成" });
-    expect(toolActivity(tools[0]!, "stopped")).toEqual({ status: "complete", label: "回复未生成" });
+  it("continues the latest activity until assistant text arrives", () => {
+    const reasoning = { type: "reasoning", status: { type: "complete" } };
+    const tool = { type: "tool-call", status: { type: "complete" }, args: {} };
+    expect(processGroupSummary([reasoning], [0], false, "pending")).toEqual({ status: "running", label: "正在思考" });
+    expect(processGroupSummary([reasoning, tool], [0, 1], false, "pending")).toEqual({ status: "running", label: "正在执行命令" });
+    expect(toolActivity(tool, "pending")).toEqual({ status: "running", label: "正在执行命令" });
+    expect(processGroupSummary([{ ...tool, isError: true }], [0], false, "pending")).toEqual({ status: "running", label: "正在执行命令" });
+    expect(toolActivity({ ...tool, isError: true }, "pending")).toEqual({ status: "running", label: "正在执行命令" });
+    expect(processGroupSummary([reasoning, tool], [0, 1], false, "spoken").label).toBe("已思考并执行 1 次命令");
+    expect(toolActivity(tool, "spoken").label).toBe("命令执行完成");
+  });
+
+  it("stops the activity when a run ends without text", () => {
+    const tool = { type: "tool-call", status: { type: "complete" }, args: {} };
+    expect(processGroupSummary([tool], [0], false, "cancelled")).toEqual({ status: "error", label: "回复中断" });
+    expect(processGroupSummary([tool], [0], false, "failed")).toEqual({ status: "error", label: "回复失败" });
+    expect(processGroupSummary([tool], [0], false, "stopped")).toEqual({ status: "complete", label: "回复未生成" });
+    expect(processGroupSummary([{ ...tool, status: { type: "incomplete" } }], [0], true, "cancelled"))
+      .toEqual({ status: "error", label: "回复中断" });
   });
 });
 
-it("recognizes speech only from nonempty assistant text in the current turn", () => {
+it("uses only current-turn assistant text to release completed labels", () => {
   const messages = [
     { id: "u1", role: "user", parts: [{ type: "text", text: "Question" }] },
     { id: "a1", role: "assistant", parts: [{ type: "text", text: "Earlier answer" }] },
@@ -74,11 +85,13 @@ it("recognizes speech only from nonempty assistant text in the current turn", ()
     { id: "a3", role: "assistant", parts: [{ type: "tool-call" }] },
   ];
   expect(turnActivityPhase(messages, "a2", true)).toBe("pending");
-  expect(turnActivityPhase(messages, "a2", false)).toBe("stopped");
+  expect(turnActivityPhase(messages, "a2", false, { type: "incomplete", reason: "cancelled" })).toBe("cancelled");
+  expect(turnActivityPhase(messages, "a2", false, { type: "requires-action" })).toBe("cancelled");
+  expect(turnActivityPhase(messages, "a2", false, { type: "incomplete", reason: "error" })).toBe("failed");
+  expect(turnActivityPhase(messages, "a2", false, { type: "complete" })).toBe("stopped");
   messages[4]!.parts.push({ type: "text", text: "Progress" });
   expect(turnActivityPhase(messages, "a2", true)).toBe("spoken");
   expect(turnActivityPhase(messages, "a3", true)).toBe("spoken");
-  expect(turnActivityPhase(messages, "a1", true)).toBe("spoken");
 });
 
 it("indexes saved message text without tool input or superseded edits", () => {

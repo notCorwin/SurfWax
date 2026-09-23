@@ -32,13 +32,16 @@ it("shimmers only active reasoning and tool labels", () => {
   expect(tool("running", "{}")).not.toContain("<svg");
 });
 
-it("shows pending, completed, and stopped labels consistently inside activity details", () => {
+it("keeps completed activity labels live until text, then settles them", () => {
   const render = (phase: ActivityPhase) => renderToStaticMarkup(createElement(ActivityPhaseContext.Provider, { value: phase },
     createElement(Reasoning, { status: { type: "complete" } } as ComponentProps<typeof Reasoning>),
     createElement(ToolFallback, { status: { type: "complete" }, args: {}, argsText: "{}" } as ComponentProps<typeof ToolFallback>)));
-  expect(render("pending")).toMatch(/正在准备回复.*正在准备回复/s);
+  expect(render("pending")).toMatch(/正在思考.*正在执行命令/s);
   expect(render("spoken")).toMatch(/思考完成.*命令执行完成/s);
-  expect(render("stopped")).toMatch(/回复未生成.*回复未生成/s);
+  expect(render("cancelled")).toMatch(/回复中断.*回复中断/s);
+  expect(render("failed")).toMatch(/回复失败.*回复失败/s);
+  expect(renderToStaticMarkup(createElement(ActivityPhaseContext.Provider, { value: "pending" },
+    createElement(Reasoning, { status: { type: "incomplete" } } as ComponentProps<typeof Reasoning>)))).toContain("正在思考");
 });
 
 it("replaces the shimmer label when command input becomes execution", async () => {
