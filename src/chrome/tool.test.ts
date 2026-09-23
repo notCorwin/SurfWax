@@ -44,6 +44,12 @@ describe("browser command tools", () => {
     await expect(repairCommandToolCall({
       toolCall: { toolCallId: "2", toolName: "act", input: JSON.stringify({ steps: JSON.stringify([{ type: "goto", url: "https://example.com" }]) }) }, tools,
     } as any)).resolves.toMatchObject({ toolName: "act", input: JSON.stringify({ steps: [{ type: "goto", url: "https://example.com" }] }) });
+    await expect(repairCommandToolCall({
+      toolCall: { toolCallId: "3", toolName: "mousewheel", input: '{"deltaX":0,"deltaY":600}' }, tools,
+    } as any)).resolves.toMatchObject({ input: '{"dx":0,"dy":600}' });
+    await expect(repairCommandToolCall({
+      toolCall: { toolCallId: "4", toolName: "mousewheel", input: '{"dx":1,"deltaX":0,"deltaY":600}' }, tools,
+    } as any)).resolves.toBeNull();
   });
 
   it("stores large non-visual results once and returns a useful reference", async () => {

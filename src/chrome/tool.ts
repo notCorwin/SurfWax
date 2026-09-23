@@ -153,6 +153,17 @@ export function parseCommandInput(name: CommandName, input: unknown): Record<str
   return definitions[name].inputSchema.parse(input) as Record<string, unknown>;
 }
 
+export function normalizeCommandInput(name: string, input: unknown): unknown | undefined {
+  if (name !== "mousewheel" || !input || typeof input !== "object" || Array.isArray(input)) return input;
+  const value = input as Record<string, unknown>;
+  if ((Object.hasOwn(value, "deltaX") && Object.hasOwn(value, "dx") && value.deltaX !== value.dx)
+    || (Object.hasOwn(value, "deltaY") && Object.hasOwn(value, "dy") && value.deltaY !== value.dy)) return undefined;
+  const { deltaX, deltaY, ...rest } = value;
+  if (Object.hasOwn(value, "deltaX") && !Object.hasOwn(value, "dx")) rest.dx = deltaX;
+  if (Object.hasOwn(value, "deltaY") && !Object.hasOwn(value, "dy")) rest.dy = deltaY;
+  return rest;
+}
+
 const LARGE_RESULT_BYTES = 8 * 1024;
 
 function hasScreenshot(value: unknown): boolean {
@@ -259,6 +270,8 @@ export const repairCommandToolCall: ToolCallRepairFunction<Record<string, Return
       input = { ...(input as Record<string, unknown>), steps: JSON.parse((input as any).steps) };
     }
   } catch { return null; }
+  input = normalizeCommandInput(toolName, input);
+  if (input === undefined) return null;
   const repaired = JSON.stringify(input);
   return toolName === toolCall.toolName && repaired === toolCall.input ? null : { ...toolCall, toolName, input: repaired };
 };

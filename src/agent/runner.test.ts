@@ -93,6 +93,37 @@ describe("createAgent", () => {
     expect(await result.text).toBe("done");
   }, 10_000);
 
+  it("executes a recovered DSML scroll, records its result, and continues", async () => {
+    let step = 0;
+    const record = vi.fn();
+    const executor = {
+      executeCommand: vi.fn(async () => ({ ok: true })),
+      browserContext: vi.fn(async () => ({ windowId: 7, tabs: [{ index: 0, current: true, title: "Course", url: "https://example.com" }] })),
+    } as unknown as ChromeExecutor;
+    const dsml = '<｜DSML｜ calls><｜DSML｜ invoke name="mousewheel"><｜DSML｜ parameter name="deltaY" string="false">600</｜DSML｜ parameter><｜DSML｜ parameter name="deltaX" string="false">0</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
+    const model = new MockLanguageModelV4({ doStream: async () => {
+      step++;
+      const answer = step === 1 ? dsml : "done";
+      return { stream: simulateReadableStream({ chunks: [
+        { type: "stream-start", warnings: [] },
+        { type: "text-start", id: "text" },
+        { type: "text-delta", id: "text", delta: answer.slice(0, 6) },
+        { type: "text-delta", id: "text", delta: answer.slice(6) },
+        { type: "text-end", id: "text" },
+        { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: usage() },
+      ] as any[] }) };
+    } });
+    const result = await createAgent({ model: { baseURL: "https://example.com/v1", model: "test" }, languageModel: model, executor, logger: { record } as any }).stream({ prompt: "scroll" });
+    const parts = [];
+    for await (const part of result.stream) parts.push(part);
+    expect(step).toBe(2);
+    expect(executor.executeCommand).toHaveBeenCalledOnce();
+    expect(executor.executeCommand).toHaveBeenCalledWith("mousewheel", { dx: 0, dy: 600 }, undefined, expect.any(Object));
+    expect(parts.filter((part) => part.type === "tool-result")).toHaveLength(1);
+    expect(await result.text).toBe("done");
+    expect(record).toHaveBeenCalledWith(expect.objectContaining({ type: "model.dsml.recovery", content: { recovered: true, toolNames: ["mousewheel"] } }));
+  }, 10_000);
+
   it("exposes an advanced tool on the first step", async () => {
     let step = 0;
     const executor = {

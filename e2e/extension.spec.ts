@@ -149,6 +149,11 @@ async function startProvider(responses: MockResponse[], delayMs = 0, summaryText
       response.end("<!doctype html><title>Side Agent Target</title><main>ready</main>");
       return;
     }
+    if (request.method === "GET" && request.url === "/scroll-target") {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end("<!doctype html><title>Scroll Target</title><main style='height:3000px'>ready</main>");
+      return;
+    }
     if (request.method === "GET" && request.url === "/automation") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end(`<!doctype html><title>Automation Target</title><label>Email <input type="email"></label><button onclick="document.querySelector('output').textContent='Welcome '+document.querySelector('input').value">Sign in</button><output></output>`);
@@ -1048,6 +1053,32 @@ test("uses dedicated snapshot, fill, and click tools", async () => {
     expect(toolNames.filter((name: string) => ["open", "attach", "close", "detach", "show", "list", "close-all", "kill-all"].includes(name))).toEqual([]);
     expect(await opened.page.evaluate(async () => (await chrome.windows.getAll()).length)).toBe(windowCount);
     expect(provider.requests.filter((request) => request.tools)).toHaveLength(5);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("recovers a streamed DSML mousewheel call in the side panel", async () => {
+  const dsml = '<｜DSML｜ calls><｜DSML｜ invoke name="mousewheel"><｜DSML｜ parameter name="deltaY" string="false">600</｜DSML｜ parameter><｜DSML｜ parameter name="deltaX" string="false">0</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
+  const provider = await startProvider([
+    streamingTextResponse([dsml.slice(0, 5), dsml.slice(5, 41), dsml.slice(41)]),
+    textResponse("SCROLL_OK"),
+    textResponse("滚动测试"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/scroll-target`);
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("scroll the page");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("SCROLL_OK");
+    await expect.poll(() => target.evaluate(() => scrollY)).toBeGreaterThan(0);
+    await expect(opened.page.locator('[data-role="assistant"]').last()).not.toContainText("DSML");
+    const events = await readEvents(opened.page);
+    expect(events.filter((event) => event.type === "tool.finished" && event.content?.toolName === "mousewheel")).toHaveLength(1);
+    expect(events.some((event) => event.type === "model.dsml.recovery" && event.content?.recovered === true)).toBe(true);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }

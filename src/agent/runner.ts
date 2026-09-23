@@ -1,4 +1,4 @@
-import { isLoopFinished, ToolLoopAgent } from "ai";
+import { isLoopFinished, ToolLoopAgent, wrapLanguageModel } from "ai";
 import type { LanguageModel } from "ai";
 import { createCommandTools, prepareToolMessages, repairCommandToolCall } from "../chrome/tool";
 import { ChromeExecutor } from "../chrome/executor";
@@ -9,6 +9,7 @@ import { inputBudget, modelSupportsImages, resolveModelLimit } from "./model-lim
 import { sdkFor } from "./model-sdks";
 import { estimateInput, type ContextCompactor } from "./compaction";
 import type { ReasoningEffort } from "./reasoning";
+import { dsmlMiddleware } from "./dsml";
 
 const BASE_INSTRUCTIONS = [
   "You are a Chrome side-panel agent helping the user automate the browser they control.",
@@ -86,7 +87,8 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
   let loggedGuard: string | undefined;
   const loggedToolCalls = new Set<string>();
   return new ToolLoopAgent<never, BrowserAgentTools>({
-    model: options.languageModel,
+    model: typeof options.languageModel === "string" ? options.languageModel
+      : wrapLanguageModel({ model: options.languageModel, middleware: dsmlMiddleware(logger, options.conversationId) }),
     ...(options.reasoning ? { reasoning: options.reasoning === "max" ? "xhigh" : options.reasoning } : {}),
     instructions,
     tools,
