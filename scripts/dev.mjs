@@ -52,22 +52,6 @@ async function waitForWorker(timeoutMs = 30_000) {
   }
 }
 
-async function enableUserScripts(extensionId) {
-  const probe = await context.newPage();
-  await probe.goto(`chrome-extension://${extensionId}/options.html`);
-  if (await probe.evaluate(() => typeof chrome.userScripts === "object")) {
-    await probe.close();
-    return;
-  }
-  const settings = await context.newPage();
-  await settings.goto(`chrome://extensions/?id=${extensionId}`);
-  await settings
-    .locator("extensions-toggle-row#allow-user-scripts cr-toggle#crToggle")
-    .click();
-  await probe.waitForFunction(() => typeof chrome.userScripts === "object");
-  await Promise.all([settings.close(), probe.close()]);
-}
-
 async function main() {
   if (!URL.canParse(targetUrl)) throw new Error(`无效的目标 URL：${targetUrl}`);
   const executablePath = chromium.executablePath();
@@ -96,7 +80,6 @@ async function main() {
 
   const worker = await waitForWorker();
   const extensionId = new URL(worker.url()).hostname;
-  await enableUserScripts(extensionId);
 
   const page = context.pages()[0] ?? (await context.newPage());
   await page.goto(targetUrl);
