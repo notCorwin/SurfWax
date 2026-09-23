@@ -144,7 +144,7 @@ Side Panel 关闭时，Harness 会立即中止当前模型请求，阻止排队�
 ## 开发与验证
 
 ```sh
-npm run check      # TypeScript 检查并构建
+npm run check      # TypeScript 检查并构建到 .dev/check-dist/，不覆盖开发扩展
 npm test           # Vitest 单元测试
 npm run test:e2e   # 构建并运行真实扩展 Playwright 测试
 git diff --check
