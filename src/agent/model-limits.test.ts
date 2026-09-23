@@ -40,6 +40,40 @@ describe("models.dev limit matching", () => {
       .resolves.toHaveProperty("openai");
   });
 
+  it("refreshes a fresh catalog and invalidates the cached model limit", async () => {
+    const values: Record<string, unknown> = {};
+    const storage = { async get(key: string) { return { [key]: values[key] }; }, async set(items: Record<string, unknown>) { Object.assign(values, items); } };
+    const config = { baseURL: "https://api.openai.com/v1", model: "gpt-5" };
+    const original = vi.fn(async () => new Response(JSON.stringify(catalog)));
+    await expect(resolveModelLimit(config, { storage, fetch: original, now: () => 100 })).resolves.toMatchObject({ context: 400_000 });
+    expect(values["side-agent:model-limit"]).toBeTruthy();
+
+    const updated = vi.fn(async () => new Response(JSON.stringify({
+      openai: { ...catalog.openai, models: { "gpt-5": { limit: { context: 500_000 } } } },
+    })));
+    await expect(loadModelCatalog({ storage, fetch: updated, now: () => 101, refresh: true }))
+      .resolves.toHaveProperty("openai.models.gpt-5.limit.context", 500_000);
+    expect(updated).toHaveBeenCalledWith("https://models.dev/api.json", expect.objectContaining({ cache: "no-cache" }));
+    expect(values["side-agent:model-limit"]).toBeNull();
+    await expect(resolveModelLimit(config, { storage, fetch: original, now: () => 102 })).resolves.toMatchObject({ context: 500_000 });
+    expect(original).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a stale fallback and still rejects an aborted refresh", async () => {
+    const values: Record<string, unknown> = { "side-agent:model-catalog": { fetchedAt: 100, catalog } };
+    const storage = { async get(key: string) { return { [key]: values[key] }; }, async set(items: Record<string, unknown>) { Object.assign(values, items); } };
+    const offline = vi.fn(async () => { throw new Error("offline"); });
+    const onStale = vi.fn();
+    await expect(loadModelCatalog({ storage, fetch: offline, now: () => 101, refresh: true, onStale }))
+      .resolves.toEqual(catalog);
+    expect(onStale).toHaveBeenCalledOnce();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(loadModelCatalog({ storage, fetch: offline, refresh: true, signal: controller.signal, onStale }))
+      .rejects.toThrow("offline");
+    expect(onStale).toHaveBeenCalledOnce();
+  });
+
   it("uses only exact provider/model matches and honors input limits", () => {
     expect(matchModel(catalog, "https://openrouter.ai/api/v1", "gpt-5")).toMatchObject({ provider: "openrouter", context: 100_000 });
     expect(matchModel(catalog, "https://api.openai.com/v1", "gpt-5-min")).toBeUndefined();

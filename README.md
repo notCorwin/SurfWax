@@ -75,6 +75,8 @@ Side Panel 标题栏的脚本按钮会打开独立的用户脚本页面。列表
 
 模型配置只保存在当前扩展的 `chrome.storage.local` 中，并按 Provider 隔离。设置页支持普通 API Key，也支持 Bedrock、Azure、Vertex、Cloudflare、GitLab、Watsonx 和 SAP AI Core 等多字段凭据；Models.dev Endpoint 中的 `${VAR}` 会自动变成独立输入项并在请求前插值。
 
+每次打开设置页都会向 Models.dev 校验 Provider 和模型目录，并更新模型上下文限制；离线时继续使用已缓存的目录并显示提示。模型运行期间沿用本地缓存，不持续轮询 Models.dev。
+
 当前 Registry 覆盖 2026-09-22 Models.dev 的 223 个 Provider、28 个 `npm` SDK 标识。兼容浏览器的 `@ai-sdk/*`、AIHubMix、OpenRouter、SaladCloud 与 Merge Gateway 按需加载原包；QVAC、Venice、Cloudflare AI Gateway、GitLab Duo、watsonx.ai 和 SAP AI Core 使用等价浏览器协议适配，不需要 Native Messaging、Node 服务或远程代理。未来出现的未知 SDK 会在加入 Registry 后才可执行。
 
 模型列表默认只推荐 Models.dev 中 `tool_call: true` 且输出文本的模型。Provider 没有符合条件的目录模型时仍可手填 Model ID；例如 Perplexity 当前会提示浏览器工具可能不可用。`/models` 能力探测只用于 OpenAI-compatible Endpoint，原生 SDK 使用 Models.dev 的 Provider/Model 元数据。

@@ -163,27 +163,32 @@ export function modelProviderPresets(catalog: ModelCatalog): ModelProviderPreset
 const catalogPending = new Map<string, Promise<ModelCatalog>>();
 
 export function loadModelCatalog(
-  options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal } = {},
+  options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; refresh?: boolean; onStale?: (error: unknown) => void } = {},
 ): Promise<ModelCatalog> {
   const storage = options.storage ?? (typeof chrome !== "undefined" ? chrome.storage?.local : undefined);
   const task = async () => {
     const cached = storage ? (await storage.get(CATALOG_CACHE_KEY).catch(() => ({ [CATALOG_CACHE_KEY]: undefined })))[CATALOG_CACHE_KEY] as CachedCatalog | undefined : undefined;
-    if (cached?.catalog && (options.now ?? Date.now)() - cached.fetchedAt < REFRESH_MS) return cached.catalog;
+    if (!options.refresh && cached?.catalog && (options.now ?? Date.now)() - cached.fetchedAt < REFRESH_MS) return cached.catalog;
     try {
       const timeout = AbortSignal.timeout(10_000);
       const response = await (options.fetch ?? fetch)(CATALOG_URL, {
+        ...(options.refresh ? { cache: "no-cache" as const } : {}),
         signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
       });
       if (!response.ok) throw new Error(`models.dev HTTP ${response.status}`);
       const catalog = normalizeCatalog(await response.json());
-      if (storage) await storage.set({ [CATALOG_CACHE_KEY]: { fetchedAt: (options.now ?? Date.now)(), catalog } satisfies CachedCatalog }).catch(() => undefined);
+      if (storage) await storage.set({
+        [CATALOG_CACHE_KEY]: { fetchedAt: (options.now ?? Date.now)(), catalog } satisfies CachedCatalog,
+        [CACHE_KEY]: null,
+      }).catch(() => undefined);
       return catalog;
     } catch (error) {
       if (options.signal?.aborted || !cached?.catalog) throw error;
+      options.onStale?.(error);
       return cached.catalog;
     }
   };
-  if (options.signal || options.fetch || options.storage || options.now) return task();
+  if (options.signal || options.fetch || options.storage || options.now || options.refresh || options.onStale) return task();
   const existing = catalogPending.get(CATALOG_URL);
   if (existing) return existing;
   const result = task().finally(() => catalogPending.delete(CATALOG_URL));

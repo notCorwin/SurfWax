@@ -30,6 +30,7 @@ export function OptionsApp() {
   const [providers, setProviders] = useState<ModelProviderPreset[]>([]);
   const [providerInput, setProviderInput] = useState("");
   const [catalogError, setCatalogError] = useState<unknown>();
+  const [catalogStale, setCatalogStale] = useState(false);
   const [ready, setReady] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState("");
@@ -60,7 +61,8 @@ export function OptionsApp() {
     let active = true;
     void Promise.all([
       loadModelConfig(),
-      loadModelCatalog().then(modelProviderPresets).catch((error) => { setCatalogError(error); return []; }),
+      loadModelCatalog({ refresh: true, onStale: () => { if (active) setCatalogStale(true); } })
+        .then(modelProviderPresets).catch((error) => { if (active) setCatalogError(error); return []; }),
     ]).then(([stored, catalogProviders]) => {
       if (!active) return;
       setModelSettings(stored);
@@ -237,6 +239,7 @@ export function OptionsApp() {
                 <FieldDescription id="provider-description">
                   {!ready ? "正在加载 Models.dev Provider 目录…" : catalogError
                     ? "Models.dev 暂时不可用；仍可选择 custom 使用自定义 Endpoint。"
+                    : catalogStale ? `Models.dev 暂时不可用，正在使用缓存目录（${providers.length.toLocaleString()} 个 Provider）。`
                     : `已载入 ${providers.length.toLocaleString()} 个内置 Provider；每个 Provider 独立保存配置。`}
                 </FieldDescription>
                 {fieldErrors.providerId && <p id="provider-id-error" className="field-error" role="alert">{fieldErrors.providerId}</p>}
