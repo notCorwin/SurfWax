@@ -55,8 +55,7 @@ export async function collectCapabilities(chromeApi: typeof chrome, options: {
       pageIsolated: { available: Boolean(chromeApi.debugger) },
       userScript: userScripts ? { available: true } : {
         available: false,
-        reason: "Chrome User Scripts is disabled.",
-        action: "Enable Allow User Scripts on this extension's details page, then reload the side panel.",
+        reason: "User Scripts is paused in this build.",
       },
       offscreen: has("OFFSCREEN_DOCUMENT") ? { available: true } : {
         available: Boolean(chromeApi.offscreen),

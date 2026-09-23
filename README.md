@@ -13,7 +13,6 @@ Surf Wax 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。它使用 
 - **一个工具同时提高下限与保留上限**：普通模型只需生成合法动作 JSON；强模型仍可通过 `run` 使用 JavaScript、Chrome API 和 CDP。
 - **纯浏览器扩展**：没有守护进程、远程执行器或中间服务；模型请求从扩展直接发送到配置的 Provider。
 - **可恢复的本地多对话**：IndexedDB 中的 append-only event log 是对话列表、UI、模型上下文和中断恢复的唯一事实来源。
-- **持久 User Scripts**：Agent 可通过原生 `chrome.userScripts` 查看、注册、更新、运行和删除脚本；Harness 保存注册快照，并在扩展启动或更新后恢复。
 - **不中断的 Agent 循环**：工具调用严格串行，不设应用级步骤上限、执行超时或输出上限，直到模型自然结束或用户中止。
 - **可中止的无限重试**：网络错误、408、429 和可恢复的 5xx 使用带 jitter 的指数退避，单次等待最多 10 秒。
 - **流畅的富文本输出**：逐 Token 流式显示 CommonMark、GFM、脚注、LaTeX、表格、任务列表、代码高亮等内容，同时保持输入框响应。
@@ -52,7 +51,7 @@ npm run build
 npm run dev
 ```
 
-该命令会启动 Vite、加载专用的 Playwright Chromium、打开测试网页和真实 Side Panel。修改 Side Panel、设置页或样式后会通过 HMR 原地更新并保留页面状态；修改后台 Service Worker 或 Manifest 时会自动重新加载扩展并恢复 Side Panel。模型配置、对话和 User Scripts 保存在 Git 忽略的 `.dev/chromium-profile/` 中，删除该目录即可重置开发环境。
+该命令会启动 Vite、加载专用的 Playwright Chromium、打开测试网页和真实 Side Panel。修改 Side Panel、设置页或样式后会通过 HMR 原地更新并保留页面状态；修改后台 Service Worker 或 Manifest 时会自动重新加载扩展并恢复 Side Panel。模型配置和对话保存在 Git 忽略的 `.dev/chromium-profile/` 中，删除该目录即可重置开发环境。
 
 可在命令后指定启动网页；只启动 Vite/CRXJS 时使用 `npm run dev:vite`：
 
@@ -69,9 +68,7 @@ npm run dev:vite
 2. 点击标题栏中的设置按钮。
 3. 选择 Models.dev Provider，填写 **Model ID** 和页面显示的凭据字段；自定义 Endpoint 需要填写 Base URL 与 API Key。
 4. 保存配置并返回 Side Panel。
-5. 如需使用持久 User Scripts，在扩展详情页开启 **Allow User Scripts**。
-
-Side Panel 标题栏的脚本按钮会打开独立的用户脚本页面。列表可搜索、多选、批量启停/删除、导入和导出；点击脚本进入全屏编辑，也可复制为新脚本。导入先预览，同名脚本逐项选择是否覆盖；导入/导出文件仅包含 Chrome 原生 `RegisteredUserScript[]` JSON，不包含启停状态。编辑器会高亮 `CSS_*` 静态字符串中的 CSS，保存时自动格式化 JavaScript 和静态 CSS。停用的脚本可继续编辑，且不会在扩展重启后自行启用。新脚本的网站范围需要明确填写。高级编辑入口保留 Chrome 原生 `RegisteredUserScript` JSON 格式及全部字段。
+用户脚本功能已暂停：扩展不提供脚本管理页，也不会恢复或运行已有脚本。更新或启动扩展时会永久清除旧脚本的本地定义和相关配置；实现源码保留在 `src/userscripts/`，供将来继续开发。
 
 模型配置只保存在当前扩展的 `chrome.storage.local` 中，并按 Provider 隔离。设置页支持普通 API Key，也支持 Bedrock、Azure、Vertex、Cloudflare、GitLab、Watsonx 和 SAP AI Core 等多字段凭据；Models.dev Endpoint 中的 `${VAR}` 会自动变成独立输入项并在请求前插值。
 
@@ -136,7 +133,7 @@ Side Panel 关闭时，Harness 会立即中止当前模型请求，阻止排队�
 | `src/agent/` | Models.dev SDK Registry、浏览器协议适配、无限重试、Agent 循环和流式 transport |
 | `src/chrome/` | 80 个命令工具、语义/视觉自动化与共享 Chrome/CDP 执行器 |
 | `src/logging.ts` | IndexedDB canonical event log 与对话重建 |
-| `src/userscripts/` | 原生 User Script 快照、迁移和恢复 |
+| `src/userscripts/` | 暂停使用的用户脚本管理与持久化源码 |
 | `src/options/` | BYOK 设置和日志清理 |
 
 系统 prompt、工具 schema 和历史消息前缀保持稳定；新上下文只追加到日志，以提高兼容 Provider 的 prompt cache hit rate。
@@ -150,7 +147,7 @@ npm run test:e2e   # 构建并运行真实扩展 Playwright 测试
 git diff --check
 ```
 
-`npm run test:e2e` 会启动带扩展的 Playwright Chromium，并使用本地协议 mock 验证 Provider 配置、工具执行、多对话切换、标题、日志与中断恢复、User Scripts、流式 Markdown 和关闭中止行为。单元测试覆盖 28 个 SDK 工厂以及 Cloudflare、GitLab、Watsonx、SAP 的浏览器协议映射；CI 不需要真实收费 Provider 凭据。
+`npm run test:e2e` 会启动带扩展的 Playwright Chromium，并使用本地协议 mock 验证 Provider 配置、工具执行、多对话切换、标题、日志与中断恢复、用户脚本停用状态、流式 Markdown 和关闭中止行为。单元测试覆盖 28 个 SDK 工厂以及 Cloudflare、GitLab、Watsonx、SAP 的浏览器协议映射；CI 不需要真实收费 Provider 凭据。
 
 实现或评审改动前，请先阅读 [AGENTS.md](AGENTS.md) 中的项目要求。
 

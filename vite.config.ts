@@ -41,7 +41,6 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
     rollupOptions: { input: {
-      userscripts: resolve(projectRoot, "userscripts.html"),
       offscreen: resolve(projectRoot, "offscreen.html"),
       devtools: resolve(projectRoot, "devtools.html"),
     } },

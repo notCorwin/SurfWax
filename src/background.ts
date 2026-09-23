@@ -1,7 +1,7 @@
 import { EventLogger } from "./logging";
 import { collectCapabilities } from "./chrome/capabilities";
 import { requireDebuggee } from "./chrome/debuggee";
-import { callUserScripts, restoreUserScripts, serializeUserScripts, snapshotUserScripts, USER_SCRIPTS_ERROR_KEY } from "./userscripts/persistence";
+import { clearSavedUserScripts } from "./userscripts/persistence";
 
 const eventLogger = new EventLogger();
 const guardedTabs = new Map<number, Set<chrome.runtime.Port>>();
@@ -134,12 +134,6 @@ chrome.runtime.onConnect.addListener((port) => {
         requireDebuggee(args[0], method);
         await chrome.debugger.detach(args[0]);
         sessions.delete(key(args[0]));
-      } else if (method === "userScripts") {
-        result = await callUserScripts(args[0], args.slice(1), { logger: eventLogger });
-      } else if (method === "restoreUserScripts") {
-        result = await restoreQueued();
-      } else if (method === "snapshotUserScripts") {
-        result = await serializeUserScripts(() => snapshotUserScripts({ logger: eventLogger }));
       } else if (method === "endPointerGestures") {
         await Promise.all([...pointerGestures].map((tabId) => endGesture(tabId)));
       } else if (method === "capabilities") {
@@ -192,36 +186,16 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-function restore(): void {
-  void restoreQueued().catch(() => undefined);
+function discardUserScripts(): void {
+  void clearSavedUserScripts().catch((error) => {
+    eventLogger.record({ type: "userscript.clear-failed", content: null, error });
+  });
 }
-
-async function restoreQueued(): Promise<boolean> {
-  try {
-    const restored = await serializeUserScripts(() => restoreUserScripts({ logger: eventLogger }));
-    if (restored) await chrome.storage.local.remove(USER_SCRIPTS_ERROR_KEY);
-    return restored;
-  } catch (error) {
-    eventLogger.record({ type: "userscript.restore-failed", content: null, error });
-    await chrome.storage.local.set({ [USER_SCRIPTS_ERROR_KEY]: error instanceof Error ? error.message : String(error) });
-    throw error;
-  }
-}
-
-chrome.runtime.onMessage.addListener((message: { type?: string; method?: string; args?: unknown[] }, _sender, respond) => {
-  if (message?.type !== "surf-wax:user-scripts") return false;
-  const task = message.method === "restore" ? restoreQueued() : callUserScripts(message.method ?? "", message.args ?? [], { logger: eventLogger });
-  void task.then(
-    (result) => respond({ ok: true, result }),
-    (error) => respond({ ok: false, error: error instanceof Error ? error.message : String(error) }),
-  );
-  return true;
-});
 
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
-  restore();
+  discardUserScripts();
 });
 
-chrome.runtime.onStartup.addListener(() => restore());
+chrome.runtime.onStartup.addListener(() => discardUserScripts());
 void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });

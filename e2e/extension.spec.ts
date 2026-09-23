@@ -294,13 +294,13 @@ async function closeServer(server: Server): Promise<void> {
   await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
 }
 
-async function openExtension(): Promise<{
+async function openExtension(existingDirectory?: string): Promise<{
   context: BrowserContext;
   extensionId: string;
   page: Page;
   userDataDirectory: string;
 }> {
-  const userDataDirectory = await mkdtemp(resolve(tmpdir(), "side-agent-e2e-"));
+  const userDataDirectory = existingDirectory ?? await mkdtemp(resolve(tmpdir(), "side-agent-e2e-"));
   const extensionPath = resolve(process.cwd(), "dist");
   const bundledChromium = chromium.executablePath();
   const systemChrome = process.platform === "darwin" ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
@@ -754,7 +754,12 @@ test("ships only the minimal MV3 Harness surface", async () => {
   try {
     const manifest = await opened.page.evaluate(() => chrome.runtime.getManifest());
     expect(manifest).toMatchObject({ name: "Surf Wax", manifest_version: 3, minimum_chrome_version: "138", version: "0.2.0" });
-    expect(manifest.permissions).toEqual(expect.arrayContaining(["debugger", "scripting", "userScripts"]));
+    expect(manifest.permissions).toEqual(expect.arrayContaining(["debugger", "scripting"]));
+    expect(manifest.permissions).not.toContain("userScripts");
+    expect(existsSync(resolve(process.cwd(), "dist/userscripts.html"))).toBe(false);
+    await expect(opened.page.getByTestId("open-user-scripts")).toHaveCount(0);
+    await expect(opened.page.getByTestId("user-scripts-disabled")).toHaveCount(0);
+    expect(await opened.page.evaluate(() => typeof chrome.userScripts)).toBe("undefined");
     await expect(opened.page.locator("h1")).toHaveText("Surf Wax");
     await expect(opened.page.getByTestId("config-required-state")).toBeVisible();
 
@@ -768,6 +773,28 @@ test("ships only the minimal MV3 Harness surface", async () => {
     await expect(opened.page.getByTestId("model-label")).toHaveCount(0);
   } finally {
     await dispose(opened.context, opened.userDataDirectory);
+  }
+});
+
+test("clears legacy user scripts on browser startup without restoring them", async () => {
+  const provider = await startProvider([]);
+  let opened = await openExtension();
+  try {
+    const keys = ["side-agent:user-scripts", "side-agent:user-scripts-data", "side-agent:user-scripts-error", "side-agent:user-script-worlds", "side-agent:user-scripts-unparsed", "side-agent:user-scripts-disabled"];
+    const script = { id: "legacy", matches: ["<all_urls>"], js: [{ code: "document.documentElement.dataset.oldScript = 'ran'" }] };
+    await opened.page.evaluate(({ keys, script }) => chrome.storage.local.set({
+      ...Object.fromEntries(keys.map((key) => [key, [script]])),
+      "side-agent:unrelated": "keep",
+    }), { keys, script });
+    await opened.context.close();
+    opened = await openExtension(opened.userDataDirectory);
+    await expect.poll(() => opened.page.evaluate(async (keys) => chrome.storage.local.get(keys), keys)).toEqual({});
+    expect(await opened.page.evaluate(async () => (await chrome.storage.local.get("side-agent:unrelated"))["side-agent:unrelated"])).toBe("keep");
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    expect(await target.evaluate(() => document.documentElement.dataset.oldScript)).toBeUndefined();
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
 
@@ -839,28 +866,6 @@ test("follows the system color scheme across every visible extension surface wit
     expect(sideSnapshots.dark.colors[4]?.foreground).toBe("rgb(245, 245, 245)");
     await opened.page.keyboard.press("Escape");
 
-    const [manager] = await Promise.all([opened.context.waitForEvent("page"), opened.page.getByTestId("open-user-scripts").click()]);
-    await manager.getByRole("button", { name: "新建脚本" }).click();
-    await expect(manager.locator("#script-code .cm-editor")).toBeVisible();
-    expect(await metadata(manager)).toEqual(expectedMetadata);
-    const managerSnapshots: Record<string, Awaited<ReturnType<typeof themeColors>>> = {};
-    for (const colorScheme of ["light", "dark"] as const) {
-      await manager.emulateMedia({ colorScheme });
-      await manager.mouse.move(0, 0);
-      await expect.poll(() => manager.evaluate(() => getComputedStyle(document.documentElement).colorScheme)).toBe(colorScheme);
-      await expect.poll(() => manager.locator('[data-slot="input"]').evaluate((input) => ({
-        colorScheme: getComputedStyle(document.documentElement).colorScheme, foreground: getComputedStyle(input).color,
-      }))).toEqual({ colorScheme, foreground: colorScheme === "dark" ? "rgb(245, 245, 245)" : "rgb(23, 23, 23)" });
-      managerSnapshots[colorScheme] = await themeColors(manager, ["body", '[data-slot="card"]', '[data-slot="input"]', "#script-code .cm-editor"]);
-      await expectThemeButton(manager.getByRole("button", { name: "保存", exact: true }), colorScheme, "default");
-      await expectThemeButton(manager.getByRole("button", { name: "删除", exact: true }), colorScheme, "destructive");
-      expect(await manager.locator('[data-slot="input"]').evaluate((input) => getComputedStyle(input).fontSize)).toBe("14px");
-    }
-    expect(managerSnapshots.light.colors.slice(0, 2)).toEqual(optionSnapshots.light.colors.slice(0, 2));
-    expect(managerSnapshots.dark.colors.slice(0, 2)).toEqual(optionSnapshots.dark.colors.slice(0, 2));
-    expect(managerSnapshots.dark.colors[2]).toEqual(optionSnapshots.dark.colors[2]);
-    expect(managerSnapshots.dark.colors[3]).not.toEqual(managerSnapshots.light.colors[3]);
-    await manager.close();
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -2938,16 +2943,13 @@ test("keeps the composer usable when a long data URL cannot be guarded", async (
   }
 });
 
-test("contains long unhandled errors in all three extension views", async () => {
+test("contains long unhandled errors in both extension views", async () => {
   const provider = await startProvider([]);
   const opened = await openExtension();
   try {
     await opened.page.setViewportSize({ width: 360, height: 700 });
     const options = await configure(opened.context, opened.page, provider.baseURL);
-    const [scripts] = await Promise.all([
-      opened.context.waitForEvent("page"), opened.page.getByTestId("open-user-scripts").click(),
-    ]);
-    for (const page of [opened.page, options, scripts]) {
+    for (const page of [opened.page, options]) {
       await page.setViewportSize({ width: 360, height: 700 });
       await page.evaluate(() => {
         const error = new Error("LONG_ERROR_".repeat(2000));
@@ -2965,7 +2967,6 @@ test("contains long unhandled errors in all three extension views", async () => 
     }
     await expect(opened.page.getByTestId("composer-input")).toBeVisible();
     await expect(options.getByRole("button", { name: "保存配置" })).toBeVisible();
-    await expect(scripts.getByTestId("user-scripts-panel")).toBeVisible();
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -3049,7 +3050,7 @@ test("shows a bounded diagnostic when the canonical event log fails", async () =
   }
 });
 
-test("contains a long user script restore error without hiding the manager", async () => {
+test.skip("contains a long user script restore error without hiding the manager", async () => {
   const opened = await openExtension();
   try {
     const [scripts] = await Promise.all([
@@ -3068,7 +3069,7 @@ test("contains a long user script restore error without hiding the manager", asy
   }
 });
 
-test("manages, edits and deletes scripts in the native Chrome scripts workbench", async () => {
+test.skip("manages, edits and deletes scripts in the native Chrome scripts workbench", async () => {
   const provider = await startProvider([]);
   const opened = await openExtension();
   try {

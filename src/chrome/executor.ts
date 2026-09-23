@@ -1,7 +1,6 @@
 import type { EventLogger } from "../logging";
 import type { BrowserInput, BrowserSelector, BrowserStep, BrowserTarget, ChromeTarget, ChromeToolInput } from "../types";
 import type { CommandName } from "./tool";
-import { restoreUserScripts, snapshotUserScripts } from "../userscripts/persistence";
 import { AutomationRuntime } from "./automation";
 import { requireDebuggee } from "./debuggee";
 
@@ -118,15 +117,14 @@ function expressionFor(code: string): string {
         };
         if (name === "tabs" && !["update", "create", "reload", "goBack", "goForward", "sendMessage", "move", "remove", "discard", "duplicate", "group", "ungroup", "highlight", "captureVisibleTab"].includes(property)) return value;
         return async (...args) => {
-          if (name === "scripting" || name === "userScripts" && property === "execute") await __mark(args[0]?.target?.tabId);
+          if (name === "scripting") await __mark(args[0]?.target?.tabId);
           if (name === "pageCapture" && property === "saveAsMHTML") await __mark(args[0]?.tabId);
           if (name === "tabs" && property !== "captureVisibleTab") await __mark(args[0]);
           if (name === "tabs" && property === "captureVisibleTab") {
             const [active] = await __nativeChrome.tabs.query({ active: true, ...(Number.isInteger(args[0]) ? { windowId: args[0] } : { currentWindow: true }) });
             await __mark(active?.id);
           }
-          const result = name === "userScripts" && ["register", "update", "unregister", "configureWorld", "resetWorldConfiguration"].includes(property)
-            ? await __bridge.call("userScripts", [property, ...args]) : await Reflect.apply(value, target, args);
+          const result = await Reflect.apply(value, target, args);
           if (name === "tabs" && property === "create") await __mark(result?.id);
           if (name === "tabs" && property === "update" && !Number.isInteger(args[0])) await __mark(result?.id);
           return result;
@@ -173,7 +171,7 @@ function expressionFor(code: string): string {
           return report;
         }
           : property === "debugger" ? __debugger
-          : ["scripting", "userScripts", "tabs", "pageCapture", "downloads"].includes(property) && target[property] ? __pageApi(property)
+          : ["scripting", "tabs", "pageCapture", "downloads"].includes(property) && target[property] ? __pageApi(property)
           : Reflect.get(target, property, receiver);
       }
     });
@@ -277,7 +275,6 @@ export class ChromeExecutor {
   private readonly automation: AutomationRuntime;
   private readonly lifetime = { aborted: false };
   private tail: Promise<void> = Promise.resolve();
-  private initialized?: Promise<void>;
   private activeDebuggee?: Debuggee;
   private readonly bridgedDebuggees = new Set<string>();
   private disposed = false;
@@ -342,9 +339,6 @@ export class ChromeExecutor {
         if (["attach", "detach", "sendCommand"].includes(method)) requireDebuggee(args[0], method);
         const port = this.port ?? connect();
         if (!port) {
-          if (method === "userScripts") return Reflect.apply((this.chromeApi.userScripts as any)[args[0] as string], this.chromeApi.userScripts, args.slice(1));
-          if (method === "restoreUserScripts") return restoreUserScripts({ chromeApi: this.chromeApi, logger: this.logger });
-          if (method === "snapshotUserScripts") return snapshotUserScripts({ chromeApi: this.chromeApi, logger: this.logger });
           return Reflect.apply((this.chromeApi.debugger as any)[method], this.chromeApi.debugger, args);
         }
         return new Promise((resolve, reject) => {
@@ -429,7 +423,6 @@ export class ChromeExecutor {
     try {
       if (this.disposed) throw new Error("Chrome executor has been disposed");
       throwIfAborted(combined);
-      await this.initialize();
       this.automation.setContext({ ...context, signal: combined });
       this.activeSignal = combined;
       this.activeContext = context;
@@ -1133,7 +1126,6 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     try {
       if (this.disposed) throw new Error("Chrome executor has been disposed");
       throwIfAborted(combined);
-      await this.initialize();
       this.automation.setContext({ ...context, signal: combined });
       this.activeSignal = combined;
       this.activeContext = context;
@@ -1282,25 +1274,8 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     this.port?.disconnect();
   }
 
-  private async initialize(): Promise<void> {
-    this.initialized ??= (async () => {
-      const call = this.bridge.call as (method: string, args: unknown[]) => Promise<unknown>;
-      try { await call("restoreUserScripts", []); }
-      catch (error) {
-        if (this.port || this.disposed || !this.chromeApi.runtime?.connect) throw error;
-        await call("restoreUserScripts", []);
-      }
-    })().catch((error) => {
-      this.initialized = undefined;
-      throw error;
-    });
-    return this.initialized;
-  }
-
   private async executeNow(input: ChromeToolInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
     if (this.disposed) throw new Error("Chrome executor has been disposed");
-    throwIfAborted(signal);
-    await this.initialize();
     throwIfAborted(signal);
 
     const target = this.normalizeTarget(input);
@@ -1315,28 +1290,7 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
         const value = await this.awaitAbort(this.automation.pageValue(target.tabId, pageExpressionFor(input.code)), signal);
         return evaluationValue({ result: { value } }, "page");
       }
-      if (target.tabId !== undefined && target.world !== "ISOLATED" && this.chromeApi.userScripts?.execute) {
-        const targetSpec = target.documentId
-          ? { tabId: target.tabId!, documentIds: [target.documentId] }
-          : target.frameId !== undefined ? { tabId: target.tabId!, frameIds: [target.frameId] } : { tabId: target.tabId! };
-        const result = await this.awaitAbort(
-          this.chromeApi.userScripts.execute({
-            target: targetSpec,
-            world: target.world ?? "MAIN",
-            js: [{ code: pageExpressionFor(input.code) }],
-            injectImmediately: true,
-          }),
-          signal,
-        );
-        throwIfAborted(signal);
-        const first = result[0];
-        if (!first) throw new Error(`No injection result for tab ${target.tabId}`);
-        if (first.error) throw new Error(first.error);
-        const value = evaluationValue({ result: { value: first.result } }, "page") as any;
-        if (value?.ref && first.documentId) value.documentId = first.documentId;
-        return value;
-      }
-      if (target.world === "USER_SCRIPT") throw new Error("Chrome User Scripts is disabled. Enable Allow User Scripts on the extension details page and reload the side panel.");
+      if (target.world === "USER_SCRIPT") throw new Error("User Scripts is paused in this build.");
       if (target.world === "ISOLATED") return this.evaluateIsolated(target, input.code, signal);
       if (target.targetId) return this.evaluateCdpPage(target, input.code, signal);
       return this.evaluate({ tabId: target.tabId }, pageExpressionFor(input.code), signal, "page");
@@ -1501,11 +1455,6 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
         } catch { /* Closing the target may already have detached it. */ }
       }
       if (this.activeDebuggee === debuggee) this.activeDebuggee = undefined;
-      try {
-        await (this.bridge.call as (method: string, args: unknown[]) => Promise<unknown>)("snapshotUserScripts", []);
-      } catch (error) {
-        this.logger?.record({ type: "userscript.snapshot-failed", content: null, error });
-      }
     }
   }
 }

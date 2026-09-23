@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { callUserScripts, restoreUserScripts, snapshotUserScripts, USER_SCRIPTS_DATA_KEY, USER_SCRIPTS_DISABLED_KEY, USER_SCRIPTS_LEGACY_KEY, USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_WORLDS_KEY } from "./persistence";
+import { callUserScripts, clearSavedUserScripts, restoreUserScripts, snapshotUserScripts, USER_SCRIPTS_DATA_KEY, USER_SCRIPTS_DISABLED_KEY, USER_SCRIPTS_LEGACY_KEY, USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_WORLDS_KEY } from "./persistence";
 
 function fakeChrome(options: { available?: boolean; stored?: Record<string, unknown>; registered?: chrome.userScripts.RegisteredUserScript[] } = {}) {
   const stored = { ...(options.stored ?? {}) };
@@ -32,6 +32,16 @@ function fakeChrome(options: { available?: boolean; stored?: Record<string, unkn
 }
 
 describe("user script persistence", () => {
+  it("clears every saved script key without touching other extension data", async () => {
+    const keys = ["side-agent:user-scripts", "side-agent:user-scripts-data", "side-agent:user-scripts-error", "side-agent:user-script-worlds", "side-agent:user-scripts-unparsed", "side-agent:user-scripts-disabled"];
+    const stored: Record<string, unknown> = Object.fromEntries(keys.map((key) => [key, "old"]));
+    stored["side-agent:model-config"] = "keep";
+    const remove = vi.fn(async (keys: string[]) => { for (const key of keys) delete stored[key]; });
+    await clearSavedUserScripts({ remove } as never);
+    expect(remove).toHaveBeenCalledWith(keys);
+    expect(stored).toEqual({ "side-agent:model-config": "keep" });
+  });
+
   it("keeps unknown legacy data intact while the native API is unavailable", async () => {
     const fake = fakeChrome({ available: false, stored: { [USER_SCRIPTS_STORAGE_KEY]: [{ id: "legacy" }] } });
     await expect(restoreUserScripts({ chromeApi: fake.chromeApi as never })).resolves.toBe(false);

@@ -1,5 +1,5 @@
 import { AssistantRuntimeProvider, ThreadListPrimitive, useAui, useAuiState } from "@assistant-ui/react";
-import { CodeXmlIcon, MessageSquarePlusIcon, SettingsIcon } from "lucide-react";
+import { MessageSquarePlusIcon, SettingsIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ConversationMenu } from "../components/assistant-ui/thread-list";
 import { Thread } from "../components/assistant-ui/thread";
@@ -31,13 +31,6 @@ function SettingsButton() {
   );
 }
 
-function ScriptsButton() {
-  return <Button type="button" variant="ghost" size="icon-sm" aria-label="管理用户脚本" title="管理用户脚本" data-testid="open-user-scripts"
-    onClick={() => void chrome.tabs.create({ url: chrome.runtime.getURL("userscripts.html") })}>
-    <CodeXmlIcon aria-hidden="true" />
-  </Button>;
-}
-
 function NewConversationButton({ setWarning }: { setWarning: (message: string) => void }) {
   const running = useAuiState((state) => state.thread.isRunning);
   useEffect(() => { if (!running) setWarning(""); }, [running, setWarning]);
@@ -53,41 +46,12 @@ function NewConversationButton({ setWarning }: { setWarning: (message: string) =
   ><MessageSquarePlusIcon aria-hidden="true" /></ThreadListPrimitive.New>;
 }
 
-function UserScriptsNotice() {
-  const [enabled, setEnabled] = useState<boolean | null>(null);
-  useEffect(() => {
-    let active = true;
-    const check = () => {
-      if (!chrome.userScripts) { setEnabled(false); return; }
-      void Promise.resolve().then(() => chrome.userScripts.getScripts()).then(
-        () => { if (active) setEnabled(true); },
-        () => { if (active) setEnabled(false); },
-      );
-    };
-    check();
-    window.addEventListener("focus", check);
-    document.addEventListener("visibilitychange", check);
-    chrome.tabs.onActivated.addListener(check);
-    return () => {
-      active = false;
-      window.removeEventListener("focus", check);
-      document.removeEventListener("visibilitychange", check);
-      chrome.tabs.onActivated.removeListener(check);
-    };
-  }, []);
-  if (enabled !== false) return null;
-  return <p role="status" data-testid="user-scripts-disabled" className="user-scripts-notice">
-    尚未开启 Allow User Scripts。请在 Surf Wax 扩展详情中开启。{' '}
-    <button type="button" onClick={() => void chrome.tabs.create({ url: `chrome://extensions/?id=${chrome.runtime.id}` })}>打开扩展详情</button>
-  </p>;
-}
-
 function Header({ conversation = false, logger }: { conversation?: boolean; logger?: EventLogger }) {
   const [warning, setWarning] = useState("");
   return <><a className="skip-link" href="#chat-content">跳转到内容</a><header className="app-header">
     {conversation && logger ? <ConversationMenu logger={logger} /> : <h1>Surf Wax</h1>}
-    <div className="flex gap-2">{conversation && <NewConversationButton setWarning={setWarning} />}<ScriptsButton /><SettingsButton /></div>
-  </header>{warning && <p role="status" className="conversation-notice">{warning}</p>}<UserScriptsNotice /></>;
+    <div className="flex gap-2">{conversation && <NewConversationButton setWarning={setWarning} />}<SettingsButton /></div>
+  </header>{warning && <p role="status" className="conversation-notice">{warning}</p>}</>;
 }
 
 export function App() {

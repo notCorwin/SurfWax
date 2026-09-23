@@ -6,6 +6,11 @@ export const USER_SCRIPTS_ERROR_KEY = "side-agent:user-scripts-error";
 export const USER_SCRIPTS_WORLDS_KEY = "side-agent:user-script-worlds";
 export const USER_SCRIPTS_LEGACY_KEY = "side-agent:user-scripts-unparsed";
 export const USER_SCRIPTS_DISABLED_KEY = "side-agent:user-scripts-disabled";
+export const USER_SCRIPTS_KEYS = [USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DATA_KEY, USER_SCRIPTS_ERROR_KEY, USER_SCRIPTS_WORLDS_KEY, USER_SCRIPTS_LEGACY_KEY, USER_SCRIPTS_DISABLED_KEY] as const;
+
+export async function clearSavedUserScripts(storage: Pick<chrome.storage.StorageArea, "remove"> = chrome.storage.local): Promise<void> {
+  await storage.remove([...USER_SCRIPTS_KEYS]);
+}
 const DATA_VERSION = 3;
 
 type UserScriptsApi = Pick<typeof chrome.userScripts, "getScripts" | "register" | "unregister" | "update">

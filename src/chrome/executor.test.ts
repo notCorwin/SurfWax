@@ -1,13 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { EventLogger, type LogEvent } from "../logging";
-import { USER_SCRIPTS_DATA_KEY, USER_SCRIPTS_STORAGE_KEY } from "../userscripts/persistence";
 import { ChromeExecutor } from "./executor";
 
 function fakeChrome(responses: Array<object | (() => Promise<object>)> = []) {
-  const stored: Record<string, unknown> = {
-    [USER_SCRIPTS_STORAGE_KEY]: [],
-    [USER_SCRIPTS_DATA_KEY]: { version: 2, resetPending: false },
-  };
+  const stored: Record<string, unknown> = {};
   const calls: string[] = [];
   const debuggerApi = {
     getTargets: vi.fn(async () => [{ id: "target-1", type: "page", title: "Surf Wax", url: "chrome-extension://id/sidepanel.html#test", attached: false }]),
@@ -235,23 +231,15 @@ describe("ChromeExecutor", () => {
     expect(String(fake.debuggerApi.sendCommand.mock.calls[1][2]?.expression)).toContain("__surfWaxResults");
   });
 
-  it("runs a page async body in MAIN by default and USER_SCRIPT when requested", async () => {
-    const fake = fakeChrome();
-    const execute = vi.fn(async (injection: chrome.userScripts.UserScriptInjection) => [{
-      frameId: 0, documentId: "doc", result: { kind: "value", value: injection.world },
-    }]);
+  it("runs page code through CDP even when a userScripts API is present", async () => {
+    const fake = fakeChrome([{ result: { value: { kind: "value", value: "CDP" } } }]);
+    const execute = vi.fn();
     (fake.chromeApi.userScripts as any).execute = execute;
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
-    await expect(executor.execute({ tabId: 5, code: "return document.title" })).resolves.toBe("MAIN");
-    await expect(executor.execute({ tabId: 5, world: "USER_SCRIPT", code: "return await Promise.resolve(document.title)" })).resolves.toBe("USER_SCRIPT");
-    await expect(executor.execute({ code: "return document.title", target: { kind: "page", tabId: 5, frameId: 2, world: "MAIN" } })).resolves.toBe("MAIN");
-    await expect(executor.executeBrowser({ mode: "run", target: { kind: "page", tabId: 5 }, code: "return document.title" })).resolves.toBe("MAIN");
-    expect(execute).toHaveBeenCalledTimes(4);
-    expect(execute.mock.calls[0][0]).toMatchObject({ target: { tabId: 5 }, world: "MAIN", injectImmediately: true });
-    expect(execute.mock.calls[0][0].js[0]?.code).toContain("return document.title");
-    expect(execute.mock.calls[1][0].world).toBe("USER_SCRIPT");
-    expect(execute.mock.calls[2][0].target).toEqual({ tabId: 5, frameIds: [2] });
-    expect(fake.debuggerApi.attach).not.toHaveBeenCalled();
+    await expect(executor.execute({ tabId: 5, code: "return document.title" })).resolves.toBe("CDP");
+    await expect(executor.execute({ tabId: 5, world: "USER_SCRIPT", code: "return document.title" })).rejects.toThrow("paused");
+    expect(execute).not.toHaveBeenCalled();
+    expect(fake.debuggerApi.attach).toHaveBeenCalledWith({ tabId: 5 }, "1.3");
     executor.dispose();
   });
 
@@ -332,33 +320,32 @@ describe("ChromeExecutor", () => {
     executor.dispose();
   });
 
-  it("uses CDP only when native page execution is unavailable and never replays failures", async () => {
+  it("uses CDP for page execution and does not retry page failures", async () => {
     const fake = fakeChrome([{ result: { value: { kind: "value", value: "CDP" } } }]);
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
     await expect(executor.execute({ tabId: 8, code: "return document.title" })).resolves.toBe("CDP");
     expect(fake.debuggerApi.attach).toHaveBeenCalledWith({ tabId: 8 }, "1.3");
     expect(String(fake.debuggerApi.sendCommand.mock.calls[0][2]?.expression)).toContain("return document.title");
-    await expect(executor.execute({ tabId: 8, world: "USER_SCRIPT", code: "return 1" })).rejects.toThrow("Allow User Scripts");
+    await expect(executor.execute({ tabId: 8, world: "USER_SCRIPT", code: "return 1" })).rejects.toThrow("paused");
     expect(fake.debuggerApi.sendCommand).toHaveBeenCalledTimes(1);
-    (fake.chromeApi.userScripts as any).execute = vi.fn(async () => [{ frameId: 0, documentId: "doc", error: "page failed" }]);
+    fake.debuggerApi.sendCommand.mockResolvedValueOnce({ exceptionDetails: { text: "page failed" } });
     await expect(executor.execute({ tabId: 8, code: "throw Error('page failed')" })).rejects.toThrow("page failed");
-    expect(fake.debuggerApi.sendCommand).toHaveBeenCalledTimes(1);
+    expect(fake.debuggerApi.sendCommand).toHaveBeenCalledTimes(2);
     executor.dispose();
   });
 
-  it("aborts a pending native page result without starting queued calls", async () => {
+  it("aborts a pending CDP page result without starting queued calls", async () => {
     const fake = fakeChrome();
-    const execute = vi.fn(() => new Promise<chrome.userScripts.InjectionResult[]>(() => undefined));
-    (fake.chromeApi.userScripts as any).execute = execute;
+    fake.debuggerApi.sendCommand.mockImplementation(() => new Promise<object>(() => undefined));
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
     const controller = new AbortController();
     const running = executor.execute({ tabId: 7, code: "await new Promise(() => {})" }, controller.signal);
     const queued = executor.execute({ tabId: 7, code: "return 2" }, controller.signal);
-    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(fake.debuggerApi.sendCommand).toHaveBeenCalledTimes(1));
     controller.abort();
     await expect(running).rejects.toMatchObject({ name: "AbortError" });
     await expect(queued).rejects.toMatchObject({ name: "AbortError" });
-    expect(execute).toHaveBeenCalledTimes(1);
+    expect(fake.debuggerApi.sendCommand).toHaveBeenCalledTimes(1);
     executor.dispose();
   });
 
@@ -433,12 +420,12 @@ describe("ChromeExecutor", () => {
     expect(fake.debuggerApi.detach).toHaveBeenCalledWith({ targetId: "target-1" });
   });
 
-  it("keeps the execution result when a user-script snapshot fails", async () => {
+  it("does not snapshot user scripts after an execution", async () => {
     const fake = fakeChrome([{ result: { value: { kind: "value", value: 42 } } }]);
-    fake.chromeApi.userScripts.getScripts.mockResolvedValueOnce([]).mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("snapshot failed"));
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
     await expect(executor.execute({ code: "return 42" })).resolves.toBe(42);
     expect(fake.debuggerApi.detach).toHaveBeenCalledWith({ targetId: "target-1" });
+    expect(fake.chromeApi.userScripts.getScripts).not.toHaveBeenCalled();
   });
 
   it("routes agent debugger calls through a panel-owned background port", async () => {
@@ -478,23 +465,6 @@ describe("ChromeExecutor", () => {
     expect(connect).toHaveBeenCalledTimes(2);
   });
 
-  it("retries only a disconnected user-script restoration before first page execution", async () => {
-    const fake = fakeChrome();
-    const execute = vi.fn(async () => [{ frameId: 0, documentId: "doc", result: { kind: "value", value: "READY" } }]);
-    (fake.chromeApi.userScripts as any).execute = execute;
-    const first = fakePort((_message, _reply, drop) => drop());
-    const second = fakePort();
-    const connect = vi.fn().mockReturnValueOnce(first.port).mockReturnValueOnce(second.port);
-    (fake.chromeApi as any).runtime = { connect };
-    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
-    await expect(executor.execute({ tabId: 5, code: "return document.title" })).resolves.toBe("READY");
-    expect(connect).toHaveBeenCalledTimes(2);
-    expect(first.port.postMessage.mock.calls[0][0].method).toBe("restoreUserScripts");
-    expect(second.port.postMessage.mock.calls[0][0].method).toBe("restoreUserScripts");
-    expect(execute).toHaveBeenCalledTimes(1);
-    executor.dispose();
-  });
-
   it("does not replay a command whose port disconnects while it is pending", async () => {
     const fake = fakeChrome();
     const first = fakePort(() => undefined);
@@ -513,22 +483,4 @@ describe("ChromeExecutor", () => {
     executor.dispose();
   });
 
-  it("does not cache a failed restoration", async () => {
-    const fake = fakeChrome();
-    const execute = vi.fn(async () => [{ frameId: 0, documentId: "doc", result: { kind: "value", value: "READY" } }]);
-    (fake.chromeApi.userScripts as any).execute = execute;
-    let first = true;
-    const { port } = fakePort((message, reply) => {
-      if (first) {
-        first = false;
-        reply({ id: message.id, error: "restore failed" });
-      } else reply({ id: message.id });
-    });
-    (fake.chromeApi as any).runtime = { connect: vi.fn(() => port) };
-    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
-    await expect(executor.execute({ tabId: 5, code: "return document.title" })).rejects.toThrow("restore failed");
-    await expect(executor.execute({ tabId: 5, code: "return document.title" })).resolves.toBe("READY");
-    expect(execute).toHaveBeenCalledTimes(1);
-    executor.dispose();
-  });
 });
