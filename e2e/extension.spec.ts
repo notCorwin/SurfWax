@@ -116,7 +116,7 @@ function queuedToolResponse(firstCode: string, secondCode: string): string[] {
   ];
 }
 
-type MockResponse = string[] | { status: number; error: string } | ((request: any) => string[]);
+type MockResponse = string[] | { status: number; error: string } | { parts: string[]; delayMs: number } | ((request: any) => string[]);
 
 async function startProvider(responses: MockResponse[], delayMs = 0, summaryText?: string, supportedEfforts = ["minimal", "low", "medium", "high", "xhigh"], summaryDelayMs = 0): Promise<{
   baseURL: string;
@@ -256,12 +256,13 @@ async function startProvider(responses: MockResponse[], delayMs = 0, summaryText
         response.end(JSON.stringify({ error: { message: "No mock response remains" } }));
         return;
       }
-      const parts = typeof queued === "function" ? queued(requestBody) : queued;
-      if (!Array.isArray(parts)) {
-        response.writeHead(parts.status, { "access-control-allow-origin": "*", "content-type": "application/json" });
-        response.end(JSON.stringify({ error: { message: parts.error } }));
+      const output = typeof queued === "function" ? queued(requestBody) : queued;
+      if (!Array.isArray(output) && !("parts" in output)) {
+        response.writeHead(output.status, { "access-control-allow-origin": "*", "content-type": "application/json" });
+        response.end(JSON.stringify({ error: { message: output.error } }));
         return;
       }
+      const parts = Array.isArray(output) ? output : output.parts;
       response.writeHead(200, SSE_HEADERS);
       response.on("close", () => {
         if (!response.writableEnded) stats.abortedResponses += 1;
@@ -276,7 +277,8 @@ async function startProvider(responses: MockResponse[], delayMs = 0, summaryText
         index += 1;
         setTimeout(write, delayMs);
       };
-      write();
+      if (Array.isArray(output)) write();
+      else setTimeout(write, output.delayMs);
     });
   });
   server.listen(0, "127.0.0.1");
@@ -1272,7 +1274,7 @@ test("starts a new process line after assistant text", async () => {
       chunk({}, "tool_calls"),
       "data: [DONE]\n\n",
     ],
-    textResponse("FINAL_AFTER_GROUPS"),
+    { parts: textResponse("FINAL_AFTER_GROUPS"), delayMs: 1500 },
     textResponse("分段过程记录"),
   ]);
   const opened = await openExtension();
@@ -1283,6 +1285,10 @@ test("starts a new process line after assistant text", async () => {
     await options.close();
     await opened.page.getByTestId("composer-input").fill("split process records around text");
     await opened.page.getByTestId("composer-input").press("Enter");
+    const liveGroups = opened.page.getByTestId("process-trace");
+    await expect(liveGroups).toHaveCount(2);
+    await expect(liveGroups.nth(0).locator(":scope > summary")).toHaveText("已执行 1 次命令");
+    await expect(liveGroups.nth(1).locator(":scope > summary")).toHaveText("已执行 1 次命令");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FINAL_AFTER_GROUPS");
     const work = opened.page.getByTestId("work-summary");
     await work.locator(":scope > summary").click();
@@ -1297,7 +1303,34 @@ test("starts a new process line after assistant text", async () => {
   }
 });
 
-test("shows the command count after an interrupted group settles", async () => {
+test("keeps completed activity pending until assistant text arrives", async () => {
+  const provider = await startProvider([
+    toolResponse("return 'DONE'"),
+    { parts: textResponse("FINAL_AFTER_WAIT"), delayMs: 1500 },
+    textResponse("等待回复"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("run then reply");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    const group = opened.page.getByTestId("process-trace");
+    await expect(group.locator(":scope > summary")).toHaveText("正在准备回复");
+    await expect(group.locator(".activity summary")).toHaveText("正在准备回复");
+    await expect(opened.page.getByTestId("work-summary")).toHaveCount(0);
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FINAL_AFTER_WAIT");
+    await opened.page.getByTestId("work-summary").locator(":scope > summary").click();
+    await expect(group.locator(":scope > summary")).toHaveText("已执行 1 次命令");
+    await expect(group.locator(".activity summary")).toHaveText("命令执行完成");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("stops pending labels when a reply is interrupted before text", async () => {
   const provider = await startProvider([
     queuedToolResponse(
       "await new Promise((resolve) => setTimeout(resolve, 60_000)); return 'TOO_LATE'",
@@ -1314,11 +1347,11 @@ test("shows the command count after an interrupted group settles", async () => {
     await opened.page.getByTestId("composer-input").press("Enter");
     const group = opened.page.getByTestId("process-trace");
     await expect(group).toHaveCount(1);
-    await expect(group.locator(":scope > summary")).toContainText("正在执行命令");
+    await expect(group.locator(":scope > summary")).toHaveText("正在准备回复");
     await expect(group.locator(".activity[data-status=running]")).toHaveCount(2);
     await expect(group.locator(".activity[data-status=running]").first()).toBeHidden();
     await opened.page.getByRole("button", { name: "停止生成" }).click();
-    await expect(group.locator(":scope > summary")).toHaveText("2 次命令中有失败");
+    await expect(group.locator(":scope > summary")).toHaveText("回复未生成");
     await group.locator(":scope > summary").click();
     await expect(group.locator(".activity[data-status]")).toHaveCount(2);
     await expect(group.locator(".activity[data-status=running]")).toHaveCount(0);
@@ -1341,9 +1374,6 @@ test("shows live work, then folds it under elapsed time while keeping the final 
     await options.close();
     await opened.page.getByTestId("composer-input").fill("do the work");
     await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.getByTestId("process-trace")).toBeVisible();
-    await expect(opened.page.getByTestId("process-trace").locator(":scope > summary")).toContainText("正在执行命令");
-    await expect(opened.page.getByTestId("work-summary")).toHaveCount(0);
     const work = opened.page.getByTestId("work-summary");
     await expect(work.locator(":scope > summary")).toHaveText(/^工作了 \d+ 秒$/);
     await expect(work.locator(":scope > summary svg")).toHaveCount(0);
@@ -1372,6 +1402,8 @@ test("shows live work, then folds it under elapsed time while keeping the final 
     await expect(opened.page.getByTestId("work-summary")).toHaveCount(1);
     await expect(opened.page.getByTestId("work-summary")).not.toHaveAttribute("open", "");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FINAL_REPLY");
+    await opened.page.getByTestId("work-summary").locator(":scope > summary").click();
+    await expect(opened.page.getByTestId("process-trace").locator(":scope > summary")).toHaveText("已执行 1 次命令");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }

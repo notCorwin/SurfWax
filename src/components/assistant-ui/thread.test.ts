@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { workLabel } from "./work-time";
 import { buildMessageSearchIndex } from "./thread-list";
-import { processGroupSummary } from "./process-group";
+import { processGroupSummary, toolActivity, turnActivityPhase } from "./process-group";
 import { toLogValue, type LogEvent } from "../../logging";
 
 describe("workLabel", () => {
@@ -53,6 +53,32 @@ describe("processGroupSummary", () => {
       { type: "reasoning", status: { type: "complete" } },
     ], [0], true)).toMatchObject({ status: "complete", label: "思考完成" });
   });
+
+  it("waits for assistant text before marking completed activity", () => {
+    const tools = [{ type: "tool-call", status: { type: "complete" }, args: {} }];
+    expect(processGroupSummary(tools, [0], false, "pending")).toEqual({ status: "running", label: "正在准备回复" });
+    expect(toolActivity(tools[0]!, "pending")).toEqual({ status: "running", label: "正在准备回复" });
+    expect(processGroupSummary(tools, [0], false, "spoken").label).toBe("已执行 1 次命令");
+    expect(toolActivity(tools[0]!, "spoken").label).toBe("命令执行完成");
+    expect(processGroupSummary(tools, [0], false, "stopped")).toEqual({ status: "complete", label: "回复未生成" });
+    expect(toolActivity(tools[0]!, "stopped")).toEqual({ status: "complete", label: "回复未生成" });
+  });
+});
+
+it("recognizes speech only from nonempty assistant text in the current turn", () => {
+  const messages = [
+    { id: "u1", role: "user", parts: [{ type: "text", text: "Question" }] },
+    { id: "a1", role: "assistant", parts: [{ type: "text", text: "Earlier answer" }] },
+    { id: "u2", role: "user", parts: [{ type: "text", text: "Next question" }] },
+    { id: "a2", role: "assistant", parts: [{ type: "reasoning" }, { type: "text", text: " \n" }] },
+    { id: "a3", role: "assistant", parts: [{ type: "tool-call" }] },
+  ];
+  expect(turnActivityPhase(messages, "a2", true)).toBe("pending");
+  expect(turnActivityPhase(messages, "a2", false)).toBe("stopped");
+  messages[4]!.parts.push({ type: "text", text: "Progress" });
+  expect(turnActivityPhase(messages, "a2", true)).toBe("spoken");
+  expect(turnActivityPhase(messages, "a3", true)).toBe("spoken");
+  expect(turnActivityPhase(messages, "a1", true)).toBe("spoken");
 });
 
 it("indexes saved message text without tool input or superseded edits", () => {
