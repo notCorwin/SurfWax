@@ -19,6 +19,8 @@ Surf Wax 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。它使用 
 
 ## 安装
 
+Chrome Web Store 的首次上架材料已备齐，商店条目仍在创建与审核阶段。审核通过后，此处会提供跨平台的商店安装链接。普通 macOS 和 Windows Chrome 不支持直接安装本地 `.crx` 文件。
+
 ### 安装 Autobuild
 
 从 [Autobuild Release](https://github.com/notCorwin/SurfWax/releases/tag/autobuild) 下载并解压 `surf-wax-autobuild.zip`，然后：
@@ -120,6 +122,8 @@ Side Panel 关闭时，Harness 会立即中止当前模型请求，阻止排队�
 重新打开 Side Panel 后，已生成的文本、推理和工具结果会从事件流恢复并标记为“回复已中断”。只有最新的中断回复提供“继续”按钮；继续时会先要求 Agent 根据已有工具结果确认当前状态，不会自动重放浏览器操作。标题栏的对话按钮可新建、切换和永久删除单条本地对话；仅切换对话不会停止后台运行中的回复。
 
 ## 数据与隐私
+
+完整说明见 [Surf Wax 隐私政策](PRIVACY.md)。
 
 事件日志会记录完整对话、模型 stop reason、usage、provider metadata、工具输入/输出/错误，以及请求 retry、abort 和 latency；网页内容不会脱敏。Side Panel 从日志恢复历史，并将历史作为后续模型上下文。
 

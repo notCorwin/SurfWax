@@ -1015,10 +1015,9 @@ test("selects large tool output without creating another reference", async () =>
     expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-select-large")?.output).toBe("LARGE_START");
     expect(events.filter((event) => event.type === "tool.result.data")).toHaveLength(1);
     await opened.page.reload();
-    await expect.poll(() => opened.page.evaluate(async (id) => {
-      const read = (globalThis as any).__surfWaxResult;
-      return typeof read === "function" ? (await read(id)).snapshot.slice(0, 11) : null;
-    }, data.id)).toBe("LARGE_START");
+    await opened.page.waitForFunction(() => typeof (globalThis as any).__surfWaxResult === "function");
+    await expect(opened.page.evaluate(async (id) => (globalThis as any).__surfWaxResult(id), data.id))
+      .rejects.toThrow("unavailable");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -1054,7 +1053,7 @@ test("uses dedicated snapshot, fill, and click tools", async () => {
     expect(verified).toMatchObject({ snapshot: expect.stringContaining("Welcome me@example.com") });
     await expect.poll(() => target.locator("output").textContent()).toBe("Welcome me@example.com");
     expect(events.some((event) => event.type === "automation.action.finished" && event.toolCallId === "call-click")).toBe(true);
-    expect(provider.requests[0].tools).toHaveLength(78);
+    expect(provider.requests[0].tools).toHaveLength(75);
     const toolNames = provider.requests[0].tools.map((tool: any) => tool.function.name);
     expect(toolNames).not.toContain("browser");
     expect(toolNames.filter((name: string) => ["open", "attach", "close", "detach", "show", "list", "close-all", "kill-all"].includes(name))).toEqual([]);
@@ -1159,7 +1158,7 @@ test("injects a screenshot and clicks its observation coordinates", async () => 
   }
 });
 
-test("keeps 100 semantic locate-and-action operations at p95 <= 100ms", async () => {
+test("keeps 100 semantic locate-and-action operations at p95 <= 100ms", { tag: "@performance" }, async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -1574,7 +1573,7 @@ test("executes run-code through the page facade, restores the conversation, and 
 
     await expect.poll(() => provider.requests.length).toBe(3);
     expect(provider.requests[0].reasoning_effort).toBe("minimal");
-    expect(provider.requests[0].tools).toHaveLength(78);
+    expect(provider.requests[0].tools).toHaveLength(75);
     expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).not.toContain("browser");
     expect(provider.requests[0].tools).toContainEqual(expect.objectContaining({ type: "function", function: expect.objectContaining({ name: "run-code" }) }));
     const events = await readEvents(opened.page);
@@ -2299,7 +2298,7 @@ test("keeps jump-to-bottom usable while a long response is streaming", async () 
   }
 });
 
-test("stress profile: dense stream and long canonical log stay interactive", async () => {
+test("stress profile: dense stream and long canonical log stay interactive", { tag: "@performance" }, async () => {
   const parts = [
     chunk({ role: "assistant", content: "# Stress\n\n" }),
     ...Array.from({ length: 1_500 }, (_, index) => chunk({

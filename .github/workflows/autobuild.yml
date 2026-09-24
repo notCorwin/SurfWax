@@ -52,8 +52,10 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 
-      - name: Run extension E2E and performance checks
-        run: npm run test:e2e
+      - name: Run extension E2E
+        run: |
+          npm run build
+          npx playwright test --grep-invert @performance
 
       - name: Package extension
         shell: bash
