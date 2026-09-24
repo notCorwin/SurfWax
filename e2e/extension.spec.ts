@@ -1738,6 +1738,17 @@ test("updates context usage during a streamed reply and shows structured details
     expect(box!.x).toBeGreaterThanOrEqual(0);
     expect(box!.x + box!.width).toBeLessThanOrEqual(320);
 
+    await opened.page.evaluate(() => {
+      Object.assign(window, { __tokenAnimationSeen: false });
+      new MutationObserver((mutations) => {
+        if (mutations.some(({ target }) => target instanceof Element
+          && target.getAttribute("data-testid") === "context-token-usage"
+          && target.getAttribute("data-animating") === "true")) {
+          Object.assign(window, { __tokenAnimationSeen: true });
+        }
+      }).observe(document.body, { attributes: true, subtree: true, attributeFilter: ["data-animating"] });
+    });
+
     await opened.page.getByTestId("composer-input").fill("stream context now");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("LIVE_CONTEXT_MARKER");
@@ -1749,9 +1760,9 @@ test("updates context usage during a streamed reply and shows structured details
     await expect.poll(async () => Number(await indicator.getAttribute("data-used-percent"))).toBeGreaterThan(initial);
     await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_COMPLETE");
-    await expect(opened.page.getByTestId("context-token-usage")).toHaveAttribute("data-animating", "true");
     await expect(opened.page.getByRole("button", { name: "发送消息" })).toBeVisible();
     await expect(opened.page.getByTestId("context-token-usage")).toHaveAttribute("data-animating", "false");
+    expect(await opened.page.evaluate(() => (window as typeof window & { __tokenAnimationSeen?: boolean }).__tokenAnimationSeen)).toBe(true);
     await expect(opened.page.getByTestId("context-input")).toHaveText("2,000 tokens");
     await expect(opened.page.getByTestId("context-output")).toHaveText("800 tokens");
     await expect(opened.page.getByTestId("context-cache-read")).toHaveText("500 tokens");
@@ -2856,12 +2867,12 @@ test("keeps the default title after an unrecoverable title request failure", asy
 test("keeps a running conversation alive when a switch is blocked", async () => {
   const slowReply = [
     chunk({ role: "assistant", content: "STREAM_RUNNING" }),
-    ...Array.from({ length: 30 }, () => chunk({ content: "." })),
+    ...Array.from({ length: 200 }, () => chunk({ content: "." })),
     chunk({ content: "BACKGROUND_DONE" }),
     chunk({}, "stop"),
     "data: [DONE]\n\n",
   ];
-  const provider = await startProvider([slowReply, textResponse("后台标题")], 10);
+  const provider = await startProvider([slowReply, textResponse("后台标题")], 20);
   const opened = await openExtension();
   try {
     const options = await configure(opened.context, opened.page, provider.baseURL);
