@@ -113,6 +113,33 @@ describe("ChromeExecutor", () => {
     executor.dispose();
   });
 
+  it("reports cancellation promptly but keeps a delayed tab mutation ahead of queued work", async () => {
+    const fake = fakeChrome();
+    const tabs: chrome.tabs.Tab[] = [{ id: 41, windowId: 7, active: true, url: "https://example.com" } as chrome.tabs.Tab];
+    let finishCreate!: (tab: chrome.tabs.Tab) => void;
+    const create = vi.fn(() => new Promise<chrome.tabs.Tab>((resolve) => { finishCreate = resolve; }));
+    const getCurrent = vi.fn(async () => ({ id: 7, tabs }));
+    Object.assign(fake.chromeApi, {
+      windows: { getCurrent, get: vi.fn(async () => ({ id: 7 })) },
+      tabs: { create, query: vi.fn(async () => tabs) },
+    });
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    const controller = new AbortController();
+    const running = executor.executeCommand("tab-new", { url: "https://example.com/next" }, controller.signal);
+    await vi.waitFor(() => expect(create).toHaveBeenCalled());
+    const queued = executor.executeCommand("tab-list", {});
+    controller.abort();
+    await expect(running).rejects.toMatchObject({ name: "AbortError", effectUnknown: true });
+    expect(getCurrent).toHaveBeenCalledTimes(1);
+    tabs[0]!.active = false;
+    const created = { id: 42, windowId: 7, active: true, url: "https://example.com/next" } as chrome.tabs.Tab;
+    tabs.push(created);
+    finishCreate(created);
+    await expect(queued).resolves.toMatchObject([{ id: 41, current: false }, { id: 42, current: true }]);
+    expect(getCurrent).toHaveBeenCalledTimes(2);
+    executor.dispose();
+  });
+
   it("navigates the current tab and creates new tabs only in the current window", async () => {
     const fake = fakeChrome();
     let url = "https://example.com/before";
@@ -197,11 +224,12 @@ describe("ChromeExecutor", () => {
     expect(String(fake.debuggerApi.sendCommand.mock.calls.at(-1)?.[2]?.expression)).toContain("return document.title");
   });
 
-  it("returns a stable automation timeout error for page calls", async () => {
+  it("returns a prompt timeout with uncertain effects for page calls", async () => {
     const fake = fakeChrome([() => new Promise<object>(() => undefined)]);
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
 
-    await expect(executor.executePage({ code: "await new Promise(() => undefined)", timeoutMs: 5 })).resolves.toMatchObject({ ok: false, error: { code: "timeout" } });
+    await expect(executor.executePage({ code: "await new Promise(() => undefined)", timeoutMs: 5 })).rejects.toMatchObject({ name: "TimeoutError", effectUnknown: true });
+    executor.dispose();
   });
 
   it("serializes page() and chrome() through the same queue", async () => {
@@ -249,11 +277,12 @@ describe("ChromeExecutor", () => {
       async append(event: Omit<LogEvent, "id">) { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; },
       async all() { return [...events]; }, async clear() { events.length = 0; },
     } });
-    const saved = await logger.append({ type: "tool.result.data", content: null, output: { observation: { snapshot: "abcdef" } } });
+    const saved = await logger.append({ type: "tool.result.data", conversationId: "first", content: null, output: { observation: { snapshot: "abcdef" } } });
     const fake = fakeChrome();
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test", logger });
 
-    await expect(executor.executeBrowser({ mode: "result", id: saved!.id, path: ["observation", "snapshot"], offset: 1, limit: 3 })).resolves.toBe("bcd");
+    await expect(executor.executeBrowser({ mode: "result", id: saved!.id, path: ["observation", "snapshot"], offset: 1, limit: 3 }, undefined, { conversationId: "first" })).resolves.toBe("bcd");
+    await expect(executor.executeBrowser({ mode: "result", id: saved!.id }, undefined, { conversationId: "second" })).rejects.toThrow("unavailable");
     expect(fake.debuggerApi.getTargets).not.toHaveBeenCalled();
     executor.dispose();
   });
@@ -274,13 +303,18 @@ describe("ChromeExecutor", () => {
     expect(await (executor as any).normalizeFiles([{ name: "upload.txt", artifactId: internal.id }])).toEqual([
       { name: "upload.txt", mimeType: "text/plain", base64: "aGVsbG8=" },
     ]);
-
     const saved = await (executor as any).storeArtifact("saved.txt", "eA==", "text/plain", true);
     expect(saved).toMatchObject({ id: 2, filename: "saved.txt", byteLength: 1, saved: true, downloadId: 17 });
     expect(fake.chromeApi.downloads.download).toHaveBeenCalledTimes(1);
 
+    const foreign = await logger.append({ type: "tool.result.data", conversationId: "other", content: null, output: { filename: "foreign.txt", mimeType: "text/plain", base64: "eA==" } });
+    await expect((executor as any).normalizeFiles([{ name: "foreign.txt", artifactId: foreign!.id }])).rejects.toThrow("unavailable");
+    await expect((globalThis as any).__surfWaxResult(foreign!.id)).rejects.toThrow("unavailable");
+    await expect((globalThis as any).__surfWaxBrowser.result(foreign!.id)).rejects.toThrow("unavailable");
+
     await expect(executor.executeCommand("artifact-save", { id: internal.id }, undefined, { conversationId: "conversation" }))
       .resolves.toMatchObject({ artifact: { id: 1, filename: "internal.txt", saved: true, downloadId: 17 } });
+    await expect(executor.executeCommand("artifact-save", { id: foreign!.id }, undefined, { conversationId: "conversation" })).rejects.toThrow("unavailable");
     expect(fake.chromeApi.downloads.download).toHaveBeenCalledTimes(2);
     executor.dispose();
   });

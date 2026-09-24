@@ -90,6 +90,14 @@ describe("canonical event log", () => {
     expect(JSON.stringify(await store.all())).toContain("sk-live-example");
   });
 
+  it("keeps tool result IDs within their conversation", async () => {
+    const logger = new EventLogger({ store: memoryStore() });
+    const result = await logger.append({ type: "tool.result.data", conversationId: "first", content: null, output: { value: "private" } });
+    await expect(logger.result(result!.id, {}, "first")).resolves.toEqual({ value: "private" });
+    await expect(logger.result(result!.id, {}, "second")).rejects.toThrow("unavailable");
+    await expect(logger.result(result!.id, {}, "")).rejects.toThrow("unavailable");
+  });
+
   it("rebuilds messages only from the append-only conversation events and clears them", async () => {
     const store = memoryStore();
     const logger = new EventLogger({ store });

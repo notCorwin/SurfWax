@@ -90,7 +90,7 @@ describe("createAgent", () => {
     expect(prompts[0]).not.toContain('"type":"file"');
     expect(executor.executeCommand).toHaveBeenCalledWith("goto", { url: "https://example.com" }, undefined, expect.any(Object));
     expect(record).toHaveBeenCalledWith(expect.objectContaining({
-      type: "model.started", content: expect.objectContaining({ activeTools: [...COMMAND_NAMES, "act", "result"], toolCount: 78 }),
+      type: "model.started", content: expect.objectContaining({ activeTools: [...COMMAND_NAMES, "act", "result"], toolCount: 75 }),
     }));
     expect(await result.text).toBe("done");
   }, 10_000);
@@ -222,7 +222,7 @@ describe("createAgent", () => {
     const model = new MockLanguageModelV4({ doStream: async (options) => {
       const names = (options.tools as any[]).map((tool) => tool.name);
       step += 1;
-      expect(names).toHaveLength(78);
+      expect(names).toHaveLength(75);
       expect(names).toContain("cookie-list");
       expect(names).not.toContain("search-tools");
       const chunks = step === 1
@@ -246,7 +246,7 @@ describe("createAgent", () => {
     const model = new MockLanguageModelV4({
       doStream: async (options) => {
         expect(options.reasoning).toBeUndefined();
-        expect((options.tools as any[])).toHaveLength(78);
+        expect((options.tools as any[])).toHaveLength(75);
         expect((options.tools as any[]).map((tool) => tool.name)).toEqual(expect.arrayContaining(["cookie-list", "act", "result"]));
         expect((options.tools as any[]).map((tool) => tool.name)).not.toContain("search-tools");
         expect((options.tools as any[]).map((tool) => tool.name)).not.toContain("browser");

@@ -37,8 +37,16 @@ function abortError(): DOMException {
   return new DOMException("Operation aborted", "AbortError");
 }
 
+function interruptionError(signal: AbortSignal, effectUnknown = false): DOMException {
+  const reason = signal.reason;
+  const error = reason instanceof DOMException && reason.name === "TimeoutError"
+    ? new DOMException(reason.message, "TimeoutError") : abortError();
+  if (effectUnknown) Object.assign(error, { effectUnknown: true });
+  return error;
+}
+
 function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw abortError();
+  if (signal?.aborted) throw interruptionError(signal);
 }
 
 function readQuoted(value: string): string {
@@ -355,7 +363,12 @@ export class ChromeExecutor {
     };
     this.automation = new AutomationRuntime({
       chromeApi: this.chromeApi,
-      command: (debuggee, method, params) => this.bridgeCommand(debuggee, method, params),
+      command: (debuggee, method, params) => {
+        const releaseInput = method === "Input.dispatchMouseEvent" && (params as { type?: string } | undefined)?.type === "mouseReleased"
+          || method === "Input.dispatchKeyEvent" && (params as { type?: string } | undefined)?.type === "keyUp";
+        if (method !== "Input.cancelDragging" && method !== "Runtime.releaseObjectGroup" && !releaseInput) throwIfAborted(this.activeSignal);
+        return this.bridgeCommand(debuggee, method, params);
+      },
       detach: async (debuggee) => {
         await (this.bridge.call as any)("detach", [debuggee]);
         this.bridgedDebuggees.delete(JSON.stringify(debuggee));
@@ -386,9 +399,9 @@ export class ChromeExecutor {
         send: (method: string, params?: object) => this.bridgeCommand(debuggee, method, params),
         detach: () => (this.bridge.call as any)("detach", [debuggee]),
       }),
-      result: (id: number, selection?: { path?: string | Array<string | number>; offset?: number; limit?: number }) => this.logger?.result(id, selection),
+      result: (id: number, selection?: { path?: string | Array<string | number>; offset?: number; limit?: number }) => this.logger?.result(id, selection, this.activeContext.conversationId ?? ""),
     };
-    (globalThis as Record<string, unknown>)[RESULT_READER_KEY] = (id: number, selection?: { path?: string | Array<string | number>; offset?: number; limit?: number }) => this.logger?.result(id, selection)
+    (globalThis as Record<string, unknown>)[RESULT_READER_KEY] = (id: number, selection?: { path?: string | Array<string | number>; offset?: number; limit?: number }) => this.logger?.result(id, selection, this.activeContext.conversationId ?? "")
       ?? Promise.reject(new Error("Tool result log is unavailable"));
   }
 
@@ -399,9 +412,11 @@ export class ChromeExecutor {
   }
 
   executeBrowser(input: BrowserInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
-    const task = this.tail.then(() => this.executeBrowserTimed(input, signal, context));
-    this.tail = task.then(() => undefined, () => undefined);
-    return task;
+    return this.enqueueAbortable(
+      (combined) => this.executeBrowserTimed(input, combined, context), signal,
+      input.mode === "act" ? input.timeoutMs ?? 10_000 : input.mode === "result" ? undefined : input.timeoutMs,
+      input.mode !== "result" && input.mode !== "observe",
+    );
   }
 
   /** Internal compatibility path for restored tests/conversations; it is not model-visible. */
@@ -410,33 +425,47 @@ export class ChromeExecutor {
   }
 
   executeCommand(name: CommandName, input: Record<string, any>, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
-    const task = this.tail.then(() => this.executeCommandTimed(name, input, signal, context));
-    this.tail = task.then(() => undefined, () => undefined);
-    return task;
+    return this.enqueueAbortable(
+      (combined) => this.executeCommandTimed(name, input, combined, context), signal,
+      input.timeoutMs ?? (this.commandNeedsTimeout(name) ? 10_000 : undefined),
+      !["snapshot", "find", "tab-list", "requests", "request", "request-headers", "request-body", "response-headers", "response-body", "route-list", "cookie-list", "cookie-get", "localstorage-list", "localstorage-get", "sessionstorage-list", "sessionstorage-get"].includes(name),
+    );
+  }
+
+  private enqueueAbortable<T>(run: (signal?: AbortSignal) => Promise<T>, signal?: AbortSignal, timeoutMs?: number, mayHaveEffect = true): Promise<T> {
+    const previous = this.tail;
+    let release!: () => void;
+    this.tail = new Promise<void>((resolve) => { release = resolve; });
+    const started = previous.then(() => {
+      const timeout = timeoutMs ? new AbortController() : undefined;
+      const timer = timeout ? setTimeout(() => timeout.abort(new DOMException(`Operation timed out after ${timeoutMs}ms`, "TimeoutError")), timeoutMs) : undefined;
+      const combined = timeout ? signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal : signal;
+      const work = run(combined);
+      const done = () => { if (timer !== undefined) clearTimeout(timer); release(); };
+      void work.then(done, done);
+      return { work, combined };
+    });
+    return this.awaitAbort(started, signal).then(({ work, combined }) => this.awaitAbort(work, combined, mayHaveEffect));
   }
 
   private async executeCommandTimed(name: CommandName, input: Record<string, any>, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
-    const timeoutMs = input.timeoutMs ?? (this.commandNeedsTimeout(name) ? 10_000 : undefined);
-    const timeout = timeoutMs ? new AbortController() : undefined;
-    const timer = timeout ? setTimeout(() => timeout.abort(new DOMException(`Operation timed out after ${timeoutMs}ms`, "TimeoutError")), timeoutMs) : undefined;
-    const combined = timeout ? signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal : signal;
     try {
       if (this.disposed) throw new Error("Chrome executor has been disposed");
-      throwIfAborted(combined);
-      this.automation.setContext({ ...context, signal: combined });
-      this.activeSignal = combined;
+      throwIfAborted(signal);
+      this.automation.setContext({ ...context, signal });
+      this.activeSignal = signal;
       this.activeContext = context;
       const result = await this.executeCommandNow(name, input);
+      throwIfAborted(signal);
       return result;
     } catch (error) {
-      if (combined?.aborted) await this.automation.abortSessions();
+      if (signal?.aborted) { await this.automation.abortSessions(); this.browserState = undefined; }
       this.recordExecutionFailure(error, { code: name }, context);
       throw error;
     } finally {
       this.activeSignal = undefined;
       this.activeContext = {};
       await this.automation.clearContext();
-      if (timer !== undefined) clearTimeout(timer);
     }
   }
 
@@ -448,6 +477,7 @@ export class ChromeExecutor {
     throwIfAborted(this.activeSignal);
     if (name === "artifact-save") return this.saveArtifact(input.id, input.filename);
     const state = await this.currentBrowserState();
+    throwIfAborted(this.activeSignal);
     if (name === "tab-list") return this.tabsOf(state);
     if (name === "tab-new") {
       const tab = await this.chromeApi.tabs.create({ windowId: state.windowId, active: true, ...(input.url ? { url: input.url } : {}) });
@@ -459,6 +489,7 @@ export class ChromeExecutor {
     if (name === "tab-close") return this.closeTab(state, input.index);
 
     const page = await this.pageFor(state);
+    throwIfAborted(this.activeSignal);
     const tabId = page.tabId;
     await this.annotateVideo(tabId, name, input);
     if (name === "goto") return this.withPageStatus(state, await page.goto(input.url));
@@ -467,7 +498,7 @@ export class ChromeExecutor {
     if (name === "reload") return this.withPageStatus(state, await page.reload());
     if (name === "type") {
       await page.insertText(input.text);
-      if (input.submit) await page.press("Enter");
+      if (input.submit) { throwIfAborted(this.activeSignal); await page.press("Enter"); }
       return this.withPageStatus(state, { performed: true });
     }
     if (name === "press") return this.withPageStatus(state, await page.press(input.key));
@@ -527,10 +558,8 @@ export class ChromeExecutor {
     if (name === "delete-data") return this.deleteBrowserData(state);
     if (name === "screenshot") return this.captureScreenshot(page, input);
     if (name === "pdf") return this.capturePdf(tabId, input.filename, input.save);
-    if (name === "state-save") return this.saveState(state, page, input.filename ?? timestamped("storage-state", "json"), input.save);
-    if (name === "state-load") return this.loadState(state, page, input.filename);
     if (name.startsWith("localstorage-") || name.startsWith("sessionstorage-")) return this.storageCommand(name, page, input);
-    if (name.startsWith("cookie-")) return this.cookieCommand(name, state, page, input);
+    if (name.startsWith("cookie-")) return this.cookieCommand(name, page, input);
     if (["requests", "request", "request-headers", "request-body", "response-headers", "response-body", "route", "route-list", "unroute", "network-state-set"].includes(name)) return this.networkCommand(name, tabId, input);
     if (name === "console") return this.consoleCommand(tabId, input);
     if (name === "run-code") return this.runPageCode(tabId, input.code, input.save);
@@ -549,13 +578,14 @@ export class ChromeExecutor {
     if (name === "click") result = await subject.click({ button: input.button, modifiers: input.modifiers });
     else if (name === "dblclick") result = await subject.dblclick({ button: input.button, modifiers: input.modifiers });
     else if (name === "hover") result = await subject.hover();
-    else if (name === "fill") { result = await subject.fill(input.text); if (input.submit) await subject.press("Enter"); }
+    else if (name === "fill") { result = await subject.fill(input.text); if (input.submit) { throwIfAborted(this.activeSignal); await subject.press("Enter"); } }
     else if (name === "select") result = await subject.selectOption(input.values);
-    else if (name === "upload") result = await subject.setInputFiles(await this.normalizeFiles(input.files));
+    else if (name === "upload") { const files = await this.normalizeFiles(input.files); throwIfAborted(this.activeSignal); result = await subject.setInputFiles(files); }
     else if (name === "check") result = await subject.check();
     else if (name === "uncheck") result = await subject.uncheck();
     else if (name === "drop") {
       const normalized = await this.normalizeFiles(input.files ?? []);
+      throwIfAborted(this.activeSignal);
       result = await subject.evaluate(`function(el, payload){
         const transfer = new DataTransfer();
         for (const file of payload.files) { const bytes = file.base64 ? Uint8Array.from(atob(file.base64), c => c.charCodeAt(0)) : new TextEncoder().encode(file.text || ""); transfer.items.add(new File([bytes], file.name, {type:file.mimeType || "application/octet-stream"})); }
@@ -693,6 +723,7 @@ export class ChromeExecutor {
       output: { filename, mimeType, base64 },
     });
     if (!event) throw new Error("CommandError[artifact-log-unavailable]: The canonical event log stopped accepting events");
+    if (save) throwIfAborted(this.activeSignal);
     const downloadId = save ? await this.chromeApi.downloads.download({ url: `data:${mimeType};base64,${base64}`, filename, saveAs: false }) : undefined;
     return { id: event.id, filename, mimeType, byteLength, saved: save, ...(downloadId === undefined ? {} : { downloadId }) };
   }
@@ -706,11 +737,12 @@ export class ChromeExecutor {
 
   private async saveArtifact(id: number, requested?: string): Promise<{ artifact: ArtifactRef }> {
     if (!this.logger) throw new Error("CommandError[artifact-log-unavailable]: The canonical event log is unavailable");
-    const stored = await this.logger.result(id) as { filename?: unknown; mimeType?: unknown; base64?: unknown };
+    const stored = await this.logger.result(id, {}, this.activeContext.conversationId ?? "") as { filename?: unknown; mimeType?: unknown; base64?: unknown };
     if (typeof stored?.base64 !== "string" || typeof stored.mimeType !== "string" || typeof stored.filename !== "string") {
       throw new Error(`CommandError[invalid-artifact]: Artifact ${id} has no downloadable data`);
     }
     const filename = requested ?? stored.filename;
+    throwIfAborted(this.activeSignal);
     const downloadId = await this.chromeApi.downloads.download({ url: `data:${stored.mimeType};base64,${stored.base64}`, filename, saveAs: false });
     return { artifact: { id, filename, mimeType: stored.mimeType, byteLength: base64ByteLength(stored.base64), saved: true, downloadId } };
   }
@@ -719,12 +751,12 @@ export class ChromeExecutor {
     return Promise.all(files.map(async (file) => {
       if (file.artifactId !== undefined) {
         if (!this.logger) throw new Error("CommandError[artifact-log-unavailable]: The canonical event log is unavailable");
-        const stored = await this.logger.result(file.artifactId) as { mimeType?: unknown; base64?: unknown };
+        const stored = await this.logger.result(file.artifactId, {}, this.activeContext.conversationId ?? "") as { mimeType?: unknown; base64?: unknown };
         if (typeof stored?.base64 !== "string") throw new Error(`CommandError[invalid-artifact]: Artifact ${file.artifactId} has no file data`);
         return { name: file.name, mimeType: file.mimeType || (typeof stored.mimeType === "string" ? stored.mimeType : "application/octet-stream"), base64: stored.base64 };
       }
       if (!file.url) return file;
-      const response = await fetch(file.url);
+      const response = await fetch(file.url, { signal: this.activeSignal });
       if (!response.ok) throw new Error(`Could not fetch upload URL: ${response.status}`);
       const bytes = new Uint8Array(await response.arrayBuffer());
       let binary = "";
@@ -773,52 +805,35 @@ export class ChromeExecutor {
     return page.evaluate(`() => { ${storage}.clear(); return true; }`);
   }
 
-  private async cookieCommand(name: string, state: BrowserState, page: any, input: Record<string, any>): Promise<unknown> {
+  private async cookieCommand(name: string, page: any, input: Record<string, any>): Promise<unknown> {
     const url = String(await page.url());
     if (name === "cookie-list") {
       const cookies = await this.chromeApi.cookies.getAll(input.domain ? { domain: input.domain } : { url });
       return input.path ? cookies.filter((cookie) => cookie.path === input.path) : cookies;
     }
     if (name === "cookie-get") return this.chromeApi.cookies.get({ url, name: input.name });
-    if (name === "cookie-set") return this.chromeApi.cookies.set({
-      url, name: input.name, value: input.value, ...(input.domain ? { domain: input.domain } : {}), path: input.path ?? "/",
-      ...(input.expires === undefined ? {} : { expirationDate: input.expires }), ...(input.httpOnly === undefined ? {} : { httpOnly: input.httpOnly }),
-      ...(input.secure === undefined ? {} : { secure: input.secure }), ...(input.sameSite ? { sameSite: input.sameSite.toLowerCase() as chrome.cookies.SameSiteStatus } : {}),
-    });
-    if (name === "cookie-delete") return this.chromeApi.cookies.remove({ url, name: input.name });
-    const cookies = (await Promise.all([...state.origins].map((origin) => this.chromeApi.cookies.getAll({ url: origin })))).flat();
-    await Promise.all(cookies.map((cookie) => this.chromeApi.cookies.remove({ url: `${cookie.secure ? "https" : "http"}://${cookie.domain.replace(/^\./, "")}${cookie.path}`, name: cookie.name, storeId: cookie.storeId }).catch(() => undefined)));
-    return { cleared: cookies.length };
+    if (name === "cookie-set") {
+      throwIfAborted(this.activeSignal);
+      return this.chromeApi.cookies.set({
+        url, name: input.name, value: input.value, ...(input.domain ? { domain: input.domain } : {}), path: input.path ?? "/",
+        ...(input.expires === undefined ? {} : { expirationDate: input.expires }), ...(input.httpOnly === undefined ? {} : { httpOnly: input.httpOnly }),
+        ...(input.secure === undefined ? {} : { secure: input.secure }), ...(input.sameSite ? { sameSite: input.sameSite.toLowerCase() as chrome.cookies.SameSiteStatus } : {}),
+      });
+    }
+    if (name === "cookie-delete") {
+      throwIfAborted(this.activeSignal);
+      return this.chromeApi.cookies.remove({ url, name: input.name });
+    }
+    throw new Error(`CommandError[unsupported]: ${name}`);
   }
 
   private async deleteBrowserData(state: BrowserState): Promise<unknown> {
     const origins = [...state.origins];
-    if (origins.length) await this.chromeApi.browsingData.remove({ origins: origins as [string, ...string[]] }, { cache: true, cacheStorage: true, cookies: true, fileSystems: true, indexedDB: true, localStorage: true, serviceWorkers: true, webSQL: true });
+    if (origins.length) {
+      throwIfAborted(this.activeSignal);
+      await this.chromeApi.browsingData.remove({ origins: origins as [string, ...string[]] }, { cache: true, cacheStorage: true, cookies: true, fileSystems: true, indexedDB: true, localStorage: true, serviceWorkers: true, webSQL: true });
+    }
     return { deletedOrigins: origins };
-  }
-
-  private async saveState(state: BrowserState, page: any, filename: string, save = false): Promise<unknown> {
-    const cookies = (await Promise.all([...state.origins].map((origin) => this.chromeApi.cookies.getAll({ url: origin })))).flat();
-    const origin = new URL(String(await page.url())).origin;
-    const localStorage = await page.evaluate("() => Object.fromEntries(Object.entries(window.localStorage))");
-    const savedState = { cookies, origins: [{ origin, localStorage }] };
-    await this.chromeApi.storage.local.set({ [`side-agent:browser-state:${filename}`]: savedState });
-    return { state: savedState, artifact: await this.storeText(filename, JSON.stringify(savedState, null, 2), "application/json", save) };
-  }
-
-  private async loadState(state: BrowserState, page: any, filename: string): Promise<unknown> {
-    const key = `side-agent:browser-state:${filename}`;
-    const savedState = (await this.chromeApi.storage.local.get(key))[key] as any;
-    if (!savedState) throw new Error(`CommandError[state-unavailable]: No saved state named ${JSON.stringify(filename)}`);
-    await Promise.all((savedState.cookies ?? []).map((cookie: chrome.cookies.Cookie) => this.chromeApi.cookies.set({
-      url: `${cookie.secure ? "https" : "http"}://${cookie.domain.replace(/^\./, "")}${cookie.path}`, name: cookie.name, value: cookie.value,
-      domain: cookie.domain, path: cookie.path, secure: cookie.secure, httpOnly: cookie.httpOnly, sameSite: cookie.sameSite, ...(cookie.expirationDate ? { expirationDate: cookie.expirationDate } : {}),
-    })));
-    const current = new URL(String(await page.url())).origin;
-    const saved = savedState.origins?.find((item: any) => item.origin === current);
-    if (saved) await page.evaluate("values => { localStorage.clear(); for (const [key,value] of Object.entries(values)) localStorage.setItem(key, String(value)); }", saved.localStorage);
-    state.origins.add(current);
-    return { loaded: filename, cookies: savedState.cookies?.length ?? 0, origin: current };
   }
 
   private async enableObservation(tabId: number): Promise<void> {
@@ -1016,8 +1031,8 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     if (name === "video-chapter") {
       const duration = input.durationMs ?? 2_000;
       state.overlay = { title: input.title, description: input.description, until: performance.now() + duration };
-      await new Promise((resolve) => setTimeout(resolve, duration));
-      state.overlay = undefined;
+      try { await this.awaitAbort(new Promise<void>((resolve) => setTimeout(resolve, duration)), this.activeSignal); }
+      finally { state.overlay = undefined; }
       return { chapter: input.title, durationMs: duration };
     }
     await this.bridgeCommand({ tabId }, "Page.stopScreencast", {}).catch(() => undefined);
@@ -1116,20 +1131,17 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
 
   private async executeBrowserTimed(input: BrowserInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
     if (input.mode === "result") {
+      throwIfAborted(signal);
       if (!this.logger) throw new Error("Tool result log is unavailable");
-      return this.logger.result(input.id, { path: input.path, offset: input.offset, limit: input.limit });
+      return this.logger.result(input.id, { path: input.path, offset: input.offset, limit: input.limit }, context.conversationId ?? "");
     }
-    const timeoutMs = input.timeoutMs ?? (input.mode === "act" ? 10_000 : undefined);
-    const timeout = timeoutMs ? new AbortController() : undefined;
-    const timer = timeout ? setTimeout(() => timeout.abort(new DOMException(`Operation timed out after ${timeoutMs}ms`, "TimeoutError")), timeoutMs) : undefined;
-    const combined = timeout ? signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal : signal;
     try {
       if (this.disposed) throw new Error("Chrome executor has been disposed");
-      throwIfAborted(combined);
-      this.automation.setContext({ ...context, signal: combined });
-      this.activeSignal = combined;
+      throwIfAborted(signal);
+      this.automation.setContext({ ...context, signal });
+      this.activeSignal = signal;
       this.activeContext = context;
-      if (input.mode === "run") return await this.executeNow({ code: input.code, target: input.target ?? { kind: "extension" }, timeoutMs }, combined, context);
+      if (input.mode === "run") return await this.executeNow({ code: input.code, target: input.target ?? { kind: "extension" }, timeoutMs: input.timeoutMs }, signal, context);
       const page = await this.automation.createPage(input.tabId);
       if (input.mode === "observe") {
         if (input.detail === "visual" && !context.visualEnabled) throw new Error("AutomationError[visual-unavailable]: Image input is disabled or unsupported by the selected model");
@@ -1142,15 +1154,15 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
       if (input.observationId) await page.ensureObservation(input.observationId);
       return await this.executeSteps(page, input.steps, input.observationId, context.visualEnabled ?? false);
     } catch (error) {
-      if (combined?.aborted) await this.automation.abortSessions();
-      const failure = timeout?.signal.aborted && !signal?.aborted ? new Error(`AutomationError[timeout]: ${JSON.stringify({ timeoutMs })}`) : error;
+      if (signal?.aborted) { await this.automation.abortSessions(); this.browserState = undefined; }
+      const failure = signal?.reason instanceof DOMException && signal.reason.name === "TimeoutError"
+        ? new Error(`AutomationError[timeout]: ${JSON.stringify({ timeoutMs: input.timeoutMs ?? 10_000 })}`) : error;
       this.recordExecutionFailure(failure, input, context);
       return { ok: false, error: this.structuredError(failure), completed: [], failed: null, notRun: input.mode === "act" ? input.steps : [] };
     } finally {
       this.activeSignal = undefined;
       this.activeContext = {};
       await this.automation.clearContext();
-      if (timer !== undefined) clearTimeout(timer);
     }
   }
 
@@ -1160,6 +1172,7 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     for (let index = 0; index < steps.length; index += 1) {
       const step = steps[index]!;
       try {
+        throwIfAborted(this.activeSignal);
         completed.push({ index, type: step.type, result: await this.executeStep(page, step, observationId) });
       } catch (error) {
         if (this.activeSignal?.aborted) await this.automation.abortSessions();
@@ -1403,11 +1416,11 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     catch (error) { throw new Error(`Service Worker execution is unavailable in this browser session: ${error instanceof Error ? error.message : String(error)}. Desktop builds may launch Chrome with --silent-debugger-extension-api.`); }
   }
 
-  private async awaitAbort<T>(task: Promise<T>, signal?: AbortSignal): Promise<T> {
+  private async awaitAbort<T>(task: Promise<T>, signal?: AbortSignal, effectUnknown = false): Promise<T> {
     if (!signal) return task;
-    throwIfAborted(signal);
+    if (signal.aborted) throw interruptionError(signal, effectUnknown);
     return new Promise<T>((resolve, reject) => {
-      const abort = () => reject(abortError());
+      const abort = () => reject(interruptionError(signal, effectUnknown));
       signal.addEventListener("abort", abort, { once: true });
       void task.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
     });

@@ -543,12 +543,12 @@ export class EventLogger {
     return (this.options.store ?? getEventStore()).all();
   }
 
-  async result(id: number, selection: { path?: string | Array<string | number>; offset?: number; limit?: number } = {}): Promise<unknown> {
+  async result(id: number, selection: { path?: string | Array<string | number>; offset?: number; limit?: number } = {}, conversationId?: string): Promise<unknown> {
     if (!Number.isSafeInteger(id) || id < 1) throw new Error("Invalid result event ID");
     await this.flush();
     const store = this.options.store ?? getEventStore();
     const event = store.get ? await store.get(id) : (await store.all()).find((item) => item.id === id);
-    if (event?.type !== "tool.result.data") throw new Error(`Tool result ${id} is unavailable`);
+    if (event?.type !== "tool.result.data" || conversationId !== undefined && event.conversationId !== conversationId) throw new Error(`Tool result ${id} is unavailable`);
     let value = fromLogValue(event.output);
     const path = typeof selection.path === "string" ? [selection.path] : selection.path ?? [];
     for (const part of path) {

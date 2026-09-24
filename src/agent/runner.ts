@@ -121,7 +121,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
           prepared,
           stepNumber,
           browserChanged ? browserContextMessage(browserContext) : undefined,
-          logger ? (id) => logger.result(id) : undefined,
+          logger ? (id) => logger.result(id, {}, options.conversationId ?? "") : undefined,
         ),
       };
     },

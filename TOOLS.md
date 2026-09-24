@@ -77,8 +77,7 @@
 
 | 命令 | 说明 |
 |---|---|
-| `state-save [filename]` / `state-load <filename>` | 保存或恢复浏览器存储状态 |
-| `cookie-list`、`cookie-get`、`cookie-set`、`cookie-delete`、`cookie-clear` | 管理 Cookie |
+| `cookie-list`、`cookie-get`、`cookie-set`、`cookie-delete` | 管理 Cookie |
 | `localstorage-list/get/set/delete/clear` | 管理 localStorage |
 | `sessionstorage-list/get/set/delete/clear` | 管理 sessionStorage |
 

@@ -571,7 +571,7 @@ export class AutomationRuntime {
         }
         const files = await Promise.all(requested.map(async (file: any) => {
           if (file?.url) {
-            const response = await fetch(file.url);
+            const response = await fetch(file.url, { signal: this.context.signal });
             if (!response.ok) throw new Error(`Could not fetch upload URL: ${response.status}`);
             const bytes = new Uint8Array(await response.arrayBuffer());
             let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte);

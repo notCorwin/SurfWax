@@ -7,7 +7,7 @@ import type { ChromeExecutor } from "./executor";
 export const COMMAND_NAMES = [
   "goto", "type", "click", "dblclick", "fill", "drag", "drop", "hover", "select", "upload", "check", "uncheck", "snapshot", "find", "eval", "dialog-accept", "dialog-dismiss", "resize", "delete-data",
   "go-back", "go-forward", "reload", "press", "keydown", "keyup", "mousemove", "mousedown", "mouseup", "mousewheel", "screenshot", "pdf",
-  "tab-list", "tab-new", "tab-close", "tab-select", "state-save", "state-load", "cookie-list", "cookie-get", "cookie-set", "cookie-delete", "cookie-clear",
+  "tab-list", "tab-new", "tab-close", "tab-select", "cookie-list", "cookie-get", "cookie-set", "cookie-delete",
   "localstorage-list", "localstorage-get", "localstorage-set", "localstorage-delete", "localstorage-clear", "sessionstorage-list", "sessionstorage-get", "sessionstorage-set", "sessionstorage-delete", "sessionstorage-clear",
   "requests", "request", "request-headers", "request-body", "response-headers", "response-body", "route", "route-list", "unroute", "network-state-set", "console", "run-code",
   "recording-start", "recording-stop", "tracing-start", "tracing-stop", "video-start", "video-stop", "video-chapter", "video-show-actions", "video-hide-actions", "artifact-save", "generate-locator", "highlight",
@@ -96,13 +96,10 @@ const definitions: Record<CommandName, Definition> = {
   "tab-new": { description: "Open and select a new tab.", inputSchema: z.object({ ...common, url: z.string().url().optional() }).strict() },
   "tab-close": { description: "Close a tab by zero-based index, or the current tab.", inputSchema: z.object({ ...common, index: index.optional() }).strict() },
   "tab-select": { description: "Select a tab by zero-based index.", inputSchema: z.object({ ...common, index }).strict() },
-  "state-save": { description: "Save cookies and visited-origin localStorage internally by filename. Set save only when the user explicitly requested a local JSON file.", inputSchema: z.object({ ...common, filename, save }).strict() },
-  "state-load": { description: "Restore a previously saved named storage state.", inputSchema: z.object({ ...common, filename: z.string().min(1) }).strict() },
   "cookie-list": { description: "List cookies, optionally filtered by domain or path.", inputSchema: z.object({ ...common, domain: z.string().optional(), path: z.string().optional() }).strict() },
   "cookie-get": { description: "Get a cookie by name.", inputSchema: z.object({ ...common, name: z.string().min(1) }).strict() },
   "cookie-set": { description: "Set a cookie.", inputSchema: z.object({ ...common, name: z.string().min(1), value: z.string(), domain: z.string().optional(), path: z.string().optional(), expires: z.number().optional(), httpOnly: z.boolean().optional(), secure: z.boolean().optional(), sameSite: z.enum(["Strict", "Lax", "None"]).optional() }).strict() },
   "cookie-delete": { description: "Delete a cookie by name.", inputSchema: z.object({ ...common, name: z.string().min(1) }).strict() },
-  "cookie-clear": { description: "Clear cookies for visited origins.", inputSchema: empty() },
   "localstorage-list": { description: "List localStorage entries for the current page.", inputSchema: empty() },
   "localstorage-get": { description: "Get a localStorage value.", inputSchema: z.object({ ...common, key: z.string() }).strict() },
   "localstorage-set": { description: "Set a localStorage value.", inputSchema: z.object({ ...common, key: z.string(), value: z.string() }).strict() },
@@ -207,10 +204,13 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
   return { $ref: event.id, bytes, preview: previewOf(value, path), access, type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value };
 }
 
-function toolFailure(error: unknown): { ok: false; error: { code: string; message: string; retryable: boolean } } {
-  const message = error instanceof Error ? error.message : String(error);
-  const code = error instanceof DOMException && error.name === "AbortError" ? "aborted" : /(?:Command|Automation)Error\[([^\]]+)\]/.exec(message)?.[1] ?? "tool-error";
-  return { ok: false, error: { code, message, retryable: code === "timeout" } };
+function toolFailure(error: unknown): { ok: false; error: { code: string; message: string; retryable: boolean; effectUnknown?: boolean } } {
+  const message = error instanceof Error || error instanceof DOMException ? error.message : String(error);
+  const code = error instanceof DOMException && error.name === "AbortError" ? "aborted"
+    : error instanceof DOMException && error.name === "TimeoutError" ? "timeout"
+    : /(?:Command|Automation)Error\[([^\]]+)\]/.exec(message)?.[1] ?? "tool-error";
+  const effectUnknown = Boolean(error && typeof error === "object" && "effectUnknown" in error && error.effectUnknown);
+  return { ok: false, error: { code, message, retryable: code === "timeout" && !effectUnknown, ...(effectUnknown ? { effectUnknown: true } : {}) } };
 }
 
 export function createCommandTools(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string; visualEnabled?: () => Promise<boolean> } = {}) {
@@ -305,7 +305,7 @@ export async function prepareToolMessages(messages: any[], stepNumber: number, b
     if (!Array.isArray(message.content) || message.content.some((part: any) => part.type === "text" && part.text === TOOL_CONTEXT)) return message;
     return { ...message, content: [...message.content, { type: "text", text: TOOL_CONTEXT }] };
   });
-  const prepared = withTools.map((message, index) => message.role !== "tool" || stepNumber > 0 && index !== withTools.length - 1 ? message : { ...message, content: message.content.map((part: any) => {
+  const prepared = withTools.map((message, index) => message.role !== "tool" ? message : { ...message, content: message.content.map((part: any) => {
     if (part.type !== "tool-result" || part.output?.type !== "json") return part;
     const found: ScreenshotSource[] = [];
     const value = scrubScreenshots(part.output.value, found);
