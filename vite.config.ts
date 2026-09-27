@@ -43,6 +43,7 @@ export default defineConfig({
     rollupOptions: { input: {
       offscreen: resolve(projectRoot, "offscreen.html"),
       devtools: resolve(projectRoot, "devtools.html"),
+      userscripts: resolve(projectRoot, "userscripts.html"),
     } },
   },
 });

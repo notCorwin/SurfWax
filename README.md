@@ -70,7 +70,7 @@ npm run dev:vite
 2. 点击标题栏中的设置按钮。
 3. 选择 Models.dev Provider，填写 **Model ID** 和页面显示的凭据字段；自定义 Endpoint 需要填写 Base URL 与 API Key。
 4. 保存配置并返回 Side Panel。
-用户脚本功能已暂停：扩展不提供脚本管理页，也不会恢复或运行已有脚本。更新或启动扩展时会永久清除旧脚本的本地定义和相关配置；实现源码保留在 `src/userscripts/`，供将来继续开发。
+用户脚本可在 Side Panel 标题栏或设置页打开管理页，也可由智能体列出、读取、创建、编辑和启停。新建脚本默认启用；脚本定义及启停状态由扩展保存，更新或启动后恢复已启用脚本。首次使用前，需在 `chrome://extensions` 的 Surf Wax 详情页开启 **Allow User Scripts**。
 
 模型配置只保存在当前扩展的 `chrome.storage.local` 中，并按 Provider 隔离。设置页支持普通 API Key，也支持 Bedrock、Azure、Vertex、Cloudflare、GitLab、Watsonx 和 SAP AI Core 等多字段凭据；Models.dev Endpoint 中的 `${VAR}` 会自动变成独立输入项并在请求前插值。
 
@@ -133,9 +133,9 @@ Side Panel 关闭时，Harness 会立即中止当前模型请求，阻止排队�
 | --- | --- |
 | `src/sidepanel/` | Side Panel 会话、配置加载、恢复和关闭生命周期 |
 | `src/agent/` | Models.dev SDK Registry、浏览器协议适配、无限重试、Agent 循环和流式 transport |
-| `src/chrome/` | 80 个命令工具、语义/视觉自动化与共享 Chrome/CDP 执行器 |
+| `src/chrome/` | 75 个浏览器工具、5 个用户脚本工具、语义/视觉自动化与共享 Chrome/CDP 执行器 |
 | `src/logging.ts` | IndexedDB canonical event log 与对话重建 |
-| `src/userscripts/` | 暂停使用的用户脚本管理与持久化源码 |
+| `src/userscripts/` | 用户脚本管理页、定义持久化和重启恢复 |
 | `src/options/` | BYOK 设置和日志清理 |
 
 系统 prompt、工具 schema 和历史消息前缀保持稳定；新上下文只追加到日志，以提高兼容 Provider 的 prompt cache hit rate。

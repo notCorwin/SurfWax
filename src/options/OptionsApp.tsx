@@ -339,6 +339,16 @@ export function OptionsApp() {
 
       <Card>
         <CardHeader>
+          <CardTitle>用户脚本</CardTitle>
+          <CardDescription>管理自动运行的脚本、匹配网站和启停状态。</CardDescription>
+        </CardHeader>
+        <CardFooter>
+          <Button asChild variant="outline"><a href="userscripts.html">打开脚本管理</a></Button>
+        </CardFooter>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>本地会话</CardTitle>
           <CardDescription>事件日志是聊天界面、恢复会话与模型上下文的唯一来源。</CardDescription>
         </CardHeader>

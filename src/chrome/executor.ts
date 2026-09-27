@@ -1303,7 +1303,7 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
         const value = await this.awaitAbort(this.automation.pageValue(target.tabId, pageExpressionFor(input.code)), signal);
         return evaluationValue({ result: { value } }, "page");
       }
-      if (target.world === "USER_SCRIPT") throw new Error("User Scripts is paused in this build.");
+      if (target.world === "USER_SCRIPT") return this.evaluateUserScript(target, input.code, signal);
       if (target.world === "ISOLATED") return this.evaluateIsolated(target, input.code, signal);
       if (target.targetId) return this.evaluateCdpPage(target, input.code, signal);
       return this.evaluate({ tabId: target.tabId }, pageExpressionFor(input.code), signal, "page");
@@ -1381,6 +1381,23 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     const error = evaluationError(response);
     if (error) throw error;
     return evaluationValue(response, "page");
+  }
+
+  private async evaluateUserScript(target: ChromeTarget, code: string, signal?: AbortSignal): Promise<unknown> {
+    if (!this.chromeApi.userScripts?.execute) throw new Error("Allow User Scripts 未开启，或 Chrome 不支持该操作。");
+    if (target.frameId !== undefined && target.documentId) throw new Error("Specify frameId or documentId, not both.");
+    const tabId = target.tabId ?? (target.targetId ? (await this.chromeApi.debugger.getTargets()).find((item) => item.id === target.targetId)?.tabId : undefined);
+    if (!Number.isInteger(tabId)) throw new Error("USER_SCRIPT execution requires a page tabId or resolvable targetId.");
+    throwIfAborted(signal);
+    const injections = await this.awaitAbort(this.chromeApi.userScripts.execute({
+      target: { tabId: tabId!, ...(target.frameId !== undefined ? { frameIds: [target.frameId] } : target.documentId ? { documentIds: [target.documentId] } : {}) },
+      js: [{ code: pageExpressionFor(code) }], world: "USER_SCRIPT", injectImmediately: true,
+    }), signal, true);
+    const results = injections.map((injection) => {
+      if (injection.error) throw new Error(injection.error);
+      return { documentId: injection.documentId, frameId: injection.frameId, result: evaluationValue({ result: { value: injection.result } }, "user-script") };
+    });
+    return results.length === 1 ? results[0]!.result : results;
   }
 
   private async evaluateCdpPage(target: ChromeTarget, code: string, signal?: AbortSignal): Promise<unknown> {

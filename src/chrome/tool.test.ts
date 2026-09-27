@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { EventLogger } from "../logging";
 import { parseCommandTarget, type ChromeExecutor } from "./executor";
-import { COMMAND_NAMES, compactToolResult, createCommandTools, parseCommandInput, prepareToolMessages, repairCommandToolCall, TOOL_SUMMARY } from "./tool";
+import { COMMAND_NAMES, USER_SCRIPT_TOOL_NAMES, compactToolResult, createCommandTools, parseCommandInput, prepareToolMessages, repairCommandToolCall, TOOL_SUMMARY } from "./tool";
 
 describe("browser command tools", () => {
   it("registers exactly the 73 executable current-window commands", () => {
@@ -13,14 +13,54 @@ describe("browser command tools", () => {
     expect(COMMAND_NAMES.filter((name) => ["browser", "open", "attach", "close", "detach", "show", "list", "close-all", "kill-all"].includes(name))).toEqual([]);
   });
 
-  it("exposes all 75 tools in stable order without search or deferred loading", () => {
+  it("exposes browser and user-script tools in stable order without search or deferred loading", () => {
     const tools = createCommandTools({} as ChromeExecutor) as Record<string, any>;
-    expect(Object.keys(tools)).toEqual([...COMMAND_NAMES, "act", "result"]);
+    expect(Object.keys(tools)).toEqual([...COMMAND_NAMES, "act", "result", ...USER_SCRIPT_TOOL_NAMES]);
     for (const name of ["install", "install-browser", "pause-at", "resume", "step-over"]) expect(tools).not.toHaveProperty(name);
     expect(tools).not.toHaveProperty("search-tools");
     expect(Object.values(tools).every((tool) => tool.deferLoading !== true)).toBe(true);
-    expect(TOOL_SUMMARY.split("\n")).toHaveLength(75);
+    expect(TOOL_SUMMARY.split("\n")).toHaveLength(80);
     for (const [name, tool] of Object.entries(tools)) expect(TOOL_SUMMARY).toContain(`- ${name}: ${tool.description}`);
+  });
+
+  it("validates native user-script definitions and keeps enabled outside them", () => {
+    const tools = createCommandTools({} as ChromeExecutor) as Record<string, any>;
+    const script = { id: "sample", matches: ["https://example.com/*"], js: [{ code: "document.title = 'Ready'" }] };
+    expect(tools["userscript-create"].inputSchema.parse({ script })).toEqual({ script });
+    expect(() => tools["userscript-create"].inputSchema.parse({ script: { ...script, enabled: false } })).toThrow();
+    expect(tools["userscript-edit"].inputSchema.parse({ id: "sample", changes: { js: [{ code: "1" }], runAt: null } })).toMatchObject({ id: "sample" });
+    expect(() => tools["userscript-edit"].inputSchema.parse({ id: "sample", changes: { id: "changed" } })).toThrow();
+  });
+
+  it("routes all five user-script tools through the background manager", async () => {
+    const sendMessage = vi.fn(async (message) => ({ ok: true, result: message.method }));
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+    try {
+      const tools = createCommandTools({} as ChromeExecutor) as Record<string, any>;
+      const script = { id: "sample", matches: ["https://example.com/*"], js: [{ code: "1" }] };
+      const inputs = [{}, { id: "sample" }, { script }, { id: "sample", changes: { js: [{ code: "2" }] } }, { id: "sample", enabled: false }];
+      for (const [index, name] of USER_SCRIPT_TOOL_NAMES.entries()) {
+        await expect(tools[name].execute(inputs[index], { toolCallId: `call-${index}` })).resolves.toBe(["list", "read", "create", "edit", "setEnabled"][index]);
+      }
+      expect(sendMessage.mock.calls.map(([message]) => message)).toEqual([
+        { type: "surf-wax:user-scripts", method: "list", args: [] },
+        { type: "surf-wax:user-scripts", method: "read", args: ["sample"] },
+        { type: "surf-wax:user-scripts", method: "create", args: [script] },
+        { type: "surf-wax:user-scripts", method: "edit", args: [inputs[3]] },
+        { type: "surf-wax:user-scripts", method: "setEnabled", args: [inputs[4]] },
+      ]);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("ends a pending user-script tool call when the panel aborts", async () => {
+    vi.stubGlobal("chrome", { runtime: { sendMessage: () => new Promise(() => undefined) } });
+    try {
+      const controller = new AbortController();
+      const tools = createCommandTools({} as ChromeExecutor) as Record<string, any>;
+      const result = tools["userscript-set-enabled"].execute({ id: "sample", enabled: false }, { toolCallId: "call", abortSignal: controller.signal });
+      controller.abort();
+      await expect(result).resolves.toEqual({ ok: false, error: { code: "aborted", message: "Operation aborted", retryable: false, effectUnknown: true } });
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it("appends the tool catalog once to the first model-visible user message", async () => {

@@ -261,12 +261,12 @@ describe("ChromeExecutor", () => {
 
   it("runs page code through CDP even when a userScripts API is present", async () => {
     const fake = fakeChrome([{ result: { value: { kind: "value", value: "CDP" } } }]);
-    const execute = vi.fn();
+    const execute = vi.fn(async () => [{ documentId: "doc", frameId: 0, result: { kind: "value", value: "USER" } }]);
     (fake.chromeApi.userScripts as any).execute = execute;
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
     await expect(executor.execute({ tabId: 5, code: "return document.title" })).resolves.toBe("CDP");
-    await expect(executor.execute({ tabId: 5, world: "USER_SCRIPT", code: "return document.title" })).rejects.toThrow("paused");
-    expect(execute).not.toHaveBeenCalled();
+    await expect(executor.execute({ tabId: 5, world: "USER_SCRIPT", code: "return document.title" })).resolves.toBe("USER");
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ target: { tabId: 5 }, world: "USER_SCRIPT", injectImmediately: true }));
     expect(fake.debuggerApi.attach).toHaveBeenCalledWith({ tabId: 5 }, "1.3");
     executor.dispose();
   });
@@ -360,7 +360,7 @@ describe("ChromeExecutor", () => {
     await expect(executor.execute({ tabId: 8, code: "return document.title" })).resolves.toBe("CDP");
     expect(fake.debuggerApi.attach).toHaveBeenCalledWith({ tabId: 8 }, "1.3");
     expect(String(fake.debuggerApi.sendCommand.mock.calls[0][2]?.expression)).toContain("return document.title");
-    await expect(executor.execute({ tabId: 8, world: "USER_SCRIPT", code: "return 1" })).rejects.toThrow("paused");
+    await expect(executor.execute({ tabId: 8, world: "USER_SCRIPT", code: "return 1" })).rejects.toThrow("Allow User Scripts");
     expect(fake.debuggerApi.sendCommand).toHaveBeenCalledTimes(1);
     fake.debuggerApi.sendCommand.mockResolvedValueOnce({ exceptionDetails: { text: "page failed" } });
     await expect(executor.execute({ tabId: 8, code: "throw Error('page failed')" })).rejects.toThrow("page failed");

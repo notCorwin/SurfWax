@@ -1,7 +1,7 @@
 import { EventLogger } from "./logging";
 import { collectCapabilities } from "./chrome/capabilities";
 import { requireDebuggee } from "./chrome/debuggee";
-import { clearSavedUserScripts } from "./userscripts/persistence";
+import { callUserScripts, restoreUserScripts, serializeUserScripts, USER_SCRIPTS_ERROR_KEY } from "./userscripts/persistence";
 
 const eventLogger = new EventLogger();
 const guardedTabs = new Map<number, Set<chrome.runtime.Port>>();
@@ -186,11 +186,27 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-function discardUserScripts(): void {
-  void clearSavedUserScripts().catch((error) => {
-    eventLogger.record({ type: "userscript.clear-failed", content: null, error });
-  });
+async function restoreSavedUserScripts(): Promise<boolean> {
+  try {
+    const restored = await serializeUserScripts(() => restoreUserScripts({ logger: eventLogger }));
+    if (restored) await chrome.storage.local.remove(USER_SCRIPTS_ERROR_KEY);
+    return restored;
+  } catch (error) {
+    await chrome.storage.local.set({ [USER_SCRIPTS_ERROR_KEY]: error instanceof Error ? error.message : String(error) });
+    eventLogger.record({ type: "userscript.restore-failed", content: null, error });
+    throw error;
+  }
 }
+
+chrome.runtime.onMessage.addListener((message: { type?: string; method?: string; args?: unknown[] }, sender, sendResponse) => {
+  if (message?.type !== "surf-wax:user-scripts" || sender.id !== chrome.runtime.id) return;
+  void (async () => {
+    const restored = await restoreSavedUserScripts();
+    return message.method === "restore" ? restored : callUserScripts(message.method ?? "", message.args ?? [], { logger: eventLogger });
+  })()
+    .then((result) => sendResponse({ ok: true, result }), (error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+  return true;
+});
 
 function discardJevConfig(): void {
   void chrome.storage.local.remove("side-agent:jev-config").catch((error) => {
@@ -200,12 +216,12 @@ function discardJevConfig(): void {
 
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
-  discardUserScripts();
+  void restoreSavedUserScripts().catch(() => undefined);
   discardJevConfig();
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  discardUserScripts();
+  void restoreSavedUserScripts().catch(() => undefined);
   discardJevConfig();
 });
 void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });

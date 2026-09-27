@@ -733,23 +733,22 @@ test("selects, locks and restores reasoning effort across conversations", async 
   }
 });
 
-test("ships only the minimal MV3 Harness surface", async () => {
+test("ships the MV3 Harness and user-script manager", async () => {
   const opened = await openExtension();
   try {
     const manifest = await opened.page.evaluate(() => chrome.runtime.getManifest());
     expect(manifest).toMatchObject({ name: "Surf Wax", manifest_version: 3, minimum_chrome_version: "138", version: "0.2.0" });
     expect(manifest.permissions).toEqual(expect.arrayContaining(["debugger", "scripting"]));
-    expect(manifest.permissions).not.toContain("userScripts");
-    expect(existsSync(resolve(process.cwd(), "dist/userscripts.html"))).toBe(false);
-    await expect(opened.page.getByTestId("open-user-scripts")).toHaveCount(0);
-    await expect(opened.page.getByTestId("user-scripts-disabled")).toHaveCount(0);
-    expect(await opened.page.evaluate(() => typeof chrome.userScripts)).toBe("undefined");
+    expect(manifest.permissions).toContain("userScripts");
+    expect(existsSync(resolve(process.cwd(), "dist/userscripts.html"))).toBe(true);
+    await expect(opened.page.getByTestId("open-user-scripts")).toBeVisible();
     await expect(opened.page.locator("h1")).toHaveText("Surf Wax");
     await expect(opened.page.getByTestId("config-required-state")).toBeVisible();
 
     const options = await configure(opened.context, opened.page, "https://provider.test/v1");
     await expect(options.getByTestId("options-card").locator("input")).toHaveCount(5);
     await expect(options.getByTestId("event-log-clear")).toBeVisible();
+    await expect(options.getByRole("link", { name: "打开脚本管理" })).toBeVisible();
     await expect(options.getByTestId("event-log")).toHaveCount(0);
     await expect(options.getByTestId("user-scripts-panel")).toHaveCount(0);
     await expect(opened.page.getByTestId("welcome-options")).toHaveCount(0);
@@ -760,23 +759,61 @@ test("ships only the minimal MV3 Harness surface", async () => {
   }
 });
 
-test("clears legacy user scripts on browser startup without restoring them", async () => {
+test("restores saved user scripts on browser startup", async () => {
   const provider = await startProvider([]);
   let opened = await openExtension();
   try {
-    const keys = ["side-agent:user-scripts", "side-agent:user-scripts-data", "side-agent:user-scripts-error", "side-agent:user-script-worlds", "side-agent:user-scripts-unparsed", "side-agent:user-scripts-disabled"];
-    const script = { id: "legacy", matches: ["<all_urls>"], js: [{ code: "document.documentElement.dataset.oldScript = 'ran'" }] };
-    await opened.page.evaluate(({ keys, script }) => chrome.storage.local.set({
-      ...Object.fromEntries(keys.map((key) => [key, [script]])),
+    await enableUserScripts(opened.context, opened.extensionId, opened.page);
+    const script = { id: "restored", matches: [`${provider.origin}/*`], js: [{ code: "document.documentElement.dataset.restoredScript = 'ran'" }] };
+    await opened.page.evaluate((script) => chrome.storage.local.set({
+      "side-agent:user-scripts": [script],
       "side-agent:unrelated": "keep",
-    }), { keys, script });
+    }), script);
     await opened.context.close();
     opened = await openExtension(opened.userDataDirectory);
-    await expect.poll(() => opened.page.evaluate(async (keys) => chrome.storage.local.get(keys), keys)).toEqual({});
+    await enableUserScripts(opened.context, opened.extensionId, opened.page);
+    await expect.poll(() => opened.page.evaluate(async () => (await chrome.userScripts.getScripts({ ids: ["restored"] })).length)).toBe(1);
+    expect((await opened.page.evaluate(async () => chrome.storage.local.get("side-agent:user-scripts")))["side-agent:user-scripts"]).toMatchObject([script]);
     expect(await opened.page.evaluate(async () => (await chrome.storage.local.get("side-agent:unrelated"))["side-agent:unrelated"])).toBe("keep");
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/target`);
-    expect(await target.evaluate(() => document.documentElement.dataset.oldScript)).toBeUndefined();
+    await expect.poll(() => target.evaluate(() => document.documentElement.dataset.restoredScript)).toBe("ran");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("lets the agent create, inspect, edit and toggle a user script", async () => {
+  const responses: string[][] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    await enableUserScripts(opened.context, opened.extensionId, opened.page);
+    const script = { id: "agent-script", matches: [`${provider.origin}/*`], js: [{ code: "document.documentElement.dataset.agentScript = 'first'" }] };
+    responses.push(
+      commandResponse("userscript-create", { script }, "call-script-create"),
+      commandResponse("userscript-list", {}, "call-script-list"),
+      commandResponse("userscript-read", { id: script.id }, "call-script-read"),
+      commandResponse("userscript-edit", { id: script.id, changes: { js: [{ code: "document.documentElement.dataset.agentScript = 'edited'" }] } }, "call-script-edit"),
+      commandResponse("userscript-set-enabled", { id: script.id, enabled: false }, "call-script-disable"),
+      commandResponse("userscript-set-enabled", { id: script.id, enabled: true }, "call-script-enable"),
+      textResponse("SCRIPT_TOOLS_DONE"), textResponse("脚本工具"),
+    );
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("创建、查看、编辑并切换脚本");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("SCRIPT_TOOLS_DONE");
+    const result = await opened.page.evaluate(async () => ({
+      scripts: await chrome.userScripts.getScripts({ ids: ["agent-script"] }),
+      disabled: (await chrome.storage.local.get("side-agent:user-scripts-disabled"))["side-agent:user-scripts-disabled"],
+    }));
+    expect(result.scripts).toMatchObject([{ id: script.id, js: [{ code: "document.documentElement.dataset.agentScript = 'edited'" }] }]);
+    expect(result.disabled).toEqual([]);
+    const events = await readEvents(opened.page);
+    for (const id of ["call-script-create", "call-script-list", "call-script-read", "call-script-edit", "call-script-disable", "call-script-enable"]) {
+      expect(events.some((event) => event.toolCallId === id && event.type === "tool.finished")).toBe(true);
+    }
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -1037,7 +1074,7 @@ test("uses dedicated snapshot, fill, and click tools", async () => {
     expect(verified).toMatchObject({ snapshot: expect.stringContaining("Welcome me@example.com") });
     await expect.poll(() => target.locator("output").textContent()).toBe("Welcome me@example.com");
     expect(events.some((event) => event.type === "automation.action.finished" && event.toolCallId === "call-click")).toBe(true);
-    expect(provider.requests[0].tools).toHaveLength(75);
+    expect(provider.requests[0].tools).toHaveLength(80);
     const toolNames = provider.requests[0].tools.map((tool: any) => tool.function.name);
     expect(toolNames).not.toContain("browser");
     expect(toolNames.filter((name: string) => ["open", "attach", "close", "detach", "show", "list", "close-all", "kill-all"].includes(name))).toEqual([]);
@@ -1557,7 +1594,7 @@ test("executes run-code through the page facade, restores the conversation, and 
 
     await expect.poll(() => provider.requests.length).toBe(3);
     expect(provider.requests[0].reasoning_effort).toBe("minimal");
-    expect(provider.requests[0].tools).toHaveLength(75);
+    expect(provider.requests[0].tools).toHaveLength(80);
     expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).not.toContain("browser");
     expect(provider.requests[0].tools).toContainEqual(expect.objectContaining({ type: "function", function: expect.objectContaining({ name: "run-code" }) }));
     const events = await readEvents(opened.page);
@@ -3115,7 +3152,7 @@ test("shows a bounded diagnostic when the canonical event log fails", async () =
   }
 });
 
-test.skip("contains a long user script restore error without hiding the manager", async () => {
+test("contains a long user script restore error without hiding the manager", async () => {
   const opened = await openExtension();
   try {
     const [scripts] = await Promise.all([
@@ -3134,19 +3171,16 @@ test.skip("contains a long user script restore error without hiding the manager"
   }
 });
 
-test.skip("manages, edits and deletes scripts in the native Chrome scripts workbench", async () => {
+test("manages, edits and deletes scripts in the native Chrome scripts workbench", async () => {
   const provider = await startProvider([]);
   const opened = await openExtension();
   try {
-    await expect(opened.page.getByTestId("user-scripts-disabled")).toContainText("Allow User Scripts");
     const [disabledManager] = await Promise.all([
       opened.context.waitForEvent("page"), opened.page.getByTestId("open-user-scripts").click(),
     ]);
     await expect(disabledManager.getByRole("status")).toContainText("Allow User Scripts");
     await disabledManager.close();
     await enableUserScripts(opened.context, opened.extensionId, opened.page);
-    await opened.page.evaluate(() => window.dispatchEvent(new Event("focus")));
-    await expect(opened.page.getByTestId("user-scripts-disabled")).toHaveCount(0);
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/target`);
     const [manager] = await Promise.all([
@@ -3250,15 +3284,11 @@ test.skip("manages, edits and deletes scripts in the native Chrome scripts workb
     const toggle = settings.locator("extensions-toggle-row#allow-user-scripts cr-toggle#crToggle");
     await toggle.click();
     await expect(toggle).toHaveAttribute("aria-pressed", "false");
-    await opened.page.evaluate(() => window.dispatchEvent(new Event("focus")));
-    await expect(opened.page.getByTestId("user-scripts-disabled")).toBeVisible();
     await manager.reload();
     await expect(manager.getByRole("status")).toContainText("Allow User Scripts");
     expect((await manager.evaluate(async () => chrome.storage.local.get("side-agent:user-scripts")))["side-agent:user-scripts"]).toHaveLength(1);
     await toggle.click();
     await expect(toggle).toHaveAttribute("aria-pressed", "true");
-    await opened.page.evaluate(() => window.dispatchEvent(new Event("focus")));
-    await expect(opened.page.getByTestId("user-scripts-disabled")).toHaveCount(0);
     await manager.reload();
     await manager.getByRole("button", { name: "返回列表" }).click();
     await expect(manager.getByLabel("已保存脚本").getByText("已注册")).toBeVisible();

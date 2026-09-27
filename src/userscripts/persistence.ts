@@ -6,11 +6,6 @@ export const USER_SCRIPTS_ERROR_KEY = "side-agent:user-scripts-error";
 export const USER_SCRIPTS_WORLDS_KEY = "side-agent:user-script-worlds";
 export const USER_SCRIPTS_LEGACY_KEY = "side-agent:user-scripts-unparsed";
 export const USER_SCRIPTS_DISABLED_KEY = "side-agent:user-scripts-disabled";
-export const USER_SCRIPTS_KEYS = [USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DATA_KEY, USER_SCRIPTS_ERROR_KEY, USER_SCRIPTS_WORLDS_KEY, USER_SCRIPTS_LEGACY_KEY, USER_SCRIPTS_DISABLED_KEY] as const;
-
-export async function clearSavedUserScripts(storage: Pick<chrome.storage.StorageArea, "remove"> = chrome.storage.local): Promise<void> {
-  await storage.remove([...USER_SCRIPTS_KEYS]);
-}
 const DATA_VERSION = 3;
 
 type UserScriptsApi = Pick<typeof chrome.userScripts, "getScripts" | "register" | "unregister" | "update">
@@ -98,8 +93,30 @@ export function serializeUserScripts<T>(operation: () => Promise<T>): Promise<T>
 export function callUserScripts(method: string, args: unknown[], options: { chromeApi?: UserScriptsChrome; logger?: EventLogger } = {}): Promise<unknown> {
   return serializeUserScripts(async () => {
     const chromeApi = options.chromeApi ?? globalThis.chrome;
+    if (method === "list" || method === "read") {
+      const stored = await chromeApi.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY]);
+      const active = scriptsFromStorage(stored[USER_SCRIPTS_STORAGE_KEY]);
+      const disabled = scriptsFromStorage(stored[USER_SCRIPTS_DISABLED_KEY]);
+      if (method === "list") return [
+        ...active.filter((script) => !disabled.some((item) => item.id === script.id)).map(({ id, matches }) => ({ id, matches, enabled: true })),
+        ...disabled.map(({ id, matches }) => ({ id, matches, enabled: false })),
+      ];
+      const id = args[0] as string;
+      const script = disabled.find((item) => item.id === id) ?? active.find((item) => item.id === id);
+      if (!script) throw new Error("找不到该脚本。");
+      return { script, enabled: !disabled.some((item) => item.id === id) };
+    }
     const api = chromeApi.userScripts as unknown as Record<string, (...params: unknown[]) => Promise<unknown>> | undefined;
-    if (!api || !["replace", "setEnabled", "delete"].includes(method) && typeof api[method] !== "function") throw new Error("Allow User Scripts 未开启，或 Chrome 不支持该操作。");
+    if (!api || !["replace", "setEnabled", "delete", "create", "edit"].includes(method) && typeof api[method] !== "function") throw new Error("Allow User Scripts 未开启，或 Chrome 不支持该操作。");
+    if (method === "create") {
+      const script = args[0] as chrome.userScripts.RegisteredUserScript;
+      const stored = await chromeApi.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY]);
+      if ([...scriptsFromStorage(stored[USER_SCRIPTS_STORAGE_KEY]), ...scriptsFromStorage(stored[USER_SCRIPTS_DISABLED_KEY])].some((item) => item.id === script.id)
+        || (await chromeApi.userScripts!.getScripts({ ids: [script.id] })).length) throw new Error("脚本 ID 已存在。");
+      await chromeApi.userScripts!.register([script]);
+      await snapshotUserScripts(options);
+      return { id: script.id, enabled: true };
+    }
     if (method === "setEnabled" || method === "delete") {
       const { id, enabled } = args[0] as { id: string; enabled?: boolean };
       if (typeof id !== "string" || !id || method === "setEnabled" && typeof enabled !== "boolean") throw new Error("无效的脚本操作。");
@@ -121,25 +138,33 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
         }
       }
       await snapshotUserScripts(options);
-      return;
+      return { id, enabled: method === "setEnabled" && enabled === true };
     }
-    if (method === "replace") {
-      const script = args[0] as chrome.userScripts.RegisteredUserScript;
-      const stored = await chromeApi.storage.local.get(USER_SCRIPTS_DISABLED_KEY);
+    if (method === "replace" || method === "edit") {
+      const id = method === "edit" ? (args[0] as { id: string }).id : (args[0] as chrome.userScripts.RegisteredUserScript).id;
+      const stored = await chromeApi.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY]);
       const disabled = scriptsFromStorage(stored[USER_SCRIPTS_DISABLED_KEY]);
-      const previous = (await chromeApi.userScripts!.getScripts({ ids: [script.id] }))[0];
-      if (!previous && disabled.some((item) => item.id === script.id)) {
-        await chromeApi.storage.local.set({ [USER_SCRIPTS_DISABLED_KEY]: disabled.map((item) => item.id === script.id ? script : item) });
-        return;
+      const previous = (await chromeApi.userScripts!.getScripts({ ids: [id] }))[0];
+      const current = previous ?? disabled.find((item) => item.id === id) ?? scriptsFromStorage(stored[USER_SCRIPTS_STORAGE_KEY]).find((item) => item.id === id);
+      if (method === "edit" && !current) throw new Error("找不到该脚本。");
+      const script = method === "edit"
+        ? { ...current!, ...(args[0] as { changes: Record<string, unknown> }).changes } as chrome.userScripts.RegisteredUserScript
+        : args[0] as chrome.userScripts.RegisteredUserScript;
+      if (method === "edit") for (const [key, value] of Object.entries((args[0] as { changes: Record<string, unknown> }).changes)) {
+        if (value === null) delete (script as unknown as Record<string, unknown>)[key];
       }
-      if (previous) await chromeApi.userScripts!.unregister({ ids: [script.id] });
+      if (!previous && disabled.some((item) => item.id === id)) {
+        await chromeApi.storage.local.set({ [USER_SCRIPTS_DISABLED_KEY]: disabled.map((item) => item.id === id ? script : item) });
+        return { id, enabled: false };
+      }
+      if (previous) await chromeApi.userScripts!.unregister({ ids: [id] });
       try { await chromeApi.userScripts!.register([script]); }
       catch (error) {
         if (previous) await chromeApi.userScripts!.register([previous]);
         throw error;
       }
       await snapshotUserScripts(options);
-      return;
+      return { id, enabled: true };
     }
     const result = await api[method](...args);
     if (["register", "update", "unregister", "configureWorld", "resetWorldConfiguration"].includes(method)) await snapshotUserScripts(options);

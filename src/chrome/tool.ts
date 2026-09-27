@@ -12,6 +12,7 @@ export const COMMAND_NAMES = [
   "requests", "request", "request-headers", "request-body", "response-headers", "response-body", "route", "route-list", "unroute", "network-state-set", "console", "run-code",
   "recording-start", "recording-stop", "tracing-start", "tracing-stop", "video-start", "video-stop", "video-chapter", "video-show-actions", "video-hide-actions", "artifact-save", "generate-locator", "highlight",
 ] as const;
+export const USER_SCRIPT_TOOL_NAMES = ["userscript-list", "userscript-read", "userscript-create", "userscript-edit", "userscript-set-enabled"] as const;
 
 export type CommandName = typeof COMMAND_NAMES[number];
 
@@ -58,6 +59,53 @@ const target = (required = true) => required ? commandTargetSchema : commandTarg
 const index = z.number().int().nonnegative();
 const requestIndex = z.number().int().positive();
 const filename = z.string().min(1).optional();
+const scriptId = z.string().min(1).refine((id) => !id.startsWith("_"), "Script IDs cannot start with _");
+const scriptSource = z.union([z.object({ code: z.string().min(1) }).strict(), z.object({ file: z.string().min(1) }).strict()]);
+const scriptFields = {
+  matches: z.array(z.string().min(1)).min(1),
+  js: z.array(scriptSource).min(1),
+  allFrames: z.boolean(),
+  excludeGlobs: z.array(z.string()),
+  excludeMatches: z.array(z.string()),
+  includeGlobs: z.array(z.string()),
+  runAt: z.enum(["document_start", "document_end", "document_idle"]),
+  world: z.enum(["USER_SCRIPT", "MAIN"]),
+  worldId: z.string().min(1),
+};
+const scriptDefinition = z.object({ id: scriptId, matches: scriptFields.matches, js: scriptFields.js,
+  allFrames: scriptFields.allFrames.optional(), excludeGlobs: scriptFields.excludeGlobs.optional(), excludeMatches: scriptFields.excludeMatches.optional(),
+  includeGlobs: scriptFields.includeGlobs.optional(), runAt: scriptFields.runAt.optional(), world: scriptFields.world.optional(), worldId: scriptFields.worldId.optional(),
+}).strict();
+const scriptChanges = z.object({
+  matches: scriptFields.matches.optional(), js: scriptFields.js.optional(),
+  allFrames: scriptFields.allFrames.nullable().optional(), excludeGlobs: scriptFields.excludeGlobs.nullable().optional(),
+  excludeMatches: scriptFields.excludeMatches.nullable().optional(), includeGlobs: scriptFields.includeGlobs.nullable().optional(),
+  runAt: scriptFields.runAt.nullable().optional(), world: scriptFields.world.nullable().optional(), worldId: scriptFields.worldId.nullable().optional(),
+}).strict().refine((changes) => Object.keys(changes).length > 0, "At least one field is required");
+const userScriptDefinitions = {
+  "userscript-list": { description: "List saved user scripts with IDs, match patterns, and enabled state; excludes source code.", inputSchema: z.object({}).strict(), method: "list" },
+  "userscript-read": { description: "Read one saved user script's complete definition and enabled state by ID.", inputSchema: z.object({ id: scriptId }).strict(), method: "read" },
+  "userscript-create": { description: "Create and enable a user script from a Chrome RegisteredUserScript definition. Fails if the ID exists.", inputSchema: z.object({ script: scriptDefinition }).strict(), method: "create" },
+  "userscript-edit": { description: "Edit specified fields of a saved user script, preserving its enabled state. Replace js and matches as whole fields; set optional fields to null to remove them.", inputSchema: z.object({ id: scriptId, changes: scriptChanges }).strict(), method: "edit" },
+  "userscript-set-enabled": { description: "Enable or disable a saved user script by ID. Repeating the same state succeeds.", inputSchema: z.object({ id: scriptId, enabled: z.boolean() }).strict(), method: "setEnabled" },
+} as const;
+
+async function callUserScriptTool(method: string, args: unknown[], signal?: AbortSignal): Promise<unknown> {
+  if (signal?.aborted) throw new DOMException("Operation aborted", "AbortError");
+  const pending = chrome.runtime.sendMessage({ type: "surf-wax:user-scripts", method, args });
+  let onAbort: (() => void) | undefined;
+  const interrupted = signal && new Promise<never>((_, reject) => {
+    onAbort = () => reject(Object.assign(new DOMException("Operation aborted", "AbortError"), { effectUnknown: !["list", "read"].includes(method) }));
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    const response = await (interrupted ? Promise.race([pending, interrupted]) : pending);
+    if (!response?.ok) throw new Error(response?.error ?? "用户脚本操作失败");
+    return response.result;
+  } finally {
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
 
 type Definition = { description: string; inputSchema: z.ZodTypeAny };
 const definitions: Record<CommandName, Definition> = {
@@ -143,6 +191,7 @@ export const TOOL_SUMMARY = [
   ...COMMAND_NAMES.map((name) => `- ${name}: ${definitions[name].description}`),
   `- act: ${ACT_DESCRIPTION}`,
   `- result: ${RESULT_DESCRIPTION}`,
+  ...USER_SCRIPT_TOOL_NAMES.map((name) => `- ${name}: ${userScriptDefinitions[name].description}`),
 ].join("\n");
 const TOOL_CONTEXT = `Available tools:\n${TOOL_SUMMARY}`;
 
@@ -239,6 +288,20 @@ export function createCommandTools(executor: ChromeExecutor, options: { logger?:
       ),
     })];
   }));
+  const userScripts = Object.fromEntries(USER_SCRIPT_TOOL_NAMES.map((name) => {
+    const definition = userScriptDefinitions[name];
+    return [name, dynamicTool({
+      description: definition.description,
+      inputSchema: definition.inputSchema,
+      needsApproval: false,
+      execute: async (input, { abortSignal, toolCallId }) => run(() => {
+        const value = definition.inputSchema.parse(input) as { id?: string; script?: unknown; changes?: unknown; enabled?: boolean };
+        const args = name === "userscript-list" ? [] : name === "userscript-read" ? [value.id]
+          : name === "userscript-create" ? [value.script] : [value];
+        return callUserScriptTool(definition.method, args, abortSignal);
+      }, toolCallId),
+    })];
+  }));
   return {
     ...commands,
     act: dynamicTool({
@@ -251,6 +314,7 @@ export function createCommandTools(executor: ChromeExecutor, options: { logger?:
       inputSchema: resultInputSchema, needsApproval: false,
       execute: async (input, { abortSignal, toolCallId }) => run(async () => executor.executeBrowser({ mode: "result", ...resultInputSchema.parse(input) } as BrowserInput, abortSignal, await context(toolCallId)), toolCallId, false),
     }),
+    ...userScripts,
   };
 }
 

@@ -49,7 +49,7 @@ function browserContextMessage(context: BrowserContext): string {
   ].join("\n");
 }
 
-const READ_ONLY_TOOLS = new Set(["snapshot", "find", "tab-list", "requests", "request", "request-headers", "request-body", "response-headers", "response-body", "route-list", "console", "cookie-list", "cookie-get", "localstorage-list", "localstorage-get", "sessionstorage-list", "sessionstorage-get", "result"]);
+const READ_ONLY_TOOLS = new Set(["snapshot", "find", "tab-list", "requests", "request", "request-headers", "request-body", "response-headers", "response-body", "route-list", "console", "cookie-list", "cookie-get", "localstorage-list", "localstorage-get", "sessionstorage-list", "sessionstorage-get", "result", "userscript-list", "userscript-read"]);
 const REPEATABLE_TOOLS = new Set(["type", "press", "keydown", "keyup", "mousemove", "mousedown", "mouseup", "mousewheel", "run-code", "act"]);
 
 function signature(value: unknown): string {

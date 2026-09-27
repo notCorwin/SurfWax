@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV4, simulateReadableStream } from "ai/test";
 import type { ChromeExecutor } from "../chrome/executor";
-import { COMMAND_NAMES, TOOL_SUMMARY } from "../chrome/tool";
+import { COMMAND_NAMES, USER_SCRIPT_TOOL_NAMES, TOOL_SUMMARY } from "../chrome/tool";
 import type { EventLogger, LogEvent } from "../logging";
 import { ContextCompactor } from "./compaction";
 import { createAgent, DEFAULT_INSTRUCTIONS, stagnationReason } from "./runner";
@@ -90,7 +90,7 @@ describe("createAgent", () => {
     expect(prompts[0]).not.toContain('"type":"file"');
     expect(executor.executeCommand).toHaveBeenCalledWith("goto", { url: "https://example.com" }, undefined, expect.any(Object));
     expect(record).toHaveBeenCalledWith(expect.objectContaining({
-      type: "model.started", content: expect.objectContaining({ activeTools: [...COMMAND_NAMES, "act", "result"], toolCount: 75 }),
+      type: "model.started", content: expect.objectContaining({ activeTools: [...COMMAND_NAMES, "act", "result", ...USER_SCRIPT_TOOL_NAMES], toolCount: 80 }),
     }));
     expect(await result.text).toBe("done");
   }, 10_000);
@@ -222,7 +222,7 @@ describe("createAgent", () => {
     const model = new MockLanguageModelV4({ doStream: async (options) => {
       const names = (options.tools as any[]).map((tool) => tool.name);
       step += 1;
-      expect(names).toHaveLength(75);
+      expect(names).toHaveLength(80);
       expect(names).toContain("cookie-list");
       expect(names).not.toContain("search-tools");
       const chunks = step === 1
@@ -246,7 +246,7 @@ describe("createAgent", () => {
     const model = new MockLanguageModelV4({
       doStream: async (options) => {
         expect(options.reasoning).toBeUndefined();
-        expect((options.tools as any[])).toHaveLength(75);
+        expect((options.tools as any[])).toHaveLength(80);
         expect((options.tools as any[]).map((tool) => tool.name)).toEqual(expect.arrayContaining(["cookie-list", "act", "result"]));
         expect((options.tools as any[]).map((tool) => tool.name)).not.toContain("search-tools");
         expect((options.tools as any[]).map((tool) => tool.name)).not.toContain("browser");

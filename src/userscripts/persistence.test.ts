@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { callUserScripts, clearSavedUserScripts, restoreUserScripts, snapshotUserScripts, USER_SCRIPTS_DATA_KEY, USER_SCRIPTS_DISABLED_KEY, USER_SCRIPTS_LEGACY_KEY, USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_WORLDS_KEY } from "./persistence";
+import { callUserScripts, restoreUserScripts, snapshotUserScripts, USER_SCRIPTS_DATA_KEY, USER_SCRIPTS_DISABLED_KEY, USER_SCRIPTS_LEGACY_KEY, USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_WORLDS_KEY } from "./persistence";
 
 function fakeChrome(options: { available?: boolean; stored?: Record<string, unknown>; registered?: chrome.userScripts.RegisteredUserScript[] } = {}) {
   const stored = { ...(options.stored ?? {}) };
@@ -32,16 +32,6 @@ function fakeChrome(options: { available?: boolean; stored?: Record<string, unkn
 }
 
 describe("user script persistence", () => {
-  it("clears every saved script key without touching other extension data", async () => {
-    const keys = ["side-agent:user-scripts", "side-agent:user-scripts-data", "side-agent:user-scripts-error", "side-agent:user-script-worlds", "side-agent:user-scripts-unparsed", "side-agent:user-scripts-disabled"];
-    const stored: Record<string, unknown> = Object.fromEntries(keys.map((key) => [key, "old"]));
-    stored["side-agent:model-config"] = "keep";
-    const remove = vi.fn(async (keys: string[]) => { for (const key of keys) delete stored[key]; });
-    await clearSavedUserScripts({ remove } as never);
-    expect(remove).toHaveBeenCalledWith(keys);
-    expect(stored).toEqual({ "side-agent:model-config": "keep" });
-  });
-
   it("keeps unknown legacy data intact while the native API is unavailable", async () => {
     const fake = fakeChrome({ available: false, stored: { [USER_SCRIPTS_STORAGE_KEY]: [{ id: "legacy" }] } });
     await expect(restoreUserScripts({ chromeApi: fake.chromeApi as never })).resolves.toBe(false);
@@ -128,5 +118,24 @@ describe("user script persistence", () => {
     await expect(callUserScripts("setEnabled", [{ id: script.id, enabled: false }], { chromeApi: fake.chromeApi as never })).rejects.toThrow("Chrome refused");
     expect(await fake.api.getScripts()).toEqual([script]);
     expect(fake.stored[USER_SCRIPTS_DISABLED_KEY]).toEqual([]);
+  });
+
+  it("runs the agent's create, list, read, edit and enable flow without changing script identity", async () => {
+    const fake = fakeChrome({ stored: { [USER_SCRIPTS_STORAGE_KEY]: [] } });
+    const options = { chromeApi: fake.chromeApi as never };
+    const script = { id: "agent-script", matches: ["https://example.com/*"], js: [{ code: "1" }], runAt: "document_start" as const };
+    await expect(callUserScripts("create", [script], options)).resolves.toEqual({ id: script.id, enabled: true });
+    await expect(callUserScripts("create", [script], options)).rejects.toThrow("脚本 ID 已存在");
+    await expect(callUserScripts("list", [], options)).resolves.toEqual([{ id: script.id, matches: script.matches, enabled: true }]);
+    await expect(callUserScripts("read", [script.id], options)).resolves.toEqual({ script, enabled: true });
+    await callUserScripts("setEnabled", [{ id: script.id, enabled: false }], options);
+    await callUserScripts("setEnabled", [{ id: script.id, enabled: false }], options);
+    expect(fake.stored[USER_SCRIPTS_DISABLED_KEY]).toHaveLength(1);
+    await expect(callUserScripts("edit", [{ id: script.id, changes: { js: [{ code: "2" }], runAt: null } }], options)).resolves.toEqual({ id: script.id, enabled: false });
+    const edited = { id: script.id, matches: script.matches, js: [{ code: "2" }] };
+    await expect(callUserScripts("read", [script.id], options)).resolves.toEqual({ script: edited, enabled: false });
+    await expect(callUserScripts("setEnabled", [{ id: script.id, enabled: true }], options)).resolves.toEqual({ id: script.id, enabled: true });
+    expect(await fake.api.getScripts()).toEqual([edited]);
+    await expect(callUserScripts("list", [], options)).resolves.toEqual([{ id: script.id, matches: script.matches, enabled: true }]);
   });
 });

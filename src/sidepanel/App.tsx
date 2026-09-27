@@ -1,5 +1,5 @@
 import { AssistantRuntimeProvider, ThreadListPrimitive, useAui, useAuiState } from "@assistant-ui/react";
-import { MessageSquarePlusIcon, SettingsIcon } from "lucide-react";
+import { CodeXmlIcon, MessageSquarePlusIcon, SettingsIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ConversationMenu } from "../components/assistant-ui/thread-list";
 import { Thread } from "../components/assistant-ui/thread";
@@ -31,6 +31,13 @@ function SettingsButton() {
   );
 }
 
+function UserScriptsButton() {
+  return <Button type="button" variant="ghost" size="icon-sm" data-testid="open-user-scripts"
+    aria-label="打开用户脚本" title="打开用户脚本" onClick={() => void chrome.tabs.create({ url: chrome.runtime.getURL("userscripts.html") })}>
+    <CodeXmlIcon aria-hidden="true" />
+  </Button>;
+}
+
 function NewConversationButton({ setWarning }: { setWarning: (message: string) => void }) {
   const running = useAuiState((state) => state.thread.isRunning);
   useEffect(() => { if (!running) setWarning(""); }, [running, setWarning]);
@@ -50,7 +57,7 @@ function Header({ conversation = false, logger }: { conversation?: boolean; logg
   const [warning, setWarning] = useState("");
   return <><a className="skip-link" href="#chat-content">跳转到内容</a><header className="app-header">
     {conversation && logger ? <ConversationMenu logger={logger} /> : <h1>Surf Wax</h1>}
-    <div className="flex gap-2">{conversation && <NewConversationButton setWarning={setWarning} />}<SettingsButton /></div>
+    <div className="flex gap-2">{conversation && <NewConversationButton setWarning={setWarning} />}<UserScriptsButton /><SettingsButton /></div>
   </header>{warning && <p role="status" className="conversation-notice">{warning}</p>}</>;
 }
 
