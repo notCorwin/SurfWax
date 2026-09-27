@@ -81,6 +81,21 @@ async function main() {
   const worker = await waitForWorker();
   const extensionId = new URL(worker.url()).hostname;
 
+  const settings = await context.newPage();
+  try {
+    await settings.goto(`chrome://extensions/?id=${extensionId}`);
+    const toggle = settings.locator(
+      "extensions-toggle-row#allow-user-scripts cr-toggle#crToggle",
+    );
+    await toggle.waitFor({ state: "visible" });
+    if (await toggle.getAttribute("aria-pressed") !== "true") await toggle.click();
+    await settings.locator(
+      "extensions-toggle-row#allow-user-scripts cr-toggle#crToggle[aria-pressed='true']",
+    ).waitFor({ state: "visible" });
+  } finally {
+    await settings.close();
+  }
+
   const page = context.pages()[0] ?? (await context.newPage());
   await page.goto(targetUrl);
   const browserSession = await context.browser().newBrowserCDPSession();

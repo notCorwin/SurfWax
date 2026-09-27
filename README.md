@@ -53,7 +53,7 @@ npm run build
 npm run dev
 ```
 
-该命令会启动 Vite、加载专用的 Playwright Chromium、打开测试网页和真实 Side Panel。修改 Side Panel、设置页或样式后会通过 HMR 原地更新并保留页面状态；修改后台 Service Worker 或 Manifest 时会自动重新加载扩展并恢复 Side Panel。模型配置和对话保存在 Git 忽略的 `.dev/chromium-profile/` 中，删除该目录即可重置开发环境。
+该命令会启动 Vite、加载专用的 Playwright Chromium、自动开启扩展的 **Allow User Scripts** 开关，并打开测试网页和真实 Side Panel。修改 Side Panel、设置页或样式后会通过 HMR 原地更新并保留页面状态；修改后台 Service Worker 或 Manifest 时会自动重新加载扩展并恢复 Side Panel。模型配置和对话保存在 Git 忽略的 `.dev/chromium-profile/` 中，删除该目录即可重置开发环境。
 
 可在命令后指定启动网页；只启动 Vite/CRXJS 时使用 `npm run dev:vite`：
 
@@ -70,7 +70,7 @@ npm run dev:vite
 2. 点击标题栏中的设置按钮。
 3. 选择 Models.dev Provider，填写 **Model ID** 和页面显示的凭据字段；自定义 Endpoint 需要填写 Base URL 与 API Key。
 4. 保存配置并返回 Side Panel。
-用户脚本可在 Side Panel 标题栏或设置页打开管理页，也可由智能体列出、读取、创建、编辑和启停。新建脚本默认启用；脚本定义及启停状态由扩展保存，更新或启动后恢复已启用脚本。首次使用前，需在 `chrome://extensions` 的 Surf Wax 详情页开启 **Allow User Scripts**。
+用户脚本可在 Side Panel 标题栏或设置页打开管理页，也可由智能体列出、读取、创建、编辑和启停。新建脚本默认启用；脚本定义及启停状态由扩展保存，更新或启动后恢复已启用脚本。手动安装扩展后，需在 `chrome://extensions` 的 Surf Wax 详情页开启 **Allow User Scripts**；`npm run dev` 会自动开启。
 
 模型配置只保存在当前扩展的 `chrome.storage.local` 中，并按 Provider 隔离。设置页支持普通 API Key，也支持 Bedrock、Azure、Vertex、Cloudflare、GitLab、Watsonx 和 SAP AI Core 等多字段凭据；Models.dev Endpoint 中的 `${VAR}` 会自动变成独立输入项并在请求前插值。
 
