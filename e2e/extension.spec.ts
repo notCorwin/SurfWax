@@ -2743,6 +2743,7 @@ test("resets conversation UI while retaining only each conversation's own draft"
 });
 
 test("edits user messages, regenerates replies and restores the selected branch", async () => {
+  const originalQuestion = "帮我收藏24小时成交量至少1000万USDT的非TradFi永续合约。成交量越小越先收藏。";
   const slowReply = streamingTextResponse(["BRANCH_RUNNING", ...Array.from({ length: 80 }, () => "."), "BRANCH_DONE"]);
   const provider = await startProvider([
     textResponse("ORIGINAL_REPLY"),
@@ -2757,7 +2758,7 @@ test("edits user messages, regenerates replies and restores the selected branch"
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     const composer = opened.page.getByTestId("composer-input");
-    await composer.fill("original question");
+    await composer.fill(originalQuestion);
     await composer.press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("ORIGINAL_REPLY");
     await expect(opened.page.getByTestId("conversation-menu")).toContainText("分支测试");
@@ -2774,7 +2775,11 @@ test("edits user messages, regenerates replies and restores the selected branch"
     await opened.page.locator(".conversation-item", { hasText: "分支测试" }).locator(".conversation-select").click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("ORIGINAL_REPLY");
 
+    const bubbleBeforeEdit = await opened.page.getByTestId("user-message-bubble").boundingBox();
     await opened.page.getByTestId("edit-message-button").click();
+    const bubbleDuringEdit = await opened.page.getByTestId("user-message-bubble").boundingBox();
+    expect(bubbleDuringEdit?.width).toBeCloseTo(bubbleBeforeEdit!.width, 0);
+    expect(Math.abs(bubbleDuringEdit!.height - bubbleBeforeEdit!.height)).toBeLessThan(4);
     await opened.page.setViewportSize({ width: 320, height: 720 });
     await opened.page.getByTestId("edit-message-input").fill("long-edit-text-".repeat(40));
     for (const colorScheme of ["light", "dark"] as const) {
@@ -2802,14 +2807,14 @@ test("edits user messages, regenerates replies and restores the selected branch"
     await composer.press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FOLLOWUP_REPLY");
     const recordedMessages = JSON.stringify((await readEvents(opened.page)).filter((event) => event.type === "conversation.message").map((event) => event.content));
-    for (const text of ["original question", "edited question", "ORIGINAL_REPLY", "REGENERATED_REPLY", "EDITED_REPLY", "FOLLOWUP_REPLY"]) {
+    for (const text of [originalQuestion, "edited question", "ORIGINAL_REPLY", "REGENERATED_REPLY", "EDITED_REPLY", "FOLLOWUP_REPLY"]) {
       expect(recordedMessages).toContain(text);
     }
     const promptTexts = provider.requests.at(-1).messages.flatMap((message: any) => typeof message.content === "string"
       ? [message.content]
       : message.content?.filter((part: any) => part.type === "text").map((part: any) => part.text) ?? []);
     expect(promptTexts).toEqual(expect.arrayContaining(["edited question", "follow up"]));
-    expect(JSON.stringify(provider.requests.at(-1).messages)).not.toContain("original question");
+    expect(JSON.stringify(provider.requests.at(-1).messages)).not.toContain(originalQuestion);
 
     await opened.page.getByRole("button", { name: "上一个分支" }).first().click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("ORIGINAL_REPLY");

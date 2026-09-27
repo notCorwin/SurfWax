@@ -346,17 +346,19 @@ const UserMessage: FC = () => {
   const editing = useAuiState((state) => state.message.composer.isEditing);
   const running = useAuiState((state) => state.thread.isRunning);
   return (
-    <MessagePrimitive.Root data-role="user" className="ml-auto max-w-[94%] text-sm leading-relaxed">
+    <MessagePrimitive.Root data-role="user" className="ml-auto w-[94%] text-sm leading-relaxed">
       {editing ? (
-        <ComposerPrimitive.Root className="rounded-xl border border-border/70 bg-muted/30 p-2 shadow-sm focus-within:border-ring">
-          <ComposerPrimitive.Input data-testid="edit-message-input" autoFocus rows={2} className="min-h-14 max-h-32 w-full resize-none overflow-y-auto border-0 bg-transparent px-2 py-1 text-sm leading-relaxed outline-none" aria-label="编辑消息" />
+        <ComposerPrimitive.Root>
+          <div data-testid="user-message-bubble" className="rounded-xl border border-border/70 bg-muted/30 px-3 py-2 shadow-sm focus-within:border-ring">
+            <ComposerPrimitive.Input data-testid="edit-message-input" autoFocus minRows={1} className="block max-h-32 w-full resize-none overflow-y-auto border-0 bg-transparent p-0 text-sm leading-relaxed outline-none" aria-label="编辑消息" />
+          </div>
           <div className="mt-2 flex justify-end gap-1">
             <ComposerPrimitive.Cancel type="button" className="inline-flex min-h-8 items-center rounded-md px-3 text-xs text-muted-foreground hover:bg-muted hover:text-foreground">取消</ComposerPrimitive.Cancel>
             <ComposerPrimitive.Send type="submit" className="inline-flex min-h-8 items-center rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50">保存并重新生成</ComposerPrimitive.Send>
           </div>
         </ComposerPrimitive.Root>
       ) : (
-        <div className="rounded-xl border border-primary/40 bg-primary/15 px-3 py-2 wrap-break-word">
+        <div data-testid="user-message-bubble" className="rounded-xl border border-primary/40 bg-primary/15 px-3 py-2 wrap-break-word">
           <MessagePrimitive.Parts />
         </div>
       )}
