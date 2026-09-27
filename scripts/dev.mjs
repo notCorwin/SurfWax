@@ -75,6 +75,7 @@ async function main() {
     args: [
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
+      "--hide-crash-restore-bubble",
     ],
   });
 
@@ -136,6 +137,7 @@ async function main() {
   await new Promise((resolveStop) => {
     process.once("SIGINT", resolveStop);
     process.once("SIGTERM", resolveStop);
+    process.once("SIGHUP", resolveStop);
     context.once("close", resolveStop);
   });
 }
