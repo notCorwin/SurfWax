@@ -125,22 +125,3 @@ export type ModelConfig = {
 };
 
 export type ModelTransport = "gateway" | "openai-compatible";
-
-export type JevConfig = {
-  provider: JevProvider;
-  baseURL: string;
-  apiKey: string;
-  model: string;
-  threshold: number;
-};
-
-export type JevProvider =
-  | "typesafe"
-  | "vercel"
-  | "openrouter"
-  | "cloudflare"
-  | "litellm"
-  | "opper"
-  | "aimlapi"
-  | "custom-systemone"
-  | "custom-decisions";

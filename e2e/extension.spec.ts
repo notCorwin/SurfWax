@@ -122,12 +122,10 @@ async function startProvider(responses: MockResponse[], delayMs = 0, summaryText
   baseURL: string;
   origin: string;
   requests: any[];
-  jevRequests: any[];
   server: Server;
   stats: { abortedResponses: number };
 }> {
   const requests: any[] = [];
-  const jevRequests: any[] = [];
   const stats = { abortedResponses: 0 };
   const server = createServer((request, response) => {
     if (request.method === "OPTIONS") {
@@ -217,19 +215,6 @@ async function startProvider(responses: MockResponse[], delayMs = 0, summaryText
       response.end("<!doctype html><title>After Navigation</title><main>new document</main>");
       return;
     }
-    if (request.method === "POST" && request.url === "/v1/systemone") {
-      const body: Buffer[] = [];
-      request.on("data", (part) => body.push(part));
-      request.on("end", () => {
-        const payload = JSON.parse(Buffer.concat(body).toString("utf8"));
-        jevRequests.push(payload);
-        response.writeHead(200, { "access-control-allow-origin": "*", "content-type": "application/json" });
-        response.end(JSON.stringify({ model: "jev-test", answers: Object.fromEntries(
-          Object.keys(payload.questions).map((key) => [key, { type: "noul", noul: 0.1 }]),
-        ), usage: { input_tokens: 100, output_tokens: 1 } }));
-      });
-      return;
-    }
     if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
       response.writeHead(404);
       response.end();
@@ -286,7 +271,7 @@ async function startProvider(responses: MockResponse[], delayMs = 0, summaryText
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Provider server did not bind a TCP port");
   const origin = `http://127.0.0.1:${address.port}`;
-  return { baseURL: `${origin}/v1`, origin, requests, jevRequests, server, stats };
+  return { baseURL: `${origin}/v1`, origin, requests, server, stats };
 }
 
 async function closeServer(server: Server): Promise<void> {
@@ -618,7 +603,6 @@ test("uses a global custom system prompt and hides disabled advanced settings", 
   try {
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await expect(options.getByRole("group", { name: "上下文窗口" })).toBeVisible();
-    await expect(options.getByText("Jev", { exact: false })).toHaveCount(0);
     await expect(options.getByTestId("model-limit-match")).toContainText("262,144 tokens");
     await options.getByLabel("自定义系统提示词").fill("You are a custom browser agent.");
     await options.getByRole("button", { name: "保存配置" }).click();
@@ -1840,28 +1824,21 @@ test("restores a pending context choice after reopening the panel", async () => 
   }
 });
 
-test("ignores stored Jev configuration and offers only LLM summary", async () => {
+test("offers LLM summary when context is full", async () => {
   const provider = await startProvider([
     textResponse("OLD_CONTEXT_MARKER " + "page observation ".repeat(900)),
     textResponse("来源会话标题"),
   ], 0, "Earlier page observations have been recorded.");
   const opened = await openExtension();
   try {
-    await opened.page.evaluate(() => chrome.storage.local.set({
-      "side-agent:jev-config": {
-        provider: "openrouter", baseURL: "https://jev.example", model: "jev-test", apiKey: "jev-key", threshold: 0.5,
-      },
-    }));
     const options = await configure(opened.context, opened.page, provider.baseURL, 8_000);
     await options.close();
     await opened.page.getByTestId("composer-input").fill("Keep this user request");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.getByTestId("context-choice")).toBeVisible();
     const choice = opened.page.getByTestId("context-choice");
-    await expect(choice.getByText("Jev", { exact: false })).toHaveCount(0);
     await expect(choice.getByRole("button")).toHaveCount(1);
     await expect(choice.getByRole("button", { name: "LLM 摘要" })).toBeVisible();
-    expect(provider.jevRequests).toHaveLength(0);
     await choice.getByRole("button", { name: "LLM 摘要" }).click();
     await expect(opened.page.getByTestId("context-choice")).toHaveCount(0);
     await expect(opened.page.getByTestId("context-status")).toContainText("历史上下文已被压缩成摘要");

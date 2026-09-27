@@ -192,10 +192,20 @@ function discardUserScripts(): void {
   });
 }
 
+function discardJevConfig(): void {
+  void chrome.storage.local.remove("side-agent:jev-config").catch((error) => {
+    eventLogger.record({ type: "legacy-config.clear-failed", content: null, error });
+  });
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
   discardUserScripts();
+  discardJevConfig();
 });
 
-chrome.runtime.onStartup.addListener(() => discardUserScripts());
+chrome.runtime.onStartup.addListener(() => {
+  discardUserScripts();
+  discardJevConfig();
+});
 void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });

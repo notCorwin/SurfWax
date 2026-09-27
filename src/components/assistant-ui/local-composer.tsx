@@ -30,7 +30,6 @@ const CONTEXT_USAGE_EVENTS = new Set([
   "conversation.branch.selected",
   "context.compacted",
   "context.checkpoint.applied",
-  "context.selection.applied",
   "context.estimate.calibrated",
 ]);
 type ContextUsage = { state: "loading" | "unavailable" } | {

@@ -68,13 +68,6 @@ export async function effectiveContext(events: readonly LogEvent[], branchIds: r
   return { checkpoint, messages: checkpoint ? [summaryMessage(checkpoint.summary), ...raw.slice(checkpoint.sourceCount)] : raw };
 }
 
-export async function saveInheritedSummary(logger: EventLogger, conversationId: string, summary: string): Promise<void> {
-  await logger.append({ type: "context.compacted", conversationId, content: {
-    strategy: "summary", branchIds: [], sourceCount: 0, sourceUiCount: 0,
-    sourceDigest: await digest([]), summary, inherited: true,
-  } });
-}
-
 export function pendingContextChoice(events: readonly LogEvent[], branchIds: readonly string[]): boolean {
   let pending = false;
   for (const event of events) {
