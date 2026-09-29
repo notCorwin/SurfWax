@@ -19,18 +19,22 @@ Surf Wax 是一个 Chrome 138+ Manifest V3 Side Panel Agent Harness。它使用 
 
 ## 安装
 
-Chrome Web Store 的首次上架材料已备齐，商店条目仍在创建与审核阶段。审核通过后，此处会提供跨平台的商店安装链接。普通 macOS 和 Windows Chrome 不支持直接安装本地 `.crx` 文件。
+### Chrome Web Store（推荐）
 
-### 安装 Autobuild
+在 macOS、Windows 或 Linux 的 Chrome 138+ 中打开 [Surf Wax 商店页面](https://chromewebstore.google.com/detail/surf-wax/kkopacjlnfpnpmfeinomkhhcndbdeoih)，点击“添加至 Chrome”。安装后点击扩展图标打开 Side Panel，并按下方“首次配置”填写模型信息。
 
-从 [Autobuild Release](https://github.com/notCorwin/SurfWax/releases/tag/autobuild) 下载并解压 `surf-wax-autobuild.zip`，然后：
+商店条目为“仅链接可见”：请直接分享上述链接，用户无法通过商店搜索找到它。通过商店安装的扩展在新版发布后由 Chrome 自动更新。
+
+### 安装 Autobuild（开发与测试）
+
+需要测试尚未发布到商店的代码时，从 [Autobuild Release](https://github.com/notCorwin/SurfWax/releases/tag/autobuild) 下载并解压 `surf-wax-autobuild.zip`，然后：
 
 1. 打开 `chrome://extensions`。
 2. 开启右上角的“开发者模式”。
 3. 点击“加载已解压的扩展程序”。
 4. 选择包含 `manifest.json` 的解压目录。
 
-发布页同时提供 `.sha256` 校验文件。
+发布页同时提供 `.sha256` 校验文件。开发者模式加载的版本不通过 Chrome Web Store 更新。
 
 ### 从源码构建
 

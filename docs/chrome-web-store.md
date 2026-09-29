@@ -1,6 +1,6 @@
-# Chrome Web Store 首次上架材料
+# Chrome Web Store 发布与更新
 
-Surf Wax 首次发布：简体中文、免费、所有地区、**仅链接可见**（仍需完整审核）。使用现有 Autobuild Release 的 `surf-wax-autobuild.zip` 上传；ZIP 根目录须直接包含 `manifest.json`。商店审核通过前，README 继续指向可加载的解压版。商店条目生成后记录其 ID 和安装链接，审核通过后更新 README。
+Surf Wax 已以简体中文、免费、所有地区、**仅链接可见**的方式上架。商店条目 ID 为 `kkopacjlnfpnpmfeinomkhhcndbdeoih`；用户安装链接为 [Chrome Web Store 页面](https://chromewebstore.google.com/detail/surf-wax/kkopacjlnfpnpmfeinomkhhcndbdeoih)。将此链接用于 README、网站或公告；仅链接可见的条目不会出现在商店搜索结果中。
 
 ## 商店页面
 
@@ -49,8 +49,11 @@ Surf Wax 首次发布：简体中文、免费、所有地区、**仅链接可见
 | `windows` | 定位和操作当前 Chrome 窗口。 |
 | `<all_urls>` | 允许智能体在用户指定的网站执行跨站页面任务，并连接自选模型端点。 |
 
-## 提交与验收
+## 后续版本发布
 
-1. `npm run check && npm test && npm run test:e2e`；从 CI Autobuild Release 下载与提交 commit 对应的 ZIP，校验其 `.sha256`，检查根目录的 Manifest、Side Panel、设置页、用户脚本管理页和后台入口，并确认没有 `localhost:5173` 开发代码。
-2. 在开发者后台创建新条目、上传 ZIP、填写商店页面与隐私字段，设置所有地区及“仅链接可见”，提交审核。审核如有具体拒绝理由，应修正对应代码或材料后重新测试和提交，不删减现有功能。
-3. 审核通过后把商店 URL 加入 README；在 macOS、Windows、Linux 的普通 Chrome 138+ 中分别安装，打开侧边栏、配置模型并运行一个浏览器任务。
+1. 在 `manifests/store.json` 中提高 `version`，并同步 `package.json` 的版本和 README 徽章。Chrome Web Store 要求更新包的 Manifest 版本高于当前已发布版本。同一条目更新时保留原有商店 ID 和安装链接。
+2. 运行 `npm run check`、`npm test`、`npm run test:e2e`。推送 `master` 后，Autobuild 工作流会生成 `surf-wax-autobuild.zip` 和 `.sha256`；确认工作流成功，下载对应 commit 的 ZIP 并校验哈希。检查 ZIP 根目录直接包含 `manifest.json`，版本与本次发布一致，Side Panel、设置页、用户脚本管理页和后台入口存在，且没有 `localhost:5173` 开发代码。
+3. 在 [Chrome Web Store 开发者后台](https://chrome.google.com/webstore/devconsole)打开现有的 Surf Wax 条目，在“Package”上传新 ZIP。功能、权限、数据用途或页面素材有变更时，同步更新商店介绍、隐私声明、审核测试说明和截图。保持“仅链接可见”和所有地区设置，然后提交审核。不要创建新条目。
+4. 审核期间，现有商店用户继续使用已发布版本；新版发布后，Chrome 会向商店安装用户自动分发更新。若新增权限，用户可能需要重新批准。审核通过后检查商店页面版本，并在 macOS、Windows、Linux 的普通 Chrome 138+ 中分别验证安装或更新、打开 Side Panel、配置模型和运行浏览器任务。
+
+仓库文档改动无需上传新的扩展包。开发者模式加载的 Autobuild 解压版不会通过商店自动更新。商店审核如有具体拒绝理由，应修正对应代码或材料后重新测试和提交，不删减现有功能。
