@@ -52,11 +52,24 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: surf-wax-${{ github.sha }}
+          path: .dev/release-candidate/
+      - name: Verify and unpack the release candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd .dev/release-candidate && sha256sum -c *.sha256)
+          unzip -q .dev/release-candidate/*.zip -d dist
+          node scripts/validate-build.mjs dist
+          node scripts/prepare-upgrade-fixture.mjs
       - run: npx playwright install-deps chromium
       - id: chrome
         run: node scripts/install-test-browser.mjs ${{ matrix.chrome }}
-      - run: npm run test:e2e
+      - run: npx playwright test --grep-invert @performance
         env:
+          SURFWAX_EXTENSION_PATH: dist
           SURFWAX_CHROME_PATH: ${{ steps.chrome.outputs.executable }}
           SURFWAX_CHROME_VERSION: ${{ steps.chrome.outputs.version }}
       - uses: actions/upload-artifact@v4

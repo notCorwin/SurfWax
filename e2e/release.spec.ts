@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 import { cp, mkdtemp, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { openExtension, reloadUpgradedExtension, configure, dispose, startProvider, textResponse, commandResponse, chunk, readEvents, enableUserScripts } from './fixtures';
+import { openExtension, reloadUpgradedExtension, configure, dispose, startProvider, textResponse, commandResponse, chunk, readEvents, enableUserScripts, startNewConversation } from './fixtures';
 
 test('fresh installation requests only the seven core permissions and leaves downloads ungranted', async () => {
   const opened = await openExtension();
@@ -19,11 +19,11 @@ test('fresh installation requests only the seven core permissions and leaves dow
   } finally { await dispose(opened.context, opened.userDataDirectory); }
 });
 
-test('upgrades a real 0.2.0 profile without changing configuration, log IDs or script enabled state', async () => {
+test('upgrades a real 0.2.0 profile without changing branches, configuration, log IDs or script enabled state', async () => {
   const profile = await mkdtemp(resolve(tmpdir(), 'surf-wax-upgrade-'));
   const extension = resolve(profile, 'extension');
   await cp(resolve('.dev/upgrade-v0.2.0/dist'), extension, { recursive: true });
-  const responses = [textResponse('PERSISTED_BEFORE_UPGRADE'), textResponse('升级保留')];
+  const responses = [textResponse('PERSISTED_BEFORE_UPGRADE'), textResponse('升级保留'), textResponse('BRANCH_BEFORE_UPGRADE')];
   const provider = await startProvider(responses);
   let opened = await openExtension(profile, { extensionPath: extension });
   try {
@@ -37,11 +37,19 @@ test('upgrades a real 0.2.0 profile without changing configuration, log IDs or s
     await opened.page.getByTestId('composer-input').press('Enter');
     await expect(opened.page.locator('.markdown-body').last()).toContainText('PERSISTED_BEFORE_UPGRADE');
     await expect(opened.page.getByTestId('conversation-menu')).toContainText('升级保留');
+    const originalReply = (await readEvents(opened.page)).find(event => event.type === 'conversation.message'
+      && event.content?.parts?.some((part: any) => part.type === 'text' && part.text === 'PERSISTED_BEFORE_UPGRADE'))?.content.id;
+    expect(originalReply).toBeTruthy();
+    await opened.page.getByTestId('replay-message-button').click();
+    await expect(opened.page.locator('.markdown-body').last()).toContainText('BRANCH_BEFORE_UPGRADE');
+    await opened.page.getByRole('button', { name: '上一个分支' }).last().click();
+    await expect(opened.page.locator('.markdown-body').last()).toContainText('PERSISTED_BEFORE_UPGRADE');
+    await expect.poll(async () => (await readEvents(opened.page)).filter(event => event.type === 'conversation.branch.selected').at(-1)?.content?.headId).toBe(originalReply);
     const previous = await readEvents(opened.page);
     const config = await opened.page.evaluate(() => chrome.storage.local.get('side-agent:model-config'));
     const id = opened.extensionId;
     await opened.context.close();
-    await cp(resolve('dist'), extension, { recursive: true });
+    await cp(resolve(process.env.SURFWAX_EXTENSION_PATH ?? 'dist'), extension, { recursive: true });
     opened = await openExtension(profile, { extensionPath: extension });
     await reloadUpgradedExtension(opened);
     expect(opened.extensionId).toBe(id);
@@ -49,6 +57,13 @@ test('upgrades a real 0.2.0 profile without changing configuration, log IDs or s
     expect(await opened.page.evaluate(() => chrome.storage.local.get('side-agent:model-config'))).toEqual(config);
     const restored = await readEvents(opened.page);
     for (const event of previous) expect(restored.find(item => item.id === event.id)).toEqual(event);
+    await opened.page.getByTestId('conversation-menu').click();
+    await opened.page.locator('.conversation-item', { hasText: '升级保留' }).locator('.conversation-select').click();
+    await expect(opened.page.locator('.markdown-body').last()).toContainText('PERSISTED_BEFORE_UPGRADE');
+    await opened.page.getByRole('button', { name: '下一个分支' }).last().click();
+    await expect(opened.page.locator('.markdown-body').last()).toContainText('BRANCH_BEFORE_UPGRADE');
+    await opened.page.getByRole('button', { name: '上一个分支' }).last().click();
+    await expect(opened.page.locator('.markdown-body').last()).toContainText('PERSISTED_BEFORE_UPGRADE');
     await enableUserScripts(opened.context, opened.extensionId, opened.page);
     await expect.poll(() => opened.page.evaluate(async () => (await chrome.userScripts.getScripts()).map(script => script.id))).toContain('upgrade-enabled');
     expect(await opened.page.evaluate(async () => (await chrome.userScripts.getScripts()).map(script => script.id))).not.toContain('upgrade-disabled');
@@ -56,6 +71,7 @@ test('upgrades a real 0.2.0 profile without changing configuration, log IDs or s
     expect(scripts.result).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'upgrade-disabled', enabled: false })]));
     // Validate the upgraded runtime as well as preserving its data. Replacing
     // unpacked files without reloading can leave Chrome's old worker cached.
+    await startNewConversation(opened.page);
     provider.requests.length = 0;
     responses.push(textResponse('UPGRADED_RUNTIME_READY'), textResponse('升级验证'));
     await opened.page.getByTestId('composer-input').fill('verify the upgraded runtime');
