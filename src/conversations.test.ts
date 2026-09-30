@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { fromThreadMessageLike } from "@assistant-ui/react";
 import { MessageRepository } from "@assistant-ui/core/internal";
-import { restoreConversationRepository } from "./conversations";
-import { rebuildConversationList, rebuildConversationRepository, selectedConversationId, toLogValue, type LogEvent } from "./logging";
+import { generateConversationTitle, restoreConversationRepository } from "./conversations";
+import * as model from "./agent/model";
+import { EventLogger, rebuildConversationList, rebuildConversationRepository, selectedConversationId, toLogValue, type LogEvent } from "./logging";
 
 function event(id: number, type: string, options: Partial<LogEvent> = {}): LogEvent {
   return {
@@ -13,6 +14,30 @@ function event(id: number, type: string, options: Partial<LogEvent> = {}): LogEv
     ...options,
   };
 }
+
+it("does not send a queued title request after the user renames the running conversation", async () => {
+  const events: LogEvent[] = [];
+  const logger = new EventLogger({ store: {
+    async append(record) { const stored = { ...record, id: events.length + 1 }; events.push(stored); return stored; },
+    async all() { return [...events]; },
+    async clear() { events.length = 0; },
+  } });
+  const createModel = vi.spyOn(model, "createModel").mockRejectedValue(new Error("Unexpected title request"));
+  const subscribe = vi.spyOn(logger, "subscribe");
+  const conversationId = "renamed-while-running";
+  try {
+    await logger.append({ type: "conversation.created", conversationId, content: { title: "新对话" } });
+    const title = generateConversationTitle(logger, { baseURL: "https://provider.test/v1", model: "test" }, conversationId);
+    await vi.waitFor(() => expect(subscribe).toHaveBeenCalledOnce());
+    await logger.append({ type: "conversation.title.updated", conversationId, content: { title: "First manual title", source: "manual" } });
+    await logger.append({ type: "conversation.title.updated", conversationId, content: { title: "Latest manual title", source: "manual" } });
+    await logger.append({ type: "conversation.finished", conversationId, runId: "finished-run", content: null });
+    await expect(title).resolves.toBe("Latest manual title");
+    expect(createModel).not.toHaveBeenCalled();
+    expect(events.filter(event => event.type.startsWith("model.title."))).toEqual([]);
+    expect(rebuildConversationList(events)[0]?.title).toBe("Latest manual title");
+  } finally { createModel.mockRestore(); subscribe.mockRestore(); }
+});
 
 describe("conversation restoration", () => {
   it("ignores legacy events and rebuilds sorted conversation metadata", () => {

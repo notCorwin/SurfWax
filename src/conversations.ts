@@ -70,6 +70,9 @@ export function generateConversationTitle(logger: EventLogger, config: ModelConf
     const unregister = registerBackgroundRequest(abortController, conversationId);
     try {
       await waitForCompletedRun(logger, conversationId, abortController.signal);
+      const manual = [...await logger.summaryEvents(conversationId)].reverse().find((event) =>
+        event.type === "conversation.title.updated" && (fromLogValue(event.content) as { source?: string }).source === "manual");
+      if (manual) return (fromLogValue(manual.content) as { title: string }).title;
       const repository = await logger.repository(conversationId);
       const firstUser = repository.messages.find(({ message }) => message.role === "user")?.message;
       const firstAssistant = repository.messages.find(({ message }) => message.role === "assistant")?.message;

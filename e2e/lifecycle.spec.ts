@@ -402,6 +402,7 @@ test('closing a native Side Panel aborts its owner and prevents a queued page mu
     await submitNative(native.panel, 'perform two queued actions');
     await expect(native.target.locator('#__surf-wax-page-guard')).toBeAttached();
     await expect.poll(() => native.panel.evaluate<boolean>('document.body.textContent.includes("正在执行命令")')).toBe(true);
+    await expect.poll(async () => (await readNativeEvents(native.panel)).filter(event => event.type === 'tool.started' && event.toolCallId?.startsWith('native-queue-')).length).toBe(2);
     await native.panel.close();
     expect((await native.browser.send('Target.closeTarget', { targetId: native.targetId })).success).toBe(true);
     await expect(native.target.locator('#__surf-wax-page-guard')).toHaveCount(0);
