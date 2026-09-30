@@ -1,0 +1,116 @@
+{
+  "recordedAt": "2026-09-30T09:46:51.334Z",
+  "version": "0.3.0",
+  "codeCommit": "b1e43ddcd2478ce707001bff04af222e8d5c9325",
+  "archive": {
+    "path": ".dev/releases/ready/surf-wax-0.3.0.zip",
+    "sha256": "22838690a4c29cc1ad7060f2d77e98a1c41aa90ed1a398dd33c54ea64271e0df",
+    "files": 421,
+    "treeSha256": "c95211a9f556dc4d6ccaa07bfb507c76da98a3eef915375a6c2af8399a3fa88e",
+    "allUnpackedFilesMatchBuild": "passed",
+    "sameDigestReuse": "passed",
+    "differentDigestOverwrite": "refused"
+  },
+  "build": {
+    "types": "passed",
+    "independentBuild": "passed",
+    "contract": "passed",
+    "mainEntrypointBytes": 1998887,
+    "permissions": [
+      "debugger",
+      "scripting",
+      "sidePanel",
+      "storage",
+      "tabs",
+      "unlimitedStorage",
+      "userScripts"
+    ],
+    "optionalPermissions": [
+      "downloads"
+    ],
+    "hostPermissions": [
+      "<all_urls>"
+    ]
+  },
+  "docs": "passed",
+  "unit": {
+    "files": 32,
+    "passed": 273,
+    "failed": 0
+  },
+  "browser": {
+    "stats": {
+      "startTime": "2026-09-30T09:35:37.761Z",
+      "duration": 591735.148,
+      "expected": 169,
+      "skipped": 1,
+      "unexpected": 0,
+      "flaky": 0
+    },
+    "projects": {
+      "chrome138": {
+        "passed": 84,
+        "skipped": 1,
+        "failed": 0,
+        "skips": [
+          {
+            "title": "opens the real side panel through the extension action",
+            "reason": "Chrome 138 lacks the CDP Extensions.triggerAction command; native panel API opening is covered by the lifecycle tests."
+          }
+        ]
+      },
+      "current": {
+        "passed": 85,
+        "skipped": 0,
+        "failed": 0,
+        "skips": []
+      }
+    },
+    "versions": {
+      "chrome138": "138.0.7204.183",
+      "current": "154.0.8037.92"
+    },
+    "source": "same extracted candidate ZIP",
+    "headless": true
+  },
+  "performance": {
+    "passed": 2,
+    "failed": 0,
+    "report": "docs/performance-results.json",
+    "environment": {
+      "platform": "darwin",
+      "arch": "arm64",
+      "node": "v22.21.0",
+      "logicalCpus": 8,
+      "cpuModel": "Apple M3"
+    },
+    "actionP95Ms": 52.599999994039536,
+    "streamFrameP95Ms": 16.700000000000273,
+    "scrollFrameP95Ms": 16.700000000000273,
+    "inputToFrameP95Ms": 14.399999998509884,
+    "reloadMs": 441
+  },
+  "tools": {
+    "label": "current",
+    "count": 49,
+    "definitionsBytes": 46022,
+    "summaryBytes": 2946,
+    "tokens": {
+      "cl100k_base": {
+        "definitions": 11048,
+        "summary": 645
+      },
+      "o200k_base": {
+        "definitions": 11429,
+        "summary": 647
+      }
+    }
+  },
+  "rawEvidence": ".dev/formalization-evidence/",
+  "canonicalEvidence": "../.dev/chromium-profile/Default/IndexedDB/",
+  "remainingReleaseGates": [
+    "Manually accept and deny the first native Chrome optional-download permission bubble, then revoke and grant again.",
+    "Review store screenshots against 0.3.0 and submit the store package after those gates pass."
+  ],
+  "releaseState": "Candidate ZIP; no formal version tag or Chrome Web Store submission performed."
+}

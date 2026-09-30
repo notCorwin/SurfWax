@@ -1,5 +1,5 @@
 {
-  "recordedAt": "2026-09-30T08:32:08.646Z",
+  "recordedAt": "2026-09-30T09:36:46.218Z",
   "version": "0.3.0",
   "browser": "Chrome for Testing 154.0.8037.92",
   "viewport": {
@@ -15,23 +15,23 @@
     "cpuModel": "Apple M3"
   },
   "semanticActions": {
-    "p95Ms": 51.70000000298023,
+    "p95Ms": 52.599999994039536,
     "samples": 100
   },
   "stress": {
-    "inputMs": 74,
-    "restoredInputMs": 14,
-    "reloadMs": 444,
+    "inputMs": 77,
+    "restoredInputMs": 17,
+    "reloadMs": 441,
     "maxFrameGap": 16.800000000000182,
     "p95FrameGap": 16.700000000000273,
-    "scrollMaxFrameGap": 66.70000000000005,
+    "scrollMaxFrameGap": 83.29999999999995,
     "scrollP95FrameGap": 16.700000000000273,
-    "inputToFrameP95": 15.200000002980232,
-    "restoredInputToFrameP95": 15.600000001490116,
+    "inputToFrameP95": 14.399999998509884,
+    "restoredInputToFrameP95": 11.199999995529652,
     "streamEvents": 1508,
     "elements": 308,
     "messages": 12,
-    "maxLongTask": 59,
+    "maxLongTask": 57,
     "longTaskCount": 1
   },
   "gates": {
@@ -40,6 +40,9 @@
     "inputToFrameP95Ms": 50,
     "reloadMs": 2000
   },
-  "rawEvidence": ".dev/formalization-evidence/performance-final/",
-  "canonicalEvidence": "../.dev/chromium-profile/Default/IndexedDB/"
+  "rawEvidence": ".dev/formalization-evidence/performance-ready/",
+  "canonicalEvidence": "../.dev/chromium-profile/Default/IndexedDB/",
+  "codeCommit": "b1e43ddcd2478ce707001bff04af222e8d5c9325",
+  "archive": ".dev/releases/ready/surf-wax-0.3.0.zip",
+  "archiveSha256": "22838690a4c29cc1ad7060f2d77e98a1c41aa90ed1a398dd33c54ea64271e0df"
 }
