@@ -113,6 +113,8 @@ export const Thread: FC<{ config: ModelConfig; logger: EventLogger; conversation
     getScrollElement: () => scrollerRef.current,
     initialRect: { height: 800, width: 430 },
     overscan: 4,
+    useFlushSync: false,
+    useAnimationFrameWithResizeObserver: true,
     scrollToFn: (offset, _options, instance) => {
       const scroller = instance.scrollElement;
       if (!scroller) return;
