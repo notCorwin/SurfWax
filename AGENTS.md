@@ -48,3 +48,9 @@
 1. 完成有效修改后，主动创建 Git Commit 并 Push 到当前远程分支。
 2. 不使用 GitHub Actions 进行性能测试。
 3. 测试日志保存在 `../.dev/chromium-profile/Default/IndexedDB`。
+
+## macOS 浏览器测试执行环境
+
+1. 在 macOS 的 Codex 命令沙箱中，Playwright 启动 Chrome 会因无法访问 LaunchServices / WindowServer 而在 `TransformProcessType` / `_RegisterApplication` 阶段触发 SIGABRT；同一沙箱也会阻止 E2E 的 localhost 服务监听。
+2. 执行 Playwright E2E、`npm run test:e2e`、`npm run test:performance` 或其他会启动 Chrome 的验证时，首次调用就应使用 `exec_command` 的 `sandbox_permissions: "require_escalated"`，使整个 Node / Playwright 进程及其浏览器子进程在沙箱外运行。按执行环境的审批机制完成授权后，继续运行完整验证。
+3. Chrome 的 `--no-sandbox` 和 headless 模式不会解除父进程继承的 Codex Seatbelt 限制。遇到上述启动栈或 localhost `listen EPERM` 时，应改用正确的执行环境重跑；不通过删除测试、跳过断言、减少扩展能力或反复重装浏览器处理。
