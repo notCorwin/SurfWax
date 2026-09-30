@@ -1,0 +1,45 @@
+{
+  "recordedAt": "2026-09-30T08:32:08.646Z",
+  "version": "0.3.0",
+  "browser": "Chrome for Testing 154.0.8037.92",
+  "viewport": {
+    "width": 430,
+    "height": 850,
+    "deviceScaleFactor": 1
+  },
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "node": "v22.21.0",
+    "logicalCpus": 8,
+    "cpuModel": "Apple M3"
+  },
+  "semanticActions": {
+    "p95Ms": 51.70000000298023,
+    "samples": 100
+  },
+  "stress": {
+    "inputMs": 74,
+    "restoredInputMs": 14,
+    "reloadMs": 444,
+    "maxFrameGap": 16.800000000000182,
+    "p95FrameGap": 16.700000000000273,
+    "scrollMaxFrameGap": 66.70000000000005,
+    "scrollP95FrameGap": 16.700000000000273,
+    "inputToFrameP95": 15.200000002980232,
+    "restoredInputToFrameP95": 15.600000001490116,
+    "streamEvents": 1508,
+    "elements": 308,
+    "messages": 12,
+    "maxLongTask": 59,
+    "longTaskCount": 1
+  },
+  "gates": {
+    "actionP95Ms": 100,
+    "frameP95Ms": 20,
+    "inputToFrameP95Ms": 50,
+    "reloadMs": 2000
+  },
+  "rawEvidence": ".dev/formalization-evidence/performance-final/",
+  "canonicalEvidence": "../.dev/chromium-profile/Default/IndexedDB/"
+}

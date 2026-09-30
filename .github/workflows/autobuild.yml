@@ -1,140 +1,135 @@
-name: Autobuild Release
+name: Verify and Release
 
 on:
   push:
-    branches:
-      - master
+    branches: [master]
+    tags: ['v*']
+  pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: autobuild-release
-  cancel-in-progress: false
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  autobuild:
-    name: Build and publish Autobuild
-    if: github.ref == 'refs/heads/master'
+  verify:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Check out commit
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Check and test
-        run: |
-          npm run check
-          npm test
-
-      - name: Verify Autobuild channel
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$GITHUB_REF" = "refs/heads/master"
-          current_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/master" --jq '.object.sha')"
-          test "$current_sha" = "$GITHUB_SHA"
-
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
-
-      - name: Run extension E2E
-        run: |
-          npm run build
-          npx playwright test --grep-invert @performance
-
-      - name: Package extension
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -f dist/manifest.json
-          test -f dist/sidepanel.html
-          test -f dist/options.html
-
-          archive="$RUNNER_TEMP/surf-wax-autobuild.zip"
-          (cd dist && zip -qr "$archive" . -x '*.DS_Store')
-          (cd "$(dirname "$archive")" && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
-
-          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
-          echo "CHECKSUM=$archive.sha256" >> "$GITHUB_ENV"
-
-      - name: Write release notes
-        shell: bash
-        run: |
-          cat > "$RUNNER_TEMP/autobuild-release-notes.md" <<EOF
-          Automated Chrome extension build for commit \`$GITHUB_SHA\`.
-
-          Install:
-
-          1. Download \`surf-wax-autobuild.zip\` and extract it.
-          2. Open \`chrome://extensions\` and enable Developer mode.
-          3. Choose **Load unpacked** and select the extracted directory containing \`manifest.json\`.
-
-          The SHA-256 checksum is available in \`surf-wax-autobuild.zip.sha256\`.
-          EOF
-
-      - name: Replace Autobuild release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          repository="$GITHUB_REPOSITORY"
-          tag="autobuild"
-
-          current_sha="$(gh api "repos/$repository/git/ref/heads/master" --jq '.object.sha')"
-          test "$current_sha" = "$GITHUB_SHA"
-
-          if gh release view "$tag" --repo "$repository" >/dev/null 2>&1; then
-            gh release delete "$tag" --repo "$repository" --cleanup-tag --yes
-          else
-            gh api --method DELETE "repos/$repository/git/refs/tags/$tag" >/dev/null 2>&1 || true
-          fi
-
-          gh release create "$tag" \
-            --repo "$repository" \
-            --target "$GITHUB_SHA" \
-            --title "Autobuild" \
-            --notes-file "$RUNNER_TEMP/autobuild-release-notes.md" \
-            --latest \
-            "$ARCHIVE" \
-            "$CHECKSUM"
-
-          verify_dir="$RUNNER_TEMP/autobuild-release-verify"
-          mkdir -p "$verify_dir"
-          gh release download "$tag" \
-            --repo "$repository" \
-            --pattern "$(basename "$ARCHIVE")" \
-            --pattern "$(basename "$CHECKSUM")" \
-            --dir "$verify_dir"
-          (cd "$verify_dir" && sha256sum -c "$(basename "$CHECKSUM")")
-
-          final_sha="$(gh api "repos/$repository/git/ref/tags/$tag" --jq '.object.sha')"
-          test "$final_sha" = "$GITHUB_SHA"
-
-      - name: Upload Playwright diagnostics
-        if: ${{ !cancelled() && failure() }}
-        uses: actions/upload-artifact@v4
+      - run: npm ci
+      - run: npm run docs:check
+      - run: npm run check
+      - run: npm test
+      - run: npm run release:package
+      - uses: actions/upload-artifact@v4
         with:
-          name: playwright-diagnostics-${{ github.run_id }}
+          name: surf-wax-${{ github.sha }}
+          path: .dev/releases/
+          if-no-files-found: error
+
+  browser:
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        chrome: ['138', current]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install-deps chromium
+      - id: chrome
+        run: node scripts/install-test-browser.mjs ${{ matrix.chrome }}
+      - run: npm run test:e2e
+        env:
+          SURFWAX_CHROME_PATH: ${{ steps.chrome.outputs.executable }}
+          SURFWAX_CHROME_VERSION: ${{ steps.chrome.outputs.version }}
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: browser-evidence-${{ matrix.chrome }}-${{ github.run_id }}
           path: |
             playwright-report/
             test-results/
+            ../.dev/chromium-profile/Default/IndexedDB/
           if-no-files-found: warn
           retention-days: 14
+
+  autobuild:
+    needs: [verify, browser]
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: surf-wax-${{ github.sha }}
+          path: release/
+      - run: node scripts/prepare-autobuild-release.mjs release
+      - name: Update verified test channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/master" --jq '.object.sha')" = "$GITHUB_SHA"
+          git tag -f autobuild "$GITHUB_SHA"
+          git push origin refs/tags/autobuild --force
+          if gh release view autobuild >/dev/null 2>&1; then
+            gh release edit autobuild --verify-tag --title "Surf Wax Autobuild" --prerelease --latest=false --notes-file release/autobuild-notes.md
+            gh release upload autobuild release/surf-wax-autobuild.zip release/surf-wax-autobuild.zip.sha256 --clobber
+          else
+            gh release create autobuild --verify-tag --title "Surf Wax Autobuild" --prerelease --latest=false --notes-file release/autobuild-notes.md release/surf-wax-autobuild.zip release/surf-wax-autobuild.zip.sha256
+          fi
+          gh release download autobuild --pattern surf-wax-autobuild.zip --pattern surf-wax-autobuild.zip.sha256 --dir "$RUNNER_TEMP/autobuild-verify"
+          (cd "$RUNNER_TEMP/autobuild-verify" && sha256sum -c surf-wax-autobuild.zip.sha256)
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/autobuild" --jq '.object.sha')" = "$GITHUB_SHA"
+
+  release:
+    needs: [verify, browser]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: surf-wax-${{ github.sha }}
+          path: release/
+      - name: Publish immutable version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release already exists; versioned assets are immutable."
+            exit 1
+          fi
+          cd release
+          sha256sum -c *.sha256
+          cd ..
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "Surf Wax $GITHUB_REF_NAME" --notes-file release/release-notes.md release/*.zip release/*.sha256
