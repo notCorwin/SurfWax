@@ -60,6 +60,20 @@ function harness(
 }
 
 describe("AutomationRuntime", () => {
+  it("keeps the starting action identity when the surrounding request phase changes while it waits", async () => {
+    const logger = { record: vi.fn() };
+    const { runtime } = harness([], undefined, logger);
+    let finish!: () => void;
+    const identity = { runId: "run", toolCallId: "1:call", toolCallIdCanonical: true as const };
+    runtime.setContext({ conversationId: "conversation", toolCallId: "call", logIdentity: identity });
+    const pending = (runtime as any).action(3, "waiting", null, () => new Promise<void>((resolve) => { finish = resolve; }));
+    runtime.setContext({ conversationId: "other", toolCallId: "later" });
+    finish(); await pending;
+    expect(logger.record.mock.calls.map(([event]) => ({ conversationId: event.conversationId, runId: event.runId, toolCallId: event.toolCallId, toolCallIdCanonical: event.toolCallIdCanonical }))).toEqual([
+      { conversationId: "conversation", ...identity }, { conversationId: "conversation", ...identity },
+    ]);
+  });
+
   it("builds compact AX snapshots with stable refs and reuses one tab session", async () => {
     const { runtime, calls } = harness();
     const page = await runtime.createPage(3);
@@ -225,6 +239,72 @@ describe("AutomationRuntime", () => {
     const observation = await page.observe("visual");
     await page.point(observation.observationId as string, 100, 50, "click");
     expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent").at(-2)?.params).toMatchObject({ type: "mousePressed", x: 50, y: 25 });
+  });
+
+  it("uses captured image dimensions when the screenshot pixel ratio differs from devicePixelRatio", async () => {
+    const { runtime, calls, command } = harness();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (debuggee, method, params) => method === "Page.captureScreenshot"
+      ? { data: btoa(String.fromCharCode(0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 0, 50, 0, 100, 3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0)) }
+      : original(debuggee, method, params));
+    const page = await runtime.createPage(3);
+    const observation = await page.observe("visual");
+    expect(observation.viewport).toMatchObject({ scale: 2 });
+    expect(observation.screenshot).toMatchObject({ width: 100, height: 50, scale: 1 });
+    await page.point(observation.observationId as string, 50, 25, "click");
+    expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent").at(-2)?.params).toMatchObject({ type: "mousePressed", x: 50, y: 25 });
+  });
+
+  it("passes mouse button and modifiers through screenshot coordinate actions", async () => {
+    const { runtime, calls } = harness([]);
+    const page = await runtime.createPage(3);
+    const observation = await page.observe("visual");
+    await page.point(observation.observationId as string, 100, 50, "dblclick", { button: "right", modifiers: ["Shift", "Alt"] });
+    const presses = calls.filter(({ method, params }) => method === "Input.dispatchMouseEvent" && params.type === "mousePressed");
+    expect(presses.map(({ params }) => ({ button: params.button, modifiers: params.modifiers, count: params.clickCount }))).toEqual([{ button: "right", modifiers: 9, count: 1 }, { button: "right", modifiers: 9, count: 2 }]);
+  });
+
+  it("returns an actionable file chooser handle using the originating frame session", async () => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    const pending = page.waitForEvent("filechooser");
+    runtime.handleEvent({ tabId: 3, sessionId: "upload-frame" }, "Page.fileChooserOpened", { backendNodeId: 55, mode: "selectMultiple" });
+    const chooser = await pending;
+    expect(chooser.isMultiple()).toBe(true);
+    await chooser.setFiles([{ name: "hello.txt", text: "hello" }]);
+    expect(command).toHaveBeenCalledWith({ tabId: 3, sessionId: "upload-frame" }, "DOM.resolveNode", expect.objectContaining({ backendNodeId: 55 }));
+    expect(command).toHaveBeenCalledWith({ tabId: 3, sessionId: "upload-frame" }, "Runtime.callFunctionOn", expect.objectContaining({ functionDeclaration: expect.stringContaining("this.files = transfer.files") }));
+  });
+
+  it("does not substitute a same-named node when snapshot DOM resolution fails", async () => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    await page.snapshot();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.resolveNode") throw new Error("node removed");
+      return original(source, method, params);
+    });
+    await expect(page.ref("e1").click()).rejects.toThrow("detached");
+    expect(command.mock.calls.filter(([, method]) => method === "Accessibility.queryAXTree")).toHaveLength(0);
+  });
+
+  it("treats negative CSS and text indices below the beginning as empty", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    const fixture = document.createElement("div");
+    fixture.innerHTML = '<button>One</button><button>Two</button>';
+    document.body.append(fixture);
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.evaluate" && params.expression.includes("metadata")) return { result: { value: new Function("document", `return ${params.expression}`)(fixture) } };
+      return original(source, method, params);
+    });
+    try {
+      const page = await runtime.createPage(3);
+      expect(await page.locator("button").nth(-3).count()).toBe(0);
+      expect(await page.locator("button").nth(-1).count()).toBe(1);
+      expect(await page.getByText("o").nth(-3).count()).toBe(0);
+    } finally { fixture.remove(); }
   });
 
   it("rejects an act batch tied to an observation from an old document", async () => {

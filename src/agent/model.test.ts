@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { APICallError, TypeValidationError } from "ai";
 import { EventLogger, type LogEvent } from "../logging";
-import { createModel, createRetryingFetch, gitlabProtocolFetch, sapProtocolFetch, watsonxProtocolFetch } from "./model";
+import { createModel, createRetryingFetch, gitlabProtocolFetch, isContextOverflowError, isRecoverableModelError, sapProtocolFetch, waitForModelRetry, watsonxProtocolFetch } from "./model";
 import { ReasoningSettings } from "./reasoning";
 
 function loggerWithEvents() {
@@ -14,6 +15,12 @@ function loggerWithEvents() {
 }
 
 describe("createRetryingFetch", () => {
+  it("recognizes explicit provider context overflows while leaving unrelated request errors permanent", () => {
+    expect(isContextOverflowError(Object.assign(new Error("maximum context length exceeded"), { statusCode: 400 }))).toBe(true);
+    expect(isContextOverflowError({ cause: { statusCode: 422, responseBody: '{"error":{"code":"context_length_exceeded"}}' } })).toBe(true);
+    expect(isContextOverflowError({ statusCode: 401, message: "maximum context length exceeded" })).toBe(false);
+    expect(isContextOverflowError({ statusCode: 400, message: "Unsupported context parameter" })).toBe(false);
+  });
   it("creates gateway and OpenAI-compatible models through their native providers", async () => {
     expect(((await createModel({ providerId: "vercel", transport: "gateway", baseURL: "", apiKey: "key", model: "openai/gpt-5" })) as unknown as { provider: string }).provider)
       .toContain("gateway");
@@ -145,11 +152,59 @@ describe("createRetryingFetch", () => {
     expect(permanent).toHaveBeenCalledOnce();
   });
 
-  it("surfaces repeated ambiguous TypeErrors with provider diagnostics", async () => {
-    const fetch = vi.fn(async () => { throw new TypeError("Failed to fetch"); });
-    await expect(createRetryingFetch({ fetch, sleep: async () => undefined })("https://provider.test"))
-      .rejects.toThrow(/CORS policy/);
-    expect(fetch).toHaveBeenCalledTimes(3);
+  it("recovers after 20 identical network TypeErrors without a retry ceiling", async () => {
+    const sleep = vi.fn(async (_delay: number) => undefined);
+    const fetch = vi.fn(async () => {
+      if (fetch.mock.calls.length <= 20) throw new TypeError("Failed to fetch");
+      return new Response("recovered");
+    });
+    expect((await createRetryingFetch({ fetch, sleep, random: () => 0.5 })("https://provider.test")).status).toBe(200);
+    expect(fetch).toHaveBeenCalledTimes(21);
+    expect(sleep).toHaveBeenCalledTimes(20);
+    expect(sleep.mock.calls.every(([delay]) => delay <= 10_000)).toBe(true);
+  });
+
+  it("honors a signal supplied in RequestInit when the input is already a Request", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetch = vi.fn(async () => new Response("should not start"));
+    await expect(createRetryingFetch({ fetch })(new Request("https://provider.test"), { signal: controller.signal }))
+      .rejects.toMatchObject({ name: "AbortError" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("classifies stream causes while keeping permanent HTTP failures terminal", () => {
+    expect(isRecoverableModelError(new Error("stream failed", { cause: new TypeError("connection reset") }))).toBe(true);
+    expect(isRecoverableModelError({ statusCode: 503, isRetryable: true })).toBe(true);
+    expect(isRecoverableModelError({ statusCode: 401, isRetryable: true })).toBe(false);
+    expect(isRecoverableModelError({ statusCode: 400, cause: new TypeError("network") })).toBe(false);
+    expect(isRecoverableModelError(new Error("unsupported parameter"))).toBe(false);
+    const controller = new AbortController();
+    controller.abort();
+    expect(isRecoverableModelError(new TypeError("network"), controller.signal)).toBe(false);
+  });
+
+  it("recovers AI SDK successful-response wrappers only when their cause is a network failure", () => {
+    const wrap = (cause: unknown) => new APICallError({ message: "Failed to process successful response",
+      url: "https://provider.test/v1/chat/completions", requestBodyValues: {}, statusCode: 200, cause, isRetryable: false });
+    expect(isRecoverableModelError(wrap(new TypeError("terminated")))).toBe(true);
+    expect(isRecoverableModelError(wrap(new Error("response read failed", { cause: new TypeError("network") })))).toBe(true);
+    expect(isRecoverableModelError(wrap(new TypeValidationError({ value: {}, cause: new Error("Invalid response schema") })))).toBe(false);
+    expect(isRecoverableModelError(wrap(undefined))).toBe(false);
+    expect(isRecoverableModelError(new APICallError({ message: "Unauthorized", url: "https://provider.test", requestBodyValues: {},
+      statusCode: 401, cause: new TypeError("network") }))).toBe(false);
+  });
+
+  it("cancels the default backoff timer immediately on abort", async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const wait = waitForModelRetry(10_000, controller.signal);
+      expect(vi.getTimerCount()).toBe(1);
+      controller.abort();
+      await expect(wait).rejects.toMatchObject({ name: "AbortError" });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 
   it("uses and remembers the lowest reasoning effort accepted by the endpoint", async () => {

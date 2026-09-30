@@ -7,7 +7,7 @@ import { createServer } from "vite";
 
 const root = process.cwd();
 const extensionPath = resolve(root, "dist");
-const profilePath = resolve(root, ".dev/chromium-profile");
+const profilePath = resolve(root, "../.dev/chromium-profile");
 const targetUrl = process.argv[2] ?? "https://polymarket.com/zh";
 const port = 5173;
 let context;

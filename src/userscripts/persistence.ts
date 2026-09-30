@@ -90,8 +90,9 @@ export function serializeUserScripts<T>(operation: () => Promise<T>): Promise<T>
   return task;
 }
 
-export function callUserScripts(method: string, args: unknown[], options: { chromeApi?: UserScriptsChrome; logger?: EventLogger } = {}): Promise<unknown> {
+export function callUserScripts(method: string, args: unknown[], options: { chromeApi?: UserScriptsChrome; logger?: EventLogger; beforeExecute?: () => void } = {}): Promise<unknown> {
   return serializeUserScripts(async () => {
+    options.beforeExecute?.();
     const chromeApi = options.chromeApi ?? globalThis.chrome;
     if (method === "list" || method === "read") {
       const stored = await chromeApi.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY]);

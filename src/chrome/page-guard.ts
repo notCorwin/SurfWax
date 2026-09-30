@@ -1,3 +1,4 @@
+import { getRunIdentity } from "../agent/coordinator";
 export async function guardActivePage(signal: AbortSignal): Promise<() => void> {
   if (signal.aborted) return () => undefined;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -16,7 +17,7 @@ export async function guardActivePage(signal: AbortSignal): Promise<() => void> 
         if (error) console.warn(`Surf Wax: ${error}`);
         resolve();
       });
-      try { port.postMessage({ id, tabId }); }
+      try { port.postMessage({ id, tabId, ...getRunIdentity() }); }
       catch { pending.delete(id); resolve(); }
     }),
   };

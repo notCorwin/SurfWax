@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { fromThreadMessageLike } from "@assistant-ui/react";
+import { MessageRepository } from "@assistant-ui/core/internal";
 import { restoreConversationRepository } from "./conversations";
-import { rebuildConversationList, selectedConversationId, toLogValue, type LogEvent } from "./logging";
+import { rebuildConversationList, rebuildConversationRepository, selectedConversationId, toLogValue, type LogEvent } from "./logging";
 
 function event(id: number, type: string, options: Partial<LogEvent> = {}): LogEvent {
   return {
@@ -86,4 +88,75 @@ describe("conversation restoration", () => {
       content: toLogValue({ headId: "missing" }),
     })])).headId).toBe("a2");
   });
+
+  it("keeps a selected branch after a late reply snapshot and advances on the next submitted run", async () => {
+    const messages = [
+      event(1, "conversation.message", { content: toLogValue({ id: "u1", role: "user", parts: [] }) }),
+      event(2, "conversation.message", { parentId: "u1", content: toLogValue({ id: "a1", role: "assistant", parts: [] }) }),
+      event(3, "conversation.message", { parentId: "u1", content: toLogValue({ id: "a2", role: "assistant", parts: [] }) }),
+      event(4, "conversation.submitted", { runId: "run" }),
+      event(5, "conversation.finished", { runId: "run" }),
+      event(6, "conversation.branch.selected", { content: toLogValue({ headId: "a1" }) }),
+      event(7, "conversation.message", { parentId: "u1", content: toLogValue({ id: "a2", role: "assistant", parts: [] }) }),
+    ];
+    expect((await restoreConversationRepository(messages)).headId).toBe("a1");
+    expect((await restoreConversationRepository([...messages,
+      event(8, "conversation.submitted", { runId: "next" }),
+      event(9, "conversation.message", { parentId: "a1", content: toLogValue({ id: "u2", role: "user", parts: [] }) }),
+    ])).headId).toBe("u2");
+  });
+
+  it("advances a selected branch when a new canonical message is appended without a submitted event", async () => {
+    const events = [
+      event(1, "conversation.message", { content: toLogValue({ id: "u1", role: "user", parts: [] }) }),
+      event(2, "conversation.submitted", { runId: "run" }),
+      event(3, "conversation.message", { parentId: "u1", content: toLogValue({ id: "a1", role: "assistant", parts: [] }) }),
+      event(4, "conversation.message", { parentId: "u1", content: toLogValue({ id: "a2", role: "assistant", parts: [] }) }),
+      event(5, "conversation.branch.selected", { content: toLogValue({ headId: "a1" }) }),
+      event(6, "conversation.message", { parentId: "a1", content: toLogValue({ id: "u2", role: "user", parts: [] }) }),
+      event(7, "conversation.message", { parentId: "u2", content: toLogValue({ id: "a3", role: "assistant", parts: [] }) }),
+    ];
+    expect((await restoreConversationRepository(events)).headId).toBe("a3");
+    expect((await restoreConversationRepository([...events,
+      event(8, "conversation.branch.selected", { content: toLogValue({ headId: "a1" }) }),
+      event(9, "conversation.message", { parentId: "u1", content: toLogValue({ id: "a2", role: "assistant", parts: [] }) }),
+    ])).headId).toBe("a1");
+  });
+
+  it("updates an old reply without moving the default head back from a newer message", async () => {
+    const events = [
+      event(1, "conversation.message", { content: toLogValue({ id: "u1", role: "user", parts: [] }) }),
+      event(2, "conversation.message", { parentId: "u1", content: toLogValue({ id: "a1", role: "assistant", parts: [{ type: "text", text: "Original" }] }) }),
+      event(3, "conversation.message", { parentId: "a1", content: toLogValue({ id: "u2", role: "user", parts: [] }) }),
+      event(4, "conversation.message", { parentId: "u2", content: toLogValue({ id: "a2", role: "assistant", parts: [] }) }),
+      event(5, "conversation.message", { parentId: "u1", content: toLogValue({ id: "a1", role: "assistant", parts: [{ type: "text", text: "Updated" }] }) }),
+    ];
+    for (const repository of [await restoreConversationRepository(events), rebuildConversationRepository(events)]) {
+      expect(repository.headId).toBe("a2");
+      expect(repository.messages.map(({ message }) => message.id)).toEqual(["u1", "a1", "u2", "a2"]);
+      expect(repository.messages.find(({ message }) => message.id === "a1")?.message.parts).toEqual([{ type: "text", text: "Updated" }]);
+      const sdkRepository = new MessageRepository();
+      sdkRepository.import({
+        headId: repository.headId,
+        messages: repository.messages.map(({ parentId, message }) => ({ parentId,
+          message: fromThreadMessageLike({ id: message.id, role: message.role, content: [] }, message.id, { type: "complete", reason: "stop" }),
+        })),
+      });
+      expect(sdkRepository.getMessages().map((message) => message.id)).toEqual(["u1", "a1", "u2", "a2"]);
+    }
+  });
+});
+
+it("keeps a completed reply when regeneration fails before producing a replacement", async () => {
+  const conversationId = "thread";
+  const original = { id: "original", role: "assistant", parts: [{ type: "tool-click", toolCallId: "original-call", state: "output-available", input: {}, output: { ok: true } }, { type: "text", text: "Original reply" }] };
+  const repository = await restoreConversationRepository([
+    event(1, "conversation.message", { conversationId, runId: "old", content: toLogValue({ id: "user", role: "user", parts: [{ type: "text", text: "Request" }] }) }),
+    event(2, "conversation.message", { conversationId, runId: "old", parentId: "user", content: toLogValue(original) }),
+    event(3, "conversation.finished", { conversationId, runId: "old" }),
+    event(4, "conversation.submitted", { conversationId, runId: "retry", content: { messageId: "user" } }),
+    event(5, "conversation.failed", { conversationId, runId: "retry", error: "Unauthorized" }),
+  ]);
+  expect(repository.headId).toBe("original");
+  expect(repository.messages.at(-1)?.message).toEqual(original);
 });

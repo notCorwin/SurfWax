@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { waitForConversationRun } from "@/agent/coordinator";
 import { modelMessages } from "@/agent/context-choice";
 import { contextPressure } from "@/agent/compaction";
 import { canAutoDispatchFollowup, FOLLOWUP_EVENT_TYPES, rebuildFollowups, type FollowupMessage } from "@/agent/followups";
@@ -153,6 +154,7 @@ function ContextIndicator({ config, logger, conversationId }: { config: ModelCon
     const controller = new AbortController();
     const limit = resolveModelLimit(config, { signal: controller.signal });
     let events: ReturnType<EventLogger["contextEvents"]> | undefined;
+    let repository: ReturnType<EventLogger["repository"]> | undefined;
     setUsage({ state: "loading" });
 
     const refresh = async () => {
@@ -166,7 +168,7 @@ function ContextIndicator({ config, logger, conversationId }: { config: ModelCon
           const current = version;
           const currentMessages = messages;
           try {
-            const [resolvedLimit, currentEvents] = await Promise.all([limit, events ??= logger.contextEvents(conversationId)]);
+            const [resolvedLimit, currentEvents, canonical] = await Promise.all([limit, events ??= logger.contextEvents(conversationId), repository ??= logger.repository(conversationId)]);
             if (!resolvedLimit) {
               if (active && current === version) setUsage({ state: "unavailable" });
               continue;
@@ -175,7 +177,7 @@ function ContextIndicator({ config, logger, conversationId }: { config: ModelCon
               id,
               role,
               parts: [...parts],
-              metadata,
+              metadata: role === "user" ? canonical.messages.find((entry) => entry.message.id === id)?.message.metadata ?? metadata : metadata,
             })) as ConversationMessage[];
             const branchIds = ui.map(({ id }) => id);
             const raw = await modelMessages(ui);
@@ -233,6 +235,7 @@ function ContextIndicator({ config, logger, conversationId }: { config: ModelCon
     const unsubscribe = logger.subscribe((event) => {
       if (event.conversationId !== conversationId || !CONTEXT_USAGE_EVENTS.has(event.type)) return;
       events = logger.contextEvents(conversationId);
+      if (event.type === "conversation.message") repository = undefined;
       schedule();
     });
     if (!loading) schedule();
@@ -372,13 +375,13 @@ export function LocalComposer({ config, logger, conversationId, blocked, draft, 
   const dispatchFollowup = useCallback((message: FollowupMessage, mode: "followup" | "immediate") => {
     if (dispatching.current || blocked) return;
     dispatching.current = message.id;
-    aui.thread.append({
+    void waitForConversationRun(conversationId).then(() => aui.thread.append({
       role: "user",
       content: [{ type: "text", text: message.text }],
       createdAt: new Date(),
       metadata: { custom: { followupId: message.id, followupMode: mode } },
-    });
-  }, [aui, blocked]);
+    })).catch(() => { dispatching.current = undefined; });
+  }, [aui, blocked, conversationId]);
 
   useEffect(() => {
     if (!dispatching.current) return;

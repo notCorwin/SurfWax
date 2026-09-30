@@ -2,7 +2,7 @@ export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
 export type ChromeTarget = {
-  kind: "auto" | "extension" | "service-worker" | "page" | "offscreen" | "devtools";
+  kind: "auto" | "extension" | "page";
   tabId?: number;
   frameId?: number;
   documentId?: string;
@@ -37,7 +37,7 @@ export type BrowserTarget =
 
 export type BrowserStep =
   | { type: "goto"; url: string }
-  | { type: "click" | "doubleClick" | "hover"; target: BrowserTarget }
+  | { type: "click" | "doubleClick" | "hover"; target: BrowserTarget; button?: "left" | "right" | "middle"; modifiers?: string[] }
   | { type: "fill"; target: BrowserTarget; value: string }
   | { type: "clear"; target: BrowserTarget }
   | { type: "press"; target?: BrowserTarget; key: string }

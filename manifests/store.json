@@ -1,7 +1,6 @@
 {
   "manifest_version": 3,
   "name": "Surf Wax",
-  "version": "0.2.0",
   "description": "在 Chrome 侧边栏中运行使用自选模型的浏览器智能体。",
   "minimum_chrome_version": "138",
   "icons": {
@@ -26,20 +25,16 @@
   },
   "options_page": "options.html",
   "permissions": [
-    "browsingData",
-    "cookies",
     "debugger",
-    "downloads",
     "scripting",
     "sidePanel",
     "storage",
     "tabs",
     "unlimitedStorage",
-    "userScripts",
-    "windows"
+    "userScripts"
   ],
+  "optional_permissions": ["downloads"],
   "host_permissions": [
     "<all_urls>"
-  ],
-  "devtools_page": "devtools.html"
+  ]
 }

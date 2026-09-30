@@ -1,7 +1,7 @@
 "use client";
 
 import type { ToolCallMessagePartComponent } from "@assistant-ui/react";
-import { useContext } from "react";
+import { useContext, useState } from "react";
 import { ActivityPhaseContext, toolActivity } from "./process-group";
 
 function format(value: unknown): string {
@@ -15,16 +15,17 @@ function format(value: unknown): string {
 export const ToolFallback: ToolCallMessagePartComponent = (part) => {
   const { status, label } = toolActivity(part, useContext(ActivityPhaseContext));
   const running = status === "running";
+  const [expanded, setExpanded] = useState(status === "error");
   return (
-    <details className="activity" data-status={status} open={status === "error"}>
+    <details className="activity" data-status={status} open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
       <summary>
         <span key={label} className={running ? "shimmer text-foreground/65" : undefined}>{label}</span>
       </summary>
-      <div className="activity-content">
+      {expanded && <div className="activity-content">
         <strong>输入</strong>
         <pre>{part.argsText || format(part.args)}</pre>
         {part.result !== undefined && <><strong>输出</strong><pre>{format(part.result)}</pre></>}
-      </div>
+      </div>}
     </details>
   );
 };

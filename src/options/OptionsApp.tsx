@@ -137,6 +137,7 @@ export function OptionsApp() {
     const preset = providers.find((provider) => provider.id === value);
     if (value !== "custom" && !preset) return;
     setModelSettings((current) => ({
+      ...current,
       selectedProviderId: value,
       profiles: current.profiles[value] ? current.profiles : { ...current.profiles, [value]: {
         providerId: value,
@@ -204,8 +205,8 @@ export function OptionsApp() {
     setStatus("clearing");
     setMessage("正在清空对话与日志…");
     try {
-      await chrome.runtime.sendMessage({ type: "side-agent:clear-log" }).catch(() => undefined);
-      await logger.clear();
+      const result = await chrome.runtime.sendMessage({ type: "side-agent:clear-log" });
+      if (!result?.ok) throw new Error(result?.error ?? "后台未确认日志清空，请重试。");
       setStatus("saved");
       setMessage("对话与事件日志已清空");
     } catch (error) {

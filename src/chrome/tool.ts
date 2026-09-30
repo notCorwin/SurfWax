@@ -3,14 +3,10 @@ import { z } from "zod";
 import type { EventLogger } from "../logging";
 import type { BrowserInput } from "../types";
 import type { ChromeExecutor } from "./executor";
+import { getRunIdentity } from "../agent/coordinator";
 
 export const COMMAND_NAMES = [
-  "goto", "type", "click", "dblclick", "fill", "drag", "drop", "hover", "select", "upload", "check", "uncheck", "snapshot", "find", "eval", "dialog-accept", "dialog-dismiss", "resize", "delete-data",
-  "go-back", "go-forward", "reload", "press", "keydown", "keyup", "mousemove", "mousedown", "mouseup", "mousewheel", "screenshot", "pdf",
-  "tab-list", "tab-new", "tab-close", "tab-select", "cookie-list", "cookie-get", "cookie-set", "cookie-delete",
-  "localstorage-list", "localstorage-get", "localstorage-set", "localstorage-delete", "localstorage-clear", "sessionstorage-list", "sessionstorage-get", "sessionstorage-set", "sessionstorage-delete", "sessionstorage-clear",
-  "requests", "request", "request-headers", "request-body", "response-headers", "response-body", "route", "route-list", "unroute", "network-state-set", "console", "run-code",
-  "recording-start", "recording-stop", "tracing-start", "tracing-stop", "video-start", "video-stop", "video-chapter", "video-show-actions", "video-hide-actions", "artifact-save", "generate-locator", "highlight",
+  "goto", "type", "click", "dblclick", "fill", "drag", "drop", "hover", "select", "upload", "check", "uncheck", "snapshot", "find", "eval", "dialog-accept", "dialog-dismiss", "go-back", "go-forward", "reload", "press", "keydown", "keyup", "mousemove", "mousedown", "mouseup", "mousewheel", "screenshot", "pdf", "tab-list", "tab-new", "tab-close", "tab-select", "requests", "request", "request-headers", "request-body", "response-headers", "response-body", "console", "run-code", "artifact-save"
 ] as const;
 export const USER_SCRIPT_TOOL_NAMES = ["userscript-list", "userscript-read", "userscript-create", "userscript-edit", "userscript-set-enabled"] as const;
 
@@ -21,28 +17,29 @@ const common = { timeoutMs };
 const save = z.boolean().optional();
 const button = z.enum(["left", "right", "middle"]).optional();
 const modifiers = z.array(z.enum(["Alt", "Control", "ControlOrMeta", "Meta", "Shift"])).optional();
-const targetObject = z.union([
+const elementTargetObject = z.union([
   z.object({ ref: z.string().min(1) }).strict(),
   z.object({ by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testId", "css"]), value: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional(), index: z.number().int().optional(), frame: z.object({ by: z.literal("css"), value: z.string().min(1) }).strict().optional() }).strict(),
-  z.object({ point: z.object({ observationId: z.string().min(1), x: z.number().finite(), y: z.number().finite() }).strict() }).strict(),
 ]);
+const pointTargetObject = z.object({ point: z.object({ observationId: z.string().min(1), x: z.number().finite(), y: z.number().finite() }).strict() }).strict();
+const targetObject = z.union([elementTargetObject, pointTargetObject]);
 export const commandTargetSchema = z.union([z.string().min(1), targetObject]);
 const file = z.object({ name: z.string().min(1), mimeType: z.string().min(1).optional(), text: z.string().optional(), base64: z.string().optional(), url: z.string().url().optional(), artifactId: z.number().int().positive().optional() }).strict()
   .refine((value) => [value.text, value.base64, value.url, value.artifactId].filter((item) => item !== undefined).length === 1, "Exactly one of text, base64, url, or artifactId is required");
 const files = z.array(file).min(1);
 const browserStepSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("goto"), url: z.string().url() }).strict(),
-  ...(["click", "doubleClick", "hover"] as const).map((kind) => z.object({ type: z.literal(kind), target: targetObject }).strict()),
-  z.object({ type: z.literal("fill"), target: targetObject, value: z.string() }).strict(),
-  z.object({ type: z.literal("clear"), target: targetObject }).strict(),
-  z.object({ type: z.literal("press"), target: targetObject.optional(), key: z.string().min(1) }).strict(),
-  z.object({ type: z.literal("insertText"), target: targetObject.optional(), text: z.string() }).strict(),
-  z.object({ type: z.literal("select"), target: targetObject, values: z.array(z.string()).min(1) }).strict(),
-  z.object({ type: z.literal("check"), target: targetObject, checked: z.boolean().optional() }).strict(),
-  z.object({ type: z.literal("drag"), from: targetObject, to: targetObject }).strict(),
-  z.object({ type: z.literal("upload"), target: targetObject, files }).strict(),
+  ...(["click", "doubleClick", "hover"] as const).map((kind) => z.object({ type: z.literal(kind), target: targetObject, button, modifiers }).strict()),
+  z.object({ type: z.literal("fill"), target: elementTargetObject, value: z.string() }).strict(),
+  z.object({ type: z.literal("clear"), target: elementTargetObject }).strict(),
+  z.object({ type: z.literal("press"), target: elementTargetObject.optional(), key: z.string().min(1) }).strict(),
+  z.object({ type: z.literal("insertText"), target: elementTargetObject.optional(), text: z.string() }).strict(),
+  z.object({ type: z.literal("select"), target: elementTargetObject, values: z.array(z.string()).min(1) }).strict(),
+  z.object({ type: z.literal("check"), target: elementTargetObject, checked: z.boolean().optional() }).strict(),
+  z.object({ type: z.literal("drag"), from: elementTargetObject, to: elementTargetObject }).strict(),
+  z.object({ type: z.literal("upload"), target: elementTargetObject, files }).strict(),
   z.object({
-    type: z.literal("expect"), target: targetObject.optional(),
+    type: z.literal("expect"), target: elementTargetObject.optional(),
     state: z.enum(["attached", "detached", "visible", "hidden", "enabled", "editable", "checked"]).optional(),
     text: z.string().optional(), value: z.string().optional(), url: z.string().optional(),
   }).strict().refine((value) => Boolean(value.url || value.target && (value.state || value.text !== undefined || value.value !== undefined)), "expect requires url or a target condition"),
@@ -55,7 +52,10 @@ export const resultInputSchema = z.object({
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().nonnegative().optional(),
 }).strict();
 const empty = () => z.object(common).strict();
-const target = (required = true) => required ? commandTargetSchema : commandTargetSchema.optional();
+const target = (required = true, point = false) => {
+  const schema = point ? commandTargetSchema : z.union([z.string().min(1), elementTargetObject]);
+  return required ? schema : schema.optional();
+};
 const index = z.number().int().nonnegative();
 const requestIndex = z.number().int().positive();
 const filename = z.string().min(1).optional();
@@ -92,7 +92,7 @@ const userScriptDefinitions = {
 
 async function callUserScriptTool(method: string, args: unknown[], signal?: AbortSignal): Promise<unknown> {
   if (signal?.aborted) throw new DOMException("Operation aborted", "AbortError");
-  const pending = chrome.runtime.sendMessage({ type: "surf-wax:user-scripts", method, args });
+  const pending = chrome.runtime.sendMessage({ type: "surf-wax:user-scripts", method, args, ...getRunIdentity(), operationId: crypto.randomUUID() });
   let onAbort: (() => void) | undefined;
   const interrupted = signal && new Promise<never>((_, reject) => {
     onAbort = () => reject(Object.assign(new DOMException("Operation aborted", "AbortError"), { effectUnknown: !["list", "read"].includes(method) }));
@@ -111,12 +111,12 @@ type Definition = { description: string; inputSchema: z.ZodTypeAny };
 const definitions: Record<CommandName, Definition> = {
   goto: { description: "Navigate the current tab to a URL.", inputSchema: z.object({ ...common, url: z.string().url() }).strict() },
   type: { description: "Type text into the focused element.", inputSchema: z.object({ ...common, text: z.string(), submit: z.boolean().optional() }).strict() },
-  click: { description: "Click a target from snapshot ref, CSS, locator expression, or structured locator.", inputSchema: z.object({ ...common, target: target(), button, modifiers }).strict() },
-  dblclick: { description: "Double-click a target.", inputSchema: z.object({ ...common, target: target(), button, modifiers }).strict() },
+  click: { description: "Click a target from snapshot ref, CSS, locator expression, or structured locator.", inputSchema: z.object({ ...common, target: target(true, true), button, modifiers }).strict() },
+  dblclick: { description: "Double-click a target.", inputSchema: z.object({ ...common, target: target(true, true), button, modifiers }).strict() },
   fill: { description: "Clear and fill a target.", inputSchema: z.object({ ...common, target: target(), text: z.string(), submit: z.boolean().optional() }).strict() },
   drag: { description: "Drag one target onto another.", inputSchema: z.object({ ...common, startTarget: target(), endTarget: target() }).strict() },
   drop: { description: "Drop in-memory files or typed data onto a target.", inputSchema: z.object({ ...common, target: target(), files: files.optional(), data: z.record(z.string(), z.string()).optional() }).strict().refine((value) => Boolean(value.files?.length || value.data && Object.keys(value.data).length), "files or data is required") },
-  hover: { description: "Hover over a target.", inputSchema: z.object({ ...common, target: target() }).strict() },
+  hover: { description: "Hover over a target.", inputSchema: z.object({ ...common, target: target(true, true) }).strict() },
   select: { description: "Select one or more option values.", inputSchema: z.object({ ...common, target: target(), values: z.array(z.string()).min(1) }).strict() },
   upload: { description: "Upload one or more in-memory files to the active file input or chooser.", inputSchema: z.object({ ...common, files, target: target(false) }).strict() },
   check: { description: "Check a checkbox or radio target.", inputSchema: z.object({ ...common, target: target() }).strict() },
@@ -126,8 +126,6 @@ const definitions: Record<CommandName, Definition> = {
   eval: { description: "Evaluate a JavaScript function in the page or on a target element. filename stores an internal artifact; set save only when the user explicitly requested a local file.", inputSchema: z.object({ ...common, func: z.string().min(1), target: target(false), filename, save }).strict() },
   "dialog-accept": { description: "Accept the active dialog, optionally with prompt text.", inputSchema: z.object({ ...common, prompt: z.string().optional() }).strict() },
   "dialog-dismiss": { description: "Dismiss the active dialog.", inputSchema: empty() },
-  resize: { description: "Resize the current page viewport.", inputSchema: z.object({ ...common, width: z.number().int().positive(), height: z.number().int().positive() }).strict() },
-  "delete-data": { description: "Delete browsing data for origins visited in the current browser target.", inputSchema: empty() },
   "go-back": { description: "Navigate back.", inputSchema: empty() },
   "go-forward": { description: "Navigate forward.", inputSchema: empty() },
   reload: { description: "Reload the current page.", inputSchema: empty() },
@@ -135,65 +133,38 @@ const definitions: Record<CommandName, Definition> = {
   keydown: { description: "Hold a keyboard key down.", inputSchema: z.object({ ...common, key: z.string().min(1) }).strict() },
   keyup: { description: "Release a keyboard key.", inputSchema: z.object({ ...common, key: z.string().min(1) }).strict() },
   mousemove: { description: "Move the mouse to viewport CSS coordinates.", inputSchema: z.object({ ...common, x: z.number().finite(), y: z.number().finite() }).strict() },
-  mousedown: { description: "Press a mouse button.", inputSchema: z.object({ ...common, button }).strict() },
-  mouseup: { description: "Release a mouse button.", inputSchema: z.object({ ...common, button }).strict() },
+  mousedown: { description: "Press a mouse button.", inputSchema: z.object({ ...common, button, clickCount: z.number().int().min(1).max(2).optional() }).strict() },
+  mouseup: { description: "Release a mouse button.", inputSchema: z.object({ ...common, button, clickCount: z.number().int().min(1).max(2).optional() }).strict() },
   mousewheel: { description: "Scroll by viewport CSS deltas.", inputSchema: z.object({ ...common, dx: z.number().finite(), dy: z.number().finite() }).strict() },
   screenshot: { description: "Capture a viewport, full-page, or element screenshot as an internal artifact. Set save only when the user explicitly requested a local file.", inputSchema: z.object({ ...common, target: target(false), filename, save, type: z.enum(["png", "jpeg", "webp"]).optional(), fullPage: z.boolean().optional(), hires: z.boolean().optional() }).strict() },
   pdf: { description: "Print the current page to an internal PDF artifact. Set save only when the user explicitly requested a local file.", inputSchema: z.object({ ...common, filename, save }).strict() },
   "tab-list": { description: "List tabs in the current Chrome window using zero-based indices.", inputSchema: empty() },
   "tab-new": { description: "Open and select a new tab.", inputSchema: z.object({ ...common, url: z.string().url().optional() }).strict() },
-  "tab-close": { description: "Close a tab by zero-based index, or the current tab.", inputSchema: z.object({ ...common, index: index.optional() }).strict() },
-  "tab-select": { description: "Select a tab by zero-based index.", inputSchema: z.object({ ...common, index }).strict() },
-  "cookie-list": { description: "List cookies, optionally filtered by domain or path.", inputSchema: z.object({ ...common, domain: z.string().optional(), path: z.string().optional() }).strict() },
-  "cookie-get": { description: "Get a cookie by name.", inputSchema: z.object({ ...common, name: z.string().min(1) }).strict() },
-  "cookie-set": { description: "Set a cookie.", inputSchema: z.object({ ...common, name: z.string().min(1), value: z.string(), domain: z.string().optional(), path: z.string().optional(), expires: z.number().optional(), httpOnly: z.boolean().optional(), secure: z.boolean().optional(), sameSite: z.enum(["Strict", "Lax", "None"]).optional() }).strict() },
-  "cookie-delete": { description: "Delete a cookie by name.", inputSchema: z.object({ ...common, name: z.string().min(1) }).strict() },
-  "localstorage-list": { description: "List localStorage entries for the current page.", inputSchema: empty() },
-  "localstorage-get": { description: "Get a localStorage value.", inputSchema: z.object({ ...common, key: z.string() }).strict() },
-  "localstorage-set": { description: "Set a localStorage value.", inputSchema: z.object({ ...common, key: z.string(), value: z.string() }).strict() },
-  "localstorage-delete": { description: "Delete a localStorage key.", inputSchema: z.object({ ...common, key: z.string() }).strict() },
-  "localstorage-clear": { description: "Clear localStorage for the current page.", inputSchema: empty() },
-  "sessionstorage-list": { description: "List sessionStorage entries for the current page.", inputSchema: empty() },
-  "sessionstorage-get": { description: "Get a sessionStorage value.", inputSchema: z.object({ ...common, key: z.string() }).strict() },
-  "sessionstorage-set": { description: "Set a sessionStorage value.", inputSchema: z.object({ ...common, key: z.string(), value: z.string() }).strict() },
-  "sessionstorage-delete": { description: "Delete a sessionStorage key.", inputSchema: z.object({ ...common, key: z.string() }).strict() },
-  "sessionstorage-clear": { description: "Clear sessionStorage for the current page.", inputSchema: empty() },
-  requests: { description: "List captured requests since navigation.", inputSchema: z.object({ ...common, static: z.boolean().optional(), filter: z.string().optional(), clear: z.boolean().optional() }).strict() },
+  "tab-close": { description: "Close a tab by stable tabId or legacy zero-based index; omitted selects current tab.", inputSchema: z.object({ ...common, index: index.optional(), tabId: z.number().int().nonnegative().optional() }).strict().refine((value) => value.index === undefined || value.tabId === undefined, "Use tabId or index, not both") },
+  "tab-select": { description: "Select a tab in the bound window by stable tabId or legacy zero-based index.", inputSchema: z.object({ ...common, index: index.optional(), tabId: z.number().int().nonnegative().optional() }).strict().refine((value) => (value.index === undefined) !== (value.tabId === undefined), "Exactly one of tabId or index is required") },
+  requests: { description: "List captured requests since navigation.", inputSchema: z.object({ ...common, static: z.boolean().optional(), filter: z.string().optional(), clear: z.boolean().optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(1000).optional() }).strict() },
   request: { description: "Read full request and response details by one-based request index. filename stores an internal artifact; save requires an explicit user request.", inputSchema: z.object({ ...common, index: requestIndex, filename, save }).strict() },
   "request-headers": { description: "Read request headers by one-based request index. filename stores an internal artifact; save requires an explicit user request.", inputSchema: z.object({ ...common, index: requestIndex, filename, save }).strict() },
   "request-body": { description: "Read request body by one-based request index. filename stores an internal artifact; save requires an explicit user request.", inputSchema: z.object({ ...common, index: requestIndex, filename, save }).strict() },
   "response-headers": { description: "Read response headers by one-based request index. filename stores an internal artifact; save requires an explicit user request.", inputSchema: z.object({ ...common, index: requestIndex, filename, save }).strict() },
   "response-body": { description: "Read response body by one-based request index. filename stores an internal artifact; save requires an explicit user request.", inputSchema: z.object({ ...common, index: requestIndex, filename, save }).strict() },
-  route: { description: "Fulfill or rewrite requests matching a URL glob.", inputSchema: z.object({ ...common, pattern: z.string().min(1), status: z.number().int().min(100).max(599).optional(), body: z.string().optional(), contentType: z.string().optional(), headers: z.record(z.string(), z.string()).optional(), removeHeaders: z.array(z.string()).optional() }).strict() },
-  "route-list": { description: "List active network routes.", inputSchema: empty() },
-  unroute: { description: "Remove one matching route or every route.", inputSchema: z.object({ ...common, pattern: z.string().optional() }).strict() },
-  "network-state-set": { description: "Set the current tab online or offline.", inputSchema: z.object({ ...common, state: z.enum(["online", "offline"]) }).strict() },
-  console: { description: "List captured console messages at or above a level.", inputSchema: z.object({ ...common, minLevel: z.enum(["debug", "info", "warning", "error"]).optional(), clear: z.boolean().optional() }).strict() },
-  "run-code": { description: "Run one async function expression receiving the current Playwright-style page facade. Set save only when the user explicitly requested chrome.downloads.download().", inputSchema: z.object({ ...common, code: z.string().min(1), save }).strict() },
-  "recording-start": { description: "Start recording user page actions.", inputSchema: empty() },
-  "recording-stop": { description: "Stop recording and return generated Playwright-style code.", inputSchema: empty() },
-  "tracing-start": { description: "Start a Chrome DevTools trace.", inputSchema: empty() },
-  "tracing-stop": { description: "Stop and store the active Chrome DevTools trace internally. Set save only when the user explicitly requested local files.", inputSchema: z.object({ ...common, filename, save }).strict() },
-  "video-start": { description: "Start a WebM screencast of the current tab.", inputSchema: z.object({ ...common, filename, width: z.number().int().positive().optional(), height: z.number().int().positive().optional() }).strict() },
-  "video-stop": { description: "Stop and store the active WebM screencast internally. Set save only when the user explicitly requested a local file.", inputSchema: z.object({ ...common, save }).strict() },
-  "video-chapter": { description: "Add a chapter card to the active screencast.", inputSchema: z.object({ ...common, title: z.string().min(1), description: z.string().optional(), durationMs: z.number().int().positive().max(30_000).optional() }).strict() },
-  "video-show-actions": { description: "Annotate subsequent commands in the active screencast.", inputSchema: z.object({ ...common, durationMs: z.number().int().positive().optional(), position: z.enum(["top-left", "top", "top-right", "bottom-left", "bottom", "bottom-right"]).optional(), cursor: z.enum(["pointer", "none"]).optional() }).strict() },
-  "video-hide-actions": { description: "Stop annotating screencast actions.", inputSchema: empty() },
+  console: { description: "List captured console messages at or above a level.", inputSchema: z.object({ ...common, minLevel: z.enum(["debug", "info", "warning", "error"]).optional(), clear: z.boolean().optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(1000).optional() }).strict() },
+  "run-code": { description: "Run an async function receiving the bound page facade: locators (CSS/text/role/label/placeholder/alt/title/testId), ref, frameLocator, evaluate, snapshot, observe, point, keyboard, navigation, waitForURL/waitForLoadState/waitForEvent. Locators auto-wait; waitFor supports attached/detached/visible/hidden/enabled/editable/checked; nth accepts negative indices. Upload with locator.setInputFiles([{name, text|base64|url, mimeType?}]); no filesystem paths. Returns serializable values or an object reference. Use dedicated tools to save artifacts.", inputSchema: z.object({ ...common, code: z.string().min(1), save }).strict() },
   "artifact-save": { description: "Save an existing internal artifact to Downloads only when the user explicitly requested it.", inputSchema: z.object({ ...common, id: z.number().int().positive(), filename }).strict() },
-  "generate-locator": { description: "Generate a Playwright-style locator for a target.", inputSchema: z.object({ ...common, target: target() }).strict() },
-  highlight: { description: "Show or hide a non-interactive highlight around a target.", inputSchema: z.object({ ...common, target: target(false), style: z.string().optional(), hide: z.boolean().optional() }).strict() },
 };
 
 const ACT_DESCRIPTION = "Execute 1-100 deterministic browser steps as one batch. Prefer a dedicated command for one action; use act for two or more related actions and include expect steps for outcomes.";
 const RESULT_DESCRIPTION = "Read an exact slice or path from a large tool result stored in the canonical event log. Use the access object returned with $ref.";
 
-export const TOOL_SUMMARY = [
-  ...COMMAND_NAMES.map((name) => `- ${name}: ${definitions[name].description}`),
-  `- act: ${ACT_DESCRIPTION}`,
-  `- result: ${RESULT_DESCRIPTION}`,
-  ...USER_SCRIPT_TOOL_NAMES.map((name) => `- ${name}: ${userScriptDefinitions[name].description}`),
-].join("\n");
-const TOOL_CONTEXT = `Available tools:\n${TOOL_SUMMARY}`;
+export const TOOL_REGISTRY = Object.freeze([
+  ...COMMAND_NAMES.map((name) => ({ name, kind: "command" as const, ...definitions[name], summary: name === "run-code" ? "Run an async function with the bound page facade and auto-waiting locators" : definitions[name].description.split(". ")[0]!.split("; ")[0]! })),
+  { name: "act", kind: "batch" as const, description: ACT_DESCRIPTION, inputSchema: actInputSchema, summary: "Execute sequential browser actions with assertions; stops at first failure" },
+  { name: "result", kind: "result" as const, description: RESULT_DESCRIPTION, inputSchema: resultInputSchema, summary: "Read a stored result by ID, path, and slice" },
+  ...USER_SCRIPT_TOOL_NAMES.map((name) => ({ name, kind: "userscript" as const, ...userScriptDefinitions[name], summary: userScriptDefinitions[name].description.split(". ")[0]! })),
+]);
+export const TOOL_SUMMARY = TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n");
+export const TOOL_CATALOG_VERSION = "formal-49-v1";
+export const TOOL_CONTEXT = `Available tools:\n${TOOL_SUMMARY}`;
 
 export function parseCommandInput(name: CommandName, input: unknown): Record<string, unknown> {
   return definitions[name].inputSchema.parse(input) as Record<string, unknown>;
@@ -238,14 +209,14 @@ function previewOf(value: unknown, path?: readonly (string | number)[]): unknown
   return selected;
 }
 
-export async function compactToolResult(value: unknown, options: { logger?: EventLogger; conversationId?: string; toolCallId?: string }): Promise<unknown> {
-  if ((value && typeof value === "object" && "$ref" in value) || !options.logger || hasScreenshot(value)) return value;
+export async function compactToolResult(value: unknown, options: { logger?: EventLogger; conversationId?: string; toolCallId?: string; runId?: string; toolCallIdCanonical?: boolean }): Promise<unknown> {
+  if ((value && typeof value === "object" && ("$ref" in value || (value as any).ok === false || (value as any).type === "tool-error")) || !options.logger || hasScreenshot(value)) return value;
   let serialized: string | undefined;
   try { serialized = JSON.stringify(value); } catch { return value; }
   if (serialized === undefined) return value;
   const bytes = new TextEncoder().encode(serialized).byteLength;
   if (bytes <= LARGE_RESULT_BYTES) return value;
-  const event = await options.logger.append({ type: "tool.result.data", conversationId: options.conversationId, toolCallId: options.toolCallId, content: { bytes }, output: value });
+  const event = await options.logger.append({ type: "tool.result.data", conversationId: options.conversationId, toolCallId: options.toolCallId, runId: options.runId, toolCallIdCanonical: options.toolCallIdCanonical, content: { bytes }, output: value });
   if (!event) throw new Error("Could not save large tool result");
   const path = readablePathOf(value);
   const selected = path ? valueAt(value, path) : value;
@@ -253,69 +224,50 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
   return { $ref: event.id, bytes, preview: previewOf(value, path), access, type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value };
 }
 
-function toolFailure(error: unknown): { ok: false; error: { code: string; message: string; retryable: boolean; effectUnknown?: boolean } } {
+function toolFailure(error: unknown): { ok: false; error: { code: string; message: string; retryable: boolean; effectUnknown?: boolean }; artifact?: unknown } {
   const message = error instanceof Error || error instanceof DOMException ? error.message : String(error);
   const code = error instanceof DOMException && error.name === "AbortError" ? "aborted"
     : error instanceof DOMException && error.name === "TimeoutError" ? "timeout"
+    : error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code
     : /(?:Command|Automation)Error\[([^\]]+)\]/.exec(message)?.[1] ?? "tool-error";
   const effectUnknown = Boolean(error && typeof error === "object" && "effectUnknown" in error && error.effectUnknown);
-  return { ok: false, error: { code, message, retryable: code === "timeout" && !effectUnknown, ...(effectUnknown ? { effectUnknown: true } : {}) } };
+  return { ok: false, error: { code, message, retryable: code === "timeout" && !effectUnknown, ...(effectUnknown ? { effectUnknown: true } : {}) }, ...(error && typeof error === "object" && "artifact" in error ? { artifact: error.artifact } : {}) };
 }
 
-export function createCommandTools(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string; visualEnabled?: () => Promise<boolean> } = {}) {
-  const context = async (toolCallId: string) => ({
-    conversationId: options.conversationId, toolCallId, visualEnabled: await options.visualEnabled?.() ?? false,
-  });
+export function createCommandTools(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string; visualEnabled?: () => Promise<boolean> } = {}): Record<string, ReturnType<typeof dynamicTool>> {
+  const context = async (toolCallId: string) => {
+    const logIdentity = options.conversationId ? options.logger?.toolIdentity(options.conversationId, toolCallId) : undefined;
+    return { conversationId: options.conversationId, toolCallId, logIdentity, visualEnabled: await options.visualEnabled?.() ?? false };
+  };
   const run = async (operation: () => Promise<unknown>, toolCallId: string, compact = true) => {
+    const identity = options.conversationId ? options.logger?.toolIdentity(options.conversationId, toolCallId) : undefined;
     try {
       const raw = await operation();
-      const result = raw && typeof raw === "object" && (raw as any).ok === false && (raw as any).error
-        ? { ...(raw as Record<string, unknown>), error: { ...(raw as any).error, retryable: (raw as any).error.retryable ?? (raw as any).error.code === "timeout" } }
+      const failure = raw && typeof raw === "object" && (raw as any).ok === false ? (raw as any).error ?? (raw as any).failed?.error : undefined;
+      const result = failure
+        ? { ...(raw as Record<string, unknown>), error: { ...failure, retryable: failure.retryable ?? (failure.code === "timeout" && !failure.effectUnknown) } }
         : raw;
-      return compact ? compactToolResult(result, { ...options, toolCallId }) : result;
+      return compact ? compactToolResult(result, { ...options, toolCallId, ...identity }) : result;
     } catch (error) {
       return toolFailure(error);
     }
   };
-  const commands = Object.fromEntries(COMMAND_NAMES.map((name) => {
-    const definition = definitions[name];
-    return [name, dynamicTool({
+  return Object.fromEntries(TOOL_REGISTRY.map((definition) => [definition.name, dynamicTool({
       description: definition.description,
       inputSchema: definition.inputSchema,
       needsApproval: false,
-      execute: async (input, { abortSignal, toolCallId }) => run(
-        async () => executor.executeCommand(name, parseCommandInput(name, input), abortSignal, await context(toolCallId)), toolCallId,
-      ),
-    })];
-  }));
-  const userScripts = Object.fromEntries(USER_SCRIPT_TOOL_NAMES.map((name) => {
-    const definition = userScriptDefinitions[name];
-    return [name, dynamicTool({
-      description: definition.description,
-      inputSchema: definition.inputSchema,
-      needsApproval: false,
-      execute: async (input, { abortSignal, toolCallId }) => run(() => {
-        const value = definition.inputSchema.parse(input) as { id?: string; script?: unknown; changes?: unknown; enabled?: boolean };
-        const args = name === "userscript-list" ? [] : name === "userscript-read" ? [value.id]
-          : name === "userscript-create" ? [value.script] : [value];
-        return callUserScriptTool(definition.method, args, abortSignal);
-      }, toolCallId),
-    })];
-  }));
-  return {
-    ...commands,
-    act: dynamicTool({
-      description: ACT_DESCRIPTION,
-      inputSchema: actInputSchema, needsApproval: false,
-      execute: async (input, { abortSignal, toolCallId }) => run(async () => executor.executeBrowser({ mode: "act", ...actInputSchema.parse(input) } as BrowserInput, abortSignal, await context(toolCallId)), toolCallId),
-    }),
-    result: dynamicTool({
-      description: RESULT_DESCRIPTION,
-      inputSchema: resultInputSchema, needsApproval: false,
-      execute: async (input, { abortSignal, toolCallId }) => run(async () => executor.executeBrowser({ mode: "result", ...resultInputSchema.parse(input) } as BrowserInput, abortSignal, await context(toolCallId)), toolCallId, false),
-    }),
-    ...userScripts,
-  };
+      execute: async (input, { abortSignal, toolCallId }) => run(async () => {
+        const value = definition.inputSchema.parse(input);
+        if (definition.kind === "command") return executor.executeCommand(definition.name as CommandName, value as Record<string, unknown>, abortSignal, await context(toolCallId));
+        if (definition.kind === "userscript") {
+          const fields = value as { id?: string; script?: unknown; changes?: unknown; enabled?: boolean };
+          const args = definition.name === "userscript-list" ? [] : definition.name === "userscript-read" ? [fields.id]
+            : definition.name === "userscript-create" ? [fields.script] : [fields];
+          return callUserScriptTool(definition.method, args, abortSignal);
+        }
+        return executor.executeBrowser({ mode: definition.kind === "batch" ? "act" : "result", ...(value as object) } as BrowserInput, abortSignal, await context(toolCallId));
+      }, toolCallId, definition.kind !== "result"),
+    })]));
 }
 
 export const repairCommandToolCall: ToolCallRepairFunction<Record<string, ReturnType<typeof dynamicTool>>> = async ({ toolCall, tools }) => {
@@ -362,11 +314,13 @@ export async function prepareToolMessages(messages: any[], stepNumber: number, b
   const inject = stepNumber > 0 && messages.at(-1)?.role === "tool";
   const current: ScreenshotSource[] = [];
   const firstUser = messages.findIndex((message) => message.role === "user");
-  const withTools = firstUser < 0 ? messages : messages.map((message, index) => {
+  const hasCatalog = messages.some((message) => typeof message.content === "string" ? message.content.includes("Available tools:\n")
+    : Array.isArray(message.content) && message.content.some((part: any) => part.type === "text" && typeof part.text === "string" && part.text.includes("Available tools:\n")));
+  const withTools = firstUser < 0 || hasCatalog ? messages : messages.map((message, index) => {
     if (index !== firstUser) return message;
-    if (typeof message.content === "string") return message.content.includes(TOOL_CONTEXT)
+    if (typeof message.content === "string") return message.content.includes("Available tools:\n")
       ? message : { ...message, content: `${message.content}\n\n${TOOL_CONTEXT}` };
-    if (!Array.isArray(message.content) || message.content.some((part: any) => part.type === "text" && part.text === TOOL_CONTEXT)) return message;
+    if (!Array.isArray(message.content) || message.content.some((part: any) => part.type === "text" && typeof part.text === "string" && part.text.includes("Available tools:\n"))) return message;
     return { ...message, content: [...message.content, { type: "text", text: TOOL_CONTEXT }] };
   });
   const prepared = withTools.map((message, index) => message.role !== "tool" ? message : { ...message, content: message.content.map((part: any) => {

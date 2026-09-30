@@ -3,6 +3,7 @@
 import { ThreadListItemPrimitive, ThreadListPrimitive, useAui, useAuiState } from "@assistant-ui/react";
 import { ArchiveIcon, PencilIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type FC, type MouseEvent } from "react";
+import { getRunIdentity } from "../../agent/coordinator";
 import { fromLogValue, isConversationMessage, type EventLogger, type LogEvent } from "../../logging";
 import { Button } from "../ui/button";
 import { ErrorNotice } from "../ui/error-notice";
@@ -37,6 +38,16 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
   const [warning, setWarning] = useState("");
   const [searchError, setSearchError] = useState<unknown>();
   const requestSearchIndex = useRef<() => void>(() => undefined);
+  const cachedMessages = useRef(new Map<string, Map<string, LogEvent>>());
+  const ingest = (event: LogEvent) => {
+    if (!event.conversationId) return;
+    const message = fromLogValue(event.content);
+    if (!isConversationMessage(message)) return;
+    const entries = cachedMessages.current.get(event.conversationId) ?? new Map<string, LogEvent>();
+    if ((entries.get(message.id)?.id ?? -1) < event.id) entries.set(message.id, event);
+    cachedMessages.current.set(event.conversationId, entries);
+  };
+  const indexed = useRef(false);
   const close = () => dialog.current?.close();
   const warn = () => setWarning("当前会话尚未结束，请等待完成或先停止运行。");
 
@@ -47,23 +58,35 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
     let active = true;
     let revision = 0;
     let requested = false;
-    // ponytail: scan saved messages on menu open; add a persistent search index only if this becomes slow.
+    // This cache is a derived view of the canonical log, updated one event at a time.
     const refresh = () => {
       requested = true;
       const current = ++revision;
-      void logger.messageEvents().then((events) => {
-        if (active && current === revision) { setIndex(buildMessageSearchIndex(events)); setSearchError(undefined); }
+      void (indexed.current ? Promise.resolve([]) : logger.messageEvents()).then((events) => {
+        if (active && current === revision) { for (const event of events) ingest(event); indexed.current = true; setIndex(buildMessageSearchIndex([...cachedMessages.current.values()].flatMap((entries) => [...entries.values()]))); setSearchError(undefined); }
       }).catch((error) => {
         if (active && current === revision) setSearchError(error);
       });
     };
     requestSearchIndex.current = () => { if (!requested) refresh(); };
     const prefetch = setTimeout(() => requestSearchIndex.current(), 500);
-    const unsubscribe = logger.subscribe((event) => {
-      if (event.type === "conversation.message" || event.type === "conversation.deleted") refresh();
-    });
-    return () => { active = false; clearTimeout(prefetch); requestSearchIndex.current = () => undefined; unsubscribe(); };
+    return () => { active = false; clearTimeout(prefetch); requestSearchIndex.current = () => undefined; };
   }, [logger, open]);
+
+  useEffect(() => logger.subscribe((event) => {
+    if (event.type === "conversation.message") {
+      ingest(event);
+      if (indexed.current && event.conversationId) {
+        const changed = buildMessageSearchIndex([...cachedMessages.current.get(event.conversationId)!.values()]);
+        setIndex((previous) => new Map([...previous, ...changed]));
+      }
+    }
+    if (event.type === "conversation.deleted") {
+      const id = (fromLogValue(event.content) as { conversationId?: string })?.conversationId;
+      if (id) cachedMessages.current.delete(id);
+      setIndex((previous) => { const next = new Map(previous); if (id) next.delete(id); return next; });
+    }
+  }), [logger]);
 
   useEffect(() => { if (open && query.trim()) requestSearchIndex.current(); }, [open, query]);
 
@@ -80,7 +103,7 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
       <Button ref={trigger} type="button" variant="ghost" className="conversation-trigger" data-testid="conversation-menu" onClick={() => { setOpen(true); dialog.current?.showModal(); }}>
         <span>{title}</span>
       </Button>
-      <dialog ref={dialog} className="conversation-dialog" aria-label="对话列表" onClose={() => { setOpen(false); setWarning(""); setQuery(""); setIndex(new Map()); trigger.current?.focus(); }} onClick={(event) => {
+      <dialog ref={dialog} className="conversation-dialog" aria-label="对话列表" onClose={() => { setOpen(false); setWarning(""); setQuery(""); trigger.current?.focus(); }} onClick={(event) => {
         if (event.target === event.currentTarget) close();
       }}>
         {open && <ThreadListPrimitive.Root className="conversation-drawer">
@@ -134,7 +157,7 @@ const ConversationItem: FC<{ close: () => void; running: boolean; warn: () => vo
   };
   const cancel = finishEditing;
   const guard = (event: MouseEvent<HTMLButtonElement>, wouldSwitch: boolean) => {
-    if (!running || !wouldSwitch) return false;
+    if (!(running || getRunIdentity()) || !wouldSwitch) return false;
     event.preventDefault();
     warn();
     return true;

@@ -12,6 +12,8 @@ export type SummaryCheckpoint = {
   sourceCount: number;
   sourceUiCount: number;
   sourceDigest: string;
+  /** Older checkpoints remain readable; new checkpoints verify the summary as well as its source. */
+  summaryDigest?: string;
   summary: string;
 };
 
@@ -33,10 +35,32 @@ export function estimateInput(messages: readonly ModelMessage[]): number {
   return estimateValue(messages);
 }
 
-async function digest(messages: readonly ModelMessage[]): Promise<string> {
-  const bytes = new TextEncoder().encode(JSON.stringify(messages));
+export function estimatePromptInput(prompt: {
+  instructions?: unknown; messages: readonly ModelMessage[]; tools?: readonly Record<string, unknown>[];
+}): number {
+  return estimateValue(prompt);
+}
+
+async function digestValue(value: unknown): Promise<string> {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
   const hash = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+// SDK response messages and messages reconstructed from the UI may use a string or
+// a single text part for the same content. Fingerprint their equivalent canonical form.
+function canonicalValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (!value || typeof value !== "object") return value;
+  const record = value as Record<string, unknown>;
+  const normalized = "role" in record && typeof record.content === "string" && record.role !== "system"
+    ? { ...record, content: [{ type: "text", text: record.content }] } : record;
+  return Object.fromEntries(Object.keys(normalized).sort().filter((key) => normalized[key] !== undefined)
+    .map((key) => [key, canonicalValue(normalized[key])]));
+}
+
+async function digest(messages: readonly ModelMessage[]): Promise<string> {
+  return digestValue(canonicalValue(messages));
 }
 
 function isBranchPrefix(prefix: readonly string[], branch: readonly string[]): boolean {
@@ -46,11 +70,17 @@ function isBranchPrefix(prefix: readonly string[], branch: readonly string[]): b
 export async function currentSummary(events: readonly LogEvent[], branchIds: readonly string[], messages: readonly ModelMessage[]): Promise<AppliedSummary | undefined> {
   for (const event of [...events].reverse()) {
     if (event.type !== "context.compacted") continue;
-    const value = fromLogValue(event.content) as Partial<SummaryCheckpoint>;
-    if (value.strategy !== undefined && value.strategy !== "summary" || !Array.isArray(value.branchIds) || !isBranchPrefix(value.branchIds, branchIds)
-      || !Number.isSafeInteger(value.sourceCount) || value.sourceCount! > messages.length
-      || typeof value.sourceDigest !== "string" || typeof value.summary !== "string") continue;
-    if (value.sourceDigest === await digest(messages.slice(0, value.sourceCount))) return {
+    const decoded = fromLogValue(event.content);
+    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) continue;
+    const value = decoded as Partial<SummaryCheckpoint>;
+    if (value.strategy !== undefined && value.strategy !== "summary" || !Array.isArray(value.branchIds)
+      || !value.branchIds.every((id) => typeof id === "string") || !isBranchPrefix(value.branchIds, branchIds)
+      || !Number.isSafeInteger(value.sourceCount) || value.sourceCount! < 0 || value.sourceCount! > messages.length
+      || typeof value.sourceDigest !== "string" || typeof value.summary !== "string" || !value.summary.trim()
+      || value.summaryDigest !== undefined && value.summaryDigest !== await digestValue(value.summary)) continue;
+    const source = messages.slice(0, value.sourceCount);
+    if (value.sourceDigest === await digest(source)
+      || value.summaryDigest === undefined && value.sourceDigest === await digestValue(source)) return {
       ...value,
       sourceUiCount: Number.isSafeInteger(value.sourceUiCount) ? value.sourceUiCount! : -1,
       eventId: event.id,
@@ -81,6 +111,7 @@ export function pendingContextChoice(events: readonly LogEvent[], branchIds: rea
 export async function contextPressure(options: {
   raw: ModelMessage[]; branchIds: string[]; events: LogEvent[]; model: ModelConfig;
   limit?: ModelLimit; signal?: AbortSignal;
+  instructions?: unknown; tools?: readonly Record<string, unknown>[];
 }): Promise<{ limit: ModelLimit; estimated: number; threshold: number; messages: ModelMessage[] } | undefined> {
   const limit = options.limit ?? await resolveModelLimit(options.model, { signal: options.signal });
   if (!limit) return undefined;
@@ -89,7 +120,8 @@ export async function contextPressure(options: {
   const contextVersion = checkpoint?.eventId ?? 0;
   const calibrated = [...options.events].reverse().find((event) => {
     if (event.type !== "context.estimate.calibrated") return false;
-    const value = fromLogValue(event.content) as Partial<EstimateCalibration>;
+    const value = fromLogValue(event.content) as Partial<EstimateCalibration> | undefined;
+    if (!value) return false;
     return Array.isArray(value.branchIds)
       && value.branchIds.every((id): id is string => typeof id === "string")
       && isBranchPrefix(value.branchIds, options.branchIds)
@@ -104,7 +136,8 @@ export async function contextPressure(options: {
     ? calibration.inputTokens : calibration?.promptEstimate;
   const estimated = Math.ceil(anchor && calibration?.baseEstimate
     ? anchor + currentEstimate - calibration.baseEstimate
-    : currentEstimate);
+    : options.instructions !== undefined || options.tools !== undefined
+      ? estimatePromptInput({ instructions: options.instructions, messages, tools: options.tools }) : currentEstimate);
   return { limit, estimated, threshold: Math.floor(inputBudget(limit) * 0.8), messages };
 }
 
@@ -112,16 +145,22 @@ export async function summarizeContext(options: {
   raw: ModelMessage[]; branchIds: string[]; uiCount: number; model: ModelConfig;
   languageModel: LanguageModel; logger: EventLogger; conversationId: string;
   signal: AbortSignal; limit?: ModelLimit;
+  /** Runtime input may contain supplemental browser state. Only raw fingerprints persisted history. */
+  prepared?: ModelMessage[]; stepNumber?: number;
 }): Promise<string> {
   const { raw, branchIds, logger, conversationId, signal } = options;
   const events = await logger.conversation(conversationId);
+  signal.throwIfAborted();
   const { messages } = await effectiveContext(events, branchIds, raw);
   const limit = options.limit ?? await resolveModelLimit(options.model, { signal });
   if (!limit) throw new Error("无法取得模型上下文窗口；请手动设置窗口大小。");
-  const summary = await generateSummary(messages, options.languageModel, logger, conversationId, signal, limit);
+  const summary = await generateSummary(options.prepared ?? messages, options.languageModel, logger, conversationId, signal, limit);
+  signal.throwIfAborted();
   const checkpoint: SummaryCheckpoint = { strategy: "summary", branchIds, sourceCount: raw.length,
-    sourceUiCount: options.uiCount, sourceDigest: await digest(raw), summary };
-  await logger.append({ type: "context.compacted", conversationId, content: { ...checkpoint, limit } });
+    sourceUiCount: options.uiCount, sourceDigest: await digest(raw), summaryDigest: await digestValue(summary), summary };
+  signal.throwIfAborted();
+  const stored = await logger.append({ type: "context.compacted", conversationId, content: { ...checkpoint, limit, stepNumber: options.stepNumber } });
+  if (!stored) throw new Error("上下文摘要未能保存；请重试。");
   return summary;
 }
 
@@ -129,18 +168,60 @@ async function generateSummary(messages: ModelMessage[], languageModel: Language
   conversationId: string, signal: AbortSignal, limit: ModelLimit): Promise<string> {
   await logger.append({ type: "context.compaction.started", conversationId, content: { strategy: "summary", messageCount: messages.length, limit } });
   try {
-    const maxOutputTokens = Math.max(128, Math.min(2048, Math.floor(inputBudget(limit) / 10)));
-    const prompt = `Complete conversation:\n${JSON.stringify(messages)}`;
-    if (estimateInput([{ role: "system", content: SUMMARY_INSTRUCTIONS }, { role: "user", content: prompt }]) + maxOutputTokens > limit.context) {
-      throw new Error("完整历史超出摘要模型的上下文窗口；请换用更大窗口的模型。");
+    const maxOutputTokens = Math.max(1, Math.min(limit.output ?? 2048, 2048, Math.max(128, Math.floor(inputBudget(limit) / 10))));
+    const promptBudget = Math.min(limit.input ?? Number.POSITIVE_INFINITY, limit.context - maxOutputTokens);
+    const fits = (prompt: string) => estimateInput([{ role: "system", content: SUMMARY_INSTRUCTIONS }, { role: "user", content: prompt }]) <= promptBudget;
+    const generate = async (prompt: string, phase: "complete" | "chunk" | "merge", chunk?: number): Promise<string> => {
+      signal.throwIfAborted();
+      if (!fits(prompt)) throw new Error("摘要模型窗口过小，无法容纳摘要指令；请增大上下文窗口。");
+      const result = await generateText({ model: languageModel, maxRetries: 0, maxOutputTokens,
+        reasoning: "minimal", abortSignal: signal, system: SUMMARY_INSTRUCTIONS, prompt });
+      signal.throwIfAborted();
+      const summary = result.text.trim();
+      if (!summary) throw new Error("Model returned an empty context summary");
+      await logger.append({ type: "model.compaction.finished", conversationId,
+        content: { text: summary, phase, chunk }, stopReason: result.finishReason, usage: result.usage, providerMetadata: result.providerMetadata });
+      return summary;
+    };
+    // Split the serialized source, including an oversized individual tool result,
+    // without dropping or rewriting any source bytes. Fragments are explicitly labeled.
+    const split = (source: string, label: string): string[] => {
+      const parts: string[] = [];
+      let offset = 0;
+      while (offset < source.length) {
+        let low = 0;
+        let high = source.length - offset;
+        const prefix = `${label}, sequential fragment ${parts.length + 1} (may begin/end inside a value):\n`;
+        while (low < high) {
+          const middle = Math.ceil((low + high) / 2);
+          if (fits(prefix + source.slice(offset, offset + middle))) low = middle;
+          else high = middle - 1;
+        }
+        // Keep a UTF-16 surrogate pair together at fragment boundaries.
+        if (low > 0 && offset + low < source.length && /[\uD800-\uDBFF]/.test(source[offset + low - 1]!)) low -= 1;
+        if (!low) throw new Error("摘要模型窗口过小，无法容纳摘要指令；请增大上下文窗口。");
+        parts.push(prefix + source.slice(offset, offset + low));
+        offset += low;
+      }
+      return parts;
+    };
+    const source = JSON.stringify(messages);
+    const completePrompt = `Complete conversation:\n${source}`;
+    if (fits(completePrompt)) return await generate(completePrompt, "complete");
+    const prompts = split(source, "Serialized conversation source");
+    let summaries: string[] = [];
+    for (let index = 0; index < prompts.length; index += 1) summaries.push(await generate(prompts[index]!, "chunk", index));
+    while (summaries.length > 1) {
+      const mergedSource = JSON.stringify(summaries);
+      const mergePrompt = `Merge these ordered summaries into one faithful continuation summary. Preserve all exact facts and unresolved work:\n${mergedSource}`;
+      if (fits(mergePrompt)) return await generate(mergePrompt, "merge");
+      const mergeParts = split(mergedSource, "Ordered intermediate summaries to merge");
+      const next: string[] = [];
+      for (let index = 0; index < mergeParts.length; index += 1) next.push(await generate(mergeParts[index]!, "merge", index));
+      if (JSON.stringify(next).length >= mergedSource.length) throw new Error("摘要模型未缩短分块结果；原始历史已保留，请重试。");
+      summaries = next;
     }
-    const result = await generateText({ model: languageModel, maxRetries: 0, maxOutputTokens,
-      reasoning: "minimal", abortSignal: signal, system: SUMMARY_INSTRUCTIONS, prompt });
-    const summary = result.text.trim();
-    if (!summary) throw new Error("Model returned an empty context summary");
-    await logger.append({ type: "model.compaction.finished", conversationId,
-      content: { text: summary }, stopReason: result.finishReason, usage: result.usage, providerMetadata: result.providerMetadata });
-    return summary;
+    return summaries[0]!;
   } catch (error) {
     await logger.append({ type: signal.aborted ? "context.compaction.aborted" : "context.compaction.failed", conversationId,
       content: { strategy: "summary" }, ...(signal.aborted ? { abort: { reason: signal.reason } } : { error }) });
@@ -148,17 +229,9 @@ async function generateSummary(messages: ModelMessage[], languageModel: Language
   }
 }
 
-async function summarizeRunContext(messages: ModelMessage[], stepNumber: number, languageModel: LanguageModel,
-  logger: EventLogger, conversationId: string, signal: AbortSignal, limit: ModelLimit): Promise<string> {
-  const summary = await generateSummary(messages, languageModel, logger, conversationId, signal, limit);
-  await logger.append({ type: "context.compacted", conversationId, content: {
-    strategy: "run-summary", stepNumber, sourceCount: messages.length, sourceDigest: await digest(messages), summary, limit,
-  } });
-  return summary;
-}
-
 export class ContextCompactor {
   private calibration?: EstimateCalibration;
+  private usageRecorded = false;
   private baseEstimate?: number;
   private contextVersion = 0;
   private warned = false;
@@ -176,27 +249,30 @@ export class ContextCompactor {
       branchIds: this.options.branchIds,
       contextVersion: this.contextVersion,
       baseEstimate: this.baseEstimate ?? estimateInput(prompt.messages),
-      promptEstimate: estimateValue({ instructions: prompt.instructions, messages: prompt.messages, tools: prompt.tools }),
+      promptEstimate: estimatePromptInput(prompt),
     };
     this.options.logger.record({ type: "context.estimate.calibrated", conversationId: this.options.conversationId, content: this.calibration });
   }
 
   recordUsage(inputTokens: number | undefined, stepNumber: number): void {
-    if (stepNumber !== 0 || !inputTokens || !this.calibration) return;
+    if (!inputTokens || !this.calibration || this.usageRecorded) return;
+    this.usageRecorded = true;
     this.calibration = { ...this.calibration, inputTokens };
-    this.options.logger.record({ type: "context.estimate.calibrated", conversationId: this.options.conversationId, content: this.calibration });
+    this.options.logger.record({ type: "context.estimate.calibrated", conversationId: this.options.conversationId, content: { ...this.calibration, stepNumber } });
   }
 
-  estimate(messages: readonly ModelMessage[]): number {
+  estimate(messages: readonly ModelMessage[], prompt?: {
+    instructions?: unknown; tools?: readonly Record<string, unknown>[];
+  }): number {
     const current = estimateInput(messages);
     const anchor = this.calibration?.inputTokens ?? this.calibration?.promptEstimate;
     return Math.ceil(anchor && this.calibration?.baseEstimate
       ? anchor + current - this.calibration.baseEstimate
-      : current);
+      : prompt ? estimatePromptInput({ ...prompt, messages }) : current);
   }
 
   canCompact(messages: readonly ModelMessage[], limit: ModelLimit): boolean {
-    // ponytail: A tiny tail cannot offset fixed tool-schema tokens; summarize again after it grows by 10% of the input budget.
+    // Summarizing an unchanged tiny tail cannot reduce fixed tool-schema overhead.
     return this.compactedBaseEstimate === undefined
       || estimateInput(messages) - this.compactedBaseEstimate >= inputBudget(limit) * 0.1;
   }
@@ -205,11 +281,13 @@ export class ContextCompactor {
     languageModel: LanguageModel, limit: ModelLimit): Promise<ModelMessage[]> {
     const { model, logger, conversationId, signal, branchIds } = this.options;
     signal.throwIfAborted();
-    const summary = stepNumber === 0
-      ? await summarizeContext({ raw, branchIds, uiCount: branchIds.length, model, languageModel, logger, conversationId, signal, limit })
-      : await summarizeRunContext(prepared, stepNumber, languageModel, logger, conversationId, signal, limit);
+    const summary = await summarizeContext({ raw, prepared, stepNumber, branchIds, uiCount: branchIds.length,
+      model, languageModel, logger, conversationId, signal, limit });
     const messages = [summaryMessage(summary)];
+    this.events = await logger.conversation(conversationId);
+    this.contextVersion = (await currentSummary(this.events, branchIds, raw))?.eventId ?? 0;
     this.calibration = undefined;
+    this.usageRecorded = false;
     this.baseEstimate = estimateInput(messages);
     this.compactedBaseEstimate = this.baseEstimate;
     return messages;

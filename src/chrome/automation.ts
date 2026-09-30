@@ -2,7 +2,7 @@ import type { EventLogger } from "../logging";
 
 type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
 type Command = (debuggee: Debuggee, method: string, params?: object) => Promise<any>;
-type RunContext = { signal?: AbortSignal; conversationId?: string; toolCallId?: string };
+type RunContext = { signal?: AbortSignal; conversationId?: string; toolCallId?: string; logIdentity?: { runId?: string; toolCallId: string; toolCallIdCanonical: true } };
 type Waiter = { resolve: (value: any) => void; reject: (error: Error) => void };
 type Query = {
   kind: "role" | "text" | "label" | "placeholder" | "alt" | "title" | "testId" | "css" | "frame";
@@ -22,7 +22,7 @@ type ObservationRecord = {
   title: string;
   lines: SnapshotLine[];
   viewport: { x: number; y: number; width: number; height: number; scale: number };
-  image?: { width: number; height: number; scale: number };
+  image?: { width: number; height: number; scale: number; origin?: { x: number; y: number } };
 };
 type Session = {
   tabId: number;
@@ -116,7 +116,7 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata) {
     }
     if (locator.hasText) current = current.filter(el => visibleText(el).toLowerCase().includes(normalize(locator.hasText).toLowerCase()));
     if (locator.has) current = current.filter(el => resolve(el, locator.has).length > 0);
-    if (locator.index !== undefined) current = current.at(locator.index < 0 ? current.length + locator.index : locator.index) ? [current.at(locator.index < 0 ? current.length + locator.index : locator.index)] : [];
+    if (locator.index !== undefined) { const index = locator.index < 0 ? current.length + locator.index : locator.index; current = index >= 0 && index < current.length ? [current[index]] : []; }
     return [...new Set(current)];
   };
   const result = resolve(document, spec);
@@ -169,6 +169,27 @@ function jpegSize(base64: string): { width: number; height: number } | undefined
   }
 }
 
+function imageSize(base64: string, format: string): { width: number; height: number } | undefined {
+  if (format === "jpeg") return jpegSize(base64);
+  const binary = atob(base64);
+  const bytes = Uint8Array.from(binary, (value) => value.charCodeAt(0));
+  if (format === "png" && bytes.length >= 24) { const view = new DataView(bytes.buffer); return { width: view.getUint32(16), height: view.getUint32(20) }; }
+  if (format === "webp" && bytes.length >= 30 && binary.slice(12, 16) === "VP8X") return { width: 1 + bytes[24]! + (bytes[25]! << 8) + (bytes[26]! << 16), height: 1 + bytes[27]! + (bytes[28]! << 8) + (bytes[29]! << 16) };
+}
+
+function modifierMask(parts: string[]): number {
+  return parts.reduce((mask, part) => mask | (part === "ControlOrMeta" ? (/Mac/.test(globalThis.navigator?.platform ?? "") ? 4 : 2) : /alt/i.test(part) ? 1 : /control/i.test(part) ? 2 : /meta/i.test(part) ? 4 : /shift/i.test(part) ? 8 : 0), 0);
+}
+function keyboardParams(chord: string): Record<string, unknown> {
+  const parts = chord.split("+"); const requested = parts.pop() || "";
+  const key = requested === "Space" ? " " : requested;
+  const modifierKeys: Record<string, number> = { Alt: 1, Control: 2, Meta: 4, Shift: 8 };
+  const modifiers = modifierMask(parts) | (modifierKeys[key] ?? 0);
+  const code = key === " " ? "Space" : ["Alt", "Control", "Shift", "Meta"].includes(key) ? `${key}Left` : key.length === 1 && /[a-z]/i.test(key) ? `Key${key.toUpperCase()}` : key.length === 1 && /\d/.test(key) ? `Digit${key}` : key;
+  const virtualKeys: Record<string, number> = { Enter: 13, Tab: 9, Escape: 27, Backspace: 8, Delete: 46, ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39, Home: 36, End: 35, PageUp: 33, PageDown: 34, Alt: 18, Control: 17, Shift: 16, Meta: 91, " ": 32 };
+  return { key, code, modifiers, windowsVirtualKeyCode: virtualKeys[key] ?? (key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0), ...(key.length === 1 && !(modifiers & 7) ? { text: key } : key === "Enter" ? { text: "\r" } : {}) };
+}
+
 export class AutomationRuntime {
   private readonly sessions = new Map<number, Session>();
   private readonly objectDebuggees = new Map<string, Debuggee>();
@@ -178,6 +199,7 @@ export class AutomationRuntime {
   private lastAttemptLog?: { reason: string; at: number };
   private readonly observations = new Map<string, ObservationRecord>();
   private readonly axRoots = new Map<string, number>();
+  private readonly fileChoosers = new Map<number, { backendNodeId: number; debuggee: Debuggee; mode: string }>();
 
   private waitDiagnostic() { return this.lastWait; }
 
@@ -191,6 +213,7 @@ export class AutomationRuntime {
       type: "automation.action.attempt",
       conversationId: this.context.conversationId,
       toolCallId: this.context.toolCallId,
+      ...this.context.logIdentity,
       content: { attempt, reason, candidateCount: candidates.length, candidates: summary, documentId: session.generation, locator },
     });
   }
@@ -214,6 +237,12 @@ export class AutomationRuntime {
     }
     await Promise.all([...debuggees.values()].map((debuggee) => this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup: "surf-wax-automation" }).catch(() => undefined)));
     this.objectDebuggees.clear();
+  }
+
+  async observationDebuggees(tabId: number): Promise<Debuggee[]> {
+    const session = await this.session(tabId);
+    await Promise.all([...session.frameReady.values()]);
+    return [...new Map([session.debuggee, ...session.frames.values()].map((debuggee) => [JSON.stringify(debuggee), debuggee])).values()];
   }
 
   async createPage(tabId?: number): Promise<PageFacade> {
@@ -271,6 +300,11 @@ export class AutomationRuntime {
     if (session && method === "Page.frameStartedLoading" && params?.frameId === session.rootFrameId) {
       session.lifecycle.clear();
     }
+    if (method === "Page.fileChooserOpened" && params.backendNodeId) {
+      const chooser = { backendNodeId: params.backendNodeId, debuggee: source, mode: params.mode };
+      this.fileChoosers.set(tabId!, chooser);
+      this.resolveWaiters(tabId!, "filechooser", chooser);
+    }
     const kind = method === "Page.javascriptDialogOpening" ? "dialog" : method === "Page.downloadWillBegin" ? "download" : undefined;
     if (kind) this.resolveWaiters(tabId!, kind, params);
   }
@@ -293,6 +327,7 @@ export class AutomationRuntime {
     this.sessions.clear();
     this.objectDebuggees.clear();
     this.observations.clear();
+    this.fileChoosers.clear();
     this.axRoots.clear();
     for (const events of this.waiters.values()) for (const waiters of events.values()) for (const waiter of waiters) waiter.reject(abortError());
     this.waiters.clear();
@@ -316,7 +351,7 @@ export class AutomationRuntime {
     });
   }
 
-  async observe(tabId: number, detail: "auto" | "semantic" | "visual" = "auto", since?: string): Promise<Record<string, unknown>> {
+  async observe(tabId: number, detail: "auto" | "semantic" | "visual" = "auto", since?: string, captureOptions: Record<string, any> = {}): Promise<Record<string, unknown>> {
     return this.action(tabId, "observe", null, async () => {
       const session = await this.session(tabId);
       const captured = await this.captureSnapshot(session);
@@ -341,12 +376,15 @@ export class AutomationRuntime {
       };
       if (detail === "visual" || detail === "auto" && !captured.lines.some(({ line }) => line.includes("[ref="))) {
         const screenshot = await this.options.command(session.debuggee, "Page.captureScreenshot", {
-          format: "jpeg", quality: 70, fromSurface: true, captureBeyondViewport: false,
+          format: "jpeg", quality: 70, fromSurface: true, captureBeyondViewport: false, ...captureOptions,
         });
-        const size = typeof screenshot.data === "string" ? jpegSize(screenshot.data) : undefined;
-        const image = { width: size?.width ?? viewport.width, height: size?.height ?? viewport.height, scale: size?.width && viewport.width ? size.width / viewport.width : 1 };
+        const clip = captureOptions.clip;
+        const size = typeof screenshot.data === "string" ? imageSize(screenshot.data, captureOptions.format ?? "jpeg") : undefined;
+        const width = clip?.width ?? viewport.width; const height = clip?.height ?? viewport.height;
+        const scale = size?.width && width ? size.width / width : (clip?.scale ?? viewport.scale);
+        const image = { width: size?.width ?? width * scale, height: size?.height ?? height * scale, scale, origin: { x: clip ? clip.x - viewport.x : 0, y: clip ? clip.y - viewport.y : 0 } };
         record.image = image;
-        result.screenshot = { mediaType: "image/jpeg", data: screenshot.data, ...image };
+        result.screenshot = { mediaType: `image/${captureOptions.format ?? "jpeg"}`, data: screenshot.data, ...image };
       }
       this.observations.set(observationId, record);
       while (this.observations.size > 32) this.observations.delete(this.observations.keys().next().value!);
@@ -354,7 +392,7 @@ export class AutomationRuntime {
     });
   }
 
-  async point(tabId: number, observationId: string, x: number, y: number, operation: "click" | "dblclick" | "hover"): Promise<Record<string, unknown>> {
+  async point(tabId: number, observationId: string, x: number, y: number, operation: "click" | "dblclick" | "hover", options: { button?: "left" | "right" | "middle"; modifiers?: string[] } = {}): Promise<Record<string, unknown>> {
     const session = await this.session(tabId);
     return this.action(tabId, operation, null, async () => {
       const observation = this.observations.get(observationId);
@@ -366,16 +404,17 @@ export class AutomationRuntime {
         throw automationError("stale-observation", { observationId, reason: "viewport-changed", before: observation.viewport, after: viewport });
       }
       const scale = observation.image?.scale ?? 1;
-      const cssX = x / scale; const cssY = y / scale;
-      if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > (observation.image?.width ?? viewport.width) || y > (observation.image?.height ?? viewport.height)) {
+      const cssX = x / scale + (observation.image?.origin?.x ?? 0); const cssY = y / scale + (observation.image?.origin?.y ?? 0);
+      if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > (observation.image?.width ?? viewport.width) || y > (observation.image?.height ?? viewport.height) || cssX < 0 || cssY < 0 || cssX > viewport.width || cssY > viewport.height) {
         throw automationError("invalid-point", { observationId, x, y, viewport });
       }
-      await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", x: cssX, y: cssY });
+      const button = options.button ?? "left"; const modifiers = modifierMask(options.modifiers ?? []);
+      await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", x: cssX, y: cssY, modifiers });
       if (operation !== "hover") {
         const count = operation === "dblclick" ? 2 : 1;
         for (let clickCount = 1; clickCount <= count; clickCount += 1) {
-          await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mousePressed", x: cssX, y: cssY, button: "left", clickCount });
-          await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseReleased", x: cssX, y: cssY, button: "left", clickCount });
+          await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mousePressed", x: cssX, y: cssY, button, modifiers, clickCount });
+          await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseReleased", x: cssX, y: cssY, button, modifiers, clickCount });
         }
       }
       return this.afterAction(session);
@@ -397,6 +436,17 @@ export class AutomationRuntime {
       else await this.options.command(session.debuggee, "Input.insertText", { text: value });
       return this.afterAction(session);
     });
+  }
+
+  async upload(tabId: number, files: unknown): Promise<unknown> {
+    const chooser = this.fileChoosers.get(tabId);
+    return this.locatorValue(tabId, chooser ? { queries: [] } : { queries: [{ kind: "css", value: "input[type=file]" }] }, "setInputFiles", [files]);
+  }
+
+  async keyState(tabId: number, operation: "keydown" | "keyup", chord: string): Promise<void> {
+    const session = await this.session(tabId);
+    const input = keyboardParams(chord);
+    await this.options.command(session.debuggee, "Input.dispatchKeyEvent", { ...input, type: operation === "keydown" ? input.text ? "keyDown" : "rawKeyDown" : "keyUp" });
   }
 
   async navigate(tabId: number, method: string, params?: object): Promise<unknown> {
@@ -442,7 +492,7 @@ export class AutomationRuntime {
     });
   }
 
-  waitForEvent(tabId: number, kind: "dialog" | "popup" | "download"): Promise<any> {
+  waitForEvent(tabId: number, kind: "dialog" | "popup" | "download" | "filechooser"): Promise<any> {
     throwIfAborted(this.context.signal);
     if (kind === "popup") return new Promise((resolve, reject) => {
       const signal = this.context.signal;
@@ -460,7 +510,7 @@ export class AutomationRuntime {
     return new Promise((resolve, reject) => {
       const events = this.waiters.get(tabId) ?? new Map();
       const waiters = events.get(kind) ?? new Set<Waiter>();
-      const done = (value: any) => { cleanup(); resolve(kind === "dialog" ? this.dialog(tabId, value) : value); };
+      const done = (value: any) => { cleanup(); resolve(kind === "dialog" ? this.dialog(tabId, value) : kind === "filechooser" ? { isMultiple: () => value.mode === "selectMultiple", setFiles: (files: unknown) => this.upload(tabId, files) } : value); };
       const abort = () => { cleanup(); reject(abortError()); };
       const waiter = { resolve: done, reject };
       const cleanup = () => { waiters.delete(waiter); this.context.signal?.removeEventListener("abort", abort); };
@@ -561,7 +611,13 @@ export class AutomationRuntime {
         return { selected, ...(await this.afterAction(session)) };
       }
       if (operation === "setInputFiles") {
-        const objectId = await this.resolveOne(session, spec);
+        const chooser = this.fileChoosers.get(tabId);
+        let objectId: string;
+        if (chooser && spec.queries.length === 0 && !spec.ref) {
+          const node = await this.options.command(chooser.debuggee, "DOM.resolveNode", { backendNodeId: chooser.backendNodeId, objectGroup: "surf-wax-automation" });
+          if (!node.object?.objectId) throw automationError("detached", { reason: "file-chooser-node-removed" });
+          objectId = node.object.objectId; this.objectDebuggees.set(objectId, chooser.debuggee);
+        } else objectId = await this.resolveOne(session, spec);
         const targetSession = this.objectSession(session, objectId);
         const requested = Array.isArray(args[0]) ? args[0] : [args[0]];
         for (const file of requested as any[]) {
@@ -580,6 +636,8 @@ export class AutomationRuntime {
           return file;
         }));
         await this.callOn(targetSession, objectId, `function(files){
+          if (!(this instanceof HTMLInputElement) || this.type !== "file") throw new Error("AutomationError[invalid-upload-target]: Expected a file input");
+          if (!this.multiple && files.length > 1) throw new Error("AutomationError[invalid-file-count]: File input does not allow multiple files");
           const transfer = new DataTransfer();
           for (const file of files) {
             const bytes = file.base64 ? Uint8Array.from(atob(file.base64), c => c.charCodeAt(0)) : new TextEncoder().encode(file.text || "");
@@ -587,6 +645,7 @@ export class AutomationRuntime {
           }
           this.files = transfer.files; this.dispatchEvent(new Event("input", { bubbles: true })); this.dispatchEvent(new Event("change", { bubbles: true }));
         }`, [files]);
+        this.fileChoosers.delete(tabId);
         return this.afterAction(session);
       }
       if (operation === "check" || operation === "uncheck") {
@@ -638,7 +697,7 @@ export class AutomationRuntime {
     session.ready ??= (async () => {
       for (const domain of ["Page", "Runtime", "DOM", "Accessibility"]) await this.options.command(session!.debuggee, `${domain}.enable`, {});
       await this.options.command(session!.debuggee, "Page.setLifecycleEventsEnabled", { enabled: true });
-      await this.options.command(session!.debuggee, "Target.setAutoAttach", { autoAttach: true, flatten: true, waitForDebuggerOnStart: false });
+      await this.options.command(session!.debuggee, "Target.setAutoAttach", { autoAttach: true, flatten: true, waitForDebuggerOnStart: false, filter: [{ type: "iframe", exclude: false }] });
       const tree = await this.options.command(session!.debuggee, "Page.getFrameTree", {});
       const add = (item: any, parentId?: string) => {
         const frameId = item?.frame?.id;
@@ -662,8 +721,7 @@ export class AutomationRuntime {
         await this.options.command(ref.debuggee, "DOM.resolveNode", { backendNodeId: ref.backendNodeId });
         return [{ role: ref.role, name: ref.name, ref: spec.ref }];
       } catch {
-        const rebound = await this.rebindRef(session, spec.ref, ref);
-        return [{ role: rebound.role, name: rebound.name, ref: spec.ref }];
+        throw automationError("detached", { ref: spec.ref, reason: "node-removed" });
       }
     }
     const scoped = await this.locatorScope(session, spec);
@@ -692,13 +750,11 @@ export class AutomationRuntime {
         const response = await this.options.command(ref.debuggee, "DOM.resolveNode", { backendNodeId: ref.backendNodeId, objectGroup: "surf-wax-automation" });
         if (!response.object?.objectId) throw new Error("missing objectId");
         this.objectDebuggees.set(response.object.objectId, ref.debuggee);
+        const connected = await this.options.command(ref.debuggee, "Runtime.callFunctionOn", { objectId: response.object.objectId, functionDeclaration: "function(){ return this.isConnected; }", returnByValue: true });
+        if (connected.result?.value === false) throw new Error("node removed");
         return response.object.objectId;
       } catch {
-        const rebound = await this.rebindRef(session, spec.ref, ref);
-        const response = await this.options.command(rebound.debuggee, "DOM.resolveNode", { backendNodeId: rebound.backendNodeId, objectGroup: "surf-wax-automation" });
-        if (!response.object?.objectId) throw automationError("detached", { ref: spec.ref, reason: "node-removed" });
-        this.objectDebuggees.set(response.object.objectId, rebound.debuggee);
-        return response.object.objectId;
+        throw automationError("detached", { ref: spec.ref, reason: "node-removed" });
       }
     }
     const scoped = await this.locatorScope(session, spec);
@@ -766,17 +822,6 @@ export class AutomationRuntime {
       matches = matches[index] ? [matches[index]!] : [];
     }
     return matches;
-  }
-
-  private async rebindRef(session: Session, id: string, ref: RefRecord): Promise<RefRecord> {
-    if (ref.generation !== session.generation) throw automationError("stale-ref", { ref: id, reason: "expired-document" });
-    const matches = await this.resolveAccessibility(ref.debuggee, { queries: [{ kind: "role", value: ref.role, name: ref.name, exact: true }] });
-    if (matches.length !== 1 || !matches[0]?.backendNodeId) {
-      throw automationError(matches.length > 1 ? "ambiguous-ref" : "detached", { ref: id, role: ref.role, name: ref.name, candidates: matches.slice(0, 10) });
-    }
-    const rebound = { ...ref, backendNodeId: matches[0].backendNodeId };
-    session.refs.set(id, rebound);
-    return rebound;
   }
 
   private async locatorScope(session: Session, spec: LocatorSpec): Promise<{ debuggee: Debuggee; spec: LocatorSpec }> {
@@ -933,7 +978,7 @@ export class AutomationRuntime {
       return;
     }
     const button = options.button ?? "left";
-    const modifiers = (options.modifiers ?? []).reduce((mask, part) => mask | (/alt/i.test(part) ? 1 : /control/i.test(part) ? 2 : /meta/i.test(part) ? 4 : /shift/i.test(part) ? 8 : 0), 0);
+    const modifiers = modifierMask(options.modifiers ?? []);
     const count = operation === "dblclick" ? 2 : 1;
     for (let clickCount = 1; clickCount <= count; clickCount += 1) {
       await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mousePressed", x: state.x, y: state.y, button, modifiers, clickCount });
@@ -942,13 +987,11 @@ export class AutomationRuntime {
   }
 
   private async press(session: Session, chord: string): Promise<void> {
-    const parts = chord.split("+"); const key = parts.pop() || "";
-    const modifiers = parts.reduce((mask, part) => mask | (/alt/i.test(part) ? 1 : /control/i.test(part) ? 2 : /meta/i.test(part) ? 4 : /shift/i.test(part) ? 8 : 0), 0);
-    const codes: Record<string, string> = { Enter: "Enter", Tab: "Tab", Escape: "Escape", Backspace: "Backspace", Delete: "Delete", ArrowUp: "ArrowUp", ArrowDown: "ArrowDown", ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight", Home: "Home", End: "End", PageUp: "PageUp", PageDown: "PageDown", Space: "Space" };
-    const code = codes[key] ?? (key.length === 1 && /[a-z]/i.test(key) ? `Key${key.toUpperCase()}` : key.length === 1 && /\d/.test(key) ? `Digit${key}` : key);
-    const text = key.length === 1 && modifiers === 0 ? key : undefined;
-    await this.options.command(session.debuggee, "Input.dispatchKeyEvent", { type: "rawKeyDown", key: key === "Space" ? " " : key, code, modifiers, ...(text ? { text } : {}) });
-    await this.options.command(session.debuggee, "Input.dispatchKeyEvent", { type: "keyUp", key: key === "Space" ? " " : key, code, modifiers });
+    const input = keyboardParams(chord);
+    await this.options.command(session.debuggee, "Input.dispatchKeyEvent", { ...input, type: input.text ? "keyDown" : "rawKeyDown" });
+    try { throwIfAborted(this.context.signal); } finally {
+      await this.options.command(session.debuggee, "Input.dispatchKeyEvent", { ...input, text: undefined, type: "keyUp" });
+    }
   }
 
   private async waitForReady(session: Session): Promise<void> {
@@ -1018,10 +1061,11 @@ export class AutomationRuntime {
     const startedAt = performance.now();
     this.lastWait = undefined;
     this.lastAttemptLog = undefined;
-    this.options.logger?.record({ type: "automation.action.started", conversationId: this.context.conversationId, toolCallId: this.context.toolCallId, content: { tabId, operation, locator } });
+    const context = this.context;
+    this.options.logger?.record({ type: "automation.action.started", conversationId: context.conversationId, toolCallId: context.toolCallId, ...context.logIdentity, content: { tabId, operation, locator } });
     try {
       const result = await run();
-      this.options.logger?.record({ type: "automation.action.finished", conversationId: this.context.conversationId, toolCallId: this.context.toolCallId, content: { tabId, operation, locator }, output: result, latencyMs: performance.now() - startedAt });
+      this.options.logger?.record({ type: "automation.action.finished", conversationId: context.conversationId, toolCallId: context.toolCallId, ...context.logIdentity, content: { tabId, operation, locator }, output: result, latencyMs: performance.now() - startedAt });
       return result;
     } catch (error) {
       const lastWait = this.waitDiagnostic();
@@ -1030,8 +1074,9 @@ export class AutomationRuntime {
         : error;
       this.options.logger?.record({
         type: "automation.action.failed",
-        conversationId: this.context.conversationId,
-        toolCallId: this.context.toolCallId,
+        conversationId: context.conversationId,
+        toolCallId: context.toolCallId,
+        ...context.logIdentity,
         content: { tabId, operation, locator, ...(failure instanceof AutomationError ? { diagnostic: { code: failure.code, ...failure.detail } } : {}) },
         error: failure,
         latencyMs: performance.now() - startedAt,
@@ -1044,9 +1089,10 @@ export class AutomationRuntime {
 export class PageFacade {
   constructor(private readonly runtime: AutomationRuntime, readonly tabId: number) {}
   snapshot() { return this.runtime.snapshot(this.tabId); }
-  observe(detail: "auto" | "semantic" | "visual" = "auto", since?: string) { return this.runtime.observe(this.tabId, detail, since); }
+  observe(detail: "auto" | "semantic" | "visual" = "auto", since?: string, captureOptions?: Record<string, any>) { return this.runtime.observe(this.tabId, detail, since, captureOptions); }
   ensureObservation(observationId: string) { return this.runtime.ensureObservation(this.tabId, observationId); }
-  point(observationId: string, x: number, y: number, operation: "click" | "dblclick" | "hover") { return this.runtime.point(this.tabId, observationId, x, y, operation); }
+  point(observationId: string, x: number, y: number, operation: "click" | "dblclick" | "hover", options?: { button?: "left" | "right" | "middle"; modifiers?: string[] }) { return this.runtime.point(this.tabId, observationId, x, y, operation, options); }
+  upload(files: unknown) { return this.runtime.upload(this.tabId, files); }
   press(key: string) { return this.runtime.keyboard(this.tabId, "press", key); }
   insertText(text: string) { return this.runtime.keyboard(this.tabId, "insertText", text); }
   ref(ref: string) { return this.runtime.ref(this.tabId, ref); }
@@ -1067,7 +1113,7 @@ export class PageFacade {
   title() { return this.runtime.pageValue(this.tabId, "document.title"); }
   waitForURL(value: string | RegExp) { return this.runtime.waitUntil(() => this.url().then((url) => typeof value === "string" ? String(url).includes(value) : value.test(String(url)))); }
   waitForLoadState(state: "domcontentloaded" | "load" = "load") { return this.runtime.waitForLoadState(this.tabId, state); }
-  waitForEvent(kind: "dialog" | "popup" | "download") { return this.runtime.waitForEvent(this.tabId, kind); }
+  waitForEvent(kind: "dialog" | "popup" | "download" | "filechooser") { return this.runtime.waitForEvent(this.tabId, kind); }
   evaluate(fn: ((arg?: unknown) => unknown) | string, arg?: unknown) { return this.runtime.pageValue(this.tabId, `(${typeof fn === "function" ? String(fn) : fn})(${JSON.stringify(arg)})`); }
 }
 

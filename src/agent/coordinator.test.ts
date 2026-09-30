@@ -1,21 +1,21 @@
-import { describe, expect, it } from "vitest";
-import { abortAllConversationWork, abortConversationWork, claimConversationRun, registerBackgroundRequest } from "./coordinator";
+import { describe, expect, it, vi } from "vitest";
+import { abortAllConversationWork, abortConversationWork, activeRunIdentity, claimConversationRun, registerBackgroundRequest } from "./coordinator";
 
 describe("conversation run coordinator", () => {
-  it("aborts and settles the previous run before granting the next", async () => {
+  it("propagates background initialization errors instead of reporting an idle coordinator", async () => {
+    const sendMessage = vi.fn(async () => ({ error: "IndexedDB unavailable" }));
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+    try {
+      await expect(activeRunIdentity()).rejects.toThrow("IndexedDB unavailable");
+      expect(sendMessage).toHaveBeenCalledWith({ type: "surf-wax:run-status" });
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it("rejects a competing run without aborting the owner", async () => {
     const first = await claimConversationRun("first");
-    let granted = false;
-    const secondTask = claimConversationRun("second").then((lease) => {
-      granted = true;
-      return lease;
-    });
-
-    await Promise.resolve();
-    expect(first.signal.aborted).toBe(true);
-    expect(granted).toBe(false);
+    await expect(claimConversationRun("second")).rejects.toThrow("已有任务运行");
+    expect(first.signal.aborted).toBe(false);
     first.finish();
-    const second = await secondTask;
-    expect(granted).toBe(true);
+    const second = await claimConversationRun("second");
     second.finish();
   });
 

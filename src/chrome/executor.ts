@@ -1,8 +1,11 @@
 import type { EventLogger } from "../logging";
 import type { BrowserInput, BrowserSelector, BrowserStep, BrowserTarget, ChromeTarget, ChromeToolInput } from "../types";
-import type { CommandName } from "./tool";
+import { COMMAND_NAMES, type CommandName } from "./tool";
 import { AutomationRuntime } from "./automation";
 import { requireDebuggee } from "./debuggee";
+import { ensureDownloadPermission } from "./downloads";
+import { BrowserDiagnostics } from "./diagnostics";
+import { getRunIdentity } from "../agent/coordinator";
 
 type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
 type DebuggerTarget = chrome.debugger.TargetInfo;
@@ -20,18 +23,14 @@ const RESULT_READER_KEY = "__surfWaxResult";
 const STATE_KEY = "__surfWaxExecutionState";
 const PAGE_KEY = "__surfWaxPage";
 const BROWSER_KEY = "__surfWaxBrowser";
-type ExecutionContext = { conversationId?: string; toolCallId?: string; visualEnabled?: boolean; allowDownloads?: boolean };
+type ExecutionContext = { conversationId?: string; toolCallId?: string; visualEnabled?: boolean; allowDownloads?: boolean; logIdentity?: { runId?: string; toolCallId: string; toolCallIdCanonical: true } };
+type BatchProgress = { completed: Array<{ index: number; type: BrowserStep["type"]; result: unknown }>; index: number; startedAt: number };
 type ArtifactRef = { id: number; filename: string; mimeType: string; byteLength: number; saved: boolean; downloadId?: number };
 type BrowserState = { windowId: number; tabId?: number; origins: Set<string> };
 export type BrowserContext = {
   windowId: number;
-  tabs: Array<{ index: number; current: boolean; title?: string; url?: string }>;
+  tabs: Array<{ index: number; tabId?: number; current: boolean; title?: string; url?: string }>;
 };
-type NetworkRecord = {
-  requestId: string; method: string; url: string; requestHeaders: Record<string, string>; requestBody?: string;
-  status?: number; statusText?: string; responseHeaders?: Record<string, string>; failed?: string; resourceType?: string;
-};
-type RouteRule = { pattern: string; status?: number; body?: string; contentType?: string; headers?: Record<string, string>; removeHeaders?: string[] };
 
 function abortError(): DOMException {
   return new DOMException("Operation aborted", "AbortError");
@@ -90,10 +89,6 @@ function base64ByteLength(base64: string): number {
   return Math.floor(base64.length * 3 / 4) - (base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0);
 }
 
-function globPattern(pattern: string): string {
-  return pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\u0000/g, ".*");
-}
-
 export function ensureSidePanelInstanceUrl(): string {
   const url = new URL(globalThis.location.href);
   if (!url.hash.startsWith("#side-agent-instance=")) {
@@ -105,84 +100,8 @@ export function ensureSidePanelInstanceUrl(): string {
 
 function expressionFor(code: string): string {
   return `(async () => {
-    const __nativeChrome = globalThis.chrome;
-    const __bridge = globalThis[${JSON.stringify(BRIDGE_KEY)}];
-    const __state = globalThis[${JSON.stringify(STATE_KEY)}];
-    const __guard = globalThis.__surfWaxGuard;
     const browser = globalThis[${JSON.stringify(BROWSER_KEY)}];
-    const __mark = async (tabId) => { if (Number.isInteger(tabId)) await __guard?.mark(tabId); };
-    const __pageApi = (name) => new Proxy(__nativeChrome[name], {
-      get(target, property, receiver) {
-        const value = Reflect.get(target, property, receiver);
-        if (typeof value !== "function") return value;
-        if (name === "downloads" && property === "download") return (...args) => {
-          if (!__state.run.allowDownloads) throw new Error("CommandError[download-not-authorized]: Set save=true only when the user explicitly requested a local download.");
-          return Reflect.apply(value, target, args);
-        };
-        if (name === "tabs" && property === "connect") return (...args) => {
-          void __mark(args[0]);
-          return Reflect.apply(value, target, args);
-        };
-        if (name === "tabs" && !["update", "create", "reload", "goBack", "goForward", "sendMessage", "move", "remove", "discard", "duplicate", "group", "ungroup", "highlight", "captureVisibleTab"].includes(property)) return value;
-        return async (...args) => {
-          if (name === "scripting") await __mark(args[0]?.target?.tabId);
-          if (name === "pageCapture" && property === "saveAsMHTML") await __mark(args[0]?.tabId);
-          if (name === "tabs" && property !== "captureVisibleTab") await __mark(args[0]);
-          if (name === "tabs" && property === "captureVisibleTab") {
-            const [active] = await __nativeChrome.tabs.query({ active: true, ...(Number.isInteger(args[0]) ? { windowId: args[0] } : { currentWindow: true }) });
-            await __mark(active?.id);
-          }
-          const result = await Reflect.apply(value, target, args);
-          if (name === "tabs" && property === "create") await __mark(result?.id);
-          if (name === "tabs" && property === "update" && !Number.isInteger(args[0])) await __mark(result?.id);
-          return result;
-        };
-      }
-    });
-    const __debugger = new Proxy(__nativeChrome.debugger, {
-      get(target, property, receiver) {
-        if (property === "onEvent" || property === "onDetach") return __bridge[property];
-        const value = Reflect.get(target, property, receiver);
-        return typeof value === "function" ? (...args) => {
-          if (property !== "detach" && (__state.run.aborted || __state.lifetime.aborted)) throw new DOMException("Operation aborted", "AbortError");
-          return (async () => {
-            if (property === "attach" || property === "sendCommand") {
-              let tabId = args[0]?.tabId;
-              if (!Number.isInteger(tabId) && args[0]?.targetId) {
-                const targets = await __nativeChrome.debugger.getTargets();
-                tabId = targets.find((item) => item.id === args[0].targetId)?.tabId;
-              }
-              await __mark(tabId);
-            }
-            return __bridge.call(property, args);
-          })().then(async (result) => {
-            if (property !== "detach" && (__state.run.aborted || __state.lifetime.aborted)) {
-              if (property === "attach") await __bridge.call("detach", [args[0]]).catch(() => undefined);
-              throw new DOMException("Operation aborted", "AbortError");
-            }
-            return result;
-          });
-        } : value;
-      }
-    });
-    const chrome = new Proxy(__nativeChrome, {
-      get(target, property, receiver) {
-        return property === "capabilities" ? async () => {
-          const report = await __bridge.call("capabilities", []);
-          report.web = {
-            languageModel: "LanguageModel" in globalThis,
-            summarizer: "Summarizer" in globalThis,
-            translator: "Translator" in globalThis,
-            languageDetector: "LanguageDetector" in globalThis,
-            webMcp: Boolean(document.modelContext),
-          };
-          return report;
-        }
-          : property === "debugger" ? __debugger
-          : ["scripting", "tabs", "pageCapture", "downloads"].includes(property) && target[property] ? __pageApi(property)
-          : Reflect.get(target, property, receiver);
-      }
-    });
+    const chrome = undefined;
     const result = await (async () => {
 ${code}
     })();
@@ -289,22 +208,17 @@ export class ChromeExecutor {
   private activeSignal?: AbortSignal;
   private activeContext: ExecutionContext = {};
   private browserState?: BrowserState;
-  private readonly network = new Map<number, NetworkRecord[]>();
+  private endingRun?: Promise<void>;
+  private readonly diagnostics: BrowserDiagnostics;
   private readonly networkEnabled = new Set<number>();
-  private readonly routes = new Map<number, RouteRule[]>();
-  private readonly consoleMessages = new Map<number, Array<{ level: string; text: string; timestamp?: number }>>();
   private readonly dialogs = new Map<number, { type: string; message: string; defaultPrompt?: string }>();
-  private readonly traceWaiters = new Map<number, (stream?: string) => void>();
-  private readonly tracingTabs = new Set<number>();
-  private readonly videoStates = new Map<number, {
-    filename: string; canvas: HTMLCanvasElement; context: CanvasRenderingContext2D; recorder: MediaRecorder; chunks: Blob[];
-    stopped: Promise<Blob>; stop: () => void; actions?: { durationMs: number; position: string; cursor: string }; overlay?: { title: string; description?: string; until: number };
-  }>();
+  private readonly heldInput = new Map<number, { x: number; y: number; buttons: Set<string>; keys: Map<string, Record<string, unknown>> }>();
 
   constructor(options: { chromeApi?: ExecutorChrome; targetUrl?: string; logger?: EventLogger } = {}) {
     this.chromeApi = options.chromeApi ?? globalThis.chrome as ExecutorChrome;
     this.targetUrl = options.targetUrl ?? ensureSidePanelInstanceUrl();
     this.logger = options.logger;
+    this.diagnostics = new BrowserDiagnostics(this.logger);
     if (!this.chromeApi?.debugger) throw new Error("Chrome extension debugger API is unavailable");
     const pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason: Error) => void }>();
     const listeners = { onEvent: new Set<(...args: any[]) => void>(), onDetach: new Set<(...args: any[]) => void>() };
@@ -352,7 +266,7 @@ export class ChromeExecutor {
         return new Promise((resolve, reject) => {
           const id = globalThis.crypto.randomUUID();
           pending.set(id, { resolve, reject });
-          try { port.postMessage({ id, method, args }); }
+          try { port.postMessage({ id, method, args, ...getRunIdentity(), operationId: crypto.randomUUID() }); }
           catch (error) {
             disconnect(port, error instanceof Error ? error : new Error(String(error)));
             try { port.disconnect(); } catch { /* The extension context may already be gone. */ }
@@ -387,7 +301,15 @@ export class ChromeExecutor {
     (globalThis as Record<string, unknown>)[BRIDGE_KEY] = this.bridge;
     (globalThis as Record<string, unknown>)[PAGE_KEY] = { create: (tabId?: number) => this.automation.createPage(tabId) };
     (globalThis as Record<string, unknown>)[BROWSER_KEY] = {
-      page: (tabId?: number) => this.automation.createPage(tabId),
+      page: async (tabId?: number) => {
+        const state = await this.currentBrowserState();
+        if (tabId !== undefined) {
+          const tab = await this.chromeApi.tabs.get(tabId);
+          if (tab.windowId !== state.windowId) throw new Error("CommandError[invalid-tab-id]: Tab is outside the bound window");
+          state.tabId = tabId;
+        }
+        return this.pageFor(state);
+      },
       runIn: async (target: ChromeTarget | { tabId: number }, code: string) => {
         if (target && typeof target === "object" && !("kind" in target) && Number.isInteger(target.tabId)) {
           const value = await this.awaitAbort(this.automation.pageValue(target.tabId, pageExpressionFor(code)), this.activeSignal);
@@ -412,11 +334,16 @@ export class ChromeExecutor {
   }
 
   executeBrowser(input: BrowserInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+    const progress: BatchProgress = { completed: [], index: 0, startedAt: performance.now() };
     return this.enqueueAbortable(
-      (combined) => this.executeBrowserTimed(input, combined, context), signal,
+      (combined) => this.executeBrowserTimed(input, combined, context, progress), signal,
       input.mode === "act" ? input.timeoutMs ?? 10_000 : input.mode === "result" ? undefined : input.timeoutMs,
       input.mode !== "result" && input.mode !== "observe",
-    );
+    ).catch((error) => {
+      if (input.mode !== "act") throw error;
+      const failure = this.structuredError(error);
+      return { ok: false, error: failure, completed: [...progress.completed], failed: progress.index < input.steps.length ? { index: progress.index, step: input.steps[progress.index], error: failure } : null, notRun: input.steps.slice(progress.index + 1), elapsedMs: performance.now() - progress.startedAt };
+    });
   }
 
   /** Internal compatibility path for restored tests/conversations; it is not model-visible. */
@@ -425,10 +352,11 @@ export class ChromeExecutor {
   }
 
   executeCommand(name: CommandName, input: Record<string, any>, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+    if (!COMMAND_NAMES.includes(name)) return Promise.reject(new Error(`CommandError[unsupported]: ${name}`));
     return this.enqueueAbortable(
       (combined) => this.executeCommandTimed(name, input, combined, context), signal,
       input.timeoutMs ?? (this.commandNeedsTimeout(name) ? 10_000 : undefined),
-      !["snapshot", "find", "tab-list", "requests", "request", "request-headers", "request-body", "response-headers", "response-body", "route-list", "cookie-list", "cookie-get", "localstorage-list", "localstorage-get", "sessionstorage-list", "sessionstorage-get"].includes(name),
+      !["snapshot", "find", "tab-list", "requests", "request", "request-headers", "request-body", "response-headers", "response-body"].includes(name),
     );
   }
 
@@ -455,11 +383,12 @@ export class ChromeExecutor {
       this.automation.setContext({ ...context, signal });
       this.activeSignal = signal;
       this.activeContext = context;
+      this.diagnostics.bind(context);
       const result = await this.executeCommandNow(name, input);
       throwIfAborted(signal);
       return result;
     } catch (error) {
-      if (signal?.aborted) { await this.automation.abortSessions(); this.browserState = undefined; }
+      if (signal?.aborted) { await this.stopBrowserOperations(); }
       this.recordExecutionFailure(error, { code: name }, context);
       throw error;
     } finally {
@@ -470,7 +399,7 @@ export class ChromeExecutor {
   }
 
   private commandNeedsTimeout(name: CommandName): boolean {
-    return !["recording-start", "recording-stop", "tracing-start", "tracing-stop", "video-start", "video-stop", "video-chapter", "video-show-actions", "video-hide-actions"].includes(name);
+    return name !== "artifact-save";
   }
 
   private async executeCommandNow(name: CommandName, input: Record<string, any>): Promise<unknown> {
@@ -485,13 +414,12 @@ export class ChromeExecutor {
       await this.rememberOrigin(state, tab.url);
       return this.tabsOf(state);
     }
-    if (name === "tab-select") return this.selectTab(state, input.index);
-    if (name === "tab-close") return this.closeTab(state, input.index);
+    if (name === "tab-select") return this.selectTab(state, input.index, input.tabId);
+    if (name === "tab-close") return this.closeTab(state, input.index, input.tabId);
 
     const page = await this.pageFor(state);
     throwIfAborted(this.activeSignal);
     const tabId = page.tabId;
-    await this.annotateVideo(tabId, name, input);
     if (name === "goto") return this.withPageStatus(state, await page.goto(input.url));
     if (name === "go-back") return this.withPageStatus(state, await page.goBack());
     if (name === "go-forward") return this.withPageStatus(state, await page.goForward());
@@ -503,14 +431,16 @@ export class ChromeExecutor {
     }
     if (name === "press") return this.withPageStatus(state, await page.press(input.key));
     if (name === "keydown" || name === "keyup") {
-      await this.bridgeCommand({ tabId }, "Input.dispatchKeyEvent", { type: name === "keydown" ? "rawKeyDown" : "keyUp", key: input.key, code: input.key });
+      await this.automation.keyState(tabId, name, input.key);
       return this.withPageStatus(state, { performed: true });
     }
     if (["mousemove", "mousedown", "mouseup", "mousewheel"].includes(name)) {
-      const params = name === "mousemove" ? { type: "mouseMoved", x: input.x, y: input.y }
-        : name === "mousedown" ? { type: "mousePressed", button: input.button ?? "left", clickCount: 1 }
-        : name === "mouseup" ? { type: "mouseReleased", button: input.button ?? "left", clickCount: 1 }
-        : { type: "mouseWheel", x: 0, y: 0, deltaX: input.dx, deltaY: input.dy };
+      const held = this.inputState(tabId);
+      const mask = [...held.buttons].reduce((result, button) => result | (button === "left" ? 1 : button === "right" ? 2 : 4), 0);
+      const params = name === "mousemove" ? { type: "mouseMoved", x: input.x, y: input.y, buttons: mask }
+        : name === "mousedown" ? { type: "mousePressed", x: held.x, y: held.y, button: input.button ?? "left", buttons: mask | (input.button === "right" ? 2 : input.button === "middle" ? 4 : 1), clickCount: input.clickCount ?? 1 }
+        : name === "mouseup" ? { type: "mouseReleased", x: held.x, y: held.y, button: input.button ?? "left", buttons: mask & ~(input.button === "right" ? 2 : input.button === "middle" ? 4 : 1), clickCount: input.clickCount ?? 1 }
+        : { type: "mouseWheel", x: held.x, y: held.y, buttons: mask, deltaX: input.dx, deltaY: input.dy };
       await this.bridgeCommand({ tabId }, "Input.dispatchMouseEvent", params);
       return this.withPageStatus(state, { performed: true });
     }
@@ -551,23 +481,11 @@ export class ChromeExecutor {
       this.dialogs.delete(tabId);
       return { handled: true, dialog };
     }
-    if (name === "resize") {
-      await this.bridgeCommand({ tabId }, "Emulation.setDeviceMetricsOverride", { width: input.width, height: input.height, deviceScaleFactor: 1, mobile: false });
-      return { width: input.width, height: input.height };
-    }
-    if (name === "delete-data") return this.deleteBrowserData(state);
     if (name === "screenshot") return this.captureScreenshot(page, input);
     if (name === "pdf") return this.capturePdf(tabId, input.filename, input.save);
-    if (name.startsWith("localstorage-") || name.startsWith("sessionstorage-")) return this.storageCommand(name, page, input);
-    if (name.startsWith("cookie-")) return this.cookieCommand(name, page, input);
-    if (["requests", "request", "request-headers", "request-body", "response-headers", "response-body", "route", "route-list", "unroute", "network-state-set"].includes(name)) return this.networkCommand(name, tabId, input);
+    if (["requests", "request", "request-headers", "request-body", "response-headers", "response-body"].includes(name)) return this.networkCommand(name, tabId, input);
     if (name === "console") return this.consoleCommand(tabId, input);
     if (name === "run-code") return this.runPageCode(tabId, input.code, input.save);
-    if (name === "recording-start" || name === "recording-stop") return this.recordingCommand(name, page);
-    if (name === "tracing-start" || name === "tracing-stop") return this.tracingCommand(name, tabId, input.filename, input.save);
-    if (name.startsWith("video-")) return this.videoCommand(name, tabId, input);
-    if (name === "generate-locator") return this.generateLocator(page, input.target);
-    if (name === "highlight") return this.highlight(page, input);
     throw new Error(`CommandError[unsupported]: ${name}`);
   }
 
@@ -580,7 +498,7 @@ export class ChromeExecutor {
     else if (name === "hover") result = await subject.hover();
     else if (name === "fill") { result = await subject.fill(input.text); if (input.submit) { throwIfAborted(this.activeSignal); await subject.press("Enter"); } }
     else if (name === "select") result = await subject.selectOption(input.values);
-    else if (name === "upload") { const files = await this.normalizeFiles(input.files); throwIfAborted(this.activeSignal); result = await subject.setInputFiles(files); }
+    else if (name === "upload") { const files = await this.normalizeFiles(input.files); throwIfAborted(this.activeSignal); result = input.target ? await subject.setInputFiles(files) : await page.upload(files); }
     else if (name === "check") result = await subject.check();
     else if (name === "uncheck") result = await subject.uncheck();
     else if (name === "drop") {
@@ -598,7 +516,7 @@ export class ChromeExecutor {
 
   private locatorFor(page: any, raw: unknown): any {
     const target = parseCommandTarget(raw);
-    if ("point" in target) return { click: () => page.point(target.point.observationId, target.point.x, target.point.y, "click"), dblclick: () => page.point(target.point.observationId, target.point.x, target.point.y, "dblclick"), hover: () => page.point(target.point.observationId, target.point.x, target.point.y, "hover") };
+    if ("point" in target) return { click: (options?: unknown) => page.point(target.point.observationId, target.point.x, target.point.y, "click", options), dblclick: (options?: unknown) => page.point(target.point.observationId, target.point.x, target.point.y, "dblclick", options), hover: () => page.point(target.point.observationId, target.point.x, target.point.y, "hover") };
     if ("ref" in target) return page.ref(target.ref);
     let scope = target.frame ? page.frameLocator(target.frame.value) : page;
     const options = { exact: target.exact };
@@ -631,7 +549,7 @@ export class ChromeExecutor {
   async browserContext(): Promise<BrowserContext> {
     const state = await this.currentBrowserState();
     const tabs = await this.tabsOf(state);
-    return { windowId: state.windowId, tabs: tabs.map(({ index, current, title, url }) => ({ index, current, title, url })) };
+    return { windowId: state.windowId, tabs: tabs.map(({ index, id, current, title, url }) => ({ index, tabId: id, current, title, url })) };
   }
 
   private async currentBrowserState(): Promise<BrowserState> {
@@ -639,7 +557,7 @@ export class ChromeExecutor {
     if (existing) {
       const window = await this.chromeApi.windows.get(existing.windowId).catch(() => undefined);
       if (window) return existing;
-      this.browserState = undefined;
+      throw new Error("CommandError[window-closed]: The bound Chrome window was closed");
     }
     const window = await this.chromeApi.windows.getCurrent({ populate: true });
     if (!Number.isInteger(window.id)) throw new Error("CommandError[no-window]: Could not resolve the current Chrome window");
@@ -659,20 +577,23 @@ export class ChromeExecutor {
     return tabs.map((tab, index) => ({ index, current: tab.id === state.tabId || !state.tabId && Boolean(tab.active), id: tab.id, title: tab.title, url: tab.url }));
   }
 
-  private async selectTab(state: BrowserState, index: number): Promise<unknown> {
+  private async selectTab(state: BrowserState, index?: number, tabId?: number): Promise<unknown> {
     const tabs = await this.chromeApi.tabs.query({ windowId: state.windowId });
-    const tab = tabs[index];
-    if (!tab?.id) throw new Error(`CommandError[invalid-tab-index]: ${index}`);
+    if ((index === undefined) === (tabId === undefined)) throw new Error("CommandError[invalid-tab-target]: Exactly one of tabId or index is required");
+    const tab = tabId === undefined ? tabs[index!] : tabs.find((item) => item.id === tabId);
+    if (!tab?.id) throw new Error(`CommandError[invalid-tab-${tabId === undefined ? "index" : "id"}]: ${tabId ?? index}`);
     await this.chromeApi.tabs.update(tab.id, { active: true });
     state.tabId = tab.id;
     await this.rememberOrigin(state, tab.url);
     return this.tabsOf(state);
   }
 
-  private async closeTab(state: BrowserState, index?: number): Promise<unknown> {
+  private async closeTab(state: BrowserState, index?: number, tabId?: number): Promise<unknown> {
     const tabs = await this.chromeApi.tabs.query({ windowId: state.windowId });
-    const tab = index === undefined ? tabs.find((item) => item.id === state.tabId) ?? tabs.find((item) => item.active) : tabs[index];
-    if (!tab?.id) throw new Error(`CommandError[invalid-tab-index]: ${String(index)}`);
+    if (index !== undefined && tabId !== undefined) throw new Error("CommandError[invalid-tab-target]: Use tabId or index, not both");
+    const tab = tabId !== undefined ? tabs.find((item) => item.id === tabId) : index === undefined ? tabs.find((item) => item.id === state.tabId) ?? tabs.find((item) => item.active) : tabs[index];
+    if (!tab?.id) throw new Error(`CommandError[invalid-tab-${tabId === undefined ? "index" : "id"}]: ${String(tabId ?? index)}`);
+    await this.detachTabRuntime(tab.id);
     await this.chromeApi.tabs.remove(tab.id);
     const remaining = await this.chromeApi.tabs.query({ windowId: state.windowId });
     state.tabId = remaining.find((item) => item.active)?.id ?? remaining[0]?.id;
@@ -719,11 +640,17 @@ export class ChromeExecutor {
       type: "tool.result.data",
       conversationId: this.activeContext.conversationId,
       toolCallId: this.activeContext.toolCallId,
+      ...this.activeContext.logIdentity,
       content: { filename, mimeType, byteLength },
       output: { filename, mimeType, base64 },
     });
     if (!event) throw new Error("CommandError[artifact-log-unavailable]: The canonical event log stopped accepting events");
-    if (save) throwIfAborted(this.activeSignal);
+    const artifact = { id: event.id, filename, mimeType, byteLength, saved: false };
+    if (save) {
+      throwIfAborted(this.activeSignal);
+      try { await ensureDownloadPermission(this.activeSignal, artifact); } catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { artifact }); }
+      throwIfAborted(this.activeSignal);
+    }
     const downloadId = save ? await this.chromeApi.downloads.download({ url: `data:${mimeType};base64,${base64}`, filename, saveAs: false }) : undefined;
     return { id: event.id, filename, mimeType, byteLength, saved: save, ...(downloadId === undefined ? {} : { downloadId }) };
   }
@@ -742,6 +669,9 @@ export class ChromeExecutor {
       throw new Error(`CommandError[invalid-artifact]: Artifact ${id} has no downloadable data`);
     }
     const filename = requested ?? stored.filename;
+    throwIfAborted(this.activeSignal);
+    const artifact = { id, filename, mimeType: stored.mimeType, byteLength: base64ByteLength(stored.base64), saved: false };
+    try { await ensureDownloadPermission(this.activeSignal, artifact); } catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { artifact }); }
     throwIfAborted(this.activeSignal);
     const downloadId = await this.chromeApi.downloads.download({ url: `data:${stored.mimeType};base64,${stored.base64}`, filename, saveAs: false });
     return { artifact: { id, filename, mimeType: stored.mimeType, byteLength: base64ByteLength(stored.base64), saved: true, downloadId } };
@@ -767,26 +697,21 @@ export class ChromeExecutor {
 
   private async captureScreenshot(page: any, input: Record<string, any>): Promise<unknown> {
     const format = input.type ?? (String(input.filename ?? "").match(/\.(jpe?g|webp)$/i)?.[1]?.replace("jpg", "jpeg") || "png");
-    const observation = !input.target && !input.fullPage ? await page.observe("visual") : undefined;
-    if (observation && format === "jpeg") {
-      const screenshot = observation.screenshot;
-      const filename = input.filename ?? timestamped("page", "jpg");
-      const artifact = await this.storeArtifact(filename, screenshot.data, screenshot.mediaType, input.save);
-      return { ...observation, artifact, screenshot: { mediaType: screenshot.mediaType, artifactId: artifact.id, width: screenshot.width, height: screenshot.height, scale: screenshot.scale } };
-    }
     const params: Record<string, unknown> = { format, fromSurface: true, captureBeyondViewport: Boolean(input.fullPage) };
     if (input.fullPage) {
       const metrics = await this.bridgeCommand({ tabId: page.tabId }, "Page.getLayoutMetrics", {});
-      if (metrics.contentSize) params.clip = { ...metrics.contentSize, scale: 1 };
+      const contentSize = metrics.cssContentSize ?? metrics.contentSize;
+      if (contentSize) params.clip = { ...contentSize, scale: 1 };
     } else if (input.target) {
-      const box = await this.locatorFor(page, input.target).evaluate("el => { const r = el.getBoundingClientRect(); return {x:r.x,y:r.y,width:r.width,height:r.height}; }");
+      const box = await this.locatorFor(page, input.target).evaluate("el => { const r = el.getBoundingClientRect(); return {x:r.x + scrollX,y:r.y + scrollY,width:r.width,height:r.height}; }");
       params.clip = { ...box, scale: input.hires ? await page.evaluate("() => devicePixelRatio") : 1 };
     }
-    const captured = await this.bridgeCommand({ tabId: page.tabId }, "Page.captureScreenshot", params);
+    const observation = await page.observe("visual", undefined, params);
+    const captured = observation.screenshot;
     const mediaType = `image/${format}`;
     const filename = input.filename ?? timestamped("page", format === "jpeg" ? "jpg" : format);
     const artifact = await this.storeArtifact(filename, captured.data, mediaType, input.save);
-    return { ...(observation ? { observationId: observation.observationId, viewport: observation.viewport } : {}), artifact, screenshot: { mediaType, artifactId: artifact.id }, page: { url: await page.url(), title: await page.title() } };
+    return { observationId: observation.observationId, viewport: observation.viewport, artifact, screenshot: { mediaType, artifactId: artifact.id, width: captured.width, height: captured.height, scale: captured.scale, origin: captured.origin }, page: { url: await page.url(), title: await page.title() } };
   }
 
   private async capturePdf(tabId: number, requested?: string, save = false): Promise<unknown> {
@@ -795,55 +720,12 @@ export class ChromeExecutor {
     return { artifact: await this.storeArtifact(filename, result.data, "application/pdf", save) };
   }
 
-  private async storageCommand(name: string, page: any, input: Record<string, any>): Promise<unknown> {
-    const storage = name.startsWith("localstorage") ? "localStorage" : "sessionStorage";
-    const action = name.slice(name.indexOf("-") + 1);
-    if (action === "list") return page.evaluate(`() => Object.fromEntries(Object.entries(${storage}))`);
-    if (action === "get") return page.evaluate(`key => ${storage}.getItem(key)`, input.key);
-    if (action === "set") return page.evaluate(`entry => { ${storage}.setItem(entry.key, entry.value); return true; }`, { key: input.key, value: input.value });
-    if (action === "delete") return page.evaluate(`key => { ${storage}.removeItem(key); return true; }`, input.key);
-    return page.evaluate(`() => { ${storage}.clear(); return true; }`);
-  }
-
-  private async cookieCommand(name: string, page: any, input: Record<string, any>): Promise<unknown> {
-    const url = String(await page.url());
-    if (name === "cookie-list") {
-      const cookies = await this.chromeApi.cookies.getAll(input.domain ? { domain: input.domain } : { url });
-      return input.path ? cookies.filter((cookie) => cookie.path === input.path) : cookies;
-    }
-    if (name === "cookie-get") return this.chromeApi.cookies.get({ url, name: input.name });
-    if (name === "cookie-set") {
-      throwIfAborted(this.activeSignal);
-      return this.chromeApi.cookies.set({
-        url, name: input.name, value: input.value, ...(input.domain ? { domain: input.domain } : {}), path: input.path ?? "/",
-        ...(input.expires === undefined ? {} : { expirationDate: input.expires }), ...(input.httpOnly === undefined ? {} : { httpOnly: input.httpOnly }),
-        ...(input.secure === undefined ? {} : { secure: input.secure }), ...(input.sameSite ? { sameSite: input.sameSite.toLowerCase() as chrome.cookies.SameSiteStatus } : {}),
-      });
-    }
-    if (name === "cookie-delete") {
-      throwIfAborted(this.activeSignal);
-      return this.chromeApi.cookies.remove({ url, name: input.name });
-    }
-    throw new Error(`CommandError[unsupported]: ${name}`);
-  }
-
-  private async deleteBrowserData(state: BrowserState): Promise<unknown> {
-    const origins = [...state.origins];
-    if (origins.length) {
-      throwIfAborted(this.activeSignal);
-      await this.chromeApi.browsingData.remove({ origins: origins as [string, ...string[]] }, { cache: true, cacheStorage: true, cookies: true, fileSystems: true, indexedDB: true, localStorage: true, serviceWorkers: true, webSQL: true });
-    }
-    return { deletedOrigins: origins };
-  }
-
   private async enableObservation(tabId: number): Promise<void> {
     if (this.networkEnabled.has(tabId)) return;
     this.networkEnabled.add(tabId);
+    const debuggees = await this.automation.observationDebuggees(tabId);
     await Promise.all([
-      this.bridgeCommand({ tabId }, "Network.enable", {}),
-      this.bridgeCommand({ tabId }, "Runtime.enable", {}),
-      this.bridgeCommand({ tabId }, "Log.enable", {}),
-      this.bridgeCommand({ tabId }, "Page.setInterceptFileChooserDialog", { enabled: true }),
+      ...debuggees.flatMap((debuggee) => [this.bridgeCommand(debuggee, "Network.enable", {}), this.bridgeCommand(debuggee, "Log.enable", {}), this.bridgeCommand(debuggee, "Page.setInterceptFileChooserDialog", { enabled: true })]),
     ]).catch((error) => { this.networkEnabled.delete(tabId); throw error; });
   }
 
@@ -852,88 +734,20 @@ export class ChromeExecutor {
     if (!Number.isInteger(tabId)) return;
     if (method === "Page.javascriptDialogOpening") this.dialogs.set(tabId!, { type: params.type, message: params.message, defaultPrompt: params.defaultPrompt });
     if (method === "Page.javascriptDialogClosed") this.dialogs.delete(tabId!);
-    if (method === "Page.frameNavigated" && !params?.frame?.parentId) {
-      this.network.set(tabId!, []);
-      this.consoleMessages.set(tabId!, []);
+    if (!this.networkEnabled.has(tabId!)) return;
+    this.diagnostics.handle(source, method, params);
+    if (method === "Target.attachedToTarget" && params?.targetInfo?.type === "iframe") {
+      const debuggee = { tabId, sessionId: params.sessionId };
+      await Promise.all([
+        ...["Network", "Log"].map((domain) => this.bridgeCommand(debuggee, `${domain}.enable`, {}).catch(() => undefined)),
+        this.bridgeCommand(debuggee, "Page.setInterceptFileChooserDialog", { enabled: true }).catch(() => undefined),
+      ]);
     }
-    if (method === "Network.requestWillBeSent") {
-      const records = this.network.get(tabId!) ?? [];
-      const existing = records.find((record) => record.requestId === params.requestId);
-      const record = existing ?? { requestId: params.requestId, method: params.request.method, url: params.request.url, requestHeaders: params.request.headers ?? {} };
-      Object.assign(record, { method: params.request.method, url: params.request.url, requestHeaders: params.request.headers ?? {}, requestBody: params.request.postData, resourceType: params.type });
-      if (!existing) records.push(record);
-      this.network.set(tabId!, records);
-    }
-    if (method === "Network.responseReceived") {
-      const record = this.network.get(tabId!)?.find((item) => item.requestId === params.requestId);
-      if (record) Object.assign(record, { status: params.response.status, statusText: params.response.statusText, responseHeaders: params.response.headers ?? {}, resourceType: params.type ?? record.resourceType });
-    }
-    if (method === "Network.loadingFailed") {
-      const record = this.network.get(tabId!)?.find((item) => item.requestId === params.requestId);
-      if (record) record.failed = params.errorText;
-    }
-    if (method === "Runtime.consoleAPICalled") {
-      const messages = this.consoleMessages.get(tabId!) ?? [];
-      messages.push({ level: params.type === "warning" ? "warning" : params.type, text: (params.args ?? []).map((arg: any) => arg.value ?? arg.description ?? arg.type).join(" "), timestamp: params.timestamp });
-      this.consoleMessages.set(tabId!, messages);
-    }
-    if (method === "Log.entryAdded") {
-      const messages = this.consoleMessages.get(tabId!) ?? [];
-      messages.push({ level: params.entry.level === "warning" ? "warning" : params.entry.level, text: params.entry.text, timestamp: params.entry.timestamp });
-      this.consoleMessages.set(tabId!, messages);
-    }
-    if (method === "Fetch.requestPaused") await this.handlePausedRequest(tabId!, params);
-    if (method === "Tracing.tracingComplete") this.traceWaiters.get(tabId!)?.(params.stream);
-    if (method === "Page.screencastFrame") await this.handleVideoFrame(tabId!, params);
-  }
-
-  private async handlePausedRequest(tabId: number, event: any): Promise<void> {
-    const rules = this.routes.get(tabId) ?? [];
-    const rule = rules.find((candidate) => new RegExp(`^${globPattern(candidate.pattern)}$`).test(event.request.url));
-    if (!rule) { await this.bridgeCommand({ tabId }, "Fetch.continueRequest", { requestId: event.requestId }); return; }
-    if (rule.body !== undefined || rule.status !== undefined) {
-      const headers = Object.entries({ ...(rule.contentType ? { "content-type": rule.contentType } : {}), ...(rule.headers ?? {}) }).map(([name, value]) => ({ name, value }));
-      const body = new TextEncoder().encode(rule.body ?? "");
-      let binary = ""; for (const byte of body) binary += String.fromCharCode(byte);
-      await this.bridgeCommand({ tabId }, "Fetch.fulfillRequest", { requestId: event.requestId, responseCode: rule.status ?? 200, responseHeaders: headers, body: btoa(binary) });
-      return;
-    }
-    const removed = new Set((rule.removeHeaders ?? []).map((name) => name.toLocaleLowerCase()));
-    const headers = Object.entries({ ...event.request.headers, ...(rule.headers ?? {}) }).filter(([name]) => !removed.has(name.toLocaleLowerCase())).map(([name, value]) => ({ name, value: String(value) }));
-    await this.bridgeCommand({ tabId }, "Fetch.continueRequest", { requestId: event.requestId, headers });
   }
 
   private async networkCommand(name: string, tabId: number, input: Record<string, any>): Promise<unknown> {
-    if (name === "requests") {
-      const records = this.network.get(tabId) ?? [];
-      if (input.clear) { this.network.set(tabId, []); return { cleared: true }; }
-      const matcher = input.filter ? new RegExp(input.filter) : undefined;
-      return records.flatMap((record, offset) => {
-        const isStatic = ["Image", "Font", "Stylesheet", "Script", "Media"].includes(record.resourceType ?? "") && !record.failed && (record.status ?? 0) < 400;
-        return (!input.static && isStatic) || matcher && !matcher.test(record.url) ? [] : [{ index: offset + 1, method: record.method, url: record.url, status: record.failed ? "FAILED" : record.status, statusText: record.failed ?? record.statusText }];
-      });
-    }
-    if (name === "route-list") return this.routes.get(tabId) ?? [];
-    if (name === "route") {
-      const rules = this.routes.get(tabId) ?? [];
-      rules.push({ pattern: input.pattern, status: input.status, body: input.body, contentType: input.contentType, headers: input.headers, removeHeaders: input.removeHeaders });
-      this.routes.set(tabId, rules);
-      await this.bridgeCommand({ tabId }, "Fetch.enable", { patterns: rules.map((rule) => ({ urlPattern: rule.pattern })) });
-      return rules;
-    }
-    if (name === "unroute") {
-      const rules = input.pattern ? (this.routes.get(tabId) ?? []).filter((rule) => rule.pattern !== input.pattern) : [];
-      this.routes.set(tabId, rules);
-      if (rules.length) await this.bridgeCommand({ tabId }, "Fetch.enable", { patterns: rules.map((rule) => ({ urlPattern: rule.pattern })) });
-      else await this.bridgeCommand({ tabId }, "Fetch.disable", {});
-      return rules;
-    }
-    if (name === "network-state-set") {
-      const offline = input.state === "offline";
-      await this.bridgeCommand({ tabId }, "Network.emulateNetworkConditions", { offline, latency: 0, downloadThroughput: offline ? 0 : -1, uploadThroughput: offline ? 0 : -1 });
-      return { state: input.state };
-    }
-    const record = (this.network.get(tabId) ?? [])[Number(input.index) - 1];
+    if (name === "requests") return this.diagnostics.requests(tabId, input);
+    const record = await this.diagnostics.request(tabId, Number(input.index));
     if (!record) throw new Error(`CommandError[invalid-request-index]: ${String(input.index)}`);
     let value: unknown;
     if (name === "request-headers") value = record.requestHeaders;
@@ -942,7 +756,7 @@ export class ChromeExecutor {
     else {
       let body: unknown = null;
       try {
-        const response = await this.bridgeCommand({ tabId }, "Network.getResponseBody", { requestId: record.requestId });
+        const response = await this.bridgeCommand(record.debuggee, "Network.getResponseBody", { requestId: record.requestId });
         body = response.base64Encoded ? { base64: response.body } : response.body;
       } catch (error) { body = { unavailable: error instanceof Error ? error.message : String(error) }; }
       value = name === "response-body" ? body : { ...record, responseBody: body };
@@ -951,12 +765,8 @@ export class ChromeExecutor {
     return value;
   }
 
-  private consoleCommand(tabId: number, input: Record<string, any>): unknown {
-    const messages = this.consoleMessages.get(tabId) ?? [];
-    if (input.clear) { this.consoleMessages.set(tabId, []); return { cleared: true }; }
-    const rank: Record<string, number> = { debug: 0, info: 1, log: 1, warning: 2, error: 3, assert: 3 };
-    const minimum = rank[input.minLevel ?? "info"] ?? 1;
-    return messages.filter((message) => (rank[message.level] ?? 1) >= minimum);
+  private consoleCommand(tabId: number, input: Record<string, any>): Promise<unknown> {
+    return this.diagnostics.console(tabId, input);
   }
 
   private async runPageCode(tabId: number, code: string, save = false): Promise<unknown> {
@@ -967,154 +777,31 @@ export class ChromeExecutor {
 return await (async (page, chrome, browser, globalThis, self, window, document, location, __surfWaxBrowser, __surfWaxDebugger, __surfWaxResult, __surfWaxResults) => (${code})(page))(page);`, target: { kind: "extension" }, save }, this.activeSignal, { ...this.activeContext, allowDownloads: save });
   }
 
-  private async recordingCommand(name: string, page: any): Promise<unknown> {
-    if (name === "recording-start") {
-      await page.evaluate(`() => {
-        globalThis.__surfWaxRecordedActions = [];
-        globalThis.__surfWaxRecorderAbort?.abort();
-        const controller = new AbortController(); globalThis.__surfWaxRecorderAbort = controller;
-        const locator = el => el.getAttribute("data-testid") ? "getByTestId(" + JSON.stringify(el.getAttribute("data-testid")) + ")"
-          : el.getAttribute("aria-label") ? "getByLabel(" + JSON.stringify(el.getAttribute("aria-label")) + ")"
-          : el.id ? "locator(" + JSON.stringify("#" + CSS.escape(el.id)) + ")"
-          : "getByText(" + JSON.stringify((el.innerText || el.textContent || el.tagName).trim().slice(0, 80)) + ")";
-        addEventListener("click", event => globalThis.__surfWaxRecordedActions.push({type:"click", locator:locator(event.target)}), {capture:true, signal:controller.signal});
-        addEventListener("change", event => { if ("value" in event.target) globalThis.__surfWaxRecordedActions.push({type:"fill", locator:locator(event.target), value:event.target.value}); }, {capture:true, signal:controller.signal});
-        addEventListener("keydown", event => { if (["Enter","Escape","Tab"].includes(event.key)) globalThis.__surfWaxRecordedActions.push({type:"press", locator:locator(event.target), key:event.key}); }, {capture:true, signal:controller.signal});
-        return true;
-      }`);
-      return { recording: true };
-    }
-    const actions = await page.evaluate(`() => { globalThis.__surfWaxRecorderAbort?.abort(); const actions = globalThis.__surfWaxRecordedActions || []; delete globalThis.__surfWaxRecorderAbort; delete globalThis.__surfWaxRecordedActions; return actions; }`) as any[];
-    const code = actions.map((action) => action.type === "fill" ? `await page.${action.locator}.fill(${JSON.stringify(action.value)});`
-      : action.type === "press" ? `await page.${action.locator}.press(${JSON.stringify(action.key)});`
-      : `await page.${action.locator}.click();`).join("\n");
-    return { recording: false, actions, code };
-  }
-
-  private async tracingCommand(name: string, tabId: number, requested?: string, save = false): Promise<unknown> {
-    if (name === "tracing-start") {
-      if (this.tracingTabs.has(tabId)) throw new Error("CommandError[trace-active]: A trace is already recording");
-      await this.bridgeCommand({ tabId }, "Tracing.start", { transferMode: "ReturnAsStream", categories: "-* ,devtools.timeline,blink.user_timing,loading,disabled-by-default-devtools.screenshot".replace("-* ,", "-*,") });
-      this.tracingTabs.add(tabId);
-      return { tracing: true };
-    }
-    if (!this.tracingTabs.has(tabId)) throw new Error("CommandError[trace-inactive]: No trace is recording");
-    const stream = new Promise<string | undefined>((resolve) => this.traceWaiters.set(tabId, resolve));
-    await this.bridgeCommand({ tabId }, "Tracing.end", {});
-    const handle = await this.awaitAbort(stream, this.activeSignal);
-    this.traceWaiters.delete(tabId); this.tracingTabs.delete(tabId);
-    if (!handle) throw new Error("CommandError[trace-failed]: Chrome returned no trace stream");
-    let trace = "";
-    while (true) {
-      const chunk = await this.bridgeCommand({ tabId }, "IO.read", { handle });
-      trace += chunk.data ?? "";
-      if (chunk.eof) break;
-    }
-    await this.bridgeCommand({ tabId }, "IO.close", { handle }).catch(() => undefined);
-    const filename = requested ?? timestamped("trace", "json");
-    const networkName = filename.replace(/\.[^.]+$/, "") + ".network.json";
-    return {
-      trace: await this.storeText(filename, trace, "application/json", save),
-      network: await this.storeText(networkName, JSON.stringify(this.network.get(tabId) ?? [], null, 2), "application/json", save),
-    };
-  }
-
-  private async videoCommand(name: string, tabId: number, input: Record<string, any>): Promise<unknown> {
-    if (name === "video-start") return this.startVideo(tabId, input);
-    const state = this.videoStates.get(tabId);
-    if (!state) throw new Error("CommandError[video-inactive]: No video is recording");
-    if (name === "video-show-actions") {
-      state.actions = { durationMs: input.durationMs ?? 500, position: input.position ?? "top-right", cursor: input.cursor ?? "pointer" };
-      return { actions: true, ...state.actions };
-    }
-    if (name === "video-hide-actions") { state.actions = undefined; return { actions: false }; }
-    if (name === "video-chapter") {
-      const duration = input.durationMs ?? 2_000;
-      state.overlay = { title: input.title, description: input.description, until: performance.now() + duration };
-      try { await this.awaitAbort(new Promise<void>((resolve) => setTimeout(resolve, duration)), this.activeSignal); }
-      finally { state.overlay = undefined; }
-      return { chapter: input.title, durationMs: duration };
-    }
-    await this.bridgeCommand({ tabId }, "Page.stopScreencast", {}).catch(() => undefined);
-    state.stop();
-    const blob = await state.stopped;
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte);
-    this.videoStates.delete(tabId);
-    return { artifact: await this.storeArtifact(state.filename, btoa(binary), "video/webm", input.save) };
-  }
-
-  private async startVideo(tabId: number, input: Record<string, any>): Promise<unknown> {
-    if (this.videoStates.has(tabId)) throw new Error("CommandError[video-active]: A video is already recording");
-    if (typeof document === "undefined" || typeof MediaRecorder === "undefined") throw new Error("CommandError[video-unavailable]: MediaRecorder is unavailable in this extension context");
-    const canvas = document.createElement("canvas");
-    canvas.width = input.width ?? 800; canvas.height = input.height ?? 600;
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("CommandError[video-unavailable]: Canvas 2D is unavailable");
-    const recorder = new MediaRecorder(canvas.captureStream(12), { mimeType: "video/webm" });
-    const chunks: Blob[] = [];
-    let finish!: (blob: Blob) => void;
-    const stopped = new Promise<Blob>((resolve) => { finish = resolve; });
-    recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
-    recorder.onstop = () => finish(new Blob(chunks, { type: "video/webm" }));
-    recorder.start(1_000);
-    this.videoStates.set(tabId, { filename: input.filename ?? timestamped("video", "webm"), canvas, context, recorder, chunks, stopped, stop: () => recorder.stop() });
-    await this.bridgeCommand({ tabId }, "Page.startScreencast", { format: "jpeg", quality: 75, maxWidth: canvas.width, maxHeight: canvas.height, everyNthFrame: 1 });
-    return { recording: true, filename: this.videoStates.get(tabId)!.filename, width: canvas.width, height: canvas.height };
-  }
-
-  private async handleVideoFrame(tabId: number, event: any): Promise<void> {
-    const state = this.videoStates.get(tabId);
-    try {
-      if (!state) return;
-      const image = await new Promise<HTMLImageElement>((resolve, reject) => { const item = new Image(); item.onload = () => resolve(item); item.onerror = reject; item.src = `data:image/jpeg;base64,${event.data}`; });
-      state.context.drawImage(image, 0, 0, state.canvas.width, state.canvas.height);
-      if (state.overlay && state.overlay.until > performance.now()) {
-        state.context.fillStyle = "rgba(0,0,0,.72)"; state.context.fillRect(0, 0, state.canvas.width, state.canvas.height);
-        state.context.fillStyle = "white"; state.context.textAlign = "center"; state.context.font = "bold 32px sans-serif"; state.context.fillText(state.overlay.title, state.canvas.width / 2, state.canvas.height / 2);
-        if (state.overlay.description) { state.context.font = "18px sans-serif"; state.context.fillText(state.overlay.description, state.canvas.width / 2, state.canvas.height / 2 + 36); }
-      }
-    } finally {
-      await this.bridgeCommand({ tabId }, "Page.screencastFrameAck", { sessionId: event.sessionId }).catch(() => undefined);
-    }
-  }
-
-  private async annotateVideo(tabId: number, name: string, input: Record<string, any>): Promise<void> {
-    const state = this.videoStates.get(tabId);
-    if (!state?.actions || name.startsWith("video-")) return;
-    state.overlay = { title: `${name}${input.target ? ` ${typeof input.target === "string" ? input.target : JSON.stringify(input.target)}` : ""}`, until: performance.now() + state.actions.durationMs };
-  }
-
-  private async generateLocator(page: any, raw: unknown): Promise<unknown> {
-    if (typeof raw === "string" && /^(?:getBy|locator\()/.test(raw)) return raw;
-    const target = parseCommandTarget(raw);
-    if ("ref" in target) {
-      const snapshot = await page.snapshot();
-      const line = String(snapshot.snapshot).split("\n").find((item) => item.includes(`[ref=${target.ref}]`));
-      const match = line && /^\s*-\s+(\S+)(?:\s+"([^"]*)")?/.exec(line);
-      return match ? `getByRole(${JSON.stringify(match[1])}, { name: ${JSON.stringify(match[2] ?? "")} })` : `ref(${JSON.stringify(target.ref)})`;
-    }
-    if ("point" in target) return `point(${target.point.x}, ${target.point.y})`;
-    const method = { role: "getByRole", text: "getByText", label: "getByLabel", placeholder: "getByPlaceholder", alt: "getByAltText", title: "getByTitle", testId: "getByTestId", css: "locator" }[target.by];
-    return target.by === "role" ? `${method}(${JSON.stringify(target.value)}${target.name ? `, { name: ${JSON.stringify(target.name)} }` : ""})` : `${method}(${JSON.stringify(target.value)})`;
-  }
-
-  private async highlight(page: any, input: Record<string, any>): Promise<unknown> {
-    if (input.hide && !input.target) return page.evaluate("() => { for (const el of document.querySelectorAll('[data-surf-wax-highlight]')) { el.style.outline = el.dataset.surfWaxOutline || ''; delete el.dataset.surfWaxHighlight; delete el.dataset.surfWaxOutline; } return true; }");
-    const locator = this.locatorFor(page, input.target);
-    return locator.evaluate(`function(el, options){
-      if (options.hide) { el.style.outline = el.dataset.surfWaxOutline || ""; delete el.dataset.surfWaxHighlight; delete el.dataset.surfWaxOutline; return true; }
-      if (!el.dataset.surfWaxHighlight) el.dataset.surfWaxOutline = el.style.outline || "";
-      el.dataset.surfWaxHighlight = "true"; el.style.outline = options.style || "3px solid #ff3b30"; return true;
-    }`, { hide: input.hide, style: input.style });
-  }
-
   private async detachTabRuntime(tabId: number): Promise<void> {
-    await this.bridgeCommand({ tabId }, "Fetch.disable", {}).catch(() => undefined);
-    await this.bridgeCommand({ tabId }, "Page.stopScreencast", {}).catch(() => undefined);
-    const video = this.videoStates.get(tabId);
-    if (video && video.recorder.state !== "inactive") video.stop();
-    this.videoStates.delete(tabId); this.routes.delete(tabId); this.network.delete(tabId); this.consoleMessages.delete(tabId); this.dialogs.delete(tabId); this.networkEnabled.delete(tabId); this.tracingTabs.delete(tabId); this.traceWaiters.delete(tabId);
+    await this.releaseInput(tabId);
+    if (this.networkEnabled.has(tabId)) await Promise.all([
+      this.bridgeCommand({ tabId }, "Network.disable", {}).catch(() => undefined),
+      this.bridgeCommand({ tabId }, "Log.disable", {}).catch(() => undefined),
+      this.bridgeCommand({ tabId }, "Page.setInterceptFileChooserDialog", { enabled: false }).catch(() => undefined),
+    ]);
+    this.diagnostics.remove(tabId); this.dialogs.delete(tabId); this.networkEnabled.delete(tabId);
+  }
+
+  private async stopBrowserOperations(): Promise<void> {
+    if (this.endingRun) return this.endingRun;
+    const cleanup = (async () => {
+      const tabs = new Set([...this.networkEnabled, ...this.heldInput.keys()]);
+      await Promise.all([...tabs].map((tabId) => this.detachTabRuntime(tabId)));
+      await this.automation.abortSessions();
+      this.diagnostics.clear();
+    })();
+    this.endingRun = cleanup;
+    try { await cleanup; } finally { if (this.endingRun === cleanup) this.endingRun = undefined; }
+  }
+
+  async endRun(): Promise<void> {
+    await this.stopBrowserOperations();
+    this.browserState = undefined;
   }
 
   private async executeTimed(input: ChromeToolInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
@@ -1129,7 +816,7 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     finally { if (timer !== undefined) clearTimeout(timer); }
   }
 
-  private async executeBrowserTimed(input: BrowserInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+  private async executeBrowserTimed(input: BrowserInput, signal?: AbortSignal, context: ExecutionContext = {}, progress?: BatchProgress): Promise<unknown> {
     if (input.mode === "result") {
       throwIfAborted(signal);
       if (!this.logger) throw new Error("Tool result log is unavailable");
@@ -1141,8 +828,15 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
       this.automation.setContext({ ...context, signal });
       this.activeSignal = signal;
       this.activeContext = context;
+      this.diagnostics.bind(context);
       if (input.mode === "run") return await this.executeNow({ code: input.code, target: input.target ?? { kind: "extension" }, timeoutMs: input.timeoutMs }, signal, context);
-      const page = await this.automation.createPage(input.tabId);
+      const state = await this.currentBrowserState();
+      if (input.tabId !== undefined) {
+        const tab = await this.chromeApi.tabs.get(input.tabId);
+        if (tab.windowId !== state.windowId) throw new Error("CommandError[invalid-tab-id]: Tab is outside the bound window");
+        state.tabId = input.tabId;
+      }
+      const page = await this.pageFor(state);
       if (input.mode === "observe") {
         if (input.detail === "visual" && !context.visualEnabled) throw new Error("AutomationError[visual-unavailable]: Image input is disabled or unsupported by the selected model");
         const result = await page.observe(input.detail === "visual" || input.detail === "auto" && context.visualEnabled ? input.detail : "semantic", input.since);
@@ -1152,9 +846,9 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
           : result;
       }
       if (input.observationId) await page.ensureObservation(input.observationId);
-      return await this.executeSteps(page, input.steps, input.observationId, context.visualEnabled ?? false);
+      return await this.executeSteps(page, input.steps, input.observationId, context.visualEnabled ?? false, progress);
     } catch (error) {
-      if (signal?.aborted) { await this.automation.abortSessions(); this.browserState = undefined; }
+      if (signal?.aborted) { await this.stopBrowserOperations(); }
       const failure = signal?.reason instanceof DOMException && signal.reason.name === "TimeoutError"
         ? new Error(`AutomationError[timeout]: ${JSON.stringify({ timeoutMs: input.timeoutMs ?? 10_000 })}`) : error;
       this.recordExecutionFailure(failure, input, context);
@@ -1166,65 +860,55 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     }
   }
 
-  private async executeSteps(page: any, steps: BrowserStep[], observationId: string | undefined, visualEnabled: boolean): Promise<unknown> {
+  private async executeSteps(page: any, steps: BrowserStep[], observationId: string | undefined, visualEnabled: boolean, progress?: BatchProgress): Promise<unknown> {
     const startedAt = performance.now();
-    const completed: Array<{ index: number; type: BrowserStep["type"]; result: unknown }> = [];
+    const completed: Array<{ index: number; type: BrowserStep["type"]; result: unknown }> = progress?.completed ?? [];
     for (let index = 0; index < steps.length; index += 1) {
       const step = steps[index]!;
+      if (progress) progress.index = index;
       try {
         throwIfAborted(this.activeSignal);
         completed.push({ index, type: step.type, result: await this.executeStep(page, step, observationId) });
+        if (this.logger && this.activeContext.conversationId && this.activeContext.toolCallId) {
+          const saved = await this.logger.append({ type: "tool.progress", conversationId: this.activeContext.conversationId,
+            ...(this.activeContext.logIdentity ?? { toolCallId: this.activeContext.toolCallId }),
+            content: { nextIndex: index + 1, steps }, output: { completed: [...completed], elapsedMs: performance.now() - startedAt } });
+          if (!saved) throw new DOMException("Could not persist the completed act step", "AbortError");
+        }
       } catch (error) {
-        if (this.activeSignal?.aborted) await this.automation.abortSessions();
+        if (this.activeSignal?.aborted) await this.stopBrowserOperations();
         let observation: unknown;
         if (!this.activeSignal?.aborted) try { observation = await page.observe(visualEnabled ? "auto" : "semantic"); } catch { /* Preserve the original failure. */ }
         return { ok: false, completed, failed: { index, step, error: this.structuredError(error) }, notRun: steps.slice(index + 1), elapsedMs: performance.now() - startedAt, ...(observation ? { observation } : {}) };
       }
     }
+    if (progress) progress.index = steps.length;
     return { ok: true, completed, elapsedMs: performance.now() - startedAt };
-  }
-
-  private locator(page: any, target: BrowserTarget): any {
-    if ("point" in target) return target;
-    if ("ref" in target) return page.ref(target.ref);
-    const selector = target as BrowserSelector;
-    let scope = selector.frame ? page.frameLocator(selector.frame.value) : page;
-    const options = { exact: selector.exact };
-    let locator = selector.by === "role" ? scope.getByRole(selector.value, { ...options, name: selector.name })
-      : selector.by === "text" ? scope.getByText(selector.value, options)
-      : selector.by === "label" ? scope.getByLabel(selector.value, options)
-      : selector.by === "placeholder" ? scope.getByPlaceholder(selector.value, options)
-      : selector.by === "alt" ? scope.getByAltText(selector.value, options)
-      : selector.by === "title" ? scope.getByTitle(selector.value, options)
-      : selector.by === "testId" ? scope.getByTestId(selector.value)
-      : scope.locator(selector.value);
-    if (selector.index !== undefined) locator = locator.nth(selector.index);
-    return locator;
   }
 
   private async executeStep(page: any, step: BrowserStep, defaultObservationId?: string): Promise<unknown> {
     if (step.type === "goto") return page.goto(step.url);
     if (step.type === "press" || step.type === "insertText") {
-      const subject = step.target ? this.locator(page, step.target) : page;
+      const subject = step.target ? this.locatorFor(page, step.target) : page;
       return step.type === "press" ? subject.press(step.key) : step.target ? subject.pressSequentially(step.text) : page.insertText(step.text);
     }
     if (step.type === "expect") {
       if (step.url) await page.waitForURL(step.url);
       if (!step.target) return { matched: true };
-      const target = this.locator(page, step.target);
+      const target = this.locatorFor(page, step.target);
       if (step.state) await target.waitFor({ state: step.state });
       if (step.text !== undefined && !String(await target.innerText()).includes(step.text)) throw new Error(`AutomationError[expectation-failed]: Expected text ${JSON.stringify(step.text)}`);
       if (step.value !== undefined && await target.inputValue() !== step.value) throw new Error(`AutomationError[expectation-failed]: Expected value ${JSON.stringify(step.value)}`);
       return { matched: true };
     }
-    if (step.type === "drag") return this.locator(page, step.from).dragTo(this.locator(page, step.to));
-    const target = this.locator(page, step.target);
-    if ("point" in step.target && ["click", "doubleClick", "hover"].includes(step.type)) {
+    if (step.type === "drag") return this.locatorFor(page, step.from).dragTo(this.locatorFor(page, step.to));
+    const target = this.locatorFor(page, step.target);
+    if ("point" in step.target && (step.type === "click" || step.type === "doubleClick" || step.type === "hover")) {
       const point = step.target.point;
-      return page.point(point.observationId || defaultObservationId, point.x, point.y, step.type === "doubleClick" ? "dblclick" : step.type);
+      return page.point(point.observationId || defaultObservationId, point.x, point.y, step.type === "doubleClick" ? "dblclick" : step.type, { button: step.button, modifiers: step.modifiers });
     }
-    if (step.type === "click") return target.click();
-    if (step.type === "doubleClick") return target.dblclick();
+    if (step.type === "click") return target.click({ button: step.button, modifiers: step.modifiers });
+    if (step.type === "doubleClick") return target.dblclick({ button: step.button, modifiers: step.modifiers });
     if (step.type === "hover") return target.hover();
     if (step.type === "fill") return target.fill(step.value);
     if (step.type === "clear") return target.clear();
@@ -1234,10 +918,10 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     throw new Error(`AutomationError[unsupported]: ${JSON.stringify({ step })}`);
   }
 
-  private structuredError(error: unknown): { code: string; message: string; detail?: unknown } {
+  private structuredError(error: unknown): { code: string; message: string; detail?: unknown; effectUnknown?: boolean } {
     const message = error instanceof Error ? error.message : String(error);
     const match = /^AutomationError\[([^\]]+)\]:\s*(.*)$/.exec(message);
-    if (!match) return { code: error instanceof DOMException && error.name === "AbortError" ? "aborted" : error instanceof DOMException && error.name === "TimeoutError" ? "timeout" : "execution-failed", message };
+    if (!match) return { ...(error && typeof error === "object" && "effectUnknown" in error && error.effectUnknown ? { effectUnknown: true } : {}), code: error instanceof DOMException && error.name === "AbortError" ? "aborted" : error instanceof DOMException && error.name === "TimeoutError" ? "timeout" : "execution-failed", message };
     let detail: unknown;
     try { detail = JSON.parse(match[2]!); } catch { detail = match[2]; }
     return { code: match[1]!, message, detail };
@@ -1251,27 +935,18 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
       this.logger?.record({
         type: "interaction.required",
         conversationId: context.conversationId,
+        ...context.logIdentity,
         content: { message, target, action: "Complete the browser prompt or required user gesture, then continue this conversation." },
       });
     } else if (/unavailable|not exposed|not installed|not currently|requires/i.test(message)) {
-      this.logger?.record({ type: "capability.unavailable", conversationId: context.conversationId, content: { message, target } });
+      this.logger?.record({ type: "capability.unavailable", conversationId: context.conversationId, ...context.logIdentity, content: { message, target } });
     }
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.lifetime.aborted = true;
-    for (const [tabId, video] of this.videoStates) {
-      if (video.recorder.state !== "inactive") video.stop();
-      void this.bridgeCommand({ tabId }, "Page.stopScreencast", {}).catch(() => undefined);
-    }
-    this.videoStates.clear();
-    this.routes.clear();
-    this.network.clear();
-    this.consoleMessages.clear();
-    this.dialogs.clear();
-    this.traceWaiters.clear();
-    this.tracingTabs.clear();
+    void this.endRun();
     this.browserState = undefined;
     this.disposed = true;
     if ((globalThis as Record<string, unknown>)[BRIDGE_KEY] === this.bridge) {
@@ -1309,19 +984,6 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
       return this.evaluate({ tabId: target.tabId }, pageExpressionFor(input.code), signal, "page");
     }
 
-    if (target.kind === "offscreen") {
-      await this.ensureOffscreen();
-      return this.evaluateHostTarget("offscreen.html", input.code, signal, "offscreen", target.targetId);
-    }
-
-    if (target.kind === "devtools") {
-      return this.evaluateHostTarget("devtools.html", input.code, signal, "devtools", target.targetId);
-    }
-
-    if (target.kind === "service-worker") {
-      return this.evaluateWorker(input.code, signal, target.targetId);
-    }
-
     const targets = await this.chromeApi.debugger.getTargets();
     if (this.disposed) throw abortError();
     throwIfAborted(signal);
@@ -1333,10 +995,11 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
   private normalizeTarget(input: ChromeToolInput): ChromeTarget {
     if (input.tabId !== undefined) return { kind: "page", tabId: input.tabId, world: input.world ?? "MAIN" };
     const target = input.target ?? { kind: "extension" as const };
+    if (!["auto", "extension", "page"].includes(target.kind)) throw new Error(`CommandError[unsupported-target]: ${target.kind}`);
     if (target.kind !== "auto") return target;
     if (target.tabId !== undefined || target.targetId !== undefined) return { ...target, kind: "page", world: target.world ?? "MAIN" };
     if (/\b(?:chrome\.|__surfWaxResult\b)/.test(input.code) || !/\b(?:document|window|location|navigator)\b/.test(input.code)) return { kind: "extension" };
-    throw new Error("Automatic target selection is ambiguous. Retry with target.kind set to extension, page, service-worker, offscreen, or devtools.");
+    throw new Error("Automatic target selection is ambiguous. Select extension or page explicitly.");
   }
 
   private async bridgeDebuggee(debuggee: Debuggee): Promise<void> {
@@ -1352,13 +1015,50 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
       autoAttach: true,
       waitForDebuggerOnStart: false,
       flatten: true,
-      filter: [{ type: "iframe", exclude: false }, { type: "worker", exclude: false }, { type: "shared_worker", exclude: false }],
+      filter: [{ type: "iframe", exclude: false }],
     }]).catch(() => undefined);
+  }
+
+  private inputState(tabId: number) {
+    let state = this.heldInput.get(tabId);
+    if (!state) { state = { x: 0, y: 0, buttons: new Set<string>(), keys: new Map<string, Record<string, unknown>>() }; this.heldInput.set(tabId, state); }
+    return state;
+  }
+
+  private async releaseInput(tabId: number): Promise<void> {
+    const state = this.heldInput.get(tabId);
+    if (!state) return;
+    for (const [key, params] of [...state.keys]) await this.bridgeCommand({ tabId }, "Input.dispatchKeyEvent", { ...params, type: "keyUp", key }).catch(() => undefined);
+    for (const button of [...state.buttons]) await this.bridgeCommand({ tabId }, "Input.dispatchMouseEvent", { type: "mouseReleased", x: state.x, y: state.y, button, buttons: 0, clickCount: 1 }).catch(() => undefined);
+    this.heldInput.delete(tabId);
   }
 
   private async bridgeCommand(debuggee: Debuggee, method: string, params?: object): Promise<any> {
     await this.bridgeDebuggee(debuggee);
-    return (this.bridge.call as any)("sendCommand", [debuggee, method, params]);
+    let input = params as Record<string, any> | undefined;
+    if (debuggee.tabId !== undefined && input && method.startsWith("Input.")) {
+      const state = this.inputState(debuggee.tabId);
+      const modifierBit = (key: string) => key === "Alt" ? 1 : key === "Control" ? 2 : key === "Meta" ? 4 : key === "Shift" ? 8 : 0;
+      const heldModifiers = [...state.keys.keys()].reduce((mask, key) => mask | modifierBit(key), 0);
+      if (method === "Input.dispatchMouseEvent") {
+        if (Number.isFinite(input.x)) state.x = input.x;
+        if (Number.isFinite(input.y)) state.y = input.y;
+        if (input.type === "mousePressed") state.buttons.add(input.button ?? "left");
+        if (input.type === "mouseReleased") state.buttons.delete(input.button ?? "left");
+        const buttons = [...state.buttons].reduce((mask, button) => mask | (button === "left" ? 1 : button === "right" ? 2 : 4), 0);
+        input = { x: state.x, y: state.y, ...input, buttons, modifiers: (input.modifiers ?? 0) | heldModifiers };
+      }
+      if (method === "Input.dispatchKeyEvent") {
+        const ownModifier = modifierBit(input.key);
+        const released = input.type === "keyUp" ? ownModifier : 0;
+        input = { ...input, modifiers: ((input.modifiers ?? 0) | heldModifiers | ownModifier) & ~released };
+        if (input.text && input.modifiers & 7) delete input.text;
+        else if (input.text && input.modifiers & 8) input.text = input.text.toUpperCase();
+        if (input.type === "keyUp") state.keys.delete(input.key);
+        else state.keys.set(input.key, { ...input });
+      }
+    }
+    return (this.bridge.call as any)("sendCommand", [debuggee, method, input]);
   }
 
   private async evaluateIsolated(target: ChromeTarget, code: string, signal?: AbortSignal): Promise<unknown> {
@@ -1409,28 +1109,6 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     const error = evaluationError(response);
     if (error) throw error;
     return evaluationValue(response, "page");
-  }
-
-  private async ensureOffscreen(): Promise<void> {
-    if (!this.chromeApi.offscreen) throw new Error("The offscreen API is unavailable in this Chrome version.");
-    const contexts = await this.chromeApi.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"], documentUrls: [this.chromeApi.runtime.getURL("offscreen.html")] });
-    if (contexts.length) return;
-    await this.chromeApi.offscreen.createDocument({ url: "offscreen.html", reasons: ["DOM_PARSER"], justification: "Run browser-agent Web APIs that require a document." });
-  }
-
-  private async evaluateHostTarget(path: string, code: string, signal: AbortSignal | undefined, kind: string, targetId?: string): Promise<unknown> {
-    const url = this.chromeApi.runtime.getURL(path);
-    const targets = await this.chromeApi.debugger.getTargets();
-    const target = targetId ? targets.find((item) => item.id === targetId) : targets.find((item) => item.url.startsWith(url));
-    if (!target?.id) throw new Error(`${kind} host is unavailable. ${kind === "devtools" ? "Open DevTools for a tab and retry." : "Reload the extension and retry."}`);
-    return this.evaluate({ targetId: target.id }, pageExpressionFor(code), signal, kind);
-  }
-
-  private async evaluateWorker(code: string, signal?: AbortSignal, targetId?: string): Promise<unknown> {
-    const target = (await this.chromeApi.debugger.getTargets()).find((item) => targetId ? item.id === targetId : item.type === "worker" && item.url.includes("background"));
-    if (!target?.id) throw new Error("The extension Service Worker is not currently exposed as a debuggable target.");
-    try { return await this.evaluate({ targetId: target.id }, pageExpressionFor(code), signal, "service-worker"); }
-    catch (error) { throw new Error(`Service Worker execution is unavailable in this browser session: ${error instanceof Error ? error.message : String(error)}. Desktop builds may launch Chrome with --silent-debugger-extension-api.`); }
   }
 
   private async awaitAbort<T>(task: Promise<T>, signal?: AbortSignal, effectUnknown = false): Promise<T> {

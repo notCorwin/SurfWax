@@ -27,6 +27,8 @@ export type LogRecord = {
   runId?: string;
   parentId?: string | null;
   toolCallId?: string;
+  /** Recovery already has the durable, phase-qualified ID. Do not qualify it again. */
+  toolCallIdCanonical?: boolean;
   stopReason?: unknown;
   usage?: unknown;
   providerMetadata?: unknown;
@@ -212,6 +214,24 @@ class IndexedDbEventStore implements EventStore {
 }
 
 let sharedStore: EventStore | undefined;
+const TERMINAL_EVENT_TYPES = ["tool.finished", "tool.failed", "conversation.finished", "conversation.failed", "conversation.aborted"];
+let localTerminalWrite: Promise<unknown> = Promise.resolve();
+
+function terminalKey(event: Pick<LogEvent, "type" | "runId" | "toolCallId" | "content">): string | undefined {
+  if (!event.runId || !TERMINAL_EVENT_TYPES.includes(event.type)) return undefined;
+  if (event.type.startsWith("conversation.")) return JSON.stringify(["run", event.runId]);
+  if (!event.toolCallId) return undefined;
+  const content = fromLogValue(event.content) as { callId?: unknown } | null;
+  return JSON.stringify(["tool", event.runId, content?.callId ?? "", event.toolCallId]);
+}
+
+function withTerminalWriteLock<T>(write: () => Promise<T>): Promise<T> {
+  if (typeof navigator !== "undefined" && navigator.locks) return navigator.locks.request("surf-wax:terminal-log", write);
+  // Tests and environments without Web Locks still serialize all local writers.
+  const task = localTerminalWrite.then(write, write);
+  localTerminalWrite = task.catch(() => undefined);
+  return task;
+}
 
 function getEventStore(): EventStore {
   sharedStore ??= new IndexedDbEventStore();
@@ -346,14 +366,28 @@ export function selectedHeadId(
   events: readonly LogEvent[],
   stored: Map<string, { eventId: number }>,
 ): string | null {
+  const createdAt = new Map<string, number>();
+  for (const event of events) {
+    if (event.type !== "conversation.message") continue;
+    const id = event.content && typeof event.content === "object" && !Array.isArray(event.content) ? event.content.id : undefined;
+    if (typeof id !== "string" || !stored.has(id)) continue;
+    createdAt.set(id, Math.min(createdAt.get(id) ?? event.id, event.id));
+  }
   const latest = [...stored].reduce<{ id: string | null; eventId: number }>(
-    (head, [id, item]) => item.eventId > head.eventId ? { id, eventId: item.eventId } : head,
+    (head, [id, item]) => {
+      const eventId = createdAt.get(id) ?? item.eventId;
+      return eventId > head.eventId ? { id, eventId } : head;
+    },
     { id: null, eventId: -1 },
   );
+  // New message nodes and submitted runs advance the head. Updating an existing
+  // node only refreshes its contents, so a late snapshot cannot undo a branch.
+  const submittedAt = events.reduce((id, event) => event.type === "conversation.submitted" ? Math.max(id, event.id) : id, -1);
+  const selectionFloor = Math.max(submittedAt, latest.eventId);
   for (const event of events) {
     if (event.type !== "conversation.branch.selected") continue;
     const content = fromLogValue(event.content) as { headId?: unknown };
-    if (typeof content?.headId === "string" && stored.has(content.headId) && event.id > latest.eventId) {
+    if (typeof content?.headId === "string" && stored.has(content.headId) && event.id > selectionFloor && event.id > latest.eventId) {
       latest.id = content.headId;
       latest.eventId = event.id;
     }
@@ -362,14 +396,14 @@ export function selectedHeadId(
 }
 
 export function rebuildConversationRepository(events: readonly LogEvent[]): ConversationRepository {
-  const stored = new Map<string, { eventId: number; parentId: string | null; message: ConversationMessage }>();
+  const stored = new Map<string, { eventId: number; firstEventId: number; parentId: string | null; message: ConversationMessage }>();
   for (const event of events) {
     if (event.type !== "conversation.message") continue;
     const message = fromLogValue(event.content);
     if (!isConversationMessage(message)) continue;
-    stored.set(message.id, { eventId: event.id, parentId: event.parentId ?? null, message });
+    stored.set(message.id, { eventId: event.id, firstEventId: stored.get(message.id)?.firstEventId ?? event.id, parentId: event.parentId ?? null, message });
   }
-  const messages = [...stored.values()].sort((left, right) => left.eventId - right.eventId).map(({ parentId, message }) => ({ parentId, message }));
+  const messages = [...stored.values()].sort((left, right) => left.firstEventId - right.firstEventId).map(({ parentId, message }) => ({ parentId, message }));
   return { headId: selectedHeadId(events, stored), messages };
 }
 
@@ -378,35 +412,98 @@ export class EventLogger {
   private buffered: Omit<LogEvent, "id">[] = [];
   private bufferTimer: ReturnType<typeof setTimeout> | undefined;
   private activeRuns = new Map<string, string>();
+  private phases = new Map<string, number>();
+  private callOwners = new Map<string, { runId: string; phase: number | undefined }>();
   private accepting = true;
+  private ready: Promise<void> = Promise.resolve();
+  private generation: number | undefined = 0;
+  private handshakePaused = false;
   private listeners = new Set<(event: LogEvent) => void>();
 
   constructor(private readonly options: {
     store?: EventStore;
     now?: () => Date;
     onError?: (error: unknown) => void;
-  } = {}) {}
+    writerPort?: chrome.runtime.Port;
+  } = {}) {
+    if (options.writerPort || !options.store && typeof document !== "undefined" && typeof chrome !== "undefined" && chrome.runtime?.connect) {
+      const port = options.writerPort ?? chrome.runtime.connect({ name: "surf-wax-log-writer" });
+      this.generation = undefined;
+      let ready!: () => void;
+      this.ready = new Promise<void>((resolve) => { ready = resolve; });
+      port.onDisconnect.addListener(() => {
+        if (this.generation === undefined) this.handshakePaused = true;
+        this.stop();
+        ready();
+        this.options.onError?.(new Error("后台日志连接已断开，请重新加载侧栏。"));
+      });
+      port.onMessage.addListener((message) => {
+        if (message.type === "writer-error") {
+          this.handshakePaused = true;
+          this.stop();
+          ready();
+          this.options.onError?.(new Error(message.error || "后台初始化失败，请重新加载扩展后重试。"));
+        }
+        if (message.type === "writer-ready") {
+          this.generation = message.generation;
+          this.handshakePaused = Boolean(message.paused);
+          if (message.paused) this.stop();
+          ready();
+        }
+        if (message.type === "prepare-clear") {
+          void import("./agent/coordinator").then(({ settleAllConversationWork }) => settleAllConversationWork("log-cleared"))
+            .then(() => { this.stop(); return this.flush(); })
+            .then(() => { this.generation = message.generation ?? (this.generation ?? 0) + 1; })
+            .then(() => port.postMessage({ id: message.id, ok: true }), (error) => port.postMessage({ id: message.id, ok: false, error: String(error) }));
+        }
+        if (message.type === "clear-complete") {
+          if (/\/(sidepanel|userscripts)\.html$/.test(location.pathname)) location.reload();
+          else this.resume();
+        }
+        if (message.type === "clear-failed") this.resume();
+      });
+    }
+  }
 
   beginRun(conversationId: string, runId: string): void {
     this.activeRuns.set(conversationId, runId);
   }
 
+  setRunPhase(runId: string, phase: number): void { this.phases.set(runId, phase); }
+
+  toolIdentity(conversationId: string, toolCallId: string): { runId?: string; toolCallId: string; toolCallIdCanonical: true } {
+    const runId = this.activeRuns.get(conversationId);
+    const phase = runId ? this.phases.get(runId) : undefined;
+    return { runId, toolCallId: phase && phase > 0 ? `${phase}:${toolCallId}` : toolCallId, toolCallIdCanonical: true };
+  }
+
   endRun(conversationId: string, runId?: string): void {
     if (!runId || this.activeRuns.get(conversationId) === runId) this.activeRuns.delete(conversationId);
+    if (runId) this.phases.delete(runId);
   }
 
   private event(record: LogRecord): Omit<LogEvent, "id"> {
+    const callId = record.content && typeof record.content === "object" && "callId" in record.content
+      && typeof record.content.callId === "string" ? record.content.callId : undefined;
+    let owner = callId ? this.callOwners.get(callId) : undefined;
+    const run = record.runId ?? owner?.runId ?? (record.conversationId ? this.activeRuns.get(record.conversationId) : undefined);
+    if (callId && run && (!owner || owner.runId !== run)) {
+      owner = { runId: run, phase: this.phases.get(run) };
+      this.callOwners.set(callId, owner);
+      if (this.callOwners.size > 1024) this.callOwners.delete(this.callOwners.keys().next().value!);
+    }
+    const phase = owner && owner.runId === run ? owner.phase : run ? this.phases.get(run) : undefined;
     return {
       timestamp: (this.options.now?.() ?? new Date()).toISOString(),
       type: record.type,
       content: toLogValue(record.content ?? null),
       ...(record.conversationId ? { conversationId: record.conversationId } : {}),
       ...(record.parentId !== undefined ? { parentId: record.parentId } : {}),
-      ...(record.runId ?? (record.conversationId ? this.activeRuns.get(record.conversationId) : undefined) ? { runId: record.runId ?? this.activeRuns.get(record.conversationId!) } : {}),
+      ...(run ? { runId: run } : {}),
       ...(record.stopReason !== undefined ? { stopReason: toLogValue(record.stopReason) } : {}),
       ...(record.usage !== undefined ? { usage: toLogValue(record.usage) } : {}),
       ...(record.providerMetadata !== undefined ? { providerMetadata: toLogValue(record.providerMetadata) } : {}),
-      ...(record.toolCallId !== undefined ? { toolCallId: record.toolCallId } : {}),
+      ...(record.toolCallId !== undefined ? { toolCallId: !record.toolCallIdCanonical && phase !== undefined && phase > 0 ? `${phase}:${record.toolCallId}` : record.toolCallId } : {}),
       ...(record.input !== undefined ? { input: toLogValue(record.input) } : {}),
       ...(record.output !== undefined ? { output: toLogValue(record.output) } : {}),
       ...(record.error !== undefined ? { error: toLogValue(record.error) } : {}),
@@ -417,13 +514,39 @@ export class EventLogger {
   }
 
   private enqueue(events: readonly Omit<LogEvent, "id">[]): Promise<LogEvent[]> {
+    const generation = this.generation;
     const task = this.pending.then(async () => {
+      await this.ready;
       const store = this.options.store ?? getEventStore();
-      const stored: LogEvent[] = [];
-      if (store.appendMany) stored.push(...await store.appendMany(events));
-      else for (const event of events) stored.push(await store.append(event));
-      for (const event of stored) for (const listener of this.listeners) listener(event);
-      return stored;
+      const write = async () => {
+        // Recheck after the cross-page lock: maintenance may have advanced while
+        // this writer was waiting for another page's terminal transaction.
+        if (generation === undefined ? this.handshakePaused : generation !== this.generation) return [];
+        const runIds = [...new Set(events.filter((event) => terminalKey(event)).map((event) => event.runId!))];
+        const prior = runIds.length ? store.byRunTypes
+          ? await store.byRunTypes(runIds, TERMINAL_EVENT_TYPES)
+          : (await store.all()).filter((event) => event.runId && runIds.includes(event.runId) && TERMINAL_EVENT_TYPES.includes(event.type)) : [];
+        const existing = new Map(prior.map((event) => [terminalKey(event), event]));
+        const accepted: Omit<LogEvent, "id">[] = [];
+        const keys = new Set(existing.keys());
+        for (const event of events) {
+          const key = terminalKey(event);
+          if (key && keys.has(key)) continue;
+          if (key) keys.add(key);
+          accepted.push(event);
+        }
+        const stored: LogEvent[] = [];
+        if (accepted.length && store.appendMany) stored.push(...await store.appendMany(accepted));
+        else for (const event of accepted) stored.push(await store.append(event));
+        for (const event of stored) for (const listener of this.listeners) listener(event);
+        // Return the accepted durable terminal to a competing callback, without
+        // publishing a second event or replacing the original reason/result.
+        for (const event of stored) { const key = terminalKey(event); if (key) existing.set(key, event); }
+        const appended = new Map(accepted.map((event, index) => [event, stored[index]!]));
+        return events.map((event) => terminalKey(event) ? existing.get(terminalKey(event)!)! : appended.get(event)!)
+          .filter((event): event is LogEvent => Boolean(event));
+      };
+      return events.some((event) => terminalKey(event)) ? withTerminalWriteLock(write) : write();
     });
     this.pending = task.catch((error) => {
       this.options.onError?.(error);
@@ -494,6 +617,12 @@ export class EventLogger {
   contextEvents(conversationId: string): Promise<LogEvent[]> {
     return this.eventsByTypes(CONTEXT_EVENT_TYPES, conversationId);
   }
+
+  diagnosticEvents(conversationId: string): Promise<LogEvent[]> {
+    return this.eventsByTypes(["browser.diagnostic"], conversationId);
+  }
+
+  inputStateEvents(): Promise<LogEvent[]> { return this.eventsByTypes(["browser.input.state"]); }
 
   modelUsageEvents(conversationId: string): Promise<LogEvent[]> {
     return this.eventsByTypes(["model.step.finished"], conversationId);
@@ -582,25 +711,57 @@ export class EventLogger {
     await this.append({ type: "conversation.deleted", content: { conversationId } });
   }
 
-  async recoverDanglingRuns(): Promise<void> {
-    const events = await this.eventsByTypes(RUN_EVENT_TYPES);
-    const terminal = new Set(events.filter((event) => event.runId && ["conversation.finished", "conversation.failed", "conversation.aborted"].includes(event.type)).map((event) => event.runId));
+  async closePendingTools(runId: string, conversationId: string, reason: unknown): Promise<void> {
+    const events = await this.eventsByRunTypes([runId], ["tool.started", "tool.finished", "tool.failed", "tool.progress"]);
+    const key = (event: LogEvent) => `${(fromLogValue(event.content) as { callId?: string })?.callId ?? ""}\0${event.toolCallId}`;
+    const terminal = new Set(events.filter((event) => ["tool.finished", "tool.failed"].includes(event.type)).map(key));
     for (const event of events) {
-      if (event.type !== "conversation.submitted" || !event.runId || !event.conversationId || terminal.has(event.runId)) continue;
-      await this.append({
-        type: "conversation.aborted",
-        conversationId: event.conversationId,
-        runId: event.runId,
-        content: null,
-        abort: { reason: "Side Panel 在运行完成前关闭。" },
-      });
+      if (event.type !== "tool.started" || !event.toolCallId || terminal.has(key(event))) continue;
+      terminal.add(key(event));
+      const progress = [...events].reverse().find((item) => item.type === "tool.progress" && item.toolCallId === event.toolCallId);
+      const progressContent = progress ? fromLogValue(progress.content) as { nextIndex: number; steps: unknown[] } : undefined;
+      const progressOutput = progress ? fromLogValue(progress.output) as { completed: unknown[]; elapsedMs: number } : undefined;
+      const input = fromLogValue(event.input) as { steps?: unknown[] } | undefined;
+      const steps = progressContent?.steps ?? input?.steps;
+      const index = progressContent?.nextIndex ?? 0;
+      const completedAll = Boolean(steps && index === steps.length);
+      const failure = { code: "interrupted", message: String(reason), effectUnknown: true };
+      const output = steps ? {
+        ok: completedAll, completed: progressOutput?.completed ?? [],
+        ...(completedAll ? {} : { error: failure, failed: { index, step: steps[index], error: failure }, notRun: steps.slice(index + 1) }),
+        elapsedMs: progressOutput?.elapsedMs ?? 0,
+      } : { ok: false, error: failure };
+      await this.append({ type: completedAll ? "tool.finished" : "tool.failed", conversationId, runId, toolCallId: event.toolCallId, toolCallIdCanonical: true,
+        content: { ...((fromLogValue(event.content) as object) ?? {}), status: completedAll ? "completed" : "interrupted", effectUnknown: !completedAll },
+        input: fromLogValue(event.input), output,
+        ...(completedAll ? {} : { error: failure, abort: { reason } }) });
     }
+  }
+
+  async recoverDanglingRuns(activeRunIds: readonly string[] | (() => Promise<readonly string[]>) = [], reason = "owner-disconnected"): Promise<void> {
+    const recover = async () => {
+      const events = await this.eventsByTypes(RUN_EVENT_TYPES);
+      const terminal = new Set(events.filter((event) => event.runId && event.type !== "conversation.submitted").map((event) => event.runId));
+      for (const event of events) {
+        if (event.type !== "conversation.submitted" || !event.runId || !event.conversationId || terminal.has(event.runId)) continue;
+        const owners = typeof activeRunIds === "function" ? await activeRunIds() : activeRunIds;
+        if (owners.includes(event.runId)) continue;
+        terminal.add(event.runId);
+        await this.closePendingTools(event.runId, event.conversationId, reason);
+        await this.append({ type: "conversation.aborted", conversationId: event.conversationId, runId: event.runId,
+          content: null, abort: { reason } });
+      }
+    };
+    if (typeof navigator !== "undefined" && navigator.locks) await navigator.locks.request("surf-wax:log-recovery", recover);
+    else await recover();
   }
 
   async clear(): Promise<void> {
     await this.flush();
     await (this.options.store ?? getEventStore()).clear();
   }
+
+  resume(): void { this.accepting = true; }
 
   stop(): void {
     this.accepting = false;
@@ -614,6 +775,7 @@ export class EventLogger {
 
   async flush(): Promise<void> {
     this.flushBuffer();
+    await this.ready;
     await this.pending;
   }
 }

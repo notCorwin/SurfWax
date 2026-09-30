@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { EventLogger, type LogEvent } from "../logging";
 import { ChromeExecutor } from "./executor";
+import { ensureDownloadPermission } from "./downloads";
+vi.mock("./downloads", () => ({ ensureDownloadPermission: vi.fn(async () => undefined) }));
 
 function fakeChrome(responses: Array<object | (() => Promise<object>)> = []) {
   const stored: Record<string, unknown> = {};
@@ -113,7 +115,7 @@ describe("ChromeExecutor", () => {
     executor.dispose();
   });
 
-  it("reports cancellation promptly but keeps a delayed tab mutation ahead of queued work", async () => {
+  it("reports cancellation promptly and keeps the run binding while delayed work closes before the next phase", async () => {
     const fake = fakeChrome();
     const tabs: chrome.tabs.Tab[] = [{ id: 41, windowId: 7, active: true, url: "https://example.com" } as chrome.tabs.Tab];
     let finishCreate!: (tab: chrome.tabs.Tab) => void;
@@ -136,7 +138,101 @@ describe("ChromeExecutor", () => {
     tabs.push(created);
     finishCreate(created);
     await expect(queued).resolves.toMatchObject([{ id: 41, current: false }, { id: 42, current: true }]);
-    expect(getCurrent).toHaveBeenCalledTimes(2);
+    expect(getCurrent).toHaveBeenCalledTimes(1);
+    expect((executor as any).browserState).toMatchObject({ windowId: 7, tabId: 42 });
+    await executor.endRun();
+    expect((executor as any).browserState).toBeUndefined();
+    executor.dispose();
+  });
+
+  it("selects stable tab IDs after reordering and rejects tabs outside the bound window", async () => {
+    const fake = fakeChrome();
+    const tabs = [{ id: 42, windowId: 7, active: false }, { id: 41, windowId: 7, active: true }] as chrome.tabs.Tab[];
+    const update = vi.fn(async () => undefined);
+    Object.assign(fake.chromeApi, { windows: { getCurrent: async () => ({ id: 7, tabs }), get: async () => ({ id: 7 }) }, tabs: { query: async () => tabs, update } });
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    await executor.executeCommand("tab-select", { tabId: 41 });
+    expect(update).toHaveBeenCalledWith(41, { active: true });
+    await expect(executor.executeCommand("tab-select", { tabId: 999 })).rejects.toThrow("invalid-tab-id");
+    await expect(executor.executeCommand("tab-select", { tabId: 41, index: 0 })).rejects.toThrow("invalid-tab-target");
+    await expect(executor.executeCommand("route" as never, { pattern: "*" })).rejects.toThrow("unsupported");
+    expect(fake.debuggerApi.attach).not.toHaveBeenCalled();
+    executor.dispose();
+  });
+
+  it("preserves completed batch steps when cancellation interrupts a later step", async () => {
+    const fake = fakeChrome();
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    (executor as any).currentBrowserState = async () => ({ windowId: 7, tabId: 41, origins: new Set() });
+    (executor as any).pageFor = async () => ({ tabId: 41 });
+    const executeStep = vi.fn().mockResolvedValueOnce({ performed: true }).mockImplementationOnce(() => new Promise(() => undefined));
+    (executor as any).executeStep = executeStep;
+    const controller = new AbortController();
+    const steps = [{ type: "goto", url: "https://test/1" }, { type: "goto", url: "https://test/2" }, { type: "goto", url: "https://test/3" }] as const;
+    const pending = executor.executeBrowser({ mode: "act", steps: [...steps] }, controller.signal);
+    await vi.waitFor(() => expect(executeStep).toHaveBeenCalledTimes(2));
+    controller.abort();
+    await expect(pending).resolves.toMatchObject({ ok: false, completed: [{ index: 0, type: "goto", result: { performed: true } }], failed: { index: 1, error: { code: "aborted", effectUnknown: true } }, notRun: [steps[2]] });
+    executor.dispose();
+  });
+
+  it("returns the stored artifact when download authorization is denied without recapturing", async () => {
+    const fake = fakeChrome();
+    const logger = { append: vi.fn(async () => ({ id: 7 })) } as unknown as EventLogger;
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test", logger });
+    (executor as any).activeContext = { conversationId: "conversation" };
+    vi.mocked(ensureDownloadPermission).mockRejectedValueOnce(new Error("permission denied"));
+    await expect((executor as any).storeArtifact("screen.png", "eA==", "image/png", true)).rejects.toMatchObject({ artifact: { id: 7, filename: "screen.png", saved: false } });
+    expect(logger.append).toHaveBeenCalledTimes(1);
+    expect(fake.chromeApi.downloads.download).not.toHaveBeenCalled();
+    executor.dispose();
+  });
+
+  it("durably saves act progress with its frozen tool identity before starting the next step", async () => {
+    const fake = fakeChrome();
+    let releaseProgress!: () => void;
+    const append = vi.fn(() => new Promise<any>((resolve) => { releaseProgress = () => resolve({ id: 7 }); }));
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test", logger: { append } as unknown as EventLogger });
+    const executeStep = vi.fn().mockResolvedValue({ performed: true });
+    (executor as any).executeStep = executeStep;
+    (executor as any).activeContext = { conversationId: "conversation", toolCallId: "batch", logIdentity: { runId: "run", toolCallId: "1:batch", toolCallIdCanonical: true } };
+    const steps = [{ type: "goto", url: "https://test/1" }, { type: "goto", url: "https://test/2" }] as const;
+    const pending = (executor as any).executeSteps({ tabId: 41 }, [...steps], undefined, false);
+    await vi.waitFor(() => expect(append).toHaveBeenCalledTimes(1));
+    expect(executeStep).toHaveBeenCalledTimes(1);
+    expect(append).toHaveBeenCalledWith(expect.objectContaining({ type: "tool.progress", conversationId: "conversation", runId: "run", toolCallId: "1:batch", toolCallIdCanonical: true,
+      content: { nextIndex: 1, steps }, output: { completed: [{ index: 0, type: "goto", result: { performed: true } }], elapsedMs: expect.any(Number) } }));
+    releaseProgress();
+    await vi.waitFor(() => expect(append).toHaveBeenCalledTimes(2));
+    expect(executeStep).toHaveBeenCalledTimes(2);
+    releaseProgress();
+    await expect(pending).resolves.toMatchObject({ ok: true, completed: [{ index: 0 }, { index: 1 }] });
+    executor.dispose();
+  });
+
+  it("does not start another act step when maintenance refuses its progress write", async () => {
+    const fake = fakeChrome();
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test", logger: { append: vi.fn(async () => undefined) } as unknown as EventLogger });
+    const executeStep = vi.fn().mockResolvedValue({ performed: true });
+    (executor as any).executeStep = executeStep;
+    (executor as any).activeContext = { conversationId: "conversation", toolCallId: "batch" };
+    const steps = [{ type: "goto", url: "https://test/1" }, { type: "goto", url: "https://test/2" }] as const;
+    const result = await (executor as any).executeSteps({ tabId: 41 }, [...steps], undefined, false);
+    expect(result).toMatchObject({ ok: false, failed: { error: { code: "aborted" } }, notRun: [steps[1]] });
+    expect(executeStep).toHaveBeenCalledTimes(1);
+    executor.dispose();
+  });
+
+  it("releases held mouse buttons and keyboard keys at the current pointer location", async () => {
+    const fake = fakeChrome();
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    await (executor as any).bridgeCommand({ tabId: 41 }, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 90, y: 40 });
+    await (executor as any).bridgeCommand({ tabId: 41 }, "Input.dispatchMouseEvent", { type: "mousePressed", x: 90, y: 40, button: "right" });
+    await (executor as any).bridgeCommand({ tabId: 41 }, "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Shift", code: "ShiftLeft" });
+    expect(fake.debuggerApi.sendCommand).toHaveBeenCalledWith({ tabId: 41 }, "Input.dispatchKeyEvent", expect.objectContaining({ type: "rawKeyDown", key: "Shift", modifiers: 8 }));
+    await executor.endRun();
+    expect(fake.debuggerApi.sendCommand).toHaveBeenCalledWith({ tabId: 41 }, "Input.dispatchKeyEvent", expect.objectContaining({ type: "keyUp", key: "Shift", modifiers: 0 }));
+    expect(fake.debuggerApi.sendCommand).toHaveBeenCalledWith({ tabId: 41 }, "Input.dispatchMouseEvent", expect.objectContaining({ type: "mouseReleased", x: 90, y: 40, button: "right" }));
     executor.dispose();
   });
 
@@ -197,7 +293,7 @@ describe("ChromeExecutor", () => {
       "Runtime.evaluate",
       expect.objectContaining({ awaitPromise: true, returnByValue: true }),
     );
-    expect(String(fake.debuggerApi.sendCommand.mock.calls[0][2]?.expression)).toContain("const chrome = new Proxy");
+    expect(String(fake.debuggerApi.sendCommand.mock.calls[0][2]?.expression)).toContain("const chrome = undefined");
   });
 
   it("exposes page() as a second meta-tool execution realm", async () => {
@@ -319,7 +415,7 @@ describe("ChromeExecutor", () => {
     executor.dispose();
   });
 
-  it("guards raw downloads and passes through explicit save authority", async () => {
+  it("removes the raw Chrome execution facade even with save requested", async () => {
     const fake = fakeChrome();
     const previousChrome = Object.getOwnPropertyDescriptor(globalThis, "chrome");
     Object.defineProperty(globalThis, "chrome", { configurable: true, value: fake.chromeApi });
@@ -331,10 +427,10 @@ describe("ChromeExecutor", () => {
 
     try {
       await expect(executor.execute({ code: "return chrome.downloads.download({url:'data:text/plain,x'})" }))
-        .rejects.toThrow("download-not-authorized");
+        .rejects.toThrow();
       expect(fake.chromeApi.downloads.download).not.toHaveBeenCalled();
-      await expect(executor.execute({ code: "return chrome.downloads.download({url:'data:text/plain,x'})", save: true })).resolves.toBe(17);
-      expect(fake.chromeApi.downloads.download).toHaveBeenCalledTimes(1);
+      await expect(executor.execute({ code: "return chrome.downloads.download({url:'data:text/plain,x'})", save: true })).rejects.toThrow();
+      expect(fake.chromeApi.downloads.download).not.toHaveBeenCalled();
     } finally {
       executor.dispose();
       if (previousChrome) Object.defineProperty(globalThis, "chrome", previousChrome);

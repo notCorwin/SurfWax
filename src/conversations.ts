@@ -138,9 +138,9 @@ function normalizeInterruptedMessage(message: ConversationMessage, events: reado
     if (!toolCallId) return [part];
     const toolEvent = tools.get(toolCallId);
     if (!toolEvent) return [];
-    return toolEvent.type === "tool.finished"
+    return toolEvent.output !== undefined
       ? [{ ...value, state: "output-available", output: fromLogValue(toolEvent.output) }]
-      : [{ ...value, state: "output-error", errorText: "Side Panel 关闭时工具尚未完成。" }];
+      : [{ ...value, state: "output-error", errorText: String((fromLogValue(toolEvent.error) as { message?: string })?.message ?? fromLogValue(toolEvent.error) ?? "工具调用已中断。") }];
   });
   const metadata = message.metadata && typeof message.metadata === "object" && !Array.isArray(message.metadata)
     ? message.metadata as Record<string, unknown>
@@ -165,7 +165,7 @@ async function replayRun(events: readonly LogEvent[], terminal: LogEvent): Promi
 }
 
 export async function restoreConversationRepository(events: readonly LogEvent[]): Promise<ConversationRepository> {
-  const stored = new Map<string, { eventId: number; parentId: string | null; message: ConversationMessage }>();
+  const stored = new Map<string, { eventId: number; firstEventId: number; runId?: string; parentId: string | null; message: ConversationMessage }>();
   const completedRuns = new Set(events
     .filter((event) => event.type === "conversation.finished" && event.runId)
     .map((event) => event.runId!));
@@ -173,14 +173,14 @@ export async function restoreConversationRepository(events: readonly LogEvent[])
     if (event.type !== "conversation.message") continue;
     const message = fromLogValue(event.content);
     if (!isConversationMessage(message)) continue;
-    stored.set(message.id, { eventId: event.id, parentId: event.parentId ?? null, message });
+    stored.set(message.id, { eventId: event.id, firstEventId: stored.get(message.id)?.firstEventId ?? event.id, runId: event.runId, parentId: event.parentId ?? null, message });
   }
   for (const terminal of events.filter((event) => event.runId && (event.type === "conversation.aborted" || event.type === "conversation.failed"))) {
     if (completedRuns.has(terminal.runId!)) continue;
     const submitted = [...events].reverse().find((event) => event.runId === terminal.runId && event.type === "conversation.submitted");
     const content = submitted ? fromLogValue(submitted.content) as { messageId?: unknown } : undefined;
     const parentId = typeof content?.messageId === "string" ? content.messageId : null;
-    const persistedPartial = [...stored.values()].find((item) => item.parentId === parentId && item.message.role === "assistant");
+    const persistedPartial = [...stored.values()].find((item) => item.runId === terminal.runId && item.parentId === parentId && item.message.role === "assistant");
     if (persistedPartial) {
       persistedPartial.message = normalizeInterruptedMessage(persistedPartial.message, events, terminal.runId!);
       continue;
@@ -189,11 +189,12 @@ export async function restoreConversationRepository(events: readonly LogEvent[])
     if (!message) continue;
     stored.set(message.id, {
       eventId: terminal.id,
+      firstEventId: terminal.id,
       parentId,
       message,
     });
   }
-  const messages = [...stored.values()].sort((left, right) => left.eventId - right.eventId).map(({ parentId, message }) => ({ parentId, message }));
+  const messages = [...stored.values()].sort((left, right) => left.firstEventId - right.firstEventId).map(({ parentId, message }) => ({ parentId, message }));
   return { headId: selectedHeadId(events, stored), messages };
 }
 

@@ -1,13 +1,41 @@
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import type { EventLogger } from "../logging";
 import { parseCommandTarget, type ChromeExecutor } from "./executor";
-import { COMMAND_NAMES, USER_SCRIPT_TOOL_NAMES, compactToolResult, createCommandTools, parseCommandInput, prepareToolMessages, repairCommandToolCall, TOOL_SUMMARY } from "./tool";
+import { COMMAND_NAMES, USER_SCRIPT_TOOL_NAMES, compactToolResult, createCommandTools, parseCommandInput, prepareToolMessages, repairCommandToolCall, TOOL_REGISTRY, TOOL_SUMMARY } from "./tool";
 
 describe("browser command tools", () => {
-  it("registers exactly the 73 executable current-window commands", () => {
-    expect(COMMAND_NAMES).toHaveLength(73);
-    expect(new Set(COMMAND_NAMES).size).toBe(73);
-    expect(COMMAND_NAMES).toEqual(expect.arrayContaining(["snapshot", "click", "run-code", "video-stop", "artifact-save"]));
+  it("preserves a large failed act result through the registered tool without compacting away its failure", async () => {
+    const failed = { ok: false, completed: [{ index: 0, type: "fill", result: { text: "completed".repeat(2000) } }], failed: { index: 1, step: { type: "expect" }, error: { code: "timeout", message: "interrupted", effectUnknown: true } }, notRun: [{ type: "click" }] };
+    expect(JSON.stringify(failed).length).toBeGreaterThan(8000);
+    const append = vi.fn(async () => ({ id: 7 }));
+    const logger = { append, toolIdentity: () => ({ toolCallId: "call", toolCallIdCanonical: true }) } as unknown as EventLogger;
+    const tools = createCommandTools({ executeBrowser: vi.fn(async () => failed) } as unknown as ChromeExecutor, { logger, conversationId: "conversation" }) as Record<string, any>;
+    const result = await tools.act.execute({ steps: [{ type: "goto", url: "https://test/" }] }, { toolCallId: "call" });
+    expect(result).toEqual({ ...failed, error: { ...failed.failed.error, retryable: false } });
+    expect(result).not.toHaveProperty("$ref");
+    expect(append).not.toHaveBeenCalled();
+    await expect(compactToolResult({ type: "tool-error", error: "large".repeat(2000) }, { logger })).resolves.toHaveProperty("type", "tool-error");
+  });
+
+  it("stores a large result with its original identity after a request phase changes", async () => {
+    let phase = 1;
+    const append = vi.fn(async () => ({ id: 7 }));
+    const logger = { append, toolIdentity: (_conversation: string, id: string) => ({ runId: "run", toolCallId: `${phase}:${id}`, toolCallIdCanonical: true }) } as unknown as EventLogger;
+    let finish!: (value: unknown) => void;
+    const executeCommand = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
+    const tools = createCommandTools({ executeCommand } as unknown as ChromeExecutor, { logger, conversationId: "conversation" }) as Record<string, any>;
+    const pending = tools.eval.execute({ func: "() => null" }, { toolCallId: "call" });
+    await vi.waitFor(() => expect(executeCommand).toHaveBeenCalled());
+    phase = 2; finish("original".repeat(2000));
+    await expect(pending).resolves.toMatchObject({ $ref: 7 });
+    expect(append).toHaveBeenCalledWith(expect.objectContaining({ type: "tool.result.data", runId: "run", toolCallId: "1:call", toolCallIdCanonical: true }));
+  });
+
+  it("registers exactly the 42 executable current-window commands", () => {
+    expect(COMMAND_NAMES).toHaveLength(42);
+    expect(new Set(COMMAND_NAMES).size).toBe(42);
+    expect(COMMAND_NAMES).toEqual(expect.arrayContaining(["snapshot", "click", "run-code", "artifact-save"]));
     for (const name of ["state-save", "state-load", "cookie-clear"]) expect(COMMAND_NAMES as readonly string[]).not.toContain(name);
     for (const name of ["install", "install-browser", "pause-at", "resume", "step-over"]) expect(COMMAND_NAMES as readonly string[]).not.toContain(name);
     expect(COMMAND_NAMES.filter((name) => ["browser", "open", "attach", "close", "detach", "show", "list", "close-all", "kill-all"].includes(name))).toEqual([]);
@@ -19,8 +47,27 @@ describe("browser command tools", () => {
     for (const name of ["install", "install-browser", "pause-at", "resume", "step-over"]) expect(tools).not.toHaveProperty(name);
     expect(tools).not.toHaveProperty("search-tools");
     expect(Object.values(tools).every((tool) => tool.deferLoading !== true)).toBe(true);
-    expect(TOOL_SUMMARY.split("\n")).toHaveLength(80);
-    for (const [name, tool] of Object.entries(tools)) expect(TOOL_SUMMARY).toContain(`- ${name}: ${tool.description}`);
+    expect(TOOL_SUMMARY.split("\n")).toHaveLength(49);
+    expect(Object.keys(tools)).toEqual(TOOL_REGISTRY.map(({ name }) => name));
+    expect(new TextEncoder().encode(TOOL_SUMMARY).byteLength).toBeLessThanOrEqual(4100);
+    for (const { name, summary } of TOOL_REGISTRY) expect(TOOL_SUMMARY).toContain(`- ${name}: ${summary}`);
+  });
+
+  it("keeps actual serialized tool metadata within the context budget", () => {
+    const metadata = TOOL_REGISTRY.map(({ name, description, inputSchema }) => ({ name, description, parameters: z.toJSONSchema(inputSchema) }));
+    expect(new TextEncoder().encode(JSON.stringify(metadata)).byteLength).toBeLessThanOrEqual(50_500);
+  });
+
+  it("rejects unsupported coordinate actions and ambiguous tab selectors", () => {
+    const point = { point: { observationId: "capture", x: 5, y: 10 } };
+    expect(parseCommandInput("click", { target: point, button: "right", modifiers: ["Shift"] })).toMatchObject({ target: point });
+    expect(() => parseCommandInput("fill", { target: point, text: "bad" })).toThrow();
+    expect(() => parseCommandInput("tab-select", {})).toThrow();
+    expect(() => parseCommandInput("tab-select", { tabId: 41, index: 0 })).toThrow();
+    expect(parseCommandInput("tab-select", { tabId: 41 })).toEqual({ tabId: 41 });
+    const tools = createCommandTools({} as ChromeExecutor) as Record<string, any>;
+    expect(() => tools.act.inputSchema.parse({ steps: [{ type: "fill", target: point, value: "bad" }] })).toThrow();
+    expect(() => tools.act.inputSchema.parse({ steps: [{ type: "click", target: { ref: "e1" }, value: "invalid" }] })).toThrow();
   });
 
   it("validates native user-script definitions and keeps enabled outside them", () => {
@@ -42,7 +89,7 @@ describe("browser command tools", () => {
       for (const [index, name] of USER_SCRIPT_TOOL_NAMES.entries()) {
         await expect(tools[name].execute(inputs[index], { toolCallId: `call-${index}` })).resolves.toBe(["list", "read", "create", "edit", "setEnabled"][index]);
       }
-      expect(sendMessage.mock.calls.map(([message]) => message)).toEqual([
+      expect(sendMessage.mock.calls.map(([{ operationId, ...message }]) => { expect(operationId).toEqual(expect.any(String)); return message; })).toEqual([
         { type: "surf-wax:user-scripts", method: "list", args: [] },
         { type: "surf-wax:user-scripts", method: "read", args: ["sample"] },
         { type: "surf-wax:user-scripts", method: "create", args: [script] },

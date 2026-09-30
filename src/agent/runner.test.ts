@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV4, simulateReadableStream } from "ai/test";
 import type { ChromeExecutor } from "../chrome/executor";
 import { COMMAND_NAMES, USER_SCRIPT_TOOL_NAMES, TOOL_SUMMARY } from "../chrome/tool";
-import type { EventLogger, LogEvent } from "../logging";
+import { EventLogger, fromLogValue, type LogEvent } from "../logging";
 import { ContextCompactor } from "./compaction";
 import { createAgent, DEFAULT_INSTRUCTIONS, stagnationReason } from "./runner";
 
@@ -14,6 +14,31 @@ function usage() {
 }
 
 describe("createAgent", () => {
+  it("records a large partial act failure as one failed SDK terminal with its full result", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: { async append(event) { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; }, async all() { return events; }, async clear() { events.splice(0); } } });
+    logger.beginRun("conversation", "run");
+    const steps = [{ type: "goto", url: "https://test/" }, { type: "expect", target: { by: "css", value: "#missing" }, state: "visible" }, { type: "click", target: { by: "css", value: "#submit" } }];
+    const failed = { ok: false, completed: [{ index: 0, type: "goto", result: { text: "completed".repeat(2000) } }], failed: { index: 1, step: steps[1], error: { code: "expectation-failed", message: "Missing target" } }, notRun: [steps[2]] };
+    const executor = { executeBrowser: vi.fn(async () => failed), browserContext: vi.fn(async () => ({ windowId: 7, tabs: [] })) } as unknown as ChromeExecutor;
+    let step = 0;
+    const model = new MockLanguageModelV4({ doStream: async () => ({ stream: simulateReadableStream({ chunks: ++step === 1 ? [
+      { type: "stream-start", warnings: [] }, { type: "tool-call", toolCallId: "large-act", toolName: "act", dynamic: true, input: JSON.stringify({ steps }) },
+      { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_calls" }, usage: usage() },
+    ] : [
+      { type: "stream-start", warnings: [] }, { type: "text-start", id: "text" }, { type: "text-delta", id: "text", delta: "done" }, { type: "text-end", id: "text" },
+      { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: usage() },
+    ] as any[] }) }) });
+    const result = await createAgent({ model: { baseURL: "https://test/v1", model: "test", contextWindowOverride: 1_000_000 }, languageModel: model, executor, logger, conversationId: "conversation" }).stream({ prompt: "act" });
+    for await (const _ of result.stream) { /* Consume tool execution. */ }
+    await logger.flush();
+    const terminal = events.filter((event) => ["tool.failed", "tool.finished"].includes(event.type) && event.toolCallId === "large-act");
+    expect(terminal).toHaveLength(1);
+    expect(terminal[0].type).toBe("tool.failed");
+    expect(fromLogValue(terminal[0].output)).toEqual({ ...failed, error: { ...failed.failed.error, retryable: false } });
+    expect(events.some((event) => event.type === "tool.result.data")).toBe(false);
+  });
+
   it("uses catalog output limits for Anthropic-compatible non-Claude providers", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ minimax: { api: "https://api.minimax.io/anthropic/v1", models: {
       "MiniMax-M3": { limit: { context: 1_048_576, output: 524_288 } },
@@ -37,6 +62,29 @@ describe("createAgent", () => {
   it("keeps the tool catalog out of the default instructions", () => {
     expect(DEFAULT_INSTRUCTIONS).not.toContain(TOOL_SUMMARY);
     expect(DEFAULT_INSTRUCTIONS).not.toContain("search-tools");
+  });
+
+  it("counts frozen tool schemas and instructions before the first provider usage", async () => {
+    const events: LogEvent[] = [];
+    const logger = {
+      record(record: Partial<LogEvent>) { events.push({ id: events.length + 1, timestamp: "2026-09-30", content: null, ...record } as LogEvent); },
+      async append(record: Partial<LogEvent>) { const event = { id: events.length + 1, timestamp: "2026-09-30", content: null, ...record } as LogEvent; events.push(event); return event; },
+      async conversation() { return [...events]; }, async result() { return undefined; },
+    } as unknown as EventLogger;
+    const config = { baseURL: "https://example.com/v1", model: "test", contextWindowOverride: 24_000 };
+    const generated = vi.fn(async () => ({ content: [{ type: "text" as const, text: "The user asks to inspect the page." }],
+      finishReason: { unified: "stop" as const, raw: "stop" }, usage: usage(), warnings: [] }));
+    const model = new MockLanguageModelV4({ doGenerate: generated, doStream: async () => ({ stream: simulateReadableStream({ chunks: [
+      { type: "stream-start", warnings: [] }, { type: "text-start", id: "t" },
+      { type: "text-delta", id: "t", delta: "done" }, { type: "text-end", id: "t" },
+      { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: usage() },
+    ] as any[] }) }) });
+    const executor = { browserContext: vi.fn(async () => ({ windowId: 7, tabs: [] })) } as unknown as ChromeExecutor;
+    const compactor = new ContextCompactor({ model: config, logger, conversationId: "one", branchIds: ["u"], signal: new AbortController().signal });
+    const result = await createAgent({ model: config, languageModel: model, executor, logger, conversationId: "one", compactor }).stream({ prompt: "inspect" });
+    await expect(result.text).resolves.toBe("done");
+    expect(generated).toHaveBeenCalledOnce();
+    expect(events.some((event) => event.type === "context.compacted" && (event.content as any).stepNumber === 0)).toBe(true);
   });
 
   it("detects repeated failures and read-only loops without stopping repeatable input", () => {
@@ -74,7 +122,7 @@ describe("createAgent", () => {
         ] as any[] }) };
       },
     });
-    const result = await createAgent({ model: { baseURL: "https://example.com/v1", apiKey: "key", model: "test" }, languageModel: model, executor, instructions: "Custom guidance.", logger: { record } as any }).stream({ prompt: [{ role: "user", content: "go" }] });
+    const result = await createAgent({ model: { baseURL: "https://example.com/v1", apiKey: "key", model: "test" }, languageModel: model, executor, instructions: "Custom guidance.", logger: { record, append: async (event: unknown) => { record(event); return event; } } as any }).stream({ prompt: [{ role: "user", content: "go" }] });
     for await (const _ of result.stream) {
       // Consume the stream so the agent can execute the repaired tool call.
     }
@@ -90,7 +138,7 @@ describe("createAgent", () => {
     expect(prompts[0]).not.toContain('"type":"file"');
     expect(executor.executeCommand).toHaveBeenCalledWith("goto", { url: "https://example.com" }, undefined, expect.any(Object));
     expect(record).toHaveBeenCalledWith(expect.objectContaining({
-      type: "model.started", content: expect.objectContaining({ activeTools: [...COMMAND_NAMES, "act", "result", ...USER_SCRIPT_TOOL_NAMES], toolCount: 80 }),
+      type: "model.started", content: expect.objectContaining({ activeTools: [...COMMAND_NAMES, "act", "result", ...USER_SCRIPT_TOOL_NAMES], toolCount: 49 }),
     }));
     expect(await result.text).toBe("done");
   }, 10_000);
@@ -115,7 +163,7 @@ describe("createAgent", () => {
         { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: usage() },
       ] as any[] }) };
     } });
-    const result = await createAgent({ model: { baseURL: "https://example.com/v1", model: "test" }, languageModel: model, executor, logger: { record } as any }).stream({ prompt: "scroll" });
+    const result = await createAgent({ model: { baseURL: "https://example.com/v1", model: "test" }, languageModel: model, executor, logger: { record, append: async (event: unknown) => { record(event); return event; } } as any }).stream({ prompt: "scroll" });
     const parts = [];
     for await (const part of result.stream) parts.push(part);
     expect(step).toBe(2);
@@ -137,8 +185,9 @@ describe("createAgent", () => {
       },
       async conversation() { return [...events]; },
       async result() { return undefined; },
+      toolIdentity(_conversationId: string, toolCallId: string) { return { toolCallId, toolCallIdCanonical: true }; },
     } as unknown as EventLogger;
-    const config = { baseURL: "https://example.com/v1", model: "test", contextWindowOverride: 30_000 };
+    const config = { baseURL: "https://example.com/v1", model: "test", contextWindowOverride: 60_000 };
     const signal = new AbortController().signal;
     const compactor = new ContextCompactor({ model: config, logger, conversationId: "one", branchIds: ["user"], signal });
     const executor = {
@@ -150,7 +199,7 @@ describe("createAgent", () => {
     const func = "() => { const txt = document.body.innerText.replace(/\\s+/g,' '); const idx = txt.indexOf('知识点掌握度'); return JSON.stringify({around: txt.slice(idx, idx+500)}); }";
     const dsml = `\n\n<｜DSML｜ calls><｜DSML｜ invoke name="eval"><｜DSML｜ parameter name="func" string="true">${func}</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>`;
     let step = 0;
-    const largeUsage = { ...usage(), inputTokens: { total: 19_000, noCache: 19_000, cacheRead: 0, cacheWrite: 0 } };
+    const largeUsage = { ...usage(), inputTokens: { total: 44_000, noCache: 44_000, cacheRead: 0, cacheWrite: 0 } };
     const model = new MockLanguageModelV4({
       doGenerate: async () => ({ content: [{ type: "text", text: "The user wants to inspect the current page." }],
         finishReason: { unified: "stop", raw: "stop" }, usage: usage(), warnings: [] }) as any,
@@ -179,7 +228,7 @@ describe("createAgent", () => {
     expect(parts.filter((part) => part.type === "tool-result")).toHaveLength(2);
     expect(parts.filter((part) => part.type === "text-delta").map((part) => part.text).join("")).not.toContain("DSML");
     expect(events).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: "context.compacted", content: expect.objectContaining({ strategy: "run-summary", stepNumber: 1 }) }),
+      expect.objectContaining({ type: "context.compacted", content: expect.objectContaining({ strategy: "summary", stepNumber: 1 }) }),
       expect.objectContaining({ type: "model.dsml.recovery", content: { recovered: true, toolNames: ["eval"] } }),
       expect.objectContaining({ type: "tool.finished" }),
     ]));
@@ -205,7 +254,7 @@ describe("createAgent", () => {
       ] as any[] }) };
     } });
     const result = await createAgent({ model: { baseURL: "https://example.com/v1", model: "test" }, languageModel: model,
-      executor, logger: { record } as any }).stream({ prompt: "inspect" });
+      executor, logger: { record, append: async (event: unknown) => { record(event); return event; } } as any }).stream({ prompt: "inspect" });
     for await (const _ of result.stream) { /* consume tool results */ }
     expect(step).toBe(4);
     expect(record).toHaveBeenCalledWith(expect.objectContaining({ type: "agent.loop-guard.triggered",
@@ -222,18 +271,18 @@ describe("createAgent", () => {
     const model = new MockLanguageModelV4({ doStream: async (options) => {
       const names = (options.tools as any[]).map((tool) => tool.name);
       step += 1;
-      expect(names).toHaveLength(80);
-      expect(names).toContain("cookie-list");
+      expect(names).toHaveLength(49);
+      expect(names).toContain("console");
       expect(names).not.toContain("search-tools");
       const chunks = step === 1
-        ? [{ type: "stream-start", warnings: [] }, { type: "tool-call", toolCallId: "cookies", toolName: "cookie-list", dynamic: true, input: "{}" }, { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_calls" }, usage: usage() }]
+        ? [{ type: "stream-start", warnings: [] }, { type: "tool-call", toolCallId: "console", toolName: "console", dynamic: true, input: "{}" }, { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_calls" }, usage: usage() }]
         : [{ type: "stream-start", warnings: [] }, { type: "text-start", id: "text" }, { type: "text-delta", id: "text", delta: "done" }, { type: "text-end", id: "text" }, { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: usage() }];
       return { stream: simulateReadableStream({ chunks: chunks as any[] }) };
     } });
-    const result = await createAgent({ model: { baseURL: "https://example.com/v1", model: "test" }, languageModel: model, executor }).stream({ prompt: "cookies" });
+    const result = await createAgent({ model: { baseURL: "https://example.com/v1", model: "test" }, languageModel: model, executor }).stream({ prompt: "console" });
     for await (const _ of result.stream) { /* consume */ }
     expect(step).toBe(2);
-    expect(executor.executeCommand).toHaveBeenCalledWith("cookie-list", {}, undefined, expect.any(Object));
+    expect(executor.executeCommand).toHaveBeenCalledWith("console", {}, undefined, expect.any(Object));
   }, 10_000);
 
   it("continues beyond twenty tool calls until natural completion", async () => {
@@ -246,8 +295,8 @@ describe("createAgent", () => {
     const model = new MockLanguageModelV4({
       doStream: async (options) => {
         expect(options.reasoning).toBeUndefined();
-        expect((options.tools as any[])).toHaveLength(80);
-        expect((options.tools as any[]).map((tool) => tool.name)).toEqual(expect.arrayContaining(["cookie-list", "act", "result"]));
+        expect((options.tools as any[])).toHaveLength(49);
+        expect((options.tools as any[]).map((tool) => tool.name)).toEqual(expect.arrayContaining(["request-headers", "act", "result"]));
         expect((options.tools as any[]).map((tool) => tool.name)).not.toContain("search-tools");
         expect((options.tools as any[]).map((tool) => tool.name)).not.toContain("browser");
         step += 1;

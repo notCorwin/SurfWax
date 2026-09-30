@@ -6,10 +6,12 @@ import {
   type UIMessage,
   type UIMessageChunk,
 } from "ai";
-import type { ConversationMessage, EventLogger } from "../logging";
+import { fromLogValue, type ConversationMessage, type EventLogger } from "../logging";
 import { claimConversationRun } from "./coordinator";
 import { guardActivePage } from "../chrome/page-guard";
-import { pendingContextChoice } from "./compaction";
+import { materializeToolCatalog } from "./tool-catalog";
+import { TOOL_CATALOG_VERSION, TOOL_CONTEXT } from "../chrome/tool";
+import { recoverModelStream } from "./stream-recovery";
 
 export type SidePanelMessage = UIMessage<any, never, any>;
 
@@ -34,7 +36,7 @@ function logStream(
   currentRunId: string,
   parentId: string | null,
   signal: AbortSignal,
-  release: () => void,
+  release: () => void | Promise<void>,
 ): ReadableStream<UIMessageChunk> {
   const [clientStream, eventStream] = stream.tee();
   const snapshots = readUIMessageStream<SidePanelMessage>({ stream: eventStream });
@@ -59,7 +61,7 @@ function logStream(
 
   const finish = async (type: "conversation.finished" | "conversation.failed" | "conversation.aborted", detail?: unknown) => {
     if (closed) return;
-    if (streamError) {
+    if (streamError && !signal.aborted && !aborting) {
       type = "conversation.failed";
       detail = streamError;
     }
@@ -67,7 +69,8 @@ function logStream(
     closed = true;
     await snapshotTask;
     try {
-      if (type === "conversation.finished" && response) {
+      await logger.closePendingTools(currentRunId, conversationId, detail ?? type);
+      if (response?.parts.length) {
         await logger.appendMessage(conversationId, response as ConversationMessage, {
           runId: currentRunId,
           parentId,
@@ -83,7 +86,7 @@ function logStream(
       });
     } finally {
       logger.endRun(conversationId, currentRunId);
-      release();
+      await release();
     }
   };
 
@@ -105,7 +108,7 @@ function logStream(
         if (next.value.type === "error") streamError = next.value.errorText;
         controller.enqueue(next.value);
       } catch (error) {
-        const aborted = error instanceof Error && error.name === "AbortError";
+        const aborted = signal.aborted || error instanceof Error && error.name === "AbortError";
         await finish(aborted ? "conversation.aborted" : "conversation.failed", error);
         controller.error(error);
       }
@@ -118,25 +121,42 @@ function logStream(
   });
 }
 
-export function createChatTransport(agent: (signal: AbortSignal, branchIds: string[]) => Agent<any, any, any, any> | Promise<Agent<any, any, any, any>>, logger: EventLogger, conversationId: string) {
+export function createChatTransport(agent: (signal: AbortSignal, branchIds: string[], resumed?: boolean) => Agent<any, any, any, any> | Promise<Agent<any, any, any, any>>, logger: EventLogger, conversationId: string, cleanup?: () => Promise<void>, onContextOverflow?: (signal: AbortSignal) => Promise<void>) {
   return {
     sendMessages: async (options: Parameters<ChatTransport<SidePanelMessage>["sendMessages"]>[0]) => {
       if (options.trigger !== "submit-message" && options.trigger !== "regenerate-message") {
         throw new Error(`Unsupported message trigger: ${options.trigger}`);
       }
-      if (pendingContextChoice(await logger.conversation(conversationId), options.messages.map((message) => message.id))) {
-        throw new Error("请先生成 LLM 摘要，再继续发送消息。");
-      }
       const currentRunId = runId();
-      const lease = await claimConversationRun(conversationId, options.abortSignal);
+      const lease = await claimConversationRun(conversationId, options.abortSignal, currentRunId);
       const releaseGuard = await guardActivePage(lease.signal).catch(() => () => undefined);
-      const release = () => { releaseGuard(); lease.finish(); };
+      const release = async () => { try { await cleanup?.(); } finally { releaseGuard(); lease.finish(); } };
 
       try {
         logger.beginRun(conversationId, currentRunId);
-        const userMessage = [...options.messages].reverse().find((message) => message.role === "user");
         const existing = await logger.repository(conversationId);
-        if (userMessage && !existing.messages.some(({ message }) => message.id === userMessage.id)) {
+        // UI snapshots can omit custom metadata; restore it from the canonical message.
+        options = { ...options, messages: options.messages.map((message) => {
+          const saved = existing.messages.find((entry) => entry.message.id === message.id)?.message;
+          return saved?.metadata ? { ...message, metadata: saved.metadata } : message;
+        }) };
+        let userMessage = [...options.messages].reverse().find((message) => message.role === "user");
+        const catalogVersion = [...options.messages].reverse().map((message) => message.metadata?.custom?.toolCatalog?.version).find(Boolean);
+        const previouslySubmitted = userMessage && (await logger.summaryEvents(conversationId)).some((event) =>
+          event.type === "conversation.submitted" && (fromLogValue(event.content) as { messageId?: unknown } | null)?.messageId === userMessage!.id);
+        const newUser = userMessage && (!existing.messages.some((entry) => entry.message.id === userMessage!.id)
+          || options.trigger === "submit-message" && !previouslySubmitted);
+        let catalogAdded = false;
+        // The history adapter can persist a new user before sendMessages. Attach
+        // its first catalogue before submission, while past request prefixes stay fixed.
+        if (userMessage && catalogVersion !== TOOL_CATALOG_VERSION && newUser) {
+          catalogAdded = true;
+          userMessage = { ...userMessage, metadata: { ...userMessage.metadata, custom: { ...userMessage.metadata?.custom,
+            toolCatalog: { version: TOOL_CATALOG_VERSION, context: catalogVersion || options.messages.findIndex((message) => message.id === userMessage!.id) > 0 ? `Tool catalog updated to ${TOOL_CATALOG_VERSION}. Removed tools remain historical only.\n${TOOL_CONTEXT}` : TOOL_CONTEXT },
+          } } };
+          options = { ...options, messages: options.messages.map((message) => message.id === userMessage!.id ? userMessage! : message) };
+        }
+        if (userMessage && (catalogAdded || !existing.messages.some(({ message }) => message.id === userMessage.id))) {
           const index = options.messages.findIndex((message) => message.id === userMessage.id);
           await logger.appendMessage(conversationId, userMessage as ConversationMessage, {
             runId: currentRunId,
@@ -156,13 +176,31 @@ export function createChatTransport(agent: (signal: AbortSignal, branchIds: stri
           runId: currentRunId,
           content: { chatId: options.chatId, messageId: userMessage?.id ?? null },
         });
-        const direct = new DirectChatTransport<any, any, any, any, SidePanelMessage>({
-          agent: await agent(lease.signal, options.messages.map((message) => message.id)),
-          generateMessageId: () => globalThis.crypto.randomUUID(),
-          onError: (error) => error instanceof Error ? error.message : String(error),
+        const messageId = globalThis.crypto.randomUUID();
+        let resumed = false;
+        const stream = recoverModelStream({
+          messages: options.messages, signal: lease.signal, logger, conversationId, runId: currentRunId, parentId: userMessage?.id ?? null,
+          onContextOverflow,
+          prepareMessages: async (messages) => {
+            const canonical = await logger.repository(conversationId);
+            const saved = new Map(canonical.messages.map((entry) => [entry.message.id, entry.message]));
+            return messages.map((message) => saved.get(message.id)?.metadata
+              ? { ...message, metadata: saved.get(message.id)!.metadata } : message);
+          },
+          open: async (messages, captureError, phaseSignal) => {
+            // Fresh prepare state sees new checkpoints and the expanded durable
+            // branch after a disconnect. The executor keeps its bound browser.
+            const runAgent = await agent(phaseSignal, messages.map((message) => message.id), resumed);
+            resumed = true;
+            const direct = new DirectChatTransport<any, any, any, any, SidePanelMessage>({ agent: runAgent,
+              generateMessageId: () => messageId,
+              onError: (error) => { captureError(error); return error instanceof Error ? error.message : String(error); },
+            });
+            return direct.sendMessages({ ...options, abortSignal: phaseSignal, messages: messages.map(materializeToolCatalog) as SidePanelMessage[] });
+          },
         });
         return logStream(
-          await direct.sendMessages({ ...options, abortSignal: lease.signal, messages: options.messages }),
+          stream,
           logger,
           conversationId,
           currentRunId,
@@ -171,18 +209,18 @@ export function createChatTransport(agent: (signal: AbortSignal, branchIds: stri
           release,
         );
       } catch (error) {
-        const aborted = error instanceof Error && error.name === "AbortError";
+        const aborted = lease.signal.aborted || error instanceof Error && error.name === "AbortError";
         try {
           await logger.append({
             type: aborted ? "conversation.aborted" : "conversation.failed",
             conversationId,
             runId: currentRunId,
             content: null,
-            ...(aborted ? { abort: { reason: error.message } } : { error }),
+            ...(aborted ? { abort: { reason: lease.signal.reason ?? String(error) } } : { error }),
           });
         } finally {
           logger.endRun(conversationId, currentRunId);
-          release();
+          await release();
         }
         throw error;
       }

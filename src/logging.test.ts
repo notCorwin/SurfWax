@@ -33,6 +33,120 @@ function memoryStore(onBatch?: (size: number) => void) {
 }
 
 describe("canonical event log", () => {
+  it("settles the writer handshake and refuses queued writes when background initialization fails", async () => {
+    const store = memoryStore();
+    const onError = vi.fn();
+    let receive!: (message: any) => void;
+    const port = { onMessage: { addListener(listener: (message: any) => void) { receive = listener; } },
+      onDisconnect: { addListener: vi.fn() }, postMessage: vi.fn() } as unknown as chrome.runtime.Port;
+    const logger = new EventLogger({ store, writerPort: port, onError });
+    const first = logger.append({ type: "conversation.created", conversationId: "pending" });
+    const flushing = logger.flush();
+    receive({ type: "writer-error", error: "后台初始化失败，请重新加载扩展后重试：IndexedDB unavailable" });
+    await expect(flushing).resolves.toBeUndefined();
+    await expect(first).resolves.toBeUndefined();
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: "后台初始化失败，请重新加载扩展后重试：IndexedDB unavailable" }));
+    expect(await logger.append({ type: "conversation.submitted", runId: "new" })).toBeUndefined();
+    expect(await store.all()).toEqual([]);
+  });
+  it("reports a disconnected writer so the UI can reload before accepting another task", async () => {
+    const store = memoryStore();
+    const onError = vi.fn();
+    let disconnect!: () => void;
+    let receive!: (message: any) => void;
+    const port = { onMessage: { addListener(listener: (message: any) => void) { receive = listener; } },
+      onDisconnect: { addListener(listener: () => void) { disconnect = listener; } }, postMessage: vi.fn() } as unknown as chrome.runtime.Port;
+    const logger = new EventLogger({ store, writerPort: port, onError });
+    receive({ type: "writer-ready", paused: false, generation: 0 });
+    disconnect();
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: "后台日志连接已断开，请重新加载侧栏。" }));
+    expect(await logger.append({ type: "conversation.submitted", conversationId: "one", runId: "new" })).toBeUndefined();
+    expect(await store.all()).toEqual([]);
+  });
+  it("serializes terminal writes from independent owners and recovery writers", async () => {
+    const store = memoryStore();
+    const owner = new EventLogger({ store });
+    const recovery = new EventLogger({ store });
+    await owner.append({ type: "conversation.submitted", runId: "run", conversationId: "one" });
+    for (const id of ["a", "b"]) await owner.append({ type: "tool.started", runId: "run", conversationId: "one", toolCallId: id, content: { callId: "call" } });
+    await Promise.all([owner.closePendingTools("run", "one", "pagehide"), recovery.recoverDanglingRuns()]);
+    await owner.append({ type: "conversation.aborted", runId: "run", conversationId: "one", abort: { reason: "pagehide" } });
+    const terminals = (await store.all()).filter((event) => ["tool.finished", "tool.failed"].includes(event.type));
+    expect(terminals.map((event) => event.toolCallId).sort()).toEqual(["a", "b"]);
+    expect((await store.all()).filter((event) => ["conversation.finished", "conversation.failed", "conversation.aborted"].includes(event.type))).toHaveLength(1);
+  });
+
+  it("keeps the first durable terminal and distinguishes separate model calls", async () => {
+    const store = memoryStore();
+    const owner = new EventLogger({ store });
+    const recovery = new EventLogger({ store });
+    const observed = vi.fn();
+    recovery.subscribe(observed);
+    const first = await owner.append({ type: "tool.finished", runId: "run", toolCallId: "tool", content: { callId: "a" }, output: { ok: true } });
+    const duplicate = await recovery.append({ type: "tool.failed", runId: "run", toolCallId: "tool", content: { callId: "a" }, error: "late callback" });
+    await recovery.append({ type: "tool.failed", runId: "run", toolCallId: "tool", content: { callId: "b" }, error: "different call" });
+    expect(duplicate).toEqual(first);
+    expect(observed).toHaveBeenCalledOnce();
+    expect((await store.all()).map((event) => event.type)).toEqual(["tool.finished", "tool.failed"]);
+  });
+
+  it("keeps late SDK callbacks in their original run phase after recovery and lease release", async () => {
+    const store = memoryStore();
+    const logger = new EventLogger({ store });
+    logger.beginRun("one", "run");
+    logger.setRunPhase("run", 0);
+    await logger.append({ type: "tool.started", conversationId: "one", toolCallId: "tool", content: { callId: "old" } });
+    await logger.closePendingTools("run", "one", "stream-disconnected");
+    logger.setRunPhase("run", 1);
+    await logger.append({ type: "tool.started", conversationId: "one", toolCallId: "tool", content: { callId: "new" } });
+    await logger.closePendingTools("run", "one", "user-stopped");
+    logger.endRun("one", "run");
+    logger.beginRun("one", "next-run");
+    logger.setRunPhase("next-run", 0);
+    await logger.append({ type: "tool.finished", conversationId: "one", toolCallId: "tool", content: { callId: "old" }, output: { ok: true } });
+    await logger.append({ type: "tool.finished", conversationId: "one", toolCallId: "tool", content: { callId: "new" }, output: { ok: true } });
+    const terminals = (await store.all()).filter((event) => ["tool.finished", "tool.failed"].includes(event.type));
+    expect(terminals.map((event) => [event.runId, event.toolCallId, event.type])).toEqual([["run", "tool", "tool.failed"], ["run", "1:tool", "tool.failed"]]);
+  });
+  it("keeps the first accepted write when a new writer joins a later maintenance generation", async () => {
+    const store = memoryStore();
+    let receive!: (message: any) => void;
+    const port = { onMessage: { addListener(listener: (message: any) => void) { receive = listener; } },
+      onDisconnect: { addListener: vi.fn() }, postMessage: vi.fn() } as unknown as chrome.runtime.Port;
+    const logger = new EventLogger({ store, writerPort: port });
+    const first = logger.append({ type: "conversation.created", conversationId: "new" });
+    receive({ type: "writer-ready", paused: false, generation: 4 });
+    expect((await first)?.type).toBe("conversation.created");
+    expect(await store.all()).toHaveLength(1);
+  });
+
+  it("discards pre-handshake writes from a writer joining while the log is being cleared", async () => {
+    const store = memoryStore();
+    let receive!: (message: any) => void;
+    const port = { onMessage: { addListener(listener: (message: any) => void) { receive = listener; } },
+      onDisconnect: { addListener: vi.fn() }, postMessage: vi.fn() } as unknown as chrome.runtime.Port;
+    const logger = new EventLogger({ store, writerPort: port });
+    const first = logger.append({ type: "conversation.created", conversationId: "late" });
+    receive({ type: "writer-ready", paused: true, generation: 4 });
+    expect(await first).toBeUndefined();
+    expect(await store.all()).toHaveLength(0);
+    expect(await logger.append({ type: "late.callback" })).toBeUndefined();
+  });
+
+  it("closes pending tools with their original phase IDs and remains idempotent after recovery", async () => {
+    const store = memoryStore();
+    const logger = new EventLogger({ store });
+    logger.setRunPhase("run", 0);
+    await logger.append({ type: "tool.started", runId: "run", conversationId: "one", toolCallId: "call", content: { callId: "phase0" } });
+    logger.setRunPhase("run", 1);
+    await logger.append({ type: "tool.started", runId: "run", conversationId: "one", toolCallId: "call", content: { callId: "phase1" } });
+    await logger.closePendingTools("run", "one", "stream-disconnected");
+    await logger.closePendingTools("run", "one", "stream-disconnected");
+    const failed = (await store.all()).filter((event) => event.type === "tool.failed");
+    expect(failed.map((event) => event.toolCallId)).toEqual(["call", "1:call"]);
+    expect(failed).toHaveLength(2);
+  });
+
   it("upgrades the existing event store without deleting legacy records", () => {
     const legacyRecords = [{ id: 1, type: "legacy" }];
     const createIndex = vi.fn();
@@ -175,5 +289,59 @@ describe("canonical event log", () => {
     const audit = (await logger.all()).find((event) => event.type === "conversation.deleted");
     expect(audit).toMatchObject({ content: { conversationId: "one" } });
     expect(audit).not.toHaveProperty("conversationId");
+  });
+});
+
+describe("run recovery", () => {
+  it("restores persisted act progress after its owner disappears", async () => {
+    const logger = new EventLogger({ store: memoryStore() });
+    const steps = [{ type: "click", target: { ref: "e1" } }, { type: "fill", target: { ref: "e2" }, value: "waiting" }, { type: "click", target: { ref: "e3" } }];
+    await logger.append({ type: "conversation.submitted", conversationId: "one", runId: "lost" });
+    await logger.append({ type: "tool.started", conversationId: "one", runId: "lost", toolCallId: "batch", input: { steps }, content: { callId: "sdk", toolName: "act" } });
+    await logger.append({ type: "tool.progress", conversationId: "one", runId: "lost", toolCallId: "batch", content: { nextIndex: 1, steps }, output: { completed: [{ index: 0, step: steps[0], result: { performed: true } }], elapsedMs: 25 } });
+    await logger.recoverDanglingRuns();
+    await logger.recoverDanglingRuns();
+    const results = (await logger.all()).filter((event) => event.type === "tool.failed");
+    expect(results).toHaveLength(1);
+    expect(results[0].output).toMatchObject({ ok: false, completed: [{ index: 0, result: { performed: true } }], failed: { index: 1, step: steps[1] }, notRun: [steps[2]], elapsedMs: 25 });
+  });
+
+  it("freezes canonical tool IDs before another stream phase begins", () => {
+    const logger = new EventLogger({ store: memoryStore() });
+    logger.beginRun("one", "run"); logger.setRunPhase("run", 1);
+    const identity = logger.toolIdentity("one", "call");
+    logger.setRunPhase("run", 2);
+    expect(identity).toEqual({ runId: "run", toolCallId: "1:call", toolCallIdCanonical: true });
+  });
+
+  it("rechecks the live owner under the recovery lock and preserves worker restart reasons", async () => {
+    const logger = new EventLogger({ store: memoryStore() });
+    await logger.append({ type: "conversation.submitted", conversationId: "one", runId: "active" });
+    await logger.append({ type: "conversation.submitted", conversationId: "two", runId: "orphan" });
+    await logger.append({ type: "tool.started", conversationId: "two", runId: "orphan", toolCallId: "pending", content: { toolName: "click" } });
+    const owners = vi.fn(async () => ["active"]);
+    await logger.recoverDanglingRuns(owners, "worker-restarted");
+    expect(owners).toHaveBeenCalledTimes(2);
+    const events = await logger.all();
+    expect(events.filter((event) => event.runId === "active")).toHaveLength(1);
+    expect(events.find((event) => event.type === "conversation.aborted")?.abort).toEqual({ reason: "worker-restarted" });
+    expect(events.find((event) => event.type === "tool.failed")?.abort).toEqual({ reason: "worker-restarted" });
+  });
+  it("closes missing tools before the run and is idempotent while preserving active owners", async () => {
+    const logger = new EventLogger({ store: memoryStore() });
+    await logger.append({ type: "conversation.submitted", conversationId: "orphan", runId: "lost" });
+    await logger.append({ type: "tool.started", conversationId: "orphan", runId: "lost", toolCallId: "pending", input: { target: "e1" }, content: { toolName: "click" } });
+    await logger.append({ type: "tool.started", conversationId: "orphan", runId: "lost", toolCallId: "done", content: { toolName: "act" } });
+    await logger.append({ type: "tool.failed", conversationId: "orphan", runId: "lost", toolCallId: "done", output: { ok: false, completed: [0], failed: 1, notRun: [2] } });
+    await logger.append({ type: "conversation.submitted", conversationId: "active", runId: "alive" });
+    await logger.recoverDanglingRuns(["alive"]); await logger.recoverDanglingRuns(["alive"]);
+    const events = await logger.all();
+    expect(events.filter((event) => event.type === "tool.failed" && event.toolCallId === "pending")).toHaveLength(1);
+    const tool = events.find((event) => event.type === "tool.failed" && event.toolCallId === "pending")!;
+    const run = events.find((event) => event.type === "conversation.aborted")!;
+    expect(tool.id).toBeLessThan(run.id);
+    expect(tool.output).toMatchObject({ error: { effectUnknown: true } });
+    expect(events.filter((event) => event.runId === "alive")).toHaveLength(1);
+    expect(events.find((event) => event.toolCallId === "done" && event.type === "tool.failed")?.output).toEqual({ ok: false, completed: [0], failed: 1, notRun: [2] });
   });
 });

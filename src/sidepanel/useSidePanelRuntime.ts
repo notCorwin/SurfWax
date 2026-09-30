@@ -5,6 +5,7 @@ import { abortAllConversationWork } from "../agent/coordinator";
 import { createAgent } from "../agent/runner";
 import { ContextCompactor } from "../agent/compaction";
 import { createModel } from "../agent/model";
+import { ensureAutomaticContextSummary } from "../agent/context-choice";
 import { reasoningSettingsFor } from "../agent/reasoning";
 import { createChatTransport, type SidePanelMessage } from "../agent/transport";
 import { ChromeExecutor } from "../chrome/executor";
@@ -29,9 +30,9 @@ export function createSidePanelCloser(runtime: CloseableRuntime, logger?: EventL
 function useConversationRuntime(config: ModelConfig, systemPrompt: string | undefined, logger: EventLogger, executor: ChromeExecutor): AssistantRuntime {
   const conversationId = useAuiState((state) => state.threadListItem.remoteId ?? state.threadListItem.id);
   const transport = useMemo(
-    () => createChatTransport(async (signal, branchIds) => {
+    () => createChatTransport(async (signal, branchIds, resumed) => {
       signal.throwIfAborted();
-      await executor.beginRun();
+      if (!resumed) await executor.beginRun();
       const reasoning = reasoningSettingsFor(config);
       await reasoning.ready;
       const languageModel = await createModel(config, logger, conversationId, { signal });
@@ -39,7 +40,9 @@ function useConversationRuntime(config: ModelConfig, systemPrompt: string | unde
       return createAgent({ model: config, languageModel, reasoning: reasoning.snapshot().selected ?? undefined, executor, logger, conversationId,
         instructions: systemPrompt,
         compactor: new ContextCompactor({ model: config, logger, conversationId, branchIds, signal }) });
-    }, logger, conversationId),
+    }, logger, conversationId, () => executor.endRun(), async (signal) => {
+      await ensureAutomaticContextSummary(logger, conversationId, config, signal, { forced: true });
+    }),
     [config, conversationId, executor, logger, systemPrompt],
   );
   const runtime = useChatRuntime<SidePanelMessage>({
@@ -72,24 +75,9 @@ export function useSidePanelRuntime(
 
   useEffect(() => {
     const close = createSidePanelCloser(runtime, logger);
-    const clear = (message: unknown, _sender: chrome.runtime.MessageSender, respond: (response: unknown) => void) => {
-      if (!message || typeof message !== "object" || (message as { type?: unknown }).type !== "side-agent:clear-log") return false;
-      close();
-      logger.stop();
-      void logger.flush()
-        .then(() => logger.clear())
-        .then(() => {
-          respond({ ok: true });
-          globalThis.location.reload();
-        })
-        .catch((error) => respond({ ok: false, error: error instanceof Error ? error.message : String(error) }));
-      return true;
-    };
     globalThis.addEventListener("pagehide", close);
-    chrome.runtime.onMessage.addListener(clear);
     return () => {
       globalThis.removeEventListener("pagehide", close);
-      chrome.runtime.onMessage.removeListener(clear);
       close();
     };
   }, [logger, runtime]);

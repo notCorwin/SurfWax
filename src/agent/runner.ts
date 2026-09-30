@@ -1,13 +1,14 @@
 import { isLoopFinished, ToolLoopAgent, wrapLanguageModel } from "ai";
 import type { LanguageModel } from "ai";
-import { createCommandTools, prepareToolMessages, repairCommandToolCall } from "../chrome/tool";
+import { z } from "zod";
+import { createCommandTools, prepareToolMessages, repairCommandToolCall, TOOL_REGISTRY } from "../chrome/tool";
 import { ChromeExecutor } from "../chrome/executor";
 import type { BrowserContext } from "../chrome/executor";
 import type { EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
 import { inputBudget, modelSupportsImages, resolveModelLimit } from "./model-limits";
 import { sdkFor } from "./model-sdks";
-import { estimateInput, type ContextCompactor } from "./compaction";
+import { estimatePromptInput, type ContextCompactor } from "./compaction";
 import type { ReasoningEffort } from "./reasoning";
 import { dsmlMiddleware } from "./dsml";
 
@@ -39,6 +40,9 @@ export type CreateAgentOptions = {
 };
 
 type BrowserAgentTools = ReturnType<typeof createCommandTools>;
+const PROMPT_TOOLS = Object.freeze(TOOL_REGISTRY.map(({ name, description, inputSchema }) => Object.freeze({
+  type: "function", name, description, inputSchema: z.toJSONSchema(inputSchema, { target: "draft-7", unrepresentable: "any" }),
+})));
 
 function browserContextMessage(context: BrowserContext): string {
   return [
@@ -49,7 +53,7 @@ function browserContextMessage(context: BrowserContext): string {
   ].join("\n");
 }
 
-const READ_ONLY_TOOLS = new Set(["snapshot", "find", "tab-list", "requests", "request", "request-headers", "request-body", "response-headers", "response-body", "route-list", "console", "cookie-list", "cookie-get", "localstorage-list", "localstorage-get", "sessionstorage-list", "sessionstorage-get", "result", "userscript-list", "userscript-read"]);
+const READ_ONLY_TOOLS = new Set(["snapshot", "find", "tab-list", "requests", "request", "request-headers", "request-body", "response-headers", "response-body", "console", "result", "userscript-list", "userscript-read"]);
 const REPEATABLE_TOOLS = new Set(["type", "press", "keydown", "keyup", "mousemove", "mousedown", "mouseup", "mousewheel", "run-code", "act"]);
 
 function signature(value: unknown): string {
@@ -94,7 +98,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     tools,
     toolOrder,
     repairToolCall: repairCommandToolCall as any,
-    prepareStep: async ({ messages, stepNumber, steps }) => {
+    prepareStep: async ({ messages, initialMessages, responseMessages, stepNumber, steps }) => {
       let prepared = await options.compactor?.prepare(messages, stepNumber) ?? messages;
       const browserContext = await options.executor.browserContext();
       const nextBrowserDigest = JSON.stringify(browserContext.tabs);
@@ -102,7 +106,15 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       browserDigest = nextBrowserDigest;
       if (browserChanged) logger?.record({ type: "browser.context.prepared", conversationId: options.conversationId, content: { stepNumber, ...browserContext } });
       const modelLimit = await limit;
-      const estimatedInput = options.compactor?.estimate(prepared) ?? estimateInput(prepared);
+      const prepareMessages = (source: typeof prepared) => prepareToolMessages(
+        source,
+        stepNumber,
+        browserChanged ? browserContextMessage(browserContext) : undefined,
+        logger ? (id) => logger.result(id, {}, options.conversationId ?? "") : undefined,
+      );
+      let outgoing = await prepareMessages(prepared);
+      const prompt = { instructions, tools: PROMPT_TOOLS };
+      const estimatedInput = options.compactor?.estimate(outgoing, prompt) ?? estimatePromptInput({ ...prompt, messages: outgoing });
       const pressure = modelLimit && estimatedInput >= inputBudget(modelLimit) * 0.8
         && (!options.compactor || options.compactor.canCompact(prepared, modelLimit));
       const guard = pressure ? "context-budget" : stagnationReason(steps);
@@ -112,17 +124,13 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       }
       if (pressure) {
         if (!options.compactor) throw new Error("上下文容量不足，无法在当前运行中压缩历史消息。");
-        prepared = await options.compactor.compact(messages, prepared, stepNumber, options.languageModel, modelLimit);
+        prepared = await options.compactor.compact([...initialMessages, ...responseMessages], prepared, stepNumber, options.languageModel, modelLimit);
+        outgoing = await prepareMessages(prepared);
       }
       return {
         ...(sdkFor(options.model) === "@ai-sdk/anthropic" && options.model.providerId !== "anthropic" && modelLimit?.output
           ? { maxOutputTokens: modelLimit.output } : {}),
-        messages: await prepareToolMessages(
-          prepared,
-          stepNumber,
-          browserChanged ? browserContextMessage(browserContext) : undefined,
-          logger ? (id) => logger.result(id, {}, options.conversationId ?? "") : undefined,
-        ),
+        messages: outgoing,
       };
     },
     ...(logger ? {
@@ -137,34 +145,34 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         content: { callId: event.callId, stepNumber: event.stepNumber, provider: event.provider, modelId: event.modelId },
       }),
       onLanguageModelCallStart: (event) => options.compactor?.recordPrompt(event),
-      onToolExecutionStart: (event) => logger.record({
+      onToolExecutionStart: async (event) => { const started = await logger.append({
         type: "tool.started",
         conversationId: options.conversationId,
         content: { callId: event.callId, toolName: event.toolCall.toolName },
         toolCallId: event.toolCall.toolCallId,
         input: event.toolCall.input,
-      }),
-      onToolExecutionEnd: (event) => {
+      }); if (!started) throw new DOMException("日志维护已阻止工具启动。", "AbortError"); },
+      onToolExecutionEnd: async (event) => {
         loggedToolCalls.add(`${event.callId}\u0000${event.toolCall.toolCallId}`);
         const failed = event.toolOutput.type === "tool-error" || (event.toolOutput as any).output?.ok === false;
-        logger.record({
+        await logger.append({
           type: failed ? "tool.failed" : "tool.finished",
           conversationId: options.conversationId,
           content: { callId: event.callId, toolName: event.toolCall.toolName, toolExecutionMs: event.toolExecutionMs },
           toolCallId: event.toolCall.toolCallId,
           input: event.toolCall.input,
-          ...(event.toolOutput.type === "tool-error" ? { error: event.toolOutput.error } : failed ? { error: (event.toolOutput as any).output.error } : { output: event.toolOutput.output }),
+          ...(event.toolOutput.type === "tool-error" ? { error: event.toolOutput.error, output: { ok: false, error: event.toolOutput.error } } : { output: event.toolOutput.output, ...(failed ? { error: (event.toolOutput as any).output.error } : {}) }),
           latencyMs: event.toolExecutionMs,
         });
       },
-      onStepEnd: (event) => {
+      onStepEnd: async (event) => {
         options.compactor?.recordUsage(event.usage.inputTokens, event.stepNumber);
         for (const part of event.content) if (part.type === "tool-error" && !loggedToolCalls.has(`${event.callId}\u0000${part.toolCallId}`)) {
           loggedToolCalls.add(`${event.callId}\u0000${part.toolCallId}`);
-          logger.record({
+          await logger.append({
             type: "tool.failed", conversationId: options.conversationId,
             content: { callId: event.callId, toolName: part.toolName },
-            toolCallId: part.toolCallId, input: part.input, error: part.error,
+            toolCallId: part.toolCallId, input: part.input, error: part.error, output: { ok: false, error: part.error },
           });
         }
         logger.record({

@@ -7,7 +7,7 @@ import { googleCredentials, isOpenAIShapedSdk, modelConfigErrors, resolvedBaseUR
 const MAX_RETRY_DELAY_MS = 10_000;
 const INITIAL_RETRY_DELAY_MS = 250;
 
-function isAbortError(error: unknown, signal?: AbortSignal): boolean {
+export function isAbortError(error: unknown, signal?: AbortSignal): boolean {
   return Boolean(signal?.aborted || error instanceof Error && error.name === "AbortError");
 }
 
@@ -15,11 +15,55 @@ function isNetworkError(error: unknown): boolean {
   return error instanceof TypeError || error instanceof Error && error.name === "NetworkError";
 }
 
-function retryableStatus(status: number): boolean {
+export function isRecoverableHttpStatus(status: number): boolean {
   return [408, 409, 425, 429, 500, 502, 503, 504].includes(status);
 }
 
-function retryDelay(attempt: number, random: () => number): number {
+/** Providers report context overflow as a permanent request error; retry requires a new checkpoint. */
+export function isContextOverflowError(error: unknown): boolean {
+  const visited = new Set<unknown>();
+  let current = error;
+  while (current && !visited.has(current)) {
+    visited.add(current);
+    if (typeof current !== "object") return false;
+    const value = current as { statusCode?: unknown; status?: unknown; message?: unknown; responseBody?: unknown; cause?: unknown; code?: unknown };
+    const status = typeof value.statusCode === "number" ? value.statusCode : value.status;
+    const text = [value.message, value.responseBody, value.code].filter((item) => typeof item === "string").join(" ");
+    if ((status === undefined || [400, 413, 422].includes(Number(status)))
+      && /context[_ -]length[_ -]exceeded|maximum\s+context\s+length|context\s+(?:window|length)[^.\n]{0,100}(?:exceed|too\s+(?:long|large)|limit)|(?:too\s+many|maximum\s+(?:number\s+of\s+)?)\s+(?:input\s+|prompt\s+)?tokens|prompt[^.\n]{0,80}(?:too\s+long|exceeds?)/i.test(text)) return true;
+    if (typeof status === "number" && ![400, 413, 422].includes(status)) return false;
+    current = value.cause;
+  }
+  return false;
+}
+
+/** Shared by fetch and interrupted stream recovery. Permanent provider errors always win. */
+export function isRecoverableModelError(error: unknown, signal?: AbortSignal): boolean {
+  const visited = new Set<unknown>();
+  let current = error;
+  while (current && !visited.has(current)) {
+    visited.add(current);
+    if (isAbortError(current, signal)) return false;
+    if (typeof current !== "object") return false;
+    const value = current as { statusCode?: unknown; status?: unknown; isRetryable?: unknown; cause?: unknown; code?: unknown; name?: unknown };
+    const status = typeof value.statusCode === "number" ? value.statusCode : value.status;
+    if (typeof status === "number") {
+      if (status >= 400) return isRecoverableHttpStatus(status);
+      // AI SDK wraps failures while reading an otherwise successful response in
+      // APICallError(status=200). Only its underlying network cause is retryable;
+      // malformed successful payloads remain terminal.
+      current = value.cause;
+      continue;
+    }
+    if (isNetworkError(current) || value.name === "TimeoutError"
+      || ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT"].includes(String(value.code))
+      || value.isRetryable === true) return true;
+    current = value.cause;
+  }
+  return false;
+}
+
+export function retryBackoffDelay(attempt: number, random: () => number = Math.random): number {
   const exponential = Math.min(MAX_RETRY_DELAY_MS, INITIAL_RETRY_DELAY_MS * 2 ** Math.min(attempt - 1, 6));
   return Math.min(MAX_RETRY_DELAY_MS, Math.round(exponential * (0.5 + random())));
 }
@@ -40,25 +84,32 @@ async function responseDetails(response: Response): Promise<Record<string, unkno
   };
 }
 
-function waitForRetry(delayMs: number, signal?: AbortSignal, sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))): Promise<void> {
+export function waitForModelRetry(delayMs: number, signal?: AbortSignal, sleep?: (ms: number) => Promise<void>): Promise<void> {
   if (signal?.aborted) return Promise.reject(new DOMException("Operation aborted", "AbortError"));
   return new Promise((resolve, reject) => {
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
     const onAbort = () => {
       if (settled) return;
       settled = true;
+      cleanup();
       reject(new DOMException("Operation aborted", "AbortError"));
     };
     signal?.addEventListener("abort", onAbort, { once: true });
-    void sleep(delayMs).then(() => {
+    const sleeping = sleep ? sleep(delayMs) : new Promise<void>((done) => { timer = setTimeout(done, delayMs); });
+    void sleeping.then(() => {
       if (settled) return;
       settled = true;
-      signal?.removeEventListener("abort", onAbort);
+      cleanup();
       resolve();
     }, (error) => {
       if (settled) return;
       settled = true;
-      signal?.removeEventListener("abort", onAbort);
+      cleanup();
       reject(error);
     });
   });
@@ -111,8 +162,7 @@ export function createRetryingFetch(options: {
 
   return async (input, init) => {
     await options.reasoningSettings?.ready;
-    const request = typeof Request !== "undefined" && input instanceof Request ? input : undefined;
-    const originalRequest = request?.clone() ?? new Request(input, init);
+    const originalRequest = new Request(input instanceof Request ? input.clone() : input, init);
     const requestedReasoningEffort = await reasoningEffortOf(originalRequest);
     let reasoningEffort: ReasoningEffort | null | undefined = options.reasoningSettings
       ? options.reasoningSettings.snapshot().selected
@@ -126,10 +176,10 @@ export function createRetryingFetch(options: {
     const signal = originalRequest.signal;
     const startedAt = now();
     let retries = 0;
-    const typeErrors = new Map<string, number>();
 
     while (true) {
       try {
+        signal.throwIfAborted();
         const response = await baseFetch(activeRequest.clone());
         const rejection = reasoningEffort == null ? undefined : await reasoningRejection(response);
         if (rejection) {
@@ -151,7 +201,7 @@ export function createRetryingFetch(options: {
           activeRequest = await withReasoningEffort(originalRequest, fallback);
           continue;
         }
-        if (!retryableStatus(response.status)) {
+        if (!isRecoverableHttpStatus(response.status)) {
           if (response.ok && requestedReasoningEffort !== undefined && !options.reasoningSettings) supportedReasoningEffort = reasoningEffort;
           const details = response.ok ? {} : await responseDetails(response);
           options.logger?.record({
@@ -164,7 +214,7 @@ export function createRetryingFetch(options: {
         }
 
         retries += 1;
-        const delayMs = retryAfter(response, now) ?? retryDelay(retries, random);
+        const delayMs = retryAfter(response, now) ?? retryBackoffDelay(retries, random);
         const details = await responseDetails(response);
         options.logger?.record({
           type: "request.retry",
@@ -174,7 +224,7 @@ export function createRetryingFetch(options: {
           latencyMs: Math.max(0, now() - startedAt),
         });
         if (response.body) await response.body.cancel().catch(() => undefined);
-        await waitForRetry(delayMs, signal, options.sleep);
+        await waitForModelRetry(delayMs, signal, options.sleep);
       } catch (error) {
         if (isAbortError(error, signal)) {
           options.logger?.record({
@@ -187,7 +237,7 @@ export function createRetryingFetch(options: {
           throw error;
         }
 
-        if (!isNetworkError(error)) {
+        if (!isRecoverableModelError(error, signal)) {
           options.logger?.record({
             type: "request.failed",
             conversationId: options.conversationId,
@@ -198,29 +248,16 @@ export function createRetryingFetch(options: {
           throw error;
         }
 
-        const key = `${error instanceof Error ? error.name : typeof error}:${error instanceof Error ? error.message : String(error)}`;
-        const repeated = (typeErrors.get(key) ?? 0) + 1;
-        typeErrors.set(key, repeated);
-        const confirmedTransient = error instanceof Error && error.name === "NetworkError"
-          || typeof navigator !== "undefined" && navigator.onLine === false;
-        if (!confirmedTransient && error instanceof TypeError && repeated >= 3) {
-          const diagnostic = new Error(`Provider network request failed repeatedly; check the endpoint URL, CORS policy, Chrome host permissions, and provider configuration. Last error: ${error.message}`, { cause: error });
-          options.logger?.record({ type: "request.failed", conversationId: options.conversationId,
-            content: { url, method, attempts: repeated, diagnosis: "provider-network-or-cors", error: diagnostic }, error: diagnostic,
-            latencyMs: Math.max(0, now() - startedAt) });
-          throw diagnostic;
-        }
-
         retries += 1;
-        const delayMs = retryDelay(retries, random);
+        const delayMs = retryBackoffDelay(retries, random);
         options.logger?.record({
           type: "request.retry",
           conversationId: options.conversationId,
-          content: { url, method, error },
+          content: { url, method, error, reason: "network", diagnosis: "Check endpoint connectivity, CORS, and provider configuration while retrying." },
           retry: { attempt: retries, delayMs },
           latencyMs: Math.max(0, now() - startedAt),
         });
-        await waitForRetry(delayMs, signal, options.sleep);
+        await waitForModelRetry(delayMs, signal, options.sleep);
       }
     }
   };

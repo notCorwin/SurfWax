@@ -5,11 +5,13 @@ import { crx } from "@crxjs/vite-plugin";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import manifest from "./manifests/store.json" with { type: "json" };
+import packageMetadata from "./package.json" with { type: "json" };
 
 const projectRoot = fileURLToPath(new URL(".", import.meta.url));
 
 const devManifest = {
   ...manifest,
+  version: packageMetadata.version,
   background: { ...manifest.background, service_worker: "src/background.ts" },
 };
 
@@ -41,8 +43,6 @@ export default defineConfig({
     outDir: "dist",
     emptyOutDir: true,
     rollupOptions: { input: {
-      offscreen: resolve(projectRoot, "offscreen.html"),
-      devtools: resolve(projectRoot, "devtools.html"),
       userscripts: resolve(projectRoot, "userscripts.html"),
     } },
   },
