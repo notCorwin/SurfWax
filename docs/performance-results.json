@@ -1,5 +1,5 @@
 {
-  "recordedAt": "2026-09-30T09:36:46.218Z",
+  "recordedAt": "2026-09-30T10:19:02.059515Z",
   "version": "0.3.0",
   "browser": "Chrome for Testing 154.0.8037.92",
   "viewport": {
@@ -15,23 +15,23 @@
     "cpuModel": "Apple M3"
   },
   "semanticActions": {
-    "p95Ms": 52.599999994039536,
+    "p95Ms": 58.100000001490116,
     "samples": 100
   },
   "stress": {
-    "inputMs": 77,
-    "restoredInputMs": 17,
-    "reloadMs": 441,
+    "inputMs": 94,
+    "restoredInputMs": 14,
+    "reloadMs": 412,
     "maxFrameGap": 16.800000000000182,
     "p95FrameGap": 16.700000000000273,
-    "scrollMaxFrameGap": 83.29999999999995,
+    "scrollMaxFrameGap": 66.60000000000014,
     "scrollP95FrameGap": 16.700000000000273,
-    "inputToFrameP95": 14.399999998509884,
-    "restoredInputToFrameP95": 11.199999995529652,
+    "inputToFrameP95": 13,
+    "restoredInputToFrameP95": 11,
     "streamEvents": 1508,
     "elements": 308,
     "messages": 12,
-    "maxLongTask": 57,
+    "maxLongTask": 58,
     "longTaskCount": 1
   },
   "gates": {
@@ -40,9 +40,15 @@
     "inputToFrameP95Ms": 50,
     "reloadMs": 2000
   },
-  "rawEvidence": ".dev/formalization-evidence/performance-ready/",
+  "rawEvidence": ".dev/formalization-evidence/performance-reviewed/",
   "canonicalEvidence": "../.dev/chromium-profile/Default/IndexedDB/",
-  "codeCommit": "b1e43ddcd2478ce707001bff04af222e8d5c9325",
-  "archive": ".dev/releases/ready/surf-wax-0.3.0.zip",
-  "archiveSha256": "22838690a4c29cc1ad7060f2d77e98a1c41aa90ed1a398dd33c54ea64271e0df"
+  "codeCommit": "fbf5ffc0d627825aac1ee4ec687a4b0fb95bbdf6",
+  "archive": ".dev/releases/reviewed/surf-wax-0.3.0.zip",
+  "archiveSha256": "f36d2a15f5dcc61d5768081f9c7b0ad3e51e7d22f78f3ccdcff487ddd01420fd",
+  "sampleCounts": {
+    "frameGaps": 122,
+    "inputToFrame": 217,
+    "restoredInputToFrame": 12,
+    "scrollFrameGaps": 122
+  }
 }

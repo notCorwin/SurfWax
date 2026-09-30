@@ -1,12 +1,12 @@
 {
-  "recordedAt": "2026-09-30T09:46:51.334Z",
+  "recordedAt": "2026-09-30T10:31:26.331Z",
   "version": "0.3.0",
-  "codeCommit": "b1e43ddcd2478ce707001bff04af222e8d5c9325",
+  "codeCommit": "fbf5ffc0d627825aac1ee4ec687a4b0fb95bbdf6",
   "archive": {
-    "path": ".dev/releases/ready/surf-wax-0.3.0.zip",
-    "sha256": "22838690a4c29cc1ad7060f2d77e98a1c41aa90ed1a398dd33c54ea64271e0df",
+    "path": ".dev/releases/reviewed/surf-wax-0.3.0.zip",
+    "sha256": "f36d2a15f5dcc61d5768081f9c7b0ad3e51e7d22f78f3ccdcff487ddd01420fd",
     "files": 421,
-    "treeSha256": "c95211a9f556dc4d6ccaa07bfb507c76da98a3eef915375a6c2af8399a3fa88e",
+    "treeSha256": "2df9ba2de37f61961acf7a044ed3ac4d7c8591a67bdc2fa4fdf26f9e90ac4df4",
     "allUnpackedFilesMatchBuild": "passed",
     "sameDigestReuse": "passed",
     "differentDigestOverwrite": "refused"
@@ -15,7 +15,7 @@
     "types": "passed",
     "independentBuild": "passed",
     "contract": "passed",
-    "mainEntrypointBytes": 1998887,
+    "mainEntrypointBytes": 1999045,
     "permissions": [
       "debugger",
       "scripting",
@@ -35,13 +35,13 @@
   "docs": "passed",
   "unit": {
     "files": 32,
-    "passed": 273,
+    "passed": 274,
     "failed": 0
   },
   "browser": {
     "stats": {
-      "startTime": "2026-09-30T09:35:37.761Z",
-      "duration": 591735.148,
+      "startTime": "2026-09-30T10:17:20.239Z",
+      "duration": 659687.5279999999,
       "expected": 169,
       "skipped": 1,
       "unexpected": 0,
@@ -70,8 +70,48 @@
       "chrome138": "138.0.7204.183",
       "current": "154.0.8037.92"
     },
-    "source": "same extracted candidate ZIP",
-    "headless": true
+    "source": "same extracted candidate ZIP; retained unchanged cases and reran corrected fixture",
+    "acceptanceEvidence": {
+      "kind": "consolidated, not a single Playwright invocation",
+      "archive": ".dev/releases/reviewed/surf-wax-0.3.0.zip",
+      "originalMatrix": ".dev/formalization-evidence/first-reviewed-matrix/matrix.json",
+      "originalStats": {
+        "startTime": "2026-09-30T10:17:20.239Z",
+        "duration": 644862.948,
+        "expected": 167,
+        "skipped": 1,
+        "unexpected": 2,
+        "flaky": 0
+      },
+      "correctedFixtureRerun": ".dev/formalization-evidence/updated-followup-matrix.json",
+      "correctedFixtureStats": {
+        "startTime": "2026-09-30T10:29:36.835Z",
+        "duration": 14824.58,
+        "expected": 4,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "replacements": [
+        {
+          "file": "conversations.spec.ts",
+          "title": "sends a selected follow-up immediately, closes interrupted tools and keeps the remaining queue",
+          "project": "chrome138",
+          "id": "911a0bb4b591b6b9295f-a6fb4fc35a4ccd54e66e",
+          "reason": "Removed obsolete title mock response and asserted exactly three provider requests; runtime ZIP unchanged."
+        },
+        {
+          "file": "conversations.spec.ts",
+          "title": "sends a selected follow-up immediately, closes interrupted tools and keeps the remaining queue",
+          "project": "current",
+          "id": "911a0bb4b591b6b9295f-44a90d9fcf46e093f2c3",
+          "reason": "Removed obsolete title mock response and asserted exactly three provider requests; runtime ZIP unchanged."
+        }
+      ],
+      "additionalRepeatedPasses": 2
+    },
+    "headless": true,
+    "fixtureCommit": "44bcd8e"
   },
   "performance": {
     "passed": 2,
@@ -84,11 +124,11 @@
       "logicalCpus": 8,
       "cpuModel": "Apple M3"
     },
-    "actionP95Ms": 52.599999994039536,
+    "actionP95Ms": 58.100000001490116,
     "streamFrameP95Ms": 16.700000000000273,
     "scrollFrameP95Ms": 16.700000000000273,
-    "inputToFrameP95Ms": 14.399999998509884,
-    "reloadMs": 441
+    "inputToFrameP95Ms": 13,
+    "reloadMs": 412
   },
   "tools": {
     "label": "current",

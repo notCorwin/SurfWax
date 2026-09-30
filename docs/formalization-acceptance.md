@@ -1,6 +1,6 @@
 # Surf Wax 0.3.0 正式化验收记录
 
-记录日期：2026-09-30。此文档记录八个工程史诗的实现与验收证据。自动验证针对下表中的候选 ZIP；Chrome 原生首次下载授权气泡与商店素材核对仍需人工完成，Chrome Web Store 尚未发布。
+记录日期：2026-09-30。此文档记录八个工程史诗的实现与验收证据。当前候选为源码 `fbf5ffc` 的 reviewed ZIP，完整功能矩阵正在执行；单元、产物完整性、本地性能与两项 race 重复回归已完成。Chrome 原生首次下载授权气泡与商店素材核对仍需人工完成，Chrome Web Store 尚未发布。
 
 发布版本来自 `package.json`。最终验证应针对同一提交、同一构建产物；修改源码后需要更新相关结果，不能沿用旧构建的通过记录。
 
@@ -55,26 +55,37 @@ Chrome 138 使用 `pagehide` 与 owner Port 断开处理关闭；有 `sidePanel.
 
 | 项目 | 结果 | 证据 |
 | --- | --- | --- |
-| 最终版本 / 提交 | 0.3.0 / `b1e43dd（源码与候选 ZIP）` | `master；按实现与门禁拆分提交，详见 Git 历史` |
+| 最终版本 / 提交 | 0.3.0 / `fbf5ffc（源码与候选 ZIP）` | `master；按实现与门禁拆分提交，详见 Git 历史` |
 | docs:check | `通过` | `.dev/formalization-evidence/docs.log` |
-| 类型、独立构建及产物契约 | `通过`；主入口 `1,998,887`B | `.dev/formalization-evidence/check.log` |
-| 单元与协议测试 | `273` / `273` | `.dev/formalization-evidence/unit.log` |
-| Chrome 138 功能矩阵 | `84` 通过 / `85`；1 项缺少 CDP 测试接口跳过，原生行为有其他真实点击用例覆盖；版本 `138.0.7204.183` | `.dev/formalization-evidence/final-matrix.json` |
-| 当前 Stable 功能矩阵 | `85` / `85` 通过；版本 `154.0.8037.92` | `.dev/formalization-evidence/final-matrix.json` |
-| 原生下载授权及实际落盘 | 真实继承授权下载与撤销通过；首次气泡仍需人工 | `native-download.spec.ts；首次原生授权气泡仍待人工` |
-| 真实 worker 重启与副作用边界 | 最终 ZIP 的两个浏览器用例均通过 | `maintenance.spec.ts；真实 ServiceWorker.stopWorker，不重放副作用` |
-| 本地性能 | 2/2 通过；流式 p95 16.7ms，滚动 p95 16.7ms，输入 p95 14.4ms，恢复 441ms | [performance-results.json](performance-results.json)；原始样本 `.dev/formalization-evidence/performance-ready/` |
-| 最终 ZIP / SHA-256 | `.dev/releases/ready/surf-wax-0.3.0.zip` / `22838690a4c29cc1ad7060f2d77e98a1c41aa90ed1a398dd33c54ea64271e0df` | `.dev/formalization-evidence/package-integrity.json；421 个解包文件与构建逐一 SHA-256 匹配；同包功能矩阵 169 通过、1 跳过、0 失败` |
-| GitHub 渠道与商店发布 | 工作流与候选版本包已准备；远端每次运行独立验证其 ZIP，商店尚未发布 | [GitHub Actions](https://github.com/notCorwin/SurfWax/actions/workflows/autobuild.yml)；正式版本与 autobuild 分离 |
+| 类型、独立构建及产物契约 | `通过`；主入口 `1,999,045`B | `.dev/formalization-evidence/check.log` |
+| 单元与协议测试 | `274` / `274` | `.dev/formalization-evidence/unit.log` |
+| Chrome 138 功能矩阵 | 84 通过、1 跳过 / 85；版本 `138.0.7204.183`；同包保留通过结果并复测更正后的夹具 | `.dev/formalization-evidence/final-matrix.json`；汇总方法见下文 |
+| 当前 Stable 功能矩阵 | 85 通过 / 85；版本 `154.0.8037.92`；同包保留通过结果并复测更正后的夹具 | `.dev/formalization-evidence/final-matrix.json`；汇总方法见下文 |
+| 原生下载授权及实际落盘 | 旧候选的真实继承授权下载与撤销已通过；当前候选在完整矩阵中复核，首次气泡仍需人工 | `native-download.spec.ts；首次原生授权气泡仍待人工` |
+| 真实 worker 重启与副作用边界 | 当前 ZIP 的两个浏览器用例均通过 | `maintenance.spec.ts；真实 ServiceWorker.stopWorker，不重放副作用` |
+| FIFO 与原生关闭 race 回归 | 8/8 通过；两个浏览器各重复两轮，未开启失败重试 | `.dev/formalization-evidence/repeated-race-regressions.log` |
+| 本地性能 | 2/2 通过；定位与动作 p95 58.1ms，流式/滚动 p95 16.7ms，输入 p95 13.0ms，恢复 412ms | [performance-results.json](performance-results.json)；原始样本 `.dev/formalization-evidence/performance-reviewed/` |
+| 最终 ZIP / SHA-256 | `.dev/releases/reviewed/surf-wax-0.3.0.zip` / `f36d2a15f5dcc61d5768081f9c7b0ad3e51e7d22f78f3ccdcff487ddd01420fd` | `.dev/formalization-evidence/package-integrity.json`；421 个 ZIP/解包文件与构建逐一 SHA-256 匹配；同 HEAD 可复用，不同内容拒绝覆盖 |
+| GitHub 渠道与商店发布 | 远端每次运行独立验证其 ZIP；对应提交结果以 Actions 为准，商店尚未发布 | [GitHub Actions](https://github.com/notCorwin/SurfWax/actions/workflows/autobuild.yml)；历史证据见下文 |
 
 Canonical IndexedDB 证据按仓库约定保存在 `../.dev/chromium-profile/Default/IndexedDB/`；隔离 profile 测试结束后复制到该位置，失败 profile 不先删除。trace、失败截图和性能 JSON 应一并保留，记录浏览器实际版本、project、提交、viewport、DPR 与运行环境。
 
-完整矩阵共 170 项，169 通过、1 跳过、无失败与重试后才通过的 flaky 项。结构化结果见 [acceptance-results.json](acceptance-results.json)，其中记录候选 ZIP 的提交、checksum、权限、工具预算、浏览器版本、跳过原因与性能环境；此报告中的源码提交与后续仅记录验收结果的文档提交分别标识。
+当前候选覆盖 170 项，最终唯一用例结果为 169 通过、1 跳过。完整首次运行得到 167 通过、1 跳过、2 失败；两项失败是同一个立即追加消息夹具仍预留已取消的标题响应，导致回复错位。删除该模拟响应后，新增“全部 Provider 请求恰好三次”的断言，在两版浏览器各重复两次，共 4/4 通过。扩展源码和 ZIP 没有再次修改，因此保留其余 167 项通过结果，不重跑无关用例。
+
+`final-matrix.json` 是上述结果的**明确标识的汇总报告**，不是单次 Playwright 原始输出；原始完整失败记录保存在 `.dev/formalization-evidence/first-reviewed-matrix/`，更正夹具的原始结果在 `updated-followup-matrix.json`。结构化 [acceptance-results.json](acceptance-results.json) 保留两个来源、原始统计与替换明细，并记录 ZIP 提交、checksum、权限、工具预算、浏览器版本、跳过原因和性能环境。
+
+## 历史 CI 排查证据
+
+[远端运行 36699418722](https://github.com/notCorwin/SurfWax/actions/runs/36699418722) 针对旧提交 `c1eaf37`，verify、浏览器证据上传与 Autobuild 发布均成功。Chrome 138 的结果是 82 项首轮通过、2 项重试后通过、1 项跳过；当前 Stable 为 85 项首轮通过。这两项 flaky 的首次 trace 保存在 `.dev/formalization-evidence/github-final-run/`，不计入当前 `fbf5ffc` 候选的验收成绩。
+
+FIFO 首次失败由已经排队的标题请求造成：用户人工命名后，标题请求仍在首轮结束时发出，消耗共用 mock 队列中下一轮响应。当前实现会在等待运行完成后、发出标题模型请求前再次读取 canonical 人工名称；已有人工名称时直接返回，保留请求完成后的名称保护。新增单元测试验证等待期间两次人工改名后返回最新名称，且没有模型请求或标题开始事件。
+
+原生关闭首次失败发生在第二项工具尚未被接受时：测试只等 UI 执行状态就关闭，却要求两个失败终态。当前用例在关闭前等待两项 canonical `tool.started`，证明活动调用与排队调用都已接受；仍核查排队页面副作用未发生及两个工具失败终态，没有放宽等待时间。以上两项使用当前 reviewed ZIP 在 Chrome 138/current 各重复两轮，共 8 项通过；也在本轮完整矩阵通过；新远端 CI 使用更正后的全部夹具。
 
 ## 发布前人工门禁与行为边界
 
 - **首次原生下载授权**：自动测试覆盖 Chrome API 边界的允许/拒绝，真实继承授权后的文件落盘、实际撤销，以及等待授权时关闭原生侧栏后的恢复。原生首次授权气泡的允许、拒绝与撤销后再次允许，仍需在普通 Chrome 中操作并记录；当前运行环境不能控制浏览器原生权限气泡。
-- **原生生命周期覆盖**：功能矩阵实际覆盖 SSE 断流续接且副作用只执行一次、双侧栏互斥与非 owner 关闭、owner 关闭后排队指令未执行、部分 act 结果恢复、等待下载授权时关闭后复用原产物。实际终止 MV3 worker 的用例验证按键释放、移除页面保护、幂等补齐工具与运行终态、新任务可启动；每种崩溃时间点尚未做穷举。
+- **原生生命周期覆盖**：用例覆盖 SSE 断流续接且副作用只执行一次、双侧栏互斥与非 owner 关闭、owner 关闭后排队指令未执行、部分 act 结果恢复、等待下载授权时关闭后复用原产物。实际终止 MV3 worker 的用例核查按键释放、移除页面保护、幂等补齐工具与运行终态、新任务可启动；当前 ZIP 的两版浏览器用例已通过；每种崩溃时间点尚未做穷举。
 - **已发出的副作用**：取消可以阻止后续和排队指令，不能撤回已经发送的 CDP 输入、网页提交、下载或服务端行为。终态日志去重与请求续接不构成外部副作用 exactly-once 保证；断线时结果不明确的动作应先观察页面再决定后续操作，不能声称它已回滚。
 - **性能范围**：本地固定环境测量流式与长日志场景的 rAF 间隔 p95 ≤20ms、input 事件到下一 rAF p95 ≤50ms；语义定位+动作 p95 ≤100ms。保留长日志恢复、DOM 数量及原有交互门槛。结果是此环境的 p95，不能理解为每一帧都在 20ms 内；GitHub Actions 不运行性能测试。
 - **发布证据**：CI 配置、版本 ZIP 与商店材料已经具备；远端工作流以对应提交的 Actions 结果为准，正式 tag 与商店提交尚未执行。现有商店图片属于既有素材，不自动证明与 0.3.0 界面一致。
