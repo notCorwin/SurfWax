@@ -72,6 +72,17 @@ jobs:
           SURFWAX_EXTENSION_PATH: dist
           SURFWAX_CHROME_PATH: ${{ steps.chrome.outputs.executable }}
           SURFWAX_CHROME_VERSION: ${{ steps.chrome.outputs.version }}
+      - name: Stage canonical log evidence for upload
+        if: ${{ !cancelled() }}
+        shell: bash
+        # GitHub-hosted jobs contain only fresh mkdtemp fixture profiles and
+        # localhost mock-provider data; no user's installed Chrome profile.
+        run: |
+          set -euo pipefail
+          mkdir -p .dev/ci-evidence
+          if test -d ../.dev/chromium-profile/Default/IndexedDB; then
+            cp -R ../.dev/chromium-profile/Default/IndexedDB .dev/ci-evidence/IndexedDB
+          fi
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:
@@ -79,8 +90,9 @@ jobs:
           path: |
             playwright-report/
             test-results/
-            ../.dev/chromium-profile/Default/IndexedDB/
+            .dev/ci-evidence/
           if-no-files-found: warn
+          include-hidden-files: true
           retention-days: 14
 
   autobuild:
