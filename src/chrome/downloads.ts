@@ -6,10 +6,11 @@ let snapshot: readonly DownloadRequest[] = [];
 function changed(): void { snapshot = [...pending.values()].map(({ id, artifact, error }) => ({ id, artifact, error })); for (const listener of listeners) listener(); }
 export function downloadRequests(): readonly DownloadRequest[] { return snapshot; }
 export function subscribeDownloadRequests(listener: () => void): () => void { listeners.add(listener); return () => listeners.delete(listener); }
-export async function ensureDownloadPermission(signal?: AbortSignal, artifact?: { id: number; filename: string }): Promise<void> {
+export async function ensureDownloadPermission(signal?: AbortSignal, artifact?: { id: number; filename: string }, onWaiting?: () => void): Promise<void> {
   signal?.throwIfAborted();
   if (await chrome.permissions.contains({ permissions: ["downloads"] })) { signal?.throwIfAborted(); return; }
   signal?.throwIfAborted();
+  onWaiting?.();
   await new Promise<void>((resolve, reject) => {
     const id = crypto.randomUUID();
     const cancel = () => { const entry = pending.get(id); if (!entry) return; pending.delete(id); entry.cleanup(); changed(); reject(signal?.reason instanceof Error ? signal.reason : new DOMException(String(signal?.reason ?? "保存已取消"), "AbortError")); };

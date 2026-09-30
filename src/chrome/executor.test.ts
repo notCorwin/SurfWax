@@ -1,8 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventLogger, type LogEvent } from "../logging";
 import { ChromeExecutor } from "./executor";
 import { ensureDownloadPermission } from "./downloads";
 vi.mock("./downloads", () => ({ ensureDownloadPermission: vi.fn(async () => undefined) }));
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 function fakeChrome(responses: Array<object | (() => Promise<object>)> = []) {
   const stored: Record<string, unknown> = {};
@@ -50,6 +51,57 @@ function fakePort(onPost: (message: { id: string; method: string }, reply: (mess
 }
 
 describe("ChromeExecutor", () => {
+  it.each(["screenshot", "pdf"] as const)("keeps %s authorization pending beyond its capture deadline and cleans up each outcome", async (name) => {
+    const downloads = await vi.importActual<typeof import("./downloads")>("./downloads");
+    vi.useFakeTimers();
+    for (const action of ["grant", "deny", "abort"] as const) {
+      const permissions = { contains: vi.fn(async () => false), request: vi.fn(async () => action === "grant") };
+      vi.stubGlobal("chrome", { permissions });
+      vi.mocked(ensureDownloadPermission).mockImplementationOnce(downloads.ensureDownloadPermission);
+      const fake = fakeChrome();
+      const logger = { append: vi.fn(async () => ({ id: 7 })) } as unknown as EventLogger;
+      const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test", logger });
+      const store = vi.fn(() => (executor as any).storeArtifact("page.pdf", "eA==", "application/pdf", true));
+      (executor as any).executeCommandNow = store;
+      const controller = new AbortController();
+      const pending = executor.executeCommand(name, { save: true }, controller.signal, { conversationId: "conversation" });
+      const outcome = pending.then((result) => ({ result }), (error: Error) => ({ error }));
+      await vi.advanceTimersByTimeAsync(11_000);
+      expect(downloads.downloadRequests()).toHaveLength(1);
+      expect(downloads.downloadRequests()[0]!.artifact).toEqual(expect.objectContaining({ id: 7, filename: "page.pdf" }));
+      expect(fake.chromeApi.downloads.download).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+      if (action === "abort") controller.abort("sidepanel-closed");
+      else await downloads.authorizeDownload(downloads.downloadRequests()[0]!.id);
+      const result = await outcome;
+      if (action === "grant") expect(result).toMatchObject({ result: { id: 7, saved: true, downloadId: 17 } });
+      else expect(result).toMatchObject({ error: action === "deny" ? { code: "download-permission-denied" } : { name: "AbortError", message: "sidepanel-closed" } });
+      expect(downloads.downloadRequests()).toEqual([]);
+      expect(fake.chromeApi.downloads.download).toHaveBeenCalledTimes(action === "grant" ? 1 : 0);
+      expect(logger.append).toHaveBeenCalledTimes(1);
+      expect(store).toHaveBeenCalledTimes(1);
+      await (executor as any).tail;
+      expect(vi.getTimerCount()).toBe(0);
+      expect((executor as any).clearDeadline).toBeUndefined();
+      executor.dispose();
+    }
+  });
+  it.each(["screenshot", "pdf"] as const)("keeps the default %s capture timeout even when download permission already exists", async (name) => {
+    vi.useFakeTimers();
+    const fake = fakeChrome();
+    vi.stubGlobal("chrome", { permissions: { contains: vi.fn(async () => true) } });
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    let finish!: () => void;
+    (executor as any).executeCommandNow = () => new Promise<void>((resolve) => { finish = resolve; });
+    const pending = executor.executeCommand(name, { save: true });
+    const failure = expect(pending).rejects.toMatchObject({ name: "TimeoutError", message: "Operation timed out after 10000ms", effectUnknown: true });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await failure;
+    finish(); await (executor as any).tail;
+    expect(vi.getTimerCount()).toBe(0);
+    expect((executor as any).clearDeadline).toBeUndefined();
+    executor.dispose();
+  });
   it("does not mark work canceled while still queued as an uncertain side effect", async () => {
     const fake = fakeChrome();
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });

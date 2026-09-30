@@ -66,7 +66,7 @@ Locator 每次操作重新定位，并要求唯一匹配；多匹配会报 stric
 
 动作返回 `performed: true` 表示输入已发送。click/press/fill 和 goto/reload/goBack/goForward 不等待应用完成异步请求或后续跳转；业务成功仍需重新观察或检查结果。`page.press`/`page.insertText` 直接发送到当前焦点，不会替你定位或等待可编辑元素。`count`、`isVisible`、`isEnabled`、`isChecked` 读取当前状态，不会等到期望值成立；evaluate、focus/blur 和 setInputFiles 也不等待应用的后续副作用。
 
-显式等待使用 `locator.waitFor({ state: 'visible' })`，可用状态包括 attached/detached/visible/hidden/enabled/editable/checked；`waitForURL` 对字符串执行包含匹配，也可传 RegExp；`waitForLoadState` 只支持 domcontentloaded/load。需要观察网页跳转或事件时，先启动对应等待，再触发动作。独立命令和 run-code 默认有 10 秒超时，可显式设置 timeoutMs；任务停止或关闭面板也会中止等待。
+显式等待使用 `locator.waitFor({ state: 'visible' })`，可用状态包括 attached/detached/visible/hidden/enabled/editable/checked；`waitForURL` 对字符串执行包含匹配，也可传 RegExp；`waitForLoadState` 只支持 domcontentloaded/load。需要观察网页跳转或事件时，先启动对应等待，再触发动作。除 artifact-save 外的独立浏览器命令和 run-code 默认有 10 秒超时，可显式设置 timeoutMs。首次保存需要人工下载授权时，停止当前命令的超时计时；用户停止或关闭面板仍立即中止等待。
 
 ```js
 async (page) => {

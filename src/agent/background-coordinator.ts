@@ -3,13 +3,13 @@ import type { RunIdentity } from "./coordinator";
 /** Transient ownership only: durable run facts remain in the event log. */
 export class BackgroundRunCoordinator {
   private generation = 0;
-  private owner?: RunIdentity & { conversationId: string; windowId?: number; port: chrome.runtime.Port; cancelled: boolean };
+  private owner?: RunIdentity & { conversationId: string; windowId?: number; documentId?: string; port: chrome.runtime.Port; cancelled: boolean };
   private operations = new Set<string>();
   maintenance = false;
   claim(port: chrome.runtime.Port, request: { runId: string; ownerId: string; conversationId: string; windowId?: number }): RunIdentity {
     if (this.maintenance) throw new Error("日志正在维护，请稍后重试。");
     if (this.owner) throw new Error("已有任务运行，请在原侧栏停止任务。");
-    this.owner = { ...request, generation: ++this.generation, port, cancelled: false };
+    this.owner = { ...request, generation: ++this.generation, documentId: port.sender?.documentId, port, cancelled: false };
     this.operations.clear();
     return this.identity()!;
   }
@@ -28,7 +28,14 @@ export class BackgroundRunCoordinator {
       this.operations.add(operationId);
     }
   }
-  cancelWindow(windowId: number): void { if (this.owner?.windowId === windowId) this.cancel(undefined, "sidepanel-closed"); }
+  async cancelClosedWindow(windowId: number, hasDocument: (documentId: string) => Promise<boolean>): Promise<void> {
+    const owner = this.owner;
+    if (owner?.windowId !== windowId || !owner.documentId) return;
+    // onClosed can arrive after another document acquired this window's run.
+    // Port disconnect remains the primary signal if the context query fails.
+    try { if (await hasDocument(owner.documentId)) return; } catch { return; }
+    if (this.owner === owner) this.cancel(owner.port, "sidepanel-closed");
+  }
   cancel(port?: chrome.runtime.Port, reason = "log-cleared"): void {
     if (!this.owner || port && this.owner.port !== port) return;
     this.owner.cancelled = true;

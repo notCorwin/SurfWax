@@ -438,4 +438,6 @@ void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 
 // Chrome 138 relies on pagehide/owner-port disconnect; Chrome 142+ adds this signal.
 const onClosed = (chrome.sidePanel as unknown as { onClosed?: { addListener: (listener: (info: { windowId: number }) => void) => void } }).onClosed;
-onClosed?.addListener(({ windowId }) => runs.cancelWindow(windowId));
+onClosed?.addListener(({ windowId }) => {
+  void runs.cancelClosedWindow(windowId, async (documentId) => (await chrome.runtime.getContexts({ documentIds: [documentId] })).length > 0);
+});

@@ -15,6 +15,9 @@ test("closing the native panel during download authorization restores the existi
     await expect.poll(() => native.panel.evaluate<boolean>(`Boolean(document.querySelector('[data-testid="download-permission"]'))`)).toBe(true);
     const artifact = (await readNativeEvents(native.panel)).find(event => event.type === "tool.result.data" && event.content?.filename === "pending-close.png")!;
     expect(artifact?.output.base64).toEqual(expect.any(String));
+    // Human authorization must outlive the command's default 10-second deadline.
+    await new Promise(resolveWaiting => setTimeout(resolveWaiting, 11_000));
+    expect(await native.panel.evaluate<boolean>(`Boolean(document.querySelector('[data-testid="download-permission"]'))`)).toBe(true);
     await native.panel.close();
     expect((await native.browser.send("Target.closeTarget", { targetId: native.targetId })).success).toBe(true);
     await expect(native.target.locator("#__surf-wax-page-guard")).toHaveCount(0);

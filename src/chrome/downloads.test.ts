@@ -8,6 +8,24 @@ function permissions(granted = false) {
 }
 async function pending() { await Promise.resolve(); await Promise.resolve(); return downloadRequests()[0]!; }
 describe("optional downloads", () => {
+  it("only suspends the operation deadline when a live request needs human authorization", async () => {
+    const onWaiting = vi.fn();
+    permissions(true);
+    await ensureDownloadPermission(undefined, undefined, onWaiting);
+    expect(onWaiting).not.toHaveBeenCalled();
+    permissions();
+    const controller = new AbortController();
+    controller.abort("sidepanel-closed");
+    await expect(ensureDownloadPermission(controller.signal, undefined, onWaiting)).rejects.toBe("sidepanel-closed");
+    expect(onWaiting).not.toHaveBeenCalled();
+    const request = ensureDownloadPermission(undefined, undefined, onWaiting);
+    const rejection = expect(request).rejects.toMatchObject({ code: "download-cancelled" });
+    await pending();
+    expect(onWaiting).toHaveBeenCalledTimes(1);
+    cancelDownload(downloadRequests()[0]!.id);
+    await rejection;
+    expect(downloadRequests()).toEqual([]);
+  });
   it("waits for a real grant and saves the existing artifact", async () => {
     const api = permissions();
     const promise = ensureDownloadPermission(undefined, { id: 7, filename: "page.pdf" });
