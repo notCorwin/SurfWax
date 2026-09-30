@@ -712,7 +712,7 @@ export class EventLogger {
   }
 
   async closePendingTools(runId: string, conversationId: string, reason: unknown): Promise<void> {
-    const events = await this.eventsByRunTypes([runId], ["tool.started", "tool.finished", "tool.failed", "tool.progress"]);
+    const events = await this.eventsByRunTypes([runId], ["tool.started", "tool.finished", "tool.failed", "tool.progress", "tool.result.data"]);
     const key = (event: LogEvent) => `${(fromLogValue(event.content) as { callId?: string })?.callId ?? ""}\0${event.toolCallId}`;
     const terminal = new Set(events.filter((event) => ["tool.finished", "tool.failed"].includes(event.type)).map(key));
     for (const event of events) {
@@ -721,11 +721,19 @@ export class EventLogger {
       const progress = [...events].reverse().find((item) => item.type === "tool.progress" && item.toolCallId === event.toolCallId);
       const progressContent = progress ? fromLogValue(progress.content) as { nextIndex: number; steps: unknown[] } : undefined;
       const progressOutput = progress ? fromLogValue(progress.output) as { completed: unknown[]; elapsedMs: number } : undefined;
-      const input = fromLogValue(event.input) as { steps?: unknown[] } | undefined;
+      const input = fromLogValue(event.input) as { steps?: unknown[]; id?: number } | undefined;
       const steps = progressContent?.steps ?? input?.steps;
       const index = progressContent?.nextIndex ?? 0;
       const completedAll = Boolean(steps && index === steps.length);
       const failure = { code: "interrupted", message: String(reason), effectUnknown: true };
+      let storedArtifact = [...events].reverse().find((item) => item.type === "tool.result.data" && item.toolCallId === event.toolCallId && item.id > event.id
+        && typeof (fromLogValue(item.content) as { filename?: unknown } | null)?.filename === "string");
+      if (!storedArtifact && (fromLogValue(event.content) as { toolName?: string })?.toolName === "artifact-save" && Number.isSafeInteger(input?.id)) {
+        const store = this.options.store ?? getEventStore();
+        const saved = store.get ? await store.get(input!.id!) : (await this.conversation(conversationId)).find((item) => item.id === input!.id);
+        if (saved?.type === "tool.result.data" && saved.conversationId === conversationId && typeof (fromLogValue(saved.content) as { filename?: unknown } | null)?.filename === "string") storedArtifact = saved;
+      }
+      const artifact = storedArtifact ? { id: storedArtifact.id, ...(fromLogValue(storedArtifact.content) as object) } : undefined;
       const output = steps ? {
         ok: completedAll, completed: progressOutput?.completed ?? [],
         ...(completedAll ? {} : { error: failure, failed: { index, step: steps[index], error: failure }, notRun: steps.slice(index + 1) }),
@@ -733,7 +741,7 @@ export class EventLogger {
       } : { ok: false, error: failure };
       await this.append({ type: completedAll ? "tool.finished" : "tool.failed", conversationId, runId, toolCallId: event.toolCallId, toolCallIdCanonical: true,
         content: { ...((fromLogValue(event.content) as object) ?? {}), status: completedAll ? "completed" : "interrupted", effectUnknown: !completedAll },
-        input: fromLogValue(event.input), output,
+        input: fromLogValue(event.input), output: { ...output, ...(artifact ? { artifact } : {}) },
         ...(completedAll ? {} : { error: failure, abort: { reason } }) });
     }
   }

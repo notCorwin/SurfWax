@@ -293,6 +293,56 @@ describe("canonical event log", () => {
 });
 
 describe("run recovery", () => {
+  it.each([["screenshot", "screen.png", "image/png"], ["pdf", "page.pdf", "application/pdf"]])("keeps the persisted %s artifact accessible after its owner closes during download authorization", async (toolName, filename, mimeType) => {
+    const logger = new EventLogger({ store: memoryStore() });
+    const runId = "download-run";
+    const toolCallId = "1:capture";
+    await logger.appendMessage("one", { id: "user", role: "user", parts: [{ type: "text", text: "Capture and save" }] });
+    await logger.append({ type: "conversation.submitted", conversationId: "one", runId, content: { messageId: "user" } });
+    logger.record({ type: "conversation.stream.chunk", conversationId: "one", runId, content: { type: "start", messageId: "assistant" } });
+    logger.record({ type: "conversation.stream.chunk", conversationId: "one", runId,
+      content: { type: "tool-input-available", toolCallId, toolName, dynamic: true, input: { filename, save: true } } });
+    await logger.append({ type: "tool.started", conversationId: "one", runId, toolCallId, toolCallIdCanonical: true,
+      content: { callId: "sdk", toolName }, input: { filename, save: true } });
+    const data = { filename, mimeType, base64: "eA==" };
+    const artifact = await logger.append({ type: "tool.result.data", conversationId: "one", runId, toolCallId, toolCallIdCanonical: true,
+      content: { filename, mimeType, byteLength: 1 }, output: data });
+    await logger.append({ type: "tool.result.data", conversationId: "one", runId, toolCallId: "other", content: { filename: "other.png", mimeType: "image/png", byteLength: 1 }, output: { base64: "eQ==" } });
+    await logger.recoverDanglingRuns([], "owner-disconnected");
+    await logger.recoverDanglingRuns([], "owner-disconnected");
+    const terminals = (await logger.all()).filter((event) => event.type === "tool.failed" && event.toolCallId === toolCallId);
+    expect(terminals).toHaveLength(1);
+    const expectedArtifact = { id: artifact!.id, filename, mimeType, byteLength: 1 };
+    expect(terminals[0]!.output).toMatchObject({ ok: false, error: { code: "interrupted", effectUnknown: true }, artifact: expectedArtifact });
+    expect(terminals[0]!.output).not.toHaveProperty("artifact.saved");
+    const { restoreConversationRepository } = await import("./conversations");
+    const restored = await restoreConversationRepository(await logger.restorationEvents("one"));
+    expect(restored.messages.at(-1)!.message.parts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ toolCallId, state: "output-available", output: expect.objectContaining({ artifact: expectedArtifact }) }),
+    ]));
+    await expect(logger.result(artifact!.id, {}, "one")).resolves.toEqual(data);
+    expect((await logger.all()).find((event) => event.id === artifact!.id)?.output).toEqual(data);
+    expect(JSON.stringify(terminals[0]!.output)).not.toContain(data.base64);
+  });
+  it.each(["one", "other"])("recovers an artifact-save reference only within its own conversation (%s)", async (artifactConversation) => {
+    const store = memoryStore();
+    const logger = new EventLogger({ store: { ...store, get: async (id) => (await store.all()).find((event) => event.id === id) } });
+    const data = { filename: "prior.pdf", mimeType: "application/pdf", base64: "eA==" };
+    const artifact = await logger.append({ type: "tool.result.data", conversationId: artifactConversation, runId: "prior-run", toolCallId: "prior-tool",
+      content: { filename: data.filename, mimeType: data.mimeType, byteLength: 1 }, output: data });
+    await logger.append({ type: "conversation.submitted", conversationId: "one", runId: "save-run" });
+    await logger.append({ type: "tool.started", conversationId: "one", runId: "save-run", toolCallId: "save-existing",
+      content: { callId: "sdk", toolName: "artifact-save" }, input: { id: artifact!.id } });
+    await logger.recoverDanglingRuns([], "owner-disconnected");
+    const result = (await logger.all()).find((event) => event.type === "tool.failed" && event.toolCallId === "save-existing")!.output;
+    if (artifactConversation === "one") {
+      expect(result).toMatchObject({ artifact: { id: artifact!.id, filename: data.filename, mimeType: data.mimeType, byteLength: 1 } });
+      expect(result).not.toHaveProperty("artifact.saved");
+      await expect(logger.result(artifact!.id, {}, "one")).resolves.toEqual(data);
+    } else expect(result).not.toHaveProperty("artifact");
+    expect(JSON.stringify(result)).not.toContain(data.base64);
+    expect((await logger.all()).filter((event) => event.type === "tool.result.data")).toHaveLength(1);
+  });
   it("restores persisted act progress after its owner disappears", async () => {
     const logger = new EventLogger({ store: memoryStore() });
     const steps = [{ type: "click", target: { ref: "e1" } }, { type: "fill", target: { ref: "e2" }, value: "waiting" }, { type: "click", target: { ref: "e3" } }];

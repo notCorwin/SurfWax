@@ -1,7 +1,43 @@
 import { cp, mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { expect, test, openExtension, reloadUpgradedExtension, configure, dispose, startProvider, commandResponse, textResponse, readEvents, type MockResponse } from "./fixtures";
+import { expect, test, openExtension, reloadUpgradedExtension, configure, dispose, startProvider, commandResponse, textResponse, readEvents, nativePanel, submitNative, readNativeEvents, type MockResponse } from "./fixtures";
+
+test("closing the native panel during download authorization restores the existing artifact without recapturing it", async () => {
+  const responses: MockResponse[] = [commandResponse("screenshot", { filename: "pending-close.png", save: true }, "pending-artifact")];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    expect(await opened.page.evaluate(() => chrome.permissions.contains({ permissions: ["downloads"] }))).toBe(false);
+    const native = await nativePanel(opened, `${provider.origin}/target`);
+    await submitNative(native.panel, "capture and save a screenshot");
+    await expect.poll(() => native.panel.evaluate<boolean>(`Boolean(document.querySelector('[data-testid="download-permission"]'))`)).toBe(true);
+    const artifact = (await readNativeEvents(native.panel)).find(event => event.type === "tool.result.data" && event.content?.filename === "pending-close.png")!;
+    expect(artifact?.output.base64).toEqual(expect.any(String));
+    await native.panel.close();
+    expect((await native.browser.send("Target.closeTarget", { targetId: native.targetId })).success).toBe(true);
+    await expect(native.target.locator("#__surf-wax-page-guard")).toHaveCount(0);
+    const recovery = await opened.context.newPage();
+    await recovery.goto(`chrome-extension://${opened.extensionId}/sidepanel.html`);
+    await expect.poll(async () => (await readEvents(recovery)).filter(event => event.type === "tool.failed" && event.toolCallId === "pending-artifact").length).toBe(1);
+    const restored = (await readEvents(recovery)).find(event => event.type === "tool.failed" && event.toolCallId === "pending-artifact")!;
+    expect(restored.output.artifact).toMatchObject({ id: artifact.id, filename: "pending-close.png", mimeType: "image/png" });
+    await recovery.getByTestId("conversation-menu").click();
+    await recovery.locator(".conversation-item").first().locator(".conversation-select").click();
+    await expect(recovery.getByTestId("interrupted-message")).toBeVisible();
+    responses.push(commandResponse("artifact-save", { id: artifact.id }, "save-restored-artifact"), textResponse("EXISTING_ARTIFACT_ONLY"), textResponse("保存原产物"));
+    await recovery.getByTestId("composer-input").fill("save the already captured artifact");
+    await recovery.getByTestId("composer-input").press("Enter");
+    await expect(recovery.getByTestId("download-permission")).toBeVisible();
+    await recovery.getByRole("button", { name: "取消保存" }).click();
+    await expect(recovery.locator(".markdown-body").last()).toContainText("EXISTING_ARTIFACT_ONLY");
+    const artifacts = (await readEvents(recovery)).filter(event => event.type === "tool.result.data" && event.content?.filename === "pending-close.png");
+    expect(artifacts).toHaveLength(1);
+    expect(artifacts[0]!.output).toEqual(artifact.output);
+    expect(await recovery.evaluate(() => chrome.permissions.contains({ permissions: ["downloads"] }))).toBe(false);
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});
 
 test("an upgraded download grant saves exactly the persisted artifact and native revocation requests it again", async () => {
   const profile = await mkdtemp(resolve(tmpdir(), "surf-wax-native-download-"));
