@@ -116,7 +116,6 @@ test("sends a selected follow-up immediately, closes interrupted tools and keeps
   const provider = await startProvider([
     toolResponse("await new Promise((resolve) => setTimeout(resolve, 60_000)); return 'TOO_LATE'", "call-followup-interrupted"),
     textResponse("URGENT_DONE"),
-    textResponse("Follow-up immediate"),
     textResponse("LATER_DONE"),
   ]);
   const opened = await openExtension();
@@ -143,6 +142,7 @@ test("sends a selected follow-up immediately, closes interrupted tools and keeps
     await expect(opened.page.locator(".markdown-body").last()).toContainText("LATER_DONE", { timeout: 15_000 });
     await expect(queue).toHaveCount(0);
     await expect.poll(() => provider.requests.filter((request) => request.tools).length).toBe(3);
+    expect(provider.requests).toHaveLength(3);
     const agentRequests = provider.requests.filter((request) => request.tools);
     expect(JSON.stringify(agentRequests[1].messages)).toContain("urgent request");
     expect(JSON.stringify(agentRequests[2].messages)).toContain("later request");
