@@ -26,7 +26,7 @@ const BROWSER_KEY = "__surfWaxBrowser";
 type ExecutionContext = { conversationId?: string; toolCallId?: string; visualEnabled?: boolean; allowDownloads?: boolean; logIdentity?: { runId?: string; toolCallId: string; toolCallIdCanonical: true } };
 type BatchProgress = { completed: Array<{ index: number; type: BrowserStep["type"]; result: unknown }>; index: number; startedAt: number };
 type ArtifactRef = { id: number; filename: string; mimeType: string; byteLength: number; saved: boolean; downloadId?: number };
-type BrowserState = { windowId: number; tabId?: number; origins: Set<string> };
+type BrowserState = { windowId: number; tabId?: number };
 export type BrowserContext = {
   windowId: number;
   tabs: Array<{ index: number; tabId?: number; current: boolean; title?: string; url?: string }>;
@@ -417,7 +417,6 @@ export class ChromeExecutor {
     if (name === "tab-new") {
       const tab = await this.chromeApi.tabs.create({ windowId: state.windowId, active: true, ...(input.url ? { url: input.url } : {}) });
       state.tabId = tab.id;
-      await this.rememberOrigin(state, tab.url);
       return this.tabsOf(state);
     }
     if (name === "tab-select") return this.selectTab(state, input.index, input.tabId);
@@ -539,16 +538,13 @@ export class ChromeExecutor {
   }
 
   async beginRun(): Promise<BrowserContext> {
-    const previous = this.browserState;
     const window = await this.chromeApi.windows.getCurrent({ populate: true });
     if (!Number.isInteger(window.id)) throw new Error("CommandError[no-window]: Could not resolve the current Chrome window");
     const selected = window.tabs?.find((tab) => tab.active) ?? window.tabs?.[0];
     this.browserState = {
       windowId: window.id!,
       tabId: selected?.id,
-      origins: previous && previous.windowId === window.id ? previous.origins : new Set<string>(),
     };
-    await this.rememberOrigin(this.browserState, selected?.url);
     return this.browserContext();
   }
 
@@ -568,9 +564,8 @@ export class ChromeExecutor {
     const window = await this.chromeApi.windows.getCurrent({ populate: true });
     if (!Number.isInteger(window.id)) throw new Error("CommandError[no-window]: Could not resolve the current Chrome window");
     const selected = window.tabs?.find((tab) => tab.active) ?? window.tabs?.[0];
-    const state = { windowId: window.id!, tabId: selected?.id, origins: new Set<string>() };
+    const state = { windowId: window.id!, tabId: selected?.id };
     this.browserState = state;
-    await this.rememberOrigin(state, selected?.url);
     return state;
   }
 
@@ -578,7 +573,6 @@ export class ChromeExecutor {
     const tabs = await this.chromeApi.tabs.query({ windowId: state.windowId });
     if (state.tabId === undefined || !tabs.some((tab) => tab.id === state.tabId)) {
       state.tabId = tabs.find((tab) => tab.active)?.id ?? tabs[0]?.id;
-      await this.rememberOrigin(state, tabs.find((tab) => tab.id === state.tabId)?.url);
     }
     return tabs.map((tab, index) => ({ index, current: tab.id === state.tabId || !state.tabId && Boolean(tab.active), id: tab.id, title: tab.title, url: tab.url }));
   }
@@ -590,7 +584,6 @@ export class ChromeExecutor {
     if (!tab?.id) throw new Error(`CommandError[invalid-tab-${tabId === undefined ? "index" : "id"}]: ${tabId ?? index}`);
     await this.chromeApi.tabs.update(tab.id, { active: true });
     state.tabId = tab.id;
-    await this.rememberOrigin(state, tab.url);
     return this.tabsOf(state);
   }
 
@@ -611,7 +604,6 @@ export class ChromeExecutor {
     if (tabId !== undefined) {
       const tab = await this.chromeApi.tabs.get(tabId).catch(() => undefined);
       if (!tab || tab.windowId !== state.windowId) tabId = undefined;
-      else await this.rememberOrigin(state, tab.url);
     }
     if (tabId === undefined) {
       const tabs = await this.chromeApi.tabs.query({ active: true, windowId: state.windowId });
@@ -622,14 +614,7 @@ export class ChromeExecutor {
     state.tabId = resolvedTabId;
     const page = await this.automation.createPage(resolvedTabId);
     await this.enableObservation(resolvedTabId);
-    const url = await page.url().catch(() => undefined);
-    await this.rememberOrigin(state, url === undefined ? undefined : String(url));
     return page;
-  }
-
-  private async rememberOrigin(state: BrowserState, url?: string): Promise<void> {
-    if (!url) return;
-    try { const parsed = new URL(url); if (["http:", "https:"].includes(parsed.protocol)) state.origins.add(parsed.origin); } catch { /* Internal pages have no clearable origin. */ }
   }
 
   private async withPageStatus(state: BrowserState, result: unknown): Promise<unknown> {

@@ -190,7 +190,7 @@ describe("ChromeExecutor", () => {
   it("preserves completed batch steps when cancellation interrupts a later step", async () => {
     const fake = fakeChrome();
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
-    (executor as any).currentBrowserState = async () => ({ windowId: 7, tabId: 41, origins: new Set() });
+    (executor as any).currentBrowserState = async () => ({ windowId: 7, tabId: 41 });
     (executor as any).pageFor = async () => ({ tabId: 41 });
     const executeStep = vi.fn().mockResolvedValueOnce({ performed: true }).mockImplementationOnce(() => new Promise(() => undefined));
     (executor as any).executeStep = executeStep;
