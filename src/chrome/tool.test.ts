@@ -1,10 +1,52 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import type { EventLogger } from "../logging";
-import { parseCommandTarget, type ChromeExecutor } from "./executor";
+import { EventLogger, type LogEvent } from "../logging";
+import { parseCommandTarget, ChromeExecutor } from "./executor";
 import { COMMAND_NAMES, USER_SCRIPT_TOOL_NAMES, compactToolResult, createCommandTools, parseCommandInput, prepareToolMessages, repairCommandToolCall, TOOL_REGISTRY, TOOL_SUMMARY } from "./tool";
 
 describe("browser command tools", () => {
+  it.each(["screenshot", "pdf", "artifact-save"])("retains a %s artifact when the abort race settles before its underlying work", async (toolName) => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: {
+      append: async (event) => { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+      all: async () => [...events], clear: async () => { events.length = 0; },
+    } });
+    const metadata = { filename: toolName === "screenshot" ? "screen.png" : "page.pdf", mimeType: toolName === "screenshot" ? "image/png" : "application/pdf", byteLength: 1 };
+    const stored = toolName === "artifact-save" ? await logger.append({ type: "tool.result.data", conversationId: "conversation", runId: "previous-run", content: metadata,
+      output: { ...metadata, base64: "eA==" } }) : undefined;
+    const input = stored ? { id: stored.id } : { filename: metadata.filename, save: true };
+    logger.beginRun("conversation", "run"); logger.setRunPhase("run", 1);
+    await logger.append({ type: "tool.started", conversationId: "conversation", toolCallId: "capture", content: { callId: "sdk", toolName }, input });
+    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    let artifactId = stored?.id;
+    let notifyStored!: () => void;
+    const ready = new Promise<void>((resolve) => { notifyStored = resolve; });
+    let finishWork!: () => void;
+    let workFinished = false;
+    (executor as any).executeCommandNow = async () => {
+      if (!artifactId) artifactId = (await logger.append({ type: "tool.result.data", conversationId: "conversation", runId: "run", toolCallId: "1:capture", toolCallIdCanonical: true,
+        content: metadata, output: { ...metadata, base64: "eA==" } }))!.id;
+      notifyStored();
+      return new Promise((resolve) => { finishWork = () => { workFinished = true; resolve(null); }; });
+    };
+    const controller = new AbortController();
+    const tools = createCommandTools(executor, { logger, conversationId: "conversation" }) as Record<string, any>;
+    const pending = tools[toolName].execute(input, { toolCallId: "capture", abortSignal: controller.signal });
+    await ready;
+    logger.setRunPhase("run", 2);
+    controller.abort("sidepanel-closed");
+    const result = await pending;
+    expect(workFinished).toBe(false);
+    expect(result).toMatchObject({ ok: false, error: { code: "aborted", message: "sidepanel-closed", effectUnknown: true }, artifact: { id: artifactId, ...metadata } });
+    expect(result).not.toHaveProperty("artifact.saved");
+    expect(JSON.stringify(result)).not.toContain("eA==");
+    // The SDK terminal wins first; background recovery must preserve it intact.
+    await logger.append({ type: "tool.failed", conversationId: "conversation", toolCallId: "capture", content: { callId: "sdk", toolName }, input, output: result, error: result.error });
+    await logger.closePendingTools("run", "conversation", "owner-disconnected");
+    expect(events.filter((event) => event.type === "tool.failed")).toHaveLength(1);
+    expect(events.find((event) => event.type === "tool.failed")).toMatchObject({ toolCallId: "1:capture", output: result });
+    finishWork(); await (executor as any).tail; executor.dispose();
+  });
   it("preserves a large failed act result through the registered tool without compacting away its failure", async () => {
     const failed = { ok: false, completed: [{ index: 0, type: "fill", result: { text: "completed".repeat(2000) } }], failed: { index: 1, step: { type: "expect" }, error: { code: "timeout", message: "interrupted", effectUnknown: true } }, notRun: [{ type: "click" }] };
     expect(JSON.stringify(failed).length).toBeGreaterThan(8000);

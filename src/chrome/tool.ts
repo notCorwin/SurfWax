@@ -249,7 +249,12 @@ export function createCommandTools(executor: ChromeExecutor, options: { logger?:
         : raw;
       return compact ? compactToolResult(result, { ...options, toolCallId, ...identity }) : result;
     } catch (error) {
-      return toolFailure(error);
+      const failure = toolFailure(error);
+      if (!failure.artifact && options.logger && identity?.runId) {
+        const artifact = await options.logger.toolArtifact(options.conversationId!, identity).catch(() => undefined);
+        if (artifact) failure.artifact = artifact;
+      }
+      return failure;
     }
   };
   return Object.fromEntries(TOOL_REGISTRY.map((definition) => [definition.name, dynamicTool({

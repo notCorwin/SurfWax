@@ -711,6 +711,25 @@ export class EventLogger {
     await this.append({ type: "conversation.deleted", content: { conversationId } });
   }
 
+  private async artifactForCall(event: LogEvent, events: readonly LogEvent[]): Promise<{ id: number } | undefined> {
+    let stored = [...events].reverse().find((item) => item.type === "tool.result.data" && item.toolCallId === event.toolCallId && item.id > event.id
+      && typeof (fromLogValue(item.content) as { filename?: unknown } | null)?.filename === "string");
+    const input = fromLogValue(event.input) as { id?: number } | null;
+    if (!stored && (fromLogValue(event.content) as { toolName?: string })?.toolName === "artifact-save" && Number.isSafeInteger(input?.id)) {
+      const store = this.options.store ?? getEventStore();
+      const saved = store.get ? await store.get(input!.id!) : (await this.conversation(event.conversationId!)).find((item) => item.id === input!.id);
+      if (saved?.type === "tool.result.data" && saved.conversationId === event.conversationId && typeof (fromLogValue(saved.content) as { filename?: unknown } | null)?.filename === "string") stored = saved;
+    }
+    return stored ? { id: stored.id, ...(fromLogValue(stored.content) as object) } : undefined;
+  }
+
+  async toolArtifact(conversationId: string, identity: { runId?: string; toolCallId: string }): Promise<{ id: number } | undefined> {
+    if (!identity.runId) return undefined;
+    const events = await this.eventsByRunTypes([identity.runId], ["tool.started", "tool.result.data"]);
+    const started = [...events].reverse().find((event) => event.type === "tool.started" && event.conversationId === conversationId && event.toolCallId === identity.toolCallId);
+    return started ? this.artifactForCall(started, events) : undefined;
+  }
+
   async closePendingTools(runId: string, conversationId: string, reason: unknown): Promise<void> {
     const events = await this.eventsByRunTypes([runId], ["tool.started", "tool.finished", "tool.failed", "tool.progress", "tool.result.data"]);
     const key = (event: LogEvent) => `${(fromLogValue(event.content) as { callId?: string })?.callId ?? ""}\0${event.toolCallId}`;
@@ -721,19 +740,12 @@ export class EventLogger {
       const progress = [...events].reverse().find((item) => item.type === "tool.progress" && item.toolCallId === event.toolCallId);
       const progressContent = progress ? fromLogValue(progress.content) as { nextIndex: number; steps: unknown[] } : undefined;
       const progressOutput = progress ? fromLogValue(progress.output) as { completed: unknown[]; elapsedMs: number } : undefined;
-      const input = fromLogValue(event.input) as { steps?: unknown[]; id?: number } | undefined;
+      const input = fromLogValue(event.input) as { steps?: unknown[] } | undefined;
       const steps = progressContent?.steps ?? input?.steps;
       const index = progressContent?.nextIndex ?? 0;
       const completedAll = Boolean(steps && index === steps.length);
       const failure = { code: "interrupted", message: String(reason), effectUnknown: true };
-      let storedArtifact = [...events].reverse().find((item) => item.type === "tool.result.data" && item.toolCallId === event.toolCallId && item.id > event.id
-        && typeof (fromLogValue(item.content) as { filename?: unknown } | null)?.filename === "string");
-      if (!storedArtifact && (fromLogValue(event.content) as { toolName?: string })?.toolName === "artifact-save" && Number.isSafeInteger(input?.id)) {
-        const store = this.options.store ?? getEventStore();
-        const saved = store.get ? await store.get(input!.id!) : (await this.conversation(conversationId)).find((item) => item.id === input!.id);
-        if (saved?.type === "tool.result.data" && saved.conversationId === conversationId && typeof (fromLogValue(saved.content) as { filename?: unknown } | null)?.filename === "string") storedArtifact = saved;
-      }
-      const artifact = storedArtifact ? { id: storedArtifact.id, ...(fromLogValue(storedArtifact.content) as object) } : undefined;
+      const artifact = await this.artifactForCall(event, events);
       const output = steps ? {
         ok: completedAll, completed: progressOutput?.completed ?? [],
         ...(completedAll ? {} : { error: failure, failed: { index, step: steps[index], error: failure }, notRun: steps.slice(index + 1) }),

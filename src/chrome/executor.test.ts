@@ -50,6 +50,33 @@ function fakePort(onPost: (message: { id: string; method: string }, reply: (mess
 }
 
 describe("ChromeExecutor", () => {
+  it("does not mark work canceled while still queued as an uncertain side effect", async () => {
+    const fake = fakeChrome();
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    let releaseQueue!: () => void;
+    (executor as any).tail = new Promise<void>((resolve) => { releaseQueue = resolve; });
+    const run = vi.fn(async (signal: AbortSignal) => {
+      if (signal.aborted) throw new DOMException(String(signal.reason), "AbortError");
+    });
+    const controller = new AbortController();
+    const pending = (executor as any).enqueueAbortable(run, controller.signal);
+    controller.abort("sidepanel-closed");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError", message: "sidepanel-closed" });
+    await expect(pending).rejects.not.toHaveProperty("effectUnknown");
+    expect(run).not.toHaveBeenCalled();
+    releaseQueue(); await (executor as any).tail; executor.dispose();
+  });
+  it.each(["user-interrupted", "sidepanel-closed", "owner-disconnected"])("keeps the abort reason %s while returning before unresolved browser work", async (reason) => {
+    const fake = fakeChrome();
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    let finish!: () => void;
+    const work = new Promise<void>((resolve) => { finish = resolve; });
+    const controller = new AbortController();
+    const pending = (executor as any).awaitAbort(work, controller.signal, true);
+    controller.abort(reason);
+    await expect(pending).rejects.toMatchObject({ name: "AbortError", message: reason, effectUnknown: true });
+    finish(); executor.dispose();
+  });
   it("rebinds each run to the active tab and keeps that target stable within the run", async () => {
     const fake = fakeChrome();
     const tabs: chrome.tabs.Tab[] = [

@@ -39,7 +39,8 @@ function abortError(): DOMException {
 function interruptionError(signal: AbortSignal, effectUnknown = false): DOMException {
   const reason = signal.reason;
   const error = reason instanceof DOMException && reason.name === "TimeoutError"
-    ? new DOMException(reason.message, "TimeoutError") : abortError();
+    ? new DOMException(reason.message, "TimeoutError")
+    : new DOMException(reason instanceof Error ? reason.message : reason === undefined ? "Operation aborted" : String(reason), "AbortError");
   if (effectUnknown) Object.assign(error, { effectUnknown: true });
   return error;
 }
@@ -362,18 +363,23 @@ export class ChromeExecutor {
 
   private enqueueAbortable<T>(run: (signal?: AbortSignal) => Promise<T>, signal?: AbortSignal, timeoutMs?: number, mayHaveEffect = true): Promise<T> {
     const previous = this.tail;
+    let operationStarted = false;
     let release!: () => void;
     this.tail = new Promise<void>((resolve) => { release = resolve; });
     const started = previous.then(() => {
       const timeout = timeoutMs ? new AbortController() : undefined;
       const timer = timeout ? setTimeout(() => timeout.abort(new DOMException(`Operation timed out after ${timeoutMs}ms`, "TimeoutError")), timeoutMs) : undefined;
       const combined = timeout ? signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal : signal;
+      operationStarted = !combined?.aborted;
       const work = run(combined);
       const done = () => { if (timer !== undefined) clearTimeout(timer); release(); };
       void work.then(done, done);
       return { work, combined };
     });
-    return this.awaitAbort(started, signal).then(({ work, combined }) => this.awaitAbort(work, combined, mayHaveEffect));
+    return this.awaitAbort(started, signal).catch((error) => {
+      if (operationStarted && mayHaveEffect && signal?.aborted) Object.assign(error, { effectUnknown: true });
+      throw error;
+    }).then(({ work, combined }) => this.awaitAbort(work, combined, mayHaveEffect));
   }
 
   private async executeCommandTimed(name: CommandName, input: Record<string, any>, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {

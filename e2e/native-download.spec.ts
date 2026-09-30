@@ -22,7 +22,8 @@ test("closing the native panel during download authorization restores the existi
     await recovery.goto(`chrome-extension://${opened.extensionId}/sidepanel.html`);
     await expect.poll(async () => (await readEvents(recovery)).filter(event => event.type === "tool.failed" && event.toolCallId === "pending-artifact").length).toBe(1);
     const restored = (await readEvents(recovery)).find(event => event.type === "tool.failed" && event.toolCallId === "pending-artifact")!;
-    expect(restored.output.artifact).toMatchObject({ id: artifact.id, filename: "pending-close.png", mimeType: "image/png" });
+    await test.info().attach("interrupted-artifact-events", { body: JSON.stringify((await readEvents(recovery)).filter(event => ["tool.started", "tool.failed", "tool.result.data"].includes(event.type)).map(({ id, type, runId, toolCallId, content, output }) => ({ id, type, runId, toolCallId, content, output: type === "tool.failed" ? output : undefined }))), contentType: "application/json" });
+    expect(restored.output).toMatchObject({ artifact: { id: artifact.id, filename: "pending-close.png", mimeType: "image/png" } });
     await recovery.getByTestId("conversation-menu").click();
     await recovery.locator(".conversation-item").first().locator(".conversation-select").click();
     await expect(recovery.getByTestId("interrupted-message")).toBeVisible();
