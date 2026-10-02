@@ -2,19 +2,19 @@ import { expect, test } from '@playwright/test';
 import { cp, mkdtemp, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { openExtension, reloadUpgradedExtension, configure, dispose, startProvider, textResponse, commandResponse, chunk, readEvents, enableUserScripts, startNewConversation } from './fixtures';
+import { openExtension, reloadUpgradedExtension, configure, dispose, startProvider, textResponse, commandResponse, readEvents, enableUserScripts, startNewConversation } from './fixtures';
 
-test('fresh installation requests only the seven core permissions and leaves downloads ungranted', async () => {
+test('fresh installation grants all eight required permissions including downloads', async () => {
   const opened = await openExtension();
   try {
     const manifest = await opened.page.evaluate(() => chrome.runtime.getManifest());
     const version = JSON.parse(await readFile('package.json', 'utf8')).version;
     expect(manifest.version).toBe(version);
-    expect(manifest.permissions).toEqual(['debugger', 'scripting', 'sidePanel', 'storage', 'tabs', 'unlimitedStorage', 'userScripts']);
-    expect(manifest.optional_permissions).toEqual(['downloads']);
+    expect(manifest.permissions).toEqual(['debugger', 'downloads', 'scripting', 'sidePanel', 'storage', 'tabs', 'unlimitedStorage', 'userScripts']);
+    expect(manifest.optional_permissions ?? []).toEqual([]);
     expect(manifest.host_permissions).toEqual(['<all_urls>']);
     expect(manifest.devtools_page).toBeUndefined();
-    expect(await opened.page.evaluate(() => chrome.permissions.contains({ permissions: ['downloads'] }))).toBe(false);
+    expect(await opened.page.evaluate(() => chrome.permissions.contains({ permissions: ['downloads'] }))).toBe(true);
     await expect(opened.page.getByTestId('config-required-state')).toBeVisible();
   } finally { await dispose(opened.context, opened.userDataDirectory); }
 });
@@ -81,60 +81,67 @@ test('upgrades a real 0.2.0 profile without changing branches, configuration, lo
   } finally { await dispose(opened.context, profile, provider.server); }
 });
 
-test('download denial keeps the artifact and cancellation issues no download', async () => {
-  const responses: Parameters<typeof startProvider>[0] = [commandResponse('screenshot', { filename: 'permission.png', save: true }, 'first-save'), textResponse('SAVE_DENIED'), textResponse('下载授权')];
+test('download failure retains the artifact and a retry saves it without requesting permission or recapturing', async () => {
+  const responses: Parameters<typeof startProvider>[0] = [commandResponse('screenshot', { filename: 'retained.png', save: true }, 'failed-save'), textResponse('SAVE_FAILED'), textResponse('保存重试')];
   const provider = await startProvider(responses);
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage(); await target.goto(`${provider.origin}/target`);
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
-    await opened.page.evaluate(() => { chrome.permissions.request = async () => false; });
+    await opened.page.evaluate(() => {
+      const state = { attempts: 0, fail: true, permissionRequests: 0 };
+      Object.assign(globalThis, { __downloadTest: state });
+      chrome.permissions.request = async () => { state.permissionRequests += 1; throw new Error('Unexpected runtime permission request'); };
+      chrome.downloads.download = async () => { state.attempts += 1; if (state.fail) throw new Error('Download failed'); return 777; };
+    });
     await opened.page.getByTestId('composer-input').fill('save the screenshot locally');
     await opened.page.getByTestId('composer-input').press('Enter');
-    await expect(opened.page.getByTestId('download-permission')).toBeVisible();
-    expect((await readEvents(opened.page)).some(event => event.type === 'tool.result.data' && event.content?.filename === 'permission.png')).toBe(true);
-    await opened.page.getByTestId('authorize-download').click();
-    await expect(opened.page.locator('.markdown-body').last()).toContainText('SAVE_DENIED');
-    const result = (await readEvents(opened.page)).find(event => event.toolCallId === 'first-save' && event.type === 'tool.failed');
-    expect(JSON.stringify(result)).toContain('download-permission-denied');
-    expect(await opened.page.evaluate(() => chrome.permissions.contains({ permissions: ['downloads'] }))).toBe(false);
-    const artifact = (await readEvents(opened.page)).find(event => event.type === 'tool.result.data' && event.content?.filename === 'permission.png');
-    responses.push(commandResponse('artifact-save', { id: artifact.id }, 'retry-save'), textResponse('SAVE_CANCELLED'));
-    await opened.page.getByTestId('composer-input').fill('try saving the stored artifact again');
-    await opened.page.getByTestId('composer-input').press('Enter');
-    await expect(opened.page.getByTestId('download-permission')).toBeVisible();
-    await opened.page.getByRole('button', { name: '停止生成' }).click();
+    await expect(opened.page.locator('.markdown-body').last()).toContainText('SAVE_FAILED');
+    await expect(opened.page.getByTestId('conversation-menu')).toContainText('保存重试');
     await expect(opened.page.getByTestId('download-permission')).toHaveCount(0);
-    expect((await readEvents(opened.page)).filter(event => event.type === 'tool.result.data' && event.content?.filename === 'permission.png')).toHaveLength(1);
+    const events = await readEvents(opened.page);
+    const artifact = events.find(event => event.type === 'tool.result.data' && event.content?.filename === 'retained.png');
+    expect(artifact).toBeTruthy();
+    expect(events.find(event => event.toolCallId === 'failed-save' && event.type === 'tool.failed')?.output)
+      .toMatchObject({ artifact: { id: artifact.id, filename: 'retained.png', saved: false } });
+    await opened.page.evaluate(() => { (globalThis as any).__downloadTest.fail = false; });
+    responses.push(commandResponse('artifact-save', { id: artifact.id }, 'retry-save'), textResponse('SAVE_RETRIED'));
+    await opened.page.getByTestId('composer-input').fill('save the stored artifact again');
+    await opened.page.getByTestId('composer-input').press('Enter');
+    await expect(opened.page.locator('.markdown-body').last()).toContainText('SAVE_RETRIED');
+    expect(await opened.page.evaluate(() => (globalThis as any).__downloadTest)).toMatchObject({ attempts: 2, permissionRequests: 0 });
+    expect((await readEvents(opened.page)).filter(event => event.type === 'tool.result.data' && event.content?.filename === 'retained.png')).toHaveLength(1);
+    expect((await readEvents(opened.page)).find(event => event.type === 'tool.finished' && event.toolCallId === 'retry-save')?.output)
+      .toMatchObject({ artifact: { id: artifact.id, saved: true, downloadId: 777 } });
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
-test('rechecks a revoked download grant before saving an existing artifact', async () => {
-  const responses: Parameters<typeof startProvider>[0] = [commandResponse('screenshot', { filename: 'grant.png', save: true }, 'grant-save'), textResponse('FIRST_SAVE_DONE'), textResponse('保存重试')];
-  const provider = await startProvider(responses); const opened = await openExtension();
+test('stopping a pending download retains its artifact and closes the tool once', async () => {
+  const provider = await startProvider([commandResponse('screenshot', { filename: 'pending.png', save: true }, 'pending-save')]);
+  const opened = await openExtension();
   try {
     const target = await opened.context.newPage(); await target.goto(`${provider.origin}/target`);
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
-    // Model the optional-permission boundary; the agent and authorization UI run unchanged.
     await opened.page.evaluate(() => {
-      const state = { granted: false, downloads: 0, allow: true };
-      Object.assign(globalThis, { __downloadTest: state });
-      const contains = chrome.permissions.contains.bind(chrome.permissions);
-      chrome.permissions.contains = async permissions => permissions.permissions?.includes('downloads') ? state.granted : contains(permissions);
-      chrome.permissions.request = async () => { state.granted = state.allow; return state.granted; };
-      Object.assign(chrome, { downloads: { download: async () => { if (!state.granted) throw new Error('Download attempted without permission'); state.downloads += 1; return 777; } } });
+      chrome.downloads.download = () => new Promise<number>(resolveDownload => {
+        Object.assign(globalThis, { __finishDownload: () => resolveDownload(777) });
+      });
     });
     await opened.page.getByTestId('composer-input').fill('save the screenshot'); await opened.page.getByTestId('composer-input').press('Enter');
-    await opened.page.getByTestId('authorize-download').click();
-    await expect(opened.page.locator('.markdown-body').last()).toContainText('FIRST_SAVE_DONE');
-    expect(await opened.page.evaluate(() => (globalThis as any).__downloadTest.downloads)).toBe(1);
-    const artifact = (await readEvents(opened.page)).find(event => event.type === 'tool.result.data' && event.content?.filename === 'grant.png');
-    await opened.page.evaluate(() => { Object.assign((globalThis as any).__downloadTest, { granted: false, allow: false }); });
-    responses.push(commandResponse('artifact-save', { id: artifact.id }, 'revoked-save'), textResponse('REVOKED_SAVE_DENIED'));
-    await opened.page.getByTestId('composer-input').fill('save the same artifact after revocation'); await opened.page.getByTestId('composer-input').press('Enter');
-    await expect(opened.page.getByTestId('download-permission')).toBeVisible(); await opened.page.getByTestId('authorize-download').click();
-    await expect(opened.page.locator('.markdown-body').last()).toContainText('REVOKED_SAVE_DENIED');
-    expect(await opened.page.evaluate(() => (globalThis as any).__downloadTest.downloads)).toBe(1);
-    expect((await readEvents(opened.page)).filter(event => event.type === 'tool.result.data' && event.content?.filename === 'grant.png')).toHaveLength(1);
+    await expect.poll(() => opened.page.evaluate(() => typeof (globalThis as any).__finishDownload)).toBe('function');
+    await opened.page.getByRole('button', { name: '停止生成' }).click();
+    await expect.poll(async () => (await readEvents(opened.page)).filter(event => event.type === 'tool.failed' && event.toolCallId === 'pending-save').length).toBe(1);
+    await opened.page.evaluate(() => (globalThis as any).__finishDownload());
+    await expect(opened.page.getByRole('button', { name: '停止生成' })).toHaveCount(0);
+    const events = await readEvents(opened.page);
+    expect(events.filter(event => event.type === 'tool.result.data' && event.content?.filename === 'pending.png')).toHaveLength(1);
+    const terminal = events.filter(event => ['tool.failed', 'tool.finished'].includes(event.type) && event.toolCallId === 'pending-save');
+    expect(terminal).toHaveLength(1);
+    expect(terminal[0]).toMatchObject({
+      content: { status: 'interrupted', effectUnknown: true },
+      output: { error: { code: 'interrupted', effectUnknown: true }, artifact: { filename: 'pending.png' } },
+      abort: { reason: { $type: 'error', name: 'AbortError' } },
+    });
+    await expect(opened.page.getByTestId('download-permission')).toHaveCount(0);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

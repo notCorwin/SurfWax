@@ -3,7 +3,7 @@ import type { BrowserInput, BrowserSelector, BrowserStep, BrowserTarget, ChromeT
 import { COMMAND_NAMES, type CommandName } from "./tool";
 import { AutomationRuntime } from "./automation";
 import { requireDebuggee } from "./debuggee";
-import { ensureDownloadPermission } from "./downloads";
+import { downloadArtifact } from "./downloads";
 import { BrowserDiagnostics } from "./diagnostics";
 import { getRunIdentity } from "../agent/coordinator";
 
@@ -207,7 +207,6 @@ export class ChromeExecutor {
   private readonly bridgedDebuggees = new Set<string>();
   private disposed = false;
   private activeSignal?: AbortSignal;
-  private clearDeadline?: () => void;
   private activeContext: ExecutionContext = {};
   private browserState?: BrowserState;
   private endingRun?: Promise<void>;
@@ -372,10 +371,9 @@ export class ChromeExecutor {
       const timer = timeout ? setTimeout(() => timeout.abort(new DOMException(`Operation timed out after ${timeoutMs}ms`, "TimeoutError")), timeoutMs) : undefined;
       const combined = timeout ? signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal : signal;
       const clearDeadline = () => { if (timer !== undefined) clearTimeout(timer); };
-      this.clearDeadline = clearDeadline;
       operationStarted = !combined?.aborted;
       const work = run(combined);
-      const done = () => { clearDeadline(); this.clearDeadline = undefined; release(); };
+      const done = () => { clearDeadline(); release(); };
       void work.then(done, done);
       return { work, combined };
     });
@@ -640,12 +638,7 @@ export class ChromeExecutor {
     });
     if (!event) throw new Error("CommandError[artifact-log-unavailable]: The canonical event log stopped accepting events");
     const artifact = { id: event.id, filename, mimeType, byteLength, saved: false };
-    if (save) {
-      throwIfAborted(this.activeSignal);
-      try { await ensureDownloadPermission(this.activeSignal, artifact, this.clearDeadline); } catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { artifact }); }
-      throwIfAborted(this.activeSignal);
-    }
-    const downloadId = save ? await this.chromeApi.downloads.download({ url: `data:${mimeType};base64,${base64}`, filename, saveAs: false }) : undefined;
+    const downloadId = save ? await downloadArtifact(this.chromeApi, artifact, base64, this.activeSignal) : undefined;
     return { id: event.id, filename, mimeType, byteLength, saved: save, ...(downloadId === undefined ? {} : { downloadId }) };
   }
 
@@ -665,9 +658,7 @@ export class ChromeExecutor {
     const filename = requested ?? stored.filename;
     throwIfAborted(this.activeSignal);
     const artifact = { id, filename, mimeType: stored.mimeType, byteLength: base64ByteLength(stored.base64), saved: false };
-    try { await ensureDownloadPermission(this.activeSignal, artifact, this.clearDeadline); } catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { artifact }); }
-    throwIfAborted(this.activeSignal);
-    const downloadId = await this.chromeApi.downloads.download({ url: `data:${stored.mimeType};base64,${stored.base64}`, filename, saveAs: false });
+    const downloadId = await downloadArtifact(this.chromeApi, artifact, stored.base64, this.activeSignal);
     return { artifact: { id, filename, mimeType: stored.mimeType, byteLength: base64ByteLength(stored.base64), saved: true, downloadId } };
   }
 

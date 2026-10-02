@@ -13,7 +13,6 @@ import { EventLogger, fromLogValue, rebuildConversationList } from "../logging";
 import type { ModelConfig } from "../types";
 import { useSidePanelRuntime } from "./useSidePanelRuntime";
 import { useSidePanelSession } from "./useSidePanelSession";
-import { DownloadAuthorization } from "./DownloadAuthorization";
 import "../styles.css";
 import "./styles.css";
 
@@ -169,7 +168,6 @@ function ConfiguredConversation({ config, logger }: { config: ModelConfig; logge
       <ReloadConversationList logger={logger} config={config} />
       <Header conversation logger={logger} />
       <RunOwnershipNotice />
-      <DownloadAuthorization />
       <ConversationView key={threadId} config={config} logger={logger} threadId={threadId} drafts={drafts.current} />
     </main>
   );

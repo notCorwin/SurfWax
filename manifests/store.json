@@ -26,6 +26,7 @@
   "options_page": "options.html",
   "permissions": [
     "debugger",
+    "downloads",
     "scripting",
     "sidePanel",
     "storage",
@@ -33,7 +34,6 @@
     "unlimitedStorage",
     "userScripts"
   ],
-  "optional_permissions": ["downloads"],
   "host_permissions": [
     "<all_urls>"
   ]

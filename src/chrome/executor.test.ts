@@ -1,8 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventLogger, type LogEvent } from "../logging";
 import { ChromeExecutor } from "./executor";
-import { ensureDownloadPermission } from "./downloads";
-vi.mock("./downloads", () => ({ ensureDownloadPermission: vi.fn(async () => undefined) }));
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 function fakeChrome(responses: Array<object | (() => Promise<object>)> = []) {
@@ -51,45 +49,46 @@ function fakePort(onPost: (message: { id: string; method: string }, reply: (mess
 }
 
 describe("ChromeExecutor", () => {
-  it.each(["screenshot", "pdf"] as const)("keeps %s authorization pending beyond its capture deadline and cleans up each outcome", async (name) => {
-    const downloads = await vi.importActual<typeof import("./downloads")>("./downloads");
-    vi.useFakeTimers();
-    for (const action of ["grant", "deny", "abort"] as const) {
-      const permissions = { contains: vi.fn(async () => false), request: vi.fn(async () => action === "grant") };
-      vi.stubGlobal("chrome", { permissions });
-      vi.mocked(ensureDownloadPermission).mockImplementationOnce(downloads.ensureDownloadPermission);
-      const fake = fakeChrome();
-      const logger = { append: vi.fn(async () => ({ id: 7 })) } as unknown as EventLogger;
-      const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test", logger });
-      const store = vi.fn(() => (executor as any).storeArtifact("page.pdf", "eA==", "application/pdf", true));
-      (executor as any).executeCommandNow = store;
-      const controller = new AbortController();
-      const pending = executor.executeCommand(name, { save: true }, controller.signal, { conversationId: "conversation" });
-      const outcome = pending.then((result) => ({ result }), (error: Error) => ({ error }));
-      await vi.advanceTimersByTimeAsync(11_000);
-      expect(downloads.downloadRequests()).toHaveLength(1);
-      expect(downloads.downloadRequests()[0]!.artifact).toEqual(expect.objectContaining({ id: 7, filename: "page.pdf" }));
-      expect(fake.chromeApi.downloads.download).not.toHaveBeenCalled();
-      expect(vi.getTimerCount()).toBe(0);
-      if (action === "abort") controller.abort("sidepanel-closed");
-      else await downloads.authorizeDownload(downloads.downloadRequests()[0]!.id);
-      const result = await outcome;
-      if (action === "grant") expect(result).toMatchObject({ result: { id: 7, saved: true, downloadId: 17 } });
-      else expect(result).toMatchObject({ error: action === "deny" ? { code: "download-permission-denied" } : { name: "AbortError", message: "sidepanel-closed" } });
-      expect(downloads.downloadRequests()).toEqual([]);
-      expect(fake.chromeApi.downloads.download).toHaveBeenCalledTimes(action === "grant" ? 1 : 0);
+  it.each(["screenshot", "pdf"] as const)("saves %s directly after persisting the artifact", async (name) => {
+    const fake = fakeChrome();
+    const logger = { append: vi.fn(async () => ({ id: 7 })) } as unknown as EventLogger;
+    fake.chromeApi.downloads.download.mockImplementationOnce(async () => {
       expect(logger.append).toHaveBeenCalledTimes(1);
-      expect(store).toHaveBeenCalledTimes(1);
-      await (executor as any).tail;
-      expect(vi.getTimerCount()).toBe(0);
-      expect((executor as any).clearDeadline).toBeUndefined();
-      executor.dispose();
-    }
+      return 17;
+    });
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test", logger });
+    const store = vi.fn(() => (executor as any).storeArtifact("page.pdf", "eA==", "application/pdf", true));
+    (executor as any).executeCommandNow = store;
+    await expect(executor.executeCommand(name, { save: true }, undefined, { conversationId: "conversation" }))
+      .resolves.toMatchObject({ id: 7, saved: true, downloadId: 17 });
+    expect(fake.chromeApi.downloads.download).toHaveBeenCalledTimes(1);
+    expect(store).toHaveBeenCalledTimes(1);
+    executor.dispose();
   });
-  it.each(["screenshot", "pdf"] as const)("keeps the default %s capture timeout even when download permission already exists", async (name) => {
+  it("retains the canonical artifact after a failed download and retries without recapturing", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: {
+      async append(event: Omit<LogEvent, "id">) { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; },
+      async all() { return [...events]; }, async clear() { events.length = 0; },
+    } });
+    const fake = fakeChrome();
+    fake.chromeApi.downloads.download.mockRejectedValueOnce(new Error("Download failed"));
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test", logger });
+    const commandNow = (executor as any).executeCommandNow;
+    (executor as any).executeCommandNow = () => (executor as any).storeArtifact("retained.png", "eA==", "image/png", true);
+    await expect(executor.executeCommand("screenshot", { save: true }, undefined, { conversationId: "conversation" }))
+      .rejects.toMatchObject({ message: "Download failed", artifact: { id: 1, filename: "retained.png", saved: false } });
+    expect(events).toHaveLength(1);
+    (executor as any).executeCommandNow = commandNow;
+    await expect(executor.executeCommand("artifact-save", { id: 1 }, undefined, { conversationId: "conversation" }))
+      .resolves.toMatchObject({ artifact: { id: 1, saved: true, downloadId: 17 } });
+    expect(events).toHaveLength(1);
+    expect(fake.chromeApi.downloads.download).toHaveBeenCalledTimes(2);
+    executor.dispose();
+  });
+  it.each(["screenshot", "pdf"] as const)("keeps the default %s timeout when saving directly", async (name) => {
     vi.useFakeTimers();
     const fake = fakeChrome();
-    vi.stubGlobal("chrome", { permissions: { contains: vi.fn(async () => true) } });
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test" });
     let finish!: () => void;
     (executor as any).executeCommandNow = () => new Promise<void>((resolve) => { finish = resolve; });
@@ -99,7 +98,6 @@ describe("ChromeExecutor", () => {
     await failure;
     finish(); await (executor as any).tail;
     expect(vi.getTimerCount()).toBe(0);
-    expect((executor as any).clearDeadline).toBeUndefined();
     executor.dispose();
   });
   it("does not mark work canceled while still queued as an uncertain side effect", async () => {
@@ -255,12 +253,16 @@ describe("ChromeExecutor", () => {
     executor.dispose();
   });
 
-  it("returns the stored artifact when download authorization is denied without recapturing", async () => {
+  it("retains the stored artifact when canceled during logging without starting a download", async () => {
     const fake = fakeChrome();
-    const logger = { append: vi.fn(async () => ({ id: 7 })) } as unknown as EventLogger;
+    const controller = new AbortController();
+    const logger = { append: vi.fn(async () => {
+      controller.abort(new DOMException("sidepanel-closed", "AbortError"));
+      return { id: 7 };
+    }) } as unknown as EventLogger;
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, targetUrl: "chrome-extension://id/sidepanel.html#test", logger });
     (executor as any).activeContext = { conversationId: "conversation" };
-    vi.mocked(ensureDownloadPermission).mockRejectedValueOnce(new Error("permission denied"));
+    (executor as any).activeSignal = controller.signal;
     await expect((executor as any).storeArtifact("screen.png", "eA==", "image/png", true)).rejects.toMatchObject({ artifact: { id: 7, filename: "screen.png", saved: false } });
     expect(logger.append).toHaveBeenCalledTimes(1);
     expect(fake.chromeApi.downloads.download).not.toHaveBeenCalled();

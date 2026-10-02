@@ -1,6 +1,6 @@
 # Surf Wax 隐私政策
 
-生效日期：2026 年 9 月 30 日
+生效日期：2026 年 10 月 2 日
 
 Surf Wax 在用户的 Chrome Side Panel 内运行智能体。用户自行选择模型服务并提供凭据；开发者不运营接收对话或网页内容的中转、遥测或同步服务器。
 
@@ -16,13 +16,13 @@ Surf Wax 在用户的 Chrome Side Panel 内运行智能体。用户自行选择�
 
 模型请求直接发送到用户选择的模型 Provider 或自定义 Endpoint，消息、历史、工具目录与任务需要的网页/网络内容可能作为上下文发送。各模型服务对数据的处理受其自身政策约束。设置页从 `models.dev` 获取模型目录，不附带本地对话日志或凭据。用户指定的本地 HTTP Endpoint 可用；普通 HTTP 传输没有 HTTPS 保护。
 
-智能体访问网站及上传文件时，对方接收正常的浏览器请求。下载默认保留为会话内部产物，只有用户选择明确保存并授权 downloads 时写入 Chrome 下载目录。
+智能体访问网站及上传文件时，对方接收正常的浏览器请求。下载默认保留为会话内部产物，只有用户明确选择保存时写入 Chrome 下载目录。
 
 ## 权限
 
-必需权限为 debugger、scripting、sidePanel、storage、tabs、unlimitedStorage、userScripts。它们分别支持浏览器执行、页面防干扰层、原生面板、本地配置、目标标签页、本地日志/产物与用户脚本。`<all_urls>` 支持用户选择的网站、脚本匹配范围及模型端点；权限获准本身不会启动任务。
+必需权限为 debugger、downloads、scripting、sidePanel、storage、tabs、unlimitedStorage、userScripts。它们分别支持浏览器执行、文件保存、页面防干扰层、原生面板、本地配置、目标标签页、本地日志/产物与用户脚本。`<all_urls>` 支持用户选择的网站、脚本匹配范围及模型端点；权限获准本身不会启动任务。
 
-downloads 是可选权限，在用户明确保存时通过界面申请。拒绝、取消或随后撤销不会删除会话内部产物；下次保存需要重新授权。Chrome 扩展详情页还控制网站访问和 Allow User Scripts。缺少权限时扩展给出相应诊断。
+downloads 在安装时作为必需权限声明，保存文件时不会再次申请权限。下载失败或任务中断不会删除会话内部产物，可再次保存已有产物。Chrome 扩展详情页还控制网站访问和 Allow User Scripts。缺少权限时扩展给出相应诊断。
 
 ## 保留、删除与恢复
 

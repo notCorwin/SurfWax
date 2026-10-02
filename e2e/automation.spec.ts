@@ -139,7 +139,7 @@ for (const deviceScaleFactor of [1, 2]) test(`injects a screenshot and clicks it
     expect(observation?.artifact).toMatchObject({ id: expect.any(Number), filename: "internal-visual.jpg", mimeType: "image/jpeg", byteLength: expect.any(Number), saved: false });
     expect(observation?.artifact).not.toHaveProperty("downloadId");
     expect(observation?.screenshot?.artifactId).toBe(observation?.artifact?.id);
-    expect(await opened.page.evaluate(async () => chrome.permissions.contains({ permissions: ["downloads"] }))).toBe(false);
+    expect(await opened.page.evaluate(async () => chrome.permissions.contains({ permissions: ["downloads"] }))).toBe(true);
     expect(JSON.stringify(provider.requests[1])).toContain("image_url");
     expect(observation.observationId).toEqual(expect.any(String));
     await expect.poll(() => target.locator("body").getAttribute("data-clicked")).toBe("yes");

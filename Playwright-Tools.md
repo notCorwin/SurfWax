@@ -2,7 +2,7 @@
 
 此文件由真实工具 registry 自动生成（npm run docs:tools）。当前暴露 49 个独立工具，全部操作本轮绑定的 Chrome 窗口与目标标签页。
 
-运行中可通过 tab-select 显式切换目标；其他操作不会因用户切换活动标签页而改变目标。截图和 PDF 默认保存为会话内部产物；明确保存时才请求 downloads 权限。网页与网络内容原样保留在 canonical event log，大结果可使用 result 精确读取。
+运行中可通过 tab-select 显式切换目标；其他操作不会因用户切换活动标签页而改变目标。截图和 PDF 默认保存为会话内部产物；downloads 在安装时作为必需权限授予，明确保存时直接下载文件。网页与网络内容原样保留在 canonical event log，大结果可使用 result 精确读取。
 
 | 工具 | 定位 |
 | --- | --- |
@@ -66,7 +66,7 @@ Locator 每次操作重新定位，并要求唯一匹配；多匹配会报 stric
 
 动作返回 `performed: true` 表示输入已发送。click/press/fill 和 goto/reload/goBack/goForward 不等待应用完成异步请求或后续跳转；业务成功仍需重新观察或检查结果。`page.press`/`page.insertText` 直接发送到当前焦点，不会替你定位或等待可编辑元素。`count`、`isVisible`、`isEnabled`、`isChecked` 读取当前状态，不会等到期望值成立；evaluate、focus/blur 和 setInputFiles 也不等待应用的后续副作用。
 
-显式等待使用 `locator.waitFor({ state: 'visible' })`，可用状态包括 attached/detached/visible/hidden/enabled/editable/checked；`waitForURL` 对字符串执行包含匹配，也可传 RegExp；`waitForLoadState` 只支持 domcontentloaded/load。需要观察网页跳转或事件时，先启动对应等待，再触发动作。除 artifact-save 外的独立浏览器命令和 run-code 默认有 10 秒超时，可显式设置 timeoutMs。首次保存需要人工下载授权时，停止当前命令的超时计时；用户停止或关闭面板仍立即中止等待。
+显式等待使用 `locator.waitFor({ state: 'visible' })`，可用状态包括 attached/detached/visible/hidden/enabled/editable/checked；`waitForURL` 对字符串执行包含匹配，也可传 RegExp；`waitForLoadState` 只支持 domcontentloaded/load。需要观察网页跳转或事件时，先启动对应等待，再触发动作。除 artifact-save 外的独立浏览器命令和 run-code 默认有 10 秒超时，可显式设置 timeoutMs。用户停止或关闭面板会立即中止当前工具。
 
 ```js
 async (page) => {

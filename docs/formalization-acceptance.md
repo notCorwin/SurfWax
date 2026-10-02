@@ -1,5 +1,9 @@
 # Surf Wax 0.3.0 正式化验收记录
 
+本记录及 acceptance-results.json 是 2026-09-30 候选包的历史证据。2026-10-02 起 downloads 改为必需权限并移除运行时授权流程；当前权限和保存行为以 README 与 Manifest 为准，旧包的权限与授权测试结果不适用于新构建。
+
+本次权限调整验证（2026-10-02）：274 个单元测试、类型检查、工具文档一致性与构建校验通过；构建含八项必需权限、无可选权限，主入口 JavaScript 为 1,996,577B。Chrome 138.0.7204.183 和 154.0.8037.92 分别验证十个相关场景，覆盖全新安装、0.2.0 升级、直接保存、真实文件字节一致、失败重试、停止与真实侧栏关闭恢复，以及 DPR 1/2 截图。首次二十个用例中十七个通过，三个失败来自新增中断断言与固定 dist 目录依赖；改为核对完整结构化中断结果和实际加载目录后，四个受影响用例重跑通过，其余通过用例未重跑。初次与重跑报告保存在 .dev/downloads-required，canonical log 仍保存在 ../.dev/chromium-profile/Default/IndexedDB。本次未重跑完整功能矩阵和性能测试。
+
 记录日期：2026-09-30。此文档记录八个工程史诗的实现与验收证据。当前候选为源码 `fbf5ffc` 的 reviewed ZIP，完整功能矩阵正在执行；单元、产物完整性、本地性能与两项 race 重复回归已完成。Chrome 原生首次下载授权气泡与商店素材核对仍需人工完成，Chrome Web Store 尚未发布。
 
 发布版本来自 `package.json`。最终验证应针对同一提交、同一构建产物；修改源码后需要更新相关结果，不能沿用旧构建的通过记录。
@@ -8,7 +12,7 @@
 
 | 史诗 | 已落盘的实现 | 主要证据与验收范围 |
 | --- | --- | --- |
-| 1. 权限与产品功能逐项对应 | 必需权限限定为 debugger、scripting、sidePanel、storage、tabs、unlimitedStorage、userScripts；保留 `<all_urls>`。downloads 改为可选权限，明确保存时显示“授权并保存”，产物先进入会话日志。移除 devtools/offscreen Manifest 入口、HTML、host 与 capabilities。 | [Manifest](../manifests/store.json)、[下载授权](../src/chrome/downloads.ts)、[下载 UI](../src/sidepanel/DownloadAuthorization.tsx)、[产物校验](../scripts/validate-build.mjs)、[发布测试](../e2e/release.spec.ts)。下载原生气泡仍待人工验证，见下文。 |
+| 1. 权限与产品功能逐项对应 | 必需权限限定为 debugger、scripting、sidePanel、storage、tabs、unlimitedStorage、userScripts；保留 `<all_urls>`。downloads 改为可选权限，明确保存时显示“授权并保存”，产物先进入会话日志。移除 devtools/offscreen Manifest 入口、HTML、host 与 capabilities。 | [Manifest](../manifests/store.json)、[当时的下载授权](https://github.com/notCorwin/SurfWax/blob/fbf5ffc/src/chrome/downloads.ts)、[当时的下载 UI](https://github.com/notCorwin/SurfWax/blob/fbf5ffc/src/sidepanel/DownloadAuthorization.tsx)、[产物校验](../scripts/validate-build.mjs)、[发布测试](../e2e/release.spec.ts)。下载原生气泡仍待人工验证，见下文。 |
 | 2. 工具收敛与 Registry | 80 个工具收敛到 49 个独立工具；保留 act、画布所需的 keydown/keyup/mousemove/mousedown/mouseup、七个只读诊断工具和五个用户脚本工具。schema、描述、摘要目录及生成文档来自同一 registry；act 保持按操作类型约束必填字段的联合 schema，tabId 保持显式目标选择能力。 | [工具源与 Registry](../src/chrome/tool.ts)、[工具契约测试](../src/chrome/tool.test.ts)、[生成器](../scripts/generate-tool-docs.mjs)、[工具参考](../Playwright-Tools.md)、[预算测量](../scripts/measure-tool-budget.mjs)。数量、字节与 BPE 结果分别记录，不能互相替代。 |
 | 3. 统一运行所有权、取消与恢复 | background 仲裁跨侧栏运行，使用 runId/ownerId/generation 与真实 Port 约束所有权。绑定本轮窗口和目标标签页，切换浏览器焦点不会重定向工具；显式 tab-select 可以切换目标。关闭 owner、中断任务、清空日志会取消请求及排队操作，并清理页面防干扰与输入状态。worker 启动时先清理遗留 guard、从 canonical input state 释放遗留按键/鼠标、补齐悬挂运行，再允许新 owner；成功释放后保存空状态，失败保留恢复证据。 | [后台仲裁](../src/agent/background-coordinator.ts)、[协调器](../src/agent/coordinator.ts)、[后台生命周期](../src/background.ts)、[原生侧栏 E2E](../e2e/lifecycle.spec.ts)、[真实 Worker 重启](../e2e/maintenance.spec.ts)。 |
 | 4. Canonical Tool Log | 对话、分支、工具结果、产物、重试和中断均从 append-only event log 恢复；没有第二份持久化运行真相。终态写入跨 writer 串行化，按 run/phase/toolCallId 去重；失败与中断补 Tool Result。清空日志使用 writer handshake、维护代际与待执行操作屏障，避免旧 writer 把数据写回。大型结果和产物使用稳定日志 ID，result 支持精确读取。 | [日志实现](../src/logging.ts)、[日志契约测试](../src/logging.test.ts)、[会话与分支](../src/conversations.ts)、[恢复测试](../e2e/conversations.spec.ts)。终态记录幂等不等于外部副作用具备 exactly-once 保证。 |

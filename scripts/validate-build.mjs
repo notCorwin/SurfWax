@@ -2,7 +2,7 @@ import { readFile, readdir, access, stat } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const requiredPermissions = ['debugger', 'scripting', 'sidePanel', 'storage', 'tabs', 'unlimitedStorage', 'userScripts'];
+export const requiredPermissions = ['debugger', 'downloads', 'scripting', 'sidePanel', 'storage', 'tabs', 'unlimitedStorage', 'userScripts'];
 export async function validateBuild(directory = 'dist') {
   const root = fileURLToPath(new URL('..', import.meta.url));
   const packageInfo = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
@@ -14,7 +14,7 @@ export async function validateBuild(directory = 'dist') {
   const equal = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
   if (manifest.version !== packageInfo.version) throw new Error('Built manifest version differs from package.json');
   if (!equal(manifest.permissions ?? [], requiredPermissions)) throw new Error('Unexpected required extension permissions');
-  if (!equal(manifest.optional_permissions ?? [], ['downloads'])) throw new Error('downloads must be the only optional permission');
+  if (!equal(manifest.optional_permissions ?? [], [])) throw new Error('No optional extension permissions are expected');
   if (!equal(manifest.host_permissions ?? [], ['<all_urls>'])) throw new Error('Expected all_urls host access');
   if (manifest.minimum_chrome_version !== '138' || manifest.manifest_version !== 3) throw new Error('Unsupported browser/manifest contract');
   if (manifest.devtools_page || manifest.offscreen_document) throw new Error('Removed execution hosts remain in manifest');
