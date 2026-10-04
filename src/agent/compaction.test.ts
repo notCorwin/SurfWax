@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
 import type { ModelMessage } from "ai";
 import type { EventLogger, LogEvent } from "../logging";
-import { ContextCompactor, contextPressure, effectiveContext, estimateInput, pendingContextChoice, summarizeContext } from "./compaction";
+import { createPromptSnapshot, PROMPT_TOOLS } from "./prompt";
+import { ContextCompactor, contextPressure, effectiveContext, estimatePromptInput, estimateInput, pendingContextChoice, summarizeContext } from "./compaction";
 
 function fixture() {
   const events: LogEvent[] = [];
@@ -44,11 +45,11 @@ describe("context choices and summary", () => {
 
     compactor.recordUsage(7_000, 0);
     expect(events.some((event) => event.type === "context.compacted")).toBe(false);
-    await expect(contextPressure({ raw, branchIds: ["u", "a"], events, model }))
+    await expect(contextPressure({ raw, branchIds: ["u", "a"], events, model, instructions: "system", tools: [{ name: "page", inputSchema: { type: "object" } }] }))
       .resolves.toMatchObject({ estimated: 7_000 });
 
     const extended = [...raw, { role: "user", content: "next" } as ModelMessage];
-    await expect(contextPressure({ raw: extended, branchIds: ["u", "a", "next"], events, model }))
+    await expect(contextPressure({ raw: extended, branchIds: ["u", "a", "next"], events, model, instructions: "system", tools: [{ name: "page", inputSchema: { type: "object" } }] }))
       .resolves.toMatchObject({ estimated: 7_000 + estimateInput(extended) - estimateInput(raw) });
   });
 
@@ -56,13 +57,13 @@ describe("context choices and summary", () => {
     const { events, logger, languageModel, model, raw } = fixture();
     events.push({ id: 1, type: "context.estimate.calibrated", timestamp: "2026-01-01", content: { scale: 8 } });
     await expect(contextPressure({ raw, branchIds: ["u", "a"], events, model }))
-      .resolves.toMatchObject({ estimated: estimateInput(raw) });
+      .resolves.toMatchObject({ estimated: estimatePromptInput({ messages: raw, instructions: createPromptSnapshot().instructions, tools: PROMPT_TOOLS }) });
 
     events.push({ id: 2, type: "context.estimate.calibrated", timestamp: "2026-01-01", content: {
       branchIds: ["other"], contextVersion: 0, baseEstimate: 1, promptEstimate: 50_000, inputTokens: 50_000,
     } });
     await expect(contextPressure({ raw, branchIds: ["u", "a"], events, model }))
-      .resolves.toMatchObject({ estimated: estimateInput(raw) });
+      .resolves.toMatchObject({ estimated: estimatePromptInput({ messages: raw, instructions: createPromptSnapshot().instructions, tools: PROMPT_TOOLS }) });
 
     await summarizeContext({ raw, branchIds: ["u", "a"], uiCount: 2, model, languageModel, logger,
       conversationId: "one", signal: new AbortController().signal });
@@ -70,7 +71,7 @@ describe("context choices and summary", () => {
       branchIds: ["u", "a"], contextVersion: 0, baseEstimate: 1, promptEstimate: 50_000, inputTokens: 50_000,
     } });
     await expect(contextPressure({ raw, branchIds: ["u", "a"], events, model }))
-      .resolves.toMatchObject({ estimated: estimateInput([{ role: "user", content: "Earlier conversation summary:\nKeep the user's constraints." }]) });
+      .resolves.toMatchObject({ estimated: estimatePromptInput({ messages: [{ role: "user", content: "Earlier conversation summary:\nKeep the user's constraints." }], instructions: createPromptSnapshot().instructions, tools: PROMPT_TOOLS }) });
   });
 
   it("summarizes the complete effective history once, then replaces the entire old prefix", async () => {
@@ -166,11 +167,11 @@ describe("context choices and summary", () => {
     compactor.recordPrompt({ instructions: "system", messages: compacted, tools: [{ name: "large", schema: "a".repeat(12_000) }] });
     compactor.recordUsage(5_000, 2);
     expect(compactor.estimate(compacted)).toBe(5_000);
-    expect(compactor.estimate(compacted, { instructions: "system", tools: [{ schema: "a".repeat(12_000) }] })).toBe(5_000);
-    await expect(contextPressure({ raw, branchIds, events, model })).resolves.toMatchObject({ estimated: 5_000 });
+    expect(compactor.estimate(compacted, { instructions: "system", tools: [{ name: "large", schema: "a".repeat(12_000) }] })).toBe(5_000);
+    await expect(contextPressure({ raw, branchIds, events, model, instructions: "system", tools: [{ name: "large", schema: "a".repeat(12_000) }] })).resolves.toMatchObject({ estimated: 5_000 });
     const withoutCalibration = events.filter((event) => event.type !== "context.estimate.calibrated");
-    const plain = await contextPressure({ raw, branchIds, events: withoutCalibration, model });
-    const withTools = await contextPressure({ raw, branchIds, events: withoutCalibration, model, tools: [{ schema: "a".repeat(12_000) }] });
+    const plain = await contextPressure({ raw, branchIds, events: withoutCalibration, model, instructions: "system", tools: [] });
+    const withTools = await contextPressure({ raw, branchIds, events: withoutCalibration, model, instructions: "system", tools: [{ schema: "a".repeat(12_000) }] });
     expect(withTools!.estimated - plain!.estimated).toBeGreaterThan(3_900);
   });
 

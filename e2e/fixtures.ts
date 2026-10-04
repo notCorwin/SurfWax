@@ -312,7 +312,7 @@ test.afterEach(async ({}, info) => {
   testProfiles.clear();
 });
 
-export async function openExtension(existingDirectory?: string, settings: { extensionPath?: string; executablePath?: string; deviceScaleFactor?: number } = {}): Promise<{
+export async function openExtension(existingDirectory?: string, settings: { extensionPath?: string; executablePath?: string; deviceScaleFactor?: number; args?: string[] } = {}): Promise<{
   context: BrowserContext;
   extensionId: string;
   page: Page;
@@ -328,7 +328,7 @@ export async function openExtension(existingDirectory?: string, settings: { exte
     executablePath: settings.executablePath ?? test.info().project.use.launchOptions?.executablePath ?? process.env.SURFWAX_CHROME_PATH ?? (existsSync(bundledChromium) ? bundledChromium : systemChrome),
     headless: process.env.SURFWAX_E2E_HEADLESS !== "false",
     deviceScaleFactor: settings.deviceScaleFactor,
-    args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, "--no-sandbox"],
+    args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, "--no-sandbox", ...(settings.args ?? [])],
   });
   testProfiles.set(userDataDirectory, context);
   let worker = context.serviceWorkers()[0];
@@ -421,14 +421,29 @@ export async function expectThemeButton(locator: Locator, colorScheme: "light" |
 export async function startNewConversation(page: Page): Promise<void> {
   if (await page.locator(".conversation-dialog").isVisible()) await page.keyboard.press("Escape");
   await page.getByTestId("new-conversation").click();
+  await expect(page.getByTestId("conversation-menu")).toContainText("新对话");
+  await expect(page.getByTestId("composer-input")).toBeEnabled();
 }
 
+/** Seed a named, idle conversation before a run. UI mutation itself is tested separately. */
 export async function nameCurrentConversation(page: Page, title: string): Promise<void> {
+  const id = await page.evaluate(async (title) => {
+    const id = crypto.randomUUID();
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("side-agent-runtime");
+      request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+    });
+    const transaction = db.transaction("events", "readwrite");
+    const store = transaction.objectStore("events");
+    const timestamp = new Date().toISOString();
+    store.add({ type: "conversation.created", conversationId: id, timestamp, content: null });
+    store.add({ type: "conversation.title.updated", conversationId: id, timestamp, content: { title, source: "manual" } });
+    await new Promise<void>((resolve, reject) => { transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error); });
+    db.close(); return id;
+  }, title);
+  await page.reload();
   await page.getByTestId("conversation-menu").click();
-  await page.getByRole("button", { name: /^重命名 / }).first().click();
-  await page.getByRole("textbox", { name: "会话名称" }).fill(title);
-  await page.getByRole("textbox", { name: "会话名称" }).press("Enter");
-  await page.keyboard.press("Escape");
+  await page.locator(".conversation-item", { hasText: title }).locator(".conversation-select").click();
   await expect(page.getByTestId("conversation-menu")).toContainText(title);
 }
 

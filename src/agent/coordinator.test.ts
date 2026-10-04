@@ -49,3 +49,39 @@ describe("conversation run coordinator", () => {
     finishOtherTitle();
   });
 });
+
+it("rejects conversation mutations in both the owner and a non-owner panel", async () => {
+  const { withIdleConversation } = await import("./coordinator");
+  const action = vi.fn();
+  const run = await claimConversationRun("owner");
+  await expect(withIdleConversation(action)).rejects.toThrow("已有任务运行");
+  run.finish();
+  vi.stubGlobal("chrome", { runtime: { sendMessage: async () => ({ identity: { runId: "remote", ownerId: "other-panel", generation: 1 } }) } });
+  await expect(withIdleConversation(action)).rejects.toThrow("已有任务运行");
+  expect(action).not.toHaveBeenCalled();
+  vi.unstubAllGlobals();
+  await withIdleConversation(action);
+  expect(action).toHaveBeenCalledOnce();
+});
+
+it("queues a run started by an idle edit until its command lease is released", async () => {
+  const { withIdleConversation } = await import("./coordinator");
+  let held = false;
+  const waiters: (() => void)[] = [];
+  const request = vi.fn(async (_name: string, options: { ifAvailable?: boolean }, callback: (lock: object | null) => Promise<void>) => {
+    if (held && options.ifAvailable) return callback(null);
+    if (held) await new Promise<void>((resolve) => waiters.push(resolve));
+    held = true;
+    try { return await callback({}); } finally { held = false; waiters.shift()?.(); }
+  });
+  vi.stubGlobal("navigator", { locks: { request } });
+  try {
+    let pending!: ReturnType<typeof claimConversationRun>;
+    await withIdleConversation(() => { pending = claimConversationRun("edited"); });
+    const run = await pending;
+    expect(request.mock.calls[1]![1].ifAvailable).toBeUndefined();
+    expect(run.signal.aborted).toBe(false);
+    run.finish();
+    await Promise.resolve();
+  } finally { vi.unstubAllGlobals(); }
+});

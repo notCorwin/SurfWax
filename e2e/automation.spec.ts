@@ -149,12 +149,20 @@ for (const deviceScaleFactor of [1, 2]) test(`injects a screenshot and clicks it
 });
 
 
-test("uses frameLocator inside a cross-origin iframe", async () => {
+for (const suspendedFrames of [false, true]) test(`uses frameLocator inside a cross-origin iframe${suspendedFrames ? " with suspended animation frames" : ""}`, async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage();
+    if (suspendedFrames) await target.addInitScript(() => {
+      if (window !== window.top) {
+        // Chrome may suppress callbacks in an occluded child frame. Exercise
+        // that condition while still requiring a real native click below.
+        window.requestAnimationFrame = () => 1;
+        window.cancelAnimationFrame = () => undefined;
+      }
+    });
     await target.goto(`${provider.origin}/complex`);
     const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/complex`);
     responses.push(

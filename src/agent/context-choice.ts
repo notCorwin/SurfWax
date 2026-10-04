@@ -42,6 +42,8 @@ export async function ensureAutomaticContextSummary(
     model, signal, limit: options.limit, instructions: options.instructions, tools: options.tools });
   if (!options.forced && !legacyPending && (!pressure || pressure.estimated <= pressure.threshold)) return false;
   if (!source.raw.length) return false;
+  // Fixed instructions/schema overhead cannot be reduced by re-summarizing an unchanged prefix.
+  if (!options.forced && !legacyPending && source.checkpoint?.sourceCount === source.raw.length) return false;
   const languageModel = options.languageModel ?? await createModel(model, logger, conversationId, { signal });
   signal.throwIfAborted();
   await summarizeContext({ raw: source.raw, branchIds: source.branchIds, uiCount: source.ui.length,

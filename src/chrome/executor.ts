@@ -284,6 +284,14 @@ export class ChromeExecutor {
         if (method !== "Input.cancelDragging" && method !== "Runtime.releaseObjectGroup" && !releaseInput) throwIfAborted(this.activeSignal);
         return this.bridgeCommand(debuggee, method, params);
       },
+      atomicClick: typeof this.chromeApi.runtime?.connect === "function" ? (debuggee, params) => {
+        throwIfAborted(this.activeSignal);
+        return this.bridgeCommand(debuggee, "Input.dispatchMouseEvent", { ...params, type: "mousePressed", surfWaxAtomicClick: true });
+      } : undefined,
+      hitTest: typeof this.chromeApi.runtime?.connect === "function" ? (debuggee, params) => {
+        throwIfAborted(this.activeSignal);
+        return this.bridgeCommand(debuggee, "Runtime.callFunctionOn", { ...params, surfWaxHitTest: true });
+      } : undefined,
       detach: async (debuggee) => {
         await (this.bridge.call as any)("detach", [debuggee]);
         this.bridgedDebuggees.delete(JSON.stringify(debuggee));
@@ -1043,7 +1051,9 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
         else state.keys.set(input.key, { ...input });
       }
     }
-    return (this.bridge.call as any)("sendCommand", [debuggee, method, input]);
+    const result = await (this.bridge.call as any)("sendCommand", [debuggee, method, input]);
+    if (debuggee.tabId !== undefined && input?.surfWaxAtomicClick) this.inputState(debuggee.tabId).buttons.delete(input.button ?? "left");
+    return result;
   }
 
   private async evaluateIsolated(target: ChromeTarget, code: string, signal?: AbortSignal): Promise<unknown> {

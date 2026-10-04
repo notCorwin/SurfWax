@@ -78,15 +78,15 @@ test("queues multiple follow-up messages while running and dispatches them in FI
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     const composer = opened.page.getByTestId("composer-input");
+    await nameCurrentConversation(opened.page, "Follow-up FIFO");
     await composer.fill("initial request");
     await composer.press("Enter");
     await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
     await expect(opened.page.getByRole("button", { name: "排队消息", exact: true })).toHaveCount(0);
-    await nameCurrentConversation(opened.page, "Follow-up FIFO");
     await expect(composer).toBeEnabled();
 
     await composer.fill("second request");
-    await expect(opened.page.getByRole("button", { name: "停止生成" })).toHaveCount(0);
+    await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
     await opened.page.getByRole("button", { name: "排队消息", exact: true }).click();
     await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
     await expect(opened.page.getByRole("button", { name: "排队消息", exact: true })).toHaveCount(0);
@@ -125,10 +125,10 @@ test("sends a selected follow-up immediately, closes interrupted tools and keeps
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     const composer = opened.page.getByTestId("composer-input");
+    await nameCurrentConversation(opened.page, "Follow-up immediate");
     await composer.fill("long running request");
     await composer.press("Enter");
     await expect(opened.page.locator(".process-trace[data-status=running]")).toBeVisible();
-    await nameCurrentConversation(opened.page, "Follow-up immediate");
     for (const message of ["later request", "urgent request", "remove request"]) {
       await composer.fill(message);
       await composer.press("Enter");
@@ -168,10 +168,10 @@ test("keeps paused follow-ups after stop and panel reload until the user resumes
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     const composer = opened.page.getByTestId("composer-input");
+    await nameCurrentConversation(opened.page, "Paused follow-up");
     await composer.fill("long request");
     await composer.press("Enter");
     await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
-    await nameCurrentConversation(opened.page, "Paused follow-up");
     await composer.fill("saved request");
     await composer.press("Enter");
     await expect(opened.page.getByTestId("followup-queue")).toContainText("saved request");
@@ -313,14 +313,11 @@ test("blocks leaving a running conversation without aborting it", async () => {
     await composer.press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_RUNNING");
     await opened.page.getByTestId("conversation-menu").click();
-    await startNewConversation(opened.page);
-    await expect(opened.page.locator(".conversation-notice")).toContainText("当前会话尚未结束");
+    await opened.page.keyboard.press("Escape");
+    await expect(opened.page.getByTestId("new-conversation")).toBeDisabled();
     await opened.page.getByTestId("conversation-menu").click();
-    await opened.page.locator(".conversation-item", { hasText: "第一标题" }).locator(".conversation-select").click();
-    await expect(opened.page.locator(".conversation-dialog .conversation-notice")).toContainText("当前会话尚未结束");
-    await opened.page.locator(".conversation-item[data-active] .conversation-action").last().click();
-    await expect(opened.page.locator(".conversation-dialog .conversation-notice")).toContainText("当前会话尚未结束");
-    await opened.page.locator(".conversation-item[data-active] .conversation-delete").click();
+    await expect(opened.page.locator(".conversation-item", { hasText: "第一标题" }).locator(".conversation-select")).toBeDisabled();
+    for (const control of await opened.page.locator(".conversation-action, .conversation-delete").all()) await expect(control).toBeDisabled();
     await expect(opened.page.locator(".conversation-dialog")).toBeVisible();
     await expect(opened.page.locator(".conversation-dialog").getByTestId("new-conversation")).toHaveCount(0);
     await expect(opened.page.locator(".conversation-item")).toHaveCount(2);
@@ -383,7 +380,8 @@ test("resets conversation UI while retaining only each conversation's own draft"
     await expect(opened.page.locator(".markdown-body")).toContainText("LONG_REPLY");
     const viewport = opened.page.getByTestId("thread-viewport");
     await expect.poll(() => viewport.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(500);
-    await viewport.evaluate((element) => { element.scrollTop = 0; });
+    await viewport.hover();
+    await opened.page.mouse.wheel(0, -100_000);
     await expect(opened.page.getByRole("button", { name: "滚动到底部" })).toBeVisible();
     await composer.fill("first unsent draft");
     await opened.context.serviceWorkers()[0]!.evaluate(() => chrome.runtime.sendMessage({ type: "surf-wax:guard-warning", tabId: 1 }));
@@ -399,6 +397,10 @@ test("resets conversation UI while retaining only each conversation's own draft"
 
     await opened.page.getByTestId("conversation-menu").click();
     await opened.page.locator(".conversation-item", { hasText: "第二标题" }).locator(".conversation-select").click();
+    // fill() can target an inert textarea behind the still-open dialog. Wait
+    // for the destination to commit, as a real user must before typing.
+    await expect(opened.page.getByRole("dialog", { name: "对话列表" })).toBeHidden();
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("第二标题");
     await expect(composer).toHaveValue("");
     await composer.fill("second unsent draft");
     await opened.page.getByTestId("conversation-menu").click();
@@ -504,7 +506,7 @@ test("edits user messages, regenerates replies and restores the selected branch"
     await composer.fill("check branch visibility");
     await composer.press("Enter");
     await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
-    await expect(opened.page.getByLabel("消息分支")).toHaveCount(0);
+    for (const branch of await opened.page.getByLabel("消息分支").getByRole("button").all()) await expect(branch).toBeDisabled();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("BRANCH_DONE");
     await expect(opened.page.getByLabel("消息分支").first()).toBeVisible();
   } catch (error) {
@@ -560,8 +562,8 @@ test("keeps a running conversation alive when a switch is blocked", async () => 
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_RUNNING");
     await opened.page.getByTestId("conversation-menu").click();
-    await startNewConversation(opened.page);
-    await expect(opened.page.locator(".conversation-notice")).toContainText("当前会话尚未结束");
+    await opened.page.keyboard.press("Escape");
+    await expect(opened.page.getByTestId("new-conversation")).toBeDisabled();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("BACKGROUND_DONE");
     await expect.poll(() => provider.requests.length).toBe(2);
     expect(provider.stats.abortedResponses).toBe(0);

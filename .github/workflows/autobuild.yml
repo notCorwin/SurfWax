@@ -1,21 +1,20 @@
-name: Verify and Release
+name: Continuous Delivery
 
 on:
   push:
     branches: [master]
     tags: ['v*']
-  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: verify-${{ github.ref }}
+  group: delivery-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  verify:
+  package:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,77 +25,19 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run docs:check
-      - run: npm run check
-      - run: npm test
+      # CI (types, tests, browsers and performance) is completed locally before push.
+      # CD rebuilds and validates the distributable and its SHA-256 only.
       - run: npm run release:package
+      - name: Verify packaged checksum
+        run: cd .dev/releases && sha256sum -c *.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: surf-wax-${{ github.sha }}
           path: .dev/releases/
           if-no-files-found: error
 
-  browser:
-    needs: verify
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        chrome: ['138', current]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - uses: actions/download-artifact@v4
-        with:
-          name: surf-wax-${{ github.sha }}
-          path: .dev/release-candidate/
-      - name: Verify and unpack the release candidate
-        shell: bash
-        run: |
-          set -euo pipefail
-          (cd .dev/release-candidate && sha256sum -c *.sha256)
-          unzip -q .dev/release-candidate/*.zip -d dist
-          node scripts/validate-build.mjs dist
-          node scripts/prepare-upgrade-fixture.mjs
-      - run: npx playwright install-deps chromium
-      - id: chrome
-        run: node scripts/install-test-browser.mjs ${{ matrix.chrome }}
-      - run: npx playwright test --grep-invert @performance
-        env:
-          SURFWAX_EXTENSION_PATH: dist
-          SURFWAX_CHROME_PATH: ${{ steps.chrome.outputs.executable }}
-          SURFWAX_CHROME_VERSION: ${{ steps.chrome.outputs.version }}
-      - name: Stage canonical log evidence for upload
-        if: ${{ !cancelled() }}
-        shell: bash
-        # GitHub-hosted jobs contain only fresh mkdtemp fixture profiles and
-        # localhost mock-provider data; no user's installed Chrome profile.
-        run: |
-          set -euo pipefail
-          mkdir -p .dev/ci-evidence
-          if test -d ../.dev/chromium-profile/Default/IndexedDB; then
-            cp -R ../.dev/chromium-profile/Default/IndexedDB .dev/ci-evidence/IndexedDB
-          fi
-      - uses: actions/upload-artifact@v4
-        if: ${{ !cancelled() }}
-        with:
-          name: browser-evidence-${{ matrix.chrome }}-${{ github.run_id }}
-          path: |
-            playwright-report/
-            test-results/
-            .dev/ci-evidence/
-          if-no-files-found: warn
-          include-hidden-files: true
-          retention-days: 14
-
   autobuild:
-    needs: [verify, browser]
+    needs: package
     if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
     permissions:
@@ -113,7 +54,7 @@ jobs:
           name: surf-wax-${{ github.sha }}
           path: release/
       - run: node scripts/prepare-autobuild-release.mjs release
-      - name: Update verified test channel
+      - name: Update test channel
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -133,7 +74,7 @@ jobs:
           test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/autobuild" --jq '.object.sha')" = "$GITHUB_SHA"
 
   release:
-    needs: [verify, browser]
+    needs: package
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

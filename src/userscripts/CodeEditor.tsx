@@ -4,9 +4,26 @@ import { javascript, javascriptLanguage } from "@codemirror/lang-javascript";
 import { cssLanguage } from "@codemirror/lang-css";
 import { LanguageSupport } from "@codemirror/language";
 import { parseMixed } from "@lezer/common";
-import { oneDark } from "@codemirror/theme-one-dark";
+import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
+import { tags } from "@lezer/highlight";
 import { basicSetup, EditorView } from "codemirror";
 
+const tokenHighlight = syntaxHighlighting(HighlightStyle.define([
+  { tag: tags.comment, color: "var(--syntax-comment)" },
+  { tag: [tags.keyword, tags.modifier], color: "var(--syntax-keyword)" },
+  { tag: [tags.string, tags.regexp], color: "var(--syntax-string)" },
+  { tag: [tags.number, tags.bool, tags.null], color: "var(--syntax-number)" },
+  { tag: tags.function(tags.variableName), color: "var(--syntax-function)" },
+  { tag: [tags.typeName, tags.className], color: "var(--syntax-type)" },
+]));
+const tokenTheme = (dark: boolean) => EditorView.theme({
+  "&": { color: "var(--foreground)", backgroundColor: "var(--background)" },
+  ".cm-content": { caretColor: "var(--foreground)", fontFamily: "var(--font-mono)" },
+  ".cm-gutters": { color: "var(--muted-foreground)", backgroundColor: "var(--muted)", borderColor: "var(--border)" },
+  ".cm-activeLine, .cm-activeLineGutter": { backgroundColor: "var(--accent)" },
+  ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": { backgroundColor: "var(--selection)" },
+  ".cm-tooltip": { backgroundColor: "var(--popover)", color: "var(--popover-foreground)", borderColor: "var(--border)" },
+}, { dark });
 const javascriptSupport = javascript();
 const mixedJavaScript = new LanguageSupport(javascriptLanguage.configure({
   wrap: parseMixed((node, input) => {
@@ -43,16 +60,17 @@ export function CodeEditor({ value, onChange, invalid, errorId }: { value: strin
       extensions: [
         basicSetup,
         mixedJavaScript,
+        tokenHighlight,
         EditorView.lineWrapping,
         EditorView.contentAttributes.of({ "aria-labelledby": "script-code-label" }),
-        theme.of(media.matches ? oneDark : []),
+        theme.of(tokenTheme(media.matches)),
         EditorView.updateListener.of((update) => {
           if (update.docChanged && !syncing.current) onChangeRef.current(update.state.doc.toString());
         }),
       ],
     });
     view.current = editor;
-    const onThemeChange = () => editor.dispatch({ effects: theme.reconfigure(media.matches ? oneDark : []) });
+    const onThemeChange = () => editor.dispatch({ effects: theme.reconfigure(tokenTheme(media.matches)) });
     media.addEventListener("change", onThemeChange);
     return () => { media.removeEventListener("change", onThemeChange); editor.destroy(); view.current = null; };
   }, []);

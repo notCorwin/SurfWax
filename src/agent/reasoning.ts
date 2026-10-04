@@ -1,3 +1,4 @@
+import { registerBackgroundRequest } from "./coordinator";
 import type { ModelConfig } from "../types";
 import { resolveModelLimit } from "./model-limits";
 import { resolvedBaseURL, sdkFor, settingsFor } from "./model-sdks";
@@ -44,6 +45,7 @@ export class ReasoningSettings {
   private manual = false;
   private fieldUnsupported = false;
   readonly ready: Promise<void>;
+  readonly controller = new AbortController();
 
   constructor(private config: ModelConfig, private options: {
     storage?: Storage;
@@ -121,7 +123,8 @@ export class ReasoningSettings {
     }
     const initialChoices = this.fieldUnsupported ? [] : REASONING_EFFORTS.filter((effort) => !this.rejected.has(effort));
     this.publish({ selected: this.fieldUnsupported ? null : manual ?? null, choices: initialChoices, source: "unknown", ready: true });
-    void this.discover().catch(() => undefined);
+    const unregister = registerBackgroundRequest(this.controller);
+    void this.discover().catch(() => undefined).finally(unregister);
   }
 
   private async discover(): Promise<void> {
@@ -131,12 +134,13 @@ export class ReasoningSettings {
     const probesModels = sdk === "@ai-sdk/openai-compatible" || sdk === "@qvac/ai-sdk-provider" || sdk === "venice-ai-sdk-provider";
     const endpoint = !probesModels ? undefined : await fetcher(`${baseURL}/models`, {
         headers: { Authorization: `Bearer ${settingsFor(this.config).apiKey}` },
-        signal: AbortSignal.timeout(5_000),
+        signal: AbortSignal.any([this.controller.signal, AbortSignal.timeout(5_000)]),
       }).then((response) => response.ok ? response.json() : undefined).then((body) => endpointEfforts(body, this.config.model)).catch(() => undefined);
     const catalog = endpoint === undefined
-      ? await (this.options.modelLimit ?? resolveModelLimit)({ ...this.config, contextWindowOverride: undefined })
+      ? await (this.options.modelLimit ?? resolveModelLimit)({ ...this.config, contextWindowOverride: undefined }, { signal: this.controller.signal })
         .then((limit) => efforts(limit?.reasoningEfforts)).catch(() => undefined)
       : undefined;
+    this.controller.signal.throwIfAborted();
     const source: ReasoningSource = endpoint !== undefined ? "endpoint" : catalog !== undefined ? "models.dev" : "unknown";
     const choices = this.fieldUnsupported ? [] : (endpoint ?? catalog ?? [...REASONING_EFFORTS]).filter((effort) => !this.rejected.has(effort));
     const manual = this.manual ? this.state.selected : null;
@@ -152,7 +156,7 @@ const settings = new Map<string, ReasoningSettings>();
 export function reasoningSettingsFor(config: ModelConfig): ReasoningSettings {
   const key = `${sdkFor(config)}\u0000${config.providerId ?? ""}\u0000${resolvedBaseURL(config)}\u0000${config.model.trim()}`;
   let current = settings.get(key);
-  if (!current) {
+  if (!current || current.controller.signal.aborted) {
     current = new ReasoningSettings(config);
     settings.set(key, current);
   }

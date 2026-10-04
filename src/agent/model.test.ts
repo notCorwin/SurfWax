@@ -63,9 +63,9 @@ describe("createRetryingFetch", () => {
       const request = input instanceof Request ? input : new Request(input, init);
       calls.push(request.clone());
       if (request.url.includes("/oauth/token")) return new Response(JSON.stringify({ access_token: "sap-token", expires_in: 3600 }));
-      return new Response(JSON.stringify({ final_result: { id: "result", model: "gpt-test", choices: [{ index: 0,
-        message: { role: "assistant", content: "", tool_calls: [{ id: "call", type: "function", function: { name: "test", arguments: "{}" } }] }, finish_reason: "tool_calls" }],
-        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } } }), { headers: { "Content-Type": "application/json" } });
+      return new Response(`data: ${JSON.stringify({ final_result: { id: "result", model: "gpt-test", choices: [{ index: 0,
+        delta: { role: "assistant", content: "", tool_calls: [{ index: 0, id: "call", type: "function", function: { name: "test", arguments: "{}" } }] }, finish_reason: "tool_calls" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } } })}\n\ndata: [DONE]\n\n`, { headers: { "Content-Type": "text/event-stream" } });
     });
     const config = { sdk: "@jerome-benoit/sap-ai-provider-v2" as const, baseURL: "", model: "gpt-test", providerSettings: {
       serviceKeyJson: JSON.stringify({ url: "https://auth.test", clientid: "client", clientsecret: "secret" }), deploymentUrl: "https://orchestration.test", resourceGroup: "rg",
@@ -76,7 +76,9 @@ describe("createRetryingFetch", () => {
     expect(calls[1]?.url).toBe("https://orchestration.test/v2/completion");
     expect(calls[1]?.headers.get("authorization")).toBe("Bearer sap-token");
     expect(calls[1]?.headers.get("ai-resource-group")).toBe("rg");
-    await expect(calls[1]?.json()).resolves.toHaveProperty("config.modules.prompt_templating.prompt.tools");
+    const body = await calls[1]?.json();
+    expect(body.config.stream.enabled).toBe(true);
+    expect(body.config.modules.prompt_templating.prompt.tools).toHaveLength(1);
     expect(await response.text()).toContain('"tool_calls"');
   });
 
@@ -145,7 +147,7 @@ describe("createRetryingFetch", () => {
     const sleep = vi.fn(async () => undefined);
     const responses = [new Response("slow", { status: 429, headers: { "Retry-After": "30" } }), new Response("ok")];
     expect((await createRetryingFetch({ fetch: vi.fn(async () => responses.shift()!), sleep })("https://provider.test")).status).toBe(200);
-    expect(sleep).toHaveBeenCalledWith(10_000);
+    expect(sleep).toHaveBeenCalledWith(5_000);
 
     const permanent = vi.fn(async () => new Response("unsupported", { status: 501 }));
     expect((await createRetryingFetch({ fetch: permanent })("https://provider.test")).status).toBe(501);
@@ -161,7 +163,7 @@ describe("createRetryingFetch", () => {
     expect((await createRetryingFetch({ fetch, sleep, random: () => 0.5 })("https://provider.test")).status).toBe(200);
     expect(fetch).toHaveBeenCalledTimes(21);
     expect(sleep).toHaveBeenCalledTimes(20);
-    expect(sleep.mock.calls.every(([delay]) => delay <= 10_000)).toBe(true);
+    expect(sleep.mock.calls.every(([delay]) => delay <= 5_000)).toBe(true);
   });
 
   it("honors a signal supplied in RequestInit when the input is already a Request", async () => {

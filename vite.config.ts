@@ -19,7 +19,11 @@ export default defineConfig({
   plugins: [
     react(),
     tailwindcss(),
-    crx({ manifest: devManifest as any }),
+    crx({ manifest: devManifest as any,
+      // document_start must install capture listeners synchronously, before
+      // website scripts. A module loader's dynamic import loses that order.
+      contentScripts: { standaloneFiles: ["src/chrome/guard-content.ts"] },
+    }),
   ],
   resolve: {
     alias: {

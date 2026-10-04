@@ -90,7 +90,7 @@ const FOLLOWUP_EVENT_TYPES = [
   "conversation.followup.dispatched",
   "conversation.followup.removed",
 ] as const;
-const CONTEXT_EVENT_TYPES = ["context.compacted", "context.estimate.calibrated"] as const;
+const CONTEXT_EVENT_TYPES = ["context.compacted", "context.estimate.calibrated", "context.prompt.updated"] as const;
 
 export function upgradeEventStore(db: IDBDatabase, transaction: IDBTransaction): void {
   const store = db.objectStoreNames.contains(EVENT_STORE)

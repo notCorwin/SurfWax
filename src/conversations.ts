@@ -20,8 +20,8 @@ import {
   type ConversationSummary,
   type LogEvent,
 } from "./logging";
-import { abortConversationWork, registerBackgroundRequest } from "./agent/coordinator";
-import { createModel } from "./agent/model";
+import { abortConversationWork, registerBackgroundRequest, withIdleConversation } from "./agent/coordinator";
+import { createModel, retryModelOperation } from "./agent/model";
 import type { ModelConfig } from "./types";
 
 function metadata(summary: ConversationSummary) {
@@ -77,8 +77,12 @@ export function generateConversationTitle(logger: EventLogger, config: ModelConf
       const firstUser = repository.messages.find(({ message }) => message.role === "user")?.message;
       const firstAssistant = repository.messages.find(({ message }) => message.role === "assistant")?.message;
       await logger.append({ type: "model.title.started", conversationId, content: null });
-      const result = streamText({
-        model: await createModel(config, logger, conversationId, { signal: abortController.signal }),
+      const model = await createModel(config, logger, conversationId, { signal: abortController.signal });
+      const { result, generated } = await retryModelOperation(async () => {
+        let streamError: unknown;
+        const result = streamText({
+        model,
+        onError: ({ error }) => { streamError = error; },
         maxRetries: 0,
         abortSignal: abortController.signal,
         prompt: [
@@ -86,9 +90,14 @@ export function generateConversationTitle(logger: EventLogger, config: ModelConf
           `用户：${visibleText(firstUser)}`,
           `助手：${visibleText(firstAssistant)}`,
         ].join("\n\n"),
-      });
-      let generated = "";
-      for await (const delta of result.textStream) generated += delta;
+        });
+        let generated = "";
+        for await (const delta of result.textStream) generated += delta;
+        // A clean EOF without a provider finish is also an interrupted request.
+        if (streamError) throw streamError;
+        if (await result.finishReason === "other") throw new TypeError("Title stream ended before completion");
+        return { result, generated };
+      }, { signal: abortController.signal, logger, conversationId, purpose: "title" });
       const title = generated.trim().split(/\r?\n/, 1)[0]?.trim();
       if (!title) throw new Error("模型没有返回对话标题");
       await logger.append({
@@ -252,7 +261,7 @@ function formattedHistory<TMessage, TStorageFormat extends Record<string, unknow
   };
 }
 
-export function createConversationAdapter(logger: EventLogger, config: ModelConfig): RemoteThreadListAdapter {
+export function createConversationAdapter(logger: EventLogger, config: ModelConfig | (() => ModelConfig)): RemoteThreadListAdapter {
   async function summaries(): Promise<ConversationSummary[]> {
     return rebuildConversationList(await logger.summaryEvents());
   }
@@ -284,17 +293,19 @@ export function createConversationAdapter(logger: EventLogger, config: ModelConf
       return { remoteId: threadId };
     },
     async rename(remoteId, title) {
-      await logger.append({ type: "conversation.title.updated", conversationId: remoteId, content: { title: title.trim() || "新对话", source: "manual" } });
+      await withIdleConversation(() => logger.append({ type: "conversation.title.updated", conversationId: remoteId, content: { title: title.trim() || "新对话", source: "manual" } }));
     },
     async archive(remoteId) {
-      await logger.append({ type: "conversation.archived", conversationId: remoteId, content: null });
+      await withIdleConversation(() => logger.append({ type: "conversation.archived", conversationId: remoteId, content: null }));
     },
     async unarchive(remoteId) {
-      await logger.append({ type: "conversation.unarchived", conversationId: remoteId, content: null });
+      await withIdleConversation(() => logger.append({ type: "conversation.unarchived", conversationId: remoteId, content: null }));
     },
     async delete(remoteId) {
-      await abortConversationWork(remoteId);
-      await logger.deleteConversation(remoteId);
+      await withIdleConversation(async () => {
+        await abortConversationWork(remoteId);
+        await logger.deleteConversation(remoteId);
+      });
     },
     async fetch(threadId) {
       const summary = (await summaries()).find(({ id }) => id === threadId);
@@ -303,7 +314,7 @@ export function createConversationAdapter(logger: EventLogger, config: ModelConf
     },
     async generateTitle(remoteId, _messages) {
       return createAssistantStream(async (controller) => {
-        controller.appendText(await generateConversationTitle(logger, config, remoteId));
+        controller.appendText(await generateConversationTitle(logger, typeof config === "function" ? config() : config, remoteId));
       });
     },
     unstable_useAdapters: useConversationAdapters,

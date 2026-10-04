@@ -131,10 +131,10 @@ describe("createAgent", () => {
     expect(prompts[0]).toContain("Current page");
     expect(prompts[0]).toContain("Other page");
     expect(prompts[0]).toContain('current\\\":true');
-    expect(systemPrompts[0]).toBe("Custom guidance.");
-    expect(systemPrompts[0]).not.toContain(TOOL_SUMMARY);
+    expect(systemPrompts[0]).toBe(`Custom guidance.\n\nAvailable tools:\n${TOOL_SUMMARY}`);
+    expect(systemPrompts[0]).toContain(TOOL_SUMMARY);
     expect(prompts.every((prompt) => prompt.split("Available tools:").length === 2)).toBe(true);
-    expect(prompts[0]).toContain("- goto: Navigate the current tab to a URL.");
+    expect(systemPrompts[0]).toContain("- goto: Navigate the current tab to a URL.");
     expect(prompts[0]).not.toContain('"type":"file"');
     expect(executor.executeCommand).toHaveBeenCalledWith("goto", { url: "https://example.com" }, undefined, expect.any(Object));
     expect(record).toHaveBeenCalledWith(expect.objectContaining({

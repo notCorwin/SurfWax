@@ -6,7 +6,7 @@ body,
 }
 
 body {
-  min-width: 320px;
+  min-width: calc(var(--spacing) * 80);
   overflow: hidden;
 }
 
@@ -21,9 +21,9 @@ p {
   height: 100%;
   min-height: 0;
   flex-direction: column;
-  gap: 12px;
+  gap: calc(var(--spacing) * 3);
   overflow: hidden;
-  padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left));
+  padding: max(calc(var(--spacing) * 3), env(safe-area-inset-top)) max(calc(var(--spacing) * 3), env(safe-area-inset-right)) max(calc(var(--spacing) * 3), env(safe-area-inset-bottom)) max(calc(var(--spacing) * 3), env(safe-area-inset-left));
 }
 
 .app-header {
@@ -31,11 +31,11 @@ p {
   flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: calc(var(--spacing) * 3);
 }
 
 .app-header h1 {
-  font-size: 18px;
+  font-size: var(--type-title);
   letter-spacing: -0.03em;
 }
 
@@ -51,8 +51,8 @@ p {
 
 .conversation-action svg,
 .conversation-delete svg {
-  width: 15px;
-  height: 15px;
+  width: calc(var(--spacing) * 3.75);
+  height: calc(var(--spacing) * 3.75);
   flex: 0 0 auto;
 }
 
@@ -62,29 +62,14 @@ p {
   white-space: nowrap;
 }
 
-.conversation-dialog {
-  width: min(100% - 20px, 520px);
-  max-height: min(72vh, 560px);
-  margin: 10px auto auto;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--background);
-  color: var(--foreground);
-  padding: 0;
-  box-shadow: 0 18px 50px rgb(0 0 0 / 0.28);
-}
-
-.conversation-dialog::backdrop {
-  background: rgb(0 0 0 / 0.42);
-}
+.conversation-dialog { width: min(calc(100% - var(--spacing) * 5), 32.5rem); max-height: 72vh; overflow: hidden; padding: 0; box-shadow: var(--shadow-lg); background: var(--background); color: var(--foreground); }
 
 .conversation-drawer {
   display: flex;
-  max-height: min(72vh, 560px);
+  max-height: min(72vh, calc(var(--spacing) * 140));
   flex-direction: column;
-  gap: 8px;
-  padding: 12px;
+  gap: calc(var(--spacing) * 2);
+  padding: calc(var(--spacing) * 3);
   overscroll-behavior: contain;
 }
 
@@ -92,7 +77,7 @@ p {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 32px;
+  min-height: calc(var(--spacing) * 8);
 }
 
 .conversation-select,
@@ -118,35 +103,35 @@ p {
 .conversation-rename input {
   min-width: 0;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--background);
   color: var(--foreground);
-  padding: 8px 10px;
-  font-size: 14px;
+  padding: calc(var(--spacing) * 2) calc(var(--spacing) * 2.5);
+  font-size: var(--type-body);
 }
 
 .conversation-search { width: 100%; }
 
 .conversation-section-title {
-  margin: 8px 10px 4px;
+  margin: calc(var(--spacing) * 2) calc(var(--spacing) * 2.5) calc(var(--spacing) * 1);
   color: var(--muted-foreground);
-  font-size: 12px;
+  font-size: var(--type-xs);
   font-weight: 600;
 }
 
 .conversation-empty,
 .conversation-notice {
-  margin: 4px 10px;
+  margin: calc(var(--spacing) * 1) calc(var(--spacing) * 2.5);
   color: var(--muted-foreground);
-  font-size: 12px;
+  font-size: var(--type-xs);
 }
 
 .conversation-rename {
   display: flex;
   flex: 1;
   flex-wrap: wrap;
-  gap: 4px;
-  padding: 4px;
+  gap: calc(var(--spacing) * 1);
+  padding: calc(var(--spacing) * 1);
 }
 
 .conversation-rename input { flex: 1; }
@@ -155,8 +140,8 @@ p {
 .conversation-item {
   display: flex;
   align-items: center;
-  gap: 4px;
-  border-radius: 8px;
+  gap: calc(var(--spacing) * 1);
+  border-radius: var(--radius-md);
 }
 
 .conversation-select {
@@ -164,8 +149,8 @@ p {
   min-width: 0;
   flex: 1;
   align-items: center;
-  gap: 8px;
-  padding: 9px 10px;
+  gap: calc(var(--spacing) * 2);
+  padding: calc(var(--spacing) * 2.25) calc(var(--spacing) * 2.5);
   text-align: left;
 }
 
@@ -180,7 +165,7 @@ p {
 .conversation-select small {
   flex: 0 0 auto;
   color: var(--muted-foreground);
-  font-size: 10px;
+  font-size: var(--type-tiny);
 }
 
 .conversation-select small[data-status="interrupted"] {
@@ -193,11 +178,11 @@ p {
 .conversation-action,
 .conversation-delete {
   display: grid;
-  width: 32px;
-  height: 32px;
+  width: calc(var(--spacing) * 8);
+  height: calc(var(--spacing) * 8);
   flex: 0 0 auto;
   place-items: center;
-  border-radius: 7px;
+  border-radius: var(--radius-sm);
   color: var(--muted-foreground);
 }
 
@@ -228,28 +213,22 @@ p {
   display: grid;
   flex: 1;
   place-content: center;
-  gap: 8px;
+  gap: calc(var(--spacing) * 2);
   color: var(--muted-foreground);
   text-align: center;
 }
 
 .empty-state h2 {
   color: var(--foreground);
-  font-size: 16px;
+  font-size: var(--type-base);
 }
 
 .empty-state p {
-  max-width: 280px;
-  font-size: 12px;
+  max-width: calc(var(--spacing) * 70);
+  font-size: var(--type-xs);
   line-height: 1.5;
 }
 
-[data-testid="thread-root"] {
-  --thread-max-width: 44rem;
-  --transcript-item-gap: 0.5rem;
-  --transcript-block-gap: 1.25rem;
-  --transcript-line-height: 1.6;
-}
 
 .conversation-turn,
 .assistant-message-content {
@@ -258,13 +237,14 @@ p {
 
 .conversation-turn {
   padding-bottom: var(--transcript-block-gap);
+  contain: layout style;
 }
 
 .work-summary-content {
   display: flex;
   flex-direction: column;
   gap: var(--transcript-block-gap);
-  padding-top: 8px;
+  padding-top: calc(var(--spacing) * 2);
 }
 
 .assistant-message {
@@ -273,21 +253,15 @@ p {
   line-height: var(--transcript-line-height);
 }
 
-[data-role="user"],
-[data-role="assistant"] {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 120px;
-}
-
 .interrupted-message {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: calc(var(--spacing) * 2.5);
   border-top: 1px solid var(--border);
   color: var(--destructive);
-  padding-top: 8px;
-  font-size: 11px;
+  padding-top: calc(var(--spacing) * 2);
+  font-size: var(--type-code);
 }
 
 .markdown-body {
@@ -295,11 +269,16 @@ p {
   color: var(--foreground);
 }
 
-.markdown-flow > :not(:last-child) {
+.markdown-flow > :not(:last-child),
+.markdown-tail > :not(:last-child),
+.markdown-block > :not(:last-child) {
   margin-block: 0 var(--transcript-block-gap);
+  margin-block-end: var(--transcript-block-gap);
 }
 
-.markdown-flow > :last-child {
+.markdown-flow > :last-child,
+.markdown-tail > :last-child,
+.markdown-block > :last-child {
   margin-block: 0;
 }
 
@@ -314,7 +293,7 @@ p {
 .markdown-body pre {
   max-width: 100%;
   overflow-x: auto;
-  font-size: 11px;
+  font-size: var(--type-code);
 }
 
 .markdown-body [data-streamdown="code-block-body"],
@@ -372,7 +351,7 @@ p {
   color: var(--muted-foreground);
   padding: 0;
   line-height: var(--transcript-line-height);
-  font-size: 14px;
+  font-size: var(--type-body);
   font-weight: 600;
 }
 
@@ -386,7 +365,7 @@ p {
 .activity-content {
   color: var(--muted-foreground);
   padding: var(--transcript-block-gap) 0 0;
-  font-size: 11px;
+  font-size: var(--type-code);
   line-height: 1.35;
 }
 
@@ -410,15 +389,15 @@ p {
   display: flex;
   flex-direction: column;
   gap: var(--transcript-item-gap);
-  padding-left: 16px;
+  padding-left: calc(var(--spacing) * 4);
   padding-top: var(--transcript-item-gap);
 }
 
 .activity-content strong {
   display: block;
-  margin: 5px 0 4px;
+  margin: calc(var(--spacing) * 1.25) 0 calc(var(--spacing) * 1);
   color: var(--foreground);
-  font-size: 10px;
+  font-size: var(--type-tiny);
 }
 
 .activity-content strong:first-child {
@@ -426,14 +405,21 @@ p {
 }
 
 .activity-content pre {
-  max-height: 180px;
+  max-height: calc(var(--spacing) * 45);
   margin: 0;
   overflow: auto;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: var(--muted);
   color: var(--foreground);
-  padding: 7px;
+  padding: calc(var(--spacing) * 1.75);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font: var(--type-tiny)/var(--line-code) var(--font-mono);
+}
+
+/* Each cached block keeps its layout/paint local as the streamed suffix grows. */
+.markdown-block {
+  contain: layout style;
+  content-visibility: auto;
+  contain-intrinsic-size: auto calc(var(--spacing) * 8);
 }

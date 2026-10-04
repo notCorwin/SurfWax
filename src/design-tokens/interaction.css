@@ -1,0 +1,20 @@
+/* Shared interaction motion tokens, used by the extension and injected shadow roots. */
+:root, :host {
+  --guard-edge-width: 2px;
+  --guard-cycle: 3s;
+  --guard-color-start: #6366f1;
+  --guard-color-mid: #22d3ee;
+  --guard-color-end: #a855f7;
+}
+:host::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  border: var(--guard-edge-width) solid transparent;
+  border-image: linear-gradient(var(--guard-angle), var(--guard-color-start), var(--guard-color-mid), var(--guard-color-end), var(--guard-color-start)) 1;
+  pointer-events: none;
+  animation: surf-wax-guard var(--guard-cycle) linear infinite;
+}
+@property --guard-angle { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+@keyframes surf-wax-guard { to { --guard-angle: 360deg; } }
+@media (prefers-reduced-motion: reduce) { :host::after { animation: none; } }

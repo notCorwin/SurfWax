@@ -2,6 +2,8 @@ export type RunIdentity = { runId: string; generation: number; ownerId: string }
 type ActiveRun = RunIdentity & { conversationId: string; controller: AbortController; done: Promise<void>; finish: () => void };
 let activeRun: ActiveRun | undefined;
 let claiming = false;
+let idleMutationDepth = 0;
+let idleLockDepth = 0;
 const backgroundControllers = new Map<AbortController, { conversationId?: string; done: Promise<void>; finish: () => void }>();
 export const RUN_LOCK = "surf-wax:active-run";
 export function getRunIdentity(): RunIdentity | undefined {
@@ -13,10 +15,33 @@ export async function activeRunIdentity(): Promise<RunIdentity | undefined> {
   if (response?.error) throw new Error(String(response.error));
   return response?.identity;
 }
+
+export const CONVERSATION_BUSY = "已有任务运行，请等待它完成或在原侧栏停止任务后再修改会话。";
+
+/** The same extension-wide lease protects command entrances and storage mutations. */
+export async function withIdleConversation<T>(action: () => T | Promise<T>): Promise<T> {
+  const perform = async () => {
+    if (activeRun || claiming || await activeRunIdentity()) throw new Error(CONVERSATION_BUSY);
+    idleMutationDepth += 1;
+    try { return await action(); } finally { idleMutationDepth -= 1; }
+  };
+  if (typeof navigator !== "undefined" && navigator.locks) {
+    let acquired = false;
+    try {
+      return await navigator.locks.request(RUN_LOCK, { ifAvailable: true }, async (lock) => {
+        if (!lock) throw new Error(CONVERSATION_BUSY);
+        acquired = true; idleLockDepth += 1;
+        return perform();
+      });
+    } finally { if (acquired) idleLockDepth -= 1; }
+  }
+  return perform();
+}
 export async function claimConversationRun(conversationId: string, signal?: AbortSignal, runId: string = crypto.randomUUID()): Promise<{ signal: AbortSignal; finish: () => void }> {
   signal?.throwIfAborted();
   if (activeRun || claiming) throw new Error("已有任务运行，请等待它完成或在原侧栏停止任务。");
   claiming = true;
+  const queueBehindOwnMutation = idleMutationDepth > 0 || idleLockDepth > 0;
   const controller = new AbortController();
   let resolve!: () => void;
   const done = new Promise<void>((r) => { resolve = r; });
@@ -25,7 +50,7 @@ export async function claimConversationRun(conversationId: string, signal?: Abor
   try {
     if (typeof navigator !== "undefined" && navigator.locks) {
       await new Promise<void>((accept, reject) => {
-        void navigator.locks.request(RUN_LOCK, { ifAvailable: true }, async (lock) => {
+        void navigator.locks.request(RUN_LOCK, queueBehindOwnMutation ? { ...(signal ? { signal } : {}) } : { ifAvailable: true }, async (lock) => {
           if (!lock) { reject(new Error("已有任务运行，请在原侧栏停止任务后重试。")); return; }
           accept();
           await new Promise<void>((r) => { releaseLock = r; });

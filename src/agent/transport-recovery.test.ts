@@ -32,7 +32,7 @@ async function consume(transport: ReturnType<typeof createChatTransport>, user: 
 }
 
 describe("durable transport recovery", () => {
-  it("adds the catalogue to an already persisted new user and rebuilds the agent after overflow", async () => {
+  it("keeps a new user untouched and logs the system catalogue snapshot and rebuilds the agent after overflow", async () => {
     const log = logger();
     const user: SidePanelMessage = { id: "user", role: "user", parts: [{ type: "text", text: "Continue" }] };
     await log.appendMessage("thread", user as ConversationMessage);
@@ -65,9 +65,10 @@ describe("durable transport recovery", () => {
     expect(factory).toHaveBeenCalledTimes(2);
     expect(summarize).toHaveBeenCalledOnce();
     expect(cleanup).toHaveBeenCalledOnce();
-    expect(requests[0]![0]!.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "text", text: expect.stringContaining("Available tools:") })]));
+    expect(requests[0]![0]!.parts).toEqual(user.parts);
     const saved = (await log.repository("thread")).messages.find((entry) => entry.message.id === "user")!.message;
-    expect((saved.metadata as any).custom.toolCatalog.version).toBe(TOOL_CATALOG_VERSION);
+    expect((saved.metadata as any)?.custom?.toolCatalog).toBeUndefined();
+    expect(fromLogValue((await log.contextEvents("thread"))[0]!.content)).toMatchObject({ prompt: { version: 2, catalogVersion: TOOL_CATALOG_VERSION, instructions: expect.stringContaining("Available tools:") } });
     expect((await log.all()).filter((event) => event.type === "conversation.finished")).toHaveLength(1);
   });
 

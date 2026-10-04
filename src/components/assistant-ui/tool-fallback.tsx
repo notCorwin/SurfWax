@@ -1,7 +1,6 @@
 "use client";
 
-import type { ToolCallMessagePartComponent } from "@assistant-ui/react";
-import { useContext, useState } from "react";
+import { memo, useContext, useState } from "react";
 import { ActivityPhaseContext, toolActivity } from "./process-group";
 
 function format(value: unknown): string {
@@ -12,7 +11,7 @@ function format(value: unknown): string {
   }
 }
 
-export const ToolFallback: ToolCallMessagePartComponent = (part) => {
+export const ToolFallback = memo(function ToolFallback(part: { status: { type: string }; args: unknown; argsText?: string; result?: unknown; isError?: boolean }) {
   const { status, label } = toolActivity(part, useContext(ActivityPhaseContext));
   const running = status === "running";
   const [expanded, setExpanded] = useState(status === "error");
@@ -28,4 +27,5 @@ export const ToolFallback: ToolCallMessagePartComponent = (part) => {
       </div>}
     </details>
   );
-};
+}, (before, after) => before.status.type === after.status.type && before.args === after.args
+  && before.argsText === after.argsText && before.result === after.result && before.isError === after.isError);

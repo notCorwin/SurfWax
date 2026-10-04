@@ -60,6 +60,21 @@ function harness(
 }
 
 describe("AutomationRuntime", () => {
+  it("waits for equal geometry across samples before dispatching native input", async () => {
+    const base = { connected: true, y: 12, height: 20, visible: true, stable: true, enabled: true,
+      editable: true, receivesEvents: true, checked: false };
+    const { runtime, calls } = harness(undefined, [
+      { ...base, x: 10, width: 20 }, { ...base, x: 30, width: 40 },
+      { ...base, x: 30, width: 40 }, { ...base, x: 30, width: 40 },
+    ]);
+    const page = await runtime.createPage(3);
+    await page.getByRole("button", { name: "Sign in" }).click();
+    const pressed = calls.findIndex(({ method, params }) => method === "Input.dispatchMouseEvent" && params.type === "mousePressed");
+    expect(calls.slice(0, pressed).filter(({ method }) => method === "Runtime.callFunctionOn")).toHaveLength(4);
+    expect(calls[pressed]?.params).toMatchObject({ x: 30, y: 12 });
+    await runtime.dispose();
+  });
+
   it("keeps the starting action identity when the surrounding request phase changes while it waits", async () => {
     const logger = { record: vi.fn() };
     const { runtime } = harness([], undefined, logger);

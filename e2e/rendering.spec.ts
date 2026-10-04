@@ -67,8 +67,10 @@ test("follows the system color scheme across every visible extension surface wit
       await opened.page.emulateMedia({ colorScheme });
       await opened.page.mouse.move(0, 0);
       await expect.poll(() => opened.page.evaluate(() => getComputedStyle(document.documentElement).colorScheme)).toBe(colorScheme);
+      await expect.poll(() => opened.page.locator(".conversation-dialog").evaluate((element) => getComputedStyle(element).backgroundColor))
+        .toBe(colorScheme === "dark" ? "rgb(24, 24, 24)" : "rgb(255, 255, 255)");
       sideSnapshots[colorScheme] = await themeColors(opened.page, ["body", '[data-testid="thread-root"]', ".conversation-dialog", '[data-streamdown="code-block"] pre', ".katex"]);
-      await expectThemeButton(opened.page.getByRole("button", { name: "发送消息" }), colorScheme, "default");
+      await expectThemeButton(opened.page.getByRole("button", { name: "发送消息", includeHidden: true }), colorScheme, "default");
       expect(await opened.page.getByTestId("composer-input").evaluate((input) => getComputedStyle(input).fontSize)).toBe("14px");
     }
     expect(sideSnapshots.light.colors.slice(0, 3)).toEqual(Array(3).fill({ background: "rgb(255, 255, 255)", foreground: "rgb(23, 23, 23)" }));
@@ -472,6 +474,8 @@ test("streams complete Markdown without blocking draft input", async () => {
     await expect(fullscreen).toBeVisible();
     for (const width of [430, 900]) {
       await opened.page.setViewportSize({ width, height: 1000 });
+      expect(await fullscreen.evaluate((element) => ({ width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height })))
+        .toEqual({ width, height: 1000 });
       const layout = await fullscreen.locator('[data-streamdown="table"] tbody tr').first().evaluate((row) => ({
         height: row.getBoundingClientRect().height,
         minCellWidth: Math.min(...[...row.querySelectorAll("td")].map((cell) => cell.getBoundingClientRect().width)),
@@ -493,7 +497,9 @@ test("streams complete Markdown without blocking draft input", async () => {
     expect(await rendered.evaluate((element) => {
       const root = document.querySelector<HTMLElement>('[data-testid="thread-root"]');
       const flow = element.querySelector<HTMLElement>(".markdown-flow");
-      const firstBlock = flow?.firstElementChild;
+      const wrapper = flow?.firstElementChild;
+      // GFM reference/footnote definitions require one shared parse block.
+      const firstBlock = wrapper?.childElementCount && wrapper.childElementCount > 1 ? wrapper.firstElementChild : wrapper;
       const content = element.closest<HTMLElement>(".assistant-message-content");
       const turn = element.closest<HTMLElement>(".conversation-turn");
       if (!root || !firstBlock || !content || !turn) throw new Error("transcript layout is incomplete");
@@ -534,7 +540,7 @@ test("keeps jump-to-bottom usable while a long response is streaming", async () 
     const viewport = opened.page.getByTestId("thread-viewport");
     const remaining = () => viewport.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop);
     await expect.poll(() => viewport.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(1_200);
-    await expect(opened.page.getByTestId("edit-message-button")).toHaveCount(0);
+    for (const edit of await opened.page.getByTestId("edit-message-button").all()) await expect(edit).toBeDisabled();
     await expect.poll(remaining).toBeLessThanOrEqual(1);
     const box = await viewport.boundingBox();
     if (!box) throw new Error("thread viewport has no bounding box");
@@ -552,5 +558,3 @@ test("keeps jump-to-bottom usable while a long response is streaming", async () 
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
-
-

@@ -45,7 +45,7 @@ const browserStepSchema = z.discriminatedUnion("type", [
   }).strict().refine((value) => Boolean(value.url || value.target && (value.state || value.text !== undefined || value.value !== undefined)), "expect requires url or a target condition"),
 ]);
 export const actInputSchema = z.object({
-  observationId: z.string().min(1).optional(), steps: z.array(browserStepSchema).min(1).max(100), timeoutMs,
+  observationId: z.string().min(1).optional(), steps: z.array(browserStepSchema).min(1), timeoutMs,
 }).strict();
 export const resultInputSchema = z.object({
   id: z.number().int().positive(), path: z.union([z.string(), z.array(z.union([z.string(), z.number().int()]))]).optional(),
@@ -153,7 +153,7 @@ const definitions: Record<CommandName, Definition> = {
   "artifact-save": { description: "Save an existing internal artifact to Downloads only when the user explicitly requested it.", inputSchema: z.object({ ...common, id: z.number().int().positive(), filename }).strict() },
 };
 
-const ACT_DESCRIPTION = "Execute 1-100 deterministic browser steps as one batch. Prefer a dedicated command for one action; use act for two or more related actions and include expect steps for outcomes.";
+const ACT_DESCRIPTION = "Execute deterministic browser steps as one batch, without a step-count limit. Prefer a dedicated command for one action; use act for two or more related actions and include expect steps for outcomes.";
 const RESULT_DESCRIPTION = "Read an exact slice or path from a large tool result stored in the canonical event log. Use the access object returned with $ref.";
 
 export const TOOL_REGISTRY = Object.freeze([
@@ -163,7 +163,7 @@ export const TOOL_REGISTRY = Object.freeze([
   ...USER_SCRIPT_TOOL_NAMES.map((name) => ({ name, kind: "userscript" as const, ...userScriptDefinitions[name], summary: userScriptDefinitions[name].description.split(". ")[0]! })),
 ]);
 export const TOOL_SUMMARY = TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n");
-export const TOOL_CATALOG_VERSION = "formal-49-v1";
+export const TOOL_CATALOG_VERSION = "formal-49-v2";
 export const TOOL_CONTEXT = `Available tools:\n${TOOL_SUMMARY}`;
 
 export function parseCommandInput(name: CommandName, input: unknown): Record<string, unknown> {
@@ -315,13 +315,13 @@ function scrubScreenshots(value: unknown, found: ScreenshotSource[]): unknown {
   }));
 }
 
-export async function prepareToolMessages(messages: any[], stepNumber: number, browserContext?: string, readArtifact?: (id: number) => Promise<unknown>): Promise<any[]> {
+export async function prepareToolMessages(messages: any[], stepNumber: number, browserContext?: string, readArtifact?: (id: number) => Promise<unknown>, legacyCatalog = true): Promise<any[]> {
   const inject = stepNumber > 0 && messages.at(-1)?.role === "tool";
   const current: ScreenshotSource[] = [];
   const firstUser = messages.findIndex((message) => message.role === "user");
   const hasCatalog = messages.some((message) => typeof message.content === "string" ? message.content.includes("Available tools:\n")
     : Array.isArray(message.content) && message.content.some((part: any) => part.type === "text" && typeof part.text === "string" && part.text.includes("Available tools:\n")));
-  const withTools = firstUser < 0 || hasCatalog ? messages : messages.map((message, index) => {
+  const withTools = !legacyCatalog || firstUser < 0 || hasCatalog ? messages : messages.map((message, index) => {
     if (index !== firstUser) return message;
     if (typeof message.content === "string") return message.content.includes("Available tools:\n")
       ? message : { ...message, content: `${message.content}\n\n${TOOL_CONTEXT}` };

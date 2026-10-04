@@ -201,9 +201,10 @@ test("uses a global custom system prompt and hides disabled advanced settings", 
     await expect(opened.page.locator(".markdown-body").last()).toContainText("CUSTOM_PROMPT_OK");
     const system = provider.requests[0].messages.find((message: any) => message.role === "system");
     const user = provider.requests[0].messages.find((message: any) => message.role === "user");
-    expect(system?.content).toBe("You are a custom browser agent.");
-    expect(JSON.stringify(user)).toContain("Available tools:");
-    expect(JSON.stringify(user)).toContain("- goto: Navigate the current tab to a URL.");
+    expect(system?.content).toMatch(/^You are a custom browser agent\.\n\n/);
+    expect(system?.content).toContain("Available tools:");
+    expect(system?.content).toContain("- goto: Navigate the current tab to a URL.");
+    expect(JSON.stringify(user)).not.toContain("Available tools:");
     await expect(opened.page.locator('[data-role="user"]')).not.toContainText("Available tools:");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);

@@ -1,7 +1,8 @@
 import { useAuiState, useRemoteThreadListRuntime, type AssistantRuntime } from "@assistant-ui/react";
 import { useChatRuntime } from "@assistant-ui/ai-sdk";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { abortAllConversationWork } from "../agent/coordinator";
+import { ensureConversationPrompt, PROMPT_TOOLS } from "../agent/prompt";
 import { createAgent } from "../agent/runner";
 import { ContextCompactor } from "../agent/compaction";
 import { createModel } from "../agent/model";
@@ -37,12 +38,14 @@ function useConversationRuntime(config: ModelConfig, systemPrompt: string | unde
       await reasoning.ready;
       const languageModel = await createModel(config, logger, conversationId, { signal });
       signal.throwIfAborted();
+      const prompt = await ensureConversationPrompt(logger, conversationId, systemPrompt, branchIds);
       return createAgent({ model: config, languageModel, reasoning: reasoning.snapshot().selected ?? undefined, executor, logger, conversationId,
-        instructions: systemPrompt,
-        compactor: new ContextCompactor({ model: config, logger, conversationId, branchIds, signal }) });
+        instructions: systemPrompt, prompt, signal,
+        compactor: new ContextCompactor({ model: config, logger, conversationId, branchIds, signal, prompt }) });
     }, logger, conversationId, () => executor.endRun(), async (signal) => {
-      await ensureAutomaticContextSummary(logger, conversationId, config, signal, { forced: true });
-    }),
+      const prompt = await ensureConversationPrompt(logger, conversationId, systemPrompt);
+      await ensureAutomaticContextSummary(logger, conversationId, config, signal, { forced: true, instructions: prompt.instructions, tools: PROMPT_TOOLS });
+    }, systemPrompt),
     [config, conversationId, executor, logger, systemPrompt],
   );
   const runtime = useChatRuntime<SidePanelMessage>({
@@ -63,7 +66,9 @@ export function useSidePanelRuntime(
   initialThreadId?: string,
 ): AssistantRuntime {
   const executor = useMemo(() => new ChromeExecutor({ logger }), [logger]);
-  const adapter = useMemo(() => createConversationAdapter(logger, config), [config, logger]);
+  const latestConfig = useRef(config);
+  latestConfig.current = config;
+  const adapter = useMemo(() => createConversationAdapter(logger, () => latestConfig.current), [logger]);
   const runtime = useRemoteThreadListRuntime({
     adapter,
     initialThreadId,

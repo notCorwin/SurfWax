@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ModelConfig } from "../types";
+import { activeRunIdentity } from "../agent/coordinator";
 import {
   EMPTY_MODEL_CONFIG,
   MODEL_CONFIG_STORAGE_KEY,
@@ -26,10 +27,14 @@ export function useSidePanelSession(): SidePanelSession {
 
   useEffect(() => {
     let active = true;
-    const refresh = async () => {
+    let deferred = false;
+    const refresh = async (initial = false) => {
       try {
         const stored = await loadModelConfig();
         if (!active) return;
+        if (!initial && await activeRunIdentity()) { deferred = true; return; }
+        if (!active) return;
+        deferred = false;
         setModelSettings(stored);
         setError(undefined);
       } catch (cause) {
@@ -41,12 +46,17 @@ export function useSidePanelSession(): SidePanelSession {
     const storageChanged = (changes: { [key: string]: chrome.storage.StorageChange }, area: string) => {
       if (area === "local" && changes[MODEL_CONFIG_STORAGE_KEY]) void refresh();
     };
+    const runChanged = (message: { type?: string; identity?: unknown }) => {
+      if (deferred && message.type === "surf-wax:run-state" && !message.identity) void refresh();
+    };
 
-    void refresh();
+    void refresh(true);
     chrome.storage.onChanged.addListener(storageChanged);
+    chrome.runtime.onMessage.addListener(runChanged);
     return () => {
       active = false;
       chrome.storage.onChanged.removeListener(storageChanged);
+      chrome.runtime.onMessage.removeListener(runChanged);
     };
   }, []);
 

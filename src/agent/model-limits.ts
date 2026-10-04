@@ -161,7 +161,7 @@ export function modelProviderPresets(catalog: ModelCatalog): ModelProviderPreset
   }).sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
 }
 
-const catalogPending = new Map<string, Promise<ModelCatalog>>();
+const catalogRequests = new WeakMap<typeof globalThis.fetch, Map<string, Promise<ModelCatalog>>>();
 
 export function loadModelCatalog(
   options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; refresh?: boolean; onStale?: (error: unknown) => void } = {},
@@ -190,14 +190,17 @@ export function loadModelCatalog(
     }
   };
   if (options.signal || options.fetch || options.storage || options.now || options.refresh || options.onStale) return task();
+  const fetcher = globalThis.fetch;
+  let catalogPending = catalogRequests.get(fetcher);
+  if (!catalogPending) { catalogPending = new Map(); catalogRequests.set(fetcher, catalogPending); }
   const existing = catalogPending.get(CATALOG_URL);
   if (existing) return existing;
-  const result = task().finally(() => catalogPending.delete(CATALOG_URL));
+  const result = task().finally(() => catalogPending!.delete(CATALOG_URL));
   catalogPending.set(CATALOG_URL, result);
   return result;
 }
 
-const pending = new Map<string, Promise<ModelLimit | undefined>>();
+const limitRequests = new WeakMap<typeof globalThis.fetch, Map<string, Promise<ModelLimit | undefined>>>();
 
 export function resolveModelLimit(
   config: ModelConfig,
@@ -223,9 +226,12 @@ export function resolveModelLimit(
     }
   };
   if (options.signal || options.fetch || options.storage || options.now) return task();
+  const fetcher = globalThis.fetch;
+  let pending = limitRequests.get(fetcher);
+  if (!pending) { pending = new Map(); limitRequests.set(fetcher, pending); }
   const existing = pending.get(key);
   if (existing) return existing;
-  const result = task().finally(() => pending.delete(key));
+  const result = task().finally(() => pending!.delete(key));
   pending.set(key, result);
   return result;
 }

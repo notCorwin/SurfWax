@@ -1,4 +1,5 @@
 import type { EventLogger } from "../logging";
+import { waitForDocumentFrame } from "./dom-frame";
 
 type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
 type Command = (debuggee: Debuggee, method: string, params?: object) => Promise<any>;
@@ -221,6 +222,8 @@ export class AutomationRuntime {
   constructor(private readonly options: {
     chromeApi: typeof chrome;
     command: Command;
+    atomicClick?: (debuggee: Debuggee, params: Record<string, unknown>) => Promise<unknown>;
+    hitTest?: (debuggee: Debuggee, params: Record<string, unknown>) => Promise<any>;
     detach: (debuggee: Debuggee) => Promise<void>;
     mark: (tabId: number) => Promise<void>;
     logger?: EventLogger;
@@ -413,8 +416,7 @@ export class AutomationRuntime {
       if (operation !== "hover") {
         const count = operation === "dblclick" ? 2 : 1;
         for (let clickCount = 1; clickCount <= count; clickCount += 1) {
-          await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mousePressed", x: cssX, y: cssY, button, modifiers, clickCount });
-          await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseReleased", x: cssX, y: cssY, button, modifiers, clickCount });
+          await this.nativeClick(session.debuggee, { x: cssX, y: cssY, button, modifiers, clickCount });
         }
       }
       return this.afterAction(session);
@@ -870,19 +872,23 @@ export class AutomationRuntime {
     return (await this.options.command(session.debuggee, "DOM.describeNode", { objectId })).node;
   }
 
-  private async callOn(session: Session, objectId: string, functionDeclaration: string, args: unknown[] = []): Promise<any> {
-    const response = await this.options.command(session.debuggee, "Runtime.callFunctionOn", {
+  private async callOn(session: Session, objectId: string, functionDeclaration: string, args: unknown[] = [], hitTest = false): Promise<any> {
+    const params = {
       objectId, functionDeclaration, arguments: args.map((value) => ({ value })), awaitPromise: true, returnByValue: true,
-    });
+    };
+    const response = hitTest && this.options.hitTest ? await this.options.hitTest(session.debuggee, params)
+      : await this.options.command(session.debuggee, "Runtime.callFunctionOn", params);
     if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
     return response.result?.value;
   }
 
   private async elementState(session: Session, objectId: string): Promise<ElementState> {
-    return this.callOn(session, objectId, `async function(){
+    // Child-frame RAF and timers can both be suspended by Chrome. Read real
+    // geometry synchronously on each side of two frames of the live harness.
+    const read = () => this.callOn(session, objectId, `function(){
       if (!this.isConnected) return { connected: false, x: 0, y: 0, visible: false, stable: false, enabled: false, editable: false, receivesEvents: false, checked: false };
       this.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
-      const first = this.getBoundingClientRect(); await new Promise(requestAnimationFrame); await new Promise(requestAnimationFrame); const rect = this.getBoundingClientRect();
+      const rect = this.getBoundingClientRect();
       const style = getComputedStyle(this); let x = rect.left + rect.width / 2; let y = rect.top + rect.height / 2;
       const guard = document.getElementById("__surf-wax-page-guard"); const pointerEvents = guard?.style.getPropertyValue("pointer-events"); const pointerPriority = guard?.style.getPropertyPriority("pointer-events");
       if (guard) guard.style.setProperty("pointer-events", "none", "important");
@@ -893,8 +899,15 @@ export class AutomationRuntime {
       while (view?.frameElement) { const frame = view.frameElement.getBoundingClientRect(); x += frame.left; y += frame.top; view = view.parent; }
       const disabled = Boolean(this.disabled || this.closest("fieldset:disabled") || this.closest('[aria-disabled="true"]'));
       const editable = !disabled && !this.readOnly && this.getAttribute("aria-readonly") !== "true" && (this.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(this.tagName));
-      return { connected: true, x, y, visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none", stable: first.x === rect.x && first.y === rect.y && first.width === rect.width && first.height === rect.height, enabled: !disabled, editable, receivesEvents: Boolean(hit && (hit === this || this.contains(hit))), checked: Boolean(this.checked) };
-    }`);
+      return { connected: true, x, y, width: rect.width, height: rect.height, visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none", stable: true, enabled: !disabled, editable, receivesEvents: Boolean(hit && (hit === this || this.contains(hit))), checked: Boolean(this.checked) };
+    }`, [], true);
+    const first = await read();
+    if (!first.connected) return first;
+    await waitForDocumentFrame(); await waitForDocumentFrame();
+    throwIfAborted(this.context.signal);
+    const next = await read();
+    return { ...next, stable: next.stable && first.x === next.x && first.y === next.y
+      && first.width === next.width && first.height === next.height };
   }
 
   private async waitForLocatorState(session: Session, spec: LocatorSpec, state: WaitState, checked = true): Promise<void> {
@@ -970,6 +983,12 @@ export class AutomationRuntime {
     return { x, y };
   }
 
+  private async nativeClick(debuggee: Debuggee, params: Record<string, unknown>) {
+    if (this.options.atomicClick) return this.options.atomicClick(debuggee, params);
+    await this.options.command(debuggee, "Input.dispatchMouseEvent", { ...params, type: "mousePressed" });
+    return this.options.command(debuggee, "Input.dispatchMouseEvent", { ...params, type: "mouseReleased" });
+  }
+
   private async pointer(session: Session, spec: LocatorSpec, operation: string, options: { button?: "left" | "right" | "middle"; modifiers?: string[] } = {}): Promise<void> {
     const target = await this.waitActionableLocator(session, spec, false, true, true, operation !== "hover");
     const state = await this.toRootPoint(session, target.targetSession, target.state);
@@ -981,8 +1000,7 @@ export class AutomationRuntime {
     const modifiers = modifierMask(options.modifiers ?? []);
     const count = operation === "dblclick" ? 2 : 1;
     for (let clickCount = 1; clickCount <= count; clickCount += 1) {
-      await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mousePressed", x: state.x, y: state.y, button, modifiers, clickCount });
-      await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseReleased", x: state.x, y: state.y, button, modifiers, clickCount });
+      await this.nativeClick(session.debuggee, { x: state.x, y: state.y, button, modifiers, clickCount });
     }
   }
 

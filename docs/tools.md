@@ -48,7 +48,7 @@
 | `console` | List captured console messages at or above a level. |
 | `run-code` | Run an async function receiving the bound page facade: locators (CSS/text/role/label/placeholder/alt/title/testId), ref, frameLocator, evaluate, snapshot, observe, point, keyboard, navigation, waitForURL/waitForLoadState/waitForEvent. Locators auto-wait; waitFor supports attached/detached/visible/hidden/enabled/editable/checked; nth accepts negative indices. Upload with locator.setInputFiles([{name, text\|base64\|url, mimeType?}]); no filesystem paths. Returns serializable values or an object reference. Use dedicated tools to save artifacts. |
 | `artifact-save` | Save an existing internal artifact to Downloads only when the user explicitly requested it. |
-| `act` | Execute 1-100 deterministic browser steps as one batch. Prefer a dedicated command for one action; use act for two or more related actions and include expect steps for outcomes. |
+| `act` | Execute deterministic browser steps as one batch, without a step-count limit. Prefer a dedicated command for one action; use act for two or more related actions and include expect steps for outcomes. |
 | `result` | Read an exact slice or path from a large tool result stored in the canonical event log. Use the access object returned with $ref. |
 | `userscript-list` | List saved user scripts with IDs, match patterns, and enabled state; excludes source code. |
 | `userscript-read` | Read one saved user script's complete definition and enabled state by ID. |

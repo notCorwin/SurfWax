@@ -1,7 +1,9 @@
 import { generateText, type LanguageModel, type ModelMessage } from "ai";
 import { fromLogValue, type EventLogger, type LogEvent } from "../logging";
 import type { ModelConfig } from "../types";
+import { createPromptSnapshot, readPromptSnapshot, PROMPT_TOOLS, type PromptSnapshot } from "./prompt";
 import { inputBudget, resolveModelLimit, type ModelLimit } from "./model-limits";
+import { retryModelOperation } from "./model";
 
 export const SUMMARY_PREFIX = "Earlier conversation summary:\n";
 const SUMMARY_INSTRUCTIONS = "Summarize the entire supplied conversation faithfully for continuing the browser task. Preserve the user's goal, constraints, decisions, page and tab identities, browser side effects, tool results, errors, unresolved work, and exact values needed later. Do not invent facts. Return only the concise summary.";
@@ -15,6 +17,7 @@ export type SummaryCheckpoint = {
   /** Older checkpoints remain readable; new checkpoints verify the summary as well as its source. */
   summaryDigest?: string;
   summary: string;
+  prompt?: PromptSnapshot;
 };
 
 type AppliedSummary = SummaryCheckpoint & { eventId: number };
@@ -25,6 +28,7 @@ type EstimateCalibration = {
   baseEstimate: number;
   promptEstimate: number;
   inputTokens?: number;
+  fixedEstimate?: number;
 };
 
 function estimateValue(value: unknown): number {
@@ -134,10 +138,11 @@ export async function contextPressure(options: {
   const calibration = fromLogValue(calibrated?.content) as Partial<EstimateCalibration> | undefined;
   const anchor = typeof calibration?.inputTokens === "number" && Number.isFinite(calibration.inputTokens) && calibration.inputTokens > 0
     ? calibration.inputTokens : calibration?.promptEstimate;
+  const prompt = { instructions: options.instructions ?? (readPromptSnapshot(options.events, options.branchIds) ?? createPromptSnapshot()).instructions, tools: options.tools ?? PROMPT_TOOLS, messages };
+  const fixedEstimate = estimatePromptInput(prompt) - currentEstimate;
   const estimated = Math.ceil(anchor && calibration?.baseEstimate
-    ? anchor + currentEstimate - calibration.baseEstimate
-    : options.instructions !== undefined || options.tools !== undefined
-      ? estimatePromptInput({ instructions: options.instructions, messages, tools: options.tools }) : currentEstimate);
+    ? anchor + currentEstimate - calibration.baseEstimate + (calibration.fixedEstimate !== undefined ? fixedEstimate - calibration.fixedEstimate : 0)
+    : estimatePromptInput(prompt));
   return { limit, estimated, threshold: Math.floor(inputBudget(limit) * 0.8), messages };
 }
 
@@ -146,7 +151,7 @@ export async function summarizeContext(options: {
   languageModel: LanguageModel; logger: EventLogger; conversationId: string;
   signal: AbortSignal; limit?: ModelLimit;
   /** Runtime input may contain supplemental browser state. Only raw fingerprints persisted history. */
-  prepared?: ModelMessage[]; stepNumber?: number;
+  prepared?: ModelMessage[]; stepNumber?: number; prompt?: PromptSnapshot;
 }): Promise<string> {
   const { raw, branchIds, logger, conversationId, signal } = options;
   const events = await logger.conversation(conversationId);
@@ -157,7 +162,8 @@ export async function summarizeContext(options: {
   const summary = await generateSummary(options.prepared ?? messages, options.languageModel, logger, conversationId, signal, limit);
   signal.throwIfAborted();
   const checkpoint: SummaryCheckpoint = { strategy: "summary", branchIds, sourceCount: raw.length,
-    sourceUiCount: options.uiCount, sourceDigest: await digest(raw), summaryDigest: await digestValue(summary), summary };
+    sourceUiCount: options.uiCount, sourceDigest: await digest(raw), summaryDigest: await digestValue(summary), summary,
+    prompt: createPromptSnapshot((options.prompt ?? readPromptSnapshot(events, branchIds))?.source) };
   signal.throwIfAborted();
   const stored = await logger.append({ type: "context.compacted", conversationId, content: { ...checkpoint, limit, stepNumber: options.stepNumber } });
   if (!stored) throw new Error("上下文摘要未能保存；请重试。");
@@ -174,8 +180,9 @@ async function generateSummary(messages: ModelMessage[], languageModel: Language
     const generate = async (prompt: string, phase: "complete" | "chunk" | "merge", chunk?: number): Promise<string> => {
       signal.throwIfAborted();
       if (!fits(prompt)) throw new Error("摘要模型窗口过小，无法容纳摘要指令；请增大上下文窗口。");
-      const result = await generateText({ model: languageModel, maxRetries: 0, maxOutputTokens,
-        reasoning: "minimal", abortSignal: signal, system: SUMMARY_INSTRUCTIONS, prompt });
+      const result = await retryModelOperation(() => generateText({ model: languageModel, maxRetries: 0, maxOutputTokens,
+        reasoning: "minimal", abortSignal: signal, system: SUMMARY_INSTRUCTIONS, prompt }),
+      { signal, logger, conversationId, purpose: "summary" });
       signal.throwIfAborted();
       const summary = result.text.trim();
       if (!summary) throw new Error("Model returned an empty context summary");
@@ -230,6 +237,7 @@ async function generateSummary(messages: ModelMessage[], languageModel: Language
 }
 
 export class ContextCompactor {
+  prompt?: PromptSnapshot;
   private calibration?: EstimateCalibration;
   private usageRecorded = false;
   private baseEstimate?: number;
@@ -240,8 +248,8 @@ export class ContextCompactor {
 
   constructor(private options: {
     model: ModelConfig; logger: EventLogger; conversationId: string;
-    branchIds: string[]; signal: AbortSignal;
-  }) {}
+    branchIds: string[]; signal: AbortSignal; prompt?: PromptSnapshot;
+  }) { this.prompt = options.prompt; }
 
   recordPrompt(prompt: { instructions?: unknown; messages: readonly ModelMessage[]; tools?: readonly Record<string, unknown>[] }): void {
     if (this.calibration) return;
@@ -250,6 +258,7 @@ export class ContextCompactor {
       contextVersion: this.contextVersion,
       baseEstimate: this.baseEstimate ?? estimateInput(prompt.messages),
       promptEstimate: estimatePromptInput(prompt),
+      fixedEstimate: estimatePromptInput(prompt) - estimateInput(prompt.messages),
     };
     this.options.logger.record({ type: "context.estimate.calibrated", conversationId: this.options.conversationId, content: this.calibration });
   }
@@ -267,7 +276,8 @@ export class ContextCompactor {
     const current = estimateInput(messages);
     const anchor = this.calibration?.inputTokens ?? this.calibration?.promptEstimate;
     return Math.ceil(anchor && this.calibration?.baseEstimate
-      ? anchor + current - this.calibration.baseEstimate
+      ? anchor + current - this.calibration.baseEstimate + (prompt && this.calibration.fixedEstimate !== undefined
+        ? estimatePromptInput({ ...prompt, messages }) - current - this.calibration.fixedEstimate : 0)
       : prompt ? estimatePromptInput({ ...prompt, messages }) : current);
   }
 
@@ -282,10 +292,12 @@ export class ContextCompactor {
     const { model, logger, conversationId, signal, branchIds } = this.options;
     signal.throwIfAborted();
     const summary = await summarizeContext({ raw, prepared, stepNumber, branchIds, uiCount: branchIds.length,
-      model, languageModel, logger, conversationId, signal, limit });
+      model, languageModel, logger, conversationId, signal, limit, prompt: this.prompt });
     const messages = [summaryMessage(summary)];
     this.events = await logger.conversation(conversationId);
-    this.contextVersion = (await currentSummary(this.events, branchIds, raw))?.eventId ?? 0;
+    const checkpoint = await currentSummary(this.events, branchIds, raw);
+    this.prompt = checkpoint?.prompt ?? this.prompt;
+    this.contextVersion = checkpoint?.eventId ?? 0;
     this.calibration = undefined;
     this.usageRecorded = false;
     this.baseEstimate = estimateInput(messages);
@@ -304,6 +316,7 @@ export class ContextCompactor {
     }
     this.events ??= await logger.conversation(conversationId);
     const { checkpoint, messages } = await effectiveContext(this.events, branchIds, rawMessages);
+    this.prompt = this.prompt ?? readPromptSnapshot(this.events, branchIds);
     this.contextVersion = checkpoint?.eventId ?? 0;
     this.baseEstimate = estimateInput(messages);
     this.compactedBaseEstimate = checkpoint ? this.baseEstimate : undefined;

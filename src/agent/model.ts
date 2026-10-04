@@ -1,10 +1,10 @@
-import type { LanguageModel } from "ai";
+import { APICallError, type LanguageModel } from "ai";
 import type { EventLogger } from "../logging";
 import type { ModelConfig, ModelSdk } from "../types";
 import { REASONING_EFFORTS, reasoningSettingsFor, type ReasoningEffort, type ReasoningSettings } from "./reasoning";
 import { googleCredentials, isOpenAIShapedSdk, modelConfigErrors, resolvedBaseURL, sdkFor, settingsFor } from "./model-sdks";
 
-const MAX_RETRY_DELAY_MS = 10_000;
+const MAX_RETRY_DELAY_MS = 5_000;
 const INITIAL_RETRY_DELAY_MS = 250;
 
 export function isAbortError(error: unknown, signal?: AbortSignal): boolean {
@@ -66,6 +66,24 @@ export function isRecoverableModelError(error: unknown, signal?: AbortSignal): b
 export function retryBackoffDelay(attempt: number, random: () => number = Math.random): number {
   const exponential = Math.min(MAX_RETRY_DELAY_MS, INITIAL_RETRY_DELAY_MS * 2 ** Math.min(attempt - 1, 6));
   return Math.min(MAX_RETRY_DELAY_MS, Math.round(exponential * (0.5 + random())));
+}
+
+/** Retry read-only model work, including response-body failures after HTTP success. */
+export async function retryModelOperation<T>(operation: () => Promise<T>, options: {
+  signal: AbortSignal; logger?: EventLogger; conversationId?: string; purpose: string;
+  sleep?: (ms: number) => Promise<void>;
+}): Promise<T> {
+  let attempt = 0;
+  while (true) {
+    options.signal.throwIfAborted();
+    try { return await operation(); } catch (error) {
+      if (!isRecoverableModelError(error, options.signal)) throw error;
+      const delayMs = retryBackoffDelay(++attempt);
+      await options.logger?.append({ type: "model.request.retrying", conversationId: options.conversationId,
+        content: { purpose: options.purpose }, error, retry: { attempt, delayMs } });
+      await waitForModelRetry(delayMs, options.signal, options.sleep);
+    }
+  }
 }
 
 function retryAfter(response: Response, now: () => number): number | undefined {
@@ -154,6 +172,7 @@ export function createRetryingFetch(options: {
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   reasoningSettings?: ReasoningSettings;
+  signal?: AbortSignal;
 } = {}): typeof globalThis.fetch {
   const baseFetch = options.fetch ?? globalThis.fetch.bind(globalThis);
   const random = options.random ?? Math.random;
@@ -162,7 +181,8 @@ export function createRetryingFetch(options: {
 
   return async (input, init) => {
     await options.reasoningSettings?.ready;
-    const originalRequest = new Request(input instanceof Request ? input.clone() : input, init);
+    const original = new Request(input instanceof Request ? input.clone() : input, init);
+    const originalRequest = new Request(original, { signal: options.signal ? AbortSignal.any([options.signal, original.signal]) : original.signal });
     const requestedReasoningEffort = await reasoningEffortOf(originalRequest);
     let reasoningEffort: ReasoningEffort | null | undefined = options.reasoningSettings
       ? options.reasoningSettings.snapshot().selected
@@ -307,30 +327,101 @@ function withJsonRequest(request: Request, url: string, body: unknown, headers: 
   return new Request(url, { method: "POST", headers: merged, body: JSON.stringify(body), signal: request.signal });
 }
 
-function oneChunkSse(value: Record<string, any>): Response {
-  const result = value.final_result ?? value;
-  const chunks = (result.choices ?? []).flatMap((choice: Record<string, any>) => [
-    { ...result, usage: undefined, choices: [{ index: choice.index ?? 0, delta: choice.message ?? {}, finish_reason: null }] },
-    { ...result, usage: result.usage, choices: [{ index: choice.index ?? 0, delta: {}, finish_reason: choice.finish_reason ?? "stop" }] },
-  ]);
-  const text = `${chunks.map((chunk: unknown) => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`;
-  return new Response(text, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+/** Adapt Orchestration v2 SSE as it arrives, including split UTF-8 and tool argument deltas. */
+export function sapIncrementalSse(response: Response): Response {
+  if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
+    throw new Error("SAP streaming request did not return a Server-sent Events response.");
+  }
+  let buffer = "";
+  let finished = false;
+  let done = false;
+  const encoder = new TextEncoder();
+  const transform = new TransformStream<string, Uint8Array>({
+    transform(text, controller) {
+      buffer += text;
+      let boundary: RegExpExecArray | null;
+      while ((boundary = /\r?\n\r?\n/.exec(buffer))) {
+        const frame = buffer.slice(0, boundary.index); buffer = buffer.slice(boundary.index + boundary[0].length);
+        const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
+        if (!data) continue;
+        if (data === "[DONE]") { done = true; controller.enqueue(encoder.encode("data: [DONE]\n\n")); continue; }
+        const value = JSON.parse(data);
+        if (value.error || frame.startsWith("event: error")) {
+          const error = value.error ?? value;
+          throw new APICallError({ message: error.message ?? "SAP orchestration stream failed", url: response.url,
+            requestBodyValues: {}, statusCode: Number(error.code ?? error.status) || 500, responseBody: data });
+        }
+        const result = value.final_result ?? (value.choices ? value : undefined);
+        if (!result) continue;
+        finished ||= result.choices?.some((choice: any) => choice.finish_reason != null) ?? false;
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(result)}\n\n`));
+      }
+    },
+    flush(controller) {
+      if (!done && !finished) throw new TypeError("SAP stream disconnected before the model finished");
+      if (!done) controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+    },
+  });
+  return new Response(response.body.pipeThrough(new TextDecoderStream()).pipeThrough(transform), {
+    status: response.status, headers: { ...Object.fromEntries(response.headers), "Content-Type": "text/event-stream" },
+  });
 }
 
 function oauthFetch(options: { tokenUrl: string; clientId: string; clientSecret: string; fetch: typeof globalThis.fetch }) {
   let cached: { token: string; expiresAt: number } | undefined;
   return async (signal?: AbortSignal) => {
     if (cached && cached.expiresAt > Date.now() + 60_000) return cached.token;
-    const response = await options.fetch(options.tokenUrl, {
-      method: "POST",
-      headers: { Authorization: `Basic ${btoa(`${options.clientId}:${options.clientSecret}`)}`, "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ grant_type: "client_credentials" }), signal,
-    });
-    if (!response.ok) throw new Error(`OAuth token request failed: ${response.status} ${await response.text()}`);
-    const data = await response.json() as { access_token?: string; expires_in?: number };
-    if (!data.access_token) throw new Error("OAuth token response did not include access_token");
+    const data = await retryModelOperation(async () => {
+      const response = await options.fetch(options.tokenUrl, {
+        method: "POST",
+        headers: { Authorization: `Basic ${btoa(`${options.clientId}:${options.clientSecret}`)}`, "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "client_credentials" }), signal,
+      });
+      if (!response.ok) throw new APICallError({ message: "Model authentication failed", url: response.url, requestBodyValues: {}, statusCode: response.status });
+      const data = await response.json() as { access_token?: string; expires_in?: number };
+      if (!data.access_token) throw new Error("OAuth token response did not include access_token");
+      return { ...data, access_token: data.access_token };
+    }, { signal: signal ?? new AbortController().signal, purpose: "oauth-auth" });
     cached = { token: data.access_token, expiresAt: Date.now() + (data.expires_in ?? 300) * 1000 };
     return cached.token;
+  };
+}
+
+/** Native Vertex edge auth uses global fetch without AbortSignal. Authenticate
+ * at our fetch boundary instead, so token exchange shares request cancellation. */
+export function googleServiceAccountFetch(config: ModelConfig, fetch: typeof globalThis.fetch): typeof globalThis.fetch {
+  const credentials = googleCredentials(config)!;
+  let cached: { token: string; expiresAt: number } | undefined;
+  const encode = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const json = (value: unknown) => encode(new TextEncoder().encode(JSON.stringify(value)));
+  return async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const signal = request.signal;
+    signal.throwIfAborted();
+    if (!cached || cached.expiresAt <= Date.now() + 60_000) {
+      const now = Math.floor(Date.now() / 1000);
+      const unsigned = `${json({ alg: "RS256", typ: "JWT", ...(credentials.privateKeyId ? { kid: credentials.privateKeyId } : {}) })}.${json({
+        iss: credentials.clientEmail, scope: "https://www.googleapis.com/auth/cloud-platform", aud: "https://oauth2.googleapis.com/token", iat: now, exp: now + 3600,
+      })}`;
+      const pem = credentials.privateKey.replace(/-----[^-]+-----|\s/g, "");
+      const key = await crypto.subtle.importKey("pkcs8", Uint8Array.from(atob(pem), (character) => character.charCodeAt(0)),
+        { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
+      const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(unsigned));
+      signal.throwIfAborted();
+      const token = await retryModelOperation(async () => {
+        const response = await fetch("https://oauth2.googleapis.com/token", { method: "POST", signal,
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: `${unsigned}.${encode(new Uint8Array(signature))}` }) });
+        if (!response.ok) throw new APICallError({ message: "Google token exchange failed", url: response.url, requestBodyValues: {}, statusCode: response.status });
+        const token = await response.json();
+        if (typeof token.access_token !== "string") throw new Error("Google token response did not include access_token");
+        return token;
+      }, { signal, purpose: "google-auth" });
+      cached = { token: token.access_token, expiresAt: Date.now() + (token.expires_in ?? 3600) * 1000 };
+    }
+    const headers = new Headers(request.headers);
+    headers.delete("x-goog-api-key"); headers.set("Authorization", `Bearer ${cached.token}`);
+    return fetch(new Request(request, { headers }));
   };
 }
 
@@ -339,13 +430,16 @@ export function watsonxProtocolFetch(config: ModelConfig, fetch: typeof globalTh
   let cached: { token: string; expiresAt: number } | undefined;
   const token = async (signal?: AbortSignal) => {
     if (cached && cached.expiresAt > Date.now() + 300_000) return cached.token;
-    const response = await authFetch("https://iam.cloud.ibm.com/identity/token", {
-      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ grant_type: "urn:ibm:params:oauth:grant-type:apikey", apikey: settings.apiKey }), signal,
-    });
-    if (!response.ok) throw new Error(`IBM IAM request failed: ${response.status} ${await response.text()}`);
-    const data = await response.json() as { access_token?: string; expires_in?: number };
-    if (!data.access_token) throw new Error("IBM IAM response did not include access_token");
+    const data = await retryModelOperation(async () => {
+      const response = await authFetch("https://iam.cloud.ibm.com/identity/token", {
+        method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ grant_type: "urn:ibm:params:oauth:grant-type:apikey", apikey: settings.apiKey }), signal,
+      });
+      if (!response.ok) throw new APICallError({ message: "Model authentication failed", url: response.url, requestBodyValues: {}, statusCode: response.status });
+      const data = await response.json() as { access_token?: string; expires_in?: number };
+      if (!data.access_token) throw new Error("IBM IAM response did not include access_token");
+      return { ...data, access_token: data.access_token };
+    }, { signal: signal ?? new AbortController().signal, purpose: "watsonx-auth" });
     cached = { token: data.access_token, expiresAt: Date.now() + (data.expires_in ?? 300) * 1000 };
     return cached.token;
   };
@@ -375,16 +469,17 @@ export function sapProtocolFetch(config: ModelConfig, fetch: typeof globalThis.f
     const request = input instanceof Request ? input : new Request(input, init);
     const source = JSON.parse(await request.clone().text()) as Record<string, any>;
     const params = Object.fromEntries(Object.entries(source).filter(([key]) => ["temperature", "top_p", "max_tokens", "stop", "tool_choice"].includes(key)));
-    const body = { config: { modules: { prompt_templating: {
-      model: { name: source.model, params },
+    const body = { config: { ...(source.stream === true ? { stream: { enabled: true } } : {}), modules: { prompt_templating: {
+      model: { name: source.model, params: { ...params, ...(source.stream === true ? { stream_options: { include_usage: true } } : {}) } },
       prompt: { template: source.messages ?? [], ...(source.tools ? { tools: source.tools } : {}), ...(source.response_format ? { response_format: source.response_format } : {}) },
     } } } };
     const response = await fetch(withJsonRequest(request, `${settings.deploymentUrl.replace(/\/+$/, "")}/v2/completion`, body, {
       Authorization: `Bearer ${await getToken(request.signal)}`, "AI-Resource-Group": settings.resourceGroup || "default",
     }));
     if (!response.ok) return response;
+    if (source.stream === true) return sapIncrementalSse(response);
     const data = await response.json() as Record<string, any>;
-    return source.stream === true ? oneChunkSse(data) : new Response(JSON.stringify(data.final_result ?? data), {
+    return new Response(JSON.stringify(data.final_result ?? data), {
       status: response.status, headers: { "Content-Type": "application/json" },
     });
   };
@@ -426,13 +521,16 @@ export function gitlabProtocolFetch(config: ModelConfig, fetch: typeof globalThi
   const directAccess = async (signal?: AbortSignal) => {
     if (cached && cached.expiresAt > Date.now()) return cached;
     const instance = (settings.instanceUrl || "https://gitlab.com").replace(/\/+$/, "");
-    const response = await authFetch(`${instance}/api/v4/ai/third_party_agents/direct_access`, {
-      method: "POST", headers: { Authorization: `Bearer ${settings.apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ feature_flags: { DuoAgentPlatformNext: true } }), signal,
-    });
-    if (!response.ok) throw new Error(`GitLab direct access failed: ${response.status} ${await response.text()}`);
-    const data = await response.json() as { token?: string; headers?: Record<string, string> };
-    if (!data.token) throw new Error("GitLab direct access response did not include token");
+    const data = await retryModelOperation(async () => {
+      const response = await authFetch(`${instance}/api/v4/ai/third_party_agents/direct_access`, {
+        method: "POST", headers: { Authorization: `Bearer ${settings.apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ feature_flags: { DuoAgentPlatformNext: true } }), signal,
+      });
+      if (!response.ok) throw new APICallError({ message: "Model authentication failed", url: response.url, requestBodyValues: {}, statusCode: response.status });
+      const data = await response.json() as { token?: string; headers?: Record<string, string> };
+      if (!data.token) throw new Error("GitLab direct access response did not include token");
+      return { ...data, token: data.token };
+    }, { signal: signal ?? new AbortController().signal, purpose: "gitlab-auth" });
     cached = { token: data.token, headers: data.headers ?? {}, expiresAt: Date.now() + 25 * 60_000 };
     return cached;
   };
@@ -453,9 +551,14 @@ export async function createModel(config: ModelConfig, logger?: EventLogger, con
   const sdk = sdkFor(config);
   const settings = settingsFor(config);
   const baseURL = resolvedBaseURL(config);
-  const baseRetryingFetch = createRetryingFetch({ logger, conversationId, fetch: options.fetch });
+  const runFetch: typeof globalThis.fetch = (input, init) => {
+    const request = new Request(input, init);
+    return (options.fetch ?? globalThis.fetch)(new Request(request, { signal: options.signal
+      ? AbortSignal.any([options.signal, request.signal]) : request.signal }));
+  };
+  const baseRetryingFetch = createRetryingFetch({ logger, conversationId, fetch: runFetch, signal: options.signal });
   const retryingFetch = createRetryingFetch({
-    logger, conversationId, fetch: options.fetch,
+    logger, conversationId, fetch: runFetch, signal: options.signal,
     reasoningSettings: isOpenAIShapedSdk(sdk) ? reasoningSettingsFor(config) : undefined,
   });
   const module = await loadSdk(sdk, options.loaders?.[sdk]);
@@ -473,12 +576,32 @@ export async function createModel(config: ModelConfig, logger?: EventLogger, con
     case "@ai-sdk/deepseek": model = module.createDeepSeek(common).languageModel(config.model); break;
     case "@ai-sdk/gateway": model = module.createGateway(common).languageModel(config.model); break;
     case "@ai-sdk/google": model = module.createGoogle(common).languageModel(config.model); break;
-    case "@ai-sdk/google-vertex": model = module.createGoogleVertex({ ...common, project: settings.project, location: settings.location, googleCredentials: googleCredentials(config) }).languageModel(config.model); break;
-    case "@ai-sdk/google-vertex/anthropic": model = module.createGoogleVertexAnthropic({ ...common, project: settings.project, location: settings.location, googleCredentials: googleCredentials(config) }).languageModel(config.model); break;
+    case "@ai-sdk/google-vertex": {
+      const serviceAccount = !settings.apiKey && googleCredentials(config);
+      model = module.createGoogleVertex({ ...common, project: settings.project, location: settings.location,
+        ...(serviceAccount ? { apiKey: "service-account", baseURL: baseURL || `https://${settings.location === "global" ? "" : `${settings.location}-`}aiplatform.googleapis.com/v1beta1/projects/${settings.project}/locations/${settings.location}/publishers/google`,
+          fetch: googleServiceAccountFetch(config, baseRetryingFetch) } : {}) }).languageModel(config.model);
+      break;
+    }
+    case "@ai-sdk/google-vertex/anthropic": model = module.createGoogleVertexAnthropic({ ...common, project: settings.project, location: settings.location,
+      generateAuthToken: async () => "service-account", fetch: googleServiceAccountFetch(config, baseRetryingFetch) }).languageModel(config.model); break;
     case "@ai-sdk/groq": model = module.createGroq(common).languageModel(config.model); break;
     case "@ai-sdk/mistral": model = module.createMistral(common).languageModel(config.model); break;
     case "@ai-sdk/openai": model = module.createOpenAI(common).languageModel(config.model); break;
-    case "@ai-sdk/perplexity": model = module.createPerplexity(common).languageModel(config.model); break;
+    case "@ai-sdk/perplexity": {
+      const native = module.createPerplexity(common).languageModel(config.model);
+      // The native Sonar SDK rejects function tools. Use the endpoint's Chat
+      // protocol for tool-capable deployments while retaining native search
+      // metadata/citations for requests without function tools.
+      const compatible = await import("@ai-sdk/openai-compatible");
+      const chat = compatible.createOpenAICompatible({ ...common, name: "perplexity",
+        baseURL: baseURL || "https://api.perplexity.ai", fetch: retryingFetch }).languageModel(config.model);
+      model = Object.assign(Object.create(native), {
+        doStream: (args: any) => (args.tools?.length ? chat : native).doStream(args),
+        doGenerate: (args: any) => (args.tools?.length ? chat : native).doGenerate(args),
+      });
+      break;
+    }
     case "@ai-sdk/togetherai": model = module.createTogetherAI(common).languageModel(config.model); break;
     case "@ai-sdk/vercel": model = module.createVercel(common).languageModel(config.model); break;
     case "@ai-sdk/xai": model = module.createXai(common).languageModel(config.model); break;

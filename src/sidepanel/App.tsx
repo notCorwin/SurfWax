@@ -1,17 +1,19 @@
-import { AssistantRuntimeProvider, ThreadListPrimitive, useAui, useAuiState } from "@assistant-ui/react";
+import { AssistantRuntimeProvider, useAui, useAuiState } from "@assistant-ui/react";
 import { CodeXmlIcon, MessageSquarePlusIcon, SettingsIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ConversationMenu } from "../components/assistant-ui/thread-list";
 import { Thread } from "../components/assistant-ui/thread";
-import { Button, buttonVariants } from "../components/ui/button";
+import { Button } from "../components/ui/button";
 import { ErrorNotice } from "../components/ui/error-notice";
 import { generateConversationTitle } from "../conversations";
 import { activeContext, ensureAutomaticContextSummary } from "../agent/context-choice";
 import { contextPressure, pendingContextChoice } from "../agent/compaction";
-import { activeRunIdentity, claimConversationRun, getRunIdentity, registerBackgroundRequest, type RunIdentity } from "../agent/coordinator";
+import { activeRunIdentity, claimConversationRun, getRunIdentity, registerBackgroundRequest, withIdleConversation, type RunIdentity } from "../agent/coordinator";
 import { EventLogger, fromLogValue, rebuildConversationList } from "../logging";
 import type { ModelConfig } from "../types";
 import { useSidePanelRuntime } from "./useSidePanelRuntime";
+import { useRunState } from "./useRunState";
+import { commandRuntime, createThreadView, RuntimeViewContext, useRuntimeView } from "./runtime-view";
 import { useSidePanelSession } from "./useSidePanelSession";
 import "../styles.css";
 import "./styles.css";
@@ -40,18 +42,13 @@ function UserScriptsButton() {
 }
 
 function NewConversationButton({ setWarning }: { setWarning: (message: string) => void }) {
-  const running = useAuiState((state) => state.thread.isRunning);
-  useEffect(() => { if (!running) setWarning(""); }, [running, setWarning]);
-  return <ThreadListPrimitive.New
-    className={buttonVariants({ variant: "ghost", size: "icon-sm" })}
-    aria-label="新对话"
-    title="新对话"
-    data-testid="new-conversation"
-    onClick={(event) => {
-      if (running || getRunIdentity()) { event.preventDefault(); setWarning("当前会话尚未结束，请等待完成或先停止运行。"); }
-      else setWarning("");
-    }}
-  ><MessageSquarePlusIcon aria-hidden="true" /></ThreadListPrimitive.New>;
+  const runtime = useRuntimeView();
+  const { locked } = useRunState();
+  useEffect(() => { if (!locked) setWarning(""); }, [locked, setWarning]);
+  return <Button type="button" variant="ghost" size="icon-sm" aria-label="新对话" title="新对话" data-testid="new-conversation" disabled={locked}
+    onClick={() => void withIdleConversation(async () => { await runtime.assistant.threads.switchToNewThread(); setWarning(""); }).catch((error) => setWarning(String(error.message)))}>
+    <MessageSquarePlusIcon aria-hidden="true" />
+  </Button>;
 }
 
 function Header({ conversation = false, logger }: { conversation?: boolean; logger?: EventLogger }) {
@@ -83,7 +80,7 @@ export function App() {
   }
 
   if (session.configured) {
-    return <ConfiguredChat key={session.chatKey} config={session.config} systemPrompt={session.systemPrompt} logger={logger} onError={setFatal} />;
+    return <ConfiguredChat config={session.config} systemPrompt={session.systemPrompt} logger={logger} onError={setFatal} />;
   }
 
   return (
@@ -153,10 +150,14 @@ function ReloadConversationList({ logger, config }: { logger: EventLogger; confi
 
 function ConfiguredRuntime({ config, systemPrompt, logger, initialThreadId }: { config: ModelConfig; systemPrompt?: string; logger: EventLogger; initialThreadId?: string }) {
   const runtime = useSidePanelRuntime(config, systemPrompt, logger, initialThreadId);
+  const commands = useMemo(() => commandRuntime(runtime), [runtime]);
+  const view = useMemo(() => ({ ...createThreadView(runtime.thread), assistant: runtime }), [runtime]);
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <ConfiguredConversation config={config} logger={logger} />
-    </AssistantRuntimeProvider>
+    <RuntimeViewContext.Provider value={view}>
+      <AssistantRuntimeProvider runtime={commands}>
+        <ConfiguredConversation config={config} logger={logger} />
+      </AssistantRuntimeProvider>
+    </RuntimeViewContext.Provider>
   );
 }
 
@@ -245,7 +246,7 @@ function ConversationView({ config, logger, threadId, drafts }: { config: ModelC
       const controller = new AbortController();
       compactionController.current = controller;
       let lease: Awaited<ReturnType<typeof claimConversationRun>> | undefined;
-      let unregister: (() => void) | undefined;
+      const unregister = registerBackgroundRequest(controller, conversationId);
       try {
         const before = await activeContext(logger, conversationId);
         if (!active) return;
@@ -264,7 +265,6 @@ function ConversationView({ config, logger, threadId, drafts }: { config: ModelC
         if (await activeRunIdentity()) return;
         controller.signal.throwIfAborted();
         lease = await claimConversationRun(conversationId, controller.signal);
-        unregister = registerBackgroundRequest(controller, conversationId);
         if (!active) { controller.abort("sidepanel-closed"); return; }
         setCompactionBusy(true);
         setCompactionError("");
@@ -276,7 +276,7 @@ function ConversationView({ config, logger, threadId, drafts }: { config: ModelC
           setContextStatus({ message: "上下文自动压缩失败；原始历史已保留。", error: true });
         }
       } finally {
-        unregister?.();
+        unregister();
         lease?.finish();
         if (compactionController.current === controller) compactionController.current = undefined;
         refreshing.current = false;
