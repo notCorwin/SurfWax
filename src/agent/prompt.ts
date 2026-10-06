@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { PROGRAM_CATALOG_VERSION, PROGRAM_TOOL_CONTEXT, PROGRAM_TOOL_REGISTRY, TOOL_REGISTRY } from "../chrome/tool";
+import { PROGRAM_CATALOG_VERSION, PROGRAM_TOOL_CONTEXT, PROGRAM_TOOL_REGISTRY } from "../chrome/tool";
 import { fromLogValue, type EventLogger, type LogEvent } from "../logging";
 
 const BASE_INSTRUCTIONS = [
@@ -21,11 +21,6 @@ export const DEFAULT_INSTRUCTIONS = BASE_INSTRUCTIONS;
 export const PROMPT_TOOLS = Object.freeze(PROGRAM_TOOL_REGISTRY.map(({ name, description, inputSchema }) => Object.freeze({
   type: "function", name, description, inputSchema: z.toJSONSchema(inputSchema, { target: "draft-7", unrepresentable: "any" }),
 })));
-export const LEGACY_PROMPT_TOOLS = Object.freeze(TOOL_REGISTRY.map(({ name, description, inputSchema }) => Object.freeze({
-  type: "function", name, description, inputSchema: z.toJSONSchema(inputSchema, { target: "draft-7", unrepresentable: "any" }),
-})));
-export function toolsForPrompt(prompt: PromptSnapshot) { return prompt.catalogVersion === PROGRAM_CATALOG_VERSION ? PROMPT_TOOLS : LEGACY_PROMPT_TOOLS; }
-
 export type PromptSnapshot = {
   version: 1 | 2;
   format: "legacy-user-tools" | "system-tools";
@@ -34,11 +29,11 @@ export type PromptSnapshot = {
   instructions: string;
 };
 
-export function createPromptSnapshot(source?: string, modern = true): PromptSnapshot {
+export function createPromptSnapshot(source?: string): PromptSnapshot {
   const base = source?.trim() ? source : DEFAULT_INSTRUCTIONS;
-  return { version: modern ? 2 : 1, format: modern ? "system-tools" : "legacy-user-tools",
+  return { version: 2, format: "system-tools",
     catalogVersion: PROGRAM_CATALOG_VERSION, source: source ?? "",
-    instructions: modern ? `${base}\n\n${PROGRAM_TOOL_CONTEXT}` : base };
+    instructions: `${base}\n\n${PROGRAM_TOOL_CONTEXT}` };
 }
 
 export function readPromptSnapshot(events: readonly LogEvent[], branchIds: readonly string[] = []): PromptSnapshot | undefined {
@@ -57,11 +52,11 @@ export function readPromptSnapshot(events: readonly LogEvent[], branchIds: reado
 export async function ensureConversationPrompt(logger: EventLogger, conversationId: string, source?: string, branchIds: readonly string[] = []): Promise<PromptSnapshot> {
   const events = await logger.contextEvents(conversationId);
   const previous = readPromptSnapshot(events, branchIds);
-  if (previous?.source === (source ?? "")) return previous;
-  const modern = previous ? previous.format === "system-tools"
-    : !(await logger.summaryEvents(conversationId)).some((event) => event.type === "conversation.submitted");
-  const prompt = createPromptSnapshot(source, modern);
-  const stored = await logger.append({ type: "context.prompt.updated", conversationId, content: { prompt } });
+  if (previous?.source === (source ?? "") && previous.catalogVersion === PROGRAM_CATALOG_VERSION && previous.format === "system-tools") return previous;
+  // Migration is append-only: historical instructions, calls, results, and user
+  // metadata remain readable, but never choose an executable legacy catalogue.
+  const prompt = createPromptSnapshot(source);
+  const stored = await logger.append({ type: "context.prompt.updated", conversationId, content: { prompt, ...(previous && previous.catalogVersion !== PROGRAM_CATALOG_VERSION ? { migratedFrom: previous.catalogVersion } : {}) } });
   if (!stored) throw new Error("系统提示词快照未能保存。");
   return prompt;
 }

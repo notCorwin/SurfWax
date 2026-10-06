@@ -81,7 +81,7 @@ export class BrowserJobs {
                 ? "timeout"
                 : combined.aborted
                   ? "aborted"
-                  : "execution-failed",
+                  : /^(?:Automation|Command)Error\[([^\]]+)\]/.exec(error instanceof Error ? error.message : String(error))?.[1] ?? "execution-failed",
               message: error instanceof Error ? error.message : String(error),
               retryable: false,
               ...((error as any)?.effectUnknown ? { effectUnknown: true } : {}),

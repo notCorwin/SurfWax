@@ -2,8 +2,8 @@ import { expect, test, openExtension, configure, dispose, startProvider, command
 
 test("worker restart closes orphaned calls, releases page protection and never replays an operation", async () => {
   const provider = await startProvider([
-    commandResponse("keydown", { key: "Shift" }, "restart-held-key"),
-    commandResponse("fill", { target: { by: "css", value: "#missing-until-restart" }, text: "waiting", timeoutMs: 300_000 }, "restart-waiting"),
+    commandResponse("run", { code: `return await page.keyboard.down(${JSON.stringify("Shift")});` }, "restart-held-key"),
+    commandResponse("run", { code: `return await page.locator(${JSON.stringify("#missing-until-restart")}).fill(${JSON.stringify("waiting")});`, timeoutMs: 300_000 }, "restart-waiting"),
     textResponse("AFTER_WORKER_RESTART"), textResponse("重启后恢复"),
   ]);
   const opened = await openExtension();

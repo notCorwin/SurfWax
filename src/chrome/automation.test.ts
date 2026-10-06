@@ -154,7 +154,7 @@ describe("AutomationRuntime", () => {
     const page = await runtime.createPage(3);
     await page.snapshot();
     await expect(page.getByRole("button", { name: "Sign in" }).click()).resolves.toMatchObject({ performed: true });
-    expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent").map(({ params }) => params.type)).toEqual(["mousePressed", "mouseReleased"]);
+    expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent").map(({ params }) => params.type)).toEqual(["mouseMoved", "mousePressed", "mouseReleased"]);
   });
 
   it("re-resolves a locator when a framework replaces the node during actionability", async () => {
@@ -166,7 +166,7 @@ describe("AutomationRuntime", () => {
     await page.getByRole("button", { name: "Sign in" }).click();
 
     expect(calls.filter(({ method }) => method === "DOM.resolveNode").length).toBeGreaterThanOrEqual(2);
-    expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent").map(({ params }) => params.type)).toEqual(["mousePressed", "mouseReleased"]);
+    expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent").map(({ params }) => params.type)).toEqual(["mouseMoved", "mousePressed", "mouseReleased"]);
   });
 
   it("waits for explicit locator states", async () => {

@@ -168,7 +168,8 @@ async function bypassPageGuard(tabId: number, enabled: boolean): Promise<void> {
 }
 
 async function guardInputTicket(tabId: number, runId: string, timestamp?: number, text?: string): Promise<void> {
-  if (!guardedTabs.has(tabId)) return;
+  // A disconnected port leaves the DOM blocker installed until Chrome executes
+  // its removal. Authorize the actual run-bound blocker even after map deletion.
   await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: authorizeGuardInput, args: [runId, timestamp ?? null, text ?? null] as any }).catch(() => undefined);
 }
 async function authorizedNativeInput(debuggee: chrome.debugger.Debuggee, tabId: number, runId: string, command: string, params: Record<string, any>) {
@@ -177,12 +178,13 @@ async function authorizedNativeInput(debuggee: chrome.debugger.Debuggee, tabId: 
   try {
     const { surfWaxAtomicClick, ...nativeParams } = params;
     if (surfWaxAtomicClick) {
-      // Queue both native commands together, using one run-bound ticket. User
+      // Queue the full native click together, using one run-bound ticket. User
       // input has no intervening IPC round trip in which to reset pressed state.
+      const moved = chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, timestamp, type: "mouseMoved", button: "none", buttons: 0, clickCount: 0 });
       const pressed = chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, timestamp, type: "mousePressed" });
       const released = chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, timestamp, type: "mouseReleased", buttons: 0 });
-      const results = await Promise.all([pressed, released]);
-      return results[1];
+      const results = await Promise.all([moved, pressed, released]);
+      return results[2];
     }
     return await chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, timestamp });
   }

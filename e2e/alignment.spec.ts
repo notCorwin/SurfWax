@@ -1,24 +1,25 @@
 import { expect, test } from "@playwright/test";
 import { commandResponse, streamingTextResponse, textResponse, startProvider, openExtension, configure, nameCurrentConversation, readEvents, dispose } from "./fixtures";
 
-test("executes more than 100 act steps and records a single tool result", async () => {
-  const responses = [commandResponse("act", { timeoutMs: 30000, steps: Array.from({ length: 121 }, () => ({ type: "click", target: { by: "role", value: "button", name: "Increment" } })) }, "over-100"), textResponse("ALL_121_DONE")];
+test("executes more than 100 program operations and records a single tool result", async () => {
+  const responses = [commandResponse("run", { timeoutMs: 30000, code: "for (let i=0;i<121;i++) await page.getByRole('button',{name:'Increment'}).click(); await check(await page.locator('output').innerText()==='121');" }, "over-100"), textResponse("ALL_121_DONE")];
   const provider = await startProvider(responses); const opened = await openExtension();
   try {
     const target = await opened.context.newPage(); await target.goto(`${provider.origin}/performance`);
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
-    await nameCurrentConversation(opened.page, "Unbounded act"); await target.bringToFront();
+    await nameCurrentConversation(opened.page, "Unbounded program"); await target.bringToFront();
     await opened.page.getByTestId("composer-input").fill("execute 121 actions"); await opened.page.getByTestId("composer-input").press("Enter");
     await expect(target.locator("output")).toHaveText("121", { timeout: 30000 });
     await expect(opened.page.locator(".markdown-body").last()).toContainText("ALL_121_DONE");
     const log = await readEvents(opened.page);
-    expect(log.filter((event) => event.type === "automation.action.finished" && event.toolCallId === "over-100")).toHaveLength(121);
+    expect(log.filter((event) => event.type === "automation.action.finished" && event.toolCallId === "over-100" && event.content.operation === "click")).toHaveLength(121);
+    expect(log.some(event => event.type === "browser.job.progress" && event.toolCallId === "over-100" && event.content.operation === "check" && event.content.state === "verified")).toBe(true);
     expect(log.filter((event) => ["tool.finished", "tool.failed"].includes(event.type) && event.toolCallId === "over-100")).toHaveLength(1);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
 test("keeps user clicks, keys and paste blocked throughout agent input and iframe work", async () => {
-  const provider = await startProvider([commandResponse("run-code", { timeoutMs: 30000, code: `async page => {
+  const provider = await startProvider([commandResponse("run", { code: `
     for (let index = 0; index < 30; index++) {
       await page.locator('#agent').focus();
       await page.insertText('海🌊');
@@ -26,7 +27,7 @@ test("keeps user clicks, keys and paste blocked throughout agent input and ifram
       await new Promise(resolve => setTimeout(resolve, 15));
     }
     return page.locator('#agent').inputValue();
-  }` }, "guard-input"), textResponse("INPUT_GUARDED")]);
+  `, timeoutMs: 30000 }, "guard-input"), textResponse("INPUT_GUARDED")]);
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage(); await target.goto(`${provider.origin}/target`);

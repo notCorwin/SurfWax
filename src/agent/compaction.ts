@@ -1,7 +1,7 @@
 import { generateText, type LanguageModel, type ModelMessage } from "ai";
 import { fromLogValue, type EventLogger, type LogEvent } from "../logging";
 import type { ModelConfig } from "../types";
-import { createPromptSnapshot, readPromptSnapshot, toolsForPrompt, type PromptSnapshot } from "./prompt";
+import { createPromptSnapshot, readPromptSnapshot, PROMPT_TOOLS, type PromptSnapshot } from "./prompt";
 import { inputBudget, resolveModelLimit, type ModelLimit } from "./model-limits";
 import { retryModelOperation } from "./model";
 
@@ -139,7 +139,7 @@ export async function contextPressure(options: {
   const anchor = typeof calibration?.inputTokens === "number" && Number.isFinite(calibration.inputTokens) && calibration.inputTokens > 0
     ? calibration.inputTokens : calibration?.promptEstimate;
   const snapshot = readPromptSnapshot(options.events, options.branchIds) ?? createPromptSnapshot();
-  const prompt = { instructions: options.instructions ?? snapshot.instructions, tools: options.tools ?? toolsForPrompt(snapshot), messages };
+  const prompt = { instructions: options.instructions ?? createPromptSnapshot(snapshot.source).instructions, tools: options.tools ?? PROMPT_TOOLS, messages };
   const fixedEstimate = estimatePromptInput(prompt) - currentEstimate;
   const estimated = Math.ceil(anchor && calibration?.baseEstimate
     ? anchor + currentEstimate - calibration.baseEstimate + (calibration.fixedEstimate !== undefined ? fixedEstimate - calibration.fixedEstimate : 0)

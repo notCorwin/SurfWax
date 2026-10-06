@@ -20,7 +20,7 @@ test("120Hz software frames include real dense-stream, code, math, history, inpu
   const deltas = Array.from({ length: total - 1 }, (_, index) => payload.slice(
     Math.floor(index * payload.length / (total - 1)), Math.floor((index + 1) * payload.length / (total - 1))));
   const text = "# TRACE_LOAD\n\n" + payload + "TRACE_COMPLETE";
-  const provider = await startProvider([commandResponse("tab-list", {}, "trace-tool"),
+  const provider = await startProvider([commandResponse("run", { code: `return await browser.tabs.list();` }, "trace-tool"),
     [chunk({ role: "assistant", content: "# TRACE_LOAD\n\n" }), ...deltas.map((content) => chunk({ content })), chunk({ content: "TRACE_COMPLETE" }), chunk({}, "stop"), "data: [DONE]\n\n"]]);
   const opened = await openExtension(undefined, { args: ["--disable-frame-rate-limit", "--disable-gpu-vsync", "--disable-gpu"] });
   const tracePath = test.info().outputPath("render-trace.json");

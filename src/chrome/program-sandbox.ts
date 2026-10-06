@@ -7,14 +7,18 @@ function workerMain() {
   let requestSequence = 0;
   const lifetime = new AbortController();
   const drained = new Set<() => void>();
+  const describeError = (error: any) => ({
+    message: error?.message ?? String(error),
+    name: error?.name,
+    code: error?.code,
+    ...(error?.artifact ? { artifact: error.artifact } : {}),
+    effectUnknown: Boolean(error?.effectUnknown),
+  });
   self.addEventListener("unhandledrejection", (event: any) => {
     event.preventDefault();
     self.postMessage({
       type: "failed",
-      error: {
-        message: event.reason?.message ?? String(event.reason),
-        effectUnknown: Boolean(event.reason?.effectUnknown),
-      },
+      error: describeError(event.reason),
     });
   });
   const close = self.close.bind(self);
@@ -172,10 +176,7 @@ function workerMain() {
     } catch (error: any) {
       self.postMessage({
         type: "failed",
-        error: {
-          message: error?.message ?? String(error),
-          effectUnknown: Boolean(error?.effectUnknown),
-        },
+        error: describeError(error),
       });
     }
   };

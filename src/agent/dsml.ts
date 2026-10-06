@@ -1,6 +1,6 @@
 import type { LanguageModelMiddleware } from "ai";
 import type { LanguageModelV4StreamPart, LanguageModelV4ToolCall } from "@ai-sdk/provider";
-import { actInputSchema, COMMAND_NAMES, normalizeCommandInput, parseCommandInput, resultInputSchema, PROGRAM_TOOL_REGISTRY, type CommandName } from "../chrome/tool";
+import { PROGRAM_TOOL_REGISTRY } from "../chrome/tool";
 import type { EventLogger } from "../logging";
 
 type Parsed = { calls: LanguageModelV4ToolCall[] } | { error: string };
@@ -51,15 +51,9 @@ function parseDsml(text: string, activeTools: Set<string>): Parsed | undefined {
       catch { return fail("invalid-json-parameter"); }
       index = valueEnd + dialect.endParameter.length;
     }
-    const normalized = normalizeCommandInput(toolName, input);
-    if (normalized === undefined) return fail("ambiguous-arguments");
     let validated: unknown;
     try {
-      const program = PROGRAM_TOOL_REGISTRY.find(({ name }) => name === toolName);
-      validated = program ? program.inputSchema.parse(normalized) : toolName === "act" ? actInputSchema.parse(normalized)
-        : toolName === "result" ? resultInputSchema.parse(normalized)
-          : COMMAND_NAMES.includes(toolName as CommandName) ? parseCommandInput(toolName as CommandName, normalized)
-            : undefined;
+      validated = PROGRAM_TOOL_REGISTRY.find(({ name }) => name === toolName)?.inputSchema.parse(input);
     } catch { return fail("invalid-tool-arguments"); }
     if (validated === undefined) return fail("unknown-tool");
     calls.push({ type: "tool-call", toolCallId: crypto.randomUUID(), toolName, input: JSON.stringify(validated), dynamic: true });

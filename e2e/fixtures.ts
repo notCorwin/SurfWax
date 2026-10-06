@@ -5,20 +5,6 @@ import { existsSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { resolve, basename } from "node:path";
-import { TOOL_CATALOG_VERSION, TOOL_CONTEXT } from "../src/chrome/tool";
-
-const HISTORICAL_PROMPT = { version: 2, format: "system-tools", catalogVersion: TOOL_CATALOG_VERSION, source: "", instructions: `You are a Chrome side-panel browser agent. Verify outcomes after actions.\n\n${TOOL_CONTEXT}` };
-function installHistoricalPrompt(prompt: typeof HISTORICAL_PROMPT) {
-  const add = IDBObjectStore.prototype.add;
-  IDBObjectStore.prototype.add = function (value: any, key?: IDBValidKey) {
-    const request = add.call(this, value, key);
-    if (this.name === "events" && value?.type === "conversation.created") add.call(this, {
-      type: "context.prompt.updated", conversationId: value.conversationId, timestamp: value.timestamp, content: { prompt },
-    });
-    return request;
-  };
-}
-
 export const SSE_HEADERS = {
   "access-control-allow-origin": "*",
   "cache-control": "no-cache",
@@ -71,7 +57,7 @@ export function streamingTextResponse(parts: string[], usage?: { promptTokens: n
 }
 
 export function toolResponse(code: string, id = "call-chrome-e2e", usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number }): string[] {
-  const input = { code: `async page => { ${code} }` };
+  const input = { code };
   return [
     chunk({
       role: "assistant",
@@ -79,7 +65,7 @@ export function toolResponse(code: string, id = "call-chrome-e2e", usage?: { pro
         index: 0,
         id,
         type: "function",
-        function: { name: "run-code", arguments: JSON.stringify(input) },
+        function: { name: "run", arguments: JSON.stringify(input) },
       }],
     }),
     chunk({}, "tool_calls"),
@@ -92,7 +78,7 @@ export function pageResponse(code: string, tabId: number, id = "call-page-e2e"):
   return [
     chunk({
       role: "assistant",
-      tool_calls: [{ index: 0, id, type: "function", function: { name: "run-code", arguments: JSON.stringify({ code: `async page => { ${code} }` }) } }],
+      tool_calls: [{ index: 0, id, type: "function", function: { name: "run", arguments: JSON.stringify({ code: `{ const page = await browser.page(${tabId}); ${code} }` }) } }],
     }),
     chunk({}, "tool_calls"),
     "data: [DONE]\n\n",
@@ -106,13 +92,6 @@ export function commandResponse(name: string, input: object, id: string): string
   ];
 }
 
-export function browserResponse(input: object, id: string): string[] {
-  return [
-    chunk({ role: "assistant", tool_calls: [{ index: 0, id, type: "function", function: { name: "browser", arguments: JSON.stringify(input) } }] }),
-    chunk({}, "tool_calls"), "data: [DONE]\n\n",
-  ];
-}
-
 export function queuedToolResponse(firstCode: string, secondCode: string): string[] {
   return [
     chunk({
@@ -121,7 +100,7 @@ export function queuedToolResponse(firstCode: string, secondCode: string): strin
         index,
         id: `call-queued-${index}`,
         type: "function",
-        function: { name: "run-code", arguments: JSON.stringify({ code: `async page => { ${code} }` }) },
+        function: { name: "run", arguments: JSON.stringify({ code }) },
       })),
     }),
     chunk({}, "tool_calls"),
@@ -325,12 +304,11 @@ test.afterEach(async ({}, info) => {
   testProfiles.clear();
 });
 
-export async function openExtension(existingDirectory?: string, settings: { extensionPath?: string; executablePath?: string; deviceScaleFactor?: number; args?: string[]; catalog?: "legacy" | "program" } = {}): Promise<{
+export async function openExtension(existingDirectory?: string, settings: { extensionPath?: string; executablePath?: string; deviceScaleFactor?: number; args?: string[] } = {}): Promise<{
   context: BrowserContext;
   extensionId: string;
   page: Page;
   userDataDirectory: string;
-  catalog: "legacy" | "program";
 }> {
   const userDataDirectory = existingDirectory ?? await mkdtemp(resolve(tmpdir(), "side-agent-e2e-"));
   const extensionPath = resolve(settings.extensionPath ?? process.env.SURFWAX_EXTENSION_PATH ?? "dist");
@@ -345,15 +323,12 @@ export async function openExtension(existingDirectory?: string, settings: { exte
     args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, "--no-sandbox", ...(settings.args ?? [])],
   });
   testProfiles.set(userDataDirectory, context);
-  // Historical suites exercise restored 49-tool conversations. New program suites opt out.
-  // Seed the canonical snapshot in the same transaction as creation, without a production test flag.
-  if (settings.catalog !== "program") await context.addInitScript(installHistoricalPrompt, HISTORICAL_PROMPT);
   let worker = context.serviceWorkers()[0];
   if (!worker) worker = await context.waitForEvent("serviceworker");
   const extensionId = new URL(worker.url()).hostname;
   const page = await context.newPage();
   await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
-  return { context, extensionId, page, userDataDirectory, catalog: settings.catalog ?? "legacy" };
+  return { context, extensionId, page, userDataDirectory };
 }
 
 export async function dispose(context: BrowserContext, directory: string, server?: Server): Promise<void> {
@@ -400,6 +375,16 @@ export async function configure(context: BrowserContext, page: Page, baseURL: st
   await options.getByRole("button", { name: "保存配置" }).click();
   await expect(options.getByRole("status")).toContainText("配置已保存");
   await expect(page.getByTestId("composer-input")).toBeVisible();
+  return options;
+}
+
+/** Explicitly advertise vision only for tests that request image artifacts. */
+export async function configureWithImages(context: BrowserContext, page: Page, baseURL: string): Promise<Page> {
+  const options = await configure(context, page, baseURL);
+  await options.getByLabel("图片输入能力").click();
+  await options.getByRole("option", { name: "支持", exact: true }).click();
+  await options.getByRole("button", { name: "保存配置" }).click();
+  await expect(options.getByRole("status")).toContainText("配置已保存");
   return options;
 }
 
@@ -579,7 +564,6 @@ export async function openNativeSidePanel(opened: Awaited<ReturnType<typeof open
   }).not.toBe('');
   const panel = await attachTarget(browser, targetId);
   await expect.poll(() => panel.evaluate<boolean>('Boolean(document.querySelector("[data-testid=composer-input]"))')).toBe(true);
-  if (opened.catalog !== "program") await panel.evaluate(`(${installHistoricalPrompt.toString()})(${JSON.stringify(HISTORICAL_PROMPT)})`);
   await harness.close();
   return { browser, panel, targetId, windowId, tabId: chromeTab.id };
 }

@@ -1,6 +1,6 @@
 import { isLoopFinished, ToolLoopAgent, wrapLanguageModel } from "ai";
 import type { LanguageModel } from "ai";
-import { createCommandTools, createProgramTools, prepareToolMessages, repairCommandToolCall } from "../chrome/tool";
+import { createProgramTools, prepareToolMessages, repairProgramToolCall } from "../chrome/tool";
 import { ChromeExecutor } from "../chrome/executor";
 import type { BrowserContext } from "../chrome/executor";
 import type { EventLogger } from "../logging";
@@ -12,7 +12,7 @@ import type { ReasoningEffort } from "./reasoning";
 import { dsmlMiddleware } from "./dsml";
 
 export { DEFAULT_INSTRUCTIONS } from "./prompt";
-import { createPromptSnapshot, toolsForPrompt, type PromptSnapshot } from "./prompt";
+import { createPromptSnapshot, PROMPT_TOOLS, type PromptSnapshot } from "./prompt";
 
 export type CreateAgentOptions = {
   model: ModelConfig;
@@ -27,7 +27,7 @@ export type CreateAgentOptions = {
   signal?: AbortSignal;
 };
 
-type BrowserAgentTools = ReturnType<typeof createCommandTools>;
+type BrowserAgentTools = ReturnType<typeof createProgramTools>;
 function browserContextMessage(context: BrowserContext): string {
   return [
     "<browser-context>",
@@ -37,8 +37,8 @@ function browserContextMessage(context: BrowserContext): string {
   ].join("\n");
 }
 
-const READ_ONLY_TOOLS = new Set(["inspect", "snapshot", "find", "tab-list", "requests", "request", "request-headers", "request-body", "response-headers", "response-body", "console", "result", "userscript-list", "userscript-read"]);
-const REPEATABLE_TOOLS = new Set(["run", "jobs", "type", "press", "keydown", "keyup", "mousemove", "mousedown", "mouseup", "mousewheel", "run-code", "act"]);
+const READ_ONLY_TOOLS = new Set(["inspect"]);
+const REPEATABLE_TOOLS = new Set(["run", "jobs"]);
 
 function signature(value: unknown): string {
   try { return JSON.stringify(value); } catch { return String(value); }
@@ -61,7 +61,7 @@ export function stagnationReason(steps: readonly any[]): string | undefined {
 
 export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, BrowserAgentTools> {
   const logger = options.logger;
-  const initialPrompt = options.prompt ?? createPromptSnapshot(options.instructions);
+  const initialPrompt = createPromptSnapshot(options.prompt?.source ?? options.instructions);
   const toolOptions = {
     logger, conversationId: options.conversationId,
     visualEnabled: (() => {
@@ -69,11 +69,11 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       return () => supported ??= modelSupportsImages(options.model, { signal: options.signal });
     })(),
   };
-  const tools = { ...createProgramTools(options.executor, toolOptions), ...createCommandTools(options.executor, toolOptions) };
+  const tools = createProgramTools(options.executor, toolOptions);
   const toolOrder = Object.keys(tools);
   let limit: ReturnType<typeof resolveModelLimit> | undefined;
-  const currentInstructions = () => options.compactor?.prompt?.instructions ?? initialPrompt.instructions;
-  const currentTools = () => toolsForPrompt(options.compactor?.prompt ?? initialPrompt);
+  const currentInstructions = () => createPromptSnapshot(options.compactor?.prompt?.source ?? initialPrompt.source).instructions;
+  const currentTools = () => PROMPT_TOOLS;
   const activeTools = () => currentTools().map(({ name }) => name);
   let browserDigest: string | undefined;
   let loggedGuard: string | undefined;
@@ -86,7 +86,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     tools,
     toolOrder,
     activeTools: activeTools(),
-    repairToolCall: repairCommandToolCall as any,
+    repairToolCall: repairProgramToolCall as any,
     prepareStep: async ({ messages, initialMessages, responseMessages, stepNumber, steps }) => {
       let prepared = await options.compactor?.prepare(messages, stepNumber) ?? messages;
       const browserContext = await options.executor.browserContext();
@@ -100,7 +100,6 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         stepNumber,
         browserChanged ? browserContextMessage(browserContext) : undefined,
         logger ? (id) => logger.result(id, {}, options.conversationId ?? "") : undefined,
-        (options.compactor?.prompt ?? initialPrompt).format === "legacy-user-tools",
       );
       let outgoing = await prepareMessages(prepared);
       const prompt = { instructions: currentInstructions(), tools: currentTools() };
@@ -147,13 +146,18 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       onToolExecutionEnd: async (event) => {
         loggedToolCalls.add(`${event.callId}\u0000${event.toolCall.toolCallId}`);
         const failed = event.toolOutput.type === "tool-error" || (event.toolOutput as any).output?.ok === false;
+        const interrupted = failed && options.signal?.aborted;
+        const effectUnknown = Boolean((event.toolOutput as any).output?.error?.effectUnknown);
+        const abortReason = interrupted ? Object.assign(new Error(String(options.signal?.reason ?? "Operation aborted")), { name: "AbortError" }) : undefined;
         await logger.append({
           type: failed ? "tool.failed" : "tool.finished",
           conversationId: options.conversationId,
-          content: { callId: event.callId, toolName: event.toolCall.toolName, toolExecutionMs: event.toolExecutionMs },
+          content: { callId: event.callId, toolName: event.toolCall.toolName, toolExecutionMs: event.toolExecutionMs,
+            ...(interrupted ? { status: "interrupted", effectUnknown } : {}) },
           toolCallId: event.toolCall.toolCallId,
           input: event.toolCall.input,
           ...(event.toolOutput.type === "tool-error" ? { error: event.toolOutput.error, output: { ok: false, error: event.toolOutput.error } } : { output: event.toolOutput.output, ...(failed ? { error: (event.toolOutput as any).output.error } : {}) }),
+          ...(interrupted ? { abort: { reason: abortReason } } : {}),
           latencyMs: event.toolExecutionMs,
         });
       },

@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 import { cp, mkdtemp, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { openExtension, reloadUpgradedExtension, configure, dispose, startProvider, textResponse, commandResponse, readEvents, enableUserScripts, startNewConversation } from './fixtures';
+import { openExtension, reloadUpgradedExtension, configure, configureWithImages, dispose, startProvider, textResponse, commandResponse, readEvents, enableUserScripts, startNewConversation } from './fixtures';
 
 test('fresh installation grants all eight required permissions including downloads', async () => {
   const opened = await openExtension();
@@ -77,17 +77,17 @@ test('upgrades a real 0.2.0 profile without changing branches, configuration, lo
     await opened.page.getByTestId('composer-input').fill('verify the upgraded runtime');
     await opened.page.getByTestId('composer-input').press('Enter');
     await expect(opened.page.locator('.markdown-body').last()).toContainText('UPGRADED_RUNTIME_READY');
-    expect(provider.requests[0].tools).toHaveLength(49);
+    expect(provider.requests[0].tools).toHaveLength(3);
   } finally { await dispose(opened.context, profile, provider.server); }
 });
 
 test('download failure retains the artifact and a retry saves it without requesting permission or recapturing', async () => {
-  const responses: Parameters<typeof startProvider>[0] = [commandResponse('screenshot', { filename: 'retained.png', save: true }, 'failed-save'), textResponse('SAVE_FAILED'), textResponse('保存重试')];
+  const responses: Parameters<typeof startProvider>[0] = [commandResponse("run", { code: `return await page.screenshot(${JSON.stringify({ filename: 'retained.png', save: true })});` }, 'failed-save'), textResponse('SAVE_FAILED'), textResponse('保存重试')];
   const provider = await startProvider(responses);
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage(); await target.goto(`${provider.origin}/target`);
-    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await (await configureWithImages(opened.context, opened.page, provider.baseURL)).close();
     await opened.page.evaluate(() => {
       const state = { attempts: 0, fail: true, permissionRequests: 0 };
       Object.assign(globalThis, { __downloadTest: state });
@@ -105,23 +105,23 @@ test('download failure retains the artifact and a retry saves it without request
     expect(events.find(event => event.toolCallId === 'failed-save' && event.type === 'tool.failed')?.output)
       .toMatchObject({ artifact: { id: artifact.id, filename: 'retained.png', saved: false } });
     await opened.page.evaluate(() => { (globalThis as any).__downloadTest.fail = false; });
-    responses.push(commandResponse('artifact-save', { id: artifact.id }, 'retry-save'), textResponse('SAVE_RETRIED'));
+    responses.push(commandResponse("run", { code: `return await artifacts.save(${JSON.stringify(artifact.id)},${JSON.stringify(undefined)});` }, 'retry-save'), textResponse('SAVE_RETRIED'));
     await opened.page.getByTestId('composer-input').fill('save the stored artifact again');
     await opened.page.getByTestId('composer-input').press('Enter');
     await expect(opened.page.locator('.markdown-body').last()).toContainText('SAVE_RETRIED');
     expect(await opened.page.evaluate(() => (globalThis as any).__downloadTest)).toMatchObject({ attempts: 2, permissionRequests: 0 });
     expect((await readEvents(opened.page)).filter(event => event.type === 'tool.result.data' && event.content?.filename === 'retained.png')).toHaveLength(1);
-    expect((await readEvents(opened.page)).find(event => event.type === 'tool.finished' && event.toolCallId === 'retry-save')?.output)
+    expect((await readEvents(opened.page)).find(event => event.type === 'tool.finished' && event.toolCallId === 'retry-save')?.output.result)
       .toMatchObject({ artifact: { id: artifact.id, saved: true, downloadId: 777 } });
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
 test('stopping a pending download retains its artifact and closes the tool once', async () => {
-  const provider = await startProvider([commandResponse('screenshot', { filename: 'pending.png', save: true }, 'pending-save')]);
+  const provider = await startProvider([commandResponse("run", { code: `return await page.screenshot(${JSON.stringify({ filename: 'pending.png', save: true })});` }, 'pending-save')]);
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage(); await target.goto(`${provider.origin}/target`);
-    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await (await configureWithImages(opened.context, opened.page, provider.baseURL)).close();
     await opened.page.evaluate(() => {
       chrome.downloads.download = () => new Promise<number>(resolveDownload => {
         Object.assign(globalThis, { __finishDownload: () => resolveDownload(777) });
@@ -139,9 +139,10 @@ test('stopping a pending download retains its artifact and closes the tool once'
     expect(terminal).toHaveLength(1);
     expect(terminal[0]).toMatchObject({
       content: { status: 'interrupted', effectUnknown: true },
-      output: { error: { code: 'interrupted', effectUnknown: true }, artifact: { filename: 'pending.png' } },
+      output: { error: { code: 'aborted', retryable: false, effectUnknown: true }, artifact: { filename: 'pending.png' } },
       abort: { reason: { $type: 'error', name: 'AbortError' } },
     });
+    await expect.poll(async () => (await readEvents(opened.page)).reverse().find(event => event.type === 'browser.job.state' && event.toolCallId === 'pending-save')?.content.state).toBe('cancelled');
     await expect(opened.page.getByTestId('download-permission')).toHaveCount(0);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

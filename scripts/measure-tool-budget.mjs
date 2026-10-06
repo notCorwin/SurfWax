@@ -18,26 +18,8 @@ try {
   if (baseline) modules.unshift(["baseline", resolve(baseline)]);
   for (const [label, path] of modules) {
     const module = await loader.ssrLoadModule(path);
-    const catalogs =
-      module.PROGRAM_TOOL_REGISTRY && label === "current"
-        ? [
-            ["legacy", module.TOOL_REGISTRY, module.TOOL_CONTEXT],
-            [
-              "current",
-              module.PROGRAM_TOOL_REGISTRY,
-              module.PROGRAM_TOOL_CONTEXT,
-            ],
-          ]
-        : [
-            [
-              label,
-              module.TOOL_REGISTRY ??
-                Object.entries(module.createCommandTools({})).map(
-                  ([name, tool]) => ({ name, ...tool }),
-                ),
-              module.TOOL_CONTEXT ?? module.TOOL_SUMMARY,
-            ],
-          ];
+    const catalogs = [[label, module.PROGRAM_TOOL_REGISTRY ?? module.TOOL_REGISTRY,
+      module.PROGRAM_TOOL_CONTEXT ?? module.TOOL_CONTEXT ?? module.TOOL_SUMMARY]];
     for (const [catalog, registry, summary] of catalogs) {
       const definitions = JSON.stringify(
         registry.map(({ name, description, inputSchema }) => ({

@@ -205,6 +205,6 @@ test('automatically summarizes and retries the same request after provider conte
     expect(events.some(event => event.type === 'context.choice.required')).toBe(false);
     const agentRequests = provider.requests.filter(request => request.stream === true && request.tools?.length);
     expect(agentRequests).toHaveLength(2);
-    expect(agentRequests.map(request => request.tools.length)).toEqual([49, 3]);
+    expect(agentRequests.map(request => request.tools.length)).toEqual([3, 3]);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

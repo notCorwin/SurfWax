@@ -477,8 +477,9 @@ export class AutomationRuntime {
         throw automationError("invalid-point", { observationId, x, y, viewport });
       }
       const button = options.button ?? "left"; const modifiers = modifierMask(options.modifiers ?? []);
-      await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", x: cssX, y: cssY, modifiers });
-      if (operation !== "hover") {
+      if (operation === "hover") {
+        await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", x: cssX, y: cssY, modifiers });
+      } else {
         const count = operation === "dblclick" ? 2 : 1;
         for (let clickCount = 1; clickCount <= count; clickCount += 1) {
           await this.nativeClick(session.debuggee, { x: cssX, y: cssY, button, modifiers, clickCount });
@@ -1055,6 +1056,7 @@ export class AutomationRuntime {
 
   private async nativeClick(debuggee: Debuggee, params: Record<string, unknown>) {
     if (this.options.atomicClick) return this.options.atomicClick(debuggee, params);
+    await this.options.command(debuggee, "Input.dispatchMouseEvent", { ...params, type: "mouseMoved", button: "none", buttons: 0, clickCount: 0 });
     await this.options.command(debuggee, "Input.dispatchMouseEvent", { ...params, type: "mousePressed" });
     return this.options.command(debuggee, "Input.dispatchMouseEvent", { ...params, type: "mouseReleased" });
   }

@@ -1,24 +1,12 @@
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
-export type ChromeTarget = {
-  kind: "auto" | "extension" | "page";
-  tabId?: number;
+export type PageExecutionTarget = {
+  kind: "page";
+  tabId: number;
+  world: "MAIN" | "ISOLATED" | "USER_SCRIPT";
   frameId?: number;
   documentId?: string;
-  world?: "MAIN" | "ISOLATED" | "USER_SCRIPT";
-  targetId?: string;
-  sessionId?: string;
-};
-
-export type ChromeToolInput = {
-  code: string;
-  target?: ChromeTarget;
-  timeoutMs?: number;
-  save?: boolean;
-  /** Legacy page target fields kept so restored conversations remain executable. */
-  tabId?: number;
-  world?: "MAIN" | "USER_SCRIPT";
 };
 
 export type BrowserSelector = {
@@ -34,44 +22,6 @@ export type BrowserTarget =
   | { ref: string }
   | BrowserSelector
   | { point: { observationId: string; x: number; y: number } };
-
-export type BrowserStep =
-  | { type: "goto"; url: string }
-  | { type: "click" | "doubleClick" | "hover"; target: BrowserTarget; button?: "left" | "right" | "middle"; modifiers?: string[] }
-  | { type: "fill"; target: BrowserTarget; value: string }
-  | { type: "clear"; target: BrowserTarget }
-  | { type: "press"; target?: BrowserTarget; key: string }
-  | { type: "insertText"; target?: BrowserTarget; text: string }
-  | { type: "select"; target: BrowserTarget; values: string[] }
-  | { type: "check"; target: BrowserTarget; checked?: boolean }
-  | { type: "drag"; from: BrowserTarget; to: BrowserTarget }
-  | { type: "upload"; target: BrowserTarget; files: Array<{ name: string; mimeType?: string; text?: string; base64?: string; url?: string; artifactId?: number }> }
-  | { type: "expect"; target?: BrowserTarget; state?: "attached" | "detached" | "visible" | "hidden" | "enabled" | "editable" | "checked"; text?: string; value?: string; url?: string };
-
-export type BrowserInput = {
-  mode: "observe";
-  tabId?: number;
-  detail?: "auto" | "semantic" | "visual";
-  since?: string;
-  timeoutMs?: number;
-} | {
-  mode: "act";
-  tabId?: number;
-  observationId?: string;
-  steps: BrowserStep[];
-  timeoutMs?: number;
-} | {
-  mode: "run";
-  code: string;
-  target?: ChromeTarget;
-  timeoutMs?: number;
-} | {
-  mode: "result";
-  id: number;
-  path?: string | Array<string | number>;
-  offset?: number;
-  limit?: number;
-};
 
 export const MODEL_SDKS = [
   "@ai-sdk/amazon-bedrock",

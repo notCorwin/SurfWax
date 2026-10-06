@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV4, simulateReadableStream } from "ai/test";
 import type { ChromeExecutor } from "../chrome/executor";
-import { PROGRAM_TOOL_CONTEXT, TOOL_SUMMARY } from "../chrome/tool";
+import { PROGRAM_TOOL_CONTEXT } from "../chrome/tool";
 import { EventLogger, fromLogValue, type LogEvent } from "../logging";
 import { ContextCompactor, estimatePromptInput } from "./compaction";
 import { createPromptSnapshot, PROMPT_TOOLS } from "./prompt";
@@ -61,7 +61,7 @@ describe("createAgent", () => {
   });
 
   it("keeps the tool catalog out of the default instructions", () => {
-    expect(DEFAULT_INSTRUCTIONS).not.toContain(TOOL_SUMMARY);
+    expect(DEFAULT_INSTRUCTIONS).not.toContain(PROGRAM_TOOL_CONTEXT);
     expect(DEFAULT_INSTRUCTIONS).not.toContain("search-tools");
   });
 
@@ -90,9 +90,9 @@ describe("createAgent", () => {
 
   it("detects repeated failures and read-only loops without stopping repeatable input", () => {
     const step = (toolName: string, output: unknown) => ({ toolResults: [{ toolName, input: {}, output }] });
-    expect(stagnationReason([step("click", { ok: false, error: { code: "x" } }), step("click", { ok: false, error: { code: "x" } })])).toBe("repeated-failure");
-    expect(stagnationReason([step("snapshot", { text: "same" }), step("snapshot", { text: "same" }), step("snapshot", { text: "same" })])).toBe("repeated-read");
-    expect(stagnationReason([step("press", { ok: true }), step("press", { ok: true }), step("press", { ok: true })])).toBeUndefined();
+    expect(stagnationReason([step("run", { ok: false, error: { code: "x" } }), step("run", { ok: false, error: { code: "x" } })])).toBe("repeated-failure");
+    expect(stagnationReason([step("inspect", { text: "same" }), step("inspect", { text: "same" }), step("inspect", { text: "same" })])).toBe("repeated-read");
+    expect(stagnationReason([step("run", { ok: true }), step("run", { ok: true }), step("run", { ok: true })])).toBeUndefined();
   });
 
   it("executes a composable navigation program without adding a model turn", async () => {

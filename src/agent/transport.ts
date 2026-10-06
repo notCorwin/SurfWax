@@ -11,7 +11,6 @@ import { claimConversationRun } from "./coordinator";
 import { guardActivePage } from "../chrome/page-guard";
 import { ensureConversationPrompt } from "./prompt";
 import { materializeToolCatalog } from "./tool-catalog";
-import { TOOL_CATALOG_VERSION, TOOL_CONTEXT } from "../chrome/tool";
 import { recoverModelStream } from "./stream-recovery";
 
 export type SidePanelMessage = UIMessage<any, never, any>;
@@ -135,30 +134,15 @@ export function createChatTransport(agent: (signal: AbortSignal, branchIds: stri
 
       try {
         logger.beginRun(conversationId, currentRunId);
-        const prompt = await ensureConversationPrompt(logger, conversationId, systemPrompt, options.messages.map((message) => message.id));
+        await ensureConversationPrompt(logger, conversationId, systemPrompt, options.messages.map((message) => message.id));
         const existing = await logger.repository(conversationId);
         // UI snapshots can omit custom metadata; restore it from the canonical message.
         options = { ...options, messages: options.messages.map((message) => {
           const saved = existing.messages.find((entry) => entry.message.id === message.id)?.message;
           return saved?.metadata ? { ...message, metadata: saved.metadata } : message;
         }) };
-        let userMessage = [...options.messages].reverse().find((message) => message.role === "user");
-        const catalogVersion = [...options.messages].reverse().map((message) => message.metadata?.custom?.toolCatalog?.version).find(Boolean);
-        const previouslySubmitted = userMessage && (await logger.summaryEvents(conversationId)).some((event) =>
-          event.type === "conversation.submitted" && (fromLogValue(event.content) as { messageId?: unknown } | null)?.messageId === userMessage!.id);
-        const newUser = userMessage && (!existing.messages.some((entry) => entry.message.id === userMessage!.id)
-          || options.trigger === "submit-message" && !previouslySubmitted);
-        let catalogAdded = false;
-        // The history adapter can persist a new user before sendMessages. Attach
-        // its first catalogue before submission, while past request prefixes stay fixed.
-        if (prompt.format === "legacy-user-tools" && userMessage && catalogVersion !== TOOL_CATALOG_VERSION && newUser) {
-          catalogAdded = true;
-          userMessage = { ...userMessage, metadata: { ...userMessage.metadata, custom: { ...userMessage.metadata?.custom,
-            toolCatalog: { version: TOOL_CATALOG_VERSION, context: catalogVersion || options.messages.findIndex((message) => message.id === userMessage!.id) > 0 ? `Tool catalog updated to ${TOOL_CATALOG_VERSION}. Removed tools remain historical only.\n${TOOL_CONTEXT}` : TOOL_CONTEXT },
-          } } };
-          options = { ...options, messages: options.messages.map((message) => message.id === userMessage!.id ? userMessage! : message) };
-        }
-        if (userMessage && (catalogAdded || !existing.messages.some(({ message }) => message.id === userMessage.id))) {
+        const userMessage = [...options.messages].reverse().find((message) => message.role === "user");
+        if (userMessage && !existing.messages.some(({ message }) => message.id === userMessage.id)) {
           const index = options.messages.findIndex((message) => message.id === userMessage.id);
           await logger.appendMessage(conversationId, userMessage as ConversationMessage, {
             runId: currentRunId,

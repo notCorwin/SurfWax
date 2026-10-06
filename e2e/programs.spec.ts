@@ -68,7 +68,7 @@ test("publishes three tools, defaults vision inspection to text, and captures pi
     },
     textResponse("TEXT_AND_PIXELS_VERIFIED"),
   ]);
-  const opened = await openExtension(undefined, { catalog: "program" });
+  const opened = await openExtension();
   try {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/visual`);
@@ -139,7 +139,7 @@ test("publishes three tools, defaults vision inspection to text, and captures pi
 test("composes same-process and cross-origin frames, chooser replies, native dialogs, held input, and downloads", async () => {
   const responses: any[] = [];
   const provider = await startProvider(responses);
-  const opened = await openExtension(undefined, { catalog: "program" });
+  const opened = await openExtension();
   try {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/complex`);
@@ -273,7 +273,7 @@ test("keeps network domains explicit, scopes protocol and tabs, and rejects stal
   let baseline: any;
   const responses: any[] = [];
   const provider = await startProvider(responses);
-  const opened = await openExtension(undefined, { catalog: "program" });
+  const opened = await openExtension();
   responses.push(
     commandResponse("inspect", {}, "owned-baseline"),
     (request: any) => {
@@ -340,7 +340,7 @@ return { isolated, requests:await net.requests(), console:await net.console(), o
 test("persists MAIN and USER_SCRIPT matching and enablement through extension reload", async () => {
   const responses: any[] = [];
   const provider = await startProvider(responses);
-  const opened = await openExtension(undefined, { catalog: "program" });
+  const opened = await openExtension();
   const main = {
     id: "program-main",
     matches: [`${provider.origin}/*`],
@@ -447,7 +447,7 @@ test("terminates synchronous timeout and abnormal worker exit, then recovers aft
     ),
     textResponse("TIMEOUT_EXIT_AND_RECOVERY_VERIFIED"),
   ]);
-  const opened = await openExtension(undefined, { catalog: "program" });
+  const opened = await openExtension();
   try {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/automation`);
@@ -527,7 +527,7 @@ test("panel reload interrupts the owned job, preserves receipts, and prevents de
     },
   ];
   const provider = await startProvider(responses);
-  const opened = await openExtension(undefined, { catalog: "program" });
+  const opened = await openExtension();
   try {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/automation`);
@@ -614,7 +614,7 @@ test("the real native Side Panel owns a sandbox program and cleans held input wh
       startAfter: new Promise(() => undefined),
     },
   ]);
-  const opened = await openExtension(undefined, { catalog: "program" });
+  const opened = await openExtension();
   try {
     await (
       await configure(opened.context, opened.page, provider.baseURL)
@@ -711,7 +711,7 @@ test("composes form operations and returns only text changes with owned referenc
     },
     textResponse("FORM_PROGRAM_VERIFIED"),
   ]);
-  const opened = await openExtension(undefined, { catalog: "program" });
+  const opened = await openExtension();
   try {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/automation`);
@@ -791,7 +791,7 @@ test("queries and cancels a synchronous infinite program while preserving prior 
     ),
     textResponse("CANCELLED_WITHOUT_ROLLBACK"),
   ]);
-  const opened = await openExtension(undefined, { catalog: "program" });
+  const opened = await openExtension();
   try {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/performance`);

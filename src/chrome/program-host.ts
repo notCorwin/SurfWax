@@ -185,6 +185,8 @@ export async function executeSandboxProgram(
                   error: {
                     message: error?.message ?? String(error),
                     name: error?.name,
+                    code: error?.code,
+                    ...(error?.artifact ? { artifact: error.artifact } : {}),
                     effectUnknown: Boolean(error?.effectUnknown),
                   },
                 });
