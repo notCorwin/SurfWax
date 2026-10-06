@@ -203,7 +203,8 @@ test("uses a global custom system prompt and hides disabled advanced settings", 
     const user = provider.requests[0].messages.find((message: any) => message.role === "user");
     expect(system?.content).toMatch(/^You are a custom browser agent\.\n\n/);
     expect(system?.content).toContain("Available tools:");
-    expect(system?.content).toContain("- goto: Navigate the current tab to a URL.");
+    expect(system?.content).toContain("- inspect:");
+    expect(provider.requests[0].tools.map((tool:any) => tool.function.name)).toEqual(["inspect", "run", "jobs"]);
     expect(JSON.stringify(user)).not.toContain("Available tools:");
     await expect(opened.page.locator('[data-role="user"]')).not.toContainText("Available tools:");
   } finally {
@@ -319,5 +320,4 @@ test("selects, locks and restores reasoning effort across conversations", async 
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
-
 

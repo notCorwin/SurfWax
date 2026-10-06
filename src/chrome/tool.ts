@@ -90,7 +90,12 @@ const userScriptDefinitions = {
   "userscript-set-enabled": { description: "Enable or disable a saved user script by ID. Repeating the same state succeeds.", inputSchema: z.object({ id: scriptId, enabled: z.boolean() }).strict(), method: "setEnabled" },
 } as const;
 
-async function callUserScriptTool(method: string, args: unknown[], signal?: AbortSignal): Promise<unknown> {
+export async function callUserScriptTool(method: string, args: unknown[], signal?: AbortSignal, onDispatch?: () => Promise<void>): Promise<unknown> {
+  const definition = Object.values(userScriptDefinitions).find((item) => item.method === method);
+  if (!definition) throw new Error("Unsupported user script method");
+  definition.inputSchema.parse(method === "list" ? {} : method === "read" ? { id: args[0] } : method === "create" ? { script: args[0] } : args[0]);
+  if (signal?.aborted) throw new DOMException("Operation aborted", "AbortError");
+  if (onDispatch) await onDispatch();
   if (signal?.aborted) throw new DOMException("Operation aborted", "AbortError");
   const pending = chrome.runtime.sendMessage({ type: "surf-wax:user-scripts", method, args, ...getRunIdentity(), operationId: crypto.randomUUID() });
   let onAbort: (() => void) | undefined;
@@ -165,6 +170,58 @@ export const TOOL_REGISTRY = Object.freeze([
 export const TOOL_SUMMARY = TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n");
 export const TOOL_CATALOG_VERSION = "formal-49-v2";
 export const TOOL_CONTEXT = `Available tools:\n${TOOL_SUMMARY}`;
+
+export const PROGRAM_CATALOG_VERSION = "inspect-run-jobs-v1";
+export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: target(false),
+  fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional(), budget: z.number().int().min(100).max(1000000).optional(),
+  offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
+  since: z.string().min(1).optional(), image: z.boolean().optional() }).strict();
+export const runInputSchema = z.object({ code: z.string().min(1), background: z.boolean().optional(), timeoutMs }).strict();
+export const jobsInputSchema = z.object({ action: z.enum(["list", "status", "wait", "cancel"]), id: z.string().min(1).optional(),
+  after: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(500).optional(), waitMs: z.number().int().min(0).max(30000).optional() }).strict()
+  .refine((value) => value.action === "list" || Boolean(value.id), "id is required for status, wait, and cancel");
+export const PROGRAM_TOOL_REGISTRY = Object.freeze([
+  { name: "inspect", inputSchema: inspectInputSchema, summary: "Read referenced semantic text; request images only when needed",
+    description: "Inspect the bound page as semantic text with stable refs and tab/document ownership. region selects a locator subtree; fields selects text/state/ref/actions; budget limits returned characters with explicit truncation and nextOffset. since returns changes only for the same document/region/fields; a truncated baseline resets to full. image=true explicitly captures a screenshot artifact for images, layout, Canvas, or ambiguity; default never captures pixels." },
+  { name: "run", inputSchema: runInputSchema, summary: "Execute one operation or a composable async JavaScript program",
+    description: "Execute an async JavaScript body with page, browser, net, protocol, artifacts, emit, check, sleep, signal. Example: await page.getByLabel('Email').fill('a@example.com'); await check(await page.getByLabel('Email').inputValue() === 'a@example.com'); return await page.inspect(); Supports variables/loops/conditions/filtering, locators/frames, page.evaluate, native input, tabs, persistent scripts, explicit page/extension fetch, scoped CDP, and artifacts. Mutations are ordered and recorded as receipts. Subscribe with page.waitForEvent before triggering actions. background=true starts a cancellable job; defaults: 10s foreground / 300s background; jobs reads progress and results. No hidden agent or side-effect retries. See the runtime API appended to the system prompt." },
+  { name: "jobs", inputSchema: jobsInputSchema, summary: "Read incremental job receipts, wait, or cancel without blocking execution",
+    description: "Manage programs in this conversation: list; status(id,after?,limit?); wait(id,waitMs<=30000,after?,limit?); cancel(id). after/nextCursor are canonical event IDs. Job status and output are projections of the canonical log, available independently of the execution queue. accepted/queued is not completion; completed input is not business success. Cancellation is not rollback. Lost hosts become interrupted and are never automatically replayed or resumed from a JavaScript stack." },
+]);
+export const PROGRAM_API = `run API (async JavaScript body; no function wrapper required):
+page: tabId; inspect(options?, regionLocator?); snapshot(); observe('semantic'|'visual'); ref/locator/frameLocator/getByRole/getByText/getByLabel/getByPlaceholder/getByAltText/getByTitle/getByTestId; goto/reload/goBack/goForward; url/title; evaluate(functionOrString,arg?); waitForURL/waitForLoadState/waitForEvent('dialog'|'popup'|'download'|'filechooser'); point(observationId,x,y,'click'|'dblclick'|'hover',options?); upload(files); drop(target,{files?,data?}); screenshot(options?); pdf({filename?,save?}); keyboard.press/insertText/down/up; mouse.move/down/up/wheel.
+locators: chain/filter/first/last/nth, count/waitFor/click/dblclick/hover/fill/clear/press/pressSequentially/check/uncheck/selectOption/dragTo/setInputFiles/focus/blur/scrollIntoViewIfNeeded/textContent/innerText/inputValue/getAttribute/isVisible/isEnabled/isChecked/evaluate. Files: {name,mimeType?,text|base64|url}; artifacts.read supplies existing file data. Event handles: chooser.isMultiple()/setFiles(files), dialog.type()/message()/defaultValue()/accept(prompt?)/dismiss(), popup is a page. Start event waits before the action, then await them.
+browser: page(tabId); tabs.list()/open(url?)/select(tabId)/close(tabId); scripts.list()/read(id)/create(definition)/edit(id,changes)/setEnabled(id,enabled). Scripts use Chrome RegisteredUserScript fields including matches, js:[{code|file}], world:MAIN|USER_SCRIPT, runAt, allFrames, include/excludeGlobs/Matches, worldId. Persisted enablement is restored at startup/upgrade; Allow User Scripts must already be enabled.
+browser.runIn({kind:'page',tabId,world:'MAIN'|'ISOLATED'|'USER_SCRIPT',frameId?,documentId?},codeBody): explicit execution domain. MAIN/ISOLATED root only; USER_SCRIPT supports Chrome frameId or documentId. Use frameLocator.evaluate for arbitrary supported frames. No automatic context substitution.
+net.fetch({context:'page'|'extension',url,tabId?,init?}) returns {url,status,ok,headers,body}; no page-to-extension fallback. Page fetch obeys page origin/cookies/CORS; extension fetch uses extension host permissions. net.requests(options?,tabId?)/request(index,tabId?); net.responseBody(index,tabId?); net.console(options?,tabId?) read captured diagnostics.
+protocol.sessions(tabId?) lists owned root/child CDP handles; protocol.send({tabId,sessionId?},method,params?): CDP Page/DOM/Runtime/Accessibility/Network/Log/Input only, in the bound window and known child sessions. No Browser/Target/permission APIs. Arbitrary JS/CDP/fetch are effectful; there is no readonly override. inspect.documentId is the local navigation generation; USER_SCRIPT documentId uses Chrome's native scripting document ID. File URL sources are fetched in extension context.
+artifacts.read(id,{path?,offset?,limit?}); text(filename,text,mimeType?,save=false); save(id,filename?). Files and images stay internal unless the user requested download/export. emit(value) persists incremental output; check(condition,message?) records a verified assertion; sleep(ms) and signal support cancellation. Completed operations only confirm dispatch/return; verify application outcomes. Queued operations are not dispatched, uncertain effects must be inspected before continuing. Program computation uses a disposable opaque-origin sandbox Worker; browser capabilities are mediated by the Side Panel. Closing the panel cancels jobs and revokes capabilities; arbitrary program finally blocks are not guaranteed to run. Only records survive restart, never arbitrary JS stacks.`;
+export const PROGRAM_TOOL_CONTEXT = `Available tools:\n${PROGRAM_TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n")}\n\n${PROGRAM_API}`;
+
+export function createProgramTools(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string; visualEnabled?: () => Promise<boolean> } = {}): Record<string, ReturnType<typeof dynamicTool>> {
+  return Object.fromEntries(PROGRAM_TOOL_REGISTRY.map((definition) => [definition.name, dynamicTool({
+    description: definition.description, inputSchema: definition.inputSchema, needsApproval: false,
+    execute: async (input, { abortSignal, toolCallId }) => {
+      const identity = options.conversationId ? options.logger?.toolIdentity(options.conversationId, toolCallId) : undefined;
+      const context = { conversationId: options.conversationId, toolCallId, logIdentity: identity, visualEnabled: await options.visualEnabled?.() ?? false };
+      try {
+        const value = definition.inputSchema.parse(input);
+        const result = definition.name === "inspect" ? await executor.inspect(value as any, abortSignal, context)
+          : definition.name === "run" ? await executor.runProgram(value as any, abortSignal, context) : await executor.queryJobs(value as any, abortSignal, context);
+        const failure = (result as any)?.ok === false ? (result as any).error ?? (result as any).failed?.error ?? (result as any).result?.error : undefined;
+        const normalized = failure ? { ...result as object, error: { ...failure, retryable: false } } : result;
+        return compactToolResult(normalized, { ...options, toolCallId, ...identity });
+      } catch (error) {
+        const failure = toolFailure(error); failure.error.retryable = false;
+        if (!failure.artifact && options.logger && identity?.runId) {
+          const artifact = await options.logger.toolArtifact(options.conversationId!, identity).catch(() => undefined);
+          if (artifact) failure.artifact = artifact;
+        }
+        return failure;
+      }
+    },
+  })]));
+}
 
 export function parseCommandInput(name: CommandName, input: unknown): Record<string, unknown> {
   return definitions[name].inputSchema.parse(input) as Record<string, unknown>;

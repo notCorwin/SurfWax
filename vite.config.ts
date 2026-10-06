@@ -48,6 +48,7 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: { input: {
       userscripts: resolve(projectRoot, "userscripts.html"),
+      programSandbox: resolve(projectRoot, "program-sandbox.html"),
     } },
   },
 });

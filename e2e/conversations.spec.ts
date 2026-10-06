@@ -485,6 +485,9 @@ test("edits user messages, regenerates replies and restores the selected branch"
     await composer.fill("follow up");
     await composer.press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FOLLOWUP_REPLY");
+    // Streaming text is visible before its final message is persisted.
+    await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "conversation.message"
+      && event.content?.parts?.some((part: any) => part.type === "text" && part.text === "FOLLOWUP_REPLY"))).toBe(true);
     const recordedMessages = JSON.stringify((await readEvents(opened.page)).filter((event) => event.type === "conversation.message").map((event) => event.content));
     for (const text of [originalQuestion, "edited question", "ORIGINAL_REPLY", "REGENERATED_REPLY", "EDITED_REPLY", "FOLLOWUP_REPLY"]) {
       expect(recordedMessages).toContain(text);

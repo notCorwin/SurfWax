@@ -24,6 +24,11 @@
     "default_path": "sidepanel.html"
   },
   "options_page": "options.html",
+  "sandbox": { "pages": ["program-sandbox.html"] },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self';",
+    "sandbox": "sandbox allow-scripts; default-src 'none'; script-src 'self' 'unsafe-eval' blob:; worker-src blob:; child-src blob:; connect-src 'none';"
+  },
   "permissions": [
     "debugger",
     "downloads",

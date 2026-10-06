@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV4, simulateReadableStream } from "ai/test";
 import type { ChromeExecutor } from "../chrome/executor";
-import { COMMAND_NAMES, USER_SCRIPT_TOOL_NAMES, TOOL_SUMMARY } from "../chrome/tool";
+import { PROGRAM_TOOL_CONTEXT, TOOL_SUMMARY } from "../chrome/tool";
 import { EventLogger, fromLogValue, type LogEvent } from "../logging";
-import { ContextCompactor } from "./compaction";
+import { ContextCompactor, estimatePromptInput } from "./compaction";
+import { createPromptSnapshot, PROMPT_TOOLS } from "./prompt";
 import { createAgent, DEFAULT_INSTRUCTIONS, stagnationReason } from "./runner";
 
 function usage() {
@@ -14,16 +15,16 @@ function usage() {
 }
 
 describe("createAgent", () => {
-  it("records a large partial act failure as one failed SDK terminal with its full result", async () => {
+  it("records a large partial program failure as one failed SDK terminal with its full result", async () => {
     const events: LogEvent[] = [];
     const logger = new EventLogger({ store: { async append(event) { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; }, async all() { return events; }, async clear() { events.splice(0); } } });
     logger.beginRun("conversation", "run");
     const steps = [{ type: "goto", url: "https://test/" }, { type: "expect", target: { by: "css", value: "#missing" }, state: "visible" }, { type: "click", target: { by: "css", value: "#submit" } }];
     const failed = { ok: false, completed: [{ index: 0, type: "goto", result: { text: "completed".repeat(2000) } }], failed: { index: 1, step: steps[1], error: { code: "expectation-failed", message: "Missing target" } }, notRun: [steps[2]] };
-    const executor = { executeBrowser: vi.fn(async () => failed), browserContext: vi.fn(async () => ({ windowId: 7, tabs: [] })) } as unknown as ChromeExecutor;
+    const executor = { runProgram: vi.fn(async () => failed), browserContext: vi.fn(async () => ({ windowId: 7, tabs: [] })) } as unknown as ChromeExecutor;
     let step = 0;
     const model = new MockLanguageModelV4({ doStream: async () => ({ stream: simulateReadableStream({ chunks: ++step === 1 ? [
-      { type: "stream-start", warnings: [] }, { type: "tool-call", toolCallId: "large-act", toolName: "act", dynamic: true, input: JSON.stringify({ steps }) },
+      { type: "stream-start", warnings: [] }, { type: "tool-call", toolCallId: "large-act", toolName: "run", dynamic: true, input: JSON.stringify({ code: "await page.goto('https://test/'); await page.locator('#missing').waitFor();" }) },
       { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_calls" }, usage: usage() },
     ] : [
       { type: "stream-start", warnings: [] }, { type: "text-start", id: "text" }, { type: "text-delta", id: "text", delta: "done" }, { type: "text-end", id: "text" },
@@ -71,7 +72,7 @@ describe("createAgent", () => {
       async append(record: Partial<LogEvent>) { const event = { id: events.length + 1, timestamp: "2026-09-30", content: null, ...record } as LogEvent; events.push(event); return event; },
       async conversation() { return [...events]; }, async result() { return undefined; },
     } as unknown as EventLogger;
-    const config = { baseURL: "https://example.com/v1", model: "test", contextWindowOverride: 24_000 };
+    const config = { baseURL: "https://example.com/v1", model: "test", contextWindowOverride: Math.ceil(estimatePromptInput({ instructions: createPromptSnapshot().instructions, tools: PROMPT_TOOLS, messages: [{ role: "user", content: "inspect" }] }) / 0.85) };
     const generated = vi.fn(async () => ({ content: [{ type: "text" as const, text: "The user asks to inspect the page." }],
       finishReason: { unified: "stop" as const, raw: "stop" }, usage: usage(), warnings: [] }));
     const model = new MockLanguageModelV4({ doGenerate: generated, doStream: async () => ({ stream: simulateReadableStream({ chunks: [
@@ -94,13 +95,13 @@ describe("createAgent", () => {
     expect(stagnationReason([step("press", { ok: true }), step("press", { ok: true }), step("press", { ok: true })])).toBeUndefined();
   });
 
-  it("executes a dedicated command tool without adding a model turn", async () => {
+  it("executes a composable navigation program without adding a model turn", async () => {
     let step = 0;
     const prompts: string[] = [];
     const systemPrompts: string[] = [];
     const record = vi.fn();
     const executor = {
-      executeCommand: vi.fn(async () => ({ ok: true })),
+      runProgram: vi.fn(async () => ({ ok: true })),
       browserContext: vi.fn(async () => ({ windowId: 7, tabs: [
         { index: 0, current: true, title: "Current page", url: "https://example.com/current" },
         { index: 1, current: false, title: "Other page", url: "https://example.com/other" },
@@ -113,7 +114,7 @@ describe("createAgent", () => {
         step += 1;
         return { stream: simulateReadableStream({ chunks: step === 1 ? [
           { type: "stream-start" as const, warnings: [] },
-          { type: "tool-call" as const, toolCallId: "call-1", toolName: "goto", dynamic: true, input: JSON.stringify({ url: "https://example.com" }) },
+          { type: "tool-call" as const, toolCallId: "call-1", toolName: "run", dynamic: true, input: JSON.stringify({ code: "await page.goto('https://example.com');" }) },
           { type: "finish" as const, finishReason: { unified: "tool-calls" as const, raw: "tool_calls" }, usage: usage() },
         ] : [
           { type: "stream-start" as const, warnings: [] },
@@ -131,14 +132,14 @@ describe("createAgent", () => {
     expect(prompts[0]).toContain("Current page");
     expect(prompts[0]).toContain("Other page");
     expect(prompts[0]).toContain('current\\\":true');
-    expect(systemPrompts[0]).toBe(`Custom guidance.\n\nAvailable tools:\n${TOOL_SUMMARY}`);
-    expect(systemPrompts[0]).toContain(TOOL_SUMMARY);
+    expect(systemPrompts[0]).toBe(`Custom guidance.\n\n${PROGRAM_TOOL_CONTEXT}`);
+    expect(systemPrompts[0]).toContain(PROGRAM_TOOL_CONTEXT);
     expect(prompts.every((prompt) => prompt.split("Available tools:").length === 2)).toBe(true);
-    expect(systemPrompts[0]).toContain("- goto: Navigate the current tab to a URL.");
+    expect(systemPrompts[0]).toContain("- run: Execute one operation or a composable async JavaScript program");
     expect(prompts[0]).not.toContain('"type":"file"');
-    expect(executor.executeCommand).toHaveBeenCalledWith("goto", { url: "https://example.com" }, undefined, expect.any(Object));
+    expect(executor.runProgram).toHaveBeenCalledWith({ code: "await page.goto('https://example.com');" }, undefined, expect.any(Object));
     expect(record).toHaveBeenCalledWith(expect.objectContaining({
-      type: "model.started", content: expect.objectContaining({ activeTools: [...COMMAND_NAMES, "act", "result", ...USER_SCRIPT_TOOL_NAMES], toolCount: 49 }),
+      type: "model.started", content: expect.objectContaining({ activeTools: ["inspect", "run", "jobs"], toolCount: 3 }),
     }));
     expect(await result.text).toBe("done");
   }, 10_000);
@@ -147,10 +148,10 @@ describe("createAgent", () => {
     let step = 0;
     const record = vi.fn();
     const executor = {
-      executeCommand: vi.fn(async () => ({ ok: true })),
+      runProgram: vi.fn(async () => ({ ok: true })),
       browserContext: vi.fn(async () => ({ windowId: 7, tabs: [{ index: 0, current: true, title: "Course", url: "https://example.com" }] })),
     } as unknown as ChromeExecutor;
-    const dsml = '<｜DSML｜ calls><｜DSML｜ invoke name="mousewheel"><｜DSML｜ parameter name="deltaY" string="false">600</｜DSML｜ parameter><｜DSML｜ parameter name="deltaX" string="false">0</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
+    const dsml = '<｜DSML｜ calls><｜DSML｜ invoke name="run"><｜DSML｜ parameter name="code" string="true">await page.mouse.wheel(0, 600);</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
     const model = new MockLanguageModelV4({ doStream: async () => {
       step++;
       const answer = step === 1 ? dsml : "done";
@@ -167,14 +168,14 @@ describe("createAgent", () => {
     const parts = [];
     for await (const part of result.stream) parts.push(part);
     expect(step).toBe(2);
-    expect(executor.executeCommand).toHaveBeenCalledOnce();
-    expect(executor.executeCommand).toHaveBeenCalledWith("mousewheel", { dx: 0, dy: 600 }, undefined, expect.any(Object));
+    expect(executor.runProgram).toHaveBeenCalledOnce();
+    expect(executor.runProgram).toHaveBeenCalledWith({ code: "await page.mouse.wheel(0, 600);" }, undefined, expect.any(Object));
     expect(parts.filter((part) => part.type === "tool-result")).toHaveLength(1);
     expect(await result.text).toBe("done");
-    expect(record).toHaveBeenCalledWith(expect.objectContaining({ type: "model.dsml.recovery", content: { recovered: true, toolNames: ["mousewheel"] } }));
+    expect(record).toHaveBeenCalledWith(expect.objectContaining({ type: "model.dsml.recovery", content: { recovered: true, toolNames: ["run"] } }));
   }, 10_000);
 
-  it("compacts during a run and executes the screenshot's split DSML eval", async () => {
+  it("compacts during a run and executes a split DSML program with page evaluation", async () => {
     const events: LogEvent[] = [];
     const logger = {
       record(record: Partial<LogEvent>) { events.push({ id: events.length + 1, timestamp: "2026-09-23", content: null, ...record } as LogEvent); },
@@ -191,24 +192,23 @@ describe("createAgent", () => {
     const signal = new AbortController().signal;
     const compactor = new ContextCompactor({ model: config, logger, conversationId: "one", branchIds: ["user"], signal });
     const executor = {
-      executeCommand: vi.fn(async (name: string) => name === "snapshot"
-        ? { ok: true, text: "page ".repeat(1_200) }
-        : { ok: true, value: "知识点掌握度" }),
+      inspect: vi.fn(async () => ({ ok: true, text: "page ".repeat(1_200) })),
+      runProgram: vi.fn(async () => ({ ok: true, value: "知识点掌握度" })),
       browserContext: vi.fn(async () => ({ windowId: 7, tabs: [] })),
     } as unknown as ChromeExecutor;
     const func = "() => { const txt = document.body.innerText.replace(/\\s+/g,' '); const idx = txt.indexOf('知识点掌握度'); return JSON.stringify({around: txt.slice(idx, idx+500)}); }";
-    const dsml = `\n\n<｜DSML｜ calls><｜DSML｜ invoke name="eval"><｜DSML｜ parameter name="func" string="true">${func}</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>`;
+    const dsml = `\n\n<｜DSML｜ calls><｜DSML｜ invoke name="run"><｜DSML｜ parameter name="code" string="true">return await page.evaluate(${func});</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>`;
     let step = 0;
     const largeUsage = { ...usage(), inputTokens: { total: 44_000, noCache: 44_000, cacheRead: 0, cacheWrite: 0 } };
     const model = new MockLanguageModelV4({
       doGenerate: async () => ({ content: [{ type: "text", text: "The user wants to inspect the current page." }],
         finishReason: { unified: "stop", raw: "stop" }, usage: usage(), warnings: [] }) as any,
       doStream: async (options) => {
-        expect((options.tools as any[]).map((tool) => tool.name)).toContain("eval");
+        expect((options.tools as any[]).map((tool) => tool.name)).toContain("run");
         step += 1;
         if (step === 1) return { stream: simulateReadableStream({ chunks: [
           { type: "stream-start", warnings: [] },
-          { type: "tool-call", toolCallId: "snapshot", toolName: "snapshot", dynamic: true, input: "{}" },
+          { type: "tool-call", toolCallId: "snapshot", toolName: "inspect", dynamic: true, input: "{}" },
           { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_calls" }, usage: largeUsage },
         ] as any[] }) };
         const answer = step === 2 ? dsml : "done";
@@ -224,12 +224,12 @@ describe("createAgent", () => {
     const parts = [];
     for await (const part of result.stream) parts.push(part);
     expect(step).toBe(3);
-    expect(executor.executeCommand).toHaveBeenCalledWith("eval", { func }, undefined, expect.any(Object));
+    expect(executor.runProgram).toHaveBeenCalledWith({ code: `return await page.evaluate(${func});` }, undefined, expect.any(Object));
     expect(parts.filter((part) => part.type === "tool-result")).toHaveLength(2);
     expect(parts.filter((part) => part.type === "text-delta").map((part) => part.text).join("")).not.toContain("DSML");
     expect(events).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "context.compacted", content: expect.objectContaining({ strategy: "summary", stepNumber: 1 }) }),
-      expect.objectContaining({ type: "model.dsml.recovery", content: { recovered: true, toolNames: ["eval"] } }),
+      expect.objectContaining({ type: "model.dsml.recovery", content: { recovered: true, toolNames: ["run"] } }),
       expect.objectContaining({ type: "tool.finished" }),
     ]));
     expect(events.filter((event) => event.type === "context.compacted")).toHaveLength(1);
@@ -239,14 +239,14 @@ describe("createAgent", () => {
   it("logs repeated reads while keeping tools available", async () => {
     const record = vi.fn();
     const executor = {
-      executeCommand: vi.fn(async () => ({ ok: true, snapshot: "unchanged" })),
+      inspect: vi.fn(async () => ({ ok: true, snapshot: "unchanged" })),
       browserContext: vi.fn(async () => ({ windowId: 7, tabs: [] })),
     } as unknown as ChromeExecutor;
     let step = 0;
     const model = new MockLanguageModelV4({ doStream: async (options) => {
-      expect((options.tools as any[]).map((tool) => tool.name)).toContain("eval");
+      expect((options.tools as any[]).map((tool) => tool.name)).toContain("run");
       const chunks = ++step <= 3
-        ? [{ type: "tool-call", toolCallId: `read-${step}`, toolName: "snapshot", dynamic: true, input: "{}" }]
+        ? [{ type: "tool-call", toolCallId: `read-${step}`, toolName: "inspect", dynamic: true, input: "{}" }]
         : [{ type: "text-start", id: "text" }, { type: "text-delta", id: "text", delta: "done" }, { type: "text-end", id: "text" }];
       return { stream: simulateReadableStream({ chunks: [
         { type: "stream-start", warnings: [] }, ...chunks,
@@ -265,38 +265,38 @@ describe("createAgent", () => {
   it("exposes an advanced tool on the first step", async () => {
     let step = 0;
     const executor = {
-      executeCommand: vi.fn(async () => [{ name: "session" }]),
+      runProgram: vi.fn(async () => [{ name: "session" }]),
       browserContext: vi.fn(async () => ({ windowId: 7, tabs: [{ index: 0, current: true, title: "test", url: "https://example.com" }] })),
     } as unknown as ChromeExecutor;
     const model = new MockLanguageModelV4({ doStream: async (options) => {
       const names = (options.tools as any[]).map((tool) => tool.name);
       step += 1;
-      expect(names).toHaveLength(49);
-      expect(names).toContain("console");
+      expect(names).toEqual(["inspect", "run", "jobs"]);
+      expect(PROGRAM_TOOL_CONTEXT).toContain("net.console");
       expect(names).not.toContain("search-tools");
       const chunks = step === 1
-        ? [{ type: "stream-start", warnings: [] }, { type: "tool-call", toolCallId: "console", toolName: "console", dynamic: true, input: "{}" }, { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_calls" }, usage: usage() }]
+        ? [{ type: "stream-start", warnings: [] }, { type: "tool-call", toolCallId: "console", toolName: "run", dynamic: true, input: JSON.stringify({ code: "return await net.console();" }) }, { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_calls" }, usage: usage() }]
         : [{ type: "stream-start", warnings: [] }, { type: "text-start", id: "text" }, { type: "text-delta", id: "text", delta: "done" }, { type: "text-end", id: "text" }, { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: usage() }];
       return { stream: simulateReadableStream({ chunks: chunks as any[] }) };
     } });
     const result = await createAgent({ model: { baseURL: "https://example.com/v1", model: "test" }, languageModel: model, executor }).stream({ prompt: "console" });
     for await (const _ of result.stream) { /* consume */ }
     expect(step).toBe(2);
-    expect(executor.executeCommand).toHaveBeenCalledWith("console", {}, undefined, expect.any(Object));
+    expect(executor.runProgram).toHaveBeenCalledWith({ code: "return await net.console();" }, undefined, expect.any(Object));
   }, 10_000);
 
   it("continues beyond twenty tool calls until natural completion", async () => {
     let step = 0;
     let toolResult = 0;
     const executor = {
-      executeCommand: vi.fn(async () => [{ id: ++toolResult, title: "test" }]),
+      inspect: vi.fn(async () => [{ id: ++toolResult, title: "test" }]),
       browserContext: vi.fn(async () => ({ windowId: 7, tabs: [{ index: 0, current: true, title: "test", url: "https://example.com" }] })),
     } as unknown as ChromeExecutor;
     const model = new MockLanguageModelV4({
       doStream: async (options) => {
         expect(options.reasoning).toBeUndefined();
-        expect((options.tools as any[])).toHaveLength(49);
-        expect((options.tools as any[]).map((tool) => tool.name)).toEqual(expect.arrayContaining(["request-headers", "act", "result"]));
+        expect((options.tools as any[])).toHaveLength(3);
+        expect((options.tools as any[]).map((tool) => tool.name)).toEqual(["inspect", "run", "jobs"]);
         expect((options.tools as any[]).map((tool) => tool.name)).not.toContain("search-tools");
         expect((options.tools as any[]).map((tool) => tool.name)).not.toContain("browser");
         step += 1;
@@ -310,7 +310,7 @@ describe("createAgent", () => {
           ]
           : [
             { type: "stream-start" as const, warnings: [] },
-            { type: "tool-call" as const, toolCallId: `call-${step}`, toolName: "tab-list", dynamic: true, input: "{}" },
+            { type: "tool-call" as const, toolCallId: `call-${step}`, toolName: "inspect", dynamic: true, input: "{}" },
             { type: "finish" as const, finishReason: { unified: "tool-calls" as const, raw: "tool_calls" }, usage: usage() },
           ];
         return { stream: simulateReadableStream({ chunks: chunks as any[] }) };
@@ -327,7 +327,7 @@ describe("createAgent", () => {
 
     expect(step).toBe(26);
     expect(toolResults).toBe(25);
-    expect(executor.executeCommand).toHaveBeenCalledTimes(25);
+    expect(executor.inspect).toHaveBeenCalledTimes(25);
     expect(await result.finishReason).toBe("stop");
   }, 90_000);
 });

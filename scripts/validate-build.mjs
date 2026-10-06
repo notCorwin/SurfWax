@@ -18,6 +18,10 @@ export async function validateBuild(directory = 'dist') {
   if (!equal(manifest.host_permissions ?? [], ['<all_urls>'])) throw new Error('Expected all_urls host access');
   if (manifest.minimum_chrome_version !== '138' || manifest.manifest_version !== 3) throw new Error('Unsupported browser/manifest contract');
   if (manifest.devtools_page || manifest.offscreen_document) throw new Error('Removed execution hosts remain in manifest');
+  if (!equal(manifest.sandbox?.pages ?? [], ['program-sandbox.html'])) throw new Error('Disposable program sandbox is missing');
+  if (manifest.content_security_policy?.extension_pages?.includes('unsafe-eval') || /allow-same-origin/.test(manifest.content_security_policy?.sandbox ?? '')) throw new Error('Sandbox isolation or extension CSP was weakened');
+  if (!/connect-src 'none'/.test(manifest.content_security_policy?.sandbox ?? '')) throw new Error('Program network must use explicit context facades');
+  for (const path of manifest.sandbox.pages) await access(join(output, path));
   for (const path of [manifest.background.service_worker, manifest.side_panel.default_path, manifest.options_page, 'userscripts.html', ...Object.values(manifest.icons)]) await access(join(output, path));
   const guards = manifest.content_scripts?.filter(script => script.run_at === 'document_start' && script.all_frames);
   if (!guards?.length) throw new Error('Document-start interaction capture is missing');

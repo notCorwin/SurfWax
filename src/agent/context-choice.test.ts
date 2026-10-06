@@ -28,7 +28,7 @@ describe("automatic context upkeep", () => {
   });
 
   it("automatically summarizes a full canonical branch and reuses its checkpoint", async () => {
-    const { events, logger, model, languageModel, generate } = await fixture("Task constraints " + "x".repeat(25_000));
+    const { events, logger, model, languageModel, generate } = await fixture("Task constraints " + "x".repeat(130_000));
     expect(await ensureAutomaticContextSummary(logger, "one", model, new AbortController().signal, { languageModel })).toBe(true);
     expect(generate).toHaveBeenCalled();
     expect(events.some((event) => event.type === "context.choice.required")).toBe(false);
@@ -54,7 +54,7 @@ describe("automatic context upkeep", () => {
   });
 
   it("keeps the branch intact and checkpoint absent after a failed or cancelled summary", async () => {
-    const { events, logger, model } = await fixture("x".repeat(25_000));
+    const { events, logger, model } = await fixture("x".repeat(130_000));
     const languageModel = new MockLanguageModelV4({ doGenerate: async () => { throw new Error("invalid model configuration"); } });
     await expect(ensureAutomaticContextSummary(logger, "one", model, new AbortController().signal, { languageModel })).rejects.toThrow("invalid model");
     expect((await activeContext(logger, "one")).checkpoint).toBeUndefined();

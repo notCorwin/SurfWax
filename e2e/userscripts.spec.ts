@@ -81,6 +81,9 @@ test("lets the agent create, inspect, edit and toggle a user script", async () =
     );
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
+    // Old tool names belong to a persisted historical conversation. Creating
+    // its snapshot during a fresh thread's initialization races prompt reads.
+    await nameCurrentConversation(opened.page, "历史脚本会话");
     await opened.page.getByTestId("composer-input").fill("创建、查看、编辑并切换脚本");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("SCRIPT_TOOLS_DONE");
@@ -91,6 +94,7 @@ test("lets the agent create, inspect, edit and toggle a user script", async () =
     expect(result.scripts).toMatchObject([{ id: script.id, js: [{ code: "document.documentElement.dataset.agentScript = 'edited'" }] }]);
     expect(result.disabled).toEqual([]);
     const events = await readEvents(opened.page);
+    expect(events.find((event) => event.type === "model.started")?.content.toolCount).toBe(49);
     for (const id of ["call-script-create", "call-script-list", "call-script-read", "call-script-edit", "call-script-disable", "call-script-enable"]) {
       expect(events.some((event) => event.toolCallId === id && event.type === "tool.finished")).toBe(true);
     }

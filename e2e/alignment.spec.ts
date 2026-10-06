@@ -80,14 +80,19 @@ test("applies explicit model and prompt changes next turn and retries user messa
     await expect(opened.page.locator(".markdown-body").last()).toContainText("NEXT_TURN");
     expect(provider.requests[1].model).toBe("next-model");
     expect(provider.requests[1].messages[0].content).toMatch(/^CUSTOM_NEXT_TURN\n\n/);
-    expect(provider.requests[1].messages[0].content).toContain("run-code");
-    const nextMessage = (await readEvents(opened.page)).filter((event) => event.type === "conversation.message" && event.content?.role === "assistant").at(-1).content.id;
+    expect(provider.requests[1].messages[0].content).toContain("- inspect:");
+    expect(provider.requests[1].tools.map((tool: any) => tool.function.name)).toEqual(["inspect", "run", "jobs"]);
+    let nextMessage: string | undefined;
+    await expect.poll(async () => {
+      nextMessage = (await readEvents(opened.page)).find((event) => event.type === "conversation.message" && event.content?.role === "assistant" && event.content.parts?.some((part: any) => part.type === "text" && part.text === "NEXT_TURN"))?.content.id;
+      return nextMessage;
+    }).toBeTruthy();
     await opened.page.getByTestId("retry-user-message-button").last().click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("USER_RETRY_BRANCH");
     await opened.page.getByRole("button", { name: "上一个分支" }).last().click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("NEXT_TURN");
     const events = await readEvents(opened.page);
     expect(events.filter((event) => event.type === "context.prompt.updated")).toHaveLength(2);
-    expect(events.filter((event) => event.type === "conversation.branch.selected").at(-1).content.headId).toBe(nextMessage);
+    await expect.poll(async () => (await readEvents(opened.page)).filter((event) => event.type === "conversation.branch.selected").at(-1)?.content.headId).toBe(nextMessage);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

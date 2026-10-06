@@ -14,6 +14,7 @@ function harness(
   metadata: object[] | undefined = [{ role: "button", name: "Sign in", tag: "button", text: "Sign in" }],
   states: object[] = [{ connected: true, x: 10, y: 12, visible: true, stable: true, enabled: true, editable: true, receivesEvents: true, checked: false }],
   logger?: { record: ReturnType<typeof vi.fn> },
+  onDispatch = vi.fn(async () => undefined),
 ) {
   metadata ??= [{ role: "button", name: "Sign in", tag: "button", text: "Sign in" }];
   const calls: Array<{ method: string; params?: any }> = [];
@@ -54,12 +55,50 @@ function harness(
     command,
     detach,
     mark: vi.fn(async () => undefined),
+    onDispatch,
     logger: logger as never,
   });
-  return { runtime, calls, command, detach, tabsCreated };
+  return { runtime, calls, command, detach, tabsCreated, onDispatch };
 }
 
 describe("AutomationRuntime", () => {
+  it("marks page evaluation at dispatch and leaves rejected locator preconditions undispatched", async () => {
+    const {runtime,onDispatch} = harness([{role:"button",name:"Save"},{role:"button",name:"Save"}]);
+    const page = await runtime.createPage(3);
+    await expect(page.getByRole("button",{name:"Save"}).evaluate(() => true)).rejects.toThrow("strict-mode");
+    expect(onDispatch).not.toHaveBeenCalled();
+    await page.evaluate(() => true); expect(onDispatch).toHaveBeenCalledTimes(1);
+    await page.inspect(); expect(onDispatch).toHaveBeenCalledTimes(1);
+  });
+  it("inspects text by default, qualifies references, and returns changes without repeating the full snapshot", async () => {
+    const metadata = [{ role: "button", name: "Save", tag: "button", text: "Save" }];
+    const { runtime, calls } = harness(metadata); const page = await runtime.createPage(3);
+    const first = await page.inspect();
+    expect(first).toMatchObject({ mode: "full", tabId: 3, documentId: 0, truncation: { baselineComplete: true } });
+    expect(first.snapshot).toContain("[ref=t3d0e1]"); expect(first).not.toHaveProperty("screenshot");
+    metadata[0]!.name = "Continue";
+    const second = await page.inspect({ since: first.observationId as string });
+    expect(second).toMatchObject({ mode: "delta", changes: [expect.objectContaining({ change: "updated", line: expect.stringContaining("Continue") })] });
+    expect(second).not.toHaveProperty("snapshot");
+    expect(calls.some((call) => call.method === "Page.captureScreenshot")).toBe(false);
+    const other = await runtime.createPage(4);
+    await expect(other.ref("t3d0e1").click()).rejects.toThrow("stale-ref");
+    runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "root" } });
+    await expect(page.inspect({ since: first.observationId as string })).rejects.toThrow("stale-observation");
+    await expect(page.ref("t3d0e1").click()).rejects.toThrow("stale-ref");
+  });
+  it("reports truncation, slices and fields, and resets a delta against an incomplete baseline", async () => {
+    const { runtime } = harness(Array.from({ length: 8 }, (_, index) => ({ role: "button", name: `Button ${index}`, tag: "button" })));
+    const page = await runtime.createPage(3);
+    const truncated = await page.inspect({ budget: 100 });
+    expect(truncated).toMatchObject({ mode: "full", truncation: { truncated: true, reason: "budget", baselineComplete: false } });
+    const reset = await page.inspect({ since: truncated.observationId as string });
+    expect(reset).toMatchObject({ mode: "full", reset: "previous-output-truncated" });
+    const sliced = await page.inspect({ offset: 1, limit: 2, fields: ["text"] });
+    expect(sliced).toMatchObject({ truncation: { offset: 1, returned: 2, nextOffset: 3, reason: "slice" } });
+    expect(sliced.snapshot).not.toContain("[ref="); expect(sliced.snapshot).not.toContain("[actions=");
+    await expect(page.inspect({ since: reset.observationId as string, fields: ["ref"] })).rejects.toThrow("stale-observation");
+  });
   it("waits for equal geometry across samples before dispatching native input", async () => {
     const base = { connected: true, y: 12, height: 20, visible: true, stable: true, enabled: true,
       editable: true, receivesEvents: true, checked: false };

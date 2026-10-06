@@ -1,7 +1,7 @@
 import { MockLanguageModelV4 } from "ai/test";
 import { describe, expect, it, vi } from "vitest";
 import { EventLogger, fromLogValue, type LogEvent } from "../logging";
-import { TOOL_CONTEXT, TOOL_REGISTRY } from "../chrome/tool";
+import { PROGRAM_TOOL_CONTEXT as TOOL_CONTEXT, TOOL_REGISTRY } from "../chrome/tool";
 import { createPromptSnapshot, ensureConversationPrompt, readPromptSnapshot } from "./prompt";
 import { contextPressure, estimatePromptInput, summarizeContext } from "./compaction";
 import { retryModelOperation } from "./model";

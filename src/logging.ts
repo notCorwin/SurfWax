@@ -622,6 +622,10 @@ export class EventLogger {
     return this.eventsByTypes(["browser.diagnostic"], conversationId);
   }
 
+  jobEvents(conversationId: string): Promise<LogEvent[]> {
+    return this.eventsByTypes(["browser.job.state", "browser.job.progress"], conversationId);
+  }
+
   inputStateEvents(): Promise<LogEvent[]> { return this.eventsByTypes(["browser.input.state"]); }
 
   modelUsageEvents(conversationId: string): Promise<LogEvent[]> {

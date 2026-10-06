@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { readUIMessageStream, type UIMessageChunk } from "ai";
 import { EventLogger, fromLogValue, type ConversationMessage, type LogEvent } from "../logging";
 import { createChatTransport, type SidePanelMessage } from "./transport";
-import { TOOL_CATALOG_VERSION } from "../chrome/tool";
+import { PROGRAM_CATALOG_VERSION as TOOL_CATALOG_VERSION } from "../chrome/tool";
 
 vi.mock("./coordinator", () => ({ claimConversationRun: async (_id: string, signal: AbortSignal) => ({ signal, finish: vi.fn() }) }));
 vi.mock("../chrome/page-guard", () => ({ guardActivePage: async () => vi.fn() }));

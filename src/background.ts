@@ -232,6 +232,7 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "surf-wax-debugger") return;
   const sessions = new Map<string, chrome.debugger.Debuggee>();
+  const runtimeEvaluations = new Map<string, {debuggee:chrome.debugger.Debuggee;count:number}>();
   const pointerGestures = new Set<number>();
   const heldInput = new Map<string, { debuggee: chrome.debugger.Debuggee; tabId?: number; runId?: string; x: number; y: number; keys: Map<string, Record<string, any>>; buttons: Map<string, Record<string, any>> }>();
   let validatedRunId: string | undefined;
@@ -299,10 +300,11 @@ chrome.runtime.onConnect.addListener((port) => {
       const command = args[1];
       const params = args[2];
       const cleanup = method === "detach" || method === "endPointerGestures" || method === "sendCommand" &&
-        (["Network.disable", "Log.disable", "Input.cancelDragging", "Runtime.releaseObjectGroup"].includes(command) ||
+        (["Network.disable", "Log.disable", "Input.cancelDragging", "Runtime.releaseObjectGroup", "Runtime.terminateExecution"].includes(command) ||
          command === "Page.setInterceptFileChooserDialog" && params?.enabled === false ||
          command === "Input.dispatchKeyEvent" && params?.type === "keyUp" ||
          command === "Input.dispatchMouseEvent" && params?.type === "mouseReleased");
+      if (command === "Runtime.terminateExecution" && !sessions.has(key(args[0]))) throw new Error("Execution cleanup requires a debuggee owned by this port");
       if (!cleanup) {
         runs.validate(message as RunIdentity, message.operationId);
         validatedRunId = message.runId!;
@@ -385,7 +387,16 @@ chrome.runtime.onConnect.addListener((port) => {
             result = {};
           } else if (input) {
             result = await authorizedNativeInput(debuggee, tabId!, message.runId ?? validatedRunId!, command, args[2] ?? {});
-          } else result = await native.apply(chrome.debugger, args);
+          } else {
+            const evaluationKey = JSON.stringify(debuggee);
+            const evaluation = method === "sendCommand" && ["Runtime.evaluate","Runtime.callFunctionOn"].includes(command);
+            if (evaluation) runtimeEvaluations.set(evaluationKey,{debuggee,count:(runtimeEvaluations.get(evaluationKey)?.count ?? 0)+1});
+            try { result = await native.apply(chrome.debugger,args); }
+            finally { if (evaluation) {
+              const entry = runtimeEvaluations.get(evaluationKey);
+              if (entry && entry.count > 1) entry.count--; else runtimeEvaluations.delete(evaluationKey);
+            } }
+          }
           if (args[2]?.surfWaxAtomicClick) heldInput.get(JSON.stringify(debuggee))?.buttons.delete(args[2].button ?? "left");
           await persistedInput?.();
           succeeded = true;
@@ -409,6 +420,7 @@ chrome.runtime.onConnect.addListener((port) => {
     const debuggees = [...sessions.values()];
     sessions.clear();
     cleanupTask = track((async () => {
+      await Promise.allSettled([...runtimeEvaluations.values()].map(({debuggee}) => chrome.debugger.sendCommand(debuggee,"Runtime.terminateExecution")));
       await Promise.allSettled([...heldInput.keys()].map(releaseHeldInput));
       await Promise.all([...pointerGestures].map((tabId) => endGesture(tabId)));
       await Promise.all(debuggees.map((debuggee) => chrome.debugger.detach(debuggee).catch(() => undefined)));

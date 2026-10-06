@@ -203,6 +203,8 @@ test('automatically summarizes and retries the same request after provider conte
     const events = await readEvents(opened.page);
     expect(events.some(event => event.type === 'context.compacted')).toBe(true);
     expect(events.some(event => event.type === 'context.choice.required')).toBe(false);
-    expect(provider.requests.filter(request => request.stream === true && request.tools?.length === 49)).toHaveLength(2);
+    const agentRequests = provider.requests.filter(request => request.stream === true && request.tools?.length);
+    expect(agentRequests).toHaveLength(2);
+    expect(agentRequests.map(request => request.tools.length)).toEqual([49, 3]);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

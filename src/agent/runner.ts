@@ -1,6 +1,6 @@
 import { isLoopFinished, ToolLoopAgent, wrapLanguageModel } from "ai";
 import type { LanguageModel } from "ai";
-import { createCommandTools, prepareToolMessages, repairCommandToolCall } from "../chrome/tool";
+import { createCommandTools, createProgramTools, prepareToolMessages, repairCommandToolCall } from "../chrome/tool";
 import { ChromeExecutor } from "../chrome/executor";
 import type { BrowserContext } from "../chrome/executor";
 import type { EventLogger } from "../logging";
@@ -12,7 +12,7 @@ import type { ReasoningEffort } from "./reasoning";
 import { dsmlMiddleware } from "./dsml";
 
 export { DEFAULT_INSTRUCTIONS } from "./prompt";
-import { createPromptSnapshot, PROMPT_TOOLS, type PromptSnapshot } from "./prompt";
+import { createPromptSnapshot, toolsForPrompt, type PromptSnapshot } from "./prompt";
 
 export type CreateAgentOptions = {
   model: ModelConfig;
@@ -37,8 +37,8 @@ function browserContextMessage(context: BrowserContext): string {
   ].join("\n");
 }
 
-const READ_ONLY_TOOLS = new Set(["snapshot", "find", "tab-list", "requests", "request", "request-headers", "request-body", "response-headers", "response-body", "console", "result", "userscript-list", "userscript-read"]);
-const REPEATABLE_TOOLS = new Set(["type", "press", "keydown", "keyup", "mousemove", "mousedown", "mouseup", "mousewheel", "run-code", "act"]);
+const READ_ONLY_TOOLS = new Set(["inspect", "snapshot", "find", "tab-list", "requests", "request", "request-headers", "request-body", "response-headers", "response-body", "console", "result", "userscript-list", "userscript-read"]);
+const REPEATABLE_TOOLS = new Set(["run", "jobs", "type", "press", "keydown", "keyup", "mousemove", "mousedown", "mouseup", "mousewheel", "run-code", "act"]);
 
 function signature(value: unknown): string {
   try { return JSON.stringify(value); } catch { return String(value); }
@@ -61,17 +61,20 @@ export function stagnationReason(steps: readonly any[]): string | undefined {
 
 export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, BrowserAgentTools> {
   const logger = options.logger;
-  const tools = createCommandTools(options.executor, {
+  const initialPrompt = options.prompt ?? createPromptSnapshot(options.instructions);
+  const toolOptions = {
     logger, conversationId: options.conversationId,
     visualEnabled: (() => {
       let supported: Promise<boolean> | undefined;
       return () => supported ??= modelSupportsImages(options.model, { signal: options.signal });
     })(),
-  });
-  const toolOrder = Object.keys(tools) as Array<keyof typeof tools>;
+  };
+  const tools = { ...createProgramTools(options.executor, toolOptions), ...createCommandTools(options.executor, toolOptions) };
+  const toolOrder = Object.keys(tools);
   let limit: ReturnType<typeof resolveModelLimit> | undefined;
-  const initialPrompt = options.prompt ?? createPromptSnapshot(options.instructions);
   const currentInstructions = () => options.compactor?.prompt?.instructions ?? initialPrompt.instructions;
+  const currentTools = () => toolsForPrompt(options.compactor?.prompt ?? initialPrompt);
+  const activeTools = () => currentTools().map(({ name }) => name);
   let browserDigest: string | undefined;
   let loggedGuard: string | undefined;
   const loggedToolCalls = new Set<string>();
@@ -82,6 +85,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     instructions: currentInstructions(),
     tools,
     toolOrder,
+    activeTools: activeTools(),
     repairToolCall: repairCommandToolCall as any,
     prepareStep: async ({ messages, initialMessages, responseMessages, stepNumber, steps }) => {
       let prepared = await options.compactor?.prepare(messages, stepNumber) ?? messages;
@@ -99,7 +103,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         (options.compactor?.prompt ?? initialPrompt).format === "legacy-user-tools",
       );
       let outgoing = await prepareMessages(prepared);
-      const prompt = { instructions: currentInstructions(), tools: PROMPT_TOOLS };
+      const prompt = { instructions: currentInstructions(), tools: currentTools() };
       const estimatedInput = options.compactor?.estimate(outgoing, prompt) ?? estimatePromptInput({ ...prompt, messages: outgoing });
       const pressure = modelLimit && estimatedInput > inputBudget(modelLimit) * 0.8
         && (!options.compactor || options.compactor.canCompact(prepared, modelLimit));
@@ -115,6 +119,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       }
       return {
         instructions: currentInstructions(),
+        activeTools: activeTools(),
         ...(sdkFor(options.model) === "@ai-sdk/anthropic" && options.model.providerId !== "anthropic" && modelLimit?.output
           ? { maxOutputTokens: modelLimit.output } : {}),
         messages: outgoing,
@@ -124,7 +129,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       onStart: (event) => logger.record({
         type: "model.started",
         conversationId: options.conversationId,
-        content: { callId: event.callId, operationId: event.operationId, provider: event.provider, modelId: event.modelId, activeTools: toolOrder, toolCount: toolOrder.length },
+        content: { callId: event.callId, operationId: event.operationId, provider: event.provider, modelId: event.modelId, activeTools: activeTools(), toolCount: activeTools().length },
       }),
       onStepStart: (event) => logger.record({
         type: "model.step.started",

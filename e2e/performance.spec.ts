@@ -12,16 +12,21 @@ import { SSE_HEADERS, p95, chunk, usageChunk, textResponse, streamingTextRespons
 test("keeps 100 semantic locate-and-action operations at p95 <= 100ms", { tag: "@performance" }, async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);
-  const opened = await openExtension();
+  const opened = await openExtension(undefined, { catalog: "program" });
   try {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/performance`);
-    const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/performance`);
-    responses.push(commandResponse("act", { steps: Array.from({ length: 100 }, () => ({ type: "click", target: { by: "role", value: "button", name: "Increment" } })) }, "call-performance"), textResponse("PERFORMANCE_OK"), textResponse("性能"));
+    responses.push(commandResponse("run", { timeoutMs: 30000, code: "for(let i=0;i<100;i++) await page.getByRole('button',{name:'Increment'}).click(); const count=await page.locator('output').innerText(); await check(count==='100','all 100 native clicks must change the counter'); return count;" }, "call-performance"), textResponse("PERFORMANCE_OK"), textResponse("性能"));
     const options = await configure(opened.context, opened.page, provider.baseURL); await options.close();
+    // This harness opens the panel in a tab; a real Side Panel retains page focus.
+    await target.bringToFront();
+    await expect.poll(() => target.evaluate(() => document.hasFocus())).toBe(true);
     await opened.page.getByTestId("composer-input").fill("benchmark semantic actions"); await opened.page.getByTestId("composer-input").press("Enter");
     await expect(target.locator("output")).toHaveText("100", { timeout: 30_000 });
-    const latencies = (await readEvents(opened.page)).filter((event) => event.type === "automation.action.finished" && event.toolCallId === "call-performance").map((event) => event.latencyMs);
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("PERFORMANCE_OK");
+    const events = await readEvents(opened.page);
+    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-performance")?.output).toMatchObject({ ok: true, state: "succeeded", result: "100" });
+    const latencies = events.filter((event) => event.type === "automation.action.finished" && event.toolCallId === "call-performance" && event.content.operation === "click").map((event) => event.latencyMs);
     const evidence = test.info().outputPath("semantic-action-latencies.json");
     await writeFile(evidence, JSON.stringify({ p95Ms: p95(latencies), samples: latencies }, null, 2));
     await test.info().attach("semantic-action-latencies", { path: evidence, contentType: "application/json" });
