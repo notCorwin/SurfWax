@@ -243,7 +243,7 @@ export function loadModelCatalog(
         ...(options.refresh ? { cache: "no-cache" as const } : {}),
         signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
       });
-      if (!response.ok) throw new Error(`models.dev HTTP ${response.status}`);
+      if (!response.ok) throw Object.assign(new Error(`models.dev HTTP ${response.status}`), { statusCode: response.status });
       const catalog = normalizeCatalog(await response.json());
       if (storage) await storage.set({
         [CATALOG_CACHE_KEY]: { version: CATALOG_CACHE_VERSION, fetchedAt: (options.now ?? Date.now)(), catalog } satisfies CachedCatalog,

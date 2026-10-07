@@ -1,5 +1,6 @@
 import { isModelSdk, type ModelConfig, type ModelSdk } from "../types";
 import { modelConfigErrors } from "../agent/model-sdks";
+import { isAbortError, retryModelOperation } from "../agent/model";
 import { loadModelCatalog, MODEL_ROUTING_VERSION, normalizeModelProviderOverride, type ModelCatalog } from "../agent/model-limits";
 
 export const MODEL_CONFIG_STORAGE_KEY = "side-agent:model-config";
@@ -25,11 +26,20 @@ function getStorageArea(): StorageAreaLike | null {
 export async function loadModelConfig(
   fallback: PersistedModelConfig = EMPTY_MODEL_CONFIG,
   storage = getStorageArea(),
-  options: { loadCatalog?: () => Promise<ModelCatalog>; migrateCatalogRouting?: boolean } = {},
+  options: {
+    loadCatalog?: (options: { signal: AbortSignal }) => Promise<ModelCatalog>;
+    migrateCatalogRouting?: boolean;
+    persistMigration?: boolean;
+    signal?: AbortSignal;
+    sleep?: (ms: number) => Promise<void>;
+  } = {},
 ): Promise<PersistedModelConfig> {
+  const signal = options.signal ?? new AbortController().signal;
+  signal.throwIfAborted();
   if (!storage) return fallback;
 
   const stored = await storage.get(MODEL_CONFIG_STORAGE_KEY);
+  signal.throwIfAborted();
   const value = stored[MODEL_CONFIG_STORAGE_KEY];
   if (!value || typeof value !== "object") return fallback;
 
@@ -68,11 +78,18 @@ export async function loadModelConfig(
     const selected = selectedModelConfig(result);
     if (options.migrateCatalogRouting !== false && selected && selected.providerId !== "custom" && !selected.modelProvider && selected.catalogRouteVersion !== MODEL_ROUTING_VERSION) {
       // Profiles created before model-level routing must be enriched before dispatch.
-      // A failed lookup leaves storage untouched and fails closed instead of selecting
-      // the provider's wrong protocol for an existing model.
+      // Recoverable catalog failures retry until recovery or cancellation. Permanent
+      // failures leave storage untouched rather than selecting the wrong protocol.
       let catalog: ModelCatalog;
-      try { catalog = await (options.loadCatalog ?? loadModelCatalog)(); }
-      catch (cause) { throw new Error("模型路由目录更新失败，请恢复网络后重试。", { cause }); }
+      try {
+        catalog = await retryModelOperation(() => (options.loadCatalog ?? loadModelCatalog)({ signal }), {
+          signal, purpose: "model-catalog-migration", sleep: options.sleep,
+        });
+      } catch (cause) {
+        if (isAbortError(cause, signal)) throw cause;
+        throw new Error("模型路由目录更新失败，请检查配置后重试。", { cause });
+      }
+      signal.throwIfAborted();
       const provider = catalog[selected.providerId];
       if (!provider) throw new Error(`模型目录中找不到 Provider：${selected.providerId}；请在设置中重新选择 Provider。`);
       const model = provider.models?.[selected.model] ?? Object.values(provider.models ?? {}).find((model) => model.id === selected.model);
@@ -85,7 +102,15 @@ export async function loadModelConfig(
         baseURL: modelProvider?.api ?? selected.baseURL,
         catalogRouteVersion: MODEL_ROUTING_VERSION,
       };
-      await storage.set({ [MODEL_CONFIG_STORAGE_KEY]: result });
+      if (options.persistMigration !== false) {
+        const current = await storage.get(MODEL_CONFIG_STORAGE_KEY);
+        signal.throwIfAborted();
+        if (JSON.stringify(current[MODEL_CONFIG_STORAGE_KEY]) !== JSON.stringify(value)) {
+          throw new DOMException("Model configuration changed during migration", "AbortError");
+        }
+        await storage.set({ [MODEL_CONFIG_STORAGE_KEY]: result });
+        signal.throwIfAborted();
+      }
     }
     return result;
   }
