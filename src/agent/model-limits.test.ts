@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { contextUsedPercent, inputBudget, loadModelCatalog, matchModel, modelProviderPresets, modelSupportsImages, resolveModelLimit } from "./model-limits";
+import { applyModelPreset, contextUsedPercent, inputBudget, loadModelCatalog, matchModel, modelPresetFields, modelProviderPresets, modelSupportsImages, normalizeModelProviderOverride, resolveModelLimit } from "./model-limits";
+import { modelConfigErrors, sdkFor } from "./model-sdks";
 
 const catalog = {
   openai: { api: "https://api.openai.com/v1", models: {
@@ -60,7 +61,7 @@ describe("models.dev limit matching", () => {
   });
 
   it("reports a stale fallback and still rejects an aborted refresh", async () => {
-    const values: Record<string, unknown> = { "side-agent:model-catalog": { fetchedAt: 100, catalog } };
+    const values: Record<string, unknown> = { "side-agent:model-catalog": { version: 2, fetchedAt: 100, catalog } };
     const storage = { async get(key: string) { return { [key]: values[key] }; }, async set(items: Record<string, unknown>) { Object.assign(values, items); } };
     const offline = vi.fn(async () => { throw new Error("offline"); });
     const onStale = vi.fn();
@@ -136,5 +137,97 @@ describe("models.dev limit matching", () => {
     expect(estimated).toMatchObject({ context: 262_144, source: "estimated" });
     expect(estimated).not.toHaveProperty("inputModalities");
     expect(estimated).not.toHaveProperty("reasoningEfforts");
+  });
+
+  it("preserves complete per-model routing metadata through catalog normalization and caching", async () => {
+    const provider = {
+      npm: "@ai-sdk/amazon-bedrock/mantle", api: "https://bedrock-mantle.${AWS_REGION}.api.aws/v1", shape: "responses",
+      body: { nested: { enabled: true, stop: ["END"], limit: 2, nullable: null } }, headers: { "x-model-route": "mantle" },
+    };
+    const storage = { async get() { return {}; }, set: vi.fn(async () => {}) };
+    const result = await loadModelCatalog({ storage, fetch: vi.fn(async () => new Response(JSON.stringify({
+      bedrock: { npm: "@ai-sdk/amazon-bedrock", models: { example: { tool_call: true, provider } } },
+    }))) });
+    expect(result.bedrock?.models?.example?.provider).toEqual(provider);
+    expect(storage.set).toHaveBeenCalledWith(expect.objectContaining({ "side-agent:model-catalog": expect.objectContaining({ version: 2, catalog: result }) }));
+    expect(modelProviderPresets(result)[0]?.models).toEqual([{ id: "example", name: "example" }]);
+  });
+
+  it("uses model overrides ahead of provider defaults and keeps credentials while changing native SDK fields", () => {
+    const [preset] = modelProviderPresets({ vertex: { npm: "@ai-sdk/google-vertex", models: {
+      claude: { id: "claude-alias", tool_call: true, provider: { npm: "@ai-sdk/google-vertex/anthropic", api: "https://claude.test/v1", headers: { "x-route": "claude" } } },
+      gemini: { tool_call: true },
+    } } });
+    const settings = { project: "project", location: "us-east5", serviceAccountJson: '{"client_email":"a","private_key":"b"}', apiKey: "saved" };
+    const config = applyModelPreset({ providerId: "vertex", sdk: "@ai-sdk/google-vertex" as const, baseURL: "", model: "claude-alias", providerSettings: settings }, preset!);
+    expect(config).toMatchObject({ sdk: "@ai-sdk/google-vertex/anthropic", baseURL: "https://claude.test/v1", modelProvider: { headers: { "x-route": "claude" } } });
+    expect(config.providerSettings).toBe(settings);
+    expect(modelPresetFields(config, preset).find(({ key }) => key === "serviceAccountJson")?.required).toBe(true);
+    const gemini = applyModelPreset({ ...config, model: "gemini" }, preset!);
+    expect(gemini.sdk).toBe("@ai-sdk/google-vertex");
+    expect(gemini.modelProvider).toBeUndefined();
+    expect(gemini.providerSettings).toBe(settings);
+    expect(modelPresetFields(gemini, preset).find(({ key }) => key === "serviceAccountJson")?.required).not.toBe(true);
+  });
+
+  it("keeps supported model SDK overrides even when a provider default is unavailable", () => {
+    const [preset] = modelProviderPresets({ mixed: { npm: "unsupported-provider", api: "https://mixed.test/v1", models: {
+      available: { tool_call: true, provider: { npm: "@ai-sdk/openai" } },
+      unavailable: { tool_call: true },
+    } } });
+    expect(preset?.models).toEqual([{ id: "available", name: "available" }]);
+    const config = { providerId: "mixed", baseURL: "", model: "available", providerSettings: { apiKey: "key" } };
+    expect(sdkFor(applyModelPreset(config, preset!))).toBe("@ai-sdk/openai");
+    expect(modelConfigErrors(applyModelPreset({ ...config, model: "unavailable" }, preset!)).sdk).toContain("unsupported-provider");
+    expect(modelConfigErrors(applyModelPreset({ ...config, model: "free-text" }, preset!)).sdk).toContain("unsupported-provider");
+  });
+
+  it("does not silently fall back for unsupported overrides on typed or restored models", () => {
+    const [preset] = modelProviderPresets({ openai: { npm: "@ai-sdk/openai", models: {
+      supported: { tool_call: true },
+      unsupported: { tool_call: true, provider: { npm: "unsupported-sdk", shape: "future-shape" } },
+    } } });
+    expect(preset?.models).toEqual([{ id: "supported", name: "supported" }]);
+    const config = applyModelPreset({ providerId: "openai", baseURL: "", model: "unsupported" }, preset!);
+    expect(config.modelProvider).toEqual({ npm: "unsupported-sdk", shape: "future-shape" });
+    expect(modelConfigErrors(config).sdk).toContain("unsupported-sdk");
+    const removed = applyModelPreset({ ...config, model: "removed-from-catalog" }, preset!);
+    expect(removed.modelProvider).toEqual(config.modelProvider);
+    expect(normalizeModelProviderOverride({ shape: "future-shape" })).toEqual({ shape: "future-shape" });
+    expect(() => normalizeModelProviderOverride({ npm: 42 })).toThrow("Invalid model provider npm");
+    expect(() => normalizeModelProviderOverride({ headers: { invalid: 42 } })).toThrow("Invalid model provider headers");
+  });
+
+  it("refreshes pre-routing catalog caches rather than reusing a normalized catalog that lost overrides", async () => {
+    const storage = { async get() { return { "side-agent:model-catalog": { fetchedAt: 100, catalog } }; }, async set() {} };
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ refreshed: { npm: "@ai-sdk/openai" } })));
+    await expect(loadModelCatalog({ storage, fetch, now: () => 101 })).resolves.toHaveProperty("refreshed");
+    expect(fetch).toHaveBeenCalledOnce();
+    await expect(loadModelCatalog({ storage, fetch: vi.fn(async () => { throw new Error("offline"); }), now: () => 101 })).rejects.toThrow("offline");
+  });
+
+  it("matches model limits at the model-specific endpoint", () => {
+    const modelCatalog = { provider: { api: "https://default.test/v1", models: {
+      routed: { provider: { api: "https://model.test/v1" }, limit: { context: 42_000 } },
+    } } };
+    expect(matchModel(modelCatalog, "https://model.test/v1", "routed")?.context).toBe(42_000);
+    expect(matchModel(modelCatalog, "https://default.test/v1", "routed")).toBeUndefined();
+  });
+
+  it("preserves a saved proxy endpoint but resets an old model endpoint and SDK when switching routes", () => {
+    const [preset] = modelProviderPresets({ provider: { npm: "@ai-sdk/openai", api: "https://catalog.test/v1", models: {
+      ordinary: { tool_call: true },
+      special: { tool_call: true, provider: { npm: "@ai-sdk/anthropic", api: "https://special.test/v1" } },
+    } } });
+    const profile = { sdk: "@ai-sdk/openai" as const, providerId: "provider", model: "ordinary", baseURL: "https://user-proxy.test/v1", providerSettings: { apiKey: "key" } };
+    expect(applyModelPreset(profile, preset!).baseURL).toBe(profile.baseURL);
+    const special = applyModelPreset({ ...profile, model: "special" }, preset!);
+    expect(special.sdk).toBe("@ai-sdk/anthropic");
+    expect(special.baseURL).toBe("https://special.test/v1");
+    const ordinary = applyModelPreset({ ...special, model: "ordinary" }, preset!);
+    expect(ordinary.sdk).toBe("@ai-sdk/openai");
+    expect(ordinary.baseURL).toBe("https://catalog.test/v1");
+    expect(ordinary.modelProvider).toBeUndefined();
+    expect(ordinary.providerSettings).toEqual(profile.providerSettings);
   });
 });
