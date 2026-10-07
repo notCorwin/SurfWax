@@ -25,6 +25,7 @@ export type BrowserTarget =
 
 export const MODEL_SDKS = [
   "@ai-sdk/amazon-bedrock",
+  "@ai-sdk/amazon-bedrock/mantle",
   "@ai-sdk/anthropic",
   "@ai-sdk/azure",
   "@ai-sdk/cerebras",
@@ -65,6 +66,8 @@ export type ModelConfig = {
   providerId?: string;
   sdk?: ModelSdk;
   providerSettings?: Record<string, string>;
+  /** Models.dev per-model transport defaults, kept separate from user credentials. */
+  modelProvider?: ModelProviderOverride;
   /** Legacy fields are read during migration and kept optional for restored tests/conversations. */
   transport?: ModelTransport;
   baseURL: string;
@@ -72,6 +75,14 @@ export type ModelConfig = {
   model: string;
   contextWindowOverride?: number;
   imageInput?: "auto" | "enabled" | "disabled";
+};
+
+export type ModelProviderOverride = {
+  npm?: string;
+  api?: string;
+  shape?: string;
+  body?: Record<string, JsonValue>;
+  headers?: Record<string, string>;
 };
 
 export type ModelTransport = "gateway" | "openai-compatible";

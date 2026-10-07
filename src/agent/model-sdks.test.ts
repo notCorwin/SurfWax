@@ -11,7 +11,7 @@ function configFor(sdk: ModelSdk): ModelConfig {
   let baseURL = "";
   let model = "test-model";
   if (sdk === "@ai-sdk/openai-compatible") baseURL = "https://compatible.test/v1";
-  if (sdk === "@ai-sdk/amazon-bedrock") Object.assign(providerSettings, { region: "us-east-1" });
+  if ((sdk === "@ai-sdk/amazon-bedrock" || sdk === "@ai-sdk/amazon-bedrock/mantle")) Object.assign(providerSettings, { region: "us-east-1" });
   if (sdk === "@ai-sdk/azure") Object.assign(providerSettings, { resourceName: "test-resource" });
   if (sdk === "@ai-sdk/google-vertex") Object.assign(providerSettings, { project: "test-project", location: "us-central1" });
   if (sdk === "@ai-sdk/google-vertex/anthropic") Object.assign(providerSettings, { project: "test-project", location: "us-east5", serviceAccountJson: serviceAccount });
@@ -28,7 +28,7 @@ function configFor(sdk: ModelSdk): ModelConfig {
 
 describe("model SDK registry", () => {
   it("contains all supported SDK identifiers and creates a language model for each", async () => {
-    expect(MODEL_SDKS).toHaveLength(29);
+    expect(MODEL_SDKS).toHaveLength(30);
     for (const sdk of MODEL_SDKS) {
       const model = await createModel(configFor(sdk));
       expect(model, sdk).toHaveProperty("specificationVersion");
@@ -70,5 +70,22 @@ describe("model SDK registry", () => {
     expect(modelConfigErrors(vertex)).toEqual({});
     vertex.providerSettings.serviceAccountJson = "not-json";
     expect(modelConfigErrors(vertex)).toHaveProperty("serviceAccountJson");
+  });
+
+  it("preserves whole URL placeholders while escaping component placeholders", () => {
+    expect(resolveEndpoint("${NEON_AI_GATEWAY_BASE_URL}/openai/v1", { NEON_AI_GATEWAY_BASE_URL: "https://gateway.example/" }))
+      .toBe("https://gateway.example/openai/v1");
+    expect(resolveEndpoint("https://${ACCOUNT}.example/v1", { ACCOUNT: "https://other.example" }))
+      .toBe("https://https%3A%2F%2Fother.example.example/v1");
+    expect(resolveEndpoint("${NEON_AI_GATEWAY_BASE_URL}/openai/v1", { NEON_AI_GATEWAY_BASE_URL: "javascript:alert(1)" }))
+      .toBe("javascript%3Aalert(1)/openai/v1");
+  });
+
+  it.each(["AZURE_RESOURCE_NAME", "AZURE_COGNITIVE_SERVICES_RESOURCE_NAME"])("uses saved Azure resourceName for model template %s", (key) => {
+    const api = `https://\${${key}}.services.ai.azure.com/models`;
+    const config: ModelConfig = { providerId: "azure", sdk: "@ai-sdk/azure", model: "kimi-k2.6", baseURL: "", providerSettings: { resourceName: "saved-resource", apiKey: "key" }, modelProvider: { npm: "@ai-sdk/openai-compatible", api, shape: "completions" } };
+    expect(providerSettingFields({ id: "azure", npm: config.modelProvider!.npm, api }).map(({ key }) => key)).toEqual(["apiKey", "resourceName", "apiVersion"]);
+    expect(resolveEndpoint(api, config.providerSettings!)).toBe("https://saved-resource.services.ai.azure.com/models");
+    expect(modelConfigErrors(config)).toEqual({});
   });
 });

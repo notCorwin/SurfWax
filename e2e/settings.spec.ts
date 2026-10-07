@@ -84,7 +84,7 @@ test("refreshes Models.dev providers and models on every settings open", async (
   try {
     let version = 1;
     let requests = 0;
-    await opened.page.evaluate(() => chrome.storage.local.set({ "side-agent:model-catalog": { fetchedAt: Date.now(), catalog: {
+    await opened.page.evaluate(() => chrome.storage.local.set({ "side-agent:model-catalog": { version: 2, fetchedAt: Date.now(), catalog: {
       cached: { name: "Cached Provider", npm: "@ai-sdk/openai-compatible", models: {} },
     } } }));
     await opened.context.route("https://models.dev/api.json", (route) => {
@@ -168,7 +168,7 @@ test("keeps custom Endpoint available when the Models.dev catalog fails", async 
 test("labels cached Models.dev providers when refresh fails", async () => {
   const opened = await openExtension();
   try {
-    await opened.page.evaluate(() => chrome.storage.local.set({ "side-agent:model-catalog": { fetchedAt: Date.now(), catalog: {
+    await opened.page.evaluate(() => chrome.storage.local.set({ "side-agent:model-catalog": { version: 2, fetchedAt: Date.now(), catalog: {
       cached: { name: "Cached Provider", npm: "@ai-sdk/openai-compatible", models: {} },
     } } }));
     await opened.context.route("https://models.dev/api.json", (route) => route.fulfill({ status: 503, body: "unavailable" }));

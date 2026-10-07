@@ -18,7 +18,7 @@ const sdkUsage = { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite
 function configFor(sdk: ModelSdk): ModelConfig {
   const settings: Record<string, string> = { apiKey: "key" };
   let model = "test";
-  if (sdk === "@ai-sdk/amazon-bedrock") settings.region = "us-east-1";
+  if (sdk === "@ai-sdk/amazon-bedrock" || sdk === "@ai-sdk/amazon-bedrock/mantle") settings.region = "us-east-1";
   if (sdk === "@ai-sdk/azure") settings.resourceName = "test";
   if (sdk.startsWith("@ai-sdk/google-vertex")) Object.assign(settings, { project: "test", location: "us-east5", serviceAccountJson: JSON.stringify({ client_email: "test@test.iam.gserviceaccount.com", private_key: key }) });
   if (sdk === "ai-gateway-provider") Object.assign(settings, { accountId: "account", gatewayId: "gateway" });
@@ -26,10 +26,10 @@ function configFor(sdk: ModelSdk): ModelConfig {
   if (sdk === "gitlab-ai-provider") { model = "duo-chat-gpt-5-1"; Object.assign(settings, { instanceUrl: "https://gitlab.test", aiGatewayUrl: "https://gateway.test" }); }
   if (sdk === "watsonx-ai-provider") settings.projectId = "project";
   if (sdk === "@jerome-benoit/sap-ai-provider-v2") Object.assign(settings, { serviceKeyJson: JSON.stringify({ url: "https://auth.test", clientid: "client", clientsecret: "secret" }), deploymentUrl: "https://sap.test", resourceGroup: "group" });
-  return { sdk, providerId: sdk, model, baseURL: "https://provider.test/v1", providerSettings: settings };
+  return { sdk, providerId: sdk, model, baseURL: "https://provider.test/v1", providerSettings: settings, ...(sdk === "@ai-sdk/amazon-bedrock/mantle" ? { modelProvider: { shape: "responses" } } : {}) };
 }
 function protocolFor(sdk: ModelSdk): Protocol {
-  if (["@ai-sdk/openai", "@ai-sdk/azure", "@ai-sdk/xai", "gitlab-ai-provider"].includes(sdk)) return "responses";
+  if (["@ai-sdk/openai", "@ai-sdk/azure", "@ai-sdk/xai", "gitlab-ai-provider", "@ai-sdk/amazon-bedrock/mantle"].includes(sdk)) return "responses";
   if (sdk.includes("anthropic")) return "anthropic";
   if (sdk === "@ai-sdk/google" || sdk === "@ai-sdk/google-vertex") return "google";
   if (sdk === "@ai-sdk/cohere") return "cohere";

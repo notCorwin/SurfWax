@@ -18,11 +18,25 @@ export type ProviderDescriptor = {
 
 const API_KEY: ProviderSettingField = { key: "apiKey", label: "API Key", type: "password", required: true };
 const field = (key: string, label: string, options: Omit<ProviderSettingField, "key" | "label"> = {}): ProviderSettingField => ({ key, label, ...options });
+const ENDPOINT_ALIASES: Record<string, string> = {
+  AWS_REGION: "region", AZURE_RESOURCE_NAME: "resourceName", AZURE_COGNITIVE_SERVICES_RESOURCE_NAME: "resourceName",
+  GOOGLE_VERTEX_PROJECT: "project", GOOGLE_VERTEX_PROJECT_ID: "project", GOOGLE_VERTEX_LOCATION: "location",
+  CLOUDFLARE_ACCOUNT_ID: "accountId", CLOUDFLARE_GATEWAY_ID: "gatewayId", WATSONX_AI_PROJECT_ID: "projectId",
+};
 
-export function sdkFor(config: Pick<ModelConfig, "providerId" | "sdk" | "transport" | "baseURL">): ModelSdk {
-  if (config.providerId === "deepseek" || config.sdk === "@ai-sdk/openai-compatible" && URL.canParse(config.baseURL)
+export function sdkFor(config: Pick<ModelConfig, "providerId" | "sdk" | "transport" | "baseURL" | "modelProvider">): ModelSdk {
+  if (config.modelProvider?.npm !== undefined) {
+    if (!isModelSdk(config.modelProvider.npm)) throw new Error(`Unsupported model SDK: ${config.modelProvider.npm}`);
+    return config.modelProvider.npm;
+  }
+  if (config.providerId === "deepseek" && (!config.sdk || config.sdk === "@ai-sdk/openai-compatible") || config.sdk === "@ai-sdk/openai-compatible" && URL.canParse(config.baseURL)
     && new URL(config.baseURL).hostname === "api.deepseek.com") return "@ai-sdk/deepseek";
   return config.sdk ?? (config.transport === "gateway" ? "@ai-sdk/gateway" : "@ai-sdk/openai-compatible");
+}
+
+/** A model's SDK override changes its protocol, not its saved gateway identity. */
+export function isCloudflareGateway(config: Pick<ModelConfig, "providerId" | "sdk" | "modelProvider">): boolean {
+  return config.providerId === "cloudflare-ai-gateway" || config.sdk === "ai-gateway-provider" || config.modelProvider?.npm === "ai-gateway-provider";
 }
 
 export function settingsFor(config: Pick<ModelConfig, "providerSettings" | "apiKey">): Record<string, string> {
@@ -41,8 +55,23 @@ export function defaultBaseURL(sdk: ModelSdk): string {
 
 export function providerSettingFields(provider: ProviderDescriptor): ProviderSettingField[] {
   if (!isModelSdk(provider.npm)) return [];
+  if (isCloudflareGateway({ providerId: provider.id, sdk: provider.npm })) return [
+    API_KEY,
+    field("accountId", "Cloudflare Account ID", { required: true }),
+    field("gatewayId", "AI Gateway ID", { required: true }),
+  ];
+  if (provider.id === "google-vertex" && provider.npm === "@ai-sdk/openai-compatible") {
+    return [...providerSettingFields({ ...provider, npm: "@ai-sdk/google-vertex" }), field("GOOGLE_VERTEX_ENDPOINT", "Vertex Endpoint（可选）", { description: "默认根据 Location 生成。" })];
+  }
   switch (provider.npm) {
     case "@ai-sdk/amazon-bedrock": return [
+      field("region", "Region", { required: true, placeholder: "us-east-1" }),
+      field("apiKey", "Bearer Token", { type: "password", description: "Bearer Token，或填写下方 Access Key 凭据。" }),
+      field("accessKeyId", "Access Key ID"),
+      field("secretAccessKey", "Secret Access Key", { type: "password" }),
+      field("sessionToken", "Session Token（可选）", { type: "password" }),
+    ];
+    case "@ai-sdk/amazon-bedrock/mantle": return [
       field("region", "Region", { required: true, placeholder: "us-east-1" }),
       field("apiKey", "Bearer Token", { type: "password", description: "Bearer Token，或填写下方 Access Key 凭据。" }),
       field("accessKeyId", "Access Key ID"),
@@ -63,11 +92,6 @@ export function providerSettingFields(provider: ProviderDescriptor): ProviderSet
       field("project", "Project", { required: true }),
       field("location", "Location", { required: true, placeholder: "us-east5" }),
       field("serviceAccountJson", "Service Account JSON", { type: "textarea", required: true }),
-    ];
-    case "ai-gateway-provider": return [
-      API_KEY,
-      field("accountId", "Cloudflare Account ID", { required: true }),
-      field("gatewayId", "AI Gateway ID", { required: true }),
     ];
     case "gitlab-ai-provider": return [
       field("apiKey", "GitLab Token", { type: "password", required: true }),
@@ -90,25 +114,32 @@ export function providerSettingFields(provider: ProviderDescriptor): ProviderSet
   }
 
   const templateVariables = [...(provider.api?.matchAll(/\$\{([A-Z0-9_]+)\}/g) ?? [])].map((match) => match[1]!);
-  return [API_KEY, ...templateVariables.map((key) => field(key, key, { required: true }))];
+  return [API_KEY, ...[...new Set(templateVariables.map((key) => ENDPOINT_ALIASES[key] ?? key))].map((key) => field(key, key, { required: true })),
+    ...((provider.id === "azure" || provider.id === "azure-cognitive-services") && provider.npm === "@ai-sdk/openai-compatible"
+      ? [field("apiVersion", "API Version（可选）", { placeholder: "2024-05-01-preview" })] : [])];
 }
 
 export function resolveEndpoint(template: string, providerSettings: Record<string, string>): string {
-  const aliases: Record<string, string> = {
-    AWS_REGION: "region", AZURE_RESOURCE_NAME: "resourceName", GOOGLE_VERTEX_PROJECT: "project",
-    GOOGLE_VERTEX_PROJECT_ID: "project", GOOGLE_VERTEX_LOCATION: "location", CLOUDFLARE_ACCOUNT_ID: "accountId",
-    CLOUDFLARE_GATEWAY_ID: "gatewayId", WATSONX_AI_PROJECT_ID: "projectId",
-  };
-  return template.replace(/\$\{([A-Z0-9_]+)\}/g, (_, key: string) => encodeURIComponent(providerSettings[key]?.trim() ?? providerSettings[aliases[key] ?? ""]?.trim() ?? ""));
+  return template.replace(/\$\{([A-Z0-9_]+)\}/g, (_, key: string, offset: number) => {
+    const location = providerSettings.GOOGLE_VERTEX_LOCATION?.trim() || providerSettings.location?.trim();
+    const vertexEndpoint = location ? `${location === "global" ? "" : `${location}-`}aiplatform.googleapis.com` : "";
+    const value = providerSettings[key]?.trim() || providerSettings[ENDPOINT_ALIASES[key] ?? ""]?.trim() || (key === "GOOGLE_VERTEX_ENDPOINT" ? vertexEndpoint : "");
+    // Catalogs such as Neon use a complete base URL, not a URL component.
+    if (offset === 0 && key.endsWith("_URL") && /^https?:\/\//i.test(value) && URL.canParse(value)) return value.replace(/\/+$/, "");
+    return encodeURIComponent(value);
+  });
 }
 
 export function resolvedBaseURL(config: ModelConfig): string {
   const settings = settingsFor(config);
   const sdk = sdkFor(config);
+  if (config.modelProvider?.api !== undefined) return resolveEndpoint(config.modelProvider.api.trim(), settings).replace(/\/+$/, "");
   if (sdk === "@ai-sdk/azure" && settings.resourceName) {
     return `https://${settings.resourceName.trim()}.openai.azure.com/openai/v1`;
   }
-  if (sdk === "ai-gateway-provider") return `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(settings.accountId?.trim() ?? "")}/ai/v1`;
+  if (sdk === "ai-gateway-provider" || isCloudflareGateway(config) && !config.baseURL.trim()) {
+    return `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(settings.accountId?.trim() ?? "")}/ai/v1`;
+  }
   if (sdk === "gitlab-ai-provider") return (settings.instanceUrl || defaultBaseURL(sdk)).trim().replace(/\/+$/, "");
   if (sdk === "@jerome-benoit/sap-ai-provider-v2") return settings.deploymentUrl?.trim().replace(/\/+$/, "") ?? "";
   if (sdk === "@qvac/ai-sdk-provider") return settings.endpoint?.trim() || config.baseURL.trim();
@@ -134,20 +165,37 @@ export function googleCredentials(config: ModelConfig) {
 
 export function modelConfigErrors(config: ModelConfig, fields?: ProviderSettingField[]): Record<string, string> {
   const errors: Record<string, string> = {};
+  if (config.modelProvider?.npm !== undefined && !isModelSdk(config.modelProvider.npm)) {
+    errors.sdk = `Unsupported model SDK: ${config.modelProvider.npm}`;
+    return errors;
+  }
+  if (config.sdk !== undefined && !isModelSdk(config.sdk)) {
+    errors.sdk = `Unsupported model SDK: ${config.sdk}`;
+    return errors;
+  }
   const sdk = sdkFor(config);
   const settings = settingsFor(config);
+  const shape = config.modelProvider?.shape;
+  if (shape !== undefined && shape !== "responses" && shape !== "completions") errors.shape = `Unsupported model API shape: ${shape}`;
   if (!config.model.trim()) errors.model = "请输入 Model ID";
   if (config.contextWindowOverride !== undefined && (!Number.isSafeInteger(config.contextWindowOverride) || config.contextWindowOverride <= 0)) {
     errors.contextWindowOverride = "请输入正整数 token 数";
   }
 
-  for (const item of fields ?? providerSettingFields({ id: config.providerId ?? "custom", npm: sdk, api: config.baseURL })) {
+  for (const item of fields ?? providerSettingFields({ id: isCloudflareGateway(config) ? "cloudflare-ai-gateway" : config.providerId ?? "custom", npm: sdk, api: config.modelProvider?.api ?? config.baseURL })) {
     if (item.required && !settings[item.key]?.trim()) errors[item.key] = `请输入${item.label}`;
   }
-  if (sdk === "@ai-sdk/amazon-bedrock" && !settings.apiKey?.trim() && !(settings.accessKeyId?.trim() && settings.secretAccessKey?.trim())) {
+  if ((sdk === "@ai-sdk/amazon-bedrock" || sdk === "@ai-sdk/amazon-bedrock/mantle") && !settings.apiKey?.trim() && !(settings.accessKeyId?.trim() && settings.secretAccessKey?.trim())) {
     errors.apiKey = "请输入 Bearer Token，或填写 Access Key ID 与 Secret Access Key";
   }
-  if (sdk === "@ai-sdk/google-vertex" && !settings.apiKey?.trim() && !googleCredentials(config)) {
+  if ((sdk === "@ai-sdk/amazon-bedrock" || sdk === "@ai-sdk/amazon-bedrock/mantle") && !settings.apiKey?.trim()
+    && Object.keys(config.modelProvider?.body ?? {}).length) {
+    errors.body = "Catalog body defaults require a bearer token for AWS; modifying a SigV4-signed body is unsupported.";
+  }
+  if (sdk === "@jerome-benoit/sap-ai-provider-v2" && Object.keys(config.modelProvider?.body ?? {}).length) {
+    errors.body = "Catalog body defaults are not supported by the SAP orchestration adapter.";
+  }
+  if ((sdk === "@ai-sdk/google-vertex" || config.providerId === "google-vertex" && sdk === "@ai-sdk/openai-compatible") && !settings.apiKey?.trim() && !googleCredentials(config)) {
     errors.serviceAccountJson = "请输入 API Key，或有效的 Service Account JSON";
   }
   if (sdk === "@ai-sdk/google-vertex/anthropic" && !googleCredentials(config)) errors.serviceAccountJson = "请输入有效的 Service Account JSON";

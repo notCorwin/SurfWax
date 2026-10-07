@@ -2,7 +2,8 @@ import { APICallError, type LanguageModel } from "ai";
 import type { EventLogger } from "../logging";
 import type { ModelConfig, ModelSdk } from "../types";
 import { REASONING_EFFORTS, reasoningSettingsFor, type ReasoningEffort, type ReasoningSettings } from "./reasoning";
-import { googleCredentials, isOpenAIShapedSdk, modelConfigErrors, resolvedBaseURL, sdkFor, settingsFor } from "./model-sdks";
+import { GITLAB_MODELS } from "./gitlab-models";
+import { googleCredentials, isCloudflareGateway, isOpenAIShapedSdk, modelConfigErrors, resolvedBaseURL, sdkFor, settingsFor } from "./model-sdks";
 
 const MAX_RETRY_DELAY_MS = 5_000;
 const INITIAL_RETRY_DELAY_MS = 250;
@@ -290,6 +291,7 @@ async function loadSdk(sdk: ModelSdk, override?: ModuleLoader): Promise<Record<s
   if (override) return override();
   switch (sdk) {
     case "@ai-sdk/amazon-bedrock": return import("@ai-sdk/amazon-bedrock");
+    case "@ai-sdk/amazon-bedrock/mantle": return import("@ai-sdk/amazon-bedrock/mantle");
     case "@ai-sdk/anthropic": return import("@ai-sdk/anthropic");
     case "@ai-sdk/azure": return import("@ai-sdk/azure");
     case "@ai-sdk/cerebras": return import("@ai-sdk/cerebras");
@@ -389,7 +391,7 @@ function oauthFetch(options: { tokenUrl: string; clientId: string; clientSecret:
 
 /** Native Vertex edge auth uses global fetch without AbortSignal. Authenticate
  * at our fetch boundary instead, so token exchange shares request cancellation. */
-export function googleServiceAccountFetch(config: ModelConfig, fetch: typeof globalThis.fetch): typeof globalThis.fetch {
+export function googleServiceAccountFetch(config: ModelConfig, fetch: typeof globalThis.fetch, authFetch = fetch): typeof globalThis.fetch {
   const credentials = googleCredentials(config)!;
   let cached: { token: string; expiresAt: number } | undefined;
   const encode = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
@@ -409,7 +411,7 @@ export function googleServiceAccountFetch(config: ModelConfig, fetch: typeof glo
       const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(unsigned));
       signal.throwIfAborted();
       const token = await retryModelOperation(async () => {
-        const response = await fetch("https://oauth2.googleapis.com/token", { method: "POST", signal,
+        const response = await authFetch("https://oauth2.googleapis.com/token", { method: "POST", signal,
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
           body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: `${unsigned}.${encode(new Uint8Array(signature))}` }) });
         if (!response.ok) throw new APICallError({ message: "Google token exchange failed", url: response.url, requestBodyValues: {}, statusCode: response.status });
@@ -473,7 +475,7 @@ export function sapProtocolFetch(config: ModelConfig, fetch: typeof globalThis.f
       model: { name: source.model, params: { ...params, ...(source.stream === true ? { stream_options: { include_usage: true } } : {}) } },
       prompt: { template: source.messages ?? [], ...(source.tools ? { tools: source.tools } : {}), ...(source.response_format ? { response_format: source.response_format } : {}) },
     } } } };
-    const response = await fetch(withJsonRequest(request, `${settings.deploymentUrl.replace(/\/+$/, "")}/v2/completion`, body, {
+    const response = await fetch(withJsonRequest(request, `${resolvedBaseURL(config)}/v2/completion`, body, {
       Authorization: `Bearer ${await getToken(request.signal)}`, "AI-Resource-Group": settings.resourceGroup || "default",
     }));
     if (!response.ok) return response;
@@ -485,37 +487,9 @@ export function sapProtocolFetch(config: ModelConfig, fetch: typeof globalThis.f
   };
 }
 
-const GITLAB_MODELS: Record<string, { provider: "openai" | "anthropic"; model: string }> = {
-  "duo-chat-fable-5-1": { provider: "anthropic", model: "claude-fable-5-1" },
-  "duo-chat-fable-5": { provider: "anthropic", model: "claude-fable-5" },
-  "duo-chat-opus-5": { provider: "anthropic", model: "claude-opus-5" },
-  "duo-chat-opus-4-8": { provider: "anthropic", model: "claude-opus-4-8" },
-  "duo-chat-opus-4-7": { provider: "anthropic", model: "claude-opus-4-7" },
-  "duo-chat-opus-4-6": { provider: "anthropic", model: "claude-opus-4-6" },
-  "duo-chat-sonnet-5": { provider: "anthropic", model: "claude-sonnet-5" },
-  "duo-chat-sonnet-4-6": { provider: "anthropic", model: "claude-sonnet-4-6" },
-  "duo-chat-opus-4-5": { provider: "anthropic", model: "claude-opus-4-5-20251101" },
-  "duo-chat-sonnet-4-5": { provider: "anthropic", model: "claude-sonnet-4-5-20250929" },
-  "duo-chat-haiku-4-5": { provider: "anthropic", model: "claude-haiku-4-5-20251001" },
-  "duo-chat-gpt-6-astra": { provider: "openai", model: "gpt-6-astra" },
-  "duo-chat-gpt-5-1": { provider: "openai", model: "gpt-5.1-2025-11-13" },
-  "duo-chat-gpt-5-2": { provider: "openai", model: "gpt-5.2-2025-12-11" },
-  "duo-chat-gpt-5-4": { provider: "openai", model: "gpt-5.4-2026-03-05" },
-  "duo-chat-gpt-5-5": { provider: "openai", model: "gpt-5.5-2026-04-23" },
-  "duo-chat-gpt-5-mini": { provider: "openai", model: "gpt-5-mini-2025-08-07" },
-  "duo-chat-gpt-5-4-mini": { provider: "openai", model: "gpt-5.4-mini" },
-  "duo-chat-gpt-5-4-nano": { provider: "openai", model: "gpt-5.4-nano" },
-  "duo-chat-gpt-5-6-sol": { provider: "openai", model: "gpt-5.6-sol" },
-  "duo-chat-gpt-5-6-terra": { provider: "openai", model: "gpt-5.6-terra" },
-  "duo-chat-gpt-5-6-luna": { provider: "openai", model: "gpt-5.6-luna" },
-  "duo-chat-gpt-5-codex": { provider: "openai", model: "gpt-5-codex" },
-  "duo-chat-gpt-5-2-codex": { provider: "openai", model: "gpt-5.2-codex" },
-  "duo-chat-gpt-5-3-codex": { provider: "openai", model: "gpt-5.3-codex" },
-};
-
 export function gitlabProtocolFetch(config: ModelConfig, fetch: typeof globalThis.fetch, authFetch = fetch): { fetch: typeof globalThis.fetch; mapping: { provider: "openai" | "anthropic"; model: string } } {
   const settings = settingsFor(config);
-  const mapping = GITLAB_MODELS[config.model];
+  const mapping = Object.hasOwn(GITLAB_MODELS, config.model) ? GITLAB_MODELS[config.model] : undefined;
   if (!mapping) throw new Error(`Unsupported GitLab Duo model: ${config.model}`);
   let cached: { token: string; headers: Record<string, string>; expiresAt: number } | undefined;
   const directAccess = async (signal?: AbortSignal) => {
@@ -545,6 +519,59 @@ export function gitlabProtocolFetch(config: ModelConfig, fetch: typeof globalThi
   } };
 }
 
+function nativeModel(provider: Record<string, any>, config: ModelConfig): Exclude<LanguageModel, string> {
+  const shape = config.modelProvider?.shape;
+  const method = shape === "responses" ? provider.responses
+    : shape === "completions" ? provider.chat ?? provider.chatModel : provider.languageModel;
+  if (typeof method !== "function") throw new Error(`SDK ${sdkFor(config)} does not support model API shape: ${shape}`);
+  return method.call(provider, config.model);
+}
+
+function modelDefaultHeaders(config: ModelConfig): Record<string, string> | undefined {
+  const cloudflare = isCloudflareGateway(config);
+  // Catalog metadata must not replace the user's authentication or gateway.
+  // Filter gateway aliases case-insensitively before supplying the saved ID.
+  const headers = Object.fromEntries(Object.entries(config.modelProvider?.headers ?? {}).filter(([key]) =>
+    !["authorization", "x-api-key", "api-key", "x-goog-api-key", "x-amz-security-token", "host", "content-length"].includes(key.toLowerCase())
+      && !(cloudflare && key.toLowerCase() === "cf-aig-gateway-id"),
+  ));
+  if (cloudflare) headers["cf-aig-gateway-id"] = settingsFor(config).gatewayId;
+  return Object.keys(headers).length ? headers : undefined;
+}
+
+function modelDefaultsFetch(config: ModelConfig, fetch: typeof globalThis.fetch): typeof globalThis.fetch {
+  const defaults = config.modelProvider?.body && Object.fromEntries(Object.entries(config.modelProvider.body).filter(([key]) =>
+    !["model", "messages", "input", "contents", "prompt", "system", "systemInstruction", "stream", "tools", "tool_choice"].includes(key),
+  ));
+  if (!defaults || !Object.keys(defaults).length) return fetch;
+  return async (input, init) => {
+    const request = new Request(input, init);
+    if (request.headers.get("authorization")?.startsWith("AWS4-HMAC-SHA256")) {
+      throw new Error("Catalog body defaults cannot be applied after AWS SigV4 signing; use a bearer token or remove the body override.");
+    }
+    if (request.method !== "POST" || !request.body) return fetch(request);
+    const body = await request.clone().json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Model request body must be a JSON object");
+    // SDK-generated model, prompt, tools, stream, and explicit options win.
+    return fetch(new Request(request, { body: JSON.stringify({ ...defaults, ...body }) }));
+  };
+}
+
+function azureInferenceFetch(config: ModelConfig, fetch: typeof globalThis.fetch): typeof globalThis.fetch {
+  const settings = settingsFor(config);
+  return async (input, init) => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    if (!/\/models\//.test(url.pathname)) return fetch(request);
+    if (!url.searchParams.has("api-version")) url.searchParams.set("api-version", settings.apiVersion || "2024-05-01-preview");
+    const headers = new Headers(request.headers);
+    headers.delete("authorization");
+    headers.set("api-key", settings.apiKey);
+    return fetch(new Request(url, { method: request.method, headers, signal: request.signal,
+      ...(request.body ? { body: await request.clone().text() } : {}) }));
+  };
+}
+
 export async function createModel(config: ModelConfig, logger?: EventLogger, conversationId?: string, options: CreateModelOptions = {}): Promise<LanguageModel> {
   const errors = modelConfigErrors(config);
   if (Object.keys(errors).length) throw new Error(Object.values(errors)[0]);
@@ -563,71 +590,89 @@ export async function createModel(config: ModelConfig, logger?: EventLogger, con
   });
   const module = await loadSdk(sdk, options.loaders?.[sdk]);
   options.signal?.throwIfAborted();
-  const common = { apiKey: settings.apiKey, ...(baseURL ? { baseURL } : {}), fetch: isOpenAIShapedSdk(sdk) ? retryingFetch : baseRetryingFetch };
+  const vertexCompatibleAuth = config.providerId === "google-vertex" && sdk === "@ai-sdk/openai-compatible" && !settings.apiKey && googleCredentials(config);
+  const azureCompatibleAuth = (config.providerId === "azure" || config.providerId === "azure-cognitive-services") && sdk === "@ai-sdk/openai-compatible";
+  const transportFetch = vertexCompatibleAuth ? googleServiceAccountFetch(config, retryingFetch, baseRetryingFetch)
+    : azureCompatibleAuth ? azureInferenceFetch(config, retryingFetch) : isOpenAIShapedSdk(sdk) ? retryingFetch : baseRetryingFetch;
+  const modelFetch = modelDefaultsFetch(config, transportFetch);
+  const common = { headers: modelDefaultHeaders(config), apiKey: vertexCompatibleAuth ? "service-account" : settings.apiKey, ...(baseURL ? { baseURL } : {}), fetch: modelFetch };
   let model: LanguageModel;
 
   switch (sdk) {
-    case "@ai-sdk/amazon-bedrock": model = module.createAmazonBedrock({ ...common, region: settings.region, accessKeyId: settings.accessKeyId, secretAccessKey: settings.secretAccessKey, sessionToken: settings.sessionToken }).languageModel(config.model); break;
-    case "@ai-sdk/anthropic": model = module.createAnthropic(common).languageModel(config.model); break;
-    case "@ai-sdk/azure": model = module.createAzure({ ...common, resourceName: settings.resourceName }).languageModel(config.model); break;
-    case "@ai-sdk/cerebras": model = module.createCerebras(common).languageModel(config.model); break;
-    case "@ai-sdk/cohere": model = module.createCohere(common).languageModel(config.model); break;
-    case "@ai-sdk/deepinfra": model = module.createDeepInfra(common).languageModel(config.model); break;
-    case "@ai-sdk/deepseek": model = module.createDeepSeek(common).languageModel(config.model); break;
-    case "@ai-sdk/gateway": model = module.createGateway(common).languageModel(config.model); break;
-    case "@ai-sdk/google": model = module.createGoogle(common).languageModel(config.model); break;
+    case "@ai-sdk/amazon-bedrock": model = nativeModel(module.createAmazonBedrock({ ...common, region: settings.region, accessKeyId: settings.accessKeyId, secretAccessKey: settings.secretAccessKey, sessionToken: settings.sessionToken }), config); break;
+    case "@ai-sdk/amazon-bedrock/mantle": model = nativeModel(module.createBedrockMantle({ ...common, region: settings.region, accessKeyId: settings.accessKeyId, secretAccessKey: settings.secretAccessKey, sessionToken: settings.sessionToken }), config); break;
+    case "@ai-sdk/anthropic": model = nativeModel(module.createAnthropic({ ...common,
+      ...(isCloudflareGateway(config) ? { apiKey: undefined, authToken: settings.apiKey } : {}),
+    }), config); break;
+    case "@ai-sdk/azure": model = nativeModel(module.createAzure({ ...common, resourceName: settings.resourceName }), config); break;
+    case "@ai-sdk/cerebras": model = nativeModel(module.createCerebras(common), config); break;
+    case "@ai-sdk/cohere": model = nativeModel(module.createCohere(common), config); break;
+    case "@ai-sdk/deepinfra": model = nativeModel(module.createDeepInfra(common), config); break;
+    case "@ai-sdk/deepseek": model = nativeModel(module.createDeepSeek(common), config); break;
+    case "@ai-sdk/gateway": model = nativeModel(module.createGateway(common), config); break;
+    case "@ai-sdk/google": model = nativeModel(module.createGoogle(common), config); break;
     case "@ai-sdk/google-vertex": {
       const serviceAccount = !settings.apiKey && googleCredentials(config);
-      model = module.createGoogleVertex({ ...common, project: settings.project, location: settings.location,
+      model = nativeModel(module.createGoogleVertex({ ...common, project: settings.project, location: settings.location,
         ...(serviceAccount ? { apiKey: "service-account", baseURL: baseURL || `https://${settings.location === "global" ? "" : `${settings.location}-`}aiplatform.googleapis.com/v1beta1/projects/${settings.project}/locations/${settings.location}/publishers/google`,
-          fetch: googleServiceAccountFetch(config, baseRetryingFetch) } : {}) }).languageModel(config.model);
+          fetch: modelDefaultsFetch(config, googleServiceAccountFetch(config, baseRetryingFetch)) } : {}) }), config);
       break;
     }
-    case "@ai-sdk/google-vertex/anthropic": model = module.createGoogleVertexAnthropic({ ...common, project: settings.project, location: settings.location,
-      generateAuthToken: async () => "service-account", fetch: googleServiceAccountFetch(config, baseRetryingFetch) }).languageModel(config.model); break;
-    case "@ai-sdk/groq": model = module.createGroq(common).languageModel(config.model); break;
-    case "@ai-sdk/mistral": model = module.createMistral(common).languageModel(config.model); break;
-    case "@ai-sdk/openai": model = module.createOpenAI(common).languageModel(config.model); break;
+    case "@ai-sdk/google-vertex/anthropic": model = nativeModel(module.createGoogleVertexAnthropic({ ...common, project: settings.project, location: settings.location,
+      generateAuthToken: async () => "service-account", fetch: modelDefaultsFetch(config, googleServiceAccountFetch(config, baseRetryingFetch)) }), config); break;
+    case "@ai-sdk/groq": model = nativeModel(module.createGroq(common), config); break;
+    case "@ai-sdk/mistral": model = nativeModel(module.createMistral(common), config); break;
+    case "@ai-sdk/openai": model = nativeModel(module.createOpenAI(common), config); break;
     case "@ai-sdk/perplexity": {
-      const native = module.createPerplexity(common).languageModel(config.model);
+      const native = nativeModel(module.createPerplexity(common), config);
       // The native Sonar SDK rejects function tools. Use the endpoint's Chat
       // protocol for tool-capable deployments while retaining native search
       // metadata/citations for requests without function tools.
       const compatible = await import("@ai-sdk/openai-compatible");
       const chat = compatible.createOpenAICompatible({ ...common, name: "perplexity",
-        baseURL: baseURL || "https://api.perplexity.ai", fetch: retryingFetch }).languageModel(config.model);
+        baseURL: baseURL || "https://api.perplexity.ai", fetch: modelDefaultsFetch(config, retryingFetch) }).languageModel(config.model);
       model = Object.assign(Object.create(native), {
         doStream: (args: any) => (args.tools?.length ? chat : native).doStream(args),
         doGenerate: (args: any) => (args.tools?.length ? chat : native).doGenerate(args),
       });
       break;
     }
-    case "@ai-sdk/togetherai": model = module.createTogetherAI(common).languageModel(config.model); break;
-    case "@ai-sdk/vercel": model = module.createVercel(common).languageModel(config.model); break;
-    case "@ai-sdk/xai": model = module.createXai(common).languageModel(config.model); break;
-    case "@aihubmix/ai-sdk-provider": model = module.createAihubmix(common).languageModel(config.model); break;
-    case "@openrouter/ai-sdk-provider": model = module.createOpenRouter(common).languageModel(config.model); break;
-    case "@saladtechnologies-oss/ai-sdk-provider": model = module.createSaladCloud(common).languageModel(config.model); break;
-    case "merge-gateway-ai-sdk-provider": model = module.createMergeGateway(common).languageModel(config.model); break;
-    case "watsonx-ai-provider": model = module.createOpenAICompatible({ name: "watsonx", baseURL: "https://watsonx.invalid/v1", apiKey: settings.apiKey, fetch: watsonxProtocolFetch(config, retryingFetch, baseRetryingFetch) }).languageModel(config.model); break;
-    case "@jerome-benoit/sap-ai-provider-v2": model = module.createOpenAICompatible({ name: "sap-ai-core", baseURL: "https://sap.invalid/v1", apiKey: "sap-oauth", fetch: sapProtocolFetch(config, baseRetryingFetch) }).languageModel(config.model); break;
+    case "@ai-sdk/togetherai": model = nativeModel(module.createTogetherAI(common), config); break;
+    case "@ai-sdk/vercel": model = nativeModel(module.createVercel(common), config); break;
+    case "@ai-sdk/xai": model = nativeModel(module.createXai(common), config); break;
+    case "@aihubmix/ai-sdk-provider": model = nativeModel(module.createAihubmix(common), config); break;
+    case "@openrouter/ai-sdk-provider": model = nativeModel(module.createOpenRouter(common), config); break;
+    case "@saladtechnologies-oss/ai-sdk-provider": model = nativeModel(module.createSaladCloud(common), config); break;
+    case "merge-gateway-ai-sdk-provider": model = nativeModel(module.createMergeGateway(common), config); break;
+    case "watsonx-ai-provider": model = nativeModel(module.createOpenAICompatible({ name: "watsonx", headers: modelDefaultHeaders(config), baseURL: "https://watsonx.invalid/v1", apiKey: settings.apiKey, fetch: modelDefaultsFetch(config, watsonxProtocolFetch(config, retryingFetch, baseRetryingFetch)) }), config); break;
+    case "@jerome-benoit/sap-ai-provider-v2": model = nativeModel(module.createOpenAICompatible({ name: "sap-ai-core", headers: modelDefaultHeaders(config), baseURL: "https://sap.invalid/v1", apiKey: "sap-oauth", fetch: modelDefaultsFetch(config, sapProtocolFetch(config, baseRetryingFetch)) }), config); break;
     case "gitlab-ai-provider": {
       const initial = gitlabProtocolFetch(config, baseRetryingFetch);
       const adapter = initial.mapping.provider === "openai" ? gitlabProtocolFetch(config, retryingFetch, baseRetryingFetch) : initial;
       const gateway = (settings.aiGatewayUrl || "https://cloud.gitlab.com").replace(/\/+$/, "");
       if (adapter.mapping.provider === "openai") {
-        const openai = await import("@ai-sdk/openai");
-        model = openai.createOpenAI({ baseURL: `${gateway}/ai/v1/proxy/openai/v1`, apiKey: "gitlab-direct-access", fetch: adapter.fetch }).languageModel(adapter.mapping.model);
+        const openai = await loadSdk("@ai-sdk/openai", options.loaders?.["@ai-sdk/openai"]);
+        model = nativeModel(openai.createOpenAI({ baseURL: config.modelProvider?.api !== undefined ? baseURL : `${gateway}/ai/v1/proxy/openai/v1`, apiKey: "gitlab-direct-access", headers: modelDefaultHeaders(config), fetch: modelDefaultsFetch(config, adapter.fetch) }), { ...config, model: adapter.mapping.model });
       } else {
-        const anthropic = await import("@ai-sdk/anthropic");
-        model = anthropic.createAnthropic({ baseURL: `${gateway}/ai/v1/proxy/anthropic`, authToken: "gitlab-direct-access", fetch: adapter.fetch }).languageModel(adapter.mapping.model);
+        const anthropic = await loadSdk("@ai-sdk/anthropic", options.loaders?.["@ai-sdk/anthropic"]);
+        model = nativeModel(anthropic.createAnthropic({ baseURL: config.modelProvider?.api !== undefined ? baseURL : `${gateway}/ai/v1/proxy/anthropic/v1`, authToken: "gitlab-direct-access", headers: modelDefaultHeaders(config), fetch: modelDefaultsFetch(config, adapter.fetch) }), { ...config, model: adapter.mapping.model });
       }
       break;
     }
-    case "ai-gateway-provider": model = module.createOpenAICompatible({ name: "cloudflare-ai-gateway", baseURL, apiKey: settings.apiKey, headers: { "cf-aig-gateway-id": settings.gatewayId }, fetch: retryingFetch }).languageModel(config.model); break;
+    case "ai-gateway-provider": model = nativeModel(module.createOpenAICompatible({ ...common, name: "cloudflare-ai-gateway", baseURL }), config); break;
     case "@qvac/ai-sdk-provider":
     case "venice-ai-sdk-provider":
-    case "@ai-sdk/openai-compatible": model = module.createOpenAICompatible({ name: config.providerId || "custom", baseURL, apiKey: settings.apiKey, fetch: retryingFetch }).languageModel(config.model); break;
+    case "@ai-sdk/openai-compatible": {
+      if (config.modelProvider?.shape === "responses") {
+        // The compatible SDK only implements Chat Completions. Keep Responses
+        // on the native OpenAI interface rather than reimplementing its protocol.
+        const openai = await loadSdk("@ai-sdk/openai", options.loaders?.["@ai-sdk/openai"]);
+        model = nativeModel(openai.createOpenAI(common), config);
+      } else {
+        model = nativeModel(module.createOpenAICompatible({ ...common, name: config.providerId || "custom", baseURL }), config);
+      }
+      break;
+    }
   }
   options.signal?.throwIfAborted();
   return model;
