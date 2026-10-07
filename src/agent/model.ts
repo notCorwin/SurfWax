@@ -3,7 +3,7 @@ import type { EventLogger } from "../logging";
 import type { ModelConfig, ModelSdk } from "../types";
 import { REASONING_EFFORTS, reasoningSettingsFor, type ReasoningEffort, type ReasoningSettings } from "./reasoning";
 import { GITLAB_MODELS } from "./gitlab-models";
-import { googleCredentials, isOpenAIShapedSdk, modelConfigErrors, resolvedBaseURL, sdkFor, settingsFor } from "./model-sdks";
+import { googleCredentials, isCloudflareGateway, isOpenAIShapedSdk, modelConfigErrors, resolvedBaseURL, sdkFor, settingsFor } from "./model-sdks";
 
 const MAX_RETRY_DELAY_MS = 5_000;
 const INITIAL_RETRY_DELAY_MS = 250;
@@ -528,11 +528,15 @@ function nativeModel(provider: Record<string, any>, config: ModelConfig): Exclud
 }
 
 function modelDefaultHeaders(config: ModelConfig): Record<string, string> | undefined {
-  if (!config.modelProvider?.headers) return undefined;
-  // Catalog metadata must not replace the user's provider authentication.
-  return Object.fromEntries(Object.entries(config.modelProvider.headers).filter(([key]) =>
-    !["authorization", "x-api-key", "api-key", "x-goog-api-key", "x-amz-security-token", "host", "content-length"].includes(key.toLowerCase()),
+  const cloudflare = isCloudflareGateway(config);
+  // Catalog metadata must not replace the user's authentication or gateway.
+  // Filter gateway aliases case-insensitively before supplying the saved ID.
+  const headers = Object.fromEntries(Object.entries(config.modelProvider?.headers ?? {}).filter(([key]) =>
+    !["authorization", "x-api-key", "api-key", "x-goog-api-key", "x-amz-security-token", "host", "content-length"].includes(key.toLowerCase())
+      && !(cloudflare && key.toLowerCase() === "cf-aig-gateway-id"),
   ));
+  if (cloudflare) headers["cf-aig-gateway-id"] = settingsFor(config).gatewayId;
+  return Object.keys(headers).length ? headers : undefined;
 }
 
 function modelDefaultsFetch(config: ModelConfig, fetch: typeof globalThis.fetch): typeof globalThis.fetch {
@@ -597,7 +601,9 @@ export async function createModel(config: ModelConfig, logger?: EventLogger, con
   switch (sdk) {
     case "@ai-sdk/amazon-bedrock": model = nativeModel(module.createAmazonBedrock({ ...common, region: settings.region, accessKeyId: settings.accessKeyId, secretAccessKey: settings.secretAccessKey, sessionToken: settings.sessionToken }), config); break;
     case "@ai-sdk/amazon-bedrock/mantle": model = nativeModel(module.createBedrockMantle({ ...common, region: settings.region, accessKeyId: settings.accessKeyId, secretAccessKey: settings.secretAccessKey, sessionToken: settings.sessionToken }), config); break;
-    case "@ai-sdk/anthropic": model = nativeModel(module.createAnthropic(common), config); break;
+    case "@ai-sdk/anthropic": model = nativeModel(module.createAnthropic({ ...common,
+      ...(isCloudflareGateway(config) ? { apiKey: undefined, authToken: settings.apiKey } : {}),
+    }), config); break;
     case "@ai-sdk/azure": model = nativeModel(module.createAzure({ ...common, resourceName: settings.resourceName }), config); break;
     case "@ai-sdk/cerebras": model = nativeModel(module.createCerebras(common), config); break;
     case "@ai-sdk/cohere": model = nativeModel(module.createCohere(common), config); break;
@@ -653,7 +659,7 @@ export async function createModel(config: ModelConfig, logger?: EventLogger, con
       }
       break;
     }
-    case "ai-gateway-provider": model = nativeModel(module.createOpenAICompatible({ name: "cloudflare-ai-gateway", baseURL, apiKey: settings.apiKey, headers: { ...modelDefaultHeaders(config), "cf-aig-gateway-id": settings.gatewayId }, fetch: modelDefaultsFetch(config, retryingFetch) }), config); break;
+    case "ai-gateway-provider": model = nativeModel(module.createOpenAICompatible({ ...common, name: "cloudflare-ai-gateway", baseURL }), config); break;
     case "@qvac/ai-sdk-provider":
     case "venice-ai-sdk-provider":
     case "@ai-sdk/openai-compatible": {

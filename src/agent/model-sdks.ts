@@ -34,6 +34,11 @@ export function sdkFor(config: Pick<ModelConfig, "providerId" | "sdk" | "transpo
   return config.sdk ?? (config.transport === "gateway" ? "@ai-sdk/gateway" : "@ai-sdk/openai-compatible");
 }
 
+/** A model's SDK override changes its protocol, not its saved gateway identity. */
+export function isCloudflareGateway(config: Pick<ModelConfig, "providerId" | "sdk" | "modelProvider">): boolean {
+  return config.providerId === "cloudflare-ai-gateway" || config.sdk === "ai-gateway-provider" || config.modelProvider?.npm === "ai-gateway-provider";
+}
+
 export function settingsFor(config: Pick<ModelConfig, "providerSettings" | "apiKey">): Record<string, string> {
   return { ...(config.providerSettings ?? {}), ...(config.providerSettings?.apiKey || !config.apiKey ? {} : { apiKey: config.apiKey }) };
 }
@@ -50,6 +55,11 @@ export function defaultBaseURL(sdk: ModelSdk): string {
 
 export function providerSettingFields(provider: ProviderDescriptor): ProviderSettingField[] {
   if (!isModelSdk(provider.npm)) return [];
+  if (isCloudflareGateway({ providerId: provider.id, sdk: provider.npm })) return [
+    API_KEY,
+    field("accountId", "Cloudflare Account ID", { required: true }),
+    field("gatewayId", "AI Gateway ID", { required: true }),
+  ];
   if (provider.id === "google-vertex" && provider.npm === "@ai-sdk/openai-compatible") {
     return [...providerSettingFields({ ...provider, npm: "@ai-sdk/google-vertex" }), field("GOOGLE_VERTEX_ENDPOINT", "Vertex Endpoint（可选）", { description: "默认根据 Location 生成。" })];
   }
@@ -82,11 +92,6 @@ export function providerSettingFields(provider: ProviderDescriptor): ProviderSet
       field("project", "Project", { required: true }),
       field("location", "Location", { required: true, placeholder: "us-east5" }),
       field("serviceAccountJson", "Service Account JSON", { type: "textarea", required: true }),
-    ];
-    case "ai-gateway-provider": return [
-      API_KEY,
-      field("accountId", "Cloudflare Account ID", { required: true }),
-      field("gatewayId", "AI Gateway ID", { required: true }),
     ];
     case "gitlab-ai-provider": return [
       field("apiKey", "GitLab Token", { type: "password", required: true }),
@@ -132,7 +137,9 @@ export function resolvedBaseURL(config: ModelConfig): string {
   if (sdk === "@ai-sdk/azure" && settings.resourceName) {
     return `https://${settings.resourceName.trim()}.openai.azure.com/openai/v1`;
   }
-  if (sdk === "ai-gateway-provider") return `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(settings.accountId?.trim() ?? "")}/ai/v1`;
+  if (sdk === "ai-gateway-provider" || isCloudflareGateway(config) && !config.baseURL.trim()) {
+    return `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(settings.accountId?.trim() ?? "")}/ai/v1`;
+  }
   if (sdk === "gitlab-ai-provider") return (settings.instanceUrl || defaultBaseURL(sdk)).trim().replace(/\/+$/, "");
   if (sdk === "@jerome-benoit/sap-ai-provider-v2") return settings.deploymentUrl?.trim().replace(/\/+$/, "") ?? "";
   if (sdk === "@qvac/ai-sdk-provider") return settings.endpoint?.trim() || config.baseURL.trim();
@@ -175,7 +182,7 @@ export function modelConfigErrors(config: ModelConfig, fields?: ProviderSettingF
     errors.contextWindowOverride = "请输入正整数 token 数";
   }
 
-  for (const item of fields ?? providerSettingFields({ id: config.providerId ?? "custom", npm: sdk, api: config.modelProvider?.api ?? config.baseURL })) {
+  for (const item of fields ?? providerSettingFields({ id: isCloudflareGateway(config) ? "cloudflare-ai-gateway" : config.providerId ?? "custom", npm: sdk, api: config.modelProvider?.api ?? config.baseURL })) {
     if (item.required && !settings[item.key]?.trim()) errors[item.key] = `请输入${item.label}`;
   }
   if ((sdk === "@ai-sdk/amazon-bedrock" || sdk === "@ai-sdk/amazon-bedrock/mantle") && !settings.apiKey?.trim() && !(settings.accessKeyId?.trim() && settings.secretAccessKey?.trim())) {

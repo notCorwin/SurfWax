@@ -1,5 +1,5 @@
 import { isModelSdk, type JsonValue, type ModelConfig, type ModelProviderOverride, type ModelSdk } from "../types";
-import { defaultBaseURL, providerSettingFields, resolvedBaseURL, sdkFor, type ProviderSettingField } from "./model-sdks";
+import { defaultBaseURL, isCloudflareGateway, providerSettingFields, resolvedBaseURL, sdkFor, type ProviderSettingField } from "./model-sdks";
 
 const CACHE_KEY = "side-agent:model-limit";
 const CATALOG_CACHE_KEY = "side-agent:model-catalog";
@@ -224,7 +224,7 @@ export function applyModelPreset<T extends ModelConfig>(config: T, preset: Model
 }
 
 export function modelPresetFields(config: ModelConfig, preset?: ModelProviderPreset): ProviderSettingField[] {
-  return providerSettingFields({ id: config.providerId ?? "custom", npm: config.modelProvider?.npm ?? sdkFor(config), api: config.baseURL, env: preset?.env });
+  return providerSettingFields({ id: isCloudflareGateway(config) ? "cloudflare-ai-gateway" : config.providerId ?? "custom", npm: config.modelProvider?.npm ?? sdkFor(config), api: config.baseURL, env: preset?.env });
 }
 
 const catalogRequests = new WeakMap<typeof globalThis.fetch, Map<string, Promise<ModelCatalog>>>();
