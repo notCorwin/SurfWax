@@ -96,8 +96,11 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
     }
     if (event.type === "conversation.deleted") {
       const id = event.conversationId ?? (fromLogValue(event.content) as { conversationId?: string } | null)?.conversationId;
-      if (id) cachedMessages.current.delete(id);
       setIndex((previous) => { const next = new Map(previous); if (id) next.delete(id); return next; });
+    }
+    if (event.type === "conversation.restored" && event.conversationId) {
+      const entries = cachedMessages.current.get(event.conversationId);
+      if (entries) setIndex((previous) => new Map([...previous, ...buildMessageSearchIndex([...entries.values()])]));
     }
   }), [logger]);
 
@@ -118,8 +121,12 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
       <InputGroup className="shrink-0"><InputGroupAddon><SearchIcon aria-hidden="true" /></InputGroupAddon><InputGroupInput ref={searchInput} type="search" aria-label="搜索会话" placeholder="搜索标题或消息…" value={query} onChange={(event) => setQuery(event.target.value)} /></InputGroup>
       {warning && <p role="status" className="conversation-notice">{warning}</p>}
       {deleted && <div role="status" className="conversation-notice flex items-center justify-between gap-2"><span>已删除“{deleted.title}”</span>
-        <Button type="button" variant="ghost" size="sm" disabled={locked} onClick={() => void runtimeCommands.threads.restore(deleted.id).then(() => {
+        <Button type="button" variant="ghost" size="sm" disabled={locked} onClick={() => void runtimeCommands.threads.restore(deleted.id).then(async () => {
           clearTimeout(undoTimer.current); setDeleted(undefined);
+          const events = await logger.messageEvents();
+          for (const event of events) ingest(event);
+          indexed.current = true;
+          setIndex(buildMessageSearchIndex([...cachedMessages.current.values()].flatMap((entries) => [...entries.values()])));
         }).catch(warn)}>撤销</Button></div>}
       {searchError !== undefined && <ErrorNotice summary="搜索记录读取失败。" error={searchError} />}
       <div className="conversation-items">

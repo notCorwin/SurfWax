@@ -103,6 +103,20 @@ describe("createAgent", () => {
     await expect(result.text).resolves.toBe("done");
   });
 
+  it("applies the Anthropic max_tokens fallback to GitLab Claude routes", async () => {
+    const executor = { browserContext: vi.fn(async () => ({ windowId: 7, tabs: [] })) } as unknown as ChromeExecutor;
+    const model = new MockLanguageModelV4({ doStream: async (options) => {
+      expect(options.maxOutputTokens).toBe(128_000);
+      return { stream: simulateReadableStream({ chunks: [
+        { type: "stream-start", warnings: [] }, { type: "text-start", id: "text" }, { type: "text-delta", id: "text", delta: "done" }, { type: "text-end", id: "text" },
+        { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: usage() },
+      ] as any[] }) };
+    } });
+    const result = await createAgent({ model: { providerId: "gitlab", sdk: "gitlab-ai-provider", baseURL: "", model: "duo-chat-claude-sonnet-4-5",
+      canonicalModelId: "anthropic/claude-sonnet-4-5", modelFamily: "claude", contextWindowOverride: 256_000 }, languageModel: model, executor }).stream({ prompt: "hello" });
+    await expect(result.text).resolves.toBe("done");
+  });
+
   it("keeps the tool catalog out of the default instructions", () => {
     expect(DEFAULT_INSTRUCTIONS).not.toContain(PROGRAM_TOOL_CONTEXT);
     expect(DEFAULT_INSTRUCTIONS).not.toContain("search-tools");

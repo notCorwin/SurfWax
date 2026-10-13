@@ -173,4 +173,15 @@ describe("three browser tools", () => {
     const value = { snapshot: "x".repeat(9_000), screenshot: { mediaType: "image/png", artifactId: 7 } };
     expect(await compactToolResult(value, { logger: { append: () => { throw new Error("must not compact visual results"); } } as unknown as EventLogger })).toBe(value);
   });
+
+  it("keeps screenshot artifact metadata without injecting pixels for text-only models", async () => {
+    const messages = [{ role: "tool", content: [{
+      type: "tool-result", toolName: "run", output: { type: "json", value: { screenshot: { mediaType: "image/png", artifactId: 7 } } },
+    }] }];
+    const readArtifact = vi.fn(async () => ({ mimeType: "image/png", base64: "pixels" }));
+    const prepared = await prepareToolMessages(messages, 1, undefined, readArtifact, false);
+    expect(prepared).toHaveLength(1);
+    expect(prepared[0].content[0].output.value.screenshot).toEqual({ mediaType: "image/png", artifactId: 7 });
+    expect(readArtifact).not.toHaveBeenCalled();
+  });
 });

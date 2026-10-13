@@ -11,7 +11,7 @@ const BASE_INSTRUCTIONS = [
   "Read large $ref outputs through run with artifacts.read and the supplied access fields. Use emit for incremental results.",
   "A completed operation confirms dispatch and return, not business success. Inspect the state and check the intended outcome before claiming success. Never blindly retry an operation whose effects are unknown.",
   "Use run(background=true) for long execution, then jobs for incremental receipts, bounded waits, status, and cancellation. Poll until terminal; do not end the turn with an unfinished job. Cancellation never rolls back completed effects. Restart preserves records, not JavaScript stacks.",
-  "Operations remain bound to the current Chrome window and stable tab IDs. Use browser.page(tabId) for another tab or browser.tabs.open(url) for a new tab. Subscribe to events before triggering actions. Page and extension network contexts must be explicit.",
+  "Operations start in the current Chrome window and use stable tab IDs. Tab discovery spans browser windows; use the supplied windowId to distinguish them. Selecting a tab moves the run's active window, while browser.tabs.open(url) opens in that active window. Subscribe to events before triggering actions. Page and extension network contexts must be explicit.",
   "Stop immediately once the requested outcome is satisfied. If progress is blocked or targets remain genuinely ambiguous, explain the blocker and ask only for the information required to continue.",
   "Generated artifacts stay in the conversation by default. Set save=true or call artifacts.save only when the user explicitly asks to save, download, or export a local file; a filename alone is not permission to download.",
 ].join(" ");

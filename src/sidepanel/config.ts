@@ -100,7 +100,7 @@ export async function loadModelConfig(
       if (!provider) throw new Error(`模型目录中找不到 Provider：${selected.providerId}；请在设置中重新选择 Provider。`);
       const model = provider.models?.[selected.model] ?? Object.values(provider.models ?? {}).find((model) => model.id === selected.model);
       const modelProvider = normalizeModelProviderOverride(model?.provider)
-        ?? (provider.npm !== undefined && !isModelSdk(provider.npm) ? { npm: provider.npm } : undefined);
+        ?? (model && provider.npm !== undefined && !isModelSdk(provider.npm) ? { npm: provider.npm } : undefined);
       result.profiles[selected.providerId] = {
         ...selected,
         ...(modelProvider ? { modelProvider } : {}),

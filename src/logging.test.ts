@@ -165,6 +165,10 @@ describe("canonical event log", () => {
     expect(createIndex).toHaveBeenCalledWith("type", "type");
     expect(createIndex).toHaveBeenCalledWith("conversationType", ["conversationId", "type"]);
     expect(createIndex).toHaveBeenCalledWith("runType", ["runId", "type"]);
+    expect(createIndex).toHaveBeenCalledWith("typeId", ["type", "id"]);
+    expect(createIndex).toHaveBeenCalledWith("conversationTypeId", ["conversationId", "type", "id"]);
+    expect(createIndex).toHaveBeenCalledWith("runTypeId", ["runId", "type", "id"]);
+    expect(createIndex).toHaveBeenCalledWith("conversationIdId", ["conversationId", "id"]);
     expect(db.deleteObjectStore).not.toHaveBeenCalled();
     expect(legacyRecords).toHaveLength(1);
   });

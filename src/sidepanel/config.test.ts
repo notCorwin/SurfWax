@@ -157,6 +157,19 @@ describe("model config persistence", () => {
     expect(migrated.profiles.openai?.modelProvider).toBeUndefined();
   });
 
+  it("preserves a supported saved SDK for custom IDs on mixed-route providers", async () => {
+    const storage = memoryStorage(MODEL_CONFIG_STORAGE_KEY);
+    storage.value = { selectedProviderId: "mixed", profiles: { mixed: {
+      sdk: "@ai-sdk/openai", baseURL: "https://saved.test/v1", model: "custom-model", providerSettings: { apiKey: "key" },
+    } } };
+    const migrated = await loadModelConfig(undefined, storage, { loadCatalog: async () => ({ mixed: {
+      npm: "unsupported-provider", models: { known: { provider: { npm: "@ai-sdk/openai" } } },
+    } }) });
+    expect(migrated.profiles.mixed).toMatchObject({ sdk: "@ai-sdk/openai", baseURL: "https://saved.test/v1", model: "custom-model", catalogRouteVersion: 1 });
+    expect(migrated.profiles.mixed?.modelProvider).toBeUndefined();
+    expect(isCompleteModelConfig(migrated.profiles.mixed)).toBe(true);
+  });
+
   it("does not dispatch or mark legacy catalog routing as migrated when the catalog is unavailable", async () => {
     const storage = memoryStorage(MODEL_CONFIG_STORAGE_KEY);
     const original = { selectedProviderId: "vertex", profiles: { vertex: { sdk: "@ai-sdk/google-vertex", baseURL: "", model: "claude" } } };

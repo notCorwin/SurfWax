@@ -6,7 +6,6 @@ function workerMain() {
   >();
   let requestSequence = 0;
   const lifetime = new AbortController();
-  const drained = new Set<() => void>();
   const describeError = (error: any) => ({
     message: error?.message ?? String(error),
     name: error?.name,
@@ -133,10 +132,6 @@ function workerMain() {
           Object.assign(new Error(message.error.message), message.error),
         );
       else waiter?.resolve(decode(message.value));
-      if (pending.size === 0) {
-        for (const notify of drained) notify();
-        drained.clear();
-      }
       return;
     }
     if (message.type !== "run") return;
@@ -169,8 +164,6 @@ function workerMain() {
         values.sleep,
         signal,
       );
-      if (pending.size)
-        await new Promise<void>((resolve) => drained.add(resolve));
       await new Promise((resolve) => setTimeout(resolve, 0));
       self.postMessage({ type: "done", value: encode(result ?? null) });
     } catch (error: any) {

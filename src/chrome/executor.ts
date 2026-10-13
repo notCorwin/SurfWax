@@ -28,7 +28,7 @@ type ArtifactRef = { id: number; filename: string; mimeType: string; byteLength:
 type BrowserState = { windowId: number; tabId?: number };
 export type BrowserContext = {
   windowId: number;
-  tabs: Array<{ index: number; tabId?: number; current: boolean; title?: string; url?: string }>;
+  tabs: Array<{ index: number; tabId?: number; windowId?: number; current: boolean; title?: string; url?: string }>;
 };
 
 function abortError(): DOMException {
@@ -319,6 +319,9 @@ export class ChromeExecutor {
         const capabilities = this.programCapabilities(page, state, scope);
         scope.guard();
         const result = await this.programHost(input.code, capabilities, programSignal);
+        // User code may intentionally abandon a losing Promise.race branch.
+        // Revoke and abort those RPCs instead of waiting forever for them.
+        scope.revoke(); lifetime.abort("program-ended");
         await scope.finish(); (deadline ?? combined).throwIfAborted();
         return result;
       } catch (error) {
@@ -510,7 +513,7 @@ export class ChromeExecutor {
   async browserContext(): Promise<BrowserContext> {
     const state = await this.currentBrowserState();
     const tabs = await this.tabsOf(state);
-    return { windowId: state.windowId, tabs: tabs.map(({ index, id, current, title, url }) => ({ index, tabId: id, current, title, url })) };
+    return { windowId: state.windowId, tabs: tabs.map(({ index, id, windowId, current, title, url }) => ({ index, tabId: id, windowId, current, title, url })) };
   }
 
   private async currentBrowserState(): Promise<BrowserState> {
@@ -528,12 +531,12 @@ export class ChromeExecutor {
     return state;
   }
 
-  private async tabsOf(state: BrowserState): Promise<Array<{ index: number; current: boolean; id?: number; title?: string; url?: string }>> {
+  private async tabsOf(state: BrowserState): Promise<Array<{ index: number; current: boolean; id?: number; windowId?: number; title?: string; url?: string }>> {
     const tabs = await this.chromeApi.tabs.query({});
     if (state.tabId === undefined || !tabs.some((tab) => tab.id === state.tabId)) {
       state.tabId = tabs.find((tab) => tab.active)?.id ?? tabs[0]?.id;
     }
-    return tabs.map((tab, index) => ({ index, current: tab.id === state.tabId || !state.tabId && Boolean(tab.active), id: tab.id, title: tab.title, url: tab.url }));
+    return tabs.map((tab, index) => ({ index, current: tab.id === state.tabId || !state.tabId && Boolean(tab.active), id: tab.id, windowId: tab.windowId, title: tab.title, url: tab.url }));
   }
 
   private async selectTab(state: BrowserState, tabId: number): Promise<unknown> {

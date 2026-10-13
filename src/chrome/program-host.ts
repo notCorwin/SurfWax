@@ -209,14 +209,7 @@ export async function executeSandboxProgram(
           );
           return;
         }
-        if (message.type === "done")
-          void Promise.allSettled([...inflight]).then((results) => {
-            const failure = results.find(
-              (result) => result.status === "rejected",
-            );
-            if (failure?.status === "rejected") fail(failure.reason);
-            else accept(decode(message.value));
-          }, fail);
+        if (message.type === "done") accept(decode(message.value));
       };
       channel.port1.start();
       document.body.append(frame);

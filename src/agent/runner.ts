@@ -37,6 +37,12 @@ function browserContextMessage(context: BrowserContext): string {
   ].join("\n");
 }
 
+function usesAnthropicMessages(config: ModelConfig): boolean {
+  const sdk = sdkFor(config);
+  return sdk === "@ai-sdk/anthropic" || sdk === "@ai-sdk/google-vertex/anthropic"
+    || sdk === "gitlab-ai-provider" && (config.canonicalModelId?.startsWith("anthropic/") === true || config.modelFamily?.toLowerCase().startsWith("claude") === true);
+}
+
 const READ_ONLY_TOOLS = new Set(["inspect"]);
 const REPEATABLE_TOOLS = new Set(["run", "jobs"]);
 
@@ -95,11 +101,12 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       browserDigest = nextBrowserDigest;
       if (browserChanged) logger?.record({ type: "browser.context.prepared", conversationId: options.conversationId, content: { stepNumber, ...browserContext } });
       const modelLimit = await (limit ??= resolveModelLimit(options.model, { signal: options.signal }));
-      const prepareMessages = (source: typeof prepared) => prepareToolMessages(
+      const prepareMessages = async (source: typeof prepared) => prepareToolMessages(
         source,
         stepNumber,
         browserChanged ? browserContextMessage(browserContext) : undefined,
         logger ? (id) => logger.result(id, {}, options.conversationId ?? "") : undefined,
+        await toolOptions.visualEnabled(),
       );
       let outgoing = await prepareMessages(prepared);
       const prompt = { instructions: currentInstructions(), tools: currentTools() };
@@ -119,7 +126,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       return {
         instructions: currentInstructions(),
         activeTools: activeTools(),
-        ...(["@ai-sdk/anthropic", "@ai-sdk/google-vertex/anthropic"].includes(sdkFor(options.model))
+        ...(usesAnthropicMessages(options.model)
           ? { maxOutputTokens: options.model.maxTokensOverride ?? modelLimit?.output ?? 128_000 } : {}),
         messages: outgoing,
       };

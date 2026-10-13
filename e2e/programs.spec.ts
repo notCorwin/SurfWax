@@ -41,6 +41,24 @@ async function submit(page: any) {
   await page.getByTestId("composer-input").press("Enter");
 }
 
+test("completes after a race abandons a pending browser RPC", async () => {
+  const provider = await startProvider([
+    commandResponse("run", { code: "return await Promise.race([page.waitForEvent('popup'), sleep(50).then(() => 'timeout')]);" }, "race"),
+    textResponse("ABANDONED_RPC_OK"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await submit(opened.page);
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("ABANDONED_RPC_OK", { timeout: 15_000 });
+    const result = (await readEvents(opened.page)).find((event) => event.type === "tool.finished" && event.toolCallId === "race")?.output;
+    expect(result).toMatchObject({ result: "timeout" });
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
 test("publishes three tools, defaults vision inspection to text, and captures pixels only on demand", async () => {
   const provider = await startProvider([
     commandResponse("inspect", {}, "text-default"),

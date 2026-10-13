@@ -52,20 +52,24 @@ type EventStore = {
   get?(id: number): Promise<LogEvent | undefined>;
   appendMany?(events: readonly Omit<LogEvent, "id">[]): Promise<LogEvent[]>;
   all(): Promise<LogEvent[]>;
-  byTypes?(types: readonly string[], conversationId?: string): Promise<LogEvent[]>;
-  byRunTypes?(runIds: readonly string[], types: readonly string[]): Promise<LogEvent[]>;
-  conversation?(conversationId: string): Promise<LogEvent[]>;
+  byTypes?(types: readonly string[], conversationId?: string, afterId?: number): Promise<LogEvent[]>;
+  byRunTypes?(runIds: readonly string[], types: readonly string[], afterId?: number): Promise<LogEvent[]>;
+  conversation?(conversationId: string, afterId?: number): Promise<LogEvent[]>;
   /** Legacy test capability; canonical runtime never invokes destructive clearing. */
   clear?(): Promise<void>;
 };
 
 const DB_NAME = "side-agent-runtime";
-const DB_VERSION = 6;
+const DB_VERSION = 7;
 const EVENT_STORE = "events";
 const CONVERSATION_INDEX = "conversationId";
 const TYPE_INDEX = "type";
 const CONVERSATION_TYPE_INDEX = "conversationType";
 const RUN_TYPE_INDEX = "runType";
+const TYPE_ID_INDEX = "typeId";
+const CONVERSATION_TYPE_ID_INDEX = "conversationTypeId";
+const RUN_TYPE_ID_INDEX = "runTypeId";
+const CONVERSATION_ID_INDEX = "conversationIdId";
 const SUMMARY_EVENT_TYPES = [
   "conversation.created",
   "conversation.selected",
@@ -105,6 +109,10 @@ export function upgradeEventStore(db: IDBDatabase, transaction: IDBTransaction):
     store.createIndex(CONVERSATION_TYPE_INDEX, [CONVERSATION_INDEX, TYPE_INDEX]);
   }
   if (!store.indexNames.contains(RUN_TYPE_INDEX)) store.createIndex(RUN_TYPE_INDEX, ["runId", TYPE_INDEX]);
+  if (!store.indexNames.contains(TYPE_ID_INDEX)) store.createIndex(TYPE_ID_INDEX, [TYPE_INDEX, "id"]);
+  if (!store.indexNames.contains(CONVERSATION_TYPE_ID_INDEX)) store.createIndex(CONVERSATION_TYPE_ID_INDEX, [CONVERSATION_INDEX, TYPE_INDEX, "id"]);
+  if (!store.indexNames.contains(RUN_TYPE_ID_INDEX)) store.createIndex(RUN_TYPE_ID_INDEX, ["runId", TYPE_INDEX, "id"]);
+  if (!store.indexNames.contains(CONVERSATION_ID_INDEX)) store.createIndex(CONVERSATION_ID_INDEX, [CONVERSATION_INDEX, "id"]);
 }
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
@@ -168,33 +176,35 @@ class IndexedDbEventStore implements EventStore {
     return events.sort((left, right) => left.id - right.id);
   }
 
-  async byTypes(types: readonly string[], conversationId?: string): Promise<LogEvent[]> {
+  async byTypes(types: readonly string[], conversationId?: string, afterId = -1): Promise<LogEvent[]> {
     const db = await this.open();
     const transaction = db.transaction(EVENT_STORE, "readonly");
     const done = transactionDone(transaction);
-    const index = transaction.objectStore(EVENT_STORE).index(conversationId ? CONVERSATION_TYPE_INDEX : TYPE_INDEX);
+    const index = transaction.objectStore(EVENT_STORE).index(conversationId ? CONVERSATION_TYPE_ID_INDEX : TYPE_ID_INDEX);
     const batches = await Promise.all(types.map((type) => requestResult<LogEvent[]>(
-      index.getAll(IDBKeyRange.only(conversationId ? [conversationId, type] : type)),
+      index.getAll(IDBKeyRange.bound(conversationId ? [conversationId, type, afterId] : [type, afterId],
+        conversationId ? [conversationId, type, Number.MAX_SAFE_INTEGER] : [type, Number.MAX_SAFE_INTEGER], true)),
     )));
     await done;
     return batches.flat().sort((left, right) => left.id - right.id);
   }
 
-  async byRunTypes(runIds: readonly string[], types: readonly string[]): Promise<LogEvent[]> {
+  async byRunTypes(runIds: readonly string[], types: readonly string[], afterId = -1): Promise<LogEvent[]> {
     const db = await this.open();
     const transaction = db.transaction(EVENT_STORE, "readonly");
     const done = transactionDone(transaction);
-    const index = transaction.objectStore(EVENT_STORE).index(RUN_TYPE_INDEX);
+    const index = transaction.objectStore(EVENT_STORE).index(RUN_TYPE_ID_INDEX);
     const batches = await Promise.all(runIds.flatMap((runId) => types.map((type) =>
-      requestResult<LogEvent[]>(index.getAll(IDBKeyRange.only([runId, type]))))));
+      requestResult<LogEvent[]>(index.getAll(IDBKeyRange.bound([runId, type, afterId], [runId, type, Number.MAX_SAFE_INTEGER], true))))));
     await done;
     return batches.flat().sort((left, right) => left.id - right.id);
   }
 
-  async conversation(conversationId: string): Promise<LogEvent[]> {
+  async conversation(conversationId: string, afterId = -1): Promise<LogEvent[]> {
     const db = await this.open();
     const transaction = db.transaction(EVENT_STORE, "readonly");
-    const events = await requestResult<LogEvent[]>(transaction.objectStore(EVENT_STORE).index(CONVERSATION_INDEX).getAll(conversationId));
+    const events = await requestResult<LogEvent[]>(transaction.objectStore(EVENT_STORE).index(CONVERSATION_ID_INDEX)
+      .getAll(IDBKeyRange.bound([conversationId, afterId], [conversationId, Number.MAX_SAFE_INTEGER], true)));
     await transactionDone(transaction);
     return events.sort((left, right) => left.id - right.id);
   }
@@ -590,13 +600,16 @@ export class EventLogger {
   private async eventsByTypes(types: readonly string[], conversationId?: string): Promise<LogEvent[]> {
     await this.flush();
     const store = this.options.store ?? getEventStore();
-    const events = this.afterLatestClear(await store.all());
-    return events.filter((event) => types.includes(event.type) && (!conversationId || event.conversationId === conversationId));
+    const floor = await this.latestClearId(store);
+    if (store.byTypes) return (await store.byTypes(types, conversationId, floor)).filter((event) => event.id > floor);
+    return (await store.all()).filter((event) => event.id > floor && types.includes(event.type) && (!conversationId || event.conversationId === conversationId));
   }
 
-  private afterLatestClear(events: readonly LogEvent[]): LogEvent[] {
-    const clearedAt = [...events].reverse().find((event) => event.type === "log.cleared")?.id ?? -1;
-    return events.filter((event) => event.id > clearedAt);
+  private async latestClearId(store: EventStore): Promise<number> {
+    const clears = store.byTypes
+      ? await store.byTypes(["log.cleared"])
+      : (await store.all()).filter((event) => event.type === "log.cleared");
+    return clears.at(-1)?.id ?? -1;
   }
 
   summaryEvents(conversationId?: string): Promise<LogEvent[]> {
@@ -632,8 +645,9 @@ export class EventLogger {
   private async eventsByRunTypes(runIds: readonly string[], types: readonly string[]): Promise<LogEvent[]> {
     await this.flush();
     const store = this.options.store ?? getEventStore();
-    const events = this.afterLatestClear(await store.all());
-    return events.filter((event) => event.runId && runIds.includes(event.runId) && types.includes(event.type));
+    const floor = await this.latestClearId(store);
+    if (store.byRunTypes) return (await store.byRunTypes(runIds, types, floor)).filter((event) => event.id > floor);
+    return (await store.all()).filter((event) => event.id > floor && event.runId && runIds.includes(event.runId) && types.includes(event.type));
   }
 
   async restorationEvents(conversationId: string): Promise<LogEvent[]> {
@@ -656,8 +670,7 @@ export class EventLogger {
 
   async messages(conversationId?: string): Promise<ConversationMessage[]> {
     if (conversationId) return (await this.repository(conversationId)).messages.map(({ message }) => message);
-    await this.flush();
-    return rebuildConversation(this.afterLatestClear(await (this.options.store ?? getEventStore()).all()));
+    return rebuildConversation(await this.eventsByTypes(["conversation.message"]));
   }
 
   async all(): Promise<LogEvent[]> {
@@ -669,7 +682,8 @@ export class EventLogger {
     if (!Number.isSafeInteger(id) || id < 1) throw new Error("Invalid result event ID");
     await this.flush();
     const store = this.options.store ?? getEventStore();
-    const event = this.afterLatestClear(await store.all()).find((item) => item.id === id);
+    const floor = await this.latestClearId(store);
+    const event = id > floor ? (store.get ? await store.get(id) : (await store.all()).find((item) => item.id === id)) : undefined;
     if (event?.type !== "tool.result.data" || conversationId !== undefined && event.conversationId !== conversationId) throw new Error(`Tool result ${id} is unavailable`);
     let value = fromLogValue(event.output);
     const path = typeof selection.path === "string" ? [selection.path] : selection.path ?? [];
@@ -691,7 +705,9 @@ export class EventLogger {
   async conversation(conversationId: string): Promise<LogEvent[]> {
     await this.flush();
     const store = this.options.store ?? getEventStore();
-    return this.afterLatestClear(await store.all()).filter((event) => event.conversationId === conversationId);
+    const floor = await this.latestClearId(store);
+    if (store.conversation) return (await store.conversation(conversationId, floor)).filter((event) => event.id > floor);
+    return (await store.all()).filter((event) => event.id > floor && event.conversationId === conversationId);
   }
 
   async deleteConversation(conversationId: string): Promise<void> {

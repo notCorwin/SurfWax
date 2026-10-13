@@ -152,14 +152,14 @@ function scrubScreenshots(value: unknown, found: ScreenshotSource[]): unknown {
   }));
 }
 
-export async function prepareToolMessages(messages: any[], stepNumber: number, browserContext?: string, readArtifact?: (id: number) => Promise<unknown>): Promise<any[]> {
+export async function prepareToolMessages(messages: any[], stepNumber: number, browserContext?: string, readArtifact?: (id: number) => Promise<unknown>, injectImages = true): Promise<any[]> {
   const inject = stepNumber > 0 && messages.at(-1)?.role === "tool";
   const current: ScreenshotSource[] = [];
   const prepared = messages.map((message, index) => message.role !== "tool" ? message : { ...message, content: message.content.map((part: any) => {
     if (part.type !== "tool-result" || part.output?.type !== "json") return part;
     const found: ScreenshotSource[] = [];
     const value = scrubScreenshots(part.output.value, found);
-    if (inject && index === messages.length - 1) current.push(...found);
+    if (injectImages && inject && index === messages.length - 1) current.push(...found);
     return { ...part, output: { ...part.output, value } };
   }) });
   const source = current.at(-1);
