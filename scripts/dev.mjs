@@ -4,6 +4,7 @@ import { createServer as createNetServer } from "node:net";
 import { resolve } from "node:path";
 import { chromium } from "@playwright/test";
 import { createServer } from "vite";
+import { reloadDevelopmentExtension } from "./reload-dev-extension.ts";
 
 const root = process.cwd();
 const extensionPath = resolve(root, "dist");
@@ -79,8 +80,9 @@ async function main() {
     ],
   });
 
-  const worker = await waitForWorker();
+  const worker = await reloadDevelopmentExtension(context, await waitForWorker());
   const extensionId = new URL(worker.url()).hostname;
+  console.log("Surf Wax 开发扩展已重新加载，当前源码已生效。");
 
   const settings = await context.newPage();
   try {

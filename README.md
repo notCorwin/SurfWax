@@ -58,7 +58,7 @@ npm run build
 npm run dev
 ```
 
-`npm run dev` 启动 localhost:5173、加载专用 Chromium、开启 Allow User Scripts 并打开真实 Side Panel。UI 支持 HMR；后台或 Manifest 变化会重新加载扩展。开发配置及测试证据存放在仓库旁的 `../.dev/chromium-profile/`。不要清理该目录后再提交失败报告。
+`npm run dev` 启动 localhost:5173、加载专用 Chromium、主动重载开发扩展以刷新持久化 profile 中的旧 Service Worker、开启 Allow User Scripts 并打开真实 Side Panel。UI 支持 HMR；后台或 Manifest 变化会重新加载扩展。开发配置及测试证据存放在仓库旁的 `../.dev/chromium-profile/`。不要清理该目录后再提交失败报告。
 
 ```sh
 npm run verify:local     # Node 24：文档、SDK、类型、构建、单测、双 Chrome E2E 与性能
