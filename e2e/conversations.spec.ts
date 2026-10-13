@@ -41,6 +41,36 @@ test("opens a bounded conversation dropdown below its trigger and keeps outside 
       await trigger.click();
       await expect(search).toBeFocused();
       await expect(dropdown.locator(".conversation-item")).toHaveCount(18);
+      if (viewport.width === 360) {
+        const row = dropdown.locator(".conversation-item").first();
+        const actions = row.getByRole("group", { name: "会话操作" });
+        const rename = row.getByRole("button", { name: /^重命名 / });
+        const remove = row.getByRole("button", { name: /^永久删除 / });
+        await opened.page.mouse.move(0, 0);
+        await expect(actions).toHaveCSS("opacity", "0");
+        await expect(actions).toHaveCSS("pointer-events", "none");
+        const width = (await row.locator(".conversation-select").boundingBox())!.width;
+        await row.hover();
+        await expect(actions).toHaveCSS("opacity", "1");
+        await expect(actions).toHaveCSS("pointer-events", "auto");
+        await expect(rename).toBeVisible();
+        await expect(remove).toBeVisible();
+        expect((await row.locator(".conversation-select").boundingBox())!.width).toBe(width);
+        await search.hover();
+        await expect(actions).toHaveCSS("opacity", "0");
+        await opened.page.keyboard.press("Tab");
+        await expect(row.locator(".conversation-select")).toBeFocused();
+        await expect(actions).toHaveCSS("opacity", "1");
+        await expect(rename).toBeVisible();
+        await opened.page.keyboard.press("Tab");
+        await expect(rename).toBeFocused();
+        await expect(actions).toHaveCSS("opacity", "1");
+        await opened.page.keyboard.press("Tab");
+        await expect(remove).toBeFocused();
+        await search.focus();
+        await expect(actions).toHaveCSS("opacity", "0");
+        await expect(actions).toHaveCSS("pointer-events", "none");
+      }
       await expect.poll(async () => {
         const anchor = await trigger.boundingBox();
         const bounds = await dropdown.boundingBox();
@@ -303,19 +333,33 @@ test("creates, titles, switches, starts fresh on reload and permanently deletes 
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FIRST_REPLY");
 
     await opened.page.getByTestId("conversation-menu").click();
-    opened.page.once("dialog", (dialog) => dialog.accept());
-    await opened.page.locator(".conversation-item", { hasText: "第二标题" }).locator(".conversation-delete").click();
+    const dialogs: string[] = [];
+    opened.page.on("dialog", (dialog) => { dialogs.push(dialog.type()); void dialog.dismiss(); });
+    const second = opened.page.locator(".conversation-item", { hasText: "第二标题" });
+    await second.hover();
+    await second.getByRole("button", { name: "永久删除 第二标题" }).click();
     await expect(opened.page.locator(".conversation-item")).toHaveCount(1);
+    expect(dialogs).toEqual([]);
     const events = await readEvents(opened.page);
     expect(events.filter((event) => event.type === "conversation.created")).toHaveLength(1);
     expect(events.some((event) => event.type === "conversation.deleted" && event.content.conversationId)).toBe(true);
+    const current = opened.page.locator(".conversation-item", { hasText: "第一标题" });
+    await current.hover();
+    await current.getByRole("button", { name: "永久删除 第一标题" }).click();
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("新对话");
+    await expect(opened.page.locator(".markdown-body")).toHaveCount(0);
+    await expect(opened.page.locator(".conversation-item")).toHaveCount(0);
+    expect(dialogs).toEqual([]);
+    await opened.page.reload();
+    await opened.page.getByTestId("conversation-menu").click();
+    await expect(opened.page.getByText("暂无已保存的会话")).toBeVisible();
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
 
 
-test("searches saved messages, renames, archives and restores conversations", async () => {
+test("searches saved messages, renames and lists historical archived conversations normally", async () => {
   const provider = await startProvider([textResponse("FIRST_REPLY"), textResponse("第一标题")]);
   const opened = await openExtension();
   try {
@@ -337,6 +381,7 @@ test("searches saved messages, renames, archives and restores conversations", as
     await expect(opened.page.getByText("没有找到匹配的会话")).toBeVisible();
     await search.fill("");
 
+    await opened.page.locator(".conversation-item", { hasText: "第一标题" }).hover();
     await opened.page.getByRole("button", { name: "重命名 第一标题" }).click();
     const name = opened.page.getByRole("textbox", { name: "会话名称" });
     await name.fill("  ");
@@ -345,23 +390,34 @@ test("searches saved messages, renames, archives and restores conversations", as
     await name.fill("取消的标题");
     await name.press("Escape");
     await expect(opened.page.locator(".conversation-item")).toContainText("第一标题");
+    await opened.page.locator(".conversation-item", { hasText: "第一标题" }).hover();
     await opened.page.getByRole("button", { name: "重命名 第一标题" }).click();
     await name.fill("手动命名");
     await name.press("Enter");
     await expect(opened.page.locator(".conversation-item")).toContainText("手动命名");
-    await opened.page.getByRole("button", { name: "归档 手动命名" }).click();
-    await expect(opened.page.getByText("已归档", { exact: true })).toBeVisible();
     await search.fill("手动命名");
     await expect(opened.page.locator(".conversation-item")).toHaveCount(1);
+    const id = (await readEvents(opened.page)).find((event) => event.type === "conversation.created")!.conversationId;
+    await opened.page.evaluate(async (conversationId) => {
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open("side-agent-runtime");
+        request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+      });
+      const transaction = db.transaction("events", "readwrite");
+      transaction.objectStore("events").add({ type: "conversation.archived", conversationId, timestamp: new Date().toISOString(), content: null });
+      await new Promise<void>((resolve, reject) => { transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error); });
+      db.close();
+    }, id);
     await opened.page.getByRole("button", { name: "关闭对话列表" }).click();
     await opened.page.reload();
     await opened.page.getByTestId("conversation-menu").click();
-    await expect(opened.page.getByText("已归档", { exact: true })).toBeVisible();
+    await expect(opened.page.getByText("已归档", { exact: true })).toHaveCount(0);
+    await expect(opened.page.getByRole("button", { name: /^(归档|恢复) /, includeHidden: true })).toHaveCount(0);
     await opened.page.getByRole("searchbox", { name: "搜索会话" }).fill("unique saved message");
     await expect(opened.page.locator(".conversation-item")).toContainText("手动命名");
-    await opened.page.getByRole("button", { name: "恢复 手动命名" }).click();
-    await expect(opened.page.getByText("已归档", { exact: true })).toHaveCount(0);
-    await expect(opened.page.locator(".conversation-item")).toContainText("手动命名");
+    await opened.page.locator(".conversation-item", { hasText: "手动命名" }).locator(".conversation-select").click();
+    await expect(opened.page.locator('[data-role="user"]')).toContainText("unique saved message");
+    await expect(opened.page.locator(".markdown-body")).toContainText("FIRST_REPLY");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -415,6 +471,7 @@ test("manual renaming wins over an in-flight automatic title", async () => {
     await expect(opened.page.locator(".markdown-body").last()).toContainText("REPLY");
     await expect.poll(() => provider.requests.length).toBeGreaterThanOrEqual(2);
     await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-item").first().hover();
     await opened.page.locator(".conversation-item .conversation-action").first().click();
     await opened.page.getByRole("textbox", { name: "会话名称" }).fill("用户指定标题");
     await opened.page.getByRole("textbox", { name: "会话名称" }).press("Enter");

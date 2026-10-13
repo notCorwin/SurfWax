@@ -2,6 +2,25 @@ import { expect, it } from "vitest";
 import { EventLogger, type LogEvent } from "../logging";
 import { ConversationStore, createMessageProjection } from "./conversation-store";
 
+it("lists historical archived conversations normally and preserves their messages", async () => {
+  const events: LogEvent[] = [];
+  const logger = new EventLogger({ store: {
+    async append(event) { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+    async all() { return [...events]; },
+    async clear() { events.length = 0; },
+  } });
+  await logger.append({ type: "conversation.created", conversationId: "legacy", content: { title: "历史对话" } });
+  await logger.appendMessage("legacy", { id: "saved", role: "user", parts: [{ type: "text", text: "保留历史消息" }] });
+  await logger.append({ type: "conversation.archived", conversationId: "legacy", content: null });
+  await logger.append({ type: "conversation.created", conversationId: "regular", content: { title: "普通对话" } });
+  const runtime = new ConversationStore(logger, () => { throw new Error("Opening saved conversations must not request a model"); });
+  await runtime.threads.reload();
+  expect(runtime.getState().threads.threadIds).toHaveLength(2);
+  expect(runtime.getState().threads.threadIds).toEqual(expect.arrayContaining(["legacy", "regular"]));
+  await runtime.threads.switchToThread("legacy");
+  expect(runtime.getState().thread.messages).toMatchObject([{ role: "user", parts: [{ type: "text", text: "保留历史消息" }] }]);
+});
+
 it("restores the selected reply inside an inactive branch when reopening a conversation", async () => {
   const events: LogEvent[] = [];
   const logger = new EventLogger({ store: {

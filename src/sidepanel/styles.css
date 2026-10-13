@@ -109,13 +109,6 @@ p {
 
 .conversation-search { width: 100%; }
 
-.conversation-section-title {
-  margin: calc(var(--spacing) * 2) calc(var(--spacing) * 2.5) calc(var(--spacing) * 1);
-  color: var(--muted-foreground);
-  font-size: var(--type-xs);
-  font-weight: 600;
-}
-
 .conversation-empty,
 .conversation-notice {
   margin: calc(var(--spacing) * 1) calc(var(--spacing) * 2.5);

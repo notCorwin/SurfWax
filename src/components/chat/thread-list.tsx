@@ -1,7 +1,7 @@
 "use client";
 import { usePanelRuntime, usePanelState, type PanelState } from "@/sidepanel/runtime-view";
 
-import { ArchiveIcon, ChevronDownIcon, HistoryIcon, SearchIcon, PencilIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
+import { ChevronDownIcon, HistoryIcon, SearchIcon, PencilIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type FC } from "react";
 import { flushSync } from "react-dom";
 import { activeRunIdentity, withIdleConversation } from "../../agent/coordinator";
@@ -34,7 +34,7 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
   const searchInput = useRef<HTMLInputElement>(null);
   const { locked } = useRunState();
   const threads = usePanelState((state) => state.threads);
-  const { threadItems: allItems, mainThreadId: currentId, threadIds, archivedThreadIds: archivedIds } = threads;
+  const { threadItems: allItems, mainThreadId: currentId } = threads;
   const title = allItems.find((item) => item.id === currentId)?.title || "新对话";
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -98,14 +98,7 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
   const matches = useCallback((item: { id: string; remoteId?: string; title?: string }) => !needle
     || (item.title ?? "新对话").toLocaleLowerCase().includes(needle)
     || (index.get(item.remoteId ?? item.id) ?? "").includes(needle), [index, needle]);
-  const visible = (ids: readonly string[]) => allItems.filter((item) => ids.includes(item.id) && matches(item)).length;
-  const regularCount = open ? visible(threadIds) : 0;
-  const archivedCount = open ? visible(archivedIds) : 0;
-
-  const renderItems = (ids: readonly string[], archived = false) => ids.map((id) => {
-    const item = allItems.find((item) => item.id === id);
-    return item && matches(item) ? <ConversationItem key={id} item={item} isCurrent={currentId === id} close={close} locked={locked} warn={warn} archived={archived} /> : null;
-  });
+  const visibleItems = open ? allItems.filter(matches) : [];
   return <Popover open={open} onOpenChange={(value) => { if (value) setOpen(true); else close(); }}>
     <PopoverTrigger asChild><Button type="button" variant="ghost" className="conversation-trigger" data-testid="conversation-menu"><HistoryIcon data-icon="inline-start" aria-hidden="true" /><span>{title}</span><ChevronDownIcon data-icon="inline-end" aria-hidden="true" /></Button></PopoverTrigger>
     <PopoverContent className="conversation-dropdown flex min-h-0 flex-col gap-2 overflow-hidden p-3" aria-label="对话列表"
@@ -117,16 +110,15 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
       {warning && <p role="status" className="conversation-notice">{warning}</p>}
       {searchError !== undefined && <ErrorNotice summary="搜索记录读取失败。" error={searchError} />}
       <div className="conversation-items">
-        {regularCount > 0 && <h2 className="conversation-section-title">当前会话</h2>}{renderItems(threadIds)}
-        {archivedCount > 0 && <h2 className="conversation-section-title">已归档</h2>}{renderItems(archivedIds, true)}
-        {regularCount + archivedCount === 0 && <p className="conversation-empty">{needle ? "没有找到匹配的会话" : "暂无已保存的会话"}</p>}
+        {visibleItems.map((item) => <ConversationItem key={item.id} item={item} isCurrent={currentId === item.id} close={close} locked={locked} warn={warn} />)}
+        {visibleItems.length === 0 && <p className="conversation-empty">{needle ? "没有找到匹配的会话" : "暂无已保存的会话"}</p>}
       </div>
     </PopoverContent>
   </Popover>;
 };
 
 type Item = PanelState["threads"]["threadItems"][number];
-const ConversationItem: FC<{ item: Item; isCurrent: boolean; close: () => void; locked: boolean; warn: () => void; archived?: boolean }> = ({ item, isCurrent, close, locked, warn, archived = false }) => {
+const ConversationItem: FC<{ item: Item; isCurrent: boolean; close: () => void; locked: boolean; warn: () => void }> = ({ item, isCurrent, close, locked, warn }) => {
   const runtime = useRuntimeView();
   const runtimeCommands = usePanelRuntime();
   const client = runtimeCommands.threads.item({ id: item.id });
@@ -145,7 +137,7 @@ const ConversationItem: FC<{ item: Item; isCurrent: boolean; close: () => void; 
     if (!draft.trim()) { setError("请输入会话名称"); input.current?.focus(); return; }
     void mutate(async () => { await client.rename(draft.trim()); finishEditing(); });
   };
-  return <div className="conversation-item" data-active={isCurrent ? "" : undefined}>
+  return <div className="conversation-item group" data-active={isCurrent ? "" : undefined}>
     {editing ? <div className="conversation-rename">
       <Input ref={input} autoFocus aria-label="会话名称" aria-invalid={Boolean(error)} disabled={locked} value={draft} onChange={(event) => { setDraft(event.target.value); setError(""); }} onKeyDown={(event) => {
         event.stopPropagation(); if (event.key === "Enter") { event.preventDefault(); save(); } if (event.key === "Escape") { event.preventDefault(); finishEditing(); }
@@ -163,13 +155,10 @@ const ConversationItem: FC<{ item: Item; isCurrent: boolean; close: () => void; 
           flushSync(close);
         }).catch(warn);
       }}><span>{title}</span>{runStatus !== "idle" && <small data-status={String(runStatus)}>{runStatus === "running" ? "运行中" : "已中断"}</small>}</Button>
-      <Button type="button" variant="ghost" size="icon-sm" disabled={locked} className="conversation-action" aria-label={`重命名 ${title}`} title="重命名" onClick={() => void mutate(() => { setDraft(title); setEditing(true); })}><PencilIcon aria-hidden="true" /></Button>
-      <Button type="button" variant="ghost" size="icon-sm" disabled={locked} className="conversation-action" aria-label={`${archived ? "恢复" : "归档"} ${title}`} title={archived ? "恢复归档" : "归档"} onClick={() => void mutate(() => archived ? client.unarchive() : client.archive())}>
-        {archived ? <RotateCcwIcon aria-hidden="true" /> : <ArchiveIcon aria-hidden="true" />}
-      </Button>
-      <Button type="button" variant="ghost" size="icon-sm" disabled={locked} className="conversation-delete" aria-label={`永久删除 ${title}`} title="永久删除" onClick={() => void mutate(() => {
-        if (globalThis.confirm("确定永久删除这条对话及其事件日志吗？此操作不可恢复。")) return client.delete();
-      })}><Trash2Icon aria-hidden="true" /></Button>
+      <div role="group" aria-label="会话操作" className="pointer-events-none flex shrink-0 items-center gap-1 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-has-[:focus-visible]:pointer-events-auto group-has-[:focus-visible]:opacity-100 [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100">
+        <Button type="button" variant="ghost" size="icon-sm" disabled={locked} className="conversation-action" aria-label={`重命名 ${title}`} title="重命名" onClick={() => void mutate(() => { setDraft(title); setEditing(true); })}><PencilIcon aria-hidden="true" /></Button>
+        <Button type="button" variant="ghost" size="icon-sm" disabled={locked} className="conversation-delete" aria-label={`永久删除 ${title}`} title="永久删除" onClick={() => void mutate(() => client.delete())}><Trash2Icon aria-hidden="true" /></Button>
+      </div>
     </>}
     {!editing && error && <ErrorNotice summary="会话操作失败。" error={error} />}
   </div>;

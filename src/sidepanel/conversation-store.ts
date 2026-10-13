@@ -20,7 +20,7 @@ export type PanelState = {
   thread: ThreadState;
   composer: { text: string };
   threadListItem: { id: string; remoteId?: string };
-  threads: { mainThreadId: string; threadItems: readonly ThreadItem[]; threadIds: readonly string[]; archivedThreadIds: readonly string[] };
+  threads: { mainThreadId: string; threadItems: readonly ThreadItem[]; threadIds: readonly string[] };
 };
 
 /** All durable state comes from the event log. These are disposable branch/display projections. */
@@ -87,7 +87,7 @@ export class ConversationStore {
   constructor(private logger: EventLogger, private transport: (id: string) => ChatTransport<SidePanelMessage>, initialId: string = crypto.randomUUID()) {
     this.state = {
       thread: { messages: [], isRunning: false, isLoading: false, isDisabled: false }, composer: { text: "" },
-      threadListItem: { id: initialId }, threads: { mainThreadId: initialId, threadItems: [], threadIds: [], archivedThreadIds: [] },
+      threadListItem: { id: initialId }, threads: { mainThreadId: initialId, threadItems: [], threadIds: [] },
     };
   }
   getState = () => this.state;
@@ -133,7 +133,7 @@ export class ConversationStore {
   connect() {
     this.closed = false;
     this.unsubscribe = this.logger.subscribe((event) => {
-      if (/^conversation\.(created|title\.updated|archived|unarchived|deleted|submitted|finished|aborted|failed)$/.test(event.type)) {
+      if (/^conversation\.(created|title\.updated|deleted|submitted|finished|aborted|failed)$/.test(event.type)) {
         void this.threads.reload().catch((error) => this.updateThread({ error }));
       }
     });
@@ -194,16 +194,12 @@ export class ConversationStore {
       const revision = ++this.listVersion;
       const items = rebuildConversationList(await this.logger.summaryEvents()).map((item): ThreadItem => ({ ...item, remoteId: item.id, custom: { runStatus: item.runStatus } }));
       if (revision !== this.listVersion) return;
-      this.publish({ threads: { ...this.state.threads, threadItems: items,
-        threadIds: items.filter((item) => item.status === "regular").map((item) => item.id),
-        archivedThreadIds: items.filter((item) => item.status === "archived").map((item) => item.id) } });
+      this.publish({ threads: { ...this.state.threads, threadItems: items, threadIds: items.map((item) => item.id) } });
     },
     switchToNewThread: () => this.switchConversation(crypto.randomUUID(), false),
     switchToThread: (id: string) => this.switchConversation(id, true),
     item: ({ id }: { id: string }) => ({
       rename: (title: string) => withIdleConversation(() => this.logger.append({ type: "conversation.title.updated", conversationId: id, content: { title: title.trim() || "新对话", source: "manual" } })),
-      archive: () => withIdleConversation(() => this.logger.append({ type: "conversation.archived", conversationId: id, content: null })),
-      unarchive: () => withIdleConversation(() => this.logger.append({ type: "conversation.unarchived", conversationId: id, content: null })),
       delete: () => withIdleConversation(async () => { await abortConversationWork(id); await this.logger.deleteConversation(id);
         if (this.state.threadListItem.id === id) await this.switchConversation(crypto.randomUUID(), false); }),
     }),

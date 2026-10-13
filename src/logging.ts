@@ -70,6 +70,7 @@ const SUMMARY_EVENT_TYPES = [
   "conversation.created",
   "conversation.selected",
   "conversation.title.updated",
+  // Keep historical archive events readable without maintaining archive state.
   "conversation.archived",
   "conversation.unarchived",
   "conversation.submitted",
@@ -314,7 +315,6 @@ export function rebuildConversation(events: readonly LogEvent[]): ConversationMe
 export type ConversationSummary = {
   id: string;
   title: string;
-  status: "regular" | "archived";
   runStatus: "idle" | "running" | "interrupted";
   createdAt: string;
   lastMessageAt: string;
@@ -329,7 +329,6 @@ export function rebuildConversationList(events: readonly LogEvent[]): Conversati
       conversations.set(event.conversationId, {
         id: event.conversationId,
         title: typeof content?.title === "string" && content.title.trim() ? content.title : "新对话",
-        status: "regular",
         runStatus: "idle",
         createdAt: event.timestamp,
         lastMessageAt: event.timestamp,
@@ -343,8 +342,6 @@ export function rebuildConversationList(events: readonly LogEvent[]): Conversati
       const content = fromLogValue(event.content) as { title?: unknown };
       if (typeof content?.title === "string" && content.title.trim()) conversation.title = content.title.trim();
     }
-    if (event.type === "conversation.archived") conversation.status = "archived";
-    if (event.type === "conversation.unarchived") conversation.status = "regular";
     if (event.type === "conversation.submitted") conversation.runStatus = "running";
     if (event.type === "conversation.finished") conversation.runStatus = "idle";
     if (event.type === "conversation.aborted" || event.type === "conversation.failed") conversation.runStatus = "interrupted";
