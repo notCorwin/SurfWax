@@ -72,7 +72,7 @@ test("uses a large observation from the real side panel before acting on its ref
       (request) => {
         const message = request.messages.findLast((entry: any) => entry.role === "tool");
         const snapshot = JSON.parse(message.content).result;
-        const ref = /button "Run exact action" \[ref=(t\d+d\d+e\d+)\]/.exec(snapshot)?.[1];
+        const ref = /button "Run exact action" \[ref=(t\d+s[a-f0-9]+d\d+e\d+)\]/.exec(snapshot)?.[1];
         if (!ref) throw new Error("The selected snapshot did not contain the target ref");
         return commandResponse("run", { code: `await page.ref(${JSON.stringify(ref)}).click(); await page.locator('body[data-clicked=yes]').waitFor({state:'attached'});` }, "call-act-from-ref");
       },

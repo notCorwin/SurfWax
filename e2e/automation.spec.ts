@@ -87,7 +87,7 @@ test("uses inspect plus composable fill and click programs", async () => {
     const events = await readEvents(opened.page);
     const observation = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-snapshot")?.output;
     const verified = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-verify")?.output;
-    expect(observation).toMatchObject({ snapshot: expect.stringMatching(/\[ref=t\d+d\d+e\d+/) });
+    expect(observation).toMatchObject({ snapshot: expect.stringMatching(/\[ref=t\d+s[a-f0-9]+d\d+e\d+/) });
     expect(verified).toMatchObject({ snapshot: expect.stringContaining("Welcome me@example.com") });
     await expect.poll(() => target.locator("output").textContent()).toBe("Welcome me@example.com");
     expect(events.some((event) => event.type === "automation.action.finished" && event.toolCallId === "call-click")).toBe(true);
@@ -594,7 +594,7 @@ test("rejects detached snapshot references and negative locator indexes below th
     commandResponse("inspect", {}, "original-ref"),
     (request) => {
       const message = request.messages.findLast((message: any) => message.role === "tool");
-      ref = /button "Sign in" \[ref=(t\d+d\d+e\d+)\]/.exec(JSON.parse(message.content).snapshot)![1]!;
+      ref = /button "Sign in" \[ref=(t\d+s[a-f0-9]+d\d+e\d+)\]/.exec(JSON.parse(message.content).snapshot)![1]!;
       return commandResponse("run", { code: `return await (page.getByRole('button', { name: 'Sign in' }).evaluate("button => { const replacement = button.cloneNode(true); replacement.onclick = () => document.body.dataset.replacementClicked = 'yes'; button.replaceWith(replacement); }"));` }, "replace-ref");
     },
     () => commandResponse("run", { code: `return await page.ref(${JSON.stringify(ref)}).click();`, timeoutMs: 1000 }, "detached-ref"),
