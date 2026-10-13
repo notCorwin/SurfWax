@@ -5,6 +5,19 @@
   --guard-color-start: #6366f1;
   --guard-color-mid: #22d3ee;
   --guard-color-end: #a855f7;
+  --guard-breath-cycle: 3s;
+  --guard-opacity-min: 0.04;
+  --guard-opacity-max: 0.12;
+  --guard-opacity-rest: 0.08;
+}
+:host::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: linear-gradient(135deg, var(--guard-color-start), var(--guard-color-mid), var(--guard-color-end));
+  opacity: var(--guard-opacity-rest);
+  pointer-events: none;
+  animation: surf-wax-guard-breathe var(--guard-breath-cycle) ease-in-out infinite;
 }
 :host::after {
   content: "";
@@ -17,4 +30,8 @@
 }
 @property --guard-angle { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
 @keyframes surf-wax-guard { to { --guard-angle: 360deg; } }
-@media (prefers-reduced-motion: reduce) { :host::after { animation: none; } }
+@keyframes surf-wax-guard-breathe {
+  0%, 100% { opacity: var(--guard-opacity-min); }
+  50% { opacity: var(--guard-opacity-max); }
+}
+@media (prefers-reduced-motion: reduce) { :host::before, :host::after { animation: none; } }
