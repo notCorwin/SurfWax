@@ -1,4 +1,4 @@
-import { chromium, expect, test, type BrowserContext, type CDPSession, type Locator, type Page } from "@playwright/test";
+import { chromium, expect, type BrowserContext, type CDPSession, type Locator, type Page } from "@playwright/test";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 
-import { SSE_HEADERS, p95, chunk, usageChunk, textResponse, streamingTextResponse, toolResponse, pageResponse, commandResponse, browserResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
+import { test, SSE_HEADERS, p95, chunk, usageChunk, textResponse, streamingTextResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
 
 test("opens a bounded conversation dropdown below its trigger and keeps outside controls interactive", async () => {
   const provider = await startProvider([]);
@@ -45,7 +45,7 @@ test("opens a bounded conversation dropdown below its trigger and keeps outside 
         const row = dropdown.locator(".conversation-item").first();
         const actions = row.getByRole("group", { name: "会话操作" });
         const rename = row.getByRole("button", { name: /^重命名 / });
-        const remove = row.getByRole("button", { name: /^永久删除 / });
+        const remove = row.getByRole("button", { name: /^删除 / });
         await opened.page.mouse.move(0, 0);
         await expect(actions).toHaveCSS("opacity", "0");
         await expect(actions).toHaveCSS("pointer-events", "none");
@@ -108,7 +108,7 @@ test("opens a bounded conversation dropdown below its trigger and keeps outside 
   }
 });
 
-test("executes run-code through the page facade, restores the conversation, and clears the log", async () => {
+test("executes run through the page facade, restores the conversation, and clears the log", async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);
   const targetUrl = `${provider.origin}/target`;
@@ -137,13 +137,13 @@ test("executes run-code through the page facade, restores the conversation, and 
 
     await expect.poll(() => provider.requests.length).toBe(3);
     expect(provider.requests[0].reasoning_effort).toBe("minimal");
-    expect(provider.requests[0].tools).toHaveLength(49);
+    expect(provider.requests[0].tools).toHaveLength(3);
     expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).not.toContain("browser");
-    expect(provider.requests[0].tools).toContainEqual(expect.objectContaining({ type: "function", function: expect.objectContaining({ name: "run-code" }) }));
+    expect(provider.requests[0].tools).toContainEqual(expect.objectContaining({ type: "function", function: expect.objectContaining({ name: "run" }) }));
     const events = await readEvents(opened.page);
     const tool = events.find((event) => event.type === "tool.finished");
-    expect(tool).toMatchObject({ toolCallId: "call-chrome-e2e", input: { code: expect.stringContaining("async page") }, latencyMs: expect.any(Number) });
-    expect(tool.output).toMatchObject({ title: "Side Agent Target", url: targetUrl });
+    expect(tool).toMatchObject({ toolCallId: "call-chrome-e2e", input: { code: expect.stringContaining("await page.title()") }, latencyMs: expect.any(Number) });
+    expect(tool.output.result).toMatchObject({ title: "Side Agent Target", url: targetUrl });
     expect(events.filter((event) => /^(model|request|tool)\./.test(event.type)).every((event) => typeof event.conversationId === "string")).toBe(true);
     expect(events.filter((event) => event.type === "conversation.message")).toHaveLength(2);
 
@@ -159,7 +159,8 @@ test("executes run-code through the page facade, restores the conversation, and 
     clearOptions.once("dialog", (dialog) => dialog.accept());
     await clearOptions.getByTestId("event-log-clear").click();
     await expect(clearOptions.getByRole("status")).toContainText("已清空");
-    await expect.poll(() => readEvents(clearOptions)).toEqual([]);
+    await expect.poll(async () => (await readEvents(clearOptions)).at(-1)?.type).toBe("log.cleared");
+    expect((await readEvents(clearOptions)).some((event) => event.type === "conversation.message")).toBe(true);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -294,7 +295,7 @@ test("keeps paused follow-ups after stop and panel reload until the user resumes
 });
 
 
-test("creates, titles, switches, starts fresh on reload and permanently deletes local conversations", async () => {
+test("creates, titles, switches, starts fresh on reload and supports undoable conversation deletion", async () => {
   const provider = await startProvider([
     textResponse("FIRST_REPLY"),
     textResponse("第一标题"),
@@ -335,17 +336,30 @@ test("creates, titles, switches, starts fresh on reload and permanently deletes 
     await opened.page.getByTestId("conversation-menu").click();
     const dialogs: string[] = [];
     opened.page.on("dialog", (dialog) => { dialogs.push(dialog.type()); void dialog.dismiss(); });
+    const search = opened.page.getByRole("searchbox", { name: "搜索会话" });
+    await search.fill("second conversation");
+    await expect(opened.page.locator(".conversation-item", { hasText: "第二标题" })).toBeVisible();
+    await search.fill("");
     const second = opened.page.locator(".conversation-item", { hasText: "第二标题" });
     await second.hover();
-    await second.getByRole("button", { name: "永久删除 第二标题" }).click();
+    await second.getByRole("button", { name: "删除 第二标题" }).click();
+    await expect(opened.page.locator(".conversation-item")).toHaveCount(1);
+    await opened.page.getByRole("button", { name: "撤销" }).click();
+    await expect(opened.page.locator(".conversation-item")).toHaveCount(2);
+    await search.fill("second conversation");
+    await expect(opened.page.locator(".conversation-item", { hasText: "第二标题" })).toBeVisible();
+    await search.fill("");
+    const restoredSecond = opened.page.locator(".conversation-item", { hasText: "第二标题" });
+    await restoredSecond.hover();
+    await restoredSecond.getByRole("button", { name: "删除 第二标题" }).click();
     await expect(opened.page.locator(".conversation-item")).toHaveCount(1);
     expect(dialogs).toEqual([]);
     const events = await readEvents(opened.page);
-    expect(events.filter((event) => event.type === "conversation.created")).toHaveLength(1);
-    expect(events.some((event) => event.type === "conversation.deleted" && event.content.conversationId)).toBe(true);
+    expect(events.filter((event) => event.type === "conversation.created")).toHaveLength(2);
+    expect(events.some((event) => event.type === "conversation.deleted" && event.conversationId)).toBe(true);
     const current = opened.page.locator(".conversation-item", { hasText: "第一标题" });
     await current.hover();
-    await current.getByRole("button", { name: "永久删除 第一标题" }).click();
+    await current.getByRole("button", { name: "删除 第一标题" }).click();
     await expect(opened.page.getByTestId("conversation-menu")).toContainText("新对话");
     await expect(opened.page.locator(".markdown-body")).toHaveCount(0);
     await expect(opened.page.locator(".conversation-item")).toHaveCount(0);
@@ -614,6 +628,9 @@ test("edits user messages, regenerates replies and restores the selected branch"
     await composer.fill("follow up");
     await composer.press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FOLLOWUP_REPLY");
+    // Streaming text is visible before its final message is persisted.
+    await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "conversation.message"
+      && event.content?.parts?.some((part: any) => part.type === "text" && part.text === "FOLLOWUP_REPLY"))).toBe(true);
     const recordedMessages = JSON.stringify((await readEvents(opened.page)).filter((event) => event.type === "conversation.message").map((event) => event.content));
     for (const text of [originalQuestion, "edited question", "ORIGINAL_REPLY", "REGENERATED_REPLY", "EDITED_REPLY", "FOLLOWUP_REPLY"]) {
       expect(recordedMessages).toContain(text);

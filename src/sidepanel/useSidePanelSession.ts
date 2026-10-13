@@ -28,19 +28,27 @@ export function useSidePanelSession(): SidePanelSession {
   useEffect(() => {
     let active = true;
     let deferred = false;
+    let controller: AbortController | undefined;
     const refresh = async (initial = false) => {
+      controller?.abort();
+      const current = new AbortController();
+      controller = current;
+      const isCurrent = () => active && controller === current && !current.signal.aborted;
       try {
-        const stored = await loadModelConfig();
-        if (!active) return;
-        if (!initial && await activeRunIdentity()) { deferred = true; return; }
-        if (!active) return;
+        // Runtime hydration is read-only: a stale load must never write an old
+        // settings snapshot over a newer choice. Options Save persists routing.
+        const stored = await loadModelConfig(undefined, undefined, { signal: current.signal, persistMigration: false });
+        if (!isCurrent()) return;
+        const running = !initial && await activeRunIdentity();
+        if (!isCurrent()) return;
+        if (running) { deferred = true; return; }
         deferred = false;
         setModelSettings(stored);
         setError(undefined);
       } catch (cause) {
-        if (active) setError(cause);
+        if (isCurrent()) setError(cause);
       } finally {
-        if (active) setConfigReady(true);
+        if (isCurrent()) setConfigReady(true);
       }
     };
     const storageChanged = (changes: { [key: string]: chrome.storage.StorageChange }, area: string) => {
@@ -55,6 +63,7 @@ export function useSidePanelSession(): SidePanelSession {
     chrome.runtime.onMessage.addListener(runChanged);
     return () => {
       active = false;
+      controller?.abort();
       chrome.storage.onChanged.removeListener(storageChanged);
       chrome.runtime.onMessage.removeListener(runChanged);
     };

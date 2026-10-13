@@ -138,7 +138,8 @@ export async function contextPressure(options: {
   const calibration = fromLogValue(calibrated?.content) as Partial<EstimateCalibration> | undefined;
   const anchor = typeof calibration?.inputTokens === "number" && Number.isFinite(calibration.inputTokens) && calibration.inputTokens > 0
     ? calibration.inputTokens : calibration?.promptEstimate;
-  const prompt = { instructions: options.instructions ?? (readPromptSnapshot(options.events, options.branchIds) ?? createPromptSnapshot()).instructions, tools: options.tools ?? PROMPT_TOOLS, messages };
+  const snapshot = readPromptSnapshot(options.events, options.branchIds) ?? createPromptSnapshot();
+  const prompt = { instructions: options.instructions ?? createPromptSnapshot(snapshot.source).instructions, tools: options.tools ?? PROMPT_TOOLS, messages };
   const fixedEstimate = estimatePromptInput(prompt) - currentEstimate;
   const estimated = Math.ceil(anchor && calibration?.baseEstimate
     ? anchor + currentEstimate - calibration.baseEstimate + (calibration.fixedEstimate !== undefined ? fixedEstimate - calibration.fixedEstimate : 0)

@@ -1,4 +1,4 @@
-import { chromium, expect, test, type BrowserContext, type CDPSession, type Locator, type Page } from "@playwright/test";
+import { chromium, expect, type BrowserContext, type CDPSession, type Locator, type Page } from "@playwright/test";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 
-import { SSE_HEADERS, p95, chunk, usageChunk, textResponse, streamingTextResponse, toolResponse, pageResponse, commandResponse, browserResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
+import { test, SSE_HEADERS, p95, chunk, usageChunk, textResponse, streamingTextResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
 
 test("follows the system color scheme across every visible extension surface without reloading", async () => {
   const provider = await startProvider([
@@ -134,7 +134,7 @@ test("starts a new process line after assistant text", async () => {
     toolResponse("return 'FIRST_RESULT'", "call-before-text"),
     [
       chunk({ role: "assistant", content: "BETWEEN_PROCESS_GROUPS" }),
-      chunk({ tool_calls: [{ index: 0, id: "call-after-text", type: "function", function: { name: "run-code", arguments: JSON.stringify({ code: "async page => { return 'SECOND_RESULT'; }" }) } }] }),
+      chunk({ tool_calls: [{ index: 0, id: "call-after-text", type: "function", function: { name: "run", arguments: JSON.stringify({ code: "return 'SECOND_RESULT';" }) } }] }),
       chunk({}, "tool_calls"),
       "data: [DONE]\n\n",
     ],
@@ -364,9 +364,9 @@ test("shows live work, then folds it under elapsed time while keeping the final 
 
 
 test("distinguishes streaming command input from command execution", async () => {
-  const input = JSON.stringify({ code: 'async page => { await new Promise((resolve) => setTimeout(resolve, 800)); return page.title(); }' });
+  const input = JSON.stringify({ code: 'await sleep(800); return await page.title();' });
   const provider = await startProvider([[
-    chunk({ role: "assistant", tool_calls: [{ index: 0, id: "call-phase", type: "function", function: { name: "run-code", arguments: input.slice(0, 25) } }] }),
+    chunk({ role: "assistant", tool_calls: [{ index: 0, id: "call-phase", type: "function", function: { name: "run", arguments: input.slice(0, 25) } }] }),
     chunk({ tool_calls: [{ index: 0, function: { arguments: input.slice(25) } }] }),
     chunk({}, "tool_calls"),
     "data: [DONE]\n\n",
@@ -542,7 +542,7 @@ test("keeps jump-to-bottom usable while a long response is streaming", async () 
     const viewport = opened.page.getByTestId("thread-viewport");
     const remaining = () => viewport.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop);
     await expect.poll(() => viewport.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(1_200);
-    for (const edit of await opened.page.getByTestId("edit-message-button").all()) await expect(edit).toBeDisabled();
+    await expect(opened.page.getByTestId("edit-message-button")).toHaveCount(0);
     await expect.poll(remaining).toBeLessThanOrEqual(1);
     const box = await viewport.boundingBox();
     if (!box) throw new Error("thread viewport has no bounding box");

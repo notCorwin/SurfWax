@@ -1,6 +1,6 @@
 import { isLoopFinished, ToolLoopAgent, wrapLanguageModel } from "ai";
 import type { LanguageModel } from "ai";
-import { createCommandTools, prepareToolMessages, repairCommandToolCall } from "../chrome/tool";
+import { createProgramTools, prepareToolMessages, repairProgramToolCall } from "../chrome/tool";
 import { ChromeExecutor } from "../chrome/executor";
 import type { BrowserContext } from "../chrome/executor";
 import type { EventLogger } from "../logging";
@@ -27,7 +27,7 @@ export type CreateAgentOptions = {
   signal?: AbortSignal;
 };
 
-type BrowserAgentTools = ReturnType<typeof createCommandTools>;
+type BrowserAgentTools = ReturnType<typeof createProgramTools>;
 function browserContextMessage(context: BrowserContext): string {
   return [
     "<browser-context>",
@@ -37,8 +37,14 @@ function browserContextMessage(context: BrowserContext): string {
   ].join("\n");
 }
 
-const READ_ONLY_TOOLS = new Set(["snapshot", "find", "tab-list", "requests", "request", "request-headers", "request-body", "response-headers", "response-body", "console", "result", "userscript-list", "userscript-read"]);
-const REPEATABLE_TOOLS = new Set(["type", "press", "keydown", "keyup", "mousemove", "mousedown", "mouseup", "mousewheel", "run-code", "act"]);
+function usesAnthropicMessages(config: ModelConfig): boolean {
+  const sdk = sdkFor(config);
+  return sdk === "@ai-sdk/anthropic" || sdk === "@ai-sdk/google-vertex/anthropic"
+    || sdk === "gitlab-ai-provider" && (config.canonicalModelId?.startsWith("anthropic/") === true || config.modelFamily?.toLowerCase().startsWith("claude") === true);
+}
+
+const READ_ONLY_TOOLS = new Set(["inspect"]);
+const REPEATABLE_TOOLS = new Set(["run", "jobs"]);
 
 function signature(value: unknown): string {
   try { return JSON.stringify(value); } catch { return String(value); }
@@ -61,17 +67,20 @@ export function stagnationReason(steps: readonly any[]): string | undefined {
 
 export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, BrowserAgentTools> {
   const logger = options.logger;
-  const tools = createCommandTools(options.executor, {
+  const initialPrompt = createPromptSnapshot(options.prompt?.source ?? options.instructions);
+  const toolOptions = {
     logger, conversationId: options.conversationId,
     visualEnabled: (() => {
       let supported: Promise<boolean> | undefined;
       return () => supported ??= modelSupportsImages(options.model, { signal: options.signal });
     })(),
-  });
-  const toolOrder = Object.keys(tools) as Array<keyof typeof tools>;
+  };
+  const tools = createProgramTools(options.executor, toolOptions);
+  const toolOrder = Object.keys(tools);
   let limit: ReturnType<typeof resolveModelLimit> | undefined;
-  const initialPrompt = options.prompt ?? createPromptSnapshot(options.instructions);
-  const currentInstructions = () => options.compactor?.prompt?.instructions ?? initialPrompt.instructions;
+  const currentInstructions = () => createPromptSnapshot(options.compactor?.prompt?.source ?? initialPrompt.source).instructions;
+  const currentTools = () => PROMPT_TOOLS;
+  const activeTools = () => currentTools().map(({ name }) => name);
   let browserDigest: string | undefined;
   let loggedGuard: string | undefined;
   const loggedToolCalls = new Set<string>();
@@ -82,7 +91,8 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     instructions: currentInstructions(),
     tools,
     toolOrder,
-    repairToolCall: repairCommandToolCall as any,
+    activeTools: activeTools(),
+    repairToolCall: repairProgramToolCall as any,
     prepareStep: async ({ messages, initialMessages, responseMessages, stepNumber, steps }) => {
       let prepared = await options.compactor?.prepare(messages, stepNumber) ?? messages;
       const browserContext = await options.executor.browserContext();
@@ -91,15 +101,15 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       browserDigest = nextBrowserDigest;
       if (browserChanged) logger?.record({ type: "browser.context.prepared", conversationId: options.conversationId, content: { stepNumber, ...browserContext } });
       const modelLimit = await (limit ??= resolveModelLimit(options.model, { signal: options.signal }));
-      const prepareMessages = (source: typeof prepared) => prepareToolMessages(
+      const prepareMessages = async (source: typeof prepared) => prepareToolMessages(
         source,
         stepNumber,
         browserChanged ? browserContextMessage(browserContext) : undefined,
         logger ? (id) => logger.result(id, {}, options.conversationId ?? "") : undefined,
-        (options.compactor?.prompt ?? initialPrompt).format === "legacy-user-tools",
+        await toolOptions.visualEnabled(),
       );
       let outgoing = await prepareMessages(prepared);
-      const prompt = { instructions: currentInstructions(), tools: PROMPT_TOOLS };
+      const prompt = { instructions: currentInstructions(), tools: currentTools() };
       const estimatedInput = options.compactor?.estimate(outgoing, prompt) ?? estimatePromptInput({ ...prompt, messages: outgoing });
       const pressure = modelLimit && estimatedInput > inputBudget(modelLimit) * 0.8
         && (!options.compactor || options.compactor.canCompact(prepared, modelLimit));
@@ -115,8 +125,9 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       }
       return {
         instructions: currentInstructions(),
-        ...(sdkFor(options.model) === "@ai-sdk/anthropic" && options.model.providerId !== "anthropic" && modelLimit?.output
-          ? { maxOutputTokens: modelLimit.output } : {}),
+        activeTools: activeTools(),
+        ...(usesAnthropicMessages(options.model)
+          ? { maxOutputTokens: options.model.maxTokensOverride ?? modelLimit?.output ?? 128_000 } : {}),
         messages: outgoing,
       };
     },
@@ -124,7 +135,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       onStart: (event) => logger.record({
         type: "model.started",
         conversationId: options.conversationId,
-        content: { callId: event.callId, operationId: event.operationId, provider: event.provider, modelId: event.modelId, activeTools: toolOrder, toolCount: toolOrder.length },
+        content: { callId: event.callId, operationId: event.operationId, provider: event.provider, modelId: event.modelId, activeTools: activeTools(), toolCount: activeTools().length },
       }),
       onStepStart: (event) => logger.record({
         type: "model.step.started",
@@ -142,22 +153,18 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       onToolExecutionEnd: async (event) => {
         loggedToolCalls.add(`${event.callId}\u0000${event.toolCall.toolCallId}`);
         const failed = event.toolOutput.type === "tool-error" || (event.toolOutput as any).output?.ok === false;
-        if (failed && options.signal?.aborted && options.conversationId) {
-          const identity = logger.toolIdentity(options.conversationId, event.toolCall.toolCallId);
-          if (identity.runId) {
-            // Cancellation can reach the SDK callback before stream cleanup.
-            // Use the same durable interruption result regardless of that race.
-            await logger.closePendingTools(identity.runId, options.conversationId, options.signal.reason);
-            return;
-          }
-        }
+        const interrupted = failed && options.signal?.aborted;
+        const effectUnknown = Boolean((event.toolOutput as any).output?.error?.effectUnknown);
+        const abortReason = interrupted ? Object.assign(new Error(String(options.signal?.reason ?? "Operation aborted")), { name: "AbortError" }) : undefined;
         await logger.append({
           type: failed ? "tool.failed" : "tool.finished",
           conversationId: options.conversationId,
-          content: { callId: event.callId, toolName: event.toolCall.toolName, toolExecutionMs: event.toolExecutionMs },
+          content: { callId: event.callId, toolName: event.toolCall.toolName, toolExecutionMs: event.toolExecutionMs,
+            ...(interrupted ? { status: "interrupted", effectUnknown } : {}) },
           toolCallId: event.toolCall.toolCallId,
           input: event.toolCall.input,
           ...(event.toolOutput.type === "tool-error" ? { error: event.toolOutput.error, output: { ok: false, error: event.toolOutput.error } } : { output: event.toolOutput.output, ...(failed ? { error: (event.toolOutput as any).output.error } : {}) }),
+          ...(interrupted ? { abort: { reason: abortReason } } : {}),
           latencyMs: event.toolExecutionMs,
         });
       },

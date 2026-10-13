@@ -1,24 +1,12 @@
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
-export type ChromeTarget = {
-  kind: "auto" | "extension" | "page";
-  tabId?: number;
+export type PageExecutionTarget = {
+  kind: "page";
+  tabId: number;
+  world: "MAIN" | "ISOLATED" | "USER_SCRIPT";
   frameId?: number;
   documentId?: string;
-  world?: "MAIN" | "ISOLATED" | "USER_SCRIPT";
-  targetId?: string;
-  sessionId?: string;
-};
-
-export type ChromeToolInput = {
-  code: string;
-  target?: ChromeTarget;
-  timeoutMs?: number;
-  save?: boolean;
-  /** Legacy page target fields kept so restored conversations remain executable. */
-  tabId?: number;
-  world?: "MAIN" | "USER_SCRIPT";
 };
 
 export type BrowserSelector = {
@@ -35,46 +23,9 @@ export type BrowserTarget =
   | BrowserSelector
   | { point: { observationId: string; x: number; y: number } };
 
-export type BrowserStep =
-  | { type: "goto"; url: string }
-  | { type: "click" | "doubleClick" | "hover"; target: BrowserTarget; button?: "left" | "right" | "middle"; modifiers?: string[] }
-  | { type: "fill"; target: BrowserTarget; value: string }
-  | { type: "clear"; target: BrowserTarget }
-  | { type: "press"; target?: BrowserTarget; key: string }
-  | { type: "insertText"; target?: BrowserTarget; text: string }
-  | { type: "select"; target: BrowserTarget; values: string[] }
-  | { type: "check"; target: BrowserTarget; checked?: boolean }
-  | { type: "drag"; from: BrowserTarget; to: BrowserTarget }
-  | { type: "upload"; target: BrowserTarget; files: Array<{ name: string; mimeType?: string; text?: string; base64?: string; url?: string; artifactId?: number }> }
-  | { type: "expect"; target?: BrowserTarget; state?: "attached" | "detached" | "visible" | "hidden" | "enabled" | "editable" | "checked"; text?: string; value?: string; url?: string };
-
-export type BrowserInput = {
-  mode: "observe";
-  tabId?: number;
-  detail?: "auto" | "semantic" | "visual";
-  since?: string;
-  timeoutMs?: number;
-} | {
-  mode: "act";
-  tabId?: number;
-  observationId?: string;
-  steps: BrowserStep[];
-  timeoutMs?: number;
-} | {
-  mode: "run";
-  code: string;
-  target?: ChromeTarget;
-  timeoutMs?: number;
-} | {
-  mode: "result";
-  id: number;
-  path?: string | Array<string | number>;
-  offset?: number;
-  limit?: number;
-};
-
 export const MODEL_SDKS = [
   "@ai-sdk/amazon-bedrock",
+  "@ai-sdk/amazon-bedrock/mantle",
   "@ai-sdk/anthropic",
   "@ai-sdk/azure",
   "@ai-sdk/cerebras",
@@ -115,13 +66,39 @@ export type ModelConfig = {
   providerId?: string;
   sdk?: ModelSdk;
   providerSettings?: Record<string, string>;
+  /** Models.dev per-model transport defaults, kept separate from user credentials. */
+  modelProvider?: ModelProviderOverride;
   /** Legacy fields are read during migration and kept optional for restored tests/conversations. */
   transport?: ModelTransport;
   baseURL: string;
+  /** Optional user override for a Models.dev provider endpoint. */
+  baseURLOverride?: string;
   apiKey?: string;
   model: string;
   contextWindowOverride?: number;
+  maxTokensOverride?: number;
+  endpointType?: ModelEndpointType;
+  canonicalModelId?: string;
+  modelFamily?: string;
   imageInput?: "auto" | "enabled" | "disabled";
+};
+
+export const MODEL_ENDPOINT_TYPES = [
+  "openai-chat-completions",
+  "openai-completions",
+  "openai-responses",
+  "anthropic-messages",
+  "google-generate-content",
+  "google-interactions",
+] as const;
+export type ModelEndpointType = typeof MODEL_ENDPOINT_TYPES[number];
+
+export type ModelProviderOverride = {
+  npm?: string;
+  api?: string;
+  shape?: string;
+  body?: Record<string, JsonValue>;
+  headers?: Record<string, string>;
 };
 
 export type ModelTransport = "gateway" | "openai-compatible";

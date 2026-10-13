@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 import {
   cp,
   mkdtemp,
@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { reloadDevelopmentExtension } from "../scripts/reload-dev-extension";
-import {
+import { test,
   closeServer,
   configure,
   openExtension,

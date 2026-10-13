@@ -165,6 +165,10 @@ describe("canonical event log", () => {
     expect(createIndex).toHaveBeenCalledWith("type", "type");
     expect(createIndex).toHaveBeenCalledWith("conversationType", ["conversationId", "type"]);
     expect(createIndex).toHaveBeenCalledWith("runType", ["runId", "type"]);
+    expect(createIndex).toHaveBeenCalledWith("typeId", ["type", "id"]);
+    expect(createIndex).toHaveBeenCalledWith("conversationTypeId", ["conversationId", "type", "id"]);
+    expect(createIndex).toHaveBeenCalledWith("runTypeId", ["runId", "type", "id"]);
+    expect(createIndex).toHaveBeenCalledWith("conversationIdId", ["conversationId", "id"]);
     expect(db.deleteObjectStore).not.toHaveBeenCalled();
     expect(legacyRecords).toHaveLength(1);
   });
@@ -235,7 +239,7 @@ describe("canonical event log", () => {
     logger.record({ type: "userscript.snapshot", content: { count: 1 } });
     await logger.flush();
     await logger.clear();
-    expect(await store.all()).toEqual([]);
+    expect((await store.all()).map(({ type }) => type)).toEqual(["sidepanel.closed", "log.cleared"]);
   });
 
   it("batches fire-and-forget events without dropping or reordering them", async () => {
@@ -272,7 +276,7 @@ describe("canonical event log", () => {
     );
   });
 
-  it("physically deletes only one conversation and retains an unscoped audit event", async () => {
+  it("hides and restores one conversation using append-only tombstones", async () => {
     const store = memoryStore();
     const logger = new EventLogger({ store });
     await logger.append({ type: "conversation.created", conversationId: "one", content: { title: "One" } });
@@ -283,12 +287,13 @@ describe("canonical event log", () => {
 
     await logger.deleteConversation("one");
 
-    expect(await logger.conversation("one")).toEqual([]);
-    expect((await logger.all()).some((event) => event.type === "tool.result.data")).toBe(false);
+    expect(await logger.conversation("one")).toEqual(expect.arrayContaining([expect.objectContaining({ type: "tool.result.data" })]));
+    expect((await logger.all()).some((event) => event.type === "tool.result.data")).toBe(true);
     expect(await logger.messages("two")).toMatchObject([{ id: "u2" }]);
     const audit = (await logger.all()).find((event) => event.type === "conversation.deleted");
-    expect(audit).toMatchObject({ content: { conversationId: "one" } });
-    expect(audit).not.toHaveProperty("conversationId");
+    expect(audit).toMatchObject({ conversationId: "one", content: null });
+    await logger.restoreConversation("one");
+    expect((await logger.summaryEvents()).map((event) => event.type)).toContain("conversation.restored");
   });
 });
 

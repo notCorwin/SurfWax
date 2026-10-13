@@ -69,7 +69,7 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
     }
     return output;
   };
-  const actions = useMemo(() => work?.mode !== "process" && <MessageFooter className={`gap-1 px-0 ${user ? "justify-end" : "justify-start"}`}>
+  const actions = useMemo(() => !running && !locked && work?.mode !== "process" && <MessageFooter className={`gap-1 px-0 ${user ? "justify-end" : "justify-start"}`}>
     <Button type="button" variant="ghost" size="icon-xs" aria-label={copied ? "已复制" : "复制消息"} title="复制消息" onClick={() => void copy()}><CopyIcon aria-hidden="true" /></Button>
     {user && !editing && <Button type="button" variant="ghost" size="icon-xs" disabled={locked} data-testid="edit-message-button" aria-label="编辑消息" title="编辑消息"
       onClick={() => command(() => { const rect = bubble.current!.getBoundingClientRect(); setEditSize({ width: rect.width, height: rect.height }); setDraft(client().getCopyText()); setEditing(true); })}><PencilIcon aria-hidden="true" /></Button>}
@@ -82,7 +82,7 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
       <span className="min-w-8 text-center">{message.branchNumber} / {message.branchCount}</span>
       <Button type="button" variant="ghost" size="icon-xs" disabled={locked || message.branchNumber >= message.branchCount} aria-label="下一个分支" title="下一个分支" onClick={() => command(() => client().switchToBranch({ position: "next" }))}><ChevronRightIcon aria-hidden="true" /></Button>
     </div>}
-  </MessageFooter>, [runtimeCommands, runtime, user, message.id, message.branchCount, message.branchNumber, copied, editing, locked, command, work?.mode]);
+  </MessageFooter>, [runtimeCommands, runtime, user, message.id, message.branchCount, message.branchNumber, copied, editing, running, locked, command, work?.mode]);
   if (work && shown.length === 0) return null;
   if (work?.mode === "process" && !message.metadata.custom?.interrupted
     && shown.every(({ part }) => part.type === "text" && !part.text.trim())) return null;

@@ -130,6 +130,20 @@ describe("conversation restoration", () => {
     ])).headId).toBe("u2");
   });
 
+  it("keeps a selected branch when regeneration fails before creating a message", async () => {
+    const events = [
+      event(1, "conversation.message", { content: toLogValue({ id: "u1", role: "user", parts: [] }) }),
+      event(2, "conversation.message", { parentId: "u1", content: toLogValue({ id: "a1", role: "assistant", parts: [] }) }),
+      event(3, "conversation.message", { parentId: "u1", content: toLogValue({ id: "a2", role: "assistant", parts: [] }) }),
+      event(4, "conversation.branch.selected", { content: toLogValue({ headId: "a1" }) }),
+      event(5, "conversation.submitted", { runId: "retry", content: toLogValue({ messageId: "u1" }) }),
+      event(6, "conversation.failed", { runId: "retry", error: "Unauthorized" }),
+    ];
+
+    expect((await restoreConversationRepository(events)).headId).toBe("a1");
+    expect(rebuildConversationRepository(events).headId).toBe("a1");
+  });
+
   it("advances a selected branch when a new canonical message is appended without a submitted event", async () => {
     const events = [
       event(1, "conversation.message", { content: toLogValue({ id: "u1", role: "user", parts: [] }) }),
