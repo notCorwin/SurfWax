@@ -1,40 +1,18 @@
-import {
-  useAui,
-  type GenericThreadHistoryAdapter,
-  type MessageFormatAdapter,
-  type RemoteThreadListAdapter,
-  type ThreadHistoryAdapter,
-  type ThreadMessage,
-} from "@assistant-ui/react";
-import { createAssistantStream } from "assistant-stream";
 import { readUIMessageStream, streamText, type UIMessageChunk } from "ai";
-import { useMemo } from "react";
 import {
   EventLogger,
   fromLogValue,
   isConversationMessage,
-  rebuildConversationList,
   selectedHeadId,
   type ConversationMessage,
   type ConversationRepository,
-  type ConversationSummary,
   type LogEvent,
 } from "./logging";
-import { abortConversationWork, registerBackgroundRequest, withIdleConversation } from "./agent/coordinator";
+import { registerBackgroundRequest } from "./agent/coordinator";
 import { createModel, retryModelOperation } from "./agent/model";
 import type { ModelConfig } from "./types";
 
-function metadata(summary: ConversationSummary) {
-  return {
-    remoteId: summary.id,
-    status: summary.status,
-    title: summary.title,
-    lastMessageAt: new Date(summary.lastMessageAt),
-    custom: { runStatus: summary.runStatus, createdAt: summary.createdAt },
-  };
-}
-
-function visibleText(message: ThreadMessage | ConversationMessage | undefined): string {
+function visibleText(message: ConversationMessage | undefined): string {
   if (!message) return "";
   const value = message as unknown as Record<string, unknown>;
   const parts = Array.isArray(value.content) ? value.content : Array.isArray(value.parts) ? value.parts : [];
@@ -133,11 +111,6 @@ export function generateConversationTitle(logger: EventLogger, config: ModelConf
   return task;
 }
 
-function withoutId(message: ConversationMessage): Record<string, unknown> {
-  const { id: _id, ...content } = message;
-  return content;
-}
-
 function normalizeInterruptedMessage(message: ConversationMessage, events: readonly LogEvent[], runId: string): ConversationMessage {
   const tools = new Map<string, LogEvent>();
   for (const event of events) if (event.runId === runId && event.toolCallId) tools.set(event.toolCallId, event);
@@ -222,101 +195,4 @@ export async function activeConversationMessages(logger: EventLogger, conversati
     id = item.parentId;
   }
   return messages;
-}
-
-function formattedHistory<TMessage, TStorageFormat extends Record<string, unknown>>(
-  format: MessageFormatAdapter<TMessage, TStorageFormat>,
-  logger: EventLogger,
-  getRemoteId: () => string | undefined,
-  initialize: () => Promise<string>,
-): GenericThreadHistoryAdapter<TMessage> {
-  return {
-    async load() {
-      const remoteId = getRemoteId();
-      if (!remoteId) return { headId: null, messages: [] };
-      const repository = await restoreConversationRepository(await logger.restorationEvents(remoteId));
-      return {
-        headId: repository.headId,
-        messages: repository.messages.map(({ parentId, message }) => format.decode({
-          id: message.id,
-          parent_id: parentId,
-          format: format.format,
-          content: withoutId(message) as TStorageFormat,
-        })),
-      };
-    },
-    async append(item) {
-      const remoteId = await initialize();
-      const id = format.getId(item.message);
-      const encoded = { id, ...format.encode(item) } as unknown as ConversationMessage;
-      if (encoded.role === "assistant" && encoded.parts.length === 0) return;
-      const repository = await logger.repository(remoteId);
-      if (repository.messages.some(({ message }) => message.id === id)) return;
-      await logger.appendMessage(remoteId, encoded, { parentId: item.parentId });
-    },
-    async update(item, localMessageId) {
-      const remoteId = await initialize();
-      await logger.appendMessage(remoteId, { id: localMessageId, ...format.encode(item) } as unknown as ConversationMessage, { parentId: item.parentId });
-    },
-  };
-}
-
-export function createConversationAdapter(logger: EventLogger, config: ModelConfig | (() => ModelConfig)): RemoteThreadListAdapter {
-  async function summaries(): Promise<ConversationSummary[]> {
-    return rebuildConversationList(await logger.summaryEvents());
-  }
-
-  function useConversationAdapters() {
-    const aui = useAui();
-    const history = useMemo<ThreadHistoryAdapter>(() => ({
-      async load() {
-        return { messages: [] };
-      },
-      async append() {},
-      withFormat: (format) => formattedHistory(
-        format,
-        logger,
-        () => aui.threadListItem.getState().remoteId,
-        async () => (await aui.threadListItem.initialize()).remoteId,
-      ),
-    }), [aui]);
-    return useMemo(() => ({ history }), [history]);
-  }
-
-  return {
-    async list() {
-      return { threads: (await summaries()).map(metadata) };
-    },
-    async initialize(threadId) {
-      const exists = (await summaries()).some(({ id }) => id === threadId);
-      if (!exists) await logger.append({ type: "conversation.created", conversationId: threadId, content: { title: "新对话" } });
-      return { remoteId: threadId };
-    },
-    async rename(remoteId, title) {
-      await withIdleConversation(() => logger.append({ type: "conversation.title.updated", conversationId: remoteId, content: { title: title.trim() || "新对话", source: "manual" } }));
-    },
-    async archive(remoteId) {
-      await withIdleConversation(() => logger.append({ type: "conversation.archived", conversationId: remoteId, content: null }));
-    },
-    async unarchive(remoteId) {
-      await withIdleConversation(() => logger.append({ type: "conversation.unarchived", conversationId: remoteId, content: null }));
-    },
-    async delete(remoteId) {
-      await withIdleConversation(async () => {
-        await abortConversationWork(remoteId);
-        await logger.deleteConversation(remoteId);
-      });
-    },
-    async fetch(threadId) {
-      const summary = (await summaries()).find(({ id }) => id === threadId);
-      if (!summary) throw new Error(`Conversation "${threadId}" was not found`);
-      return metadata(summary);
-    },
-    async generateTitle(remoteId, _messages) {
-      return createAssistantStream(async (controller) => {
-        controller.appendText(await generateConversationTitle(logger, typeof config === "function" ? config() : config, remoteId));
-      });
-    },
-    unstable_useAdapters: useConversationAdapters,
-  };
 }

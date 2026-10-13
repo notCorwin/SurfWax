@@ -11,7 +11,7 @@ function format(value: unknown): string {
   }
 }
 
-export const ToolFallback = memo(function ToolFallback(part: { status: { type: string }; args: unknown; argsText?: string; result?: unknown; isError?: boolean }) {
+export const ToolFallback = memo(function ToolFallback(part: { status: { type: string }; args: unknown; argsText?: string; inputStreaming?: boolean; result?: unknown; isError?: boolean }) {
   const { status, label } = toolActivity(part, useContext(ActivityPhaseContext));
   const running = status === "running";
   const [expanded, setExpanded] = useState(status === "error");
@@ -28,4 +28,4 @@ export const ToolFallback = memo(function ToolFallback(part: { status: { type: s
     </details>
   );
 }, (before, after) => before.status.type === after.status.type && before.args === after.args
-  && before.argsText === after.argsText && before.result === after.result && before.isError === after.isError);
+  && before.inputStreaming === after.inputStreaming && before.argsText === after.argsText && before.result === after.result && before.isError === after.isError);

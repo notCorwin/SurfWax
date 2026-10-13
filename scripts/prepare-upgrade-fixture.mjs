@@ -1,4 +1,4 @@
-import { access, mkdir, symlink, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, lstat, unlink, readFile, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 
@@ -9,8 +9,11 @@ try { await access(resolve(directory, 'dist/manifest.json')); } catch {
   await mkdir(directory, { recursive: true });
   const archive = execFileSync('git', ['archive', base], { maxBuffer: 32 * 1024 * 1024 });
   execFileSync('tar', ['-xf', '-', '-C', directory], { input: archive });
-  try { await access(resolve(directory, 'node_modules')); } catch { await symlink(resolve('node_modules'), resolve(directory, 'node_modules'), 'dir'); }
-  execFileSync(process.execPath, [resolve('node_modules/vite/bin/vite.js'), 'build'], { cwd: directory, stdio: 'inherit' });
+  // Historical dependencies must remain independent of the current extension.
+  const modules = resolve(directory, 'node_modules');
+  try { if ((await lstat(modules)).isSymbolicLink()) await unlink(modules); } catch {}
+  execFileSync('npm', ['ci', '--no-audit', '--no-fund'], { cwd: directory, stdio: 'inherit' });
+  execFileSync(process.execPath, [resolve(directory, 'node_modules/vite/bin/vite.js'), 'build'], { cwd: directory, stdio: 'inherit' });
   await writeFile(resolve(directory, 'fixture-source.json'), JSON.stringify({ commit: base, version: '0.2.0' }, null, 2));
 }
 const manifest = JSON.parse(await readFile(resolve(directory, 'dist/manifest.json'), 'utf8'));

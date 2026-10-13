@@ -4,7 +4,7 @@
 [![Chrome 138+](https://img.shields.io/badge/Chrome-138%2B-4285F4?logo=googlechrome&logoColor=white)](https://www.google.com/chrome/)
 [![Version](https://img.shields.io/github/package-json/v/notCorwin/SurfWax)](package.json)
 
-Surf Wax 是 Chrome 138+ 的 Manifest V3 Side Panel 智能体运行环境。它使用 Vercel AI SDK 和 Assistant UI 的非视觉运行时，以 shadcn/ui 与 Streamdown 构建界面，直接连接用户选择的 Provider 或 OpenAI-compatible Endpoint，支持 BYOK。
+Surf Wax 是 Chrome 138+ 的 Manifest V3 Side Panel 智能体运行环境。它使用 Vercel AI SDK 和基于事件日志的会话运行时，以 shadcn/ui 与 Streamdown 构建界面，直接连接用户选择的 Provider 或 OpenAI-compatible Endpoint，支持 BYOK。
 
 智能体使用 49 个独立、结构化工具完成网页阅读、表单、导航、多标签任务、画布输入、文件上传、截图、PDF、只读网络诊断和用户脚本。工具目录由源码 registry 生成，见 [工具参考](docs/tools.md)。
 
@@ -25,6 +25,8 @@ Provider 配置保存在本机 `chrome.storage.local`，按 Provider 隔离。�
 - 任何侧栏存在运行中的任务时，全部会话的新建、切换、编辑、重试、分支、重命名、归档与删除均锁定。搜索、复制、草稿、Follow-up 队列和停止始终可用。用户消息与 Assistant 回复均支持复制、重试及分支；用户消息另支持编辑。
 - 正在操作的页面有透明防干扰层。所有已操作标签页及 iframe 的阻断监听器保持安装，智能体通过当前 run 的受控输入票据执行原生输入；任务结束、导航和中断时清理。
 - 截图、PDF 和大型结果默认作为会话内部产物。用户明确要求保存时直接下载文件，无需再次授权。下载失败或任务中断后，内部产物仍可再次保存，无需重新生成。
+
+Side Panel 使用统一的磨砂材质 Design Tokens，自动跟随浅色／深色模式。任务建议可填入草稿后编辑发送；会话抽屉支持搜索和管理。用户消息显示为气泡，Assistant 回复通栏呈现；Markdown、LaTeX、代码高亮和工具详情完整保留，响应按动画帧合并更新，长历史按会话轮次虚拟化。
 
 用户脚本有独立管理页和五个智能体工具。脚本定义及启停状态由扩展持久化，并在启动或升级时恢复已启用脚本。使用前在 Chrome 扩展详情页开启 **Allow User Scripts**。
 

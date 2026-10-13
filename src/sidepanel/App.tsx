@@ -1,8 +1,10 @@
-import { AssistantRuntimeProvider, useAui, useAuiState } from "@assistant-ui/react";
-import { CodeXmlIcon, MessageSquarePlusIcon, SettingsIcon } from "lucide-react";
+import { usePanelRuntime, usePanelState } from "@/sidepanel/runtime-view";
+import { CodeXmlIcon, MessageSquarePlusIcon, SettingsIcon, WavesIcon, SlidersHorizontalIcon, LoaderCircleIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ConversationMenu } from "../components/assistant-ui/thread-list";
-import { Thread } from "../components/assistant-ui/thread";
+import { ConversationMenu } from "../components/chat/thread-list";
+import { Thread } from "../components/chat/thread";
+import { Badge } from "../components/ui/badge";
+import { Empty, EmptyHeader, EmptyTitle, EmptyDescription, EmptyMedia, EmptyContent } from "../components/ui/empty";
 import { Button } from "../components/ui/button";
 import { ErrorNotice } from "../components/ui/error-notice";
 import { generateConversationTitle } from "../conversations";
@@ -13,7 +15,7 @@ import { EventLogger, fromLogValue, rebuildConversationList } from "../logging";
 import type { ModelConfig } from "../types";
 import { useSidePanelRuntime } from "./useSidePanelRuntime";
 import { useRunState } from "./useRunState";
-import { commandRuntime, createThreadView, RuntimeViewContext, useRuntimeView } from "./runtime-view";
+import { RuntimeViewContext } from "./runtime-view";
 import { useSidePanelSession } from "./useSidePanelSession";
 import "../styles.css";
 import "./styles.css";
@@ -42,21 +44,38 @@ function UserScriptsButton() {
 }
 
 function NewConversationButton({ setWarning }: { setWarning: (message: string) => void }) {
-  const runtime = useRuntimeView();
+  const runtime = usePanelRuntime();
   const { locked } = useRunState();
   useEffect(() => { if (!locked) setWarning(""); }, [locked, setWarning]);
   return <Button type="button" variant="ghost" size="icon-sm" aria-label="新对话" title="新对话" data-testid="new-conversation" disabled={locked}
-    onClick={() => void withIdleConversation(async () => { await runtime.assistant.threads.switchToNewThread(); setWarning(""); }).catch((error) => setWarning(String(error.message)))}>
+    onClick={() => void withIdleConversation(async () => { await runtime.threads.switchToNewThread(); setWarning(""); }).catch((error) => setWarning(String(error.message)))}>
     <MessageSquarePlusIcon aria-hidden="true" />
   </Button>;
 }
 
 function Header({ conversation = false, logger }: { conversation?: boolean; logger?: EventLogger }) {
   const [warning, setWarning] = useState("");
-  return <><a className="skip-link" href="#chat-content">跳转到内容</a><header className="app-header">
-    {conversation && logger ? <ConversationMenu logger={logger} /> : <h1>Surf Wax</h1>}
-    <div className="flex gap-2">{conversation && <NewConversationButton setWarning={setWarning} />}<UserScriptsButton /><SettingsButton /></div>
-  </header>{warning && <p role="status" className="conversation-notice">{warning}</p>}</>;
+  return <><a className="skip-link" href="#chat-content">跳转到内容</a>
+    <header className="app-header">
+      <div className="flex min-w-0 items-center gap-2.5">
+        <WavesIcon className="brand-mark size-6 shrink-0" aria-hidden="true" />
+        <h1 translate="no">Surf Wax</h1>
+      </div>
+      <nav aria-label="侧栏工具" className="flex shrink-0 items-center gap-0.5">
+        {conversation && <NewConversationButton setWarning={setWarning} />}<UserScriptsButton /><SettingsButton />
+      </nav>
+    </header>
+    {conversation && logger && <div className="conversation-bar"><ConversationMenu logger={logger} /><RunBadge /></div>}
+    {warning && <p role="status" className="conversation-notice">{warning}</p>}
+  </>;
+}
+
+function RunBadge() {
+  const { locked, localRunning } = useRunState();
+  return <Badge variant="outline" className="run-badge" aria-live="polite">
+    <span className="status-dot" data-running={locked} aria-hidden="true" />
+    {localRunning ? "正在工作" : locked ? "任务进行中" : "就绪"}
+  </Badge>;
 }
 
 export function App() {
@@ -87,11 +106,17 @@ export function App() {
     <main className="app-shell" data-testid="sidepanel-shell">
       <Header />
       <section id="chat-content" tabIndex={-1} className="chat-scroll">
-        <div className="empty-state" data-testid="config-required-state">
-          <h2>{session.configReady ? "先完成模型配置" : "正在准备对话…"}</h2>
-          <p>{session.configReady ? "打开设置页选择 Provider，并填写 Model ID 和 API Key。" : "正在读取模型配置…"}</p>
-          {session.error !== undefined && <ErrorNotice summary="配置读取失败；请打开设置页重试。" error={session.error} />}
-        </div>
+        <Empty data-testid="config-required-state" className="welcome">
+          <EmptyHeader>
+            <EmptyMedia className="welcome-symbol">{session.configReady ? <SlidersHorizontalIcon aria-hidden="true" /> : <LoaderCircleIcon className="animate-spin" aria-hidden="true" />}</EmptyMedia>
+            <EmptyTitle><h2>{session.configReady ? "让浏览器成为你的助手" : "正在准备对话…"}</h2></EmptyTitle>
+            <EmptyDescription>{session.configReady ? "连接你常用的模型，就可以开始阅读页面、整理信息和执行任务。" : "正在读取模型配置…"}</EmptyDescription>
+          </EmptyHeader>
+          <EmptyContent>
+            {session.configReady && <Button onClick={() => void chrome.runtime.openOptionsPage()}><SlidersHorizontalIcon data-icon="inline-start" />配置模型</Button>}
+            {session.error !== undefined && <ErrorNotice summary="配置读取失败；请打开设置页重试。" error={session.error} />}
+          </EmptyContent>
+        </Empty>
       </section>
     </main>
   );
@@ -124,8 +149,7 @@ function ConfiguredChat({ config, systemPrompt, logger, onError }: { config: Mod
   return <ConfiguredRuntime config={config} systemPrompt={systemPrompt} logger={logger} initialThreadId={initialThreadId ?? undefined} />;
 }
 
-function ReloadConversationList({ logger, config }: { logger: EventLogger; config: ModelConfig }) {
-  const aui = useAui();
+function RecoverConversationTitles({ logger, config }: { logger: EventLogger; config: ModelConfig }) {
   useEffect(() => {
     const recoverTitle = async (conversationId: string) => {
       const events = await logger.summaryEvents(conversationId);
@@ -139,34 +163,26 @@ function ReloadConversationList({ logger, config }: { logger: EventLogger; confi
       rebuildConversationList(events).map(({ id }) => recoverTitle(id)),
     ));
     return logger.subscribe((event) => {
-      if (["conversation.submitted", "conversation.finished", "conversation.failed", "conversation.aborted", "conversation.title.updated"].includes(event.type)) {
-        void aui.threads.reload();
-      }
       if (event.type === "conversation.finished" && event.conversationId) void recoverTitle(event.conversationId).catch(() => undefined);
     });
-  }, [aui, config, logger]);
+  }, [config, logger]);
   return null;
 }
 
 function ConfiguredRuntime({ config, systemPrompt, logger, initialThreadId }: { config: ModelConfig; systemPrompt?: string; logger: EventLogger; initialThreadId?: string }) {
   const runtime = useSidePanelRuntime(config, systemPrompt, logger, initialThreadId);
-  const commands = useMemo(() => commandRuntime(runtime), [runtime]);
-  const view = useMemo(() => ({ ...createThreadView(runtime.thread), assistant: runtime }), [runtime]);
-  return (
-    <RuntimeViewContext.Provider value={view}>
-      <AssistantRuntimeProvider runtime={commands}>
-        <ConfiguredConversation config={config} logger={logger} />
-      </AssistantRuntimeProvider>
-    </RuntimeViewContext.Provider>
-  );
+  const view = useMemo(() => ({ getState: runtime.thread.getState, thread: runtime.thread, runtime }), [runtime]);
+  return <RuntimeViewContext.Provider value={view}>
+    <ConfiguredConversation config={config} logger={logger} />
+  </RuntimeViewContext.Provider>;
 }
 
 function ConfiguredConversation({ config, logger }: { config: ModelConfig; logger: EventLogger }) {
-  const threadId = useAuiState((state) => state.threads.mainThreadId);
+  const threadId = usePanelState((state) => state.threads.mainThreadId);
   const drafts = useRef(new Map<string, string>());
   return (
     <main className="app-shell" data-testid="sidepanel-shell">
-      <ReloadConversationList logger={logger} config={config} />
+      <RecoverConversationTitles logger={logger} config={config} />
       <Header conversation logger={logger} />
       <RunOwnershipNotice />
       <ConversationView key={threadId} config={config} logger={logger} threadId={threadId} drafts={drafts.current} />
@@ -176,7 +192,7 @@ function ConfiguredConversation({ config, logger }: { config: ModelConfig; logge
 
 function RunOwnershipNotice() {
   const [owner, setOwner] = useState<RunIdentity>();
-  const localRunning = useAuiState((state) => state.thread.isRunning);
+  const localRunning = usePanelState((state) => state.thread.isRunning);
   useEffect(() => {
     let active = true;
     let revision = 0;
@@ -196,8 +212,8 @@ function RunOwnershipNotice() {
 }
 
 function ConversationView({ config, logger, threadId, drafts }: { config: ModelConfig; logger: EventLogger; threadId: string; drafts: Map<string, string> }) {
-  const conversationId = useAuiState((state) => state.threadListItem.remoteId ?? state.threadListItem.id);
-  const isRunning = useAuiState((state) => state.thread.isRunning);
+  const conversationId = usePanelState((state) => state.threadListItem.remoteId ?? state.threadListItem.id);
+  const isRunning = usePanelState((state) => state.thread.isRunning);
   const [guardWarning, setGuardWarning] = useState("");
   const [contextStatus, setContextStatus] = useState<{ message: string; error: boolean }>();
   const [compactionBusy, setCompactionBusy] = useState(false);

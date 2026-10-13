@@ -142,6 +142,15 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       onToolExecutionEnd: async (event) => {
         loggedToolCalls.add(`${event.callId}\u0000${event.toolCall.toolCallId}`);
         const failed = event.toolOutput.type === "tool-error" || (event.toolOutput as any).output?.ok === false;
+        if (failed && options.signal?.aborted && options.conversationId) {
+          const identity = logger.toolIdentity(options.conversationId, event.toolCall.toolCallId);
+          if (identity.runId) {
+            // Cancellation can reach the SDK callback before stream cleanup.
+            // Use the same durable interruption result regardless of that race.
+            await logger.closePendingTools(identity.runId, options.conversationId, options.signal.reason);
+            return;
+          }
+        }
         await logger.append({
           type: failed ? "tool.failed" : "tool.finished",
           conversationId: options.conversationId,

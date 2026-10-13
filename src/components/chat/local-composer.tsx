@@ -1,9 +1,10 @@
 "use client";
+import { usePanelRuntime, usePanelState, type PanelState } from "@/sidepanel/runtime-view";
 
-import { useAui, useAuiState, type AssistantState } from "@assistant-ui/react";
 import { cn } from "cn";
 import { ArrowUpIcon, ForwardIcon, SquareIcon, XIcon } from "lucide-react";
 import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent } from "react";
+import { InputGroup, InputGroupTextarea, InputGroupAddon } from "@/components/ui/input-group";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
@@ -19,9 +20,9 @@ import { fromLogValue, type ConversationMessage, type EventLogger, type LogEvent
 import type { ModelConfig } from "@/types";
 import { useRuntimeView } from "@/sidepanel/runtime-view";
 
-const composerText = (state: AssistantState) => state.composer.text;
-const threadRunning = (state: AssistantState) => state.thread.isRunning;
-const composerDisabled = (state: AssistantState) => state.thread.isDisabled || state.thread.isLoading || Boolean(state.composer.dictation?.inputDisabled);
+const composerText = (state: PanelState) => state.composer.text;
+const threadRunning = (state: PanelState) => state.thread.isRunning;
+const composerDisabled = (state: PanelState) => state.thread.isDisabled || state.thread.isLoading;
 const EFFORT_LABELS: Record<ReasoningEffort, string> = {
   none: "关闭", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "极高", max: "最高",
 };
@@ -193,10 +194,10 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
               continue;
             }
             const metadataById = new Map(canonical.messages.map((entry) => [entry.message.id, entry.message.metadata]));
-            const ui = currentMessages.map(({ id, role, parts, metadata }) => ({
+            const ui = currentMessages.map(({ id, role, source, metadata }) => ({
               id,
               role,
-              parts: [...parts],
+              parts: [...source.parts],
               metadata: role === "user" ? metadataById.get(id) ?? metadata : metadata,
             })) as ConversationMessage[];
             const branchIds = ui.map(({ id }) => id);
@@ -352,10 +353,10 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
   const settings = reasoningSettingsFor(config);
   const reasoning = useSyncExternalStore(settings.subscribe, settings.snapshot);
   const model = config.model;
-  const aui = useAui();
-  const externalText = useAuiState(composerText);
-  const isRunning = useAuiState(threadRunning);
-  const isDisabled = useAuiState(composerDisabled);
+  const runtimeCommands = usePanelRuntime();
+  const externalText = usePanelState(composerText);
+  const isRunning = usePanelState(threadRunning);
+  const isDisabled = usePanelState(composerDisabled);
   const followups = useFollowups(logger, conversationId);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const composing = useRef(false);
@@ -386,13 +387,13 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
   const dispatchFollowup = useCallback((message: FollowupMessage, mode: "followup" | "immediate") => {
     if (dispatching.current || blocked) return;
     dispatching.current = message.id;
-    void waitForConversationRun(conversationId).then(() => aui.thread.append({
+    void waitForConversationRun(conversationId).then(() => runtimeCommands.thread.append({
       role: "user",
       content: [{ type: "text", text: message.text }],
       createdAt: new Date(),
       metadata: { custom: { followupId: message.id, followupMode: mode } },
     })).catch(() => { dispatching.current = undefined; });
-  }, [aui, blocked, conversationId]);
+  }, [runtimeCommands, blocked, conversationId]);
 
   useEffect(() => {
     if (!dispatching.current) return;
@@ -418,8 +419,8 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
     const value = input?.value ?? "";
     if (!input || !value.trim() || isDisabled || blocked) return;
     if (followups.ready && !isRunning && followups.messages.length === 0) {
-      aui.composer.setText(value);
-      aui.composer.send();
+      runtimeCommands.composer.setText(value);
+      runtimeCommands.composer.send();
       clearInput();
       return;
     }
@@ -436,17 +437,17 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
     }).then(() => {
       if (!followups.ready || !isRunning) setResumeQueue(true);
     }).catch(() => undefined);
-  }, [aui, blocked, clearInput, conversationId, followups.messages.length, followups.ready, isDisabled, isRunning, logger]);
+  }, [runtimeCommands, blocked, clearInput, conversationId, followups.messages.length, followups.ready, isDisabled, isRunning, logger]);
 
   const sendImmediately = useCallback((message: FollowupMessage) => {
     if (blocked || dispatching.current) return;
     if (isRunning) {
       setImmediateId(message.id);
-      aui.thread.cancelRun();
+      runtimeCommands.thread.cancelRun();
     } else {
       dispatchFollowup(message, "immediate");
     }
-  }, [aui, blocked, dispatchFollowup, isRunning]);
+  }, [runtimeCommands, blocked, dispatchFollowup, isRunning]);
 
   const removeFollowup = useCallback((id: string) => {
     void logger.append({ type: "conversation.followup.removed", conversationId, content: { id } }).catch(() => undefined);
@@ -487,13 +488,13 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
           </Button>
         </div>)}
       </div>}
-      <div className="flex w-full flex-col gap-2 rounded-xl border border-border/70 bg-muted/30 p-2 shadow-sm focus-within:border-ring">
-        <textarea
+      <InputGroup className="composer-surface flex-col gap-1 rounded-2xl" aria-label="发送浏览器任务">
+        <InputGroupTextarea
           ref={inputRef}
           data-testid="composer-input"
           defaultValue={draft ?? externalText}
           placeholder="描述要执行的浏览器任务…"
-          className="field-sizing-content min-h-12 max-h-32 w-full resize-none overflow-y-auto bg-transparent px-2 py-1 text-sm leading-relaxed outline-none placeholder:text-muted-foreground"
+          className="min-h-20 max-h-40 w-full overflow-y-auto px-4 py-3"
           rows={2}
           disabled={isDisabled || blocked}
           autoFocus
@@ -507,9 +508,9 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
           onCompositionStart={() => { composing.current = true; }}
           onCompositionEnd={() => { composing.current = false; }}
         />
-        <div className="flex min-w-0 items-center justify-between gap-2">
+        <InputGroupAddon align="block-end" className="min-w-0 justify-between gap-1 px-2 pb-2">
           <div className="flex min-w-0 items-center gap-1">
-            <span data-testid="composer-model" className="min-w-0 truncate px-2 text-xs text-muted-foreground" title={model}>
+            <span data-testid="composer-model" className="composer-model min-w-0 truncate px-2 text-xs text-muted-foreground" title={model}>
               {(model.split("/").at(-1) ?? model).split(/[-_\s]+/).filter(Boolean).map((part) =>
                 /^(gpt|glm|api)$/i.test(part) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1),
               ).join(" ")}
@@ -517,7 +518,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
             <Select value={reasoning.selected ?? undefined} disabled={!reasoning.ready || isRunning || !reasoning.choices.length}
               onValueChange={(value) => settings.select(value as ReasoningEffort)}>
               <SelectTrigger data-testid="reasoning-effort" size="sm" aria-label="思考强度"
-                className="h-7 max-w-24 gap-1 border-transparent bg-transparent px-2 text-xs text-muted-foreground shadow-none hover:bg-accent hover:text-foreground dark:bg-transparent dark:hover:bg-accent">
+                className="reasoning-select h-7 max-w-20 gap-1 px-1.5">
                 <SelectValue placeholder="默认" />
               </SelectTrigger>
               <SelectContent position="popper" align="start">
@@ -529,12 +530,16 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
             <ContextIndicator config={config} logger={logger} conversationId={conversationId} />
           </div>
           <div className="flex items-center gap-1">
-            {isRunning && <Button type="button" size="icon-sm" className="rounded-full" aria-label="停止生成" title="停止生成" onClick={() => aui.thread.cancelRun()}><SquareIcon aria-hidden="true" /></Button>}
+            {isRunning && <Button type="button" size="icon-sm" className="rounded-full" aria-label="停止生成" title="停止生成" onClick={() => runtimeCommands.thread.cancelRun()}><SquareIcon aria-hidden="true" /></Button>}
             {(!isRunning || hasText) && <Button type="button" size="icon-sm" className="rounded-full" disabled={!hasText || isDisabled || blocked}
               aria-label={isRunning || followups.messages.length > 0 ? "排队消息" : "发送消息"}
               title={isRunning || followups.messages.length > 0 ? "加入 Follow-up 队列" : "发送消息"} onClick={submit}><ArrowUpIcon aria-hidden="true" /></Button>}
           </div>
-        </div>
+        </InputGroupAddon>
+      </InputGroup>
+      <div className="composer-hint mt-2 flex items-center justify-between gap-2 px-1 text-muted-foreground">
+        <span>{isRunning ? "可以继续输入，消息将排队发送" : "Enter 发送 · Shift + Enter 换行"}</span>
+        <span translate="no">Surf Wax</span>
       </div>
     </form>
   );

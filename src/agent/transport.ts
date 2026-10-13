@@ -1,6 +1,5 @@
 import {
   DirectChatTransport,
-  readUIMessageStream,
   type Agent,
   type ChatTransport,
   type UIMessage,
@@ -13,6 +12,7 @@ import { ensureConversationPrompt } from "./prompt";
 import { materializeToolCatalog } from "./tool-catalog";
 import { TOOL_CATALOG_VERSION, TOOL_CONTEXT } from "../chrome/tool";
 import { recoverModelStream } from "./stream-recovery";
+import { readMessageSnapshots } from "./message-snapshots";
 
 export type SidePanelMessage = UIMessage<any, never, any>;
 
@@ -40,7 +40,7 @@ function logStream(
   release: () => void | Promise<void>,
 ): ReadableStream<UIMessageChunk> {
   const [clientStream, eventStream] = stream.tee();
-  const snapshots = readUIMessageStream<SidePanelMessage>({ stream: eventStream });
+  const snapshots = readMessageSnapshots<SidePanelMessage>(eventStream, () => undefined);
   const snapshotReader = snapshots.getReader();
   const clientReader = clientStream.getReader();
   let response: SidePanelMessage | undefined;
@@ -149,7 +149,7 @@ export function createChatTransport(agent: (signal: AbortSignal, branchIds: stri
         const newUser = userMessage && (!existing.messages.some((entry) => entry.message.id === userMessage!.id)
           || options.trigger === "submit-message" && !previouslySubmitted);
         let catalogAdded = false;
-        // The history adapter can persist a new user before sendMessages. Attach
+        // The panel can persist a new user before sendMessages. Attach
         // its first catalogue before submission, while past request prefixes stay fixed.
         if (prompt.format === "legacy-user-tools" && userMessage && catalogVersion !== TOOL_CATALOG_VERSION && newUser) {
           catalogAdded = true;

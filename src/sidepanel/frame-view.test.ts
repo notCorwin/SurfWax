@@ -38,32 +38,17 @@ describe("frame projection", () => {
   });
 });
 
-import type { AssistantRuntime, ThreadRuntime } from "@assistant-ui/react";
-import { commandRuntime, createThreadView } from "./runtime-view";
+import { createMessageProjection } from "./conversation-store";
+import type { SidePanelMessage } from "../agent/transport";
 
-it("keeps all runtime history while command clients avoid historic message subscriptions", () => {
-  let state: any = { isRunning: true, messages: Array.from({ length: 1000 }, (_, index) => ({ id: String(index), role: "assistant", content: [{ type: "text", text: String(index) }] })) };
-  const getMessageByIndex = vi.fn((index: number) => ({
-    getState: () => ({ ...state.messages[index], index, isLast: index === state.messages.length - 1, branchNumber: 1, branchCount: 1 }),
-    getMessagePartByIndex: (part: number) => ({ getState: () => ({ ...state.messages[index].content[part], status: { type: "complete" } }) }),
-  }));
-  const thread = { getState: () => state, getMessageByIndex } as unknown as ThreadRuntime;
-  const runtime = { thread, threads: { main: thread } } as AssistantRuntime;
-  const commands = commandRuntime(runtime);
-  const view = createThreadView(thread);
-  expect(commands.thread.getState().messages).toHaveLength(0);
-  expect(commands.thread.getState()).toBe(commands.thread.getState());
-  const commandState = commands.thread.getState();
-  expect(runtime.thread.getState().messages).toHaveLength(1000);
-  const before = view.getState();
-  expect(before.messages).toHaveLength(1000);
-  getMessageByIndex.mockClear();
-  state = { ...state, messages: [...state.messages.slice(0, -1), { ...state.messages.at(-1), content: [{ type: "text", text: "latest token" }] }] };
-  const after = view.getState();
-  expect(commands.thread.getState()).toBe(commandState);
-  state = { ...state, isRunning: false };
-  expect(commands.thread.getState().isRunning).toBe(false);
-  expect(getMessageByIndex).toHaveBeenCalledExactlyOnceWith(999);
-  expect(after.messages[0]).toBe(before.messages[0]);
-  expect(after.messages[999].parts[0]).toMatchObject({ text: "latest token" });
+it("keeps historic message identity stable while projecting streamed tokens and branch changes", () => {
+  const projection = createMessageProjection();
+  const messages: SidePanelMessage[] = Array.from({ length: 1000 }, (_, index) => ({ id: String(index), role: "assistant", parts: [{ type: "text", text: String(index) }] }));
+  const before = messages.map((message) => projection.message(message, true, [message.id]));
+  const updated = { ...messages[999]!, parts: [{ type: "text" as const, text: "latest token" }] };
+  const after = [...messages.slice(0, -1), updated].map((message) => projection.message(message, true, [message.id]));
+  expect(after[0]).toBe(before[0]);
+  expect(after[999]?.parts[0]).toMatchObject({ text: "latest token" });
+  expect(projection.message(updated, false, [updated.id]).status.type).toBe("complete");
+  expect(projection.message(messages[0]!, false, ["other", "0"])).toMatchObject({ branchNumber: 2, branchCount: 2 });
 });

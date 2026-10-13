@@ -2,10 +2,11 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MessageScrollerProvider, MessageScroller, MessageScrollerViewport, MessageScrollerContent, MessageScrollerButton } from "@/components/ui/message-scroller";
-import { withIdleConversation } from "@/agent/coordinator";
 import { useFrameThread } from "@/sidepanel/frame-view";
 import { useRunState } from "@/sidepanel/useRunState";
 import { createTurnProjection } from "@/sidepanel/turn-projection";
+import { Welcome } from "./welcome";
+import { ErrorNotice } from "../ui/error-notice";
 import { LocalComposer } from "./local-composer";
 import { MessageRow, type MessageView, type WorkView } from "./message-row";
 import { workLabel } from "./work-time";
@@ -39,7 +40,7 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
   const [warning, setWarning] = useState("");
   const command = useCallback((action: () => void) => {
     if (locked) { setWarning("当前会话尚未结束，请等待完成或先停止运行。"); return; }
-    void withIdleConversation(action).catch((error) => setWarning(error instanceof Error ? error.message : String(error)));
+    void Promise.resolve().then(action).catch((error) => setWarning(error instanceof Error ? error.message : String(error)));
   }, [locked]);
   useEffect(() => {
     let active = true;
@@ -54,12 +55,15 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
     getScrollElement: () => scroller.current, initialRect: { height: 800, width: 430 }, overscan: 2,
     useFlushSync: false, directDomUpdates: true, useAnimationFrameWithResizeObserver: true });
   const items = virtualizer.getVirtualItems();
-  return <div data-testid="thread-root" className="relative flex h-full min-h-0 flex-col bg-background">
+  return <div data-testid="thread-root" className="relative flex h-full min-h-0 flex-col">
+    {state.error !== undefined && <ErrorNotice summary="会话读取失败，请重试。" error={state.error} />}
     {warning && <p role="status" className="conversation-notice">{warning}</p>}
-    <MessageScrollerProvider autoScroll>
+    <MessageScrollerProvider autoScroll={turns.length > 0}>
       <MessageScroller className="flex-1">
         <MessageScrollerViewport ref={scroller} data-testid="thread-viewport" className="overflow-x-hidden">
-          <MessageScrollerContent className="mx-auto block w-full max-w-(--thread-max-width) px-1 pt-3 pb-10">
+          <MessageScrollerContent className="mx-auto block w-full max-w-(--thread-max-width) px-4 pt-5 pb-8">
+            {turns.length === 0 && !state.isLoading && <Welcome disabled={locked} />}
+            {state.isLoading && <p role="status" className="conversation-notice py-8">正在读取对话…</p>}
             <div ref={virtualizer.containerRef} className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
               {items.map((item) => {
                 const turn = turns[item.index]!;
@@ -83,10 +87,10 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
             </div>
           </MessageScrollerContent>
         </MessageScrollerViewport>
-        <MessageScrollerButton aria-label="滚动到底部" title="滚动到底部" />
+        {turns.length > 0 && <MessageScrollerButton aria-label="滚动到底部" title="滚动到底部" />}
       </MessageScroller>
     </MessageScrollerProvider>
-    <div className="shrink-0 bg-background px-1 pt-2 pb-2">
+    <div className="composer-dock shrink-0 px-3 pt-2 pb-3">
       <LocalComposer config={config} logger={logger} conversationId={conversationId} blocked={contextBlocked} draft={draft} onDraftChange={onDraftChange} />
     </div>
   </div>;

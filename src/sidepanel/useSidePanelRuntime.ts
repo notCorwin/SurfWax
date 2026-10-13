@@ -1,5 +1,3 @@
-import { useAuiState, useRemoteThreadListRuntime, type AssistantRuntime } from "@assistant-ui/react";
-import { useChatRuntime } from "@assistant-ui/ai-sdk";
 import { useEffect, useMemo, useRef } from "react";
 import { abortAllConversationWork } from "../agent/coordinator";
 import { ensureConversationPrompt, PROMPT_TOOLS } from "../agent/prompt";
@@ -8,13 +6,13 @@ import { ContextCompactor } from "../agent/compaction";
 import { createModel } from "../agent/model";
 import { ensureAutomaticContextSummary } from "../agent/context-choice";
 import { reasoningSettingsFor } from "../agent/reasoning";
-import { createChatTransport, type SidePanelMessage } from "../agent/transport";
+import { createChatTransport } from "../agent/transport";
 import { ChromeExecutor } from "../chrome/executor";
-import { createConversationAdapter } from "../conversations";
+import { ConversationStore } from "./conversation-store";
 import type { EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
 
-type CloseableRuntime = { thread: Pick<AssistantRuntime["thread"], "cancelRun"> };
+type CloseableRuntime = { thread: { cancelRun: () => unknown } };
 
 export function createSidePanelCloser(runtime: CloseableRuntime, logger?: EventLogger): () => void {
   let closed = false;
@@ -28,10 +26,13 @@ export function createSidePanelCloser(runtime: CloseableRuntime, logger?: EventL
   };
 }
 
-function useConversationRuntime(config: ModelConfig, systemPrompt: string | undefined, logger: EventLogger, executor: ChromeExecutor): AssistantRuntime {
-  const conversationId = useAuiState((state) => state.threadListItem.remoteId ?? state.threadListItem.id);
-  const transport = useMemo(
-    () => createChatTransport(async (signal, branchIds, resumed) => {
+export function useSidePanelRuntime(config: ModelConfig, systemPrompt: string | undefined, logger: EventLogger, initialThreadId?: string) {
+  const executor = useMemo(() => new ChromeExecutor({ logger }), [logger]);
+  const latest = useRef({ config, systemPrompt });
+  latest.current = { config, systemPrompt };
+  const runtime = useMemo(() => new ConversationStore(logger, (conversationId) => {
+    const { config, systemPrompt } = latest.current;
+    return createChatTransport(async (signal, branchIds, resumed) => {
       signal.throwIfAborted();
       if (!resumed) await executor.beginRun();
       const reasoning = reasoningSettingsFor(config);
@@ -45,38 +46,10 @@ function useConversationRuntime(config: ModelConfig, systemPrompt: string | unde
     }, logger, conversationId, () => executor.endRun(), async (signal) => {
       const prompt = await ensureConversationPrompt(logger, conversationId, systemPrompt);
       await ensureAutomaticContextSummary(logger, conversationId, config, signal, { forced: true, instructions: prompt.instructions, tools: PROMPT_TOOLS });
-    }, systemPrompt),
-    [config, conversationId, executor, logger, systemPrompt],
-  );
-  const runtime = useChatRuntime<SidePanelMessage>({
-    id: conversationId,
-    transport,
-    unstable_onBranchChange: ({ headId }) => {
-      void logger.append({ type: "conversation.branch.selected", conversationId, content: { headId } });
-    },
-  });
+    }, systemPrompt);
+  }, initialThreadId), [executor, logger, initialThreadId]);
 
-  return runtime;
-}
-
-export function useSidePanelRuntime(
-  config: ModelConfig,
-  systemPrompt: string | undefined,
-  logger: EventLogger,
-  initialThreadId?: string,
-): AssistantRuntime {
-  const executor = useMemo(() => new ChromeExecutor({ logger }), [logger]);
-  const latestConfig = useRef(config);
-  latestConfig.current = config;
-  const adapter = useMemo(() => createConversationAdapter(logger, () => latestConfig.current), [logger]);
-  const runtime = useRemoteThreadListRuntime({
-    adapter,
-    initialThreadId,
-    runtimeHook: () => useConversationRuntime(config, systemPrompt, logger, executor),
-    onThreadIdChange: (conversationId) => {
-      if (conversationId) logger.record({ type: "conversation.selected", conversationId, content: null });
-    },
-  });
+  useEffect(() => runtime.connect(), [runtime]);
 
   useEffect(() => {
     const close = createSidePanelCloser(runtime, logger);

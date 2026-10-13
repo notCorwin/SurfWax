@@ -1,13 +1,10 @@
 "use client";
 
-import type {
-  ReasoningMessagePartComponent,
-} from "@assistant-ui/react";
 import { memo, useContext } from "react";
 import { MarkdownText } from "./markdown-text";
 import { ActivityPhaseContext } from "./process-group";
 
-const ReasoningImpl: ReasoningMessagePartComponent = ({ status, text }) => {
+const ReasoningImpl = ({ status, text }: { status: { type: string }; text: string }) => {
   const phase = useContext(ActivityPhaseContext);
   const running = phase === "pending" || phase === "settled" && status.type === "running";
   const label = phase === "cancelled" ? "回复中断" : phase === "failed" ? "回复失败" : phase === "stopped" ? "回复未生成"

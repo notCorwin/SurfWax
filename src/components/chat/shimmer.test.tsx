@@ -4,11 +4,12 @@ import type { ComponentProps } from "react";
 import { act, createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createRoot } from "react-dom/client";
-import { parsePartialJsonObject } from "assistant-stream/utils";
 import { expect, it, vi } from "vitest";
 import { Reasoning } from "./reasoning";
 import { ToolFallback } from "./tool-fallback";
 import { ActivityPhaseContext, type ActivityPhase } from "./process-group";
+
+const inputStreaming = (text: string) => { try { JSON.parse(text); return false; } catch { return true; } };
 
 vi.mock("./markdown-text", () => ({ MarkdownText: () => null }));
 
@@ -16,10 +17,11 @@ it("shimmers only active reasoning and tool labels", () => {
   const reasoning = (type: "running" | "complete") => renderToStaticMarkup(createElement(Reasoning, {
     status: { type },
   } as ComponentProps<typeof Reasoning>));
-  const tool = (type: "running" | "complete" | "incomplete", argsText: string, args = parsePartialJsonObject(argsText)) => renderToStaticMarkup(createElement(ToolFallback, {
+  const tool = (type: "running" | "complete" | "incomplete", argsText: string, args = {}) => renderToStaticMarkup(createElement(ToolFallback, {
     status: { type },
     argsText,
     args,
+    inputStreaming: inputStreaming(argsText),
   } as ComponentProps<typeof ToolFallback>));
 
   expect(reasoning("running")).toContain('class="shimmer text-foreground/65">正在思考');
@@ -51,7 +53,8 @@ it("replaces the shimmer label when command input becomes execution", async () =
   const render = (argsText: string) => createElement(ToolFallback, {
     status: { type: "running" },
     argsText,
-    args: parsePartialJsonObject(argsText),
+    args: {},
+    inputStreaming: inputStreaming(argsText),
   } as ComponentProps<typeof ToolFallback>);
 
   await act(() => root.render(render('{"code":"return 1')));

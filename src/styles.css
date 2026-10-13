@@ -215,3 +215,68 @@ summary,
     transition-duration: var(--motion-reduced) !important;
   }
 }
+
+/* Shared materials: components choose opacity, never their own palette. */
+:root {
+  --brand: #246d61;
+  --surface-opacity: 0.045;
+  --surface-hover-opacity: 0.075;
+  --surface-selected-opacity: 0.11;
+  --surface-blur: 16px;
+  --overlay-blur: 32px;
+  --surface-soft: color-mix(in srgb, var(--foreground) calc(var(--surface-opacity) * 100%), transparent);
+  --surface-hover: color-mix(in srgb, var(--foreground) calc(var(--surface-hover-opacity) * 100%), transparent);
+  --surface-selected: color-mix(in srgb, var(--brand) calc(var(--surface-selected-opacity) * 100%), transparent);
+  --surface-stroke: color-mix(in srgb, var(--foreground) 10%, transparent);
+  --surface-shadow: 0 2px 8px color-mix(in srgb, var(--foreground) 3%, transparent), 0 12px 32px color-mix(in srgb, var(--foreground) 3%, transparent);
+  --material-overlay: var(--popover);
+  --radius-panel: 1.25rem;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --brand: #9dd9c9;
+    --surface-opacity: 0.05;
+    --surface-hover-opacity: 0.09;
+    --surface-selected-opacity: 0.13;
+  }
+}
+@theme inline {
+  --color-brand: var(--brand);
+  --color-surface: var(--surface-soft);
+  --color-surface-hover: var(--surface-hover);
+  --color-surface-selected: var(--surface-selected);
+  --color-surface-stroke: var(--surface-stroke);
+}
+
+/* Remove stock component fills; keep all surfaces on the same material scale. */
+[data-slot="card"], [data-slot="input"], [data-slot="textarea"],
+[data-slot="input-group"], [data-slot="input-group-control"],
+[data-slot="select-trigger"], [data-slot="alert"], [data-slot="empty-icon"] {
+  background: transparent;
+}
+[data-slot="badge"] { background: transparent; color: var(--foreground); }
+[data-slot="badge"][data-variant="secondary"] {
+  background: var(--surface-selected);
+  color: var(--brand);
+}
+[data-slot="badge"][data-variant="destructive"] {
+  background: color-mix(in srgb, var(--destructive) 10%, transparent);
+  color: var(--destructive);
+}
+[data-slot="bubble"] [data-slot="bubble-content"] {
+  background: var(--surface-soft);
+  color: var(--foreground);
+  border-color: var(--surface-stroke);
+  backdrop-filter: blur(var(--surface-blur));
+}
+[data-slot="bubble"][data-variant="ghost"] [data-slot="bubble-content"] { background: transparent; backdrop-filter: none; }
+[data-slot="dialog-content"], [data-slot="alert-dialog-content"],
+[data-slot="select-content"], [data-slot="tooltip-content"],
+.search-combobox-content, [data-streamdown="table-fullscreen"] {
+  background: var(--material-overlay);
+  color: var(--popover-foreground);
+  backdrop-filter: blur(var(--overlay-blur)) saturate(0.8);
+  border-color: var(--surface-stroke);
+  box-shadow: var(--surface-shadow);
+}
+[data-slot="dialog-overlay"], [data-slot="alert-dialog-overlay"] { backdrop-filter: blur(var(--surface-blur)); }

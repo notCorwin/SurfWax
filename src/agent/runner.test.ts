@@ -14,6 +14,32 @@ function usage() {
 }
 
 describe("createAgent", () => {
+  it("records an aborted tool as one interruption even when its SDK callback finishes before stream cleanup", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: { async append(event) { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; }, async all() { return events; }, async clear() { events.splice(0); } } });
+    logger.beginRun("conversation", "run");
+    const controller = new AbortController();
+    const executor = {
+      executeCommand: async () => { controller.abort(); throw controller.signal.reason; },
+      browserContext: async () => ({ windowId: 7, tabs: [] }),
+    } as unknown as ChromeExecutor;
+    let step = 0;
+    const model = new MockLanguageModelV4({ doStream: async () => ({ stream: simulateReadableStream({ chunks: ++step === 1 ? [
+      { type: "stream-start", warnings: [] }, { type: "tool-call", toolCallId: "cancelled", toolName: "tab-list", dynamic: true, input: "{}" },
+      { type: "finish", finishReason: { unified: "tool-calls", raw: "tool_calls" }, usage: usage() },
+    ] : [
+      { type: "stream-start", warnings: [] }, { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: usage() },
+    ] as any[] }) }) });
+    const result = await createAgent({ model: { baseURL: "https://test/v1", model: "test", contextWindowOverride: 1_000_000 },
+      languageModel: model, executor, logger, conversationId: "conversation", signal: controller.signal }).stream({ prompt: "inspect" });
+    for await (const _ of result.stream) { /* Let the SDK deliver its final tool callback. */ }
+    await logger.closePendingTools("run", "conversation", controller.signal.reason);
+    const terminal = events.filter((event) => ["tool.failed", "tool.finished"].includes(event.type));
+    expect(terminal).toHaveLength(1);
+    expect(terminal[0]).toMatchObject({ type: "tool.failed", content: { status: "interrupted", effectUnknown: true },
+      output: { ok: false, error: { code: "interrupted" } }, abort: { reason: { $type: "error", name: "AbortError" } } });
+  });
+
   it("records a large partial act failure as one failed SDK terminal with its full result", async () => {
     const events: LogEvent[] = [];
     const logger = new EventLogger({ store: { async append(event) { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; }, async all() { return events; }, async clear() { events.splice(0); } } });

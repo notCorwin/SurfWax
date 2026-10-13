@@ -1,6 +1,6 @@
 "use client";
 import "katex/dist/katex.min.css";
-import { normalizeMathDelimiters } from "@assistant-ui/react-streamdown";
+import { normalizeMathDelimiters } from "./math-delimiters";
 import { createCodePlugin } from "@streamdown/code";
 import { math } from "@streamdown/math";
 import { memo, useMemo, useRef, type ReactElement } from "react";

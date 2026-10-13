@@ -1,9 +1,9 @@
+import { usePanelState } from "@/sidepanel/runtime-view";
 import { useEffect, useState } from "react";
-import { useAuiState } from "@assistant-ui/react";
 import { activeRunIdentity, type RunIdentity } from "../agent/coordinator";
 
 export function useRunState() {
-  const localRunning = useAuiState((state) => state.thread.isRunning);
+  const localRunning = usePanelState((state) => state.thread.isRunning);
   const [owner, setOwner] = useState<RunIdentity>();
   useEffect(() => {
     let active = true;

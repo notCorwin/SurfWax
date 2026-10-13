@@ -1,7 +1,7 @@
 "use client";
+import { usePanelRuntime, usePanelState, type PanelState } from "@/sidepanel/runtime-view";
 
-import { useAui, useAuiState, type AssistantState } from "@assistant-ui/react";
-import { ArchiveIcon, PencilIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
+import { ArchiveIcon, ChevronDownIcon, HistoryIcon, SearchIcon, PencilIcon, RotateCcwIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type FC } from "react";
 import { flushSync } from "react-dom";
 import { activeRunIdentity, withIdleConversation } from "../../agent/coordinator";
@@ -9,6 +9,7 @@ import { fromLogValue, isConversationMessage, type EventLogger, type LogEvent } 
 import { useRunState } from "../../sidepanel/useRunState";
 import { useRuntimeView } from "../../sidepanel/runtime-view";
 import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "../ui/dialog";
+import { InputGroup, InputGroupInput, InputGroupAddon } from "../ui/input-group";
 import { Input } from "../ui/input";
 import { Button } from "../ui/button";
 import { ErrorNotice } from "../ui/error-notice";
@@ -31,9 +32,8 @@ export function buildMessageSearchIndex(events: readonly LogEvent[]): Map<string
 
 export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
   const trigger = useRef<HTMLButtonElement>(null);
-  const aui = useAui();
   const { locked } = useRunState();
-  const threads = useAuiState((state) => state.threads);
+  const threads = usePanelState((state) => state.threads);
   const { threadItems: allItems, mainThreadId: currentId, threadIds, archivedThreadIds: archivedIds } = threads;
   const title = allItems.find((item) => item.id === currentId)?.title || "新对话";
   const [open, setOpen] = useState(false);
@@ -107,12 +107,12 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
     return item && matches(item) ? <ConversationItem key={id} item={item} isCurrent={currentId === id} close={close} locked={locked} warn={warn} archived={archived} /> : null;
   });
   return <Dialog open={open} onOpenChange={(value) => { if (value) setOpen(true); else close(); }}>
-    <DialogTrigger asChild><Button ref={trigger} type="button" variant="ghost" className="conversation-trigger" data-testid="conversation-menu"><span>{title}</span></Button></DialogTrigger>
+    <DialogTrigger asChild><Button ref={trigger} type="button" variant="ghost" className="conversation-trigger" data-testid="conversation-menu"><HistoryIcon data-icon="inline-start" aria-hidden="true" /><span>{title}</span><ChevronDownIcon data-icon="inline-end" aria-hidden="true" /></Button></DialogTrigger>
     <DialogContent className="conversation-dialog" aria-describedby={undefined} showCloseButton={false}
       onEscapeKeyDown={(event) => { if (document.activeElement?.getAttribute("aria-label") === "会话名称") event.preventDefault(); }}>
       <div className="conversation-drawer">
         <header><DialogTitle className="text-base">对话列表</DialogTitle><Button type="button" variant="ghost" size="icon-sm" aria-label="关闭对话列表" title="关闭" onClick={close}><XIcon aria-hidden="true" /></Button></header>
-        <Input type="search" aria-label="搜索会话" placeholder="搜索标题或消息…" value={query} onChange={(event) => setQuery(event.target.value)} />
+        <InputGroup><InputGroupAddon><SearchIcon aria-hidden="true" /></InputGroupAddon><InputGroupInput type="search" aria-label="搜索会话" placeholder="搜索标题或消息…" value={query} onChange={(event) => setQuery(event.target.value)} /></InputGroup>
         {warning && <p role="status" className="conversation-notice">{warning}</p>}
         {searchError !== undefined && <ErrorNotice summary="搜索记录读取失败。" error={searchError} />}
         <div className="conversation-items">
@@ -125,11 +125,11 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
   </Dialog>;
 };
 
-type Item = AssistantState["threads"]["threadItems"][number];
+type Item = PanelState["threads"]["threadItems"][number];
 const ConversationItem: FC<{ item: Item; isCurrent: boolean; close: () => void; locked: boolean; warn: () => void; archived?: boolean }> = ({ item, isCurrent, close, locked, warn, archived = false }) => {
   const runtime = useRuntimeView();
-  const aui = useAui();
-  const client = aui.threads.item({ id: item.id });
+  const runtimeCommands = usePanelRuntime();
+  const client = runtimeCommands.threads.item({ id: item.id });
   const title = item.title || "新对话";
   const runStatus = item.custom?.runStatus ?? "idle";
   const [editing, setEditing] = useState(false);
@@ -137,13 +137,13 @@ const ConversationItem: FC<{ item: Item; isCurrent: boolean; close: () => void; 
   const [error, setError] = useState("");
   const input = useRef<HTMLInputElement>(null);
   const finishEditing = () => { setEditing(false); setError(""); };
-  const mutate = async (action: () => void) => {
-    if (locked || await activeRunIdentity()) { warn(); return; }
-    action();
+  const mutate = async (action: () => unknown) => {
+    try { if (locked || await activeRunIdentity()) { warn(); return; } await action(); }
+    catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); }
   };
   const save = () => {
     if (!draft.trim()) { setError("请输入会话名称"); input.current?.focus(); return; }
-    void mutate(() => { client.rename(draft.trim()); finishEditing(); });
+    void mutate(async () => { await client.rename(draft.trim()); finishEditing(); });
   };
   return <div className="conversation-item" data-active={isCurrent ? "" : undefined}>
     {editing ? <div className="conversation-rename">
@@ -157,7 +157,7 @@ const ConversationItem: FC<{ item: Item; isCurrent: boolean; close: () => void; 
         if (isCurrent) { close(); return; }
         if (locked) { warn(); return; }
         void withIdleConversation(async () => {
-          await runtime.assistant.threads.switchToThread(item.id);
+          await runtime.runtime.threads.switchToThread(item.id);
           // Commit the destination composer before dismissing the modal so a
           // fast keystroke cannot be saved under the conversation just left.
           flushSync(close);
@@ -168,8 +168,9 @@ const ConversationItem: FC<{ item: Item; isCurrent: boolean; close: () => void; 
         {archived ? <RotateCcwIcon aria-hidden="true" /> : <ArchiveIcon aria-hidden="true" />}
       </Button>
       <Button type="button" variant="ghost" size="icon-sm" disabled={locked} className="conversation-delete" aria-label={`永久删除 ${title}`} title="永久删除" onClick={() => void mutate(() => {
-        if (globalThis.confirm("确定永久删除这条对话及其事件日志吗？此操作不可恢复。")) client.delete();
+        if (globalThis.confirm("确定永久删除这条对话及其事件日志吗？此操作不可恢复。")) return client.delete();
       })}><Trash2Icon aria-hidden="true" /></Button>
     </>}
+    {!editing && error && <ErrorNotice summary="会话操作失败。" error={error} />}
   </div>;
 };

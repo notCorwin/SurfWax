@@ -1,5 +1,4 @@
 import { createContext } from "react";
-import { getPartialJsonObjectMeta } from "assistant-stream/utils";
 
 export type ActivityPhase = "pending" | "settled" | "cancelled" | "failed" | "stopped";
 export const ActivityPhaseContext = createContext<ActivityPhase>("settled");
@@ -49,12 +48,13 @@ type ToolActivityPart = {
   readonly status: { readonly type: string };
   readonly isError?: boolean;
   readonly args: unknown;
+  readonly inputStreaming?: boolean;
 };
 
 export function toolActivity(part: ToolActivityPart, phase: ActivityPhase = "settled"): { status: "running" | "error" | "complete"; label: string } {
   if (phase === "pending" && part.status.type !== "requires-action") return {
     status: "running",
-    label: part.status.type === "running" && getPartialJsonObjectMeta(part.args as Record<symbol, unknown>)?.state === "partial"
+    label: part.status.type === "running" && part.inputStreaming
       ? "正在输入命令" : "正在执行命令",
   };
   if (part.status.type === "incomplete" || part.isError) return { status: "error", label: "命令执行失败" };
@@ -64,7 +64,7 @@ export function toolActivity(part: ToolActivityPart, phase: ActivityPhase = "set
   if (part.status.type === "requires-action") return { status: "running", label: "等待操作" };
   if (part.status.type === "running") return {
     status: "running",
-    label: part.status.type === "running" && getPartialJsonObjectMeta(part.args as Record<symbol, unknown>)?.state === "partial"
+    label: part.status.type === "running" && part.inputStreaming
       ? "正在输入命令" : "正在执行命令",
   };
   return { status: "complete", label: "命令执行完成" };
@@ -75,6 +75,7 @@ type ProcessPart = {
   readonly status: { readonly type: string };
   readonly isError?: boolean;
   readonly args?: unknown;
+  readonly inputStreaming?: boolean;
 };
 
 export function processGroupSummary(parts: readonly ProcessPart[], indices: readonly number[], interrupted = false, phase: ActivityPhase = "settled") {
@@ -85,7 +86,7 @@ export function processGroupSummary(parts: readonly ProcessPart[], indices: read
   if (latest?.status.type === "requires-action" && !interrupted) return { status: "running" as const, label: "等待操作" };
   if (latest && (phase === "pending" || !latest.isError && latest.status.type === "running")) {
     if (latest.type === "reasoning") return { status: "running" as const, label: "正在思考" };
-    if (latest.type === "tool-call") return toolActivity({ status: latest.status, isError: latest.isError, args: latest.args }, phase);
+    if (latest.type === "tool-call") return toolActivity({ status: latest.status, isError: latest.isError, args: latest.args, inputStreaming: latest.inputStreaming }, phase);
   }
   if (phase === "cancelled") return { status: "error" as const, label: "回复中断" };
   if (phase === "failed") return { status: "error" as const, label: "回复失败" };

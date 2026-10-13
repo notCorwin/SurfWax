@@ -40,17 +40,17 @@ test("follows the system color scheme across every visible extension surface wit
     }
     expect(optionSnapshots.light).toEqual({ colorScheme: "light", colors: [
       { background: "rgb(255, 255, 255)", foreground: "rgb(23, 23, 23)" },
-      { background: "rgb(255, 255, 255)", foreground: "rgb(23, 23, 23)" },
+      { background: "rgba(0, 0, 0, 0)", foreground: "rgb(23, 23, 23)" },
       { background: "rgba(0, 0, 0, 0)", foreground: "rgb(23, 23, 23)" },
       { background: "rgb(255, 255, 255)", foreground: "rgb(23, 23, 23)" },
     ] });
     expect(optionSnapshots.dark.colorScheme).toBe("dark");
     expect(optionSnapshots.dark.colors.slice(0, 2)).toEqual([
       { background: "rgb(24, 24, 24)", foreground: "rgb(245, 245, 245)" },
-      { background: "rgb(32, 32, 32)", foreground: "rgb(245, 245, 245)" },
+      { background: "rgba(0, 0, 0, 0)", foreground: "rgb(245, 245, 245)" },
     ]);
     expect(optionSnapshots.dark.colors[2]?.foreground).toBe("rgb(245, 245, 245)");
-    expect(optionSnapshots.dark.colors[2]?.background).not.toBe(optionSnapshots.light.colors[2]?.background);
+    expect(optionSnapshots.dark.colors[2]?.background).toBe(optionSnapshots.light.colors[2]?.background);
     expect(optionSnapshots.dark.colors[3]).toEqual({ background: "rgb(32, 32, 32)", foreground: "rgb(245, 245, 245)" });
     await options.close();
 
@@ -68,13 +68,21 @@ test("follows the system color scheme across every visible extension surface wit
       await opened.page.mouse.move(0, 0);
       await expect.poll(() => opened.page.evaluate(() => getComputedStyle(document.documentElement).colorScheme)).toBe(colorScheme);
       await expect.poll(() => opened.page.locator(".conversation-dialog").evaluate((element) => getComputedStyle(element).backgroundColor))
-        .toBe(colorScheme === "dark" ? "rgb(24, 24, 24)" : "rgb(255, 255, 255)");
+        .toBe(colorScheme === "dark" ? "rgb(32, 32, 32)" : "rgb(255, 255, 255)");
       sideSnapshots[colorScheme] = await themeColors(opened.page, ["body", '[data-testid="thread-root"]', ".conversation-dialog", '[data-streamdown="code-block"] pre', ".katex"]);
       await expectThemeButton(opened.page.getByRole("button", { name: "发送消息", includeHidden: true }), colorScheme, "default");
       expect(await opened.page.getByTestId("composer-input").evaluate((input) => getComputedStyle(input).fontSize)).toBe("14px");
     }
-    expect(sideSnapshots.light.colors.slice(0, 3)).toEqual(Array(3).fill({ background: "rgb(255, 255, 255)", foreground: "rgb(23, 23, 23)" }));
-    expect(sideSnapshots.dark.colors.slice(0, 3)).toEqual(Array(3).fill({ background: "rgb(24, 24, 24)", foreground: "rgb(245, 245, 245)" }));
+    expect(sideSnapshots.light.colors.slice(0, 3)).toEqual([
+      { background: "rgb(255, 255, 255)", foreground: "rgb(23, 23, 23)" },
+      { background: "rgba(0, 0, 0, 0)", foreground: "rgb(23, 23, 23)" },
+      { background: "rgb(255, 255, 255)", foreground: "rgb(23, 23, 23)" },
+    ]);
+    expect(sideSnapshots.dark.colors.slice(0, 3)).toEqual([
+      { background: "rgb(24, 24, 24)", foreground: "rgb(245, 245, 245)" },
+      { background: "rgba(0, 0, 0, 0)", foreground: "rgb(245, 245, 245)" },
+      { background: "rgb(32, 32, 32)", foreground: "rgb(245, 245, 245)" },
+    ]);
     expect(sideSnapshots.dark.colors[3]).not.toEqual(sideSnapshots.light.colors[3]);
     expect(sideSnapshots.dark.colors[4]?.foreground).toBe("rgb(245, 245, 245)");
     await opened.page.keyboard.press("Escape");
@@ -510,7 +518,7 @@ test("streams complete Markdown without blocking draft input", async () => {
         partGap: getComputedStyle(content).rowGap,
         turnGap: getComputedStyle(turn).rowGap,
       };
-    })).toEqual({ background: "rgb(24, 24, 24)", variable: "1.25rem", markdownGap: "20px", partGap: "20px", turnGap: "20px" });
+    })).toEqual({ background: "rgba(0, 0, 0, 0)", variable: "1.25rem", markdownGap: "20px", partGap: "20px", turnGap: "20px" });
     await opened.page.getByTestId("thread-viewport").evaluate((viewport) => { viewport.scrollTop = 0; });
     await expect(composer).toBeInViewport();
   } finally {

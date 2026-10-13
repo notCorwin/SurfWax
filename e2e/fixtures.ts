@@ -408,14 +408,22 @@ export async function themeColors(page: Page, selectors: string[]): Promise<{ co
 }
 
 export async function expectThemeButton(locator: Locator, colorScheme: "light" | "dark", variant: "default" | "destructive") {
-  const expected = variant === "destructive"
-    ? colorScheme === "light" ? { background: "rgb(185, 28, 28)", foreground: "rgb(255, 255, 255)" } : { foreground: "rgb(255, 255, 255)" }
-    : colorScheme === "light" ? { background: "rgb(23, 23, 23)", foreground: "rgb(255, 255, 255)" }
-      : { background: "rgb(245, 245, 245)", foreground: "rgb(24, 24, 24)" };
+  const expectedColor = variant === "destructive"
+    ? colorScheme === "light" ? "rgb(185, 28, 28)" : "rgb(239, 68, 68)"
+    : colorScheme === "light" ? "rgb(36, 109, 97)" : "rgb(157, 217, 201)";
   await expect.poll(() => locator.evaluate((element) => {
     const style = getComputedStyle(element);
-    return { background: style.backgroundColor, foreground: style.color, fontSize: style.fontSize, fontWeight: style.fontWeight };
-  })).toMatchObject({ ...expected, fontSize: "14px", fontWeight: "500" });
+    const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
+    const context = canvas.getContext("2d")!; context.fillStyle = style.backgroundColor; context.fillRect(0, 0, 1, 1);
+    return { alpha: context.getImageData(0, 0, 1, 1).data[3], foreground: style.color, fontSize: style.fontSize, fontWeight: style.fontWeight };
+  })).toMatchObject({ foreground: expectedColor, fontSize: "14px", fontWeight: "500" });
+  const alpha = await locator.evaluate((element) => {
+    const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
+    const context = canvas.getContext("2d")!; context.fillStyle = getComputedStyle(element).backgroundColor; context.fillRect(0, 0, 1, 1);
+    return context.getImageData(0, 0, 1, 1).data[3]!;
+  });
+  expect(alpha).toBeGreaterThan(0);
+  expect(alpha).toBeLessThan(64);
 }
 
 export async function startNewConversation(page: Page): Promise<void> {

@@ -1,4 +1,4 @@
-import { useAui } from "@assistant-ui/react";
+import { usePanelRuntime } from "@/sidepanel/runtime-view";
 import { ChevronLeftIcon, ChevronRightIcon, CopyIcon, PencilIcon, RotateCcwIcon } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -18,7 +18,7 @@ export const CONTINUE_INTERRUPTED_TEXT = "继续上一次被中断的工作。�
 type RowProps = { message: MessageView; messages: readonly MessageView[]; running: boolean; locked: boolean;
   command: (action: () => void) => void; latest: boolean; work?: WorkView };
 export const MessageRow = memo(function MessageRow({ message, messages, running, locked, command, latest, work }: RowProps) {
-  const aui = useAui();
+  const runtimeCommands = usePanelRuntime();
   const runtime = useRuntimeView();
   const client = () => runtime.thread.getMessageById(message.id);
   const [editing, setEditing] = useState(false);
@@ -30,7 +30,7 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
   const copyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(copyTimer.current), []);
   const copy = async () => {
-    try { await navigator.clipboard.writeText(client().unstable_getCopyText()); setCopied(true); setCopyError(undefined);
+    try { await navigator.clipboard.writeText(client().getCopyText()); setCopied(true); setCopyError(undefined);
       clearTimeout(copyTimer.current); copyTimer.current = setTimeout(() => setCopied(false), 1500);
     } catch (error) { setCopyError(error); }
   };
@@ -72,17 +72,17 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
   const actions = useMemo(() => work?.mode !== "process" && <MessageFooter className={`gap-1 px-0 ${user ? "justify-end" : "justify-start"}`}>
     <Button type="button" variant="ghost" size="icon-xs" aria-label={copied ? "已复制" : "复制消息"} title="复制消息" onClick={() => void copy()}><CopyIcon aria-hidden="true" /></Button>
     {user && !editing && <Button type="button" variant="ghost" size="icon-xs" disabled={locked} data-testid="edit-message-button" aria-label="编辑消息" title="编辑消息"
-      onClick={() => command(() => { const rect = bubble.current!.getBoundingClientRect(); setEditSize({ width: rect.width, height: rect.height }); setDraft(client().unstable_getCopyText()); setEditing(true); })}><PencilIcon aria-hidden="true" /></Button>}
+      onClick={() => command(() => { const rect = bubble.current!.getBoundingClientRect(); setEditSize({ width: rect.width, height: rect.height }); setDraft(client().getCopyText()); setEditing(true); })}><PencilIcon aria-hidden="true" /></Button>}
     <Button type="button" variant="ghost" size="icon-xs" disabled={locked || editing} data-testid={user ? "retry-user-message-button" : "replay-message-button"}
       aria-label={user ? "重试消息" : "重新生成回复"} title={user ? "重试消息" : "重新生成回复"} onClick={() => command(() => {
-        if (user) aui.thread.startRun({ parentId: message.id }); else client().reload();
+        if (user) runtimeCommands.thread.startRun({ parentId: message.id }); else client().reload();
       })}><RotateCcwIcon aria-hidden="true" /></Button>
     {message.branchCount > 1 && <div className="flex items-center gap-0.5 tabular-nums" aria-label="消息分支">
       <Button type="button" variant="ghost" size="icon-xs" disabled={locked || message.branchNumber <= 1} aria-label="上一个分支" title="上一个分支" onClick={() => command(() => client().switchToBranch({ position: "previous" }))}><ChevronLeftIcon aria-hidden="true" /></Button>
       <span className="min-w-8 text-center">{message.branchNumber} / {message.branchCount}</span>
       <Button type="button" variant="ghost" size="icon-xs" disabled={locked || message.branchNumber >= message.branchCount} aria-label="下一个分支" title="下一个分支" onClick={() => command(() => client().switchToBranch({ position: "next" }))}><ChevronRightIcon aria-hidden="true" /></Button>
     </div>}
-  </MessageFooter>, [aui, runtime, user, message.id, message.branchCount, message.branchNumber, copied, editing, locked, command, work?.mode]);
+  </MessageFooter>, [runtimeCommands, runtime, user, message.id, message.branchCount, message.branchNumber, copied, editing, locked, command, work?.mode]);
   if (work && shown.length === 0) return null;
   return <Message data-role={message.role} align={user ? "end" : "start"} aria-live={latest && !user ? "polite" : undefined} className={user ? "user-message" : "assistant-message px-2"}>
     <MessageContent className={user ? "items-end" : "assistant-message-content"}>
@@ -96,12 +96,12 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
         {editing && <div className="flex justify-end gap-1">
           <Button type="button" size="sm" variant="ghost" onClick={() => setEditing(false)}>取消</Button>
           <Button type="button" size="sm" disabled={locked || !draft.trim()} onClick={() => command(() => {
-            const composer = client().composer; composer.beginEdit(); composer.setText(draft); composer.send(); setEditing(false);
+            void runtime.thread.edit(message.id, draft); setEditing(false);
           })}>保存并重新生成</Button>
         </div>}
       </form> : renderParts()}
       {!user && message.metadata.custom?.interrupted === true && work?.mode !== "final" && <div className="interrupted-message" data-testid="interrupted-message">
-        <span>回复已中断</span>{latest && <Button type="button" size="sm" variant="outline" disabled={locked} data-testid="continue-interrupted" onClick={() => command(() => aui.thread.append(CONTINUE_INTERRUPTED_TEXT))}>继续</Button>}
+        <span>回复已中断</span>{latest && <Button type="button" size="sm" variant="outline" disabled={locked} data-testid="continue-interrupted" onClick={() => command(() => runtimeCommands.thread.append(CONTINUE_INTERRUPTED_TEXT))}>继续</Button>}
       </div>}
       {message.status?.type === "incomplete" && message.status.reason === "error" && work?.mode !== "process" && <ErrorNotice summary="模型请求失败。" error={message.status.error} />}
       {copyError !== undefined && <ErrorNotice summary="复制失败。" error={copyError} />}

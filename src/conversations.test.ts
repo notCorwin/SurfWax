@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { fromThreadMessageLike } from "@assistant-ui/react";
-import { MessageRepository } from "@assistant-ui/core/internal";
+import { branchMessages } from "./sidepanel/conversation-store";
 import { generateConversationTitle, restoreConversationRepository } from "./conversations";
 import * as model from "./agent/model";
 import { EventLogger, rebuildConversationList, rebuildConversationRepository, selectedConversationId, toLogValue, type LogEvent } from "./logging";
@@ -160,14 +159,7 @@ describe("conversation restoration", () => {
       expect(repository.headId).toBe("a2");
       expect(repository.messages.map(({ message }) => message.id)).toEqual(["u1", "a1", "u2", "a2"]);
       expect(repository.messages.find(({ message }) => message.id === "a1")?.message.parts).toEqual([{ type: "text", text: "Updated" }]);
-      const sdkRepository = new MessageRepository();
-      sdkRepository.import({
-        headId: repository.headId,
-        messages: repository.messages.map(({ parentId, message }) => ({ parentId,
-          message: fromThreadMessageLike({ id: message.id, role: message.role, content: [] }, message.id, { type: "complete", reason: "stop" }),
-        })),
-      });
-      expect(sdkRepository.getMessages().map((message) => message.id)).toEqual(["u1", "a1", "u2", "a2"]);
+      expect(branchMessages(repository).map((message) => message.id)).toEqual(["u1", "a1", "u2", "a2"]);
     }
   });
 });
