@@ -171,6 +171,60 @@ test("recovers the screenshot's streamed DSML eval in the side panel", async () 
 });
 
 
+test("keeps the page guard visibly breathing despite website animation overrides", async () => {
+  const provider = await startProvider([toolResponse("await new Promise(() => undefined);")]);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    await target.emulateMedia({ reducedMotion: "no-preference" });
+    await target.evaluate(() => {
+      document.body.style.cssText = "margin:0;background:white";
+      document.body.replaceChildren();
+      const style = document.createElement("style");
+      style.textContent = "div::before, div::after { content: none !important; animation: none !important; background: transparent !important; border: 0 !important; }";
+      document.head.append(style);
+    });
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("keep the page guarded");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    const guard = target.locator("#__surf-wax-page-guard");
+    await expect(guard).toBeAttached();
+
+    // Sample rendered pixels in a blank area, rather than merely checking that
+    // an animation declaration exists. The page's own CSS must not hide it.
+    const sample = async () => {
+      const screenshot = await target.screenshot({ clip: { x: 300, y: 300, width: 1, height: 1 } });
+      return target.evaluate(async (data) => {
+        const image = new Image(); image.src = `data:image/png;base64,${data}`;
+        await image.decode();
+        const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
+        const context = canvas.getContext("2d")!;
+        context.drawImage(image, 0, 0);
+        return context.getImageData(0, 0, 1, 1).data[0]!;
+      }, screenshot.toString("base64"));
+    };
+    const pixels: number[] = [];
+    for (let index = 0; index < 12; index++) {
+      pixels.push(await sample());
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    expect(Math.max(...pixels) - Math.min(...pixels)).toBeGreaterThan(20);
+    expect(Math.min(...pixels)).toBeGreaterThan(180);
+
+    await target.emulateMedia({ reducedMotion: "reduce" });
+    const resting = await sample();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(Math.abs(await sample() - resting)).toBeLessThanOrEqual(1);
+    expect(resting).toBeLessThan(250);
+    await opened.page.close();
+    await expect(guard).toHaveCount(0);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
 test("blocks page clicks while the agent runs and removes the guard after navigation and panel close", async () => {
   const responses: string[][] = [
     toolResponse("await new Promise((resolve) => setTimeout(resolve, 2500)); return true;"),

@@ -5,12 +5,21 @@
   --guard-color-start: #6366f1;
   --guard-color-mid: #22d3ee;
   --guard-color-end: #a855f7;
-  --guard-breath-cycle: 3s;
+  --guard-breath-cycle: 2.4s;
   --guard-opacity-min: 0.04;
-  --guard-opacity-max: 0.12;
-  --guard-opacity-rest: 0.08;
+  --guard-opacity-max: 0.22;
+  --guard-opacity-rest: 0.12;
+  --guard-glow-size: 36px;
+  --guard-glow-color: rgb(99 102 241 / 0.45);
+  --guard-edge-opacity-min: 0.35;
+  --guard-edge-opacity-max: 1;
 }
-:host::before {
+.guard-visual {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+.guard-visual::before {
   content: "";
   position: fixed;
   inset: 0;
@@ -19,14 +28,15 @@
   pointer-events: none;
   animation: surf-wax-guard-breathe var(--guard-breath-cycle) ease-in-out infinite;
 }
-:host::after {
+.guard-visual::after {
   content: "";
   position: fixed;
   inset: 0;
   border: var(--guard-edge-width) solid transparent;
   border-image: linear-gradient(var(--guard-angle), var(--guard-color-start), var(--guard-color-mid), var(--guard-color-end), var(--guard-color-start)) 1;
+  box-shadow: inset 0 0 var(--guard-glow-size) var(--guard-glow-color);
   pointer-events: none;
-  animation: surf-wax-guard var(--guard-cycle) linear infinite;
+  animation: surf-wax-guard var(--guard-cycle) linear infinite, surf-wax-guard-edge-breathe var(--guard-breath-cycle) ease-in-out infinite;
 }
 @property --guard-angle { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
 @keyframes surf-wax-guard { to { --guard-angle: 360deg; } }
@@ -34,4 +44,8 @@
   0%, 100% { opacity: var(--guard-opacity-min); }
   50% { opacity: var(--guard-opacity-max); }
 }
-@media (prefers-reduced-motion: reduce) { :host::before, :host::after { animation: none; } }
+@keyframes surf-wax-guard-edge-breathe {
+  0%, 100% { opacity: var(--guard-edge-opacity-min); }
+  50% { opacity: var(--guard-edge-opacity-max); }
+}
+@media (prefers-reduced-motion: reduce) { .guard-visual::before, .guard-visual::after { animation: none; } }

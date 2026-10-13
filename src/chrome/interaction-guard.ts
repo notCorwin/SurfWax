@@ -22,7 +22,9 @@ export function installPageGuard(runId: string, css = "", passThrough = false): 
   overlay.setAttribute("aria-hidden", "true");
   overlay.style.cssText = `all:initial!important;position:fixed!important;inset:0!important;z-index:2147483647!important;background:transparent!important;pointer-events:${passThrough ? "none" : "auto"}!important;cursor:wait!important`;
   const shadow = overlay.attachShadow({ mode: "closed" });
-  const style = document.createElement("style"); style.textContent = css; shadow.append(style);
+  const style = document.createElement("style"); style.textContent = css;
+  const visual = document.createElement("div"); visual.className = "guard-visual";
+  shadow.append(style, visual);
   const types = ["pointerdown", "pointerup", "pointermove", "pointercancel", "mousedown", "mouseup", "mousemove", "click", "dblclick", "auxclick", "contextmenu", "touchstart", "touchmove", "touchend", "touchcancel", "wheel", "keydown", "keyup", "keypress", "beforeinput", "input", "paste", "cut", "drop", "dragstart", "dragover", "dragenter", "dragleave", "dragend", "compositionstart", "compositionupdate", "compositionend"];
   let ticket: { stamp: number; expires: number; text?: string } | undefined;
   let derived: { target: EventTarget | null; text?: string; clipboard?: boolean } | undefined;
