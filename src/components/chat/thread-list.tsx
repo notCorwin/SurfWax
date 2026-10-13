@@ -8,7 +8,7 @@ import { activeRunIdentity, withIdleConversation } from "../../agent/coordinator
 import { fromLogValue, isConversationMessage, type EventLogger, type LogEvent } from "../../logging";
 import { useRunState } from "../../sidepanel/useRunState";
 import { useRuntimeView } from "../../sidepanel/runtime-view";
-import { Dialog, DialogContent, DialogTitle, DialogTrigger } from "../ui/dialog";
+import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { InputGroup, InputGroupInput, InputGroupAddon } from "../ui/input-group";
 import { Input } from "../ui/input";
 import { Button } from "../ui/button";
@@ -31,7 +31,7 @@ export function buildMessageSearchIndex(events: readonly LogEvent[]): Map<string
 }
 
 export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
-  const trigger = useRef<HTMLButtonElement>(null);
+  const searchInput = useRef<HTMLInputElement>(null);
   const { locked } = useRunState();
   const threads = usePanelState((state) => state.threads);
   const { threadItems: allItems, mainThreadId: currentId, threadIds, archivedThreadIds: archivedIds } = threads;
@@ -106,23 +106,23 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
     const item = allItems.find((item) => item.id === id);
     return item && matches(item) ? <ConversationItem key={id} item={item} isCurrent={currentId === id} close={close} locked={locked} warn={warn} archived={archived} /> : null;
   });
-  return <Dialog open={open} onOpenChange={(value) => { if (value) setOpen(true); else close(); }}>
-    <DialogTrigger asChild><Button ref={trigger} type="button" variant="ghost" className="conversation-trigger" data-testid="conversation-menu"><HistoryIcon data-icon="inline-start" aria-hidden="true" /><span>{title}</span><ChevronDownIcon data-icon="inline-end" aria-hidden="true" /></Button></DialogTrigger>
-    <DialogContent className="conversation-dialog" aria-describedby={undefined} showCloseButton={false}
+  return <Popover open={open} onOpenChange={(value) => { if (value) setOpen(true); else close(); }}>
+    <PopoverTrigger asChild><Button type="button" variant="ghost" className="conversation-trigger" data-testid="conversation-menu"><HistoryIcon data-icon="inline-start" aria-hidden="true" /><span>{title}</span><ChevronDownIcon data-icon="inline-end" aria-hidden="true" /></Button></PopoverTrigger>
+    <PopoverContent className="conversation-dropdown flex min-h-0 flex-col gap-2 overflow-hidden p-3" aria-label="对话列表"
+      side="bottom" align="start" sideOffset={8} collisionPadding={12}
+      onOpenAutoFocus={(event) => { event.preventDefault(); searchInput.current?.focus(); }}
       onEscapeKeyDown={(event) => { if (document.activeElement?.getAttribute("aria-label") === "会话名称") event.preventDefault(); }}>
-      <div className="conversation-drawer">
-        <header><DialogTitle className="text-base">对话列表</DialogTitle><Button type="button" variant="ghost" size="icon-sm" aria-label="关闭对话列表" title="关闭" onClick={close}><XIcon aria-hidden="true" /></Button></header>
-        <InputGroup><InputGroupAddon><SearchIcon aria-hidden="true" /></InputGroupAddon><InputGroupInput type="search" aria-label="搜索会话" placeholder="搜索标题或消息…" value={query} onChange={(event) => setQuery(event.target.value)} /></InputGroup>
-        {warning && <p role="status" className="conversation-notice">{warning}</p>}
-        {searchError !== undefined && <ErrorNotice summary="搜索记录读取失败。" error={searchError} />}
-        <div className="conversation-items">
-          {regularCount > 0 && <h2 className="conversation-section-title">当前会话</h2>}{renderItems(threadIds)}
-          {archivedCount > 0 && <h2 className="conversation-section-title">已归档</h2>}{renderItems(archivedIds, true)}
-          {regularCount + archivedCount === 0 && <p className="conversation-empty">{needle ? "没有找到匹配的会话" : "暂无已保存的会话"}</p>}
-        </div>
+      <header className="flex min-h-8 shrink-0 items-center justify-between px-1 py-2"><h2 className="text-base font-semibold">对话列表</h2><Button type="button" variant="ghost" size="icon-sm" aria-label="关闭对话列表" title="关闭" onClick={close}><XIcon aria-hidden="true" /></Button></header>
+      <InputGroup className="shrink-0"><InputGroupAddon><SearchIcon aria-hidden="true" /></InputGroupAddon><InputGroupInput ref={searchInput} type="search" aria-label="搜索会话" placeholder="搜索标题或消息…" value={query} onChange={(event) => setQuery(event.target.value)} /></InputGroup>
+      {warning && <p role="status" className="conversation-notice">{warning}</p>}
+      {searchError !== undefined && <ErrorNotice summary="搜索记录读取失败。" error={searchError} />}
+      <div className="conversation-items">
+        {regularCount > 0 && <h2 className="conversation-section-title">当前会话</h2>}{renderItems(threadIds)}
+        {archivedCount > 0 && <h2 className="conversation-section-title">已归档</h2>}{renderItems(archivedIds, true)}
+        {regularCount + archivedCount === 0 && <p className="conversation-empty">{needle ? "没有找到匹配的会话" : "暂无已保存的会话"}</p>}
       </div>
-    </DialogContent>
-  </Dialog>;
+    </PopoverContent>
+  </Popover>;
 };
 
 type Item = PanelState["threads"]["threadItems"][number];
@@ -158,7 +158,7 @@ const ConversationItem: FC<{ item: Item; isCurrent: boolean; close: () => void; 
         if (locked) { warn(); return; }
         void withIdleConversation(async () => {
           await runtime.runtime.threads.switchToThread(item.id);
-          // Commit the destination composer before dismissing the modal so a
+          // Commit the destination composer before dismissing the dropdown so a
           // fast keystroke cannot be saved under the conversation just left.
           flushSync(close);
         }).catch(warn);

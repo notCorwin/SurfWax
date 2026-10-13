@@ -9,6 +9,75 @@ import { resolve } from "node:path";
 
 import { SSE_HEADERS, p95, chunk, usageChunk, textResponse, streamingTextResponse, toolResponse, pageResponse, commandResponse, browserResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
 
+test("opens a bounded conversation dropdown below its trigger and keeps outside controls interactive", async () => {
+  const provider = await startProvider([]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.evaluate(async () => {
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open("side-agent-runtime");
+        request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+      });
+      const transaction = db.transaction("events", "readwrite");
+      const events = transaction.objectStore("events");
+      const timestamp = new Date().toISOString();
+      for (let index = 0; index < 18; index++) {
+        const conversationId = crypto.randomUUID();
+        events.add({ type: "conversation.created", conversationId, timestamp, content: null });
+        events.add({ type: "conversation.title.updated", conversationId, timestamp, content: { title: `下拉会话 ${index}`, source: "manual" } });
+      }
+      await new Promise<void>((resolve, reject) => { transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error); });
+      db.close();
+    });
+    await opened.page.reload();
+    const trigger = opened.page.getByTestId("conversation-menu");
+    const dropdown = opened.page.getByRole("dialog", { name: "对话列表" });
+    const search = dropdown.getByRole("searchbox", { name: "搜索会话" });
+    const composer = opened.page.getByTestId("composer-input");
+    for (const viewport of [{ width: 360, height: 700 }, { width: 320, height: 400 }, { width: 430, height: 850 }]) {
+      await opened.page.setViewportSize(viewport);
+      await trigger.click();
+      await expect(search).toBeFocused();
+      await expect(dropdown.locator(".conversation-item")).toHaveCount(18);
+      await expect.poll(async () => {
+        const anchor = await trigger.boundingBox();
+        const bounds = await dropdown.boundingBox();
+        return Boolean(anchor && bounds && bounds.y >= anchor.y + anchor.height
+          && bounds.x >= 0 && bounds.x + bounds.width <= viewport.width
+          && bounds.y + bounds.height <= viewport.height);
+      }).toBe(true);
+      if (viewport.width === 360) {
+        const path = test.info().outputPath("conversation-dropdown.png");
+        await opened.page.screenshot({ path });
+        await test.info().attach("conversation-dropdown", { path, contentType: "image/png" });
+      }
+      expect(await dropdown.locator(".conversation-items").evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+      await dropdown.locator(".conversation-select").last().scrollIntoViewIfNeeded();
+      await expect(dropdown.locator(".conversation-select").last()).toBeInViewport();
+      await opened.page.keyboard.press("Escape");
+      await expect(dropdown).toBeHidden();
+      await expect(trigger).toBeFocused();
+    }
+    await trigger.press("Enter");
+    await expect(search).toBeFocused();
+    await search.fill("不存在的会话");
+    await expect(dropdown).toContainText("没有找到匹配的会话");
+    await composer.click();
+    await expect(dropdown).toBeHidden();
+    await expect(composer).toBeFocused();
+    await composer.fill("保留草稿");
+    await trigger.click();
+    await expect(search).toHaveValue("");
+    await trigger.click();
+    await expect(dropdown).toBeHidden();
+    await expect(composer).toHaveValue("保留草稿");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
 test("executes run-code through the page facade, restores the conversation, and clears the log", async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);
@@ -318,8 +387,8 @@ test("blocks leaving a running conversation without aborting it", async () => {
     await opened.page.getByTestId("conversation-menu").click();
     await expect(opened.page.locator(".conversation-item", { hasText: "第一标题" }).locator(".conversation-select")).toBeDisabled();
     for (const control of await opened.page.locator(".conversation-action, .conversation-delete").all()) await expect(control).toBeDisabled();
-    await expect(opened.page.locator(".conversation-dialog")).toBeVisible();
-    await expect(opened.page.locator(".conversation-dialog").getByTestId("new-conversation")).toHaveCount(0);
+    await expect(opened.page.locator(".conversation-dropdown")).toBeVisible();
+    await expect(opened.page.locator(".conversation-dropdown").getByTestId("new-conversation")).toHaveCount(0);
     await expect(opened.page.locator(".conversation-item")).toHaveCount(2);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_DONE");
     expect(provider.stats.abortedResponses).toBe(0);
@@ -397,8 +466,7 @@ test("resets conversation UI while retaining only each conversation's own draft"
 
     await opened.page.getByTestId("conversation-menu").click();
     await opened.page.locator(".conversation-item", { hasText: "第二标题" }).locator(".conversation-select").click();
-    // fill() can target an inert textarea behind the still-open dialog. Wait
-    // for the destination to commit, as a real user must before typing.
+    // Wait for the destination to commit before typing its draft.
     await expect(opened.page.getByRole("dialog", { name: "对话列表" })).toBeHidden();
     await expect(opened.page.getByTestId("conversation-menu")).toContainText("第二标题");
     await expect(composer).toHaveValue("");
@@ -593,7 +661,7 @@ test("contains a long conversation search error inside the menu", async () => {
       };
     });
     await opened.page.getByTestId("conversation-menu").click();
-    const dialog = opened.page.locator(".conversation-dialog");
+    const dialog = opened.page.locator(".conversation-dropdown");
     const notice = dialog.locator(".app-error-notice");
     await expect(notice).toContainText("搜索记录读取失败");
     await expect(dialog.getByRole("button", { name: "关闭对话列表" })).toBeVisible();

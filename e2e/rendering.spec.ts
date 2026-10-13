@@ -60,16 +60,16 @@ test("follows the system color scheme across every visible extension surface wit
     await expect(opened.page.locator(".markdown-body").last()).toContainText("const theme");
     await expect(opened.page.locator(".katex")).not.toHaveCount(0);
     await opened.page.getByTestId("conversation-menu").click();
-    await expect(opened.page.locator(".conversation-dialog")).toBeVisible();
+    await expect(opened.page.locator(".conversation-dropdown")).toBeVisible();
     expect(await metadata(opened.page)).toEqual(expectedMetadata);
     const sideSnapshots: Record<string, Awaited<ReturnType<typeof themeColors>>> = {};
     for (const colorScheme of ["light", "dark"] as const) {
       await opened.page.emulateMedia({ colorScheme });
       await opened.page.mouse.move(0, 0);
       await expect.poll(() => opened.page.evaluate(() => getComputedStyle(document.documentElement).colorScheme)).toBe(colorScheme);
-      await expect.poll(() => opened.page.locator(".conversation-dialog").evaluate((element) => getComputedStyle(element).backgroundColor))
+      await expect.poll(() => opened.page.locator(".conversation-dropdown").evaluate((element) => getComputedStyle(element).backgroundColor))
         .toBe(colorScheme === "dark" ? "rgb(32, 32, 32)" : "rgb(255, 255, 255)");
-      sideSnapshots[colorScheme] = await themeColors(opened.page, ["body", '[data-testid="thread-root"]', ".conversation-dialog", '[data-streamdown="code-block"] pre', ".katex"]);
+      sideSnapshots[colorScheme] = await themeColors(opened.page, ["body", '[data-testid="thread-root"]', ".conversation-dropdown", '[data-streamdown="code-block"] pre', ".katex"]);
       await expectThemeButton(opened.page.getByRole("button", { name: "发送消息", includeHidden: true }), colorScheme, "default");
       expect(await opened.page.getByTestId("composer-input").evaluate((input) => getComputedStyle(input).fontSize)).toBe("14px");
     }

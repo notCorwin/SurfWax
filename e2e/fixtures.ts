@@ -427,7 +427,7 @@ export async function expectThemeButton(locator: Locator, colorScheme: "light" |
 }
 
 export async function startNewConversation(page: Page): Promise<void> {
-  if (await page.locator(".conversation-dialog").isVisible()) await page.keyboard.press("Escape");
+  if (await page.locator(".conversation-dropdown").isVisible()) await page.keyboard.press("Escape");
   await page.getByTestId("new-conversation").click();
   await expect(page.getByTestId("conversation-menu")).toContainText("新对话");
   await expect(page.getByTestId("composer-input")).toBeEnabled();

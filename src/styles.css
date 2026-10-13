@@ -270,7 +270,7 @@ summary,
   backdrop-filter: blur(var(--surface-blur));
 }
 [data-slot="bubble"][data-variant="ghost"] [data-slot="bubble-content"] { background: transparent; backdrop-filter: none; }
-[data-slot="dialog-content"], [data-slot="alert-dialog-content"],
+[data-slot="dialog-content"], [data-slot="alert-dialog-content"], [data-slot="popover-content"],
 [data-slot="select-content"], [data-slot="tooltip-content"],
 .search-combobox-content, [data-streamdown="table-fullscreen"] {
   background: var(--material-overlay);

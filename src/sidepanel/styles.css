@@ -69,28 +69,11 @@ p {
   white-space: nowrap;
 }
 
-.conversation-dialog {
-  top: calc(var(--spacing) * 3); left: calc(var(--spacing) * 3); translate: none;
-  width: min(calc(100% - var(--spacing) * 6), 24rem);
-  max-width: none; height: calc(100% - var(--spacing) * 6); max-height: none;
-  overflow: hidden; padding: 0; border-radius: var(--radius-panel);
-}
-
-.conversation-drawer {
-  display: flex;
-  height: 100%;
-  min-height: 0;
-  flex-direction: column;
-  gap: calc(var(--spacing) * 2);
-  padding: calc(var(--spacing) * 3);
+.conversation-dropdown {
+  width: min(calc(100vw - var(--spacing) * 6), 24rem);
+  max-height: min(calc(var(--spacing) * 128), var(--radix-popover-content-available-height));
+  border-radius: var(--radius-panel);
   overscroll-behavior: contain;
-}
-
-.conversation-drawer > header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: calc(var(--spacing) * 8);
 }
 
 .conversation-select,
@@ -205,7 +188,7 @@ p {
   background: color-mix(in srgb, var(--foreground) 10%, transparent);
 }
 
-.conversation-dialog :is(button, input):focus-visible {
+.conversation-dropdown :is(button, input):focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
 }
@@ -443,8 +426,7 @@ p {
 .conversation-trigger > span { max-width: 100%; }
 .conversation-item { min-height: calc(var(--spacing) * 12); }
 .conversation-select { height: auto; min-height: calc(var(--spacing) * 12); }
-.conversation-drawer > header { padding: calc(var(--spacing) * 2) calc(var(--spacing) * 1); }
-.conversation-dialog .conversation-notice { margin-inline: calc(var(--spacing) * 1); }
+.conversation-dropdown .conversation-notice { margin-inline: calc(var(--spacing) * 1); }
 .welcome { min-height: min(26rem, calc(100dvh - 19rem)); }
 .welcome-symbol { color: var(--brand); }
 .welcome-symbol svg { width: calc(var(--spacing) * 10); height: calc(var(--spacing) * 10); stroke-width: 1.2; }
