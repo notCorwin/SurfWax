@@ -90,7 +90,7 @@ describe("createRetryingFetch", () => {
       if (request.url.includes("direct_access")) return new Response(JSON.stringify({ token: "direct-token", headers: { "x-gitlab-feature-enabled-by-namespace-ids": "1", "x-api-key": "remove" } }));
       return new Response("ok");
     });
-    const adapter = gitlabProtocolFetch({ sdk: "gitlab-ai-provider", baseURL: "", model: "duo-chat-gpt-5-1",
+    const adapter = gitlabProtocolFetch({ sdk: "gitlab-ai-provider", baseURL: "", model: "duo-chat-gpt-5-1", canonicalModelId: "openai/gpt-5.1-2025-11-13", modelFamily: "gpt",
       providerSettings: { apiKey: "gitlab-token", instanceUrl: "https://gitlab.example" } }, fetch);
     expect(adapter.mapping).toEqual({ provider: "openai", model: "gpt-5.1-2025-11-13" });
     await adapter.fetch(new Request("https://cloud.gitlab.com/ai/v1/proxy/openai/v1/chat/completions", { method: "POST", headers: { "x-api-key": "placeholder" }, body: "{}" }));

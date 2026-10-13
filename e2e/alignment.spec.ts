@@ -69,7 +69,7 @@ test("applies explicit model and prompt changes next turn and retries user messa
     await nameCurrentConversation(opened.page, "Deferred settings");
     await opened.page.getByTestId("composer-input").fill("first turn"); await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("CONFIG_RUNNING");
-    await expect(opened.page.getByTestId("retry-user-message-button")).toBeDisabled();
+    await expect(opened.page.getByTestId("retry-user-message-button")).toHaveCount(0);
     await options.getByLabel("Model ID", { exact: true }).fill("next-model");
     await options.getByLabel("自定义系统提示词").fill("CUSTOM_NEXT_TURN");
     await options.getByRole("button", { name: "保存配置" }).click();

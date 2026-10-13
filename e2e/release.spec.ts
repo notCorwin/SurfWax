@@ -139,7 +139,7 @@ test('stopping a pending download retains its artifact and closes the tool once'
     expect(terminal).toHaveLength(1);
     expect(terminal[0]).toMatchObject({
       content: { status: 'interrupted', effectUnknown: true },
-      output: { error: { code: 'interrupted', effectUnknown: true }, artifact: { filename: 'pending.png' } },
+      output: { error: { code: 'aborted', effectUnknown: true }, artifact: { filename: 'pending.png' } },
       abort: { reason: { $type: 'error', name: 'AbortError' } },
     });
     await expect.poll(async () => (await readEvents(opened.page)).reverse().find(event => event.type === 'browser.job.state' && event.toolCallId === 'pending-save')?.content.state).toBe('cancelled');

@@ -3,14 +3,13 @@ const isName = value => typeof value === 'string' && value.trim().length > 0;
 const sortedUnique = values => [...new Set(values)].sort();
 
 /** Catalog name and alias coverage only; this does not exercise provider protocols. */
-export function analyzeSdkCoverage(catalog, supportedSdks, gitlabMappings) {
+export function analyzeSdkCoverage(catalog, supportedSdks) {
   if (!isRecord(catalog) || !Object.keys(catalog).length) {
     throw new Error('Models.dev catalog must be a non-empty provider object');
   }
   if (!Array.isArray(supportedSdks) || !supportedSdks.length || !supportedSdks.every(isName)) {
     throw new Error('SDK registry must be a non-empty array of SDK names');
   }
-  if (!isRecord(gitlabMappings)) throw new Error('GitLab model mapping registry must be an object');
 
   const providerSdks = [];
   const modelOverrideSdks = [];
@@ -42,20 +41,16 @@ export function analyzeSdkCoverage(catalog, supportedSdks, gitlabMappings) {
           ...(override.body !== undefined ? { bodyKeys: Object.keys(override.body) } : {}),
           ...(override.headers !== undefined ? { headerNames: Object.keys(override.headers) } : {}) });
       }
-      if ((override?.npm ?? provider.npm) === 'gitlab-ai-provider') gitlabModels.push(modelId);
+      if ((override?.npm ?? provider.npm) === 'gitlab-ai-provider') gitlabModels.push({ id: modelId, family: model.family, canonicalModelId: model.canonical_model_id });
       models += 1;
     }
   }
 
   const listed = sortedUnique([...providerSdks, ...modelOverrideSdks]);
   const supported = sortedUnique(supportedSdks);
-  const gitlabModelIds = sortedUnique(gitlabModels);
+  const gitlabModelIds = sortedUnique(gitlabModels.map(({ id }) => id));
   const missing = listed.filter(sdk => !supported.includes(sdk));
-  const missingGitlabModels = gitlabModelIds.filter(id => !Object.hasOwn(gitlabMappings, id));
-  const invalidGitlabMappings = gitlabModelIds.filter(id => Object.hasOwn(gitlabMappings, id)
-    && (!isRecord(gitlabMappings[id]) || !['openai', 'anthropic'].includes(gitlabMappings[id].provider)
-      || !isName(gitlabMappings[id].model)));
-  const retainedGitlabModels = Object.keys(gitlabMappings).filter(id => !gitlabModelIds.includes(id)).sort();
+  const missingGitlabMetadata = gitlabModels.filter(model => !isName(model.family) && !isName(model.canonicalModelId)).map(({ id }) => id).sort();
   return {
     providers: Object.keys(catalog).length,
     models,
@@ -65,17 +60,15 @@ export function analyzeSdkCoverage(catalog, supportedSdks, gitlabMappings) {
     supportedSdks: supported,
     missing,
     modelOverrides: modelOverrides.sort((a, b) => `${a.providerId}/${a.modelId}`.localeCompare(`${b.providerId}/${b.modelId}`)),
-    gitlab: { catalogModelIds: gitlabModelIds, missing: missingGitlabModels,
-      invalid: invalidGitlabMappings, retained: retainedGitlabModels },
-    coverageComplete: missing.length === 0 && missingGitlabModels.length === 0 && invalidGitlabMappings.length === 0,
-    limitations: 'Checks SDK name registration and GitLab alias coverage only. Does not prove protocol, authentication, streaming, tool-call or account-level model compatibility.',
+    gitlab: { catalogModelIds: gitlabModelIds, missingMetadata: missingGitlabMetadata },
+    coverageComplete: missing.length === 0 && missingGitlabMetadata.length === 0,
+    limitations: 'Checks SDK name registration and Models.dev GitLab routing metadata only. Does not prove protocol, authentication, streaming, tool-call or account-level model compatibility.',
   };
 }
 
 export function sdkCoverageFailures(report) {
   return [
     ...(report.missing.length ? [`Unsupported Models.dev SDKs: ${report.missing.join(', ')}`] : []),
-    ...(report.gitlab.missing.length ? [`Unmapped GitLab Duo models: ${report.gitlab.missing.join(', ')}`] : []),
-    ...(report.gitlab.invalid.length ? [`Invalid GitLab Duo mappings: ${report.gitlab.invalid.join(', ')}`] : []),
+    ...(report.gitlab.missingMetadata.length ? [`GitLab Duo models missing Models.dev routing metadata: ${report.gitlab.missingMetadata.join(', ')}`] : []),
   ];
 }

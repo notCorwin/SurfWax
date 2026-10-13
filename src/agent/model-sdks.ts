@@ -24,7 +24,14 @@ const ENDPOINT_ALIASES: Record<string, string> = {
   CLOUDFLARE_ACCOUNT_ID: "accountId", CLOUDFLARE_GATEWAY_ID: "gatewayId", WATSONX_AI_PROJECT_ID: "projectId",
 };
 
-export function sdkFor(config: Pick<ModelConfig, "providerId" | "sdk" | "transport" | "baseURL" | "modelProvider">): ModelSdk {
+export function sdkFor(config: Pick<ModelConfig, "providerId" | "sdk" | "transport" | "baseURL" | "modelProvider" | "endpointType">): ModelSdk {
+  const endpointType = config.endpointType;
+  if (config.providerId === "custom" && endpointType) {
+    if (endpointType === "anthropic-messages") return "@ai-sdk/anthropic";
+    if (endpointType === "google-generate-content" || endpointType === "google-interactions") return "@ai-sdk/google";
+    if (endpointType === "openai-completions" || endpointType === "openai-responses") return "@ai-sdk/openai";
+    return "@ai-sdk/openai-compatible";
+  }
   if (config.modelProvider?.npm !== undefined) {
     if (!isModelSdk(config.modelProvider.npm)) throw new Error(`Unsupported model SDK: ${config.modelProvider.npm}`);
     return config.modelProvider.npm;
@@ -133,6 +140,7 @@ export function resolveEndpoint(template: string, providerSettings: Record<strin
 export function resolvedBaseURL(config: ModelConfig): string {
   const settings = settingsFor(config);
   const sdk = sdkFor(config);
+  if (config.baseURLOverride?.trim()) return resolveEndpoint(config.baseURLOverride.trim(), settings).replace(/\/+$/, "");
   if (config.modelProvider?.api !== undefined) return resolveEndpoint(config.modelProvider.api.trim(), settings).replace(/\/+$/, "");
   if (sdk === "@ai-sdk/azure" && settings.resourceName) {
     return `https://${settings.resourceName.trim()}.openai.azure.com/openai/v1`;
@@ -176,10 +184,13 @@ export function modelConfigErrors(config: ModelConfig, fields?: ProviderSettingF
   const sdk = sdkFor(config);
   const settings = settingsFor(config);
   const shape = config.modelProvider?.shape;
-  if (shape !== undefined && shape !== "responses" && shape !== "completions") errors.shape = `Unsupported model API shape: ${shape}`;
+  if (shape !== undefined && !["responses", "completions", "completion", "interactions"].includes(shape)) errors.shape = `Unsupported model API shape: ${shape}`;
   if (!config.model.trim()) errors.model = "请输入 Model ID";
   if (config.contextWindowOverride !== undefined && (!Number.isSafeInteger(config.contextWindowOverride) || config.contextWindowOverride <= 0)) {
     errors.contextWindowOverride = "请输入正整数 token 数";
+  }
+  if (config.maxTokensOverride !== undefined && (!Number.isSafeInteger(config.maxTokensOverride) || config.maxTokensOverride <= 0)) {
+    errors.maxTokensOverride = "请输入正整数 token 数";
   }
 
   for (const item of fields ?? providerSettingFields({ id: isCloudflareGateway(config) ? "cloudflare-ai-gateway" : config.providerId ?? "custom", npm: sdk, api: config.modelProvider?.api ?? config.baseURL })) {
@@ -209,7 +220,7 @@ export function modelConfigErrors(config: ModelConfig, fields?: ProviderSettingF
   }
 
   const endpoint = resolvedBaseURL(config);
-  if (sdk === "@ai-sdk/openai-compatible" && !endpoint) errors.baseURL = "请输入 Base URL";
+  if ((sdk === "@ai-sdk/openai-compatible" || config.providerId === "custom") && !endpoint) errors.baseURL = "请输入 Base URL";
   if (endpoint && /\$\{/.test(endpoint)) errors.baseURL = "请填写 Endpoint 模板变量";
   if (endpoint) {
     try {

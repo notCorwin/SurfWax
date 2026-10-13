@@ -71,11 +71,27 @@ export type ModelConfig = {
   /** Legacy fields are read during migration and kept optional for restored tests/conversations. */
   transport?: ModelTransport;
   baseURL: string;
+  /** Optional user override for a Models.dev provider endpoint. */
+  baseURLOverride?: string;
   apiKey?: string;
   model: string;
   contextWindowOverride?: number;
+  maxTokensOverride?: number;
+  endpointType?: ModelEndpointType;
+  canonicalModelId?: string;
+  modelFamily?: string;
   imageInput?: "auto" | "enabled" | "disabled";
 };
+
+export const MODEL_ENDPOINT_TYPES = [
+  "openai-chat-completions",
+  "openai-completions",
+  "openai-responses",
+  "anthropic-messages",
+  "google-generate-content",
+  "google-interactions",
+] as const;
+export type ModelEndpointType = typeof MODEL_ENDPOINT_TYPES[number];
 
 export type ModelProviderOverride = {
   npm?: string;

@@ -60,9 +60,7 @@ export class BrowserJobs {
           this.write(context, id, "running"),
         );
         combined.throwIfAborted();
-        const failed =
-          result && typeof result === "object" && (result as any).ok === false;
-        await this.write(context, id, failed ? "failed" : "succeeded", result);
+        await this.write(context, id, "succeeded", result);
       } catch (error) {
         const timedOut =
           (combined.reason ?? error) instanceof DOMException &&
@@ -207,6 +205,10 @@ export class BrowserJobs {
         ? { cancellationRequested: true, rollback: false }
         : {}),
     };
+  }
+
+  cancelAll(reason = "run-ended"): void {
+    for (const owner of this.live.values()) owner.controller.abort(reason);
   }
 
   private async wait(

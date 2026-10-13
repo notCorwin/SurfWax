@@ -88,7 +88,7 @@ describe("three browser tools", () => {
     expect(() => tools.inspect.inputSchema.parse({ image: true, readonly: true })).toThrow();
     expect(() => tools.run.inputSchema.parse({ code: "return 1;", world: "MAIN" })).toThrow();
     expect(() => tools.jobs.inputSchema.parse({ action: "cancel" })).toThrow();
-    expect(() => tools.jobs.inputSchema.parse({ action: "wait", id: "one", waitMs: 30001 })).toThrow();
+    expect(tools.jobs.inputSchema.parse({ action: "wait", id: "one", waitMs: 30001 })).toMatchObject({ waitMs: 30001 });
     expect(tools.jobs.inputSchema.parse({ action: "list" })).toEqual({ action: "list" });
   });
   it("preserves historical user content and never injects an executable old catalogue", async () => {

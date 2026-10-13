@@ -89,6 +89,20 @@ describe("createAgent", () => {
     } finally { vi.unstubAllGlobals(); }
   });
 
+  it.each([[undefined, 128_000], [77_777, 77_777]])("uses the Anthropic max_tokens fallback or manual override %s", async (maxTokensOverride, expected) => {
+    const executor = { browserContext: vi.fn(async () => ({ windowId: 7, tabs: [] })) } as unknown as ChromeExecutor;
+    const model = new MockLanguageModelV4({ doStream: async (options) => {
+      expect(options.maxOutputTokens).toBe(expected);
+      return { stream: simulateReadableStream({ chunks: [
+        { type: "stream-start", warnings: [] }, { type: "text-start", id: "text" }, { type: "text-delta", id: "text", delta: "done" }, { type: "text-end", id: "text" },
+        { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: usage() },
+      ] as any[] }) };
+    } });
+    const result = await createAgent({ model: { providerId: "anthropic", sdk: "@ai-sdk/anthropic", baseURL: "https://api.anthropic.com/v1",
+      model: "custom", contextWindowOverride: 256_000, ...(maxTokensOverride ? { maxTokensOverride } : {}) }, languageModel: model, executor }).stream({ prompt: "hello" });
+    await expect(result.text).resolves.toBe("done");
+  });
+
   it("keeps the tool catalog out of the default instructions", () => {
     expect(DEFAULT_INSTRUCTIONS).not.toContain(PROGRAM_TOOL_CONTEXT);
     expect(DEFAULT_INSTRUCTIONS).not.toContain("search-tools");

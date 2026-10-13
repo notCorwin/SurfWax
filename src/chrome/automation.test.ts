@@ -75,17 +75,21 @@ describe("AutomationRuntime", () => {
     const { runtime, calls } = harness(metadata); const page = await runtime.createPage(3);
     const first = await page.inspect();
     expect(first).toMatchObject({ mode: "full", tabId: 3, documentId: 0, truncation: { baselineComplete: true } });
-    expect(first.snapshot).toContain("[ref=t3d0e1]"); expect(first).not.toHaveProperty("screenshot");
+    const ref = /\[ref=([^\]]+)\]/.exec(first.snapshot as string)?.[1];
+    expect(ref).toMatch(/^t3s[a-f0-9]+d0e1$/); expect(first).not.toHaveProperty("screenshot");
     metadata[0]!.name = "Continue";
     const second = await page.inspect({ since: first.observationId as string });
     expect(second).toMatchObject({ mode: "delta", changes: [expect.objectContaining({ change: "updated", line: expect.stringContaining("Continue") })] });
     expect(second).not.toHaveProperty("snapshot");
     expect(calls.some((call) => call.method === "Page.captureScreenshot")).toBe(false);
     const other = await runtime.createPage(4);
-    await expect(other.ref("t3d0e1").click()).rejects.toThrow("stale-ref");
+    await expect(other.ref(ref!).click()).rejects.toThrow("stale-ref");
     runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "root" } });
     await expect(page.inspect({ since: first.observationId as string })).rejects.toThrow("stale-observation");
-    await expect(page.ref("t3d0e1").click()).rejects.toThrow("stale-ref");
+    await expect(page.ref(ref!).click()).rejects.toThrow("stale-ref");
+    await runtime.abortSessions();
+    const replacement = await (await runtime.createPage(3)).inspect();
+    expect(replacement.snapshot).not.toContain(`[ref=${ref}]`);
   });
   it("reports truncation, slices and fields, and resets a delta against an incomplete baseline", async () => {
     const { runtime } = harness(Array.from({ length: 8 }, (_, index) => ({ role: "button", name: `Button ${index}`, tag: "button" })));

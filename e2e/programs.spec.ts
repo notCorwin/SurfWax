@@ -269,7 +269,7 @@ return await artifacts.save(artifact.id);
   }
 });
 
-test("keeps network domains explicit, scopes protocol and tabs, and rejects stale document refs", async () => {
+test("keeps network domains explicit, exposes protocol and tabs, and rejects stale document refs", async () => {
   let baseline: any;
   const responses: any[] = [];
   const provider = await startProvider(responses);
@@ -293,7 +293,6 @@ let worldRequired = false; try { await browser.runIn({kind:'page',tabId:page.tab
 await check(await page.evaluate(() => globalThis.onlyIsolated) === undefined);
 const cdp = await protocol.send({tabId:page.tabId},'Runtime.evaluate',{expression:'document.title',returnByValue:true}); await check(cdp.result.value === 'Automation Target');
 await check((await protocol.sessions()).every(session => session.tabId === page.tabId));
-let rejected = false; try { await protocol.send({tabId:page.tabId},'Browser.grantPermissions',{}); } catch { rejected=true; } await check(rejected);
 const other = await browser.tabs.open(${JSON.stringify(provider.origin + "/target")}); await other.waitForURL(new RegExp('/target')); await check((await browser.tabs.list()).some(tab => tab.tabId === other.tabId || tab.id === other.tabId)); await browser.tabs.close(other.tabId);
 await page.goto(${JSON.stringify(provider.origin + "/complex-next")}); await page.waitForURL(/complex-next/);
 let stale = false; try { await page.ref(${JSON.stringify(ref)}).click(); } catch (error) { stale=String(error.message).includes('stale-ref'); } await check(stale);

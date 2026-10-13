@@ -1,4 +1,4 @@
-import { isModelSdk, type ModelConfig, type ModelSdk } from "../types";
+import { isModelSdk, MODEL_ENDPOINT_TYPES, type ModelConfig, type ModelSdk } from "../types";
 import { modelConfigErrors } from "../agent/model-sdks";
 import { isAbortError, retryModelOperation } from "../agent/model";
 import { loadModelCatalog, MODEL_ROUTING_VERSION, normalizeModelProviderOverride, type ModelCatalog } from "../agent/model-limits";
@@ -64,10 +64,16 @@ export async function loadModelConfig(
         ...(modelProvider ? { modelProvider } : {}),
         providerSettings,
         baseURL: typeof profile.baseURL === "string" ? profile.baseURL : "",
+        ...(typeof profile.baseURLOverride === "string" && profile.baseURLOverride.trim() ? { baseURLOverride: profile.baseURLOverride } : {}),
         model: typeof profile.model === "string" ? profile.model : "",
+        ...(typeof profile.endpointType === "string" && (MODEL_ENDPOINT_TYPES as readonly string[]).includes(profile.endpointType) ? { endpointType: profile.endpointType as ModelConfig["endpointType"] } : {}),
+        ...(typeof profile.canonicalModelId === "string" ? { canonicalModelId: profile.canonicalModelId } : {}),
+        ...(typeof profile.modelFamily === "string" ? { modelFamily: profile.modelFamily } : {}),
         imageInput: profile.imageInput === "enabled" || profile.imageInput === "disabled" ? profile.imageInput : "auto",
         ...(Number.isSafeInteger(profile.contextWindowOverride) && Number(profile.contextWindowOverride) > 0
           ? { contextWindowOverride: Number(profile.contextWindowOverride) } : {}),
+        ...(Number.isSafeInteger(profile.maxTokensOverride) && Number(profile.maxTokensOverride) > 0
+          ? { maxTokensOverride: Number(profile.maxTokensOverride) } : {}),
       } satisfies ModelProfile]];
     }));
     const result: PersistedModelConfig = {
@@ -100,6 +106,8 @@ export async function loadModelConfig(
         ...(modelProvider ? { modelProvider } : {}),
         sdk: isModelSdk(modelProvider?.npm) ? modelProvider.npm : selected.sdk,
         baseURL: modelProvider?.api ?? selected.baseURL,
+        ...(model?.canonical_model_id ? { canonicalModelId: model.canonical_model_id } : {}),
+        ...(model?.family ? { modelFamily: model.family } : {}),
         catalogRouteVersion: MODEL_ROUTING_VERSION,
       };
       if (options.persistMigration !== false) {
@@ -126,6 +134,8 @@ export async function loadModelConfig(
     imageInput: legacy.imageInput === "enabled" || legacy.imageInput === "disabled" ? legacy.imageInput : "auto",
     ...(Number.isSafeInteger(legacy.contextWindowOverride) && Number(legacy.contextWindowOverride) > 0
       ? { contextWindowOverride: Number(legacy.contextWindowOverride) } : {}),
+    ...(Number.isSafeInteger(legacy.maxTokensOverride) && Number(legacy.maxTokensOverride) > 0
+      ? { maxTokensOverride: Number(legacy.maxTokensOverride) } : {}),
   } } };
 }
 
@@ -145,9 +155,14 @@ export async function saveModelConfig(
         ...(profile.modelProvider ? { modelProvider: normalizeModelProviderOverride(profile.modelProvider) } : {}),
         providerSettings: Object.fromEntries(Object.entries(profile.providerSettings).map(([key, value]) => [key, value.trim()])),
         baseURL: profile.baseURL.trim(),
+        ...(profile.baseURLOverride?.trim() ? { baseURLOverride: profile.baseURLOverride.trim() } : {}),
         model: profile.model.trim(),
+        ...(profile.endpointType ? { endpointType: profile.endpointType } : {}),
+        ...(profile.canonicalModelId ? { canonicalModelId: profile.canonicalModelId } : {}),
+        ...(profile.modelFamily ? { modelFamily: profile.modelFamily } : {}),
         imageInput: profile.imageInput ?? "auto",
         ...(profile.contextWindowOverride ? { contextWindowOverride: profile.contextWindowOverride } : {}),
+        ...(profile.maxTokensOverride ? { maxTokensOverride: profile.maxTokensOverride } : {}),
       }])),
       ...(config.systemPrompt?.trim() ? { systemPrompt: config.systemPrompt } : {}),
     } satisfies PersistedModelConfig,

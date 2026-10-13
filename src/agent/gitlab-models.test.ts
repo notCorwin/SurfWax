@@ -35,7 +35,7 @@ describe.each(newAliases)("GitLab alias $alias", ({ alias, provider, model: nati
           content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", stop_sequence: null,
           usage: { input_tokens: 1, output_tokens: 1 } });
     });
-    const model = await createModel({ sdk: "gitlab-ai-provider", baseURL: "", model: alias,
+    const model = await createModel({ sdk: "gitlab-ai-provider", baseURL: "", model: alias, canonicalModelId: `${provider}/${nativeModel}`, modelFamily: provider === "anthropic" ? "claude" : "gpt",
       providerSettings: { apiKey: "gitlab-token", instanceUrl: "https://gitlab.test", aiGatewayUrl: "https://gateway.test" } },
     undefined, undefined, { fetch });
     const result = await generateText({ model, prompt: "test" });
@@ -44,10 +44,16 @@ describe.each(newAliases)("GitLab alias $alias", ({ alias, provider, model: nati
   });
 });
 
-it.each(["duo-chat-unknown", "toString", "__proto__"])("rejects unknown GitLab alias %s before authentication", async (alias) => {
-  const fetch = vi.fn();
-  await expect(createModel({ sdk: "gitlab-ai-provider", baseURL: "", model: alias,
-    providerSettings: { apiKey: "gitlab-token" } }, undefined, undefined, { fetch }))
-    .rejects.toThrow(`Unsupported GitLab Duo model: ${alias}`);
-  expect(fetch).not.toHaveBeenCalled();
+it("keeps a user-entered GitLab model ID when Models.dev has no canonical alias", async () => {
+  const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = new Request(input, init);
+    if (request.url.includes("direct_access")) return Response.json({ token: "proxy-token" });
+    expect((await request.json()).model).toBe("custom-model");
+    return Response.json({ id: "response", created_at: 1, model: "custom-model",
+      output: [{ type: "message", id: "message", role: "assistant", content: [{ type: "output_text", text: "ok", annotations: [] }] }],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } });
+  });
+  const model = await createModel({ sdk: "gitlab-ai-provider", baseURL: "", model: "custom-model",
+    providerSettings: { apiKey: "gitlab-token", aiGatewayUrl: "https://gateway.test" } }, undefined, undefined, { fetch });
+  expect((await generateText({ model, prompt: "test" })).text).toBe("ok");
 });

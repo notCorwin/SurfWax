@@ -59,7 +59,7 @@ export function parseLocatorTarget(value: unknown): BrowserTarget {
   if (value && typeof value === "object") return value as BrowserTarget;
   if (typeof value !== "string" || !value.trim()) throw new Error("AutomationError[invalid-target]: target is required");
   const input = value.trim();
-  if (/^(?:t\d+d\d+)?e\d+$/.test(input)) return { ref: input };
+  if (/^(?:t\d+s[a-f0-9]+d\d+)?e\d+$/.test(input)) return { ref: input };
   const locator = /^locator\((.+)\)$/.exec(input);
   if (locator) return { by: "css", value: readQuoted(locator[1]!) };
   const simple = /^getBy(Text|Label|Placeholder|AltText|Title|TestId)\((['"][\s\S]*?['"])(?:\s*,\s*\{([\s\S]*)\})?\)$/.exec(input);
@@ -296,13 +296,14 @@ export class ChromeExecutor {
         const region = input.region === undefined ? undefined : this.locatorFor(page, input.region);
         return await page.inspect(input, region);
       } finally { this.activeSignal = undefined; this.activeContext = {}; await this.automation.clearContext(); }
-    }, signal, input.timeoutMs ?? 10000, false);
+    }, signal, input.timeoutMs, false);
   }
 
   async runProgram(input: { code: string; background?: boolean; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
     if (!context.conversationId || !this.logger) throw new Error("Programs require a conversation and canonical event log");
     const jobContext = { conversationId: context.conversationId, logIdentity: context.logIdentity };
-    const id = await this.jobs.start(jobContext, signal, (combined, jobId, started) => this.enqueueAbortable(async (deadline) => {
+    const jobSignal = input.background ? undefined : signal;
+    const id = await this.jobs.start(jobContext, jobSignal, (combined, jobId, started) => this.enqueueAbortable(async (deadline) => {
       if (this.disposed) throw new Error("Chrome executor has been disposed");
       await started();
       const lifetime = new AbortController();
@@ -324,15 +325,17 @@ export class ChromeExecutor {
         scope.revoke(); lifetime.abort("program-ended");
         await this.stopBrowserOperations();
         await scope.finish();
-        if (scope.effectUnknown && error && typeof error === "object") Object.assign(error, { effectUnknown: true });
-        throw error;
+        const failure = error && typeof error === "object" ? error
+          : Object.assign(new DOMException(String(error ?? programSignal.reason ?? "Operation aborted"), programSignal.aborted ? "AbortError" : "Error"), { cause: error });
+        if (scope.effectUnknown) Object.assign(failure, { effectUnknown: true });
+        throw failure;
       } finally {
         scope.revoke(); lifetime.abort("program-ended");
         if (this.programScope === scope) this.programScope = undefined;
         this.activeSignal = undefined; this.activeContext = {};
         await this.automation.clearContext();
       }
-    }, combined, input.timeoutMs ?? (input.background ? 300000 : 10000), false, true));
+    }, combined, input.timeoutMs, false, true));
     if (input.background) return { jobId: id, state: "queued", accepted: true, complete: false };
     while (true) {
       const status = await this.jobs.query({ action: "wait", id, waitMs: 1000 }, context.conversationId, signal) as any;
@@ -348,8 +351,8 @@ export class ChromeExecutor {
 
   private async boundPage(tabId: number, state: BrowserState): Promise<any> {
     const tab = await this.chromeApi.tabs.get(tabId);
-    if (!tab || tab.windowId !== state.windowId) throw new Error("CommandError[invalid-tab-id]: Tab is outside the bound window");
-    return this.pageFor({ windowId: state.windowId, tabId });
+    if (!tab || !Number.isInteger(tab.windowId)) throw new Error("CommandError[invalid-tab-id]: Tab is unavailable");
+    return this.pageFor({ windowId: tab.windowId!, tabId });
   }
 
   private async programPage(raw: any, scope: ProgramScope): Promise<any> {
@@ -380,7 +383,6 @@ export class ChromeExecutor {
       if (key === "keyboard") return keyboard;
       if (key === "mouse") return mouse;
       if (key === "screenshot") return (options = {}) => call("page.screenshot", async () => {
-        if (!this.activeContext.visualEnabled) throw new Error("AutomationError[visual-unavailable]: Image input unavailable");
         return this.captureScreenshot(raw, options);
       });
       if (key === "pdf") return (options: { filename?: string; save?: boolean } = {}) => call("page.pdf", () => this.capturePdf(raw.tabId, options.filename, options.save));
@@ -436,7 +438,6 @@ export class ChromeExecutor {
     const protocol = { sessions: (tabId = page.tabId) => call("protocol.sessions", false, async () => {
       await this.boundPage(tabId,state); return this.automation.observationDebuggees(tabId);
     }), send: (target: { tabId: number; sessionId?: string }, method: string, params?: object) => call(`protocol.${method}`, true, async () => {
-      if (!/^(Page|DOM|Runtime|Accessibility|Network|Log|Input)\.[A-Za-z]+$/.test(method)) throw new Error("Unsupported CDP domain; allowed: Page, DOM, Runtime, Accessibility, Network, Log, Input");
       await this.boundPage(target.tabId, state);
       if (target.sessionId && !(await this.automation.observationDebuggees(target.tabId)).some((item) => item.sessionId === target.sessionId)) throw new Error("CDP session is not owned by the selected tab");
       await scope.dispatched();
@@ -528,7 +529,7 @@ export class ChromeExecutor {
   }
 
   private async tabsOf(state: BrowserState): Promise<Array<{ index: number; current: boolean; id?: number; title?: string; url?: string }>> {
-    const tabs = await this.chromeApi.tabs.query({ windowId: state.windowId });
+    const tabs = await this.chromeApi.tabs.query({});
     if (state.tabId === undefined || !tabs.some((tab) => tab.id === state.tabId)) {
       state.tabId = tabs.find((tab) => tab.active)?.id ?? tabs[0]?.id;
     }
@@ -536,21 +537,22 @@ export class ChromeExecutor {
   }
 
   private async selectTab(state: BrowserState, tabId: number): Promise<unknown> {
-    const tabs = await this.chromeApi.tabs.query({ windowId: state.windowId });
+    const tabs = await this.chromeApi.tabs.query({});
     const tab = tabs.find((item) => item.id === tabId);
     if (!tab?.id) throw new Error(`CommandError[invalid-tab-id]: ${tabId}`);
     await this.chromeApi.tabs.update(tab.id, { active: true });
+    if (Number.isInteger(tab.windowId)) state.windowId = tab.windowId!;
     state.tabId = tab.id;
     return this.tabsOf(state);
   }
 
   private async closeTab(state: BrowserState, tabId: number): Promise<unknown> {
-    const tabs = await this.chromeApi.tabs.query({ windowId: state.windowId });
+    const tabs = await this.chromeApi.tabs.query({});
     const tab = tabs.find((item) => item.id === tabId);
     if (!tab?.id) throw new Error(`CommandError[invalid-tab-id]: ${tabId}`);
     await this.detachTabRuntime(tab.id);
     await this.chromeApi.tabs.remove(tab.id);
-    const remaining = await this.chromeApi.tabs.query({ windowId: state.windowId });
+    const remaining = await this.chromeApi.tabs.query({});
     state.tabId = remaining.find((item) => item.active)?.id ?? remaining[0]?.id;
     return this.tabsOf(state);
   }
@@ -559,7 +561,7 @@ export class ChromeExecutor {
     let tabId = state.tabId;
     if (tabId !== undefined) {
       const tab = await this.chromeApi.tabs.get(tabId).catch(() => undefined);
-      if (!tab || tab.windowId !== state.windowId) tabId = undefined;
+      if (!tab) tabId = undefined;
     }
     if (tabId === undefined) {
       const tabs = await this.chromeApi.tabs.query({ active: true, windowId: state.windowId });
@@ -720,6 +722,7 @@ export class ChromeExecutor {
   }
 
   async endRun(): Promise<void> {
+    this.jobs.cancelAll("run-ended");
     await this.jobs.settle();
     await this.stopBrowserOperations();
     this.browserState = undefined;

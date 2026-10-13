@@ -5,15 +5,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { GITLAB_MODELS } from '../../src/agent/gitlab-models.ts';
 import { analyzeSdkCoverage, sdkCoverageFailures } from '../sdk-coverage.mjs';
 
 const bedrock = '@ai-sdk/amazon-bedrock';
 const mantle = '@ai-sdk/amazon-bedrock/mantle';
 const gitlab = 'gitlab-ai-provider';
 const provider = (npm, models = {}) => ({ npm, models });
-const analyze = (catalog, supported = [bedrock, mantle, gitlab], mappings = GITLAB_MODELS) =>
-  analyzeSdkCoverage(catalog, supported, mappings);
+const analyze = (catalog, supported = [bedrock, mantle, gitlab]) => analyzeSdkCoverage(catalog, supported);
 
 test('includes model-level SDK overrides in the full SDK union', () => {
   const report = analyze({ aws: provider(bedrock, {
@@ -53,52 +51,26 @@ test('records override routing without dumping request body or header values', (
   assert.equal(JSON.stringify(report).includes('private-value'), false);
 });
 
-test('detects GitLab catalog aliases missing from the runtime map', () => {
+test('requires GitLab routing metadata from Models.dev', () => {
   const report = analyze({ gitlab: provider(gitlab, { 'duo-chat-new': {} }) });
-  assert.deepEqual(report.gitlab.missing, ['duo-chat-new']);
+  assert.deepEqual(report.gitlab.missingMetadata, ['duo-chat-new']);
   assert.equal(report.coverageComplete, false);
-  assert.match(sdkCoverageFailures(report)[0], /Unmapped GitLab Duo models: duo-chat-new/);
+  assert.match(sdkCoverageFailures(report)[0], /missing Models.dev routing metadata/);
 });
 
 test('checks effective model SDKs and model IDs rather than object keys', () => {
   const report = analyze({ relay: provider(bedrock, {
-    displayKey: { id: 'duo-chat-new', provider: { npm: gitlab } },
+    displayKey: { id: 'duo-chat-new', family: 'gpt', provider: { npm: gitlab } },
   }), gitlab: provider(gitlab, { bypass: { provider: { npm: mantle } } }) });
   assert.deepEqual(report.gitlab.catalogModelIds, ['duo-chat-new']);
 });
 
-test('inherited properties are not valid GitLab mappings', () => {
-  const report = analyze({ gitlab: provider(gitlab, { toString: {} }) }, [gitlab], {});
-  assert.deepEqual(report.gitlab.missing, ['toString']);
-});
-
-test('rejects empty and unsupported GitLab mapping targets', () => {
-  const report = analyze({ gitlab: provider(gitlab, { a: {}, b: {}, c: {} }) }, [gitlab], {
-    a: { provider: 'openai', model: '' }, b: { provider: 'unknown', model: 'model' }, c: null,
-  });
-  assert.deepEqual(report.gitlab.invalid, ['a', 'b', 'c']);
-  assert.equal(report.coverageComplete, false);
-});
-
-test('retains removed catalog aliases for saved configurations without failing', () => {
-  const report = analyze({ gitlab: provider(gitlab, { known: {} }) }, [gitlab], {
-    known: { provider: 'openai', model: 'gpt-6-sol' }, old: { provider: 'anthropic', model: 'claude-old' },
-  });
-  assert.deepEqual(report.gitlab.retained, ['old']);
+test('accepts Models.dev family or canonical model identifiers for GitLab', () => {
+  const report = analyze({ gitlab: provider(gitlab, {
+    alias: { family: 'claude-sonnet' }, canonical: { canonical_model_id: 'openai/gpt-6-sol' },
+  }) });
+  assert.deepEqual(report.gitlab.missingMetadata, []);
   assert.equal(report.coverageComplete, true);
-});
-
-test('maps all five new GitLab aliases to verified native model IDs', () => {
-  const expected = {
-    'duo-chat-gpt-6-1-sol': { provider: 'openai', model: 'gpt-6.1-sol' },
-    'duo-chat-gpt-6-sol': { provider: 'openai', model: 'gpt-6-sol' },
-    'duo-chat-gpt-6-luna': { provider: 'openai', model: 'gpt-6-luna' },
-    'duo-chat-opus-5-5': { provider: 'anthropic', model: 'claude-opus-5-5' },
-    'duo-chat-sonnet-5-5': { provider: 'anthropic', model: 'claude-sonnet-5-5' },
-  };
-  for (const [id, mapping] of Object.entries(expected)) assert.deepEqual(GITLAB_MODELS[id], mapping);
-  const report = analyze({ gitlab: provider(gitlab, Object.fromEntries(Object.keys(expected).map(id => [id, {}]))) });
-  assert.deepEqual(report.gitlab.missing, []);
 });
 
 test('fails closed for empty or malformed catalogs instead of reporting zero-SDK success', () => {
@@ -117,7 +89,7 @@ test('CLI writes failure evidence and never labels a local snapshot live', async
     const scriptPath = fileURLToPath(new URL('../check-sdk-coverage.mjs', import.meta.url));
     const run = spawnSync(process.execPath, [scriptPath, '--catalog', catalogPath], { cwd: directory, encoding: 'utf8' });
     assert.equal(run.status, 1);
-    assert.match(run.stderr, /Unmapped GitLab Duo models: duo-chat-new/);
+    assert.match(run.stderr, /missing Models.dev routing metadata/);
     const report = JSON.parse(await readFile(join(directory, '.dev/verification/sdk-coverage.json'), 'utf8'));
     assert.equal(report.sourceKind, 'snapshot');
     assert.equal(report.coverageComplete, false);

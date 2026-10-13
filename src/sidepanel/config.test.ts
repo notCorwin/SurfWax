@@ -55,10 +55,11 @@ describe("model config persistence", () => {
     } } });
   });
 
-  it("persists an optional manual context window", async () => {
+  it("persists advanced context, max-token, endpoint, and Base URL overrides", async () => {
     const storage = memoryStorage(MODEL_CONFIG_STORAGE_KEY);
     const config = { selectedProviderId: "vercel", profiles: { vercel: {
-      providerId: "vercel", sdk: "@ai-sdk/gateway" as const, providerSettings: { apiKey: "key" }, baseURL: "https://ai-gateway.vercel.sh/v4/ai", model: "test", contextWindowOverride: 8192, catalogRouteVersion: 1,
+      providerId: "vercel", sdk: "@ai-sdk/gateway" as const, providerSettings: { apiKey: "key" }, baseURL: "https://ai-gateway.vercel.sh/v4/ai", baseURLOverride: "https://proxy.test/v1",
+      model: "test", contextWindowOverride: 8192, maxTokensOverride: 4096, endpointType: "openai-responses" as const, catalogRouteVersion: 1,
     } } };
     await saveModelConfig(config, storage);
     await expect(loadModelConfig(undefined, storage)).resolves.toEqual({ selectedProviderId: "vercel", profiles: { vercel: { ...config.profiles.vercel, imageInput: "auto" } } });

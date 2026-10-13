@@ -43,7 +43,8 @@ test("restores independent credentials and models when switching Providers", asy
     await options.getByLabel("Provider", { exact: true }).fill("Gateway");
     await options.getByRole("option", { name: /Vercel AI Gateway.*vercel/ }).click();
     await expect(options.getByLabel("Provider", { exact: true })).toHaveValue("Vercel AI Gateway (vercel)");
-    await expect(options.getByText("https://ai-gateway.vercel.sh/v4/ai", { exact: true })).toBeVisible();
+    await options.getByText("高级设置", { exact: true }).click();
+    await expect(options.getByLabel("Base URL", { exact: true })).toHaveAttribute("placeholder", "https://ai-gateway.vercel.sh/v4/ai");
     await options.getByLabel("Model ID", { exact: true }).click();
     await options.getByLabel("Model ID", { exact: true }).fill("GPT Test");
     await options.getByLabel("Model ID", { exact: true }).press("ArrowDown");
@@ -133,7 +134,8 @@ test("persists multi-field credentials and interpolates template Endpoints", asy
     await options.getByLabel("Model ID", { exact: true }).fill("agent-model");
     await options.getByLabel("API Key", { exact: true }).fill("template-key");
     await options.getByLabel("ACCOUNT", { exact: true }).fill("tenant");
-    await expect(options.getByText("https://api.example/tenant/v1", { exact: true })).toBeVisible();
+    await options.getByText("高级设置", { exact: true }).click();
+    await expect(options.getByLabel("Base URL", { exact: true })).toHaveAttribute("placeholder", "https://api.example/tenant/v1");
     await options.getByRole("button", { name: "保存配置" }).click();
 
     await selectProvider(options, "bedrock", /Amazon Bedrock.*bedrock/);
@@ -158,6 +160,7 @@ test("keeps custom Endpoint available when the Models.dev catalog fails", async 
     await options.waitForLoadState("domcontentloaded");
     await expect(options.getByText("Models.dev 暂时不可用；仍可选择 custom 使用自定义 Endpoint。")).toBeVisible();
     await selectProvider(options, "custom", /自定义 Endpoint.*custom/);
+    await options.getByText("高级设置", { exact: true }).click();
     await expect(options.getByLabel("Base URL", { exact: true })).toBeVisible();
   } finally {
     await dispose(opened.context, opened.userDataDirectory);
@@ -187,7 +190,7 @@ test("uses a global custom system prompt and hides disabled advanced settings", 
   try {
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await expect(options.getByRole("group", { name: "上下文窗口" })).toBeVisible();
-    await expect(options.getByTestId("model-limit-match")).toContainText("262,144 tokens");
+    await expect(options.getByTestId("model-limit-match")).toContainText("256,000 tokens");
     await options.getByLabel("自定义系统提示词").fill("You are a custom browser agent.");
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(options.getByRole("status")).toContainText("配置已保存");

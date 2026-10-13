@@ -23,7 +23,7 @@ import "../styles.css";
 import "./styles.css";
 
 type Status = "idle" | "saving" | "clearing" | "saved" | "error";
-type ModelField = "providerId" | "baseURL" | "model" | "contextWindowOverride" | "imageInput" | string;
+type ModelField = "providerId" | "baseURL" | "baseURLOverride" | "model" | "contextWindowOverride" | "maxTokensOverride" | "endpointType" | "imageInput" | string;
 
 export function OptionsApp() {
   const [modelSettings, setModelSettings] = useState(EMPTY_MODEL_CONFIG);
@@ -105,15 +105,17 @@ export function OptionsApp() {
   const update = (field: Exclude<ModelField, "providerId">, value: string) => {
     if (!config) return;
     setModelSettings((current) => ({ ...current, profiles: { ...current.profiles, [config.providerId]: {
-      ...config, [field]: field === "contextWindowOverride" ? (value ? Number(value) : undefined) : value,
+      ...config, [field]: field === "contextWindowOverride" || field === "maxTokensOverride" ? (value ? Number(value) : undefined) : value,
       // A new free-text model must never inherit the previous model's route.
       ...(field === "model" ? {
         modelProvider: undefined,
+        canonicalModelId: selectedProvider?.models.find((model) => model.id === value)?.canonicalModelId,
+        modelFamily: selectedProvider?.models.find((model) => model.id === value)?.family,
         ...(config.modelProvider?.api !== undefined && selectedProvider ? { baseURL: selectedProvider.baseURL } : {}),
       } : {}),
     } } }));
     setFieldErrors((current) => field === "model" ? {} : { ...current, [field]: undefined });
-    if (field === "baseURL" || field === "model") {
+    if (field === "baseURL" || field === "baseURLOverride" || field === "model" || field === "endpointType") {
       matchingKey.current = "";
       setMatchedLimit(undefined);
     }
@@ -153,6 +155,7 @@ export function OptionsApp() {
         providerSettings: {},
         baseURL: preset?.baseURL ?? "",
         model: "",
+        ...(value === "custom" ? { endpointType: "openai-chat-completions" as const } : {}),
         imageInput: "auto",
       } satisfies ModelProfile },
     }));
@@ -173,10 +176,10 @@ export function OptionsApp() {
       setStatus("error");
       setMessage("请检查标出的字段");
       setErrorDetail(undefined);
-      const firstMainError = ["providerId", "baseURL", "model", ...settingFields.map(({ key }) => key), "contextWindowOverride"]
+      const firstMainError = ["providerId", "baseURL", "baseURLOverride", "model", ...settingFields.map(({ key }) => key), "contextWindowOverride", "maxTokensOverride"]
         .find((key) => errors[key]) as ModelField | undefined;
       const firstErrorId = firstMainError
-        ? ({ providerId: "provider-id", baseURL: "base-url", model: "model-id", apiKey: "api-key", contextWindowOverride: "context-window", imageInput: "image-input" }[firstMainError] ?? `provider-setting-${firstMainError}`)
+        ? ({ providerId: "provider-id", baseURL: "base-url", baseURLOverride: "base-url", model: "model-id", apiKey: "api-key", contextWindowOverride: "context-window", maxTokensOverride: "max-tokens", imageInput: "image-input" }[firstMainError] ?? `provider-setting-${firstMainError}`)
         : undefined;
       if (firstErrorId) {
         const field = document.getElementById(firstErrorId);
@@ -254,14 +257,6 @@ export function OptionsApp() {
                 {fieldErrors.providerId && <p id="provider-id-error" className="field-error" role="alert">{fieldErrors.providerId}</p>}
               </Field>
               {config && <>
-                {modelSettings.selectedProviderId === "custom" ? <Field data-disabled={busy || undefined} data-invalid={!!fieldErrors.baseURL || undefined}>
-                  <FieldLabel htmlFor="base-url">Base URL</FieldLabel>
-                  <Input id="base-url" name="baseURL" type="url" autoComplete="url" aria-invalid={!!fieldErrors.baseURL} aria-describedby={fieldErrors.baseURL ? "base-url-error" : undefined} value={config.baseURL} disabled={busy} onChange={(event) => update("baseURL", event.target.value)} />
-                  {fieldErrors.baseURL && <p id="base-url-error" className="field-error" role="alert">{fieldErrors.baseURL}</p>}
-                </Field> : <Field>
-                  <FieldLabel>Endpoint</FieldLabel>
-                  <p className="model-limit-match">{routingError ? config.baseURL : resolvedBaseURL(config) || "由 SDK 使用默认 Endpoint"}</p>
-                </Field>}
                 <Field data-disabled={busy || undefined} data-invalid={!!fieldErrors.model || undefined}>
                   <FieldLabel htmlFor="model-id">Model ID</FieldLabel>
                   <SearchCombobox id="model-id" name="model" allowCustom
@@ -302,6 +297,33 @@ export function OptionsApp() {
                 <summary><ChevronRightIcon aria-hidden="true" /><span>高级设置</span></summary>
                 <div className="advanced-settings-content">
                   <FieldSet>
+                    <FieldLegend>模型端点</FieldLegend>
+                    {modelSettings.selectedProviderId === "custom" && <Field data-disabled={busy || !config || undefined}>
+                      <FieldLabel htmlFor="endpoint-type">协议</FieldLabel>
+                      <Select value={config?.endpointType ?? "openai-chat-completions"} disabled={busy || !config} onValueChange={(value) => update("endpointType", value)}>
+                        <SelectTrigger id="endpoint-type" aria-label="模型端点协议" className="w-full"><SelectValue /></SelectTrigger>
+                        <SelectContent position="popper"><SelectGroup>
+                          <SelectItem value="openai-chat-completions">OpenAI Chat Completions</SelectItem>
+                          <SelectItem value="openai-completions">OpenAI Completions</SelectItem>
+                          <SelectItem value="openai-responses">OpenAI Responses</SelectItem>
+                          <SelectItem value="anthropic-messages">Anthropic Messages</SelectItem>
+                          <SelectItem value="google-generate-content">Google generateContent</SelectItem>
+                          <SelectItem value="google-interactions">Google Interactions</SelectItem>
+                        </SelectGroup></SelectContent>
+                      </Select>
+                    </Field>}
+                    <Field data-disabled={busy || !config || undefined} data-invalid={!!(fieldErrors.baseURL || fieldErrors.baseURLOverride) || undefined}>
+                      <FieldLabel htmlFor="base-url">Base URL</FieldLabel>
+                      <Input id="base-url" name={modelSettings.selectedProviderId === "custom" ? "baseURL" : "baseURLOverride"} type="url" autoComplete="url"
+                        aria-invalid={!!(fieldErrors.baseURL || fieldErrors.baseURLOverride)} aria-describedby={fieldErrors.baseURL || fieldErrors.baseURLOverride ? "base-url-error" : undefined}
+                        value={modelSettings.selectedProviderId === "custom" ? config?.baseURL ?? "" : config?.baseURLOverride ?? ""} disabled={busy || !config}
+                        placeholder={modelSettings.selectedProviderId === "custom" ? "https://provider.example/v1" : config ? resolvedBaseURL({ ...config, baseURLOverride: undefined }) || "由 SDK 自动配置" : ""}
+                        onChange={(event) => update(modelSettings.selectedProviderId === "custom" ? "baseURL" : "baseURLOverride", event.target.value)} />
+                      {(fieldErrors.baseURL || fieldErrors.baseURLOverride) && <p id="base-url-error" className="field-error" role="alert">{fieldErrors.baseURL || fieldErrors.baseURLOverride}</p>}
+                      <FieldDescription>{modelSettings.selectedProviderId === "custom" ? "填写所选协议的根地址；可包含 /v1、/v1beta 或 /v1beta/openai。" : "留空使用 Models.dev 绑定地址；填写后覆盖当前 Provider 地址。"}</FieldDescription>
+                    </Field>
+                  </FieldSet>
+                  <FieldSet>
                     <FieldLegend>系统提示词</FieldLegend>
                     <Field data-disabled={busy || undefined}>
                       <FieldLabel htmlFor="system-prompt">自定义系统提示词</FieldLabel>
@@ -317,6 +339,17 @@ export function OptionsApp() {
                       <Input id="context-window" name="contextWindowOverride" type="number" min="1" step="1" aria-invalid={!!fieldErrors.contextWindowOverride} aria-describedby={fieldErrors.contextWindowOverride ? "context-window-error" : undefined} value={config?.contextWindowOverride ?? ""} disabled={busy || !config}
                         onChange={(event) => update("contextWindowOverride", event.target.value)} />
                       {fieldErrors.contextWindowOverride && <p id="context-window-error" className="field-error" role="alert">{fieldErrors.contextWindowOverride}</p>}
+                    </Field>
+                  </FieldSet>
+                  <FieldSet>
+                    <FieldLegend>最大输出</FieldLegend>
+                    <Field data-disabled={busy || !config || undefined} data-invalid={!!fieldErrors.maxTokensOverride || undefined}>
+                      <FieldLabel htmlFor="max-tokens">max_tokens</FieldLabel>
+                      <Input id="max-tokens" name="maxTokensOverride" type="number" min="1" step="1" aria-invalid={!!fieldErrors.maxTokensOverride}
+                        aria-describedby={fieldErrors.maxTokensOverride ? "max-tokens-error" : "max-tokens-description"} value={config?.maxTokensOverride ?? ""} disabled={busy || !config}
+                        onChange={(event) => update("maxTokensOverride", event.target.value)} />
+                      {fieldErrors.maxTokensOverride && <p id="max-tokens-error" className="field-error" role="alert">{fieldErrors.maxTokensOverride}</p>}
+                      <FieldDescription id="max-tokens-description">仅 Anthropic 类端点发送；未知模型默认 128,000。</FieldDescription>
                     </Field>
                   </FieldSet>
                   <FieldSet>

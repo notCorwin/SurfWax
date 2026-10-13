@@ -31,6 +31,7 @@ type ObservationRecord = {
 };
 type Session = {
   tabId: number;
+  token: string;
   debuggee: Debuggee;
   ready?: Promise<void>;
   generation: number;
@@ -414,8 +415,8 @@ export class AutomationRuntime {
       const generation = session.generation;
       if (previous && previous.documentId !== session.generation) throw automationError("stale-observation", { observationId: options.since, reason: "document-changed-during-inspection" });
       const fields = new Set(options.fields ?? ["text", "state", "ref", "actions"]);
-      const qualified = captured.lines.map(({ id, line }) => ({ id, line: line.replace(/\[actions=([^\]]+)\]/g, (_match, value: string) => `[actions=${value.split(",").map((action) => action === "doubleClick" ? "dblclick" : action === "insertText" ? "pressSequentially" : action).join(",")}]`).replace(/\[ref=(e\d+)\]/g, (_match, ref: string) => {
-        const owned = `t${tabId}d${session.generation}${ref}`;
+      const qualified = captured.lines.map(({ id, line }) => ({ id, line: line.replace(/\[actions=([^\]]+)\]/g, (_match, value: string) => `[actions=${value.split(",").map((action) => action === "doubleClick" ? "dblclick" : action === "insertText" ? "pressSequentially" : action === "select" ? "selectOption" : action).join(",")}]`).replace(/\[ref=(e\d+)\]/g, (_match, ref: string) => {
+        const owned = `t${tabId}s${session.token}d${session.generation}${ref}`;
         const record = session.refs.get(ref);
         if (record) session.refs.set(owned, record);
         return `[ref=${owned}]`;
@@ -757,6 +758,7 @@ export class AutomationRuntime {
     if (!session) {
       session = {
         tabId,
+        token: crypto.randomUUID().replace(/-/g, "").slice(0, 12),
         debuggee: { tabId },
         generation: 0,
         nextRef: 1,

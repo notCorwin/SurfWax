@@ -14,7 +14,7 @@ Surf Wax 是 Chrome 138+ 的 Manifest V3 Side Panel 智能体运行环境。它�
 
 也可从 [版本发布页](https://github.com/notCorwin/SurfWax/releases) 下载对应版本的 ZIP 和 `.sha256` 文件，核对 SHA-256，解压后在 `chrome://extensions` 开启开发者模式并选择“加载已解压的扩展程序”。商店版通过商店更新；已解压版本需要手动更新。正式版本发布绑定不可变的 Git 标签和提交，不覆盖已有版本产物。`autobuild` 是 master 的可变测试渠道，提交前在本地运行完整 CI，标记为 prerelease，不会占用 Latest。
 
-Provider 配置保存在本机 `chrome.storage.local`，按 Provider 隔离。设置页会刷新 Models.dev 模型目录，并保留目录不可用时的自定义 Endpoint。模型上下文容量未匹配时使用 256K；用户可覆盖容量及图片支持状态。
+Provider 配置保存在本机 `chrome.storage.local`，按 Provider 隔离。设置页会刷新 Models.dev 模型目录，并保留目录不可用时的自定义 Endpoint。高级设置可覆盖 Base URL、Context Window、Anthropic 类 `max_tokens` 和图片支持状态；未知上下文默认 256,000，未知 Anthropic 类输出默认 128,000。自定义 Endpoint 可选择 OpenAI Chat Completions、Completions、Responses、Anthropic Messages、Google generateContent 或 Interactions 协议。
 
 ## 任务与会话
 
@@ -22,7 +22,7 @@ Provider 配置保存在本机 `chrome.storage.local`，按 Provider 隔离。�
 - 历史上下文保持稳定前缀，新会话将完整工具简明目录追加到用户自定义系统提示词后，并把版本与快照写入日志；旧会话保持原格式，首次成功压缩后迁移。剩余容量不足 20% 或 Provider 报上下文超限时自动生成摘要。
 - 可恢复请求错误无限重试，单次退避不超过 5 秒；可查看重试状态或立即停止。
 - 关闭真实 Side Panel 会中止模型请求、工具及排队调用。操作成功、失败和中断都写入 Tool Result，已发生的网页操作不会回滚或自动重放。
-- 会话支持搜索、重命名和一键永久删除；删除无需确认且不可恢复。会话行操作按钮在悬浮或键盘聚焦时显示，无悬浮能力的设备保留可见入口。任何侧栏存在运行中的任务时，全部会话的新建、切换、编辑、重试、分支、重命名与删除均锁定。搜索、复制、草稿、Follow-up 队列和停止始终可用。用户消息与 Assistant 回复均支持复制、重试及分支；用户消息另支持编辑。
+- 会话支持搜索、重命名和一键删除；删除无需确认，并在短时间内提供撤销。删除和清空通过追加 tombstone 隐藏数据，不改写 canonical event log。会话行操作按钮在悬浮或键盘聚焦时显示，无悬浮能力的设备保留可见入口。任何侧栏存在运行中的任务时，全部会话的新建、切换、编辑、复制、重试、分支、重命名与删除均锁定且隐藏消息操作。草稿、Follow-up 队列和停止始终可用。用户消息与 Assistant 回复均支持复制、重试及分支；用户消息另支持编辑。
 - 正在操作的页面有透明防干扰层。所有已操作标签页及 iframe 的阻断监听器保持安装，智能体通过当前 run 的受控输入票据执行原生输入；任务结束、导航和中断时清理。
 - 截图、PDF 和大型结果默认作为会话内部产物。用户明确要求保存时直接下载文件，无需再次授权。下载失败或任务中断后，内部产物仍可再次保存，无需重新生成。
 

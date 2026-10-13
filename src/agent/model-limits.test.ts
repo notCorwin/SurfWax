@@ -134,7 +134,7 @@ describe("models.dev limit matching", () => {
     const estimated = await resolveModelLimit({ baseURL: "https://unknown.test/v1", model: "unknown" }, {
       storage, fetch: vi.fn(async () => new Response(JSON.stringify(catalog))),
     });
-    expect(estimated).toMatchObject({ context: 262_144, source: "estimated" });
+    expect(estimated).toMatchObject({ context: 256_000, source: "estimated" });
     expect(estimated).not.toHaveProperty("inputModalities");
     expect(estimated).not.toHaveProperty("reasoningEfforts");
   });
@@ -179,7 +179,7 @@ describe("models.dev limit matching", () => {
     const config = { providerId: "mixed", baseURL: "", model: "available", providerSettings: { apiKey: "key" } };
     expect(sdkFor(applyModelPreset(config, preset!))).toBe("@ai-sdk/openai");
     expect(modelConfigErrors(applyModelPreset({ ...config, model: "unavailable" }, preset!)).sdk).toContain("unsupported-provider");
-    expect(modelConfigErrors(applyModelPreset({ ...config, model: "free-text" }, preset!)).sdk).toContain("unsupported-provider");
+    expect(sdkFor(applyModelPreset({ ...config, model: "free-text" }, preset!))).toBe("@ai-sdk/openai");
   });
 
   it("does not silently fall back for unsupported overrides on typed or restored models", () => {

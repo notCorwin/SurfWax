@@ -1,7 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { MODEL_SDKS } from '../src/types.ts';
-import { GITLAB_MODELS } from '../src/agent/gitlab-models.ts';
 import { publicJson } from './public-json.mjs';
 import { analyzeSdkCoverage, sdkCoverageFailures } from './sdk-coverage.mjs';
 
@@ -12,7 +11,7 @@ if (args.length && (args.length !== 2 || args[0] !== '--catalog')) {
 const source = args.length ? resolve(args[1]) : 'https://models.dev/api.json';
 const catalog = args.length ? JSON.parse(await readFile(source, 'utf8')) : await publicJson(source);
 const report = { source, sourceKind: args.length ? 'snapshot' : 'live', checkedAt: new Date().toISOString(),
-  ...analyzeSdkCoverage(catalog, MODEL_SDKS, GITLAB_MODELS) };
+  ...analyzeSdkCoverage(catalog, MODEL_SDKS) };
 await mkdir('.dev/verification', { recursive: true });
 await writeFile('.dev/verification/sdk-coverage.json', JSON.stringify(report, null, 2));
 const failures = sdkCoverageFailures(report);

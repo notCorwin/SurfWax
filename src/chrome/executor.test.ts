@@ -62,7 +62,8 @@ function programHarness(work: (capabilities: any, signal: AbortSignal) => Promis
   const tabs = [{ id: 41, windowId: 7, active: true, title: "Current" }, { id: 42, windowId: 7, active: false }, { id: 99, windowId: 9 }] as chrome.tabs.Tab[];
   Object.assign(fake.chromeApi, {
     windows: { getCurrent: vi.fn(async () => ({ id: 7, tabs })), get: vi.fn(async () => ({ id: 7 })), update: vi.fn(), create: vi.fn(), remove: vi.fn() },
-    tabs: { get: vi.fn(async (id: number) => tabs.find(tab => tab.id === id)), query: vi.fn(async () => tabs.filter(tab => tab.windowId === 7)),
+    tabs: { get: vi.fn(async (id: number) => tabs.find(tab => tab.id === id)), query: vi.fn(async () => tabs,
+      ),
       update: vi.fn(async (id: number) => { tabs.forEach(tab => { tab.active = tab.id === id; }); }),
       create: vi.fn(async (input: any) => { const tab = { id: 43, ...input }; tabs.push(tab); return tab; }),
       remove: vi.fn(async (id: number) => { const index = tabs.findIndex(tab => tab.id === id); if (index >= 0) tabs.splice(index, 1); }),
@@ -100,13 +101,13 @@ describe("ChromeExecutor programs", () => {
     expect(h.events.filter(event => event.type === "tool.result.data")).toHaveLength(1);
     expect(h.raw.observe).toHaveBeenCalledTimes(1); expect(h.fake.chromeApi.downloads.download).toHaveBeenCalledTimes(2); h.executor.dispose();
   });
-  it.each(["screenshot", "pdf"] as const)("keeps the ten-second foreground timeout while saving %s", async (name) => {
+  it.each(["screenshot", "pdf"] as const)("honors an explicit timeout while saving %s", async (name) => {
     vi.useFakeTimers();
     const h = programHarness(async ({ page }) => name === "screenshot" ? page.screenshot({ save: true }) : page.pdf({ save: true }));
     h.fake.debuggerApi.sendCommand.mockImplementation(async (_debuggee, method) => method === "Page.printToPDF" ? { data: "eA==" } : {});
     let finish!: () => void;
     h.fake.chromeApi.downloads.download.mockImplementationOnce(() => new Promise<number>(resolve => { finish = () => resolve(17); }));
-    const pending = h.run();
+    const pending = h.run(undefined, { timeoutMs: 10_000 });
     await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
     await vi.advanceTimersByTimeAsync(10000);
     expect(await pending).toMatchObject({ ok: false, result: { error: { code: "timeout", effectUnknown: true } } });
@@ -115,7 +116,7 @@ describe("ChromeExecutor programs", () => {
   });
   it("selects a stable tab without focusing or creating a Chrome window", async () => {
     const h = programHarness(async ({ browser }) => browser.tabs.select(42));
-    expect(await h.run()).toMatchObject({ ok: true, result: [{ id: 41, current: false }, { id: 42, current: true }] });
+    expect(await h.run()).toMatchObject({ ok: true, result: [{ id: 41, current: false }, { id: 42, current: true }, { id: 99, current: false }] });
     expect((h.fake.chromeApi as any).tabs.update).toHaveBeenCalledWith(42, { active: true });
     expect((h.fake.chromeApi as any).windows.update).not.toHaveBeenCalled(); h.executor.dispose();
   });
@@ -132,11 +133,12 @@ describe("ChromeExecutor programs", () => {
     expect((h.executor as any).browserState).toMatchObject({ windowId: 7, tabId: 41 });
     await h.executor.endRun(); expect((h.executor as any).browserState).toBeUndefined(); h.executor.dispose();
   });
-  it("selects IDs after reorder, rejects foreign/missing tabs, and exposes no legacy routing methods", async () => {
+  it("selects IDs across windows after reorder, rejects missing tabs, and exposes no legacy routing methods", async () => {
     let tabId = 41; const h = programHarness(async ({ browser }) => browser.tabs.select(tabId));
     h.tabs.reverse(); expect(await h.run()).toMatchObject({ ok: true });
     expect((h.fake.chromeApi as any).tabs.update).toHaveBeenCalledWith(41, { active: true });
-    for (const invalid of [99, 999]) { tabId = invalid; expect(await h.run()).toMatchObject({ ok: false, result: { error: { message: expect.stringContaining("invalid-tab-id") } } }); }
+    tabId = 99; expect(await h.run()).toMatchObject({ ok: true });
+    tabId = 999; expect(await h.run()).toMatchObject({ ok: false, result: { error: { message: expect.stringContaining("invalid-tab-id") } } });
     for (const name of ["execute", "executeCommand", "executeBrowser", "executePage", "executeCommandNow", "runPageCode"]) expect(h.executor).not.toHaveProperty(name);
     expect(h.fake.debuggerApi.getTargets).not.toHaveBeenCalled(); h.executor.dispose();
   });
@@ -175,7 +177,7 @@ describe("ChromeExecutor programs", () => {
   });
   it("returns by-value program results without discovering or evaluating the Side Panel target", async () => {
     const h = programHarness(async ({ page, browser }) => ({ title: await page.title(), tabs: (await browser.tabs.list()).length }));
-    expect(await h.run()).toMatchObject({ ok: true, result: { title: "Current", tabs: 2 } });
+    expect(await h.run()).toMatchObject({ ok: true, result: { title: "Current", tabs: 3 } });
     expect(h.fake.debuggerApi.getTargets).not.toHaveBeenCalled(); expect(h.fake.debuggerApi.sendCommand).not.toHaveBeenCalled();
     expect((globalThis as any).__surfWaxBrowser).toBeUndefined(); expect((globalThis as any).__surfWaxPage).toBeUndefined(); expect((globalThis as any).__surfWaxResult).toBeUndefined(); h.executor.dispose();
   });
@@ -244,9 +246,9 @@ describe("ChromeExecutor programs", () => {
     });
     expect(await h.run()).toMatchObject({ ok: true, result: ["artifacts", "browser", "check", "emit", "net", "page", "protocol", "signal", "sleep"] }); h.executor.dispose();
   });
-  it("applies the default ten-second program timeout and honors an explicit deadline", async () => {
+  it("has no default program deadline and honors an explicit deadline", async () => {
     const h = programHarness(async () => 1); const timer = vi.spyOn(globalThis, "setTimeout");
-    expect(await h.run()).toMatchObject({ ok: true }); expect(timer.mock.calls.some(([, delay]) => delay === 10000)).toBe(true);
+    expect(await h.run()).toMatchObject({ ok: true }); expect(timer.mock.calls.some(([, delay]) => delay === 10000)).toBe(false);
     expect(await h.run(undefined, { timeoutMs: 37 })).toMatchObject({ ok: true }); expect(timer.mock.calls.some(([, delay]) => delay === 37)).toBe(true);
     timer.mockRestore(); h.executor.dispose();
   });
@@ -336,7 +338,7 @@ describe("ChromeExecutor programs", () => {
       },
       tabs: {
         get: vi.fn(async (tabId: number) => tabs.find((tab) => tab.id === tabId)),
-        query: vi.fn(async ({ windowId, active }: chrome.tabs.QueryInfo) => tabs.filter((tab) => tab.windowId === windowId && (!active || tab.active))),
+        query: vi.fn(async ({ windowId, active }: chrome.tabs.QueryInfo = {}) => tabs.filter((tab) => (windowId === undefined || tab.windowId === windowId) && (!active || tab.active))),
       },
     });
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never });

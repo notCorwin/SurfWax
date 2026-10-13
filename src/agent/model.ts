@@ -2,7 +2,6 @@ import { APICallError, type LanguageModel } from "ai";
 import type { EventLogger } from "../logging";
 import type { ModelConfig, ModelSdk } from "../types";
 import { REASONING_EFFORTS, reasoningSettingsFor, type ReasoningEffort, type ReasoningSettings } from "./reasoning";
-import { GITLAB_MODELS } from "./gitlab-models";
 import { googleCredentials, isCloudflareGateway, isOpenAIShapedSdk, modelConfigErrors, resolvedBaseURL, sdkFor, settingsFor } from "./model-sdks";
 
 const MAX_RETRY_DELAY_MS = 5_000;
@@ -489,8 +488,10 @@ export function sapProtocolFetch(config: ModelConfig, fetch: typeof globalThis.f
 
 export function gitlabProtocolFetch(config: ModelConfig, fetch: typeof globalThis.fetch, authFetch = fetch): { fetch: typeof globalThis.fetch; mapping: { provider: "openai" | "anthropic"; model: string } } {
   const settings = settingsFor(config);
-  const mapping = Object.hasOwn(GITLAB_MODELS, config.model) ? GITLAB_MODELS[config.model] : undefined;
-  if (!mapping) throw new Error(`Unsupported GitLab Duo model: ${config.model}`);
+  const [canonicalProvider, ...canonicalModel] = config.canonicalModelId?.split("/") ?? [];
+  const provider: "openai" | "anthropic" = canonicalProvider === "anthropic" || canonicalProvider === "openai" ? canonicalProvider
+    : config.modelFamily?.startsWith("claude-") ? "anthropic" : "openai";
+  const mapping = { provider, model: canonicalModel.length ? canonicalModel.join("/") : config.model };
   let cached: { token: string; headers: Record<string, string>; expiresAt: number } | undefined;
   const directAccess = async (signal?: AbortSignal) => {
     if (cached && cached.expiresAt > Date.now()) return cached;
@@ -520,9 +521,14 @@ export function gitlabProtocolFetch(config: ModelConfig, fetch: typeof globalThi
 }
 
 function nativeModel(provider: Record<string, any>, config: ModelConfig): Exclude<LanguageModel, string> {
-  const shape = config.modelProvider?.shape;
+  const shape = config.endpointType === "openai-completions" ? "completion"
+    : config.endpointType === "openai-responses" ? "responses"
+      : config.endpointType === "google-interactions" ? "interactions"
+        : config.endpointType === "openai-chat-completions" ? undefined : config.modelProvider?.shape;
   const method = shape === "responses" ? provider.responses
-    : shape === "completions" ? provider.chat ?? provider.chatModel : provider.languageModel;
+    : shape === "completion" ? provider.completion
+      : shape === "interactions" ? provider.interactions
+        : shape === "completions" ? provider.chat ?? provider.chatModel : provider.languageModel;
   if (typeof method !== "function") throw new Error(`SDK ${sdkFor(config)} does not support model API shape: ${shape}`);
   return method.call(provider, config.model);
 }

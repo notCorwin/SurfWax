@@ -374,10 +374,10 @@ export async function configure(context: BrowserContext, page: Page, baseURL: st
   const [options] = await Promise.all([context.waitForEvent("page"), page.getByTestId("open-settings").click()]);
   await options.waitForLoadState("domcontentloaded");
   await selectProvider(options, "custom", /自定义 Endpoint.*custom/);
+  await options.getByText("高级设置", { exact: true }).click();
   await options.getByLabel("Base URL", { exact: true }).fill(baseURL);
   await options.getByLabel("Model ID", { exact: true }).fill("test-model");
   await options.getByLabel("API Key", { exact: true }).fill("test-key");
-  await options.getByText("高级设置", { exact: true }).click();
   await options.getByLabel("窗口大小（tokens）").fill(String(contextWindow));
   await options.getByRole("button", { name: "保存配置" }).click();
   await expect(options.getByRole("status")).toContainText("配置已保存");

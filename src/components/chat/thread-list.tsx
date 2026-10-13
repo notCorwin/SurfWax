@@ -31,6 +31,7 @@ export function buildMessageSearchIndex(events: readonly LogEvent[]): Map<string
 }
 
 export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
+  const runtimeCommands = usePanelRuntime();
   const searchInput = useRef<HTMLInputElement>(null);
   const { locked } = useRunState();
   const threads = usePanelState((state) => state.threads);
@@ -41,6 +42,8 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
   const [index, setIndex] = useState(() => new Map<string, string>());
   const [warning, setWarning] = useState("");
   const [searchError, setSearchError] = useState<unknown>();
+  const [deleted, setDeleted] = useState<{ id: string; title: string }>();
+  const undoTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const requestSearchIndex = useRef<() => void>(() => undefined);
   const cachedMessages = useRef(new Map<string, Map<string, LogEvent>>());
   const ingest = (event: LogEvent) => {
@@ -56,6 +59,12 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
   const warn = () => setWarning("当前会话尚未结束，请等待完成或先停止运行。");
 
   useEffect(() => { if (!locked) setWarning(""); }, [locked]);
+  useEffect(() => () => clearTimeout(undoTimer.current), []);
+  const deletedConversation = (id: string, deletedTitle: string) => {
+    setDeleted({ id, title: deletedTitle });
+    clearTimeout(undoTimer.current);
+    undoTimer.current = setTimeout(() => setDeleted(undefined), 6_000);
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -86,7 +95,7 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
       }
     }
     if (event.type === "conversation.deleted") {
-      const id = (fromLogValue(event.content) as { conversationId?: string })?.conversationId;
+      const id = event.conversationId ?? (fromLogValue(event.content) as { conversationId?: string } | null)?.conversationId;
       if (id) cachedMessages.current.delete(id);
       setIndex((previous) => { const next = new Map(previous); if (id) next.delete(id); return next; });
     }
@@ -108,9 +117,13 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
       <header className="flex min-h-8 shrink-0 items-center justify-between px-1 py-2"><h2 className="text-base font-semibold">对话列表</h2><Button type="button" variant="ghost" size="icon-sm" aria-label="关闭对话列表" title="关闭" onClick={close}><XIcon aria-hidden="true" /></Button></header>
       <InputGroup className="shrink-0"><InputGroupAddon><SearchIcon aria-hidden="true" /></InputGroupAddon><InputGroupInput ref={searchInput} type="search" aria-label="搜索会话" placeholder="搜索标题或消息…" value={query} onChange={(event) => setQuery(event.target.value)} /></InputGroup>
       {warning && <p role="status" className="conversation-notice">{warning}</p>}
+      {deleted && <div role="status" className="conversation-notice flex items-center justify-between gap-2"><span>已删除“{deleted.title}”</span>
+        <Button type="button" variant="ghost" size="sm" disabled={locked} onClick={() => void runtimeCommands.threads.restore(deleted.id).then(() => {
+          clearTimeout(undoTimer.current); setDeleted(undefined);
+        }).catch(warn)}>撤销</Button></div>}
       {searchError !== undefined && <ErrorNotice summary="搜索记录读取失败。" error={searchError} />}
       <div className="conversation-items">
-        {visibleItems.map((item) => <ConversationItem key={item.id} item={item} isCurrent={currentId === item.id} close={close} locked={locked} warn={warn} />)}
+        {visibleItems.map((item) => <ConversationItem key={item.id} item={item} isCurrent={currentId === item.id} close={close} locked={locked} warn={warn} onDeleted={deletedConversation} />)}
         {visibleItems.length === 0 && <p className="conversation-empty">{needle ? "没有找到匹配的会话" : "暂无已保存的会话"}</p>}
       </div>
     </PopoverContent>
@@ -118,7 +131,7 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
 };
 
 type Item = PanelState["threads"]["threadItems"][number];
-const ConversationItem: FC<{ item: Item; isCurrent: boolean; close: () => void; locked: boolean; warn: () => void }> = ({ item, isCurrent, close, locked, warn }) => {
+const ConversationItem: FC<{ item: Item; isCurrent: boolean; close: () => void; locked: boolean; warn: () => void; onDeleted: (id: string, title: string) => void }> = ({ item, isCurrent, close, locked, warn, onDeleted }) => {
   const runtime = useRuntimeView();
   const runtimeCommands = usePanelRuntime();
   const client = runtimeCommands.threads.item({ id: item.id });
@@ -157,7 +170,7 @@ const ConversationItem: FC<{ item: Item; isCurrent: boolean; close: () => void; 
       }}><span>{title}</span>{runStatus !== "idle" && <small data-status={String(runStatus)}>{runStatus === "running" ? "运行中" : "已中断"}</small>}</Button>
       <div role="group" aria-label="会话操作" className="pointer-events-none flex shrink-0 items-center gap-1 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-has-[:focus-visible]:pointer-events-auto group-has-[:focus-visible]:opacity-100 [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100">
         <Button type="button" variant="ghost" size="icon-sm" disabled={locked} className="conversation-action" aria-label={`重命名 ${title}`} title="重命名" onClick={() => void mutate(() => { setDraft(title); setEditing(true); })}><PencilIcon aria-hidden="true" /></Button>
-        <Button type="button" variant="ghost" size="icon-sm" disabled={locked} className="conversation-delete" aria-label={`永久删除 ${title}`} title="永久删除" onClick={() => void mutate(() => client.delete())}><Trash2Icon aria-hidden="true" /></Button>
+        <Button type="button" variant="ghost" size="icon-sm" disabled={locked} className="conversation-delete" aria-label={`删除 ${title}`} title="删除" onClick={() => void mutate(async () => { await client.delete(); onDeleted(item.id, title); })}><Trash2Icon aria-hidden="true" /></Button>
       </div>
     </>}
     {!editing && error && <ErrorNotice summary="会话操作失败。" error={error} />}

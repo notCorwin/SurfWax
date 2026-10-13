@@ -119,8 +119,8 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       return {
         instructions: currentInstructions(),
         activeTools: activeTools(),
-        ...(sdkFor(options.model) === "@ai-sdk/anthropic" && options.model.providerId !== "anthropic" && modelLimit?.output
-          ? { maxOutputTokens: modelLimit.output } : {}),
+        ...(["@ai-sdk/anthropic", "@ai-sdk/google-vertex/anthropic"].includes(sdkFor(options.model))
+          ? { maxOutputTokens: options.model.maxTokensOverride ?? modelLimit?.output ?? 128_000 } : {}),
         messages: outgoing,
       };
     },

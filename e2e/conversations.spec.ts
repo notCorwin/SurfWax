@@ -45,7 +45,7 @@ test("opens a bounded conversation dropdown below its trigger and keeps outside 
         const row = dropdown.locator(".conversation-item").first();
         const actions = row.getByRole("group", { name: "会话操作" });
         const rename = row.getByRole("button", { name: /^重命名 / });
-        const remove = row.getByRole("button", { name: /^永久删除 / });
+        const remove = row.getByRole("button", { name: /^删除 / });
         await opened.page.mouse.move(0, 0);
         await expect(actions).toHaveCSS("opacity", "0");
         await expect(actions).toHaveCSS("pointer-events", "none");
@@ -159,7 +159,8 @@ test("executes run through the page facade, restores the conversation, and clear
     clearOptions.once("dialog", (dialog) => dialog.accept());
     await clearOptions.getByTestId("event-log-clear").click();
     await expect(clearOptions.getByRole("status")).toContainText("已清空");
-    await expect.poll(() => readEvents(clearOptions)).toEqual([]);
+    await expect.poll(async () => (await readEvents(clearOptions)).at(-1)?.type).toBe("log.cleared");
+    expect((await readEvents(clearOptions)).some((event) => event.type === "conversation.message")).toBe(true);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -294,7 +295,7 @@ test("keeps paused follow-ups after stop and panel reload until the user resumes
 });
 
 
-test("creates, titles, switches, starts fresh on reload and permanently deletes local conversations", async () => {
+test("creates, titles, switches, starts fresh on reload and supports undoable conversation deletion", async () => {
   const provider = await startProvider([
     textResponse("FIRST_REPLY"),
     textResponse("第一标题"),
@@ -337,15 +338,21 @@ test("creates, titles, switches, starts fresh on reload and permanently deletes 
     opened.page.on("dialog", (dialog) => { dialogs.push(dialog.type()); void dialog.dismiss(); });
     const second = opened.page.locator(".conversation-item", { hasText: "第二标题" });
     await second.hover();
-    await second.getByRole("button", { name: "永久删除 第二标题" }).click();
+    await second.getByRole("button", { name: "删除 第二标题" }).click();
+    await expect(opened.page.locator(".conversation-item")).toHaveCount(1);
+    await opened.page.getByRole("button", { name: "撤销" }).click();
+    await expect(opened.page.locator(".conversation-item")).toHaveCount(2);
+    const restoredSecond = opened.page.locator(".conversation-item", { hasText: "第二标题" });
+    await restoredSecond.hover();
+    await restoredSecond.getByRole("button", { name: "删除 第二标题" }).click();
     await expect(opened.page.locator(".conversation-item")).toHaveCount(1);
     expect(dialogs).toEqual([]);
     const events = await readEvents(opened.page);
-    expect(events.filter((event) => event.type === "conversation.created")).toHaveLength(1);
-    expect(events.some((event) => event.type === "conversation.deleted" && event.content.conversationId)).toBe(true);
+    expect(events.filter((event) => event.type === "conversation.created")).toHaveLength(2);
+    expect(events.some((event) => event.type === "conversation.deleted" && event.conversationId)).toBe(true);
     const current = opened.page.locator(".conversation-item", { hasText: "第一标题" });
     await current.hover();
-    await current.getByRole("button", { name: "永久删除 第一标题" }).click();
+    await current.getByRole("button", { name: "删除 第一标题" }).click();
     await expect(opened.page.getByTestId("conversation-menu")).toContainText("新对话");
     await expect(opened.page.locator(".markdown-body")).toHaveCount(0);
     await expect(opened.page.locator(".conversation-item")).toHaveCount(0);

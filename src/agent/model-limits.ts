@@ -31,6 +31,8 @@ export type ModelCatalog = Record<string, {
   models?: Record<string, {
     id?: string;
     name?: string;
+    family?: string;
+    canonical_model_id?: string;
     provider?: ModelProviderOverride;
     tool_call?: boolean;
     modalities?: { input?: string[]; output?: string[] };
@@ -54,7 +56,7 @@ export type ModelProviderPreset = {
   fields: ProviderSettingField[];
   /** Legacy display/tests; request dispatch uses sdk. */
   transport: "gateway" | "openai-compatible";
-  models: Array<{ id: string; name: string }>;
+  models: Array<{ id: string; name: string; family?: string; canonicalModelId?: string }>;
   /** Includes unselectable models so a typed/restored unsupported route fails explicitly. */
   modelProviders?: Record<string, ModelProviderOverride>;
   defaultProvider?: ModelProviderOverride;
@@ -156,6 +158,8 @@ function normalizeCatalog(value: unknown): ModelCatalog {
       return [[modelId, {
         ...(typeof model.id === "string" ? { id: model.id } : {}),
         ...(typeof model.name === "string" ? { name: model.name } : {}),
+        ...(typeof model.family === "string" ? { family: model.family } : {}),
+        ...(typeof model.canonical_model_id === "string" ? { canonical_model_id: model.canonical_model_id } : {}),
         ...(modelProvider ? { provider: modelProvider } : {}),
         ...(typeof model.tool_call === "boolean" ? { tool_call: model.tool_call } : {}),
         ...(modalities ? { modalities: {
@@ -193,7 +197,8 @@ export function modelProviderPresets(catalog: ModelCatalog): ModelProviderPreset
     }));
     const models = Object.entries(provider.models ?? {}).filter(([, model]) =>
       isModelSdk(model.provider?.npm ?? defaultSdk) && model.tool_call === true && (model.modalities?.output?.includes("text") ?? true),
-    ).map(([modelId, model]) => ({ id: model.id ?? modelId, name: model.name ?? modelId }))
+    ).map(([modelId, model]) => ({ id: model.id ?? modelId, name: model.name ?? modelId,
+      ...(model.family ? { family: model.family } : {}), ...(model.canonical_model_id ? { canonicalModelId: model.canonical_model_id } : {}) }))
       .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
     const sdk = isModelSdk(defaultSdk) ? defaultSdk : modelProviders[models[0]?.id ?? ""]?.npm;
     if (!isModelSdk(sdk)) return [];
@@ -212,13 +217,16 @@ export function applyModelPreset<T extends ModelConfig>(config: T, preset: Model
   sdk: ModelSdk; baseURL: string; modelProvider?: ModelProviderOverride; catalogRouteVersion: number;
 } {
   const route = preset.modelProviders && Object.hasOwn(preset.modelProviders, config.model.trim())
-    ? preset.modelProviders[config.model.trim()] : config.modelProvider ?? preset.defaultProvider;
+    ? preset.modelProviders[config.model.trim()] : config.modelProvider;
   const modelProvider = route && Object.keys(route).length ? route : undefined;
+  const selected = preset.models.find((model) => model.id === config.model.trim());
   return {
     ...config,
     sdk: isModelSdk(modelProvider?.npm) ? modelProvider.npm : preset.sdk,
     baseURL: modelProvider?.api ?? (config.modelProvider?.api !== undefined ? preset.baseURL : config.baseURL.trim() ? config.baseURL : preset.baseURL),
     modelProvider,
+    canonicalModelId: selected?.canonicalModelId,
+    modelFamily: selected?.family,
     catalogRouteVersion: MODEL_ROUTING_VERSION,
   };
 }
@@ -286,10 +294,10 @@ export function resolveModelLimit(
       const catalog = await loadModelCatalog(options);
       const match = matchModel(catalog, resolvedBaseURL(config), config.model, config.providerId);
       if (match && storage) await storage.set({ [CACHE_KEY]: { key, fetchedAt: (options.now ?? Date.now)(), match } satisfies CachedLimit }).catch(() => undefined);
-      return match ?? validCache?.match ?? { provider: "unknown", model: config.model, context: 262_144, source: "estimated" };
+      return match ?? validCache?.match ?? { provider: "unknown", model: config.model, context: 256_000, source: "estimated" };
     } catch (error) {
       if (options.signal?.aborted) throw error;
-      return validCache?.match ?? { provider: "unknown", model: config.model, context: 262_144, source: "estimated" };
+      return validCache?.match ?? { provider: "unknown", model: config.model, context: 256_000, source: "estimated" };
     }
   };
   if (options.signal || options.fetch || options.storage || options.now) return task();

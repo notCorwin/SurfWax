@@ -10,6 +10,32 @@ const responses = () => Response.json({ id: "response", created_at: 1, model: "t
 const chat = () => Response.json({ id: "response", created: 1, model: "test", choices: [{ index: 0, message: { role: "assistant", content: "done" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } });
 
 describe("model-specific SDK routes", () => {
+  it.each([
+    ["openai-chat-completions", "@ai-sdk/openai-compatible", "createOpenAICompatible", "languageModel"],
+    ["openai-completions", "@ai-sdk/openai", "createOpenAI", "completion"],
+    ["openai-responses", "@ai-sdk/openai", "createOpenAI", "responses"],
+    ["anthropic-messages", "@ai-sdk/anthropic", "createAnthropic", "languageModel"],
+    ["google-generate-content", "@ai-sdk/google", "createGoogle", "languageModel"],
+    ["google-interactions", "@ai-sdk/google", "createGoogle", "interactions"],
+  ] as const)("selects the %s advanced endpoint through its native AI SDK factory", async (endpointType, sdk, factoryName, methodName) => {
+    const languageModel = { specificationVersion: "v4", provider: "test", modelId: "model" } as any;
+    const method = vi.fn(() => languageModel);
+    const factory = vi.fn(() => ({ [methodName]: method }));
+    const model = await createModel({ providerId: "custom", sdk: "@ai-sdk/openai-compatible", endpointType,
+      baseURL: endpointType === "openai-chat-completions" ? "https://custom.test/v1beta/openai" : "https://custom.test/v1",
+      model: "custom-model", providerSettings: { apiKey: "key" } }, undefined, undefined, {
+      loaders: { [sdk]: async () => ({ [factoryName]: factory }) } as any,
+    });
+    expect(model).toBe(languageModel);
+    expect(method).toHaveBeenCalledWith("custom-model");
+    expect(factory).toHaveBeenCalledWith(expect.objectContaining({ baseURL: expect.stringContaining("https://custom.test/") }));
+  });
+
+  it("lets an advanced Base URL override a Models.dev route", () => {
+    const config: ModelConfig = { providerId: "openai", sdk: "@ai-sdk/openai", baseURL: "https://api.openai.com/v1",
+      baseURLOverride: " https://proxy.test/v1 ", model: "gpt" };
+    expect(resolvedBaseURL(config)).toBe("https://proxy.test/v1");
+  });
   it("uses native Mantle Responses at the model endpoint with saved provider credentials", async () => {
     const config: ModelConfig = { providerId: "amazon-bedrock", sdk: "@ai-sdk/amazon-bedrock", baseURL: "https://bedrock-runtime.us-east-1.amazonaws.com", model: "openai.gpt-6.1-sol", apiKey: "legacy-key",
       providerSettings: { apiKey: "user-key", region: "eu-west-1" }, modelProvider: { npm: "@ai-sdk/amazon-bedrock/mantle", api: "https://bedrock-mantle.${AWS_REGION}.api.aws/openai/v1", shape: "responses", headers: { "x-catalog": "model", Authorization: "catalog-key" }, body: { service_tier: "priority", model: "wrong", input: "wrong", stream: true } } };
@@ -92,7 +118,7 @@ describe("model-specific SDK routes", () => {
 
   it("honors a GitLab model endpoint and shape without changing its token issuer", async () => {
     const requests: Request[] = [];
-    const model = await createModel({ providerId: "gitlab", sdk: "gitlab-ai-provider", baseURL: "", model: "duo-chat-gpt-6-sol", providerSettings: { apiKey: "gitlab-key", instanceUrl: "https://gitlab.test" }, modelProvider: { api: "https://model-proxy.test/v1", shape: "completions", body: { service_tier: "priority" } } }, undefined, undefined, {
+    const model = await createModel({ providerId: "gitlab", sdk: "gitlab-ai-provider", baseURL: "", model: "duo-chat-gpt-6-sol", canonicalModelId: "openai/gpt-6-sol", modelFamily: "gpt-sol", providerSettings: { apiKey: "gitlab-key", instanceUrl: "https://gitlab.test" }, modelProvider: { api: "https://model-proxy.test/v1", shape: "completions", body: { service_tier: "priority" } } }, undefined, undefined, {
       fetch: async (input, init) => { const request = new Request(input, init); requests.push(request); return request.url.includes("direct_access") ? Response.json({ token: "direct-token" }) : chat(); },
     });
     expect((await generateText({ model, prompt: "hello" })).text).toBe("done");
