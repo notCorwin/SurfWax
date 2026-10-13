@@ -97,7 +97,6 @@ body {
 }
 
 .search-combobox-option:is(:hover, :focus-visible) {
-  outline: none;
   background: var(--accent);
   color: var(--accent-foreground);
 }

@@ -188,11 +188,6 @@ p {
   background: color-mix(in srgb, var(--foreground) 10%, transparent);
 }
 
-.conversation-dropdown :is(button, input):focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: 2px;
-}
-
 .conversation-delete:hover {
   color: var(--destructive);
   background: color-mix(in srgb, var(--destructive) 10%, transparent);
@@ -306,11 +301,6 @@ p {
 .markdown-body [data-streamdown="table-wrapper"] {
   min-width: 0;
   max-width: 100%;
-}
-
-:is(.markdown-body, [data-streamdown="table-fullscreen"]) [data-streamdown="table-wrapper"] > :last-child:focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: -2px;
 }
 
 :is(.markdown-body, [data-streamdown="table-fullscreen"]) [data-streamdown="table"] {
@@ -438,16 +428,13 @@ p {
 .suggestion small { font-size: var(--type-tiny); font-weight: 400; color: var(--muted-foreground); }
 .composer-dock { max-width: var(--thread-max-width); width: 100%; margin-inline: auto; }
 .composer-surface { border-color: var(--surface-stroke); background: var(--surface-soft); backdrop-filter: blur(var(--surface-blur)); box-shadow: var(--surface-shadow); }
-.composer-surface:focus-within { border-color: color-mix(in srgb, var(--brand) 45%, transparent); box-shadow: 0 0 0 2px var(--surface-selected), var(--surface-shadow); }
-.composer-surface [data-slot="input-group-control"] { outline: none; font-size: var(--type-body); line-height: var(--line-body); }
+.composer-surface [data-slot="input-group-control"] { font-size: var(--type-body); line-height: var(--line-body); }
 .composer-surface [data-slot="input-group-addon"] { cursor: default; }
 .composer-model { max-width: min(40vw, 16rem); }
 .reasoning-select { font-size: var(--type-xs); color: var(--muted-foreground); border-color: transparent; box-shadow: none; }
 .composer-hint { font-size: var(--type-tiny); line-height: var(--line-caption); }
 .composer-hint > :last-child { opacity: 0.65; }
 .user-message [data-slot="bubble-content"] { border-radius: var(--radius-xl); padding: calc(var(--spacing) * 2) calc(var(--spacing) * 3); }
-.user-message form:focus-within [data-slot="bubble-content"] { border-color: var(--ring); }
-.user-message textarea:focus-visible { outline: none; }
 .assistant-message { padding-inline: 0; }
 :is(.process-trace, .work-summary, .thinking-item, .activity) > summary { gap: calc(var(--spacing) * 2); font-weight: 450; font-size: var(--type-xs); min-height: calc(var(--spacing) * 6); }
 :is(.process-trace, .work-summary, .thinking-item, .activity) > summary::after {

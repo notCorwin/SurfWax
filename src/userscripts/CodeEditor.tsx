@@ -62,7 +62,7 @@ export function CodeEditor({ value, onChange, invalid, errorId }: { value: strin
         mixedJavaScript,
         tokenHighlight,
         EditorView.lineWrapping,
-        EditorView.contentAttributes.of({ "aria-labelledby": "script-code-label" }),
+        EditorView.contentAttributes.of({ "aria-labelledby": "script-code-label", "data-focus-delegate": "" }),
         theme.of(tokenTheme(media.matches)),
         EditorView.updateListener.of((update) => {
           if (update.docChanged && !syncing.current) onChangeRef.current(update.state.doc.toString());
@@ -89,5 +89,5 @@ export function CodeEditor({ value, onChange, invalid, errorId }: { value: strin
     else view.current?.contentDOM.removeAttribute("aria-describedby");
   }, [errorId]);
 
-  return <div id="script-code" ref={host} className="scripts-code-editor" />;
+  return <div id="script-code" ref={host} className="scripts-code-editor" data-focus-group="" />;
 }

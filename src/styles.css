@@ -63,6 +63,10 @@
   --border: #e5e5e5;
   --input: #d4d4d4;
   --ring: #737373;
+  --focus-color: var(--ring);
+  --focus-width: 2px;
+  --focus-offset: 2px;
+  --focus-inset-offset: calc(-1 * var(--focus-width));
   --radius: 0.625rem;
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
@@ -167,14 +171,44 @@ button:not(:disabled),
   cursor: pointer;
 }
 
-@layer base {
-  :is(button, input, textarea, select, summary, a, [role="button"]):focus-visible {
-    outline: 1px solid var(--ring);
-    outline-offset: 2px;
-  }
+/* Focus belongs to one control or its nearest delegate group. Keep this
+   unlayered so component utilities cannot add a second focus indicator. */
+:where(button, input, textarea, select, summary, a[href], [role="button"], [role="option"],
+  [contenteditable="true"], [tabindex]:not([tabindex="-1"]), [data-focus-group]) {
+  outline: none;
 }
 
-[data-slot="select-trigger"]:focus-visible { border-color: transparent; box-shadow: none; }
+:where(:focus, [data-focus-group]:focus-within) {
+  /* Remove Tailwind ring layers while preserving the component's normal shadow. */
+  --tw-ring-shadow: 0 0 transparent;
+  --tw-ring-offset-shadow: 0 0 transparent;
+  --tw-inset-ring-shadow: 0 0 transparent;
+}
+
+/* :where keeps this weaker than the delegate reset, including after CSS builds. */
+:where(:focus-visible,
+  [data-focus-group]:has(:is([data-focus-delegate], [data-slot="input-group-control"]):focus-visible):not(:has([data-focus-group] :is([data-focus-delegate], [data-slot="input-group-control"]):focus-visible))) {
+  outline: var(--focus-width) solid var(--focus-color);
+  outline-offset: var(--focus-offset);
+}
+
+[data-focus-group] :is([data-focus-delegate], [data-slot="input-group-control"]):focus-visible,
+[data-focus-group] .cm-editor.cm-focused {
+  outline: none;
+}
+
+[aria-invalid="true"], [data-focus-group]:has([aria-invalid="true"]:focus-visible) {
+  --focus-color: var(--destructive);
+}
+
+/* Scroll boundaries keep the same indicator inside their clipping edge. */
+:is([data-focus-inset], [role="option"], [data-streamdown="table-wrapper"] > :last-child) {
+  --focus-offset: var(--focus-inset-offset);
+}
+
+[data-slot="dialog-content"], [data-slot="alert-dialog-content"],
+[data-slot="popover-content"], [data-slot="select-content"], .search-combobox-content { outline: none; }
+
 [data-slot="select-content"] { border-color: transparent; }
 
 button,

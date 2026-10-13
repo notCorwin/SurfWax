@@ -300,7 +300,7 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
           aria-valuenow={usage.state === "ready" ? usage.usedPercent : undefined}
           aria-label={label}
           className={cn(
-            "flex size-7 shrink-0 items-center justify-center rounded-md outline-none focus-visible:ring-1 focus-visible:ring-ring",
+            "flex size-7 shrink-0 items-center justify-center rounded-md",
             usage.state === "ready" && usage.usedPercent < 80 ? "text-foreground" : "text-muted-foreground",
             usage.state === "ready" && usage.usedPercent >= 80 && "text-destructive",
           )}

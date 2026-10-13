@@ -47,8 +47,8 @@ export function SearchCombobox({ id, name, value, options, onValueChange, allowC
 
   return <PopoverPrimitive.Root open={open} onOpenChange={setOpenState}>
     <PopoverPrimitive.Anchor asChild>
-      <div className="search-combobox">
-        <Input id={id} name={name} role="combobox" autoComplete="off" spellCheck={false}
+      <div className="search-combobox rounded-md" data-focus-group="">
+        <Input id={id} name={name} role="combobox" data-focus-delegate="" autoComplete="off" spellCheck={false}
           aria-autocomplete="list" aria-expanded={open} aria-controls={listId} aria-invalid={invalid}
           aria-describedby={describedBy} placeholder={placeholder} value={displayValue} disabled={disabled}
           onClick={() => setOpenState(true)}

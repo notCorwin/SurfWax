@@ -39,6 +39,7 @@
 7. 逐 Token 流式接收并渲染模型输出，在任何场景下都以 120 FPS 为目标。
 8. 侧边栏 UI 更新 Response 时按 Animation Frame 合并，避免每个 Token 都触发独立渲染。
 9. 用户消息使用消息气泡。Assistant 回复不使用气泡背景，正文直接占据消息区域可用宽度。
+10. 焦点指示由 `src/styles.css` 与统一的 Design Tokens 管理，组件和业务样式不得单独定义焦点 `ring`、`outline` 或焦点阴影。组合控件使用 `data-focus-group`，需要将焦点指示交给容器的文本控件使用 `data-focus-delegate`；容器内的按钮仍保留独立的键盘焦点指示。滚动边界内的焦点指示使用 `data-focus-inset`。
 
 ## 会话与交互
 
