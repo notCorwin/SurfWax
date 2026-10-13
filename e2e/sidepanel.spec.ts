@@ -1,5 +1,5 @@
-import { expect, test } from "@playwright/test";
-import { configure, dispose, openExtension, startProvider, textResponse } from "./fixtures";
+import { expect } from "@playwright/test";
+import { test, configure, dispose, openExtension, startProvider, textResponse } from "./fixtures";
 
 test("offers editable task suggestions and keeps the redesigned panel usable in narrow light and dark views", async () => {
   const provider = await startProvider([textResponse("## 页面重点\n\n已经整理好当前页面的主要内容。\n\n- 保留关键信息\n- 列出下一步行动"), textResponse("页面重点整理")]);

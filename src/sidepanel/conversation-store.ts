@@ -133,7 +133,7 @@ export class ConversationStore {
   connect() {
     this.closed = false;
     this.unsubscribe = this.logger.subscribe((event) => {
-      if (/^conversation\.(created|title\.updated|deleted|submitted|finished|aborted|failed)$/.test(event.type)) {
+      if (/^conversation\.(created|title\.updated|deleted|restored|submitted|finished|aborted|failed)$/.test(event.type) || event.type === "log.cleared") {
         void this.threads.reload().catch((error) => this.updateThread({ error }));
       }
     });
@@ -203,6 +203,7 @@ export class ConversationStore {
       delete: () => withIdleConversation(async () => { await abortConversationWork(id); await this.logger.deleteConversation(id);
         if (this.state.threadListItem.id === id) await this.switchConversation(crypto.randomUUID(), false); }),
     }),
+    restore: (id: string) => withIdleConversation(() => this.logger.restoreConversation(id)),
   };
   private async switchConversation(id: string, exists: boolean) {
     if (this.state.thread.isRunning) throw new Error("当前会话尚未结束，请等待完成或先停止运行。");

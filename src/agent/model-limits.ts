@@ -1,8 +1,11 @@
-import { isModelSdk, type ModelConfig, type ModelSdk } from "../types";
-import { defaultBaseURL, providerSettingFields, resolvedBaseURL, sdkFor, type ProviderSettingField } from "./model-sdks";
+import { isModelSdk, type JsonValue, type ModelConfig, type ModelProviderOverride, type ModelSdk } from "../types";
+import { defaultBaseURL, isCloudflareGateway, providerSettingFields, resolvedBaseURL, sdkFor, type ProviderSettingField } from "./model-sdks";
 
 const CACHE_KEY = "side-agent:model-limit";
 const CATALOG_CACHE_KEY = "side-agent:model-catalog";
+// Older normalized catalogs discarded per-model routes and cannot be reused safely.
+const CATALOG_CACHE_VERSION = 2;
+export const MODEL_ROUTING_VERSION = 1;
 const CATALOG_URL = "https://models.dev/api.json";
 const REFRESH_MS = 24 * 60 * 60 * 1000;
 const VERCEL_GATEWAY_URL = "https://ai-gateway.vercel.sh/v4/ai";
@@ -28,6 +31,9 @@ export type ModelCatalog = Record<string, {
   models?: Record<string, {
     id?: string;
     name?: string;
+    family?: string;
+    canonical_model_id?: string;
+    provider?: ModelProviderOverride;
     tool_call?: boolean;
     modalities?: { input?: string[]; output?: string[] };
     reasoning?: boolean;
@@ -37,7 +43,7 @@ export type ModelCatalog = Record<string, {
 }>;
 
 type CachedLimit = { key: string; fetchedAt: number; match: ModelLimit };
-type CachedCatalog = { fetchedAt: number; catalog: ModelCatalog };
+type CachedCatalog = { version: number; fetchedAt: number; catalog: ModelCatalog };
 type Storage = { get(key: string): Promise<Record<string, unknown>>; set(items: Record<string, unknown>): Promise<void> };
 
 export type ModelProviderPreset = {
@@ -50,7 +56,10 @@ export type ModelProviderPreset = {
   fields: ProviderSettingField[];
   /** Legacy display/tests; request dispatch uses sdk. */
   transport: "gateway" | "openai-compatible";
-  models: Array<{ id: string; name: string }>;
+  models: Array<{ id: string; name: string; family?: string; canonicalModelId?: string }>;
+  /** Includes unselectable models so a typed/restored unsupported route fails explicitly. */
+  modelProviders?: Record<string, ModelProviderOverride>;
+  defaultProvider?: ModelProviderOverride;
 };
 
 function validLimit(value: unknown): value is number {
@@ -70,10 +79,10 @@ export function matchModel(catalog: ModelCatalog, baseURL: string, modelId: stri
   const normalized = normalize(modelId);
   const host = hostname(baseURL);
   for (const [providerId, provider] of Object.entries(catalog)) {
-    const providerHost = hostname(provider.api ?? "");
-    const providerMatch = selectedProviderId === providerId || Boolean(host && providerHost && host === providerHost);
-    if (!providerMatch) continue;
     for (const [id, details] of Object.entries(provider.models ?? {})) {
+      const providerHost = hostname(details.provider?.api ?? provider.api ?? "");
+      const providerMatch = selectedProviderId === providerId || Boolean(host && providerHost && host === providerHost);
+      if (!providerMatch) continue;
       const limit = details.limit;
       if (!validLimit(limit?.context)) continue;
       const alias = typeof details.id === "string" ? details.id : undefined;
@@ -96,6 +105,35 @@ export function matchModel(catalog: ModelCatalog, baseURL: string, modelId: stri
   return undefined;
 }
 
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  return Boolean(value && typeof value === "object" && Object.values(value).every(isJsonValue));
+}
+
+/** Keep unknown SDK/shape names for validation; never erase an explicit unsupported route. */
+export function normalizeModelProviderOverride(value: unknown): ModelProviderOverride | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid model provider override");
+  const provider = value as Record<string, unknown>;
+  for (const key of ["npm", "api", "shape"] as const) {
+    if (provider[key] !== undefined && typeof provider[key] !== "string") throw new Error(`Invalid model provider ${key}`);
+  }
+  if (provider.body !== undefined && (!provider.body || typeof provider.body !== "object" || Array.isArray(provider.body) || !isJsonValue(provider.body))) {
+    throw new Error("Invalid model provider body");
+  }
+  if (provider.headers !== undefined && (!provider.headers || typeof provider.headers !== "object" || Array.isArray(provider.headers)
+    || !Object.values(provider.headers).every((header) => typeof header === "string"))) throw new Error("Invalid model provider headers");
+  return {
+    ...(typeof provider.npm === "string" ? { npm: provider.npm } : {}),
+    ...(typeof provider.api === "string" ? { api: provider.api } : {}),
+    ...(typeof provider.shape === "string" ? { shape: provider.shape } : {}),
+    ...(provider.body !== undefined ? { body: provider.body as Record<string, JsonValue> } : {}),
+    ...(provider.headers !== undefined ? { headers: provider.headers as Record<string, string> } : {}),
+  };
+}
+
 function normalizeCatalog(value: unknown): ModelCatalog {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Models.dev returned an invalid catalog");
   return Object.fromEntries(Object.entries(value).flatMap(([providerId, rawProvider]) => {
@@ -106,6 +144,7 @@ function normalizeCatalog(value: unknown): ModelCatalog {
     const models = Object.fromEntries(Object.entries(rawModels).flatMap(([modelId, rawModel]) => {
       if (!rawModel || typeof rawModel !== "object" || Array.isArray(rawModel)) return [];
       const model = rawModel as Record<string, unknown>;
+      const modelProvider = normalizeModelProviderOverride(model.provider);
       const limit = model.limit && typeof model.limit === "object" ? model.limit as Record<string, unknown> : undefined;
       const modalities = model.modalities && typeof model.modalities === "object" ? model.modalities as Record<string, unknown> : undefined;
       const reasoningOptions = Array.isArray(model.reasoning_options)
@@ -119,6 +158,9 @@ function normalizeCatalog(value: unknown): ModelCatalog {
       return [[modelId, {
         ...(typeof model.id === "string" ? { id: model.id } : {}),
         ...(typeof model.name === "string" ? { name: model.name } : {}),
+        ...(typeof model.family === "string" ? { family: model.family } : {}),
+        ...(typeof model.canonical_model_id === "string" ? { canonical_model_id: model.canonical_model_id } : {}),
+        ...(modelProvider ? { provider: modelProvider } : {}),
         ...(typeof model.tool_call === "boolean" ? { tool_call: model.tool_call } : {}),
         ...(modalities ? { modalities: {
           ...(Array.isArray(modalities.input) ? { input: modalities.input.filter((item): item is string => typeof item === "string") } : {}),
@@ -147,18 +189,50 @@ function normalizeCatalog(value: unknown): ModelCatalog {
 
 export function modelProviderPresets(catalog: ModelCatalog): ModelProviderPreset[] {
   return Object.entries(catalog).flatMap(([id, provider]) => {
-    if (!isModelSdk(provider.npm)) return [];
-    const sdk = id === "deepseek" ? "@ai-sdk/deepseek" : provider.npm;
-    const gateway = provider.npm === "@ai-sdk/gateway";
+    const defaultSdk = id === "deepseek" && provider.npm === "@ai-sdk/openai-compatible" ? "@ai-sdk/deepseek" : provider.npm;
+    const defaultProvider = isModelSdk(defaultSdk) ? undefined : { npm: defaultSdk ?? "" };
+    const modelProviders = Object.fromEntries(Object.entries(provider.models ?? {}).flatMap(([modelId, model]) => {
+      const route = { ...defaultProvider, ...model.provider };
+      return [[modelId, route], ...(model.id && model.id !== modelId ? [[model.id, route]] : [])];
+    }));
     const models = Object.entries(provider.models ?? {}).filter(([, model]) =>
-      model.tool_call === true && (model.modalities?.output?.includes("text") ?? true),
-    ).map(([modelId, model]) => ({ id: model.id ?? modelId, name: model.name ?? modelId }))
+      isModelSdk(model.provider?.npm ?? defaultSdk) && model.tool_call === true && (model.modalities?.output?.includes("text") ?? true),
+    ).map(([modelId, model]) => ({ id: model.id ?? modelId, name: model.name ?? modelId,
+      ...(model.family ? { family: model.family } : {}), ...(model.canonical_model_id ? { canonicalModelId: model.canonical_model_id } : {}) }))
       .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+    const sdk = isModelSdk(defaultSdk) ? defaultSdk : modelProviders[models[0]?.id ?? ""]?.npm;
+    if (!isModelSdk(sdk)) return [];
+    const gateway = sdk === "@ai-sdk/gateway";
     const descriptor = { id, npm: sdk, api: provider.api, env: provider.env };
     return [{ id, name: provider.name ?? id, baseURL: gateway ? VERCEL_GATEWAY_URL : provider.api ?? defaultBaseURL(sdk),
       sdk, env: provider.env ?? [], doc: provider.doc, fields: providerSettingFields(descriptor),
-      transport: gateway ? "gateway" as const : "openai-compatible" as const, models }];
+      transport: gateway ? "gateway" as const : "openai-compatible" as const, models, modelProviders,
+      ...(defaultProvider ? { defaultProvider } : {}),
+    }];
   }).sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+}
+
+/** Apply the selected model's route without replacing the provider's credentials/settings. */
+export function applyModelPreset<T extends ModelConfig>(config: T, preset: ModelProviderPreset): Omit<T, "sdk" | "baseURL" | "modelProvider"> & {
+  sdk: ModelSdk; baseURL: string; modelProvider?: ModelProviderOverride; catalogRouteVersion: number;
+} {
+  const route = preset.modelProviders && Object.hasOwn(preset.modelProviders, config.model.trim())
+    ? preset.modelProviders[config.model.trim()] : config.modelProvider;
+  const modelProvider = route && Object.keys(route).length ? route : undefined;
+  const selected = preset.models.find((model) => model.id === config.model.trim());
+  return {
+    ...config,
+    sdk: isModelSdk(modelProvider?.npm) ? modelProvider.npm : preset.sdk,
+    baseURL: modelProvider?.api ?? (config.modelProvider?.api !== undefined ? preset.baseURL : config.baseURL.trim() ? config.baseURL : preset.baseURL),
+    modelProvider,
+    canonicalModelId: selected?.canonicalModelId,
+    modelFamily: selected?.family,
+    catalogRouteVersion: MODEL_ROUTING_VERSION,
+  };
+}
+
+export function modelPresetFields(config: ModelConfig, preset?: ModelProviderPreset): ProviderSettingField[] {
+  return providerSettingFields({ id: isCloudflareGateway(config) ? "cloudflare-ai-gateway" : config.providerId ?? "custom", npm: config.modelProvider?.npm ?? sdkFor(config), api: config.baseURL, env: preset?.env });
 }
 
 const catalogRequests = new WeakMap<typeof globalThis.fetch, Map<string, Promise<ModelCatalog>>>();
@@ -168,7 +242,8 @@ export function loadModelCatalog(
 ): Promise<ModelCatalog> {
   const storage = options.storage ?? (typeof chrome !== "undefined" ? chrome.storage?.local : undefined);
   const task = async () => {
-    const cached = storage ? (await storage.get(CATALOG_CACHE_KEY).catch(() => ({ [CATALOG_CACHE_KEY]: undefined })))[CATALOG_CACHE_KEY] as CachedCatalog | undefined : undefined;
+    const stored = storage ? (await storage.get(CATALOG_CACHE_KEY).catch(() => ({ [CATALOG_CACHE_KEY]: undefined })))[CATALOG_CACHE_KEY] as CachedCatalog | undefined : undefined;
+    const cached = stored?.version === CATALOG_CACHE_VERSION ? stored : undefined;
     if (!options.refresh && cached?.catalog && (options.now ?? Date.now)() - cached.fetchedAt < REFRESH_MS) return cached.catalog;
     try {
       const timeout = AbortSignal.timeout(10_000);
@@ -176,10 +251,10 @@ export function loadModelCatalog(
         ...(options.refresh ? { cache: "no-cache" as const } : {}),
         signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
       });
-      if (!response.ok) throw new Error(`models.dev HTTP ${response.status}`);
+      if (!response.ok) throw Object.assign(new Error(`models.dev HTTP ${response.status}`), { statusCode: response.status });
       const catalog = normalizeCatalog(await response.json());
       if (storage) await storage.set({
-        [CATALOG_CACHE_KEY]: { fetchedAt: (options.now ?? Date.now)(), catalog } satisfies CachedCatalog,
+        [CATALOG_CACHE_KEY]: { version: CATALOG_CACHE_VERSION, fetchedAt: (options.now ?? Date.now)(), catalog } satisfies CachedCatalog,
         [CACHE_KEY]: null,
       }).catch(() => undefined);
       return catalog;
@@ -219,10 +294,10 @@ export function resolveModelLimit(
       const catalog = await loadModelCatalog(options);
       const match = matchModel(catalog, resolvedBaseURL(config), config.model, config.providerId);
       if (match && storage) await storage.set({ [CACHE_KEY]: { key, fetchedAt: (options.now ?? Date.now)(), match } satisfies CachedLimit }).catch(() => undefined);
-      return match ?? validCache?.match ?? { provider: "unknown", model: config.model, context: 262_144, source: "estimated" };
+      return match ?? validCache?.match ?? { provider: "unknown", model: config.model, context: 256_000, source: "estimated" };
     } catch (error) {
       if (options.signal?.aborted) throw error;
-      return validCache?.match ?? { provider: "unknown", model: config.model, context: 262_144, source: "estimated" };
+      return validCache?.match ?? { provider: "unknown", model: config.model, context: 256_000, source: "estimated" };
     }
   };
   if (options.signal || options.fetch || options.storage || options.now) return task();

@@ -1,4 +1,4 @@
-import { chromium, expect, test, type BrowserContext, type CDPSession, type Locator, type Page } from "@playwright/test";
+import { chromium, expect, type BrowserContext, type CDPSession, type Locator, type Page } from "@playwright/test";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 
-import { SSE_HEADERS, p95, chunk, usageChunk, textResponse, streamingTextResponse, toolResponse, pageResponse, commandResponse, browserResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
+import { test, SSE_HEADERS, p95, chunk, usageChunk, textResponse, streamingTextResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
 
 test("shows the configured model at the bottom left of the composer", async () => {
   const opened = await openExtension();
@@ -43,7 +43,8 @@ test("restores independent credentials and models when switching Providers", asy
     await options.getByLabel("Provider", { exact: true }).fill("Gateway");
     await options.getByRole("option", { name: /Vercel AI Gateway.*vercel/ }).click();
     await expect(options.getByLabel("Provider", { exact: true })).toHaveValue("Vercel AI Gateway (vercel)");
-    await expect(options.getByText("https://ai-gateway.vercel.sh/v4/ai", { exact: true })).toBeVisible();
+    await options.getByText("高级设置", { exact: true }).click();
+    await expect(options.getByLabel("Base URL", { exact: true })).toHaveAttribute("placeholder", "https://ai-gateway.vercel.sh/v4/ai");
     await options.getByLabel("Model ID", { exact: true }).click();
     await options.getByLabel("Model ID", { exact: true }).fill("GPT Test");
     await options.getByLabel("Model ID", { exact: true }).press("ArrowDown");
@@ -84,7 +85,7 @@ test("refreshes Models.dev providers and models on every settings open", async (
   try {
     let version = 1;
     let requests = 0;
-    await opened.page.evaluate(() => chrome.storage.local.set({ "side-agent:model-catalog": { fetchedAt: Date.now(), catalog: {
+    await opened.page.evaluate(() => chrome.storage.local.set({ "side-agent:model-catalog": { version: 2, fetchedAt: Date.now(), catalog: {
       cached: { name: "Cached Provider", npm: "@ai-sdk/openai-compatible", models: {} },
     } } }));
     await opened.context.route("https://models.dev/api.json", (route) => {
@@ -133,7 +134,8 @@ test("persists multi-field credentials and interpolates template Endpoints", asy
     await options.getByLabel("Model ID", { exact: true }).fill("agent-model");
     await options.getByLabel("API Key", { exact: true }).fill("template-key");
     await options.getByLabel("ACCOUNT", { exact: true }).fill("tenant");
-    await expect(options.getByText("https://api.example/tenant/v1", { exact: true })).toBeVisible();
+    await options.getByText("高级设置", { exact: true }).click();
+    await expect(options.getByLabel("Base URL", { exact: true })).toHaveAttribute("placeholder", "https://api.example/tenant/v1");
     await options.getByRole("button", { name: "保存配置" }).click();
 
     await selectProvider(options, "bedrock", /Amazon Bedrock.*bedrock/);
@@ -158,6 +160,7 @@ test("keeps custom Endpoint available when the Models.dev catalog fails", async 
     await options.waitForLoadState("domcontentloaded");
     await expect(options.getByText("Models.dev 暂时不可用；仍可选择 custom 使用自定义 Endpoint。")).toBeVisible();
     await selectProvider(options, "custom", /自定义 Endpoint.*custom/);
+    await options.getByText("高级设置", { exact: true }).click();
     await expect(options.getByLabel("Base URL", { exact: true })).toBeVisible();
   } finally {
     await dispose(opened.context, opened.userDataDirectory);
@@ -168,7 +171,7 @@ test("keeps custom Endpoint available when the Models.dev catalog fails", async 
 test("labels cached Models.dev providers when refresh fails", async () => {
   const opened = await openExtension();
   try {
-    await opened.page.evaluate(() => chrome.storage.local.set({ "side-agent:model-catalog": { fetchedAt: Date.now(), catalog: {
+    await opened.page.evaluate(() => chrome.storage.local.set({ "side-agent:model-catalog": { version: 2, fetchedAt: Date.now(), catalog: {
       cached: { name: "Cached Provider", npm: "@ai-sdk/openai-compatible", models: {} },
     } } }));
     await opened.context.route("https://models.dev/api.json", (route) => route.fulfill({ status: 503, body: "unavailable" }));
@@ -187,7 +190,7 @@ test("uses a global custom system prompt and hides disabled advanced settings", 
   try {
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await expect(options.getByRole("group", { name: "上下文窗口" })).toBeVisible();
-    await expect(options.getByTestId("model-limit-match")).toContainText("262,144 tokens");
+    await expect(options.getByTestId("model-limit-match")).toContainText("256,000 tokens");
     await options.getByLabel("自定义系统提示词").fill("You are a custom browser agent.");
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(options.getByRole("status")).toContainText("配置已保存");
@@ -203,7 +206,8 @@ test("uses a global custom system prompt and hides disabled advanced settings", 
     const user = provider.requests[0].messages.find((message: any) => message.role === "user");
     expect(system?.content).toMatch(/^You are a custom browser agent\.\n\n/);
     expect(system?.content).toContain("Available tools:");
-    expect(system?.content).toContain("- goto: Navigate the current tab to a URL.");
+    expect(system?.content).toContain("- inspect:");
+    expect(provider.requests[0].tools.map((tool:any) => tool.function.name)).toEqual(["inspect", "run", "jobs"]);
     expect(JSON.stringify(user)).not.toContain("Available tools:");
     await expect(opened.page.locator('[data-role="user"]')).not.toContainText("Available tools:");
   } finally {
@@ -235,7 +239,7 @@ test("shows inline settings errors and returns keyboard focus after closing conv
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(options.locator("#base-url-error")).toHaveText("请输入 Base URL");
     await expect(options.locator("#base-url")).toBeFocused();
-    expect(await options.locator("#base-url").evaluate((input) => getComputedStyle(input).outlineStyle)).toBe("none");
+    expect(await options.locator("#base-url").evaluate((input) => getComputedStyle(input).outlineStyle)).toBe("solid");
     await expect(options.locator("#base-url")).toHaveAttribute("aria-invalid", "true");
     await options.setViewportSize({ width: 320, height: 720 });
     expect(await options.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -319,5 +323,3 @@ test("selects, locks and restores reasoning effort across conversations", async 
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
-
-

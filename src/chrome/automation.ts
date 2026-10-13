@@ -5,6 +5,7 @@ type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
 type Command = (debuggee: Debuggee, method: string, params?: object) => Promise<any>;
 type RunContext = { signal?: AbortSignal; conversationId?: string; toolCallId?: string; logIdentity?: { runId?: string; toolCallId: string; toolCallIdCanonical: true } };
 type Waiter = { resolve: (value: any) => void; reject: (error: Error) => void };
+type FileChooserRecord = { backendNodeId: number; debuggee: Debuggee; mode: string };
 type Query = {
   kind: "role" | "text" | "label" | "placeholder" | "alt" | "title" | "testId" | "css" | "frame";
   value: string;
@@ -15,6 +16,7 @@ type LocatorSpec = { queries: Query[]; index?: number; ref?: string; hasText?: s
 type WaitState = "attached" | "detached" | "visible" | "hidden" | "enabled" | "editable" | "checked";
 type RefRecord = { backendNodeId: number; frameId?: string; debuggee: Debuggee; role: string; name: string; generation: number };
 type SnapshotLine = { id: string; line: string };
+export type InspectOptions = { since?: string; fields?: Array<"text" | "state" | "ref" | "actions">; budget?: number; offset?: number; limit?: number; depth?: number };
 type ObservationRecord = {
   observationId: string;
   tabId: number;
@@ -24,9 +26,12 @@ type ObservationRecord = {
   lines: SnapshotLine[];
   viewport: { x: number; y: number; width: number; height: number; scale: number };
   image?: { width: number; height: number; scale: number; origin?: { x: number; y: number } };
+  scopeKey?: string;
+  incomplete?: boolean;
 };
 type Session = {
   tabId: number;
+  token: string;
   debuggee: Debuggee;
   ready?: Promise<void>;
   generation: number;
@@ -200,7 +205,7 @@ export class AutomationRuntime {
   private lastAttemptLog?: { reason: string; at: number };
   private readonly observations = new Map<string, ObservationRecord>();
   private readonly axRoots = new Map<string, number>();
-  private readonly fileChoosers = new Map<number, { backendNodeId: number; debuggee: Debuggee; mode: string }>();
+  private readonly fileChoosers = new Map<number, FileChooserRecord>();
 
   private waitDiagnostic() { return this.lastWait; }
 
@@ -226,6 +231,7 @@ export class AutomationRuntime {
     hitTest?: (debuggee: Debuggee, params: Record<string, unknown>) => Promise<any>;
     detach: (debuggee: Debuggee) => Promise<void>;
     mark: (tabId: number) => Promise<void>;
+    onDispatch?: () => Promise<void>;
     logger?: EventLogger;
   }) {}
 
@@ -357,6 +363,7 @@ export class AutomationRuntime {
   async observe(tabId: number, detail: "auto" | "semantic" | "visual" = "auto", since?: string, captureOptions: Record<string, any> = {}): Promise<Record<string, unknown>> {
     return this.action(tabId, "observe", null, async () => {
       const session = await this.session(tabId);
+      const generation = session.generation;
       const captured = await this.captureSnapshot(session);
       const viewport = await this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})") as ObservationRecord["viewport"];
       const observationId = globalThis.crypto.randomUUID();
@@ -389,9 +396,69 @@ export class AutomationRuntime {
         record.image = image;
         result.screenshot = { mediaType: `image/${captureOptions.format ?? "jpeg"}`, data: screenshot.data, ...image };
       }
+      if (generation !== session.generation) throw automationError("stale-observation", { reason: "document-changed-during-observation" });
       this.observations.set(observationId, record);
       while (this.observations.size > 32) this.observations.delete(this.observations.keys().next().value!);
       return result;
+    });
+  }
+
+  async inspect(tabId: number, options: InspectOptions = {}, region?: LocatorSpec): Promise<Record<string, unknown>> {
+    return this.action(tabId, "inspect", region ?? null, async () => {
+      const session = await this.session(tabId);
+      const scopeKey = JSON.stringify([region ?? null, options.fields ?? ["text", "state", "ref", "actions"], options.depth ?? null]);
+      const previous = options.since ? this.observations.get(options.since) : undefined;
+      if (options.since && (!previous || previous.tabId !== tabId || previous.documentId !== session.generation || previous.scopeKey !== scopeKey)) {
+        throw automationError("stale-observation", { observationId: options.since, reason: "document-or-scope-changed" });
+      }
+      const captured = await this.captureSnapshot(session, region);
+      const generation = session.generation;
+      if (previous && previous.documentId !== session.generation) throw automationError("stale-observation", { observationId: options.since, reason: "document-changed-during-inspection" });
+      const fields = new Set(options.fields ?? ["text", "state", "ref", "actions"]);
+      const qualified = captured.lines.map(({ id, line }) => ({ id, line: line.replace(/\[actions=([^\]]+)\]/g, (_match, value: string) => `[actions=${value.split(",").map((action) => action === "doubleClick" ? "dblclick" : action === "insertText" ? "pressSequentially" : action === "select" ? "selectOption" : action).join(",")}]`).replace(/\[ref=(e\d+)\]/g, (_match, ref: string) => {
+        const owned = `t${tabId}s${session.token}d${session.generation}${ref}`;
+        const record = session.refs.get(ref);
+        if (record) session.refs.set(owned, record);
+        return `[ref=${owned}]`;
+      }) }));
+      const lines = qualified.filter(({ line }) => options.depth === undefined || (line.match(/^ */)?.[0].length ?? 0) / 2 <= options.depth)
+        .map(({ id, line }) => ({ id, line: line.replace(/ \[(ref|actions|checked|disabled|expanded|pressed|selected|required|readonly)=([^\]]*)\]/g,
+          (match, key: string) => fields.has(key === "ref" ? "ref" : key === "actions" ? "actions" : "state") ? match : "")
+          .replace(fields.has("text") ? /(?!)x/ : /("(?:[^"\\]|\\.)*"|: .*?$)/g, "") }));
+      const viewport = await this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})") as ObservationRecord["viewport"];
+      if (generation !== session.generation) throw automationError("stale-observation", { reason: "document-changed-during-inspection" });
+      const observationId = crypto.randomUUID();
+      const baseline = previous && !previous.incomplete ? previous : undefined;
+      const before = new Map(baseline?.lines.map((item) => [item.id, item.line]));
+      const after = new Map(lines.map((item) => [item.id, item.line]));
+      const changes = baseline ? [
+        ...baseline.lines.filter(({ id }) => !after.has(id)).map((item) => ({ ...item, change: "removed" })),
+        ...lines.filter(({ id, line }) => before.get(id) !== line).map((item) => ({ ...item, change: before.has(item.id) ? "updated" : "added", after: lines[lines.indexOf(item) - 1]?.id ?? null })),
+        ...lines.filter((item, index) => before.has(item.id) && baseline.lines[baseline.lines.findIndex((prior) => prior.id === item.id) - 1]?.id !== lines[index - 1]?.id)
+          .map((item) => ({ id: item.id, line: item.line, change: "moved", after: lines[lines.indexOf(item) - 1]?.id ?? null })),
+      ] : undefined;
+      const source = changes ?? lines;
+      const offset = options.offset ?? 0;
+      const limit = options.limit ?? source.length;
+      const budget = options.budget ?? 12000;
+      let used = 0;
+      const selected: typeof source = [];
+      for (const item of source.slice(offset, offset + limit)) {
+        const size = (changes ? JSON.stringify(item).length : item.line.length) + 1;
+        if (used + size > budget) break;
+        used += size; selected.push(item);
+      }
+      const nextOffset = offset + selected.length;
+      const incomplete = offset > 0 || nextOffset < source.length;
+      const record: ObservationRecord = { observationId, tabId, documentId: session.generation, ...captured, lines, viewport, scopeKey, incomplete };
+      this.observations.set(observationId, record);
+      while (this.observations.size > 32) this.observations.delete(this.observations.keys().next().value!);
+      return { observationId, tabId, documentId: session.generation, url: captured.url, title: captured.title, viewport,
+        mode: baseline ? "delta" : "full", ...(previous?.incomplete ? { reset: "previous-output-truncated" } : {}),
+        ...(changes ? { changes: selected } : { snapshot: selected.map(({ line }) => line).join("\n") }),
+        truncation: { truncated: incomplete, total: source.length, returned: selected.length, offset, nextOffset, budget, used,
+          ...(incomplete ? { reason: selected.length < Math.min(limit, source.length - offset) ? "budget" : "slice", baselineComplete: false,
+            ...(selected.length === 0 && source[offset] ? { requiredBudget: (changes ? JSON.stringify(source[offset]).length : source[offset]!.line.length) + 1 } : {}) } : { baselineComplete: true }) } };
     });
   }
 
@@ -412,8 +479,9 @@ export class AutomationRuntime {
         throw automationError("invalid-point", { observationId, x, y, viewport });
       }
       const button = options.button ?? "left"; const modifiers = modifierMask(options.modifiers ?? []);
-      await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", x: cssX, y: cssY, modifiers });
-      if (operation !== "hover") {
+      if (operation === "hover") {
+        await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", x: cssX, y: cssY, modifiers });
+      } else {
         const count = operation === "dblclick" ? 2 : 1;
         for (let clickCount = 1; clickCount <= count; clickCount += 1) {
           await this.nativeClick(session.debuggee, { x: cssX, y: cssY, button, modifiers, clickCount });
@@ -440,9 +508,8 @@ export class AutomationRuntime {
     });
   }
 
-  async upload(tabId: number, files: unknown): Promise<unknown> {
-    const chooser = this.fileChoosers.get(tabId);
-    return this.locatorValue(tabId, chooser ? { queries: [] } : { queries: [{ kind: "css", value: "input[type=file]" }] }, "setInputFiles", [files]);
+  async upload(tabId: number, files: unknown, chooser = this.fileChoosers.get(tabId)): Promise<unknown> {
+    return this.locatorValue(tabId, chooser ? { queries: [] } : { queries: [{ kind: "css", value: "input[type=file]" }] }, "setInputFiles", [files], chooser);
   }
 
   async keyState(tabId: number, operation: "keydown" | "keyup", chord: string): Promise<void> {
@@ -473,8 +540,9 @@ export class AutomationRuntime {
     });
   }
 
-  async pageValue(tabId: number, expression: string): Promise<unknown> {
+  async pageValue(tabId: number, expression: string, effect = false): Promise<unknown> {
     const session = await this.session(tabId);
+    if (effect) await this.options.onDispatch?.();
     const response = await this.options.command(session.debuggee, "Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
     if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
     return response.result?.value;
@@ -512,7 +580,7 @@ export class AutomationRuntime {
     return new Promise((resolve, reject) => {
       const events = this.waiters.get(tabId) ?? new Map();
       const waiters = events.get(kind) ?? new Set<Waiter>();
-      const done = (value: any) => { cleanup(); resolve(kind === "dialog" ? this.dialog(tabId, value) : kind === "filechooser" ? { isMultiple: () => value.mode === "selectMultiple", setFiles: (files: unknown) => this.upload(tabId, files) } : value); };
+      const done = (value: any) => { cleanup(); resolve(kind === "dialog" ? this.dialog(tabId, value) : kind === "filechooser" ? { isMultiple: () => value.mode === "selectMultiple", setFiles: (files: unknown) => this.upload(tabId, files, value) } : value); };
       const abort = () => { cleanup(); reject(abortError()); };
       const waiter = { resolve: done, reject };
       const cleanup = () => { waiters.delete(waiter); this.context.signal?.removeEventListener("abort", abort); };
@@ -537,7 +605,7 @@ export class AutomationRuntime {
     for (const waiter of [...waiters]) waiter.resolve(value);
   }
 
-  async locatorValue(tabId: number, spec: LocatorSpec, operation: string, args: unknown[] = []): Promise<unknown> {
+  async locatorValue(tabId: number, spec: LocatorSpec, operation: string, args: unknown[] = [], fileChooser?: FileChooserRecord): Promise<unknown> {
     const session = await this.session(tabId);
     return this.action(tabId, operation, spec, async () => {
       if (operation === "count") return (await this.resolveMetadata(session, spec)).length;
@@ -564,6 +632,7 @@ export class AutomationRuntime {
         const objectId = await this.resolveOne(session, spec);
         const targetSession = this.objectSession(session, objectId);
         const source = typeof args[0] === "function" ? String(args[0]) : String(args[0]);
+        await this.options.onDispatch?.();
         return this.callOn(targetSession, objectId, `function(arg){ return (${source})(this,arg); }`, [args[1]]);
       }
       if (operation === "scrollIntoViewIfNeeded") {
@@ -578,7 +647,7 @@ export class AutomationRuntime {
         if (operation === "focus") {
           const node = await this.describe(targetSession, objectId);
           await this.options.command(targetSession.debuggee, "DOM.focus", { backendNodeId: node.backendNodeId });
-        } else await this.callOn(targetSession, objectId, "function(){ this.blur(); }");
+        } else { await this.options.onDispatch?.(); await this.callOn(targetSession, objectId, "function(){ this.blur(); }"); }
         return this.afterAction(session);
       }
       if (operation === "fill" || operation === "clear") {
@@ -605,6 +674,7 @@ export class AutomationRuntime {
       if (operation === "selectOption") {
         const { objectId, targetSession } = await this.waitActionableLocator(session, spec, false, false);
         const values = Array.isArray(args[0]) ? args[0].map(String) : [String(args[0])];
+        await this.options.onDispatch?.();
         const selected = await this.callOn(targetSession, objectId, `function(values){
           for (const option of this.options) option.selected = values.includes(option.value) || values.includes(option.label);
           this.dispatchEvent(new Event("input", { bubbles: true })); this.dispatchEvent(new Event("change", { bubbles: true }));
@@ -613,9 +683,11 @@ export class AutomationRuntime {
         return { selected, ...(await this.afterAction(session)) };
       }
       if (operation === "setInputFiles") {
-        const chooser = this.fileChoosers.get(tabId);
+        const chooser = fileChooser ?? this.fileChoosers.get(tabId);
+        let usedChooser = false;
         let objectId: string;
         if (chooser && spec.queries.length === 0 && !spec.ref) {
+          usedChooser = true;
           const node = await this.options.command(chooser.debuggee, "DOM.resolveNode", { backendNodeId: chooser.backendNodeId, objectGroup: "surf-wax-automation" });
           if (!node.object?.objectId) throw automationError("detached", { reason: "file-chooser-node-removed" });
           objectId = node.object.objectId; this.objectDebuggees.set(objectId, chooser.debuggee);
@@ -629,6 +701,7 @@ export class AutomationRuntime {
         }
         const files = await Promise.all(requested.map(async (file: any) => {
           if (file?.url) {
+            await this.options.onDispatch?.();
             const response = await fetch(file.url, { signal: this.context.signal });
             if (!response.ok) throw new Error(`Could not fetch upload URL: ${response.status}`);
             const bytes = new Uint8Array(await response.arrayBuffer());
@@ -637,17 +710,19 @@ export class AutomationRuntime {
           }
           return file;
         }));
+        await this.options.onDispatch?.();
         await this.callOn(targetSession, objectId, `function(files){
-          if (!(this instanceof HTMLInputElement) || this.type !== "file") throw new Error("AutomationError[invalid-upload-target]: Expected a file input");
+          const view = this.ownerDocument && this.ownerDocument.defaultView;
+          if (!view || this.localName !== "input" || String(this.type).toLowerCase() !== "file") throw new Error("AutomationError[invalid-upload-target]: Expected a file input");
           if (!this.multiple && files.length > 1) throw new Error("AutomationError[invalid-file-count]: File input does not allow multiple files");
-          const transfer = new DataTransfer();
+          const transfer = new view.DataTransfer();
           for (const file of files) {
-            const bytes = file.base64 ? Uint8Array.from(atob(file.base64), c => c.charCodeAt(0)) : new TextEncoder().encode(file.text || "");
-            transfer.items.add(new File([bytes], file.name, { type: file.mimeType || "application/octet-stream" }));
+            const bytes = file.base64 ? view.Uint8Array.from(view.atob(file.base64), c => c.charCodeAt(0)) : new view.TextEncoder().encode(file.text || "");
+            transfer.items.add(new view.File([bytes], file.name, { type: file.mimeType || "application/octet-stream" }));
           }
-          this.files = transfer.files; this.dispatchEvent(new Event("input", { bubbles: true })); this.dispatchEvent(new Event("change", { bubbles: true }));
+          this.files = transfer.files; this.dispatchEvent(new view.Event("input", { bubbles: true })); this.dispatchEvent(new view.Event("change", { bubbles: true }));
         }`, [files]);
-        this.fileChoosers.delete(tabId);
+        if (usedChooser && this.fileChoosers.get(tabId) === chooser) this.fileChoosers.delete(tabId);
         return this.afterAction(session);
       }
       if (operation === "check" || operation === "uncheck") {
@@ -683,6 +758,7 @@ export class AutomationRuntime {
     if (!session) {
       session = {
         tabId,
+        token: crypto.randomUUID().replace(/-/g, "").slice(0, 12),
         debuggee: { tabId },
         generation: 0,
         nextRef: 1,
@@ -985,6 +1061,7 @@ export class AutomationRuntime {
 
   private async nativeClick(debuggee: Debuggee, params: Record<string, unknown>) {
     if (this.options.atomicClick) return this.options.atomicClick(debuggee, params);
+    await this.options.command(debuggee, "Input.dispatchMouseEvent", { ...params, type: "mouseMoved", button: "none", buttons: 0, clickCount: 0 });
     await this.options.command(debuggee, "Input.dispatchMouseEvent", { ...params, type: "mousePressed" });
     return this.options.command(debuggee, "Input.dispatchMouseEvent", { ...params, type: "mouseReleased" });
   }
@@ -1020,10 +1097,14 @@ export class AutomationRuntime {
     }
   }
 
-  private async captureSnapshot(session: Session): Promise<{ url: string; title: string; lines: SnapshotLine[] }> {
+  private async captureSnapshot(session: Session, region?: LocatorSpec): Promise<{ url: string; title: string; lines: SnapshotLine[] }> {
     while (true) {
       throwIfAborted(this.context.signal);
       const generation = session.generation;
+      const regionObject = region ? await this.resolveOnce(session, region) : undefined;
+      const regionDebuggee = regionObject ? this.objectDebuggees.get(regionObject) ?? session.debuggee : undefined;
+      const regionNode = regionObject ? await this.options.command(regionDebuggee!, "DOM.describeNode", { objectId: regionObject }) : undefined;
+      if (region && !regionNode?.node?.backendNodeId) throw automationError("not-found", { locator: region });
       const depthOf = (frameId: string) => { let depth = 0; let current = session.frameParents.get(frameId); while (current) { depth += 1; current = session.frameParents.get(current); } return depth; };
       const childFrames = [...session.frames]
         .filter(([, debuggee]) => debuggee.sessionId)
@@ -1038,6 +1119,7 @@ export class AutomationRuntime {
       if (generation !== session.generation) { await delay(0, this.context.signal); continue; }
       const lines: SnapshotLine[] = [];
       const render = (nodes: any[], debuggee: Debuggee, frameLabel?: string, frameDepth = 0) => {
+        if (regionDebuggee && JSON.stringify(regionDebuggee) !== JSON.stringify(debuggee)) return;
         const byId = new Map(nodes.map((node) => [node.nodeId, node]));
         const scope = debuggee.sessionId ?? session.rootFrameId ?? "root";
         if (frameLabel) lines.push({ id: `${scope}:frame`, line: `${"  ".repeat(frameDepth)}- iframe [frame=${frameLabel}]` });
@@ -1062,7 +1144,8 @@ export class AutomationRuntime {
           }
           for (const child of node.childIds ?? []) visit(byId.get(child), depth);
         };
-        const root = nodes.find((node) => !node.parentId) ?? nodes[0];
+        const root = regionNode ? nodes.find((node) => node.backendDOMNodeId === regionNode.node.backendNodeId) : nodes.find((node) => !node.parentId) ?? nodes[0];
+        if (regionNode && !root) throw automationError("snapshot-region-unavailable", { locator: region });
         visit(root, frameLabel ? frameDepth + 1 : 0);
       };
       for (const { debuggee, frameId, depth, tree } of trees) render(tree.nodes ?? [], debuggee, frameId, depth);
@@ -1107,6 +1190,7 @@ export class AutomationRuntime {
 export class PageFacade {
   constructor(private readonly runtime: AutomationRuntime, readonly tabId: number) {}
   snapshot() { return this.runtime.snapshot(this.tabId); }
+  inspect(options: InspectOptions = {}, region?: LocatorFacade) { return this.runtime.inspect(this.tabId, options, region?.spec); }
   observe(detail: "auto" | "semantic" | "visual" = "auto", since?: string, captureOptions?: Record<string, any>) { return this.runtime.observe(this.tabId, detail, since, captureOptions); }
   ensureObservation(observationId: string) { return this.runtime.ensureObservation(this.tabId, observationId); }
   point(observationId: string, x: number, y: number, operation: "click" | "dblclick" | "hover", options?: { button?: "left" | "right" | "middle"; modifiers?: string[] }) { return this.runtime.point(this.tabId, observationId, x, y, operation, options); }
@@ -1132,7 +1216,7 @@ export class PageFacade {
   waitForURL(value: string | RegExp) { return this.runtime.waitUntil(() => this.url().then((url) => typeof value === "string" ? String(url).includes(value) : value.test(String(url)))); }
   waitForLoadState(state: "domcontentloaded" | "load" = "load") { return this.runtime.waitForLoadState(this.tabId, state); }
   waitForEvent(kind: "dialog" | "popup" | "download" | "filechooser") { return this.runtime.waitForEvent(this.tabId, kind); }
-  evaluate(fn: ((arg?: unknown) => unknown) | string, arg?: unknown) { return this.runtime.pageValue(this.tabId, `(${typeof fn === "function" ? String(fn) : fn})(${JSON.stringify(arg)})`); }
+  evaluate(fn: ((arg?: unknown) => unknown) | string, arg?: unknown) { return this.runtime.pageValue(this.tabId, `(${typeof fn === "function" ? String(fn) : fn})(${JSON.stringify(arg)})`, true); }
 }
 
 export class LocatorFacade {

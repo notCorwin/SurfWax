@@ -6,7 +6,7 @@
 
 Surf Wax 是 Chrome 138+ 的 Manifest V3 Side Panel 智能体运行环境。它使用 Vercel AI SDK 和基于事件日志的会话运行时，以 shadcn/ui 与 Streamdown 构建界面，直接连接用户选择的 Provider 或 OpenAI-compatible Endpoint，支持 BYOK。
 
-智能体使用 49 个独立、结构化工具完成网页阅读、表单、导航、多标签任务、画布输入、文件上传、截图、PDF、只读网络诊断和用户脚本。工具目录由源码 registry 生成，见 [工具参考](docs/tools.md)。
+新会话通过三个可组合入口操控浏览器：inspect 默认读取带引用的语义文本，run 执行单个动作或 async JavaScript 程序，jobs 管理长执行的状态、增量回执、等待和取消。保留表单、frame、原生输入/Canvas、多标签、上传下载、页面脚本、网络/CDP 与持久用户脚本能力。截图只按需获取。工具目录由源码 registry 生成，见 [工具参考](docs/tools.md)。
 
 ## 安装与首次配置
 
@@ -14,7 +14,7 @@ Surf Wax 是 Chrome 138+ 的 Manifest V3 Side Panel 智能体运行环境。它�
 
 也可从 [版本发布页](https://github.com/notCorwin/SurfWax/releases) 下载对应版本的 ZIP 和 `.sha256` 文件，核对 SHA-256，解压后在 `chrome://extensions` 开启开发者模式并选择“加载已解压的扩展程序”。商店版通过商店更新；已解压版本需要手动更新。正式版本发布绑定不可变的 Git 标签和提交，不覆盖已有版本产物。`autobuild` 是 master 的可变测试渠道，提交前在本地运行完整 CI，标记为 prerelease，不会占用 Latest。
 
-Provider 配置保存在本机 `chrome.storage.local`，按 Provider 隔离。设置页会刷新 Models.dev 模型目录，并保留目录不可用时的自定义 Endpoint。模型上下文容量未匹配时使用 256K；用户可覆盖容量及图片支持状态。
+Provider 配置保存在本机 `chrome.storage.local`，按 Provider 隔离。设置页会刷新 Models.dev 模型目录，并保留目录不可用时的自定义 Endpoint。高级设置可覆盖 Base URL、Context Window、Anthropic 类 `max_tokens` 和图片支持状态；未知上下文默认 256,000，未知 Anthropic 类输出默认 128,000。自定义 Endpoint 可选择 OpenAI Chat Completions、Completions、Responses、Anthropic Messages、Google generateContent 或 Interactions 协议。
 
 ## 任务与会话
 
@@ -22,13 +22,13 @@ Provider 配置保存在本机 `chrome.storage.local`，按 Provider 隔离。�
 - 历史上下文保持稳定前缀，新会话将完整工具简明目录追加到用户自定义系统提示词后，并把版本与快照写入日志；旧会话保持原格式，首次成功压缩后迁移。剩余容量不足 20% 或 Provider 报上下文超限时自动生成摘要。
 - 可恢复请求错误无限重试，单次退避不超过 5 秒；可查看重试状态或立即停止。
 - 关闭真实 Side Panel 会中止模型请求、工具及排队调用。操作成功、失败和中断都写入 Tool Result，已发生的网页操作不会回滚或自动重放。
-- 会话支持搜索、重命名和一键永久删除；删除无需确认且不可恢复。会话行操作按钮在悬浮或键盘聚焦时显示，无悬浮能力的设备保留可见入口。任何侧栏存在运行中的任务时，全部会话的新建、切换、编辑、重试、分支、重命名与删除均锁定。搜索、复制、草稿、Follow-up 队列和停止始终可用。用户消息与 Assistant 回复均支持复制、重试及分支；用户消息另支持编辑。
+- 会话支持搜索、重命名和一键删除；删除无需确认，并在短时间内提供撤销。删除和清空通过追加 tombstone 隐藏数据，不改写 canonical event log。会话行操作按钮在悬浮或键盘聚焦时显示，无悬浮能力的设备保留可见入口。任何侧栏存在运行中的任务时，全部会话的新建、切换、编辑、复制、重试、分支、重命名与删除均锁定且隐藏消息操作。草稿、Follow-up 队列和停止始终可用。用户消息与 Assistant 回复均支持复制、重试及分支；用户消息另支持编辑。
 - 正在操作的页面有透明防干扰层。所有已操作标签页及 iframe 的阻断监听器保持安装，智能体通过当前 run 的受控输入票据执行原生输入；任务结束、导航和中断时清理。
 - 截图、PDF 和大型结果默认作为会话内部产物。用户明确要求保存时直接下载文件，无需再次授权。下载失败或任务中断后，内部产物仍可再次保存，无需重新生成。
 
 Side Panel 使用统一的磨砂材质 Design Tokens，自动跟随浅色／深色模式。任务建议可填入草稿后编辑发送；会话抽屉支持搜索和管理。用户消息显示为气泡，Assistant 回复通栏呈现；Markdown、LaTeX、代码高亮和工具详情完整保留，响应按动画帧合并更新，长历史按会话轮次虚拟化。
 
-用户脚本有独立管理页和五个智能体工具。脚本定义及启停状态由扩展持久化，并在启动或升级时恢复已启用脚本。使用前在 Chrome 扩展详情页开启 **Allow User Scripts**。
+用户脚本有独立管理页，智能体通过 run 中的 browser.scripts 组合管理；历史会话的五个工具仍可恢复。脚本定义及启停状态由扩展持久化，并在启动或升级时恢复已启用脚本。使用前在 Chrome 扩展详情页开启 **Allow User Scripts**。
 
 ## 权限与数据
 
@@ -87,6 +87,8 @@ node scripts/install-test-browser.mjs current
 CI 全部由 `npm run verify:local` 在本地 Node 24 执行，自动安装 Chrome for Testing 138 与当前 Stable，并逐版本运行功能与性能验收。120 FPS 负载由软件以 120Hz 驱动真实 RAF 与渲染，不需要 120Hz 屏幕；预热至少 1 秒，测量至少 600 帧，要求真实渲染 trace 的每帧工作 P95 ≤ 8.33ms、截止时间违约率 ≤ 1%，并验证最终正文与 canonical log。原始 trace、浏览器版本及报告保存在 `.dev/verification/performance/`。macOS 测试需要允许 Chrome 访问 WindowServer 并监听 localhost 的本地执行环境。GitHub Actions 只执行 CD：重建打包、产物和 SHA-256 校验、master Autobuild 与不可变版本标签发布。版本只有 `package.json` 一个来源，构建校验 lockfile 和产物版本一致。
 
 ## 架构与贡献
+
+程序计算运行在可销毁的 opaque-origin sandbox Worker 中，Side Panel 中介浏览器能力。jobs 不受执行队列阻塞；取消不是回滚，关闭面板会撤销能力，重启只保留 canonical 回执而不恢复任意 JS 栈。sandbox 使用独立 CSP，扩展页面不允许 eval，Chrome 权限保持不变。
 
 `src/sidepanel/` 管理会话与生命周期，`src/agent/` 管理模型、请求与上下文，`src/chrome/` 提供 registry 和共享浏览器执行器，`src/logging.ts` 提供 canonical event log，`src/userscripts/` 与 `src/options/` 分别提供脚本和配置管理。
 
