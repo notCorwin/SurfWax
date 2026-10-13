@@ -6,7 +6,7 @@
 
 Surf Wax 是 Chrome 138+ 的 Manifest V3 Side Panel 智能体运行环境。它使用 Vercel AI SDK 和基于事件日志的会话运行时，以 shadcn/ui 与 Streamdown 构建界面，直接连接用户选择的 Provider 或 OpenAI-compatible Endpoint，支持 BYOK。
 
-智能体使用 49 个独立、结构化工具完成网页阅读、表单、导航、多标签任务、画布输入、文件上传、截图、PDF、只读网络诊断和用户脚本。工具目录由源码 registry 生成，见 [工具参考](docs/tools.md)。
+新会话通过三个可组合入口操控浏览器：inspect 默认读取带引用的语义文本，run 执行单个动作或 async JavaScript 程序，jobs 管理长执行的状态、增量回执、等待和取消。保留表单、frame、原生输入/Canvas、多标签、上传下载、页面脚本、网络/CDP 与持久用户脚本能力。截图只按需获取。工具目录由源码 registry 生成，见 [工具参考](docs/tools.md)。
 
 ## 安装与首次配置
 
@@ -28,7 +28,7 @@ Provider 配置保存在本机 `chrome.storage.local`，按 Provider 隔离。�
 
 Side Panel 使用统一的磨砂材质 Design Tokens，自动跟随浅色／深色模式。任务建议可填入草稿后编辑发送；会话抽屉支持搜索和管理。用户消息显示为气泡，Assistant 回复通栏呈现；Markdown、LaTeX、代码高亮和工具详情完整保留，响应按动画帧合并更新，长历史按会话轮次虚拟化。
 
-用户脚本有独立管理页和五个智能体工具。脚本定义及启停状态由扩展持久化，并在启动或升级时恢复已启用脚本。使用前在 Chrome 扩展详情页开启 **Allow User Scripts**。
+用户脚本有独立管理页，智能体通过 run 中的 browser.scripts 组合管理；历史会话的五个工具仍可恢复。脚本定义及启停状态由扩展持久化，并在启动或升级时恢复已启用脚本。使用前在 Chrome 扩展详情页开启 **Allow User Scripts**。
 
 ## 权限与数据
 
@@ -87,6 +87,8 @@ node scripts/install-test-browser.mjs current
 CI 全部由 `npm run verify:local` 在本地 Node 24 执行，自动安装 Chrome for Testing 138 与当前 Stable，并逐版本运行功能与性能验收。120 FPS 负载由软件以 120Hz 驱动真实 RAF 与渲染，不需要 120Hz 屏幕；预热至少 1 秒，测量至少 600 帧，要求真实渲染 trace 的每帧工作 P95 ≤ 8.33ms、截止时间违约率 ≤ 1%，并验证最终正文与 canonical log。原始 trace、浏览器版本及报告保存在 `.dev/verification/performance/`。macOS 测试需要允许 Chrome 访问 WindowServer 并监听 localhost 的本地执行环境。GitHub Actions 只执行 CD：重建打包、产物和 SHA-256 校验、master Autobuild 与不可变版本标签发布。版本只有 `package.json` 一个来源，构建校验 lockfile 和产物版本一致。
 
 ## 架构与贡献
+
+程序计算运行在可销毁的 opaque-origin sandbox Worker 中，Side Panel 中介浏览器能力。jobs 不受执行队列阻塞；取消不是回滚，关闭面板会撤销能力，重启只保留 canonical 回执而不恢复任意 JS 栈。sandbox 使用独立 CSP，扩展页面不允许 eval，Chrome 权限保持不变。
 
 `src/sidepanel/` 管理会话与生命周期，`src/agent/` 管理模型、请求与上下文，`src/chrome/` 提供 registry 和共享浏览器执行器，`src/logging.ts` 提供 canonical event log，`src/userscripts/` 与 `src/options/` 分别提供脚本和配置管理。
 

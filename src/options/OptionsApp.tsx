@@ -9,7 +9,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { ErrorNotice } from "../components/ui/error-notice";
 import { SearchCombobox, type SearchComboboxOption } from "./SearchCombobox";
 import { EventLogger } from "../logging";
-import { loadModelCatalog, modelProviderPresets, resolveModelLimit, type ModelLimit, type ModelProviderPreset } from "../agent/model-limits";
+import { applyModelPreset, loadModelCatalog, modelPresetFields, modelProviderPresets, resolveModelLimit, type ModelLimit, type ModelProviderPreset } from "../agent/model-limits";
 import { modelConfigErrors, resolvedBaseURL, type ProviderSettingField } from "../agent/model-sdks";
 import type { ModelProfile } from "../sidepanel/config";
 import {
@@ -47,9 +47,11 @@ export function OptionsApp() {
     ...providers.filter((provider) => provider.id !== "vercel").map((provider) => ({ value: provider.id, label: provider.name })),
   ], [providers]);
   const config = storedProfile && selectedProvider
-    ? { ...storedProfile, baseURL: selectedProvider.baseURL, sdk: selectedProvider.sdk }
+    ? applyModelPreset(storedProfile, selectedProvider)
     : storedProfile;
-  const settingFields: ProviderSettingField[] = selectedProvider?.fields ?? [{ key: "apiKey", label: "API Key", type: "password", required: true }];
+  const settingFields: ProviderSettingField[] = config ? modelPresetFields(config, selectedProvider) : [];
+  const routingErrors = config ? modelConfigErrors(config, settingFields) : {};
+  const routingError = routingErrors.sdk ?? routingErrors.shape ?? routingErrors.body ?? routingErrors.headers;
   const fail = (summary: string, error: unknown) => {
     setStatus("error");
     setMessage(summary);
@@ -59,10 +61,11 @@ export function OptionsApp() {
 
   useEffect(() => {
     let active = true;
+    const catalog = loadModelCatalog({ refresh: true, onStale: () => { if (active) setCatalogStale(true); } });
     void Promise.all([
-      loadModelConfig(),
-      loadModelCatalog({ refresh: true, onStale: () => { if (active) setCatalogStale(true); } })
-        .then(modelProviderPresets).catch((error) => { if (active) setCatalogError(error); return []; }),
+      // Always restore all settings for repair, even when migration cannot fetch a catalog.
+      loadModelConfig(undefined, undefined, { migrateCatalogRouting: false }),
+      catalog.then(modelProviderPresets).catch((error) => { if (active) setCatalogError(error); return []; }),
     ]).then(([stored, catalogProviders]) => {
       if (!active) return;
       setModelSettings(stored);
@@ -71,7 +74,7 @@ export function OptionsApp() {
       savedConfig.current = JSON.stringify({ modelSettings: stored, providerInput: stored.selectedProviderId });
       const selected = selectedModelConfig(stored);
       const preset = catalogProviders.find((provider) => provider.id === stored.selectedProviderId);
-      const effective = selected && preset ? { ...selected, baseURL: preset.baseURL, sdk: preset.sdk } : selected;
+      const effective = selected && preset ? applyModelPreset(selected, preset) : selected;
       matchingKey.current = effective ? `${effective.baseURL}\u0000${effective.model}` : "";
       if (effective && isCompleteModelConfig(effective)) {
         void resolveModelLimit({ ...effective, contextWindowOverride: undefined }).then((limit) => {
@@ -103,8 +106,13 @@ export function OptionsApp() {
     if (!config) return;
     setModelSettings((current) => ({ ...current, profiles: { ...current.profiles, [config.providerId]: {
       ...config, [field]: field === "contextWindowOverride" ? (value ? Number(value) : undefined) : value,
+      // A new free-text model must never inherit the previous model's route.
+      ...(field === "model" ? {
+        modelProvider: undefined,
+        ...(config.modelProvider?.api !== undefined && selectedProvider ? { baseURL: selectedProvider.baseURL } : {}),
+      } : {}),
     } } }));
-    setFieldErrors((current) => ({ ...current, [field]: undefined }));
+    setFieldErrors((current) => field === "model" ? {} : { ...current, [field]: undefined });
     if (field === "baseURL" || field === "model") {
       matchingKey.current = "";
       setMatchedLimit(undefined);
@@ -252,7 +260,7 @@ export function OptionsApp() {
                   {fieldErrors.baseURL && <p id="base-url-error" className="field-error" role="alert">{fieldErrors.baseURL}</p>}
                 </Field> : <Field>
                   <FieldLabel>Endpoint</FieldLabel>
-                  <p className="model-limit-match">{resolvedBaseURL(config) || "由 SDK 使用默认 Endpoint"}</p>
+                  <p className="model-limit-match">{routingError ? config.baseURL : resolvedBaseURL(config) || "由 SDK 使用默认 Endpoint"}</p>
                 </Field>}
                 <Field data-disabled={busy || undefined} data-invalid={!!fieldErrors.model || undefined}>
                   <FieldLabel htmlFor="model-id">Model ID</FieldLabel>
@@ -261,6 +269,7 @@ export function OptionsApp() {
                     value={config.model} disabled={busy} onValueChange={(value) => update("model", value)}
                     aria-invalid={!!fieldErrors.model} aria-describedby={fieldErrors.model ? "model-id-error" : undefined} />
                   {fieldErrors.model && <p id="model-id-error" className="field-error" role="alert">{fieldErrors.model}</p>}
+                  {routingError && <p className="field-error" role="alert">{routingError}</p>}
                   {selectedProvider && selectedProvider.models.length === 0 && <FieldDescription>
                     Models.dev 当前没有符合文本输出与 tool_call 条件的目录模型；可手填 Model ID，浏览器工具可能不可用。
                   </FieldDescription>}

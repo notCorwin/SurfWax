@@ -1,11 +1,15 @@
 import type { EventLogger } from "../logging";
-import type { BrowserInput, BrowserSelector, BrowserStep, BrowserTarget, ChromeTarget, ChromeToolInput } from "../types";
-import { COMMAND_NAMES, type CommandName } from "./tool";
+import type { BrowserTarget, PageExecutionTarget } from "../types";
 import { AutomationRuntime } from "./automation";
 import { requireDebuggee } from "./debuggee";
 import { downloadArtifact } from "./downloads";
 import { BrowserDiagnostics } from "./diagnostics";
 import { getRunIdentity } from "../agent/coordinator";
+import { BrowserJobs, type JobQuery } from "./jobs";
+import { ProgramScope } from "./program";
+import type { InspectOptions } from "./automation";
+import { callUserScript } from "./script-client";
+import { executeSandboxProgram } from "./program-host";
 
 type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
 type DebuggerTarget = chrome.debugger.TargetInfo;
@@ -19,12 +23,7 @@ type ExecutorChrome = typeof chrome & { debugger: DebuggerApi };
 
 const BRIDGE_KEY = "__surfWaxDebugger";
 const RESULTS_KEY = "__surfWaxResults";
-const RESULT_READER_KEY = "__surfWaxResult";
-const STATE_KEY = "__surfWaxExecutionState";
-const PAGE_KEY = "__surfWaxPage";
-const BROWSER_KEY = "__surfWaxBrowser";
-type ExecutionContext = { conversationId?: string; toolCallId?: string; visualEnabled?: boolean; allowDownloads?: boolean; logIdentity?: { runId?: string; toolCallId: string; toolCallIdCanonical: true } };
-type BatchProgress = { completed: Array<{ index: number; type: BrowserStep["type"]; result: unknown }>; index: number; startedAt: number };
+type ExecutionContext = { conversationId?: string; toolCallId?: string; visualEnabled?: boolean; logIdentity?: { runId?: string; toolCallId: string; toolCallIdCanonical: true } };
 type ArtifactRef = { id: number; filename: string; mimeType: string; byteLength: number; saved: boolean; downloadId?: number };
 type BrowserState = { windowId: number; tabId?: number };
 export type BrowserContext = {
@@ -56,18 +55,18 @@ function readQuoted(value: string): string {
   throw new Error(`AutomationError[invalid-target]: Expected a quoted locator argument: ${value}`);
 }
 
-export function parseCommandTarget(value: unknown): BrowserTarget {
+export function parseLocatorTarget(value: unknown): BrowserTarget {
   if (value && typeof value === "object") return value as BrowserTarget;
   if (typeof value !== "string" || !value.trim()) throw new Error("AutomationError[invalid-target]: target is required");
   const input = value.trim();
-  if (/^e\d+$/.test(input)) return { ref: input };
+  if (/^(?:t\d+d\d+)?e\d+$/.test(input)) return { ref: input };
   const locator = /^locator\((.+)\)$/.exec(input);
   if (locator) return { by: "css", value: readQuoted(locator[1]!) };
   const simple = /^getBy(Text|Label|Placeholder|AltText|Title|TestId)\((['"][\s\S]*?['"])(?:\s*,\s*\{([\s\S]*)\})?\)$/.exec(input);
   if (simple) {
     const by = ({ Text: "text", Label: "label", Placeholder: "placeholder", AltText: "alt", Title: "title", TestId: "testId" } as const)[simple[1] as "Text"];
     const options = simple[3]?.trim();
-    if (options && !/^exact\s*:\s*(?:true|false)$/.test(options)) throw new Error(`AutomationError[invalid-target]: Unsupported locator expression ${JSON.stringify(input)}; use a structured target or run-code`);
+    if (options && !/^exact\s*:\s*(?:true|false)$/.test(options)) throw new Error(`AutomationError[invalid-target]: Unsupported locator expression ${JSON.stringify(input)}; use a structured target or run`);
     return { by, value: readQuoted(simple[2]!), ...(options ? { exact: /true$/.test(options) } : {}) };
   }
   const role = /^getByRole\((['"][\s\S]*?['"])(?:\s*,\s*\{([\s\S]*)\})?\)$/.exec(input);
@@ -75,10 +74,10 @@ export function parseCommandTarget(value: unknown): BrowserTarget {
     const options = role[2] ?? "";
     const name = /\bname\s*:\s*(['"][\s\S]*?['"])(?:\s*,|$)/.exec(options)?.[1];
     const unsupportedOptions = options.replace(/\bname\s*:\s*(['"][\s\S]*?['"])/, "").replace(/\bexact\s*:\s*(?:true|false)/, "").replace(/[\s,]/g, "");
-    if (unsupportedOptions) throw new Error(`AutomationError[invalid-target]: Unsupported locator expression ${JSON.stringify(input)}; use a structured target or run-code`);
+    if (unsupportedOptions) throw new Error(`AutomationError[invalid-target]: Unsupported locator expression ${JSON.stringify(input)}; use a structured target or run`);
     return { by: "role", value: readQuoted(role[1]!), ...(name ? { name: readQuoted(name) } : {}), ...(/\bexact\s*:\s*true\b/.test(options) ? { exact: true } : {}) };
   }
-  if (/^[A-Za-z_$][\w$]*\s*\(/.test(input)) throw new Error(`AutomationError[invalid-target]: Unsupported locator expression ${JSON.stringify(input)}; use a structured target or run-code`);
+  if (/^[A-Za-z_$][\w$]*\s*\(/.test(input)) throw new Error(`AutomationError[invalid-target]: Unsupported locator expression ${JSON.stringify(input)}; use a structured target or run`);
   return { by: "css", value: input };
 }
 
@@ -88,26 +87,6 @@ function timestamped(prefix: string, extension: string): string {
 
 function base64ByteLength(base64: string): number {
   return Math.floor(base64.length * 3 / 4) - (base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0);
-}
-
-export function ensureSidePanelInstanceUrl(): string {
-  const url = new URL(globalThis.location.href);
-  if (!url.hash.startsWith("#side-agent-instance=")) {
-    url.hash = `side-agent-instance=${globalThis.crypto.randomUUID()}`;
-    globalThis.history.replaceState(null, "", url.href);
-  }
-  return url.href;
-}
-
-function expressionFor(code: string): string {
-  return `(async () => {
-    const browser = globalThis[${JSON.stringify(BROWSER_KEY)}];
-    const chrome = undefined;
-    const result = await (async () => {
-${code}
-    })();
-    ${resultEnvelope()}
-  })()`;
 }
 
 function resultEnvelope(): string {
@@ -157,16 +136,6 @@ ${code}
   })()`;
 }
 
-function automationExpressionFor(code: string, tabId?: number): string {
-  return `(async () => {
-    const page = await globalThis[${JSON.stringify(PAGE_KEY)}].create(${tabId === undefined ? "undefined" : tabId});
-    const result = await (async () => {
-${code}
-    })();
-    ${resultEnvelope()}
-  })()`;
-}
-
 function evaluationError(response: any): Error | undefined {
   const details = response?.exceptionDetails;
   if (!details) return undefined;
@@ -196,14 +165,11 @@ function evaluationValue(response: any, scope = "extension"): unknown {
 
 export class ChromeExecutor {
   private readonly chromeApi: ExecutorChrome;
-  private readonly targetUrl: string;
   private readonly logger?: EventLogger;
   private port?: chrome.runtime.Port;
   private readonly bridge: Record<string, unknown>;
   private readonly automation: AutomationRuntime;
-  private readonly lifetime = { aborted: false };
   private tail: Promise<void> = Promise.resolve();
-  private activeDebuggee?: Debuggee;
   private readonly bridgedDebuggees = new Set<string>();
   private disposed = false;
   private activeSignal?: AbortSignal;
@@ -214,11 +180,16 @@ export class ChromeExecutor {
   private readonly networkEnabled = new Set<number>();
   private readonly dialogs = new Map<number, { type: string; message: string; defaultPrompt?: string }>();
   private readonly heldInput = new Map<number, { x: number; y: number; buttons: Set<string>; keys: Map<string, Record<string, unknown>> }>();
+  private readonly jobs: BrowserJobs;
+  private programScope?: ProgramScope;
+  private readonly programEvaluations = new Map<string, { debuggee: Debuggee; count: number }>();
+  private readonly programHost: typeof executeSandboxProgram;
 
-  constructor(options: { chromeApi?: ExecutorChrome; targetUrl?: string; logger?: EventLogger } = {}) {
+  constructor(options: { chromeApi?: ExecutorChrome; logger?: EventLogger; programHost?: typeof executeSandboxProgram } = {}) {
     this.chromeApi = options.chromeApi ?? globalThis.chrome as ExecutorChrome;
-    this.targetUrl = options.targetUrl ?? ensureSidePanelInstanceUrl();
     this.logger = options.logger;
+    this.jobs = new BrowserJobs(this.logger);
+    this.programHost = options.programHost ?? executeSandboxProgram;
     this.diagnostics = new BrowserDiagnostics(this.logger);
     if (!this.chromeApi?.debugger) throw new Error("Chrome extension debugger API is unavailable");
     const pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason: Error) => void }>();
@@ -297,6 +268,7 @@ export class ChromeExecutor {
         this.bridgedDebuggees.delete(JSON.stringify(debuggee));
       },
       mark: async (tabId) => (globalThis as Record<string, any>).__surfWaxGuard?.mark(tabId),
+      onDispatch: () => this.programScope?.dispatched() ?? Promise.resolve(),
       logger: this.logger,
     });
     listeners.onEvent.add((source, method, params) => {
@@ -308,70 +280,181 @@ export class ChromeExecutor {
       this.automation.handleDetach(source);
     });
     (globalThis as Record<string, unknown>)[BRIDGE_KEY] = this.bridge;
-    (globalThis as Record<string, unknown>)[PAGE_KEY] = { create: (tabId?: number) => this.automation.createPage(tabId) };
-    (globalThis as Record<string, unknown>)[BROWSER_KEY] = {
-      page: async (tabId?: number) => {
+  }
+
+  inspect(input: InspectOptions & { tabId?: number; region?: unknown; image?: boolean; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+    return this.enqueueAbortable(async (combined) => {
+      this.activeSignal = combined; this.activeContext = context;
+      this.automation.setContext({ ...context, signal: combined });
+      try {
         const state = await this.currentBrowserState();
-        if (tabId !== undefined) {
-          const tab = await this.chromeApi.tabs.get(tabId);
-          if (tab.windowId !== state.windowId) throw new Error("CommandError[invalid-tab-id]: Tab is outside the bound window");
-          state.tabId = tabId;
+        const page = input.tabId === undefined ? await this.pageFor(state) : await this.boundPage(input.tabId, state);
+        if (input.image) {
+          if (!context.visualEnabled) throw new Error("AutomationError[visual-unavailable]: Image input is disabled or unsupported by the selected model");
+          return await this.captureScreenshot(page, { target: input.region });
         }
-        return this.pageFor(state);
-      },
-      runIn: async (target: ChromeTarget | { tabId: number }, code: string) => {
-        if (target && typeof target === "object" && !("kind" in target) && Number.isInteger(target.tabId)) {
-          const value = await this.awaitAbort(this.automation.pageValue(target.tabId, pageExpressionFor(code)), this.activeSignal);
-          return evaluationValue({ result: { value } }, "page");
-        }
-        return this.executeNow({ target: target as ChromeTarget, code }, this.activeSignal, this.activeContext);
-      },
-      cdp: (debuggee: Debuggee) => ({
-        send: (method: string, params?: object) => this.bridgeCommand(debuggee, method, params),
-        detach: () => (this.bridge.call as any)("detach", [debuggee]),
-      }),
-      result: (id: number, selection?: { path?: string | Array<string | number>; offset?: number; limit?: number }) => this.logger?.result(id, selection, this.activeContext.conversationId ?? ""),
+        const region = input.region === undefined ? undefined : this.locatorFor(page, input.region);
+        return await page.inspect(input, region);
+      } finally { this.activeSignal = undefined; this.activeContext = {}; await this.automation.clearContext(); }
+    }, signal, input.timeoutMs ?? 10000, false);
+  }
+
+  async runProgram(input: { code: string; background?: boolean; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+    if (!context.conversationId || !this.logger) throw new Error("Programs require a conversation and canonical event log");
+    const jobContext = { conversationId: context.conversationId, logIdentity: context.logIdentity };
+    const id = await this.jobs.start(jobContext, signal, (combined, jobId, started) => this.enqueueAbortable(async (deadline) => {
+      if (this.disposed) throw new Error("Chrome executor has been disposed");
+      await started();
+      const lifetime = new AbortController();
+      const programSignal = AbortSignal.any([deadline ?? combined, lifetime.signal]);
+      this.activeSignal = programSignal; this.activeContext = context;
+      this.automation.setContext({ ...context, signal: programSignal }); this.diagnostics.bind(context);
+      const scope = new ProgramScope(programSignal, jobId, jobContext, this.logger!);
+      this.programScope = scope;
+      try {
+        scope.guard();
+        const state = await this.currentBrowserState();
+        const page = await this.programPage(await this.pageFor(state), scope);
+        const capabilities = this.programCapabilities(page, state, scope);
+        scope.guard();
+        const result = await this.programHost(input.code, capabilities, programSignal);
+        await scope.finish(); (deadline ?? combined).throwIfAborted();
+        return result;
+      } catch (error) {
+        scope.revoke(); lifetime.abort("program-ended");
+        await this.stopBrowserOperations();
+        await scope.finish();
+        if (scope.effectUnknown && error && typeof error === "object") Object.assign(error, { effectUnknown: true });
+        throw error;
+      } finally {
+        scope.revoke(); lifetime.abort("program-ended");
+        if (this.programScope === scope) this.programScope = undefined;
+        this.activeSignal = undefined; this.activeContext = {};
+        await this.automation.clearContext();
+      }
+    }, combined, input.timeoutMs ?? (input.background ? 300000 : 10000), false, true));
+    if (input.background) return { jobId: id, state: "queued", accepted: true, complete: false };
+    while (true) {
+      const status = await this.jobs.query({ action: "wait", id, waitMs: 1000 }, context.conversationId, signal) as any;
+      if (status.terminal) return { jobId: id, ok: status.ok, state: status.state, result: status.result, receipts: { action: "status", id, after: 0 } };
+    }
+  }
+
+  queryJobs(input: JobQuery, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+    if (!context.conversationId) return Promise.reject(new Error("Jobs require a conversation"));
+    // Deliberately bypass tail: a running program must never block status/wait/cancel.
+    return this.jobs.query(input, context.conversationId, signal);
+  }
+
+  private async boundPage(tabId: number, state: BrowserState): Promise<any> {
+    const tab = await this.chromeApi.tabs.get(tabId);
+    if (!tab || tab.windowId !== state.windowId) throw new Error("CommandError[invalid-tab-id]: Tab is outside the bound window");
+    return this.pageFor({ windowId: state.windowId, tabId });
+  }
+
+  private async programPage(raw: any, scope: ProgramScope): Promise<any> {
+    const page = scope.wrap(raw);
+    const call = (name: string, invoke: () => Promise<unknown>) => scope.call(name, invoke);
+    const keyboard = {
+      press: (key: string) => page.press(key), insertText: (text: string) => page.insertText(text),
+      down: (key: string) => call("keyboard.down", () => this.automation.keyState(raw.tabId, "keydown", key)),
+      up: (key: string) => call("keyboard.up", () => this.automation.keyState(raw.tabId, "keyup", key)),
     };
-    (globalThis as Record<string, unknown>)[RESULT_READER_KEY] = (id: number, selection?: { path?: string | Array<string | number>; offset?: number; limit?: number }) => this.logger?.result(id, selection, this.activeContext.conversationId ?? "")
-      ?? Promise.reject(new Error("Tool result log is unavailable"));
+    const mouse = {
+      move: (x: number, y: number) => call("mouse.move", () => this.bridgeCommand({ tabId: raw.tabId }, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y })),
+      down: (button = "left") => call("mouse.down", () => this.bridgeCommand({ tabId: raw.tabId }, "Input.dispatchMouseEvent", { type: "mousePressed", button, clickCount: 1 })),
+      up: (button = "left") => call("mouse.up", () => this.bridgeCommand({ tabId: raw.tabId }, "Input.dispatchMouseEvent", { type: "mouseReleased", button, clickCount: 1 })),
+      wheel: (dx: number, dy: number) => call("mouse.wheel", () => this.bridgeCommand({ tabId: raw.tabId }, "Input.dispatchMouseEvent", { type: "mouseWheel", deltaX: dx, deltaY: dy })),
+    };
+    return new Proxy(page, { get: (target, key) => {
+      if (key === "snapshot") return () => scope.call("page.snapshot", () => raw.inspect({ budget: Number.MAX_SAFE_INTEGER }), false);
+      if (key === "observe") return (detail = "semantic", since?: string) => detail === "visual" ? call("page.observe.visual", async () => {
+        if (!this.activeContext.visualEnabled) throw new Error("AutomationError[visual-unavailable]: Image input unavailable");
+        return this.captureScreenshot(raw, {});
+      }) : scope.call("page.observe", () => raw.inspect({ since }), false);
+      if (key === "inspect") return (options = {}, region?: unknown) => scope.call("page.inspect", () => raw.inspect(options, scope.unwrap(region)), false);
+      if (key === "waitForEvent") return (kind: "dialog" | "popup" | "download" | "filechooser") => scope.call("page.waitForEvent", () => raw.waitForEvent(kind).then(async (event: any) => {
+        if (kind === "popup") return this.programPage(await this.boundPage(event.tabId, await this.currentBrowserState()), scope);
+        return event && typeof event === "object" && (event.setFiles || event.accept) ? scope.wrap(event, "event") : event;
+      }), false, false, true);
+      if (key === "keyboard") return keyboard;
+      if (key === "mouse") return mouse;
+      if (key === "screenshot") return (options = {}) => call("page.screenshot", async () => {
+        if (!this.activeContext.visualEnabled) throw new Error("AutomationError[visual-unavailable]: Image input unavailable");
+        return this.captureScreenshot(raw, options);
+      });
+      if (key === "pdf") return (options: { filename?: string; save?: boolean } = {}) => call("page.pdf", () => this.capturePdf(raw.tabId, options.filename, options.save));
+      if (key === "drop") return (target: unknown, options: { files?: any[]; data?: Record<string, string> }) => call("page.drop", async () => {
+        const files = await this.normalizeFiles(options.files ?? []);
+        return this.locatorFor(raw, target).evaluate(`(el, payload) => {
+          const transfer = new DataTransfer();
+          for (const file of payload.files) { const bytes = file.base64 ? Uint8Array.from(atob(file.base64), c => c.charCodeAt(0)) : new TextEncoder().encode(file.text || ""); transfer.items.add(new File([bytes], file.name, {type:file.mimeType || "application/octet-stream"})); }
+          for (const [type, value] of Object.entries(payload.data)) transfer.setData(type, value);
+          el.dispatchEvent(new DragEvent("drop", { bubbles:true, cancelable:true, dataTransfer:transfer }));
+        }`, { files, data: options.data ?? {} });
+      });
+      return Reflect.get(target, key);
+    } });
   }
 
-  execute(input: ChromeToolInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
-    const task = this.tail.then(() => this.executeTimed(input, signal, context));
-    this.tail = task.then(() => undefined, () => undefined);
-    return task;
+  private programCapabilities(page: any, state: BrowserState, scope: ProgramScope) {
+    const call = (name: string, effect: boolean, invoke: () => unknown | Promise<unknown>) => scope.call(name, invoke, effect);
+    const scripts = Object.fromEntries(["list", "read", "create", "edit", "setEnabled"].map((method) => [method, (...args: any[]) => call(`scripts.${method}`, !["list", "read"].includes(method),
+      () => callUserScript(method, method === "edit" ? [{ id: args[0], changes: args[1] }] : method === "setEnabled" ? [{ id: args[0], enabled: args[1] }] : args, scope.signal, () => scope.dispatched()))]));
+    const browser = {
+      page: (tabId: number) => call("browser.page", false, async () => this.programPage(await this.boundPage(tabId, state), scope)),
+      tabs: {
+        list: () => call("tabs.list", false, () => this.tabsOf(state)),
+        open: (url?: string) => call("tabs.open", true, async () => { await scope.dispatched(); const tab = await this.chromeApi.tabs.create({ windowId: state.windowId, active: true, ...(url ? { url } : {}) }); return this.programPage(await this.boundPage(tab.id!, state), scope); }),
+        select: (tabId: number) => call("tabs.select", true, async () => { await this.boundPage(tabId, state); await scope.dispatched(); return this.selectTab(state, tabId); }),
+        close: (tabId: number) => call("tabs.close", true, async () => { await this.boundPage(tabId, state); await scope.dispatched(); return this.closeTab(state, tabId); }),
+      },
+      scripts,
+      runIn: (target: PageExecutionTarget, code: string) => call("browser.runIn", true, async () => {
+        if (target.kind !== "page" || target.tabId === undefined || "targetId" in target || "sessionId" in target) throw new Error("runIn supports explicit page tabId and MAIN/ISOLATED/USER_SCRIPT worlds; use frameLocator for frame interaction");
+        if (!["MAIN", "ISOLATED", "USER_SCRIPT"].includes(target.world ?? "")) throw new Error("runIn requires an explicit MAIN, ISOLATED, or USER_SCRIPT execution world");
+        await this.boundPage(target.tabId, state);
+        if (target.world !== "USER_SCRIPT" && (target.documentId || target.frameId !== undefined && target.frameId !== 0)) throw new Error("MAIN/ISOLATED runIn supports the root document; use USER_SCRIPT documentId/frameId or frameLocator.evaluate for frames");
+        await scope.dispatched();
+        return this.executePageWorld(target, code, scope.signal, this.activeContext);
+      }),
+    };
+    const fetchResult = async (response: Response) => ({ url: response.url, status: response.status, ok: response.ok, headers: Object.fromEntries(response.headers), body: await response.text() });
+    const net = {
+      fetch: (input: { context: "page" | "extension"; url: string; tabId?: number; init?: RequestInit }) => call(`net.fetch.${input.context}`, true, async () => {
+        if (input.context === "extension") { await scope.dispatched(); return fetchResult(await fetch(input.url, { ...input.init, signal: scope.signal })); }
+        if (input.context !== "page") throw new Error("net.fetch requires explicit page or extension context");
+        const raw = await this.boundPage(input.tabId ?? page.tabId, state);
+        await scope.dispatched();
+        return raw.evaluate(`async payload => { const response = await fetch(payload.url, payload.init); return { url:response.url,status:response.status,ok:response.ok,headers:Object.fromEntries(response.headers),body:await response.text() }; }`, { url: input.url, init: input.init });
+      }),
+      requests: (options: Record<string, any> = {}, tabId = page.tabId) => call("net.requests", false, async () => { await this.boundPage(tabId, state); return this.diagnostics.requests(tabId, options); }),
+      request: (index: number, tabId = page.tabId) => call("net.request", false, async () => { await this.boundPage(tabId, state); return this.readRequest(tabId, index); }),
+      responseBody: (index: number, tabId = page.tabId) => call("net.responseBody", false, async () => { await this.boundPage(tabId, state); return this.readRequest(tabId, index, true); }),
+      console: (options: Record<string, any> = {}, tabId = page.tabId) => call("net.console", false, async () => { await this.boundPage(tabId, state); return this.diagnostics.console(tabId, options); }),
+    };
+    const protocol = { sessions: (tabId = page.tabId) => call("protocol.sessions", false, async () => {
+      await this.boundPage(tabId,state); return this.automation.observationDebuggees(tabId);
+    }), send: (target: { tabId: number; sessionId?: string }, method: string, params?: object) => call(`protocol.${method}`, true, async () => {
+      if (!/^(Page|DOM|Runtime|Accessibility|Network|Log|Input)\.[A-Za-z]+$/.test(method)) throw new Error("Unsupported CDP domain; allowed: Page, DOM, Runtime, Accessibility, Network, Log, Input");
+      await this.boundPage(target.tabId, state);
+      if (target.sessionId && !(await this.automation.observationDebuggees(target.tabId)).some((item) => item.sessionId === target.sessionId)) throw new Error("CDP session is not owned by the selected tab");
+      await scope.dispatched();
+      return this.bridgeCommand(target, method, params);
+    }) };
+    const artifacts = {
+      read: (id: number, selection = {}) => call("artifacts.read", false, () => this.logger!.result(id, selection, this.activeContext.conversationId)),
+      save: (id: number, filename?: string) => call("artifacts.save", true, () => this.saveArtifact(id, filename)),
+      text: (filename: string, text: string, mimeType = "text/plain", save = false) => call("artifacts.text", save, () => this.storeText(filename, text, mimeType, save)),
+    };
+    return { page, browser, net, protocol, artifacts, signal: scope.signal,
+      emit: (value: unknown) => scope.emit(value), check: (condition: unknown, message?: string) => scope.check(condition, message), sleep: (ms: number) => scope.sleep(ms) };
   }
 
-  executeBrowser(input: BrowserInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
-    const progress: BatchProgress = { completed: [], index: 0, startedAt: performance.now() };
-    return this.enqueueAbortable(
-      (combined) => this.executeBrowserTimed(input, combined, context, progress), signal,
-      input.mode === "act" ? input.timeoutMs ?? 10_000 : input.mode === "result" ? undefined : input.timeoutMs,
-      input.mode !== "result" && input.mode !== "observe",
-    ).catch((error) => {
-      if (input.mode !== "act") throw error;
-      const failure = this.structuredError(error);
-      return { ok: false, error: failure, completed: [...progress.completed], failed: progress.index < input.steps.length ? { index: progress.index, step: input.steps[progress.index], error: failure } : null, notRun: input.steps.slice(progress.index + 1), elapsedMs: performance.now() - progress.startedAt };
-    });
-  }
-
-  /** Internal compatibility path for restored tests/conversations; it is not model-visible. */
-  executePage(input: { code: string; tabId?: number; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
-    return this.executeBrowser({ mode: "run", code: `const page = await browser.page(${input.tabId === undefined ? "undefined" : input.tabId});\n${input.code}`, timeoutMs: input.timeoutMs }, signal, context);
-  }
-
-  executeCommand(name: CommandName, input: Record<string, any>, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
-    if (!COMMAND_NAMES.includes(name)) return Promise.reject(new Error(`CommandError[unsupported]: ${name}`));
-    return this.enqueueAbortable(
-      (combined) => this.executeCommandTimed(name, input, combined, context), signal,
-      input.timeoutMs ?? (this.commandNeedsTimeout(name) ? 10_000 : undefined),
-      !["snapshot", "find", "tab-list", "requests", "request", "request-headers", "request-body", "response-headers", "response-body"].includes(name),
-    );
-  }
-
-  private enqueueAbortable<T>(run: (signal?: AbortSignal) => Promise<T>, signal?: AbortSignal, timeoutMs?: number, mayHaveEffect = true): Promise<T> {
+  private enqueueAbortable<T>(run: (signal?: AbortSignal) => Promise<T>, signal?: AbortSignal, timeoutMs?: number, mayHaveEffect = true, awaitCleanup = false): Promise<T> {
     const previous = this.tail;
     let operationStarted = false;
+    let cleanup: Promise<T> | undefined;
     let release!: () => void;
     this.tail = new Promise<void>((resolve) => { release = resolve; });
     const started = previous.then(() => {
@@ -379,157 +462,23 @@ export class ChromeExecutor {
       const timer = timeout ? setTimeout(() => timeout.abort(new DOMException(`Operation timed out after ${timeoutMs}ms`, "TimeoutError")), timeoutMs) : undefined;
       const combined = timeout ? signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal : signal;
       const clearDeadline = () => { if (timer !== undefined) clearTimeout(timer); };
-      operationStarted = !combined?.aborted;
-      const work = run(combined);
+      if (combined?.aborted) { clearDeadline(); release(); combined.throwIfAborted(); }
+      operationStarted = true;
+      const work = Promise.resolve().then(() => run(combined));
+      cleanup = work;
       const done = () => { clearDeadline(); release(); };
       void work.then(done, done);
       return { work, combined };
     });
-    return this.awaitAbort(started, signal).catch((error) => {
+    return this.awaitAbort(started, signal).catch(async (error) => {
+      if (awaitCleanup && operationStarted) await cleanup?.catch(() => undefined);
       if (operationStarted && mayHaveEffect && signal?.aborted) Object.assign(error, { effectUnknown: true });
       throw error;
-    }).then(({ work, combined }) => this.awaitAbort(work, combined, mayHaveEffect));
-  }
-
-  private async executeCommandTimed(name: CommandName, input: Record<string, any>, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
-    try {
-      if (this.disposed) throw new Error("Chrome executor has been disposed");
-      throwIfAborted(signal);
-      this.automation.setContext({ ...context, signal });
-      this.activeSignal = signal;
-      this.activeContext = context;
-      this.diagnostics.bind(context);
-      const result = await this.executeCommandNow(name, input);
-      throwIfAborted(signal);
-      return result;
-    } catch (error) {
-      if (signal?.aborted) { await this.stopBrowserOperations(); }
-      this.recordExecutionFailure(error, { code: name }, context);
-      throw error;
-    } finally {
-      this.activeSignal = undefined;
-      this.activeContext = {};
-      await this.automation.clearContext();
-    }
-  }
-
-  private commandNeedsTimeout(name: CommandName): boolean {
-    return name !== "artifact-save";
-  }
-
-  private async executeCommandNow(name: CommandName, input: Record<string, any>): Promise<unknown> {
-    throwIfAborted(this.activeSignal);
-    if (name === "artifact-save") return this.saveArtifact(input.id, input.filename);
-    const state = await this.currentBrowserState();
-    throwIfAborted(this.activeSignal);
-    if (name === "tab-list") return this.tabsOf(state);
-    if (name === "tab-new") {
-      const tab = await this.chromeApi.tabs.create({ windowId: state.windowId, active: true, ...(input.url ? { url: input.url } : {}) });
-      state.tabId = tab.id;
-      return this.tabsOf(state);
-    }
-    if (name === "tab-select") return this.selectTab(state, input.index, input.tabId);
-    if (name === "tab-close") return this.closeTab(state, input.index, input.tabId);
-
-    const page = await this.pageFor(state);
-    throwIfAborted(this.activeSignal);
-    const tabId = page.tabId;
-    if (name === "goto") return this.withPageStatus(state, await page.goto(input.url));
-    if (name === "go-back") return this.withPageStatus(state, await page.goBack());
-    if (name === "go-forward") return this.withPageStatus(state, await page.goForward());
-    if (name === "reload") return this.withPageStatus(state, await page.reload());
-    if (name === "type") {
-      await page.insertText(input.text);
-      if (input.submit) { throwIfAborted(this.activeSignal); await page.press("Enter"); }
-      return this.withPageStatus(state, { performed: true });
-    }
-    if (name === "press") return this.withPageStatus(state, await page.press(input.key));
-    if (name === "keydown" || name === "keyup") {
-      await this.automation.keyState(tabId, name, input.key);
-      return this.withPageStatus(state, { performed: true });
-    }
-    if (["mousemove", "mousedown", "mouseup", "mousewheel"].includes(name)) {
-      const held = this.inputState(tabId);
-      const mask = [...held.buttons].reduce((result, button) => result | (button === "left" ? 1 : button === "right" ? 2 : 4), 0);
-      const params = name === "mousemove" ? { type: "mouseMoved", x: input.x, y: input.y, buttons: mask }
-        : name === "mousedown" ? { type: "mousePressed", x: held.x, y: held.y, button: input.button ?? "left", buttons: mask | (input.button === "right" ? 2 : input.button === "middle" ? 4 : 1), clickCount: input.clickCount ?? 1 }
-        : name === "mouseup" ? { type: "mouseReleased", x: held.x, y: held.y, button: input.button ?? "left", buttons: mask & ~(input.button === "right" ? 2 : input.button === "middle" ? 4 : 1), clickCount: input.clickCount ?? 1 }
-        : { type: "mouseWheel", x: held.x, y: held.y, buttons: mask, deltaX: input.dx, deltaY: input.dy };
-      await this.bridgeCommand({ tabId }, "Input.dispatchMouseEvent", params);
-      return this.withPageStatus(state, { performed: true });
-    }
-    if (["click", "dblclick", "hover", "fill", "drag", "drop", "select", "upload", "check", "uncheck"].includes(name)) {
-      return this.executeInteraction(name, input, page, state);
-    }
-    if (name === "snapshot") {
-      let result = await page.snapshot();
-      if (input.depth !== undefined) result = { ...result, snapshot: String(result.snapshot).split("\n").filter((line) => (line.match(/^\s*/)?.[0].length ?? 0) / 2 <= input.depth).join("\n") };
-      if (input.target) {
-        const text = await this.locatorFor(page, input.target).innerText();
-        result = { ...result, snapshot: text };
-      }
-      if (input.boxes) {
-        const refs = [...String(result.snapshot).matchAll(/\[ref=(e\d+)\]/g)].map((match) => match[1]!);
-        const entries = await Promise.all(refs.map(async (ref) => [ref, await page.ref(ref).evaluate("el => { const r = el.getBoundingClientRect(); return {x:r.x,y:r.y,width:r.width,height:r.height}; }")]));
-        result = { ...result, boxes: Object.fromEntries(entries) };
-      }
-      if (input.filename || input.save) return { ...result, artifact: await this.storeText(input.filename ?? timestamped("snapshot", "yaml"), result.snapshot, "text/yaml", input.save) };
-      return result;
-    }
-    if (name === "find") {
-      const snapshot = await page.snapshot();
-      const needle = String(input.text ?? "").toLocaleLowerCase();
-      const lines = String(snapshot.snapshot).split("\n");
-      const matches = needle ? lines.flatMap((line, i) => line.toLocaleLowerCase().includes(needle) ? lines.slice(Math.max(0, i - 1), i + 2) : []) : lines;
-      return { url: snapshot.url, title: snapshot.title, matches: [...new Set(matches)] };
-    }
-    if (name === "eval") {
-      const value = input.target ? await this.locatorFor(page, input.target).evaluate(input.func) : await page.evaluate(input.func);
-      if (input.filename || input.save) return { value: null, artifact: await this.storeText(input.filename ?? timestamped("evaluation", "json"), typeof value === "string" ? value : JSON.stringify(value, null, 2), "application/json", input.save) };
-      return value;
-    }
-    if (name === "dialog-accept" || name === "dialog-dismiss") {
-      const dialog = this.dialogs.get(tabId);
-      if (!dialog) throw new Error("AutomationError[no-dialog]: No dialog is open");
-      await this.bridgeCommand({ tabId }, "Page.handleJavaScriptDialog", { accept: name === "dialog-accept", ...(input.prompt === undefined ? {} : { promptText: input.prompt }) });
-      this.dialogs.delete(tabId);
-      return { handled: true, dialog };
-    }
-    if (name === "screenshot") return this.captureScreenshot(page, input);
-    if (name === "pdf") return this.capturePdf(tabId, input.filename, input.save);
-    if (["requests", "request", "request-headers", "request-body", "response-headers", "response-body"].includes(name)) return this.networkCommand(name, tabId, input);
-    if (name === "console") return this.consoleCommand(tabId, input);
-    if (name === "run-code") return this.runPageCode(tabId, input.code, input.save);
-    throw new Error(`CommandError[unsupported]: ${name}`);
-  }
-
-  private async executeInteraction(name: string, input: Record<string, any>, page: any, state: BrowserState): Promise<unknown> {
-    if (name === "drag") return this.withPageStatus(state, await this.locatorFor(page, input.startTarget).dragTo(this.locatorFor(page, input.endTarget)));
-    const subject = this.locatorFor(page, input.target ?? "input[type=file]");
-    let result: unknown;
-    if (name === "click") result = await subject.click({ button: input.button, modifiers: input.modifiers });
-    else if (name === "dblclick") result = await subject.dblclick({ button: input.button, modifiers: input.modifiers });
-    else if (name === "hover") result = await subject.hover();
-    else if (name === "fill") { result = await subject.fill(input.text); if (input.submit) { throwIfAborted(this.activeSignal); await subject.press("Enter"); } }
-    else if (name === "select") result = await subject.selectOption(input.values);
-    else if (name === "upload") { const files = await this.normalizeFiles(input.files); throwIfAborted(this.activeSignal); result = input.target ? await subject.setInputFiles(files) : await page.upload(files); }
-    else if (name === "check") result = await subject.check();
-    else if (name === "uncheck") result = await subject.uncheck();
-    else if (name === "drop") {
-      const normalized = await this.normalizeFiles(input.files ?? []);
-      throwIfAborted(this.activeSignal);
-      result = await subject.evaluate(`function(el, payload){
-        const transfer = new DataTransfer();
-        for (const file of payload.files) { const bytes = file.base64 ? Uint8Array.from(atob(file.base64), c => c.charCodeAt(0)) : new TextEncoder().encode(file.text || ""); transfer.items.add(new File([bytes], file.name, {type:file.mimeType || "application/octet-stream"})); }
-        for (const [type, value] of Object.entries(payload.data || {})) transfer.setData(type, value);
-        el.dispatchEvent(new DragEvent("drop", {bubbles:true, cancelable:true, dataTransfer:transfer}));
-      }`, { files: normalized, data: input.data ?? {} });
-    }
-    return this.withPageStatus(state, result);
+    }).then(({ work, combined }) => awaitCleanup ? work : this.awaitAbort(work, combined, mayHaveEffect));
   }
 
   private locatorFor(page: any, raw: unknown): any {
-    const target = parseCommandTarget(raw);
+    const target = parseLocatorTarget(raw);
     if ("point" in target) return { click: (options?: unknown) => page.point(target.point.observationId, target.point.x, target.point.y, "click", options), dblclick: (options?: unknown) => page.point(target.point.observationId, target.point.x, target.point.y, "dblclick", options), hover: () => page.point(target.point.observationId, target.point.x, target.point.y, "hover") };
     if ("ref" in target) return page.ref(target.ref);
     let scope = target.frame ? page.frameLocator(target.frame.value) : page;
@@ -586,21 +535,19 @@ export class ChromeExecutor {
     return tabs.map((tab, index) => ({ index, current: tab.id === state.tabId || !state.tabId && Boolean(tab.active), id: tab.id, title: tab.title, url: tab.url }));
   }
 
-  private async selectTab(state: BrowserState, index?: number, tabId?: number): Promise<unknown> {
+  private async selectTab(state: BrowserState, tabId: number): Promise<unknown> {
     const tabs = await this.chromeApi.tabs.query({ windowId: state.windowId });
-    if ((index === undefined) === (tabId === undefined)) throw new Error("CommandError[invalid-tab-target]: Exactly one of tabId or index is required");
-    const tab = tabId === undefined ? tabs[index!] : tabs.find((item) => item.id === tabId);
-    if (!tab?.id) throw new Error(`CommandError[invalid-tab-${tabId === undefined ? "index" : "id"}]: ${tabId ?? index}`);
+    const tab = tabs.find((item) => item.id === tabId);
+    if (!tab?.id) throw new Error(`CommandError[invalid-tab-id]: ${tabId}`);
     await this.chromeApi.tabs.update(tab.id, { active: true });
     state.tabId = tab.id;
     return this.tabsOf(state);
   }
 
-  private async closeTab(state: BrowserState, index?: number, tabId?: number): Promise<unknown> {
+  private async closeTab(state: BrowserState, tabId: number): Promise<unknown> {
     const tabs = await this.chromeApi.tabs.query({ windowId: state.windowId });
-    if (index !== undefined && tabId !== undefined) throw new Error("CommandError[invalid-tab-target]: Use tabId or index, not both");
-    const tab = tabId !== undefined ? tabs.find((item) => item.id === tabId) : index === undefined ? tabs.find((item) => item.id === state.tabId) ?? tabs.find((item) => item.active) : tabs[index];
-    if (!tab?.id) throw new Error(`CommandError[invalid-tab-${tabId === undefined ? "index" : "id"}]: ${String(tabId ?? index)}`);
+    const tab = tabs.find((item) => item.id === tabId);
+    if (!tab?.id) throw new Error(`CommandError[invalid-tab-id]: ${tabId}`);
     await this.detachTabRuntime(tab.id);
     await this.chromeApi.tabs.remove(tab.id);
     const remaining = await this.chromeApi.tabs.query({ windowId: state.windowId });
@@ -626,13 +573,6 @@ export class ChromeExecutor {
     return page;
   }
 
-  private async withPageStatus(state: BrowserState, result: unknown): Promise<unknown> {
-    const page = await this.pageFor(state);
-    const status = { url: await page.url(), title: await page.title(), modal: state.tabId === undefined ? undefined : this.dialogs.get(state.tabId) };
-    const tabs = await this.tabsOf(state);
-    return { result, page: status, ...(tabs.length > 1 ? { tabs } : {}) };
-  }
-
   private async storeArtifact(filename: string, base64: string, mimeType: string, save = false): Promise<ArtifactRef> {
     if (!this.logger || !this.activeContext.conversationId) throw new Error("CommandError[artifact-log-unavailable]: The canonical event log is unavailable");
     const byteLength = base64ByteLength(base64);
@@ -646,6 +586,7 @@ export class ChromeExecutor {
     });
     if (!event) throw new Error("CommandError[artifact-log-unavailable]: The canonical event log stopped accepting events");
     const artifact = { id: event.id, filename, mimeType, byteLength, saved: false };
+    if (save && this.programScope) await this.programScope.dispatched();
     const downloadId = save ? await downloadArtifact(this.chromeApi, artifact, base64, this.activeSignal) : undefined;
     return { id: event.id, filename, mimeType, byteLength, saved: save, ...(downloadId === undefined ? {} : { downloadId }) };
   }
@@ -666,6 +607,11 @@ export class ChromeExecutor {
     const filename = requested ?? stored.filename;
     throwIfAborted(this.activeSignal);
     const artifact = { id, filename, mimeType: stored.mimeType, byteLength: base64ByteLength(stored.base64), saved: false };
+    const referenced = await this.logger.append({ type: "browser.artifact.used", conversationId: this.activeContext.conversationId,
+      toolCallId: this.activeContext.toolCallId, ...this.activeContext.logIdentity, content: { artifactId: id } });
+    if (!referenced) throw new DOMException("Could not persist artifact ownership", "AbortError");
+    throwIfAborted(this.activeSignal);
+    if (this.programScope) await this.programScope.dispatched();
     const downloadId = await downloadArtifact(this.chromeApi, artifact, stored.base64, this.activeSignal);
     return { artifact: { id, filename, mimeType: stored.mimeType, byteLength: base64ByteLength(stored.base64), saved: true, downloadId } };
   }
@@ -679,6 +625,7 @@ export class ChromeExecutor {
         return { name: file.name, mimeType: file.mimeType || (typeof stored.mimeType === "string" ? stored.mimeType : "application/octet-stream"), base64: stored.base64 };
       }
       if (!file.url) return file;
+      if (this.programScope) await this.programScope.dispatched();
       const response = await fetch(file.url, { signal: this.activeSignal });
       if (!response.ok) throw new Error(`Could not fetch upload URL: ${response.status}`);
       const bytes = new Uint8Array(await response.arrayBuffer());
@@ -704,7 +651,7 @@ export class ChromeExecutor {
     const mediaType = `image/${format}`;
     const filename = input.filename ?? timestamped("page", format === "jpeg" ? "jpg" : format);
     const artifact = await this.storeArtifact(filename, captured.data, mediaType, input.save);
-    return { observationId: observation.observationId, viewport: observation.viewport, artifact, screenshot: { mediaType, artifactId: artifact.id, width: captured.width, height: captured.height, scale: captured.scale, origin: captured.origin }, page: { url: await page.url(), title: await page.title() } };
+    return { observationId: observation.observationId, tabId: page.tabId, documentId: observation.documentId, viewport: observation.viewport, artifact, screenshot: { mediaType, artifactId: artifact.id, width: captured.width, height: captured.height, scale: captured.scale, origin: captured.origin }, page: { url: observation.url, title: observation.title } };
   }
 
   private async capturePdf(tabId: number, requested?: string, save = false): Promise<unknown> {
@@ -738,36 +685,15 @@ export class ChromeExecutor {
     }
   }
 
-  private async networkCommand(name: string, tabId: number, input: Record<string, any>): Promise<unknown> {
-    if (name === "requests") return this.diagnostics.requests(tabId, input);
-    const record = await this.diagnostics.request(tabId, Number(input.index));
-    if (!record) throw new Error(`CommandError[invalid-request-index]: ${String(input.index)}`);
-    let value: unknown;
-    if (name === "request-headers") value = record.requestHeaders;
-    else if (name === "request-body") value = record.requestBody ?? null;
-    else if (name === "response-headers") value = record.responseHeaders ?? {};
-    else {
-      let body: unknown = null;
-      try {
-        const response = await this.bridgeCommand(record.debuggee, "Network.getResponseBody", { requestId: record.requestId });
-        body = response.base64Encoded ? { base64: response.body } : response.body;
-      } catch (error) { body = { unavailable: error instanceof Error ? error.message : String(error) }; }
-      value = name === "response-body" ? body : { ...record, responseBody: body };
-    }
-    if (input.filename || input.save) return { artifact: await this.storeText(input.filename ?? timestamped(name, "json"), typeof value === "string" ? value : JSON.stringify(value, null, 2), "application/json", input.save) };
-    return value;
-  }
-
-  private consoleCommand(tabId: number, input: Record<string, any>): Promise<unknown> {
-    return this.diagnostics.console(tabId, input);
-  }
-
-  private async runPageCode(tabId: number, code: string, save = false): Promise<unknown> {
-    if (!/^\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>/.test(code) && !/^\s*(?:async\s+)?function\b/.test(code)) {
-      throw new Error("CommandError[invalid-code]: run-code requires one function expression receiving page");
-    }
-    return this.executeNow({ code: `const page = await browser.page(${tabId});
-return await (async (page, chrome, browser, globalThis, self, window, document, location, __surfWaxBrowser, __surfWaxDebugger, __surfWaxResult, __surfWaxResults) => (${code})(page))(page);`, target: { kind: "extension" }, save }, this.activeSignal, { ...this.activeContext, allowDownloads: save });
+  private async readRequest(tabId: number, index: number, bodyOnly = false): Promise<unknown> {
+    const record = await this.diagnostics.request(tabId, index);
+    if (!record) throw new Error(`CommandError[invalid-request-index]: ${index}`);
+    let body: unknown;
+    try {
+      const response = await this.bridgeCommand(record.debuggee, "Network.getResponseBody", { requestId: record.requestId });
+      body = response.base64Encoded ? { base64: response.body } : response.body;
+    } catch (error) { body = { unavailable: error instanceof Error ? error.message : String(error) }; }
+    return bodyOnly ? body : { ...record, responseBody: body };
   }
 
   private async detachTabRuntime(tabId: number): Promise<void> {
@@ -783,6 +709,7 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
   private async stopBrowserOperations(): Promise<void> {
     if (this.endingRun) return this.endingRun;
     const cleanup = (async () => {
+      await Promise.all([...this.programEvaluations.values()].map(({debuggee}) => this.bridgeCommand(debuggee,"Runtime.terminateExecution").catch(() => undefined)));
       const tabs = new Set([...this.networkEnabled, ...this.heldInput.keys()]);
       await Promise.all([...tabs].map((tabId) => this.detachTabRuntime(tabId)));
       await this.automation.abortSessions();
@@ -793,206 +720,33 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
   }
 
   async endRun(): Promise<void> {
+    await this.jobs.settle();
     await this.stopBrowserOperations();
     this.browserState = undefined;
   }
 
-  private async executeTimed(input: ChromeToolInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
-    const timeout = input.timeoutMs ? new AbortController() : undefined;
-    const timer = timeout ? setTimeout(() => timeout.abort(new DOMException(`Operation timed out after ${input.timeoutMs}ms`, "TimeoutError")), input.timeoutMs) : undefined;
-    const combined = timeout ? signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal : signal;
-    try { return await this.executeNow(input, combined, context); }
-    catch (error) {
-      this.recordExecutionFailure(error, input, context);
-      throw error;
-    }
-    finally { if (timer !== undefined) clearTimeout(timer); }
-  }
-
-  private async executeBrowserTimed(input: BrowserInput, signal?: AbortSignal, context: ExecutionContext = {}, progress?: BatchProgress): Promise<unknown> {
-    if (input.mode === "result") {
-      throwIfAborted(signal);
-      if (!this.logger) throw new Error("Tool result log is unavailable");
-      return this.logger.result(input.id, { path: input.path, offset: input.offset, limit: input.limit }, context.conversationId ?? "");
-    }
-    try {
-      if (this.disposed) throw new Error("Chrome executor has been disposed");
-      throwIfAborted(signal);
-      this.automation.setContext({ ...context, signal });
-      this.activeSignal = signal;
-      this.activeContext = context;
-      this.diagnostics.bind(context);
-      if (input.mode === "run") return await this.executeNow({ code: input.code, target: input.target ?? { kind: "extension" }, timeoutMs: input.timeoutMs }, signal, context);
-      const state = await this.currentBrowserState();
-      if (input.tabId !== undefined) {
-        const tab = await this.chromeApi.tabs.get(input.tabId);
-        if (tab.windowId !== state.windowId) throw new Error("CommandError[invalid-tab-id]: Tab is outside the bound window");
-        state.tabId = input.tabId;
-      }
-      const page = await this.pageFor(state);
-      if (input.mode === "observe") {
-        if (input.detail === "visual" && !context.visualEnabled) throw new Error("AutomationError[visual-unavailable]: Image input is disabled or unsupported by the selected model");
-        const result = await page.observe(input.detail === "visual" || input.detail === "auto" && context.visualEnabled ? input.detail : "semantic", input.since);
-        if (!context.visualEnabled && (result as any).screenshot) throw new Error("AutomationError[visual-unavailable]: Image input is disabled or unsupported by the selected model");
-        return !context.visualEnabled && (input.detail ?? "auto") === "auto" && !String((result as any).snapshot).includes("[ref=")
-          ? { ...result, visual: { available: false, error: { code: "visual-unavailable", message: "Image input is disabled, unsupported, or unknown for the selected model" } } }
-          : result;
-      }
-      if (input.observationId) await page.ensureObservation(input.observationId);
-      return await this.executeSteps(page, input.steps, input.observationId, context.visualEnabled ?? false, progress);
-    } catch (error) {
-      if (signal?.aborted) { await this.stopBrowserOperations(); }
-      const failure = signal?.reason instanceof DOMException && signal.reason.name === "TimeoutError"
-        ? new Error(`AutomationError[timeout]: ${JSON.stringify({ timeoutMs: input.timeoutMs ?? 10_000 })}`) : error;
-      this.recordExecutionFailure(failure, input, context);
-      return { ok: false, error: this.structuredError(failure), completed: [], failed: null, notRun: input.mode === "act" ? input.steps : [] };
-    } finally {
-      this.activeSignal = undefined;
-      this.activeContext = {};
-      await this.automation.clearContext();
-    }
-  }
-
-  private async executeSteps(page: any, steps: BrowserStep[], observationId: string | undefined, visualEnabled: boolean, progress?: BatchProgress): Promise<unknown> {
-    const startedAt = performance.now();
-    const completed: Array<{ index: number; type: BrowserStep["type"]; result: unknown }> = progress?.completed ?? [];
-    for (let index = 0; index < steps.length; index += 1) {
-      const step = steps[index]!;
-      if (progress) progress.index = index;
-      try {
-        throwIfAborted(this.activeSignal);
-        completed.push({ index, type: step.type, result: await this.executeStep(page, step, observationId) });
-        if (this.logger && this.activeContext.conversationId && this.activeContext.toolCallId) {
-          const saved = await this.logger.append({ type: "tool.progress", conversationId: this.activeContext.conversationId,
-            ...(this.activeContext.logIdentity ?? { toolCallId: this.activeContext.toolCallId }),
-            content: { nextIndex: index + 1, steps }, output: { completed: [...completed], elapsedMs: performance.now() - startedAt } });
-          if (!saved) throw new DOMException("Could not persist the completed act step", "AbortError");
-        }
-      } catch (error) {
-        if (this.activeSignal?.aborted) await this.stopBrowserOperations();
-        let observation: unknown;
-        if (!this.activeSignal?.aborted) try { observation = await page.observe(visualEnabled ? "auto" : "semantic"); } catch { /* Preserve the original failure. */ }
-        return { ok: false, completed, failed: { index, step, error: this.structuredError(error) }, notRun: steps.slice(index + 1), elapsedMs: performance.now() - startedAt, ...(observation ? { observation } : {}) };
-      }
-    }
-    if (progress) progress.index = steps.length;
-    return { ok: true, completed, elapsedMs: performance.now() - startedAt };
-  }
-
-  private async executeStep(page: any, step: BrowserStep, defaultObservationId?: string): Promise<unknown> {
-    if (step.type === "goto") return page.goto(step.url);
-    if (step.type === "press" || step.type === "insertText") {
-      const subject = step.target ? this.locatorFor(page, step.target) : page;
-      return step.type === "press" ? subject.press(step.key) : step.target ? subject.pressSequentially(step.text) : page.insertText(step.text);
-    }
-    if (step.type === "expect") {
-      if (step.url) await page.waitForURL(step.url);
-      if (!step.target) return { matched: true };
-      const target = this.locatorFor(page, step.target);
-      if (step.state) await target.waitFor({ state: step.state });
-      if (step.text !== undefined && !String(await target.innerText()).includes(step.text)) throw new Error(`AutomationError[expectation-failed]: Expected text ${JSON.stringify(step.text)}`);
-      if (step.value !== undefined && await target.inputValue() !== step.value) throw new Error(`AutomationError[expectation-failed]: Expected value ${JSON.stringify(step.value)}`);
-      return { matched: true };
-    }
-    if (step.type === "drag") return this.locatorFor(page, step.from).dragTo(this.locatorFor(page, step.to));
-    const target = this.locatorFor(page, step.target);
-    if ("point" in step.target && (step.type === "click" || step.type === "doubleClick" || step.type === "hover")) {
-      const point = step.target.point;
-      return page.point(point.observationId || defaultObservationId, point.x, point.y, step.type === "doubleClick" ? "dblclick" : step.type, { button: step.button, modifiers: step.modifiers });
-    }
-    if (step.type === "click") return target.click({ button: step.button, modifiers: step.modifiers });
-    if (step.type === "doubleClick") return target.dblclick({ button: step.button, modifiers: step.modifiers });
-    if (step.type === "hover") return target.hover();
-    if (step.type === "fill") return target.fill(step.value);
-    if (step.type === "clear") return target.clear();
-    if (step.type === "select") return target.selectOption(step.values);
-    if (step.type === "check") return step.checked === false ? target.uncheck() : target.check();
-    if (step.type === "upload") return target.setInputFiles(await this.normalizeFiles(step.files));
-    throw new Error(`AutomationError[unsupported]: ${JSON.stringify({ step })}`);
-  }
-
-  private structuredError(error: unknown): { code: string; message: string; detail?: unknown; effectUnknown?: boolean } {
-    const message = error instanceof Error ? error.message : String(error);
-    const match = /^AutomationError\[([^\]]+)\]:\s*(.*)$/.exec(message);
-    if (!match) return { ...(error && typeof error === "object" && "effectUnknown" in error && error.effectUnknown ? { effectUnknown: true } : {}), code: error instanceof DOMException && error.name === "AbortError" ? "aborted" : error instanceof DOMException && error.name === "TimeoutError" ? "timeout" : "execution-failed", message };
-    let detail: unknown;
-    try { detail = JSON.parse(match[2]!); } catch { detail = match[2]; }
-    return { code: match[1]!, message, detail };
-  }
-
-  private recordExecutionFailure(error: unknown, input: ChromeToolInput | BrowserInput, context: ExecutionContext): void {
-    const message = error instanceof Error ? error.message : String(error);
-    const target = "mode" in input ? { kind: input.mode, tabId: "tabId" in input ? input.tabId : undefined }
-      : input.target ?? (input.tabId !== undefined ? { kind: "page", tabId: input.tabId } : { kind: "extension" });
-    if (/user gesture|user activation|permission|not allowed|denied/i.test(message)) {
-      this.logger?.record({
-        type: "interaction.required",
-        conversationId: context.conversationId,
-        ...context.logIdentity,
-        content: { message, target, action: "Complete the browser prompt or required user gesture, then continue this conversation." },
-      });
-    } else if (/unavailable|not exposed|not installed|not currently|requires/i.test(message)) {
-      this.logger?.record({ type: "capability.unavailable", conversationId: context.conversationId, ...context.logIdentity, content: { message, target } });
-    }
-  }
-
   dispose(): void {
     if (this.disposed) return;
-    this.lifetime.aborted = true;
     void this.endRun();
     this.browserState = undefined;
     this.disposed = true;
     if ((globalThis as Record<string, unknown>)[BRIDGE_KEY] === this.bridge) {
       delete (globalThis as Record<string, unknown>)[BRIDGE_KEY];
-      delete (globalThis as Record<string, unknown>)[RESULT_READER_KEY];
-      delete (globalThis as Record<string, unknown>)[PAGE_KEY];
-      delete (globalThis as Record<string, unknown>)[BROWSER_KEY];
     }
     this.automation.dispose();
-    const sessions = [this.activeDebuggee].filter((item): item is Debuggee => Boolean(item));
-    this.activeDebuggee = undefined;
-    for (const debuggee of sessions) void this.chromeApi.debugger.detach(debuggee).catch(() => undefined);
     this.port?.disconnect();
   }
 
-  private async executeNow(input: ChromeToolInput, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+  private async executePageWorld(target: PageExecutionTarget, code: string, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
     if (this.disposed) throw new Error("Chrome executor has been disposed");
     throwIfAborted(signal);
-
-    const target = this.normalizeTarget(input);
     this.logger?.record({ type: "tool.route", conversationId: context.conversationId, content: { target } });
-
-    if (target.kind === "page") {
-      if (!Number.isInteger(target.tabId) && !target.targetId) throw new Error("A page target requires tabId or targetId. Query chrome.tabs or chrome.debugger.getTargets first.");
-      if (Number.isInteger(target.tabId)) await (globalThis as Record<string, any>).__surfWaxGuard?.mark(target.tabId);
-      throwIfAborted(signal);
-      if (target.tabId !== undefined && target.frameId === undefined && target.documentId === undefined && !target.targetId && !target.sessionId
-        && (target.world === undefined || target.world === "MAIN") && this.automation.hasSession(target.tabId)) {
-        const value = await this.awaitAbort(this.automation.pageValue(target.tabId, pageExpressionFor(input.code)), signal);
-        return evaluationValue({ result: { value } }, "page");
-      }
-      if (target.world === "USER_SCRIPT") return this.evaluateUserScript(target, input.code, signal);
-      if (target.world === "ISOLATED") return this.evaluateIsolated(target, input.code, signal);
-      if (target.targetId) return this.evaluateCdpPage(target, input.code, signal);
-      return this.evaluate({ tabId: target.tabId }, pageExpressionFor(input.code), signal, "page");
-    }
-
-    const targets = await this.chromeApi.debugger.getTargets();
-    if (this.disposed) throw abortError();
+    await (globalThis as Record<string, any>).__surfWaxGuard?.mark(target.tabId);
     throwIfAborted(signal);
-    const panelTarget = targets.find((candidate) => candidate.url === this.targetUrl && candidate.id);
-    if (!panelTarget?.id) throw new Error(`Side Panel DevTools target not found: ${this.targetUrl}`);
-    return this.evaluate({ targetId: panelTarget.id }, expressionFor(input.code), signal, "extension", input.save);
-  }
-
-  private normalizeTarget(input: ChromeToolInput): ChromeTarget {
-    if (input.tabId !== undefined) return { kind: "page", tabId: input.tabId, world: input.world ?? "MAIN" };
-    const target = input.target ?? { kind: "extension" as const };
-    if (!["auto", "extension", "page"].includes(target.kind)) throw new Error(`CommandError[unsupported-target]: ${target.kind}`);
-    if (target.kind !== "auto") return target;
-    if (target.tabId !== undefined || target.targetId !== undefined) return { ...target, kind: "page", world: target.world ?? "MAIN" };
-    if (/\b(?:chrome\.|__surfWaxResult\b)/.test(input.code) || !/\b(?:document|window|location|navigator)\b/.test(input.code)) return { kind: "extension" };
-    throw new Error("Automatic target selection is ambiguous. Select extension or page explicitly.");
+    if (target.world === "USER_SCRIPT") return this.evaluateUserScript(target, code, signal);
+    if (target.world === "ISOLATED") return this.evaluateIsolated(target, code, signal);
+    const value = await this.awaitAbort(this.automation.pageValue(target.tabId, pageExpressionFor(code)), signal, true);
+    return evaluationValue({ result: { value } }, "page");
   }
 
   private async bridgeDebuggee(debuggee: Debuggee): Promise<void> {
@@ -1027,6 +781,7 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
   }
 
   private async bridgeCommand(debuggee: Debuggee, method: string, params?: object): Promise<any> {
+    if (/^(Input\.|DOM\.(focus|scrollIntoViewIfNeeded)|Page\.(navigate|reload|navigateToHistoryEntry|handleJavaScriptDialog))/.test(method) && !this.activeSignal?.aborted) await this.programScope?.dispatched();
     await this.bridgeDebuggee(debuggee);
     let input = params as Record<string, any> | undefined;
     if (debuggee.tabId !== undefined && input && method.startsWith("Input.")) {
@@ -1051,16 +806,22 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
         else state.keys.set(input.key, { ...input });
       }
     }
-    const result = await (this.bridge.call as any)("sendCommand", [debuggee, method, input]);
+    const key = JSON.stringify(debuggee);
+    const tracked = Boolean(this.programScope && ["Runtime.evaluate", "Runtime.callFunctionOn"].includes(method));
+    if (tracked) this.programEvaluations.set(key, {debuggee,count:(this.programEvaluations.get(key)?.count ?? 0)+1});
+    let result: any;
+    try { result = await (this.bridge.call as any)("sendCommand", [debuggee, method, input]); }
+    finally { if (tracked) {
+      const entry = this.programEvaluations.get(key);
+      if (entry && entry.count > 1) entry.count--; else this.programEvaluations.delete(key);
+    } }
     if (debuggee.tabId !== undefined && input?.surfWaxAtomicClick) this.inputState(debuggee.tabId).buttons.delete(input.button ?? "left");
     return result;
   }
 
-  private async evaluateIsolated(target: ChromeTarget, code: string, signal?: AbortSignal): Promise<unknown> {
+  private async evaluateIsolated(target: PageExecutionTarget, code: string, signal?: AbortSignal): Promise<unknown> {
     if (target.documentId) throw new Error("ISOLATED execution cannot resolve documentId directly. Use frameId, targetId/sessionId, or USER_SCRIPT.");
-    const debuggee: Debuggee = target.targetId
-      ? { targetId: target.targetId, ...(target.sessionId ? { sessionId: target.sessionId } : {}) } as Debuggee
-      : { tabId: target.tabId! };
+    const debuggee: Debuggee = { tabId: target.tabId };
     throwIfAborted(signal);
     const tree = await this.bridgeCommand(debuggee, "Page.getFrameTree");
     const rootFrameId = tree?.frameTree?.frame?.id;
@@ -1078,11 +839,11 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     return evaluationValue(response, "page");
   }
 
-  private async evaluateUserScript(target: ChromeTarget, code: string, signal?: AbortSignal): Promise<unknown> {
+  private async evaluateUserScript(target: PageExecutionTarget, code: string, signal?: AbortSignal): Promise<unknown> {
     if (!this.chromeApi.userScripts?.execute) throw new Error("Allow User Scripts 未开启，或 Chrome 不支持该操作。");
     if (target.frameId !== undefined && target.documentId) throw new Error("Specify frameId or documentId, not both.");
-    const tabId = target.tabId ?? (target.targetId ? (await this.chromeApi.debugger.getTargets()).find((item) => item.id === target.targetId)?.tabId : undefined);
-    if (!Number.isInteger(tabId)) throw new Error("USER_SCRIPT execution requires a page tabId or resolvable targetId.");
+    const tabId = target.tabId;
+    if (!Number.isInteger(tabId)) throw new Error("USER_SCRIPT execution requires a page tabId.");
     throwIfAborted(signal);
     const injections = await this.awaitAbort(this.chromeApi.userScripts.execute({
       target: { tabId: tabId!, ...(target.frameId !== undefined ? { frameIds: [target.frameId] } : target.documentId ? { documentIds: [target.documentId] } : {}) },
@@ -1095,20 +856,9 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     return results.length === 1 ? results[0]!.result : results;
   }
 
-  private async evaluateCdpPage(target: ChromeTarget, code: string, signal?: AbortSignal): Promise<unknown> {
-    const debuggee = { ...(target.targetId ? { targetId: target.targetId } : { tabId: target.tabId }), ...(target.sessionId ? { sessionId: target.sessionId } : {}) } as Debuggee;
-    const response = await this.bridgeCommand(debuggee, "Runtime.evaluate", {
-      expression: pageExpressionFor(code), awaitPromise: true, returnByValue: true, userGesture: true,
-    });
-    throwIfAborted(signal);
-    const error = evaluationError(response);
-    if (error) throw error;
-    return evaluationValue(response, "page");
-  }
-
   private async awaitAbort<T>(task: Promise<T>, signal?: AbortSignal, effectUnknown = false): Promise<T> {
     if (!signal) return task;
-    if (signal.aborted) throw interruptionError(signal, effectUnknown);
+    if (signal.aborted) { void task.catch(() => undefined); throw interruptionError(signal, effectUnknown); }
     return new Promise<T>((resolve, reject) => {
       const abort = () => reject(interruptionError(signal, effectUnknown));
       signal.addEventListener("abort", abort, { once: true });
@@ -1116,48 +866,4 @@ return await (async (page, chrome, browser, globalThis, self, window, document, 
     });
   }
 
-  private async evaluate(debuggee: Debuggee, expression: string, signal?: AbortSignal, scope = "extension", allowDownloads = false): Promise<unknown> {
-    let attached = false;
-    const state = { lifetime: this.lifetime, run: { aborted: false, allowDownloads } };
-    let rejectAbort: ((error: DOMException) => void) | undefined;
-    const aborted = new Promise<never>((_, reject) => { rejectAbort = reject; });
-    const onAbort = () => {
-      state.run.aborted = true;
-      if (attached) void this.chromeApi.debugger.detach(debuggee).catch(() => undefined);
-      rejectAbort?.(abortError());
-    };
-    try {
-      throwIfAborted(signal);
-      await this.chromeApi.debugger.attach(debuggee, "1.3");
-      attached = true;
-      this.activeDebuggee = debuggee;
-      if (this.disposed) throw abortError();
-      throwIfAborted(signal);
-      signal?.addEventListener("abort", onAbort, { once: true });
-      (globalThis as Record<string, unknown>)[STATE_KEY] = state;
-      const evaluation = this.chromeApi.debugger.sendCommand(debuggee, "Runtime.evaluate", {
-        expression,
-        awaitPromise: true,
-        returnByValue: true,
-        userGesture: true,
-      });
-      const response = signal
-        ? await Promise.race([evaluation, aborted])
-        : await evaluation;
-      if (this.disposed) throw abortError();
-      throwIfAborted(signal);
-      const error = evaluationError(response);
-      if (error) throw error;
-      return evaluationValue(response, scope);
-    } finally {
-      signal?.removeEventListener("abort", onAbort);
-      if ((globalThis as Record<string, unknown>)[STATE_KEY] === state) delete (globalThis as Record<string, unknown>)[STATE_KEY];
-      if (attached) {
-        try {
-          await this.chromeApi.debugger.detach(debuggee);
-        } catch { /* Closing the target may already have detached it. */ }
-      }
-      if (this.activeDebuggee === debuggee) this.activeDebuggee = undefined;
-    }
-  }
 }

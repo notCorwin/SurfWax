@@ -1,5 +1,5 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
-import { configure, dispose, enableUserScripts, focusPageControl, openExtension, startProvider } from "./fixtures";
+import { expect, type Locator, type Page } from "@playwright/test";
+import { test, configure, dispose, enableUserScripts, focusPageControl, openExtension, startProvider } from "./fixtures";
 
 async function expectFocus(page: Page, control: Locator, owner: Locator, color: string) {
   await page.bringToFront();

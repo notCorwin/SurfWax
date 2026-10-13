@@ -1,4 +1,4 @@
-import { chromium, expect, test, type BrowserContext, type CDPSession, type Locator, type Page } from "@playwright/test";
+import { chromium, expect, type BrowserContext, type CDPSession, type Locator, type Page } from "@playwright/test";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 
-import { SSE_HEADERS, p95, chunk, usageChunk, textResponse, streamingTextResponse, toolResponse, pageResponse, commandResponse, browserResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
+import { test, SSE_HEADERS, p95, chunk, usageChunk, textResponse, streamingTextResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
 
 test("opens a bounded conversation dropdown below its trigger and keeps outside controls interactive", async () => {
   const provider = await startProvider([]);
@@ -108,7 +108,7 @@ test("opens a bounded conversation dropdown below its trigger and keeps outside 
   }
 });
 
-test("executes run-code through the page facade, restores the conversation, and clears the log", async () => {
+test("executes run through the page facade, restores the conversation, and clears the log", async () => {
   const responses: string[][] = [];
   const provider = await startProvider(responses);
   const targetUrl = `${provider.origin}/target`;
@@ -137,13 +137,13 @@ test("executes run-code through the page facade, restores the conversation, and 
 
     await expect.poll(() => provider.requests.length).toBe(3);
     expect(provider.requests[0].reasoning_effort).toBe("minimal");
-    expect(provider.requests[0].tools).toHaveLength(49);
+    expect(provider.requests[0].tools).toHaveLength(3);
     expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).not.toContain("browser");
-    expect(provider.requests[0].tools).toContainEqual(expect.objectContaining({ type: "function", function: expect.objectContaining({ name: "run-code" }) }));
+    expect(provider.requests[0].tools).toContainEqual(expect.objectContaining({ type: "function", function: expect.objectContaining({ name: "run" }) }));
     const events = await readEvents(opened.page);
     const tool = events.find((event) => event.type === "tool.finished");
-    expect(tool).toMatchObject({ toolCallId: "call-chrome-e2e", input: { code: expect.stringContaining("async page") }, latencyMs: expect.any(Number) });
-    expect(tool.output).toMatchObject({ title: "Side Agent Target", url: targetUrl });
+    expect(tool).toMatchObject({ toolCallId: "call-chrome-e2e", input: { code: expect.stringContaining("await page.title()") }, latencyMs: expect.any(Number) });
+    expect(tool.output.result).toMatchObject({ title: "Side Agent Target", url: targetUrl });
     expect(events.filter((event) => /^(model|request|tool)\./.test(event.type)).every((event) => typeof event.conversationId === "string")).toBe(true);
     expect(events.filter((event) => event.type === "conversation.message")).toHaveLength(2);
 
@@ -614,6 +614,9 @@ test("edits user messages, regenerates replies and restores the selected branch"
     await composer.fill("follow up");
     await composer.press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FOLLOWUP_REPLY");
+    // Streaming text is visible before its final message is persisted.
+    await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "conversation.message"
+      && event.content?.parts?.some((part: any) => part.type === "text" && part.text === "FOLLOWUP_REPLY"))).toBe(true);
     const recordedMessages = JSON.stringify((await readEvents(opened.page)).filter((event) => event.type === "conversation.message").map((event) => event.content));
     for (const text of [originalQuestion, "edited question", "ORIGINAL_REPLY", "REGENERATED_REPLY", "EDITED_REPLY", "FOLLOWUP_REPLY"]) {
       expect(recordedMessages).toContain(text);

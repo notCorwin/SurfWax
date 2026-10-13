@@ -1,4 +1,4 @@
-import { chromium, expect, test, type BrowserContext, type CDPSession, type Locator, type Page } from "@playwright/test";
+import { chromium, expect, type BrowserContext, type CDPSession, type Locator, type Page } from "@playwright/test";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 
-import { SSE_HEADERS, p95, chunk, usageChunk, textResponse, streamingTextResponse, toolResponse, pageResponse, commandResponse, browserResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
+import { test, SSE_HEADERS, p95, chunk, usageChunk, textResponse, streamingTextResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
 
 test("shows the configured model at the bottom left of the composer", async () => {
   const opened = await openExtension();
@@ -84,7 +84,7 @@ test("refreshes Models.dev providers and models on every settings open", async (
   try {
     let version = 1;
     let requests = 0;
-    await opened.page.evaluate(() => chrome.storage.local.set({ "side-agent:model-catalog": { fetchedAt: Date.now(), catalog: {
+    await opened.page.evaluate(() => chrome.storage.local.set({ "side-agent:model-catalog": { version: 2, fetchedAt: Date.now(), catalog: {
       cached: { name: "Cached Provider", npm: "@ai-sdk/openai-compatible", models: {} },
     } } }));
     await opened.context.route("https://models.dev/api.json", (route) => {
@@ -168,7 +168,7 @@ test("keeps custom Endpoint available when the Models.dev catalog fails", async 
 test("labels cached Models.dev providers when refresh fails", async () => {
   const opened = await openExtension();
   try {
-    await opened.page.evaluate(() => chrome.storage.local.set({ "side-agent:model-catalog": { fetchedAt: Date.now(), catalog: {
+    await opened.page.evaluate(() => chrome.storage.local.set({ "side-agent:model-catalog": { version: 2, fetchedAt: Date.now(), catalog: {
       cached: { name: "Cached Provider", npm: "@ai-sdk/openai-compatible", models: {} },
     } } }));
     await opened.context.route("https://models.dev/api.json", (route) => route.fulfill({ status: 503, body: "unavailable" }));
@@ -203,7 +203,8 @@ test("uses a global custom system prompt and hides disabled advanced settings", 
     const user = provider.requests[0].messages.find((message: any) => message.role === "user");
     expect(system?.content).toMatch(/^You are a custom browser agent\.\n\n/);
     expect(system?.content).toContain("Available tools:");
-    expect(system?.content).toContain("- goto: Navigate the current tab to a URL.");
+    expect(system?.content).toContain("- inspect:");
+    expect(provider.requests[0].tools.map((tool:any) => tool.function.name)).toEqual(["inspect", "run", "jobs"]);
     expect(JSON.stringify(user)).not.toContain("Available tools:");
     await expect(opened.page.locator('[data-role="user"]')).not.toContainText("Available tools:");
   } finally {
@@ -235,7 +236,7 @@ test("shows inline settings errors and returns keyboard focus after closing conv
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(options.locator("#base-url-error")).toHaveText("请输入 Base URL");
     await expect(options.locator("#base-url")).toBeFocused();
-    expect(await options.locator("#base-url").evaluate((input) => getComputedStyle(input).outlineStyle)).toBe("none");
+    expect(await options.locator("#base-url").evaluate((input) => getComputedStyle(input).outlineStyle)).toBe("solid");
     await expect(options.locator("#base-url")).toHaveAttribute("aria-invalid", "true");
     await options.setViewportSize({ width: 320, height: 720 });
     expect(await options.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -319,5 +320,3 @@ test("selects, locks and restores reasoning effort across conversations", async 
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
-
-

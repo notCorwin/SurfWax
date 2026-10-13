@@ -1,187 +1,115 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { EventLogger, type LogEvent } from "../logging";
-import { parseCommandTarget, ChromeExecutor } from "./executor";
-import { COMMAND_NAMES, USER_SCRIPT_TOOL_NAMES, compactToolResult, createCommandTools, parseCommandInput, prepareToolMessages, repairCommandToolCall, TOOL_REGISTRY, TOOL_SUMMARY } from "./tool";
+import { parseLocatorTarget, ChromeExecutor } from "./executor";
+import { compactToolResult, createProgramTools, prepareToolMessages, repairProgramToolCall, PROGRAM_TOOL_REGISTRY, PROGRAM_TOOL_CONTEXT } from "./tool";
+import { callUserScript } from "./script-client";
 
-describe("browser command tools", () => {
-  it.each(["screenshot", "pdf", "artifact-save"])("retains a %s artifact when the abort race settles before its underlying work", async (toolName) => {
+describe("three browser tools", () => {
+  it.each(["screenshot", "pdf", "save"])("retains a %s artifact when the abort race settles before its underlying work", async (operation) => {
     const events: LogEvent[] = [];
     const logger = new EventLogger({ store: {
       append: async (event) => { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
       all: async () => [...events], clear: async () => { events.length = 0; },
     } });
-    const metadata = { filename: toolName === "screenshot" ? "screen.png" : "page.pdf", mimeType: toolName === "screenshot" ? "image/png" : "application/pdf", byteLength: 1 };
-    const stored = toolName === "artifact-save" ? await logger.append({ type: "tool.result.data", conversationId: "conversation", runId: "previous-run", content: metadata,
+    const metadata = { filename: operation === "screenshot" ? "screen.png" : "page.pdf", mimeType: operation === "screenshot" ? "image/png" : "application/pdf", byteLength: 1 };
+    const stored = operation === "save" ? await logger.append({ type: "tool.result.data", conversationId: "conversation", runId: "previous-run", content: metadata,
       output: { ...metadata, base64: "eA==" } }) : undefined;
-    const input = stored ? { id: stored.id } : { filename: metadata.filename, save: true };
+    const input = { code: operation === "save" ? `return await artifacts.save(${stored!.id});` : `return await page.${operation}({save:true});` };
     logger.beginRun("conversation", "run"); logger.setRunPhase("run", 1);
-    await logger.append({ type: "tool.started", conversationId: "conversation", toolCallId: "capture", content: { callId: "sdk", toolName }, input });
-    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger, targetUrl: "chrome-extension://id/sidepanel.html#test" });
+    await logger.append({ type: "tool.started", conversationId: "conversation", toolCallId: "capture", content: { callId: "sdk", toolName: "run" }, input });
+    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
     let artifactId = stored?.id;
     let notifyStored!: () => void;
     const ready = new Promise<void>((resolve) => { notifyStored = resolve; });
     let finishWork!: () => void;
     let workFinished = false;
-    (executor as any).executeCommandNow = async () => {
+    executor.runProgram = async (_input, signal) => {
       if (!artifactId) artifactId = (await logger.append({ type: "tool.result.data", conversationId: "conversation", runId: "run", toolCallId: "1:capture", toolCallIdCanonical: true,
         content: metadata, output: { ...metadata, base64: "eA==" } }))!.id;
+      if (stored) await logger.append({ type: "browser.artifact.used", conversationId: "conversation", runId: "run", toolCallId: "1:capture", toolCallIdCanonical: true, content: { artifactId } });
       notifyStored();
-      return new Promise((resolve) => { finishWork = () => { workFinished = true; resolve(null); }; });
+      return (executor as any).awaitAbort(new Promise((resolve) => { finishWork = () => { workFinished = true; resolve(null); }; }), signal, true);
     };
     const controller = new AbortController();
-    const tools = createCommandTools(executor, { logger, conversationId: "conversation" }) as Record<string, any>;
-    const pending = tools[toolName].execute(input, { toolCallId: "capture", abortSignal: controller.signal });
-    await ready;
-    logger.setRunPhase("run", 2);
-    controller.abort("sidepanel-closed");
+    const tools = createProgramTools(executor, { logger, conversationId: "conversation" }) as Record<string, any>;
+    const pending = tools.run.execute(input, { toolCallId: "capture", abortSignal: controller.signal });
+    await ready; logger.setRunPhase("run", 2); controller.abort("sidepanel-closed");
     const result = await pending;
     expect(workFinished).toBe(false);
     expect(result).toMatchObject({ ok: false, error: { code: "aborted", message: "sidepanel-closed", effectUnknown: true }, artifact: { id: artifactId, ...metadata } });
-    expect(result).not.toHaveProperty("artifact.saved");
-    expect(JSON.stringify(result)).not.toContain("eA==");
-    // The SDK terminal wins first; background recovery must preserve it intact.
-    await logger.append({ type: "tool.failed", conversationId: "conversation", toolCallId: "capture", content: { callId: "sdk", toolName }, input, output: result, error: result.error });
+    expect(result).not.toHaveProperty("artifact.saved"); expect(JSON.stringify(result)).not.toContain("eA==");
+    await logger.append({ type: "tool.failed", conversationId: "conversation", toolCallId: "capture", content: { callId: "sdk", toolName: "run" }, input, output: result, error: result.error });
     await logger.closePendingTools("run", "conversation", "owner-disconnected");
     expect(events.filter((event) => event.type === "tool.failed")).toHaveLength(1);
     expect(events.find((event) => event.type === "tool.failed")).toMatchObject({ toolCallId: "1:capture", output: result });
-    finishWork(); await (executor as any).tail; executor.dispose();
+    finishWork(); executor.dispose();
   });
-  it("preserves a large failed act result through the registered tool without compacting away its failure", async () => {
-    const failed = { ok: false, completed: [{ index: 0, type: "fill", result: { text: "completed".repeat(2000) } }], failed: { index: 1, step: { type: "expect" }, error: { code: "timeout", message: "interrupted", effectUnknown: true } }, notRun: [{ type: "click" }] };
+  it("preserves a large failed program and its full partial output without hiding the failure", async () => {
+    const failed = { ok: false, state: "failed", result: { error: { code: "timeout", message: "interrupted", effectUnknown: true }, completed: "completed".repeat(2000) } };
     expect(JSON.stringify(failed).length).toBeGreaterThan(8000);
     const append = vi.fn(async () => ({ id: 7 }));
     const logger = { append, toolIdentity: () => ({ toolCallId: "call", toolCallIdCanonical: true }) } as unknown as EventLogger;
-    const tools = createCommandTools({ executeBrowser: vi.fn(async () => failed) } as unknown as ChromeExecutor, { logger, conversationId: "conversation" }) as Record<string, any>;
-    const result = await tools.act.execute({ steps: [{ type: "goto", url: "https://test/" }] }, { toolCallId: "call" });
-    expect(result).toEqual({ ...failed, error: { ...failed.failed.error, retryable: false } });
-    expect(result).not.toHaveProperty("$ref");
-    expect(append).not.toHaveBeenCalled();
+    const tools = createProgramTools({ runProgram: vi.fn(async () => failed) } as unknown as ChromeExecutor, { logger, conversationId: "conversation" }) as Record<string, any>;
+    const result = await tools.run.execute({ code: "await check(false);" }, { toolCallId: "call" });
+    expect(result).toEqual({ ...failed, error: { ...failed.result.error, retryable: false } });
+    expect(result).not.toHaveProperty("$ref"); expect(append).not.toHaveBeenCalled();
     await expect(compactToolResult({ type: "tool-error", error: "large".repeat(2000) }, { logger })).resolves.toHaveProperty("type", "tool-error");
   });
-
   it("stores a large result with its original identity after a request phase changes", async () => {
     let phase = 1;
     const append = vi.fn(async () => ({ id: 7 }));
     const logger = { append, toolIdentity: (_conversation: string, id: string) => ({ runId: "run", toolCallId: `${phase}:${id}`, toolCallIdCanonical: true }) } as unknown as EventLogger;
     let finish!: (value: unknown) => void;
-    const executeCommand = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
-    const tools = createCommandTools({ executeCommand } as unknown as ChromeExecutor, { logger, conversationId: "conversation" }) as Record<string, any>;
-    const pending = tools.eval.execute({ func: "() => null" }, { toolCallId: "call" });
-    await vi.waitFor(() => expect(executeCommand).toHaveBeenCalled());
-    phase = 2; finish("original".repeat(2000));
-    await expect(pending).resolves.toMatchObject({ $ref: 7 });
+    const runProgram = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
+    const tools = createProgramTools({ runProgram } as unknown as ChromeExecutor, { logger, conversationId: "conversation" }) as Record<string, any>;
+    const pending = tools.run.execute({ code: "return await page.evaluate(() => null);" }, { toolCallId: "call" });
+    await vi.waitFor(() => expect(runProgram).toHaveBeenCalled());
+    phase = 2; finish({ ok: true, result: "original".repeat(2000) });
+    await expect(pending).resolves.toMatchObject({ $ref: 7, access: { path: ["result"] } });
     expect(append).toHaveBeenCalledWith(expect.objectContaining({ type: "tool.result.data", runId: "run", toolCallId: "1:call", toolCallIdCanonical: true }));
   });
-
-  it("registers exactly the 42 executable current-window commands", () => {
-    expect(COMMAND_NAMES).toHaveLength(42);
-    expect(new Set(COMMAND_NAMES).size).toBe(42);
-    expect(COMMAND_NAMES).toEqual(expect.arrayContaining(["snapshot", "click", "run-code", "artifact-save"]));
-    for (const name of ["state-save", "state-load", "cookie-clear"]) expect(COMMAND_NAMES as readonly string[]).not.toContain(name);
-    for (const name of ["install", "install-browser", "pause-at", "resume", "step-over"]) expect(COMMAND_NAMES as readonly string[]).not.toContain(name);
-    expect(COMMAND_NAMES.filter((name) => ["browser", "open", "attach", "close", "detach", "show", "list", "close-all", "kill-all"].includes(name))).toEqual([]);
-  });
-
-  it("exposes browser and user-script tools in stable order without search or deferred loading", () => {
-    const tools = createCommandTools({} as ChromeExecutor) as Record<string, any>;
-    expect(Object.keys(tools)).toEqual([...COMMAND_NAMES, "act", "result", ...USER_SCRIPT_TOOL_NAMES]);
-    for (const name of ["install", "install-browser", "pause-at", "resume", "step-over"]) expect(tools).not.toHaveProperty(name);
-    expect(tools).not.toHaveProperty("search-tools");
+  it("registers exactly inspect/run/jobs in stable order, with no old tool aliases or deferred loading", () => {
+    const tools = createProgramTools({} as ChromeExecutor) as Record<string, any>;
+    expect(Object.keys(tools)).toEqual(["inspect", "run", "jobs"]);
+    expect(Object.keys(tools)).toEqual(PROGRAM_TOOL_REGISTRY.map(({ name }) => name));
+    for (const name of ["snapshot", "act", "run-code", "browser", "result", "userscript-create", "click", "search-tools", "install"]) expect(tools).not.toHaveProperty(name);
     expect(Object.values(tools).every((tool) => tool.deferLoading !== true)).toBe(true);
-    expect(TOOL_SUMMARY.split("\n")).toHaveLength(49);
-    expect(Object.keys(tools)).toEqual(TOOL_REGISTRY.map(({ name }) => name));
-    expect(new TextEncoder().encode(TOOL_SUMMARY).byteLength).toBeLessThanOrEqual(4100);
-    for (const { name, summary } of TOOL_REGISTRY) expect(TOOL_SUMMARY).toContain(`- ${name}: ${summary}`);
+    for (const { name, summary } of PROGRAM_TOOL_REGISTRY) expect(PROGRAM_TOOL_CONTEXT).toContain(`- ${name}: ${summary}`);
   });
-
-  it("keeps actual serialized tool metadata within the context budget", () => {
-    const metadata = TOOL_REGISTRY.map(({ name, description, inputSchema }) => ({ name, description, parameters: z.toJSONSchema(inputSchema) }));
-    expect(new TextEncoder().encode(JSON.stringify(metadata)).byteLength).toBeLessThanOrEqual(50_500);
+  it("keeps actual serialized tool metadata and the documented program API within budget", () => {
+    const metadata = PROGRAM_TOOL_REGISTRY.map(({ name, description, inputSchema }) => ({ name, description, parameters: z.toJSONSchema(inputSchema) }));
+    expect(new TextEncoder().encode(JSON.stringify(metadata)).byteLength).toBeLessThanOrEqual(5050);
+    expect(new TextEncoder().encode(PROGRAM_TOOL_CONTEXT).byteLength).toBeLessThanOrEqual(6000);
   });
-
-  it("rejects unsupported coordinate actions and ambiguous tab selectors", () => {
-    const point = { point: { observationId: "capture", x: 5, y: 10 } };
-    expect(parseCommandInput("click", { target: point, button: "right", modifiers: ["Shift"] })).toMatchObject({ target: point });
-    expect(() => parseCommandInput("fill", { target: point, text: "bad" })).toThrow();
-    expect(() => parseCommandInput("tab-select", {})).toThrow();
-    expect(() => parseCommandInput("tab-select", { tabId: 41, index: 0 })).toThrow();
-    expect(parseCommandInput("tab-select", { tabId: 41 })).toEqual({ tabId: 41 });
-    const tools = createCommandTools({} as ChromeExecutor) as Record<string, any>;
-    expect(() => tools.act.inputSchema.parse({ steps: [{ type: "fill", target: point, value: "bad" }] })).toThrow();
-    expect(() => tools.act.inputSchema.parse({ steps: [{ type: "click", target: { ref: "e1" }, value: "invalid" }] })).toThrow();
+  it("strictly validates the three public schemas, including job ownership selectors", () => {
+    const tools = createProgramTools({} as ChromeExecutor) as Record<string, any>;
+    expect(tools.inspect.inputSchema.parse({ region: { by: "label", value: "Email" }, fields: ["text", "ref"], budget: 100 })).toHaveProperty("budget", 100);
+    expect(() => tools.inspect.inputSchema.parse({ image: true, readonly: true })).toThrow();
+    expect(() => tools.run.inputSchema.parse({ code: "return 1;", world: "MAIN" })).toThrow();
+    expect(() => tools.jobs.inputSchema.parse({ action: "cancel" })).toThrow();
+    expect(() => tools.jobs.inputSchema.parse({ action: "wait", id: "one", waitMs: 30001 })).toThrow();
+    expect(tools.jobs.inputSchema.parse({ action: "list" })).toEqual({ action: "list" });
   });
-
-  it("validates native user-script definitions and keeps enabled outside them", () => {
-    const tools = createCommandTools({} as ChromeExecutor) as Record<string, any>;
-    const script = { id: "sample", matches: ["https://example.com/*"], js: [{ code: "document.title = 'Ready'" }] };
-    expect(tools["userscript-create"].inputSchema.parse({ script })).toEqual({ script });
-    expect(() => tools["userscript-create"].inputSchema.parse({ script: { ...script, enabled: false } })).toThrow();
-    expect(tools["userscript-edit"].inputSchema.parse({ id: "sample", changes: { js: [{ code: "1" }], runAt: null } })).toMatchObject({ id: "sample" });
-    expect(() => tools["userscript-edit"].inputSchema.parse({ id: "sample", changes: { id: "changed" } })).toThrow();
+  it("preserves historical user content and never injects an executable old catalogue", async () => {
+    const messages = [{ role: "user", content: "Task\n\nAvailable tools:\n- run-code: historical" }, { role: "assistant", content: "Working" }];
+    expect(await prepareToolMessages(messages, 0)).toEqual(messages);
+    expect(await prepareToolMessages([{ role: "user", content: "Task" }], 0)).toEqual([{ role: "user", content: "Task" }]);
   });
-
-  it("routes all five user-script tools through the background manager", async () => {
-    const sendMessage = vi.fn(async (message) => ({ ok: true, result: message.method }));
-    vi.stubGlobal("chrome", { runtime: { sendMessage } });
-    try {
-      const tools = createCommandTools({} as ChromeExecutor) as Record<string, any>;
-      const script = { id: "sample", matches: ["https://example.com/*"], js: [{ code: "1" }] };
-      const inputs = [{}, { id: "sample" }, { script }, { id: "sample", changes: { js: [{ code: "2" }] } }, { id: "sample", enabled: false }];
-      for (const [index, name] of USER_SCRIPT_TOOL_NAMES.entries()) {
-        await expect(tools[name].execute(inputs[index], { toolCallId: `call-${index}` })).resolves.toBe(["list", "read", "create", "edit", "setEnabled"][index]);
-      }
-      expect(sendMessage.mock.calls.map(([{ operationId, ...message }]) => { expect(operationId).toEqual(expect.any(String)); return message; })).toEqual([
-        { type: "surf-wax:user-scripts", method: "list", args: [] },
-        { type: "surf-wax:user-scripts", method: "read", args: ["sample"] },
-        { type: "surf-wax:user-scripts", method: "create", args: [script] },
-        { type: "surf-wax:user-scripts", method: "edit", args: [inputs[3]] },
-        { type: "surf-wax:user-scripts", method: "setEnabled", args: [inputs[4]] },
-      ]);
-    } finally { vi.unstubAllGlobals(); }
+  it("repairs only lossless current tool names/stringified JSON and never translates old names", async () => {
+    const tools = createProgramTools({} as ChromeExecutor);
+    await expect(repairProgramToolCall({ toolCall: { toolCallId: "1", toolName: "INSPECT", input: JSON.stringify("{}") }, tools } as any)).resolves.toMatchObject({ toolName: "inspect", input: "{}" });
+    for (const name of ["run-code", "RUN_CODE", "act", "snapshot", "click", "userscript-list"]) {
+      await expect(repairProgramToolCall({ toolCall: { toolCallId: "old", toolName: name, input: "{}" }, tools } as any)).resolves.toBeNull();
+    }
   });
-
-  it("ends a pending user-script tool call when the panel aborts", async () => {
-    vi.stubGlobal("chrome", { runtime: { sendMessage: () => new Promise(() => undefined) } });
-    try {
-      const controller = new AbortController();
-      const tools = createCommandTools({} as ChromeExecutor) as Record<string, any>;
-      const result = tools["userscript-set-enabled"].execute({ id: "sample", enabled: false }, { toolCallId: "call", abortSignal: controller.signal });
-      controller.abort();
-      await expect(result).resolves.toEqual({ ok: false, error: { code: "aborted", message: "Operation aborted", retryable: false, effectUnknown: true } });
-    } finally { vi.unstubAllGlobals(); }
+  it("never suggests retrying timed-out programs with uncertain effects", async () => {
+    const error = Object.assign(new DOMException("late Chrome response", "TimeoutError"), { effectUnknown: true });
+    const tools = createProgramTools({ runProgram: async () => { throw error; } } as unknown as ChromeExecutor) as Record<string, any>;
+    await expect(tools.run.execute({ code: "await browser.tabs.open();" }, { toolCallId: "call" })).resolves.toEqual({
+      ok: false, error: { code: "timeout", message: "late Chrome response", retryable: false, effectUnknown: true },
+    });
   });
-
-  it("appends the tool catalog once to the first model-visible user message", async () => {
-    const stringMessages = [{ role: "user", content: "Do the task" }, { role: "assistant", content: "Working" }];
-    const first = await prepareToolMessages(stringMessages, 0);
-    expect(first[0].content).toBe(`Do the task\n\nAvailable tools:\n${TOOL_SUMMARY}`);
-    expect(await prepareToolMessages(first, 1)).toEqual(first);
-
-    const parts = await prepareToolMessages([{ role: "user", content: [{ type: "text", text: "Inspect this" }, { type: "file", data: "image" }] }], 0);
-    expect(parts[0].content).toEqual([
-      { type: "text", text: "Inspect this" },
-      { type: "file", data: "image" },
-      { type: "text", text: `Available tools:\n${TOOL_SUMMARY}` },
-    ]);
-  });
-
-  it("repairs only lossless tool-name and stringified JSON mistakes", async () => {
-    const tools = createCommandTools({} as ChromeExecutor);
-    await expect(repairCommandToolCall({
-      toolCall: { toolCallId: "1", toolName: "TAB_LIST", input: JSON.stringify("{}") }, tools,
-    } as any)).resolves.toMatchObject({ toolName: "tab-list", input: "{}" });
-    await expect(repairCommandToolCall({
-      toolCall: { toolCallId: "2", toolName: "act", input: JSON.stringify({ steps: JSON.stringify([{ type: "goto", url: "https://example.com" }]) }) }, tools,
-    } as any)).resolves.toMatchObject({ toolName: "act", input: JSON.stringify({ steps: [{ type: "goto", url: "https://example.com" }] }) });
-    await expect(repairCommandToolCall({
-      toolCall: { toolCallId: "3", toolName: "mousewheel", input: '{"deltaX":0,"deltaY":600}' }, tools,
-    } as any)).resolves.toMatchObject({ input: '{"dx":0,"dy":600}' });
-    await expect(repairCommandToolCall({
-      toolCall: { toolCallId: "4", toolName: "mousewheel", input: '{"dx":1,"deltaX":0,"deltaY":600}' }, tools,
-    } as any)).resolves.toBeNull();
-  });
-
   it("stores large non-visual results once and returns a useful reference", async () => {
     const appended: any[] = [];
     const logger = { append: async (event: any) => { appended.push(event); return { ...event, id: 9 }; } } as EventLogger;
@@ -193,44 +121,21 @@ describe("browser command tools", () => {
     expect(appended[0].output).toBe(value);
   });
 
-  it("strictly validates command-specific structured inputs", () => {
-    expect(parseCommandInput("click", { target: "e15", button: "right", modifiers: ["Shift"] })).toEqual({ target: "e15", button: "right", modifiers: ["Shift"] });
-    expect(parseCommandInput("fill", { target: { by: "label", value: "Email" }, text: "a@b.test", submit: true })).toMatchObject({ text: "a@b.test" });
-    expect(parseCommandInput("tab-select", { index: 0 })).toEqual({ index: 0 });
-    expect(parseCommandInput("request", { index: 1 })).toEqual({ index: 1 });
-    expect(parseCommandInput("upload", { files: [{ name: "a.txt", text: "hello" }] })).toMatchObject({ files: [{ name: "a.txt" }] });
-    expect(parseCommandInput("upload", { files: [{ name: "a.txt", artifactId: 7 }] })).toMatchObject({ files: [{ artifactId: 7 }] });
-    expect(parseCommandInput("screenshot", { filename: "internal.png", save: true })).toMatchObject({ filename: "internal.png", save: true });
-    expect(() => parseCommandInput("click", { target: "e1", extra: true })).toThrow();
-    expect(() => parseCommandInput("goto", { url: "https://example.com", session: "other" })).toThrow();
-    expect(() => parseCommandInput("upload", { files: [{ name: "a.txt", text: "x", base64: "eA==" }] })).toThrow();
-    expect(() => parseCommandInput("upload", { files: [{ name: "a.txt", text: "x", artifactId: 7 }] })).toThrow();
-    expect(() => parseCommandInput("request", { index: 0 })).toThrow();
-  });
-
-  it("does not suggest retrying a timed-out operation with uncertain effects", async () => {
-    const error = Object.assign(new DOMException("late Chrome response", "TimeoutError"), { effectUnknown: true });
-    const tools = createCommandTools({ executeCommand: async () => { throw error; } } as unknown as ChromeExecutor) as Record<string, any>;
-    await expect(tools["tab-new"].execute({}, { toolCallId: "call" })).resolves.toEqual({
-      ok: false, error: { code: "timeout", message: "late Chrome response", retryable: false, effectUnknown: true },
-    });
-  });
-
   it("accepts refs, CSS, documented locators, and structured targets", () => {
-    expect(parseCommandTarget("e15")).toEqual({ ref: "e15" });
-    expect(parseCommandTarget("#main > button")).toEqual({ by: "css", value: "#main > button" });
-    expect(parseCommandTarget("getByRole('button', { name: 'Submit', exact: true })")).toEqual({ by: "role", value: "button", name: "Submit", exact: true });
-    expect(parseCommandTarget('getByText("Login")')).toEqual({ by: "text", value: "Login" });
-    expect(parseCommandTarget('getByLabel("Email", { exact: false })')).toEqual({ by: "label", value: "Email", exact: false });
-    expect(parseCommandTarget({ by: "label", value: "Email" })).toEqual({ by: "label", value: "Email" });
-    expect(() => parseCommandTarget("getByUnknown('x')")).toThrow(/Unsupported locator expression/);
-    expect(() => parseCommandTarget("getByRole('button', { pressed: true })")).toThrow(/Unsupported locator expression/);
+    expect(parseLocatorTarget("e15")).toEqual({ ref: "e15" });
+    expect(parseLocatorTarget("#main > button")).toEqual({ by: "css", value: "#main > button" });
+    expect(parseLocatorTarget("getByRole('button', { name: 'Submit', exact: true })")).toEqual({ by: "role", value: "button", name: "Submit", exact: true });
+    expect(parseLocatorTarget('getByText("Login")')).toEqual({ by: "text", value: "Login" });
+    expect(parseLocatorTarget('getByLabel("Email", { exact: false })')).toEqual({ by: "label", value: "Email", exact: false });
+    expect(parseLocatorTarget({ by: "label", value: "Email" })).toEqual({ by: "label", value: "Email" });
+    expect(() => parseLocatorTarget("getByUnknown('x')")).toThrow(/Unsupported locator expression/);
+    expect(() => parseLocatorTarget("getByRole('button', { pressed: true })")).toThrow(/Unsupported locator expression/);
   });
 
   it("injects only the latest screenshot and keeps historical browser results compatible", async () => {
     const messages = [{ role: "tool", content: [
       { type: "tool-result", toolName: "browser", output: { type: "json", value: { screenshot: { mediaType: "image/jpeg", data: "old" } } } },
-      { type: "tool-result", toolName: "screenshot", output: { type: "json", value: { screenshot: { mediaType: "image/png", data: "new" } } } },
+      { type: "tool-result", toolName: "inspect", output: { type: "json", value: { screenshot: { mediaType: "image/png", data: "new" } } } },
     ] }];
     const prepared = await prepareToolMessages(messages, 1, "tab context");
     expect(prepared[0].content[0].output.value.screenshot.data).toBe("[stored in canonical event log]");
@@ -259,7 +164,7 @@ describe("browser command tools", () => {
 
   it("loads the latest screenshot from its canonical artifact", async () => {
     const messages = [{ role: "tool", content: [{
-      type: "tool-result", toolName: "screenshot", output: { type: "json", value: { screenshot: { mediaType: "image/png", artifactId: 7 } } },
+      type: "tool-result", toolName: "inspect", output: { type: "json", value: { screenshot: { mediaType: "image/png", artifactId: 7 } } },
     }] }];
     const prepared = await prepareToolMessages(messages, 1, undefined, async (id) => ({ mimeType: "image/png", base64: `image-${id}` }));
     expect(prepared[1]).toMatchObject({ role: "user", content: [

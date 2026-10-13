@@ -1,11 +1,10 @@
-import { chromium, expect, test, type BrowserContext, type CDPSession, type Locator, type Page } from "@playwright/test";
+import { chromium, expect, test as base, type BrowserContext, type CDPSession, type Locator, type Page } from "@playwright/test";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm, mkdir, cp, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { resolve, basename } from "node:path";
-
 export const SSE_HEADERS = {
   "access-control-allow-origin": "*",
   "cache-control": "no-cache",
@@ -58,7 +57,7 @@ export function streamingTextResponse(parts: string[], usage?: { promptTokens: n
 }
 
 export function toolResponse(code: string, id = "call-chrome-e2e", usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number }): string[] {
-  const input = { code: `async page => { ${code} }` };
+  const input = { code };
   return [
     chunk({
       role: "assistant",
@@ -66,7 +65,7 @@ export function toolResponse(code: string, id = "call-chrome-e2e", usage?: { pro
         index: 0,
         id,
         type: "function",
-        function: { name: "run-code", arguments: JSON.stringify(input) },
+        function: { name: "run", arguments: JSON.stringify(input) },
       }],
     }),
     chunk({}, "tool_calls"),
@@ -79,7 +78,7 @@ export function pageResponse(code: string, tabId: number, id = "call-page-e2e"):
   return [
     chunk({
       role: "assistant",
-      tool_calls: [{ index: 0, id, type: "function", function: { name: "run-code", arguments: JSON.stringify({ code: `async page => { ${code} }` }) } }],
+      tool_calls: [{ index: 0, id, type: "function", function: { name: "run", arguments: JSON.stringify({ code: `{ const page = await browser.page(${tabId}); ${code} }` }) } }],
     }),
     chunk({}, "tool_calls"),
     "data: [DONE]\n\n",
@@ -93,13 +92,6 @@ export function commandResponse(name: string, input: object, id: string): string
   ];
 }
 
-export function browserResponse(input: object, id: string): string[] {
-  return [
-    chunk({ role: "assistant", tool_calls: [{ index: 0, id, type: "function", function: { name: "browser", arguments: JSON.stringify(input) } }] }),
-    chunk({}, "tool_calls"), "data: [DONE]\n\n",
-  ];
-}
-
 export function queuedToolResponse(firstCode: string, secondCode: string): string[] {
   return [
     chunk({
@@ -108,7 +100,7 @@ export function queuedToolResponse(firstCode: string, secondCode: string): strin
         index,
         id: `call-queued-${index}`,
         type: "function",
-        function: { name: "run-code", arguments: JSON.stringify({ code: `async page => { ${code} }` }) },
+        function: { name: "run", arguments: JSON.stringify({ code }) },
       })),
     }),
     chunk({}, "tool_calls"),
@@ -294,22 +286,26 @@ export async function closeServer(server: Server): Promise<void> {
   await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
 }
 
-const testProfiles = new Map<string, BrowserContext>();
+const testProfiles = new Map<string, { context: BrowserContext; browserVersion: string }>();
 
-test.afterEach(async ({}, info) => {
-  for (const [directory, context] of testProfiles) {
-    await context.close().catch(() => undefined);
-    const source = resolve(directory, "Default/IndexedDB");
-    const destination = resolve(process.env.SURFWAX_EVIDENCE_PATH ?? "../.dev/chromium-profile/Default/IndexedDB", basename(directory));
-    if (existsSync(source)) {
-      await mkdir(destination, { recursive: true });
-      await cp(source, destination, { recursive: true });
-      await writeFile(resolve(destination, "test-evidence.json"), JSON.stringify({ title: info.titlePath, status: info.status, browser: process.env.SURFWAX_CHROME_VERSION ?? context.browser()?.version() ?? "unknown", project: info.project.name, profile: directory }, null, 2));
-      await info.attach("canonical-log-location", { body: destination, contentType: "text/plain" });
+export const test = base.extend<{ _profileCleanup: void }>({
+  _profileCleanup: [async ({}, use, info) => {
+    await use();
+    for (const [directory, profile] of testProfiles) {
+      const { context, browserVersion } = profile;
+      await context.close().catch(() => undefined);
+      const source = resolve(directory, "Default/IndexedDB");
+      const destination = resolve(process.env.SURFWAX_EVIDENCE_PATH ?? "../.dev/chromium-profile/Default/IndexedDB", basename(directory));
+      if (existsSync(source)) {
+        await mkdir(destination, { recursive: true });
+        await cp(source, destination, { recursive: true });
+        await writeFile(resolve(destination, "test-evidence.json"), JSON.stringify({ title: info.titlePath, status: info.status, browser: browserVersion, project: info.project.name, profile: directory }, null, 2));
+        await info.attach("canonical-log-location", { body: destination, contentType: "text/plain" });
+      }
+      if (info.status === info.expectedStatus) await rm(directory, { recursive: true, force: true });
     }
-    if (info.status === info.expectedStatus) await rm(directory, { recursive: true, force: true });
-  }
-  testProfiles.clear();
+    testProfiles.clear();
+  }, { auto: true }],
 });
 
 export async function openExtension(existingDirectory?: string, settings: { extensionPath?: string; executablePath?: string; deviceScaleFactor?: number; args?: string[] } = {}): Promise<{
@@ -330,7 +326,10 @@ export async function openExtension(existingDirectory?: string, settings: { exte
     deviceScaleFactor: settings.deviceScaleFactor,
     args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, "--no-sandbox", ...(settings.args ?? [])],
   });
-  testProfiles.set(userDataDirectory, context);
+  testProfiles.set(userDataDirectory, {
+    context,
+    browserVersion: process.env.SURFWAX_CHROME_VERSION ?? context.browser()?.version() ?? "unknown",
+  });
   let worker = context.serviceWorkers()[0];
   if (!worker) worker = await context.waitForEvent("serviceworker");
   const extensionId = new URL(worker.url()).hostname;
@@ -383,6 +382,16 @@ export async function configure(context: BrowserContext, page: Page, baseURL: st
   await options.getByRole("button", { name: "保存配置" }).click();
   await expect(options.getByRole("status")).toContainText("配置已保存");
   await expect(page.getByTestId("composer-input")).toBeVisible();
+  return options;
+}
+
+/** Explicitly advertise vision only for tests that request image artifacts. */
+export async function configureWithImages(context: BrowserContext, page: Page, baseURL: string): Promise<Page> {
+  const options = await configure(context, page, baseURL);
+  await options.getByLabel("图片输入能力").click();
+  await options.getByRole("option", { name: "支持", exact: true }).click();
+  await options.getByRole("button", { name: "保存配置" }).click();
+  await expect(options.getByRole("status")).toContainText("配置已保存");
   return options;
 }
 
@@ -521,7 +530,7 @@ export async function warnsOnLeave(page: Page): Promise<boolean> {
 }
 
 
-export { expect, test, chromium };
+export { expect, chromium };
 
 export async function openNativeSidePanel(opened: Awaited<ReturnType<typeof openExtension>>, targetURL: string,
   settings: { browser?: CDPSession; windowId?: number } = {}) {

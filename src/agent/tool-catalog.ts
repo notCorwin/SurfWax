@@ -1,4 +1,4 @@
-/** Reconstruct the persisted, append-only model catalogue without displaying it in the chat UI. */
+/** Read historical catalogue text without mutating saved messages or registering executable tools. */
 export function materializeToolCatalog<T>(message: T): T {
   if (!message || typeof message !== "object" || Array.isArray(message)) return message;
   const record = message as Record<string, unknown>;

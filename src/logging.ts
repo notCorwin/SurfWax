@@ -377,10 +377,10 @@ export function selectedHeadId(
     },
     { id: null, eventId: -1 },
   );
-  // New message nodes and submitted runs advance the head. Updating an existing
-  // node only refreshes its contents, so a late snapshot cannot undo a branch.
-  const submittedAt = events.reduce((id, event) => event.type === "conversation.submitted" ? Math.max(id, event.id) : id, -1);
-  const selectionFloor = Math.max(submittedAt, latest.eventId);
+  // Only a new message node advances the head. A submitted run may fail or be
+  // cancelled before creating one, and must not discard an explicit branch.
+  // Updating an existing node only refreshes its contents.
+  const selectionFloor = latest.eventId;
   for (const event of events) {
     if (event.type !== "conversation.branch.selected") continue;
     const content = fromLogValue(event.content) as { headId?: unknown };
@@ -619,6 +619,10 @@ export class EventLogger {
     return this.eventsByTypes(["browser.diagnostic"], conversationId);
   }
 
+  jobEvents(conversationId: string): Promise<LogEvent[]> {
+    return this.eventsByTypes(["browser.job.state", "browser.job.progress"], conversationId);
+  }
+
   inputStateEvents(): Promise<LogEvent[]> { return this.eventsByTypes(["browser.input.state"]); }
 
   modelUsageEvents(conversationId: string): Promise<LogEvent[]> {
@@ -711,6 +715,13 @@ export class EventLogger {
   private async artifactForCall(event: LogEvent, events: readonly LogEvent[]): Promise<{ id: number } | undefined> {
     let stored = [...events].reverse().find((item) => item.type === "tool.result.data" && item.toolCallId === event.toolCallId && item.id > event.id
       && typeof (fromLogValue(item.content) as { filename?: unknown } | null)?.filename === "string");
+    const referenced = [...events].reverse().find(item => item.type === "browser.artifact.used" && item.toolCallId === event.toolCallId && item.id > event.id);
+    const referencedId = (fromLogValue(referenced?.content) as { artifactId?: number } | null)?.artifactId;
+    if (!stored && Number.isSafeInteger(referencedId)) {
+      const store = this.options.store ?? getEventStore();
+      const saved = store.get ? await store.get(referencedId!) : (await this.conversation(event.conversationId!)).find(item => item.id === referencedId);
+      if (saved?.type === "tool.result.data" && saved.conversationId === event.conversationId && typeof (fromLogValue(saved.content) as { filename?: unknown } | null)?.filename === "string") stored = saved;
+    }
     const input = fromLogValue(event.input) as { id?: number } | null;
     if (!stored && (fromLogValue(event.content) as { toolName?: string })?.toolName === "artifact-save" && Number.isSafeInteger(input?.id)) {
       const store = this.options.store ?? getEventStore();
@@ -722,13 +733,13 @@ export class EventLogger {
 
   async toolArtifact(conversationId: string, identity: { runId?: string; toolCallId: string }): Promise<{ id: number } | undefined> {
     if (!identity.runId) return undefined;
-    const events = await this.eventsByRunTypes([identity.runId], ["tool.started", "tool.result.data"]);
+    const events = await this.eventsByRunTypes([identity.runId], ["tool.started", "tool.result.data", "browser.artifact.used"]);
     const started = [...events].reverse().find((event) => event.type === "tool.started" && event.conversationId === conversationId && event.toolCallId === identity.toolCallId);
     return started ? this.artifactForCall(started, events) : undefined;
   }
 
   async closePendingTools(runId: string, conversationId: string, reason: unknown): Promise<void> {
-    const events = await this.eventsByRunTypes([runId], ["tool.started", "tool.finished", "tool.failed", "tool.progress", "tool.result.data"]);
+    const events = await this.eventsByRunTypes([runId], ["tool.started", "tool.finished", "tool.failed", "tool.progress", "tool.result.data", "browser.artifact.used"]);
     const key = (event: LogEvent) => `${(fromLogValue(event.content) as { callId?: string })?.callId ?? ""}\0${event.toolCallId}`;
     const terminal = new Set(events.filter((event) => ["tool.finished", "tool.failed"].includes(event.type)).map(key));
     for (const event of events) {
