@@ -40,9 +40,10 @@
   --syntax-function: #953800;
   --syntax-type: #116329;
   --thread-max-width: 44rem;
-  --transcript-item-gap: calc(var(--spacing) * 2);
-  --transcript-block-gap: 1.25rem;
-  --transcript-line-height: var(--line-body);
+  --transcript-item-gap: calc(var(--spacing) * 1);
+  --transcript-block-gap: 0.75rem;
+  --transcript-turn-gap: 1.25rem;
+  --transcript-line-height: 1.5;
   --background: #fff;
   --foreground: #171717;
   --card: #fff;

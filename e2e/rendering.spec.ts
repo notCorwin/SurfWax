@@ -326,14 +326,14 @@ test("shows live work, then folds it under elapsed time while keeping the final 
     await expect(work.locator(":scope > summary")).toHaveText(/^工作了 \d+ 秒$/);
     await expect(work.locator(":scope > summary svg")).toHaveCount(0);
     const workLeft = await work.locator(":scope > summary span").evaluate((element) => element.getBoundingClientRect().left);
-    const answerLeft = await opened.page.locator(".conversation-turn").last().locator(".markdown-body").last()
+    const answerLeft = await opened.page.locator(".conversation-turn").last().locator(".markdown-body p").last()
       .evaluate((element) => element.getBoundingClientRect().left);
     expect(workLeft).toBe(answerLeft);
     await expect(work).not.toHaveAttribute("open", "");
     await expect(work.locator(".activity")).toBeHidden();
     await expect(work).toContainText("PROGRESS_TEXT");
     await expect(work).not.toContainText("FINAL_REPLY");
-    await expect(work.locator(".markdown-body")).toBeHidden();
+    await expect(work.locator(".markdown-body p")).toBeHidden();
     await expect(opened.page.locator(".conversation-turn").last().locator(".markdown-body").last()).toContainText("FINAL_REPLY");
     await expect(work.locator(".markdown-body")).toContainText("PROGRESS_TEXT");
     await expect(opened.page.locator('[data-role="user"]').last()).toContainText("do the work");
@@ -502,23 +502,17 @@ test("streams complete Markdown without blocking draft input", async () => {
     await expect(copy).toBeEnabled();
     await copy.click();
     await expect(rendered.locator('output[aria-live="polite"]')).toHaveText("Copied");
+    await rendered.locator("p").first().scrollIntoViewIfNeeded();
     expect(await rendered.evaluate((element) => {
       const root = document.querySelector<HTMLElement>('[data-testid="thread-root"]');
-      const flow = element.querySelector<HTMLElement>(".markdown-flow");
-      const wrapper = flow?.firstElementChild;
-      // GFM reference/footnote definitions require one shared parse block.
-      const firstBlock = wrapper?.childElementCount && wrapper.childElementCount > 1 ? wrapper.firstElementChild : wrapper;
-      const content = element.closest<HTMLElement>(".assistant-message-content");
-      const turn = element.closest<HTMLElement>(".conversation-turn");
-      if (!root || !firstBlock || !content || !turn) throw new Error("transcript layout is incomplete");
+      const [first, second] = element.querySelectorAll("p");
+      if (!root || !first || !second) throw new Error("transcript layout is incomplete");
       return {
         background: getComputedStyle(root).backgroundColor,
-        variable: getComputedStyle(root).getPropertyValue("--transcript-block-gap").trim(),
-        markdownGap: getComputedStyle(firstBlock).marginBottom,
-        partGap: getComputedStyle(content).rowGap,
-        turnGap: getComputedStyle(turn).rowGap,
+        paragraphGap: second.getBoundingClientRect().top - first.getBoundingClientRect().bottom,
+        lineHeight: getComputedStyle(first).lineHeight,
       };
-    })).toEqual({ background: "rgba(0, 0, 0, 0)", variable: "1.25rem", markdownGap: "20px", partGap: "20px", turnGap: "20px" });
+    })).toEqual({ background: "rgba(0, 0, 0, 0)", paragraphGap: 12, lineHeight: "21px" });
     await opened.page.getByTestId("thread-viewport").evaluate((viewport) => { viewport.scrollTop = 0; });
     await expect(composer).toBeInViewport();
   } finally {

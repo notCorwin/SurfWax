@@ -84,6 +84,8 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
     </div>}
   </MessageFooter>, [runtimeCommands, runtime, user, message.id, message.branchCount, message.branchNumber, copied, editing, locked, command, work?.mode]);
   if (work && shown.length === 0) return null;
+  if (work?.mode === "process" && !message.metadata.custom?.interrupted
+    && shown.every(({ part }) => part.type === "text" && !part.text.trim())) return null;
   return <Message data-role={message.role} align={user ? "end" : "start"} aria-live={latest && !user ? "polite" : undefined} className={user ? "user-message" : "assistant-message px-2"}>
     <MessageContent className={user ? "items-end" : "assistant-message-content"}>
       {user ? <form className="flex w-full min-w-0 flex-col items-end gap-1" onSubmit={(event) => event.preventDefault()}>

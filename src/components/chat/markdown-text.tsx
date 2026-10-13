@@ -8,6 +8,7 @@ import { Block, Streamdown, type BlockProps } from "streamdown";
 import { createMarkdownBlockParser } from "./markdown-blocks";
 
 const CachedBlock = memo(function CachedBlock(props: BlockProps) {
+  if (!props.content.trim()) return null;
   return <div className="markdown-block"><Block {...props} /></div>;
 });
 
@@ -53,9 +54,10 @@ export const MarkdownText = memo(function MarkdownText({ text, running = false }
   // Completed blocks retain their React elements, parsed Markdown and highlight
   // state. Only the unfinished suffix goes through streaming repair/parsing.
   // Cross-block GFM references/footnotes stay in one shared block in the parser.
-  return <div className="markdown-body" data-status={running ? "running" : "complete"}><div className="markdown-flow">
+  if (!normalized.trim()) return null;
+  return <div className="markdown-body" data-status={running ? "running" : "complete"}>
     {document.completed}
-    {document.tail && <Streamdown className="markdown-tail" plugins={PLUGINS} remend={REMEND}
+    {document.tail.trim() && <Streamdown className="markdown-tail" plugins={PLUGINS} remend={REMEND}
       BlockComponent={CachedBlock} isAnimating={running} controls>{document.tail}</Streamdown>}
-  </div></div>;
+  </div>;
 });

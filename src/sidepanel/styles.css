@@ -228,19 +228,21 @@ p {
 
 
 .conversation-turn,
-.assistant-message-content {
+.assistant-message-content,
+.work-summary-content,
+.thinking-body,
+.markdown-block {
+  display: flex;
+  flex-direction: column;
   gap: var(--transcript-block-gap);
 }
 
 .conversation-turn {
-  padding-bottom: var(--transcript-block-gap);
+  padding-bottom: var(--transcript-turn-gap);
   contain: layout style;
 }
 
 .work-summary-content {
-  display: flex;
-  flex-direction: column;
-  gap: var(--transcript-block-gap);
   padding-top: calc(var(--spacing) * 2);
 }
 
@@ -266,16 +268,14 @@ p {
   color: var(--foreground);
 }
 
-.markdown-flow > :not(:last-child),
-.markdown-tail > :not(:last-child),
-.markdown-block > :not(:last-child) {
-  margin-block: 0 var(--transcript-block-gap);
-  margin-block-end: var(--transcript-block-gap);
+/* Text blocks and tool summaries share the message's single vertical flow. */
+.markdown-body,
+.markdown-tail {
+  display: contents;
 }
 
-.markdown-flow > :last-child,
-.markdown-tail > :last-child,
-.markdown-block > :last-child {
+.markdown-block > *,
+.markdown-tail > * {
   margin-block: 0;
 }
 
@@ -363,7 +363,7 @@ p {
   color: var(--muted-foreground);
   padding: var(--transcript-block-gap) 0 0;
   font-size: var(--type-code);
-  line-height: 1.35;
+  line-height: var(--transcript-line-height);
 }
 
 .activity[data-status="error"] summary,
