@@ -3,6 +3,14 @@ import type { SyntaxNode } from "@lezer/common";
 
 const MINIMUM_TIMEOUT_MS = 30_000;
 const MAXIMUM_AUTOMATIC_TIMEOUT_MS = 10 * 60_000;
+const CAPABILITY_ROOTS = new Set([
+  "page",
+  "browser",
+  "net",
+  "protocol",
+  "artifacts",
+]);
+const GLOBAL_OPERATIONS = new Set(["check"]);
 
 const OPERATION_BUDGETS = new Map<string, number>([
   ...[
@@ -146,6 +154,70 @@ function firstArgument(node: SyntaxNode): SyntaxNode | null {
     : null;
 }
 
+type Analysis = {
+  aliases: Set<string>;
+  helpers: Map<string, SyntaxNode>;
+  helperBudgets: Map<string, number>;
+  visitingHelpers: Set<string>;
+};
+
+function isCapabilityExpression(
+  source: string,
+  node: SyntaxNode | null,
+  analysis: Analysis,
+): boolean {
+  if (!node) return false;
+  if (node.name === "VariableName") {
+    const name = textOf(source, node);
+    return CAPABILITY_ROOTS.has(name) || analysis.aliases.has(name);
+  }
+  if (
+    ["MemberExpression", "CallExpression", "ParenthesizedExpression"].includes(
+      node.name,
+    )
+  )
+    return isCapabilityExpression(source, node.firstChild, analysis);
+  return false;
+}
+
+function collectDefinitions(source: string, root: SyntaxNode): Analysis {
+  const analysis: Analysis = {
+    aliases: new Set(),
+    helpers: new Map(),
+    helperBudgets: new Map(),
+    visitingHelpers: new Set(),
+  };
+  const visit = (node: SyntaxNode) => {
+    const parts = children(node);
+    if (node.name === "FunctionDeclaration") {
+      const name = parts.find((part) => part.name === "VariableDefinition");
+      const body = parts.find((part) => part.name === "Block");
+      if (name && body) analysis.helpers.set(textOf(source, name), body);
+    } else if (node.name === "VariableDeclaration") {
+      const name = parts.find((part) => part.name === "VariableDefinition");
+      const equals = parts.findIndex((part) => part.name === "Equals");
+      const value = equals >= 0 ? parts[equals + 1] : undefined;
+      if (
+        name &&
+        value &&
+        ["ArrowFunction", "FunctionExpression"].includes(value.name)
+      ) {
+        const body = children(value).at(-1);
+        if (body) analysis.helpers.set(textOf(source, name), body);
+      } else if (
+        name &&
+        value &&
+        isCapabilityExpression(source, value, analysis)
+      ) {
+        analysis.aliases.add(textOf(source, name));
+      }
+    }
+    for (const part of parts) visit(part);
+  };
+  visit(root);
+  return analysis;
+}
+
 function boundedIterations(
   source: string,
   node: SyntaxNode,
@@ -188,9 +260,35 @@ function addBudget(total: number, amount: number, multiplier: number): number {
   );
 }
 
-function nodeBudget(source: string, node: SyntaxNode, multiplier = 1): number {
+function helperBudget(
+  source: string,
+  name: string,
+  analysis: Analysis,
+): number {
+  const cached = analysis.helperBudgets.get(name);
+  if (cached !== undefined) return cached;
+  const body = analysis.helpers.get(name);
+  if (!body || analysis.visitingHelpers.has(name)) return 0;
+  analysis.visitingHelpers.add(name);
+  const budget = nodeBudget(source, body, analysis);
+  analysis.visitingHelpers.delete(name);
+  analysis.helperBudgets.set(name, budget);
+  return budget;
+}
+
+function nodeBudget(
+  source: string,
+  node: SyntaxNode,
+  analysis: Analysis,
+  multiplier = 1,
+): number {
   if (multiplier <= 0) return 0;
   const parts = children(node);
+  if (
+    node.name === "FunctionDeclaration" ||
+    ["ArrowFunction", "FunctionExpression"].includes(node.name)
+  )
+    return 0;
   if (node.name === "ForStatement") {
     const body = parts.at(-1)!;
     const iterations = boundedIterations(source, node) ?? 1;
@@ -201,6 +299,7 @@ function nodeBudget(source: string, node: SyntaxNode, multiplier = 1): number {
         nodeBudget(
           source,
           part,
+          analysis,
           part === body ? multiplier * iterations : multiplier,
         ),
         1,
@@ -210,16 +309,25 @@ function nodeBudget(source: string, node: SyntaxNode, multiplier = 1): number {
   let total = 0;
   if (node.name === "CallExpression") {
     const name = callName(source, node);
+    const callee = node.firstChild;
     const duration =
-      name === "sleep"
+      name === "sleep" && callee?.name === "VariableName"
         ? constant(source, firstArgument(node))
-        : name
+        : name && callee?.name === "VariableName" && GLOBAL_OPERATIONS.has(name)
           ? OPERATION_BUDGETS.get(name)
-          : undefined;
+          : name &&
+              callee?.name === "VariableName" &&
+              analysis.helpers.has(name)
+            ? helperBudget(source, name, analysis)
+            : name &&
+                callee?.name === "MemberExpression" &&
+                isCapabilityExpression(source, callee, analysis)
+              ? OPERATION_BUDGETS.get(name)
+              : undefined;
     if (duration !== undefined) total = addBudget(total, duration, multiplier);
   }
   for (const part of parts) {
-    total = addBudget(total, nodeBudget(source, part, multiplier), 1);
+    total = addBudget(total, nodeBudget(source, part, analysis, multiplier), 1);
     if (total >= MAXIMUM_AUTOMATIC_TIMEOUT_MS) break;
   }
   return total;
@@ -228,8 +336,9 @@ function nodeBudget(source: string, node: SyntaxNode, multiplier = 1): number {
 /** Derive a finite safety deadline from executable JavaScript syntax. */
 export function estimateProgramTimeoutMs(source: string): number {
   const syntax = parser.parse(source);
+  const analysis = collectDefinitions(source, syntax.topNode);
   return Math.min(
     MAXIMUM_AUTOMATIC_TIMEOUT_MS,
-    MINIMUM_TIMEOUT_MS + nodeBudget(source, syntax.topNode),
+    MINIMUM_TIMEOUT_MS + nodeBudget(source, syntax.topNode, analysis),
   );
 }

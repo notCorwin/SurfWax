@@ -83,6 +83,36 @@ describe("program timeout estimation", () => {
     expect(estimateProgramTimeoutMs(source)).toBe(31_000);
   });
 
+  it("charges local helpers at each statically identifiable invocation", () => {
+    expect(
+      estimateProgramTimeoutMs(`
+        async function pause() { await sleep(25_000); }
+        await pause(); await pause(); await pause();
+      `),
+    ).toBe(105_000);
+    expect(
+      estimateProgramTimeoutMs(`
+        const act = async () => { await page.getByText("Ready").click(); };
+        for (let i = 0; i < 3; i++) await act();
+      `),
+    ).toBe(45_000);
+  });
+
+  it("budgets member calls only when rooted in Surf Wax capabilities", () => {
+    expect(
+      estimateProgramTimeoutMs(`
+        for (let i = 0; i < 100; i++) Array(10).fill(0);
+        await new Promise(() => {});
+      `),
+    ).toBe(30_000);
+    expect(
+      estimateProgramTimeoutMs(`
+        const button = page.getByRole("button");
+        await button.fill("ready");
+      `),
+    ).toBe(35_000);
+  });
+
   it("ignores method-like text in comments, strings, and embedded scripts", () => {
     expect(
       estimateProgramTimeoutMs(`
