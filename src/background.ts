@@ -124,7 +124,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message?.type === "surf-wax:run-status") { void bootReady.then(() => respond({ identity: runs.identity() }), (error) => respond({ error: String(error) })); return true; }
   if (message?.type === "surf-wax:guard-status") {
     const tabId = sender.tab?.id;
-    const runId = tabId !== undefined ? confirmedGuards.get(tabId) ?? loadingGuards.get(tabId) : undefined;
+    const runId = tabId !== undefined ? confirmedGuards.get(tabId) ?? loadingGuards.get(tabId)?.runId : undefined;
     respond({ runId, passThrough: runId !== undefined && tabId !== undefined && bypassedTabs.has(tabId) }); return;
   }
   if (message?.type !== "side-agent:clear-log") return;
@@ -136,7 +136,7 @@ const guardedTabs = new Map<number, Set<chrome.runtime.Port>>();
 const bypassedTabs = new Map<number, number>();
 const guardUpdates = new Map<number, Promise<void>>();
 const confirmedGuards = new Map<number, string>();
-const loadingGuards = new Map<number, string>();
+const loadingGuards = new Map<number, { runId: string }>();
 
 function warnPageGuard(tabId: number, error: unknown): string {
   eventLogger.record({ type: "page-guard.failed", content: { tabId }, error });
@@ -146,6 +146,7 @@ function warnPageGuard(tabId: number, error: unknown): string {
 }
 
 async function updatePageGuard(tabId: number): Promise<void> {
+  const loading = loadingGuards.get(tabId);
   const task = (guardUpdates.get(tabId) ?? Promise.resolve()).catch(() => undefined).then(async () => {
     const enabled = guardedTabs.has(tabId);
     confirmedGuards.delete(tabId);
@@ -164,7 +165,7 @@ async function updatePageGuard(tabId: number): Promise<void> {
   try { await task; }
   finally {
     if (guardUpdates.get(tabId) === task) guardUpdates.delete(tabId);
-    loadingGuards.delete(tabId);
+    if (loading && loadingGuards.get(tabId) === loading) loadingGuards.delete(tabId);
   }
 }
 
@@ -202,7 +203,7 @@ async function authorizedNativeInput(debuggee: chrome.debugger.Debuggee, tabId: 
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (change.status === "loading") {
     const runId = guardedTabs.has(tabId) ? runs.identity()?.runId : undefined;
-    if (runId) loadingGuards.set(tabId, runId);
+    if (runId) loadingGuards.set(tabId, { runId });
     else loadingGuards.delete(tabId);
     confirmedGuards.delete(tabId);
   }
