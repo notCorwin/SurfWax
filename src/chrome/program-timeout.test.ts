@@ -228,6 +228,26 @@ describe("program timeout estimation", () => {
     ).toBe(45_000);
   });
 
+  it("keeps the maximum helper budget across conditional assignments", () => {
+    expect(
+      estimateProgramTimeoutMs(`
+        let pause = async () => { await sleep(60_000); };
+        if (false) pause = async () => {};
+        await pause();
+      `),
+    ).toBe(90_000);
+  });
+
+  it("records assignments in the declared binding scope", () => {
+    expect(
+      estimateProgramTimeoutMs(`
+        let pause;
+        { pause = async () => { await sleep(60_000); }; }
+        await pause();
+      `),
+    ).toBe(90_000);
+  });
+
   it("ignores method-like text in comments, strings, and embedded scripts", () => {
     expect(
       estimateProgramTimeoutMs(`

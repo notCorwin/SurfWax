@@ -168,26 +168,39 @@ type ScopedNode = { value: SyntaxNode; scope: SyntaxNode; bindingAt: number };
 type Analysis = {
   aliases: Map<string, ScopedNode[]>;
   helpers: Map<string, ScopedNode[]>;
+  declarations: Map<string, ScopedNode[]>;
   helperBudgets: Map<SyntaxNode, number>;
   visitingHelpers: Set<SyntaxNode>;
 };
+
+function scopedCandidates(
+  bindings: Map<string, ScopedNode[]>,
+  name: string,
+  at: SyntaxNode,
+): ScopedNode[] {
+  const candidates =
+    bindings
+      .get(name)
+      ?.filter(
+        ({ scope, bindingAt }) =>
+          scope.from <= at.from && scope.to >= at.to && bindingAt <= at.from,
+      ) ?? [];
+  const smallestScope = Math.min(
+    ...candidates.map(({ scope }) => scope.to - scope.from),
+  );
+  return candidates.filter(
+    ({ scope }) => scope.to - scope.from === smallestScope,
+  );
+}
 
 function resolveScoped(
   bindings: Map<string, ScopedNode[]>,
   name: string,
   at: SyntaxNode,
 ): SyntaxNode | undefined {
-  return bindings
-    .get(name)
-    ?.filter(
-      ({ scope, bindingAt }) =>
-        scope.from <= at.from && scope.to >= at.to && bindingAt <= at.from,
-    )
-    .sort((left, right) => {
-      const scopeDifference =
-        left.scope.to - left.scope.from - (right.scope.to - right.scope.from);
-      return scopeDifference || right.bindingAt - left.bindingAt;
-    })[0]?.value;
+  return scopedCandidates(bindings, name, at).sort(
+    (left, right) => right.bindingAt - left.bindingAt,
+  )[0]?.value;
 }
 
 function addScoped(
@@ -229,6 +242,7 @@ function collectDefinitions(source: string, root: SyntaxNode): Analysis {
   const analysis: Analysis = {
     aliases: new Map(),
     helpers: new Map(),
+    declarations: new Map(),
     helperBudgets: new Map(),
     visitingHelpers: new Set(),
   };
@@ -246,7 +260,14 @@ function collectDefinitions(source: string, root: SyntaxNode): Analysis {
     if (node.name === "FunctionDeclaration") {
       const name = parts.find((part) => part.name === "VariableDefinition");
       const body = parts.find((part) => part.name === "Block");
-      if (name && body)
+      if (name && body) {
+        addScoped(
+          analysis.declarations,
+          textOf(source, name),
+          name,
+          scope,
+          scope.from,
+        );
         addScoped(
           analysis.helpers,
           textOf(source, name),
@@ -254,10 +275,21 @@ function collectDefinitions(source: string, root: SyntaxNode): Analysis {
           scope,
           scope.from,
         );
+      }
     } else if (node.name === "VariableDeclaration") {
       const declarationScope = parts[0]?.name === "var" ? functionScope : scope;
       for (let index = 0; index < parts.length; index += 1) {
         const name = parts[index];
+        if (name?.name === "VariableDefinition")
+          addScoped(
+            analysis.declarations,
+            textOf(source, name),
+            name,
+            declarationScope,
+            declarationScope === functionScope
+              ? declarationScope.from
+              : name.from,
+          );
         if (
           name?.name !== "VariableDefinition" ||
           parts[index + 1]?.name !== "Equals"
@@ -286,6 +318,15 @@ function collectDefinitions(source: string, root: SyntaxNode): Analysis {
     } else if (node.name === "AssignmentExpression") {
       const name = parts[0];
       const value = parts[2];
+      const declaredScope =
+        name?.name === "VariableName"
+          ? scopedCandidates(
+              analysis.declarations,
+              textOf(source, name),
+              node,
+            )[0]?.scope
+          : undefined;
+      const assignmentScope = declaredScope ?? scope;
       if (
         name?.name === "VariableName" &&
         value &&
@@ -293,13 +334,23 @@ function collectDefinitions(source: string, root: SyntaxNode): Analysis {
       ) {
         const body = children(value).at(-1);
         if (body)
-          addScoped(analysis.helpers, textOf(source, name), body, scope);
+          addScoped(
+            analysis.helpers,
+            textOf(source, name),
+            body,
+            assignmentScope,
+          );
       } else if (
         name?.name === "VariableName" &&
         value &&
         isCapabilityExpression(source, value, analysis)
       ) {
-        addScoped(analysis.aliases, textOf(source, name), value, scope);
+        addScoped(
+          analysis.aliases,
+          textOf(source, name),
+          value,
+          assignmentScope,
+        );
       }
     }
     const functionBody = [
@@ -436,18 +487,24 @@ function nodeBudget(
     const name = callName(source, node);
     const callee = node.firstChild;
     const immediateBody = immediateFunctionBody(callee);
-    const helper =
+    const helpers =
       name && callee?.name === "VariableName"
-        ? resolveScoped(analysis.helpers, name, node)
-        : undefined;
+        ? scopedCandidates(analysis.helpers, name, node).map(
+            ({ value }) => value,
+          )
+        : [];
     const duration = immediateBody
       ? nodeBudget(source, immediateBody, analysis)
       : name === "sleep" && callee?.name === "VariableName"
         ? constant(source, firstArgument(node))
         : name && callee?.name === "VariableName" && GLOBAL_OPERATIONS.has(name)
           ? OPERATION_BUDGETS.get(name)
-          : helper
-            ? helperBudget(source, helper, analysis)
+          : helpers.length
+            ? Math.max(
+                ...helpers.map((helper) =>
+                  helperBudget(source, helper, analysis),
+                ),
+              )
             : name &&
                 callee?.name === "MemberExpression" &&
                 isCapabilityExpression(source, callee, analysis)
