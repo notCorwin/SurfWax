@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Combobox } from "@base-ui/react/combobox";
 import { CheckIcon, ChevronsUpDownIcon } from "lucide-react";
 import { Button } from "../components/ui/button";
@@ -26,10 +26,20 @@ export function SearchCombobox({ id, name, value, options, onValueChange, allowC
   const displayValue = allowCustom ? value : selected ? `${selected.label} (${selected.value})` : "";
   const [open, setOpen] = useState(false);
   const [inputValue, setInputValue] = useState(displayValue);
+  const container = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) setInputValue(displayValue);
   }, [displayValue, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsidePress = (event: PointerEvent) => {
+      if (!container.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePress, true);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePress, true);
+  }, [open]);
 
   return (
     <Combobox.Root
@@ -38,6 +48,7 @@ export function SearchCombobox({ id, name, value, options, onValueChange, allowC
       value={value || null}
       inputValue={inputValue}
       open={open}
+      inline={open}
       disabled={disabled}
       autoHighlight
       itemToStringLabel={(itemValue) => {
@@ -62,30 +73,30 @@ export function SearchCombobox({ id, name, value, options, onValueChange, allowC
         onValueChange(next);
         const option = options.find((item) => item.value === next);
         setInputValue(allowCustom ? next : option ? `${option.label} (${option.value})` : next);
+        setOpen(false);
       }}
     >
-      <Combobox.InputGroup className="search-combobox rounded-md" data-focus-group="">
-        <Combobox.Input
-          render={<Input />}
-          id={id}
-          data-focus-delegate=""
-          autoComplete="off"
-          spellCheck={false}
-          aria-invalid={invalid}
-          aria-describedby={describedBy}
-          placeholder={placeholder}
-        />
-        <Combobox.Trigger
-          render={<Button type="button" variant="ghost" size="icon" />}
-          className="search-combobox-trigger"
-          aria-label={name === "providerId" ? "展开 Provider 候选" : "展开模型候选"}
-        >
-          <ChevronsUpDownIcon aria-hidden="true" />
-        </Combobox.Trigger>
-      </Combobox.InputGroup>
-      <Combobox.Portal>
-        <Combobox.Positioner className="z-50 outline-none" align="start" sideOffset={4} collisionPadding={8}>
-          <Combobox.Popup className="search-combobox-content origin-[var(--transform-origin)] transition-[transform,opacity] duration-(--motion-fast) data-starting-style:scale-95 data-starting-style:opacity-0 data-ending-style:scale-95 data-ending-style:opacity-0">
+      <div ref={container} className="search-combobox rounded-md" data-focus-group="">
+        <Combobox.InputGroup>
+          <Combobox.Input
+            render={<Input />}
+            id={id}
+            data-focus-delegate=""
+            autoComplete="off"
+            spellCheck={false}
+            aria-invalid={invalid}
+            aria-describedby={describedBy}
+            placeholder={placeholder}
+          />
+          <Combobox.Trigger
+            render={<Button type="button" variant="ghost" size="icon" />}
+            className="search-combobox-trigger"
+            aria-label={name === "providerId" ? "展开 Provider 候选" : "展开模型候选"}
+          >
+            <ChevronsUpDownIcon aria-hidden="true" />
+          </Combobox.Trigger>
+        </Combobox.InputGroup>
+        {open && <div className="search-combobox-content">
             <Combobox.Empty className="search-combobox-empty">没有匹配项</Combobox.Empty>
             <Combobox.List>
               {(itemValue: string) => {
@@ -99,9 +110,8 @@ export function SearchCombobox({ id, name, value, options, onValueChange, allowC
                 );
               }}
             </Combobox.List>
-          </Combobox.Popup>
-        </Combobox.Positioner>
-      </Combobox.Portal>
+        </div>}
+      </div>
     </Combobox.Root>
   );
 }

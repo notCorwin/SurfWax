@@ -93,7 +93,7 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
           {editing ? <Textarea autoFocus data-focus-delegate="" data-testid="edit-message-input" aria-label="编辑消息" value={draft} disabled={locked}
             style={{ height: Math.min(128, Math.max(22, editSize.height - 16)) }}
             onChange={(event) => { setDraft(event.target.value); event.currentTarget.style.height = "auto"; event.currentTarget.style.height = `${Math.min(128, event.currentTarget.scrollHeight)}px`; }}
-            className="max-h-32 min-h-0 resize-none rounded-none border-0 bg-transparent p-0 text-sm leading-relaxed shadow-none dark:bg-transparent" /> : renderParts()}
+            className="max-h-32 !min-h-0 !resize-none !rounded-none !border-0 !bg-transparent !p-0 !text-sm !leading-relaxed !shadow-none" /> : renderParts()}
         </BubbleContent></Bubble>
         {editing && <div className="flex justify-end gap-1">
           <Button type="button" size="sm" variant="ghost" onClick={() => setEditing(false)}>取消</Button>

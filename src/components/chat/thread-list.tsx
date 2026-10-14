@@ -111,7 +111,10 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
     || (item.title ?? "新对话").toLocaleLowerCase().includes(needle)
     || (index.get(item.remoteId ?? item.id) ?? "").includes(needle), [index, needle]);
   const visibleItems = open ? allItems.filter(matches) : [];
-  return <Popover open={open} onOpenChange={(value) => { if (value) setOpen(true); else close(); }}>
+  return <Popover open={open} onOpenChange={(value, details) => {
+    if (!value && details.reason === "focus-out") { details.cancel(); return; }
+    if (value) setOpen(true); else close();
+  }}>
     <PopoverTrigger render={<Button type="button" variant="ghost" className="conversation-trigger" data-testid="conversation-menu" />}><HistoryIcon data-icon="inline-start" aria-hidden="true" /><span>{title}</span><ChevronDownIcon data-icon="inline-end" aria-hidden="true" /></PopoverTrigger>
     <PopoverContent className="conversation-dropdown flex min-h-0 flex-col gap-2 overflow-hidden p-3" aria-label="对话列表"
       side="bottom" align="start" sideOffset={8} collisionPadding={12}
