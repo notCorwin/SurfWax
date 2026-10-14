@@ -237,23 +237,21 @@ export class ConversationStore {
     this.display(messages);
     let failure: unknown;
     let priorFailureEventId = 0;
-    let partial: SidePanelMessage | undefined;
     try {
-      priorFailureEventId = Math.max(0, ...(await this.logger.restorationEvents(id))
-        .filter((event) => event.type === "conversation.failed").map((event) => event.id));
       if (!this.state.threadListItem.remoteId) {
         await this.logger.append({ type: "conversation.created", conversationId: id, content: { title: "新对话" } });
         this.publish({ threadListItem: { id, remoteId: id } });
       }
-      controller.signal.throwIfAborted();
       const user = messages.at(-1);
       if (user?.role === "user" && !this.repository.messages.some((item) => item.message.id === user.id)) {
         await this.logger.appendMessage(id, { ...user }, { parentId: messages.at(-2)?.id ?? null });
       }
+      priorFailureEventId = Math.max(0, ...(await this.logger.restorationEvents(id))
+        .filter((event) => event.type === "conversation.failed").map((event) => event.id));
+      controller.signal.throwIfAborted();
       const modelMessages = messages.filter((message) => !isSyntheticTerminalMessage(message));
       const stream = await this.transport(id).sendMessages({ trigger, chatId: id, messageId: undefined, messages: modelMessages, abortSignal: controller.signal });
       for await (const message of readMessageSnapshots<SidePanelMessage>(stream, (error) => { if (!controller.signal.aborted) failure = error; })) {
-        partial = message;
         this.display([...messages, message], message.id);
       }
     } catch (error) { if (!controller.signal.aborted) failure = error; }

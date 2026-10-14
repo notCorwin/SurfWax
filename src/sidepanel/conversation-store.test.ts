@@ -148,3 +148,26 @@ it("always clears running state when the failure baseline cannot be read", async
   expect(runtime.getState().thread.isRunning).toBe(false);
   expect(runtime.getState().thread.error).toEqual(new Error("IndexedDB unavailable"));
 });
+
+it("persists a submitted user turn before a pending failure baseline can be cancelled", async () => {
+  const events: LogEvent[] = [];
+  const logger = new EventLogger({ store: {
+    async append(event) { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+    async all() { return [...events]; },
+    async clear() { events.length = 0; },
+  } });
+  await logger.append({ type: "conversation.created", conversationId: "existing", content: { title: "Existing" } });
+  const runtime = new ConversationStore(logger, () => { throw new Error("transport must not start"); }, "existing");
+  await runtime.threads.switchToThread("existing");
+  let release!: () => void;
+  const baseline = new Promise<void>((resolve) => { release = resolve; });
+  const original = logger.restorationEvents.bind(logger);
+  vi.spyOn(logger, "restorationEvents").mockImplementationOnce(async (...args) => { await baseline; return original(...args); });
+  const running = runtime.thread.append("keep this turn");
+  await vi.waitFor(() => expect(events.some((event) => event.type === "conversation.message")).toBe(true));
+  runtime.thread.cancelRun();
+  release();
+  await running;
+  expect(events.find((event) => event.type === "conversation.message")?.content).toMatchObject({ role: "user", parts: [{ text: "keep this turn" }] });
+  expect(runtime.getState().thread.isRunning).toBe(false);
+});
