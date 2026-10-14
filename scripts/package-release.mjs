@@ -25,8 +25,16 @@ const isInside = (parent, candidate) => {
 };
 const buildRequested = process.argv[2] === '--build';
 const repository = realpathSync(execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim());
-const output = canonicalPath(process.env.SURFWAX_RELEASE_DIR ?? '.dev/releases');
-const buildDirectory = canonicalPath((buildRequested ? undefined : process.argv[2]) ?? process.env.SURFWAX_DEV_OUT_DIR ?? 'dist');
+const gitDirectory = realpathSync(execFileSync('git', ['rev-parse', '--absolute-git-dir'], { encoding: 'utf8' }).trim());
+const gitEntry = resolve(repository, '.git');
+const outputRequested = resolve(process.env.SURFWAX_RELEASE_DIR ?? '.dev/releases');
+const buildDirectoryRequested = resolve((buildRequested ? undefined : process.argv[2]) ?? process.env.SURFWAX_DEV_OUT_DIR ?? 'dist');
+if (isInside(gitEntry, outputRequested)) throw new Error('SURFWAX_RELEASE_DIR must not be inside the Git metadata directory.');
+if (isInside(gitEntry, buildDirectoryRequested)) throw new Error('SURFWAX_DEV_OUT_DIR must not be inside the Git metadata directory because Vite clears the build directory.');
+const output = canonicalPath(outputRequested);
+const buildDirectory = canonicalPath(buildDirectoryRequested);
+if (isInside(gitDirectory, output)) throw new Error('SURFWAX_RELEASE_DIR must not be inside the Git metadata directory.');
+if (isInside(gitDirectory, buildDirectory)) throw new Error('SURFWAX_DEV_OUT_DIR must not be inside the Git metadata directory because Vite clears the build directory.');
 const outputIsInsideRepository = isInside(repository, output);
 if (outputIsInsideRepository && spawnSync('git', ['check-ignore', '-q', '--no-index', '--', `${output}${sep}`]).status !== 0) {
   throw new Error('SURFWAX_RELEASE_DIR must be outside the Git worktree or ignored by Git so generated artifacts cannot make the worktree dirty.');
@@ -49,16 +57,33 @@ const assertCleanWorktree = () => {
   if (status.trim()) throw new Error('Release packaging requires a clean Git worktree; commit or remove all staged, unstaged, and untracked changes first.');
 };
 assertCleanWorktree();
+
+const packageVersion = JSON.parse(await readFile(join(repository, 'package.json'), 'utf8')).version;
+const expectedTag = `v${packageVersion}`;
+const refTag = process.env.GITHUB_REF_TYPE === 'tag' ? process.env.GITHUB_REF_NAME : undefined;
+if (refTag && refTag !== expectedTag) throw new Error(`Release tag ${refTag} differs from package version ${expectedTag}`);
+const versionTagsAtHead = execFileSync('git', ['tag', '--points-at', 'HEAD', '--list', 'v*'], { cwd: repository, encoding: 'utf8' })
+  .trim()
+  .split('\n')
+  .filter(Boolean);
+const mismatchedVersionTags = versionTagsAtHead.filter(tag => tag !== expectedTag);
+if (mismatchedVersionTags.length > 0) throw new Error(`Checked-out version tag ${mismatchedVersionTags.join(', ')} differs from package version ${expectedTag}`);
+
 if (buildRequested) {
-  execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['exec', '--', 'vite', 'build', '--mode', 'production'], { stdio: 'inherit', env: { ...process.env, NODE_ENV: 'production' } });
+  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const installEnvironment = { ...process.env };
+  delete installEnvironment.NODE_ENV;
+  delete installEnvironment.NPM_CONFIG_PRODUCTION;
+  delete installEnvironment.npm_config_production;
+  execFileSync(npm, ['ci', '--include=dev'], { cwd: repository, stdio: 'inherit', env: installEnvironment });
+  execFileSync(npm, ['exec', '--', 'vite', 'build', '--mode', 'production'], { cwd: repository, stdio: 'inherit', env: { ...process.env, NODE_ENV: 'production' } });
   assertCleanWorktree();
 }
 
 const { version, files, directory } = await validateBuild(buildDirectory);
+if (version !== packageVersion) throw new Error(`Built version ${version} differs from package version ${packageVersion}`);
 await mkdir(output, { recursive: true });
 const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-const tag = process.env.GITHUB_REF_TYPE === 'tag' ? process.env.GITHUB_REF_NAME : `v${version}`;
-if (process.env.GITHUB_REF_TYPE === 'tag' && tag !== `v${version}`) throw new Error(`Release tag ${tag} differs from package version v${version}`);
 const archive = join(output, `surf-wax-${version}.zip`);
 // Staging shares the destination filesystem so a completed file can be published atomically.
 const staging = await mkdtemp(join(output, `.surf-wax-${version}-`));
