@@ -12,7 +12,10 @@ const ALIASES: Record<string, string> = {
 const MAX_CACHED_HIGHLIGHTS = 64;
 
 /** A deliberately small, lazy Shiki registry. Unknown fences remain readable plain text. */
-export function createCodeHighlighter(themes: [ThemeInput, ThemeInput]): CodeHighlighterPlugin {
+export function createCodeHighlighter(
+  themes: [ThemeInput, ThemeInput],
+  loadHighlight = () => import("./highlight-code").then(({ highlightCode }) => highlightCode),
+): CodeHighlighterPlugin {
   type Result = NonNullable<ReturnType<CodeHighlighterPlugin["highlight"]>>;
   const results = new Map<string, Result>();
   const pending = new Map<string, Set<(result: Result) => void>>();
@@ -38,7 +41,7 @@ export function createCodeHighlighter(themes: [ThemeInput, ThemeInput]): CodeHig
       const listeners = pending.get(key) ?? new Set();
       if (callback) listeners.add(callback);
       pending.set(key, listeners);
-      if (!alreadyPending) void import("./highlight-code").then(({ highlightCode }) => highlightCode(code, resolved, themes)).then((result) => {
+      if (!alreadyPending) void loadHighlight().then((highlightCode) => highlightCode(code, resolved, themes)).then((result) => {
         results.set(key, result);
         if (results.size > MAX_CACHED_HIGHLIGHTS) results.delete(results.keys().next().value!);
         for (const listener of pending.get(key) ?? []) listener(result);

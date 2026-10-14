@@ -1,22 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 import { createCodeHighlighter } from "./code-highlighter";
-import { highlightCode } from "./highlight-code";
-
-vi.mock("./highlight-code", () => ({
-  highlightCode: vi.fn(async (code: string) => ({ tokens: [[{ content: code }]] })),
-}));
+import type { highlightCode as HighlightCode } from "./highlight-code";
 
 describe("createCodeHighlighter", () => {
   it("evicts the least recently used completed highlights", async () => {
-    const highlighter = createCodeHighlighter(["light", "dark"]);
+    const highlightCode = vi.fn(async (code: string) => ({ tokens: [[{ content: code }]] })) as unknown as typeof HighlightCode;
+    const highlighter = createCodeHighlighter(["light", "dark"], async () => highlightCode);
+    const options = (code: string) => ({ code, language: "ts", themes: ["light", "dark"] as [string, string] });
 
     for (let index = 0; index < 65; index += 1) {
-      highlighter.highlight({ code: `prefix-${index}`, language: "ts" }, vi.fn());
+      highlighter.highlight(options(`prefix-${index}`), vi.fn());
     }
     await vi.waitFor(() => expect(highlightCode).toHaveBeenCalledTimes(65));
 
-    expect(highlighter.highlight({ code: "prefix-64", language: "ts" }, vi.fn())).not.toBeNull();
-    expect(highlighter.highlight({ code: "prefix-0", language: "ts" }, vi.fn())).toBeNull();
+    expect(highlighter.highlight(options("prefix-64"), vi.fn())).not.toBeNull();
+    expect(highlighter.highlight(options("prefix-0"), vi.fn())).toBeNull();
     await vi.waitFor(() => expect(highlightCode).toHaveBeenCalledTimes(66));
   });
 });
