@@ -274,6 +274,10 @@ function cachedCatalogRevision(cached?: CachedCatalog): string {
   return cached?.revision ?? (cached ? `legacy:${cached.fetchedAt}` : `bundle:${bundledCatalogMetadata.sha256}`);
 }
 
+function currentCatalogCache(value?: CachedCatalog): CachedCatalog | undefined {
+  return value?.version === CATALOG_CACHE_VERSION && value.fetchedAt >= Date.parse(bundledCatalogMetadata.fetchedAt) ? value : undefined;
+}
+
 export function loadModelCatalog(
   options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; refresh?: boolean; onStale?: (error: unknown) => void; bundledFallback?: boolean; validateCompleteness?: boolean } = {},
 ): Promise<ModelCatalog> {
@@ -368,7 +372,7 @@ export function resolveModelLimit(
     const cached = storage ? (await storage.get(CACHE_KEY).catch(() => ({ [CACHE_KEY]: undefined })))[CACHE_KEY] as CachedLimit | undefined : undefined;
     const currentCatalog = storage ? (await storage.get(CATALOG_CACHE_KEY).catch(() => ({ [CATALOG_CACHE_KEY]: undefined })))[CATALOG_CACHE_KEY] as CachedCatalog | undefined : undefined;
     const validCache = cached?.key === key && validLimit(cached.match?.context)
-      && cached.catalogRevision === cachedCatalogRevision(currentCatalog?.version === CATALOG_CACHE_VERSION ? currentCatalog : undefined) ? cached : undefined;
+      && cached.catalogRevision === cachedCatalogRevision(currentCatalogCache(currentCatalog)) ? cached : undefined;
     if (validCache && (options.now ?? Date.now)() - validCache.fetchedAt < REFRESH_MS) return validCache.match;
     try {
       const catalog = await loadModelCatalog(options);
@@ -377,7 +381,7 @@ export function resolveModelLimit(
       if (match && storage) {
         await storage.set({ [CACHE_KEY]: { key, fetchedAt: (options.now ?? Date.now)(), catalogRevision, match } satisfies CachedLimit }).catch(() => undefined);
         const latest = (await storage.get(CATALOG_CACHE_KEY).catch(() => ({ [CATALOG_CACHE_KEY]: undefined })))[CATALOG_CACHE_KEY] as CachedCatalog | undefined;
-        if (cachedCatalogRevision(latest?.version === CATALOG_CACHE_VERSION ? latest : undefined) !== catalogRevision) {
+        if (cachedCatalogRevision(currentCatalogCache(latest)) !== catalogRevision) {
           await storage.set({ [CACHE_KEY]: null }).catch(() => undefined);
         }
       }
