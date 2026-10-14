@@ -11,6 +11,20 @@ const CAPABILITY_ROOTS = new Set([
   "artifacts",
 ]);
 const GLOBAL_OPERATIONS = new Set(["check"]);
+const EAGER_ITERATION_METHODS = new Set([
+  "every",
+  "filter",
+  "find",
+  "findIndex",
+  "findLast",
+  "findLastIndex",
+  "flatMap",
+  "forEach",
+  "map",
+  "reduce",
+  "reduceRight",
+  "some",
+]);
 
 const OPERATION_BUDGETS = new Map<string, number>([
   ...[
@@ -143,6 +157,14 @@ function callName(source: string, node: SyntaxNode): string | undefined {
   for (let index = parts.length - 1; index >= 0; index -= 1)
     if (parts[index]!.name === "PropertyName")
       return textOf(source, parts[index]!);
+    else if (parts[index]!.name === "String") {
+      try {
+        const value = JSON.parse(textOf(source, parts[index]!));
+        return typeof value === "string" ? value : undefined;
+      } catch {
+        return undefined;
+      }
+    }
   return undefined;
 }
 
@@ -162,6 +184,29 @@ function immediateFunctionBody(node: SyntaxNode | null): SyntaxNode | null {
     );
   if (!["ArrowFunction", "FunctionExpression"].includes(node.name)) return null;
   return children(node).at(-1) ?? null;
+}
+
+function literalIterations(
+  source: string,
+  iterable: SyntaxNode | null,
+): number | undefined {
+  if (iterable?.name === "ArrayExpression") {
+    const parts = children(iterable);
+    if (parts.some((part) => part.name.includes("Spread"))) return undefined;
+    const interior = textOf(source, iterable).slice(1, -1).trim();
+    if (!interior) return 0;
+    const commas = parts.filter((part) => part.name === ",").length;
+    return commas + (interior.endsWith(",") ? 0 : 1);
+  }
+  if (iterable?.name === "String") {
+    const raw = textOf(source, iterable);
+    try {
+      return [...JSON.parse(raw)].length;
+    } catch {
+      return [...raw.slice(1, -1)].length;
+    }
+  }
+  return undefined;
 }
 
 type ScopedNode = { value: SyntaxNode; scope: SyntaxNode; bindingAt: number };
@@ -380,22 +425,8 @@ function boundedIterations(
     const iterable = children(forOf).find((part) =>
       ["ArrayExpression", "String"].includes(part.name),
     );
-    if (iterable?.name === "ArrayExpression") {
-      const parts = children(iterable);
-      if (parts.some((part) => part.name.includes("Spread"))) return undefined;
-      const interior = textOf(source, iterable).slice(1, -1).trim();
-      if (!interior) return 0;
-      const commas = parts.filter((part) => part.name === ",").length;
-      return commas + (interior.endsWith(",") ? 0 : 1);
-    }
-    if (iterable?.name === "String") {
-      const raw = textOf(source, iterable);
-      try {
-        return JSON.parse(raw).length;
-      } catch {
-        return [...raw.slice(1, -1)].length;
-      }
-    }
+    const iterations = literalIterations(source, iterable ?? null);
+    if (iterations !== undefined) return iterations;
   }
   const spec = children(node).find((part) => part.name === "ForSpec");
   if (!spec) return undefined;
@@ -493,23 +524,43 @@ function nodeBudget(
             ({ value }) => value,
           )
         : [];
+    const calleeParts =
+      callee?.name === "MemberExpression" ? children(callee) : [];
+    const eagerIterations =
+      name && EAGER_ITERATION_METHODS.has(name)
+        ? literalIterations(source, calleeParts[0] ?? null)
+        : undefined;
+    const eagerCallback =
+      eagerIterations !== undefined
+        ? (children(node)
+            .find((part) => part.name === "ArgList")
+            ?.getChild("ArrowFunction") ??
+          children(node)
+            .find((part) => part.name === "ArgList")
+            ?.getChild("FunctionExpression"))
+        : undefined;
+    const eagerBody = immediateFunctionBody(eagerCallback ?? null);
     const duration = immediateBody
       ? nodeBudget(source, immediateBody, analysis)
-      : name === "sleep" && callee?.name === "VariableName"
-        ? constant(source, firstArgument(node))
-        : name && callee?.name === "VariableName" && GLOBAL_OPERATIONS.has(name)
-          ? OPERATION_BUDGETS.get(name)
-          : helpers.length
-            ? Math.max(
-                ...helpers.map((helper) =>
-                  helperBudget(source, helper, analysis),
-                ),
-              )
-            : name &&
-                callee?.name === "MemberExpression" &&
-                isCapabilityExpression(source, callee, analysis)
-              ? OPERATION_BUDGETS.get(name)
-              : undefined;
+      : eagerBody
+        ? nodeBudget(source, eagerBody, analysis) * eagerIterations!
+        : name === "sleep" && callee?.name === "VariableName"
+          ? constant(source, firstArgument(node))
+          : name &&
+              callee?.name === "VariableName" &&
+              GLOBAL_OPERATIONS.has(name)
+            ? OPERATION_BUDGETS.get(name)
+            : helpers.length
+              ? Math.max(
+                  ...helpers.map((helper) =>
+                    helperBudget(source, helper, analysis),
+                  ),
+                )
+              : name &&
+                  callee?.name === "MemberExpression" &&
+                  isCapabilityExpression(source, callee, analysis)
+                ? OPERATION_BUDGETS.get(name)
+                : undefined;
     if (duration !== undefined) total = addBudget(total, duration, multiplier);
   }
   for (const part of parts) {

@@ -248,6 +248,26 @@ describe("program timeout estimation", () => {
     ).toBe(90_000);
   });
 
+  it("budgets callbacks invoked by eager finite-literal iteration", () => {
+    expect(
+      estimateProgramTimeoutMs(`
+        await Promise.all([1].map(async () => { await sleep(60_000); }));
+      `),
+    ).toBe(90_000);
+    expect(
+      estimateProgramTimeoutMs(
+        `[1, 2, 3].forEach(() => page.getByText("Ready").click());`,
+      ),
+    ).toBe(45_000);
+  });
+
+  it("recognizes statically computed capability method names", () => {
+    expect(
+      estimateProgramTimeoutMs(`await page["waitForEvent"]("popup");`),
+    ).toBe(45_000);
+    expect(estimateProgramTimeoutMs(`await page["click"]();`)).toBe(35_000);
+  });
+
   it("ignores method-like text in comments, strings, and embedded scripts", () => {
     expect(
       estimateProgramTimeoutMs(`
