@@ -152,7 +152,7 @@ export async function summarizeContext(options: {
   languageModel: LanguageModel; logger: EventLogger; conversationId: string;
   signal: AbortSignal; limit?: ModelLimit;
   /** Runtime input may contain supplemental browser state. Only raw fingerprints persisted history. */
-  prepared?: ModelMessage[]; stepNumber?: number; prompt?: PromptSnapshot;
+  prepared?: ModelMessage[]; stepNumber?: number; prompt?: PromptSnapshot; force?: boolean;
 }): Promise<string> {
   const { raw, branchIds, logger, conversationId, signal } = options;
   const events = await logger.conversation(conversationId);
@@ -161,7 +161,7 @@ export async function summarizeContext(options: {
   // Every trigger (in-run pressure, overflow recovery, and post-turn upkeep)
   // converges here. Reuse an already committed checkpoint for the exact same
   // branch instead of allowing sequential triggers to summarize it twice.
-  if (priorCheckpoint?.sourceCount === raw.length && priorCheckpoint.sourceDigest === await digest(raw)) return priorCheckpoint.summary;
+  if (!options.force && priorCheckpoint?.sourceCount === raw.length && priorCheckpoint.sourceDigest === await digest(raw)) return priorCheckpoint.summary;
   const limit = options.limit ?? await resolveModelLimit(options.model, { signal });
   if (!limit) throw new Error("无法取得模型上下文窗口；请手动设置窗口大小。");
   const summary = await generateSummary(options.prepared ?? messages, options.languageModel, logger, conversationId, signal, limit);
@@ -297,7 +297,7 @@ export class ContextCompactor {
     const { model, logger, conversationId, signal, branchIds } = this.options;
     signal.throwIfAborted();
     const summary = await summarizeContext({ raw, prepared, stepNumber, branchIds, uiCount: branchIds.length,
-      model, languageModel, logger, conversationId, signal, limit, prompt: this.prompt });
+      model, languageModel, logger, conversationId, signal, limit, prompt: this.prompt, force: true });
     const messages = [summaryMessage(summary)];
     this.events = await logger.conversation(conversationId);
     const checkpoint = await currentSummary(this.events, branchIds, raw);
