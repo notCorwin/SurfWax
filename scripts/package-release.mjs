@@ -19,6 +19,9 @@ if (outputIsInsideRepository && spawnSync('git', ['check-ignore', '-q', '--no-in
 const outputRelativeToBuild = relative(buildDirectory, output);
 const outputIsInsideBuild = !isAbsolute(outputRelativeToBuild) && outputRelativeToBuild !== '..' && !outputRelativeToBuild.startsWith(`..${sep}`);
 if (outputIsInsideBuild) throw new Error('SURFWAX_RELEASE_DIR must not equal or be nested under the build directory because Vite clears that directory before each build.');
+const outputRelativeToPublic = relative(resolve(repository, 'public'), output);
+const outputIsInsidePublic = !isAbsolute(outputRelativeToPublic) && outputRelativeToPublic !== '..' && !outputRelativeToPublic.startsWith(`..${sep}`);
+if (outputIsInsidePublic) throw new Error('SURFWAX_RELEASE_DIR must not equal or be nested under public because Vite copies that directory into every build.');
 const buildRelative = relative(repository, buildDirectory);
 const buildIsInsideRepository = !isAbsolute(buildRelative) && buildRelative !== '..' && !buildRelative.startsWith(`..${sep}`);
 if (buildIsInsideRepository && spawnSync('git', ['check-ignore', '-q', '--no-index', '--', `${buildDirectory}${sep}`]).status !== 0) {
