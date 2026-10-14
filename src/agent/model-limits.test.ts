@@ -130,6 +130,54 @@ describe("models.dev limit matching", () => {
     expect(onStale).toHaveBeenCalledOnce();
   });
 
+  it("prefers the release snapshot over an older valid cache while offline", async () => {
+    const snapshot = await loadModelCatalog({ storage: { async get() { return {}; }, async set() {} },
+      fetch: vi.fn(async () => { throw new Error("offline"); }), bundledFallback: true });
+    const staleCatalog = { ...snapshot };
+    const values: Record<string, unknown> = { "side-agent:model-catalog": { version: 2, fetchedAt: 1, catalog: staleCatalog } };
+    const storage = { async get(key: string) { return { [key]: values[key] }; }, async set(items: Record<string, unknown>) { Object.assign(values, items); } };
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("offline"); }));
+    try {
+      const result = await loadModelCatalog({ storage });
+      expect(result).toBe(snapshot);
+      expect(result).not.toBe(staleCatalog);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("clears a bundled limit write that races with a successful background refresh", async () => {
+    const snapshot = await loadModelCatalog({ storage: { async get() { return {}; }, async set() {} },
+      fetch: vi.fn(async () => { throw new Error("offline"); }), bundledFallback: true });
+    const modelEntry = Object.entries(snapshot).flatMap(([providerId, provider]) => Object.entries(provider.models ?? {})
+      .filter(([, model]) => Boolean(model.limit?.context)).map(([modelId, model]) => ({ providerId, provider, modelId, model })))[0]!;
+    let finishFetch!: (response: Response) => void;
+    const fetchPending = new Promise<Response>((resolve) => { finishFetch = resolve; });
+    vi.stubGlobal("fetch", vi.fn(() => fetchPending));
+    let releaseLimitWrite!: () => void;
+    const limitWriteBlocked = new Promise<void>((resolve) => { releaseLimitWrite = resolve; });
+    let limitWriteStarted!: () => void;
+    const limitWriteStarting = new Promise<void>((resolve) => { limitWriteStarted = resolve; });
+    const values: Record<string, unknown> = {};
+    const storage = {
+      async get(key: string) { return { [key]: values[key] }; },
+      async set(items: Record<string, unknown>) {
+        if (items["side-agent:model-limit"] && items["side-agent:model-limit"] !== null) {
+          limitWriteStarted();
+          await limitWriteBlocked;
+        }
+        Object.assign(values, items);
+      },
+    };
+    try {
+      const result = resolveModelLimit({ providerId: modelEntry.providerId, baseURL: modelEntry.model.provider?.api ?? modelEntry.provider.api ?? "", model: modelEntry.model.id ?? modelEntry.modelId }, { storage });
+      await limitWriteStarting;
+      finishFetch(Response.json(snapshot));
+      await vi.waitFor(() => expect(values["side-agent:model-catalog"]).toBeTruthy());
+      releaseLimitWrite();
+      await expect(result).resolves.toHaveProperty("context");
+      expect(values["side-agent:model-limit"]).toBeNull();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("uses only exact provider/model matches and honors input limits", () => {
     expect(matchModel(catalog, "https://openrouter.ai/api/v1", "gpt-5")).toMatchObject({ provider: "openrouter", context: 100_000 });
     expect(matchModel(catalog, "https://api.openai.com/v1", "gpt-5-min")).toBeUndefined();
