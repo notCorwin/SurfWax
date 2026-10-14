@@ -10,7 +10,7 @@ const buildDirectory = resolve(process.argv[2] ?? process.env.SURFWAX_DEV_OUT_DI
 const repository = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
 const outputRelative = relative(repository, output);
 const outputIsInsideRepository = !isAbsolute(outputRelative) && outputRelative !== '..' && !outputRelative.startsWith(`..${sep}`);
-if (outputIsInsideRepository && spawnSync('git', ['check-ignore', '-q', '--no-index', '--', output]).status !== 0) {
+if (outputIsInsideRepository && spawnSync('git', ['check-ignore', '-q', '--no-index', '--', `${output}${sep}`]).status !== 0) {
   throw new Error('SURFWAX_RELEASE_DIR must be outside the Git worktree or ignored by Git so generated artifacts cannot make the worktree dirty.');
 }
 const outputRelativeToBuild = relative(buildDirectory, output);
@@ -28,15 +28,24 @@ const archive = join(output, `surf-wax-${version}.zip`);
 // Staging shares the destination filesystem so a completed file can be published atomically.
 const staging = await mkdtemp(join(output, `.surf-wax-${version}-`));
 const candidate = join(staging, `surf-wax-${version}.zip`);
-const epoch = new Date(Number(process.env.SOURCE_DATE_EPOCH ?? execFileSync('git', ['show', '-s', '--format=%ct', 'HEAD'], { encoding: 'utf8' }).trim()) * 1000);
+const epochSeconds = Number(process.env.SOURCE_DATE_EPOCH ?? execFileSync('git', ['show', '-s', '--format=%ct', 'HEAD'], { encoding: 'utf8' }).trim());
+if (!Number.isFinite(epochSeconds)) throw new Error('SOURCE_DATE_EPOCH must be a finite Unix timestamp.');
+const epochInstant = new Date(epochSeconds * 1000);
+const epoch = epochInstant.getUTCFullYear() < 1980
+  ? new Date(1980, 0, 1)
+  : epochInstant.getUTCFullYear() > 2099
+    ? new Date(2099, 11, 31, 23, 59, 58)
+    : new Date(epochInstant.getUTCFullYear(), epochInstant.getUTCMonth(), epochInstant.getUTCDate(), epochInstant.getUTCHours(), epochInstant.getUTCMinutes(), epochInstant.getUTCSeconds());
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 let checksum;
 let reused = false;
 try {
-  const paths = files.map(file => relative(directory, file)).sort();
+  const paths = files
+    .map(file => ({ file, archivePath: relative(directory, file).split(sep).join('/') }))
+    .sort((left, right) => left.archivePath.localeCompare(right.archivePath));
   const archiveEntries = Object.create(null);
-  for (const path of paths) {
-    archiveEntries[path] = [new Uint8Array(await readFile(resolve(directory, path))), { mtime: epoch }];
+  for (const { file, archivePath } of paths) {
+    archiveEntries[archivePath] = [new Uint8Array(await readFile(file)), { mtime: epoch }];
   }
   await writeFile(candidate, zipSync(archiveEntries, { level: 9 }));
   checksum = sha256(await readFile(candidate));
