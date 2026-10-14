@@ -68,10 +68,8 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
     <MessageScrollerProvider autoScroll={false}>
       <MessageScroller className="flex-1">
         <MessageScrollerViewport ref={scroller} data-testid="thread-viewport" className="overflow-x-hidden"
-          onWheel={() => { followingEnd.current = false; }} onTouchMove={() => { followingEnd.current = false; }}
-          onPointerDown={() => { followingEnd.current = false; }}
-          onKeyDown={(event) => { if (["ArrowUp", "PageUp", "Home"].includes(event.key)) followingEnd.current = false; }}
-          onScroll={(event) => { const viewport = event.currentTarget; if (viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 2) followingEnd.current = true; }}>
+          onScroll={(event) => { const viewport = event.currentTarget;
+            followingEnd.current = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 2; }}>
           <MessageScrollerContent className="mx-auto block w-full max-w-(--thread-max-width) px-4 pt-5 pb-8">
             {turns.length === 0 && !state.isLoading && <Welcome disabled={locked} />}
             {state.isLoading && <p role="status" className="conversation-notice py-8">正在读取对话…</p>}
