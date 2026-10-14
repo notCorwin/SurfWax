@@ -27,7 +27,7 @@ export async function loadModelConfig(
   fallback: PersistedModelConfig = EMPTY_MODEL_CONFIG,
   storage = getStorageArea(),
   options: {
-    loadCatalog?: (options: { signal: AbortSignal }) => Promise<ModelCatalog>;
+    loadCatalog?: (options: { signal: AbortSignal; refresh: true }) => Promise<ModelCatalog>;
     migrateCatalogRouting?: boolean;
     persistMigration?: boolean;
     signal?: AbortSignal;
@@ -88,7 +88,9 @@ export async function loadModelConfig(
       // failures leave storage untouched rather than selecting the wrong protocol.
       let catalog: ModelCatalog;
       try {
-        catalog = await retryModelOperation(() => (options.loadCatalog ?? loadModelCatalog)({ signal }), {
+        // Routing migrations must observe the live catalog attempt instead of
+        // returning the bundle immediately while a detached refresh runs.
+        catalog = await retryModelOperation(() => (options.loadCatalog ?? loadModelCatalog)({ signal, refresh: true }), {
           signal, purpose: "model-catalog-migration", sleep: options.sleep,
         });
       } catch (cause) {

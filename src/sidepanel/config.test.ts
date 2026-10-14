@@ -142,6 +142,7 @@ describe("model config persistence", () => {
     const loadCatalog = vi.fn(async () => ({ bedrock: { npm: "@ai-sdk/amazon-bedrock", models: { key: { id: "alias", provider } } } }));
     const migrated = await loadModelConfig(undefined, storage, { loadCatalog });
     expect(migrated.profiles.bedrock).toMatchObject({ sdk: "@ai-sdk/amazon-bedrock/mantle", baseURL: "https://mantle.test/v1", modelProvider: provider, providerSettings, catalogRouteVersion: 1 });
+    expect(loadCatalog).toHaveBeenCalledWith(expect.objectContaining({ refresh: true }));
     await expect(loadModelConfig(undefined, storage, { loadCatalog })).resolves.toEqual(migrated);
     expect(loadCatalog).toHaveBeenCalledOnce();
   });
