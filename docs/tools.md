@@ -39,4 +39,4 @@ run(background=true) 返回 queued/accepted，不代表完成。jobs 的 after/n
 
 取消会销毁 Worker、撤销能力、清理浏览器输入和监听器，已经派发的请求可能有未知效果，不会回滚或盲目重试。关闭侧栏会取消全部作业；宿主丢失后持久记录变为 interrupted，不恢复任意 JS 调用栈或自动重放。所有状态、回执与产物来自同一个 canonical event log。
 
-截图、PDF 与文本默认是会话内部产物；用户明确请求保存或导出才调用 save。网络必须显式选择 page 或 extension 上下文，页面 CORS/凭据和扩展 host permissions 不自动互换。公开 CDP 限于绑定窗口内的 Page/DOM/Runtime/Accessibility/Network/Log/Input 与已知子会话；任意 JS、CDP 和 fetch 按有副作用处理。
+截图、PDF 与文本默认是会话内部产物；用户明确请求保存或导出才调用 save。网络必须显式选择 page 或 extension 上下文，页面 CORS/凭据和扩展 host permissions 不自动互换。公开 CDP 绑定当前窗口中的页面及其已知子会话，不按 CDP 域限制；任意 JS、CDP 和 fetch 按有副作用处理。
