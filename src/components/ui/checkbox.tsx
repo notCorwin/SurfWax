@@ -1,6 +1,6 @@
 import * as React from "react"
 import { Checkbox as CheckboxPrimitive } from "@base-ui/react/checkbox"
-import { cn } from "cn"
+import { stateClasses } from "@/classes"
 import { CheckIcon } from "lucide-react"
 
 function Checkbox({
@@ -10,7 +10,7 @@ function Checkbox({
   return (
     <CheckboxPrimitive.Root
       data-slot="checkbox"
-      className={cn(
+      className={stateClasses(
         "peer flex size-4 shrink-0 items-center justify-center rounded-[4px] border border-input shadow-xs transition-shadow data-disabled:cursor-not-allowed data-disabled:opacity-50 aria-invalid:border-destructive data-checked:border-primary data-checked:bg-primary data-checked:text-primary-foreground dark:bg-input/30 dark:data-checked:bg-primary",
         className
       )}

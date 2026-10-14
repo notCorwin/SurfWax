@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { ChevronRightIcon, LoaderCircleIcon } from "lucide-react";
-import { Button } from "../components/ui/button";
+import { Button, buttonClassName } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../components/ui/card";
 import { Field, FieldDescription, FieldGroup, FieldLabel, FieldLegend, FieldSet } from "../components/ui/field";
 import { Input } from "../components/ui/input";
@@ -315,7 +315,7 @@ export function OptionsApp() {
                     {modelSettings.selectedProviderId === "custom" && <Field data-disabled={busy || !config || undefined}>
                       <FieldLabel htmlFor="endpoint-type">协议</FieldLabel>
                       <Select items={ENDPOINT_OPTIONS} value={config?.endpointType ?? "openai-chat-completions"} disabled={busy || !config} onValueChange={(value) => update("endpointType", value)}>
-                        <SelectTrigger id="endpoint-type" aria-label="模型端点协议" className="w-full"><SelectValue /></SelectTrigger>
+                        <SelectTrigger id="endpoint-type" aria-label="模型端点协议" className="!w-full"><SelectValue /></SelectTrigger>
                         <SelectContent position="popper"><SelectGroup>
                           {ENDPOINT_OPTIONS.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}
                         </SelectGroup></SelectContent>
@@ -366,7 +366,7 @@ export function OptionsApp() {
                     <Field data-disabled={busy || !config || undefined}>
                       <FieldLabel htmlFor="image-input">视觉能力</FieldLabel>
                       <Select items={IMAGE_INPUT_OPTIONS} value={config?.imageInput ?? "auto"} disabled={busy || !config} onValueChange={(value) => update("imageInput", value)}>
-                        <SelectTrigger id="image-input" aria-label="图片输入能力" className="w-full"><SelectValue /></SelectTrigger>
+                        <SelectTrigger id="image-input" aria-label="图片输入能力" className="!w-full"><SelectValue /></SelectTrigger>
                         <SelectContent position="popper"><SelectGroup>
                           {IMAGE_INPUT_OPTIONS.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}
                         </SelectGroup></SelectContent>
@@ -393,7 +393,7 @@ export function OptionsApp() {
           <CardDescription>管理自动运行的脚本、匹配网站和启停状态。</CardDescription>
         </CardHeader>
         <CardFooter>
-          <Button asChild variant="outline"><a href="userscripts.html">打开脚本管理</a></Button>
+          <a href="userscripts.html" data-slot="button" data-variant="outline" data-size="default" className={buttonClassName()}>打开脚本管理</a>
         </CardFooter>
       </Card>
 

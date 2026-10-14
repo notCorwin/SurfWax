@@ -1,6 +1,6 @@
 import * as React from "react"
 import { Progress as ProgressPrimitive } from "@base-ui/react/progress"
-import { cn } from "cn"
+import { stateClasses } from "@/classes"
 
 function Progress({
   className,
@@ -11,7 +11,7 @@ function Progress({
     <ProgressPrimitive.Root
       data-slot="progress"
       value={value}
-      className={cn(
+      className={stateClasses(
         "relative h-2 w-full overflow-hidden rounded-full bg-primary/20",
         className
       )}

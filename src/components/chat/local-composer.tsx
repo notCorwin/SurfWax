@@ -1,7 +1,7 @@
 "use client";
 import { usePanelRuntime, usePanelState, type PanelState } from "@/sidepanel/runtime-view";
 
-import { cn } from "cn";
+import { classes } from "@/classes";
 import { ArrowUpIcon, ForwardIcon, SquareIcon, XIcon } from "lucide-react";
 import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent } from "react";
 import { InputGroup, InputGroupTextarea, InputGroupAddon } from "@/components/ui/input-group";
@@ -298,7 +298,7 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
           aria-valuemax={100}
           aria-valuenow={usage.state === "ready" ? usage.usedPercent : undefined}
           aria-label={label}
-          className={cn(
+          className={classes(
             "flex size-7 shrink-0 items-center justify-center rounded-md",
             usage.state === "ready" && usage.usedPercent < 80 ? "text-foreground" : "text-muted-foreground",
             usage.state === "ready" && usage.usedPercent >= 80 && "text-destructive",
@@ -315,14 +315,14 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
           <div className="flex items-start justify-between gap-3">
             <div className="flex flex-col gap-1">
               <p className="text-muted-foreground">上下文用量</p>
-              <p className={cn("text-xl font-semibold tracking-tight", (usage.state === "unavailable" || usage.state === "ready" && usage.usedPercent >= 80) && "text-destructive")}>
+              <p className={classes("text-xl font-semibold tracking-tight", (usage.state === "unavailable" || usage.state === "ready" && usage.usedPercent >= 80) && "text-destructive")}>
                 {usage.state === "ready" ? `约 ${usage.usedPercent}%` : usage.state === "loading" ? "估算中" : "不可用"}
               </p>
             </div>
             {source && <Badge variant={usage.state === "ready" && usage.usedPercent >= 80 ? "destructive" : "secondary"}>{source}</Badge>}
           </div>
           {usage.state === "ready" ? <>
-            <Progress data-testid="context-detail-progress" aria-label="上下文用量详情" value={usage.usedPercent} className="h-1.5" />
+            <Progress data-testid="context-detail-progress" aria-label="上下文用量详情" value={usage.usedPercent} className="!h-1.5" />
             <dl data-testid="context-token-usage" data-animating={tokens.animating} className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
               <dt className="text-muted-foreground">输入</dt>
               <dd data-testid="context-input" className="text-right font-medium tabular-nums">{tokens.input.toLocaleString("zh-CN")} tokens</dd>
@@ -486,7 +486,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
           </Button>
         </div>)}
       </div>}
-      <InputGroup className="composer-surface flex-col gap-1 rounded-2xl" aria-label="发送浏览器任务">
+      <InputGroup className="composer-surface flex-col gap-1 !rounded-2xl" aria-label="发送浏览器任务">
         <InputGroupTextarea
           ref={inputRef}
           data-testid="composer-input"
@@ -506,7 +506,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
           onCompositionStart={() => { composing.current = true; }}
           onCompositionEnd={() => { composing.current = false; }}
         />
-        <InputGroupAddon align="block-end" className="min-w-0 justify-between gap-1 px-2 pb-2">
+        <InputGroupAddon align="block-end" className="min-w-0 !justify-between gap-1 !px-2 !pb-2">
           <div className="flex min-w-0 items-center gap-1">
             <span data-testid="composer-model" className="composer-model min-w-0 truncate px-2 text-xs text-muted-foreground" title={model}>
               {(model.split("/").at(-1) ?? model).split(/[-_\s]+/).filter(Boolean).map((part) =>
@@ -517,7 +517,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
               value={reasoning.selected ?? undefined} disabled={!reasoning.ready || isRunning || !reasoning.choices.length}
               onValueChange={(value) => settings.select(value as ReasoningEffort)}>
               <SelectTrigger data-testid="reasoning-effort" size="sm" aria-label="思考强度"
-                className="reasoning-select h-7 max-w-20 gap-1 px-1.5">
+                className="reasoning-select !h-7 max-w-20 gap-1 px-1.5">
                 <SelectValue placeholder="默认" />
               </SelectTrigger>
               <SelectContent position="popper" align="start">
@@ -529,8 +529,8 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
             <ContextIndicator config={config} logger={logger} conversationId={conversationId} />
           </div>
           <div className="flex items-center gap-1">
-            {isRunning && <Button type="button" size="icon-sm" className="rounded-full" aria-label="停止生成" title="停止生成" onClick={() => runtimeCommands.thread.cancelRun()}><SquareIcon aria-hidden="true" /></Button>}
-            {(!isRunning || hasText) && <Button type="button" size="icon-sm" className="rounded-full" disabled={!hasText || isDisabled || blocked}
+            {isRunning && <Button type="button" size="icon-sm" className="!rounded-full" aria-label="停止生成" title="停止生成" onClick={() => runtimeCommands.thread.cancelRun()}><SquareIcon aria-hidden="true" /></Button>}
+            {(!isRunning || hasText) && <Button type="button" size="icon-sm" className="!rounded-full" disabled={!hasText || isDisabled || blocked}
               aria-label={isRunning || followups.messages.length > 0 ? "排队消息" : "发送消息"}
               title={isRunning || followups.messages.length > 0 ? "加入 Follow-up 队列" : "发送消息"} onClick={submit}><ArrowUpIcon aria-hidden="true" /></Button>}
           </div>

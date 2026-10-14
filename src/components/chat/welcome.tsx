@@ -11,13 +11,13 @@ const suggestions = [
 
 export function Welcome({ disabled }: { disabled: boolean }) {
   const runtime = usePanelRuntime();
-  return <Empty className="welcome mx-auto w-full max-w-sm px-5 py-8" data-testid="thread-empty">
+  return <Empty className="welcome mx-auto w-full max-w-sm !px-5 !py-8" data-testid="thread-empty">
     <EmptyHeader>
       <EmptyMedia className="welcome-symbol"><CompassIcon aria-hidden="true" /></EmptyMedia>
       <EmptyTitle><h2>下一步，想做什么？</h2></EmptyTitle>
       <EmptyDescription>阅读、探索，或完成一项任务。<br />Surf Wax 会在浏览器里帮你接着做。</EmptyDescription>
     </EmptyHeader>
-    <EmptyContent className="gap-2">
+    <EmptyContent className="!gap-2">
       {suggestions.map(({ icon: Icon, title, detail, prompt }) => <Button key={title} variant="outline" disabled={disabled}
         className="suggestion w-full justify-start gap-3" onClick={() => {
           runtime.composer.setText(prompt);
