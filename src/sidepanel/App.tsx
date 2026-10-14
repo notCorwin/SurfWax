@@ -10,7 +10,7 @@ import { ErrorNotice } from "../components/ui/error-notice";
 import { generateConversationTitle } from "../conversations";
 import { activeContext, ensureAutomaticContextSummary } from "../agent/context-choice";
 import { contextPressure, pendingContextChoice } from "../agent/compaction";
-import { activeRunIdentity, claimConversationRun, getRunIdentity, registerBackgroundRequest, withIdleConversation, type RunIdentity } from "../agent/coordinator";
+import { activeRunIdentity, claimConversationRun, registerBackgroundRequest, withIdleConversation } from "../agent/coordinator";
 import { EventLogger, fromLogValue, rebuildConversationList } from "../logging";
 import type { ModelConfig } from "../types";
 import { useSidePanelRuntime } from "./useSidePanelRuntime";
@@ -191,22 +191,8 @@ function ConfiguredConversation({ config, logger }: { config: ModelConfig; logge
 }
 
 function RunOwnershipNotice() {
-  const [owner, setOwner] = useState<RunIdentity>();
-  const localRunning = usePanelState((state) => state.thread.isRunning);
-  useEffect(() => {
-    let active = true;
-    let revision = 0;
-    const changed = (message: { type?: string; identity?: RunIdentity | null }) => {
-      if (message.type !== "surf-wax:run-state") return;
-      revision += 1;
-      if (active) setOwner(message.identity ?? undefined);
-    };
-    chrome.runtime.onMessage.addListener(changed);
-    const requestedAt = revision;
-    void activeRunIdentity().then((identity) => { if (active && revision === requestedAt) setOwner(identity); }).catch(() => undefined);
-    return () => { active = false; chrome.runtime.onMessage.removeListener(changed); };
-  }, []);
-  return owner && !localRunning && owner.runId !== getRunIdentity()?.runId
+  const { otherRunning } = useRunState();
+  return otherRunning
     ? <p role="status" data-testid="other-run-busy" className="conversation-notice">其他窗口已有任务运行；请等待完成或在原侧栏停止任务。</p>
     : null;
 }
