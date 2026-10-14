@@ -287,8 +287,7 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
 
   return (
     <Tooltip onOpenChange={(open) => { detailsOpen.current = open; if (open) setUsage(latestUsage.current); }}>
-      <TooltipTrigger asChild>
-        <span
+      <TooltipTrigger render={<span
           ref={indicator}
           data-testid="context-indicator"
           data-state={usage.state}
@@ -310,8 +309,7 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
             {usage.state === "ready" && <circle cx="10" cy="10" r="7" pathLength="100" fill="none" stroke="currentColor" strokeWidth="3"
               strokeLinecap="round" strokeDasharray="100" strokeDashoffset={100 - usedPercent} />}
           </svg>
-        </span>
-      </TooltipTrigger>
+        </span>} />
       <TooltipContent side="top" sideOffset={8} collisionPadding={8} className="w-64 max-w-[calc(100vw-1rem)]">
         <div data-testid="context-detail" className="flex flex-col gap-3">
           <div className="flex items-start justify-between gap-3">
