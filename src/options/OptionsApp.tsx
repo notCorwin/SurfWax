@@ -25,6 +25,19 @@ import "./styles.css";
 
 type Status = "idle" | "saving" | "clearing" | "saved" | "error";
 type ModelField = "providerId" | "baseURL" | "baseURLOverride" | "model" | "contextWindowOverride" | "maxTokensOverride" | "endpointType" | "imageInput" | string;
+const ENDPOINT_OPTIONS = [
+  { value: "openai-chat-completions", label: "OpenAI Chat Completions" },
+  { value: "openai-completions", label: "OpenAI Completions" },
+  { value: "openai-responses", label: "OpenAI Responses" },
+  { value: "anthropic-messages", label: "Anthropic Messages" },
+  { value: "google-generate-content", label: "Google generateContent" },
+  { value: "google-interactions", label: "Google Interactions" },
+];
+const IMAGE_INPUT_OPTIONS = [
+  { value: "auto", label: "自动检测" },
+  { value: "enabled", label: "支持" },
+  { value: "disabled", label: "不支持" },
+];
 
 export function OptionsApp() {
   const [modelSettings, setModelSettings] = useState(EMPTY_MODEL_CONFIG);
@@ -301,15 +314,10 @@ export function OptionsApp() {
                     <FieldLegend>模型端点</FieldLegend>
                     {modelSettings.selectedProviderId === "custom" && <Field data-disabled={busy || !config || undefined}>
                       <FieldLabel htmlFor="endpoint-type">协议</FieldLabel>
-                      <Select value={config?.endpointType ?? "openai-chat-completions"} disabled={busy || !config} onValueChange={(value) => update("endpointType", value)}>
+                      <Select items={ENDPOINT_OPTIONS} value={config?.endpointType ?? "openai-chat-completions"} disabled={busy || !config} onValueChange={(value) => update("endpointType", value)}>
                         <SelectTrigger id="endpoint-type" aria-label="模型端点协议" className="w-full"><SelectValue /></SelectTrigger>
                         <SelectContent position="popper"><SelectGroup>
-                          <SelectItem value="openai-chat-completions">OpenAI Chat Completions</SelectItem>
-                          <SelectItem value="openai-completions">OpenAI Completions</SelectItem>
-                          <SelectItem value="openai-responses">OpenAI Responses</SelectItem>
-                          <SelectItem value="anthropic-messages">Anthropic Messages</SelectItem>
-                          <SelectItem value="google-generate-content">Google generateContent</SelectItem>
-                          <SelectItem value="google-interactions">Google Interactions</SelectItem>
+                          {ENDPOINT_OPTIONS.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}
                         </SelectGroup></SelectContent>
                       </Select>
                     </Field>}
@@ -357,12 +365,10 @@ export function OptionsApp() {
                     <FieldLegend>图片输入</FieldLegend>
                     <Field data-disabled={busy || !config || undefined}>
                       <FieldLabel htmlFor="image-input">视觉能力</FieldLabel>
-                      <Select value={config?.imageInput ?? "auto"} disabled={busy || !config} onValueChange={(value) => update("imageInput", value)}>
+                      <Select items={IMAGE_INPUT_OPTIONS} value={config?.imageInput ?? "auto"} disabled={busy || !config} onValueChange={(value) => update("imageInput", value)}>
                         <SelectTrigger id="image-input" aria-label="图片输入能力" className="w-full"><SelectValue /></SelectTrigger>
                         <SelectContent position="popper"><SelectGroup>
-                          <SelectItem value="auto">自动检测</SelectItem>
-                          <SelectItem value="enabled">支持</SelectItem>
-                          <SelectItem value="disabled">不支持</SelectItem>
+                          {IMAGE_INPUT_OPTIONS.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}
                         </SelectGroup></SelectContent>
                       </Select>
                       <FieldDescription>自动模式读取模型目录；未知模型默认仅使用语义路径。</FieldDescription>
