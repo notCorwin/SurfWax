@@ -164,12 +164,36 @@ function immediateFunctionBody(node: SyntaxNode | null): SyntaxNode | null {
   return children(node).at(-1) ?? null;
 }
 
+type ScopedNode = { value: SyntaxNode; scope: SyntaxNode };
 type Analysis = {
-  aliases: Set<string>;
-  helpers: Map<string, SyntaxNode>;
-  helperBudgets: Map<string, number>;
-  visitingHelpers: Set<string>;
+  aliases: Map<string, ScopedNode[]>;
+  helpers: Map<string, ScopedNode[]>;
+  helperBudgets: Map<SyntaxNode, number>;
+  visitingHelpers: Set<SyntaxNode>;
 };
+
+function resolveScoped(
+  bindings: Map<string, ScopedNode[]>,
+  name: string,
+  at: SyntaxNode,
+): SyntaxNode | undefined {
+  return bindings
+    .get(name)
+    ?.filter(({ scope }) => scope.from <= at.from && scope.to >= at.to)
+    .sort(
+      (left, right) =>
+        left.scope.to - left.scope.from - (right.scope.to - right.scope.from),
+    )[0]?.value;
+}
+
+function addScoped(
+  bindings: Map<string, ScopedNode[]>,
+  name: string,
+  value: SyntaxNode,
+  scope: SyntaxNode,
+): void {
+  bindings.set(name, [...(bindings.get(name) ?? []), { value, scope }]);
+}
 
 function isCapabilityExpression(
   source: string,
@@ -179,7 +203,10 @@ function isCapabilityExpression(
   if (!node) return false;
   if (node.name === "VariableName") {
     const name = textOf(source, node);
-    return CAPABILITY_ROOTS.has(name) || analysis.aliases.has(name);
+    return (
+      CAPABILITY_ROOTS.has(name) ||
+      Boolean(resolveScoped(analysis.aliases, name, node))
+    );
   }
   if (
     ["MemberExpression", "CallExpression", "ParenthesizedExpression"].includes(
@@ -192,39 +219,43 @@ function isCapabilityExpression(
 
 function collectDefinitions(source: string, root: SyntaxNode): Analysis {
   const analysis: Analysis = {
-    aliases: new Set(),
+    aliases: new Map(),
     helpers: new Map(),
     helperBudgets: new Map(),
     visitingHelpers: new Set(),
   };
-  const visit = (node: SyntaxNode) => {
+  const visit = (node: SyntaxNode, inheritedScope: SyntaxNode) => {
+    const scope = ["Script", "Block"].includes(node.name)
+      ? node
+      : inheritedScope;
     const parts = children(node);
     if (node.name === "FunctionDeclaration") {
       const name = parts.find((part) => part.name === "VariableDefinition");
       const body = parts.find((part) => part.name === "Block");
-      if (name && body) analysis.helpers.set(textOf(source, name), body);
+      if (name && body)
+        addScoped(analysis.helpers, textOf(source, name), body, scope);
     } else if (node.name === "VariableDeclaration") {
-      const name = parts.find((part) => part.name === "VariableDefinition");
-      const equals = parts.findIndex((part) => part.name === "Equals");
-      const value = equals >= 0 ? parts[equals + 1] : undefined;
-      if (
-        name &&
-        value &&
-        ["ArrowFunction", "FunctionExpression"].includes(value.name)
-      ) {
-        const body = children(value).at(-1);
-        if (body) analysis.helpers.set(textOf(source, name), body);
-      } else if (
-        name &&
-        value &&
-        isCapabilityExpression(source, value, analysis)
-      ) {
-        analysis.aliases.add(textOf(source, name));
+      for (let index = 0; index < parts.length; index += 1) {
+        const name = parts[index];
+        if (
+          name?.name !== "VariableDefinition" ||
+          parts[index + 1]?.name !== "Equals"
+        )
+          continue;
+        const value = parts[index + 2];
+        if (!value) continue;
+        if (["ArrowFunction", "FunctionExpression"].includes(value.name)) {
+          const body = children(value).at(-1);
+          if (body)
+            addScoped(analysis.helpers, textOf(source, name), body, scope);
+        } else if (isCapabilityExpression(source, value, analysis)) {
+          addScoped(analysis.aliases, textOf(source, name), value, scope);
+        }
       }
     }
-    for (const part of parts) visit(part);
+    for (const part of parts) visit(part, scope);
   };
-  visit(root);
+  visit(root, root);
   return analysis;
 }
 
@@ -232,6 +263,28 @@ function boundedIterations(
   source: string,
   node: SyntaxNode,
 ): number | undefined {
+  const forOf = children(node).find((part) => part.name === "ForOfSpec");
+  if (forOf) {
+    const iterable = children(forOf).find((part) =>
+      ["ArrayExpression", "String"].includes(part.name),
+    );
+    if (iterable?.name === "ArrayExpression") {
+      const elements = children(iterable).filter(
+        (part) => !["[", "]", ","].includes(part.name),
+      );
+      return elements.some((part) => part.name === "Spread")
+        ? undefined
+        : elements.length;
+    }
+    if (iterable?.name === "String") {
+      const raw = textOf(source, iterable);
+      try {
+        return JSON.parse(raw).length;
+      } catch {
+        return [...raw.slice(1, -1)].length;
+      }
+    }
+  }
   const spec = children(node).find((part) => part.name === "ForSpec");
   if (!spec) return undefined;
   const value = textOf(source, spec);
@@ -272,17 +325,16 @@ function addBudget(total: number, amount: number, multiplier: number): number {
 
 function helperBudget(
   source: string,
-  name: string,
+  body: SyntaxNode,
   analysis: Analysis,
 ): number {
-  const cached = analysis.helperBudgets.get(name);
+  const cached = analysis.helperBudgets.get(body);
   if (cached !== undefined) return cached;
-  const body = analysis.helpers.get(name);
-  if (!body || analysis.visitingHelpers.has(name)) return 0;
-  analysis.visitingHelpers.add(name);
+  if (analysis.visitingHelpers.has(body)) return 0;
+  analysis.visitingHelpers.add(body);
   const budget = nodeBudget(source, body, analysis);
-  analysis.visitingHelpers.delete(name);
-  analysis.helperBudgets.set(name, budget);
+  analysis.visitingHelpers.delete(body);
+  analysis.helperBudgets.set(body, budget);
   return budget;
 }
 
@@ -321,16 +373,18 @@ function nodeBudget(
     const name = callName(source, node);
     const callee = node.firstChild;
     const immediateBody = immediateFunctionBody(callee);
+    const helper =
+      name && callee?.name === "VariableName"
+        ? resolveScoped(analysis.helpers, name, node)
+        : undefined;
     const duration = immediateBody
       ? nodeBudget(source, immediateBody, analysis)
       : name === "sleep" && callee?.name === "VariableName"
         ? constant(source, firstArgument(node))
         : name && callee?.name === "VariableName" && GLOBAL_OPERATIONS.has(name)
           ? OPERATION_BUDGETS.get(name)
-          : name &&
-              callee?.name === "VariableName" &&
-              analysis.helpers.has(name)
-            ? helperBudget(source, name, analysis)
+          : helper
+            ? helperBudget(source, helper, analysis)
             : name &&
                 callee?.name === "MemberExpression" &&
                 isCapabilityExpression(source, callee, analysis)

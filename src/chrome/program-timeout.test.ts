@@ -124,6 +124,45 @@ describe("program timeout estimation", () => {
     ).toBe(35_000);
   });
 
+  it("counts statically finite for-of literals", () => {
+    expect(
+      estimateProgramTimeoutMs(
+        `for (const item of [1, 2, 3]) await sleep(20_000);`,
+      ),
+    ).toBe(90_000);
+    expect(
+      estimateProgramTimeoutMs(
+        `for (const character of "abc") await sleep(1_000);`,
+      ),
+    ).toBe(33_000);
+  });
+
+  it("indexes every helper in a multi-declarator statement", () => {
+    expect(
+      estimateProgramTimeoutMs(`
+        const noop = () => {}, pause = async () => { await sleep(60_000); };
+        await pause();
+      `),
+    ).toBe(90_000);
+  });
+
+  it("resolves helpers in their nearest lexical scope", () => {
+    expect(
+      estimateProgramTimeoutMs(`
+        function pause() { return sleep(60_000); }
+        function unused() { function pause() {} }
+        await pause();
+      `),
+    ).toBe(90_000);
+    expect(
+      estimateProgramTimeoutMs(`
+        function pause() { return sleep(60_000); }
+        function outer() { function pause() { return sleep(1_000); } return pause(); }
+        await outer(); await pause();
+      `),
+    ).toBe(91_000);
+  });
+
   it("ignores method-like text in comments, strings, and embedded scripts", () => {
     expect(
       estimateProgramTimeoutMs(`
