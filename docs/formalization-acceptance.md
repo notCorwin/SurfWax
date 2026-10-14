@@ -23,7 +23,7 @@
 | 5. 可靠请求与自动压缩 | 可恢复错误无限重试，退避单次不超过 10 秒，停止可中断退避。SSE 断流从持久化部分文本和工具结果续接，工具调用按请求 phase 区分。剩余容量不足 20% 或 Provider 拒绝超长上下文时自动摘要；保留分支/source/summary digest，超长源先分块再合并。失败保留原历史并提供重试，取消不写半成品 checkpoint；旧手动 gate 自动迁移。未匹配模型窗口使用 256K，首条用户消息的工具目录前缀按其持久化版本恢复。 | [请求与流恢复](../src/agent/model.ts)、[SSE 恢复](../src/agent/stream-recovery.ts)、[自动压缩](../src/agent/context-choice.ts)、[压缩契约](../src/agent/compaction.ts)、[工具目录前缀](../src/agent/tool-catalog.ts)、[上下文 E2E](../e2e/context.spec.ts)。真实断流与副作用未重放由原生侧栏用例验证。 |
 | 6. 浏览器操作语义 | 专用命令、act 与 run-code 的 page facade 共用浏览器执行层。按操作检查可见、稳定、启用、可编辑与接收输入条件；严格唯一匹配，ref 节点失效明确报错。支持跨源 iframe、open Shadow DOM、隐藏 file input/filechooser、组合键及跨命令保留输入状态。截图/PDF 默认是内部产物，坐标按观察信息映射；act 部分失败保留已完成步骤。 | [共享自动化](../src/chrome/automation.ts)、[执行器](../src/chrome/executor.ts)、[自动化 E2E](../e2e/automation.spec.ts)、[page facade 等待约定](tools.md)。DPR=2、框架与输入场景必须以最终矩阵实测为准。 |
 | 7. 只读诊断、性能与 UX | 保留请求列表/详情、请求头/body、响应头/body与 console。诊断内存缓存设上限，原始 CDP 事件保留在日志，查询支持分页并从日志补读。UI 按 animation frame 合并流式更新，保留完整 GFM、LaTeX 与语法高亮；长会话虚拟化，工具结果展开时加载，完整错误仍可查看。会话编辑、分支、归档、搜索与运行中切换约束保留。 | [只读诊断](../src/chrome/diagnostics.ts)、[诊断测试](../src/chrome/diagnostics.test.ts)、[渲染 E2E](../e2e/rendering.spec.ts)、[本地性能测试](../e2e/performance.spec.ts)。本地固定环境测量见下表与 performance-results.json。 |
-| 8. 可维护升级发布 | package.json 为版本唯一来源；lockfile、Manifest、七权限、入口与移除 host 均由构建验证，主入口 JS 上限为 2,000,000B。E2E 按域拆分并共享夹具，失败保留 profile；真实 0.2.0 fixture 验证升级配置、日志 ID 与用户脚本启停状态。CI 验证 Chrome 138/current 功能矩阵；性能仅本地。本地版本包同 SHA 可复用、不同 SHA 拒绝覆盖并原子发布；正式 v* 发布不覆盖，ZIP 有 SHA-256；autobuild 经验证后更新固定测试渠道资产，标记 prerelease 且不占 Latest。 | [构建与版本校验](../scripts/validate-build.mjs)、[历史升级 fixture](../scripts/prepare-upgrade-fixture.mjs)、[发布工作流](../.github/workflows/autobuild.yml)、[ZIP 打包](../scripts/package-release.mjs)、[商店材料](store-listing.md)、[隐私政策](../PRIVACY.md)、[更新记录](../CHANGELOG.md)。CI 浏览器门禁直接安装 verify 已打包且经 checksum 校验的 ZIP，不重新构建；工作流配置不代表正式发布或商店审核已经完成。 |
+| 8. 可维护升级发布 | package.json 为版本唯一来源；lockfile、Manifest、七权限、入口与移除 host 均由构建验证，主入口 JS 上限为 2,000,000B。E2E 按域拆分并共享夹具，失败保留 profile；真实 0.2.0 fixture 验证升级配置、日志 ID 与用户脚本启停状态。CI 验证 Chrome 138/current 功能矩阵；性能仅本地。本地版本包同 SHA 可复用、不同 SHA 拒绝覆盖并原子发布；正式 v* 发布不覆盖，ZIP 有 SHA-256；当时的 autobuild 会更新固定测试渠道资产。该自动发布流程现已移除。 | [构建与版本校验](../scripts/validate-build.mjs)、[历史升级 fixture](../scripts/prepare-upgrade-fixture.mjs)、[ZIP 打包](../scripts/package-release.mjs)、[商店材料](store-listing.md)、[隐私政策](../PRIVACY.md)、[更新记录](../CHANGELOG.md)。正式发布或商店审核均未执行。 |
 
 ## 工具输入预算的实际测量
 
@@ -74,7 +74,7 @@ Chrome 138 使用 `pagehide` 与 owner Port 断开处理关闭；有 `sidePanel.
 | FIFO 与原生关闭 race 回归 | 8/8 通过；两个浏览器各重复两轮，未开启失败重试 | `.dev/formalization-evidence/repeated-race-regressions.log` |
 | 本地性能 | 2/2 通过；定位与动作 p95 58.1ms，流式/滚动 p95 16.7ms，输入 p95 13.0ms，恢复 412ms | [performance-results.json](performance-results.json)；原始样本 `.dev/formalization-evidence/performance-reviewed/` |
 | 最终 ZIP / SHA-256 | `.dev/releases/reviewed/surf-wax-0.3.0.zip` / `f36d2a15f5dcc61d5768081f9c7b0ad3e51e7d22f78f3ccdcff487ddd01420fd` | `.dev/formalization-evidence/package-integrity.json`；421 个 ZIP/解包文件与构建逐一 SHA-256 匹配；同 HEAD 可复用，不同内容拒绝覆盖 |
-| GitHub 渠道与商店发布 | 远端每次运行独立验证其 ZIP；对应提交结果以 Actions 为准，商店尚未发布 | [GitHub Actions](https://github.com/notCorwin/SurfWax/actions/workflows/autobuild.yml)；历史证据见下文 |
+| GitHub 渠道与商店发布 | 历史自动发布流程已移除，商店尚未发布 | 历史证据见下文 |
 
 Canonical IndexedDB 证据按仓库约定保存在 `../.dev/chromium-profile/Default/IndexedDB/`；隔离 profile 测试结束后复制到该位置，失败 profile 不先删除。trace、失败截图和性能 JSON 应一并保留，记录浏览器实际版本、project、提交、viewport、DPR 与运行环境。
 
@@ -96,6 +96,6 @@ FIFO 首次失败由已经排队的标题请求造成：用户人工命名后，
 - **原生生命周期覆盖**：用例覆盖 SSE 断流续接且副作用只执行一次、双侧栏互斥与非 owner 关闭、owner 关闭后排队指令未执行、部分 act 结果恢复、等待下载授权时关闭后复用原产物。实际终止 MV3 worker 的用例核查按键释放、移除页面保护、幂等补齐工具与运行终态、新任务可启动；当前 ZIP 的两版浏览器用例已通过；每种崩溃时间点尚未做穷举。
 - **已发出的副作用**：取消可以阻止后续和排队指令，不能撤回已经发送的 CDP 输入、网页提交、下载或服务端行为。终态日志去重与请求续接不构成外部副作用 exactly-once 保证；断线时结果不明确的动作应先观察页面再决定后续操作，不能声称它已回滚。
 - **性能范围**：本地固定环境测量流式与长日志场景的 rAF 间隔 p95 ≤20ms、input 事件到下一 rAF p95 ≤50ms；语义定位+动作 p95 ≤100ms。保留长日志恢复、DOM 数量及原有交互门槛。结果是此环境的 p95，不能理解为每一帧都在 20ms 内；GitHub Actions 不运行性能测试。
-- **发布证据**：CI 配置、版本 ZIP 与商店材料已经具备；远端工作流以对应提交的 Actions 结果为准，正式 tag 与商店提交尚未执行。现有商店图片属于既有素材，不自动证明与 0.3.0 界面一致。
+- **发布证据**：历史版本 ZIP 与商店材料已经具备；自动发布流程现已移除，正式发布与商店提交尚未执行。现有商店图片属于既有素材，不自动证明与 0.3.0 界面一致。
 
 最终结论以“最终验证结果”表为准。正式版本 tag 与商店提交须在人工授权气泡、素材核对及远端发布门禁通过后进行；本轮交付为可独立安装的候选版本包。

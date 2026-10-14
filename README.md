@@ -1,6 +1,5 @@
 # Surf Wax
 
-[![Continuous Delivery](https://github.com/notCorwin/SurfWax/actions/workflows/autobuild.yml/badge.svg)](https://github.com/notCorwin/SurfWax/actions/workflows/autobuild.yml)
 [![Version](https://img.shields.io/github/package-json/v/notCorwin/SurfWax)](package.json)
 [![Chrome 138+](https://img.shields.io/badge/Chrome-138%2B-4285F4?logo=googlechrome&logoColor=white)](https://www.google.com/chrome/)
 
@@ -117,7 +116,7 @@ npm run docs:check  # 检查生成的工具文档是否最新
 npm run verify:local
 ```
 
-完整验证要求 Node 24，会安装 Chrome for Testing 138 和当前 Stable，并执行文档、SDK、类型、构建、单元、E2E 与性能检查。所有浏览器测试均以 Headless 模式运行；GitHub Actions 只负责 CD。
+完整验证要求 Node 24，会安装 Chrome for Testing 138 和当前 Stable，并执行文档、SDK、类型、构建、单元、E2E 与性能检查。所有浏览器测试均以 Headless 模式运行；仓库当前不配置 GitHub Actions 或自动发布。
 
 其他维护命令见 [package.json](package.json)。浏览器工具 API 由源码 registry 生成，详见 [工具参考](docs/tools.md)。
 

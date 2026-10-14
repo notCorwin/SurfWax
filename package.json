@@ -1,6 +1,6 @@
 {
   "name": "surf-wax",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -13,7 +13,7 @@
     "test:e2e": "npm run build && node scripts/prepare-upgrade-fixture.mjs && playwright test --grep-invert @performance",
     "docs:tools": "node scripts/generate-tool-docs.mjs",
     "docs:check": "node scripts/generate-tool-docs.mjs --check",
-    "release:package": "npm run build && node scripts/package-release.mjs",
+    "release:package": "node scripts/package-release.mjs --build",
     "test:performance": "npm run build && playwright test --grep @performance",
     "measure:tools": "node scripts/measure-tool-budget.mjs",
     "sdk:check": "node scripts/check-sdk-coverage.mjs",
@@ -79,6 +79,7 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.0.5",
+    "fflate": "^0.8.3",
     "jsdom": "^29.1.1",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",

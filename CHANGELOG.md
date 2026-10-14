@@ -14,7 +14,7 @@
 - 将工具目录追加到新会话系统提示词并记录快照；旧会话在成功摘要后迁移，上下文计入系统和 schema，未匹配时回退 256,000 tokens。
 - SAP 改为真实增量 SSE，Vertex 服务账号鉴权支持重试及 Abort；全部 Models.dev SDK 加入流式与工具协议契约。
 - 页面阻断监听器在智能体原生输入期间保持安装，按 run 与时间戳授权；覆盖导航和 iframe。
-- 新增 Node 24 本地完整 CI 与 Chrome 138/current 120Hz 渲染 trace 验收；GitHub Actions 仅负责 CD。工具参考迁至 docs/tools.md。
+- 新增 Node 24 本地完整 CI 与 Chrome 138/current 120Hz 渲染 trace 验收；当前不配置 GitHub Actions 或自动发布。工具参考迁至 docs/tools.md。
 
 - downloads 改为必需权限，安装时授予；明确保存文件时直接下载。
 - 移除首次下载授权按钮、等待队列及暂停操作超时的逻辑；下载失败仍保留内部产物供再次保存。
