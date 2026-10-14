@@ -41,6 +41,15 @@ describe("models.dev limit matching", () => {
       .resolves.toHaveProperty("openai");
   });
 
+  it("falls back to the release-pinned catalog on a first offline launch", async () => {
+    const storage = { async get() { return {}; }, async set() {} };
+    const onStale = vi.fn();
+    const result = await loadModelCatalog({ storage, fetch: vi.fn(async () => { throw new Error("offline"); }), bundledFallback: true, onStale });
+    expect(Object.keys(result).length).toBeGreaterThan(100);
+    expect(result.openai?.models && Object.keys(result.openai.models).length).toBeGreaterThan(0);
+    expect(onStale).toHaveBeenCalledOnce();
+  });
+
   it("refreshes a fresh catalog and invalidates the cached model limit", async () => {
     const values: Record<string, unknown> = {};
     const storage = { async get(key: string) { return { [key]: values[key] }; }, async set(items: Record<string, unknown>) { Object.assign(values, items); } };

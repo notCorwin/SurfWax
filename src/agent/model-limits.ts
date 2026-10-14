@@ -1,5 +1,6 @@
 import { isModelSdk, type JsonValue, type ModelConfig, type ModelProviderOverride, type ModelSdk } from "../types";
 import { defaultBaseURL, isCloudflareGateway, providerSettingFields, resolvedBaseURL, sdkFor, type ProviderSettingField } from "./model-sdks";
+import bundledCatalogGzip from "../data/models-dev-api";
 
 const CACHE_KEY = "side-agent:model-limit";
 const CATALOG_CACHE_KEY = "side-agent:model-catalog";
@@ -187,6 +188,17 @@ function normalizeCatalog(value: unknown): ModelCatalog {
   }));
 }
 
+// A compressed, release-pinned copy keeps provider/model selection and routing
+// usable offline without adding the whole JSON text to the main JavaScript chunk.
+let bundledCatalogPending: Promise<ModelCatalog> | undefined;
+function loadBundledCatalog(): Promise<ModelCatalog> {
+  return bundledCatalogPending ??= (async () => {
+    const compressed = Uint8Array.from(atob(bundledCatalogGzip), (character) => character.charCodeAt(0));
+    const stream = new Response(compressed).body!.pipeThrough(new DecompressionStream("gzip"));
+    return normalizeCatalog(JSON.parse(await new Response(stream).text()));
+  })();
+}
+
 export function modelProviderPresets(catalog: ModelCatalog): ModelProviderPreset[] {
   return Object.entries(catalog).flatMap(([id, provider]) => {
     const defaultSdk = id === "deepseek" && provider.npm === "@ai-sdk/openai-compatible" ? "@ai-sdk/deepseek" : provider.npm;
@@ -238,7 +250,7 @@ export function modelPresetFields(config: ModelConfig, preset?: ModelProviderPre
 const catalogRequests = new WeakMap<typeof globalThis.fetch, Map<string, Promise<ModelCatalog>>>();
 
 export function loadModelCatalog(
-  options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; refresh?: boolean; onStale?: (error: unknown) => void } = {},
+  options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; refresh?: boolean; onStale?: (error: unknown) => void; bundledFallback?: boolean } = {},
 ): Promise<ModelCatalog> {
   const storage = options.storage ?? (typeof chrome !== "undefined" ? chrome.storage?.local : undefined);
   const task = async () => {
@@ -259,9 +271,18 @@ export function loadModelCatalog(
       }).catch(() => undefined);
       return catalog;
     } catch (error) {
-      if (options.signal?.aborted || !cached?.catalog) throw error;
-      options.onStale?.(error);
-      return cached.catalog;
+      if (options.signal?.aborted) throw error;
+      if (cached?.catalog) {
+        options.onStale?.(error);
+        return cached.catalog;
+      }
+      // Custom fetchers are generally tests/adapters which need the original
+      // failure for retry classification. The normal extension path is offline-safe.
+      if (options.bundledFallback ?? !options.fetch) {
+        options.onStale?.(error);
+        return loadBundledCatalog();
+      }
+      throw error;
     }
   };
   if (options.signal || options.fetch || options.storage || options.now || options.refresh || options.onStale) return task();
