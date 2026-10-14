@@ -50,6 +50,10 @@ export async function restoreUserScripts(options: { chromeApi?: UserScriptsChrom
     await snapshotUserScripts(options);
     return true;
   }
+  const desiredIds = new Set(desired.map((script) => script.id));
+  for (const script of active) {
+    if (!desiredIds.has(script.id)) await api.unregister({ ids: [script.id] });
+  }
   const byId = new Map(active.map((script) => [script.id, script]));
   for (const script of desired) {
     if (disabledIds.has(script.id)) continue;

@@ -124,8 +124,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message?.type === "surf-wax:run-status") { void bootReady.then(() => respond({ identity: runs.identity() }), (error) => respond({ error: String(error) })); return true; }
   if (message?.type === "surf-wax:guard-status") {
     const tabId = sender.tab?.id;
-    respond({ runId: tabId !== undefined ? confirmedGuards.get(tabId) : undefined,
-      passThrough: tabId !== undefined && confirmedGuards.has(tabId) && bypassedTabs.has(tabId) }); return;
+    const runId = tabId !== undefined ? confirmedGuards.get(tabId) ?? loadingGuards.get(tabId) : undefined;
+    respond({ runId, passThrough: runId !== undefined && tabId !== undefined && bypassedTabs.has(tabId) }); return;
   }
   if (message?.type !== "side-agent:clear-log") return;
   clearing ??= bootReady.then(clearEventLog).finally(() => { clearing = undefined; });
@@ -136,6 +136,7 @@ const guardedTabs = new Map<number, Set<chrome.runtime.Port>>();
 const bypassedTabs = new Map<number, number>();
 const guardUpdates = new Map<number, Promise<void>>();
 const confirmedGuards = new Map<number, string>();
+const loadingGuards = new Map<number, string>();
 
 function warnPageGuard(tabId: number, error: unknown): string {
   eventLogger.record({ type: "page-guard.failed", content: { tabId }, error });
@@ -161,7 +162,10 @@ async function updatePageGuard(tabId: number): Promise<void> {
   });
   guardUpdates.set(tabId, task);
   try { await task; }
-  finally { if (guardUpdates.get(tabId) === task) guardUpdates.delete(tabId); }
+  finally {
+    if (guardUpdates.get(tabId) === task) guardUpdates.delete(tabId);
+    loadingGuards.delete(tabId);
+  }
 }
 
 async function bypassPageGuard(tabId: number, enabled: boolean): Promise<void> {
@@ -196,7 +200,12 @@ async function authorizedNativeInput(debuggee: chrome.debugger.Debuggee, tabId: 
 }
 
 chrome.tabs.onUpdated.addListener((tabId, change) => {
-  if (change.status === "loading") confirmedGuards.delete(tabId);
+  if (change.status === "loading") {
+    const runId = guardedTabs.has(tabId) ? runs.identity()?.runId : undefined;
+    if (runId) loadingGuards.set(tabId, runId);
+    else loadingGuards.delete(tabId);
+    confirmedGuards.delete(tabId);
+  }
   if (change.status === "complete" && guardedTabs.has(tabId)) void updatePageGuard(tabId).catch((error) => {
     warnPageGuard(tabId, error);
   });
