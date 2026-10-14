@@ -171,15 +171,20 @@ export async function restoreConversationRepository(events: readonly LogEvent[])
       continue;
     }
     const message = await replayRun(events, terminal);
-    // A regeneration that fails before producing output must leave the
-    // previously selected reply as the branch head. Only a first-response
-    // failure needs a synthetic, log-derived diagnostic message.
-    if (!message && [...stored.values()].some((item) => item.parentId === parentId && item.message.role === "assistant")) continue;
+    const siblings = [...stored.entries()].filter(([, item]) => item.parentId === parentId && item.message.role === "assistant");
+    const synthetic = siblings.filter(([, item]) => item.message.id.startsWith("failed-")
+      && (item.message.metadata as { custom?: { syntheticTerminal?: boolean } } | undefined)?.custom?.syntheticTerminal === true);
+    // A failed regeneration must preserve a real prior reply, while a newer
+    // output-free terminal supersedes an older synthetic diagnostic.
+    if (!message && siblings.some(([, item]) => !synthetic.some(([id]) => id === item.message.id))) continue;
+    for (const [id] of synthetic) stored.delete(id);
     const restored = message ?? {
       id: `failed-${terminal.runId}`,
       role: "assistant" as const,
       parts: [],
-      metadata: { custom: { failure: fromLogValue(terminal.error) ?? "模型请求失败" } },
+      metadata: terminal.type === "conversation.aborted"
+        ? { custom: { interrupted: true, syntheticTerminal: true } }
+        : { custom: { failure: fromLogValue(terminal.error) ?? "模型请求失败", syntheticTerminal: true } },
     };
     stored.set(restored.id, {
       eventId: terminal.id,

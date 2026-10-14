@@ -191,3 +191,24 @@ it("keeps a completed reply when regeneration fails before producing a replaceme
   expect(repository.headId).toBe("original");
   expect(repository.messages.at(-1)?.message).toEqual(original);
 });
+
+it("replaces an output-free synthetic failure with the latest terminal", async () => {
+  const repository = await restoreConversationRepository([
+    event(1, "conversation.message", { content: toLogValue({ id: "user", role: "user", parts: [] }) }),
+    event(2, "conversation.submitted", { runId: "first", content: toLogValue({ messageId: "user" }) }),
+    event(3, "conversation.failed", { runId: "first", error: "old error" }),
+    event(4, "conversation.submitted", { runId: "second", content: toLogValue({ messageId: "user" }) }),
+    event(5, "conversation.failed", { runId: "second", error: "new error" }),
+  ]);
+  expect(repository.messages.map(({ message }) => message.id)).toEqual(["user", "failed-second"]);
+  expect(repository.messages[1]?.message.metadata).toMatchObject({ custom: { failure: "new error" } });
+});
+
+it("reconstructs an output-free abort as an interrupted response", async () => {
+  const repository = await restoreConversationRepository([
+    event(1, "conversation.message", { content: toLogValue({ id: "user", role: "user", parts: [] }) }),
+    event(2, "conversation.submitted", { runId: "stopped", content: toLogValue({ messageId: "user" }) }),
+    event(3, "conversation.aborted", { runId: "stopped" }),
+  ]);
+  expect(repository.messages[1]?.message).toMatchObject({ id: "failed-stopped", metadata: { custom: { interrupted: true } } });
+});

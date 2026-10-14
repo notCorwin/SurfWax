@@ -235,6 +235,9 @@ export class ConversationStore {
     this.updateThread({ isRunning: true, error: undefined });
     this.display(messages);
     let failure: unknown;
+    const priorFailureIds = new Set(this.repository.messages
+      .filter(({ message }) => (message.metadata as { custom?: { failure?: unknown } } | undefined)?.custom?.failure !== undefined)
+      .map(({ message }) => message.id));
     let partial: SidePanelMessage | undefined;
     try {
       if (!this.state.threadListItem.remoteId) {
@@ -254,6 +257,11 @@ export class ConversationStore {
     } catch (error) { if (!controller.signal.aborted) failure = error; }
     finally {
       try { await this.restore(id); } catch (error) { failure ??= error; }
+      if (failure !== undefined) {
+        const recorded = this.repository.messages.some(({ message }) => !priorFailureIds.has(message.id)
+          && (message.metadata as { custom?: { failure?: unknown } } | undefined)?.custom?.failure !== undefined);
+        if (!recorded) this.updateThread({ error: failure });
+      }
       this.controller = undefined;
       this.updateThread({ isRunning: false });
     }

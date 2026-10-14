@@ -93,3 +93,19 @@ it("rebuilds an early request failure from the canonical terminal event", async 
   expect(createMessageProjection().message(restored as SidePanelMessage, false, [restored.id]).status)
     .toEqual({ type: "incomplete", reason: "error", error: failure });
 });
+
+it("keeps a transport error visible when no canonical terminal was recorded", async () => {
+  const events: LogEvent[] = [];
+  const logger = new EventLogger({ store: {
+    async append(event) { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+    async all() { return [...events]; },
+    async clear() { events.length = 0; },
+  } });
+  const runtime = new ConversationStore(logger, () => ({
+    async sendMessages() { throw new Error("运行已由另一个面板接管"); },
+    async reconnectToStream() { return null; },
+  }));
+  await runtime.thread.append("hello");
+  expect(runtime.getState().thread.error).toEqual(new Error("运行已由另一个面板接管"));
+  expect(events.some((event) => event.type === "conversation.failed")).toBe(false);
+});
