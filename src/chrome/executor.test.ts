@@ -246,10 +246,10 @@ describe("ChromeExecutor programs", () => {
     });
     expect(await h.run()).toMatchObject({ ok: true, result: ["artifacts", "browser", "check", "emit", "net", "page", "protocol", "signal", "sleep"] }); h.executor.dispose();
   });
-  it("has no default program deadline and honors an explicit deadline", async () => {
+  it("applies an estimated program deadline and honors an explicit deadline", async () => {
     const h = programHarness(async () => 1); const timer = vi.spyOn(globalThis, "setTimeout");
-    expect(await h.run()).toMatchObject({ ok: true }); expect(timer.mock.calls.some(([, delay]) => delay === 10000)).toBe(false);
-    expect(await h.run(undefined, { timeoutMs: 37 })).toMatchObject({ ok: true }); expect(timer.mock.calls.some(([, delay]) => delay === 37)).toBe(true);
+    expect(await h.run()).toMatchObject({ ok: true, timeoutMs: 30000, timeoutSource: "estimated" }); expect(timer.mock.calls.some(([, delay]) => delay === 30000)).toBe(true);
+    expect(await h.run(undefined, { timeoutMs: 37 })).toMatchObject({ ok: true, timeoutMs: 37, timeoutSource: "explicit" }); expect(timer.mock.calls.some(([, delay]) => delay === 37)).toBe(true);
     timer.mockRestore(); h.executor.dispose();
   });
   it("never retries a failed world or silently substitutes an available MAIN host for USER_SCRIPT", async () => {

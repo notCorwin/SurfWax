@@ -10,6 +10,7 @@ import { ProgramScope } from "./program";
 import type { InspectOptions } from "./automation";
 import { callUserScript } from "./script-client";
 import { executeSandboxProgram } from "./program-host";
+import { estimateProgramTimeoutMs } from "./program-timeout";
 
 type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
 type DebuggerTarget = chrome.debugger.TargetInfo;
@@ -303,6 +304,7 @@ export class ChromeExecutor {
     if (!context.conversationId || !this.logger) throw new Error("Programs require a conversation and canonical event log");
     const jobContext = { conversationId: context.conversationId, logIdentity: context.logIdentity };
     const jobSignal = input.background ? undefined : signal;
+    const timeoutMs = input.timeoutMs ?? estimateProgramTimeoutMs(input.code);
     const id = await this.jobs.start(jobContext, jobSignal, (combined, jobId, started) => this.enqueueAbortable(async (deadline) => {
       if (this.disposed) throw new Error("Chrome executor has been disposed");
       await started();
@@ -338,11 +340,11 @@ export class ChromeExecutor {
         this.activeSignal = undefined; this.activeContext = {};
         await this.automation.clearContext();
       }
-    }, combined, input.timeoutMs, false, true));
-    if (input.background) return { jobId: id, state: "queued", accepted: true, complete: false };
+    }, combined, timeoutMs, false, true));
+    if (input.background) return { jobId: id, state: "queued", accepted: true, complete: false, timeoutMs, timeoutSource: input.timeoutMs === undefined ? "estimated" : "explicit" };
     while (true) {
       const status = await this.jobs.query({ action: "wait", id, waitMs: 1000 }, context.conversationId, signal) as any;
-      if (status.terminal) return { jobId: id, ok: status.ok, state: status.state, result: status.result, receipts: { action: "status", id, after: 0 } };
+      if (status.terminal) return { jobId: id, ok: status.ok, state: status.state, result: status.result, timeoutMs, timeoutSource: input.timeoutMs === undefined ? "estimated" : "explicit", receipts: { action: "status", id, after: 0 } };
     }
   }
 
