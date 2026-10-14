@@ -17,7 +17,6 @@ export type SidePanelSession = {
   configReady: boolean;
   error?: unknown;
   configured: boolean;
-  chatKey: string;
 };
 
 export function useSidePanelSession(): SidePanelSession {
@@ -76,6 +75,5 @@ export function useSidePanelSession(): SidePanelSession {
     configReady,
     error,
     configured: configReady && Boolean(modelSettings.selectedProviderId) && isCompleteModelConfig(config),
-    chatKey: `${config.providerId ?? ""}\u0000${config.sdk ?? ""}\u0000${config.baseURL}\u0000${JSON.stringify(config.providerSettings ?? {})}\u0000${config.model}\u0000${config.contextWindowOverride ?? ""}\u0000${modelSettings.systemPrompt ?? ""}`,
   };
 }
