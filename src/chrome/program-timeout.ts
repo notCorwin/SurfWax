@@ -164,7 +164,7 @@ function immediateFunctionBody(node: SyntaxNode | null): SyntaxNode | null {
   return children(node).at(-1) ?? null;
 }
 
-type ScopedNode = { value: SyntaxNode; scope: SyntaxNode };
+type ScopedNode = { value: SyntaxNode; scope: SyntaxNode; bindingAt: number };
 type Analysis = {
   aliases: Map<string, ScopedNode[]>;
   helpers: Map<string, ScopedNode[]>;
@@ -179,11 +179,15 @@ function resolveScoped(
 ): SyntaxNode | undefined {
   return bindings
     .get(name)
-    ?.filter(({ scope }) => scope.from <= at.from && scope.to >= at.to)
-    .sort(
-      (left, right) =>
-        left.scope.to - left.scope.from - (right.scope.to - right.scope.from),
-    )[0]?.value;
+    ?.filter(
+      ({ scope, bindingAt }) =>
+        scope.from <= at.from && scope.to >= at.to && bindingAt <= at.from,
+    )
+    .sort((left, right) => {
+      const scopeDifference =
+        left.scope.to - left.scope.from - (right.scope.to - right.scope.from);
+      return scopeDifference || right.bindingAt - left.bindingAt;
+    })[0]?.value;
 }
 
 function addScoped(
@@ -191,8 +195,12 @@ function addScoped(
   name: string,
   value: SyntaxNode,
   scope: SyntaxNode,
+  bindingAt = value.from,
 ): void {
-  bindings.set(name, [...(bindings.get(name) ?? []), { value, scope }]);
+  bindings.set(name, [
+    ...(bindings.get(name) ?? []),
+    { value, scope, bindingAt },
+  ]);
 }
 
 function isCapabilityExpression(
@@ -224,17 +232,30 @@ function collectDefinitions(source: string, root: SyntaxNode): Analysis {
     helperBudgets: new Map(),
     visitingHelpers: new Set(),
   };
-  const visit = (node: SyntaxNode, inheritedScope: SyntaxNode) => {
+  const visit = (
+    node: SyntaxNode,
+    inheritedScope: SyntaxNode,
+    inheritedFunctionScope: SyntaxNode,
+  ) => {
     const scope = ["Script", "Block"].includes(node.name)
       ? node
       : inheritedScope;
+    const functionScope =
+      node.name === "Script" ? node : inheritedFunctionScope;
     const parts = children(node);
     if (node.name === "FunctionDeclaration") {
       const name = parts.find((part) => part.name === "VariableDefinition");
       const body = parts.find((part) => part.name === "Block");
       if (name && body)
-        addScoped(analysis.helpers, textOf(source, name), body, scope);
+        addScoped(
+          analysis.helpers,
+          textOf(source, name),
+          body,
+          scope,
+          scope.from,
+        );
     } else if (node.name === "VariableDeclaration") {
+      const declarationScope = parts[0]?.name === "var" ? functionScope : scope;
       for (let index = 0; index < parts.length; index += 1) {
         const name = parts[index];
         if (
@@ -247,9 +268,19 @@ function collectDefinitions(source: string, root: SyntaxNode): Analysis {
         if (["ArrowFunction", "FunctionExpression"].includes(value.name)) {
           const body = children(value).at(-1);
           if (body)
-            addScoped(analysis.helpers, textOf(source, name), body, scope);
+            addScoped(
+              analysis.helpers,
+              textOf(source, name),
+              body,
+              declarationScope,
+            );
         } else if (isCapabilityExpression(source, value, analysis)) {
-          addScoped(analysis.aliases, textOf(source, name), value, scope);
+          addScoped(
+            analysis.aliases,
+            textOf(source, name),
+            value,
+            declarationScope,
+          );
         }
       }
     } else if (node.name === "AssignmentExpression") {
@@ -263,11 +294,29 @@ function collectDefinitions(source: string, root: SyntaxNode): Analysis {
         const body = children(value).at(-1);
         if (body)
           addScoped(analysis.helpers, textOf(source, name), body, scope);
+      } else if (
+        name?.name === "VariableName" &&
+        value &&
+        isCapabilityExpression(source, value, analysis)
+      ) {
+        addScoped(analysis.aliases, textOf(source, name), value, scope);
       }
     }
-    for (const part of parts) visit(part, scope);
+    const functionBody = [
+      "FunctionDeclaration",
+      "ArrowFunction",
+      "FunctionExpression",
+    ].includes(node.name)
+      ? parts.at(-1)
+      : undefined;
+    for (const part of parts)
+      visit(
+        part,
+        scope,
+        part === functionBody && part.name === "Block" ? part : functionScope,
+      );
   };
-  visit(root, root);
+  visit(root, root, root);
   return analysis;
 }
 

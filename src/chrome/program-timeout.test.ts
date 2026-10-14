@@ -199,6 +199,35 @@ describe("program timeout estimation", () => {
     ).toBe(90_000);
   });
 
+  it("resolves the latest same-scope helper assignment before a call", () => {
+    expect(
+      estimateProgramTimeoutMs(`
+        let pause = async () => {};
+        pause = async () => { await sleep(60_000); };
+        await pause();
+      `),
+    ).toBe(90_000);
+  });
+
+  it("gives var helpers their enclosing function or script scope", () => {
+    expect(
+      estimateProgramTimeoutMs(`
+        { var pause = async () => { await sleep(60_000); }; }
+        await pause();
+      `),
+    ).toBe(90_000);
+  });
+
+  it("tracks capability aliases created by assignment", () => {
+    expect(
+      estimateProgramTimeoutMs(`
+        let target;
+        target = page.getByText("Ready");
+        await target.waitFor();
+      `),
+    ).toBe(45_000);
+  });
+
   it("ignores method-like text in comments, strings, and embedded scripts", () => {
     expect(
       estimateProgramTimeoutMs(`
