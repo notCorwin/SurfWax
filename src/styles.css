@@ -206,8 +206,8 @@ button:not(:disabled),
   --focus-offset: var(--focus-inset-offset);
 }
 
-[data-slot="dialog-content"], [data-slot="alert-dialog-content"],
-[data-slot="popover-content"], [data-slot="select-content"], .search-combobox-content { outline: none; }
+[data-slot="alert-dialog-content"], [data-slot="popover-content"],
+[data-slot="select-content"], .search-combobox-content { outline: none; }
 
 [data-slot="select-content"] { border-color: transparent; }
 
