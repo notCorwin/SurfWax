@@ -76,7 +76,7 @@ describe("sidepanel configuration refresh", () => {
       .mockResolvedValueOnce(Response.json(catalog));
     vi.stubGlobal("fetch", fetch);
       await act(async () => root.render(<Harness />));
-      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
       await vi.waitFor(() => expect(latest.configReady).toBe(true));
       expect(latest.configured).toBe(true);
       expect(latest.error).toBeUndefined();
@@ -134,7 +134,7 @@ describe("sidepanel configuration refresh", () => {
     await act(async () => { root.unmount(); mounted = false; });
     expect(signal?.aborted).toBe(true);
     expect(listeners.size).toBe(0);
-    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledTimes(2);
     expect(set).not.toHaveBeenCalled();
   });
 
@@ -156,11 +156,11 @@ describe("sidepanel configuration refresh", () => {
     const fetch = vi.fn(async () => { throw new TypeError("offline"); });
     vi.stubGlobal("fetch", fetch);
       await act(async () => root.render(<Harness />));
-      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
       await vi.waitFor(() => expect(latest.configReady).toBe(true));
       expect(latest.error).toBeUndefined();
       await act(async () => { root.unmount(); mounted = false; });
-      expect(fetch).toHaveBeenCalledOnce();
+      expect(fetch).toHaveBeenCalledTimes(2);
       expect(set).not.toHaveBeenCalled();
   });
 });
