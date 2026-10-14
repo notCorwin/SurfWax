@@ -200,8 +200,23 @@ it("replaces an output-free synthetic failure with the latest terminal", async (
     event(4, "conversation.submitted", { runId: "second", content: toLogValue({ messageId: "user" }) }),
     event(5, "conversation.failed", { runId: "second", error: "new error" }),
   ]);
-  expect(repository.messages.map(({ message }) => message.id)).toEqual(["user", "failed-second"]);
+  expect(repository.messages.map(({ message }) => message.id)).toEqual(["user", "failed-first"]);
   expect(repository.messages[1]?.message.metadata).toMatchObject({ custom: { failure: "new error" } });
+});
+
+it("keeps descendants connected when replacing a synthetic failure", async () => {
+  const repository = await restoreConversationRepository([
+    event(1, "conversation.message", { content: toLogValue({ id: "user", role: "user", parts: [] }) }),
+    event(2, "conversation.submitted", { runId: "first", content: toLogValue({ messageId: "user" }) }),
+    event(3, "conversation.failed", { runId: "first", error: "old error" }),
+    event(4, "conversation.message", { parentId: "failed-first", content: toLogValue({ id: "follow-up", role: "user", parts: [] }) }),
+    event(5, "conversation.message", { parentId: "follow-up", content: toLogValue({ id: "follow-up-reply", role: "assistant", parts: [] }) }),
+    event(6, "conversation.submitted", { runId: "second", content: toLogValue({ messageId: "user" }) }),
+    event(7, "conversation.failed", { runId: "second", error: "new error" }),
+  ]);
+  expect(repository.messages.find(({ message }) => message.id === "follow-up")?.parentId).toBe("failed-first");
+  expect(branchMessages(repository, "follow-up-reply").map(({ id }) => id))
+    .toEqual(["user", "failed-first", "follow-up", "follow-up-reply"]);
 });
 
 it("reconstructs an output-free abort as an interrupted response", async () => {

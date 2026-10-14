@@ -177,9 +177,11 @@ export async function restoreConversationRepository(events: readonly LogEvent[])
     // A failed regeneration must preserve a real prior reply, while a newer
     // output-free terminal supersedes an older synthetic diagnostic.
     if (!message && siblings.some(([, item]) => !synthetic.some(([id]) => id === item.message.id))) continue;
-    for (const [id] of synthetic) stored.delete(id);
+    const previousSynthetic = synthetic[0]?.[1];
+    const syntheticId = synthetic[0]?.[0] ?? `failed-${terminal.runId}`;
+    for (const [id] of synthetic.slice(1)) stored.delete(id);
     const restored = message ?? {
-      id: `failed-${terminal.runId}`,
+      id: syntheticId,
       role: "assistant" as const,
       parts: [],
       metadata: terminal.type === "conversation.aborted"
@@ -188,7 +190,7 @@ export async function restoreConversationRepository(events: readonly LogEvent[])
     };
     stored.set(restored.id, {
       eventId: terminal.id,
-      firstEventId: terminal.id,
+      firstEventId: previousSynthetic?.firstEventId ?? terminal.id,
       parentId,
       message: restored,
     });
