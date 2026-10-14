@@ -76,7 +76,7 @@ describe("sidepanel configuration refresh", () => {
       .mockResolvedValueOnce(Response.json(catalog));
     vi.stubGlobal("fetch", fetch);
       await act(async () => root.render(<Harness />));
-      expect(fetch).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
       await vi.waitFor(() => expect(latest.configReady).toBe(true));
       expect(latest.configured).toBe(true);
       expect(latest.error).toBeUndefined();
@@ -87,12 +87,12 @@ describe("sidepanel configuration refresh", () => {
       expect(set.mock.calls.some(([items]) => Object.hasOwn(items, MODEL_CONFIG_STORAGE_KEY))).toBe(false);
   });
 
-  it("hydrates legacy routing without persisting a stale settings snapshot", async () => {
+  it("hydrates legacy routing from the bundled snapshot without persisting settings", async () => {
     const original = values[MODEL_CONFIG_STORAGE_KEY];
     vi.stubGlobal("fetch", vi.fn(async () => Response.json(catalog)));
     await act(async () => root.render(<Harness />));
-    expect(latest.configReady).toBe(true);
-    expect(latest.config.modelProvider?.shape).toBe("completions");
+    await vi.waitFor(() => expect(latest.configReady).toBe(true));
+    expect(latest.config.modelProvider).toBeUndefined();
     expect(latest.configured).toBe(true);
     expect(values[MODEL_CONFIG_STORAGE_KEY]).toBe(original);
     expect(set.mock.calls.some(([items]) => Object.hasOwn(items, MODEL_CONFIG_STORAGE_KEY))).toBe(false);
@@ -107,7 +107,7 @@ describe("sidepanel configuration refresh", () => {
       return pending.promise;
     }));
     await act(async () => root.render(<Harness />));
-    expect(latest.configReady).toBe(false);
+    await vi.waitFor(() => expect(signal).toBeDefined());
     expect(signal?.aborted).toBe(false);
     const newer = custom("new-profile");
     await replaceSettings(newer);
@@ -129,6 +129,7 @@ describe("sidepanel configuration refresh", () => {
     }));
     vi.stubGlobal("fetch", fetch);
     await act(async () => root.render(<Harness />));
+    await vi.waitFor(() => expect(signal).toBeDefined());
     expect(signal?.aborted).toBe(false);
     await act(async () => { root.unmount(); mounted = false; });
     expect(signal?.aborted).toBe(true);
@@ -155,7 +156,7 @@ describe("sidepanel configuration refresh", () => {
     const fetch = vi.fn(async () => { throw new TypeError("offline"); });
     vi.stubGlobal("fetch", fetch);
       await act(async () => root.render(<Harness />));
-      expect(fetch).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
       await vi.waitFor(() => expect(latest.configReady).toBe(true));
       expect(latest.error).toBeUndefined();
       await act(async () => { root.unmount(); mounted = false; });

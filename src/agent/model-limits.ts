@@ -1,6 +1,6 @@
 import { isModelSdk, type JsonValue, type ModelConfig, type ModelProviderOverride, type ModelSdk } from "../types";
 import { defaultBaseURL, isCloudflareGateway, providerSettingFields, resolvedBaseURL, sdkFor, type ProviderSettingField } from "./model-sdks";
-import bundledCatalogGzip from "../data/models-dev-api";
+import bundledCatalogGzip, { metadata as bundledCatalogMetadata } from "../data/models-dev-api";
 
 const CACHE_KEY = "side-agent:model-limit";
 const CATALOG_CACHE_KEY = "side-agent:model-catalog";
@@ -188,6 +188,21 @@ function normalizeCatalog(value: unknown): ModelCatalog {
   }));
 }
 
+function validateCatalog(catalog: ModelCatalog, expected?: { providers: number; models: number }): ModelCatalog {
+  const providers = Object.keys(catalog).length;
+  const models = Object.values(catalog).reduce((count, provider) => count + Object.keys(provider.models ?? {}).length, 0);
+  if (providers < 100 || models < 1_000 || !Object.keys(catalog.openai?.models ?? {}).length) {
+    throw new Error(`Models.dev returned an incomplete catalog (${providers} providers, ${models} models)`);
+  }
+  if (expected && (providers !== expected.providers || models !== expected.models)) throw new Error("Bundled Models.dev catalog metadata does not match its payload");
+  return catalog;
+}
+
+async function sha256(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 // A compressed, release-pinned copy keeps provider/model selection and routing
 // usable offline without adding the whole JSON text to the main JavaScript chunk.
 let bundledCatalogPending: Promise<ModelCatalog> | undefined;
@@ -195,7 +210,9 @@ function loadBundledCatalog(): Promise<ModelCatalog> {
   return bundledCatalogPending ??= (async () => {
     const compressed = Uint8Array.from(atob(bundledCatalogGzip), (character) => character.charCodeAt(0));
     const stream = new Response(compressed).body!.pipeThrough(new DecompressionStream("gzip"));
-    return normalizeCatalog(JSON.parse(await new Response(stream).text()));
+    const json = await new Response(stream).text();
+    if (await sha256(json) !== bundledCatalogMetadata.sha256) throw new Error("Bundled Models.dev catalog checksum mismatch");
+    return validateCatalog(normalizeCatalog(JSON.parse(json)), bundledCatalogMetadata);
   })();
 }
 
@@ -248,16 +265,19 @@ export function modelPresetFields(config: ModelConfig, preset?: ModelProviderPre
 }
 
 const catalogRequests = new WeakMap<typeof globalThis.fetch, Map<string, Promise<ModelCatalog>>>();
+const backgroundCatalogRefreshes = new WeakMap<typeof globalThis.fetch, Promise<ModelCatalog>>();
 
 export function loadModelCatalog(
-  options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; refresh?: boolean; onStale?: (error: unknown) => void; bundledFallback?: boolean } = {},
+  options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; refresh?: boolean; onStale?: (error: unknown) => void; bundledFallback?: boolean; validateCompleteness?: boolean } = {},
 ): Promise<ModelCatalog> {
   const storage = options.storage ?? (typeof chrome !== "undefined" ? chrome.storage?.local : undefined);
+  const validateCompleteness = options.validateCompleteness ?? !options.fetch;
   const task = async () => {
     const stored = storage ? (await storage.get(CATALOG_CACHE_KEY).catch(() => ({ [CATALOG_CACHE_KEY]: undefined })))[CATALOG_CACHE_KEY] as CachedCatalog | undefined : undefined;
-    const cached = stored?.version === CATALOG_CACHE_VERSION ? stored : undefined;
+    let cached = stored?.version === CATALOG_CACHE_VERSION ? stored : undefined;
+    try { if (cached?.catalog && validateCompleteness) validateCatalog(cached.catalog); } catch { cached = undefined; }
     if (!options.refresh && cached?.catalog && (options.now ?? Date.now)() - cached.fetchedAt < REFRESH_MS) return cached.catalog;
-    try {
+    const fetchCatalog = async () => {
       const timeout = AbortSignal.timeout(10_000);
       const response = await (options.fetch ?? fetch)(CATALOG_URL, {
         ...(options.refresh ? { cache: "no-cache" as const } : {}),
@@ -265,11 +285,28 @@ export function loadModelCatalog(
       });
       if (!response.ok) throw Object.assign(new Error(`models.dev HTTP ${response.status}`), { statusCode: response.status });
       const catalog = normalizeCatalog(await response.json());
+      if (validateCompleteness) validateCatalog(catalog);
       if (storage) await storage.set({
         [CATALOG_CACHE_KEY]: { version: CATALOG_CACHE_VERSION, fetchedAt: (options.now ?? Date.now)(), catalog } satisfies CachedCatalog,
         [CACHE_KEY]: null,
       }).catch(() => undefined);
       return catalog;
+    };
+    if (!cached?.catalog && !options.fetch && options.bundledFallback !== false) {
+      const catalog = await loadBundledCatalog();
+      const fetcher = globalThis.fetch;
+      if (!backgroundCatalogRefreshes.has(fetcher)) {
+        const refresh = fetchCatalog().catch((error) => {
+          if (!options.signal?.aborted) options.onStale?.(error);
+          throw error;
+        }).finally(() => backgroundCatalogRefreshes.delete(fetcher));
+        backgroundCatalogRefreshes.set(fetcher, refresh);
+        void refresh.catch(() => undefined);
+      }
+      return catalog;
+    }
+    try {
+      return await fetchCatalog();
     } catch (error) {
       if (options.signal?.aborted) throw error;
       if (cached?.catalog) {

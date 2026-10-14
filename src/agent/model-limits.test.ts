@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { applyModelPreset, contextUsedPercent, inputBudget, loadModelCatalog, matchModel, modelPresetFields, modelProviderPresets, modelSupportsImages, normalizeModelProviderOverride, resolveModelLimit } from "./model-limits";
 import { modelConfigErrors, sdkFor } from "./model-sdks";
+import { metadata as bundledMetadata } from "../data/models-dev-api";
 
 const catalog = {
   openai: { api: "https://api.openai.com/v1", models: {
@@ -47,6 +48,17 @@ describe("models.dev limit matching", () => {
     const result = await loadModelCatalog({ storage, fetch: vi.fn(async () => { throw new Error("offline"); }), bundledFallback: true, onStale });
     expect(Object.keys(result).length).toBeGreaterThan(100);
     expect(result.openai?.models && Object.keys(result.openai.models).length).toBeGreaterThan(0);
+    expect(onStale).toHaveBeenCalledOnce();
+    expect(Object.keys(result)).toHaveLength(bundledMetadata.providers);
+    expect(Object.values(result).reduce((count, provider) => count + Object.keys(provider.models ?? {}).length, 0)).toBe(bundledMetadata.models);
+    expect(bundledMetadata).toMatchObject({ source: "https://models.dev/api.json", sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
+  });
+
+  it("rejects an incomplete successful response and uses the bundled catalog", async () => {
+    const onStale = vi.fn();
+    const result = await loadModelCatalog({ storage: { async get() { return {}; }, async set() {} },
+      fetch: vi.fn(async () => Response.json({})), validateCompleteness: true, bundledFallback: true, onStale });
+    expect(Object.keys(result)).toHaveLength(bundledMetadata.providers);
     expect(onStale).toHaveBeenCalledOnce();
   });
 
