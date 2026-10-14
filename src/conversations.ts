@@ -189,7 +189,7 @@ export async function restoreConversationRepository(events: readonly LogEvent[])
         : { custom: { failure: fromLogValue(terminal.error) ?? "模型请求失败", syntheticTerminal: true } },
     };
     stored.set(restored.id, {
-      eventId: terminal.id,
+      eventId: previousSynthetic?.eventId ?? terminal.id,
       firstEventId: previousSynthetic?.firstEventId ?? terminal.id,
       parentId,
       message: restored,

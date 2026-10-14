@@ -215,6 +215,7 @@ it("keeps descendants connected when replacing a synthetic failure", async () =>
     event(7, "conversation.failed", { runId: "second", error: "new error" }),
   ]);
   expect(repository.messages.find(({ message }) => message.id === "follow-up")?.parentId).toBe("failed-first");
+  expect(repository.headId).toBe("follow-up-reply");
   expect(branchMessages(repository, "follow-up-reply").map(({ id }) => id))
     .toEqual(["user", "failed-first", "follow-up", "follow-up-reply"]);
 });
