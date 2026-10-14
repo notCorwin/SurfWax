@@ -2,6 +2,7 @@ import { EventLogger, fromLogValue } from "./logging";
 import { BackgroundRunCoordinator } from "./agent/background-coordinator";
 import type { RunIdentity } from "./agent/coordinator";
 import { recoverBrowserInput } from "./chrome/input-recovery";
+import { createHeldInputState, debuggeeKey, shouldPersistInputState, updateHeldInputState, type HeldInputState } from "./chrome/input-state";
 import { installPageGuard, removePageGuard, authorizeGuardInput, insertGuardedText } from "./chrome/interaction-guard";
 import guardCss from "./design-tokens/interaction.css?raw";
 import { requireDebuggee } from "./chrome/debuggee";
@@ -46,9 +47,6 @@ function track<T>(task: Promise<T>): Promise<T> {
   operations.add(task);
   void task.finally(() => operations.delete(task)).catch(() => undefined);
   return task;
-}
-function savedInputNeeded(state: { buttons: Map<string, unknown> }, type: unknown): boolean {
-  return state.buttons.size > 0 || type === "mousePressed" || type === "mouseReleased";
 }
 function writerBarrier(port: chrome.runtime.Port): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -236,7 +234,7 @@ chrome.runtime.onConnect.addListener((port) => {
   const sessions = new Map<string, chrome.debugger.Debuggee>();
   const runtimeEvaluations = new Map<string, {debuggee:chrome.debugger.Debuggee;count:number}>();
   const pointerGestures = new Set<number>();
-  const heldInput = new Map<string, { debuggee: chrome.debugger.Debuggee; tabId?: number; runId?: string; x: number; y: number; keys: Map<string, Record<string, any>>; buttons: Map<string, Record<string, any>> }>();
+  const heldInput = new Map<string, HeldInputState>();
   let validatedRunId: string | undefined;
   const gestureTimers = new Map<number, ReturnType<typeof setTimeout>>();
   const endGesture = async (tabId: number) => {
@@ -250,8 +248,6 @@ chrome.runtime.onConnect.addListener((port) => {
     gestureTimers.set(tabId, setTimeout(() => void endGesture(tabId), 10_000));
   };
   let closed = false;
-  const key = (debuggee: chrome.debugger.Debuggee) => debuggee.targetId
-    ? `target:${debuggee.targetId}` : debuggee.tabId !== undefined ? `tab:${debuggee.tabId}` : `extension:${debuggee.extensionId}`;
   const inputReleases = new Map<string, Promise<void>>();
   function releaseHeldInput(inputKey: string): Promise<void> {
     const pending = inputReleases.get(inputKey);
@@ -286,10 +282,10 @@ chrome.runtime.onConnect.addListener((port) => {
     return task;
   }
   const onEvent = (source: chrome.debugger.Debuggee, method: string, params?: object) => {
-    if (!closed && sessions.has(key(source))) port.postMessage({ event: "onEvent", args: [source, method, params] });
+    if (!closed && sessions.has(debuggeeKey(source))) port.postMessage({ event: "onEvent", args: [source, method, params] });
   };
   const onDetach = (source: chrome.debugger.Debuggee, reason: string) => {
-    if (!sessions.delete(key(source))) return;
+    if (!sessions.delete(debuggeeKey(source))) return;
     if (!closed) port.postMessage({ event: "onDetach", args: [source, reason] });
   };
   chrome.debugger.onEvent.addListener(onEvent);
@@ -306,7 +302,7 @@ chrome.runtime.onConnect.addListener((port) => {
          command === "Page.setInterceptFileChooserDialog" && params?.enabled === false ||
          command === "Input.dispatchKeyEvent" && params?.type === "keyUp" ||
          command === "Input.dispatchMouseEvent" && params?.type === "mouseReleased");
-      if (command === "Runtime.terminateExecution" && !sessions.has(key(args[0]))) throw new Error("Execution cleanup requires a debuggee owned by this port");
+      if (command === "Runtime.terminateExecution" && !sessions.has(debuggeeKey(args[0]))) throw new Error("Execution cleanup requires a debuggee owned by this port");
       if (!cleanup) {
         runs.validate(message as RunIdentity, message.operationId);
         validatedRunId = message.runId!;
@@ -316,15 +312,15 @@ chrome.runtime.onConnect.addListener((port) => {
       if (closed && !cleanup) throw new DOMException("Side Panel 已关闭", "AbortError");
       if (method === "attach") {
         requireDebuggee(args[0], method);
-        if (!sessions.has(key(args[0]))) await chrome.debugger.attach(args[0], args[1]);
+        if (!sessions.has(debuggeeKey(args[0]))) await chrome.debugger.attach(args[0], args[1]);
         try { if (closed) throw new DOMException("Side Panel 已关闭", "AbortError"); runs.validate(message as RunIdentity); }
         catch (error) { await chrome.debugger.detach(args[0]).catch(() => undefined); throw error; }
-        sessions.set(key(args[0]), args[0]);
+        sessions.set(debuggeeKey(args[0]), args[0]);
       } else if (method === "detach") {
         requireDebuggee(args[0], method);
-        await Promise.all([...heldInput].filter(([, state]) => key(state.debuggee) === key(args[0])).map(([inputKey]) => releaseHeldInput(inputKey)));
+        await Promise.all([...heldInput].filter(([, state]) => debuggeeKey(state.debuggee) === debuggeeKey(args[0])).map(([inputKey]) => releaseHeldInput(inputKey)));
         await chrome.debugger.detach(args[0]);
-        sessions.delete(key(args[0]));
+        sessions.delete(debuggeeKey(args[0]));
       } else if (method === "endPointerGestures") {
         await Promise.all([...pointerGestures].map((tabId) => endGesture(tabId)));
       } else {
@@ -354,16 +350,13 @@ chrome.runtime.onConnect.addListener((port) => {
           if (input && ["Input.dispatchKeyEvent", "Input.dispatchMouseEvent"].includes(command)) {
             const inputKey = JSON.stringify(debuggee);
             let state = heldInput.get(inputKey);
-            if (!state) { state = { debuggee, tabId, runId: message.runId ?? validatedRunId, x: 0, y: 0, keys: new Map(), buttons: new Map() }; heldInput.set(inputKey, state); }
+            if (!state) { state = createHeldInputState(debuggee, tabId, message.runId ?? validatedRunId); heldInput.set(inputKey, state); }
             else if (!state.keys.size && !state.buttons.size && message.runId) state.runId = message.runId;
             const params = args[2] ?? {};
             const beforeKeys = new Map(state.keys);
             const beforeButtons = new Map(state.buttons);
-            if (Number.isFinite(params.x)) state.x = params.x;
-            if (Number.isFinite(params.y)) state.y = params.y;
-            if (command === "Input.dispatchKeyEvent") { if (type === "keyUp") state.keys.delete(params.key); else state.keys.set(params.key, { ...params }); }
-            if (command === "Input.dispatchMouseEvent") { if (type === "mousePressed") state.buttons.set(params.button ?? "left", { ...params }); else if (type === "mouseReleased") state.buttons.delete(params.button ?? "left"); }
-            if (state.runId && (command === "Input.dispatchKeyEvent" || savedInputNeeded(state, type))) {
+            updateHeldInputState(state, command, params);
+            if (state.runId && (command === "Input.dispatchKeyEvent" || shouldPersistInputState(state, type))) {
               const saved = state;
               const record = (keys: Map<string, Record<string, any>>, buttons: Map<string, Record<string, any>>) => eventLogger.append({
                 type: "browser.input.state", runId: saved.runId,

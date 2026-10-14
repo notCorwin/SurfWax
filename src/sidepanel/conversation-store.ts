@@ -3,7 +3,7 @@ import { readMessageSnapshots } from "../agent/message-snapshots";
 import { restoreConversationRepository } from "../conversations";
 import { abortConversationWork, withIdleConversation } from "../agent/coordinator";
 import type { SidePanelMessage } from "../agent/transport";
-import { fromLogValue, rebuildConversationList, type ConversationRepository, type ConversationSummary, type EventLogger, type LogEvent } from "../logging";
+import { ConversationListProjection, fromLogValue, type ConversationRepository, type ConversationSummary, type EventLogger, type LogEvent } from "../logging";
 
 export type PartStatus = { type: "running" | "complete" | "incomplete" | "requires-action"; reason?: string; error?: unknown };
 export type MessagePart =
@@ -83,6 +83,7 @@ export class ConversationStore {
   private listVersion = 0;
   private closed = false;
   private unsubscribe?: () => void;
+  private conversationList = new ConversationListProjection();
 
   constructor(private logger: EventLogger, private transport: (id: string) => ChatTransport<SidePanelMessage>, initialId: string = crypto.randomUUID()) {
     this.state = {
@@ -133,9 +134,9 @@ export class ConversationStore {
   connect() {
     this.closed = false;
     this.unsubscribe = this.logger.subscribe((event) => {
-      if (/^conversation\.(created|title\.updated|deleted|restored|submitted|finished|aborted|failed)$/.test(event.type) || event.type === "log.cleared") {
+      if (event.type === "log.cleared") { void this.threads.reload().catch((error) => this.updateThread({ error })); return; }
+      if (/^conversation\.(created|title\.updated|deleted|restored|submitted|finished|aborted|failed)$/.test(event.type))
         void this.threads.reload().catch((error) => this.updateThread({ error }));
-      }
     });
     void this.threads.reload().catch((error) => this.updateThread({ error }));
     return () => { this.closed = true; this.unsubscribe?.(); this.thread.cancelRun(); };
@@ -192,9 +193,9 @@ export class ConversationStore {
   threads = {
     reload: async () => {
       const revision = ++this.listVersion;
-      const items = rebuildConversationList(await this.logger.summaryEvents()).map((item): ThreadItem => ({ ...item, remoteId: item.id, custom: { runStatus: item.runStatus } }));
+      const summaries = this.conversationList.reset(await this.logger.summaryEvents());
       if (revision !== this.listVersion) return;
-      this.publish({ threads: { ...this.state.threads, threadItems: items, threadIds: items.map((item) => item.id) } });
+      this.publishThreadItems(summaries);
     },
     switchToNewThread: () => this.switchConversation(crypto.randomUUID(), false),
     switchToThread: (id: string) => this.switchConversation(id, true),
@@ -205,6 +206,10 @@ export class ConversationStore {
     }),
     restore: (id: string) => withIdleConversation(() => this.logger.restoreConversation(id)),
   };
+  private publishThreadItems(summaries: readonly ConversationSummary[]) {
+    const items = summaries.map((item): ThreadItem => ({ ...item, remoteId: item.id, custom: { runStatus: item.runStatus } }));
+    this.publish({ threads: { ...this.state.threads, threadItems: items, threadIds: items.map((item) => item.id) } });
+  }
   private async switchConversation(id: string, exists: boolean) {
     if (this.state.thread.isRunning) throw new Error("当前会话尚未结束，请等待完成或先停止运行。");
     const revision = ++this.loadVersion;

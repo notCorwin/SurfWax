@@ -1,4 +1,4 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { EventLogger, type LogEvent } from "../logging";
 import { ConversationStore, createMessageProjection } from "./conversation-store";
 
@@ -19,6 +19,29 @@ it("lists historical archived conversations normally and preserves their message
   expect(runtime.getState().threads.threadIds).toEqual(expect.arrayContaining(["legacy", "regular"]));
   await runtime.threads.switchToThread("legacy");
   expect(runtime.getState().thread.messages).toMatchObject([{ role: "user", parts: [{ type: "text", text: "保留历史消息" }] }]);
+});
+
+it("reconciles conversation-list writes from another logger before publishing a local update", async () => {
+  const events: LogEvent[] = [];
+  const store = {
+    async append(event: Omit<LogEvent, "id">) { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+    async all() { return [...events]; },
+    async clear() { events.length = 0; },
+  };
+  const logger = new EventLogger({ store });
+  const otherLogger = new EventLogger({ store });
+  const runtime = new ConversationStore(logger, () => { throw new Error("Listing conversations must not request a model"); });
+  runtime.connect();
+  await runtime.threads.reload();
+
+  await otherLogger.append({ type: "conversation.created", conversationId: "external", content: { title: "其他窗口" } });
+  expect(runtime.getState().threads.threadIds).not.toContain("external");
+
+  await logger.append({ type: "conversation.created", conversationId: "local", content: { title: "当前窗口" } });
+  await vi.waitFor(() => {
+    expect(runtime.getState().threads.threadIds).toHaveLength(2);
+    expect(runtime.getState().threads.threadIds).toEqual(expect.arrayContaining(["external", "local"]));
+  });
 });
 
 it("restores the selected reply inside an inactive branch when reopening a conversation", async () => {
