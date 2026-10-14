@@ -157,7 +157,11 @@ export async function summarizeContext(options: {
   const { raw, branchIds, logger, conversationId, signal } = options;
   const events = await logger.conversation(conversationId);
   signal.throwIfAborted();
-  const { messages } = await effectiveContext(events, branchIds, raw);
+  const { checkpoint: priorCheckpoint, messages } = await effectiveContext(events, branchIds, raw);
+  // Every trigger (in-run pressure, overflow recovery, and post-turn upkeep)
+  // converges here. Reuse an already committed checkpoint for the exact same
+  // branch instead of allowing sequential triggers to summarize it twice.
+  if (priorCheckpoint?.sourceCount === raw.length && priorCheckpoint.sourceDigest === await digest(raw)) return priorCheckpoint.summary;
   const limit = options.limit ?? await resolveModelLimit(options.model, { signal });
   if (!limit) throw new Error("无法取得模型上下文窗口；请手动设置窗口大小。");
   const summary = await generateSummary(options.prepared ?? messages, options.languageModel, logger, conversationId, signal, limit);
