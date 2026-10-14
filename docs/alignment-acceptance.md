@@ -1,6 +1,6 @@
 # Surf Wax 需求对齐验收
 
-`npm run verify:local` 是提交前的完整 CI 入口，要求 Node 24。它校验生成文档、live Models.dev 的 SDK 覆盖差集、类型、构建、Manifest、单测，并在 Chrome for Testing 138 和当前 Stable 分别运行全部功能 E2E 与性能检查。GitHub Actions 仅负责 CD 的构建打包、SHA-256 校验、master Autobuild 和版本标签的不可变发布。
+`npm run verify:local` 是提交前的完整 CI 入口，要求 Node 24。它校验生成文档、live Models.dev 的 SDK 覆盖差集、类型、构建、Manifest、单测，并在 Chrome for Testing 138 和当前 Stable 分别运行全部功能 E2E 与性能检查。仓库当前不配置 GitHub Actions 或自动发布；版本包只能从干净工作区手动生成。
 
 ## 运行时与日志
 
