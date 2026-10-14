@@ -335,26 +335,29 @@ export type ConversationSummary = {
   lastMessageAt: string;
 };
 
-export function rebuildConversationList(events: readonly LogEvent[]): ConversationSummary[] {
-  const conversations = new Map<string, ConversationSummary>();
-  const deleted = new Set<string>();
-  for (const event of events) {
-    if (!event.conversationId) continue;
+export class ConversationListProjection {
+  private conversations = new Map<string, ConversationSummary>();
+  private deleted = new Set<string>();
+
+  reset(events: readonly LogEvent[]): ConversationSummary[] {
+    this.conversations.clear(); this.deleted.clear();
+    for (const event of events) this.apply(event);
+    return this.snapshot();
+  }
+
+  apply(event: LogEvent): boolean {
+    if (!event.conversationId) return false;
     if (event.type === "conversation.created") {
       const content = fromLogValue(event.content) as { title?: unknown };
-      conversations.set(event.conversationId, {
-        id: event.conversationId,
+      this.conversations.set(event.conversationId, { id: event.conversationId,
         title: typeof content?.title === "string" && content.title.trim() ? content.title : "新对话",
-        runStatus: "idle",
-        createdAt: event.timestamp,
-        lastMessageAt: event.timestamp,
-      });
-      continue;
+        runStatus: "idle", createdAt: event.timestamp, lastMessageAt: event.timestamp });
+      return true;
     }
-    const conversation = conversations.get(event.conversationId);
-    if (!conversation) continue;
-    if (event.type === "conversation.deleted") { deleted.add(event.conversationId); continue; }
-    if (event.type === "conversation.restored") { deleted.delete(event.conversationId); continue; }
+    const conversation = this.conversations.get(event.conversationId);
+    if (!conversation) return false;
+    if (event.type === "conversation.deleted") { this.deleted.add(event.conversationId); return true; }
+    if (event.type === "conversation.restored") { this.deleted.delete(event.conversationId); return true; }
     if (event.type !== "conversation.selected") conversation.lastMessageAt = event.timestamp;
     if (event.type === "conversation.title.updated") {
       const content = fromLogValue(event.content) as { title?: unknown };
@@ -363,8 +366,17 @@ export function rebuildConversationList(events: readonly LogEvent[]): Conversati
     if (event.type === "conversation.submitted") conversation.runStatus = "running";
     if (event.type === "conversation.finished") conversation.runStatus = "idle";
     if (event.type === "conversation.aborted" || event.type === "conversation.failed") conversation.runStatus = "interrupted";
+    return true;
   }
-  return [...conversations.values()].filter(({ id }) => !deleted.has(id)).sort((left, right) => right.lastMessageAt.localeCompare(left.lastMessageAt));
+
+  snapshot(): ConversationSummary[] {
+    return [...this.conversations.values()].filter(({ id }) => !this.deleted.has(id))
+      .sort((left, right) => right.lastMessageAt.localeCompare(left.lastMessageAt));
+  }
+}
+
+export function rebuildConversationList(events: readonly LogEvent[]): ConversationSummary[] {
+  return new ConversationListProjection().reset(events);
 }
 
 export function selectedConversationId(events: readonly LogEvent[]): string | undefined {
@@ -434,6 +446,7 @@ export class EventLogger {
   private generation: number | undefined = 0;
   private handshakePaused = false;
   private listeners = new Set<(event: LogEvent) => void>();
+  private clearFloor?: Promise<number>;
 
   constructor(private readonly options: {
     store?: EventStore;
@@ -553,7 +566,10 @@ export class EventLogger {
         const stored: LogEvent[] = [];
         if (accepted.length && store.appendMany) stored.push(...await store.appendMany(accepted));
         else for (const event of accepted) stored.push(await store.append(event));
-        for (const event of stored) for (const listener of this.listeners) listener(event);
+        for (const event of stored) {
+          if (event.type === "log.cleared") this.clearFloor = Promise.resolve(event.id);
+          for (const listener of this.listeners) listener(event);
+        }
         // Return the accepted durable terminal to a competing callback, without
         // publishing a second event or replacing the original reason/result.
         for (const event of stored) { const key = terminalKey(event); if (key) existing.set(key, event); }
@@ -624,10 +640,13 @@ export class EventLogger {
   }
 
   private async latestClearId(store: EventStore): Promise<number> {
-    const clears = store.byTypes
-      ? await store.byTypes(["log.cleared"])
-      : (await store.all()).filter((event) => event.type === "log.cleared");
-    return clears.at(-1)?.id ?? -1;
+    this.clearFloor ??= (async () => {
+      const clears = store.byTypes
+        ? await store.byTypes(["log.cleared"])
+        : (await store.all()).filter((event) => event.type === "log.cleared");
+      return clears.at(-1)?.id ?? -1;
+    })();
+    return this.clearFloor;
   }
 
   summaryEvents(conversationId?: string): Promise<LogEvent[]> {
@@ -812,6 +831,7 @@ export class EventLogger {
     await this.flush();
     const event = this.event({ type: "log.cleared", content: null });
     const stored = await (this.options.store ?? getEventStore()).append(event);
+    this.clearFloor = Promise.resolve(stored.id);
     for (const listener of this.listeners) listener(stored);
   }
 

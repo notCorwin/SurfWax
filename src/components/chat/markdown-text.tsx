@@ -1,11 +1,11 @@
 "use client";
 import "katex/dist/katex.min.css";
 import { normalizeMathDelimiters } from "./math-delimiters";
-import { createCodePlugin } from "@streamdown/code";
 import { math } from "@streamdown/math";
 import { memo, useMemo, useRef, type ReactElement } from "react";
 import { Block, Streamdown, type BlockProps } from "streamdown";
 import { createMarkdownBlockParser } from "./markdown-blocks";
+import { createCodeHighlighter } from "./code-highlighter";
 
 const CachedBlock = memo(function CachedBlock(props: BlockProps) {
   if (!props.content.trim()) return null;
@@ -26,7 +26,7 @@ const syntaxTheme = {
   ],
 };
 const REMEND = { katex: false };
-const PLUGINS = { code: createCodePlugin({ themes: [syntaxTheme, { ...syntaxTheme, name: "surf-wax-dark", type: "dark" }] }), math };
+const PLUGINS = { code: createCodeHighlighter([syntaxTheme, { ...syntaxTheme, name: "surf-wax-dark", type: "dark" }]), math };
 
 const CompletedBlock = memo(function CompletedBlock({ text }: { text: string }) {
   return <Streamdown className="markdown-block" mode="static" plugins={PLUGINS} controls>{text}</Streamdown>;

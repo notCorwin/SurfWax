@@ -38,11 +38,16 @@ export async function validateBuild(directory = 'dist') {
   const entrypoint = sidepanel.match(/<script\b[^>]*\bsrc=["']([^"']+)["']/)?.[1];
   if (!entrypoint) throw new Error('Side panel JavaScript entrypoint missing');
   const entrypointBytes = (await stat(join(output, entrypoint.replace(/^\//, '')))).size;
-  if (entrypointBytes > 2_000_000) throw new Error(`Side panel entrypoint ${entrypointBytes} bytes exceeds the 2,000,000-byte budget`);
+  const fileSizes = await Promise.all(files.map(async path => ({ path, bytes: (await stat(path)).size })));
+  const totalBytes = fileSizes.reduce((total, file) => total + file.bytes, 0);
+  const largestAsset = fileSizes.reduce((largest, file) => file.bytes > largest.bytes ? file : largest, { path: '', bytes: 0 });
+  if (entrypointBytes > 900_000) throw new Error(`Side panel entrypoint ${entrypointBytes} bytes exceeds the 900,000-byte budget`);
+  if (totalBytes > 9_000_000) throw new Error(`Extension output ${totalBytes} bytes exceeds the 9,000,000-byte budget`);
+  if (largestAsset.bytes > 900_000) throw new Error(`Asset ${largestAsset.path} is ${largestAsset.bytes} bytes and exceeds the 900,000-byte budget`);
   if (files.some(path => /(?:^|\/)(?:offscreen|devtools)(?:[.-]|\/)/.test(path))) throw new Error('Removed execution host is included in build');
-  return { version: packageInfo.version, manifest, files, directory: output, entrypointBytes };
+  return { version: packageInfo.version, manifest, files, directory: output, entrypointBytes, totalBytes };
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const result = await validateBuild(process.argv[2]);
-  console.log(`Validated Surf Wax ${result.version}: ${result.files.length} files, ${result.manifest.permissions.length} required permissions, main JavaScript ${result.entrypointBytes} bytes.`);
+  console.log(`Validated Surf Wax ${result.version}: ${result.files.length} files, ${result.manifest.permissions.length} required permissions, main JavaScript ${result.entrypointBytes} bytes, total ${result.totalBytes} bytes.`);
 }

@@ -230,6 +230,24 @@ describe("canonical event log", () => {
     expect(await logger.messages()).toEqual([]);
   });
 
+  it("reads the clear boundary once across repeated indexed queries", async () => {
+    const base = memoryStore();
+    let clearQueries = 0;
+    const store = { ...base, async byTypes(types: readonly string[], conversationId?: string) {
+      if (types.length === 1 && types[0] === "log.cleared") clearQueries += 1;
+      return base.byTypes(types, conversationId);
+    } };
+    const logger = new EventLogger({ store });
+    await logger.append({ type: "conversation.created", conversationId: "one" });
+    await logger.summaryEvents();
+    await logger.summaryEvents("one");
+    await logger.restorationEvents("one");
+    expect(clearQueries).toBe(1);
+    await logger.clear();
+    await logger.summaryEvents();
+    expect(clearQueries).toBe(1);
+  });
+
   it("does not accept late events after a session is stopped for clearing", async () => {
     const store = memoryStore();
     const logger = new EventLogger({ store });
