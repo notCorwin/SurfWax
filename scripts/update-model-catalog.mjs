@@ -10,6 +10,9 @@ const source = "https://models.dev/api.json";
 const destination = resolve("src/data/models-dev-api.ts");
 const check = process.argv.slice(2).includes("--check");
 if (process.argv.length > 3 || (process.argv[2] && !check)) throw new Error("Usage: node scripts/update-model-catalog.mjs [--check]");
+const currentSource = await readFile(destination, "utf8").catch(() => "");
+const currentProviders = Number(currentSource.match(/"providers":(\d+)/)?.[1] ?? 0);
+const currentModels = Number(currentSource.match(/"models":(\d+)/)?.[1] ?? 0);
 const rawCatalog = await publicJson(source);
 if (!rawCatalog || typeof rawCatalog !== "object" || Array.isArray(rawCatalog) || Object.keys(rawCatalog).length < 100) {
   throw new Error("Models.dev returned an unexpectedly small or invalid catalog");
@@ -28,6 +31,10 @@ if (failures.length) throw new Error(failures.join("; "));
 if (coverage.providers < 100 || coverage.models < 1_000 || !catalog.openai?.models || !Object.keys(catalog.openai.models).length) {
   throw new Error(`Models.dev snapshot failed completeness checks (${coverage.providers} providers, ${coverage.models} models)`);
 }
+if (currentProviders && currentModels
+  && (coverage.providers < Math.floor(currentProviders * 0.8) || coverage.models < Math.floor(currentModels * 0.8))) {
+  throw new Error(`Models.dev snapshot regressed relative to the existing bundle (${coverage.providers}/${currentProviders} providers, ${coverage.models}/${currentModels} models)`);
+}
 if (JSON.stringify(coverage.catalogSdks) !== JSON.stringify(rawCoverage.catalogSdks)
   || JSON.stringify(coverage.modelOverrides) !== JSON.stringify(rawCoverage.modelOverrides)) {
   throw new Error("Models.dev snapshot pruning changed SDK or model routing metadata");
@@ -39,8 +46,7 @@ if (gunzipSync(compressed).toString("utf8") !== json) throw new Error("Models.de
 const metadata = { source, fetchedAt: new Date().toISOString(), sha256: createHash("sha256").update(json).digest("hex"),
   providers: coverage.providers, models: coverage.models };
 if (check) {
-  const current = await readFile(destination, "utf8");
-  const currentHash = current.match(/"sha256":"([a-f0-9]{64})"/)?.[1];
+  const currentHash = currentSource.match(/"sha256":"([a-f0-9]{64})"/)?.[1];
   if (currentHash !== metadata.sha256) throw new Error("Bundled Models.dev catalog is stale; run npm run catalog:update");
   console.log(`Bundled Models.dev catalog is current (${coverage.providers} providers, ${coverage.models} models)`);
   process.exit(0);
