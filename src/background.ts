@@ -145,7 +145,7 @@ function warnPageGuard(tabId: number, error: unknown): string {
   return detail;
 }
 
-async function updatePageGuard(tabId: number): Promise<void> {
+async function updatePageGuard(tabId: number, consumeLoading = false): Promise<void> {
   const loading = loadingGuards.get(tabId);
   const task = (guardUpdates.get(tabId) ?? Promise.resolve()).catch(() => undefined).then(async () => {
     const enabled = guardedTabs.has(tabId);
@@ -165,7 +165,7 @@ async function updatePageGuard(tabId: number): Promise<void> {
   try { await task; }
   finally {
     if (guardUpdates.get(tabId) === task) guardUpdates.delete(tabId);
-    if (loading && loadingGuards.get(tabId) === loading) loadingGuards.delete(tabId);
+    if (consumeLoading && loading && loadingGuards.get(tabId) === loading) loadingGuards.delete(tabId);
   }
 }
 
@@ -207,7 +207,7 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
     else loadingGuards.delete(tabId);
     confirmedGuards.delete(tabId);
   }
-  if (change.status === "complete" && guardedTabs.has(tabId)) void updatePageGuard(tabId).catch((error) => {
+  if (change.status === "complete" && guardedTabs.has(tabId)) void updatePageGuard(tabId, true).catch((error) => {
     warnPageGuard(tabId, error);
   });
 });
@@ -241,6 +241,7 @@ chrome.runtime.onConnect.addListener((port) => {
       holders?.delete(port);
       if (holders?.size) continue;
       guardedTabs.delete(tabId);
+      loadingGuards.delete(tabId);
       void updatePageGuard(tabId);
     }
   });
