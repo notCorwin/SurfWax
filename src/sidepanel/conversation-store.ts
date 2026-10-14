@@ -1,6 +1,6 @@
 import type { ChatTransport } from "ai";
 import { readMessageSnapshots } from "../agent/message-snapshots";
-import { restoreConversationRepository } from "../conversations";
+import { isSyntheticTerminalMessage, restoreConversationRepository } from "../conversations";
 import { abortConversationWork, withIdleConversation } from "../agent/coordinator";
 import type { SidePanelMessage } from "../agent/transport";
 import { ConversationListProjection, fromLogValue, type ConversationRepository, type ConversationSummary, type EventLogger, type LogEvent } from "../logging";
@@ -236,10 +236,11 @@ export class ConversationStore {
     this.updateThread({ isRunning: true, error: undefined });
     this.display(messages);
     let failure: unknown;
-    const priorFailureEventId = Math.max(0, ...(await this.logger.restorationEvents(id))
-      .filter((event) => event.type === "conversation.failed").map((event) => event.id));
+    let priorFailureEventId = 0;
     let partial: SidePanelMessage | undefined;
     try {
+      priorFailureEventId = Math.max(0, ...(await this.logger.restorationEvents(id))
+        .filter((event) => event.type === "conversation.failed").map((event) => event.id));
       if (!this.state.threadListItem.remoteId) {
         await this.logger.append({ type: "conversation.created", conversationId: id, content: { title: "新对话" } });
         this.publish({ threadListItem: { id, remoteId: id } });
@@ -249,7 +250,8 @@ export class ConversationStore {
       if (user?.role === "user" && !this.repository.messages.some((item) => item.message.id === user.id)) {
         await this.logger.appendMessage(id, { ...user }, { parentId: messages.at(-2)?.id ?? null });
       }
-      const stream = await this.transport(id).sendMessages({ trigger, chatId: id, messageId: undefined, messages, abortSignal: controller.signal });
+      const modelMessages = messages.filter((message) => !isSyntheticTerminalMessage(message));
+      const stream = await this.transport(id).sendMessages({ trigger, chatId: id, messageId: undefined, messages: modelMessages, abortSignal: controller.signal });
       for await (const message of readMessageSnapshots<SidePanelMessage>(stream, (error) => { if (!controller.signal.aborted) failure = error; })) {
         partial = message;
         this.display([...messages, message], message.id);

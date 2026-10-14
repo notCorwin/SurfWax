@@ -134,3 +134,17 @@ it("does not duplicate a refreshed canonical failure when its synthetic message 
   expect(runtime.getState().thread.error).toBeUndefined();
   expect(runtime.getState().thread.messages.at(-1)?.status).toMatchObject({ reason: "error", error: "new" });
 });
+
+it("always clears running state when the failure baseline cannot be read", async () => {
+  const events: LogEvent[] = [];
+  const logger = new EventLogger({ store: {
+    async append(event) { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+    async all() { return [...events]; },
+    async clear() { events.length = 0; },
+  } });
+  vi.spyOn(logger, "restorationEvents").mockRejectedValueOnce(new Error("IndexedDB unavailable"));
+  const runtime = new ConversationStore(logger, () => { throw new Error("transport must not start"); });
+  await runtime.thread.append("hello");
+  expect(runtime.getState().thread.isRunning).toBe(false);
+  expect(runtime.getState().thread.error).toEqual(new Error("IndexedDB unavailable"));
+});

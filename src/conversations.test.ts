@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { branchMessages } from "./sidepanel/conversation-store";
-import { generateConversationTitle, restoreConversationRepository } from "./conversations";
+import { activeConversationMessages, generateConversationTitle, restoreConversationRepository } from "./conversations";
 import * as model from "./agent/model";
 import { EventLogger, rebuildConversationList, rebuildConversationRepository, selectedConversationId, toLogValue, type LogEvent } from "./logging";
 
@@ -226,4 +226,17 @@ it("reconstructs an output-free abort as an interrupted response", async () => {
     event(3, "conversation.aborted", { runId: "stopped" }),
   ]);
   expect(repository.messages[1]?.message).toMatchObject({ id: "failed-stopped", metadata: { custom: { interrupted: true } } });
+});
+
+it("keeps synthetic terminals in the repository but excludes them from model history", async () => {
+  const events = [
+    event(1, "conversation.message", { conversationId: "thread", content: toLogValue({ id: "user", role: "user", parts: [] }) }),
+    event(2, "conversation.submitted", { conversationId: "thread", runId: "stopped", content: toLogValue({ messageId: "user" }) }),
+    event(3, "conversation.aborted", { conversationId: "thread", runId: "stopped" }),
+    event(4, "conversation.message", { conversationId: "thread", parentId: "failed-stopped", content: toLogValue({ id: "continued", role: "user", parts: [{ type: "text", text: "continue" }] }) }),
+  ];
+  const logger = { restorationEvents: async () => events } as unknown as EventLogger;
+  expect((await restoreConversationRepository(events)).messages.map(({ message }) => message.id))
+    .toEqual(["user", "failed-stopped", "continued"]);
+  expect((await activeConversationMessages(logger, "thread")).map(({ id }) => id)).toEqual(["user", "continued"]);
 });

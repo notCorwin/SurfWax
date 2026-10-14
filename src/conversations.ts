@@ -207,8 +207,12 @@ export async function activeConversationMessages(logger: EventLogger, conversati
   while (id) {
     const item = byId.get(id);
     if (!item) break;
-    messages.unshift(item.message);
+    if (!isSyntheticTerminalMessage(item.message)) messages.unshift(item.message);
     id = item.parentId;
   }
   return messages;
+}
+
+export function isSyntheticTerminalMessage(message: object): boolean {
+  return ((message as { metadata?: { custom?: { syntheticTerminal?: boolean } } }).metadata)?.custom?.syntheticTerminal === true;
 }
