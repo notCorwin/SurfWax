@@ -265,14 +265,14 @@ export class ContextCompactor {
       promptEstimate: estimatePromptInput(prompt),
       fixedEstimate: estimatePromptInput(prompt) - estimateInput(prompt.messages),
     };
-    this.options.logger.record({ type: "context.estimate.calibrated", conversationId: this.options.conversationId, content: this.calibration });
+    void this.options.logger.append({ type: "context.estimate.calibrated", conversationId: this.options.conversationId, content: this.calibration });
   }
 
   recordUsage(inputTokens: number | undefined, stepNumber: number): void {
     if (!inputTokens || !this.calibration || this.usageRecorded) return;
     this.usageRecorded = true;
     this.calibration = { ...this.calibration, inputTokens };
-    this.options.logger.record({ type: "context.estimate.calibrated", conversationId: this.options.conversationId, content: { ...this.calibration, stepNumber } });
+    void this.options.logger.append({ type: "context.estimate.calibrated", conversationId: this.options.conversationId, content: { ...this.calibration, stepNumber } });
   }
 
   estimate(messages: readonly ModelMessage[], prompt?: {
@@ -316,7 +316,7 @@ export class ContextCompactor {
     if (stepNumber > 0) return undefined;
     const limit = await resolveModelLimit(model, { signal });
     if (!limit && !this.warned) {
-      logger.record({ type: "context.limit.unavailable", conversationId, content: { model: model.model } });
+      void logger.append({ type: "context.limit.unavailable", conversationId, content: { model: model.model } });
       this.warned = true;
     }
     this.events ??= await logger.conversation(conversationId);

@@ -224,7 +224,7 @@ export class ConversationStore {
       this.restoreBranches(repository, events);
       this.publish({ threadListItem: { id, ...(exists ? { remoteId: id } : {}) }, composer: { text: "" }, threads: { ...this.state.threads, mainThreadId: id } });
       this.display(branchMessages(repository));
-      if (exists) this.logger.record({ type: "conversation.selected", conversationId: id, content: null });
+      if (exists) this.logger.telemetry({ type: "conversation.selected", conversationId: id, content: null });
     } catch (error) { this.updateThread({ error }); throw error; }
     finally { if (revision === this.loadVersion) this.updateThread({ isLoading: false }); }
   }

@@ -603,11 +603,15 @@ export class EventLogger {
     return this.enqueue([this.event(record)]).then(([event]) => event);
   }
 
-  record(record: LogRecord): void {
+  /** Best-effort diagnostics only. State restoration must never depend on it. */
+  telemetry(record: LogRecord): void {
     if (!this.accepting) return;
     this.buffered.push(this.event(record));
     this.bufferTimer ??= setTimeout(() => this.flushBuffer(), 16);
   }
+
+  /** @deprecated Use append for canonical facts or telemetry for diagnostics. */
+  record(record: LogRecord): void { this.telemetry(record); }
 
   async appendMessage(conversationId: string, message: ConversationMessage, options?: { runId?: string; parentId?: string | null }): Promise<void>;
   async appendMessage(message: ConversationMessage, runId?: string): Promise<void>;
