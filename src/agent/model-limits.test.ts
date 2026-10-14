@@ -62,6 +62,18 @@ describe("models.dev limit matching", () => {
     expect(onStale).toHaveBeenCalledOnce();
   });
 
+  it("rejects a truncated response that clears the old absolute thresholds", async () => {
+    const truncated = Object.fromEntries(Array.from({ length: 100 }, (_, providerIndex) => {
+      const id = providerIndex === 0 ? "openai" : `provider-${providerIndex}`;
+      return [id, { npm: "@ai-sdk/openai-compatible", models: Object.fromEntries(
+        Array.from({ length: 10 }, (_, modelIndex) => [`model-${modelIndex}`, { tool_call: true }]),
+      ) }];
+    }));
+    const result = await loadModelCatalog({ storage: { async get() { return {}; }, async set() {} },
+      fetch: vi.fn(async () => Response.json(truncated)), validateCompleteness: true, bundledFallback: true });
+    expect(Object.keys(result)).toHaveLength(bundledMetadata.providers);
+  });
+
   it("refreshes a fresh catalog and invalidates the cached model limit", async () => {
     const values: Record<string, unknown> = {};
     const storage = { async get(key: string) { return { [key]: values[key] }; }, async set(items: Record<string, unknown>) { Object.assign(values, items); } };

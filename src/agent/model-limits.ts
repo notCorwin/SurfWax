@@ -191,8 +191,10 @@ function normalizeCatalog(value: unknown): ModelCatalog {
 function validateCatalog(catalog: ModelCatalog, expected?: { providers: number; models: number }): ModelCatalog {
   const providers = Object.keys(catalog).length;
   const models = Object.values(catalog).reduce((count, provider) => count + Object.keys(provider.models ?? {}).length, 0);
-  if (providers < 100 || models < 1_000 || !Object.keys(catalog.openai?.models ?? {}).length) {
-    throw new Error(`Models.dev returned an incomplete catalog (${providers} providers, ${models} models)`);
+  const minimumProviders = Math.floor(bundledCatalogMetadata.providers * 0.8);
+  const minimumModels = Math.floor(bundledCatalogMetadata.models * 0.8);
+  if (providers < minimumProviders || models < minimumModels || !Object.keys(catalog.openai?.models ?? {}).length) {
+    throw new Error(`Models.dev returned an incomplete catalog (${providers}/${bundledCatalogMetadata.providers} providers, ${models}/${bundledCatalogMetadata.models} models)`);
   }
   if (expected && (providers !== expected.providers || models !== expected.models)) throw new Error("Bundled Models.dev catalog metadata does not match its payload");
   return catalog;
