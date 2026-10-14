@@ -1,6 +1,5 @@
 # Surf Wax
 
-[![Continuous Delivery](https://github.com/notCorwin/SurfWax/actions/workflows/autobuild.yml/badge.svg)](https://github.com/notCorwin/SurfWax/actions/workflows/autobuild.yml)
 [![Version](https://img.shields.io/github/package-json/v/notCorwin/SurfWax)](package.json)
 [![Chrome 138+](https://img.shields.io/badge/Chrome-138%2B-4285F4?logo=googlechrome&logoColor=white)](https://www.google.com/chrome/)
 
