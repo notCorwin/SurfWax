@@ -17,6 +17,8 @@
     "test:performance": "npm run build && playwright test --grep @performance",
     "measure:tools": "node scripts/measure-tool-budget.mjs",
     "sdk:check": "node scripts/check-sdk-coverage.mjs",
+    "catalog:update": "node scripts/update-model-catalog.mjs",
+    "catalog:check": "node scripts/update-model-catalog.mjs --check",
     "verify:local": "node scripts/verify-local.mjs"
   },
   "dependencies": {

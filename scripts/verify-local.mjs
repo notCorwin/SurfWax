@@ -21,6 +21,7 @@ try {
   run('Generated documentation', node, ['scripts/generate-tool-docs.mjs', '--check']);
   run('SDK coverage checker regression tests', node, ['--test', 'scripts/tests/sdk-coverage.test.mjs']);
   run('Live Models.dev SDK coverage', node, ['scripts/check-sdk-coverage.mjs']);
+  run('Bundled Models.dev freshness', node, ['scripts/update-model-catalog.mjs', '--check']);
   run('Type checking', node, ['node_modules/typescript/bin/tsc', '--noEmit']);
   run('Extension build', node, ['node_modules/vite/bin/vite.js', 'build']);
   run('Manifest and bundle contract', node, ['scripts/validate-build.mjs']);

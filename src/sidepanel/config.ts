@@ -27,7 +27,7 @@ export async function loadModelConfig(
   fallback: PersistedModelConfig = EMPTY_MODEL_CONFIG,
   storage = getStorageArea(),
   options: {
-    loadCatalog?: (options: { signal: AbortSignal }) => Promise<ModelCatalog>;
+    loadCatalog?: (options: { signal: AbortSignal; refresh?: boolean; staleFallback?: boolean }) => Promise<ModelCatalog>;
     migrateCatalogRouting?: boolean;
     persistMigration?: boolean;
     signal?: AbortSignal;
@@ -87,10 +87,18 @@ export async function loadModelConfig(
       // Recoverable catalog failures retry until recovery or cancellation. Permanent
       // failures leave storage untouched rather than selecting the wrong protocol.
       let catalog: ModelCatalog;
+      const loadCatalog = (refresh = false) => retryModelOperation(
+        () => (options.loadCatalog ?? loadModelCatalog)({ signal, ...(refresh ? { refresh: true, staleFallback: false } : {}) }),
+        { signal, purpose: "model-catalog-migration", sleep: options.sleep },
+      );
       try {
-        catalog = await retryModelOperation(() => (options.loadCatalog ?? loadModelCatalog)({ signal }), {
-          signal, purpose: "model-catalog-migration", sleep: options.sleep,
-        });
+        catalog = await loadCatalog();
+        const bundledProvider = catalog[selected.providerId];
+        const bundledModel = bundledProvider?.models?.[selected.model]
+          ?? Object.values(bundledProvider?.models ?? {}).find((model) => model.id === selected.model);
+        // Bundle/cache resolution keeps offline startup immediate. Only wait for
+        // live data when it may contain a provider or corrected per-model route.
+        if (!bundledProvider || !bundledModel) catalog = await loadCatalog(true);
       } catch (cause) {
         if (isAbortError(cause, signal)) throw cause;
         throw new Error("模型路由目录更新失败，请检查配置后重试。", { cause });

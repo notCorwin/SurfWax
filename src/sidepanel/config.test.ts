@@ -142,8 +142,33 @@ describe("model config persistence", () => {
     const loadCatalog = vi.fn(async () => ({ bedrock: { npm: "@ai-sdk/amazon-bedrock", models: { key: { id: "alias", provider } } } }));
     const migrated = await loadModelConfig(undefined, storage, { loadCatalog });
     expect(migrated.profiles.bedrock).toMatchObject({ sdk: "@ai-sdk/amazon-bedrock/mantle", baseURL: "https://mantle.test/v1", modelProvider: provider, providerSettings, catalogRouteVersion: 1 });
+    expect(loadCatalog).toHaveBeenCalledWith(expect.not.objectContaining({ refresh: true }));
     await expect(loadModelConfig(undefined, storage, { loadCatalog })).resolves.toEqual(migrated);
     expect(loadCatalog).toHaveBeenCalledOnce();
+  });
+
+  it("waits for a live refresh only when the offline catalog cannot resolve the saved route", async () => {
+    const storage = legacyCatalogProfile();
+    const loadCatalog = vi.fn(async ({ refresh }: { refresh?: boolean }) => refresh ? migrationCatalog : ({}));
+    const migrated = await loadModelConfig(undefined, storage, { loadCatalog });
+    expect(migrated.profiles.openai?.modelProvider?.shape).toBe("completions");
+    expect(loadCatalog.mock.calls.map(([options]) => options.refresh ?? false)).toEqual([false, true]);
+    expect(loadCatalog.mock.calls[1]?.[0]).toMatchObject({ refresh: true, staleFallback: false });
+  });
+
+  it("retries a required live route when stale fallback data is returned", async () => {
+    const storage = legacyCatalogProfile();
+    const sleep = vi.fn(async () => {});
+    let liveAttempts = 0;
+    const loadCatalog = vi.fn(async ({ refresh, staleFallback }: { refresh?: boolean; staleFallback?: boolean }) => {
+      if (!refresh) return {};
+      expect(staleFallback).toBe(false);
+      if (liveAttempts++ === 0) throw new TypeError("offline");
+      return migrationCatalog;
+    });
+    await expect(loadModelConfig(undefined, storage, { loadCatalog, sleep })).resolves.toHaveProperty("profiles.openai.modelProvider.shape", "completions");
+    expect(liveAttempts).toBe(2);
+    expect(sleep).toHaveBeenCalledOnce();
   });
 
   it("preserves existing endpoints and credentials when migrating models without overrides", async () => {
@@ -264,7 +289,7 @@ describe("model config persistence", () => {
   });
 
   it("does not retry an invalid catalog or missing provider", async () => {
-    for (const response of [null, {}]) {
+    for (const [response, expectedFetches] of [[null, 1], [{}, 2]] as const) {
       const storage = legacyCatalogProfile();
       const original = storage.value;
       const fetch = vi.fn(async () => Response.json(response));
@@ -272,7 +297,7 @@ describe("model config persistence", () => {
       await expect(loadModelConfig(undefined, storage, {
         loadCatalog: ({ signal }) => loadModelCatalog({ signal, fetch, storage: { async get() { return {}; }, async set() {} } }), sleep,
       })).rejects.toThrow();
-      expect(fetch).toHaveBeenCalledOnce();
+      expect(fetch).toHaveBeenCalledTimes(expectedFetches);
       expect(sleep).not.toHaveBeenCalled();
       expect(storage.value).toBe(original);
     }

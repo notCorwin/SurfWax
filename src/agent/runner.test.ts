@@ -69,24 +69,19 @@ describe("createAgent", () => {
     expect(events.some((event) => event.type === "tool.result.data")).toBe(false);
   });
 
-  it("uses catalog output limits for Anthropic-compatible non-Claude providers", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ minimax: { api: "https://api.minimax.io/anthropic/v1", models: {
-      "MiniMax-M3": { limit: { context: 1_048_576, output: 524_288 } },
-    } } }))));
+  it("uses bundled catalog output limits for Anthropic-compatible non-Claude providers", async () => {
     const executor = { browserContext: vi.fn(async () => ({ windowId: 7, tabs: [] })) } as unknown as ChromeExecutor;
     const model = new MockLanguageModelV4({ doStream: async (options) => {
-      expect(options.maxOutputTokens).toBe(524_288);
+      expect(options.maxOutputTokens).toBe(512_000);
       return { stream: simulateReadableStream({ chunks: [
         { type: "stream-start", warnings: [] },
         { type: "text-start", id: "text" }, { type: "text-delta", id: "text", delta: "done" }, { type: "text-end", id: "text" },
         { type: "finish", finishReason: { unified: "stop", raw: "stop" }, usage: usage() },
       ] as any[] }) };
     } });
-    try {
-      const agent = createAgent({ model: { providerId: "minimax", sdk: "@ai-sdk/anthropic", baseURL: "https://api.minimax.io/anthropic/v1", model: "MiniMax-M3" }, languageModel: model, executor });
-      const result = await agent.stream({ prompt: "hello" });
-      await expect(result.text).resolves.toBe("done");
-    } finally { vi.unstubAllGlobals(); }
+    const agent = createAgent({ model: { providerId: "minimax", sdk: "@ai-sdk/anthropic", baseURL: "https://api.minimax.io/anthropic/v1", model: "MiniMax-M3" }, languageModel: model, executor });
+    const result = await agent.stream({ prompt: "hello" });
+    await expect(result.text).resolves.toBe("done");
   });
 
   it.each([[undefined, 128_000], [77_777, 77_777]])("uses the Anthropic max_tokens fallback or manual override %s", async (maxTokensOverride, expected) => {

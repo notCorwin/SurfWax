@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { applyModelPreset, contextUsedPercent, inputBudget, loadModelCatalog, matchModel, modelPresetFields, modelProviderPresets, modelSupportsImages, normalizeModelProviderOverride, resolveModelLimit } from "./model-limits";
 import { modelConfigErrors, sdkFor } from "./model-sdks";
+import { metadata as bundledMetadata } from "../data/models-dev-api";
 
 const catalog = {
   openai: { api: "https://api.openai.com/v1", models: {
@@ -41,22 +42,77 @@ describe("models.dev limit matching", () => {
       .resolves.toHaveProperty("openai");
   });
 
+  it("falls back to the release-pinned catalog on a first offline launch", async () => {
+    const storage = { async get() { return {}; }, async set() {} };
+    const onStale = vi.fn();
+    const result = await loadModelCatalog({ storage, fetch: vi.fn(async () => { throw new Error("offline"); }), bundledFallback: true, onStale });
+    expect(Object.keys(result).length).toBeGreaterThan(100);
+    expect(result.openai?.models && Object.keys(result.openai.models).length).toBeGreaterThan(0);
+    expect(onStale).toHaveBeenCalledOnce();
+    expect(Object.keys(result)).toHaveLength(bundledMetadata.providers);
+    expect(Object.values(result).reduce((count, provider) => count + Object.keys(provider.models ?? {}).length, 0)).toBe(bundledMetadata.models);
+    expect(bundledMetadata).toMatchObject({ source: "https://models.dev/api.json", sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
+  });
+
+  it("honors an explicit refresh before falling back on a fresh installation", async () => {
+    let resolve!: (response: Response) => void;
+    const pending = new Promise<Response>((done) => { resolve = done; });
+    const fetch = vi.fn(() => pending);
+    vi.stubGlobal("fetch", fetch);
+    try {
+      let settled = false;
+      const result = loadModelCatalog({ storage: { async get() { return {}; }, async set() {} }, refresh: true }).finally(() => { settled = true; });
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+      expect(settled).toBe(false);
+      resolve(Response.json({}));
+      await expect(result).resolves.toHaveProperty("openai");
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("rejects an already-cancelled bundled fallback", async () => {
+    const controller = new AbortController();
+    controller.abort(new DOMException("stopped", "AbortError"));
+    await expect(loadModelCatalog({ storage: { async get() { return {}; }, async set() {} }, signal: controller.signal }))
+      .rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("rejects an incomplete successful response and uses the bundled catalog", async () => {
+    const onStale = vi.fn();
+    const result = await loadModelCatalog({ storage: { async get() { return {}; }, async set() {} },
+      fetch: vi.fn(async () => Response.json({})), validateCompleteness: true, bundledFallback: true, onStale });
+    expect(Object.keys(result)).toHaveLength(bundledMetadata.providers);
+    expect(onStale).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a truncated response that clears the old absolute thresholds", async () => {
+    const truncated = Object.fromEntries(Array.from({ length: 100 }, (_, providerIndex) => {
+      const id = providerIndex === 0 ? "openai" : `provider-${providerIndex}`;
+      return [id, { npm: "@ai-sdk/openai-compatible", models: Object.fromEntries(
+        Array.from({ length: 10 }, (_, modelIndex) => [`model-${modelIndex}`, { tool_call: true }]),
+      ) }];
+    }));
+    const result = await loadModelCatalog({ storage: { async get() { return {}; }, async set() {} },
+      fetch: vi.fn(async () => Response.json(truncated)), validateCompleteness: true, bundledFallback: true });
+    expect(Object.keys(result)).toHaveLength(bundledMetadata.providers);
+  });
+
   it("refreshes a fresh catalog and invalidates the cached model limit", async () => {
     const values: Record<string, unknown> = {};
     const storage = { async get(key: string) { return { [key]: values[key] }; }, async set(items: Record<string, unknown>) { Object.assign(values, items); } };
     const config = { baseURL: "https://api.openai.com/v1", model: "gpt-5" };
+    const now = Date.parse(bundledMetadata.fetchedAt) + 1;
     const original = vi.fn(async () => new Response(JSON.stringify(catalog)));
-    await expect(resolveModelLimit(config, { storage, fetch: original, now: () => 100 })).resolves.toMatchObject({ context: 400_000 });
+    await expect(resolveModelLimit(config, { storage, fetch: original, now: () => now })).resolves.toMatchObject({ context: 400_000 });
     expect(values["side-agent:model-limit"]).toBeTruthy();
 
     const updated = vi.fn(async () => new Response(JSON.stringify({
       openai: { ...catalog.openai, models: { "gpt-5": { limit: { context: 500_000 } } } },
     })));
-    await expect(loadModelCatalog({ storage, fetch: updated, now: () => 101, refresh: true }))
+    await expect(loadModelCatalog({ storage, fetch: updated, now: () => now + 1, refresh: true }))
       .resolves.toHaveProperty("openai.models.gpt-5.limit.context", 500_000);
     expect(updated).toHaveBeenCalledWith("https://models.dev/api.json", expect.objectContaining({ cache: "no-cache" }));
     expect(values["side-agent:model-limit"]).toBeNull();
-    await expect(resolveModelLimit(config, { storage, fetch: original, now: () => 102 })).resolves.toMatchObject({ context: 500_000 });
+    await expect(resolveModelLimit(config, { storage, fetch: original, now: () => now + 2 })).resolves.toMatchObject({ context: 500_000 });
     expect(original).toHaveBeenCalledTimes(1);
   });
 
@@ -71,8 +127,76 @@ describe("models.dev limit matching", () => {
     const controller = new AbortController();
     controller.abort();
     await expect(loadModelCatalog({ storage, fetch: offline, refresh: true, signal: controller.signal, onStale }))
-      .rejects.toThrow("offline");
+      .rejects.toMatchObject({ name: "AbortError" });
     expect(onStale).toHaveBeenCalledOnce();
+  });
+
+  it("prefers the release snapshot over an older valid cache while offline", async () => {
+    const snapshot = await loadModelCatalog({ storage: { async get() { return {}; }, async set() {} },
+      fetch: vi.fn(async () => { throw new Error("offline"); }), bundledFallback: true });
+    const staleCatalog = { ...snapshot };
+    const values: Record<string, unknown> = { "side-agent:model-catalog": { version: 2, fetchedAt: 1, catalog: staleCatalog } };
+    const storage = { async get(key: string) { return { [key]: values[key] }; }, async set(items: Record<string, unknown>) { Object.assign(values, items); } };
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("offline"); }));
+    try {
+      const result = await loadModelCatalog({ storage });
+      expect(result).toBe(snapshot);
+      expect(result).not.toBe(staleCatalog);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("does not return a fresh limit backed by a catalog older than the release snapshot", async () => {
+    const snapshot = await loadModelCatalog({ storage: { async get() { return {}; }, async set() {} },
+      fetch: vi.fn(async () => { throw new Error("offline"); }), bundledFallback: true });
+    const modelEntry = Object.entries(snapshot).flatMap(([providerId, provider]) => Object.entries(provider.models ?? {})
+      .filter(([, model]) => Boolean(model.limit?.context)).map(([modelId, model]) => ({ providerId, provider, modelId, model })))[0]!;
+    const config = { providerId: modelEntry.providerId, baseURL: modelEntry.model.provider?.api ?? modelEntry.provider.api ?? "", model: modelEntry.model.id ?? modelEntry.modelId };
+    const key = `${sdkFor(config)}\u0000${config.providerId}\u0000${config.baseURL}\u0000${config.model}\u0000`;
+    const staleRevision = "previous-release";
+    const values: Record<string, unknown> = {
+      "side-agent:model-catalog": { version: 2, fetchedAt: 1, revision: staleRevision, catalog: snapshot },
+      "side-agent:model-limit": { key, fetchedAt: 100, catalogRevision: staleRevision,
+        match: { provider: modelEntry.providerId, model: config.model, context: 1, source: "models.dev" } },
+    };
+    const storage = { async get(storageKey: string) { return { [storageKey]: values[storageKey] }; }, async set(items: Record<string, unknown>) { Object.assign(values, items); } };
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("offline"); }));
+    try {
+      await expect(resolveModelLimit(config, { storage, now: () => 101 })).resolves.toMatchObject({ context: modelEntry.model.limit!.context });
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("clears a bundled limit write that races with a successful background refresh", async () => {
+    const snapshot = await loadModelCatalog({ storage: { async get() { return {}; }, async set() {} },
+      fetch: vi.fn(async () => { throw new Error("offline"); }), bundledFallback: true });
+    const modelEntry = Object.entries(snapshot).flatMap(([providerId, provider]) => Object.entries(provider.models ?? {})
+      .filter(([, model]) => Boolean(model.limit?.context)).map(([modelId, model]) => ({ providerId, provider, modelId, model })))[0]!;
+    let finishFetch!: (response: Response) => void;
+    const fetchPending = new Promise<Response>((resolve) => { finishFetch = resolve; });
+    vi.stubGlobal("fetch", vi.fn(() => fetchPending));
+    let releaseLimitWrite!: () => void;
+    const limitWriteBlocked = new Promise<void>((resolve) => { releaseLimitWrite = resolve; });
+    let limitWriteStarted!: () => void;
+    const limitWriteStarting = new Promise<void>((resolve) => { limitWriteStarted = resolve; });
+    const values: Record<string, unknown> = {};
+    const storage = {
+      async get(key: string) { return { [key]: values[key] }; },
+      async set(items: Record<string, unknown>) {
+        if (items["side-agent:model-limit"] && items["side-agent:model-limit"] !== null) {
+          limitWriteStarted();
+          await limitWriteBlocked;
+        }
+        Object.assign(values, items);
+      },
+    };
+    try {
+      const result = resolveModelLimit({ providerId: modelEntry.providerId, baseURL: modelEntry.model.provider?.api ?? modelEntry.provider.api ?? "", model: modelEntry.model.id ?? modelEntry.modelId }, { storage });
+      await limitWriteStarting;
+      finishFetch(Response.json(snapshot));
+      await vi.waitFor(() => expect(values["side-agent:model-catalog"]).toBeTruthy());
+      releaseLimitWrite();
+      await expect(result).resolves.toHaveProperty("context");
+      expect(values["side-agent:model-limit"]).toBeNull();
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it("uses only exact provider/model matches and honors input limits", () => {
