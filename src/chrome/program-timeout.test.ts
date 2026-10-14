@@ -113,6 +113,17 @@ describe("program timeout estimation", () => {
     ).toBe(35_000);
   });
 
+  it("charges immediately invoked function bodies at the call site", () => {
+    expect(
+      estimateProgramTimeoutMs(
+        `await (async () => { await sleep(60_000); })();`,
+      ),
+    ).toBe(90_000);
+    expect(
+      estimateProgramTimeoutMs(`(function () { return page.click(); })();`),
+    ).toBe(35_000);
+  });
+
   it("ignores method-like text in comments, strings, and embedded scripts", () => {
     expect(
       estimateProgramTimeoutMs(`

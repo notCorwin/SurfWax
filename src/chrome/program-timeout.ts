@@ -154,6 +154,16 @@ function firstArgument(node: SyntaxNode): SyntaxNode | null {
     : null;
 }
 
+function immediateFunctionBody(node: SyntaxNode | null): SyntaxNode | null {
+  if (!node) return null;
+  if (node.name === "ParenthesizedExpression")
+    return immediateFunctionBody(
+      children(node).find((part) => !["(", ")"].includes(part.name)) ?? null,
+    );
+  if (!["ArrowFunction", "FunctionExpression"].includes(node.name)) return null;
+  return children(node).at(-1) ?? null;
+}
+
 type Analysis = {
   aliases: Set<string>;
   helpers: Map<string, SyntaxNode>;
@@ -310,8 +320,10 @@ function nodeBudget(
   if (node.name === "CallExpression") {
     const name = callName(source, node);
     const callee = node.firstChild;
-    const duration =
-      name === "sleep" && callee?.name === "VariableName"
+    const immediateBody = immediateFunctionBody(callee);
+    const duration = immediateBody
+      ? nodeBudget(source, immediateBody, analysis)
+      : name === "sleep" && callee?.name === "VariableName"
         ? constant(source, firstArgument(node))
         : name && callee?.name === "VariableName" && GLOBAL_OPERATIONS.has(name)
           ? OPERATION_BUDGETS.get(name)
