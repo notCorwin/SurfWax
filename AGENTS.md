@@ -3,8 +3,9 @@
 高级设置：默认由系统自动检测、推断或配置，不在常规界面主动展示，但允许用户手动查看和修改。
 ## 核心架构
 1. Chrome 138+，Manifest V3。
-2. 单一 Chrome Extension，不桥接 Desktop App。Side Panel 为主要执行环境。
-3. 使用追加式 Canonical Event Log（唯一权威事件日志）同时作为日志和对话记录。
+2. 统一使用开发构建流程，不使用生产构建流程。
+3. 单一 Chrome Extension，不桥接 Desktop App。Side Panel 为主要执行环境。
+4. 使用追加式 Canonical Event Log（唯一权威事件日志）同时作为日志和对话记录。
 ## 模型调用
 1. 使用 Vercel AI SDK 作为统一架构：
 	1. `ai`
