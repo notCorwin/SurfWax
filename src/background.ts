@@ -149,7 +149,7 @@ async function updatePageGuard(tabId: number, consumeLoading = false): Promise<v
   const loading = loadingGuards.get(tabId);
   const task = (guardUpdates.get(tabId) ?? Promise.resolve()).catch(() => undefined).then(async () => {
     const enabled = guardedTabs.has(tabId);
-    confirmedGuards.delete(tabId);
+    if (!enabled) confirmedGuards.delete(tabId);
     try {
       if (enabled) {
         const runId = runs.identity()?.runId ?? "";
