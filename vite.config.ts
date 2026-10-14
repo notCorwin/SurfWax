@@ -9,17 +9,28 @@ import packageMetadata from "./package.json" with { type: "json" };
 
 const projectRoot = fileURLToPath(new URL(".", import.meta.url));
 
-const devManifest = {
+const buildManifest = {
   ...manifest,
   version: packageMetadata.version,
   background: { ...manifest.background, service_worker: "src/background.ts" },
 };
 
-export default defineConfig({
+const devManifest = {
+  ...buildManifest,
+  // CRXJS serves extension pages through localhost in development. A manifest
+  // sandbox has an opaque `null` origin, so its loader needs explicit access
+  // to the Vite HTTP and HMR endpoints. The store manifest remains locked down.
+  content_security_policy: {
+    ...manifest.content_security_policy,
+    sandbox: "sandbox allow-scripts; default-src 'none'; script-src 'self' 'unsafe-eval' blob:; worker-src blob:; child-src blob:; connect-src http://localhost:5173 ws://localhost:5173;",
+  },
+};
+
+export default defineConfig(({ command }) => ({
   plugins: [
     react(),
     tailwindcss(),
-    crx({ manifest: devManifest as any,
+    crx({ manifest: (command === "serve" ? devManifest : buildManifest) as any,
       // document_start must install capture listeners synchronously, before
       // website scripts. A module loader's dynamic import loses that order.
       contentScripts: { standaloneFiles: ["src/chrome/guard-content.ts"] },
@@ -36,7 +47,8 @@ export default defineConfig({
     strictPort: true,
     watch: { ignored: ["**/.dev/check-dist/**"] },
     cors: {
-      origin: [/chrome-extension:\/\//],
+      // Sandboxed extension pages use an opaque origin serialized as `null`.
+      origin: [/chrome-extension:\/\//, /^null$/],
     },
     ws: {
       host: "localhost",
@@ -51,4 +63,4 @@ export default defineConfig({
       programSandbox: resolve(projectRoot, "program-sandbox.html"),
     } },
   },
-});
+}));
