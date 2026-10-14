@@ -171,12 +171,21 @@ export async function restoreConversationRepository(events: readonly LogEvent[])
       continue;
     }
     const message = await replayRun(events, terminal);
-    if (!message) continue;
-    stored.set(message.id, {
+    // A regeneration that fails before producing output must leave the
+    // previously selected reply as the branch head. Only a first-response
+    // failure needs a synthetic, log-derived diagnostic message.
+    if (!message && [...stored.values()].some((item) => item.parentId === parentId && item.message.role === "assistant")) continue;
+    const restored = message ?? {
+      id: `failed-${terminal.runId}`,
+      role: "assistant" as const,
+      parts: [],
+      metadata: { custom: { failure: fromLogValue(terminal.error) ?? "模型请求失败" } },
+    };
+    stored.set(restored.id, {
       eventId: terminal.id,
       firstEventId: terminal.id,
       parentId,
-      message,
+      message: restored,
     });
   }
   const messages = [...stored.values()].sort((left, right) => left.firstEventId - right.firstEventId).map(({ parentId, message }) => ({ parentId, message }));

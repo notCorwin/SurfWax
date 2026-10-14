@@ -1,6 +1,8 @@
 import { expect, it, vi } from "vitest";
+import { restoreConversationRepository } from "../conversations";
 import { EventLogger, type LogEvent } from "../logging";
 import { ConversationStore, createMessageProjection } from "./conversation-store";
+import type { SidePanelMessage } from "../agent/transport";
 
 it("lists historical archived conversations normally and preserves their messages", async () => {
   const events: LogEvent[] = [];
@@ -73,4 +75,21 @@ it("shows structured tool failures without losing the full result", () => {
     type: "dynamic-tool", toolName: "removed-command", toolCallId: "call", state: "output-available", input: {}, output,
   }] }, false, ["reply"]);
   expect(projected.parts[0]).toMatchObject({ type: "tool-call", isError: true, status: { type: "incomplete" }, result: output });
+});
+
+it("rebuilds an early request failure from the canonical terminal event", async () => {
+  const failure = { message: "provider rejected the request", status: 400 };
+  const repository = await restoreConversationRepository([
+    { id: 1, timestamp: new Date(0).toISOString(), type: "conversation.message", conversationId: "failed", parentId: null,
+      content: { id: "question", role: "user", parts: [{ type: "text", text: "hello" }] } },
+    { id: 2, timestamp: new Date(1).toISOString(), type: "conversation.submitted", conversationId: "failed", runId: "run-1",
+      content: { messageId: "question" } },
+    { id: 3, timestamp: new Date(2).toISOString(), type: "conversation.failed", conversationId: "failed", runId: "run-1",
+      content: null, error: failure },
+  ]);
+  expect(repository.messages).toHaveLength(2);
+  const restored = repository.messages[1]!.message;
+  expect(restored).toMatchObject({ id: "failed-run-1", role: "assistant", metadata: { custom: { failure } } });
+  expect(createMessageProjection().message(restored as SidePanelMessage, false, [restored.id]).status)
+    .toEqual({ type: "incomplete", reason: "error", error: failure });
 });

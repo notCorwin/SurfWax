@@ -47,7 +47,10 @@ export function createMessageProjection() {
       const previous = cache.get(source);
       if (previous?.signature === signature) return previous.view;
       const interrupted = source.metadata?.interrupted === true || source.metadata?.custom?.interrupted === true;
-      const status: PartStatus = running ? { type: "running" } : interrupted ? { type: "incomplete", reason: "cancelled" } : { type: "complete" };
+      const failure = source.metadata?.custom?.failure;
+      const status: PartStatus = running ? { type: "running" }
+        : failure !== undefined ? { type: "incomplete", reason: "error", error: failure }
+        : interrupted ? { type: "incomplete", reason: "cancelled" } : { type: "complete" };
       const parts: MessagePart[] = source.parts.flatMap((part): MessagePart[] => {
         if (part.type === "text" || part.type === "reasoning") return [{ type: part.type, text: part.text,
           status: running && part.state === "streaming" ? { type: "running" } : { type: "complete" } }];
@@ -251,14 +254,6 @@ export class ConversationStore {
     } catch (error) { if (!controller.signal.aborted) failure = error; }
     finally {
       try { await this.restore(id); } catch (error) { failure ??= error; }
-      // Early transport failures still need a visible, actionable diagnostic.
-      // The original successful branch remains in the canonical repository.
-      if (failure !== undefined) {
-        const restored = this.state.thread.messages.find((message) => message.id === partial?.id);
-        const failed = restored ?? this.projection.message({ id: crypto.randomUUID(), role: "assistant", parts: [] }, false, []);
-        const current = this.state.thread.messages.filter((message) => message.id !== failed.id);
-        this.updateThread({ messages: [...current, { ...failed, metadata: { custom: { ...failed.metadata.custom, interrupted: false } }, status: { type: "incomplete", reason: "error", error: failure } }] });
-      }
       this.controller = undefined;
       this.updateThread({ isRunning: false });
     }
