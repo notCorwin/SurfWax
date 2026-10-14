@@ -47,7 +47,7 @@ export async function ensureAutomaticContextSummary(
   const languageModel = options.languageModel ?? await createModel(model, logger, conversationId, { signal });
   signal.throwIfAborted();
   await summarizeContext({ raw: source.raw, branchIds: source.branchIds, uiCount: source.ui.length,
-    model, languageModel, logger, conversationId, signal, limit: options.limit ?? pressure?.limit });
+    model, languageModel, logger, conversationId, signal, limit: options.limit ?? pressure?.limit, force: options.forced });
   if (legacyPending) await logger.append({ type: "context.choice.resolved", conversationId,
     content: { branchIds: source.branchIds, action: "summary", automatic: true } });
   return true;
@@ -56,7 +56,7 @@ export async function ensureAutomaticContextSummary(
 export async function applySummaryChoice(logger: EventLogger, conversationId: string, model: ModelConfig, signal: AbortSignal): Promise<void> {
   const source = await activeContext(logger, conversationId);
   await summarizeContext({ raw: source.raw, branchIds: source.branchIds, uiCount: source.ui.length,
-    model, languageModel: await createModel(model, logger, conversationId, { signal }), logger, conversationId, signal });
+    model, languageModel: await createModel(model, logger, conversationId, { signal }), logger, conversationId, signal, force: true });
   await logger.append({ type: "context.choice.resolved", conversationId,
     content: { branchIds: source.branchIds, action: "summary" } });
 }

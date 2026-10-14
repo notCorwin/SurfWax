@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { branchMessages } from "./sidepanel/conversation-store";
-import { generateConversationTitle, restoreConversationRepository } from "./conversations";
+import { activeConversationMessages, generateConversationTitle, restoreConversationRepository } from "./conversations";
 import * as model from "./agent/model";
 import { EventLogger, rebuildConversationList, rebuildConversationRepository, selectedConversationId, toLogValue, type LogEvent } from "./logging";
 
@@ -190,4 +190,54 @@ it("keeps a completed reply when regeneration fails before producing a replaceme
   ]);
   expect(repository.headId).toBe("original");
   expect(repository.messages.at(-1)?.message).toEqual(original);
+});
+
+it("replaces an output-free synthetic failure with the latest terminal", async () => {
+  const repository = await restoreConversationRepository([
+    event(1, "conversation.message", { content: toLogValue({ id: "user", role: "user", parts: [] }) }),
+    event(2, "conversation.submitted", { runId: "first", content: toLogValue({ messageId: "user" }) }),
+    event(3, "conversation.failed", { runId: "first", error: "old error" }),
+    event(4, "conversation.submitted", { runId: "second", content: toLogValue({ messageId: "user" }) }),
+    event(5, "conversation.failed", { runId: "second", error: "new error" }),
+  ]);
+  expect(repository.messages.map(({ message }) => message.id)).toEqual(["user", "failed-first"]);
+  expect(repository.messages[1]?.message.metadata).toMatchObject({ custom: { failure: "new error" } });
+});
+
+it("keeps descendants connected when replacing a synthetic failure", async () => {
+  const repository = await restoreConversationRepository([
+    event(1, "conversation.message", { content: toLogValue({ id: "user", role: "user", parts: [] }) }),
+    event(2, "conversation.submitted", { runId: "first", content: toLogValue({ messageId: "user" }) }),
+    event(3, "conversation.failed", { runId: "first", error: "old error" }),
+    event(4, "conversation.message", { parentId: "failed-first", content: toLogValue({ id: "follow-up", role: "user", parts: [] }) }),
+    event(5, "conversation.message", { parentId: "follow-up", content: toLogValue({ id: "follow-up-reply", role: "assistant", parts: [] }) }),
+    event(6, "conversation.submitted", { runId: "second", content: toLogValue({ messageId: "user" }) }),
+    event(7, "conversation.failed", { runId: "second", error: "new error" }),
+  ]);
+  expect(repository.messages.find(({ message }) => message.id === "follow-up")?.parentId).toBe("failed-first");
+  expect(repository.headId).toBe("follow-up-reply");
+  expect(branchMessages(repository, "follow-up-reply").map(({ id }) => id))
+    .toEqual(["user", "failed-first", "follow-up", "follow-up-reply"]);
+});
+
+it("reconstructs an output-free abort as an interrupted response", async () => {
+  const repository = await restoreConversationRepository([
+    event(1, "conversation.message", { content: toLogValue({ id: "user", role: "user", parts: [] }) }),
+    event(2, "conversation.submitted", { runId: "stopped", content: toLogValue({ messageId: "user" }) }),
+    event(3, "conversation.aborted", { runId: "stopped" }),
+  ]);
+  expect(repository.messages[1]?.message).toMatchObject({ id: "failed-stopped", metadata: { custom: { interrupted: true } } });
+});
+
+it("keeps synthetic terminals in the repository but excludes them from model history", async () => {
+  const events = [
+    event(1, "conversation.message", { conversationId: "thread", content: toLogValue({ id: "user", role: "user", parts: [] }) }),
+    event(2, "conversation.submitted", { conversationId: "thread", runId: "stopped", content: toLogValue({ messageId: "user" }) }),
+    event(3, "conversation.aborted", { conversationId: "thread", runId: "stopped" }),
+    event(4, "conversation.message", { conversationId: "thread", parentId: "failed-stopped", content: toLogValue({ id: "continued", role: "user", parts: [{ type: "text", text: "continue" }] }) }),
+  ];
+  const logger = { restorationEvents: async () => events } as unknown as EventLogger;
+  expect((await restoreConversationRepository(events)).messages.map(({ message }) => message.id))
+    .toEqual(["user", "failed-stopped", "continued"]);
+  expect((await activeConversationMessages(logger, "thread")).map(({ id }) => id)).toEqual(["user", "continued"]);
 });

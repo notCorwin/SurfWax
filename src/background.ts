@@ -124,8 +124,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message?.type === "surf-wax:run-status") { void bootReady.then(() => respond({ identity: runs.identity() }), (error) => respond({ error: String(error) })); return true; }
   if (message?.type === "surf-wax:guard-status") {
     const tabId = sender.tab?.id;
-    respond({ runId: tabId !== undefined && guardedTabs.has(tabId) ? runs.identity()?.runId : undefined,
-      passThrough: tabId !== undefined && bypassedTabs.has(tabId) }); return;
+    const runId = tabId !== undefined ? confirmedGuards.get(tabId) ?? loadingGuards.get(tabId)?.runId : undefined;
+    respond({ runId, passThrough: runId !== undefined && tabId !== undefined && bypassedTabs.has(tabId) }); return;
   }
   if (message?.type !== "side-agent:clear-log") return;
   clearing ??= bootReady.then(clearEventLog).finally(() => { clearing = undefined; });
@@ -135,6 +135,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
 const guardedTabs = new Map<number, Set<chrome.runtime.Port>>();
 const bypassedTabs = new Map<number, number>();
 const guardUpdates = new Map<number, Promise<void>>();
+const confirmedGuards = new Map<number, string>();
+const loadingGuards = new Map<number, { runId: string }>();
 
 function warnPageGuard(tabId: number, error: unknown): string {
   eventLogger.record({ type: "page-guard.failed", content: { tabId }, error });
@@ -143,11 +145,17 @@ function warnPageGuard(tabId: number, error: unknown): string {
   return detail;
 }
 
-async function updatePageGuard(tabId: number): Promise<void> {
+async function updatePageGuard(tabId: number, consumeLoading = false): Promise<void> {
+  const loading = loadingGuards.get(tabId);
   const task = (guardUpdates.get(tabId) ?? Promise.resolve()).catch(() => undefined).then(async () => {
     const enabled = guardedTabs.has(tabId);
+    if (!enabled) confirmedGuards.delete(tabId);
     try {
-      if (enabled) await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: installPageGuard, args: [runs.identity()?.runId ?? "", guardCss, bypassedTabs.has(tabId)] });
+      if (enabled) {
+        const runId = runs.identity()?.runId ?? "";
+        await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: installPageGuard, args: [runId, guardCss, bypassedTabs.has(tabId)] });
+        if (guardedTabs.has(tabId) && runs.identity()?.runId === runId) confirmedGuards.set(tabId, runId);
+      }
       else await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: removePageGuard });
     } catch (error) {
       if (enabled) throw error;
@@ -155,7 +163,10 @@ async function updatePageGuard(tabId: number): Promise<void> {
   });
   guardUpdates.set(tabId, task);
   try { await task; }
-  finally { if (guardUpdates.get(tabId) === task) guardUpdates.delete(tabId); }
+  finally {
+    if (guardUpdates.get(tabId) === task) guardUpdates.delete(tabId);
+    if (consumeLoading && loading && loadingGuards.get(tabId) === loading) loadingGuards.delete(tabId);
+  }
 }
 
 async function bypassPageGuard(tabId: number, enabled: boolean): Promise<void> {
@@ -190,7 +201,13 @@ async function authorizedNativeInput(debuggee: chrome.debugger.Debuggee, tabId: 
 }
 
 chrome.tabs.onUpdated.addListener((tabId, change) => {
-  if (change.status === "complete" && guardedTabs.has(tabId)) void updatePageGuard(tabId).catch((error) => {
+  if (change.status === "loading") {
+    const runId = guardedTabs.has(tabId) ? runs.identity()?.runId : undefined;
+    if (runId) loadingGuards.set(tabId, { runId });
+    else loadingGuards.delete(tabId);
+    confirmedGuards.delete(tabId);
+  }
+  if (change.status === "complete" && guardedTabs.has(tabId)) void updatePageGuard(tabId, true).catch((error) => {
     warnPageGuard(tabId, error);
   });
 });
@@ -224,6 +241,7 @@ chrome.runtime.onConnect.addListener((port) => {
       holders?.delete(port);
       if (holders?.size) continue;
       guardedTabs.delete(tabId);
+      loadingGuards.delete(tabId);
       void updatePageGuard(tabId);
     }
   });

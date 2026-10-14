@@ -1,6 +1,6 @@
 import type { ChatTransport } from "ai";
 import { readMessageSnapshots } from "../agent/message-snapshots";
-import { restoreConversationRepository } from "../conversations";
+import { isSyntheticTerminalMessage, restoreConversationRepository } from "../conversations";
 import { abortConversationWork, withIdleConversation } from "../agent/coordinator";
 import type { SidePanelMessage } from "../agent/transport";
 import { ConversationListProjection, fromLogValue, type ConversationRepository, type ConversationSummary, type EventLogger, type LogEvent } from "../logging";
@@ -47,7 +47,10 @@ export function createMessageProjection() {
       const previous = cache.get(source);
       if (previous?.signature === signature) return previous.view;
       const interrupted = source.metadata?.interrupted === true || source.metadata?.custom?.interrupted === true;
-      const status: PartStatus = running ? { type: "running" } : interrupted ? { type: "incomplete", reason: "cancelled" } : { type: "complete" };
+      const failure = source.metadata?.custom?.failure;
+      const status: PartStatus = running ? { type: "running" }
+        : failure !== undefined ? { type: "incomplete", reason: "error", error: failure }
+        : interrupted ? { type: "incomplete", reason: "cancelled" } : { type: "complete" };
       const parts: MessagePart[] = source.parts.flatMap((part): MessagePart[] => {
         if (part.type === "text" || part.type === "reasoning") return [{ type: part.type, text: part.text,
           status: running && part.state === "streaming" ? { type: "running" } : { type: "complete" } }];
@@ -126,10 +129,11 @@ export class ConversationStore {
     this.remember(this.repository.headId);
     this.projection.reset();
   }
-  private async restore(id: string) {
+  private async restore(id: string): Promise<LogEvent[]> {
     const events = await this.logger.restorationEvents(id);
     this.restoreBranches(await restoreConversationRepository(events), events);
     this.display(branchMessages(this.repository));
+    return events;
   }
   connect() {
     this.closed = false;
@@ -221,7 +225,7 @@ export class ConversationStore {
       this.restoreBranches(repository, events);
       this.publish({ threadListItem: { id, ...(exists ? { remoteId: id } : {}) }, composer: { text: "" }, threads: { ...this.state.threads, mainThreadId: id } });
       this.display(branchMessages(repository));
-      if (exists) this.logger.record({ type: "conversation.selected", conversationId: id, content: null });
+      if (exists) this.logger.telemetry({ type: "conversation.selected", conversationId: id, content: null });
     } catch (error) { this.updateThread({ error }); throw error; }
     finally { if (revision === this.loadVersion) this.updateThread({ isLoading: false }); }
   }
@@ -232,32 +236,31 @@ export class ConversationStore {
     this.updateThread({ isRunning: true, error: undefined });
     this.display(messages);
     let failure: unknown;
-    let partial: SidePanelMessage | undefined;
+    let priorFailureEventId = 0;
     try {
       if (!this.state.threadListItem.remoteId) {
         await this.logger.append({ type: "conversation.created", conversationId: id, content: { title: "新对话" } });
         this.publish({ threadListItem: { id, remoteId: id } });
       }
-      controller.signal.throwIfAborted();
       const user = messages.at(-1);
       if (user?.role === "user" && !this.repository.messages.some((item) => item.message.id === user.id)) {
         await this.logger.appendMessage(id, { ...user }, { parentId: messages.at(-2)?.id ?? null });
       }
-      const stream = await this.transport(id).sendMessages({ trigger, chatId: id, messageId: undefined, messages, abortSignal: controller.signal });
+      priorFailureEventId = Math.max(0, ...(await this.logger.restorationEvents(id))
+        .filter((event) => event.type === "conversation.failed").map((event) => event.id));
+      controller.signal.throwIfAborted();
+      const modelMessages = messages.filter((message) => !isSyntheticTerminalMessage(message));
+      const stream = await this.transport(id).sendMessages({ trigger, chatId: id, messageId: undefined, messages: modelMessages, abortSignal: controller.signal });
       for await (const message of readMessageSnapshots<SidePanelMessage>(stream, (error) => { if (!controller.signal.aborted) failure = error; })) {
-        partial = message;
         this.display([...messages, message], message.id);
       }
     } catch (error) { if (!controller.signal.aborted) failure = error; }
     finally {
-      try { await this.restore(id); } catch (error) { failure ??= error; }
-      // Early transport failures still need a visible, actionable diagnostic.
-      // The original successful branch remains in the canonical repository.
+      let restoredEvents: LogEvent[] = [];
+      try { restoredEvents = await this.restore(id); } catch (error) { failure ??= error; }
       if (failure !== undefined) {
-        const restored = this.state.thread.messages.find((message) => message.id === partial?.id);
-        const failed = restored ?? this.projection.message({ id: crypto.randomUUID(), role: "assistant", parts: [] }, false, []);
-        const current = this.state.thread.messages.filter((message) => message.id !== failed.id);
-        this.updateThread({ messages: [...current, { ...failed, metadata: { custom: { ...failed.metadata.custom, interrupted: false } }, status: { type: "incomplete", reason: "error", error: failure } }] });
+        const recorded = restoredEvents.some((event) => event.type === "conversation.failed" && event.id > priorFailureEventId);
+        if (!recorded) this.updateThread({ error: failure });
       }
       this.controller = undefined;
       this.updateThread({ isRunning: false });

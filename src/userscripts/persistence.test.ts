@@ -60,8 +60,19 @@ describe("user script persistence", () => {
     expect(fake.api.register).toHaveBeenLastCalledWith([saved]);
     expect(fake.api.update).toHaveBeenCalledWith([{ ...legacy, js: [{ code: "3" }] }]);
     expect(fake.api.unregister).not.toHaveBeenCalled();
+    expect(fake.stored[USER_SCRIPTS_STORAGE_KEY]).toEqual([saved, { ...legacy, js: [{ code: "3" }] }]);
     await snapshotUserScripts({ chromeApi: fake.chromeApi as never });
     expect(fake.stored[USER_SCRIPTS_STORAGE_KEY]).toHaveLength(2);
+  });
+
+  it("removes unrelated native registry drift without promoting it into storage", async () => {
+    const saved = { id: "saved", matches: ["<all_urls>"], js: [{ code: "1" }] };
+    const foreign = { id: "foreign", matches: ["<all_urls>"], js: [{ code: "2" }] };
+    const fake = fakeChrome({ registered: [foreign], stored: { [USER_SCRIPTS_STORAGE_KEY]: [saved] } });
+    await restoreUserScripts({ chromeApi: fake.chromeApi as never });
+    expect(fake.stored[USER_SCRIPTS_STORAGE_KEY]).toEqual([saved]);
+    expect(await fake.api.getScripts()).toEqual([saved]);
+    expect(fake.api.unregister).toHaveBeenCalledWith({ ids: [foreign.id] });
   });
 
   it("serializes concurrent changes and saves the native result immediately", async () => {

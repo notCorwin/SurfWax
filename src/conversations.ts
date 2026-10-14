@@ -171,12 +171,28 @@ export async function restoreConversationRepository(events: readonly LogEvent[])
       continue;
     }
     const message = await replayRun(events, terminal);
-    if (!message) continue;
-    stored.set(message.id, {
-      eventId: terminal.id,
-      firstEventId: terminal.id,
+    const siblings = [...stored.entries()].filter(([, item]) => item.parentId === parentId && item.message.role === "assistant");
+    const synthetic = siblings.filter(([, item]) => item.message.id.startsWith("failed-")
+      && (item.message.metadata as { custom?: { syntheticTerminal?: boolean } } | undefined)?.custom?.syntheticTerminal === true);
+    // A failed regeneration must preserve a real prior reply, while a newer
+    // output-free terminal supersedes an older synthetic diagnostic.
+    if (!message && siblings.some(([, item]) => !synthetic.some(([id]) => id === item.message.id))) continue;
+    const previousSynthetic = synthetic[0]?.[1];
+    const syntheticId = synthetic[0]?.[0] ?? `failed-${terminal.runId}`;
+    for (const [id] of synthetic.slice(1)) stored.delete(id);
+    const restored = message ?? {
+      id: syntheticId,
+      role: "assistant" as const,
+      parts: [],
+      metadata: terminal.type === "conversation.aborted"
+        ? { custom: { interrupted: true, syntheticTerminal: true } }
+        : { custom: { failure: fromLogValue(terminal.error) ?? "模型请求失败", syntheticTerminal: true } },
+    };
+    stored.set(restored.id, {
+      eventId: previousSynthetic?.eventId ?? terminal.id,
+      firstEventId: previousSynthetic?.firstEventId ?? terminal.id,
       parentId,
-      message,
+      message: restored,
     });
   }
   const messages = [...stored.values()].sort((left, right) => left.firstEventId - right.firstEventId).map(({ parentId, message }) => ({ parentId, message }));
@@ -191,8 +207,12 @@ export async function activeConversationMessages(logger: EventLogger, conversati
   while (id) {
     const item = byId.get(id);
     if (!item) break;
-    messages.unshift(item.message);
+    if (!isSyntheticTerminalMessage(item.message)) messages.unshift(item.message);
     id = item.parentId;
   }
   return messages;
+}
+
+export function isSyntheticTerminalMessage(message: object): boolean {
+  return ((message as { metadata?: { custom?: { syntheticTerminal?: boolean } } }).metadata)?.custom?.syntheticTerminal === true;
 }

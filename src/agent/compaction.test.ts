@@ -91,6 +91,20 @@ describe("context choices and summary", () => {
     expect(pressure?.messages).toEqual(applied.messages);
   });
 
+  it("replaces a complete checkpoint when compaction is forced", async () => {
+    const { events, logger, generate, languageModel, model, raw } = fixture();
+    const options = { raw, branchIds: ["u", "a"], uiCount: 2, model, languageModel, logger,
+      conversationId: "one", signal: new AbortController().signal };
+    await summarizeContext(options);
+    generate.mockResolvedValueOnce({
+      content: [{ type: "text", text: "A shorter replacement." }], finishReason: { unified: "stop", raw: "stop" },
+      usage: { inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 10, text: 10, reasoning: 0 } }, warnings: [],
+    } as any);
+    await summarizeContext({ ...options, force: true, limit: { provider: "manual", model: "test", context: 4_000, source: "manual" } });
+    expect(events.filter((event) => event.type === "context.compacted")).toHaveLength(2);
+    expect((await effectiveContext(events, options.branchIds, raw)).checkpoint?.summary).toBe("A shorter replacement.");
+  });
+
   it("summarizes every oversized source fragment and merges before writing one checkpoint", async () => {
     const { events, logger, generate, languageModel, model, raw } = fixture();
     await summarizeContext({ raw, branchIds: ["u", "a"], uiCount: 2, model, languageModel, logger,

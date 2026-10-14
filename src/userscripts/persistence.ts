@@ -50,6 +50,10 @@ export async function restoreUserScripts(options: { chromeApi?: UserScriptsChrom
     await snapshotUserScripts(options);
     return true;
   }
+  const desiredIds = new Set(desired.map((script) => script.id));
+  for (const script of active) {
+    if (!desiredIds.has(script.id)) await api.unregister({ ids: [script.id] });
+  }
   const byId = new Map(active.map((script) => [script.id, script]));
   for (const script of desired) {
     if (disabledIds.has(script.id)) continue;
@@ -57,7 +61,11 @@ export async function restoreUserScripts(options: { chromeApi?: UserScriptsChrom
     if (!current) await api.register([script]);
     else if (JSON.stringify(current) !== JSON.stringify(script)) await api.update([script]);
   }
-  await snapshotUserScripts(options);
+  // Storage is the declaration; the native registry is only its executable
+  // projection. Normalize a legacy active/disabled conflict without taking a
+  // reverse snapshot that could make unrelated native drift canonical.
+  const normalized = desired.filter((script) => !disabledIds.has(script.id));
+  if (normalized.length !== desired.length) await chromeApi.storage.local.set({ [USER_SCRIPTS_STORAGE_KEY]: normalized });
   options.logger?.record({ type: "userscript.restored", content: { count: desired.length } });
   return true;
 }
