@@ -150,7 +150,9 @@ describe("canonical event log", () => {
   it("upgrades the existing event store without deleting legacy records", () => {
     const legacyRecords = [{ id: 1, type: "legacy" }];
     const createIndex = vi.fn();
-    const store = { indexNames: { contains: () => false }, createIndex };
+    const deleteIndex = vi.fn();
+    const existing = new Set(["typeId", "conversationTypeId", "runTypeId", "conversationIdId"]);
+    const store = { indexNames: { contains: (name: string) => existing.has(name) }, createIndex, deleteIndex };
     const db = {
       objectStoreNames: { contains: () => true },
       createObjectStore: vi.fn(),
@@ -165,10 +167,7 @@ describe("canonical event log", () => {
     expect(createIndex).toHaveBeenCalledWith("type", "type");
     expect(createIndex).toHaveBeenCalledWith("conversationType", ["conversationId", "type"]);
     expect(createIndex).toHaveBeenCalledWith("runType", ["runId", "type"]);
-    expect(createIndex).toHaveBeenCalledWith("typeId", ["type", "id"]);
-    expect(createIndex).toHaveBeenCalledWith("conversationTypeId", ["conversationId", "type", "id"]);
-    expect(createIndex).toHaveBeenCalledWith("runTypeId", ["runId", "type", "id"]);
-    expect(createIndex).toHaveBeenCalledWith("conversationIdId", ["conversationId", "id"]);
+    expect(deleteIndex.mock.calls.map(([name]) => name)).toEqual(["typeId", "conversationTypeId", "runTypeId", "conversationIdId"]);
     expect(db.deleteObjectStore).not.toHaveBeenCalled();
     expect(legacyRecords).toHaveLength(1);
   });

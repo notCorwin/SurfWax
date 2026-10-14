@@ -60,16 +60,13 @@ type EventStore = {
 };
 
 const DB_NAME = "side-agent-runtime";
-const DB_VERSION = 7;
+const DB_VERSION = 8;
 const EVENT_STORE = "events";
 const CONVERSATION_INDEX = "conversationId";
 const TYPE_INDEX = "type";
 const CONVERSATION_TYPE_INDEX = "conversationType";
 const RUN_TYPE_INDEX = "runType";
-const TYPE_ID_INDEX = "typeId";
-const CONVERSATION_TYPE_ID_INDEX = "conversationTypeId";
-const RUN_TYPE_ID_INDEX = "runTypeId";
-const CONVERSATION_ID_INDEX = "conversationIdId";
+const OBSOLETE_ID_INDEXES = ["typeId", "conversationTypeId", "runTypeId", "conversationIdId"] as const;
 const SUMMARY_EVENT_TYPES = [
   "conversation.created",
   "conversation.selected",
@@ -109,10 +106,12 @@ export function upgradeEventStore(db: IDBDatabase, transaction: IDBTransaction):
     store.createIndex(CONVERSATION_TYPE_INDEX, [CONVERSATION_INDEX, TYPE_INDEX]);
   }
   if (!store.indexNames.contains(RUN_TYPE_INDEX)) store.createIndex(RUN_TYPE_INDEX, ["runId", TYPE_INDEX]);
-  if (!store.indexNames.contains(TYPE_ID_INDEX)) store.createIndex(TYPE_ID_INDEX, [TYPE_INDEX, "id"]);
-  if (!store.indexNames.contains(CONVERSATION_TYPE_ID_INDEX)) store.createIndex(CONVERSATION_TYPE_ID_INDEX, [CONVERSATION_INDEX, TYPE_INDEX, "id"]);
-  if (!store.indexNames.contains(RUN_TYPE_ID_INDEX)) store.createIndex(RUN_TYPE_ID_INDEX, ["runId", TYPE_INDEX, "id"]);
-  if (!store.indexNames.contains(CONVERSATION_ID_INDEX)) store.createIndex(CONVERSATION_ID_INDEX, [CONVERSATION_INDEX, "id"]);
+  // Version 7 added four compound indexes over the append-only event payloads.
+  // Rebuilding them could exhaust a Side Panel renderer when a development
+  // profile had accumulated a large log. The existing indexes already order
+  // duplicate keys by primary key, so cursor seeking provides the same range
+  // reads without copying every historical event during an upgrade.
+  for (const name of OBSOLETE_ID_INDEXES) if (store.indexNames.contains(name)) store.deleteIndex(name);
 }
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
@@ -127,6 +126,29 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB transaction failed"));
     transaction.onabort = () => reject(transaction.error ?? new Error("IndexedDB transaction aborted"));
+  });
+}
+
+function indexEventsAfter(index: IDBIndex, key: IDBValidKey, afterId: number): Promise<LogEvent[]> {
+  return new Promise((resolve, reject) => {
+    const events: LogEvent[] = [];
+    const request = index.openCursor(IDBKeyRange.only(key));
+    let sought = afterId < 0;
+    request.onerror = () => reject(request.error ?? new Error("IndexedDB cursor failed"));
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) { resolve(events); return; }
+      if (!sought) {
+        sought = true;
+        const nextId = Math.min(Number.MAX_SAFE_INTEGER, afterId + 1);
+        if (Number(cursor.primaryKey) < nextId) {
+          cursor.continuePrimaryKey(key, nextId);
+          return;
+        }
+      }
+      if (Number(cursor.primaryKey) > afterId) events.push(cursor.value as LogEvent);
+      cursor.continue();
+    };
   });
 }
 
@@ -180,11 +202,8 @@ class IndexedDbEventStore implements EventStore {
     const db = await this.open();
     const transaction = db.transaction(EVENT_STORE, "readonly");
     const done = transactionDone(transaction);
-    const index = transaction.objectStore(EVENT_STORE).index(conversationId ? CONVERSATION_TYPE_ID_INDEX : TYPE_ID_INDEX);
-    const batches = await Promise.all(types.map((type) => requestResult<LogEvent[]>(
-      index.getAll(IDBKeyRange.bound(conversationId ? [conversationId, type, afterId] : [type, afterId],
-        conversationId ? [conversationId, type, Number.MAX_SAFE_INTEGER] : [type, Number.MAX_SAFE_INTEGER], true)),
-    )));
+    const index = transaction.objectStore(EVENT_STORE).index(conversationId ? CONVERSATION_TYPE_INDEX : TYPE_INDEX);
+    const batches = await Promise.all(types.map((type) => indexEventsAfter(index, conversationId ? [conversationId, type] : type, afterId)));
     await done;
     return batches.flat().sort((left, right) => left.id - right.id);
   }
@@ -193,9 +212,9 @@ class IndexedDbEventStore implements EventStore {
     const db = await this.open();
     const transaction = db.transaction(EVENT_STORE, "readonly");
     const done = transactionDone(transaction);
-    const index = transaction.objectStore(EVENT_STORE).index(RUN_TYPE_ID_INDEX);
+    const index = transaction.objectStore(EVENT_STORE).index(RUN_TYPE_INDEX);
     const batches = await Promise.all(runIds.flatMap((runId) => types.map((type) =>
-      requestResult<LogEvent[]>(index.getAll(IDBKeyRange.bound([runId, type, afterId], [runId, type, Number.MAX_SAFE_INTEGER], true))))));
+      indexEventsAfter(index, [runId, type], afterId))));
     await done;
     return batches.flat().sort((left, right) => left.id - right.id);
   }
@@ -203,8 +222,7 @@ class IndexedDbEventStore implements EventStore {
   async conversation(conversationId: string, afterId = -1): Promise<LogEvent[]> {
     const db = await this.open();
     const transaction = db.transaction(EVENT_STORE, "readonly");
-    const events = await requestResult<LogEvent[]>(transaction.objectStore(EVENT_STORE).index(CONVERSATION_ID_INDEX)
-      .getAll(IDBKeyRange.bound([conversationId, afterId], [conversationId, Number.MAX_SAFE_INTEGER], true)));
+    const events = await indexEventsAfter(transaction.objectStore(EVENT_STORE).index(CONVERSATION_INDEX), conversationId, afterId);
     await transactionDone(transaction);
     return events.sort((left, right) => left.id - right.id);
   }

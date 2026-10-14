@@ -156,8 +156,9 @@ test("executes run through the page facade, restores the conversation, and clear
     await expect(opened.page.locator(".markdown-body").last()).toContainText("META_OK");
 
     const clearOptions = await configure(opened.context, opened.page, provider.baseURL);
-    clearOptions.once("dialog", (dialog) => dialog.accept());
     await clearOptions.getByTestId("event-log-clear").click();
+    await expect(clearOptions.getByRole("alertdialog")).toContainText("此操作不可恢复");
+    await clearOptions.getByRole("button", { name: "确认清空" }).click();
     await expect(clearOptions.getByRole("status")).toContainText("已清空");
     await expect.poll(async () => (await readEvents(clearOptions)).at(-1)?.type).toBe("log.cleared");
     expect((await readEvents(clearOptions)).some((event) => event.type === "conversation.message")).toBe(true);

@@ -7,6 +7,7 @@ import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { ErrorNotice } from "../components/ui/error-notice";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "../components/ui/alert-dialog";
 import { SearchCombobox, type SearchComboboxOption } from "./SearchCombobox";
 import { EventLogger } from "../logging";
 import { applyModelPreset, loadModelCatalog, modelPresetFields, modelProviderPresets, resolveModelLimit, type ModelLimit, type ModelProviderPreset } from "../agent/model-limits";
@@ -37,6 +38,7 @@ export function OptionsApp() {
   const [errorDetail, setErrorDetail] = useState<unknown>();
   const [matchedLimit, setMatchedLimit] = useState<ModelLimit>();
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<ModelField, string>>>({});
+  const [clearConfirmationOpen, setClearConfirmationOpen] = useState(false);
   const savedConfig = useRef(JSON.stringify({ modelSettings: EMPTY_MODEL_CONFIG, providerInput: "" }));
   const matchingKey = useRef("");
   const storedProfile = selectedModelConfig(modelSettings);
@@ -212,7 +214,6 @@ export function OptionsApp() {
   };
 
   const clearLog = async () => {
-    if (!globalThis.confirm("确定清空全部本地对话与事件日志吗？此操作不可恢复。")) return;
     setStatus("clearing");
     setMessage("正在清空对话与日志…");
     try {
@@ -396,7 +397,7 @@ export function OptionsApp() {
           <CardDescription>事件日志是聊天界面、恢复会话与模型上下文的唯一来源。</CardDescription>
         </CardHeader>
         <CardFooter>
-          <Button type="button" variant="destructive" data-testid="event-log-clear" disabled={busy} onClick={() => void clearLog()}>
+          <Button type="button" variant="destructive" data-testid="event-log-clear" disabled={busy} onClick={() => setClearConfirmationOpen(true)}>
             {status === "clearing" && <LoaderCircleIcon className="animate-spin" aria-hidden="true" />}
             清空对话与日志
           </Button>
@@ -406,6 +407,18 @@ export function OptionsApp() {
       {message && (status === "error" && errorDetail !== undefined
         ? <ErrorNotice summary={message} error={errorDetail} />
         : <p className="options-status" data-state={status} role={status === "error" ? "alert" : "status"}>{message}</p>)}
+      <AlertDialog open={clearConfirmationOpen} onOpenChange={setClearConfirmationOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>清空全部本地对话与事件日志？</AlertDialogTitle>
+            <AlertDialogDescription>此操作不可恢复。模型配置和用户脚本不会被删除。</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={status === "clearing"}>取消</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" disabled={status === "clearing"} onClick={() => void clearLog()}>确认清空</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </main>
   );
 }
