@@ -5,8 +5,11 @@ import { resolve, relative, join, isAbsolute, sep } from 'node:path';
 import { zipSync } from 'fflate';
 import { validateBuild } from './validate-build.mjs';
 
+process.env.TZ = 'UTC';
+
+const buildRequested = process.argv[2] === '--build';
 const output = resolve(process.env.SURFWAX_RELEASE_DIR ?? '.dev/releases');
-const buildDirectory = resolve(process.argv[2] ?? process.env.SURFWAX_DEV_OUT_DIR ?? 'dist');
+const buildDirectory = resolve((buildRequested ? undefined : process.argv[2]) ?? process.env.SURFWAX_DEV_OUT_DIR ?? 'dist');
 const repository = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
 const outputRelative = relative(repository, output);
 const outputIsInsideRepository = !isAbsolute(outputRelative) && outputRelative !== '..' && !outputRelative.startsWith(`..${sep}`);
@@ -16,8 +19,20 @@ if (outputIsInsideRepository && spawnSync('git', ['check-ignore', '-q', '--no-in
 const outputRelativeToBuild = relative(buildDirectory, output);
 const outputIsInsideBuild = !isAbsolute(outputRelativeToBuild) && outputRelativeToBuild !== '..' && !outputRelativeToBuild.startsWith(`..${sep}`);
 if (outputIsInsideBuild) throw new Error('SURFWAX_RELEASE_DIR must not equal or be nested under the build directory because Vite clears that directory before each build.');
-const worktreeStatus = execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], { encoding: 'utf8' });
-if (worktreeStatus.trim()) throw new Error('Release packaging requires a clean Git worktree; commit or remove all staged, unstaged, and untracked changes first.');
+const buildRelative = relative(repository, buildDirectory);
+const buildIsInsideRepository = !isAbsolute(buildRelative) && buildRelative !== '..' && !buildRelative.startsWith(`..${sep}`);
+if (buildIsInsideRepository && spawnSync('git', ['check-ignore', '-q', '--no-index', '--', `${buildDirectory}${sep}`]).status !== 0) {
+  throw new Error('SURFWAX_DEV_OUT_DIR must be outside the Git worktree or ignored by Git so the build cannot make the worktree dirty.');
+}
+const assertCleanWorktree = () => {
+  const status = execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], { encoding: 'utf8' });
+  if (status.trim()) throw new Error('Release packaging requires a clean Git worktree; commit or remove all staged, unstaged, and untracked changes first.');
+};
+assertCleanWorktree();
+if (buildRequested) {
+  execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], { stdio: 'inherit' });
+  assertCleanWorktree();
+}
 
 const { version, files, directory } = await validateBuild(buildDirectory);
 await mkdir(output, { recursive: true });
@@ -30,12 +45,7 @@ const staging = await mkdtemp(join(output, `.surf-wax-${version}-`));
 const candidate = join(staging, `surf-wax-${version}.zip`);
 const epochSeconds = Number(process.env.SOURCE_DATE_EPOCH ?? execFileSync('git', ['show', '-s', '--format=%ct', 'HEAD'], { encoding: 'utf8' }).trim());
 if (!Number.isFinite(epochSeconds)) throw new Error('SOURCE_DATE_EPOCH must be a finite Unix timestamp.');
-const epochInstant = new Date(epochSeconds * 1000);
-const epoch = epochInstant.getUTCFullYear() < 1980
-  ? new Date(1980, 0, 1)
-  : epochInstant.getUTCFullYear() > 2099
-    ? new Date(2099, 11, 31, 23, 59, 58)
-    : new Date(epochInstant.getUTCFullYear(), epochInstant.getUTCMonth(), epochInstant.getUTCDate(), epochInstant.getUTCHours(), epochInstant.getUTCMinutes(), epochInstant.getUTCSeconds());
+const epoch = new Date(Math.min(Date.UTC(2099, 11, 31, 23, 59, 58), Math.max(Date.UTC(1980, 0, 1), epochSeconds * 1000)));
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 let checksum;
 let reused = false;
