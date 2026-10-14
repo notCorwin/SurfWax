@@ -163,6 +163,42 @@ describe("program timeout estimation", () => {
     ).toBe(91_000);
   });
 
+  it("counts array elisions in finite for-of literals", () => {
+    expect(
+      estimateProgramTimeoutMs(
+        `for (const item of [,,,,]) await sleep(10_000);`,
+      ),
+    ).toBe(70_000);
+    expect(
+      estimateProgramTimeoutMs(
+        `for (const item of [1,,3,]) await sleep(1_000);`,
+      ),
+    ).toBe(33_000);
+  });
+
+  it("accepts signed constants in bounded loop headers", () => {
+    expect(
+      estimateProgramTimeoutMs(
+        `for (let i = -60; i < 0; i++) await sleep(1_000);`,
+      ),
+    ).toBe(90_000);
+    expect(
+      estimateProgramTimeoutMs(
+        `for (let i = +6; i > 0; i += -2) await sleep(1_000);`,
+      ),
+    ).toBe(33_000);
+  });
+
+  it("indexes helpers assigned after declaration", () => {
+    expect(
+      estimateProgramTimeoutMs(`
+        let pause;
+        pause = async () => { await sleep(60_000); };
+        await pause();
+      `),
+    ).toBe(90_000);
+  });
+
   it("ignores method-like text in comments, strings, and embedded scripts", () => {
     expect(
       estimateProgramTimeoutMs(`

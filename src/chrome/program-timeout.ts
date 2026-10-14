@@ -252,6 +252,18 @@ function collectDefinitions(source: string, root: SyntaxNode): Analysis {
           addScoped(analysis.aliases, textOf(source, name), value, scope);
         }
       }
+    } else if (node.name === "AssignmentExpression") {
+      const name = parts[0];
+      const value = parts[2];
+      if (
+        name?.name === "VariableName" &&
+        value &&
+        ["ArrowFunction", "FunctionExpression"].includes(value.name)
+      ) {
+        const body = children(value).at(-1);
+        if (body)
+          addScoped(analysis.helpers, textOf(source, name), body, scope);
+      }
     }
     for (const part of parts) visit(part, scope);
   };
@@ -269,12 +281,12 @@ function boundedIterations(
       ["ArrayExpression", "String"].includes(part.name),
     );
     if (iterable?.name === "ArrayExpression") {
-      const elements = children(iterable).filter(
-        (part) => !["[", "]", ","].includes(part.name),
-      );
-      return elements.some((part) => part.name === "Spread")
-        ? undefined
-        : elements.length;
+      const parts = children(iterable);
+      if (parts.some((part) => part.name.includes("Spread"))) return undefined;
+      const interior = textOf(source, iterable).slice(1, -1).trim();
+      if (!interior) return 0;
+      const commas = parts.filter((part) => part.name === ",").length;
+      return commas + (interior.endsWith(",") ? 0 : 1);
     }
     if (iterable?.name === "String") {
       const raw = textOf(source, iterable);
@@ -288,17 +300,19 @@ function boundedIterations(
   const spec = children(node).find((part) => part.name === "ForSpec");
   if (!spec) return undefined;
   const value = textOf(source, spec);
-  const number = `([\\d_]+(?:\\.[\\d_]+)?)`;
+  const number = `([+-]?\\s*[\\d_]+(?:\\.[\\d_]+)?)`;
   const match = new RegExp(
     `^\\(\\s*(?:let|const|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*${number}\\s*;\\s*\\1\\s*(<=|<|>=|>)\\s*${number}\\s*;\\s*(?:((?:\\+\\+|--)\\s*\\1|\\1\\s*(?:\\+\\+|--))|\\1\\s*(\\+=|-=)\\s*${number})\\s*\\)$`,
   ).exec(value);
   if (!match) return undefined;
-  const start = Number(match[2]!.replaceAll("_", ""));
+  const start = Number(match[2]!.replaceAll("_", "").replaceAll(" ", ""));
   const operator = match[3]!;
-  const end = Number(match[4]!.replaceAll("_", ""));
+  const end = Number(match[4]!.replaceAll("_", "").replaceAll(" ", ""));
   const unary = match[5];
   const assignment = match[6];
-  const amount = Number((match[7] ?? "1").replaceAll("_", ""));
+  const amount = Number(
+    (match[7] ?? "1").replaceAll("_", "").replaceAll(" ", ""),
+  );
   const step = unary?.includes("--") || assignment === "-=" ? -amount : amount;
   if (!Number.isFinite(step) || step === 0) return undefined;
   const directionMatches =
