@@ -124,8 +124,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message?.type === "surf-wax:run-status") { void bootReady.then(() => respond({ identity: runs.identity() }), (error) => respond({ error: String(error) })); return true; }
   if (message?.type === "surf-wax:guard-status") {
     const tabId = sender.tab?.id;
-    respond({ runId: tabId !== undefined && guardedTabs.has(tabId) ? runs.identity()?.runId : undefined,
-      passThrough: tabId !== undefined && bypassedTabs.has(tabId) }); return;
+    respond({ runId: tabId !== undefined ? confirmedGuards.get(tabId) : undefined,
+      passThrough: tabId !== undefined && confirmedGuards.has(tabId) && bypassedTabs.has(tabId) }); return;
   }
   if (message?.type !== "side-agent:clear-log") return;
   clearing ??= bootReady.then(clearEventLog).finally(() => { clearing = undefined; });
@@ -135,6 +135,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
 const guardedTabs = new Map<number, Set<chrome.runtime.Port>>();
 const bypassedTabs = new Map<number, number>();
 const guardUpdates = new Map<number, Promise<void>>();
+const confirmedGuards = new Map<number, string>();
 
 function warnPageGuard(tabId: number, error: unknown): string {
   eventLogger.record({ type: "page-guard.failed", content: { tabId }, error });
@@ -146,8 +147,13 @@ function warnPageGuard(tabId: number, error: unknown): string {
 async function updatePageGuard(tabId: number): Promise<void> {
   const task = (guardUpdates.get(tabId) ?? Promise.resolve()).catch(() => undefined).then(async () => {
     const enabled = guardedTabs.has(tabId);
+    confirmedGuards.delete(tabId);
     try {
-      if (enabled) await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: installPageGuard, args: [runs.identity()?.runId ?? "", guardCss, bypassedTabs.has(tabId)] });
+      if (enabled) {
+        const runId = runs.identity()?.runId ?? "";
+        await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: installPageGuard, args: [runId, guardCss, bypassedTabs.has(tabId)] });
+        if (guardedTabs.has(tabId) && runs.identity()?.runId === runId) confirmedGuards.set(tabId, runId);
+      }
       else await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: removePageGuard });
     } catch (error) {
       if (enabled) throw error;
@@ -190,6 +196,7 @@ async function authorizedNativeInput(debuggee: chrome.debugger.Debuggee, tabId: 
 }
 
 chrome.tabs.onUpdated.addListener((tabId, change) => {
+  if (change.status === "loading") confirmedGuards.delete(tabId);
   if (change.status === "complete" && guardedTabs.has(tabId)) void updatePageGuard(tabId).catch((error) => {
     warnPageGuard(tabId, error);
   });
