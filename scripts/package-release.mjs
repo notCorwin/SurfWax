@@ -1,14 +1,20 @@
 import { readFile, mkdir, mkdtemp, copyFile, utimes, rm, writeFile, link, rename } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-import { resolve, relative, dirname, join } from 'node:path';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { resolve, relative, dirname, join, isAbsolute, sep } from 'node:path';
 import { validateBuild } from './validate-build.mjs';
 
+const output = resolve(process.env.SURFWAX_RELEASE_DIR ?? '.dev/releases');
+const repository = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
+const outputRelative = relative(repository, output);
+const outputIsInsideRepository = !isAbsolute(outputRelative) && outputRelative !== '..' && !outputRelative.startsWith(`..${sep}`);
+if (outputIsInsideRepository && spawnSync('git', ['check-ignore', '-q', '--no-index', '--', output]).status !== 0) {
+  throw new Error('SURFWAX_RELEASE_DIR must be outside the Git worktree or ignored by Git so generated artifacts cannot make the worktree dirty.');
+}
 const worktreeStatus = execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], { encoding: 'utf8' });
 if (worktreeStatus.trim()) throw new Error('Release packaging requires a clean Git worktree; commit or remove all staged, unstaged, and untracked changes first.');
 
 const { version, files, directory } = await validateBuild(process.argv[2] ?? 'dist');
-const output = resolve(process.env.SURFWAX_RELEASE_DIR ?? '.dev/releases');
 await mkdir(output, { recursive: true });
 const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 const tag = process.env.GITHUB_REF_TYPE === 'tag' ? process.env.GITHUB_REF_NAME : `v${version}`;
