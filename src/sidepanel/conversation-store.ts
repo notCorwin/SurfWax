@@ -135,8 +135,8 @@ export class ConversationStore {
     this.closed = false;
     this.unsubscribe = this.logger.subscribe((event) => {
       if (event.type === "log.cleared") { void this.threads.reload().catch((error) => this.updateThread({ error })); return; }
-      if (/^conversation\.(created|title\.updated|deleted|restored|submitted|finished|aborted|failed)$/.test(event.type)
-        && this.conversationList.apply(event)) this.publishThreadItems(this.conversationList.snapshot());
+      if (/^conversation\.(created|title\.updated|deleted|restored|submitted|finished|aborted|failed)$/.test(event.type))
+        void this.threads.reload().catch((error) => this.updateThread({ error }));
     });
     void this.threads.reload().catch((error) => this.updateThread({ error }));
     return () => { this.closed = true; this.unsubscribe?.(); this.thread.cancelRun(); };

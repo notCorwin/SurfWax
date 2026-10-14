@@ -9,6 +9,8 @@ const ALIASES: Record<string, string> = {
   python: "python", py: "python",
   typescript: "typescript", ts: "typescript", tsx: "typescript",
 };
+const MAX_CACHED_HIGHLIGHTS = 64;
+
 /** A deliberately small, lazy Shiki registry. Unknown fences remain readable plain text. */
 export function createCodeHighlighter(themes: [ThemeInput, ThemeInput]): CodeHighlighterPlugin {
   type Result = NonNullable<ReturnType<CodeHighlighterPlugin["highlight"]>>;
@@ -27,12 +29,18 @@ export function createCodeHighlighter(themes: [ThemeInput, ThemeInput]): CodeHig
       if (!resolved) return null;
       const key = `${resolved}\0${code}`;
       const cached = results.get(key);
-      if (cached) return cached;
+      if (cached) {
+        results.delete(key);
+        results.set(key, cached);
+        return cached;
+      }
+      const alreadyPending = pending.has(key);
       const listeners = pending.get(key) ?? new Set();
       if (callback) listeners.add(callback);
       pending.set(key, listeners);
-      if (listeners.size <= 1) void import("./highlight-code").then(({ highlightCode }) => highlightCode(code, resolved, themes)).then((result) => {
+      if (!alreadyPending) void import("./highlight-code").then(({ highlightCode }) => highlightCode(code, resolved, themes)).then((result) => {
         results.set(key, result);
+        if (results.size > MAX_CACHED_HIGHLIGHTS) results.delete(results.keys().next().value!);
         for (const listener of pending.get(key) ?? []) listener(result);
         pending.delete(key);
       }).catch((error) => { console.error("[Surf Wax] Code highlighting failed", error); pending.delete(key); });
