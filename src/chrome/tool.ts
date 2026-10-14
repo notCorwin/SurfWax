@@ -8,7 +8,7 @@ const elementTargetObject = z.union([
   z.object({ ref: z.string().min(1) }).strict(),
   z.object({ by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testId", "css"]), value: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional(), index: z.number().int().optional(), frame: z.object({ by: z.literal("css"), value: z.string().min(1) }).strict().optional() }).strict(),
 ]);
-export const PROGRAM_CATALOG_VERSION = "inspect-run-jobs-v1";
+export const PROGRAM_CATALOG_VERSION = "inspect-run-jobs-v2";
 export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetObject]).optional(),
   fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional(), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),

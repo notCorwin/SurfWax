@@ -20,4 +20,12 @@ describe("program timeout estimation", () => {
   it("caps only automatically derived deadlines", () => {
     expect(estimateProgramTimeoutMs("await sleep(999999999)")).toBe(600_000);
   });
+
+  it("budgets locator waits like the other supported waits", () => {
+    expect(
+      estimateProgramTimeoutMs(
+        `await page.getByText("Ready").waitFor({ state: "visible" })`,
+      ),
+    ).toBe(45_000);
+  });
 });

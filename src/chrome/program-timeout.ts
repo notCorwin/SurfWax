@@ -5,7 +5,7 @@ const MAXIMUM_AUTOMATIC_TIMEOUT_MS = 10 * 60_000;
 // safety net for broken programs, not a performance target.
 const OPERATION_BUDGETS: ReadonlyArray<[RegExp, number]> = [
   [
-    /\b(?:goto|reload|goBack|goForward|waitForURL|waitForLoadState|waitForEvent)\s*\(/g,
+    /\b(?:goto|reload|goBack|goForward|waitFor|waitForURL|waitForLoadState|waitForEvent)\s*\(/g,
     15_000,
   ],
   [

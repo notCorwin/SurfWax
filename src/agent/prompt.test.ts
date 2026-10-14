@@ -30,7 +30,7 @@ describe("canonical prompt versions", () => {
     const historical = JSON.stringify(events);
     expect(readPromptSnapshot(events, ["u"])).toEqual(legacy);
     const current = await ensureConversationPrompt(logger, "one", "Custom", ["u"]);
-    expect(current).toMatchObject({ format: "system-tools", catalogVersion: "inspect-run-jobs-v1", instructions: `Custom\n\n${TOOL_CONTEXT}` });
+    expect(current).toMatchObject({ format: "system-tools", catalogVersion: "inspect-run-jobs-v2", instructions: `Custom\n\n${TOOL_CONTEXT}` });
     expect(JSON.stringify(events.slice(0, 2))).toBe(historical);
     expect(fromLogValue(events[2]!.content)).toMatchObject({ migratedFrom: "formal-49-v2" });
     await ensureConversationPrompt(logger, "one", "Custom", ["other-branch"]);
