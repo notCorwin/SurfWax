@@ -2,6 +2,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { activeRunIdentity } from "../agent/coordinator";
+import { CATALOG_CACHE_KEY } from "../agent/model-limits";
 import { MODEL_CONFIG_STORAGE_KEY } from "./config";
 import { useSidePanelSession, type SidePanelSession } from "./useSidePanelSession";
 
@@ -69,6 +70,7 @@ async function replaceSettings(settings: unknown) {
 
 describe("sidepanel configuration refresh", () => {
   it("uses the bundled catalog immediately when offline without changing settings", async () => {
+    values[MODEL_CONFIG_STORAGE_KEY] = { ...legacy(), profiles: { openai: { ...legacy().profiles.openai, model: "gpt-5" } } };
     const original = values[MODEL_CONFIG_STORAGE_KEY];
     const fetch = vi.fn()
       .mockRejectedValueOnce(new TypeError("offline"))
@@ -76,11 +78,11 @@ describe("sidepanel configuration refresh", () => {
       .mockResolvedValueOnce(Response.json(catalog));
     vi.stubGlobal("fetch", fetch);
       await act(async () => root.render(<Harness />));
-      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
       await vi.waitFor(() => expect(latest.configReady).toBe(true));
       expect(latest.configured).toBe(true);
       expect(latest.error).toBeUndefined();
-      expect(latest.config.model).toBe("legacy");
+      expect(latest.config.model).toBe("gpt-5");
       expect(latest.config.modelProvider).toBeUndefined();
       expect(latest.error).toBeUndefined();
       expect(values[MODEL_CONFIG_STORAGE_KEY]).toBe(original);
@@ -88,6 +90,7 @@ describe("sidepanel configuration refresh", () => {
   });
 
   it("hydrates legacy routing from the bundled snapshot without persisting settings", async () => {
+    values[MODEL_CONFIG_STORAGE_KEY] = { ...legacy(), profiles: { openai: { ...legacy().profiles.openai, model: "gpt-5" } } };
     const original = values[MODEL_CONFIG_STORAGE_KEY];
     vi.stubGlobal("fetch", vi.fn(async () => Response.json(catalog)));
     await act(async () => root.render(<Harness />));
@@ -96,6 +99,18 @@ describe("sidepanel configuration refresh", () => {
     expect(latest.configured).toBe(true);
     expect(values[MODEL_CONFIG_STORAGE_KEY]).toBe(original);
     expect(set.mock.calls.some(([items]) => Object.hasOwn(items, MODEL_CONFIG_STORAGE_KEY))).toBe(false);
+  });
+
+  it("rehydrates settings when a background catalog refresh commits", async () => {
+    values[MODEL_CONFIG_STORAGE_KEY] = custom("current-model");
+    await act(async () => root.render(<Harness />));
+    await vi.waitFor(() => expect(latest.configReady).toBe(true));
+    const previous = latest.config;
+    await act(async () => {
+      for (const listener of listeners) listener({ [CATALOG_CACHE_KEY]: { newValue: { version: 2 } } }, "local");
+    });
+    await vi.waitFor(() => expect(latest.config).not.toBe(previous));
+    expect(latest.error).toBeUndefined();
   });
 
   it("aborts an old refresh and never lets its late result replace newer settings", async () => {
@@ -122,6 +137,7 @@ describe("sidepanel configuration refresh", () => {
   });
 
   it("aborts an in-flight catalog request and removes listeners on unmount", async () => {
+    values[MODEL_CONFIG_STORAGE_KEY] = { ...legacy(), profiles: { openai: { ...legacy().profiles.openai, model: "gpt-5" } } };
     let signal: AbortSignal | undefined;
     const fetch = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
       signal = init?.signal ?? undefined;
@@ -134,7 +150,7 @@ describe("sidepanel configuration refresh", () => {
     await act(async () => { root.unmount(); mounted = false; });
     expect(signal?.aborted).toBe(true);
     expect(listeners.size).toBe(0);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledOnce();
     expect(set).not.toHaveBeenCalled();
   });
 
@@ -153,14 +169,15 @@ describe("sidepanel configuration refresh", () => {
   });
 
   it("does not schedule a retry backoff after the bundled offline fallback succeeds", async () => {
+    values[MODEL_CONFIG_STORAGE_KEY] = { ...legacy(), profiles: { openai: { ...legacy().profiles.openai, model: "gpt-5" } } };
     const fetch = vi.fn(async () => { throw new TypeError("offline"); });
     vi.stubGlobal("fetch", fetch);
       await act(async () => root.render(<Harness />));
-      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
       await vi.waitFor(() => expect(latest.configReady).toBe(true));
       expect(latest.error).toBeUndefined();
       await act(async () => { root.unmount(); mounted = false; });
-      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(fetch).toHaveBeenCalledOnce();
       expect(set).not.toHaveBeenCalled();
   });
 });

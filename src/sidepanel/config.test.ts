@@ -153,6 +153,22 @@ describe("model config persistence", () => {
     const migrated = await loadModelConfig(undefined, storage, { loadCatalog });
     expect(migrated.profiles.openai?.modelProvider?.shape).toBe("completions");
     expect(loadCatalog.mock.calls.map(([options]) => options.refresh ?? false)).toEqual([false, true]);
+    expect(loadCatalog.mock.calls[1]?.[0]).toMatchObject({ refresh: true, staleFallback: false });
+  });
+
+  it("retries a required live route when stale fallback data is returned", async () => {
+    const storage = legacyCatalogProfile();
+    const sleep = vi.fn(async () => {});
+    let liveAttempts = 0;
+    const loadCatalog = vi.fn(async ({ refresh, staleFallback }: { refresh?: boolean; staleFallback?: boolean }) => {
+      if (!refresh) return {};
+      expect(staleFallback).toBe(false);
+      if (liveAttempts++ === 0) throw new TypeError("offline");
+      return migrationCatalog;
+    });
+    await expect(loadModelConfig(undefined, storage, { loadCatalog, sleep })).resolves.toHaveProperty("profiles.openai.modelProvider.shape", "completions");
+    expect(liveAttempts).toBe(2);
+    expect(sleep).toHaveBeenCalledOnce();
   });
 
   it("preserves existing endpoints and credentials when migrating models without overrides", async () => {

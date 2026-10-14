@@ -3,7 +3,7 @@ import { defaultBaseURL, isCloudflareGateway, providerSettingFields, resolvedBas
 import bundledCatalogGzip, { metadata as bundledCatalogMetadata } from "../data/models-dev-api";
 
 const CACHE_KEY = "side-agent:model-limit";
-const CATALOG_CACHE_KEY = "side-agent:model-catalog";
+export const CATALOG_CACHE_KEY = "side-agent:model-catalog";
 // Older normalized catalogs discarded per-model routes and cannot be reused safely.
 const CATALOG_CACHE_VERSION = 2;
 export const MODEL_ROUTING_VERSION = 1;
@@ -279,7 +279,7 @@ function currentCatalogCache(value?: CachedCatalog): CachedCatalog | undefined {
 }
 
 export function loadModelCatalog(
-  options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; refresh?: boolean; onStale?: (error: unknown) => void; bundledFallback?: boolean; validateCompleteness?: boolean } = {},
+  options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; refresh?: boolean; onStale?: (error: unknown) => void; bundledFallback?: boolean; staleFallback?: boolean; validateCompleteness?: boolean } = {},
 ): Promise<ModelCatalog> {
   const storage = options.storage ?? (typeof chrome !== "undefined" ? chrome.storage?.local : undefined);
   const validateCompleteness = options.validateCompleteness ?? !options.fetch;
@@ -333,13 +333,13 @@ export function loadModelCatalog(
       return await fetchCatalog();
     } catch (error) {
       if (options.signal?.aborted) throw error;
-      if (cached?.catalog) {
+      if (cached?.catalog && options.staleFallback !== false) {
         options.onStale?.(error);
         return cached.catalog;
       }
       // Custom fetchers are generally tests/adapters which need the original
       // failure for retry classification. The normal extension path is offline-safe.
-      if (options.bundledFallback ?? !options.fetch) {
+      if (options.staleFallback !== false && (options.bundledFallback ?? !options.fetch)) {
         options.onStale?.(error);
         return fallbackToBundle();
       }

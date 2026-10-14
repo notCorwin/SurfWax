@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ModelConfig } from "../types";
 import { activeRunIdentity } from "../agent/coordinator";
+import { CATALOG_CACHE_KEY } from "../agent/model-limits";
 import {
   EMPTY_MODEL_CONFIG,
   MODEL_CONFIG_STORAGE_KEY,
@@ -52,7 +53,7 @@ export function useSidePanelSession(): SidePanelSession {
       }
     };
     const storageChanged = (changes: { [key: string]: chrome.storage.StorageChange }, area: string) => {
-      if (area === "local" && changes[MODEL_CONFIG_STORAGE_KEY]) void refresh();
+      if (area === "local" && (changes[MODEL_CONFIG_STORAGE_KEY] || changes[CATALOG_CACHE_KEY])) void refresh();
     };
     const runChanged = (message: { type?: string; identity?: unknown }) => {
       if (deferred && message.type === "surf-wax:run-state" && !message.identity) void refresh();
