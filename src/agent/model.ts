@@ -2,7 +2,8 @@ import { APICallError, type LanguageModel } from "ai";
 import type { EventLogger } from "../logging";
 import type { ModelConfig, ModelSdk } from "../types";
 import { REASONING_EFFORTS, reasoningSettingsFor, type ReasoningEffort, type ReasoningSettings } from "./reasoning";
-import { googleCredentials, isCloudflareGateway, isOpenAIShapedSdk, modelConfigErrors, resolvedBaseURL, sdkFor, settingsFor } from "./model-sdks";
+import { googleCredentials, isCloudflareGateway, modelConfigErrors, resolvedBaseURL, sdkFor, settingsFor } from "./model-sdks";
+import { loadProviderModule, providerAdapterFor, type ProviderModuleLoader } from "./provider-adapters";
 
 const MAX_RETRY_DELAY_MS = 5_000;
 const INITIAL_RETRY_DELAY_MS = 250;
@@ -283,44 +284,7 @@ export function createRetryingFetch(options: {
   };
 }
 
-type ModuleLoader = () => Promise<Record<string, any>>;
-export type CreateModelOptions = { fetch?: typeof globalThis.fetch; loaders?: Partial<Record<ModelSdk, ModuleLoader>>; signal?: AbortSignal };
-
-async function loadSdk(sdk: ModelSdk, override?: ModuleLoader): Promise<Record<string, any>> {
-  if (override) return override();
-  switch (sdk) {
-    case "@ai-sdk/amazon-bedrock": return import("@ai-sdk/amazon-bedrock");
-    case "@ai-sdk/amazon-bedrock/mantle": return import("@ai-sdk/amazon-bedrock/mantle");
-    case "@ai-sdk/anthropic": return import("@ai-sdk/anthropic");
-    case "@ai-sdk/azure": return import("@ai-sdk/azure");
-    case "@ai-sdk/cerebras": return import("@ai-sdk/cerebras");
-    case "@ai-sdk/cohere": return import("@ai-sdk/cohere");
-    case "@ai-sdk/deepinfra": return import("@ai-sdk/deepinfra");
-    case "@ai-sdk/deepseek": return import("@ai-sdk/deepseek");
-    case "@ai-sdk/gateway": return import("@ai-sdk/gateway");
-    case "@ai-sdk/google": return import("@ai-sdk/google");
-    case "@ai-sdk/google-vertex": return import("@ai-sdk/google-vertex/edge");
-    case "@ai-sdk/google-vertex/anthropic": return import("@ai-sdk/google-vertex/anthropic/edge");
-    case "@ai-sdk/groq": return import("@ai-sdk/groq");
-    case "@ai-sdk/mistral": return import("@ai-sdk/mistral");
-    case "@ai-sdk/openai": return import("@ai-sdk/openai");
-    case "@ai-sdk/openai-compatible": return import("@ai-sdk/openai-compatible");
-    case "@ai-sdk/perplexity": return import("@ai-sdk/perplexity");
-    case "@ai-sdk/togetherai": return import("@ai-sdk/togetherai");
-    case "@ai-sdk/vercel": return import("@ai-sdk/vercel");
-    case "@ai-sdk/xai": return import("@ai-sdk/xai");
-    case "@aihubmix/ai-sdk-provider": return import("@aihubmix/ai-sdk-provider");
-    case "@openrouter/ai-sdk-provider": return import("@openrouter/ai-sdk-provider");
-    case "@saladtechnologies-oss/ai-sdk-provider": return import("@saladtechnologies-oss/ai-sdk-provider");
-    case "merge-gateway-ai-sdk-provider": return import("merge-gateway-ai-sdk-provider");
-    case "@qvac/ai-sdk-provider":
-    case "venice-ai-sdk-provider":
-    case "ai-gateway-provider":
-    case "gitlab-ai-provider":
-    case "watsonx-ai-provider":
-    case "@jerome-benoit/sap-ai-provider-v2": return import("@ai-sdk/openai-compatible");
-  }
-}
+export type CreateModelOptions = { fetch?: typeof globalThis.fetch; loaders?: Partial<Record<ModelSdk, ProviderModuleLoader>>; signal?: AbortSignal };
 
 function withJsonRequest(request: Request, url: string, body: unknown, headers: HeadersInit = {}): Request {
   const merged = new Headers(request.headers);
@@ -581,7 +545,8 @@ function azureInferenceFetch(config: ModelConfig, fetch: typeof globalThis.fetch
 export async function createModel(config: ModelConfig, logger?: EventLogger, conversationId?: string, options: CreateModelOptions = {}): Promise<LanguageModel> {
   const errors = modelConfigErrors(config);
   if (Object.keys(errors).length) throw new Error(Object.values(errors)[0]);
-  const sdk = sdkFor(config);
+  const adapter = providerAdapterFor(config);
+  const sdk = adapter.sdk;
   const settings = settingsFor(config);
   const baseURL = resolvedBaseURL(config);
   const runFetch: typeof globalThis.fetch = (input, init) => {
@@ -592,14 +557,14 @@ export async function createModel(config: ModelConfig, logger?: EventLogger, con
   const baseRetryingFetch = createRetryingFetch({ logger, conversationId, fetch: runFetch, signal: options.signal });
   const retryingFetch = createRetryingFetch({
     logger, conversationId, fetch: runFetch, signal: options.signal,
-    reasoningSettings: isOpenAIShapedSdk(sdk) ? reasoningSettingsFor(config) : undefined,
+    reasoningSettings: adapter.protocol === "openai-compatible" ? reasoningSettingsFor(config) : undefined,
   });
-  const module = await loadSdk(sdk, options.loaders?.[sdk]);
+  const module = await loadProviderModule(sdk, options.loaders?.[sdk]);
   options.signal?.throwIfAborted();
-  const vertexCompatibleAuth = config.providerId === "google-vertex" && sdk === "@ai-sdk/openai-compatible" && !settings.apiKey && googleCredentials(config);
-  const azureCompatibleAuth = (config.providerId === "azure" || config.providerId === "azure-cognitive-services") && sdk === "@ai-sdk/openai-compatible";
+  const vertexCompatibleAuth = adapter.auth === "google-service-account" && sdk === "@ai-sdk/openai-compatible";
+  const azureCompatibleAuth = adapter.auth === "azure-api-key";
   const transportFetch = vertexCompatibleAuth ? googleServiceAccountFetch(config, retryingFetch, baseRetryingFetch)
-    : azureCompatibleAuth ? azureInferenceFetch(config, retryingFetch) : isOpenAIShapedSdk(sdk) ? retryingFetch : baseRetryingFetch;
+    : azureCompatibleAuth ? azureInferenceFetch(config, retryingFetch) : adapter.protocol === "openai-compatible" ? retryingFetch : baseRetryingFetch;
   const modelFetch = modelDefaultsFetch(config, transportFetch);
   const common = { headers: modelDefaultHeaders(config), apiKey: vertexCompatibleAuth ? "service-account" : settings.apiKey, ...(baseURL ? { baseURL } : {}), fetch: modelFetch };
   let model: LanguageModel;
@@ -657,10 +622,10 @@ export async function createModel(config: ModelConfig, logger?: EventLogger, con
       const adapter = initial.mapping.provider === "openai" ? gitlabProtocolFetch(config, retryingFetch, baseRetryingFetch) : initial;
       const gateway = (settings.aiGatewayUrl || "https://cloud.gitlab.com").replace(/\/+$/, "");
       if (adapter.mapping.provider === "openai") {
-        const openai = await loadSdk("@ai-sdk/openai", options.loaders?.["@ai-sdk/openai"]);
+        const openai = await loadProviderModule("@ai-sdk/openai", options.loaders?.["@ai-sdk/openai"]);
         model = nativeModel(openai.createOpenAI({ baseURL: config.modelProvider?.api !== undefined ? baseURL : `${gateway}/ai/v1/proxy/openai/v1`, apiKey: "gitlab-direct-access", headers: modelDefaultHeaders(config), fetch: modelDefaultsFetch(config, adapter.fetch) }), { ...config, model: adapter.mapping.model });
       } else {
-        const anthropic = await loadSdk("@ai-sdk/anthropic", options.loaders?.["@ai-sdk/anthropic"]);
+        const anthropic = await loadProviderModule("@ai-sdk/anthropic", options.loaders?.["@ai-sdk/anthropic"]);
         model = nativeModel(anthropic.createAnthropic({ baseURL: config.modelProvider?.api !== undefined ? baseURL : `${gateway}/ai/v1/proxy/anthropic/v1`, authToken: "gitlab-direct-access", headers: modelDefaultHeaders(config), fetch: modelDefaultsFetch(config, adapter.fetch) }), { ...config, model: adapter.mapping.model });
       }
       break;
@@ -672,7 +637,7 @@ export async function createModel(config: ModelConfig, logger?: EventLogger, con
       if (config.modelProvider?.shape === "responses") {
         // The compatible SDK only implements Chat Completions. Keep Responses
         // on the native OpenAI interface rather than reimplementing its protocol.
-        const openai = await loadSdk("@ai-sdk/openai", options.loaders?.["@ai-sdk/openai"]);
+        const openai = await loadProviderModule("@ai-sdk/openai", options.loaders?.["@ai-sdk/openai"]);
         model = nativeModel(openai.createOpenAI(common), config);
       } else {
         model = nativeModel(module.createOpenAICompatible({ ...common, name: config.providerId || "custom", baseURL }), config);
