@@ -1,95 +1,155 @@
 # Surf Wax
 
 [![Continuous Delivery](https://github.com/notCorwin/SurfWax/actions/workflows/autobuild.yml/badge.svg)](https://github.com/notCorwin/SurfWax/actions/workflows/autobuild.yml)
-[![Chrome 138+](https://img.shields.io/badge/Chrome-138%2B-4285F4?logo=googlechrome&logoColor=white)](https://www.google.com/chrome/)
 [![Version](https://img.shields.io/github/package-json/v/notCorwin/SurfWax)](package.json)
+[![Chrome 138+](https://img.shields.io/badge/Chrome-138%2B-4285F4?logo=googlechrome&logoColor=white)](https://www.google.com/chrome/)
 
-Surf Wax 是 Chrome 138+ 的 Manifest V3 Side Panel 智能体运行环境。它使用 Vercel AI SDK 和基于事件日志的会话运行时，以 shadcn/ui 与 Streamdown 构建界面，直接连接用户选择的 Provider 或 OpenAI-compatible Endpoint，支持 BYOK。
+Surf Wax 是一个运行在 Chrome Side Panel 中的浏览器智能体。它让你使用自己的模型和 API 凭据，通过自然语言读取页面、填写表单、管理标签页、处理文件，并组合执行复杂的浏览器任务。
 
-新会话通过三个可组合入口操控浏览器：inspect 默认读取带引用的语义文本，run 执行单个动作或 async JavaScript 程序，jobs 管理长执行的状态、增量回执、等待和取消。保留表单、frame、原生输入/Canvas、多标签、上传下载、页面脚本、网络/CDP 与持久用户脚本能力。截图只按需获取。工具目录由源码 registry 生成，见 [工具参考](docs/tools.md)。
+![Surf Wax Side Panel](docs/store/screenshot-1280x800.png)
 
-## 安装与首次配置
+## 为什么使用 Surf Wax
 
-在 [Chrome Web Store](https://chromewebstore.google.com/detail/surf-wax/kkopacjlnfpnpmfeinomkhhcndbdeoih) 安装后点击扩展图标打开 Side Panel。打开设置，选择 Provider 或自定义 Endpoint，填写凭据和模型，保存配置后即可发送任务。
+- **自选模型（BYOK）**：Provider 和模型目录来自 [Models.dev](https://models.dev/)，也支持自定义 Model ID、Base URL 和协议。
+- **直接连接模型服务**：没有开发者运营的模型中转、遥测或同步服务；配置、凭据和会话记录保存在本机。
+- **可组合浏览器自动化**：智能体通过 `inspect`、`run` 和 `jobs` 读取页面、执行 JavaScript 工作流并管理后台任务，而不是受固定步骤数限制。
+- **适合长任务**：追加式 canonical event log 统一保存对话、工具结果、错误、中断状态和产物；上下文不足时自动压缩。
+- **完整 Side Panel 体验**：支持流式输出、GFM、LaTeX、代码高亮、会话搜索、分支和重试，以及浅色和深色主题。
+- **安全的交互边界**：智能体操作页面时会显示防干扰层；工具无论成功、失败或中断都会留下结果记录。
+- **持久用户脚本**：可创建、编辑、启停并在扩展启动或升级后恢复 `chrome.userScripts` 脚本。
 
-也可从 [版本发布页](https://github.com/notCorwin/SurfWax/releases) 下载对应版本的 ZIP 和 `.sha256` 文件，核对 SHA-256，解压后在 `chrome://extensions` 开启开发者模式并选择“加载已解压的扩展程序”。商店版通过商店更新；已解压版本需要手动更新。正式版本发布绑定不可变的 Git 标签和提交，不覆盖已有版本产物。`autobuild` 是 master 的可变测试渠道，提交前在本地运行完整 CI，标记为 prerelease，不会占用 Latest。
+## 安装
 
-Provider 配置保存在本机 `chrome.storage.local`，按 Provider 隔离。设置页会刷新 Models.dev 模型目录，并保留目录不可用时的自定义 Endpoint。高级设置可覆盖 Base URL、Context Window、Anthropic 类 `max_tokens` 和图片支持状态；未知上下文默认 256,000，未知 Anthropic 类输出默认 128,000。自定义 Endpoint 可选择 OpenAI Chat Completions、Completions、Responses、Anthropic Messages、Google generateContent 或 Interactions 协议。
+### Chrome Web Store
 
-## 任务与会话
+从 [Chrome Web Store](https://chromewebstore.google.com/detail/surf-wax/kkopacjlnfpnpmfeinomkhhcndbdeoih) 安装 Surf Wax。需要 Chrome 138 或更高版本。
 
-- 每轮绑定当前 Chrome 窗口的目标标签页，用户切换活动页面不会改变任务目标；工具可以显式选择该窗口内其他标签页。
-- 历史上下文保持稳定前缀，新会话将完整工具简明目录追加到用户自定义系统提示词后，并把版本与快照写入日志；旧会话保持原格式，首次成功压缩后迁移。剩余容量不足 20% 或 Provider 报上下文超限时自动生成摘要。
-- 可恢复请求错误无限重试，单次退避不超过 5 秒；可查看重试状态或立即停止。
-- 关闭真实 Side Panel 会中止模型请求、工具及排队调用。操作成功、失败和中断都写入 Tool Result，已发生的网页操作不会回滚或自动重放。
-- 会话支持搜索、重命名和一键删除；删除无需确认，并在短时间内提供撤销。删除和清空通过追加 tombstone 隐藏数据，不改写 canonical event log。会话行操作按钮在悬浮或键盘聚焦时显示，无悬浮能力的设备保留可见入口。任何侧栏存在运行中的任务时，全部会话的新建、切换、编辑、复制、重试、分支、重命名与删除均锁定且隐藏消息操作。草稿、Follow-up 队列和停止始终可用。用户消息与 Assistant 回复均支持复制、重试及分支；用户消息另支持编辑。
-- 正在操作的页面有透明防干扰层。所有已操作标签页及 iframe 的阻断监听器保持安装，智能体通过当前 run 的受控输入票据执行原生输入；任务结束、导航和中断时清理。
-- 截图、PDF 和大型结果默认作为会话内部产物。用户明确要求保存时直接下载文件，无需再次授权。下载失败或任务中断后，内部产物仍可再次保存，无需重新生成。
+### 手动安装发布包
 
-Side Panel 使用统一的磨砂材质 Design Tokens，自动跟随浅色／深色模式。任务建议可填入草稿后编辑发送；会话抽屉支持搜索和管理。用户消息显示为气泡，Assistant 回复通栏呈现；Markdown、LaTeX、代码高亮和工具详情完整保留，响应按动画帧合并更新，长历史按会话轮次虚拟化。
+1. 从 [Releases](https://github.com/notCorwin/SurfWax/releases) 下载版本 ZIP，并使用同版本的 `.sha256` 文件校验完整性。
+2. 解压 ZIP。
+3. 打开 `chrome://extensions`，启用“开发者模式”。
+4. 选择“加载已解压的扩展程序”，然后选择解压目录。
 
-用户脚本有独立管理页，智能体通过 run 中的 browser.scripts 组合管理；历史会话的五个工具仍可恢复。脚本定义及启停状态由扩展持久化，并在启动或升级时恢复已启用脚本。使用前在 Chrome 扩展详情页开启 **Allow User Scripts**。
+手动安装的版本不会通过 Chrome Web Store 自动更新。
 
-## 权限与数据
+## 开始使用
 
-必需权限由实际功能逐项对应：
+1. 点击 Surf Wax 扩展图标，打开 Side Panel。
+2. 打开设置，选择一个 Provider，并填写所需凭据。
+3. 选择或输入 Model ID，然后保存。
+4. 打开目标网页，在 Side Panel 中描述任务，例如：
 
-| 权限 | 用途 |
-| --- | --- |
-| debugger | 可访问性、截图和真实浏览器输入的 CDP 执行 |
-| scripting | 安装和释放页面防干扰层 |
-| sidePanel | 原生 Side Panel |
-| storage | 本地配置、凭据及用户脚本定义 |
-| tabs | 当前窗口标签页的标题、URL 和目标管理 |
-| unlimitedStorage | 本地 canonical event log 和产物 |
-| userScripts | 注册、恢复、启停用户脚本 |
-| downloads | 用户明确保存时下载内部产物 |
-| `<all_urls>` | 跨网站网页任务、用户脚本及用户指定模型端点 |
+   ```text
+   阅读这个页面，提取产品名称和价格，并整理成 Markdown 表格。
+   ```
 
-扩展不提供开发者运营的中转或同步服务。网页及工具内容不会脱敏、过滤或改写；用于模型上下文的内容会直接发送到用户配置的模型服务。对话、工具结果、重试和中断记录均来自本地 IndexedDB 的 canonical event log。删除、导出和保留规则见 [隐私政策](PRIVACY.md)。
+   ```text
+   填写注册表单，但提交前停下来让我确认。
+   ```
 
-## 开发与验证
+如果使用用户脚本，请先在扩展详情页启用 **Allow User Scripts**。高级设置中可以覆盖 Context Window、`max_tokens`、图片输入能力、Base URL 和端点协议。自定义端点支持：
 
-需要 Node.js 24、npm 和 Chrome 138+：
+- OpenAI Chat Completions、Completions 和 Responses
+- Anthropic Messages
+- Google `generateContent` 和 Interactions
+
+未知模型的 Context Window 默认按 256,000 tokens 处理；除 Anthropic 类端点外，Surf Wax 不会主动传递未知的 `max_tokens`。
+
+## 数据与权限
+
+模型配置和凭据存储在 `chrome.storage.local`，会话和工具事件存储在本机 IndexedDB。任务所需的消息、网页内容、截图或工具结果会直接发送到你配置的模型服务，不会经过 Surf Wax 开发者服务器。
+
+扩展需要 `debugger`、`downloads`、`scripting`、`sidePanel`、`storage`、`tabs`、`unlimitedStorage`、`userScripts` 和 `<all_urls>`，用于浏览器控制、文件保存、防干扰层、本地记录、用户脚本和连接自定义模型端点。完整的数据处理与删除规则见 [隐私政策](PRIVACY.md)。
+
+## 本地开发
+
+### 环境要求
+
+- Node.js 24
+- npm
+- Chrome 138+（日常使用）
+- Playwright Chromium（开发环境）
+
+安装依赖和开发浏览器：
 
 ```sh
 npm ci
-npm run build
+npx playwright install chromium
+```
+
+启动开发环境：
+
+```sh
 npm run dev
 ```
 
-`npm run dev` 启动 localhost:5173、加载专用 Chromium、主动重载开发扩展以刷新持久化 profile 中的旧 Service Worker、开启 Allow User Scripts 并打开真实 Side Panel。UI 支持 HMR；后台或 Manifest 变化会重新加载扩展。开发配置及测试证据存放在仓库旁的 `../.dev/chromium-profile/`。不要清理该目录后再提交失败报告。
+该命令启动 Vite、加载 `dist/` 中的开发扩展、打开一个持久化 Chromium profile，并显示真实 Side Panel。也可以指定启动页面：
 
 ```sh
-npm run verify:local     # Node 24：文档、SDK、类型、构建、单测、双 Chrome E2E 与性能
-npm run sdk:check        # 与 live Models.dev 的 SDK 集合比较差集
-npm run docs:tools       # 从唯一 registry 生成工具参考
-npm run docs:check       # 拒绝过期工具文档
-npm run measure:tools    # 实测目录与 JSON schema 字节及可用 BPE token 数
-npm run check           # 类型、独立构建及产物契约校验
-npm test                # 单元测试
-npm run test:e2e         # 功能 E2E，包含历史版本升级
-npm run test:performance # 本地性能测试；GitHub Actions 不运行
-npm run release:package  # 构建、ZIP、SHA-256 和 release notes
+npm run dev -- https://example.com
 ```
 
-E2E 按设置、自动化、会话、上下文、生命周期、渲染、用户脚本、发布与升级及性能划分，共用真实扩展夹具和本地 Provider 协议 mock。失败会保留完整临时 profile；IndexedDB 证据复制到 `../.dev/chromium-profile/Default/IndexedDB/`，trace/screenshot 位于 `test-results/`。
+界面代码支持 HMR；后台脚本或 Manifest 变化会重新加载扩展。开发 profile 保存在仓库相邻的 `../.dev/chromium-profile/`。
 
-指定 Chrome 可执行文件，或同时验证最低版本与当前版本：
+如需仅构建扩展：
 
 ```sh
-SURFWAX_CHROME_PATH=/path/to/current/chrome npm run test:e2e
-SURFWAX_CHROME_138_PATH=/path/to/chrome138 SURFWAX_CHROME_PATH=/path/to/current/chrome npm run test:e2e
-node scripts/install-test-browser.mjs 138
-node scripts/install-test-browser.mjs current
+npm run build
 ```
 
-CI 全部由 `npm run verify:local` 在本地 Node 24 执行，自动安装 Chrome for Testing 138 与当前 Stable，并逐版本运行功能与性能验收。120 FPS 负载由软件以 120Hz 驱动真实 RAF 与渲染，不需要 120Hz 屏幕；预热至少 1 秒，测量至少 600 帧，要求真实渲染 trace 的每帧工作 P95 ≤ 8.33ms、截止时间违约率 ≤ 1%，并验证最终正文与 canonical log。原始 trace、浏览器版本及报告保存在 `.dev/verification/performance/`。macOS 测试需要允许 Chrome 访问 WindowServer 并监听 localhost 的本地执行环境。GitHub Actions 只执行 CD：重建打包、产物和 SHA-256 校验、master Autobuild 与不可变版本标签发布。版本只有 `package.json` 一个来源，构建校验 lockfile 和产物版本一致。
+构建结果位于 `dist/`，可通过 `chrome://extensions` 加载。
 
-## 架构与贡献
+## 验证
 
-程序计算运行在可销毁的 opaque-origin sandbox Worker 中，Side Panel 中介浏览器能力。jobs 不受执行队列阻塞；取消不是回滚，关闭面板会撤销能力，重启只保留 canonical 回执而不恢复任意 JS 栈。sandbox 使用独立 CSP，扩展页面不允许 eval，Chrome 权限保持不变。
+常用检查：
 
-`src/sidepanel/` 管理会话与生命周期，`src/agent/` 管理模型、请求与上下文，`src/chrome/` 提供 registry 和共享浏览器执行器，`src/logging.ts` 提供 canonical event log，`src/userscripts/` 与 `src/options/` 分别提供脚本和配置管理。
+```sh
+npm run check       # TypeScript、独立构建和产物契约
+npm test            # Vitest 单元测试
+npm run test:e2e    # Headless Chrome 功能测试
+npm run docs:check  # 检查生成的工具文档是否最新
+```
 
-贡献前阅读 [AGENTS.md](AGENTS.md)。修改功能后运行相关测试和完整类型/构建检查；性能验证在本地完成。不要提交构建产物、浏览器 profile 或凭据。缺陷和功能请求请提交 [GitHub Issue](https://github.com/notCorwin/SurfWax/issues)，附版本、复现和经过自行审阅的诊断。仓库目前没有 LICENSE 文件，分发许可需由维护者另行确定。
+提交前运行完整本地 CI：
+
+```sh
+npm run verify:local
+```
+
+完整验证要求 Node 24，会安装 Chrome for Testing 138 和当前 Stable，并执行文档、SDK、类型、构建、单元、E2E 与性能检查。所有浏览器测试均以 Headless 模式运行；GitHub Actions 只负责 CD。
+
+其他维护命令见 [package.json](package.json)。浏览器工具 API 由源码 registry 生成，详见 [工具参考](docs/tools.md)。
+
+## 项目结构
+
+```text
+src/
+├── agent/        模型路由、流式请求、上下文与智能体协调
+├── chrome/       页面检查、浏览器执行、任务和交互防护
+├── components/   聊天界面与通用 UI 组件
+├── options/      Provider、模型和高级设置
+├── sidepanel/    会话运行时、事件投影和 Side Panel
+└── userscripts/  用户脚本管理器
+e2e/              Chrome 扩展端到端与性能测试
+docs/             工具参考、验收记录和商店材料
+scripts/          开发、验证、文档生成和发布脚本
+```
+
+Surf Wax 是单一 Manifest V3 Chrome Extension，不依赖桌面桥接应用。Side Panel 是主要运行环境；模型调用统一基于 Vercel AI SDK。`src/logging.ts` 中的追加式 canonical event log 是会话和执行记录的唯一权威来源。
+
+## 贡献
+
+提交修改前请先阅读 [AGENTS.md](AGENTS.md)，并遵循以下流程：
+
+1. 从最新的 `master` 创建分支。
+2. 保持现有功能完整，并为可观察的行为变化补充核心测试。
+3. 更新由变更影响的文档；工具 registry 变化后运行 `npm run docs:tools`。
+4. 运行相关测试以及 `npm run verify:local`。
+5. 提交 Pull Request，说明用户可见变化和验证结果。
+
+不要提交凭据、浏览器 profile、测试产物或 `dist/`。项目由 [notCorwin](https://github.com/notCorwin) 维护；问题、功能建议和贡献讨论请使用 [GitHub Issues](https://github.com/notCorwin/SurfWax/issues)。提交日志或截图前请先移除私人网页内容和凭据。
+
+## 发布与许可
+
+版本历史见 [CHANGELOG.md](CHANGELOG.md)，安装包见 [GitHub Releases](https://github.com/notCorwin/SurfWax/releases)。仓库目前未提供 LICENSE 文件；在复制、修改或分发代码前，请先联系维护者确认授权。
