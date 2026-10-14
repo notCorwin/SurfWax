@@ -1,31 +1,46 @@
 import { readFile, mkdir, mkdtemp, rm, writeFile, link, rename } from 'node:fs/promises';
+import { existsSync, realpathSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { resolve, relative, join, isAbsolute, sep } from 'node:path';
+import { resolve, relative, join, isAbsolute, sep, dirname, basename } from 'node:path';
 import { zipSync } from 'fflate';
 import { validateBuild } from './validate-build.mjs';
 
 process.env.TZ = 'UTC';
 
+const canonicalPath = path => {
+  let existing = resolve(path);
+  const missing = [];
+  while (!existsSync(existing)) {
+    missing.unshift(basename(existing));
+    const parent = dirname(existing);
+    if (parent === existing) break;
+    existing = parent;
+  }
+  return resolve(realpathSync(existing), ...missing);
+};
+const isInside = (parent, candidate) => {
+  const path = relative(parent, candidate);
+  return !isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`);
+};
 const buildRequested = process.argv[2] === '--build';
-const output = resolve(process.env.SURFWAX_RELEASE_DIR ?? '.dev/releases');
-const buildDirectory = resolve((buildRequested ? undefined : process.argv[2]) ?? process.env.SURFWAX_DEV_OUT_DIR ?? 'dist');
-const repository = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
-const outputRelative = relative(repository, output);
-const outputIsInsideRepository = !isAbsolute(outputRelative) && outputRelative !== '..' && !outputRelative.startsWith(`..${sep}`);
+const repository = realpathSync(execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim());
+const output = canonicalPath(process.env.SURFWAX_RELEASE_DIR ?? '.dev/releases');
+const buildDirectory = canonicalPath((buildRequested ? undefined : process.argv[2]) ?? process.env.SURFWAX_DEV_OUT_DIR ?? 'dist');
+const outputIsInsideRepository = isInside(repository, output);
 if (outputIsInsideRepository && spawnSync('git', ['check-ignore', '-q', '--no-index', '--', `${output}${sep}`]).status !== 0) {
   throw new Error('SURFWAX_RELEASE_DIR must be outside the Git worktree or ignored by Git so generated artifacts cannot make the worktree dirty.');
 }
-const outputRelativeToBuild = relative(buildDirectory, output);
-const outputIsInsideBuild = !isAbsolute(outputRelativeToBuild) && outputRelativeToBuild !== '..' && !outputRelativeToBuild.startsWith(`..${sep}`);
+if (isInside(buildDirectory, repository)) throw new Error('SURFWAX_DEV_OUT_DIR must not equal or contain the Git worktree because Vite clears the build directory.');
+const outputIsInsideBuild = isInside(buildDirectory, output);
 if (outputIsInsideBuild) throw new Error('SURFWAX_RELEASE_DIR must not equal or be nested under the build directory because Vite clears that directory before each build.');
-const outputRelativeToPublic = relative(resolve(repository, 'public'), output);
-const outputIsInsidePublic = !isAbsolute(outputRelativeToPublic) && outputRelativeToPublic !== '..' && !outputRelativeToPublic.startsWith(`..${sep}`);
+const publicDirectory = canonicalPath(resolve(repository, 'public'));
+const outputIsInsidePublic = isInside(publicDirectory, output);
 if (outputIsInsidePublic) throw new Error('SURFWAX_RELEASE_DIR must not equal or be nested under public because Vite copies that directory into every build.');
+if (isInside(publicDirectory, buildDirectory)) throw new Error('SURFWAX_DEV_OUT_DIR must not equal or be nested under public because Vite copies that directory into every build.');
 const ignoredPublicInputs = execFileSync('git', ['ls-files', '--others', '--ignored', '--exclude-standard', '--', 'public'], { encoding: 'utf8' });
 if (ignoredPublicInputs.trim()) throw new Error(`Release packaging refuses ignored files under public because Vite copies them into the build:\n${ignoredPublicInputs.trim()}`);
-const buildRelative = relative(repository, buildDirectory);
-const buildIsInsideRepository = !isAbsolute(buildRelative) && buildRelative !== '..' && !buildRelative.startsWith(`..${sep}`);
+const buildIsInsideRepository = isInside(repository, buildDirectory);
 if (buildIsInsideRepository && spawnSync('git', ['check-ignore', '-q', '--no-index', '--', `${buildDirectory}${sep}`]).status !== 0) {
   throw new Error('SURFWAX_DEV_OUT_DIR must be outside the Git worktree or ignored by Git so the build cannot make the worktree dirty.');
 }
@@ -35,7 +50,7 @@ const assertCleanWorktree = () => {
 };
 assertCleanWorktree();
 if (buildRequested) {
-  execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['exec', '--', 'vite', 'build'], { stdio: 'inherit' });
+  execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['exec', '--', 'vite', 'build', '--mode', 'production'], { stdio: 'inherit', env: { ...process.env, NODE_ENV: 'production' } });
   assertCleanWorktree();
 }
 
