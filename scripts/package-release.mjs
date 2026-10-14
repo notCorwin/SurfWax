@@ -1,20 +1,25 @@
-import { readFile, mkdir, mkdtemp, copyFile, utimes, rm, writeFile, link, rename } from 'node:fs/promises';
+import { readFile, mkdir, mkdtemp, rm, writeFile, link, rename } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { resolve, relative, dirname, join, isAbsolute, sep } from 'node:path';
+import { resolve, relative, join, isAbsolute, sep } from 'node:path';
+import { zipSync } from 'fflate';
 import { validateBuild } from './validate-build.mjs';
 
 const output = resolve(process.env.SURFWAX_RELEASE_DIR ?? '.dev/releases');
+const buildDirectory = resolve(process.argv[2] ?? process.env.SURFWAX_DEV_OUT_DIR ?? 'dist');
 const repository = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
 const outputRelative = relative(repository, output);
 const outputIsInsideRepository = !isAbsolute(outputRelative) && outputRelative !== '..' && !outputRelative.startsWith(`..${sep}`);
 if (outputIsInsideRepository && spawnSync('git', ['check-ignore', '-q', '--no-index', '--', output]).status !== 0) {
   throw new Error('SURFWAX_RELEASE_DIR must be outside the Git worktree or ignored by Git so generated artifacts cannot make the worktree dirty.');
 }
+const outputRelativeToBuild = relative(buildDirectory, output);
+const outputIsInsideBuild = !isAbsolute(outputRelativeToBuild) && outputRelativeToBuild !== '..' && !outputRelativeToBuild.startsWith(`..${sep}`);
+if (outputIsInsideBuild) throw new Error('SURFWAX_RELEASE_DIR must not equal or be nested under the build directory because Vite clears that directory before each build.');
 const worktreeStatus = execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all'], { encoding: 'utf8' });
 if (worktreeStatus.trim()) throw new Error('Release packaging requires a clean Git worktree; commit or remove all staged, unstaged, and untracked changes first.');
 
-const { version, files, directory } = await validateBuild(process.argv[2] ?? 'dist');
+const { version, files, directory } = await validateBuild(buildDirectory);
 await mkdir(output, { recursive: true });
 const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 const tag = process.env.GITHUB_REF_TYPE === 'tag' ? process.env.GITHUB_REF_NAME : `v${version}`;
@@ -22,7 +27,6 @@ if (process.env.GITHUB_REF_TYPE === 'tag' && tag !== `v${version}`) throw new Er
 const archive = join(output, `surf-wax-${version}.zip`);
 // Staging shares the destination filesystem so a completed file can be published atomically.
 const staging = await mkdtemp(join(output, `.surf-wax-${version}-`));
-const contents = join(staging, 'contents');
 const candidate = join(staging, `surf-wax-${version}.zip`);
 const epoch = new Date(Number(process.env.SOURCE_DATE_EPOCH ?? execFileSync('git', ['show', '-s', '--format=%ct', 'HEAD'], { encoding: 'utf8' }).trim()) * 1000);
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -30,13 +34,11 @@ let checksum;
 let reused = false;
 try {
   const paths = files.map(file => relative(directory, file)).sort();
+  const archiveEntries = Object.create(null);
   for (const path of paths) {
-    const destination = join(contents, path);
-    await mkdir(dirname(destination), { recursive: true });
-    await copyFile(resolve(directory, path), destination);
-    await utimes(destination, epoch, epoch);
+    archiveEntries[path] = [new Uint8Array(await readFile(resolve(directory, path))), { mtime: epoch }];
   }
-  execFileSync('zip', ['-X', '-q', candidate, ...paths], { cwd: contents });
+  await writeFile(candidate, zipSync(archiveEntries, { level: 9 }));
   checksum = sha256(await readFile(candidate));
   const checksumText = `${checksum}  surf-wax-${version}.zip\n`;
   try {
