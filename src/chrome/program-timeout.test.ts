@@ -47,6 +47,42 @@ describe("program timeout estimation", () => {
     ).toBe(60_000);
   });
 
+  it("supports inclusive, descending, and unbraced nested loops", () => {
+    expect(
+      estimateProgramTimeoutMs(
+        `for (let i = 0; i <= 60; i++) await sleep(1_000);`,
+      ),
+    ).toBe(91_000);
+    expect(
+      estimateProgramTimeoutMs(
+        `for (let i = 10; i >= 0; i -= 2) await sleep(1_000);`,
+      ),
+    ).toBe(36_000);
+    expect(
+      estimateProgramTimeoutMs(
+        `for (let i=0;i<10;i++) for (let j=0;j<10;j++) await sleep(1_000);`,
+      ),
+    ).toBe(130_000);
+  });
+
+  it("evaluates constant arithmetic in sleep durations", () => {
+    expect(estimateProgramTimeoutMs(`await sleep(60 * 1_000);`)).toBe(90_000);
+    expect(estimateProgramTimeoutMs(`await sleep((30 + 30) * 1_000);`)).toBe(
+      90_000,
+    );
+  });
+
+  it("preserves executable template interpolations", () => {
+    expect(estimateProgramTimeoutMs("return `${await sleep(60_000)}`;")).toBe(
+      90_000,
+    );
+  });
+
+  it("handles deeply nested loops in linear traversal time", () => {
+    const source = `${Array.from({ length: 30 }, (_, index) => `for (let i${index}=0;i${index}<1;i${index}++) `).join("")}await sleep(1_000);`;
+    expect(estimateProgramTimeoutMs(source)).toBe(31_000);
+  });
+
   it("ignores method-like text in comments, strings, and embedded scripts", () => {
     expect(
       estimateProgramTimeoutMs(`
