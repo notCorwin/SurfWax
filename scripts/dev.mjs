@@ -7,10 +7,10 @@ import { createServer } from "vite";
 import { reloadDevelopmentExtension } from "./reload-dev-extension.ts";
 
 const root = process.cwd();
-const extensionPath = resolve(root, "dist");
+const extensionPath = resolve(root, process.env.SURFWAX_DEV_OUT_DIR ?? "dist");
 const profilePath = resolve(root, "../.dev/chromium-profile");
 const targetUrl = process.argv[2] ?? "https://polymarket.com/zh";
-const port = 5173;
+const port = Number(process.env.SURFWAX_DEV_PORT ?? 5173);
 let context;
 let vite;
 

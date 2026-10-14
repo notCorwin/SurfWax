@@ -178,7 +178,7 @@ function workerMain() {
 const initialize = (event: MessageEvent) => {
   if (
     event.source !== parent ||
-    event.origin !== new URL(location.href).origin ||
+    (!import.meta.env.DEV && event.origin !== new URL(location.href).origin) ||
     event.data?.type !== "surf-wax:program-init" ||
     event.data.token !== location.hash.slice(1) ||
     event.ports.length !== 1

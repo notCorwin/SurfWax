@@ -8,29 +8,37 @@ import manifest from "./manifests/store.json" with { type: "json" };
 import packageMetadata from "./package.json" with { type: "json" };
 
 const projectRoot = fileURLToPath(new URL(".", import.meta.url));
+const devPort = Number(process.env.SURFWAX_DEV_PORT ?? 5173);
+const outDir = process.env.SURFWAX_DEV_OUT_DIR ?? "dist";
 
-const buildManifest = {
+const devManifest = {
   ...manifest,
   version: packageMetadata.version,
   background: { ...manifest.background, service_worker: "src/background.ts" },
 };
 
-const devManifest = {
-  ...buildManifest,
-  // CRXJS serves extension pages through localhost in development. A manifest
-  // sandbox has an opaque `null` origin, so its loader needs explicit access
-  // to the Vite HTTP and HMR endpoints. The store manifest remains locked down.
-  content_security_policy: {
-    ...manifest.content_security_policy,
-    sandbox: "sandbox allow-scripts; default-src 'none'; script-src 'self' 'unsafe-eval' blob:; worker-src blob:; child-src blob:; connect-src http://localhost:5173 ws://localhost:5173;",
+export default defineConfig({
+  define: {
+    __SURF_WAX_DEV_SERVER__: JSON.stringify(`http://localhost:${devPort}`),
   },
-};
-
-export default defineConfig(({ command }) => ({
   plugins: [
+    {
+      name: "surf-wax-development-sandbox",
+      configureServer(server) {
+        // Bypass CRXJS's extension-page HTML wrapper. This endpoint runs in a
+        // separate localhost renderer and loads only the disposable sandbox.
+        server.middlewares.use((request, response, next) => {
+          if (new URL(request.url ?? "/", `http://localhost:${devPort}`).pathname !== "/@surf-wax/program-sandbox") return next();
+          response.statusCode = 200;
+          response.setHeader("Content-Type", "text/html; charset=utf-8");
+          response.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'self' 'unsafe-eval' blob:; worker-src blob:; child-src blob:; connect-src 'none';");
+          response.end('<!doctype html><html><head><meta charset="UTF-8"><title>Surf Wax development program host</title></head><body><script type="module" src="/src/chrome/program-sandbox.ts"></script></body></html>');
+        });
+      },
+    },
     react(),
     tailwindcss(),
-    crx({ manifest: (command === "serve" ? devManifest : buildManifest) as any,
+    crx({ manifest: devManifest as any,
       // document_start must install capture listeners synchronously, before
       // website scripts. A module loader's dynamic import loses that order.
       contentScripts: { standaloneFiles: ["src/chrome/guard-content.ts"] },
@@ -43,24 +51,23 @@ export default defineConfig(({ command }) => ({
   },
   server: {
     host: "localhost",
-    port: 5173,
+    port: devPort,
     strictPort: true,
     watch: { ignored: ["**/.dev/check-dist/**"] },
     cors: {
-      // Sandboxed extension pages use an opaque origin serialized as `null`.
-      origin: [/chrome-extension:\/\//, /^null$/],
+      origin: [/chrome-extension:\/\//],
     },
     ws: {
       host: "localhost",
-      clientPort: 5173,
+      clientPort: devPort,
     },
   },
   build: {
-    outDir: "dist",
+    outDir,
     emptyOutDir: true,
     rollupOptions: { input: {
       userscripts: resolve(projectRoot, "userscripts.html"),
       programSandbox: resolve(projectRoot, "program-sandbox.html"),
     } },
   },
-}));
+});

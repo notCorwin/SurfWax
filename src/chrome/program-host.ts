@@ -10,7 +10,13 @@ export async function executeSandboxProgram(
   const frame = document.createElement("iframe");
   const token = crypto.randomUUID();
   frame.hidden = true;
-  frame.src = `${chrome.runtime.getURL("program-sandbox.html")}#${token}`;
+  // Chrome 151 crashes an extension renderer when a Vite-served extension page
+  // embeds a manifest sandbox. In development, host the same opaque worker
+  // bridge in Vite's separate localhost renderer; production remains on the
+  // packaged manifest sandbox with no network access.
+  frame.src = import.meta.env.DEV
+    ? `${__SURF_WAX_DEV_SERVER__}/@surf-wax/program-sandbox#${token}`
+    : `${chrome.runtime.getURL("program-sandbox.html")}#${token}`;
   const channel = new MessageChannel();
   const objects = new Map<string, any>();
   const ids = new WeakMap<object, string>();
