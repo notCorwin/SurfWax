@@ -109,3 +109,28 @@ it("keeps a transport error visible when no canonical terminal was recorded", as
   expect(runtime.getState().thread.error).toEqual(new Error("运行已由另一个面板接管"));
   expect(events.some((event) => event.type === "conversation.failed")).toBe(false);
 });
+
+it("does not duplicate a refreshed canonical failure when its synthetic message ID is reused", async () => {
+  const events: LogEvent[] = [];
+  const logger = new EventLogger({ store: {
+    async append(event) { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+    async all() { return [...events]; },
+    async clear() { events.length = 0; },
+  } });
+  const conversationId = "retry-failure";
+  await logger.appendMessage(conversationId, { id: "question", role: "user", parts: [] });
+  await logger.append({ type: "conversation.submitted", conversationId, runId: "first", content: { messageId: "question" } });
+  await logger.append({ type: "conversation.failed", conversationId, runId: "first", content: null, error: "old" });
+  const runtime = new ConversationStore(logger, () => ({
+    async sendMessages() {
+      await logger.append({ type: "conversation.submitted", conversationId, runId: "second", content: { messageId: "question" } });
+      await logger.append({ type: "conversation.failed", conversationId, runId: "second", content: null, error: "new" });
+      throw new Error("new");
+    },
+    async reconnectToStream() { return null; },
+  }));
+  await runtime.threads.switchToThread(conversationId);
+  await runtime.thread.startRun({ parentId: "question" });
+  expect(runtime.getState().thread.error).toBeUndefined();
+  expect(runtime.getState().thread.messages.at(-1)?.status).toMatchObject({ reason: "error", error: "new" });
+});

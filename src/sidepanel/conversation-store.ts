@@ -129,10 +129,11 @@ export class ConversationStore {
     this.remember(this.repository.headId);
     this.projection.reset();
   }
-  private async restore(id: string) {
+  private async restore(id: string): Promise<LogEvent[]> {
     const events = await this.logger.restorationEvents(id);
     this.restoreBranches(await restoreConversationRepository(events), events);
     this.display(branchMessages(this.repository));
+    return events;
   }
   connect() {
     this.closed = false;
@@ -235,9 +236,8 @@ export class ConversationStore {
     this.updateThread({ isRunning: true, error: undefined });
     this.display(messages);
     let failure: unknown;
-    const priorFailureIds = new Set(this.repository.messages
-      .filter(({ message }) => (message.metadata as { custom?: { failure?: unknown } } | undefined)?.custom?.failure !== undefined)
-      .map(({ message }) => message.id));
+    const priorFailureEventId = Math.max(0, ...(await this.logger.restorationEvents(id))
+      .filter((event) => event.type === "conversation.failed").map((event) => event.id));
     let partial: SidePanelMessage | undefined;
     try {
       if (!this.state.threadListItem.remoteId) {
@@ -256,10 +256,10 @@ export class ConversationStore {
       }
     } catch (error) { if (!controller.signal.aborted) failure = error; }
     finally {
-      try { await this.restore(id); } catch (error) { failure ??= error; }
+      let restoredEvents: LogEvent[] = [];
+      try { restoredEvents = await this.restore(id); } catch (error) { failure ??= error; }
       if (failure !== undefined) {
-        const recorded = this.repository.messages.some(({ message }) => !priorFailureIds.has(message.id)
-          && (message.metadata as { custom?: { failure?: unknown } } | undefined)?.custom?.failure !== undefined);
+        const recorded = restoredEvents.some((event) => event.type === "conversation.failed" && event.id > priorFailureEventId);
         if (!recorded) this.updateThread({ error: failure });
       }
       this.controller = undefined;
