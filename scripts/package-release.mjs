@@ -22,6 +22,8 @@ if (outputIsInsideBuild) throw new Error('SURFWAX_RELEASE_DIR must not equal or 
 const outputRelativeToPublic = relative(resolve(repository, 'public'), output);
 const outputIsInsidePublic = !isAbsolute(outputRelativeToPublic) && outputRelativeToPublic !== '..' && !outputRelativeToPublic.startsWith(`..${sep}`);
 if (outputIsInsidePublic) throw new Error('SURFWAX_RELEASE_DIR must not equal or be nested under public because Vite copies that directory into every build.');
+const ignoredPublicInputs = execFileSync('git', ['ls-files', '--others', '--ignored', '--exclude-standard', '--', 'public'], { encoding: 'utf8' });
+if (ignoredPublicInputs.trim()) throw new Error(`Release packaging refuses ignored files under public because Vite copies them into the build:\n${ignoredPublicInputs.trim()}`);
 const buildRelative = relative(repository, buildDirectory);
 const buildIsInsideRepository = !isAbsolute(buildRelative) && buildRelative !== '..' && !buildRelative.startsWith(`..${sep}`);
 if (buildIsInsideRepository && spawnSync('git', ['check-ignore', '-q', '--no-index', '--', `${buildDirectory}${sep}`]).status !== 0) {
@@ -33,7 +35,7 @@ const assertCleanWorktree = () => {
 };
 assertCleanWorktree();
 if (buildRequested) {
-  execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], { stdio: 'inherit' });
+  execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['exec', '--', 'vite', 'build'], { stdio: 'inherit' });
   assertCleanWorktree();
 }
 
@@ -55,7 +57,7 @@ let reused = false;
 try {
   const paths = files
     .map(file => ({ file, archivePath: relative(directory, file).split(sep).join('/') }))
-    .sort((left, right) => left.archivePath.localeCompare(right.archivePath));
+    .sort((left, right) => left.archivePath < right.archivePath ? -1 : left.archivePath > right.archivePath ? 1 : 0);
   const archiveEntries = Object.create(null);
   for (const { file, archivePath } of paths) {
     archiveEntries[archivePath] = [new Uint8Array(await readFile(file)), { mtime: epoch }];
