@@ -54,6 +54,28 @@ describe("models.dev limit matching", () => {
     expect(bundledMetadata).toMatchObject({ source: "https://models.dev/api.json", sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
   });
 
+  it("honors an explicit refresh before falling back on a fresh installation", async () => {
+    let resolve!: (response: Response) => void;
+    const pending = new Promise<Response>((done) => { resolve = done; });
+    const fetch = vi.fn(() => pending);
+    vi.stubGlobal("fetch", fetch);
+    try {
+      let settled = false;
+      const result = loadModelCatalog({ storage: { async get() { return {}; }, async set() {} }, refresh: true }).finally(() => { settled = true; });
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+      expect(settled).toBe(false);
+      resolve(Response.json({}));
+      await expect(result).resolves.toHaveProperty("openai");
+    } finally { vi.unstubAllGlobals(); }
+  });
+
+  it("rejects an already-cancelled bundled fallback", async () => {
+    const controller = new AbortController();
+    controller.abort(new DOMException("stopped", "AbortError"));
+    await expect(loadModelCatalog({ storage: { async get() { return {}; }, async set() {} }, signal: controller.signal }))
+      .rejects.toMatchObject({ name: "AbortError" });
+  });
+
   it("rejects an incomplete successful response and uses the bundled catalog", async () => {
     const onStale = vi.fn();
     const result = await loadModelCatalog({ storage: { async get() { return {}; }, async set() {} },
@@ -104,7 +126,7 @@ describe("models.dev limit matching", () => {
     const controller = new AbortController();
     controller.abort();
     await expect(loadModelCatalog({ storage, fetch: offline, refresh: true, signal: controller.signal, onStale }))
-      .rejects.toThrow("offline");
+      .rejects.toMatchObject({ name: "AbortError" });
     expect(onStale).toHaveBeenCalledOnce();
   });
 

@@ -275,6 +275,7 @@ export function loadModelCatalog(
   const storage = options.storage ?? (typeof chrome !== "undefined" ? chrome.storage?.local : undefined);
   const validateCompleteness = options.validateCompleteness ?? !options.fetch;
   const task = async () => {
+    options.signal?.throwIfAborted();
     const stored = storage ? (await storage.get(CATALOG_CACHE_KEY).catch(() => ({ [CATALOG_CACHE_KEY]: undefined })))[CATALOG_CACHE_KEY] as CachedCatalog | undefined : undefined;
     let cached = stored?.version === CATALOG_CACHE_VERSION ? stored : undefined;
     try { if (cached?.catalog && validateCompleteness) validateCatalog(cached.catalog); } catch { cached = undefined; }
@@ -294,8 +295,14 @@ export function loadModelCatalog(
       }).catch(() => undefined);
       return catalog;
     };
-    if (!cached?.catalog && !options.fetch && options.bundledFallback !== false) {
+    const fallbackToBundle = async () => {
+      options.signal?.throwIfAborted();
       const catalog = await loadBundledCatalog();
+      options.signal?.throwIfAborted();
+      return catalog;
+    };
+    if (!cached?.catalog && !options.refresh && !options.fetch && options.bundledFallback !== false) {
+      const catalog = await fallbackToBundle();
       const fetcher = globalThis.fetch;
       if (!backgroundCatalogRefreshes.has(fetcher)) {
         const refresh = fetchCatalog().catch((error) => {
@@ -319,7 +326,7 @@ export function loadModelCatalog(
       // failure for retry classification. The normal extension path is offline-safe.
       if (options.bundledFallback ?? !options.fetch) {
         options.onStale?.(error);
-        return loadBundledCatalog();
+        return fallbackToBundle();
       }
       throw error;
     }
