@@ -18,7 +18,7 @@ describe("three browser tools", () => {
     const input = { code: operation === "save" ? `return await artifacts.save(${stored!.id});` : `return await page.${operation}({save:true});` };
     logger.beginRun("conversation", "run"); logger.setRunPhase("run", 1);
     await logger.append({ type: "tool.started", conversationId: "conversation", toolCallId: "capture", content: { callId: "sdk", toolName: "run" }, input });
-    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
+    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger, confirmDownload: async () => undefined });
     let artifactId = stored?.id;
     let notifyStored!: () => void;
     const ready = new Promise<void>((resolve) => { notifyStored = resolve; });

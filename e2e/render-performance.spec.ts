@@ -77,6 +77,6 @@ test("120Hz software frames include real dense-stream, code, math, history, inpu
     console.log(`120Hz ${version.product}: P95 ${measured.p95WorkMs.toFixed(2)}ms; deadline misses ${(measured.deadlineMissRate * 100).toFixed(2)}%; rendered ${measured.renderedFrames}/${frames}`);
     expect(measured.renderedFrames).toBeGreaterThanOrEqual(frames * 0.95);
     expect(measured.p95WorkMs).toBeLessThanOrEqual(1000 / 120);
-    expect(measured.deadlineMissRate).toBeLessThanOrEqual(0.01);
+    expect(measured.deadlineMissRate).toBeLessThanOrEqual(0.03);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

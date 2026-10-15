@@ -12,7 +12,7 @@ inspect 默认只返回语义文本，有视觉能力的模型也不会自动截
 
 ## 可组合程序
 
-run 接受 async JavaScript 函数体；简单操作直接调用，复杂工作可用变量、循环、条件、等待、过滤和断言。页面动作、脚本、网络、标签页、持久脚本与产物在同一程序中组合。同步循环运行在可销毁的 opaque-origin sandbox Worker，Side Panel 中介浏览器能力，jobs 不进入动作队列。没有新增 Chrome 权限，MV3 service worker 不 eval 模型字符串。
+run 接受模型生成的 async JavaScript 函数体；简单操作直接调用，复杂工作可用变量、循环、条件、等待、过滤和断言。页面动作、脚本、网络、标签页、持久脚本与产物在同一程序中组合。同步循环运行在可销毁的 opaque-origin sandbox Worker，Side Panel 只通过显式能力 RPC 中介浏览器操作，jobs 不进入动作队列。没有新增 Chrome 权限，MV3 service worker 不 eval 模型字符串。
 
 ```js
 await page.getByLabel('Email').fill('me@example.com');
@@ -30,7 +30,7 @@ browser: page(tabId); tabs.list()/open(url?)/select(tabId)/close(tabId); scripts
 browser.runIn({kind:'page',tabId,world:'MAIN'|'ISOLATED'|'USER_SCRIPT',frameId?,documentId?},codeBody): explicit execution domain. MAIN/ISOLATED root only; USER_SCRIPT supports Chrome frameId or documentId. Use frameLocator.evaluate for arbitrary supported frames. No automatic context substitution.
 net.fetch({context:'page'|'extension',url,tabId?,init?}) returns {url,status,ok,headers,body}; no page-to-extension fallback. Page fetch obeys page origin/cookies/CORS; extension fetch uses extension host permissions. net.requests(options?,tabId?)/request(index,tabId?); net.responseBody(index,tabId?); net.console(options?,tabId?) read captured diagnostics.
 protocol.sessions(tabId?) lists root/child CDP handles; protocol.send({tabId,sessionId?},method,params?) sends any Chrome CDP method available to the extension. Arbitrary JS/CDP/fetch are effectful; there is no readonly override. inspect.documentId is the local navigation generation; USER_SCRIPT documentId uses Chrome's native scripting document ID. File URL sources are fetched in extension context.
-artifacts.read(id,{path?,offset?,limit?}); text(filename,text,mimeType?,save=false); save(id,filename?). Files and images stay internal unless the user requested download/export. emit(value) persists incremental output; check(condition,message?) records a verified assertion; sleep(ms) and signal support cancellation. Completed operations only confirm dispatch/return; verify application outcomes. Queued operations are not dispatched, uncertain effects must be inspected before continuing. Program computation uses a disposable opaque-origin sandbox Worker; browser capabilities are mediated by the Side Panel. Closing the panel cancels jobs and revokes capabilities; arbitrary program finally blocks are not guaranteed to run. Only records survive restart, never arbitrary JS stacks.
+artifacts.read(id,{path?,offset?,limit?}); text(filename,text,mimeType?,save=false); save(id,filename?). Files and images stay internal unless the user requested download/export, and every extension artifact download still requires explicit confirmation in the Side Panel. emit(value) persists incremental output; check(condition,message?) records a verified assertion; sleep(ms) and signal support cancellation. Completed operations only confirm dispatch/return; verify application outcomes. Queued operations are not dispatched, uncertain effects must be inspected before continuing. Program computation uses a disposable opaque-origin sandbox Worker; browser capabilities are mediated by the Side Panel. Closing the panel cancels jobs and revokes capabilities; arbitrary program finally blocks are not guaranteed to run. Only records survive restart, never arbitrary JS stacks.
 ```
 
 ## 任务、回执与恢复
@@ -39,4 +39,4 @@ run(background=true) 返回 queued/accepted，不代表完成。jobs 的 after/n
 
 取消会销毁 Worker、撤销能力、清理浏览器输入和监听器，已经派发的请求可能有未知效果，不会回滚或盲目重试。关闭侧栏会取消全部作业；宿主丢失后持久记录变为 interrupted，不恢复任意 JS 调用栈或自动重放。所有状态、回执与产物来自同一个 canonical event log。
 
-截图、PDF 与文本默认是会话内部产物；用户明确请求保存或导出才调用 save。网络必须显式选择 page 或 extension 上下文，页面 CORS/凭据和扩展 host permissions 不自动互换。公开 CDP 绑定当前窗口中的页面及其已知子会话，不按 CDP 域限制；任意 JS、CDP 和 fetch 按有副作用处理。
+截图、PDF 与文本默认是会话内部产物；用户明确请求保存或导出才调用 save，且每次下载仍需在 Side Panel 明确确认。网络必须显式选择 page 或 extension 上下文，页面 CORS/凭据和扩展 host permissions 不自动互换。标签发现可跨浏览器窗口，并使用 windowId 区分；选择其他窗口标签页会移动本轮活动窗口。CDP 不按域限制；任意 JS、CDP 和 fetch 均按有副作用处理。

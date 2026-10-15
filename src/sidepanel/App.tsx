@@ -10,13 +10,15 @@ import { ErrorNotice } from "../components/ui/error-notice";
 import { generateConversationTitle } from "../conversations";
 import { activeContext, ensureAutomaticContextSummary } from "../agent/context-choice";
 import { contextPressure, pendingContextChoice } from "../agent/compaction";
-import { activeRunIdentity, claimConversationRun, registerBackgroundRequest, withIdleConversation } from "../agent/coordinator";
+import { abortConversationWork, activeRunIdentity, claimConversationRun, registerBackgroundRequest, requestActiveRunCancellation, withIdleConversation } from "../agent/coordinator";
 import { EventLogger, fromLogValue, rebuildConversationList } from "../logging";
 import type { ModelConfig } from "../types";
+import { resolvedBaseURL } from "../agent/model-sdks";
 import { useSidePanelRuntime } from "./useSidePanelRuntime";
 import { useRunState } from "./useRunState";
 import { RuntimeViewContext } from "./runtime-view";
 import { useSidePanelSession } from "./useSidePanelSession";
+import { DownloadConfirmation } from "./DownloadConfirmation";
 import "../styles.css";
 import "./styles.css";
 
@@ -174,6 +176,7 @@ function ConfiguredRuntime({ config, systemPrompt, logger, initialThreadId }: { 
   const view = useMemo(() => ({ getState: runtime.thread.getState, thread: runtime.thread, runtime }), [runtime]);
   return <RuntimeViewContext.Provider value={view}>
     <ConfiguredConversation config={config} logger={logger} />
+    <DownloadConfirmation />
   </RuntimeViewContext.Provider>;
 }
 
@@ -185,6 +188,7 @@ function ConfiguredConversation({ config, logger }: { config: ModelConfig; logge
       <RecoverConversationTitles logger={logger} config={config} />
       <Header conversation logger={logger} />
       <RunOwnershipNotice />
+      <SecurityNotices config={config} />
       <ConversationView key={threadId} config={config} logger={logger} threadId={threadId} drafts={drafts.current} />
     </main>
   );
@@ -197,15 +201,30 @@ function RunOwnershipNotice() {
     : null;
 }
 
+function SecurityNotices({ config }: { config: ModelConfig }) {
+  let insecureRemote = false;
+  try {
+    const url = new URL(resolvedBaseURL(config));
+    insecureRemote = url.protocol === "http:" && !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+  } catch { /* Configuration validation reports malformed endpoints separately. */ }
+  return <>
+    {insecureRemote && <p role="alert" className="conversation-notice">当前模型 Endpoint 使用远程明文 HTTP；凭据与任务内容在传输中不受 HTTPS 保护。</p>}
+    {chrome.extension?.inIncognitoContext === true && <p role="status" className="conversation-notice">隐身窗口任务仍会写入 Surf Wax 的持久本地日志，并可能在普通窗口中继续可见。</p>}
+  </>;
+}
+
 function ConversationView({ config, logger, threadId, drafts }: { config: ModelConfig; logger: EventLogger; threadId: string; drafts: Map<string, string> }) {
   const conversationId = usePanelState((state) => state.threadListItem.remoteId ?? state.threadListItem.id);
   const isRunning = usePanelState((state) => state.thread.isRunning);
+  const isRunningRef = useRef(isRunning);
+  isRunningRef.current = isRunning;
   const [guardWarning, setGuardWarning] = useState("");
   const [contextStatus, setContextStatus] = useState<{ message: string; error: boolean }>();
   const [compactionBusy, setCompactionBusy] = useState(false);
   const [compactionError, setCompactionError] = useState("");
   const [retry, setRetry] = useState<{ attempt: number; delayMs: number; reason: string }>();
   const refreshing = useRef(false);
+  const pendingRefresh = useRef<boolean | undefined>(undefined);
   const compactionController = useRef<AbortController | undefined>(undefined);
   const refreshContext = useRef<(forced?: boolean) => Promise<void>>(async () => undefined);
   useEffect(() => {
@@ -243,7 +262,12 @@ function ConversationView({ config, logger, threadId, drafts }: { config: ModelC
   useEffect(() => {
     let active = true;
     const refresh = async (force = false) => {
-      if (refreshing.current || isRunning) return;
+      if (refreshing.current || isRunningRef.current) {
+        pendingRefresh.current = Boolean(pendingRefresh.current || force);
+        return;
+      }
+      force ||= pendingRefresh.current === true;
+      pendingRefresh.current = undefined;
       refreshing.current = true;
       const controller = new AbortController();
       compactionController.current = controller;
@@ -253,6 +277,18 @@ function ConversationView({ config, logger, threadId, drafts }: { config: ModelC
         const before = await activeContext(logger, conversationId);
         if (!active) return;
         const lastRun = [...before.events].reverse().find((event) => ["conversation.finished", "conversation.failed", "conversation.aborted", "conversation.submitted"].includes(event.type));
+        const lastCompaction = [...before.events].reverse().find((event) => ["context.compacted", "context.compaction.failed", "context.compaction.aborted"].includes(event.type));
+        if (!force && lastCompaction && lastCompaction.id > (lastRun?.id ?? -1) && lastCompaction.type === "context.compaction.failed") {
+          const detail = JSON.stringify(fromLogValue(lastCompaction.error)) ?? "模型未能生成摘要";
+          setCompactionError(detail);
+          setContextStatus({ message: "上下文自动压缩失败；原始历史已保留。", error: true });
+          return;
+        }
+        if (!force && lastCompaction && lastCompaction.id > (lastRun?.id ?? -1) && lastCompaction.type === "context.compaction.aborted") {
+          setCompactionError("");
+          setContextStatus({ message: "上下文压缩已停止；原始历史已保留。", error: false });
+          return;
+        }
         const overflow = lastRun?.type === "conversation.failed"
           && /context.{0,30}(length|window|token)|maximum.{0,30}token/i.test(JSON.stringify(lastRun.error))
           && (!before.checkpoint || before.checkpoint.eventId < lastRun.id);
@@ -283,6 +319,11 @@ function ConversationView({ config, logger, threadId, drafts }: { config: ModelC
         if (compactionController.current === controller) compactionController.current = undefined;
         refreshing.current = false;
         if (active) setCompactionBusy(false);
+        if (active && !isRunningRef.current && pendingRefresh.current !== undefined) {
+          const pending = pendingRefresh.current;
+          pendingRefresh.current = undefined;
+          void refresh(pending);
+        }
       }
     };
     refreshContext.current = refresh;
@@ -292,8 +333,11 @@ function ConversationView({ config, logger, threadId, drafts }: { config: ModelC
       if (event.type === "conversation.failed" && /context.{0,30}(length|window|token)|maximum.{0,30}token/i.test(JSON.stringify(event.error))) void refresh(true);
     });
     void refresh();
-    return () => { active = false; unsubscribe(); compactionController.current?.abort("sidepanel-closed"); };
-  }, [config, conversationId, isRunning, logger]);
+    return () => { active = false; pendingRefresh.current = undefined; unsubscribe(); compactionController.current?.abort("sidepanel-closed"); };
+  }, [config, conversationId, logger]);
+  useEffect(() => {
+    if (!isRunning) void refreshContext.current();
+  }, [isRunning]);
   return (
     <>
       {guardWarning && <ErrorNotice role="status" summary={guardWarning} />}
@@ -305,7 +349,12 @@ function ConversationView({ config, logger, threadId, drafts }: { config: ModelC
       </p>}
       {(compactionBusy || compactionError) && <section role="group" aria-label="上下文处理" data-testid="context-maintenance" className="conversation-notice">
         <div className="flex gap-2">
-          {compactionBusy ? <Button type="button" variant="outline" onClick={() => compactionController.current?.abort("user-stopped-compaction")}>停止压缩</Button>
+          {compactionBusy ? <Button type="button" variant="outline" onClick={() => {
+            compactionController.current?.abort("user-stopped-compaction");
+            setCompactionBusy(false);
+            void abortConversationWork(conversationId, "user-stopped-compaction");
+            void requestActiveRunCancellation("user-stopped-compaction");
+          }}>停止压缩</Button>
             : <Button type="button" variant="outline" disabled={isRunning} onClick={() => void refreshContext.current(true)}>重试压缩</Button>}
         </div>
         {compactionBusy && <p role="status">正在处理上下文…</p>}

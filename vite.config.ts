@@ -65,9 +65,12 @@ export default defineConfig({
   build: {
     outDir,
     emptyOutDir: true,
-    rollupOptions: { input: {
-      userscripts: resolve(projectRoot, "userscripts.html"),
-      programSandbox: resolve(projectRoot, "program-sandbox.html"),
-    } },
+    chunkSizeWarningLimit: 900,
+    rollupOptions: {
+      input: {
+        userscripts: resolve(projectRoot, "userscripts.html"),
+        programSandbox: resolve(projectRoot, "program-sandbox.html"),
+      },
+    },
   },
 });

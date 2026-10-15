@@ -1,8 +1,8 @@
-import { flushSync } from "react-dom";
+import { unstable_batchedUpdates } from "react-dom";
 
 /** Share one browser frame and one React commit across response/scroll/UI work. */
 export function batchAnimationFrames(scope: Pick<typeof globalThis, "requestAnimationFrame" | "cancelAnimationFrame">,
-  batch: (work: () => void) => void = flushSync) {
+  batch: (work: () => void) => void = unstable_batchedUpdates) {
   const nativeFrame = scope.requestAnimationFrame.bind(scope);
   const nativeCancel = scope.cancelAnimationFrame.bind(scope);
   let nextId = 0;

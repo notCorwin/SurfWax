@@ -13,7 +13,7 @@ const BASE_INSTRUCTIONS = [
   "Use run(background=true) for long execution, then jobs for incremental receipts, bounded waits, status, and cancellation. Poll until terminal; do not end the turn with an unfinished job. Cancellation never rolls back completed effects. Restart preserves records, not JavaScript stacks.",
   "Operations start in the current Chrome window and use stable tab IDs. Tab discovery spans browser windows; use the supplied windowId to distinguish them. Selecting a tab moves the run's active window, while browser.tabs.open(url) opens in that active window. Subscribe to events before triggering actions. Page and extension network contexts must be explicit.",
   "Stop immediately once the requested outcome is satisfied. If progress is blocked or targets remain genuinely ambiguous, explain the blocker and ask only for the information required to continue.",
-  "Generated artifacts stay in the conversation by default. Set save=true or call artifacts.save only when the user explicitly asks to save, download, or export a local file; a filename alone is not permission to download.",
+  "Generated artifacts stay in the conversation by default. Set save=true or call artifacts.save only when the user explicitly asks to save, download, or export a local file; a filename alone is not permission to download. Surf Wax will still require the user to approve every extension artifact download in the Side Panel.",
 ].join(" ");
 
 export const DEFAULT_INSTRUCTIONS = BASE_INSTRUCTIONS;

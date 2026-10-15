@@ -62,6 +62,8 @@ export function defaultBaseURL(sdk: ModelSdk): string {
 
 export function providerSettingFields(provider: ProviderDescriptor): ProviderSettingField[] {
   if (!isModelSdk(provider.npm)) return [];
+  if (provider.id === "custom") return [{ ...API_KEY, required: false,
+    description: "免鉴权的本地 Endpoint 可留空。" }];
   if (isCloudflareGateway({ providerId: provider.id, sdk: provider.npm })) return [
     API_KEY,
     field("accountId", "Cloudflare Account ID", { required: true }),

@@ -40,6 +40,8 @@ function deferred<T>() {
 describe("model config persistence", () => {
   it("recognizes complete configuration without trimming the API key", () => {
     expect(isCompleteModelConfig({ baseURL: " https://provider.test/v1 ", model: " model ", apiKey: " key " })).toBe(true);
+    expect(isCompleteModelConfig({ providerId: "custom", sdk: "@ai-sdk/openai-compatible", providerSettings: { apiKey: "test-key" },
+      baseURL: "http://127.0.0.1:60098/v1", model: "test-model", endpointType: "openai-chat-completions", contextWindowOverride: 1_000_000 })).toBe(true);
     expect(isCompleteModelConfig({ baseURL: "", model: "model", apiKey: "key" })).toBe(false);
   });
 

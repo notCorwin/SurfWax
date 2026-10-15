@@ -3,7 +3,7 @@ const isName = value => typeof value === 'string' && value.trim().length > 0;
 const sortedUnique = values => [...new Set(values)].sort();
 
 /** Catalog name and alias coverage only; this does not exercise provider protocols. */
-export function analyzeSdkCoverage(catalog, supportedSdks) {
+export function analyzeSdkCoverage(catalog, supportedSdks, ignoredSdks = []) {
   if (!isRecord(catalog) || !Object.keys(catalog).length) {
     throw new Error('Models.dev catalog must be a non-empty provider object');
   }
@@ -49,7 +49,9 @@ export function analyzeSdkCoverage(catalog, supportedSdks) {
   const listed = sortedUnique([...providerSdks, ...modelOverrideSdks]);
   const supported = sortedUnique(supportedSdks);
   const gitlabModelIds = sortedUnique(gitlabModels.map(({ id }) => id));
-  const missing = listed.filter(sdk => !supported.includes(sdk));
+  const ignored = sortedUnique(ignoredSdks);
+  const ignoredPresent = listed.filter(sdk => ignored.includes(sdk));
+  const missing = listed.filter(sdk => !supported.includes(sdk) && !ignored.includes(sdk));
   const missingGitlabMetadata = gitlabModels.filter(model => !isName(model.family) && !isName(model.canonicalModelId)).map(({ id }) => id).sort();
   return {
     providers: Object.keys(catalog).length,
@@ -58,11 +60,13 @@ export function analyzeSdkCoverage(catalog, supportedSdks) {
     modelOverrideSdks: sortedUnique(modelOverrideSdks),
     catalogSdks: listed,
     supportedSdks: supported,
+    ignoredSdks: ignored,
+    ignoredPresent,
     missing,
     modelOverrides: modelOverrides.sort((a, b) => `${a.providerId}/${a.modelId}`.localeCompare(`${b.providerId}/${b.modelId}`)),
     gitlab: { catalogModelIds: gitlabModelIds, missingMetadata: missingGitlabMetadata },
     coverageComplete: missing.length === 0 && missingGitlabMetadata.length === 0,
-    limitations: 'Checks SDK name registration and Models.dev GitLab routing metadata only. Does not prove protocol, authentication, streaming, tool-call or account-level model compatibility.',
+    limitations: 'Checks SDK name registration, explicit deprecated exclusions, and Models.dev GitLab routing metadata only. Does not prove protocol, authentication, streaming, tool-call or account-level model compatibility.',
   };
 }
 

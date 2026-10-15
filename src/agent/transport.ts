@@ -128,11 +128,18 @@ export function createChatTransport(agent: (signal: AbortSignal, branchIds: stri
         throw new Error(`Unsupported message trigger: ${options.trigger}`);
       }
       const currentRunId = runId();
-      const lease = await claimConversationRun(conversationId, options.abortSignal, currentRunId);
-      const releaseGuard = await guardActivePage(lease.signal).catch(() => () => undefined);
-      const release = async () => { try { await cleanup?.(); } finally { releaseGuard(); lease.finish(); } };
+      let lease: Awaited<ReturnType<typeof claimConversationRun>> | undefined;
+      let releaseGuard: () => void = () => undefined;
+      let released = false;
+      const release = async () => {
+        if (released) return;
+        released = true;
+        try { await cleanup?.(); } finally { releaseGuard(); lease?.finish(); }
+      };
 
       try {
+        lease = await claimConversationRun(conversationId, options.abortSignal, currentRunId);
+        releaseGuard = await guardActivePage(lease.signal).catch(() => () => undefined);
         logger.beginRun(conversationId, currentRunId);
         await ensureConversationPrompt(logger, conversationId, systemPrompt, options.messages.map((message) => message.id));
         const existing = await logger.repository(conversationId);
@@ -195,14 +202,14 @@ export function createChatTransport(agent: (signal: AbortSignal, branchIds: stri
           release,
         );
       } catch (error) {
-        const aborted = lease.signal.aborted || error instanceof Error && error.name === "AbortError";
+        const aborted = Boolean(lease?.signal.aborted || options.abortSignal?.aborted || error instanceof Error && error.name === "AbortError");
         try {
           await logger.append({
             type: aborted ? "conversation.aborted" : "conversation.failed",
             conversationId,
             runId: currentRunId,
             content: null,
-            ...(aborted ? { abort: { reason: lease.signal.reason ?? String(error) } } : { error }),
+            ...(aborted ? { abort: { reason: lease?.signal.reason ?? options.abortSignal?.reason ?? String(error) } } : { error }),
           });
         } finally {
           logger.endRun(conversationId, currentRunId);

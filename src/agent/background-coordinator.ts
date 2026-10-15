@@ -34,7 +34,13 @@ export class BackgroundRunCoordinator {
     // onClosed can arrive after another document acquired this window's run.
     // Port disconnect remains the primary signal if the context query fails.
     try { if (await hasDocument(owner.documentId)) return; } catch { return; }
-    if (this.owner === owner) this.cancel(owner.port, "sidepanel-closed");
+    if (this.owner === owner) {
+      this.cancel(owner.port, "sidepanel-closed");
+      // Chrome may keep a closed Side Panel renderer alive long enough that its
+      // owner port does not disconnect promptly. Closing the background end
+      // makes cleanup deterministic and triggers the normal disconnect path.
+      try { owner.port.disconnect(); } catch { /* The renderer already closed. */ }
+    }
   }
   cancel(port?: chrome.runtime.Port, reason = "log-cleared"): void {
     if (!this.owner || port && this.owner.port !== port) return;

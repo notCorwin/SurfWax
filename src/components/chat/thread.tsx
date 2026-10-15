@@ -52,15 +52,24 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
   useEffect(() => { if (!locked) setWarning(""); }, [locked]);
   const scroller = useRef<HTMLDivElement>(null);
   const followingEnd = useRef(true);
+  const directScrollInteraction = useRef(false);
   const virtualizer = useVirtualizer({ count: turns.length, estimateSize: () => 200, getItemKey: projectTurns.getItemKey(),
     getScrollElement: () => scroller.current, initialRect: { height: 800, width: 430 }, overscan: 2,
     useFlushSync: false, directDomUpdates: true, useAnimationFrameWithResizeObserver: true });
   const items = virtualizer.getVirtualItems();
   const totalSize = virtualizer.getTotalSize();
   useLayoutEffect(() => {
+    if (scroller.current) scroller.current.scrollTop = 0;
+  }, []);
+  useLayoutEffect(() => {
     const viewport = scroller.current;
     const content = viewport?.firstElementChild;
     if (!viewport || !content) return;
+    if (turns.length === 0) {
+      followingEnd.current = true;
+      viewport.scrollTop = 0;
+      return;
+    }
     let frame: number | undefined;
     const follow = () => {
       if (!followingEnd.current || frame !== undefined) return;
@@ -76,7 +85,7 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
       observer.disconnect();
       if (frame !== undefined) cancelAnimationFrame(frame);
     };
-  }, []);
+  }, [turns.length]);
   useLayoutEffect(() => {
     const viewport = scroller.current;
     if (!viewport || !followingEnd.current || turns.length === 0) return;
@@ -90,8 +99,17 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
         <MessageScrollerViewport ref={scroller} data-testid="thread-viewport" className="overflow-x-hidden"
           onScroll={(event) => { const viewport = event.currentTarget;
             const atEnd = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 2;
-            if (atEnd) followingEnd.current = true; }}
-          onWheel={(event) => { if (event.deltaY < 0) followingEnd.current = false; }}>
+            if (atEnd) followingEnd.current = true;
+            else if (directScrollInteraction.current) followingEnd.current = false; }}
+          onWheelCapture={(event) => { if (event.deltaY < 0) {
+            followingEnd.current = false;
+            event.preventDefault();
+            event.currentTarget.scrollTop += event.deltaY;
+          } }}
+          onPointerDown={() => { directScrollInteraction.current = true; }}
+          onPointerUp={() => { directScrollInteraction.current = false; }}
+          onPointerCancel={() => { directScrollInteraction.current = false; }}
+          onKeyDown={(event) => { if (["ArrowUp", "PageUp", "Home"].includes(event.key)) followingEnd.current = false; }}>
           <MessageScrollerContent className="mx-auto block w-full max-w-(--thread-max-width) px-4 pt-5 pb-8">
             {turns.length === 0 && !state.isLoading && <Welcome disabled={locked} />}
             {state.isLoading && <p role="status" className="conversation-notice py-8">正在读取对话…</p>}

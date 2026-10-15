@@ -1,6 +1,11 @@
 # 更新记录
 
-## 未发布 — 2026-10-04
+## 1.0.0 — 2026-10-15
+
+- 修复多 Side Panel 抢占失败缺少 canonical 终态、模型失败误显示为中断、动态页面测试不稳定和 Models.dev 测试夹具失效；完整目录、SDK、功能与性能门禁统一绑定到发布提交。
+- 单个会话继续使用可撤销 tombstone；设置页永久清空现在物理删除 IndexedDB 历史与内部产物。每次扩展产物下载都要求 Side Panel 明确确认，并补齐 HTTP 与隐身模式风险提示。
+- Provider、React、Vite、Playwright、Shiki、Streamdown、KaTeX、Vitest 等升级到最新稳定主版本；删除已移除 Model API 的 `@ai-sdk/vercel`，Vercel AI Gateway 继续使用 `@ai-sdk/gateway`。
+- 发布脚本强制 Node 24 和同提交完整验证证据，加入依赖新鲜度、安全审计与 Biome 静态检查；更新 GPL-3.0-only 许可、商店披露、三工具预算和候选素材。
 
 - 对齐 AGENTS.md：事件日志删除/清空改为追加 tombstone，会话删除支持撤销；高级设置补齐六类端点、Base URL、Context Window 与 Anthropic max_tokens；模型路由元数据统一来自 Models.dev，并移除工具时长、CDP 域和跨窗口限制。
 - 所有新回合统一使用 inspect / run / jobs；移除旧 49 工具的注册、独立执行入口、目录回退及侧栏自身 DevTools 求值路径。历史日志、分支与产物保留可读，继续或重试时追加当前目录快照。

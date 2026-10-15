@@ -81,6 +81,13 @@ test('fails closed for empty or malformed catalogs instead of reporting zero-SDK
   }
 });
 
+test('reports explicitly ignored deprecated SDKs without treating them as supported', () => {
+  const report = analyzeSdkCoverage({ legacy: { npm: '@ai-sdk/vercel', models: {} } }, [bedrock], ['@ai-sdk/vercel']);
+  assert.deepEqual(report.ignoredPresent, ['@ai-sdk/vercel']);
+  assert.deepEqual(report.missing, []);
+  assert.equal(report.supportedSdks.includes('@ai-sdk/vercel'), false);
+});
+
 test('CLI writes failure evidence and never labels a local snapshot live', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'surfwax-sdk-coverage-'));
   try {

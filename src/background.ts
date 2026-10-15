@@ -48,6 +48,16 @@ function track<T>(task: Promise<T>): Promise<T> {
   void task.finally(() => operations.delete(task)).catch(() => undefined);
   return task;
 }
+async function settleWithin(tasks: readonly Promise<unknown>[], timeoutMs: number): Promise<void> {
+  if (!tasks.length) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.allSettled(tasks),
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
+    ]);
+  } finally { if (timer !== undefined) clearTimeout(timer); }
+}
 function writerBarrier(port: chrome.runtime.Port): Promise<void> {
   return new Promise((resolve, reject) => {
     const id = crypto.randomUUID();
@@ -122,6 +132,13 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (sender.id !== chrome.runtime.id) return;
   if (message?.type === "surf-wax:run-status") { void bootReady.then(() => respond({ identity: runs.identity() }), (error) => respond({ error: String(error) })); return true; }
+  if (message?.type === "surf-wax:cancel-run") {
+    void bootReady.then(() => {
+      try { runs.validate(message.identity); runs.cancel(undefined, String(message.reason ?? "user-interrupted")); respond({ ok: true }); }
+      catch (error) { respond({ error: String(error) }); }
+    }, (error) => respond({ error: String(error) }));
+    return true;
+  }
   if (message?.type === "surf-wax:guard-status") {
     const tabId = sender.tab?.id;
     const runId = tabId !== undefined ? confirmedGuards.get(tabId) ?? loadingGuards.get(tabId)?.runId : undefined;
@@ -169,17 +186,23 @@ async function updatePageGuard(tabId: number, consumeLoading = false): Promise<v
   }
 }
 
-async function bypassPageGuard(tabId: number, enabled: boolean): Promise<void> {
+async function bypassPageGuard(tabId: number, enabled: boolean, timeoutMs?: number): Promise<void> {
   const count = (bypassedTabs.get(tabId) ?? 0) + (enabled ? 1 : -1);
   if (count > 0) bypassedTabs.set(tabId, count);
   else bypassedTabs.delete(tabId);
-  if (guardedTabs.has(tabId)) await updatePageGuard(tabId).catch(() => undefined);
+  if (guardedTabs.has(tabId)) {
+    const update = updatePageGuard(tabId).catch(() => undefined);
+    if (timeoutMs === undefined) await update;
+    else await settleWithin([update], timeoutMs);
+  }
 }
 
-async function guardInputTicket(tabId: number, runId: string, timestamp?: number, text?: string): Promise<void> {
+async function guardInputTicket(tabId: number, runId: string, timestamp?: number, text?: string, timeoutMs?: number): Promise<void> {
   // A disconnected port leaves the DOM blocker installed until Chrome executes
   // its removal. Authorize the actual run-bound blocker even after map deletion.
-  await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: authorizeGuardInput, args: [runId, timestamp ?? null, text ?? null] as any }).catch(() => undefined);
+  const update = chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: authorizeGuardInput, args: [runId, timestamp ?? null, text ?? null] as any }).catch(() => undefined);
+  if (timeoutMs === undefined) await update;
+  else await settleWithin([update], timeoutMs);
 }
 async function authorizedNativeInput(debuggee: chrome.debugger.Debuggee, tabId: number, runId: string, command: string, params: Record<string, any>) {
   const timestamp = Date.now() / 1000 + 86400 + Math.random() / 1000;
@@ -274,16 +297,25 @@ chrome.runtime.onConnect.addListener((port) => {
     if (!state) return Promise.resolve();
     const task = (async () => {
       const failures: string[] = [];
-      if (state.tabId !== undefined) await bypassPageGuard(state.tabId, true);
+      if (state.tabId !== undefined) await bypassPageGuard(state.tabId, true, 250);
       try {
         for (const [heldKey, params] of [...state.keys]) {
-          try { await authorizedNativeInput(state.debuggee, state.tabId!, state.runId!, "Input.dispatchKeyEvent", { ...params, text: undefined, unmodifiedText: undefined, type: "keyUp", modifiers: 0 }); state.keys.delete(heldKey); }
+          try {
+            await guardInputTicket(state.tabId!, state.runId!, Date.now() / 1000 + 86400, undefined, 250);
+            await chrome.debugger.sendCommand(state.debuggee, "Input.dispatchKeyEvent", { ...params, text: undefined, unmodifiedText: undefined, type: "keyUp", modifiers: 0 });
+            state.keys.delete(heldKey);
+          }
           catch (error) { failures.push(String(error)); }
         }
         for (const [button, params] of [...state.buttons]) {
-          try { await authorizedNativeInput(state.debuggee, state.tabId!, state.runId!, "Input.dispatchMouseEvent", { ...params, type: "mouseReleased", x: state.x, y: state.y, button, buttons: 0, modifiers: 0 }); state.buttons.delete(button); }
+          try {
+            await guardInputTicket(state.tabId!, state.runId!, Date.now() / 1000 + 86400, undefined, 250);
+            await chrome.debugger.sendCommand(state.debuggee, "Input.dispatchMouseEvent", { ...params, type: "mouseReleased", x: state.x, y: state.y, button, buttons: 0, modifiers: 0 });
+            state.buttons.delete(button);
+          }
           catch (error) { failures.push(String(error)); }
         }
+        if (state.tabId !== undefined && state.runId) await guardInputTicket(state.tabId, state.runId, undefined, undefined, 250);
         await chrome.debugger.sendCommand(state.debuggee, "Input.cancelDragging", {}).catch((error) => { failures.push(String(error)); });
         if (state.runId) {
           await eventLogger.append({ type: "browser.input.state", runId: state.runId,
@@ -292,12 +324,39 @@ chrome.runtime.onConnect.addListener((port) => {
         }
       } finally {
         heldInput.delete(inputKey);
-        if (state.tabId !== undefined) await bypassPageGuard(state.tabId, false);
+        if (state.tabId !== undefined) await bypassPageGuard(state.tabId, false, 250);
       }
     })();
     inputReleases.set(inputKey, task);
     void task.finally(() => { if (inputReleases.get(inputKey) === task) inputReleases.delete(inputKey); }).catch(() => undefined);
     return task;
+  }
+  async function releaseAfterDetach(state: HeldInputState): Promise<void> {
+    if (state.tabId === undefined || !state.runId || !(state.keys.size || state.buttons.size)) return;
+    let attached = false;
+    try {
+      await chrome.debugger.attach(state.debuggee, "1.3"); attached = true;
+      for (const [heldKey, params] of [...state.keys]) {
+        const timestamp = Date.now() / 1000 + 86400 + Math.random() / 1000;
+        await guardInputTicket(state.tabId, state.runId, timestamp, undefined, 1_000);
+        await chrome.debugger.sendCommand(state.debuggee, "Input.dispatchKeyEvent", { ...params, text: undefined, unmodifiedText: undefined, type: "keyUp", modifiers: 0 });
+        state.keys.delete(heldKey);
+      }
+      for (const [button, params] of [...state.buttons]) {
+        const timestamp = Date.now() / 1000 + 86400 + Math.random() / 1000;
+        await guardInputTicket(state.tabId, state.runId, timestamp, undefined, 1_000);
+        await chrome.debugger.sendCommand(state.debuggee, "Input.dispatchMouseEvent", { ...params, type: "mouseReleased", x: state.x, y: state.y, button, buttons: 0, modifiers: 0 });
+        state.buttons.delete(button);
+      }
+      await guardInputTicket(state.tabId, state.runId, undefined, undefined, 1_000);
+      await eventLogger.append({ type: "browser.input.state", runId: state.runId,
+        content: { tabId: state.tabId, debuggee: state.debuggee, x: state.x, y: state.y, keys: [], buttons: [] } });
+    } catch (error) {
+      await eventLogger.append({ type: "browser.input.release-failed", runId: state.runId,
+        content: { tabId: state.tabId, debuggee: state.debuggee }, error }).catch(() => undefined);
+    } finally {
+      if (attached) await chrome.debugger.detach(state.debuggee).catch(() => undefined);
+    }
   }
   const onEvent = (source: chrome.debugger.Debuggee, method: string, params?: object) => {
     if (!closed && sessions.has(debuggeeKey(source))) port.postMessage({ event: "onEvent", args: [source, method, params] });
@@ -336,8 +395,10 @@ chrome.runtime.onConnect.addListener((port) => {
         sessions.set(debuggeeKey(args[0]), args[0]);
       } else if (method === "detach") {
         requireDebuggee(args[0], method);
-        await Promise.all([...heldInput].filter(([, state]) => debuggeeKey(state.debuggee) === debuggeeKey(args[0])).map(([inputKey]) => releaseHeldInput(inputKey)));
-        await chrome.debugger.detach(args[0]);
+        const states = [...heldInput].filter(([, state]) => debuggeeKey(state.debuggee) === debuggeeKey(args[0]));
+        await settleWithin(states.map(([inputKey]) => releaseHeldInput(inputKey)), 500);
+        await chrome.debugger.detach(args[0]).catch(() => undefined);
+        for (const [, state] of states) await releaseAfterDetach(state);
         sessions.delete(debuggeeKey(args[0]));
       } else if (method === "endPointerGestures") {
         await Promise.all([...pointerGestures].map((tabId) => endGesture(tabId)));
@@ -433,10 +494,12 @@ chrome.runtime.onConnect.addListener((port) => {
     const debuggees = [...sessions.values()];
     sessions.clear();
     cleanupTask = track((async () => {
-      await Promise.allSettled([...runtimeEvaluations.values()].map(({debuggee}) => chrome.debugger.sendCommand(debuggee,"Runtime.terminateExecution")));
-      await Promise.allSettled([...heldInput.keys()].map(releaseHeldInput));
+      await settleWithin([...runtimeEvaluations.values()].map(({debuggee}) => chrome.debugger.sendCommand(debuggee,"Runtime.terminateExecution")), 1_000);
+      const inputStates = [...heldInput.values()];
+      await settleWithin([...heldInput.keys()].map(releaseHeldInput), 500);
       await Promise.all([...pointerGestures].map((tabId) => endGesture(tabId)));
       await Promise.all(debuggees.map((debuggee) => chrome.debugger.detach(debuggee).catch(() => undefined)));
+      for (const state of inputStates) await releaseAfterDetach(state);
     })());
     void cleanupTask.finally(() => { try { port.disconnect(); } catch { /* Already disconnected. */ } });
     return cleanupTask;

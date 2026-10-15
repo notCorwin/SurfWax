@@ -10,8 +10,9 @@ if (args.length && (args.length !== 2 || args[0] !== '--catalog')) {
 }
 const source = args.length ? resolve(args[1]) : 'https://models.dev/api.json';
 const catalog = args.length ? JSON.parse(await readFile(source, 'utf8')) : await publicJson(source);
+const ignoredSdks = ['@ai-sdk/vercel']; // Deprecated upstream: the Model API was removed and no replacement exists.
 const report = { source, sourceKind: args.length ? 'snapshot' : 'live', checkedAt: new Date().toISOString(),
-  ...analyzeSdkCoverage(catalog, MODEL_SDKS) };
+  ...analyzeSdkCoverage(catalog, MODEL_SDKS, ignoredSdks) };
 await mkdir('.dev/verification', { recursive: true });
 await writeFile('.dev/verification/sdk-coverage.json', JSON.stringify(report, null, 2));
 const failures = sdkCoverageFailures(report);
@@ -19,5 +20,5 @@ if (failures.length) throw new Error(failures.join('; '));
 console.log(`Models.dev (${report.sourceKind}): ${report.catalogSdks.length} SDK names `
   + `(${report.providerSdks.length} provider-level, ${report.modelOverrideSdks.length} model-override), `
   + `${report.providers} providers, ${report.models} models; SDK name and GitLab alias coverage complete `
-  + `(${report.gitlab.catalogModelIds.length} GitLab aliases).`);
+  + `(${report.gitlab.catalogModelIds.length} GitLab aliases; ${report.ignoredPresent.length} deprecated SDK exclusions).`);
 console.log(report.limitations);

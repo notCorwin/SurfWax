@@ -2,7 +2,7 @@ import { expect } from "@playwright/test";
 import { cp, mkdtemp, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { test, openExtension, reloadUpgradedExtension, configure, configureWithImages, dispose, startProvider, textResponse, commandResponse, readEvents, enableUserScripts, startNewConversation } from './fixtures';
+import { test, openExtension, reloadUpgradedExtension, configure, configureWithImages, dispose, startProvider, textResponse, commandResponse, readEvents, enableUserScripts, startNewConversation, approveDownload } from './fixtures';
 
 test('fresh installation grants all eight required permissions including downloads', async () => {
   const opened = await openExtension();
@@ -13,6 +13,7 @@ test('fresh installation grants all eight required permissions including downloa
     expect(manifest.permissions).toEqual(['debugger', 'downloads', 'scripting', 'sidePanel', 'storage', 'tabs', 'unlimitedStorage', 'userScripts']);
     expect(manifest.optional_permissions ?? []).toEqual([]);
     expect(manifest.host_permissions).toEqual(['<all_urls>']);
+    expect(manifest.incognito).toBe('spanning');
     expect(manifest.devtools_page).toBeUndefined();
     expect(await opened.page.evaluate(() => chrome.permissions.contains({ permissions: ['downloads'] }))).toBe(true);
     await expect(opened.page.getByTestId('config-required-state')).toBeVisible();
@@ -81,7 +82,7 @@ test('upgrades a real 0.2.0 profile without changing branches, configuration, lo
   } finally { await dispose(opened.context, profile, provider.server); }
 });
 
-test('download failure retains the artifact and a retry saves it without requesting permission or recapturing', async () => {
+test('download failure retains the artifact and an approved retry saves it without recapturing', async () => {
   const responses: Parameters<typeof startProvider>[0] = [commandResponse("run", { code: `return await page.screenshot(${JSON.stringify({ filename: 'retained.png', save: true })});` }, 'failed-save'), textResponse('SAVE_FAILED'), textResponse('保存重试')];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -96,6 +97,7 @@ test('download failure retains the artifact and a retry saves it without request
     });
     await opened.page.getByTestId('composer-input').fill('save the screenshot locally');
     await opened.page.getByTestId('composer-input').press('Enter');
+    await approveDownload(opened.page);
     await expect(opened.page.locator('.markdown-body').last()).toContainText('SAVE_FAILED');
     await expect(opened.page.getByTestId('conversation-menu')).toContainText('保存重试');
     await expect(opened.page.getByTestId('download-permission')).toHaveCount(0);
@@ -108,6 +110,7 @@ test('download failure retains the artifact and a retry saves it without request
     responses.push(commandResponse("run", { code: `return await artifacts.save(${JSON.stringify(artifact.id)},${JSON.stringify(undefined)});` }, 'retry-save'), textResponse('SAVE_RETRIED'));
     await opened.page.getByTestId('composer-input').fill('save the stored artifact again');
     await opened.page.getByTestId('composer-input').press('Enter');
+    await approveDownload(opened.page);
     await expect(opened.page.locator('.markdown-body').last()).toContainText('SAVE_RETRIED');
     expect(await opened.page.evaluate(() => (globalThis as any).__downloadTest)).toMatchObject({ attempts: 2, permissionRequests: 0 });
     expect((await readEvents(opened.page)).filter(event => event.type === 'tool.result.data' && event.content?.filename === 'retained.png')).toHaveLength(1);
@@ -128,6 +131,7 @@ test('stopping a pending download retains its artifact and closes the tool once'
       });
     });
     await opened.page.getByTestId('composer-input').fill('save the screenshot'); await opened.page.getByTestId('composer-input').press('Enter');
+    await approveDownload(opened.page);
     await expect.poll(() => opened.page.evaluate(() => typeof (globalThis as any).__finishDownload)).toBe('function');
     await opened.page.getByRole('button', { name: '停止生成' }).click();
     await expect.poll(async () => (await readEvents(opened.page)).filter(event => event.type === 'tool.failed' && event.toolCallId === 'pending-save').length).toBe(1);

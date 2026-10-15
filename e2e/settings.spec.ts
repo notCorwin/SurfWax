@@ -5,9 +5,14 @@ import { existsSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { gunzipSync } from "node:zlib";
+import bundledCatalogGzip from "../src/data/models-dev-api";
 
 
 import { test, SSE_HEADERS, p95, chunk, usageChunk, textResponse, streamingTextResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
+
+const bundledCatalog = JSON.parse(gunzipSync(Buffer.from(bundledCatalogGzip, "base64")).toString("utf8"));
+const catalogWith = (providers: Record<string, unknown>) => ({ ...bundledCatalog, ...providers });
 
 test("shows the configured model at the bottom left of the composer", async () => {
   const opened = await openExtension();
@@ -28,15 +33,15 @@ test("shows the configured model at the bottom left of the composer", async () =
 test("restores independent credentials and models when switching Providers", async () => {
   const opened = await openExtension();
   try {
-    await opened.context.route("https://models.dev/api.json", (route) => route.fulfill({ json: {
+    await opened.context.route("https://models.dev/api.json", (route) => route.fulfill({ json: catalogWith({
       vercel: { name: "Vercel AI Gateway", npm: "@ai-sdk/gateway", models: {
         "openai/gpt-test": { name: "GPT Test", tool_call: true, modalities: { output: ["text"] }, limit: { context: 100_000 } },
       } },
-    } }));
+    }) }));
     const [options] = await Promise.all([opened.context.waitForEvent("page"), opened.page.getByTestId("open-settings").click()]);
     await options.waitForLoadState("domcontentloaded");
 
-    await expect(options.getByText("已载入 1 个内置 Provider；每个 Provider 独立保存配置。")).toBeVisible();
+    await expect(options.getByText(/已载入 .* 个内置 Provider；每个 Provider 独立保存配置。/)).toBeVisible();
     await options.getByLabel("Provider", { exact: true }).click();
     await expect(options.getByRole("option", { name: /自定义 Endpoint.*custom/ })).toBeVisible();
     await expect(options.getByRole("option", { name: /Vercel AI Gateway.*vercel/ })).toBeVisible();
@@ -85,15 +90,12 @@ test("refreshes Models.dev providers and models on every settings open", async (
   try {
     let version = 1;
     let requests = 0;
-    await opened.page.evaluate(() => chrome.storage.local.set({ "side-agent:model-catalog": { version: 2, fetchedAt: Date.now(), catalog: {
-      cached: { name: "Cached Provider", npm: "@ai-sdk/openai-compatible", models: {} },
-    } } }));
     await opened.context.route("https://models.dev/api.json", (route) => {
       requests += 1;
       const id = version === 1 ? "first" : "second";
-      return route.fulfill({ json: { [id]: { name: `${id} Provider`, npm: "@ai-sdk/openai-compatible",
+      return route.fulfill({ json: catalogWith({ [id]: { name: `${id} Provider`, npm: "@ai-sdk/openai-compatible",
         models: { [`${id}-model`]: { name: `${id} Model`, tool_call: true, modalities: { output: ["text"] } } },
-      } } });
+      } }) });
     });
 
     const [first] = await Promise.all([opened.context.waitForEvent("page"), opened.page.getByTestId("open-settings").click()]);
@@ -117,14 +119,14 @@ test("refreshes Models.dev providers and models on every settings open", async (
 test("persists multi-field credentials and interpolates template Endpoints", async () => {
   const opened = await openExtension();
   try {
-    await opened.context.route("https://models.dev/api.json", (route) => route.fulfill({ json: {
-      bedrock: { name: "Amazon Bedrock", npm: "@ai-sdk/amazon-bedrock", models: {} },
+    await opened.context.route("https://models.dev/api.json", (route) => route.fulfill({ json: catalogWith({
+      "fixture-bedrock": { name: "Fixture Bedrock", npm: "@ai-sdk/amazon-bedrock", models: {} },
       template: { name: "Template Provider", npm: "@ai-sdk/openai-compatible", api: "https://api.example/${ACCOUNT}/v1", models: {} },
-    } }));
+    }) }));
     const [options] = await Promise.all([opened.context.waitForEvent("page"), opened.page.getByTestId("open-settings").click()]);
     await options.waitForLoadState("domcontentloaded");
 
-    await selectProvider(options, "bedrock", /Amazon Bedrock.*bedrock/);
+    await selectProvider(options, "fixture-bedrock", /Fixture Bedrock.*fixture-bedrock/);
     await options.getByLabel("Model ID", { exact: true }).fill("anthropic.test");
     await options.getByLabel("Region", { exact: true }).fill("us-east-1");
     await options.getByLabel("Bearer Token", { exact: true }).fill("bedrock-token");
@@ -138,12 +140,12 @@ test("persists multi-field credentials and interpolates template Endpoints", asy
     await expect(options.getByLabel("Base URL", { exact: true })).toHaveAttribute("placeholder", "https://api.example/tenant/v1");
     await options.getByRole("button", { name: "保存配置" }).click();
 
-    await selectProvider(options, "bedrock", /Amazon Bedrock.*bedrock/);
+    await selectProvider(options, "fixture-bedrock", /Fixture Bedrock.*fixture-bedrock/);
     await expect(options.getByLabel("Region", { exact: true })).toHaveValue("us-east-1");
     await expect(options.getByLabel("Bearer Token", { exact: true })).toHaveValue("bedrock-token");
     await expect.poll(() => options.evaluate(async () => (await chrome.storage.local.get("side-agent:model-config"))["side-agent:model-config"]))
       .toMatchObject({ profiles: {
-        bedrock: { providerSettings: { region: "us-east-1", apiKey: "bedrock-token" } },
+        "fixture-bedrock": { providerSettings: { region: "us-east-1", apiKey: "bedrock-token" } },
         template: { providerSettings: { apiKey: "template-key", ACCOUNT: "tenant" } },
       } });
   } finally {
@@ -158,7 +160,7 @@ test("keeps custom Endpoint available when the Models.dev catalog fails", async 
     await opened.context.route("https://models.dev/api.json", (route) => route.fulfill({ status: 503, body: "unavailable" }));
     const [options] = await Promise.all([opened.context.waitForEvent("page"), opened.page.getByTestId("open-settings").click()]);
     await options.waitForLoadState("domcontentloaded");
-    await expect(options.getByText("Models.dev 暂时不可用；仍可选择 custom 使用自定义 Endpoint。")).toBeVisible();
+    await expect(options.getByText(/Models.dev 暂时不可用，正在使用缓存目录/)).toBeVisible();
     await selectProvider(options, "custom", /自定义 Endpoint.*custom/);
     await options.getByText("高级设置", { exact: true }).click();
     await expect(options.getByLabel("Base URL", { exact: true })).toBeVisible();
@@ -168,16 +170,13 @@ test("keeps custom Endpoint available when the Models.dev catalog fails", async 
 });
 
 
-test("labels cached Models.dev providers when refresh fails", async () => {
+test("labels the bundled Models.dev catalog when refresh fails", async () => {
   const opened = await openExtension();
   try {
-    await opened.page.evaluate(() => chrome.storage.local.set({ "side-agent:model-catalog": { version: 2, fetchedAt: Date.now(), catalog: {
-      cached: { name: "Cached Provider", npm: "@ai-sdk/openai-compatible", models: {} },
-    } } }));
     await opened.context.route("https://models.dev/api.json", (route) => route.fulfill({ status: 503, body: "unavailable" }));
     const [options] = await Promise.all([opened.context.waitForEvent("page"), opened.page.getByTestId("open-settings").click()]);
-    await expect(options.getByText("Models.dev 暂时不可用，正在使用缓存目录（1 个 Provider）。")).toBeVisible();
-    await selectProvider(options, "cached", /Cached Provider.*cached/);
+    await expect(options.getByText(/Models.dev 暂时不可用，正在使用缓存目录/)).toBeVisible();
+    await selectProvider(options, "openai", /OpenAI.*openai/);
   } finally {
     await dispose(opened.context, opened.userDataDirectory);
   }

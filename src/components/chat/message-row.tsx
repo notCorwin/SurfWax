@@ -6,10 +6,10 @@ import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Message, MessageContent, MessageFooter } from "@/components/ui/message";
 import { Textarea } from "@/components/ui/textarea";
 import { ErrorNotice } from "@/components/ui/error-notice";
-import { MarkdownText } from "./markdown-text";
 import { ActivityPhaseContext, activityPhaseAt, processGroupSummary, turnActivityBoundary, turnActivityPhase } from "./process-group";
 import { Reasoning } from "./reasoning";
 import { ToolFallback } from "./tool-fallback";
+import { LazyMarkdownText } from "./lazy-markdown-text";
 
 import { useRuntimeView, type MessageView } from "@/sidepanel/runtime-view";
 export type { MessageView } from "@/sidepanel/runtime-view";
@@ -49,7 +49,8 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
     for (let offset = 0; offset < shown.length;) {
       const entry = shown[offset]!;
       if (entry.part.type === "text") {
-        output.push(user ? <p key={entry.index} className="whitespace-pre-wrap wrap-break-word">{entry.part.text}</p> : <MarkdownText key={entry.index} text={entry.part.text} running={entry.part.status.type === "running"} />); offset++; continue;
+        output.push(user ? <p key={entry.index} className="whitespace-pre-wrap wrap-break-word">{entry.part.text}</p>
+          : <LazyMarkdownText key={entry.index} text={entry.part.text} running={entry.part.status.type === "running"} />); offset++; continue;
       }
       if (entry.part.type !== "reasoning" && entry.part.type !== "tool-call") { offset++; continue; }
       const indices: number[] = [];
@@ -77,7 +78,7 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
       aria-label={user ? "重试消息" : "重新生成回复"} title={user ? "重试消息" : "重新生成回复"} onClick={() => command(() => {
         if (user) runtimeCommands.thread.startRun({ parentId: message.id }); else client().reload();
       })}><RotateCcwIcon aria-hidden="true" /></Button>
-    {message.branchCount > 1 && <div className="flex items-center gap-0.5 tabular-nums" aria-label="消息分支">
+    {message.branchCount > 1 && <div role="group" className="flex items-center gap-0.5 tabular-nums" aria-label="消息分支">
       <Button type="button" variant="ghost" size="icon-xs" disabled={locked || message.branchNumber <= 1} aria-label="上一个分支" title="上一个分支" onClick={() => command(() => client().switchToBranch({ position: "previous" }))}><ChevronLeftIcon aria-hidden="true" /></Button>
       <span className="min-w-8 text-center">{message.branchNumber} / {message.branchCount}</span>
       <Button type="button" variant="ghost" size="icon-xs" disabled={locked || message.branchNumber >= message.branchCount} aria-label="下一个分支" title="下一个分支" onClick={() => command(() => client().switchToBranch({ position: "next" }))}><ChevronRightIcon aria-hidden="true" /></Button>

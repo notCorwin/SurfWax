@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useContext } from "react";
-import { MarkdownText } from "./markdown-text";
+import { LazyMarkdownText } from "./lazy-markdown-text";
 import { ActivityPhaseContext } from "./process-group";
 
 const ReasoningImpl = ({ status, text }: { status: { type: string }; text: string }) => {
@@ -19,7 +19,7 @@ const ReasoningImpl = ({ status, text }: { status: { type: string }; text: strin
         <span className={running ? "shimmer text-foreground/65" : undefined}>{label}</span>
       </summary>
       <div className="thinking-body" aria-busy={status.type === "running" && phase !== "cancelled" && phase !== "failed" && phase !== "stopped"}>
-        <MarkdownText text={text} running={running} />
+        <LazyMarkdownText text={text} running={running} />
       </div>
     </details>
   );

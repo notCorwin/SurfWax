@@ -17,6 +17,7 @@ export async function validateBuild(directory = 'dist') {
   if (!equal(manifest.optional_permissions ?? [], [])) throw new Error('No optional extension permissions are expected');
   if (!equal(manifest.host_permissions ?? [], ['<all_urls>'])) throw new Error('Expected all_urls host access');
   if (manifest.minimum_chrome_version !== '138' || manifest.manifest_version !== 3) throw new Error('Unsupported browser/manifest contract');
+  if (manifest.incognito !== 'spanning') throw new Error('Incognito behavior must remain explicit so shared persistent logging is disclosed consistently');
   if (manifest.devtools_page || manifest.offscreen_document) throw new Error('Removed execution hosts remain in manifest');
   if (!equal(manifest.sandbox?.pages ?? [], ['program-sandbox.html'])) throw new Error('Disposable program sandbox is missing');
   if (manifest.content_security_policy?.extension_pages?.includes('unsafe-eval') || /allow-same-origin/.test(manifest.content_security_policy?.sandbox ?? '')) throw new Error('Sandbox isolation or extension CSP was weakened');

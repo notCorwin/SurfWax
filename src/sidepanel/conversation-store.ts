@@ -101,7 +101,7 @@ export class ConversationStore {
     for (const listener of this.listeners) listener();
   }
   private updateThread(update: Partial<ThreadState>) { this.publish({ thread: { ...this.state.thread, ...update } }); }
-  private display(messages: SidePanelMessage[], liveId?: string) {
+  private views(messages: SidePanelMessage[], liveId?: string): MessageView[] {
     const siblings = new Map<string | null, string[]>();
     const parents = new Map<string, string | null>();
     for (const { parentId, message } of this.repository.messages) {
@@ -109,12 +109,13 @@ export class ConversationStore {
       const group = siblings.get(parentId) ?? [];
       group.push(message.id); siblings.set(parentId, group);
     }
-    this.updateThread({ messages: messages.map((message, index) => {
+    return messages.map((message, index) => {
       const parent = parents.get(message.id) ?? messages[index - 1]?.id ?? null;
       const group = siblings.get(parent) ?? [];
       return this.projection.message(message, message.id === liveId, group.includes(message.id) ? group : [...group, message.id]);
-    }) });
+    });
   }
+  private display(messages: SidePanelMessage[], liveId?: string) { this.updateThread({ messages: this.views(messages, liveId) }); }
   private remember(headId: string | null) {
     const parents = new Map(this.repository.messages.map((entry) => [entry.message.id, entry.parentId]));
     for (const message of branchMessages(this.repository, headId)) this.preferredChildren.set(parents.get(message.id) ?? null, message.id);
@@ -204,7 +205,7 @@ export class ConversationStore {
     switchToNewThread: () => this.switchConversation(crypto.randomUUID(), false),
     switchToThread: (id: string) => this.switchConversation(id, true),
     item: ({ id }: { id: string }) => ({
-      rename: (title: string) => withIdleConversation(() => this.logger.append({ type: "conversation.title.updated", conversationId: id, content: { title: title.trim() || "新对话", source: "manual" } })),
+      rename: (title: string) => withIdleConversation(() => this.logger.append({ type: "conversation.title.updated", conversationId: id, content: { title: [...title.trim()].slice(0, 120).join("") || "新对话", source: "manual" } })),
       delete: () => withIdleConversation(async () => { await abortConversationWork(id); await this.logger.deleteConversation(id);
         if (this.state.threadListItem.id === id) await this.switchConversation(crypto.randomUUID(), false); }),
     }),
@@ -223,8 +224,9 @@ export class ConversationStore {
       const repository = exists ? await restoreConversationRepository(events) : { headId: null, messages: [] };
       if (revision !== this.loadVersion) return;
       this.restoreBranches(repository, events);
-      this.publish({ threadListItem: { id, ...(exists ? { remoteId: id } : {}) }, composer: { text: "" }, threads: { ...this.state.threads, mainThreadId: id } });
-      this.display(branchMessages(repository));
+      const messages = this.views(branchMessages(repository));
+      this.publish({ threadListItem: { id, ...(exists ? { remoteId: id } : {}) }, composer: { text: "" },
+        threads: { ...this.state.threads, mainThreadId: id }, thread: { ...this.state.thread, messages } });
       if (exists) this.logger.telemetry({ type: "conversation.selected", conversationId: id, content: null });
     } catch (error) { this.updateThread({ error }); throw error; }
     finally { if (revision === this.loadVersion) this.updateThread({ isLoading: false }); }

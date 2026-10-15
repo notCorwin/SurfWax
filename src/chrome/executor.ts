@@ -11,6 +11,7 @@ import type { InspectOptions } from "./automation";
 import { callUserScript } from "./script-client";
 import { executeSandboxProgram } from "./program-host";
 import { estimateProgramTimeoutMs } from "./program-timeout";
+import { requestDownloadConfirmation } from "../sidepanel/download-confirmation";
 
 type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
 type DebuggerTarget = chrome.debugger.TargetInfo;
@@ -24,6 +25,8 @@ type ExecutorChrome = typeof chrome & { debugger: DebuggerApi };
 
 const BRIDGE_KEY = "__surfWaxDebugger";
 const RESULTS_KEY = "__surfWaxResults";
+const MAX_NETWORK_RESULT_BYTES = 5 * 1024 * 1024;
+const MAX_UPLOAD_SOURCE_BYTES = 50 * 1024 * 1024;
 type ExecutionContext = { conversationId?: string; toolCallId?: string; visualEnabled?: boolean; logIdentity?: { runId?: string; toolCallId: string; toolCallIdCanonical: true } };
 type ArtifactRef = { id: number; filename: string; mimeType: string; byteLength: number; saved: boolean; downloadId?: number };
 type BrowserState = { windowId: number; tabId?: number };
@@ -47,6 +50,17 @@ function interruptionError(signal: AbortSignal, effectUnknown = false): DOMExcep
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw interruptionError(signal);
+}
+
+async function settleWithin(tasks: readonly Promise<unknown>[], timeoutMs: number): Promise<void> {
+  if (!tasks.length) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.allSettled(tasks),
+      new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
+    ]);
+  } finally { if (timer !== undefined) clearTimeout(timer); }
 }
 
 function readQuoted(value: string): string {
@@ -88,6 +102,33 @@ function timestamped(prefix: string, extension: string): string {
 
 function base64ByteLength(base64: string): number {
   return Math.floor(base64.length * 3 / 4) - (base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0);
+}
+
+async function limitedResponseBytes(response: Response, limit: number): Promise<{ bytes: Uint8Array; truncated: boolean }> {
+  if (!response.body) return { bytes: new Uint8Array(), truncated: false };
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  let truncated = false;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      const remaining = limit - size;
+      if (next.value.byteLength > remaining) {
+        if (remaining > 0) chunks.push(next.value.subarray(0, remaining));
+        size = limit; truncated = true; break;
+      }
+      chunks.push(next.value); size += next.value.byteLength;
+    }
+  } finally {
+    if (truncated) void reader.cancel("response size limit reached").catch(() => undefined);
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return { bytes, truncated };
 }
 
 function resultEnvelope(): string {
@@ -185,12 +226,15 @@ export class ChromeExecutor {
   private programScope?: ProgramScope;
   private readonly programEvaluations = new Map<string, { debuggee: Debuggee; count: number }>();
   private readonly programHost: typeof executeSandboxProgram;
+  private readonly confirmDownload: typeof requestDownloadConfirmation;
 
-  constructor(options: { chromeApi?: ExecutorChrome; logger?: EventLogger; programHost?: typeof executeSandboxProgram } = {}) {
+  constructor(options: { chromeApi?: ExecutorChrome; logger?: EventLogger; programHost?: typeof executeSandboxProgram;
+    confirmDownload?: typeof requestDownloadConfirmation } = {}) {
     this.chromeApi = options.chromeApi ?? globalThis.chrome as ExecutorChrome;
     this.logger = options.logger;
     this.jobs = new BrowserJobs(this.logger);
     this.programHost = options.programHost ?? executeSandboxProgram;
+    this.confirmDownload = options.confirmDownload ?? requestDownloadConfirmation;
     this.diagnostics = new BrowserDiagnostics(this.logger);
     if (!this.chromeApi?.debugger) throw new Error("Chrome extension debugger API is unavailable");
     const pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason: Error) => void }>();
@@ -426,14 +470,17 @@ export class ChromeExecutor {
         return this.executePageWorld(target, code, scope.signal, this.activeContext);
       }),
     };
-    const fetchResult = async (response: Response) => ({ url: response.url, status: response.status, ok: response.ok, headers: Object.fromEntries(response.headers), body: await response.text() });
+    const fetchResult = async (response: Response) => { const body = await limitedResponseBytes(response, MAX_NETWORK_RESULT_BYTES); return {
+      url: response.url, status: response.status, ok: response.ok, headers: Object.fromEntries(response.headers),
+      body: new TextDecoder().decode(body.bytes), ...(body.truncated ? { bodyTruncated: true, bodyLimitBytes: MAX_NETWORK_RESULT_BYTES } : {}),
+    }; };
     const net = {
       fetch: (input: { context: "page" | "extension"; url: string; tabId?: number; init?: RequestInit }) => call(`net.fetch.${input.context}`, true, async () => {
         if (input.context === "extension") { await scope.dispatched(); return fetchResult(await fetch(input.url, { ...input.init, signal: scope.signal })); }
         if (input.context !== "page") throw new Error("net.fetch requires explicit page or extension context");
         const raw = await this.boundPage(input.tabId ?? page.tabId, state);
         await scope.dispatched();
-        return raw.evaluate(`async payload => { const response = await fetch(payload.url, payload.init); return { url:response.url,status:response.status,ok:response.ok,headers:Object.fromEntries(response.headers),body:await response.text() }; }`, { url: input.url, init: input.init });
+        return raw.evaluate(`async payload => { const response = await fetch(payload.url, payload.init); const reader=response.body?.getReader(); const chunks=[]; let size=0,truncated=false; if(reader){try{while(true){const next=await reader.read();if(next.done)break;const remaining=payload.limit-size;if(next.value.byteLength>remaining){if(remaining>0)chunks.push(next.value.slice(0,remaining));size=payload.limit;truncated=true;break;}chunks.push(next.value);size+=next.value.byteLength;}}finally{if(truncated)void reader.cancel('response size limit reached').catch(()=>{});reader.releaseLock();}}const bytes=new Uint8Array(size);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}return { url:response.url,status:response.status,ok:response.ok,headers:Object.fromEntries(response.headers),body:new TextDecoder().decode(bytes),...(truncated?{bodyTruncated:true,bodyLimitBytes:payload.limit}:{}) }; }`, { url: input.url, init: input.init, limit: MAX_NETWORK_RESULT_BYTES });
       }),
       requests: (options: Record<string, any> = {}, tabId = page.tabId) => call("net.requests", false, async () => { await this.boundPage(tabId, state); return this.diagnostics.requests(tabId, options); }),
       request: (index: number, tabId = page.tabId) => call("net.request", false, async () => { await this.boundPage(tabId, state); return this.readRequest(tabId, index); }),
@@ -465,7 +512,11 @@ export class ChromeExecutor {
     this.tail = new Promise<void>((resolve) => { release = resolve; });
     const started = previous.then(() => {
       const timeout = timeoutMs ? new AbortController() : undefined;
-      const timer = timeout ? setTimeout(() => timeout.abort(new DOMException(`Operation timed out after ${timeoutMs}ms`, "TimeoutError")), timeoutMs) : undefined;
+      const timer = timeout ? setTimeout(() => {
+        this.logger?.record({ type: "browser.operation.timeout", conversationId: this.activeContext.conversationId,
+          content: { timeoutMs, toolCallId: this.activeContext.toolCallId } });
+        timeout.abort(new DOMException(`Operation timed out after ${timeoutMs}ms`, "TimeoutError"));
+      }, timeoutMs) : undefined;
       const combined = timeout ? signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal : signal;
       const clearDeadline = () => { if (timer !== undefined) clearTimeout(timer); };
       if (combined?.aborted) { clearDeadline(); release(); combined.throwIfAborted(); }
@@ -593,6 +644,7 @@ export class ChromeExecutor {
     });
     if (!event) throw new Error("CommandError[artifact-log-unavailable]: The canonical event log stopped accepting events");
     const artifact = { id: event.id, filename, mimeType, byteLength, saved: false };
+    if (save) await this.confirmDownload({ filename, mimeType, byteLength }, this.activeSignal);
     if (save && this.programScope) await this.programScope.dispatched();
     const downloadId = save ? await downloadArtifact(this.chromeApi, artifact, base64, this.activeSignal) : undefined;
     return { id: event.id, filename, mimeType, byteLength, saved: save, ...(downloadId === undefined ? {} : { downloadId }) };
@@ -614,6 +666,8 @@ export class ChromeExecutor {
     const filename = requested ?? stored.filename;
     throwIfAborted(this.activeSignal);
     const artifact = { id, filename, mimeType: stored.mimeType, byteLength: base64ByteLength(stored.base64), saved: false };
+    await this.confirmDownload({ filename, mimeType: stored.mimeType, byteLength: artifact.byteLength }, this.activeSignal);
+    throwIfAborted(this.activeSignal);
     const referenced = await this.logger.append({ type: "browser.artifact.used", conversationId: this.activeContext.conversationId,
       toolCallId: this.activeContext.toolCallId, ...this.activeContext.logIdentity, content: { artifactId: id } });
     if (!referenced) throw new DOMException("Could not persist artifact ownership", "AbortError");
@@ -635,7 +689,9 @@ export class ChromeExecutor {
       if (this.programScope) await this.programScope.dispatched();
       const response = await fetch(file.url, { signal: this.activeSignal });
       if (!response.ok) throw new Error(`Could not fetch upload URL: ${response.status}`);
-      const bytes = new Uint8Array(await response.arrayBuffer());
+      const loaded = await limitedResponseBytes(response, MAX_UPLOAD_SOURCE_BYTES + 1);
+      if (loaded.truncated || loaded.bytes.byteLength > MAX_UPLOAD_SOURCE_BYTES) throw new Error(`Upload URL exceeds ${MAX_UPLOAD_SOURCE_BYTES} bytes`);
+      const bytes = loaded.bytes;
       let binary = "";
       for (const byte of bytes) binary += String.fromCharCode(byte);
       return { name: file.name, mimeType: file.mimeType || response.headers.get("content-type") || "application/octet-stream", base64: btoa(binary) };
@@ -716,10 +772,16 @@ export class ChromeExecutor {
   private async stopBrowserOperations(): Promise<void> {
     if (this.endingRun) return this.endingRun;
     const cleanup = (async () => {
-      await Promise.all([...this.programEvaluations.values()].map(({debuggee}) => this.bridgeCommand(debuggee,"Runtime.terminateExecution").catch(() => undefined)));
+      // Some Chrome versions leave Runtime.terminateExecution unresolved for a
+      // synchronous page loop. Detachment below is the final kill boundary, so
+      // never let the advisory terminate command block cleanup indefinitely.
+      await settleWithin([...this.programEvaluations.values()].map(({debuggee}) => this.bridgeCommand(debuggee,"Runtime.terminateExecution").catch(() => undefined)), 1_000);
       const tabs = new Set([...this.networkEnabled, ...this.heldInput.keys()]);
-      await Promise.all([...tabs].map((tabId) => this.detachTabRuntime(tabId)));
+      if (typeof this.chromeApi.runtime?.connect !== "function") await Promise.all([...this.heldInput.keys()].map((tabId) => this.releaseInput(tabId)));
       await this.automation.abortSessions();
+      for (const tabId of tabs) { this.diagnostics.remove(tabId); this.dialogs.delete(tabId); }
+      this.networkEnabled.clear();
+      this.heldInput.clear();
       this.diagnostics.clear();
     })();
     this.endingRun = cleanup;

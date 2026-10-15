@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { ErrorNotice } from "@/components/ui/error-notice";
 import { registerBackgroundRequest, waitForConversationRun } from "@/agent/coordinator";
 import { modelMessages } from "@/agent/context-choice";
 import { contextPressure, estimateInput } from "@/agent/compaction";
@@ -43,7 +44,7 @@ type ContextUsage = { state: "loading" | "unavailable" } | {
 type TokenUsage = { input: number; output: number; cacheRead: number };
 type TokenDisplay = TokenUsage & { animating: boolean };
 const usageLabel = (usage: ContextUsage) => usage.state === "ready"
-  ? `上下文已使用约 ${usage.usedPercent}% · ${usage.estimated.toLocaleString("zh-CN")} / ${usage.budget.toLocaleString("zh-CN")} tokens · ${usage.limit.source === "manual" ? "手动设置" : "Models.dev"}`
+  ? `上下文已使用约 ${usage.usedPercent}% · ${usage.estimated.toLocaleString("zh-CN")} / ${usage.budget.toLocaleString("zh-CN")} tokens · ${usage.limit.source === "manual" ? "手动设置" : usage.limit.source === "models.dev" ? "Models.dev" : "估算"}`
   : usage.state === "loading" ? "正在估算上下文…" : "无法取得上下文窗口；可在设置中手动指定";
 
 function sumTokenUsage(events: readonly LogEvent[]): TokenUsage {
@@ -285,7 +286,7 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
 
   const label = usageLabel(latestUsage.current);
   const usedPercent = usage.state === "ready" ? usage.usedPercent : 0;
-  const source = usage.state === "ready" ? usage.limit.source === "manual" ? "手动设置" : "Models.dev" : undefined;
+  const source = usage.state === "ready" ? usage.limit.source === "manual" ? "手动设置" : usage.limit.source === "models.dev" ? "Models.dev" : "估算" : undefined;
   const changeTooltipOpen = (open: boolean) => {
     detailsOpen.current = open;
     setTooltipOpen(open);
@@ -301,6 +302,7 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
           data-testid="context-indicator"
           data-state={usage.state}
           data-used-percent={usage.state === "ready" ? usage.usedPercent : undefined}
+          data-token-animating={tokens.animating}
           tabIndex={0}
           role="progressbar"
           aria-valuemin={0}
@@ -371,6 +373,8 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
   const dispatching = useRef<string | undefined>(undefined);
   const [immediateId, setImmediateId] = useState<string>();
   const [resumeQueue, setResumeQueue] = useState(false);
+  const [queueing, setQueueing] = useState(false);
+  const [followupError, setFollowupError] = useState<unknown>();
   const [hasText, setHasText] = useState(() => Boolean((draft ?? externalText).trim()));
   const previousExternalText = useRef(externalText);
 
@@ -395,12 +399,13 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
   const dispatchFollowup = useCallback((message: FollowupMessage, mode: "followup" | "immediate") => {
     if (dispatching.current || blocked) return;
     dispatching.current = message.id;
+    setFollowupError(undefined);
     void waitForConversationRun(conversationId).then(() => runtimeCommands.thread.append({
       role: "user",
       content: [{ type: "text", text: message.text }],
       createdAt: new Date(),
       metadata: { custom: { followupId: message.id, followupMode: mode } },
-    })).catch(() => { dispatching.current = undefined; });
+    })).catch((error) => { setFollowupError(error); }).finally(() => { dispatching.current = undefined; });
   }, [runtimeCommands, blocked, conversationId]);
 
   useEffect(() => {
@@ -437,14 +442,16 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
       text: value,
       createdAt: new Date().toISOString(),
     };
-    clearInput();
+    setQueueing(true);
+    setFollowupError(undefined);
     void logger.append({
       type: "conversation.followup.queued",
       conversationId,
       content: queued,
     }).then(() => {
+      clearInput();
       if (!followups.ready || !isRunning) setResumeQueue(true);
-    }).catch(() => undefined);
+    }).catch((error) => setFollowupError(error)).finally(() => setQueueing(false));
   }, [runtimeCommands, blocked, clearInput, conversationId, followups.messages.length, followups.ready, isDisabled, isRunning, logger]);
 
   const sendImmediately = useCallback((message: FollowupMessage) => {
@@ -465,24 +472,16 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
     if (event.key !== "Enter" || event.nativeEvent.isComposing || composing.current || event.shiftKey) return;
     event.preventDefault();
     event.stopPropagation();
-    if (event.metaKey || event.ctrlKey) {
-      const start = event.currentTarget.selectionStart ?? event.currentTarget.value.length;
-      const end = event.currentTarget.selectionEnd ?? start;
-      event.currentTarget.setRangeText("\n", start, end, "end");
-      onDraftChange(event.currentTarget.value);
-      setHasText(Boolean(event.currentTarget.value.trim()));
-      return;
-    }
     submit();
-  }, [onDraftChange, submit]);
+  }, [submit]);
 
   return (
     <form className="relative flex w-full flex-col" onSubmit={(event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
       submit();
     }}>
-      {followups.messages.length > 0 && <div className="mb-2 flex flex-col gap-1" role="list" aria-label="等待发送的消息" data-testid="followup-queue">
-        {followups.messages.map((message, index) => <div key={message.id} role="listitem" data-testid="followup-item"
+      {followups.messages.length > 0 && <ol className="mb-2 flex flex-col gap-1" aria-label="等待发送的消息" data-testid="followup-queue">
+        {followups.messages.map((message, index) => <li key={message.id} data-testid="followup-item"
           className="flex min-w-0 items-center gap-2 rounded-lg border border-border/70 bg-muted/50 px-2 py-1.5 text-xs">
           <span className="shrink-0 text-muted-foreground">{index + 1}</span>
           <span className="min-w-0 flex-1 truncate" title={message.text}>{message.text}</span>
@@ -494,8 +493,9 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
             aria-label="移除排队消息" title="移除" onClick={() => removeFollowup(message.id)}>
             <XIcon aria-hidden="true" />
           </Button>
-        </div>)}
-      </div>}
+        </li>)}
+      </ol>}
+      {followupError !== undefined && <div className="mb-2"><ErrorNotice summary="排队消息未能保存或发送；原文已保留，请重试。" error={followupError} /></div>}
       <InputGroup className="composer-surface flex-col gap-1 !rounded-2xl" aria-label="发送浏览器任务">
         <InputGroupTextarea
           ref={inputRef}
@@ -504,7 +504,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
           placeholder="描述要执行的浏览器任务…"
           className="min-h-20 max-h-40 w-full overflow-y-auto px-4 py-3"
           rows={2}
-          disabled={isDisabled || blocked}
+          disabled={isDisabled || blocked || queueing}
           autoFocus
           enterKeyHint="send"
           aria-label="消息输入"
@@ -540,14 +540,14 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
           </div>
           <div className="flex items-center gap-1">
             {isRunning && <Button type="button" size="icon-sm" className="!rounded-full" aria-label="停止生成" title="停止生成" onClick={() => runtimeCommands.thread.cancelRun()}><SquareIcon aria-hidden="true" /></Button>}
-            {(!isRunning || hasText) && <Button type="button" size="icon-sm" className="!rounded-full" disabled={!hasText || isDisabled || blocked}
+            {(!isRunning || hasText) && <Button type="button" size="icon-sm" className="!rounded-full" disabled={!hasText || isDisabled || blocked || queueing}
               aria-label={isRunning || followups.messages.length > 0 ? "排队消息" : "发送消息"}
               title={isRunning || followups.messages.length > 0 ? "加入 Follow-up 队列" : "发送消息"} onClick={submit}><ArrowUpIcon aria-hidden="true" /></Button>}
           </div>
         </InputGroupAddon>
       </InputGroup>
       <div className="composer-hint mt-2 flex items-center justify-between gap-2 px-1 text-muted-foreground">
-        <span>{isRunning ? "可以继续输入，消息将排队发送" : "Enter 发送 · Shift + Enter 换行"}</span>
+        <span>{isRunning ? "可以继续输入，消息将排队发送" : "Enter / ⌘/Ctrl + Enter 发送 · Shift + Enter 换行"}</span>
         <span translate="no">Surf Wax</span>
       </div>
     </form>

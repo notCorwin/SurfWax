@@ -112,7 +112,7 @@ export type MockResponse = string[] | { status: number; error: string } | {
   parts: string[]; delayMs: number; partDelayMs?: number; disconnect?: boolean; startAfter?: Promise<void>;
 } | ((request: any) => string[]);
 
-export async function startProvider(responses: MockResponse[], delayMs = 0, summaryText?: string, supportedEfforts = ["minimal", "low", "medium", "high", "xhigh"], summaryDelayMs = 0, summaryFailures = 0): Promise<{
+export async function startProvider(responses: MockResponse[], delayMs = 0, summaryText?: string, supportedEfforts = ["minimal", "low", "medium", "high", "xhigh"], summaryDelayMs = 0, summaryFailures = 0, summaryStartAfter?: Promise<void>): Promise<{
   baseURL: string;
   origin: string;
   requests: any[];
@@ -229,12 +229,13 @@ export async function startProvider(responses: MockResponse[], delayMs = 0, summ
           response.end(JSON.stringify({ error: { message: "Summary generation rejected for this test" } }));
           return;
         }
-        setTimeout(() => {
+        void (summaryStartAfter ?? Promise.resolve()).then(() => setTimeout(() => {
+          if (response.destroyed) return;
           response.writeHead(200, { "access-control-allow-origin": "*", "content-type": "application/json" });
           response.end(JSON.stringify({ id: "summary", object: "chat.completion", created: 1, model: "test-model",
             choices: [{ index: 0, message: { role: "assistant", content: summaryText }, finish_reason: "stop" }],
             usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 } }));
-        }, summaryDelayMs);
+        }, summaryDelayMs));
         return;
       }
       const queued = responses.shift();
@@ -321,10 +322,12 @@ export async function openExtension(existingDirectory?: string, settings: { exte
     : process.platform === "win32" ? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
     : "/usr/bin/google-chrome";
   const context = await chromium.launchPersistentContext(userDataDirectory, {
-    executablePath: settings.executablePath ?? test.info().project.use.launchOptions?.executablePath ?? process.env.SURFWAX_CHROME_PATH ?? (existsSync(bundledChromium) ? bundledChromium : systemChrome),
+    executablePath: settings.executablePath ?? test.info().project.use.launchOptions?.executablePath ?? process.env.SURFWAX_CHROME_PATH
+      ?? (existsSync(bundledChromium) ? bundledChromium : systemChrome),
     headless: process.env.SURFWAX_E2E_HEADLESS !== "false",
     deviceScaleFactor: settings.deviceScaleFactor,
-    args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, "--no-sandbox", ...(settings.args ?? [])],
+    args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, "--no-sandbox",
+      "--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows", ...(settings.args ?? [])],
   });
   testProfiles.set(userDataDirectory, {
     context,
@@ -381,6 +384,8 @@ export async function configure(context: BrowserContext, page: Page, baseURL: st
   await options.getByLabel("窗口大小（tokens）").fill(String(contextWindow));
   await options.getByRole("button", { name: "保存配置" }).click();
   await expect(options.getByRole("status")).toContainText("配置已保存");
+  await expect.poll(() => options.evaluate(async () => (await chrome.storage.local.get("side-agent:model-config"))["side-agent:model-config"]))
+    .toMatchObject({ selectedProviderId: "custom", profiles: { custom: { baseURL, model: "test-model" } } });
   await expect(page.getByTestId("composer-input")).toBeVisible();
   return options;
 }
@@ -578,7 +583,16 @@ export async function openNativeSidePanel(opened: Awaited<ReturnType<typeof open
     return targetId;
   }).not.toBe('');
   const panel = await attachTarget(browser, targetId);
-  await expect.poll(() => panel.evaluate<boolean>('Boolean(document.querySelector("[data-testid=composer-input]"))')).toBe(true);
+  try {
+    await expect.poll(() => panel.evaluate<boolean>('Boolean(document.querySelector("[data-testid=composer-input]"))'), { timeout: 5_000 }).toBe(true);
+  } catch {
+    // Current Chrome can expose a newly-created native panel target before its
+    // extension document commits when another window already owns a panel.
+    // Reload that exact panel target rather than attaching to a stale blank host.
+    await panel.send('Page.enable');
+    await panel.send('Page.reload', { ignoreCache: true });
+    await expect.poll(() => panel.evaluate<boolean>('Boolean(document.querySelector("[data-testid=composer-input]"))'), { timeout: 30_000 }).toBe(true);
+  }
   await harness.close();
   return { browser, panel, targetId, windowId, tabId: chromeTab.id };
 }
@@ -592,6 +606,17 @@ export async function submitNative(panel: Awaited<ReturnType<typeof attachTarget
   await panel.send('Input.insertText', { text });
   await panel.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter' });
   await panel.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter' });
+}
+
+export async function approveDownload(page: Page): Promise<void> {
+  const confirmation = page.getByTestId("download-confirmation");
+  await expect(confirmation).toBeVisible();
+  await confirmation.getByRole("button", { name: "允许保存" }).click();
+}
+
+export async function approveNativeDownload(panel: Awaited<ReturnType<typeof attachTarget>>): Promise<void> {
+  await expect.poll(() => panel.evaluate<boolean>(`Boolean(document.querySelector('[data-testid="download-confirmation"]'))`)).toBe(true);
+  await panel.evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent?.includes('允许保存'))?.click()`);
 }
 
 export async function readNativeEvents(panel: Awaited<ReturnType<typeof attachTarget>>): Promise<any[]> {

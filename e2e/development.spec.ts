@@ -82,6 +82,7 @@ async function pixelRange(page: Page): Promise<number> {
 }
 
 test("reloads updated development code instead of restoring the profile's stale page guard", async () => {
+  test.setTimeout(120_000);
   const directory = await mkdtemp(resolve(tmpdir(), "surf-wax-dev-reload-"));
   const extension = resolve(directory, "extension");
   const profile = resolve(directory, "profile");

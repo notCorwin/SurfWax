@@ -228,6 +228,16 @@ describe("canonical event log", () => {
     ]);
     await logger.clear();
     expect(await logger.messages()).toEqual([]);
+    expect((await logger.all()).map((event) => event.type)).toEqual(["log.cleared"]);
+  });
+
+  it("searches only the latest version of each message without retaining a full text index", async () => {
+    const logger = new EventLogger({ store: memoryStore() });
+    await logger.appendMessage("one", { id: "u1", role: "user", parts: [{ type: "text", text: "old secret phrase" }] });
+    await logger.appendMessage("one", { id: "u1", role: "user", parts: [{ type: "text", text: "updated public phrase" }] });
+    await logger.appendMessage("two", { id: "u2", role: "user", parts: [{ type: "text", text: "another public phrase" }] });
+    await expect(logger.searchMessages("old secret")).resolves.toEqual([]);
+    await expect(logger.searchMessages("public phrase")).resolves.toEqual(["one", "two"]);
   });
 
   it("reads the clear boundary once across repeated indexed queries", async () => {
@@ -256,7 +266,7 @@ describe("canonical event log", () => {
     logger.record({ type: "userscript.snapshot", content: { count: 1 } });
     await logger.flush();
     await logger.clear();
-    expect((await store.all()).map(({ type }) => type)).toEqual(["sidepanel.closed", "log.cleared"]);
+    expect((await store.all()).map(({ type }) => type)).toEqual(["log.cleared"]);
   });
 
   it("batches fire-and-forget events without dropping or reordering them", async () => {
