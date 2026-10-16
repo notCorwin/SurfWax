@@ -1,16 +1,15 @@
 "use client";
 import { usePanelRuntime, usePanelState, type PanelState } from "@/sidepanel/runtime-view";
 
-import { classes } from "@/classes";
+import { cn } from "cn";
 import { ArrowUpIcon, ForwardIcon, SquareIcon, XIcon } from "lucide-react";
-import { memo, useCallback, useEffect, useId, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent } from "react";
+import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent } from "react";
 import { InputGroup, InputGroupTextarea, InputGroupAddon } from "@/components/ui/input-group";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { ErrorNotice } from "@/components/ui/error-notice";
 import { registerBackgroundRequest, waitForConversationRun } from "@/agent/coordinator";
 import { modelMessages } from "@/agent/context-choice";
 import { contextPressure, estimateInput } from "@/agent/compaction";
@@ -44,7 +43,7 @@ type ContextUsage = { state: "loading" | "unavailable" } | {
 type TokenUsage = { input: number; output: number; cacheRead: number };
 type TokenDisplay = TokenUsage & { animating: boolean };
 const usageLabel = (usage: ContextUsage) => usage.state === "ready"
-  ? `上下文已使用约 ${usage.usedPercent}% · ${usage.estimated.toLocaleString("zh-CN")} / ${usage.budget.toLocaleString("zh-CN")} tokens · ${usage.limit.source === "manual" ? "手动设置" : usage.limit.source === "models.dev" ? "Models.dev" : "估算"}`
+  ? `上下文已使用约 ${usage.usedPercent}% · ${usage.estimated.toLocaleString("zh-CN")} / ${usage.budget.toLocaleString("zh-CN")} tokens · ${usage.limit.source === "manual" ? "手动设置" : "Models.dev"}`
   : usage.state === "loading" ? "正在估算上下文…" : "无法取得上下文窗口；可在设置中手动指定";
 
 function sumTokenUsage(events: readonly LogEvent[]): TokenUsage {
@@ -100,10 +99,8 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
   const runtime = useRuntimeView();
   const [usage, setUsage] = useState<ContextUsage>({ state: "loading" });
   const latestUsage = useRef(usage);
-  const indicator = useRef<HTMLButtonElement>(null);
+  const indicator = useRef<HTMLSpanElement>(null);
   const detailsOpen = useRef(false);
-  const [tooltipOpen, setTooltipOpen] = useState(false);
-  const tooltipTriggerId = useId();
   const publishUsage = useCallback((next: ContextUsage) => {
     latestUsage.current = next;
     // Keep the exact accessible estimate fresh without rebuilding a closed
@@ -286,31 +283,23 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
 
   const label = usageLabel(latestUsage.current);
   const usedPercent = usage.state === "ready" ? usage.usedPercent : 0;
-  const source = usage.state === "ready" ? usage.limit.source === "manual" ? "手动设置" : usage.limit.source === "models.dev" ? "Models.dev" : "估算" : undefined;
-  const changeTooltipOpen = (open: boolean) => {
-    detailsOpen.current = open;
-    setTooltipOpen(open);
-    if (open) setUsage(latestUsage.current);
-  };
+  const source = usage.state === "ready" ? usage.limit.source === "manual" ? "手动设置" : "Models.dev" : undefined;
 
   return (
-    <Tooltip open={tooltipOpen} triggerId={tooltipTriggerId} onOpenChange={changeTooltipOpen}>
-      <TooltipTrigger
-          type="button"
-          id={tooltipTriggerId}
+    <Tooltip onOpenChange={(open) => { detailsOpen.current = open; if (open) setUsage(latestUsage.current); }}>
+      <TooltipTrigger asChild>
+        <span
           ref={indicator}
           data-testid="context-indicator"
           data-state={usage.state}
           data-used-percent={usage.state === "ready" ? usage.usedPercent : undefined}
-          data-token-animating={tokens.animating}
           tabIndex={0}
           role="progressbar"
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={usage.state === "ready" ? usage.usedPercent : undefined}
           aria-label={label}
-          onFocusCapture={() => changeTooltipOpen(true)}
-          className={classes(
+          className={cn(
             "flex size-7 shrink-0 items-center justify-center rounded-md",
             usage.state === "ready" && usage.usedPercent < 80 ? "text-foreground" : "text-muted-foreground",
             usage.state === "ready" && usage.usedPercent >= 80 && "text-destructive",
@@ -321,20 +310,21 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
             {usage.state === "ready" && <circle cx="10" cy="10" r="7" pathLength="100" fill="none" stroke="currentColor" strokeWidth="3"
               strokeLinecap="round" strokeDasharray="100" strokeDashoffset={100 - usedPercent} />}
           </svg>
-        </TooltipTrigger>
+        </span>
+      </TooltipTrigger>
       <TooltipContent side="top" sideOffset={8} collisionPadding={8} className="w-64 max-w-[calc(100vw-1rem)]">
         <div data-testid="context-detail" className="flex flex-col gap-3">
           <div className="flex items-start justify-between gap-3">
             <div className="flex flex-col gap-1">
               <p className="text-muted-foreground">上下文用量</p>
-              <p className={classes("text-xl font-semibold tracking-tight", (usage.state === "unavailable" || usage.state === "ready" && usage.usedPercent >= 80) && "text-destructive")}>
+              <p className={cn("text-xl font-semibold tracking-tight", (usage.state === "unavailable" || usage.state === "ready" && usage.usedPercent >= 80) && "text-destructive")}>
                 {usage.state === "ready" ? `约 ${usage.usedPercent}%` : usage.state === "loading" ? "估算中" : "不可用"}
               </p>
             </div>
             {source && <Badge variant={usage.state === "ready" && usage.usedPercent >= 80 ? "destructive" : "secondary"}>{source}</Badge>}
           </div>
           {usage.state === "ready" ? <>
-            <Progress data-testid="context-detail-progress" aria-label="上下文用量详情" value={usage.usedPercent} className="!h-1.5" />
+            <Progress data-testid="context-detail-progress" aria-label="上下文用量详情" value={usage.usedPercent} className="h-1.5" />
             <dl data-testid="context-token-usage" data-animating={tokens.animating} className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
               <dt className="text-muted-foreground">输入</dt>
               <dd data-testid="context-input" className="text-right font-medium tabular-nums">{tokens.input.toLocaleString("zh-CN")} tokens</dd>
@@ -373,8 +363,6 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
   const dispatching = useRef<string | undefined>(undefined);
   const [immediateId, setImmediateId] = useState<string>();
   const [resumeQueue, setResumeQueue] = useState(false);
-  const [queueing, setQueueing] = useState(false);
-  const [followupError, setFollowupError] = useState<unknown>();
   const [hasText, setHasText] = useState(() => Boolean((draft ?? externalText).trim()));
   const previousExternalText = useRef(externalText);
 
@@ -399,13 +387,12 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
   const dispatchFollowup = useCallback((message: FollowupMessage, mode: "followup" | "immediate") => {
     if (dispatching.current || blocked) return;
     dispatching.current = message.id;
-    setFollowupError(undefined);
     void waitForConversationRun(conversationId).then(() => runtimeCommands.thread.append({
       role: "user",
       content: [{ type: "text", text: message.text }],
       createdAt: new Date(),
       metadata: { custom: { followupId: message.id, followupMode: mode } },
-    })).catch((error) => { setFollowupError(error); }).finally(() => { dispatching.current = undefined; });
+    })).catch(() => { dispatching.current = undefined; });
   }, [runtimeCommands, blocked, conversationId]);
 
   useEffect(() => {
@@ -442,16 +429,14 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
       text: value,
       createdAt: new Date().toISOString(),
     };
-    setQueueing(true);
-    setFollowupError(undefined);
+    clearInput();
     void logger.append({
       type: "conversation.followup.queued",
       conversationId,
       content: queued,
     }).then(() => {
-      clearInput();
       if (!followups.ready || !isRunning) setResumeQueue(true);
-    }).catch((error) => setFollowupError(error)).finally(() => setQueueing(false));
+    }).catch(() => undefined);
   }, [runtimeCommands, blocked, clearInput, conversationId, followups.messages.length, followups.ready, isDisabled, isRunning, logger]);
 
   const sendImmediately = useCallback((message: FollowupMessage) => {
@@ -472,16 +457,24 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
     if (event.key !== "Enter" || event.nativeEvent.isComposing || composing.current || event.shiftKey) return;
     event.preventDefault();
     event.stopPropagation();
+    if (event.metaKey || event.ctrlKey) {
+      const start = event.currentTarget.selectionStart ?? event.currentTarget.value.length;
+      const end = event.currentTarget.selectionEnd ?? start;
+      event.currentTarget.setRangeText("\n", start, end, "end");
+      onDraftChange(event.currentTarget.value);
+      setHasText(Boolean(event.currentTarget.value.trim()));
+      return;
+    }
     submit();
-  }, [submit]);
+  }, [onDraftChange, submit]);
 
   return (
     <form className="relative flex w-full flex-col" onSubmit={(event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
       submit();
     }}>
-      {followups.messages.length > 0 && <ol className="mb-2 flex flex-col gap-1" aria-label="等待发送的消息" data-testid="followup-queue">
-        {followups.messages.map((message, index) => <li key={message.id} data-testid="followup-item"
+      {followups.messages.length > 0 && <div className="mb-2 flex flex-col gap-1" role="list" aria-label="等待发送的消息" data-testid="followup-queue">
+        {followups.messages.map((message, index) => <div key={message.id} role="listitem" data-testid="followup-item"
           className="flex min-w-0 items-center gap-2 rounded-lg border border-border/70 bg-muted/50 px-2 py-1.5 text-xs">
           <span className="shrink-0 text-muted-foreground">{index + 1}</span>
           <span className="min-w-0 flex-1 truncate" title={message.text}>{message.text}</span>
@@ -493,10 +486,9 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
             aria-label="移除排队消息" title="移除" onClick={() => removeFollowup(message.id)}>
             <XIcon aria-hidden="true" />
           </Button>
-        </li>)}
-      </ol>}
-      {followupError !== undefined && <div className="mb-2"><ErrorNotice summary="排队消息未能保存或发送；原文已保留，请重试。" error={followupError} /></div>}
-      <InputGroup className="composer-surface flex-col gap-1 !rounded-2xl" aria-label="发送浏览器任务">
+        </div>)}
+      </div>}
+      <InputGroup className="composer-surface flex-col gap-1 rounded-2xl" aria-label="发送浏览器任务">
         <InputGroupTextarea
           ref={inputRef}
           data-testid="composer-input"
@@ -504,7 +496,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
           placeholder="描述要执行的浏览器任务…"
           className="min-h-20 max-h-40 w-full overflow-y-auto px-4 py-3"
           rows={2}
-          disabled={isDisabled || blocked || queueing}
+          disabled={isDisabled || blocked}
           autoFocus
           enterKeyHint="send"
           aria-label="消息输入"
@@ -516,18 +508,17 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
           onCompositionStart={() => { composing.current = true; }}
           onCompositionEnd={() => { composing.current = false; }}
         />
-        <InputGroupAddon align="block-end" className="min-w-0 !justify-between gap-1 !px-2 !pb-2">
+        <InputGroupAddon align="block-end" className="min-w-0 justify-between gap-1 px-2 pb-2">
           <div className="flex min-w-0 items-center gap-1">
             <span data-testid="composer-model" className="composer-model min-w-0 truncate px-2 text-xs text-muted-foreground" title={model}>
               {(model.split("/").at(-1) ?? model).split(/[-_\s]+/).filter(Boolean).map((part) =>
                 /^(gpt|glm|api)$/i.test(part) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1),
               ).join(" ")}
             </span>
-            <Select items={reasoning.choices.map((effort) => ({ value: effort, label: EFFORT_LABELS[effort] }))}
-              value={reasoning.selected ?? null} disabled={!reasoning.ready || isRunning || !reasoning.choices.length}
+            <Select value={reasoning.selected ?? undefined} disabled={!reasoning.ready || isRunning || !reasoning.choices.length}
               onValueChange={(value) => settings.select(value as ReasoningEffort)}>
               <SelectTrigger data-testid="reasoning-effort" size="sm" aria-label="思考强度"
-                className="reasoning-select !h-7 max-w-20 gap-1 px-1.5">
+                className="reasoning-select h-7 max-w-20 gap-1 px-1.5">
                 <SelectValue placeholder="默认" />
               </SelectTrigger>
               <SelectContent position="popper" align="start">
@@ -539,15 +530,15 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
             <ContextIndicator config={config} logger={logger} conversationId={conversationId} />
           </div>
           <div className="flex items-center gap-1">
-            {isRunning && <Button type="button" size="icon-sm" className="!rounded-full" aria-label="停止生成" title="停止生成" onClick={() => runtimeCommands.thread.cancelRun()}><SquareIcon aria-hidden="true" /></Button>}
-            {(!isRunning || hasText) && <Button type="button" size="icon-sm" className="!rounded-full" disabled={!hasText || isDisabled || blocked || queueing}
+            {isRunning && <Button type="button" size="icon-sm" className="rounded-full" aria-label="停止生成" title="停止生成" onClick={() => runtimeCommands.thread.cancelRun()}><SquareIcon aria-hidden="true" /></Button>}
+            {(!isRunning || hasText) && <Button type="button" size="icon-sm" className="rounded-full" disabled={!hasText || isDisabled || blocked}
               aria-label={isRunning || followups.messages.length > 0 ? "排队消息" : "发送消息"}
               title={isRunning || followups.messages.length > 0 ? "加入 Follow-up 队列" : "发送消息"} onClick={submit}><ArrowUpIcon aria-hidden="true" /></Button>}
           </div>
         </InputGroupAddon>
       </InputGroup>
       <div className="composer-hint mt-2 flex items-center justify-between gap-2 px-1 text-muted-foreground">
-        <span>{isRunning ? "可以继续输入，消息将排队发送" : "Enter / ⌘/Ctrl + Enter 发送 · Shift + Enter 换行"}</span>
+        <span>{isRunning ? "可以继续输入，消息将排队发送" : "Enter 发送 · Shift + Enter 换行"}</span>
         <span translate="no">Surf Wax</span>
       </div>
     </form>

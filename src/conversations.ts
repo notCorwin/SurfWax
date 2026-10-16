@@ -22,28 +22,19 @@ function visibleText(message: ConversationMessage | undefined): string {
 }
 
 async function waitForCompletedRun(logger: EventLogger, conversationId: string, signal: AbortSignal): Promise<void> {
-  signal.throwIfAborted();
+  if ((await logger.conversation(conversationId)).some((event) => event.type === "conversation.finished")) return;
   await new Promise<void>((resolve, reject) => {
-    let settled = false;
-    const finish = (error?: unknown) => {
-      if (settled) return;
-      settled = true;
-      signal.removeEventListener("abort", onAbort);
-      unsubscribe();
-      error === undefined ? resolve() : reject(error);
-    };
     const onAbort = () => {
-      finish(signal.reason instanceof Error ? signal.reason : new DOMException("Operation aborted", "AbortError"));
+      unsubscribe();
+      reject(new DOMException("Operation aborted", "AbortError"));
     };
     const unsubscribe = logger.subscribe((event) => {
       if (event.conversationId !== conversationId || event.type !== "conversation.finished") return;
-      finish();
+      signal.removeEventListener("abort", onAbort);
+      unsubscribe();
+      resolve();
     });
     signal.addEventListener("abort", onAbort, { once: true });
-    if (signal.aborted) { onAbort(); return; }
-    void logger.conversation(conversationId).then((events) => {
-      if (events.some((event) => event.type === "conversation.finished")) finish();
-    }, finish);
   });
 }
 
@@ -85,7 +76,7 @@ export function generateConversationTitle(logger: EventLogger, config: ModelConf
         if (await result.finishReason === "other") throw new TypeError("Title stream ended before completion");
         return { result, generated };
       }, { signal: abortController.signal, logger, conversationId, purpose: "title" });
-      const title = [...(generated.trim().split(/\r?\n/, 1)[0]?.trim() ?? "")].slice(0, 120).join("");
+      const title = generated.trim().split(/\r?\n/, 1)[0]?.trim();
       if (!title) throw new Error("模型没有返回对话标题");
       await logger.append({
         type: "model.title.finished",
@@ -120,8 +111,7 @@ export function generateConversationTitle(logger: EventLogger, config: ModelConf
   return task;
 }
 
-function normalizeTerminalMessage(message: ConversationMessage, events: readonly LogEvent[], terminal: LogEvent): ConversationMessage {
-  const runId = terminal.runId!;
+function normalizeInterruptedMessage(message: ConversationMessage, events: readonly LogEvent[], runId: string): ConversationMessage {
   const tools = new Map<string, LogEvent>();
   for (const event of events) if (event.runId === runId && event.toolCallId) tools.set(event.toolCallId, event);
   const parts = message.parts.flatMap((part) => {
@@ -140,13 +130,7 @@ function normalizeTerminalMessage(message: ConversationMessage, events: readonly
   const metadata = message.metadata && typeof message.metadata === "object" && !Array.isArray(message.metadata)
     ? message.metadata as Record<string, unknown>
     : {};
-  const custom = metadata.custom && typeof metadata.custom === "object" && !Array.isArray(metadata.custom)
-    ? metadata.custom as Record<string, unknown> : {};
-  return terminal.type === "conversation.failed"
-    ? { ...message, id: message.id || `failed-${runId}`, parts, metadata: { ...metadata,
-      custom: { ...custom, interrupted: false, failure: fromLogValue(terminal.error) ?? "模型请求失败" } } }
-    : { ...message, id: message.id || `interrupted-${runId}`, parts, metadata: { ...metadata,
-      interrupted: true, custom: { ...custom, interrupted: true } } };
+  return { ...message, id: message.id || `interrupted-${runId}`, parts, metadata: { ...metadata, interrupted: true } };
 }
 
 async function replayRun(events: readonly LogEvent[], terminal: LogEvent): Promise<ConversationMessage | undefined> {
@@ -162,7 +146,7 @@ async function replayRun(events: readonly LogEvent[], terminal: LogEvent): Promi
   });
   let message: ConversationMessage | undefined;
   for await (const snapshot of readUIMessageStream({ stream })) message = snapshot as ConversationMessage;
-  return message?.parts.length ? normalizeTerminalMessage(message, events, terminal) : undefined;
+  return message?.parts.length ? normalizeInterruptedMessage(message, events, terminal.runId) : undefined;
 }
 
 export async function restoreConversationRepository(events: readonly LogEvent[]): Promise<ConversationRepository> {
@@ -183,7 +167,7 @@ export async function restoreConversationRepository(events: readonly LogEvent[])
     const parentId = typeof content?.messageId === "string" ? content.messageId : null;
     const persistedPartial = [...stored.values()].find((item) => item.runId === terminal.runId && item.parentId === parentId && item.message.role === "assistant");
     if (persistedPartial) {
-      persistedPartial.message = normalizeTerminalMessage(persistedPartial.message, events, terminal);
+      persistedPartial.message = normalizeInterruptedMessage(persistedPartial.message, events, terminal.runId!);
       continue;
     }
     const message = await replayRun(events, terminal);

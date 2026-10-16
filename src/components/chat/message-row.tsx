@@ -6,10 +6,10 @@ import { Bubble, BubbleContent } from "@/components/ui/bubble";
 import { Message, MessageContent, MessageFooter } from "@/components/ui/message";
 import { Textarea } from "@/components/ui/textarea";
 import { ErrorNotice } from "@/components/ui/error-notice";
+import { MarkdownText } from "./markdown-text";
 import { ActivityPhaseContext, activityPhaseAt, processGroupSummary, turnActivityBoundary, turnActivityPhase } from "./process-group";
 import { Reasoning } from "./reasoning";
 import { ToolFallback } from "./tool-fallback";
-import { LazyMarkdownText } from "./lazy-markdown-text";
 
 import { useRuntimeView, type MessageView } from "@/sidepanel/runtime-view";
 export type { MessageView } from "@/sidepanel/runtime-view";
@@ -49,8 +49,7 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
     for (let offset = 0; offset < shown.length;) {
       const entry = shown[offset]!;
       if (entry.part.type === "text") {
-        output.push(user ? <p key={entry.index} className="whitespace-pre-wrap wrap-break-word">{entry.part.text}</p>
-          : <LazyMarkdownText key={entry.index} text={entry.part.text} running={entry.part.status.type === "running"} />); offset++; continue;
+        output.push(user ? <p key={entry.index} className="whitespace-pre-wrap wrap-break-word">{entry.part.text}</p> : <MarkdownText key={entry.index} text={entry.part.text} running={entry.part.status.type === "running"} />); offset++; continue;
       }
       if (entry.part.type !== "reasoning" && entry.part.type !== "tool-call") { offset++; continue; }
       const indices: number[] = [];
@@ -78,7 +77,7 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
       aria-label={user ? "重试消息" : "重新生成回复"} title={user ? "重试消息" : "重新生成回复"} onClick={() => command(() => {
         if (user) runtimeCommands.thread.startRun({ parentId: message.id }); else client().reload();
       })}><RotateCcwIcon aria-hidden="true" /></Button>
-    {message.branchCount > 1 && <div role="group" className="flex items-center gap-0.5 tabular-nums" aria-label="消息分支">
+    {message.branchCount > 1 && <div className="flex items-center gap-0.5 tabular-nums" aria-label="消息分支">
       <Button type="button" variant="ghost" size="icon-xs" disabled={locked || message.branchNumber <= 1} aria-label="上一个分支" title="上一个分支" onClick={() => command(() => client().switchToBranch({ position: "previous" }))}><ChevronLeftIcon aria-hidden="true" /></Button>
       <span className="min-w-8 text-center">{message.branchNumber} / {message.branchCount}</span>
       <Button type="button" variant="ghost" size="icon-xs" disabled={locked || message.branchNumber >= message.branchCount} aria-label="下一个分支" title="下一个分支" onClick={() => command(() => client().switchToBranch({ position: "next" }))}><ChevronRightIcon aria-hidden="true" /></Button>
@@ -90,11 +89,11 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
   return <Message data-role={message.role} align={user ? "end" : "start"} aria-live={latest && !user ? "polite" : undefined} className={user ? "user-message" : "assistant-message px-2"}>
     <MessageContent className={user ? "items-end" : "assistant-message-content"}>
       {user ? <form className="flex w-full min-w-0 flex-col items-end gap-1" onSubmit={(event) => event.preventDefault()}>
-        <Bubble variant="muted" align="end" className="!max-w-[94%]" style={editing ? { width: editSize.width } : undefined}><BubbleContent ref={bubble} data-focus-group="" data-testid="user-message-bubble" className={`border-border/70 ${editing ? "!w-full" : ""}`}>
+        <Bubble variant="muted" align="end" className="max-w-[94%]" style={editing ? { width: editSize.width } : undefined}><BubbleContent ref={bubble} data-focus-group="" data-testid="user-message-bubble" className={`border-border/70 ${editing ? "w-full" : ""}`}>
           {editing ? <Textarea autoFocus data-focus-delegate="" data-testid="edit-message-input" aria-label="编辑消息" value={draft} disabled={locked}
             style={{ height: Math.min(128, Math.max(22, editSize.height - 16)) }}
             onChange={(event) => { setDraft(event.target.value); event.currentTarget.style.height = "auto"; event.currentTarget.style.height = `${Math.min(128, event.currentTarget.scrollHeight)}px`; }}
-            className="max-h-32 !min-h-0 !resize-none !rounded-none !border-0 !bg-transparent !p-0 !text-sm !leading-relaxed !shadow-none" /> : renderParts()}
+            className="max-h-32 min-h-0 resize-none rounded-none border-0 bg-transparent p-0 text-sm leading-relaxed shadow-none dark:bg-transparent" /> : renderParts()}
         </BubbleContent></Bubble>
         {editing && <div className="flex justify-end gap-1">
           <Button type="button" size="sm" variant="ghost" onClick={() => setEditing(false)}>取消</Button>

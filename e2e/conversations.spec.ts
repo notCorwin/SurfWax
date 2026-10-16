@@ -157,11 +157,11 @@ test("executes run through the page facade, restores the conversation, and clear
 
     const clearOptions = await configure(opened.context, opened.page, provider.baseURL);
     await clearOptions.getByTestId("event-log-clear").click();
-    await expect(clearOptions.getByRole("alertdialog")).toContainText("物理删除且不可恢复");
+    await expect(clearOptions.getByRole("alertdialog")).toContainText("此操作不可恢复");
     await clearOptions.getByRole("button", { name: "确认清空" }).click();
     await expect(clearOptions.getByRole("status")).toContainText("已清空");
     await expect.poll(async () => (await readEvents(clearOptions)).at(-1)?.type).toBe("log.cleared");
-    expect((await readEvents(clearOptions)).map((event) => event.type)).toEqual(["log.cleared"]);
+    expect((await readEvents(clearOptions)).some((event) => event.type === "conversation.message")).toBe(true);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -740,7 +740,6 @@ test("contains a long conversation search error inside the menu", async () => {
       };
     });
     await opened.page.getByTestId("conversation-menu").click();
-    await opened.page.getByRole("searchbox").fill("trigger search");
     const dialog = opened.page.locator(".conversation-dropdown");
     const notice = dialog.locator(".app-error-notice");
     await expect(notice).toContainText("搜索记录读取失败");

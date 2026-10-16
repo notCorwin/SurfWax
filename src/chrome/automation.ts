@@ -276,10 +276,7 @@ export class AutomationRuntime {
     for (const events of this.waiters.values()) for (const waiters of events.values()) for (const waiter of waiters) waiter.reject(abortError());
     this.waiters.clear();
     await Promise.all(sessions.map(async (session) => {
-      await Promise.race([
-        this.options.command(session.debuggee, "Input.cancelDragging", {}).catch(() => undefined),
-        new Promise<void>((resolve) => setTimeout(resolve, 250)),
-      ]);
+      await this.options.command(session.debuggee, "Input.cancelDragging", {}).catch(() => undefined);
       await this.options.detach(session.debuggee).catch(() => undefined);
     }));
   }

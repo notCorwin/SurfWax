@@ -95,41 +95,10 @@ function retryAfter(response: Response, now: () => number): number | undefined {
   return Number.isFinite(delay) ? Math.max(0, Math.min(MAX_RETRY_DELAY_MS, Math.round(delay))) : undefined;
 }
 
-const MAX_ERROR_RESPONSE_BYTES = 64 * 1024;
-
-async function limitedResponseText(response: Response, limit = MAX_ERROR_RESPONSE_BYTES): Promise<{ text: string; truncated: boolean }> {
-  if (!response.body) return { text: "", truncated: false };
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let text = "";
-  let bytes = 0;
-  let truncated = false;
-  try {
-    while (true) {
-      const next = await reader.read();
-      if (next.done) break;
-      const remaining = limit - bytes;
-      if (next.value.byteLength > remaining) {
-        text += decoder.decode(next.value.subarray(0, Math.max(0, remaining)), { stream: true });
-        truncated = true;
-        break;
-      }
-      bytes += next.value.byteLength;
-      text += decoder.decode(next.value, { stream: true });
-    }
-    text += decoder.decode();
-  } finally {
-    if (truncated) void reader.cancel("error response capture limit reached").catch(() => undefined);
-    reader.releaseLock();
-  }
-  return { text, truncated };
-}
-
 async function responseDetails(response: Response): Promise<Record<string, unknown>> {
   const headers = Object.fromEntries(response.headers.entries());
-  const body = await limitedResponseText(response.clone()).catch(() => ({ text: "", truncated: false }));
   return {
-    responseBody: body.text, ...(body.truncated ? { responseBodyTruncated: true, responseBodyLimitBytes: MAX_ERROR_RESPONSE_BYTES } : {}), headers,
+    responseBody: await response.clone().text().catch(() => ""), headers,
     requestId: response.headers.get("x-request-id") ?? response.headers.get("request-id") ?? response.headers.get("cf-ray") ?? undefined,
   };
 }
@@ -267,10 +236,7 @@ export function createRetryingFetch(options: {
 
         retries += 1;
         const delayMs = retryAfter(response, now) ?? retryBackoffDelay(retries, random);
-        const details = retries === 1 ? await responseDetails(response) : {
-          requestId: response.headers.get("x-request-id") ?? response.headers.get("request-id") ?? response.headers.get("cf-ray") ?? undefined,
-          repeatedResponseDetailsOmitted: true,
-        };
+        const details = await responseDetails(response);
         options.logger?.record({
           type: "request.retry",
           conversationId: options.conversationId,
@@ -643,6 +609,7 @@ export async function createModel(config: ModelConfig, logger?: EventLogger, con
       break;
     }
     case "@ai-sdk/togetherai": model = nativeModel(module.createTogetherAI(common), config); break;
+    case "@ai-sdk/vercel": model = nativeModel(module.createVercel(common), config); break;
     case "@ai-sdk/xai": model = nativeModel(module.createXai(common), config); break;
     case "@aihubmix/ai-sdk-provider": model = nativeModel(module.createAihubmix(common), config); break;
     case "@openrouter/ai-sdk-provider": model = nativeModel(module.createOpenRouter(common), config); break;

@@ -69,8 +69,7 @@ function programHarness(work: (capabilities: any, signal: AbortSignal) => Promis
       remove: vi.fn(async (id: number) => { const index = tabs.findIndex(tab => tab.id === id); if (index >= 0) tabs.splice(index, 1); }),
     },
   });
-  const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, logger: log.logger, confirmDownload: async () => undefined,
-    programHost: async (_code, caps, signal) => work(caps, signal) });
+  const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, logger: log.logger, programHost: async (_code, caps, signal) => work(caps, signal) });
   const raw: any = {
     tabId: 41, inspect: vi.fn(async () => ({ snapshot: "Current [ref=t41d1e1]" })),
     url: vi.fn(async () => "https://example.com"), title: vi.fn(async () => "Current"),
@@ -366,7 +365,7 @@ describe("ChromeExecutor programs", () => {
       controller.abort(new DOMException("sidepanel-closed", "AbortError"));
       return { id: 7 };
     }) } as unknown as EventLogger;
-    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, logger, confirmDownload: async () => undefined });
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, logger });
     (executor as any).activeContext = { conversationId: "conversation" };
     (executor as any).activeSignal = controller.signal;
     await expect((executor as any).storeArtifact("screen.png", "eA==", "image/png", true)).rejects.toMatchObject({ artifact: { id: 7, filename: "screen.png", saved: false } });

@@ -224,8 +224,8 @@ test("stress profile: dense stream and long canonical log stay interactive", { t
     expect(metrics.frameGaps.length).toBeGreaterThan(30);
     expect(metrics.inputLatencies.length).toBeGreaterThan(10);
     expect(restoredInputLatencies.length).toBeGreaterThan(5);
-    expect(p95FrameGap).toBeLessThanOrEqual(34);
-    expect(scrollP95FrameGap).toBeLessThanOrEqual(34);
+    expect(p95FrameGap).toBeLessThanOrEqual(20);
+    expect(scrollP95FrameGap).toBeLessThanOrEqual(20);
     expect(measured.inputToFrameP95).toBeLessThanOrEqual(50);
     expect(measured.restoredInputToFrameP95).toBeLessThanOrEqual(50);
   } finally {

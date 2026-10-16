@@ -279,7 +279,7 @@ function currentCatalogCache(value?: CachedCatalog): CachedCatalog | undefined {
 }
 
 export function loadModelCatalog(
-  options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; refresh?: boolean; onStale?: (error: unknown) => void; bundledFallback?: boolean; staleFallback?: boolean; validateCompleteness?: boolean; backgroundRefresh?: boolean } = {},
+  options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; refresh?: boolean; onStale?: (error: unknown) => void; bundledFallback?: boolean; staleFallback?: boolean; validateCompleteness?: boolean } = {},
 ): Promise<ModelCatalog> {
   const storage = options.storage ?? (typeof chrome !== "undefined" ? chrome.storage?.local : undefined);
   const validateCompleteness = options.validateCompleteness ?? !options.fetch;
@@ -319,7 +319,7 @@ export function loadModelCatalog(
     if (!cached?.catalog && !options.refresh && !options.fetch && options.bundledFallback !== false) {
       const catalog = await fallbackToBundle();
       const fetcher = globalThis.fetch;
-      if (options.backgroundRefresh !== false && !backgroundCatalogRefreshes.has(fetcher)) {
+      if (!backgroundCatalogRefreshes.has(fetcher)) {
         const refresh = fetchCatalog().catch((error) => {
           if (!options.signal?.aborted) options.onStale?.(error);
           throw error;

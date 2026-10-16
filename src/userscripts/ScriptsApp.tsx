@@ -19,7 +19,7 @@ import "../options/styles.css";
 import "./styles.css";
 
 type Script = chrome.userScripts.RegisteredUserScript;
-type ScriptField = "id" | "matches" | "code";
+type Field = "id" | "matches" | "code";
 const TEMPLATE: Script = { id: "", matches: [], js: [{ code: "" }], world: "USER_SCRIPT" };
 const SCRIPT_FIELDS = new Set(["allFrames", "excludeGlobs", "excludeMatches", "id", "includeGlobs", "js", "matches", "runAt", "world", "worldId"]);
 
@@ -65,7 +65,7 @@ export function ScriptsApp() {
   const [registered, setRegistered] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [draftError, setDraftError] = useState("");
-  const [fieldErrors, setFieldErrors] = useState<Partial<Record<ScriptField, string>>>({});
+  const [fieldErrors, setFieldErrors] = useState<Partial<Record<Field, string>>>({});
   const [message, setMessage] = useState("");
   const [restoreError, setRestoreError] = useState("");
   const [legacy, setLegacy] = useState<unknown>();
@@ -146,9 +146,9 @@ export function ScriptsApp() {
   };
 
   useEffect(() => {
-    void refresh().catch((cause) => setError(errorDetails(cause)));
+    void refresh();
     const onChanged = (changes: Record<string, chrome.storage.StorageChange>, area: string) => {
-      if (area === "local" && (changes[USER_SCRIPTS_STORAGE_KEY] || changes[USER_SCRIPTS_DISABLED_KEY] || changes[USER_SCRIPTS_ERROR_KEY] || changes[USER_SCRIPTS_LEGACY_KEY])) void refresh(false).catch((cause) => setError(errorDetails(cause)));
+      if (area === "local" && (changes[USER_SCRIPTS_STORAGE_KEY] || changes[USER_SCRIPTS_DISABLED_KEY] || changes[USER_SCRIPTS_ERROR_KEY] || changes[USER_SCRIPTS_LEGACY_KEY])) void refresh(false);
     };
     chrome.storage.onChanged.addListener(onChanged);
     return () => chrome.storage.onChanged.removeListener(onChanged);
@@ -188,7 +188,7 @@ export function ScriptsApp() {
     }
   };
 
-  const updateField = (field: ScriptField, value: string) => {
+  const updateField = (field: Field, value: string) => {
     if (!formReady) return;
     draftRevision.current += 1;
     const next: Script = { ...parsed };
@@ -212,7 +212,7 @@ export function ScriptsApp() {
       return;
     }
     if (mode === "form" && editableAsForm(script)) {
-      const errors: Partial<Record<ScriptField, string>> = {};
+      const errors: Partial<Record<Field, string>> = {};
       if (!script.id.trim()) errors.id = "请输入脚本 ID。";
       const matches = script.matches.map((match) => match.trim()).filter(Boolean);
       if (!matches.length) errors.matches = "请填写至少一条网站匹配规则。";
@@ -360,10 +360,7 @@ export function ScriptsApp() {
     setError("");
     setImportScripts(null);
     setOverwriteIds([]);
-    try {
-      if (file.size > 5 * 1024 * 1024) throw new Error("导入文件超过 5 MB 上限。");
-      setImportScripts(parseImport(await file.text()));
-    }
+    try { setImportScripts(parseImport(await file.text())); }
     catch (cause) { setError(`无法读取导入文件：${errorDetails(cause)}`); }
     if (fileInput.current) fileInput.current.value = "";
   };
@@ -415,15 +412,15 @@ export function ScriptsApp() {
             <label className="scripts-check-label"><Checkbox checked={visibleIds.every((id) => checkedIds.includes(id))} onCheckedChange={(checked) => setCheckedIds((current) => checked ? [...new Set([...current, ...visibleIds])] : current.filter((id) => !visibleIds.includes(id)))} aria-label="选择当前搜索结果" />选择当前结果</label>
             <span className="text-muted-foreground text-sm tabular-nums">已选 {checkedIds.length} 个</span>
           </div>}
-          {checkedIds.length > 0 && <div className="scripts-toolbar" role="toolbar" aria-label="批量操作">
+          {checkedIds.length > 0 && <div className="scripts-toolbar" aria-label="批量操作">
             <Button type="button" variant="outline" size="sm" disabled={busy || !available} onClick={() => void toggleMany(checkedIds, true)}>批量启用</Button>
             <Button type="button" variant="outline" size="sm" disabled={busy || !available} onClick={() => void toggleMany(checkedIds, false)}>批量停用</Button>
             <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => exportScripts(checkedIds)}>导出所选</Button>
             <Button type="button" variant="destructive" size="sm" disabled={busy || !available} onClick={() => setDeleteIds(checkedIds)}>批量删除</Button>
             <Button type="button" variant="ghost" size="sm" onClick={() => setCheckedIds([])}>清除选择</Button>
           </div>}
-          <div className="scripts-list" role="list" aria-label="已保存脚本">
-            {visibleScripts.map((script) => <div className="script-row" role="listitem" key={script.id}>
+          <div className="scripts-list" aria-label="已保存脚本">
+            {visibleScripts.map((script) => <div className="script-row" key={script.id}>
               <Checkbox checked={checkedIds.includes(script.id)} onCheckedChange={(checked) => setCheckedIds((current) => checked ? [...current, script.id] : current.filter((id) => id !== script.id))} aria-label={`选择 ${script.id}`} />
               <button className="script-item" type="button" disabled={busy} onClick={() => choose(script)}>
                 <span className="script-item-title">{script.id}</span>
@@ -450,7 +447,7 @@ export function ScriptsApp() {
         </CardContent>
       </Card>}
     </div>
-    {importScripts && <Card><CardHeader><CardTitle><h2>预览导入</h2></CardTitle><CardDescription>新脚本将启用；同名脚本仅在勾选覆盖后替换，并保留本地启停状态。</CardDescription></CardHeader><CardContent className="flex flex-col gap-4"><div className="scripts-import-list" role="list">{importScripts.map((script) => { const exists = scripts.some((item) => item.id === script.id); return <label className="scripts-import-row" role="listitem" key={script.id}><Checkbox aria-label={exists ? `覆盖 ${script.id}` : `新增 ${script.id}`} checked={!exists || overwriteIds.includes(script.id)} disabled={!exists} onCheckedChange={(checked) => setOverwriteIds((current) => checked ? [...current, script.id] : current.filter((id) => id !== script.id))} /><span className="min-w-0 break-words">{script.id}</span><Badge variant={exists ? "secondary" : "outline"}>{exists ? "覆盖同名" : "新增"}</Badge></label>; })}</div><div className="scripts-actions"><Button type="button" disabled={busy || !available} onClick={() => void applyImport()}>{action === "importing" && <LoaderCircleIcon data-icon="inline-start" className="animate-spin" aria-hidden="true" />}导入所选</Button><Button type="button" variant="outline" disabled={busy} onClick={() => setImportScripts(null)}>取消</Button></div></CardContent></Card>}
+    {importScripts && <Card><CardHeader><CardTitle><h2>预览导入</h2></CardTitle><CardDescription>新脚本将启用；同名脚本仅在勾选覆盖后替换，并保留本地启停状态。</CardDescription></CardHeader><CardContent className="flex flex-col gap-4"><div className="scripts-import-list">{importScripts.map((script) => { const exists = scripts.some((item) => item.id === script.id); return <label className="scripts-import-row" key={script.id}><Checkbox aria-label={exists ? `覆盖 ${script.id}` : `新增 ${script.id}`} checked={!exists || overwriteIds.includes(script.id)} disabled={!exists} onCheckedChange={(checked) => setOverwriteIds((current) => checked ? [...current, script.id] : current.filter((id) => id !== script.id))} /><span className="min-w-0 break-words">{script.id}</span><Badge variant={exists ? "secondary" : "outline"}>{exists ? "覆盖同名" : "新增"}</Badge></label>; })}</div><div className="scripts-actions"><Button type="button" disabled={busy || !available} onClick={() => void applyImport()}>{action === "importing" && <LoaderCircleIcon data-icon="inline-start" className="animate-spin" aria-hidden="true" />}导入所选</Button><Button type="button" variant="outline" disabled={busy} onClick={() => setImportScripts(null)}>取消</Button></div></CardContent></Card>}
     <AlertDialog open={deleteIds.length > 0} onOpenChange={(open) => { if (!open) setDeleteIds([]); }}><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>删除 {deleteIds.length} 个脚本？</AlertDialogTitle><AlertDialogDescription>脚本将从 Chrome 注销并从本地记录删除，此操作不可撤销。</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>取消</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => void remove(deleteIds)}>确认删除</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
   </main>;
 }

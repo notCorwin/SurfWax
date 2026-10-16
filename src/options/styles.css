@@ -1,13 +1,7 @@
 body {
   min-width: calc(var(--spacing) * 80);
   min-height: 100vh;
-  overflow: hidden;
-}
-
-.search-combobox-list {
-  max-height: min(calc(var(--spacing) * 90), calc(100dvh - calc(var(--spacing) * 8)));
   overflow-y: auto;
-  overscroll-behavior: contain;
 }
 
 .options-shell {
@@ -46,7 +40,6 @@ body {
 [data-slot="card"] form {
   display: contents;
 }
-[data-slot="card-title"] h2 { margin: 0; font: inherit; }
 
 [data-slot="card-footer"] {
   justify-content: flex-end;
@@ -77,12 +70,9 @@ body {
 }
 
 .search-combobox-content {
-  position: absolute;
   z-index: 50;
-  top: calc(100% + var(--spacing));
-  left: 0;
   width: min(32rem, calc(100vw - calc(var(--spacing) * 8)));
-  max-height: min(calc(var(--spacing) * 90), calc(100dvh - calc(var(--spacing) * 8)));
+  max-height: min(calc(var(--spacing) * 90), var(--radix-popover-content-available-height));
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -104,10 +94,9 @@ body {
   color: inherit;
   text-align: left;
   cursor: pointer;
-  top: 0;
 }
 
-.search-combobox-option:is(:hover, :focus-visible, [data-highlighted]) {
+.search-combobox-option:is(:hover, :focus-visible) {
   background: var(--accent);
   color: var(--accent-foreground);
 }

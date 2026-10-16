@@ -13,7 +13,6 @@ import { test,
   nativePanel,
   submitNative,
   readNativeEvents,
-  approveDownload,
 } from "./fixtures";
 
 function lastTool(request: any) {
@@ -246,7 +245,6 @@ return await artifacts.save(artifact.id);
     );
     await target.bringToFront();
     await submit(opened.page);
-    await approveDownload(opened.page);
     await expect(opened.page.locator(".markdown-body").last()).toContainText(
       "CAPABILITIES_VERIFIED",
       { timeout: 30000 },
@@ -478,7 +476,6 @@ test("terminates synchronous timeout and abnormal worker exit, then recovers aft
     await submit(opened.page);
     await expect(opened.page.locator(".markdown-body").last()).toContainText(
       "TIMEOUT_EXIT_AND_RECOVERY_VERIFIED",
-      { timeout: 30_000 },
     );
     const events = await readEvents(opened.page);
     expect(

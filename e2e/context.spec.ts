@@ -59,11 +59,11 @@ test("updates context usage during a streamed reply and shows structured details
       Object.assign(window, { __tokenAnimationSeen: false });
       new MutationObserver((mutations) => {
         if (mutations.some(({ target }) => target instanceof Element
-          && target.getAttribute("data-testid") === "context-indicator"
-          && target.getAttribute("data-token-animating") === "true")) {
+          && target.getAttribute("data-testid") === "context-token-usage"
+          && target.getAttribute("data-animating") === "true")) {
           Object.assign(window, { __tokenAnimationSeen: true });
         }
-      }).observe(document.body, { attributes: true, subtree: true, attributeFilter: ["data-token-animating"] });
+      }).observe(document.body, { attributes: true, subtree: true, attributeFilter: ["data-animating"] });
     });
 
     await opened.page.getByTestId("composer-input").fill("stream context now");
@@ -177,7 +177,7 @@ test('a summary failure keeps original history and exposes a retry that creates 
 });
 
 test('stopping background summarization leaves the source log intact and no partial checkpoint', async () => {
-  const provider = await startProvider([textResponse(largeReply), textResponse('停止摘要')], 0, summary, ['minimal'], 0, 0, new Promise(() => undefined));
+  const provider = await startProvider([textResponse(largeReply), textResponse('停止摘要')], 0, summary, ['minimal'], 2_000);
   const opened = await openExtension();
   try {
     await (await configure(opened.context, opened.page, provider.baseURL, 50_000)).close();

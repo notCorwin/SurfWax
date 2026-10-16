@@ -55,8 +55,8 @@ type EventStore = {
   byTypes?(types: readonly string[], conversationId?: string, afterId?: number): Promise<LogEvent[]>;
   byRunTypes?(runIds: readonly string[], types: readonly string[], afterId?: number): Promise<LogEvent[]>;
   conversation?(conversationId: string, afterId?: number): Promise<LogEvent[]>;
-  searchMessages?(query: string, afterId?: number): Promise<string[]>;
-  clear(): Promise<void>;
+  /** Legacy test capability; canonical runtime never invokes destructive clearing. */
+  clear?(): Promise<void>;
 };
 
 const DB_NAME = "side-agent-runtime";
@@ -152,32 +152,6 @@ function indexEventsAfter(index: IDBIndex, key: IDBValidKey, afterId: number): P
   });
 }
 
-function searchMessageConversations(index: IDBIndex, afterId: number, query: string): Promise<string[]> {
-  return new Promise((resolve, reject) => {
-    const conversations = new Set<string>();
-    const seenMessages = new Set<string>();
-    const request = index.openCursor(IDBKeyRange.only("conversation.message"), "prev");
-    request.onerror = () => reject(request.error ?? new Error("IndexedDB search cursor failed"));
-    request.onsuccess = () => {
-      const cursor = request.result;
-      if (!cursor || Number(cursor.primaryKey) <= afterId) { resolve([...conversations]); return; }
-      const event = cursor.value as LogEvent;
-      const message = fromLogValue(event.content);
-      if (event.conversationId && isConversationMessage(message)) {
-        const identity = `${event.conversationId}\0${message.id}`;
-        if (!seenMessages.has(identity)) {
-          seenMessages.add(identity);
-          const text = message.parts.flatMap((part) => part && typeof part === "object"
-            && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string"
-            ? [(part as { text: string }).text] : []).join("\n").toLocaleLowerCase();
-          if (text.includes(query)) conversations.add(event.conversationId);
-        }
-      }
-      cursor.continue();
-    };
-  });
-}
-
 class IndexedDbEventStore implements EventStore {
   private dbPromise?: Promise<IDBDatabase>;
 
@@ -251,21 +225,6 @@ class IndexedDbEventStore implements EventStore {
     const events = await indexEventsAfter(transaction.objectStore(EVENT_STORE).index(CONVERSATION_INDEX), conversationId, afterId);
     await transactionDone(transaction);
     return events.sort((left, right) => left.id - right.id);
-  }
-
-  async searchMessages(query: string, afterId = -1): Promise<string[]> {
-    const db = await this.open();
-    const transaction = db.transaction(EVENT_STORE, "readonly");
-    const result = await searchMessageConversations(transaction.objectStore(EVENT_STORE).index(TYPE_INDEX), afterId, query);
-    await transactionDone(transaction);
-    return result;
-  }
-
-  async clear(): Promise<void> {
-    const db = await this.open();
-    const transaction = db.transaction(EVENT_STORE, "readwrite");
-    transaction.objectStore(EVENT_STORE).clear();
-    await transactionDone(transaction);
   }
 
 }
@@ -724,29 +683,6 @@ export class EventLogger {
     return this.eventsByTypes(["conversation.message"]);
   }
 
-  async searchMessages(query: string): Promise<string[]> {
-    const needle = query.trim().toLocaleLowerCase();
-    if (!needle) return [];
-    await this.flush();
-    const store = this.options.store ?? getEventStore();
-    const floor = await this.latestClearId(store);
-    if (store.searchMessages) return store.searchMessages(needle, floor);
-    const latest = new Map<string, LogEvent>();
-    for (const event of await this.eventsByTypes(["conversation.message"])) {
-      const message = fromLogValue(event.content);
-      if (event.conversationId && isConversationMessage(message)) latest.set(`${event.conversationId}\0${message.id}`, event);
-    }
-    const matches = new Set<string>();
-    for (const event of latest.values()) {
-      const message = fromLogValue(event.content) as ConversationMessage;
-      const text = message.parts.flatMap((part) => part && typeof part === "object"
-        && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string"
-        ? [(part as { text: string }).text] : []).join("\n").toLocaleLowerCase();
-      if (text.includes(needle)) matches.add(event.conversationId!);
-    }
-    return [...matches];
-  }
-
   private async eventsByRunTypes(runIds: readonly string[], types: readonly string[]): Promise<LogEvent[]> {
     await this.flush();
     const store = this.options.store ?? getEventStore();
@@ -897,13 +833,8 @@ export class EventLogger {
 
   async clear(): Promise<void> {
     await this.flush();
-    const store = this.options.store ?? getEventStore();
-    await store.clear();
-    this.callOwners.clear();
-    this.phases.clear();
-    this.activeRuns.clear();
     const event = this.event({ type: "log.cleared", content: null });
-    const stored = await store.append(event);
+    const stored = await (this.options.store ?? getEventStore()).append(event);
     this.clearFloor = Promise.resolve(stored.id);
     for (const listener of this.listeners) listener(stored);
   }

@@ -206,8 +206,8 @@ button:not(:disabled),
   --focus-offset: var(--focus-inset-offset);
 }
 
-[data-slot="alert-dialog-content"], [data-slot="popover-content"],
-[data-slot="select-content"], .search-combobox-content { outline: none; }
+[data-slot="dialog-content"], [data-slot="alert-dialog-content"],
+[data-slot="popover-content"], [data-slot="select-content"], .search-combobox-content { outline: none; }
 
 [data-slot="select-content"] { border-color: transparent; }
 
@@ -314,4 +314,4 @@ summary,
   border-color: var(--surface-stroke);
   box-shadow: var(--surface-shadow);
 }
-[data-slot="dialog-overlay"], [data-slot="alert-dialog-backdrop"] { backdrop-filter: blur(var(--surface-blur)); }
+[data-slot="dialog-overlay"], [data-slot="alert-dialog-overlay"] { backdrop-filter: blur(var(--surface-blur)); }

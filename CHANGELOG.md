@@ -1,11 +1,6 @@
 # 更新记录
 
-## 1.0.0 — 2026-10-15
-
-- 修复多 Side Panel 抢占失败缺少 canonical 终态、模型失败误显示为中断、动态页面测试不稳定和 Models.dev 测试夹具失效；完整目录、SDK、功能与性能门禁统一绑定到发布提交。
-- 单个会话继续使用可撤销 tombstone；设置页永久清空现在物理删除 IndexedDB 历史与内部产物。每次扩展产物下载都要求 Side Panel 明确确认，并补齐 HTTP 与隐身模式风险提示。
-- Provider、React、Vite、Playwright、Shiki、Streamdown、KaTeX、Vitest 等升级到最新稳定主版本；删除已移除 Model API 的 `@ai-sdk/vercel`，Vercel AI Gateway 继续使用 `@ai-sdk/gateway`。
-- 发布脚本强制 Node 24 和同提交完整验证证据，加入依赖新鲜度、安全审计与 Biome 静态检查；更新 GPL-3.0-only 许可、商店披露、三工具预算和候选素材。
+## 未发布 — 2026-10-04
 
 - 对齐 AGENTS.md：事件日志删除/清空改为追加 tombstone，会话删除支持撤销；高级设置补齐六类端点、Base URL、Context Window 与 Anthropic max_tokens；模型路由元数据统一来自 Models.dev，并移除工具时长、CDP 域和跨窗口限制。
 - 所有新回合统一使用 inspect / run / jobs；移除旧 49 工具的注册、独立执行入口、目录回退及侧栏自身 DevTools 求值路径。历史日志、分支与产物保留可读，继续或重试时追加当前目录快照。
@@ -13,7 +8,7 @@
 - 定位与坐标点击包含原生指针移动、按下、释放的完整序列，三步共用一次防护授权；真实页面回归验证可信事件顺序及单次点击效果。完整本地验收输出单元、E2E 和性能的机器可读汇总。
 - 修复侧栏关闭时防护登记先删除、网页监听器尚未移除的竞态；输入释放继续使用页面内匹配 run 的授权，确保清理事件到达页面，随后撤销授权。
 
-- 以 Base UI、Tailwind CSS 和项目设计 Token 重建会话、消息、气泡与滚动界面，保留非视觉运行时和 canonical event log；RAF 合并响应，直接使用 Streamdown 渲染 GFM、LaTeX 和代码。
+- 以 shadcn/ui 重建会话、消息、气泡与滚动界面，保留非视觉运行时和 canonical event log；RAF 合并响应，直接使用 Streamdown 渲染 GFM、LaTeX 和代码。
 - 统一侧栏、设置与脚本编辑器的 Design Token，跟随浏览器主题；运行期间全会话操作锁定，停止按钮始终可用。
 - 模型请求与流恢复无限重试，退避上限 5 秒；摘要、标题及模型鉴权共用取消与恢复契约。移除 act 的 100 步限制。
 - 将工具目录追加到新会话系统提示词并记录快照；旧会话在成功摘要后迁移，上下文计入系统和 schema，未匹配时回退 256,000 tokens。

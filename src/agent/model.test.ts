@@ -117,17 +117,6 @@ describe("createRetryingFetch", () => {
     await logger.flush();
     expect(events.map((event) => event.type)).toEqual(["request.retry", "request.retry", "request.completed"]);
     expect(events.every((event) => typeof event.latencyMs === "number")).toBe(true);
-    expect(events[0]?.content).toMatchObject({ responseBody: "busy" });
-    expect(events[1]?.content).toMatchObject({ repeatedResponseDetailsOmitted: true });
-  });
-
-  it("bounds a provider error body before writing it to the retry log", async () => {
-    const responses = [new Response("x".repeat(100_000), { status: 503 }), new Response("ok")];
-    const { events, logger } = loggerWithEvents();
-    await createRetryingFetch({ fetch: vi.fn(async () => responses.shift()!), sleep: async () => undefined, logger })("https://provider.test");
-    await logger.flush();
-    expect((events[0]?.content as any).responseBody).toHaveLength(64 * 1024);
-    expect(events[0]?.content).toMatchObject({ responseBodyTruncated: true, responseBodyLimitBytes: 64 * 1024 });
   });
 
   it("aborts during backoff and retries network TypeErrors with the same Request body", async () => {
