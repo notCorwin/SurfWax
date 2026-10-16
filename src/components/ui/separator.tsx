@@ -1,5 +1,5 @@
 import * as React from "react"
-import { classes } from "@/classes"
+import { cn } from "cn"
 
 function Separator({
   className,
@@ -16,7 +16,7 @@ function Separator({
       role={decorative ? "none" : "separator"}
       aria-orientation={decorative ? undefined : orientation}
       data-orientation={orientation}
-      className={classes(
+      className={cn(
         "shrink-0 bg-border data-[orientation=horizontal]:h-px data-[orientation=horizontal]:w-full data-[orientation=vertical]:h-full data-[orientation=vertical]:w-px",
         className
       )}

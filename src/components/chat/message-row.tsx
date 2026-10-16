@@ -89,7 +89,7 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
   return <Message data-role={message.role} align={user ? "end" : "start"} aria-live={latest && !user ? "polite" : undefined} className={user ? "user-message" : "assistant-message px-2"}>
     <MessageContent className={user ? "items-end" : "assistant-message-content"}>
       {user ? <form className="flex w-full min-w-0 flex-col items-end gap-1" onSubmit={(event) => event.preventDefault()}>
-        <Bubble variant="muted" align="end" className="!max-w-[94%]" style={editing ? { width: editSize.width } : undefined}><BubbleContent ref={bubble} data-focus-group="" data-testid="user-message-bubble" className={`border-border/70 ${editing ? "!w-full" : ""}`}>
+        <Bubble variant="muted" align="end" className="max-w-[94%]" style={editing ? { width: editSize.width } : undefined}><BubbleContent ref={bubble} data-focus-group="" data-testid="user-message-bubble" className={`border-border/70 ${editing ? "w-full" : ""}`}>
           {editing ? <Textarea autoFocus data-focus-delegate="" data-testid="edit-message-input" aria-label="编辑消息" value={draft} disabled={locked}
             style={{ height: Math.min(128, Math.max(22, editSize.height - 16)) }}
             onChange={(event) => { setDraft(event.target.value); event.currentTarget.style.height = "auto"; event.currentTarget.style.height = `${Math.min(128, event.currentTarget.scrollHeight)}px`; }}

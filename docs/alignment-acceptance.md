@@ -4,7 +4,7 @@
 
 ## 运行时与日志
 
-Assistant UI 只提供非视觉运行时和历史适配器；Thread、Message、Composer、ActionBar、BranchPicker、ThreadList 和 Markdown 视觉组件已由 Base UI、Tailwind CSS、原生 CSS 与直接 Streamdown 渲染替代。TanStack Virtual 限制长历史的挂载范围，帧级投影每个 RAF 最多发布一次最新响应；流式事件全部写入 canonical event log。完成的 Markdown 块由 Streamdown 缓存，Shiki 语言按需加载，GFM 与 KaTeX 覆盖表格、任务列表、行内及块级数学。完成的轮次、工具状态、消息操作与输入区保留稳定的投影和组件身份，正文流动只更新发生变化的部分。
+Assistant UI 只提供非视觉运行时和历史适配器；Thread、Message、Composer、ActionBar、BranchPicker、ThreadList 和 Markdown 视觉组件已由 shadcn/ui、Tailwind 与直接 Streamdown 渲染替代。TanStack Virtual 限制长历史的挂载范围，帧级投影每个 RAF 最多发布一次最新响应；流式事件全部写入 canonical event log。完成的 Markdown 块由 Streamdown 缓存，Shiki 语言按需加载，GFM 与 KaTeX 覆盖表格、任务列表、行内及块级数学。完成的轮次、工具状态、消息操作与输入区保留稳定的投影和组件身份，正文流动只更新发生变化的部分。
 
 所有颜色、字体、字号、间距、圆角、阴影、语法色与动效来自 `src/styles.css` 和 `src/design-tokens/interaction.css`。浏览器浅深主题自动生效，脚本编辑器使用同一套语法 Token。用户使用 Bubble，Assistant 正文占据完整可用宽度。
 
