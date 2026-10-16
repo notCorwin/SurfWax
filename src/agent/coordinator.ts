@@ -111,14 +111,6 @@ export async function abortConversationWork(conversationId: string, reason = "co
   for (const [controller] of requests) controller.abort(reason);
   await Promise.all([...(run ? [run.done] : []), ...requests.map(([, entry]) => entry.done)]);
 }
-export async function requestActiveRunCancellation(reason = "user-interrupted"): Promise<void> {
-  activeRun?.controller.abort(reason);
-  if (typeof chrome === "undefined" || !chrome.runtime?.sendMessage) return;
-  const identity = await activeRunIdentity();
-  if (!identity) return;
-  const response = await chrome.runtime.sendMessage({ type: "surf-wax:cancel-run", identity, reason });
-  if (response?.error) throw new Error(String(response.error));
-}
 export function abortAllConversationWork(reason = "sidepanel-closed"): void {
   activeRun?.controller.abort(reason);
   for (const controller of backgroundControllers.keys()) controller.abort(reason);

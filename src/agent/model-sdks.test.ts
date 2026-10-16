@@ -28,7 +28,7 @@ function configFor(sdk: ModelSdk): ModelConfig {
 
 describe("model SDK registry", () => {
   it("contains all supported SDK identifiers and creates a language model for each", async () => {
-    expect(MODEL_SDKS).toHaveLength(29);
+    expect(MODEL_SDKS).toHaveLength(30);
     for (const sdk of MODEL_SDKS) {
       const model = await createModel(configFor(sdk));
       expect(model, sdk).toHaveProperty("specificationVersion");

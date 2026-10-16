@@ -7,7 +7,6 @@ import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { ErrorNotice } from "../components/ui/error-notice";
-import { Alert, AlertDescription } from "../components/ui/alert";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "../components/ui/alert-dialog";
 import { SearchCombobox, type SearchComboboxOption } from "./SearchCombobox";
 import { EventLogger } from "../logging";
@@ -62,9 +61,9 @@ export function OptionsApp() {
     ...providers.filter((provider) => provider.id === "vercel").map((provider) => ({ value: provider.id, label: provider.name })),
     ...providers.filter((provider) => provider.id !== "vercel").map((provider) => ({ value: provider.id, label: provider.name })),
   ], [providers]);
-  // A saved route is a credential boundary. Catalog refreshes may update the
-  // choices, but never rewrite an existing profile until the user picks a model.
-  const config = storedProfile;
+  const config = storedProfile && selectedProvider
+    ? applyModelPreset(storedProfile, selectedProvider)
+    : storedProfile;
   const settingFields: ProviderSettingField[] = config ? modelPresetFields(config, selectedProvider) : [];
   const routingErrors = config ? modelConfigErrors(config, settingFields) : {};
   const routingError = routingErrors.sdk ?? routingErrors.shape ?? routingErrors.body ?? routingErrors.headers;
@@ -77,11 +76,11 @@ export function OptionsApp() {
 
   useEffect(() => {
     let active = true;
-    const initialCatalog = loadModelCatalog({ backgroundRefresh: false, onStale: () => { if (active) setCatalogStale(true); } });
+    const catalog = loadModelCatalog({ refresh: true, onStale: () => { if (active) setCatalogStale(true); } });
     void Promise.all([
       // Always restore all settings for repair, even when migration cannot fetch a catalog.
       loadModelConfig(undefined, undefined, { migrateCatalogRouting: false }),
-      initialCatalog.then(modelProviderPresets).catch((error) => { if (active) setCatalogError(error); return []; }),
+      catalog.then(modelProviderPresets).catch((error) => { if (active) setCatalogError(error); return []; }),
     ]).then(([stored, catalogProviders]) => {
       if (!active) return;
       setModelSettings(stored);
@@ -103,16 +102,6 @@ export function OptionsApp() {
     }).finally(() => {
       if (active) setReady(true);
     });
-    void initialCatalog.then(async () => {
-      let stale = false;
-      const refreshed = await loadModelCatalog({ refresh: true, onStale: (error) => {
-        stale = true;
-        if (active) setCatalogStale(true);
-      } });
-      if (!active) return;
-      setProviders(modelProviderPresets(refreshed));
-      if (!stale) { setCatalogStale(false); setCatalogError(undefined); }
-    }).catch((error) => { if (active) { setCatalogStale(true); setCatalogError(error); } });
     return () => {
       active = false;
     };
@@ -130,18 +119,16 @@ export function OptionsApp() {
 
   const update = (field: Exclude<ModelField, "providerId">, value: string) => {
     if (!config) return;
-    const changed = {
+    setModelSettings((current) => ({ ...current, profiles: { ...current.profiles, [config.providerId]: {
       ...config, [field]: field === "contextWindowOverride" || field === "maxTokensOverride" ? (value ? Number(value) : undefined) : value,
       // A new free-text model must never inherit the previous model's route.
       ...(field === "model" ? {
         modelProvider: undefined,
         canonicalModelId: selectedProvider?.models.find((model) => model.id === value)?.canonicalModelId,
         modelFamily: selectedProvider?.models.find((model) => model.id === value)?.family,
-        ...(selectedProvider ? { sdk: selectedProvider.sdk, baseURL: selectedProvider.baseURL } : {}),
+        ...(config.modelProvider?.api !== undefined && selectedProvider ? { baseURL: selectedProvider.baseURL } : {}),
       } : {}),
-    };
-    const routed = field === "model" && selectedProvider ? applyModelPreset(changed, selectedProvider) : changed;
-    setModelSettings((current) => ({ ...current, profiles: { ...current.profiles, [config.providerId]: routed } }));
+    } } }));
     setFieldErrors((current) => field === "model" ? {} : { ...current, [field]: undefined });
     if (field === "baseURL" || field === "baseURLOverride" || field === "model" || field === "endpointType") {
       matchingKey.current = "";
@@ -253,14 +240,6 @@ export function OptionsApp() {
   };
 
   const busy = !ready || status === "saving" || status === "clearing";
-  const endpoint = config ? resolvedBaseURL(config) : "";
-  const insecureRemoteEndpoint = (() => {
-    try {
-      const url = new URL(endpoint);
-      return url.protocol === "http:" && !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
-    } catch { return false; }
-  })();
-  const incognito = chrome.extension?.inIncognitoContext === true;
 
   return (
     <main className="options-shell">
@@ -273,7 +252,7 @@ export function OptionsApp() {
       <Card id="options-content" tabIndex={-1} data-testid="options-card">
         <form noValidate onSubmit={(event) => void save(event)}>
           <CardHeader>
-            <CardTitle><h2>Provider 配置</h2></CardTitle>
+            <CardTitle>Provider 配置</CardTitle>
             <CardDescription>仅保存在当前扩展的 chrome.storage.local。</CardDescription>
           </CardHeader>
           <CardContent>
@@ -284,9 +263,9 @@ export function OptionsApp() {
                   onValueChange={changeProvider} disabled={busy} placeholder="搜索或选择 Provider…"
                   aria-invalid={!!fieldErrors.providerId} aria-describedby={fieldErrors.providerId ? "provider-id-error" : "provider-description"} />
                 <FieldDescription id="provider-description">
-                  {!ready ? "正在加载 Models.dev Provider 目录…" : catalogStale
-                    ? `Models.dev 暂时不可用，正在使用缓存目录（${providers.length.toLocaleString()} 个 Provider）。`
-                    : catalogError ? "Models.dev 目录无法读取；仍可选择 custom 使用自定义 Endpoint。"
+                  {!ready ? "正在加载 Models.dev Provider 目录…" : catalogError
+                    ? "Models.dev 暂时不可用；仍可选择 custom 使用自定义 Endpoint。"
+                    : catalogStale ? `Models.dev 暂时不可用，正在使用缓存目录（${providers.length.toLocaleString()} 个 Provider）。`
                     : `已载入 ${providers.length.toLocaleString()} 个内置 Provider；每个 Provider 独立保存配置。`}
                 </FieldDescription>
                 {fieldErrors.providerId && <p id="provider-id-error" className="field-error" role="alert">{fieldErrors.providerId}</p>}
@@ -328,12 +307,6 @@ export function OptionsApp() {
                   {config.contextWindowOverride && <p className="model-limit-match">当前生效：手动指定 {config.contextWindowOverride.toLocaleString()} tokens</p>}
                 </Field>}
               </>}
-              {insecureRemoteEndpoint && <Alert variant="destructive"><AlertDescription>
-                当前 Endpoint 使用远程明文 HTTP。API 凭据、对话和任务网页内容在传输中不受 HTTPS 保护；仅连接你完全信任的网络与服务。
-              </AlertDescription></Alert>}
-              {incognito && <Alert><AlertDescription>
-                当前位于隐身窗口。任务内容仍会写入 Surf Wax 的持久本地日志，并可能在普通窗口中继续可见；可在设置中永久清空。
-              </AlertDescription></Alert>}
               <details className="advanced-settings">
                 <summary><ChevronRightIcon aria-hidden="true" /><span>高级设置</span></summary>
                 <div className="advanced-settings-content">
@@ -416,7 +389,7 @@ export function OptionsApp() {
 
       <Card>
         <CardHeader>
-          <CardTitle><h2>用户脚本</h2></CardTitle>
+          <CardTitle>用户脚本</CardTitle>
           <CardDescription>管理自动运行的脚本、匹配网站和启停状态。</CardDescription>
         </CardHeader>
         <CardFooter>
@@ -426,13 +399,13 @@ export function OptionsApp() {
 
       <Card>
         <CardHeader>
-          <CardTitle><h2>本地会话</h2></CardTitle>
+          <CardTitle>本地会话</CardTitle>
           <CardDescription>事件日志是聊天界面、恢复会话与模型上下文的唯一来源。</CardDescription>
         </CardHeader>
         <CardFooter>
           <Button type="button" variant="destructive" data-testid="event-log-clear" disabled={busy} onClick={() => setClearConfirmationOpen(true)}>
             {status === "clearing" && <LoaderCircleIcon className="animate-spin" aria-hidden="true" />}
-            永久清空对话与日志
+            清空对话与日志
           </Button>
         </CardFooter>
       </Card>
@@ -443,8 +416,8 @@ export function OptionsApp() {
       <AlertDialog open={clearConfirmationOpen} onOpenChange={setClearConfirmationOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>永久清空全部本地对话、事件与产物？</AlertDialogTitle>
-            <AlertDialogDescription>IndexedDB 中的历史内容会被物理删除且不可恢复。模型配置和用户脚本不会被删除。</AlertDialogDescription>
+            <AlertDialogTitle>清空全部本地对话与事件日志？</AlertDialogTitle>
+            <AlertDialogDescription>此操作不可恢复。模型配置和用户脚本不会被删除。</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={status === "clearing"}>取消</AlertDialogCancel>

@@ -13,21 +13,21 @@
 | 既有条目 | [Surf Wax Chrome Web Store 页面](https://chromewebstore.google.com/detail/surf-wax/kkopacjlnfpnpmfeinomkhhcndbdeoih)；条目 ID 沿用仓库资料 |
 | 支持 | [GitHub Issues](https://github.com/notCorwin/SurfWax/issues) |
 | 隐私政策 | [PRIVACY.md](https://github.com/notCorwin/SurfWax/blob/master/PRIVACY.md) |
-| 候选版本 | 1.0.0；版本来源为 package.json，构建时写入 Manifest |
+| 版本来源 | package.json，构建时写入 Manifest |
 
 ## 可直接填写的详细说明
 
-Surf Wax 是运行在 Chrome 侧边栏中的浏览器智能体。选择自己的模型服务并配置 API 凭据后，可以用自然语言让它阅读网页、填写表单、跨浏览器窗口操作标签页，并观察任务结果。
+Surf Wax 是运行在 Chrome 侧边栏中的浏览器智能体。选择自己的模型服务并配置 API 凭据后，可以用自然语言让它阅读网页、填写表单、操作当前窗口中的标签页，并观察任务结果。
 
 你可以连接 Models.dev 收录的模型 Provider，或配置自定义 Endpoint。自定义端点支持 OpenAI Chat Completions、Completions、Responses、Anthropic Messages、Google generateContent 和 Interactions 协议。模型请求从扩展直接发送到你选择的服务；开发者不运营转发对话、网页内容的中转或同步服务器。
 
-智能体通过 inspect 读取带引用的页面语义，通过 run 执行模型生成的组合 JavaScript 程序，处理表单、跨源 iframe、文件上传、画布输入、跨窗口标签页、截图/PDF、显式页面或扩展网络请求、网络/控制台诊断和 Chrome DevTools Protocol 能力，并通过 jobs 管理长执行。程序计算位于无扩展 API 的 opaque-origin sandbox Worker；Side Panel 只通过显式 RPC 能力中介浏览器操作。用户脚本有独立管理页，也可由智能体创建、编辑和启停；定义与启停状态保存在本机，启动或升级时恢复已启用脚本。使用用户脚本前需在 Chrome 扩展详情页开启 Allow User Scripts。
+智能体通过 inspect 读取带引用的页面语义，通过 run 组合表单、跨源 iframe、文件上传、画布输入、多标签页、截图/PDF、显式页面或扩展网络请求、网络/控制台诊断和限定的 Chrome DevTools Protocol 能力，通过 jobs 管理长执行。用户脚本有独立管理页，也可由智能体创建、编辑和启停；定义与启停状态保存在本机，启动或升级时恢复已启用脚本。使用用户脚本前需在 Chrome 扩展详情页开启 Allow User Scripts。
 
 会话支持编辑消息、复制、重试、分支、搜索、重命名和删除；删除后可在短时间内撤销。历史较长时自动生成摘要，原始会话及完整工具结果仍保存在本机日志。正在执行任务的页面会显示带呼吸状态的透明防干扰层；可随时停止任务，关闭侧栏会中止本轮请求及工具。已经发生的网页操作不会回滚。
 
-截图、PDF 和大型结果默认保存在会话内部。downloads 在安装时作为必需权限授予，但每次把扩展产物写入 Chrome 下载目录前仍会在 Side Panel 显示文件名、类型和大小并要求用户确认。拒绝、下载失败或任务中断后仍保留内部产物，之后可以再次请求保存。网页自身触发的下载仍遵循 Chrome 与网站的正常行为。
+截图、PDF 和大型结果默认保存在会话内部。downloads 在安装时作为必需权限授予，明确保存文件时直接下载。下载失败或任务中断后仍保留内部产物，之后可以再次保存。
 
-智能体可能读取任务涉及的网页内容、截图、文件、跨窗口标签页信息、网络数据及工具结果，并将任务需要的内容发送给你选择的模型服务。扩展不会对这些内容脱敏、过滤或改写。配置和凭据保存在本机 Chrome 扩展存储，对话与工具日志保存在本机 IndexedDB。单个会话删除为可撤销 tombstone；设置页的永久清空会物理删除全部 IndexedDB 会话、事件与内部产物。远程明文 HTTP Endpoint 会持续警告；允许扩展进入隐身窗口时，隐身任务仍写入扩展持久日志。详情请阅读隐私政策。
+智能体可能读取任务涉及的网页内容、截图、文件、标签页信息、网络数据及工具结果，并将任务需要的内容发送给你选择的模型服务。扩展不会对这些内容脱敏、过滤或改写。配置和凭据保存在本机 Chrome 扩展存储，对话与工具日志保存在本机 IndexedDB。详情请阅读隐私政策。
 
 需要 Chrome 138 或更高版本。安装后点击扩展图标打开侧栏，进入设置页选择 Provider 或自定义 Endpoint、填写凭据和模型，保存后即可输入任务。
 
@@ -41,10 +41,10 @@ Surf Wax 是运行在 Chrome 侧边栏中的浏览器智能体。选择自己的
 | scripting | 必需 | 在正在操作的页面安装与释放透明防干扰层，启动恢复时清理遗留状态。 |
 | sidePanel | 必需 | 显示原生 Side Panel 智能体会话界面。 |
 | storage | 必需 | 在本机保存按 Provider 隔离的模型配置、API 凭据、用户脚本定义及启停状态。 |
-| tabs | 必需 | 读取浏览器窗口中的标签页标题/URL，按稳定 tabId 和 windowId 确定目标，并按任务创建、关闭或跨窗口选择标签页。 |
+| tabs | 必需 | 读取本轮窗口中标签页的标题/URL，确定目标并按任务创建、关闭或选择标签页。 |
 | unlimitedStorage | 必需 | 保留本机完整 canonical event log、可恢复会话和较大的内部任务产物。 |
 | userScripts | 必需 | 注册、编辑、启停并恢复用户脚本；使用前还需用户在 Chrome 详情页开启 Allow User Scripts。 |
-| downloads | 必需 | 用户在 Side Panel 确认保存内部产物后调用 Chrome 下载能力；安装时授予，不再显示运行时权限气泡，但每次文件保存仍有应用内确认。 |
+| downloads | 必需 | 用户明确保存内部产物时调用 Chrome 下载能力；安装时授予，保存时不再申请权限。 |
 | `<all_urls>` | Host access | 支持用户指定的跨网站任务、脚本匹配范围及自选模型端点。获准 host access 本身不会发起智能体任务。 |
 
 扩展没有专用 Cookie/网页存储管理、浏览数据清理、请求改写、离线模拟、录制、Trace、视频或备用执行 host。通用网页求值和用户脚本仍能处理网页本身允许访问的数据，不能把删除这些专用命令表述为“扩展不可能接触相关数据”。
@@ -53,6 +53,6 @@ Surf Wax 是运行在 Chrome 侧边栏中的浏览器智能体。选择自己的
 
 **单一用途草稿**：让用户通过自选 AI 服务在 Chrome 侧边栏中读取、操作并验证网页任务。
 
-**数据用途草稿**：任务可能涉及用户输入、网页内容、跨窗口浏览活动、截图、上传文件、通信内容及页面中可访问的身份或认证信息。模型配置与凭据保存在本机；完整会话、工具输入/输出/错误和内部产物保存在本机日志。用于模型上下文的数据直接发送到用户配置的模型端点。Models.dev 仅提供模型目录，目录请求不附带本地对话日志或凭据。隐身窗口记录不自动隔离。具体数据类型应按最终功能和商店实际申报表填写。
+**数据用途草稿**：任务可能涉及用户输入、网页内容、浏览活动、截图、上传文件、通信内容及页面中可访问的身份或认证信息。模型配置与凭据保存在本机；完整会话、工具输入/输出/错误和内部产物保存在本机日志。用于模型上下文的数据直接发送到用户配置的模型端点。Models.dev 仅提供模型目录，目录请求不附带本地对话日志或凭据。具体数据类型应按最终功能和商店实际申报表填写。
 
-**执行功能说明草稿**：智能体通过 inspect、run、jobs 操作浏览器。模型响应可以提供 run 的 JavaScript 函数体；代码仅在 opaque-origin sandbox Worker 中执行，不能直接访问扩展数据或 `chrome.*`，所有页面、跨窗口标签页、网络、产物、持久用户脚本和 CDP 操作均通过 Side Panel 的显式 RPC 能力执行并写入 canonical event log。可在显式 MAIN/ISOLATED/USER_SCRIPT 页面执行域求值，也可对扩展拥有的页面及已知子会话调用 CDP。MV3 service worker 不 eval 模型字符串，也不恢复任意 JS 调用栈。网络上下文必须明确选择页面或扩展，没有自动替换。审核材料应如实说明远程模型生成代码和能力桥接；此说明不代表已获得商店审核结论。
+**执行功能说明草稿**：智能体通过 inspect、run、jobs 操作浏览器。run 的组合程序在 opaque-origin sandbox Worker 中运行，浏览器能力由 Side Panel 中介；可在显式 MAIN/ISOLATED/USER_SCRIPT 页面执行域求值，对绑定窗口内扩展拥有的页面及已知子会话调用 CDP，并创建或编辑持久网页脚本。MV3 service worker 不直接 eval 模型字符串，也不恢复任意 JS 调用栈。网络上下文必须明确选择页面或扩展，没有自动替换。审核材料应说明实际的模型代码执行、网页脚本及协议能力；此说明不代表已获得商店审核结论。

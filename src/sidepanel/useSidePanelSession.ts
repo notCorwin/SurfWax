@@ -2,10 +2,10 @@ import { useEffect, useState } from "react";
 import type { ModelConfig } from "../types";
 import { activeRunIdentity } from "../agent/coordinator";
 import { CATALOG_CACHE_KEY } from "../agent/model-limits";
-import { modelConfigErrors } from "../agent/model-sdks";
 import {
   EMPTY_MODEL_CONFIG,
   MODEL_CONFIG_STORAGE_KEY,
+  isCompleteModelConfig,
   loadModelConfig,
   selectedModelConfig,
 } from "./config";
@@ -70,13 +70,11 @@ export function useSidePanelSession(): SidePanelSession {
   }, []);
 
   const config = selectedModelConfig(modelSettings) ?? EMPTY_CONFIG;
-  const validationErrors = configReady && modelSettings.selectedProviderId ? modelConfigErrors(config) : {};
-  const validationError = Object.values(validationErrors)[0];
   return {
     config,
     systemPrompt: modelSettings.systemPrompt,
     configReady,
-    error: error ?? (validationError ? new Error(validationError) : undefined),
-    configured: configReady && Boolean(modelSettings.selectedProviderId) && Object.keys(validationErrors).length === 0,
+    error,
+    configured: configReady && Boolean(modelSettings.selectedProviderId) && isCompleteModelConfig(config),
   };
 }

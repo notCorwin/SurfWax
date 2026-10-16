@@ -31,6 +31,7 @@ const SDK_LOADERS: Record<ModelSdk, ProviderModuleLoader> = {
   "@ai-sdk/openai-compatible": () => import("@ai-sdk/openai-compatible"),
   "@ai-sdk/perplexity": () => import("@ai-sdk/perplexity"),
   "@ai-sdk/togetherai": () => import("@ai-sdk/togetherai"),
+  "@ai-sdk/vercel": () => import("@ai-sdk/vercel"),
   "@ai-sdk/xai": () => import("@ai-sdk/xai"),
   "@aihubmix/ai-sdk-provider": () => import("@aihubmix/ai-sdk-provider"),
   "@openrouter/ai-sdk-provider": () => import("@openrouter/ai-sdk-provider"),

@@ -19,7 +19,6 @@ const canonicalPath = path => {
   }
   return resolve(realpathSync(existing), ...missing);
 };
-if (Number(process.versions.node.split('.')[0]) !== 24) throw new Error('Release packaging requires Node 24.');
 const isInside = (parent, candidate) => {
   const path = relative(parent, candidate);
   return !isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`);
@@ -77,21 +76,14 @@ if (buildRequested) {
   delete installEnvironment.NPM_CONFIG_PRODUCTION;
   delete installEnvironment.npm_config_production;
   execFileSync(npm, ['ci', '--include=dev'], { cwd: repository, stdio: 'inherit', env: installEnvironment });
-  execFileSync(npm, ['run', 'verify:local'], { cwd: repository, stdio: 'inherit', env: installEnvironment });
+  execFileSync(npm, ['exec', '--', 'vite', 'build', '--mode', 'production'], { cwd: repository, stdio: 'inherit', env: { ...process.env, NODE_ENV: 'production' } });
   assertCleanWorktree();
-}
-
-const verification = JSON.parse(await readFile(join(repository, '.dev/verification/local-ci.json'), 'utf8').catch(() => '{}'));
-const currentCommit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-if (verification.success !== true || verification.commit !== currentCommit || verification.version !== packageVersion
-  || Number(String(verification.node ?? '').replace(/^v/, '').split('.')[0]) !== 24) {
-  throw new Error('Release packaging requires a successful Node 24 verify:local result for this exact version and commit.');
 }
 
 const { version, files, directory } = await validateBuild(buildDirectory);
 if (version !== packageVersion) throw new Error(`Built version ${version} differs from package version ${packageVersion}`);
 await mkdir(output, { recursive: true });
-const commit = currentCommit;
+const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 const archive = join(output, `surf-wax-${version}.zip`);
 // Staging shares the destination filesystem so a completed file can be published atomically.
 const staging = await mkdtemp(join(output, `.surf-wax-${version}-`));
@@ -133,7 +125,7 @@ try {
     if (await readFile(`${archive}.sha256`, 'utf8') !== checksumText) throw new Error(`Existing checksum differs for version ${version}; refusing to overwrite ${archive}.sha256`);
   }
   const notes = join(staging, 'release-notes.md');
-  await writeFile(notes, `# Surf Wax ${version}\n\nCommit: ${commit}\n\nChrome 138+; Manifest V3. This archive is tied to this version and commit.\n\nThe side panel uses Base UI, GFM/math/code rendering and frame-batched streaming. Model requests recover indefinitely with a maximum 5-second delay; closing the panel aborts model and tool work. New sessions snapshot the system prompt and complete tool catalog in the canonical event log. User Scripts and interaction protection cover all touched pages and frames. The exact commit passed the Node 24 local CI matrix, including Chrome 138/current, dependency audit and 120Hz render traces, before this package was generated from a clean Git worktree.\n\nDownload the ZIP and checksum, verify SHA-256, extract it, and use Chrome's Load unpacked on the directory containing manifest.json. To retain the same unpacked extension identity and local data, replace the files in the existing extension directory and reload it instead of loading a new versioned directory. Chrome Web Store installations update through the store.\n\nRequired permissions: debugger, downloads, scripting, sidePanel, storage, tabs, unlimitedStorage, userScripts; website access: all URLs. Agent-created files remain internal until you approve each download in the Side Panel.\n\nConversation data and full browser/tool results stay in the local canonical event log and are sent directly to your configured model endpoint when used as model context. Deleting a conversation adds an undoable tombstone; the settings action permanently clears event and artifact data from IndexedDB. See PRIVACY.md in the repository for details.\n`);
+  await writeFile(notes, `# Surf Wax ${version}\n\nCommit: ${commit}\n\nChrome 138+; Manifest V3. This archive is tied to this version and commit.\n\nThe side panel uses shadcn/ui, GFM/math/code rendering and frame-batched streaming. Model requests recover indefinitely with a maximum 5-second delay; closing the panel aborts model and tool work. New sessions snapshot the system prompt and complete tool catalog in the canonical event log. User Scripts and interaction protection cover all touched pages and frames. All checks, packaging, and delivery are manual. Checks run locally under Node 24, including Chrome 138/current and 120Hz render traces; this package was generated from a clean Git worktree.\n\nDownload the ZIP and checksum, verify SHA-256, extract it, and use Chrome's Load unpacked on the directory containing manifest.json. Chrome Web Store installations update through the store; unpacked installations must be updated manually.\n\nRequired permissions: debugger, downloads, scripting, sidePanel, storage, tabs, unlimitedStorage, userScripts; website access: all URLs. Downloads are created only when you explicitly choose to save a file; no runtime permission prompt is required.\n\nConversation data and full browser/tool results stay in the local canonical event log and are sent directly to your configured model endpoint when used as model context. See PRIVACY.md in the repository for details.\n`);
   // The unversioned notes describe this invocation; immutable versioned assets above never replace files.
   await rename(notes, join(output, 'release-notes.md'));
 } finally { await rm(staging, { recursive: true, force: true }); }

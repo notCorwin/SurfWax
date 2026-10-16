@@ -443,6 +443,3 @@ p {
 }
 
 .work-summary { padding-inline: 0; }
-.download-confirmation-details { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: calc(var(--spacing) * 2) calc(var(--spacing) * 4); margin: 0; font-size: var(--type-body); }
-.download-confirmation-details dt { color: var(--muted-foreground); }
-.download-confirmation-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }

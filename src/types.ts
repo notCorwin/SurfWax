@@ -42,6 +42,7 @@ export const MODEL_SDKS = [
   "@ai-sdk/openai-compatible",
   "@ai-sdk/perplexity",
   "@ai-sdk/togetherai",
+  "@ai-sdk/vercel",
   "@ai-sdk/xai",
   "@aihubmix/ai-sdk-provider",
   "@jerome-benoit/sap-ai-provider-v2",

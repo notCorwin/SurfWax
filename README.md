@@ -11,7 +11,7 @@ Surf Wax 是一个运行在 Chrome Side Panel 中的浏览器智能体。它让�
 
 - **自选模型（BYOK）**：Provider 和模型目录来自 [Models.dev](https://models.dev/)，也支持自定义 Model ID、Base URL 和协议。
 - **直接连接模型服务**：没有开发者运营的模型中转、遥测或同步服务；配置、凭据和会话记录保存在本机。
-- **可组合浏览器自动化**：智能体通过 `inspect`、`run` 和 `jobs` 读取页面、跨窗口管理标签页、执行 JavaScript 工作流并管理后台任务，而不是受固定步骤数限制。
+- **可组合浏览器自动化**：智能体通过 `inspect`、`run` 和 `jobs` 读取页面、执行 JavaScript 工作流并管理后台任务，而不是受固定步骤数限制。
 - **适合长任务**：追加式 canonical event log 统一保存对话、工具结果、错误、中断状态和产物；上下文不足时自动压缩。
 - **完整 Side Panel 体验**：支持流式输出、GFM、LaTeX、代码高亮、会话搜索、分支和重试，以及浅色和深色主题。
 - **安全的交互边界**：智能体操作页面时会显示防干扰层；工具无论成功、失败或中断都会留下结果记录。
@@ -21,21 +21,21 @@ Surf Wax 是一个运行在 Chrome Side Panel 中的浏览器智能体。它让�
 
 ### Chrome Web Store
 
-从 [Chrome Web Store](https://chromewebstore.google.com/detail/surf-wax/kkopacjlnfpnpmfeinomkhhcndbdeoih) 安装 Surf Wax。需要 Chrome 138 或更高版本；商店当前公开版本可能晚于仓库中的未发布源码。
+从 [Chrome Web Store](https://chromewebstore.google.com/detail/surf-wax/kkopacjlnfpnpmfeinomkhhcndbdeoih) 安装 Surf Wax。需要 Chrome 138 或更高版本。
 
 ### 手动安装发布包
 
-1. 正式版本发布后，从 [Releases](https://github.com/notCorwin/SurfWax/releases) 下载版本 ZIP，并使用同版本的 `.sha256` 文件校验完整性。若页面尚无 Release，请勿使用来源不明的安装包。
+1. 从 [Releases](https://github.com/notCorwin/SurfWax/releases) 下载版本 ZIP，并使用同版本的 `.sha256` 文件校验完整性。
 2. 解压 ZIP。
 3. 打开 `chrome://extensions`，启用“开发者模式”。
 4. 选择“加载已解压的扩展程序”，然后选择解压目录。
 
-手动安装的版本不会通过 Chrome Web Store 自动更新。升级时应在原目录中替换文件并从扩展管理页重新加载；把新版本解压到另一个路径后重新安装可能产生新的扩展 ID，原本地配置与会话不会自动迁移。
+手动安装的版本不会通过 Chrome Web Store 自动更新。
 
 ## 开始使用
 
 1. 点击 Surf Wax 扩展图标，打开 Side Panel。
-2. 打开设置，选择一个 Provider，并填写所需凭据；免鉴权的自定义 Endpoint 可将 API Key 留空。
+2. 打开设置，选择一个 Provider，并填写所需凭据。
 3. 选择或输入 Model ID，然后保存。
 4. 打开目标网页，在 Side Panel 中描述任务，例如：
 
@@ -53,13 +53,13 @@ Surf Wax 是一个运行在 Chrome Side Panel 中的浏览器智能体。它让�
 - Anthropic Messages
 - Google `generateContent` 和 Interactions
 
-未知模型的 Context Window 默认按 256,000 tokens 处理；除 Anthropic 类端点外，Surf Wax 不会主动传递未知的 `max_tokens`。远程 HTTP Endpoint 会在界面中持续警告，因为凭据和任务内容没有 HTTPS 传输保护。
+未知模型的 Context Window 默认按 256,000 tokens 处理；除 Anthropic 类端点外，Surf Wax 不会主动传递未知的 `max_tokens`。
 
 ## 数据与权限
 
-模型配置和凭据存储在 `chrome.storage.local`，会话和工具事件存储在本机 IndexedDB。任务所需的消息、网页内容、截图或工具结果会直接发送到你配置的模型服务，不会经过 Surf Wax 开发者服务器。删除单个会话会写入可撤销 tombstone；设置页的“永久清空”会物理删除全部 IndexedDB 会话、事件和内部产物。
+模型配置和凭据存储在 `chrome.storage.local`，会话和工具事件存储在本机 IndexedDB。任务所需的消息、网页内容、截图或工具结果会直接发送到你配置的模型服务，不会经过 Surf Wax 开发者服务器。
 
-扩展需要 `debugger`、`downloads`、`scripting`、`sidePanel`、`storage`、`tabs`、`unlimitedStorage`、`userScripts` 和 `<all_urls>`，用于浏览器控制、文件保存、防干扰层、本地记录、用户脚本和连接自定义模型端点。智能体生成的文件默认只保存在内部日志，每次写入 Chrome 下载目录前仍需用户在 Side Panel 确认。允许扩展进入隐身窗口时，任务内容仍写入扩展的持久本地日志。完整规则见 [隐私政策](PRIVACY.md)。
+扩展需要 `debugger`、`downloads`、`scripting`、`sidePanel`、`storage`、`tabs`、`unlimitedStorage`、`userScripts` 和 `<all_urls>`，用于浏览器控制、文件保存、防干扰层、本地记录、用户脚本和连接自定义模型端点。完整的数据处理与删除规则见 [隐私政策](PRIVACY.md)。
 
 ## 本地开发
 
@@ -105,7 +105,6 @@ npm run build
 
 ```sh
 npm run check       # TypeScript、独立构建和产物契约
-npm run lint        # Biome 静态正确性检查
 npm test            # Vitest 单元测试
 npm run test:e2e    # Headless Chrome 功能测试
 npm run docs:check  # 检查生成的工具文档是否最新
@@ -117,7 +116,7 @@ npm run docs:check  # 检查生成的工具文档是否最新
 npm run verify:local
 ```
 
-完整验证要求 Node 24，会安装 Chrome for Testing 138 和当前 Stable，并执行文档、SDK、依赖新鲜度、安全审计、静态检查、类型、构建、单元、E2E 与性能检查。所有浏览器测试均以 Headless 模式运行；发布前还应人工检查真实 Side Panel、下载确认和商店素材。仓库当前不配置 GitHub Actions 或自动发布。
+完整验证要求 Node 24，会安装 Chrome for Testing 138 和当前 Stable，并执行文档、SDK、类型、构建、单元、E2E 与性能检查。所有浏览器测试均以 Headless 模式运行；仓库当前不配置 GitHub Actions 或自动发布。
 
 其他维护命令见 [package.json](package.json)。浏览器工具 API 由源码 registry 生成，详见 [工具参考](docs/tools.md)。
 
@@ -152,4 +151,4 @@ Surf Wax 是单一 Manifest V3 Chrome Extension，不依赖桌面桥接应用。
 
 ## 发布与许可
 
-版本历史见 [CHANGELOG.md](CHANGELOG.md)，安装包见 [GitHub Releases](https://github.com/notCorwin/SurfWax/releases)。源码按 [GNU General Public License v3.0 only](LICENSE) 授权。
+版本历史见 [CHANGELOG.md](CHANGELOG.md)，安装包见 [GitHub Releases](https://github.com/notCorwin/SurfWax/releases)。仓库目前未提供 LICENSE 文件；在复制、修改或分发代码前，请先联系维护者确认授权。

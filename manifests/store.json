@@ -10,13 +10,12 @@
     "128": "icons/icon-128.png"
   },
   "action": {
-    "default_title": "打开 Surf Wax",
+    "default_title": "Open Surf Wax",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png"
     }
   },
-  "incognito": "spanning",
   "background": {
     "service_worker": "background.js",
     "type": "module"

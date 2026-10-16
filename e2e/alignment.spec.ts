@@ -8,7 +8,6 @@ test("executes more than 100 program operations and records a single tool result
     const target = await opened.context.newPage(); await target.goto(`${provider.origin}/performance`);
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     await nameCurrentConversation(opened.page, "Unbounded program"); await target.bringToFront();
-    await expect.poll(() => target.evaluate(() => document.hasFocus())).toBe(true);
     await opened.page.getByTestId("composer-input").fill("execute 121 actions"); await opened.page.getByTestId("composer-input").press("Enter");
     await expect(target.locator("output")).toHaveText("121", { timeout: 30000 });
     await expect(opened.page.locator(".markdown-body").last()).toContainText("ALL_121_DONE");

@@ -314,4 +314,4 @@ summary,
   border-color: var(--surface-stroke);
   box-shadow: var(--surface-shadow);
 }
-[data-slot="dialog-overlay"], [data-slot="alert-dialog-backdrop"] { backdrop-filter: blur(var(--surface-blur)); }
+[data-slot="dialog-overlay"], [data-slot="alert-dialog-overlay"] { backdrop-filter: blur(var(--surface-blur)); }

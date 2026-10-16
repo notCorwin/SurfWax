@@ -22,11 +22,11 @@ function workerMain() {
   });
   const close = self.close.bind(self);
   self.close = () => {
-    // Throw through the run boundary so the failure message is delivered before
-    // the worker closes. Immediate close() can discard its final postMessage in
-    // newer Chromium versions.
-    setTimeout(close, 0);
-    throw new Error("Program worker exited");
+    self.postMessage({
+      type: "failed",
+      error: { message: "Program worker exited" },
+    });
+    close();
   };
   const remotes = new WeakMap<object, any>();
   const chains = new Set([
@@ -151,11 +151,8 @@ function workerMain() {
         "check",
         "sleep",
         "signal",
-        "self",
-        "close",
         message.code,
       );
-      const exit = () => { throw new Error("Program worker exited"); };
       const result = await execute(
         values.page,
         values.browser,
@@ -166,8 +163,6 @@ function workerMain() {
         values.check,
         values.sleep,
         signal,
-        { close: exit },
-        exit,
       );
       await new Promise((resolve) => setTimeout(resolve, 0));
       self.postMessage({ type: "done", value: encode(result ?? null) });
