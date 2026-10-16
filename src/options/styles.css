@@ -72,7 +72,7 @@ body {
 .search-combobox-content {
   z-index: 50;
   width: min(32rem, calc(100vw - calc(var(--spacing) * 8)));
-  max-height: min(calc(var(--spacing) * 90), var(--available-height));
+  max-height: min(calc(var(--spacing) * 90), var(--radix-popover-content-available-height));
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -96,7 +96,7 @@ body {
   cursor: pointer;
 }
 
-.search-combobox-option:is(:hover, :focus-visible, [data-highlighted]) {
+.search-combobox-option:is(:hover, :focus-visible) {
   background: var(--accent);
   color: var(--accent-foreground);
 }
