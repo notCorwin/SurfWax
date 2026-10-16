@@ -70,12 +70,9 @@ body {
 }
 
 .search-combobox-content {
-  position: absolute;
   z-index: 50;
-  top: calc(100% + var(--spacing));
-  left: 0;
   width: min(32rem, calc(100vw - calc(var(--spacing) * 8)));
-  max-height: min(calc(var(--spacing) * 90), calc(100dvh - calc(var(--spacing) * 8)));
+  max-height: min(calc(var(--spacing) * 90), var(--available-height));
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);

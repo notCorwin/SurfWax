@@ -3,7 +3,7 @@ import { usePanelRuntime, usePanelState, type PanelState } from "@/sidepanel/run
 
 import { classes } from "@/classes";
 import { ArrowUpIcon, ForwardIcon, SquareIcon, XIcon } from "lucide-react";
-import { memo, useCallback, useEffect, useId, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent } from "react";
+import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type KeyboardEvent } from "react";
 import { InputGroup, InputGroupTextarea, InputGroupAddon } from "@/components/ui/input-group";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -99,10 +99,8 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
   const runtime = useRuntimeView();
   const [usage, setUsage] = useState<ContextUsage>({ state: "loading" });
   const latestUsage = useRef(usage);
-  const indicator = useRef<HTMLButtonElement>(null);
+  const indicator = useRef<HTMLSpanElement>(null);
   const detailsOpen = useRef(false);
-  const [tooltipOpen, setTooltipOpen] = useState(false);
-  const tooltipTriggerId = useId();
   const publishUsage = useCallback((next: ContextUsage) => {
     latestUsage.current = next;
     // Keep the exact accessible estimate fresh without rebuilding a closed
@@ -286,17 +284,10 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
   const label = usageLabel(latestUsage.current);
   const usedPercent = usage.state === "ready" ? usage.usedPercent : 0;
   const source = usage.state === "ready" ? usage.limit.source === "manual" ? "手动设置" : "Models.dev" : undefined;
-  const changeTooltipOpen = (open: boolean) => {
-    detailsOpen.current = open;
-    setTooltipOpen(open);
-    if (open) setUsage(latestUsage.current);
-  };
 
   return (
-    <Tooltip open={tooltipOpen} triggerId={tooltipTriggerId} onOpenChange={changeTooltipOpen}>
-      <TooltipTrigger
-          type="button"
-          id={tooltipTriggerId}
+    <Tooltip onOpenChange={(open) => { detailsOpen.current = open; if (open) setUsage(latestUsage.current); }}>
+      <TooltipTrigger render={<span
           ref={indicator}
           data-testid="context-indicator"
           data-state={usage.state}
@@ -307,7 +298,6 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
           aria-valuemax={100}
           aria-valuenow={usage.state === "ready" ? usage.usedPercent : undefined}
           aria-label={label}
-          onFocusCapture={() => changeTooltipOpen(true)}
           className={classes(
             "flex size-7 shrink-0 items-center justify-center rounded-md",
             usage.state === "ready" && usage.usedPercent < 80 ? "text-foreground" : "text-muted-foreground",
@@ -319,7 +309,7 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
             {usage.state === "ready" && <circle cx="10" cy="10" r="7" pathLength="100" fill="none" stroke="currentColor" strokeWidth="3"
               strokeLinecap="round" strokeDasharray="100" strokeDashoffset={100 - usedPercent} />}
           </svg>
-        </TooltipTrigger>
+        </span>} />
       <TooltipContent side="top" sideOffset={8} collisionPadding={8} className="w-64 max-w-[calc(100vw-1rem)]">
         <div data-testid="context-detail" className="flex flex-col gap-3">
           <div className="flex items-start justify-between gap-3">
@@ -524,7 +514,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
               ).join(" ")}
             </span>
             <Select items={reasoning.choices.map((effort) => ({ value: effort, label: EFFORT_LABELS[effort] }))}
-              value={reasoning.selected ?? null} disabled={!reasoning.ready || isRunning || !reasoning.choices.length}
+              value={reasoning.selected ?? undefined} disabled={!reasoning.ready || isRunning || !reasoning.choices.length}
               onValueChange={(value) => settings.select(value as ReasoningEffort)}>
               <SelectTrigger data-testid="reasoning-effort" size="sm" aria-label="思考强度"
                 className="reasoning-select !h-7 max-w-20 gap-1 px-1.5">

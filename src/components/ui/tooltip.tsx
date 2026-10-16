@@ -45,7 +45,6 @@ function TooltipContent({
       >
         <TooltipPrimitive.Popup
           data-slot="tooltip-content"
-          role="tooltip"
           className={stateClasses(
             "w-fit origin-[var(--transform-origin)] rounded-lg border border-border bg-popover p-3 text-xs text-popover-foreground shadow-md transition-[transform,opacity] duration-(--motion-fast) data-starting-style:scale-95 data-starting-style:opacity-0 data-ending-style:scale-95 data-ending-style:opacity-0 data-instant:transition-none",
             className

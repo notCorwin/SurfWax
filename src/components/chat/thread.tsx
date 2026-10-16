@@ -59,26 +59,6 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
   const totalSize = virtualizer.getTotalSize();
   useLayoutEffect(() => {
     const viewport = scroller.current;
-    const content = viewport?.firstElementChild;
-    if (!viewport || !content) return;
-    let frame: number | undefined;
-    const follow = () => {
-      if (!followingEnd.current || frame !== undefined) return;
-      frame = requestAnimationFrame(() => {
-        frame = undefined;
-        if (followingEnd.current) viewport.scrollTop = viewport.scrollHeight;
-      });
-    };
-    const observer = new ResizeObserver(follow);
-    observer.observe(content);
-    for (const child of content.children) observer.observe(child);
-    return () => {
-      observer.disconnect();
-      if (frame !== undefined) cancelAnimationFrame(frame);
-    };
-  }, []);
-  useLayoutEffect(() => {
-    const viewport = scroller.current;
     if (!viewport || !followingEnd.current || turns.length === 0) return;
     viewport.scrollTop = viewport.scrollHeight;
   }, [state.messages, totalSize, turns.length]);
@@ -89,9 +69,7 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
       <MessageScroller className="flex-1">
         <MessageScrollerViewport ref={scroller} data-testid="thread-viewport" className="overflow-x-hidden"
           onScroll={(event) => { const viewport = event.currentTarget;
-            const atEnd = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 2;
-            if (atEnd) followingEnd.current = true; }}
-          onWheel={(event) => { if (event.deltaY < 0) followingEnd.current = false; }}>
+            followingEnd.current = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 2; }}>
           <MessageScrollerContent className="mx-auto block w-full max-w-(--thread-max-width) px-4 pt-5 pb-8">
             {turns.length === 0 && !state.isLoading && <Welcome disabled={locked} />}
             {state.isLoading && <p role="status" className="conversation-notice py-8">正在读取对话…</p>}

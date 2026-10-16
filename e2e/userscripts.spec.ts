@@ -24,7 +24,7 @@ test("ships the MV3 Harness and user-script manager", async () => {
     await expect(opened.page.getByTestId("config-required-state")).toBeVisible();
 
     const options = await configure(opened.context, opened.page, "https://provider.test/v1");
-    await expect(options.getByTestId("options-card").locator('input:not([aria-hidden="true"])')).toHaveCount(6);
+    await expect(options.getByTestId("options-card").locator("input")).toHaveCount(6);
     await expect(options.getByTestId("event-log-clear")).toBeVisible();
     await expect(options.getByRole("link", { name: "打开脚本管理" })).toBeVisible();
     await expect(options.getByTestId("event-log")).toHaveCount(0);
