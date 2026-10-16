@@ -513,8 +513,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
                 /^(gpt|glm|api)$/i.test(part) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1),
               ).join(" ")}
             </span>
-            <Select items={reasoning.choices.map((effort) => ({ value: effort, label: EFFORT_LABELS[effort] }))}
-              value={reasoning.selected ?? undefined} disabled={!reasoning.ready || isRunning || !reasoning.choices.length}
+            <Select value={reasoning.selected ?? undefined} disabled={!reasoning.ready || isRunning || !reasoning.choices.length}
               onValueChange={(value) => settings.select(value as ReasoningEffort)}>
               <SelectTrigger data-testid="reasoning-effort" size="sm" aria-label="思考强度"
                 className="reasoning-select h-7 max-w-20 gap-1 px-1.5">
