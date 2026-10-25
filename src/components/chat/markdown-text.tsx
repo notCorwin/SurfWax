@@ -2,15 +2,9 @@
 import "katex/dist/katex.min.css";
 import { normalizeMathDelimiters } from "./math-delimiters";
 import { math } from "@streamdown/math";
-import { memo, useMemo, useRef, type ReactElement } from "react";
-import { Block, Streamdown, type BlockProps } from "streamdown";
-import { createMarkdownBlockParser } from "./markdown-blocks";
+import { memo } from "react";
+import { Streamdown } from "streamdown";
 import { createCodeHighlighter } from "./code-highlighter";
-
-const CachedBlock = memo(function CachedBlock(props: BlockProps) {
-  if (!props.content.trim()) return null;
-  return <div className="markdown-block"><Block {...props} /></div>;
-});
 
 // Shiki emits token references; actual colors are owned by styles.css.
 const syntaxTheme = {
@@ -25,39 +19,10 @@ const syntaxTheme = {
     { scope: ["entity.name.type", "support.type"], settings: { foreground: "var(--syntax-type)" } },
   ],
 };
-const REMEND = { katex: false };
 const PLUGINS = { code: createCodeHighlighter([syntaxTheme, { ...syntaxTheme, name: "surf-wax-dark", type: "dark" }]), math };
 
-const CompletedBlock = memo(function CompletedBlock({ text }: { text: string }) {
-  return <Streamdown className="markdown-block" mode="static" plugins={PLUGINS} controls>{text}</Streamdown>;
-});
-
-export const MarkdownText = memo(function MarkdownText({ text, running = false }: { text: string; running?: boolean }) {
-  const parseBlocks = useMemo(createMarkdownBlockParser, []);
-  const normalized = useMemo(() => normalizeMathDelimiters(text), [text]);
-  const cache = useRef(new Map<number, { text: string; element: ReactElement }>());
-  const document = useMemo(() => {
-    const blocks = parseBlocks(normalized);
-    const closed = running ? parseBlocks.closedCount() : blocks.length;
-    const next = new Map<number, { text: string; element: ReactElement }>();
-    const completed: ReactElement[] = [];
-    for (let index = 0; index < closed; index++) {
-      const text = blocks[index]!;
-      if (!text.trim()) continue;
-      const previous = cache.current.get(index);
-      const entry = previous?.text === text ? previous : { text, element: <CompletedBlock key={index} text={text} /> };
-      next.set(index, entry); completed.push(entry.element);
-    }
-    cache.current = next;
-    return { completed, tail: blocks.slice(closed).join("") };
-  }, [normalized, running, parseBlocks]);
-  // Completed blocks retain their React elements, parsed Markdown and highlight
-  // state. Only the unfinished suffix goes through streaming repair/parsing.
-  // Cross-block GFM references/footnotes stay in one shared block in the parser.
+export const MarkdownText = memo(function MarkdownText({ text }: { text: string }) {
+  const normalized = normalizeMathDelimiters(text);
   if (!normalized.trim()) return null;
-  return <div className="markdown-body" data-status={running ? "running" : "complete"}>
-    {document.completed}
-    {document.tail.trim() && <Streamdown className="markdown-tail" plugins={PLUGINS} remend={REMEND}
-      BlockComponent={CachedBlock} isAnimating={running} controls>{document.tail}</Streamdown>}
-  </div>;
+  return <Streamdown className="markdown-body" mode="static" plugins={PLUGINS} controls>{normalized}</Streamdown>;
 });

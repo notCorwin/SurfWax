@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 
-import { test, SSE_HEADERS, p95, chunk, usageChunk, textResponse, streamingTextResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
+import { test, p95, textResponse, assistantResponse, delayedResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
 
 test("follows the system color scheme across every visible extension surface without reloading", async () => {
   const provider = await startProvider([
@@ -108,14 +108,15 @@ test("collapses adjacent commands into one line without hiding their details", a
     await opened.page.getByTestId("composer-input").press("Enter");
     const group = opened.page.getByTestId("process-trace");
     const work = opened.page.getByTestId("work-summary");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("完成");
+    await expect(work).toHaveCount(1);
+    await work.locator(":scope > summary").click();
     await expect(opened.page.locator(".activity[data-status=complete]")).toHaveCount(2);
     await expect(group).toHaveCount(1);
     await expect(group.locator(":scope > summary")).toBeVisible();
     await expect(group.locator("summary svg")).toHaveCount(0);
     await expect(group.locator(".activity").first()).toBeHidden();
     await expect(opened.page.locator(".activity[data-status]")).toHaveCount(2);
-    await expect(work).toHaveCount(1);
-    await work.locator(":scope > summary").click();
     await expect(group.locator(":scope > summary")).toHaveText("已执行 2 次命令");
     await expect(group.locator(".activity")).toHaveCount(2);
     await expect(group).not.toHaveAttribute("open", "");
@@ -132,13 +133,8 @@ test("collapses adjacent commands into one line without hiding their details", a
 test("starts a new process line after assistant text", async () => {
   const provider = await startProvider([
     toolResponse("return 'FIRST_RESULT'", "call-before-text"),
-    [
-      chunk({ role: "assistant", content: "BETWEEN_PROCESS_GROUPS" }),
-      chunk({ tool_calls: [{ index: 0, id: "call-after-text", type: "function", function: { name: "run", arguments: JSON.stringify({ code: "return 'SECOND_RESULT';" }) } }] }),
-      chunk({}, "tool_calls"),
-      "data: [DONE]\n\n",
-    ],
-    { parts: textResponse("FINAL_AFTER_GROUPS"), delayMs: 1500 },
+    assistantResponse({ content: "BETWEEN_PROCESS_GROUPS", tool_calls: [{ id: "call-after-text", type: "function", function: { name: "run", arguments: JSON.stringify({ code: "return 'SECOND_RESULT';" }) } }] }),
+    delayedResponse(textResponse("FINAL_AFTER_GROUPS"), 1_500),
     textResponse("分段过程记录"),
   ]);
   const opened = await openExtension();
@@ -170,12 +166,11 @@ test("starts a new process line after assistant text", async () => {
 
 test("continues the latest activity after earlier progress text", async () => {
   const provider = await startProvider([
-    [
-      chunk({ role: "assistant", content: "PROGRESS_BEFORE_ACTIVITIES" }),
-      chunk({ reasoning_content: "PLAN" }),
-      ...queuedToolResponse("return 'FIRST_RESULT'", "return 'SECOND_RESULT'"),
-    ],
-    { parts: textResponse("NEXT_PROGRESS_TEXT"), delayMs: 2500 },
+    assistantResponse({ content: "PROGRESS_BEFORE_ACTIVITIES", reasoning_content: "PLAN", tool_calls: [
+      { id: "call-queued-0", type: "function", function: { name: "run", arguments: JSON.stringify({ code: "return 'FIRST_RESULT'" }) } },
+      { id: "call-queued-1", type: "function", function: { name: "run", arguments: JSON.stringify({ code: "return 'SECOND_RESULT'" }) } },
+    ] }),
+    delayedResponse(textResponse("NEXT_PROGRESS_TEXT"), 2_500),
     textResponse("活动顺序测试"),
   ]);
   const opened = await openExtension();
@@ -204,10 +199,10 @@ test("continues the latest activity after earlier progress text", async () => {
 });
 
 
-test("continues the command label until assistant text arrives", async () => {
+test("continues the command label while waiting for the next complete response", async () => {
   const provider = await startProvider([
     toolResponse("return 'DONE'"),
-    { parts: textResponse("FINAL_AFTER_WAIT"), delayMs: 1500 },
+    delayedResponse(textResponse("FINAL_AFTER_WAIT"), 1_500),
     textResponse("等待回复"),
   ]);
   const opened = await openExtension();
@@ -231,10 +226,10 @@ test("continues the command label until assistant text arrives", async () => {
 });
 
 
-test("switches from reasoning to command while keeping completion labels for text", async () => {
+test("shows completed reasoning alongside command execution", async () => {
   const provider = await startProvider([
-    [chunk({ role: "assistant", reasoning_content: "PLAN" }), ...toolResponse("return 'DONE'")],
-    { parts: textResponse("ANSWER_AFTER_REASONING"), delayMs: 1500 },
+    assistantResponse({ reasoning_content: "PLAN", tool_calls: [{ id: "call-chrome-e2e", type: "function", function: { name: "run", arguments: JSON.stringify({ code: "return 'DONE'" }) } }] }),
+    delayedResponse(textResponse("ANSWER_AFTER_REASONING"), 1_500),
     textResponse("推理测试"),
   ], 600);
   const opened = await openExtension();
@@ -246,7 +241,6 @@ test("switches from reasoning to command while keeping completion labels for tex
     await opened.page.getByTestId("composer-input").fill("reason then run");
     await opened.page.getByTestId("composer-input").press("Enter");
     const group = opened.page.getByTestId("process-trace");
-    await expect(group.locator(":scope > summary")).toHaveText("正在思考");
     await expect(group.locator(":scope > summary")).toHaveText("正在执行命令");
     await group.locator(":scope > summary").click();
     await expect(group.getByTestId("reasoning-item").locator(":scope > summary")).toHaveText("思考完成");
@@ -310,7 +304,7 @@ test("stops continued activity when the model request fails", async () => {
 
 test("shows live work, then folds it under elapsed time while keeping the final reply visible after restore", async () => {
   const provider = await startProvider([
-    [chunk({ role: "assistant", content: "PROGRESS_TEXT" }), ...toolResponse("await new Promise((resolve) => setTimeout(resolve, 300)); return 'WORK_RESULT'")],
+    assistantResponse({ content: "PROGRESS_TEXT", tool_calls: [{ id: "call-chrome-e2e", type: "function", function: { name: "run", arguments: JSON.stringify({ code: "await new Promise((resolve) => setTimeout(resolve, 300)); return 'WORK_RESULT'" }) } }] }),
     textResponse("FINAL_REPLY"),
     textResponse("工作摘要标题"),
   ]);
@@ -363,41 +357,36 @@ test("shows live work, then folds it under elapsed time while keeping the final 
 });
 
 
-test("distinguishes streaming command input from command execution", async () => {
-  const input = JSON.stringify({ code: 'await sleep(800); return await page.title();' });
-  const provider = await startProvider([[
-    chunk({ role: "assistant", tool_calls: [{ index: 0, id: "call-phase", type: "function", function: { name: "run", arguments: input.slice(0, 25) } }] }),
-    chunk({ tool_calls: [{ index: 0, function: { arguments: input.slice(25) } }] }),
-    chunk({}, "tool_calls"),
-    "data: [DONE]\n\n",
-  ], textResponse("PHASE_DONE")], 300);
+test("executes complete tool arguments once they arrive", async () => {
+  const provider = await startProvider([toolResponse('await sleep(800); return await page.title();', "call-phase"), textResponse("PHASE_DONE")]);
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/target`);
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
-    await opened.page.getByTestId("composer-input").fill("run a staged command");
+    await opened.page.getByTestId("composer-input").fill("run one complete command");
     await opened.page.getByTestId("composer-input").press("Enter");
     const label = opened.page.getByTestId("process-trace").locator(":scope > summary span");
-    await expect(label).toHaveText("正在输入命令");
     await expect(label).toHaveText("正在执行命令");
     await expect(label).toHaveText("已执行 1 次命令");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("PHASE_DONE");
+    const events = await readEvents(opened.page);
+    expect(events.filter((event) => event.type === "tool.started" && event.toolCallId === "call-phase")).toHaveLength(1);
+    expect(events.filter((event) => ["tool.finished", "tool.failed"].includes(event.type) && event.toolCallId === "call-phase")).toHaveLength(1);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
 
 
-test("streams complete Markdown without blocking draft input", async () => {
+test("renders a complete Markdown response without blocking draft input", async () => {
   const markdown = [
     "# Heading\n\n> quote\n\n- [x] task\n\n~~strike~~ and [link](https://example.com).\n\n",
     "| 搜索引擎 | 公司/国家 | 国际内容 | 中文内容 | 隐私功能 |\n| - | - | - | - | - |\n| Google | 美国 Google | ★★★ 最强 | ★★ 充足 | 一般 |\n| Bing 必应 | 美国 微软 | ★★ 仅次于 Google | ★★★ 丰富 | 一般 |\n\nInline $x^2$ and block:\n\n$$y=x+1$$\n\n",
     "```javascript\nconst answer = 42;\n```\n\nFootnote[^1].\n\n[^1]: note\n\nFINAL_MARKER",
   ].join("");
-  const parts = [chunk({ role: "assistant", content: "LONG_RUNNING_LINE\n\n".repeat(100) }), ...[...markdown].map((content) => chunk({ content })), chunk({}, "stop"), "data: [DONE]\n\n"];
-  const provider = await startProvider([parts, textResponse("Markdown 测试")], 2);
+  const provider = await startProvider([delayedResponse(textResponse("LONG_RESPONSE_LINE\n\n".repeat(100) + markdown), 700), textResponse("Markdown 测试")]);
   const opened = await openExtension();
   try {
     await opened.page.setViewportSize({ width: 430, height: 1000 });
@@ -405,12 +394,10 @@ test("streams complete Markdown without blocking draft input", async () => {
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     const composer = opened.page.getByTestId("composer-input");
-    await composer.fill("stream markdown");
+    await composer.fill("render complete markdown");
     await composer.press("Enter");
-    await expect(opened.page.locator(".markdown-body").last()).toHaveAttribute("data-status", "running");
-    await opened.page.getByTestId("thread-viewport").evaluate((viewport) => { viewport.scrollTop = 0; });
-    await expect(composer).toBeInViewport();
-
+    await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
+    await expect(opened.page.locator(".markdown-body")).toHaveCount(0);
     const draft = "responsive-draft-".repeat(40);
     const started = Date.now();
     await composer.pressSequentially(draft);
@@ -521,28 +508,22 @@ test("streams complete Markdown without blocking draft input", async () => {
 });
 
 
-test("keeps jump-to-bottom usable while a long response is streaming", async () => {
-  const parts = [
-    chunk({ role: "assistant", content: "SCROLL_LINE\n\n".repeat(400) }),
-    ...Array.from({ length: 500 }, (_, index) => chunk({ content: index % 40 === 0 ? `\nline ${index}\n` : "." })),
-    chunk({ content: "FINAL_SCROLL_MARKER" }),
-    chunk({}, "stop"),
-    "data: [DONE]\n\n",
-  ];
-  const provider = await startProvider([parts, textResponse("滚动测试")], 3);
+test("keeps jump-to-bottom usable after a long complete response", async () => {
+  const longReply = "SCROLL_LINE\n\n".repeat(400) + Array.from({ length: 500 }, (_, index) => index % 40 === 0 ? `\nline ${index}\n` : ".").join("") + "FINAL_SCROLL_MARKER";
+  const provider = await startProvider([textResponse(longReply), textResponse("滚动测试")]);
   const opened = await openExtension();
   try {
     await opened.page.setViewportSize({ width: 430, height: 850 });
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     const composer = opened.page.getByTestId("composer-input");
-    await composer.fill("stream a long response");
+    await composer.fill("render a long response");
     await composer.press("Enter");
 
     const viewport = opened.page.getByTestId("thread-viewport");
     const remaining = () => viewport.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop);
     await expect.poll(() => viewport.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(1_200);
-    await expect(opened.page.getByTestId("edit-message-button")).toHaveCount(0);
+    await expect(opened.page.getByTestId("edit-message-button")).toBeVisible();
     await expect.poll(remaining).toBeLessThanOrEqual(1);
     const box = await viewport.boundingBox();
     if (!box) throw new Error("thread viewport has no bounding box");

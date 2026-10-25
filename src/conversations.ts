@@ -1,4 +1,4 @@
-import { readUIMessageStream, streamText, type UIMessageChunk } from "ai";
+import { generateText } from "ai";
 import {
   EventLogger,
   fromLogValue,
@@ -56,11 +56,8 @@ export function generateConversationTitle(logger: EventLogger, config: ModelConf
       const firstAssistant = repository.messages.find(({ message }) => message.role === "assistant")?.message;
       await logger.append({ type: "model.title.started", conversationId, content: null });
       const model = await createModel(config, logger, conversationId, { signal: abortController.signal });
-      const { result, generated } = await retryModelOperation(async () => {
-        let streamError: unknown;
-        const result = streamText({
+      const result = await retryModelOperation(() => generateText({
         model,
-        onError: ({ error }) => { streamError = error; },
         maxRetries: 0,
         abortSignal: abortController.signal,
         prompt: [
@@ -68,23 +65,16 @@ export function generateConversationTitle(logger: EventLogger, config: ModelConf
           `用户：${visibleText(firstUser)}`,
           `助手：${visibleText(firstAssistant)}`,
         ].join("\n\n"),
-        });
-        let generated = "";
-        for await (const delta of result.textStream) generated += delta;
-        // A clean EOF without a provider finish is also an interrupted request.
-        if (streamError) throw streamError;
-        if (await result.finishReason === "other") throw new TypeError("Title stream ended before completion");
-        return { result, generated };
-      }, { signal: abortController.signal, logger, conversationId, purpose: "title" });
-      const title = generated.trim().split(/\r?\n/, 1)[0]?.trim();
+      }), { signal: abortController.signal, logger, conversationId, purpose: "title" });
+      const title = result.text.trim().split(/\r?\n/, 1)[0]?.trim();
       if (!title) throw new Error("模型没有返回对话标题");
       await logger.append({
         type: "model.title.finished",
         conversationId,
         content: { title },
-        stopReason: await result.finishReason,
-        usage: await result.usage,
-        providerMetadata: await result.providerMetadata,
+        stopReason: result.finishReason,
+        usage: result.usage,
+        providerMetadata: result.providerMetadata,
       });
       const manuallyNamed = (await logger.summaryEvents(conversationId)).some((event) =>
         event.type === "conversation.title.updated" && (fromLogValue(event.content) as { source?: string }).source === "manual");
@@ -111,7 +101,8 @@ export function generateConversationTitle(logger: EventLogger, config: ModelConf
   return task;
 }
 
-function normalizeInterruptedMessage(message: ConversationMessage, events: readonly LogEvent[], runId: string): ConversationMessage {
+function normalizeInterruptedMessage(message: ConversationMessage, events: readonly LogEvent[], terminal: LogEvent): ConversationMessage {
+  const runId = terminal.runId!;
   const tools = new Map<string, LogEvent>();
   for (const event of events) if (event.runId === runId && event.toolCallId) tools.set(event.toolCallId, event);
   const parts = message.parts.flatMap((part) => {
@@ -122,7 +113,8 @@ function normalizeInterruptedMessage(message: ConversationMessage, events: reado
     const toolCallId = typeof value.toolCallId === "string" ? value.toolCallId : undefined;
     if (!toolCallId) return [part];
     const toolEvent = tools.get(toolCallId);
-    if (!toolEvent) return [];
+    if (!toolEvent && ["output-available", "output-error", "output-denied"].includes(String(value.state))) return [part];
+    if (!toolEvent) return [{ ...value, state: "output-error", errorText: "工具调用已中断，此操作未执行。" }];
     return toolEvent.output !== undefined
       ? [{ ...value, state: "output-available", output: fromLogValue(toolEvent.output) }]
       : [{ ...value, state: "output-error", errorText: String((fromLogValue(toolEvent.error) as { message?: string })?.message ?? fromLogValue(toolEvent.error) ?? "工具调用已中断。") }];
@@ -130,23 +122,13 @@ function normalizeInterruptedMessage(message: ConversationMessage, events: reado
   const metadata = message.metadata && typeof message.metadata === "object" && !Array.isArray(message.metadata)
     ? message.metadata as Record<string, unknown>
     : {};
-  return { ...message, id: message.id || `interrupted-${runId}`, parts, metadata: { ...metadata, interrupted: true } };
-}
-
-async function replayRun(events: readonly LogEvent[], terminal: LogEvent): Promise<ConversationMessage | undefined> {
-  const chunks = events
-    .filter((event) => event.runId === terminal.runId && event.type === "conversation.stream.chunk")
-    .map((event) => fromLogValue(event.content) as UIMessageChunk);
-  if (!terminal.runId || chunks.length === 0) return undefined;
-  const stream = new ReadableStream<UIMessageChunk>({
-    start(controller) {
-      for (const chunk of chunks) controller.enqueue(chunk);
-      controller.close();
-    },
-  });
-  let message: ConversationMessage | undefined;
-  for await (const snapshot of readUIMessageStream({ stream })) message = snapshot as ConversationMessage;
-  return message?.parts.length ? normalizeInterruptedMessage(message, events, terminal.runId) : undefined;
+  return { ...message, id: message.id || `interrupted-${runId}`, parts, metadata: {
+    ...metadata,
+    ...(terminal.type === "conversation.aborted" ? { interrupted: true } : {
+      custom: { ...(metadata.custom && typeof metadata.custom === "object" ? metadata.custom : {}),
+        failure: fromLogValue(terminal.error) ?? "模型请求失败" },
+    }),
+  } };
 }
 
 export async function restoreConversationRepository(events: readonly LogEvent[]): Promise<ConversationRepository> {
@@ -167,20 +149,19 @@ export async function restoreConversationRepository(events: readonly LogEvent[])
     const parentId = typeof content?.messageId === "string" ? content.messageId : null;
     const persistedPartial = [...stored.values()].find((item) => item.runId === terminal.runId && item.parentId === parentId && item.message.role === "assistant");
     if (persistedPartial) {
-      persistedPartial.message = normalizeInterruptedMessage(persistedPartial.message, events, terminal.runId!);
+      persistedPartial.message = normalizeInterruptedMessage(persistedPartial.message, events, terminal);
       continue;
     }
-    const message = await replayRun(events, terminal);
     const siblings = [...stored.entries()].filter(([, item]) => item.parentId === parentId && item.message.role === "assistant");
     const synthetic = siblings.filter(([, item]) => item.message.id.startsWith("failed-")
       && (item.message.metadata as { custom?: { syntheticTerminal?: boolean } } | undefined)?.custom?.syntheticTerminal === true);
     // A failed regeneration must preserve a real prior reply, while a newer
     // output-free terminal supersedes an older synthetic diagnostic.
-    if (!message && siblings.some(([, item]) => !synthetic.some(([id]) => id === item.message.id))) continue;
+    if (siblings.some(([, item]) => !synthetic.some(([id]) => id === item.message.id))) continue;
     const previousSynthetic = synthetic[0]?.[1];
     const syntheticId = synthetic[0]?.[0] ?? `failed-${terminal.runId}`;
     for (const [id] of synthetic.slice(1)) stored.delete(id);
-    const restored = message ?? {
+    const restored = {
       id: syntheticId,
       role: "assistant" as const,
       parts: [],

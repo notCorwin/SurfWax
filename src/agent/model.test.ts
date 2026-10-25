@@ -41,45 +41,46 @@ describe("createRetryingFetch", () => {
     expect(options.headers).toEqual({ "cf-aig-gateway-id": "gateway" });
   });
 
-  it("adapts Watsonx IAM and chat streaming requests", async () => {
+  it("adapts Watsonx IAM and sends complete JSON requests to chat", async () => {
     const calls: Request[] = [];
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = input instanceof Request ? input : new Request(input, init);
       calls.push(request.clone());
       if (request.url.includes("iam.cloud.ibm.com")) return new Response(JSON.stringify({ access_token: "iam-token", expires_in: 3600 }));
-      return new Response("data: [DONE]\n\n", { headers: { "Content-Type": "text/event-stream" } });
+      return Response.json({ choices: [{ message: { role: "assistant", content: "done" }, finish_reason: "stop" }] });
     });
     const adapter = watsonxProtocolFetch({ sdk: "watsonx-ai-provider", baseURL: "", model: "ibm/granite",
       providerSettings: { apiKey: "key", projectId: "project" } }, fetch);
-    await adapter(new Request("https://watsonx.invalid/v1/chat/completions", { method: "POST", body: JSON.stringify({ model: "ibm/granite", messages: [], stream: true }) }));
-    expect(calls[1]?.url).toBe("https://us-south.ml.cloud.ibm.com/ml/v1/text/chat_stream?version=2026-04-20");
+    await adapter(new Request("https://watsonx.invalid/v1/chat/completions", { method: "POST", body: JSON.stringify({ model: "ibm/granite", messages: [] }) }));
+    expect(calls[1]?.url).toBe("https://us-south.ml.cloud.ibm.com/ml/v1/text/chat?version=2026-04-20");
     expect(calls[1]?.headers.get("authorization")).toBe("Bearer iam-token");
     await expect(calls[1]?.json()).resolves.toMatchObject({ model_id: "ibm/granite", project_id: "project", messages: [] });
   });
 
-  it("adapts SAP OAuth, Orchestration v2, tools, and streaming output", async () => {
+  it("adapts SAP OAuth and Orchestration v2 to complete JSON responses", async () => {
     const calls: Request[] = [];
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = input instanceof Request ? input : new Request(input, init);
       calls.push(request.clone());
       if (request.url.includes("/oauth/token")) return new Response(JSON.stringify({ access_token: "sap-token", expires_in: 3600 }));
-      return new Response(`data: ${JSON.stringify({ final_result: { id: "result", model: "gpt-test", choices: [{ index: 0,
-        delta: { role: "assistant", content: "", tool_calls: [{ index: 0, id: "call", type: "function", function: { name: "test", arguments: "{}" } }] }, finish_reason: "tool_calls" }],
-        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } } })}\n\ndata: [DONE]\n\n`, { headers: { "Content-Type": "text/event-stream" } });
+      return Response.json({ final_result: { id: "result", model: "gpt-test", choices: [{ index: 0,
+        message: { role: "assistant", content: null, tool_calls: [{ id: "call", type: "function", function: { name: "test", arguments: "{}" } }] }, finish_reason: "tool_calls" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } } });
     });
     const config = { sdk: "@jerome-benoit/sap-ai-provider-v2" as const, baseURL: "", model: "gpt-test", providerSettings: {
       serviceKeyJson: JSON.stringify({ url: "https://auth.test", clientid: "client", clientsecret: "secret" }), deploymentUrl: "https://orchestration.test", resourceGroup: "rg",
     } };
     const response = await sapProtocolFetch(config, fetch)(new Request("https://sap.invalid/v1/chat/completions", { method: "POST", body: JSON.stringify({
-      model: "gpt-test", messages: [{ role: "user", content: "hi" }], tools: [{ type: "function", function: { name: "test", parameters: {} } }], stream: true,
+      model: "gpt-test", messages: [{ role: "user", content: "hi" }], tools: [{ type: "function", function: { name: "test", parameters: {} } }],
     }) }));
     expect(calls[1]?.url).toBe("https://orchestration.test/v2/completion");
     expect(calls[1]?.headers.get("authorization")).toBe("Bearer sap-token");
     expect(calls[1]?.headers.get("ai-resource-group")).toBe("rg");
     const body = await calls[1]?.json();
-    expect(body.config.stream.enabled).toBe(true);
+    expect(body.config.stream).toBeUndefined();
+    expect(body.config.modules.prompt_templating.model.params.stream_options).toBeUndefined();
     expect(body.config.modules.prompt_templating.prompt.tools).toHaveLength(1);
-    expect(await response.text()).toContain('"tool_calls"');
+    await expect(response.json()).resolves.toMatchObject({ choices: [{ message: { tool_calls: [{ id: "call" }] } }] });
   });
 
   it("uses GitLab direct access token headers for the model proxy", async () => {
@@ -175,8 +176,8 @@ describe("createRetryingFetch", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("classifies stream causes while keeping permanent HTTP failures terminal", () => {
-    expect(isRecoverableModelError(new Error("stream failed", { cause: new TypeError("connection reset") }))).toBe(true);
+  it("classifies request causes while keeping permanent HTTP failures terminal", () => {
+    expect(isRecoverableModelError(new Error("request failed", { cause: new TypeError("connection reset") }))).toBe(true);
     expect(isRecoverableModelError({ statusCode: 503, isRetryable: true })).toBe(true);
     expect(isRecoverableModelError({ statusCode: 401, isRetryable: true })).toBe(false);
     expect(isRecoverableModelError({ statusCode: 400, cause: new TypeError("network") })).toBe(false);

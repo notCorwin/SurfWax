@@ -1,4 +1,4 @@
-import { expect, test, startProvider, textResponse, streamingTextResponse, toolResponse, configure, openExtension, dispose, readEvents, startNewConversation, focusPageControl } from './fixtures';
+import { expect, test, startProvider, textResponse, delayedResponse, toolResponse, configure, openExtension, dispose, readEvents, startNewConversation, focusPageControl } from './fixtures';
 
 const largeReply = 'OLD_CONTEXT_MARKER ' + 'page observation '.repeat(8_000);
 const summary = 'Earlier page observations and the user request have been recorded.';
@@ -20,7 +20,7 @@ test('automatically summarizes after a completed turn and preserves the full can
     expect(JSON.stringify(events.filter(event => event.type === 'conversation.message'))).toContain('OLD_CONTEXT_MARKER');
     await composer.fill('continue'); await composer.press('Enter');
     await expect(opened.page.locator('.markdown-body').last()).toContainText('COMPACTED_REPLY');
-    const final = [...provider.requests].reverse().find(request => request.stream === true && JSON.stringify(request.messages).includes('continue'));
+    const final = [...provider.requests].reverse().find(request => JSON.stringify(request.messages).includes('continue'));
     expect(JSON.stringify(final?.messages)).toContain(summary);
     expect(JSON.stringify(final?.messages)).not.toContain('OLD_CONTEXT_MARKER');
     await opened.page.getByTestId('conversation-menu').click(); await startNewConversation(opened.page);
@@ -28,10 +28,12 @@ test('automatically summarizes after a completed turn and preserves the full can
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
-test("updates context usage during a streamed reply and shows structured details", async () => {
+test("updates context usage from a completed reply and shows structured details", async () => {
+  let releaseReply!: () => void;
+  const replyMayFinish = new Promise<void>((resolve) => { releaseReply = resolve; });
   const provider = await startProvider([
-    streamingTextResponse(["LIVE_CONTEXT_MARKER " + "page state ".repeat(2_000), " STREAM_COMPLETE"],
-      { promptTokens: 2_000, completionTokens: 800, cachedTokens: 500 }),
+    delayedResponse(textResponse("LIVE_CONTEXT_MARKER " + "page state ".repeat(2_000) + " CONTEXT_COMPLETE",
+      { promptTokens: 2_000, completionTokens: 800, cachedTokens: 500 }), 0, replyMayFinish),
     textResponse("实时上下文测试"),
   ], 700);
   const opened = await openExtension();
@@ -66,18 +68,14 @@ test("updates context usage during a streamed reply and shows structured details
       }).observe(document.body, { attributes: true, subtree: true, attributeFilter: ["data-animating"] });
     });
 
-    await opened.page.getByTestId("composer-input").fill("stream context now");
+    await opened.page.getByTestId("composer-input").fill("measure context after completion");
     await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("LIVE_CONTEXT_MARKER");
-    await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
     await focusPageControl(opened.page, indicator);
-    await expect(opened.page.getByTestId("context-input")).toHaveText("0 tokens");
-    await expect(opened.page.getByTestId("context-output")).toHaveText("0 tokens");
-    await expect(opened.page.getByTestId("context-cache-read")).toContainText("0 tokens");
-    await expect.poll(async () => Number(await indicator.getAttribute("data-used-percent"))).toBeGreaterThan(initial);
-    await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_COMPLETE");
+    await expect(opened.page.getByTestId("context-token-usage")).toBeVisible();
+    releaseReply();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("CONTEXT_COMPLETE");
     await expect(opened.page.getByRole("button", { name: "发送消息" })).toBeVisible();
+    await expect.poll(async () => Number(await indicator.getAttribute("data-used-percent"))).toBeGreaterThan(initial);
     await expect(opened.page.getByTestId("context-token-usage")).toHaveAttribute("data-animating", "false");
     expect(await opened.page.evaluate(() => (window as typeof window & { __tokenAnimationSeen?: boolean }).__tokenAnimationSeen)).toBe(true);
     await expect(opened.page.getByTestId("context-input")).toHaveText("2,000 tokens");
@@ -203,7 +201,7 @@ test('automatically summarizes and retries the same request after provider conte
     const events = await readEvents(opened.page);
     expect(events.some(event => event.type === 'context.compacted')).toBe(true);
     expect(events.some(event => event.type === 'context.choice.required')).toBe(false);
-    const agentRequests = provider.requests.filter(request => request.stream === true && request.tools?.length);
+    const agentRequests = provider.requests.filter(request => request.tools?.length);
     expect(agentRequests).toHaveLength(2);
     expect(agentRequests.map(request => request.tools.length)).toEqual([3, 3]);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }

@@ -62,7 +62,7 @@ export function analyzeSdkCoverage(catalog, supportedSdks) {
     modelOverrides: modelOverrides.sort((a, b) => `${a.providerId}/${a.modelId}`.localeCompare(`${b.providerId}/${b.modelId}`)),
     gitlab: { catalogModelIds: gitlabModelIds, missingMetadata: missingGitlabMetadata },
     coverageComplete: missing.length === 0 && missingGitlabMetadata.length === 0,
-    limitations: 'Checks SDK name registration and Models.dev GitLab routing metadata only. Does not prove protocol, authentication, streaming, tool-call or account-level model compatibility.',
+    limitations: 'Checks SDK name registration and Models.dev GitLab routing metadata only. Does not prove protocol, authentication, tool-call or account-level model compatibility.',
   };
 }
 

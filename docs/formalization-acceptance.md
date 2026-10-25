@@ -20,10 +20,10 @@
 | 2. 工具收敛与 Registry | 80 个工具收敛到 49 个独立工具；保留 act、画布所需的 keydown/keyup/mousemove/mousedown/mouseup、七个只读诊断工具和五个用户脚本工具。schema、描述、摘要目录及生成文档来自同一 registry；act 保持按操作类型约束必填字段的联合 schema，tabId 保持显式目标选择能力。 | [工具源与 Registry](../src/chrome/tool.ts)、[工具契约测试](../src/chrome/tool.test.ts)、[生成器](../scripts/generate-tool-docs.mjs)、[工具参考](tools.md)、[预算测量](../scripts/measure-tool-budget.mjs)。数量、字节与 BPE 结果分别记录，不能互相替代。 |
 | 3. 统一运行所有权、取消与恢复 | background 仲裁跨侧栏运行，使用 runId/ownerId/generation 与真实 Port 约束所有权。绑定本轮窗口和目标标签页，切换浏览器焦点不会重定向工具；显式 tab-select 可以切换目标。关闭 owner、中断任务、清空日志会取消请求及排队操作，并清理页面防干扰与输入状态。worker 启动时先清理遗留 guard、从 canonical input state 释放遗留按键/鼠标、补齐悬挂运行，再允许新 owner；成功释放后保存空状态，失败保留恢复证据。 | [后台仲裁](../src/agent/background-coordinator.ts)、[协调器](../src/agent/coordinator.ts)、[后台生命周期](../src/background.ts)、[原生侧栏 E2E](../e2e/lifecycle.spec.ts)、[真实 Worker 重启](../e2e/maintenance.spec.ts)。 |
 | 4. Canonical Tool Log | 对话、分支、工具结果、产物、重试和中断均从 append-only event log 恢复；没有第二份持久化运行真相。终态写入跨 writer 串行化，按 run/phase/toolCallId 去重；失败与中断补 Tool Result。清空日志使用 writer handshake、维护代际与待执行操作屏障，避免旧 writer 把数据写回。大型结果和产物使用稳定日志 ID，result 支持精确读取。 | [日志实现](../src/logging.ts)、[日志契约测试](../src/logging.test.ts)、[会话与分支](../src/conversations.ts)、[恢复测试](../e2e/conversations.spec.ts)。终态记录幂等不等于外部副作用具备 exactly-once 保证。 |
-| 5. 可靠请求与自动压缩 | 可恢复错误无限重试，退避单次不超过 10 秒，停止可中断退避。SSE 断流从持久化部分文本和工具结果续接，工具调用按请求 phase 区分。剩余容量不足 20% 或 Provider 拒绝超长上下文时自动摘要；保留分支/source/summary digest，超长源先分块再合并。失败保留原历史并提供重试，取消不写半成品 checkpoint；旧手动 gate 自动迁移。未匹配模型窗口使用 256K，首条用户消息的工具目录前缀按其持久化版本恢复。 | [请求与流恢复](../src/agent/model.ts)、[SSE 恢复](../src/agent/stream-recovery.ts)、[自动压缩](../src/agent/context-choice.ts)、[压缩契约](../src/agent/compaction.ts)、[工具目录前缀](../src/agent/tool-catalog.ts)、[上下文 E2E](../e2e/context.spec.ts)。真实断流与副作用未重放由原生侧栏用例验证。 |
+| 5. 可靠请求与自动压缩 | 可恢复的完整响应请求持续重试，退避单次不超过 10 秒，停止可中断退避。工具结果在追加到 canonical log 后随下一次完整请求复用；失败重试不会重放已完成的工具。剩余容量不足 20% 或 Provider 拒绝超长上下文时自动摘要；保留分支/source/summary digest，超长源先分块再合并。失败保留原历史并提供重试，取消不写半成品 checkpoint；旧手动 gate 自动迁移。未匹配模型窗口使用 256K，首条用户消息的工具目录前缀按其持久化版本恢复。 | [模型请求](../src/agent/model.ts)、[自动压缩](../src/agent/context-choice.ts)、[压缩契约](../src/agent/compaction.ts)、[工具目录前缀](../src/agent/tool-catalog.ts)、[上下文 E2E](../e2e/context.spec.ts)。原生侧栏用例验证完整响应失败后的重试与工具副作用只执行一次。 |
 | 6. 浏览器操作语义 | 专用命令、act 与 run-code 的 page facade 共用浏览器执行层。按操作检查可见、稳定、启用、可编辑与接收输入条件；严格唯一匹配，ref 节点失效明确报错。支持跨源 iframe、open Shadow DOM、隐藏 file input/filechooser、组合键及跨命令保留输入状态。截图/PDF 默认是内部产物，坐标按观察信息映射；act 部分失败保留已完成步骤。 | [共享自动化](../src/chrome/automation.ts)、[执行器](../src/chrome/executor.ts)、[自动化 E2E](../e2e/automation.spec.ts)、[page facade 等待约定](tools.md)。DPR=2、框架与输入场景必须以最终矩阵实测为准。 |
-| 7. 只读诊断、性能与 UX | 保留请求列表/详情、请求头/body、响应头/body与 console。诊断内存缓存设上限，原始 CDP 事件保留在日志，查询支持分页并从日志补读。UI 按 animation frame 合并流式更新，保留完整 GFM、LaTeX 与语法高亮；长会话虚拟化，工具结果展开时加载，完整错误仍可查看。会话编辑、分支、归档、搜索与运行中切换约束保留。 | [只读诊断](../src/chrome/diagnostics.ts)、[诊断测试](../src/chrome/diagnostics.test.ts)、[渲染 E2E](../e2e/rendering.spec.ts)、[本地性能测试](../e2e/performance.spec.ts)。本地固定环境测量见下表与 performance-results.json。 |
-| 8. 可维护升级发布 | package.json 为版本唯一来源；lockfile、Manifest、七权限、入口与移除 host 均由构建验证，主入口 JS 上限为 2,000,000B。E2E 按域拆分并共享夹具，失败保留 profile；真实 0.2.0 fixture 验证升级配置、日志 ID 与用户脚本启停状态。CI 验证 Chrome 138/current 功能矩阵；性能仅本地。本地版本包同 SHA 可复用、不同 SHA 拒绝覆盖并原子发布；正式 v* 发布不覆盖，ZIP 有 SHA-256；当时的 autobuild 会更新固定测试渠道资产。该自动发布流程现已移除。 | [构建与版本校验](../scripts/validate-build.mjs)、[历史升级 fixture](../scripts/prepare-upgrade-fixture.mjs)、[ZIP 打包](../scripts/package-release.mjs)、[商店材料](store-listing.md)、[隐私政策](../PRIVACY.md)、[更新记录](../CHANGELOG.md)。正式发布或商店审核均未执行。 |
+| 7. 只读诊断、性能与 UX | 保留请求列表/详情、请求头/body、响应头/body与 console。诊断内存缓存设上限，原始 CDP 事件保留在日志，查询支持分页并从日志补读。UI 直接呈现 store 状态与静态 Markdown，保留完整 GFM、LaTeX 与语法高亮；长会话虚拟化，工具结果展开时加载，完整错误仍可查看。会话编辑、分支、归档、搜索与运行中切换约束保留。 | [只读诊断](../src/chrome/diagnostics.ts)、[诊断测试](../src/chrome/diagnostics.test.ts)、[渲染 E2E](../e2e/rendering.spec.ts)、[本地性能测试](../e2e/performance.spec.ts)。旧版性能报告已废弃；当前数值由新的完整响应负载运行生成。 |
+| 8. 可维护升级发布 | package.json 为版本唯一来源；lockfile、Manifest、七权限、入口与移除 host 均由构建验证，主入口 JS 上限为 2,000,000B。E2E 按域拆分并共享夹具，失败保留 profile；当前非流式构建验证扩展重载后配置、日志 ID、分支与用户脚本启停状态的恢复。CI 验证 Chrome 138/current 功能矩阵；性能仅本地。本地版本包同 SHA 可复用、不同 SHA 拒绝覆盖并原子发布；正式 v* 发布不覆盖，ZIP 有 SHA-256；当时的 autobuild 会更新固定测试渠道资产。该自动发布流程现已移除。 | [构建与版本校验](../scripts/validate-build.mjs)、[ZIP 打包](../scripts/package-release.mjs)、[商店材料](store-listing.md)、[隐私政策](../PRIVACY.md)、[更新记录](../CHANGELOG.md)。正式发布或商店审核均未执行。 |
 
 ## 工具输入预算的实际测量
 
@@ -72,11 +72,11 @@ Chrome 138 使用 `pagehide` 与 owner Port 断开处理关闭；有 `sidePanel.
 | 原生下载授权及实际落盘 | 旧候选的真实继承授权下载与撤销已通过；当前候选在完整矩阵中复核，首次气泡仍需人工 | `native-download.spec.ts；首次原生授权气泡仍待人工` |
 | 真实 worker 重启与副作用边界 | 当前 ZIP 的两个浏览器用例均通过 | `maintenance.spec.ts；真实 ServiceWorker.stopWorker，不重放副作用` |
 | FIFO 与原生关闭 race 回归 | 8/8 通过；两个浏览器各重复两轮，未开启失败重试 | `.dev/formalization-evidence/repeated-race-regressions.log` |
-| 本地性能 | 2/2 通过；定位与动作 p95 58.1ms，流式/滚动 p95 16.7ms，输入 p95 13.0ms，恢复 412ms | [performance-results.json](performance-results.json)；原始样本 `.dev/formalization-evidence/performance-reviewed/` |
+| 本地性能 | 旧版测量数据已废弃；当前完整响应性能结果待重新运行 | 新报告保存于 `.dev/verification/performance/` |
 | 最终 ZIP / SHA-256 | `.dev/releases/reviewed/surf-wax-0.3.0.zip` / `f36d2a15f5dcc61d5768081f9c7b0ad3e51e7d22f78f3ccdcff487ddd01420fd` | `.dev/formalization-evidence/package-integrity.json`；421 个 ZIP/解包文件与构建逐一 SHA-256 匹配；同 HEAD 可复用，不同内容拒绝覆盖 |
 | GitHub 渠道与商店发布 | 历史自动发布流程已移除，商店尚未发布 | 历史证据见下文 |
 
-Canonical IndexedDB 证据按仓库约定保存在 `../.dev/chromium-profile/Default/IndexedDB/`；隔离 profile 测试结束后复制到该位置，失败 profile 不先删除。trace、失败截图和性能 JSON 应一并保留，记录浏览器实际版本、project、提交、viewport、DPR 与运行环境。
+Canonical IndexedDB 证据按仓库约定保存在 `../.dev/chromium-profile/Default/IndexedDB/`；隔离 profile 测试结束后复制到该位置，失败 profile 不先删除。当前 trace、失败截图和性能 JSON 应一并保留，记录浏览器实际版本、project、提交、viewport、DPR 与运行环境。
 
 当前候选覆盖 170 项，最终唯一用例结果为 169 通过、1 跳过。完整首次运行得到 167 通过、1 跳过、2 失败；两项失败是同一个立即追加消息夹具仍预留已取消的标题响应，导致回复错位。删除该模拟响应后，新增“全部 Provider 请求恰好三次”的断言，在两版浏览器各重复两次，共 4/4 通过。扩展源码和 ZIP 没有再次修改，因此保留其余 167 项通过结果，不重跑无关用例。
 
@@ -93,9 +93,9 @@ FIFO 首次失败由已经排队的标题请求造成：用户人工命名后，
 ## 发布前人工门禁与行为边界
 
 - **首次原生下载授权**：自动测试覆盖 Chrome API 边界的允许/拒绝，真实继承授权后的文件落盘、实际撤销，以及等待授权时关闭原生侧栏后的恢复。原生首次授权气泡的允许、拒绝与撤销后再次允许，仍需在普通 Chrome 中操作并记录；当前运行环境不能控制浏览器原生权限气泡。
-- **原生生命周期覆盖**：用例覆盖 SSE 断流续接且副作用只执行一次、双侧栏互斥与非 owner 关闭、owner 关闭后排队指令未执行、部分 act 结果恢复、等待下载授权时关闭后复用原产物。实际终止 MV3 worker 的用例核查按键释放、移除页面保护、幂等补齐工具与运行终态、新任务可启动；当前 ZIP 的两版浏览器用例已通过；每种崩溃时间点尚未做穷举。
-- **已发出的副作用**：取消可以阻止后续和排队指令，不能撤回已经发送的 CDP 输入、网页提交、下载或服务端行为。终态日志去重与请求续接不构成外部副作用 exactly-once 保证；断线时结果不明确的动作应先观察页面再决定后续操作，不能声称它已回滚。
-- **性能范围**：本地固定环境测量流式与长日志场景的 rAF 间隔 p95 ≤20ms、input 事件到下一 rAF p95 ≤50ms；语义定位+动作 p95 ≤100ms。保留长日志恢复、DOM 数量及原有交互门槛。结果是此环境的 p95，不能理解为每一帧都在 20ms 内；GitHub Actions 不运行性能测试。
+- **原生生命周期覆盖**：用例覆盖完整响应失败后的自动重试且已完成副作用只执行一次、双侧栏互斥与非 owner 关闭、owner 关闭后排队指令未执行、部分 act 结果恢复、等待下载授权时关闭后复用原产物。实际终止 MV3 worker 的用例核查按键释放、移除页面保护、幂等补齐工具与运行终态、新任务可启动；每种崩溃时间点尚未做穷举。
+- **已发出的副作用**：取消可以阻止后续和排队指令，不能撤回已经发送的 CDP 输入、网页提交、下载或服务端行为。终态日志去重与请求重试不构成外部副作用 exactly-once 保证；结果不明确的动作应先观察页面再决定后续操作，不能声称它已回滚。
+- **性能范围**：旧版性能结果已退役，不作为当前完整响应实现的性能保证。新的固定环境报告应测量完整响应渲染、长历史、滚动和输入响应；GitHub Actions 不运行性能测试。
 - **发布证据**：历史版本 ZIP 与商店材料已经具备；自动发布流程现已移除，正式发布与商店提交尚未执行。现有商店图片属于既有素材，不自动证明与 0.3.0 界面一致。
 
 最终结论以“最终验证结果”表为准。正式版本 tag 与商店提交须在人工授权气泡、素材核对及远端发布门禁通过后进行；本轮交付为可独立安装的候选版本包。

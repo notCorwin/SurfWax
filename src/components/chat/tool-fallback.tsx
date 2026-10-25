@@ -11,7 +11,7 @@ function format(value: unknown): string {
   }
 }
 
-export const ToolFallback = memo(function ToolFallback(part: { status: { type: string }; args: unknown; argsText?: string; inputStreaming?: boolean; result?: unknown; isError?: boolean }) {
+export const ToolFallback = memo(function ToolFallback(part: { status: { type: string }; args: unknown; result?: unknown; isError?: boolean }) {
   const { status, label } = toolActivity(part, useContext(ActivityPhaseContext));
   const running = status === "running";
   const [expanded, setExpanded] = useState(status === "error");
@@ -22,10 +22,10 @@ export const ToolFallback = memo(function ToolFallback(part: { status: { type: s
       </summary>
       {expanded && <div className="activity-content">
         <strong>输入</strong>
-        <pre>{part.argsText || format(part.args)}</pre>
+        <pre>{format(part.args)}</pre>
         {part.result !== undefined && <><strong>输出</strong><pre>{format(part.result)}</pre></>}
       </div>}
     </details>
   );
 }, (before, after) => before.status.type === after.status.type && before.args === after.args
-  && before.inputStreaming === after.inputStreaming && before.argsText === after.argsText && before.result === after.result && before.isError === after.isError);
+  && before.result === after.result && before.isError === after.isError);

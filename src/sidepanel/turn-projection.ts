@@ -37,6 +37,6 @@ export function createTurnProjection() {
     return turns;
   };
   // TanStack invalidates all measurements when the key callback changes.
-  // Tokens change bodies, while branch/turn changes update this callback.
+  // Response snapshots change bodies, while branch/turn changes update this callback.
   return Object.assign(project, { getItemKey: () => getItemKey });
 }

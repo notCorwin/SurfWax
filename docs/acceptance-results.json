@@ -113,23 +113,6 @@
     "headless": true,
     "fixtureCommit": "44bcd8e"
   },
-  "performance": {
-    "passed": 2,
-    "failed": 0,
-    "report": "docs/performance-results.json",
-    "environment": {
-      "platform": "darwin",
-      "arch": "arm64",
-      "node": "v22.21.0",
-      "logicalCpus": 8,
-      "cpuModel": "Apple M3"
-    },
-    "actionP95Ms": 58.100000001490116,
-    "streamFrameP95Ms": 16.700000000000273,
-    "scrollFrameP95Ms": 16.700000000000273,
-    "inputToFrameP95Ms": 13,
-    "reloadMs": 412
-  },
   "tools": {
     "label": "current",
     "count": 49,

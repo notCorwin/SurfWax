@@ -1,5 +1,5 @@
 import type { LanguageModelMiddleware } from "ai";
-import type { LanguageModelV4StreamPart, LanguageModelV4ToolCall } from "@ai-sdk/provider";
+import type { LanguageModelV4ToolCall } from "@ai-sdk/provider";
 import { PROGRAM_TOOL_REGISTRY } from "../chrome/tool";
 import type { EventLogger } from "../logging";
 
@@ -84,61 +84,6 @@ export function dsmlMiddleware(logger?: EventLogger, conversationId?: string): L
         content: result.content.flatMap((part, index) => part.type !== "text" ? [part] : !nativeCall && index === firstText ? parsed.calls : []),
         finishReason: nativeCall ? result.finishReason : { ...result.finishReason, unified: "tool-calls" as const },
       };
-    },
-    wrapStream: async ({ doStream, params }) => {
-      const result = await doStream();
-      if (!params.tools?.some((tool) => tool.type === "function") || params.toolChoice?.type === "none") return result;
-      const activeTools = new Set(params.tools.filter((tool) => tool.type === "function" && (params.toolChoice?.type !== "tool" || tool.name === params.toolChoice.toolName)).map((tool) => tool.name));
-      let mode: "probe" | "buffer" | "pass" = "probe";
-      let buffered: LanguageModelV4StreamPart[] = [];
-      let text = "";
-      let nativeCall = false;
-      const flush = (controller: TransformStreamDefaultController<LanguageModelV4StreamPart>) => {
-        for (const part of buffered) controller.enqueue(part);
-        buffered = [];
-      };
-      return { ...result, stream: result.stream.pipeThrough(new TransformStream<LanguageModelV4StreamPart, LanguageModelV4StreamPart>({
-        transform(part, controller) {
-          if (part.type === "tool-call" || part.type === "tool-input-start") {
-            nativeCall = true;
-            if (mode !== "pass") {
-              if (text && !text.trimStart().startsWith(DSML_MARKER)) {
-                flush(controller);
-                mode = "pass";
-              }
-            }
-            controller.enqueue(part);
-            return;
-          }
-          if (mode !== "pass" && (part.type === "text-start" || part.type === "text-delta" || part.type === "text-end")) {
-            buffered.push(part);
-            if (part.type === "text-delta") text += part.delta;
-            if (mode === "probe") {
-              const candidate = text.trimStart();
-              if (candidate.startsWith(DSML_MARKER)) mode = "buffer";
-              else if (!DIALECTS.some(({ calls }) => calls.startsWith(candidate))) { flush(controller); mode = "pass"; }
-            }
-            return;
-          }
-          if (part.type === "finish" && mode !== "pass") {
-            const parsed = parseDsml(text, activeTools);
-            if (parsed && !nativeCall) log(parsed);
-            if (parsed && "calls" in parsed && !nativeCall) {
-              buffered = [];
-              for (const call of parsed.calls) controller.enqueue(call);
-              controller.enqueue({ ...part, finishReason: { ...part.finishReason, unified: "tool-calls" } });
-            } else {
-              if (nativeCall && parsed && "calls" in parsed) buffered = [];
-              else flush(controller);
-              controller.enqueue(part);
-            }
-            mode = "pass";
-            return;
-          }
-          controller.enqueue(part);
-        },
-        flush(controller) { flush(controller); },
-      })) };
     },
   };
 }

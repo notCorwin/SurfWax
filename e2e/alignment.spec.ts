@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { test, commandResponse, streamingTextResponse, textResponse, startProvider, openExtension, configure, nameCurrentConversation, readEvents, dispose } from "./fixtures";
+import { test, commandResponse, textResponse, delayedResponse, startProvider, openExtension, configure, nameCurrentConversation, readEvents, dispose } from "./fixtures";
 
 test("executes more than 100 program operations and records a single tool result", async () => {
   const responses = [commandResponse("run", { timeoutMs: 30000, code: "for (let i=0;i<121;i++) await page.getByRole('button',{name:'Increment'}).click(); await check(await page.locator('output').innerText()==='121');" }, "over-100"), textResponse("ALL_121_DONE")];
@@ -60,7 +60,7 @@ test("keeps user clicks, keys and paste blocked throughout agent input and ifram
 
 test("applies explicit model and prompt changes next turn and retries user messages as logged branches", async () => {
   const provider = await startProvider([
-    streamingTextResponse(["CONFIG_RUNNING", ...Array.from({ length: 200 }, () => "."), "CONFIG_DONE"]),
+    delayedResponse(textResponse("CONFIG_DONE"), 250),
     textResponse("NEXT_TURN"), textResponse("USER_RETRY_BRANCH"),
   ], 10);
   const opened = await openExtension();
@@ -68,7 +68,7 @@ test("applies explicit model and prompt changes next turn and retries user messa
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await nameCurrentConversation(opened.page, "Deferred settings");
     await opened.page.getByTestId("composer-input").fill("first turn"); await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("CONFIG_RUNNING");
+    await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
     await expect(opened.page.getByTestId("retry-user-message-button")).toHaveCount(0);
     await options.getByLabel("Model ID", { exact: true }).fill("next-model");
     await options.getByLabel("自定义系统提示词").fill("CUSTOM_NEXT_TURN");

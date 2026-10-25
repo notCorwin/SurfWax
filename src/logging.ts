@@ -583,6 +583,8 @@ export class EventLogger {
       this.options.onError?.(error);
       throw error;
     });
+    // Retain the failed queue to block later writes; the caller owns the error.
+    void this.pending.catch(() => undefined);
     return task;
   }
 
@@ -622,13 +624,14 @@ export class EventLogger {
   ): Promise<void> {
     const legacy = typeof conversationOrMessage !== "string";
     const message = (legacy ? conversationOrMessage : messageOrRunId) as ConversationMessage;
-    await this.append({
+    const saved = await this.append({
       type: "conversation.message",
       ...(legacy ? {} : { conversationId: conversationOrMessage }),
       runId: legacy && typeof messageOrRunId === "string" ? messageOrRunId : options.runId,
       parentId: options.parentId,
       content: message,
     });
+    if (!saved) throw new DOMException("日志维护已阻止消息保存。", "AbortError");
   }
 
   async repository(conversationId: string): Promise<ConversationRepository> {
@@ -701,7 +704,6 @@ export class EventLogger {
       .map((event) => event.runId!))];
     if (interrupted.length === 0) return lifecycle;
     const replay = await this.eventsByRunTypes(interrupted, [
-      "conversation.stream.chunk",
       "tool.started",
       "tool.finished",
       "tool.failed",
@@ -786,7 +788,7 @@ export class EventLogger {
   }
 
   async closePendingTools(runId: string, conversationId: string, reason: unknown): Promise<void> {
-    const events = await this.eventsByRunTypes([runId], ["tool.started", "tool.finished", "tool.failed", "tool.progress", "tool.result.data", "browser.artifact.used"]);
+    const events = await this.eventsByRunTypes([runId], ["conversation.message", "tool.started", "tool.finished", "tool.failed", "tool.progress", "tool.result.data", "browser.artifact.used"]);
     const key = (event: LogEvent) => `${(fromLogValue(event.content) as { callId?: string })?.callId ?? ""}\0${event.toolCallId}`;
     const terminal = new Set(events.filter((event) => ["tool.finished", "tool.failed"].includes(event.type)).map(key));
     for (const event of events) {
@@ -810,6 +812,27 @@ export class EventLogger {
         content: { ...((fromLogValue(event.content) as object) ?? {}), status: completedAll ? "completed" : "interrupted", effectUnknown: !completedAll },
         input: fromLogValue(event.input), output: { ...output, ...(artifact ? { artifact } : {}) },
         ...(completedAll ? {} : { error: failure, abort: { reason } }) });
+    }
+    const started = new Set(events.filter((event) => event.type === "tool.started" || event.type === "tool.finished" || event.type === "tool.failed").map((event) => event.toolCallId));
+    const messages = new Map<string, ConversationMessage>();
+    for (const event of events) if (event.type === "conversation.message") {
+      const message = fromLogValue(event.content);
+      if (isConversationMessage(message)) messages.set(message.id, message);
+    }
+    // A complete response can contain several calls. Cancellation before their
+    // execution still needs a terminal result for every accepted call.
+    for (const message of messages.values()) for (const part of message.parts) {
+      if (!part || typeof part !== "object" || !("toolCallId" in part) || !("state" in part)
+        || typeof part.toolCallId !== "string" || !["input-available", "output-error"].includes(String(part.state)) || started.has(part.toolCallId)) continue;
+      started.add(part.toolCallId);
+      const input = "input" in part ? part.input : undefined;
+      const toolName = "toolName" in part ? part.toolName : "type" in part ? String(part.type).slice(5) : undefined;
+      const invalid = part.state === "output-error";
+      const error = { code: invalid ? "invalid-tool-call" : "interrupted",
+        message: invalid && "errorText" in part ? String(part.errorText) : "工具调用已中断，此操作未执行。", effectUnknown: false };
+      await this.append({ type: "tool.failed", conversationId, runId, toolCallId: part.toolCallId, toolCallIdCanonical: true,
+        content: { toolName, status: invalid ? "failed" : "interrupted", effectUnknown: false }, input, output: { ok: false, error }, error,
+        ...(invalid ? {} : { abort: { reason } }) });
     }
   }
 

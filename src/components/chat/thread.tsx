@@ -1,8 +1,8 @@
 "use client";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { MessageScrollerProvider, MessageScroller, MessageScrollerViewport, MessageScrollerContent, MessageScrollerButton } from "@/components/ui/message-scroller";
-import { useFrameThread } from "@/sidepanel/frame-view";
+import { useThreadState } from "@/sidepanel/runtime-view";
 import { useRunState } from "@/sidepanel/useRunState";
 import { createTurnProjection } from "@/sidepanel/turn-projection";
 import { Welcome } from "./welcome";
@@ -32,7 +32,7 @@ export function completedWork(events: readonly LogEvent[]): Map<string, number> 
 export function Thread({ config, logger, conversationId, contextBlocked, draft, onDraftChange }: {
   config: ModelConfig; logger: EventLogger; conversationId: string; contextBlocked?: boolean; draft?: string; onDraftChange: (value: string) => void;
 }) {
-  const state = useFrameThread();
+  const state = useThreadState();
   const { locked } = useRunState();
   const projectTurns = useMemo(createTurnProjection, []);
   const turns = useMemo(() => projectTurns(state.messages), [projectTurns, state.messages]);
@@ -68,7 +68,7 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
     <MessageScrollerProvider autoScroll={false}>
       <MessageScroller className="flex-1">
         <MessageScrollerViewport ref={scroller} data-testid="thread-viewport" className="overflow-x-hidden"
-          onScroll={(event) => { const viewport = event.currentTarget;
+          onScroll={(event: UIEvent<HTMLDivElement>) => { const viewport = event.currentTarget;
             followingEnd.current = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 2; }}>
           <MessageScrollerContent className="mx-auto block w-full max-w-(--thread-max-width) px-4 pt-5 pb-8">
             {turns.length === 0 && !state.isLoading && <Welcome disabled={locked} />}

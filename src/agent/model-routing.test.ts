@@ -38,7 +38,7 @@ describe("model-specific SDK routes", () => {
   });
   it("uses native Mantle Responses at the model endpoint with saved provider credentials", async () => {
     const config: ModelConfig = { providerId: "amazon-bedrock", sdk: "@ai-sdk/amazon-bedrock", baseURL: "https://bedrock-runtime.us-east-1.amazonaws.com", model: "openai.gpt-6.1-sol", apiKey: "legacy-key",
-      providerSettings: { apiKey: "user-key", region: "eu-west-1" }, modelProvider: { npm: "@ai-sdk/amazon-bedrock/mantle", api: "https://bedrock-mantle.${AWS_REGION}.api.aws/openai/v1", shape: "responses", headers: { "x-catalog": "model", Authorization: "catalog-key" }, body: { service_tier: "priority", model: "wrong", input: "wrong", stream: true } } };
+      providerSettings: { apiKey: "user-key", region: "eu-west-1" }, modelProvider: { npm: "@ai-sdk/amazon-bedrock/mantle", api: "https://bedrock-mantle.${AWS_REGION}.api.aws/openai/v1", shape: "responses", headers: { "x-catalog": "model", Authorization: "catalog-key" }, body: { service_tier: "priority", model: "wrong", input: "wrong", stream: true, stream_options: { include_usage: true }, extra_body: { streaming: true, stream_mode: "enabled", vendor_setting: "kept" } } } };
     const requests: Request[] = [];
     const model = await createModel(config, undefined, undefined, { fetch: async (input, init) => { requests.push(new Request(input, init)); return responses(); } });
     expect((await generateText({ model, prompt: "hello" })).text).toBe("done");
@@ -53,6 +53,8 @@ describe("model-specific SDK routes", () => {
     expect(body.service_tier).toBe("priority");
     // Catalog defaults cannot change the operation or inject prompt/tool fields.
     expect(body.stream).not.toBe(true);
+    expect(body.stream_options).toBeUndefined();
+    expect(body.extra_body).toEqual({ vendor_setting: "kept" });
   });
 
   it("selects native OpenAI Chat Completions instead of its default Responses interface", async () => {

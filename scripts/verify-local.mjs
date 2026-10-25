@@ -25,8 +25,7 @@ try {
   run('Type checking', node, ['node_modules/typescript/bin/tsc', '--noEmit']);
   run('Extension build', node, ['node_modules/vite/bin/vite.js', 'build']);
   run('Manifest and bundle contract', node, ['scripts/validate-build.mjs']);
-  run('Unit and SDK streaming contracts', node, ['node_modules/vitest/vitest.mjs', 'run', '--reporter=default', '--reporter=json', '--outputFile.json=.dev/verification/unit-results.json']);
-  run('Upgrade fixture', node, ['scripts/prepare-upgrade-fixture.mjs']);
+  run('Unit and SDK request contracts', node, ['node_modules/vitest/vitest.mjs', 'run', '--reporter=default', '--reporter=json', '--outputFile.json=.dev/verification/unit-results.json']);
   env.SURFWAX_CHROME_138_PATH = run('Chrome 138', node, ['scripts/install-test-browser.mjs', '138'], { capture: true });
   env.SURFWAX_CHROME_PATH = run('Current Chrome Stable', node, ['scripts/install-test-browser.mjs', 'current'], { capture: true });
   env.SURFWAX_EXTENSION_PATH = resolve('dist');

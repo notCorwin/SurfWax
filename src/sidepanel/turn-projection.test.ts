@@ -8,17 +8,17 @@ it("keeps completed history stable while appending and updating the current turn
   const history = Array.from({ length: 500 }, (_, index) => [message(`u${index}`, "user"), message(`a${index}`)]).flat();
   const before = project(history);
   const user = message("new", "user"), first = message("response");
-  const streamed = project([...history, user, first]);
+  const initial = project([...history, user, first]);
   const keys = project.getItemKey();
-  expect(streamed.slice(0, 500)).toEqual(before);
-  expect(streamed[499]).toBe(before[499]);
+  expect(initial.slice(0, 500)).toEqual(before);
+  expect(initial[499]).toBe(before[499]);
   const updated = message("response");
   const next = project([...history, user, updated, message("tool-response")]);
   expect(project.getItemKey()).toBe(keys);
   expect(keys(500)).toBe("new");
   expect(next[499]).toBe(before[499]);
   expect(next[500]?.assistants).toEqual([updated, message("tool-response")]);
-  expect(streamed[500]?.assistants).toEqual([first]);
+  expect(initial[500]?.assistants).toEqual([first]);
 });
 it("handles branch replacement, partial truncation and empty history", () => {
   const project = createTurnProjection();

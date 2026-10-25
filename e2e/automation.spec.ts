@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 
-import { test, SSE_HEADERS, p95, chunk, usageChunk, textResponse, streamingTextResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, nativePanel, submitNative, readNativeEvents, type MockResponse } from './fixtures';
+import { test, p95, textResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, delayedResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, nativePanel, submitNative, readNativeEvents, type MockResponse } from './fixtures';
 
 test("selects large tool output without creating another reference", async () => {
   const responses: MockResponse[] = [];
@@ -62,7 +62,7 @@ test("selects large tool output without creating another reference", async () =>
 
 
 test("uses inspect plus composable fill and click programs", async () => {
-  const responses: string[][] = [];
+  const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
   try {
@@ -197,7 +197,7 @@ for (const deviceScaleFactor of [1, 2]) test(`injects a screenshot and clicks it
 
 
 for (const suspendedFrames of [false, true]) test(`uses frameLocator inside a cross-origin iframe${suspendedFrames ? " with suspended animation frames" : ""}`, async () => {
-  const responses: string[][] = [];
+  const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
   try {
@@ -232,7 +232,7 @@ for (const suspendedFrames of [false, true]) test(`uses frameLocator inside a cr
 
 
 test("re-resolves replaced nodes and uses browser semantics through open shadow DOM", async () => {
-  const responses: string[][] = [];
+  const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
   try {

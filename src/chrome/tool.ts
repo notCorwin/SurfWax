@@ -35,20 +35,31 @@ protocol.sessions(tabId?) lists root/child CDP handles; protocol.send({tabId,ses
 artifacts.read(id,{path?,offset?,limit?}); text(filename,text,mimeType?,save=false); save(id,filename?). Files and images stay internal unless the user requested download/export. emit(value) persists incremental output; check(condition,message?) records a verified assertion; sleep(ms) and signal support cancellation. Completed operations only confirm dispatch/return; verify application outcomes. Queued operations are not dispatched, uncertain effects must be inspected before continuing. Program computation uses a disposable opaque-origin sandbox Worker; browser capabilities are mediated by the Side Panel. Closing the panel cancels jobs and revokes capabilities; arbitrary program finally blocks are not guaranteed to run. Only records survive restart, never arbitrary JS stacks.`;
 export const PROGRAM_TOOL_CONTEXT = `Available tools:\n${PROGRAM_TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n")}\n\n${PROGRAM_API}`;
 
-export function createProgramTools(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string; visualEnabled?: () => Promise<boolean> } = {}): Record<string, ReturnType<typeof dynamicTool>> {
+export function createProgramTools(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string; callId?: () => string | undefined; visualEnabled?: () => Promise<boolean> } = {}): Record<string, ReturnType<typeof dynamicTool>> {
   return Object.fromEntries(PROGRAM_TOOL_REGISTRY.map((definition) => [definition.name, dynamicTool({
     description: definition.description, inputSchema: definition.inputSchema, needsApproval: false,
     execute: async (input, { abortSignal, toolCallId }) => {
+      abortSignal?.throwIfAborted();
       const identity = options.conversationId ? options.logger?.toolIdentity(options.conversationId, toolCallId) : undefined;
-      const context = { conversationId: options.conversationId, toolCallId, logIdentity: identity, visualEnabled: await options.visualEnabled?.() ?? false };
+      const callId = options.callId?.();
+      if (options.logger) {
+        const started = await options.logger.append({ type: "tool.started", conversationId: options.conversationId,
+          content: { callId, toolName: definition.name }, input, toolCallId, ...identity });
+        if (!started) throw new DOMException("日志维护已阻止工具启动。", "AbortError");
+      }
+      const startedAt = performance.now();
+      let output: unknown;
       try {
+        abortSignal?.throwIfAborted();
+        const context = { conversationId: options.conversationId, toolCallId, logIdentity: identity, visualEnabled: await options.visualEnabled?.() ?? false };
+        abortSignal?.throwIfAborted();
         const value = definition.inputSchema.parse(input);
         const result = definition.name === "inspect" ? await executor.inspect(value as any, abortSignal, context)
           : definition.name === "run" ? await executor.runProgram(value as any, abortSignal, context) : await executor.queryJobs(value as any, abortSignal, context);
         const failure = (result as any)?.ok === false ? (result as any).error ?? (result as any).failed?.error ?? (result as any).result?.error : undefined;
         const artifact = (result as any)?.result?.artifact;
         const normalized = failure ? { ...result as object, ...(artifact ? { artifact } : {}), error: { ...failure, retryable: false } } : result;
-        return compactToolResult(normalized, { ...options, toolCallId, ...identity });
+        output = await compactToolResult(normalized, { ...options, toolCallId, ...identity });
       } catch (error) {
         const cause = abortSignal?.aborted && !(error instanceof Error)
           ? Object.assign(new DOMException(abortSignal.reason instanceof Error ? abortSignal.reason.message : String(abortSignal.reason ?? error ?? "Operation aborted"), "AbortError"), { effectUnknown: definition.name === "run" })
@@ -58,8 +69,22 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
           const artifact = await options.logger.toolArtifact(options.conversationId!, identity).catch(() => undefined);
           if (artifact) failure.artifact = artifact;
         }
-        return failure;
+        output = failure;
       }
+      if (options.logger) {
+        const failed = Boolean(output && typeof output === "object" && "ok" in output && output.ok === false);
+        const interrupted = failed && abortSignal?.aborted;
+        const error = failed ? (output as { error?: unknown }).error : undefined;
+        const effectUnknown = Boolean(error && typeof error === "object" && "effectUnknown" in error && error.effectUnknown);
+        const toolExecutionMs = Math.max(0, performance.now() - startedAt);
+        const terminal = await options.logger.append({ type: failed ? "tool.failed" : "tool.finished", conversationId: options.conversationId,
+          content: { callId, toolName: definition.name, toolExecutionMs, ...(interrupted ? { status: "interrupted", effectUnknown } : {}) },
+          input, output, toolCallId, ...identity, ...(failed ? { error } : {}),
+          ...(interrupted ? { abort: { reason: Object.assign(new Error(String(abortSignal?.reason ?? "Operation aborted")), { name: "AbortError" }) } } : {}),
+          latencyMs: toolExecutionMs });
+        if (!terminal) throw new DOMException("日志维护已阻止工具结果保存。", "AbortError");
+      }
+      return output;
     },
   })]));
 }

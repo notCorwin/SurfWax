@@ -10,7 +10,7 @@
     "check": "tsc --noEmit && vite build --outDir .dev/check-dist && node scripts/validate-build.mjs .dev/check-dist",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "npm run build && node scripts/prepare-upgrade-fixture.mjs && playwright test --grep-invert @performance",
+    "test:e2e": "npm run build && playwright test --grep-invert @performance",
     "docs:tools": "node scripts/generate-tool-docs.mjs",
     "docs:check": "node scripts/generate-tool-docs.mjs --check",
     "release:package": "node scripts/package-release.mjs --build",
@@ -74,8 +74,6 @@
   "devDependencies": {
     "@crxjs/vite-plugin": "^2.7.1",
     "@playwright/test": "^1.62.1",
-    "@smithy/eventstream-codec": "^4.5.2",
-    "@smithy/util-utf8": "^4.5.2",
     "@tailwindcss/vite": "^4.3.3",
     "@types/chrome": "^0.2.5",
     "@types/node": "^26.2.0",

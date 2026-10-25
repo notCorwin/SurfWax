@@ -1,27 +1,21 @@
 import { expect } from "@playwright/test";
 import { mkdir, writeFile, copyFile } from "node:fs/promises";
-import { test, chunk, textResponse, commandResponse, startProvider, openExtension, configure, nameCurrentConversation, readEvents, dispose } from "./fixtures";
+import { test, textResponse, commandResponse, startProvider, openExtension, configure, nameCurrentConversation, readEvents, dispose } from "./fixtures";
 import { finishRenderTrace, installSoftwareCadence, measureRenderTrace, startRenderTrace } from "./render-trace";
 
 // The CDP render trace below is the evidence. A second Playwright screencast /
 // DOM snapshot recorder forces extra layout/paint while measuring the frames.
 test.use({ trace: "off", screenshot: "off" });
 
-test("120Hz software frames include real dense-stream, code, math, history, input, scroll and tool rendering", { tag: "@performance" }, async () => {
+test("120Hz software frames measure a dense complete response with history, input, scroll and tool rendering", { tag: "@performance" }, async () => {
   const frames = Math.max(600, Number(process.env.SURFWAX_PERFORMANCE_FRAMES ?? 600));
-  const warmupMs = Math.max(1000, Number(process.env.SURFWAX_PERFORMANCE_WARMUP_MS ?? 1000));
-  const total = frames + Math.ceil(warmupMs * 120 / 1000);
-  const tokens = Array.from({ length: total - 1 }, (_, index) => index % 60 === 0
+  const tokens = Array.from({ length: frames - 1 }, (_, index) => index % 60 === 0
     ? `\n\n\`\`\`typescript\nconst value${index}: number = ${index};\n\`\`\`\n\n$$\\int_0^1 x^2 dx = \\frac{1}{3}$$\n\n| A | B |\n| - | - |\n| ${index} | **value** |\n\n`
     : `token-${index} ${index % 4 === 0 ? "\n\n" : ""}`);
   const payload = tokens.join("");
-  // Keep the same dense document, but stream its code/math/table syntax as
-  // incremental tokens rather than putting three whole blocks in one token.
-  const deltas = Array.from({ length: total - 1 }, (_, index) => payload.slice(
-    Math.floor(index * payload.length / (total - 1)), Math.floor((index + 1) * payload.length / (total - 1))));
   const text = "# TRACE_LOAD\n\n" + payload + "TRACE_COMPLETE";
   const provider = await startProvider([commandResponse("run", { code: `return await browser.tabs.list();` }, "trace-tool"),
-    [chunk({ role: "assistant", content: "# TRACE_LOAD\n\n" }), ...deltas.map((content) => chunk({ content })), chunk({ content: "TRACE_COMPLETE" }), chunk({}, "stop"), "data: [DONE]\n\n"]]);
+    textResponse(text)]);
   const opened = await openExtension(undefined, { args: ["--disable-frame-rate-limit", "--disable-gpu-vsync", "--disable-gpu"] });
   const tracePath = test.info().outputPath("render-trace.json");
   try {
@@ -47,12 +41,13 @@ test("120Hz software frames include real dense-stream, code, math, history, inpu
     await expect(opened.page.locator(".markdown-body").last()).toContainText("Answer 499");
     const session = await opened.context.newCDPSession(opened.page);
     if (process.env.SURFWAX_PROFILE) { await session.send("Profiler.enable"); await session.send("Profiler.start"); }
-    await installSoftwareCadence(opened.page, `${provider.baseURL}/chat/completions`, frames, warmupMs);
+    await installSoftwareCadence(opened.page, frames);
     await startRenderTrace(session);
     await opened.page.getByTestId("composer-input").fill("render trace workload"); await opened.page.getByTestId("composer-input").press("Enter");
-    await expect.poll(() => opened.page.evaluate(() => (globalThis as any).__renderTraceLoad.done), { timeout: 30000 }).toBe(true);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("TRACE_COMPLETE");
     await expect(opened.page.getByRole("button", { name: "停止生成" })).toHaveCount(0);
+    await opened.page.evaluate(() => (globalThis as any).__renderTraceLoad.run());
+    await expect.poll(() => opened.page.evaluate(() => (globalThis as any).__renderTraceLoad.done), { timeout: 30_000 }).toBe(true);
     if (process.env.SURFWAX_PROFILE) {
       const { profile } = await session.send("Profiler.stop");
       await writeFile(".dev/render-profile.json", JSON.stringify(profile));
@@ -64,10 +59,10 @@ test("120Hz software frames include real dense-stream, code, math, history, inpu
     expect(final.content.parts.filter((part: any) => part.type === "text").map((part: any) => part.text).join("")).toBe(text);
     expect(log.filter((event) => ["tool.finished", "tool.failed"].includes(event.type) && event.toolCallId === "trace-tool")).toHaveLength(1);
     const state = await opened.page.evaluate(() => (globalThis as any).__renderTraceLoad);
-    expect(state.supplied).toBe(total); expect(state.measured).toBe(frames);
+    expect(state.measured).toBe(frames);
     const version = await session.send("Browser.getVersion");
-    const report = { ...measured, warmupMs, browser: version, node: process.version, finalTextLength: text.length,
-      streamEvents: log.filter((event) => event.type === "conversation.stream.chunk").length, integrity: "exact final text and single tool result verified" };
+    const report = { ...measured, warmupFrames: state.warmupFrames, browser: version, node: process.version, finalTextLength: text.length,
+      integrity: "exact final text and single tool result verified; no streaming events" };
     const reportPath = test.info().outputPath("render-report.json"); await writeFile(reportPath, JSON.stringify(report, null, 2));
     await mkdir(`.dev/verification/performance/${test.info().project.name || "current"}`, { recursive: true });
     await copyFile(tracePath, `.dev/verification/performance/${test.info().project.name || "current"}/render-trace.json`);

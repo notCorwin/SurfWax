@@ -1,6 +1,6 @@
 import { expect, it, vi } from "vitest";
 import { restoreConversationRepository } from "../conversations";
-import { EventLogger, type LogEvent } from "../logging";
+import { EventLogger, type ConversationMessage, type LogEvent } from "../logging";
 import { ConversationStore, createMessageProjection } from "./conversation-store";
 import type { SidePanelMessage } from "../agent/transport";
 
@@ -103,7 +103,6 @@ it("keeps a transport error visible when no canonical terminal was recorded", as
   } });
   const runtime = new ConversationStore(logger, () => ({
     async sendMessages() { throw new Error("运行已由另一个面板接管"); },
-    async reconnectToStream() { return null; },
   }));
   await runtime.thread.append("hello");
   expect(runtime.getState().thread.error).toEqual(new Error("运行已由另一个面板接管"));
@@ -127,12 +126,43 @@ it("does not duplicate a refreshed canonical failure when its synthetic message 
       await logger.append({ type: "conversation.failed", conversationId, runId: "second", content: null, error: "new" });
       throw new Error("new");
     },
-    async reconnectToStream() { return null; },
   }));
   await runtime.threads.switchToThread(conversationId);
   await runtime.thread.startRun({ parentId: "question" });
   expect(runtime.getState().thread.error).toBeUndefined();
   expect(runtime.getState().thread.messages.at(-1)?.status).toMatchObject({ reason: "error", error: "new" });
+});
+
+it("publishes complete transport snapshots while running and restores its returned message", async () => {
+  const events: LogEvent[] = [];
+  const logger = new EventLogger({ store: {
+    async append(event) { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+    async all() { return [...events]; },
+    async clear() { events.length = 0; },
+  } });
+  const snapshot: SidePanelMessage = { id: "reply", role: "assistant", parts: [{ type: "text", text: "完整的模型响应" }] };
+  const terminal: SidePanelMessage = { id: "reply", role: "assistant", parts: [{ type: "text", text: "工具完成后的最终响应" }] };
+  let release!: (message: SidePanelMessage) => void;
+  const finalMessage = new Promise<SidePanelMessage>((resolve) => { release = resolve; });
+  let submittedId = "";
+  const runtime = new ConversationStore(logger, () => ({
+    async sendMessages(options) {
+      submittedId = options.messages.at(-1)!.id;
+      await options.onMessage?.(snapshot);
+      return finalMessage;
+    },
+  }), "snapshot-test");
+
+  const running = runtime.thread.append("请执行操作");
+  await vi.waitFor(() => expect(runtime.getState().thread.messages.at(-1)?.source.id).toBe("reply"));
+  expect(runtime.getState().thread.isRunning).toBe(true);
+  expect(runtime.getState().thread.messages.at(-1)?.parts).toMatchObject([{ type: "text", text: "完整的模型响应" }]);
+
+  await logger.appendMessage("snapshot-test", terminal as ConversationMessage, { parentId: submittedId });
+  release(terminal);
+  await running;
+  expect(runtime.getState().thread.isRunning).toBe(false);
+  expect(runtime.getState().thread.messages.at(-1)?.parts).toMatchObject([{ type: "text", text: "工具完成后的最终响应" }]);
 });
 
 it("always clears running state when the failure baseline cannot be read", async () => {

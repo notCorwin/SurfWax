@@ -1,17 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { readUIMessageStream, type UIMessageChunk } from "ai";
+import { MockLanguageModelV4 } from "ai/test";
 import { EventLogger, fromLogValue, type ConversationMessage, type LogEvent } from "../logging";
 import { createChatTransport, type SidePanelMessage } from "./transport";
-import { PROGRAM_CATALOG_VERSION as TOOL_CATALOG_VERSION } from "../chrome/tool";
+import { createAgent } from "./runner";
+import type { ChromeExecutor } from "../chrome/executor";
+import { PROGRAM_CATALOG_VERSION } from "../chrome/tool";
 
-vi.mock("./coordinator", () => ({ claimConversationRun: async (_id: string, signal: AbortSignal) => ({ signal, finish: vi.fn() }) }));
+vi.mock("./coordinator", () => ({ claimConversationRun: async (_id: string, signal?: AbortSignal) => ({ signal: signal ?? new AbortController().signal, finish: vi.fn() }) }));
 vi.mock("../chrome/page-guard", () => ({ guardActivePage: async () => vi.fn() }));
-vi.mock("ai", async (original) => ({ ...await original<typeof import("ai")>(),
-  DirectChatTransport: class {
-    constructor(private options: any) {}
-    sendMessages(options: any) { return this.options.agent.open(options, this.options.onError, this.options.generateMessageId()); }
-  },
-}));
 function logger() {
   const events: LogEvent[] = [];
   return new EventLogger({ store: {
@@ -19,74 +15,155 @@ function logger() {
     async all() { return [...events]; }, async clear() { events.length = 0; },
   } });
 }
-function stream(chunks: UIMessageChunk[]) {
-  return new ReadableStream<UIMessageChunk>({ start(controller) { for (const chunk of chunks) controller.enqueue(chunk); controller.close(); } });
+const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 5, text: 5, reasoning: 0 } };
+const reply = (text = "Recovered") => ({ content: [{ type: "text" as const, text }], finishReason: { unified: "stop" as const, raw: "stop" }, usage, warnings: [] });
+const call = (id: string, code: string, toolName = "run") => ({ content: [{ type: "text" as const, text: "Ready to act" },
+  { type: "tool-call" as const, toolCallId: id, toolName, input: JSON.stringify({ code }) }],
+  finishReason: { unified: "tool-calls" as const, raw: "tool_calls" }, usage, warnings: [] });
+const user: SidePanelMessage = { id: "user", role: "user", parts: [{ type: "text", text: "Continue" }] };
+function setup(model: MockLanguageModelV4, log = logger(), executor = { browserContext: async () => ({ tabs: [] }), runProgram: vi.fn(async () => ({ ok: true })) }) {
+  const factory = vi.fn(async (signal, _branchIds, _resumed, onResponse) => createAgent({
+    model: { baseURL: "https://test/v1", model: "test", contextWindowOverride: 1_000_000 }, languageModel: model,
+    executor: executor as unknown as ChromeExecutor, logger: log, conversationId: "thread", signal, onResponse,
+  }));
+  return { log, factory, executor };
 }
-function response(id: string) { return stream([{ type: "start", messageId: id }, { type: "text-start", id: "text" },
-  { type: "text-delta", id: "text", delta: "Recovered" }, { type: "text-end", id: "text" }, { type: "finish" }]); }
-async function consume(transport: ReturnType<typeof createChatTransport>, user: SidePanelMessage) {
-  const output = await transport.sendMessages({ trigger: "submit-message", chatId: "thread", messageId: user.id, messages: [user], abortSignal: new AbortController().signal });
-  let result;
-  for await (const message of readUIMessageStream({ stream: output })) result = message;
-  return result;
-}
+const options = () => ({ trigger: "submit-message" as const, chatId: "thread", messages: [user], abortSignal: new AbortController().signal });
 
-describe("durable transport recovery", () => {
-  it("keeps a new user untouched and logs the system catalogue snapshot and rebuilds the agent after overflow", async () => {
-    const log = logger();
-    const user: SidePanelMessage = { id: "user", role: "user", parts: [{ type: "text", text: "Continue" }] };
-    await log.appendMessage("thread", user as ConversationMessage);
-    const requests: SidePanelMessage[][] = [];
-    const summarize = vi.fn(async (signal: AbortSignal) => {
-      signal.throwIfAborted();
-      const saved = (await log.repository("thread")).messages[0]!.message;
-      await log.appendMessage("thread", { ...saved, metadata: { ...(saved.metadata as any), checkpointTest: true } });
-      await log.append({ type: "context.compacted", conversationId: "thread", content: { summary: "Saved summary" } });
-    });
-    let factories = 0;
-    const factory = vi.fn(async (signal, branchIds, resumed) => {
-      expect(branchIds).toEqual(["user"]);
-      expect(resumed).toBe(factories > 0);
-      if (factories++) expect((await log.conversation("thread")).some((event) => event.type === "context.compacted")).toBe(true);
-      return { open(options: any, onError: (error: unknown) => string, id: string) {
-        requests.push(options.messages);
-        if (requests.length === 1) {
-          const error = Object.assign(new Error("maximum context length exceeded"), { statusCode: 400 });
-          return stream([{ type: "start", messageId: id }, { type: "error", errorText: onError(error) }]);
-        }
-        expect(signal.aborted).toBe(false);
-        expect(options.messages[0].metadata.checkpointTest).toBe(true);
-        return response(id);
-      } } as any;
-    });
+describe("complete-response transport", () => {
+  it.each(["response", "tool-start", "tool-result", "invalid-result"])("stops browser work when the canonical %s cannot be persisted", async (stage) => {
+    const events: LogEvent[] = [];
+    const failure = new Error("Canonical storage write failed");
+    const log = new EventLogger({ store: {
+      async append(record) {
+        if (stage === "response" && record.type === "conversation.message" && (record.content as any)?.role === "assistant"
+          || stage === "tool-start" && record.type === "tool.started"
+          || stage === "tool-result" && record.type === "tool.finished"
+          || stage === "invalid-result" && record.type === "tool.failed") throw failure;
+        const saved = { ...record, id: events.length + 1 }; events.push(saved); return saved;
+      },
+      async all() { return [...events]; }, async clear() {},
+    } });
+    const { factory, executor } = setup(new MockLanguageModelV4({ doGenerate: async () => call("effect", "return 1;", stage === "invalid-result" ? "missing-tool" : "run") }), log);
     const cleanup = vi.fn(async () => undefined);
-    const result = await consume(createChatTransport(factory, log, "thread", cleanup, summarize), user);
-    expect(result?.parts).toMatchObject([{ type: "text", text: "Recovered" }]);
-    expect(factory).toHaveBeenCalledTimes(2);
-    expect(summarize).toHaveBeenCalledOnce();
+    await expect(createChatTransport(factory, log, "thread", cleanup).sendMessages(options())).rejects.toBe(failure);
+    expect(executor.runProgram).toHaveBeenCalledTimes(stage === "tool-result" ? 1 : 0);
+    expect(factory).toHaveBeenCalledOnce();
     expect(cleanup).toHaveBeenCalledOnce();
-    expect(requests[0]![0]!.parts).toEqual(user.parts);
-    const saved = (await log.repository("thread")).messages.find((entry) => entry.message.id === "user")!.message;
-    expect((saved.metadata as any)?.custom?.toolCatalog).toBeUndefined();
-    expect(fromLogValue((await log.contextEvents("thread"))[0]!.content)).toMatchObject({ prompt: { version: 2, catalogVersion: TOOL_CATALOG_VERSION, instructions: expect.stringContaining("Available tools:") } });
-    expect((await log.all()).filter((event) => event.type === "conversation.finished")).toHaveLength(1);
   });
 
-  it("preserves an old submitted catalogue prefix during regeneration", async () => {
+  it("publishes only complete responses and persists them before executing tools", async () => {
+    let step = 0;
     const log = logger();
-    const user: SidePanelMessage = { id: "user", role: "user", parts: [{ type: "text", text: "Continue" }],
-      metadata: { custom: { toolCatalog: { version: "0.2.0", context: "Historical tools" } } } };
+    const executor = { browserContext: async () => ({ tabs: [] }), runProgram: vi.fn(async () => {
+      const saved = (await log.repository("thread")).messages.at(-1)!.message;
+      expect(saved.parts).toEqual(expect.arrayContaining([expect.objectContaining({ text: "Ready to act", state: "done" }),
+        expect.objectContaining({ toolCallId: "effect", state: "input-available", input: { code: "return 1;" } })]));
+      return { ok: true };
+    }) };
+    const { factory } = setup(new MockLanguageModelV4({ doGenerate: async () => ++step === 1 ? call("effect", "return 1;") : reply() }), log, executor);
+    const snapshots: SidePanelMessage[] = [];
+    const result = await createChatTransport(factory, log, "thread").sendMessages({ ...options(), onMessage: (message) => { snapshots.push(message); } });
+    expect(result.parts).toEqual(expect.arrayContaining([expect.objectContaining({ text: "Recovered", state: "done" }),
+      expect.objectContaining({ toolCallId: "effect", state: "output-available", output: { ok: true } })]));
+    expect(snapshots[0]!.parts.some((part) => "toolCallId" in part && part.state === "input-available")).toBe(true);
+    expect(snapshots.every((message) => message.parts.every((part) => !("state" in part) || part.state !== "streaming"))).toBe(true);
+    expect((await log.all()).some((event) => event.type === "conversation.stream.chunk")).toBe(false);
+  });
+
+  it("records exactly one result for an invalid call before continuing", async () => {
+    let step = 0;
+    const { factory, executor, log } = setup(new MockLanguageModelV4({
+      doGenerate: async () => ++step === 1 ? call("invalid", "return 1;", "missing-tool") : reply(),
+    }));
+    const result = await createChatTransport(factory, log, "thread").sendMessages(options());
+    expect(executor.runProgram).not.toHaveBeenCalled();
+    expect((await log.all()).filter((event) => event.toolCallId === "invalid" && ["tool.failed", "tool.finished"].includes(event.type)))
+      .toMatchObject([{ type: "tool.failed" }]);
+    expect(result.parts).toEqual(expect.arrayContaining([expect.objectContaining({ toolCallId: "invalid", state: "output-error" })]));
+  });
+
+  it("recovers a missing invalid-call result after a one-time terminal write failure", async () => {
+    const log = logger();
+    const append = log.append.bind(log);
+    const failure = new Error("Temporary terminal write failure");
+    let rejected = false;
+    vi.spyOn(log, "append").mockImplementation((record) => {
+      if (record.type === "tool.failed" && !rejected) { rejected = true; return Promise.reject(failure); }
+      return append(record);
+    });
+    const { factory, executor } = setup(new MockLanguageModelV4({ doGenerate: async () => call("invalid", "return 1;", "missing-tool") }), log);
+    await expect(createChatTransport(factory, log, "thread").sendMessages(options())).rejects.toBe(failure);
+    expect(executor.runProgram).not.toHaveBeenCalled();
+    expect((await log.all()).filter((event) => event.toolCallId === "invalid" && event.type === "tool.failed")).toHaveLength(1);
+    expect((await log.all()).filter((event) => event.type === "conversation.failed")).toHaveLength(1);
+  });
+
+  it("refreshes canonical metadata and the agent after context overflow", async () => {
+    const log = logger();
     await log.appendMessage("thread", user as ConversationMessage);
-    await log.append({ type: "conversation.submitted", conversationId: "thread", runId: "old", content: { messageId: "user" } });
-    const factory = async () => ({ open(options: any, _onError: any, id: string) {
-      expect(options.messages[0].parts).toMatchObject([{ type: "text", text: "Continue" }, { type: "text", text: "Historical tools" }]);
-      return response(id);
-    } }) as any;
-    const transport = createChatTransport(factory, log, "thread");
-    const output = await transport.sendMessages({ trigger: "regenerate-message", chatId: "thread", messageId: "user", messages: [user], abortSignal: new AbortController().signal });
-    for await (const _message of readUIMessageStream({ stream: output })) { /* consume */ }
-    const messages = (await log.all()).filter((event) => event.type === "conversation.message").map((event) => fromLogValue(event.content) as SidePanelMessage);
-    expect(messages.filter((message) => message.id === "user")).toHaveLength(1);
-    expect(messages[0]!.metadata.custom.toolCatalog.version).toBe("0.2.0");
+    const requests: unknown[] = [];
+    const model = new MockLanguageModelV4({ doGenerate: async (request) => {
+      requests.push(request.prompt);
+      if (requests.length === 1) throw Object.assign(new Error("maximum context length exceeded"), { statusCode: 400 });
+      return reply();
+    } });
+    const { factory } = setup(model, log);
+    const summarize = vi.fn(async (signal: AbortSignal) => {
+      signal.throwIfAborted();
+      await log.append({ type: "context.compacted", conversationId: "thread", content: { summary: "Saved summary" } });
+    });
+    const cleanup = vi.fn(async () => undefined);
+    const result = await createChatTransport(factory, log, "thread", cleanup, summarize).sendMessages(options());
+    expect(result.parts).toEqual(expect.arrayContaining([expect.objectContaining({ text: "Recovered" })]));
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(factory.mock.calls.map((entry) => entry[2])).toEqual([false, true]);
+    expect(summarize).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect((await log.all()).filter((event) => event.type === "conversation.finished")).toHaveLength(1);
+    expect(fromLogValue((await log.contextEvents("thread"))[0]!.content)).toMatchObject({ prompt: { catalogVersion: PROGRAM_CATALOG_VERSION } });
+  });
+
+  it("resumes from completed tool results after a response-body failure without repeating the effect", async () => {
+    let request = 0;
+    const prompts: string[] = [];
+    const { factory, executor, log } = setup(new MockLanguageModelV4({ doGenerate: async (options) => {
+      prompts.push(JSON.stringify(options.prompt));
+      if (++request === 1) return call("effect", "return 1;");
+      if (request === 2) throw new TypeError("Response body connection lost");
+      return reply();
+    } }));
+    await createChatTransport(factory, log, "thread").sendMessages(options());
+    expect(request).toBe(3);
+    expect(executor.runProgram).toHaveBeenCalledOnce();
+    expect(prompts[2]).toContain('"toolCallId":"effect"');
+    expect(prompts[2]).toContain('"ok":true');
+    expect((await log.all()).filter((event) => event.type === "tool.finished")).toHaveLength(1);
+    expect((await log.all()).filter((event) => event.type === "model.request.retrying")).toMatchObject([{ retry: { attempt: 1, reason: "request-failed" } }]);
+  });
+
+  it("rejects permanent errors and releases the run exactly once", async () => {
+    const error = Object.assign(new Error("Unauthorized"), { statusCode: 401 });
+    const { factory, log } = setup(new MockLanguageModelV4({ doGenerate: async () => { throw error; } }));
+    const cleanup = vi.fn(async () => undefined);
+    await expect(createChatTransport(factory, log, "thread", cleanup).sendMessages(options())).rejects.toBe(error);
+    expect(factory).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect((await log.all()).filter((event) => event.type === "conversation.failed")).toHaveLength(1);
+    expect((await log.repository("thread")).messages.map((entry) => entry.message.id)).toEqual(["user"]);
+  });
+
+  it("aborts a waiting request without publishing an unfinished response", async () => {
+    const controller = new AbortController();
+    const { factory, log } = setup(new MockLanguageModelV4({ doGenerate: async ({ abortSignal }) => {
+      return new Promise((_resolve, reject) => { abortSignal!.addEventListener("abort", () => reject(new DOMException("Stopped", "AbortError")), { once: true }); });
+    } }));
+    const task = createChatTransport(factory, log, "thread").sendMessages({ ...options(), abortSignal: controller.signal });
+    const failure = expect(task).rejects.toThrow();
+    await vi.waitFor(() => expect(factory).toHaveBeenCalledOnce());
+    controller.abort();
+    await failure;
+    expect((await log.all()).filter((event) => event.type === "conversation.aborted")).toHaveLength(1);
+    expect((await log.repository("thread")).messages.map((entry) => entry.message.id)).toEqual(["user"]);
   });
 });

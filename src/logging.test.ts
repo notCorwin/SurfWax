@@ -96,7 +96,7 @@ describe("canonical event log", () => {
     logger.beginRun("one", "run");
     logger.setRunPhase("run", 0);
     await logger.append({ type: "tool.started", conversationId: "one", toolCallId: "tool", content: { callId: "old" } });
-    await logger.closePendingTools("run", "one", "stream-disconnected");
+    await logger.closePendingTools("run", "one", "request-failed");
     logger.setRunPhase("run", 1);
     await logger.append({ type: "tool.started", conversationId: "one", toolCallId: "tool", content: { callId: "new" } });
     await logger.closePendingTools("run", "one", "user-stopped");
@@ -140,8 +140,8 @@ describe("canonical event log", () => {
     await logger.append({ type: "tool.started", runId: "run", conversationId: "one", toolCallId: "call", content: { callId: "phase0" } });
     logger.setRunPhase("run", 1);
     await logger.append({ type: "tool.started", runId: "run", conversationId: "one", toolCallId: "call", content: { callId: "phase1" } });
-    await logger.closePendingTools("run", "one", "stream-disconnected");
-    await logger.closePendingTools("run", "one", "stream-disconnected");
+    await logger.closePendingTools("run", "one", "request-failed");
+    await logger.closePendingTools("run", "one", "request-failed");
     const failed = (await store.all()).filter((event) => event.type === "tool.failed");
     expect(failed.map((event) => event.toolCallId)).toEqual(["call", "1:call"]);
     expect(failed).toHaveLength(2);
@@ -265,7 +265,7 @@ describe("canonical event log", () => {
     const logger = new EventLogger({ store });
 
     for (let index = 0; index < 100; index += 1) {
-      logger.record({ type: "conversation.stream.chunk", content: { index } });
+      logger.telemetry({ type: "model.diagnostic", content: { index } });
     }
     await logger.flush();
 
@@ -275,22 +275,29 @@ describe("canonical event log", () => {
     );
   });
 
-  it("skips completed stream chunks during restore but retains interrupted replay data", async () => {
-    const store = memoryStore();
-    const logger = new EventLogger({ store });
+  it("restores complete messages and interrupted tool facts", async () => {
+    const logger = new EventLogger({ store: memoryStore() });
     await logger.appendMessage("one", { id: "u1", role: "user", parts: [] });
-    logger.record({ type: "conversation.stream.chunk", conversationId: "one", runId: "done", content: { delta: "complete" } });
+    await logger.appendMessage("one", { id: "a1", role: "assistant", parts: [{ type: "text", text: "Complete reply" }] }, { runId: "done", parentId: "u1" });
     await logger.append({ type: "conversation.finished", conversationId: "one", runId: "done" });
-
-    expect(await logger.restorationEvents("one")).not.toEqual(
-      expect.arrayContaining([expect.objectContaining({ type: "conversation.stream.chunk" })]),
-    );
-
-    logger.record({ type: "conversation.stream.chunk", conversationId: "one", runId: "stopped", content: { delta: "partial" } });
+    await logger.append({ type: "tool.started", conversationId: "one", runId: "stopped", toolCallId: "pending", input: {} });
     await logger.append({ type: "conversation.aborted", conversationId: "one", runId: "stopped" });
-    expect(await logger.restorationEvents("one")).toEqual(
-      expect.arrayContaining([expect.objectContaining({ type: "conversation.stream.chunk", runId: "stopped" })]),
-    );
+    expect(await logger.restorationEvents("one")).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "conversation.message", content: expect.objectContaining({ id: "a1" }) }),
+      expect.objectContaining({ type: "tool.started", runId: "stopped", toolCallId: "pending" }),
+    ]));
+  });
+
+  it("records a result for each accepted tool when cancellation precedes execution", async () => {
+    const logger = new EventLogger({ store: memoryStore() });
+    await logger.appendMessage("one", { id: "assistant", role: "assistant", parts: [
+      { type: "dynamic-tool", toolCallId: "waiting", toolName: "run", state: "input-available", input: { code: "return 1" } },
+    ] }, { runId: "run", parentId: "user" });
+    await logger.closePendingTools("run", "one", "Stopped");
+    await logger.closePendingTools("run", "one", "Stopped");
+    expect((await logger.all()).filter((event) => event.type === "tool.failed")).toMatchObject([
+      { toolCallId: "waiting", output: { ok: false, error: { effectUnknown: false } } },
+    ]);
   });
 
   it("hides and restores one conversation using append-only tombstones", async () => {
@@ -321,9 +328,9 @@ describe("run recovery", () => {
     const toolCallId = "1:capture";
     await logger.appendMessage("one", { id: "user", role: "user", parts: [{ type: "text", text: "Capture and save" }] });
     await logger.append({ type: "conversation.submitted", conversationId: "one", runId, content: { messageId: "user" } });
-    logger.record({ type: "conversation.stream.chunk", conversationId: "one", runId, content: { type: "start", messageId: "assistant" } });
-    logger.record({ type: "conversation.stream.chunk", conversationId: "one", runId,
-      content: { type: "tool-input-available", toolCallId, toolName, dynamic: true, input: { filename, save: true } } });
+    await logger.appendMessage("one", { id: "assistant", role: "assistant", parts: [
+      { type: "dynamic-tool", toolCallId, toolName, state: "input-available", input: { filename, save: true } },
+    ] }, { runId, parentId: "user" });
     await logger.append({ type: "tool.started", conversationId: "one", runId, toolCallId, toolCallIdCanonical: true,
       content: { callId: "sdk", toolName }, input: { filename, save: true } });
     const data = { filename, mimeType, base64: "eA==" };
@@ -378,7 +385,7 @@ describe("run recovery", () => {
     expect(results[0].output).toMatchObject({ ok: false, completed: [{ index: 0, result: { performed: true } }], failed: { index: 1, step: steps[1] }, notRun: [steps[2]], elapsedMs: 25 });
   });
 
-  it("freezes canonical tool IDs before another stream phase begins", () => {
+  it("freezes canonical tool IDs before another request attempt begins", () => {
     const logger = new EventLogger({ store: memoryStore() });
     logger.beginRun("one", "run"); logger.setRunPhase("run", 1);
     const identity = logger.toolIdentity("one", "call");

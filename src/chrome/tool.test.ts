@@ -17,7 +17,6 @@ describe("three browser tools", () => {
       output: { ...metadata, base64: "eA==" } }) : undefined;
     const input = { code: operation === "save" ? `return await artifacts.save(${stored!.id});` : `return await page.${operation}({save:true});` };
     logger.beginRun("conversation", "run"); logger.setRunPhase("run", 1);
-    await logger.append({ type: "tool.started", conversationId: "conversation", toolCallId: "capture", content: { callId: "sdk", toolName: "run" }, input });
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
     let artifactId = stored?.id;
     let notifyStored!: () => void;
@@ -32,7 +31,7 @@ describe("three browser tools", () => {
       return (executor as any).awaitAbort(new Promise((resolve) => { finishWork = () => { workFinished = true; resolve(null); }; }), signal, true);
     };
     const controller = new AbortController();
-    const tools = createProgramTools(executor, { logger, conversationId: "conversation" }) as Record<string, any>;
+    const tools = createProgramTools(executor, { logger, conversationId: "conversation", callId: () => "sdk" }) as Record<string, any>;
     const pending = tools.run.execute(input, { toolCallId: "capture", abortSignal: controller.signal });
     await ready; logger.setRunPhase("run", 2); controller.abort("sidepanel-closed");
     const result = await pending;
@@ -53,7 +52,10 @@ describe("three browser tools", () => {
     const tools = createProgramTools({ runProgram: vi.fn(async () => failed) } as unknown as ChromeExecutor, { logger, conversationId: "conversation" }) as Record<string, any>;
     const result = await tools.run.execute({ code: "await check(false);" }, { toolCallId: "call" });
     expect(result).toEqual({ ...failed, error: { ...failed.result.error, retryable: false } });
-    expect(result).not.toHaveProperty("$ref"); expect(append).not.toHaveBeenCalled();
+    expect(result).not.toHaveProperty("$ref");
+    expect(append).toHaveBeenCalledTimes(2);
+    expect(append).toHaveBeenCalledWith(expect.objectContaining({ type: "tool.started" }));
+    expect(append).toHaveBeenCalledWith(expect.objectContaining({ type: "tool.failed", output: result }));
     await expect(compactToolResult({ type: "tool-error", error: "large".repeat(2000) }, { logger })).resolves.toHaveProperty("type", "tool-error");
   });
   it("stores a large result with its original identity after a request phase changes", async () => {

@@ -1,5 +1,5 @@
 import { isLoopFinished, ToolLoopAgent, wrapLanguageModel } from "ai";
-import type { LanguageModel } from "ai";
+import type { LanguageModel, LanguageModelCallEndEvent } from "ai";
 import { createProgramTools, prepareToolMessages, repairProgramToolCall } from "../chrome/tool";
 import { ChromeExecutor } from "../chrome/executor";
 import type { BrowserContext } from "../chrome/executor";
@@ -25,6 +25,7 @@ export type CreateAgentOptions = {
   compactor?: ContextCompactor;
   prompt?: PromptSnapshot;
   signal?: AbortSignal;
+  onResponse?: (event: LanguageModelCallEndEvent<any>) => void | Promise<void>;
 };
 
 type BrowserAgentTools = ReturnType<typeof createProgramTools>;
@@ -67,9 +68,11 @@ export function stagnationReason(steps: readonly any[]): string | undefined {
 
 export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, BrowserAgentTools> {
   const logger = options.logger;
+  let callId: string | undefined;
   const initialPrompt = createPromptSnapshot(options.prompt?.source ?? options.instructions);
   const toolOptions = {
     logger, conversationId: options.conversationId,
+    callId: () => callId,
     visualEnabled: (() => {
       let supported: Promise<boolean> | undefined;
       return () => supported ??= modelSupportsImages(options.model, { signal: options.signal });
@@ -83,7 +86,6 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
   const activeTools = () => currentTools().map(({ name }) => name);
   let browserDigest: string | undefined;
   let loggedGuard: string | undefined;
-  const loggedToolCalls = new Set<string>();
   return new ToolLoopAgent<never, BrowserAgentTools>({
     model: typeof options.languageModel === "string" ? options.languageModel
       : wrapLanguageModel({ model: options.languageModel, middleware: dsmlMiddleware(logger, options.conversationId) }),
@@ -93,6 +95,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     toolOrder,
     activeTools: activeTools(),
     repairToolCall: repairProgramToolCall as any,
+    onLanguageModelCallEnd: options.onResponse,
     prepareStep: async ({ messages, initialMessages, responseMessages, stepNumber, steps }) => {
       let prepared = await options.compactor?.prepare(messages, stepNumber) ?? messages;
       const browserContext = await options.executor.browserContext();
@@ -132,52 +135,19 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       };
     },
     ...(logger ? {
-      onStart: (event) => logger.record({
+      onStart: (event) => { callId = event.callId; logger.record({
         type: "model.started",
         conversationId: options.conversationId,
         content: { callId: event.callId, operationId: event.operationId, provider: event.provider, modelId: event.modelId, activeTools: activeTools(), toolCount: activeTools().length },
-      }),
+      }); },
       onStepStart: (event) => logger.record({
         type: "model.step.started",
         conversationId: options.conversationId,
         content: { callId: event.callId, stepNumber: event.stepNumber, provider: event.provider, modelId: event.modelId },
       }),
       onLanguageModelCallStart: (event) => options.compactor?.recordPrompt(event),
-      onToolExecutionStart: async (event) => { const started = await logger.append({
-        type: "tool.started",
-        conversationId: options.conversationId,
-        content: { callId: event.callId, toolName: event.toolCall.toolName },
-        toolCallId: event.toolCall.toolCallId,
-        input: event.toolCall.input,
-      }); if (!started) throw new DOMException("日志维护已阻止工具启动。", "AbortError"); },
-      onToolExecutionEnd: async (event) => {
-        loggedToolCalls.add(`${event.callId}\u0000${event.toolCall.toolCallId}`);
-        const failed = event.toolOutput.type === "tool-error" || (event.toolOutput as any).output?.ok === false;
-        const interrupted = failed && options.signal?.aborted;
-        const effectUnknown = Boolean((event.toolOutput as any).output?.error?.effectUnknown);
-        const abortReason = interrupted ? Object.assign(new Error(String(options.signal?.reason ?? "Operation aborted")), { name: "AbortError" }) : undefined;
-        await logger.append({
-          type: failed ? "tool.failed" : "tool.finished",
-          conversationId: options.conversationId,
-          content: { callId: event.callId, toolName: event.toolCall.toolName, toolExecutionMs: event.toolExecutionMs,
-            ...(interrupted ? { status: "interrupted", effectUnknown } : {}) },
-          toolCallId: event.toolCall.toolCallId,
-          input: event.toolCall.input,
-          ...(event.toolOutput.type === "tool-error" ? { error: event.toolOutput.error, output: { ok: false, error: event.toolOutput.error } } : { output: event.toolOutput.output, ...(failed ? { error: (event.toolOutput as any).output.error } : {}) }),
-          ...(interrupted ? { abort: { reason: abortReason } } : {}),
-          latencyMs: event.toolExecutionMs,
-        });
-      },
       onStepEnd: async (event) => {
         options.compactor?.recordUsage(event.usage.inputTokens, event.stepNumber);
-        for (const part of event.content) if (part.type === "tool-error" && !loggedToolCalls.has(`${event.callId}\u0000${part.toolCallId}`)) {
-          loggedToolCalls.add(`${event.callId}\u0000${part.toolCallId}`);
-          await logger.append({
-            type: "tool.failed", conversationId: options.conversationId,
-            content: { callId: event.callId, toolName: part.toolName },
-            toolCallId: part.toolCallId, input: part.input, error: part.error, output: { ok: false, error: part.error },
-          });
-        }
         logger.record({
           type: "model.step.finished",
           conversationId: options.conversationId,

@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 
-import { test, SSE_HEADERS, p95, chunk, usageChunk, textResponse, streamingTextResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
+import { test, textResponse, toolResponse, pageResponse, commandResponse, startProvider, closeServer, openExtension, dispose, configure, enableUserScripts, readEvents, nameCurrentConversation, warnsOnLeave, expectThemeButton, type MockResponse } from './fixtures';
 
 test("ships the MV3 Harness and user-script manager", async () => {
   const opened = await openExtension();
@@ -64,7 +64,7 @@ test("restores saved user scripts on browser startup", async () => {
 
 
 test("lets the agent create, inspect, edit and toggle a user script", async () => {
-  const responses: string[][] = [];
+  const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
   try {

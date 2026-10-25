@@ -49,7 +49,7 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
     for (let offset = 0; offset < shown.length;) {
       const entry = shown[offset]!;
       if (entry.part.type === "text") {
-        output.push(user ? <p key={entry.index} className="whitespace-pre-wrap wrap-break-word">{entry.part.text}</p> : <MarkdownText key={entry.index} text={entry.part.text} running={entry.part.status.type === "running"} />); offset++; continue;
+        output.push(user ? <p key={entry.index} className="whitespace-pre-wrap wrap-break-word">{entry.part.text}</p> : <MarkdownText key={entry.index} text={entry.part.text} />); offset++; continue;
       }
       if (entry.part.type !== "reasoning" && entry.part.type !== "tool-call") { offset++; continue; }
       const indices: number[] = [];
@@ -111,8 +111,8 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
     </MessageContent>
   </Message>;
 }, (before, after) => before.message === after.message
-  // A growing reply changes the turn array, but settled tool/user rows need
-  // another render only when their derived activity state changes.
+  // A new response snapshot changes the turn array, but settled tool/user rows
+  // need another render only when their derived activity state changes.
   && (before.messages === after.messages
     || turnActivityBoundary(before.messages, before.message.id) === turnActivityBoundary(after.messages, after.message.id)
       && turnActivityPhase(before.messages, before.message.id, before.running) === turnActivityPhase(after.messages, after.message.id, after.running))

@@ -218,8 +218,7 @@ p {
 .conversation-turn,
 .assistant-message-content,
 .work-summary-content,
-.thinking-body,
-.markdown-block {
+.thinking-body {
   display: flex;
   flex-direction: column;
   gap: var(--transcript-block-gap);
@@ -257,13 +256,13 @@ p {
 }
 
 /* Text blocks and tool summaries share the message's single vertical flow. */
-.markdown-body,
-.markdown-tail {
-  display: contents;
+.markdown-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--transcript-block-gap);
 }
 
-.markdown-block > *,
-.markdown-tail > * {
+.markdown-body > * {
   margin-block: 0;
 }
 
@@ -395,13 +394,6 @@ p {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font: var(--type-tiny)/var(--line-code) var(--font-mono);
-}
-
-/* Each cached block keeps its layout/paint local as the streamed suffix grows. */
-.markdown-block {
-  contain: layout style;
-  content-visibility: auto;
-  contain-intrinsic-size: auto calc(var(--spacing) * 8);
 }
 
 /* Panel layouts consume the shared material and typography tokens. */

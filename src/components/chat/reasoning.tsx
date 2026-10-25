@@ -19,7 +19,7 @@ const ReasoningImpl = ({ status, text }: { status: { type: string }; text: strin
         <span className={running ? "shimmer text-foreground/65" : undefined}>{label}</span>
       </summary>
       <div className="thinking-body" aria-busy={status.type === "running" && phase !== "cancelled" && phase !== "failed" && phase !== "stopped"}>
-        <MarkdownText text={text} running={running} />
+        <MarkdownText text={text} />
       </div>
     </details>
   );

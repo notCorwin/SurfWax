@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 
-import { test, SSE_HEADERS, p95, chunk, usageChunk, textResponse, streamingTextResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
+import { test, p95, textResponse, delayedResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
 
 test("opens a bounded conversation dropdown below its trigger and keeps outside controls interactive", async () => {
   const provider = await startProvider([]);
@@ -109,7 +109,7 @@ test("opens a bounded conversation dropdown below its trigger and keeps outside 
 });
 
 test("executes run through the page facade, restores the conversation, and clears the log", async () => {
-  const responses: string[][] = [];
+  const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const targetUrl = `${provider.origin}/target`;
   const code = "return { title: await page.title(), url: await page.url() };";
@@ -145,7 +145,10 @@ test("executes run through the page facade, restores the conversation, and clear
     expect(tool).toMatchObject({ toolCallId: "call-chrome-e2e", input: { code: expect.stringContaining("await page.title()") }, latencyMs: expect.any(Number) });
     expect(tool.output.result).toMatchObject({ title: "Side Agent Target", url: targetUrl });
     expect(events.filter((event) => /^(model|request|tool)\./.test(event.type)).every((event) => typeof event.conversationId === "string")).toBe(true);
-    expect(events.filter((event) => event.type === "conversation.message")).toHaveLength(2);
+    const logicalMessages = [...new Map(events.filter((event) => event.type === "conversation.message")
+      .map((event) => [event.content.id, event.content.role])).entries()];
+    expect(logicalMessages.map(([id]) => id)).toHaveLength(2);
+    expect(logicalMessages.map(([, role]) => role)).toEqual(["user", "assistant"]);
 
     await opened.page.reload();
     await expect(opened.page.getByTestId("conversation-menu")).toContainText("新对话");
@@ -170,7 +173,7 @@ test("executes run through the page facade, restores the conversation, and clear
 
 test("queues multiple follow-up messages while running and dispatches them in FIFO order", async () => {
   const provider = await startProvider([
-    streamingTextResponse(["FIRST_RUNNING", ...Array.from({ length: 80 }, () => "."), " FIRST_DONE"]),
+    delayedResponse(textResponse("FIRST_DONE"), 1_000),
     textResponse("SECOND_DONE"),
     textResponse("THIRD_DONE"),
   ], 120);
@@ -261,7 +264,7 @@ test("sends a selected follow-up immediately, closes interrupted tools and keeps
 
 test("keeps paused follow-ups after stop and panel reload until the user resumes them", async () => {
   const provider = await startProvider([
-    streamingTextResponse(["WORKING", ...Array.from({ length: 80 }, () => ".")]),
+    delayedResponse(textResponse("CANCELLED_BEFORE_COMPLETION"), 30_000),
     textResponse("RESUMED_DONE"),
   ], 120);
   const opened = await openExtension();
@@ -440,8 +443,7 @@ test("searches saved messages, renames and lists historical archived conversatio
 
 
 test("blocks leaving a running conversation without aborting it", async () => {
-  const slowReply = [chunk({ role: "assistant", content: "STREAM_RUNNING" }), ...Array.from({ length: 100 }, () => chunk({ content: "." })), chunk({ content: "STREAM_DONE" }), chunk({}, "stop"), "data: [DONE]\n\n"];
-  const provider = await startProvider([textResponse("FIRST_REPLY"), textResponse("第一标题"), slowReply, textResponse("第二标题")], 20);
+  const provider = await startProvider([textResponse("FIRST_REPLY"), textResponse("第一标题"), delayedResponse(textResponse("FULL_REPLY_DONE"), 2_000), textResponse("第二标题")]);
   const opened = await openExtension();
   try {
     const options = await configure(opened.context, opened.page, provider.baseURL);
@@ -454,7 +456,7 @@ test("blocks leaving a running conversation without aborting it", async () => {
     await startNewConversation(opened.page);
     await composer.fill("second task");
     await composer.press("Enter");
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_RUNNING");
+    await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
     await opened.page.getByTestId("conversation-menu").click();
     await opened.page.keyboard.press("Escape");
     await expect(opened.page.getByTestId("new-conversation")).toBeDisabled();
@@ -464,7 +466,7 @@ test("blocks leaving a running conversation without aborting it", async () => {
     await expect(opened.page.locator(".conversation-dropdown")).toBeVisible();
     await expect(opened.page.locator(".conversation-dropdown").getByTestId("new-conversation")).toHaveCount(0);
     await expect(opened.page.locator(".conversation-item")).toHaveCount(2);
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_DONE");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FULL_REPLY_DONE");
     expect(provider.stats.abortedResponses).toBe(0);
     await opened.page.locator(".conversation-item", { hasText: "第一标题" }).locator(".conversation-select").click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FIRST_REPLY");
@@ -475,8 +477,7 @@ test("blocks leaving a running conversation without aborting it", async () => {
 
 
 test("manual renaming wins over an in-flight automatic title", async () => {
-  const slowTitle = [chunk({ role: "assistant", content: "自动标题" }), ...Array.from({ length: 60 }, () => chunk({ content: "。" })), chunk({}, "stop"), "data: [DONE]\n\n"];
-  const provider = await startProvider([textResponse("REPLY"), slowTitle], 20);
+  const provider = await startProvider([textResponse("REPLY"), delayedResponse(textResponse("自动标题"), 1_200)]);
   const opened = await openExtension();
   try {
     const options = await configure(opened.context, opened.page, provider.baseURL);
@@ -563,7 +564,7 @@ test("resets conversation UI while retaining only each conversation's own draft"
 
 test("edits user messages, regenerates replies and restores the selected branch", async () => {
   const originalQuestion = "帮我收藏24小时成交量至少1000万USDT的非TradFi永续合约。成交量越小越先收藏。";
-  const slowReply = streamingTextResponse(["BRANCH_RUNNING", ...Array.from({ length: 80 }, () => "."), "BRANCH_DONE"]);
+  const slowReply = delayedResponse(textResponse("BRANCH_DONE"), 1_000);
   const provider = await startProvider([
     textResponse("ORIGINAL_REPLY"),
     textResponse("分支测试"),
@@ -629,7 +630,7 @@ test("edits user messages, regenerates replies and restores the selected branch"
     await composer.fill("follow up");
     await composer.press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FOLLOWUP_REPLY");
-    // Streaming text is visible before its final message is persisted.
+    // The final response and its canonical message are committed together.
     await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "conversation.message"
       && event.content?.parts?.some((part: any) => part.type === "text" && part.text === "FOLLOWUP_REPLY"))).toBe(true);
     const recordedMessages = JSON.stringify((await readEvents(opened.page)).filter((event) => event.type === "conversation.message").map((event) => event.content));
@@ -693,21 +694,15 @@ test("keeps the original reply after a failed regeneration", async () => {
 
 
 test("keeps a running conversation alive when a switch is blocked", async () => {
-  const slowReply = [
-    chunk({ role: "assistant", content: "STREAM_RUNNING" }),
-    ...Array.from({ length: 200 }, () => chunk({ content: "." })),
-    chunk({ content: "BACKGROUND_DONE" }),
-    chunk({}, "stop"),
-    "data: [DONE]\n\n",
-  ];
-  const provider = await startProvider([slowReply, textResponse("后台标题")], 20);
+  const slowReply = delayedResponse(textResponse("BACKGROUND_DONE"), 1_000);
+  const provider = await startProvider([slowReply, textResponse("后台标题")]);
   const opened = await openExtension();
   try {
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     await opened.page.getByTestId("composer-input").fill("keep running in background");
     await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_RUNNING");
+    await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
     await opened.page.getByTestId("conversation-menu").click();
     await opened.page.keyboard.press("Escape");
     await expect(opened.page.getByTestId("new-conversation")).toBeDisabled();

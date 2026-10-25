@@ -1,14 +1,12 @@
-import type { ChatTransport } from "ai";
-import { readMessageSnapshots } from "../agent/message-snapshots";
 import { isSyntheticTerminalMessage, restoreConversationRepository } from "../conversations";
 import { abortConversationWork, withIdleConversation } from "../agent/coordinator";
-import type { SidePanelMessage } from "../agent/transport";
+import type { ConversationTransport, SidePanelMessage } from "../agent/transport";
 import { ConversationListProjection, fromLogValue, type ConversationRepository, type ConversationSummary, type EventLogger, type LogEvent } from "../logging";
 
 export type PartStatus = { type: "running" | "complete" | "incomplete" | "requires-action"; reason?: string; error?: unknown };
 export type MessagePart =
   | { type: "text" | "reasoning"; text: string; status: PartStatus }
-  | { type: "tool-call"; toolCallId: string; toolName: string; args: unknown; argsText?: string; result?: unknown; isError?: boolean; inputStreaming: boolean; status: PartStatus };
+  | { type: "tool-call"; toolCallId: string; toolName: string; args: unknown; result?: unknown; isError?: boolean; status: PartStatus };
 export type MessageView = {
   id: string; role: SidePanelMessage["role"]; parts: readonly MessagePart[]; content: readonly MessagePart[];
   metadata: { custom?: Record<string, unknown> }; status: PartStatus;
@@ -52,8 +50,7 @@ export function createMessageProjection() {
         : failure !== undefined ? { type: "incomplete", reason: "error", error: failure }
         : interrupted ? { type: "incomplete", reason: "cancelled" } : { type: "complete" };
       const parts: MessagePart[] = source.parts.flatMap((part): MessagePart[] => {
-        if (part.type === "text" || part.type === "reasoning") return [{ type: part.type, text: part.text,
-          status: running && part.state === "streaming" ? { type: "running" } : { type: "complete" } }];
+        if (part.type === "text" || part.type === "reasoning") return [{ type: part.type, text: part.text, status: { type: "complete" } }];
         if (part.type !== "dynamic-tool" && !part.type.startsWith("tool-")) return [];
         const tool = part as Extract<SidePanelMessage["parts"][number], { toolCallId: string }>;
         const complete = tool.state === "output-available";
@@ -63,7 +60,7 @@ export function createMessageProjection() {
         return [{ type: "tool-call", toolCallId: tool.toolCallId,
           toolName: "toolName" in tool ? String(tool.toolName) : tool.type.slice(5),
           args: tool.input, result: complete ? tool.output : "errorText" in tool ? tool.errorText : tool.state === "output-denied" ? "工具操作被拒绝" : undefined,
-          inputStreaming: tool.state === "input-streaming", isError,
+          isError,
           status: { type: isError ? "incomplete" : complete ? "complete" : running ? "running" : "requires-action" } }];
       });
       const view: MessageView = { id: source.id, role: source.role, parts, content: parts, source, status,
@@ -88,7 +85,7 @@ export class ConversationStore {
   private unsubscribe?: () => void;
   private conversationList = new ConversationListProjection();
 
-  constructor(private logger: EventLogger, private transport: (id: string) => ChatTransport<SidePanelMessage>, initialId: string = crypto.randomUUID()) {
+  constructor(private logger: EventLogger, private transport: (id: string) => ConversationTransport, initialId: string = crypto.randomUUID()) {
     this.state = {
       thread: { messages: [], isRunning: false, isLoading: false, isDisabled: false }, composer: { text: "" },
       threadListItem: { id: initialId }, threads: { mainThreadId: initialId, threadItems: [], threadIds: [] },
@@ -250,10 +247,9 @@ export class ConversationStore {
         .filter((event) => event.type === "conversation.failed").map((event) => event.id));
       controller.signal.throwIfAborted();
       const modelMessages = messages.filter((message) => !isSyntheticTerminalMessage(message));
-      const stream = await this.transport(id).sendMessages({ trigger, chatId: id, messageId: undefined, messages: modelMessages, abortSignal: controller.signal });
-      for await (const message of readMessageSnapshots<SidePanelMessage>(stream, (error) => { if (!controller.signal.aborted) failure = error; })) {
-        this.display([...messages, message], message.id);
-      }
+      const response = await this.transport(id).sendMessages({ trigger, chatId: id, messages: modelMessages, abortSignal: controller.signal,
+        onMessage: (message) => { if (!controller.signal.aborted) this.display([...messages, message], message.id); } });
+      if (!controller.signal.aborted) this.display([...messages, response], response.id);
     } catch (error) { if (!controller.signal.aborted) failure = error; }
     finally {
       let restoredEvents: LogEvent[] = [];

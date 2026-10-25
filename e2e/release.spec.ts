@@ -19,10 +19,10 @@ test('fresh installation grants all eight required permissions including downloa
   } finally { await dispose(opened.context, opened.userDataDirectory); }
 });
 
-test('upgrades a real 0.2.0 profile without changing branches, configuration, log IDs or script enabled state', async () => {
+test('reloads a nonstream profile without changing branches, configuration, log IDs or script enabled state', async () => {
   const profile = await mkdtemp(resolve(tmpdir(), 'surf-wax-upgrade-'));
   const extension = resolve(profile, 'extension');
-  await cp(resolve('.dev/upgrade-v0.2.0/dist'), extension, { recursive: true });
+  await cp(resolve(process.env.SURFWAX_EXTENSION_PATH ?? 'dist'), extension, { recursive: true });
   const responses = [textResponse('PERSISTED_BEFORE_UPGRADE'), textResponse('升级保留'), textResponse('BRANCH_BEFORE_UPGRADE')];
   const provider = await startProvider(responses);
   let opened = await openExtension(profile, { extensionPath: extension });

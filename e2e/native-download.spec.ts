@@ -46,17 +46,17 @@ test("closing the native panel during a pending download restores the existing a
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
-for (const installation of ["fresh", "upgraded"] as const) test(`${installation} installation saves exactly the persisted artifact without runtime authorization`, async () => {
+for (const installation of ["fresh", "reloaded"] as const) test(`${installation} installation saves exactly the persisted artifact without runtime authorization`, async () => {
   const profile = await mkdtemp(resolve(tmpdir(), "surf-wax-native-download-"));
   const extension = resolve(profile, "extension");
-  await cp(resolve(installation === "upgraded" ? ".dev/upgrade-v0.2.0/dist" : process.env.SURFWAX_EXTENSION_PATH ?? "dist"), extension, { recursive: true });
+  await cp(resolve(process.env.SURFWAX_EXTENSION_PATH ?? "dist"), extension, { recursive: true });
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   let opened = await openExtension(profile, { extensionPath: extension });
   try {
     await (await configureWithImages(opened.context, opened.page, provider.baseURL)).close();
     expect(await opened.page.evaluate(() => chrome.permissions.contains({ permissions: ["downloads"] }))).toBe(true);
-    if (installation === "upgraded") {
+    if (installation === "reloaded") {
       await opened.context.close();
       await cp(resolve(process.env.SURFWAX_EXTENSION_PATH ?? "dist"), extension, { recursive: true });
       opened = await openExtension(profile, { extensionPath: extension });

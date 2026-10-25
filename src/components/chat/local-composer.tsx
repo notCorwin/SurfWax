@@ -236,8 +236,8 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
         loading = latest.isLoading;
         if (loading) return;
         if (latest.isRunning && anchor && messages.length >= anchor.count) {
-          // During a response only its append-only suffix changes. Estimating
-          // the complete virtualized history for every token blocks rendering.
+          // During a response only its appended snapshots change. Estimating
+          // the complete virtualized history after every snapshot blocks rendering.
           const estimated = anchor.usage.estimated + tailEstimate(messages, Math.max(0, anchor.count - 1)) - anchor.tail;
           publishUsage({ ...anchor.usage, estimated, usedPercent: contextUsedPercent(estimated, anchor.usage.limit) });
         } else void refresh();

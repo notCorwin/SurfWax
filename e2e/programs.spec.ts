@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
 import { test,
   commandResponse,
+  delayedResponse,
   textResponse,
   startProvider,
   openExtension,
@@ -13,6 +14,7 @@ import { test,
   nativePanel,
   submitNative,
   readNativeEvents,
+  type MockResponse,
 } from "./fixtures";
 
 function lastTool(request: any) {
@@ -528,7 +530,7 @@ test("terminates synchronous timeout and abnormal worker exit, then recovers aft
 });
 
 test("panel reload interrupts the owned job, preserves receipts, and prevents delayed browser effects", async () => {
-  const responses: any[] = [
+  const responses: MockResponse[] = [
     commandResponse(
       "run",
       {
@@ -537,11 +539,7 @@ test("panel reload interrupts the owned job, preserves receipts, and prevents de
       },
       "reload-job",
     ),
-    {
-      parts: textResponse("unreachable"),
-      delayMs: 0,
-      startAfter: new Promise(() => undefined),
-    },
+    delayedResponse(textResponse("unreachable"), 0, new Promise<void>(() => undefined)),
   ];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -625,11 +623,7 @@ test("the real native Side Panel owns a sandbox program and cleans held input wh
       },
       "native-program",
     ),
-    {
-      parts: textResponse("unreachable"),
-      delayMs: 0,
-      startAfter: new Promise(() => undefined),
-    },
+    delayedResponse(textResponse("unreachable"), 0, new Promise<void>(() => undefined)),
   ]);
   const opened = await openExtension();
   try {

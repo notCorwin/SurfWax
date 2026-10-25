@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { branchMessages } from "./sidepanel/conversation-store";
+import { branchMessages, createMessageProjection } from "./sidepanel/conversation-store";
+import type { SidePanelMessage } from "./agent/transport";
 import { activeConversationMessages, generateConversationTitle, restoreConversationRepository } from "./conversations";
 import * as model from "./agent/model";
 import { EventLogger, rebuildConversationList, rebuildConversationRepository, selectedConversationId, toLogValue, type LogEvent } from "./logging";
@@ -39,6 +40,21 @@ it("does not send a queued title request after the user renames the running conv
 });
 
 describe("conversation restoration", () => {
+  it("shows a failed completed response as an error instead of a user cancellation", async () => {
+    const repository = await restoreConversationRepository([
+      event(1, "conversation.message", { content: { id: "user", role: "user", parts: [] } }),
+      event(2, "conversation.submitted", { runId: "run", content: { messageId: "user" } }),
+      event(3, "conversation.message", { runId: "run", parentId: "user", content: {
+        id: "assistant", role: "assistant", parts: [{ type: "text", text: "Completed progress", state: "done" }],
+      } }),
+      event(4, "conversation.failed", { runId: "run", error: "Provider rejected the next request" }),
+    ]);
+    const message = repository.messages.at(-1)!.message as SidePanelMessage;
+    const view = createMessageProjection().message(message, false, [message.id]);
+    expect(view.status).toMatchObject({ type: "incomplete", reason: "error", error: "Provider rejected the next request" });
+    expect(view.parts).toMatchObject([{ type: "text", text: "Completed progress" }]);
+  });
+
   it("ignores legacy events and rebuilds sorted conversation metadata", () => {
     const events = [
       event(1, "conversation.message", { content: toLogValue({ id: "legacy" }) }),
@@ -57,31 +73,26 @@ describe("conversation restoration", () => {
     expect(selectedConversationId(events)).toBe("old");
   });
 
-  it("replays interrupted text and reconciles finished and unfinished tools", async () => {
+  it("restores complete responses and reconciles interrupted tool results", async () => {
     const conversationId = "thread-1";
     const runId = "run-1";
     const events = [
-      event(1, "conversation.created", { conversationId, content: toLogValue({ title: "新对话" }) }),
-      event(2, "conversation.message", {
-        conversationId,
-        runId,
-        content: toLogValue({ id: "user-1", role: "user", parts: [{ type: "text", text: "检查页面" }] }),
-      }),
-      event(3, "conversation.submitted", { conversationId, runId, content: toLogValue({ messageId: "user-1" }) }),
-      event(4, "conversation.stream.chunk", { conversationId, runId, content: toLogValue({ type: "start", messageId: "assistant-1" }) }),
-      event(5, "conversation.stream.chunk", { conversationId, runId, content: toLogValue({ type: "text-start", id: "text-1" }) }),
-      event(6, "conversation.stream.chunk", { conversationId, runId, content: toLogValue({ type: "text-delta", id: "text-1", delta: "已经读取" }) }),
-      event(7, "conversation.stream.chunk", { conversationId, runId, content: toLogValue({ type: "tool-input-available", toolCallId: "done", toolName: "chrome", dynamic: true, input: { code: "return 1" } }) }),
-      event(8, "tool.finished", { conversationId, runId, toolCallId: "done", output: toLogValue({ value: 1 }) }),
-      event(9, "conversation.stream.chunk", { conversationId, runId, content: toLogValue({ type: "tool-input-available", toolCallId: "pending", toolName: "chrome", dynamic: true, input: { code: "return 2" } }) }),
-      event(10, "tool.started", { conversationId, runId, toolCallId: "pending" }),
-      event(11, "conversation.stream.chunk", { conversationId, runId, content: toLogValue({ type: "reasoning-start", id: "reasoning-1" }) }),
-      event(12, "conversation.stream.chunk", { conversationId, runId, content: toLogValue({ type: "reasoning-delta", id: "reasoning-1", delta: "先确认状态" }) }),
-      event(13, "conversation.stream.chunk", { conversationId, runId, content: toLogValue({ type: "tool-input-start", toolCallId: "partial", toolName: "chrome", dynamic: true }) }),
-      event(14, "conversation.stream.chunk", { conversationId, runId, content: toLogValue({ type: "tool-input-delta", toolCallId: "partial", inputTextDelta: "{\"code\":\"ret" }) }),
-      event(15, "conversation.aborted", { conversationId, runId }),
+      event(1, "conversation.message", { conversationId, runId,
+        content: toLogValue({ id: "user-1", role: "user", parts: [{ type: "text", text: "检查页面" }] }) }),
+      event(2, "conversation.submitted", { conversationId, runId, content: { messageId: "user-1" } }),
+      event(3, "conversation.message", { conversationId, runId, parentId: "user-1", content: toLogValue({
+        id: "assistant-1", role: "assistant", parts: [
+          { type: "text", text: "已经读取", state: "done" },
+          { type: "reasoning", text: "先确认状态", state: "done" },
+          { type: "dynamic-tool", toolCallId: "done", toolName: "run", state: "input-available", input: { code: "return 1" } },
+          { type: "dynamic-tool", toolCallId: "pending", toolName: "run", state: "input-available", input: { code: "return 2" } },
+          { type: "dynamic-tool", toolCallId: "not-started", toolName: "run", state: "input-available", input: { code: "return 3" } },
+        ],
+      }) }),
+      event(4, "tool.finished", { conversationId, runId, toolCallId: "done", output: { value: 1 } }),
+      event(5, "tool.started", { conversationId, runId, toolCallId: "pending" }),
+      event(6, "conversation.aborted", { conversationId, runId }),
     ];
-
     const repository = await restoreConversationRepository(events);
     expect(repository.headId).toBe("assistant-1");
     expect(repository.messages.map(({ message }) => message.role)).toEqual(["user", "assistant"]);
@@ -90,10 +101,10 @@ describe("conversation restoration", () => {
     expect(assistant.parts).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "text", text: "已经读取", state: "done" }),
       expect.objectContaining({ type: "reasoning", text: "先确认状态", state: "done" }),
-      expect.objectContaining({ type: "dynamic-tool", toolCallId: "done", state: "output-available", output: { value: 1 } }),
-      expect.objectContaining({ type: "dynamic-tool", toolCallId: "pending", state: "output-error" }),
+      expect.objectContaining({ toolCallId: "done", state: "output-available", output: { value: 1 } }),
+      expect.objectContaining({ toolCallId: "pending", state: "output-error" }),
+      expect.objectContaining({ toolCallId: "not-started", state: "output-error" }),
     ]));
-    expect(assistant.parts).not.toEqual(expect.arrayContaining([expect.objectContaining({ toolCallId: "partial" })]));
   });
 
   it("restores the selected branch until a newer message advances the head", async () => {

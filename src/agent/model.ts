@@ -38,7 +38,7 @@ export function isContextOverflowError(error: unknown): boolean {
   return false;
 }
 
-/** Shared by fetch and interrupted stream recovery. Permanent provider errors always win. */
+/** Permanent provider errors always win over retryable network causes. */
 export function isRecoverableModelError(error: unknown, signal?: AbortSignal): boolean {
   const visited = new Set<unknown>();
   let current = error;
@@ -292,46 +292,6 @@ function withJsonRequest(request: Request, url: string, body: unknown, headers: 
   return new Request(url, { method: "POST", headers: merged, body: JSON.stringify(body), signal: request.signal });
 }
 
-/** Adapt Orchestration v2 SSE as it arrives, including split UTF-8 and tool argument deltas. */
-export function sapIncrementalSse(response: Response): Response {
-  if (!response.body || !response.headers.get("content-type")?.includes("text/event-stream")) {
-    throw new Error("SAP streaming request did not return a Server-sent Events response.");
-  }
-  let buffer = "";
-  let finished = false;
-  let done = false;
-  const encoder = new TextEncoder();
-  const transform = new TransformStream<string, Uint8Array>({
-    transform(text, controller) {
-      buffer += text;
-      let boundary: RegExpExecArray | null;
-      while ((boundary = /\r?\n\r?\n/.exec(buffer))) {
-        const frame = buffer.slice(0, boundary.index); buffer = buffer.slice(boundary.index + boundary[0].length);
-        const data = frame.split(/\r?\n/).filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trimStart()).join("\n");
-        if (!data) continue;
-        if (data === "[DONE]") { done = true; controller.enqueue(encoder.encode("data: [DONE]\n\n")); continue; }
-        const value = JSON.parse(data);
-        if (value.error || frame.startsWith("event: error")) {
-          const error = value.error ?? value;
-          throw new APICallError({ message: error.message ?? "SAP orchestration stream failed", url: response.url,
-            requestBodyValues: {}, statusCode: Number(error.code ?? error.status) || 500, responseBody: data });
-        }
-        const result = value.final_result ?? (value.choices ? value : undefined);
-        if (!result) continue;
-        finished ||= result.choices?.some((choice: any) => choice.finish_reason != null) ?? false;
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(result)}\n\n`));
-      }
-    },
-    flush(controller) {
-      if (!done && !finished) throw new TypeError("SAP stream disconnected before the model finished");
-      if (!done) controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-    },
-  });
-  return new Response(response.body.pipeThrough(new TextDecoderStream()).pipeThrough(transform), {
-    status: response.status, headers: { ...Object.fromEntries(response.headers), "Content-Type": "text/event-stream" },
-  });
-}
-
 function oauthFetch(options: { tokenUrl: string; clientId: string; clientSecret: string; fetch: typeof globalThis.fetch }) {
   let cached: { token: string; expiresAt: number } | undefined;
   return async (signal?: AbortSignal) => {
@@ -411,13 +371,12 @@ export function watsonxProtocolFetch(config: ModelConfig, fetch: typeof globalTh
   return async (input, init) => {
     const request = input instanceof Request ? input : new Request(input, init);
     const body = JSON.parse(await request.clone().text()) as Record<string, unknown>;
-    const stream = body.stream === true;
     delete body.stream;
     delete body.stream_options;
     body.model_id = body.model;
     body.project_id = settings.projectId;
     delete body.model;
-    const url = `${resolvedBaseURL(config)}/ml/v1/text/${stream ? "chat_stream" : "chat"}?version=2026-04-20`;
+    const url = `${resolvedBaseURL(config)}/ml/v1/text/chat?version=2026-04-20`;
     return fetch(withJsonRequest(request, url, body, { Authorization: `Bearer ${await token(request.signal)}` }));
   };
 }
@@ -434,15 +393,14 @@ export function sapProtocolFetch(config: ModelConfig, fetch: typeof globalThis.f
     const request = input instanceof Request ? input : new Request(input, init);
     const source = JSON.parse(await request.clone().text()) as Record<string, any>;
     const params = Object.fromEntries(Object.entries(source).filter(([key]) => ["temperature", "top_p", "max_tokens", "stop", "tool_choice"].includes(key)));
-    const body = { config: { ...(source.stream === true ? { stream: { enabled: true } } : {}), modules: { prompt_templating: {
-      model: { name: source.model, params: { ...params, ...(source.stream === true ? { stream_options: { include_usage: true } } : {}) } },
+    const body = { config: { modules: { prompt_templating: {
+      model: { name: source.model, params },
       prompt: { template: source.messages ?? [], ...(source.tools ? { tools: source.tools } : {}), ...(source.response_format ? { response_format: source.response_format } : {}) },
     } } } };
     const response = await fetch(withJsonRequest(request, `${resolvedBaseURL(config)}/v2/completion`, body, {
       Authorization: `Bearer ${await getToken(request.signal)}`, "AI-Resource-Group": settings.resourceGroup || "default",
     }));
     if (!response.ok) return response;
-    if (source.stream === true) return sapIncrementalSse(response);
     const data = await response.json() as Record<string, any>;
     return new Response(JSON.stringify(data.final_result ?? data), {
       status: response.status, headers: { "Content-Type": "application/json" },
@@ -509,9 +467,17 @@ function modelDefaultHeaders(config: ModelConfig): Record<string, string> | unde
   return Object.keys(headers).length ? headers : undefined;
 }
 
+function withoutStreamingOptions(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutStreamingOptions);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !/^stream(?:ing)?(?:$|_)/i.test(key))
+    .map(([key, entry]) => [key, withoutStreamingOptions(entry)]));
+}
+
 function modelDefaultsFetch(config: ModelConfig, fetch: typeof globalThis.fetch): typeof globalThis.fetch {
-  const defaults = config.modelProvider?.body && Object.fromEntries(Object.entries(config.modelProvider.body).filter(([key]) =>
-    !["model", "messages", "input", "contents", "prompt", "system", "systemInstruction", "stream", "tools", "tool_choice"].includes(key),
+  const bodyDefaults = config.modelProvider?.body && withoutStreamingOptions(config.modelProvider.body) as Record<string, unknown>;
+  const defaults = bodyDefaults && Object.fromEntries(Object.entries(bodyDefaults).filter(([key]) =>
+    !["model", "messages", "input", "contents", "prompt", "system", "systemInstruction", "tools", "tool_choice"].includes(key),
   ));
   if (!defaults || !Object.keys(defaults).length) return fetch;
   return async (input, init) => {
@@ -522,8 +488,10 @@ function modelDefaultsFetch(config: ModelConfig, fetch: typeof globalThis.fetch)
     if (request.method !== "POST" || !request.body) return fetch(request);
     const body = await request.clone().json();
     if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Model request body must be a JSON object");
-    // SDK-generated model, prompt, tools, stream, and explicit options win.
-    return fetch(new Request(request, { body: JSON.stringify({ ...defaults, ...body }) }));
+    // SDK-generated model, prompt, tools, and explicit options win.
+    const merged = { ...defaults, ...body };
+    for (const key of Object.keys(merged)) if (/^stream(?:ing)?(?:$|_)/i.test(key)) delete merged[key];
+    return fetch(new Request(request, { body: JSON.stringify(merged) }));
   };
 }
 
@@ -603,7 +571,6 @@ export async function createModel(config: ModelConfig, logger?: EventLogger, con
       const chat = compatible.createOpenAICompatible({ ...common, name: "perplexity",
         baseURL: baseURL || "https://api.perplexity.ai", fetch: modelDefaultsFetch(config, retryingFetch) }).languageModel(config.model);
       model = Object.assign(Object.create(native), {
-        doStream: (args: any) => (args.tools?.length ? chat : native).doStream(args),
         doGenerate: (args: any) => (args.tools?.length ? chat : native).doGenerate(args),
       });
       break;

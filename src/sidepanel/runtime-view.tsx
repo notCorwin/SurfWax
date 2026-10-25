@@ -10,7 +10,11 @@ export function useRuntimeView() {
   return view;
 }
 export function usePanelRuntime() { return useRuntimeView().runtime; }
-/** Command controls select stable values; token updates render only through the frame projection. */
+export function useThreadState() {
+  const runtime = usePanelRuntime();
+  return useSyncExternalStore(runtime.thread.subscribe, runtime.thread.getState);
+}
+/** Select a stable value from the conversation store. */
 export function usePanelState<T>(select: (state: PanelState) => T): T {
   const runtime = usePanelRuntime();
   return useSyncExternalStore(runtime.subscribe, () => select(runtime.getState()));

@@ -5,122 +5,99 @@ import { existsSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { resolve, basename } from "node:path";
-export const SSE_HEADERS = {
+const JSON_HEADERS = {
   "access-control-allow-origin": "*",
-  "cache-control": "no-cache",
-  "content-type": "text/event-stream",
+  "content-type": "application/json",
 };
+
+type CompletionResponse = {
+  id: string;
+  object: "chat.completion";
+  created: number;
+  model: string;
+  choices: Array<{
+    index: number;
+    message: Record<string, unknown> & { role: "assistant" };
+    finish_reason: "stop" | "tool_calls";
+  }>;
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    prompt_tokens_details: { cached_tokens: number };
+  };
+};
+
+function completion(message: Record<string, unknown>, usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number }): CompletionResponse {
+  const toolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
+  return {
+    id: "chatcmpl-side-agent-e2e",
+    object: "chat.completion",
+    created: 1,
+    model: "test-model",
+    choices: [{ index: 0, message: { role: "assistant", ...message }, finish_reason: toolCalls ? "tool_calls" : "stop" }],
+    ...(usage ? { usage: {
+      prompt_tokens: usage.promptTokens,
+      completion_tokens: usage.completionTokens,
+      total_tokens: usage.promptTokens + usage.completionTokens,
+      prompt_tokens_details: { cached_tokens: usage.cachedTokens ?? 0 },
+    } } : {}),
+  };
+}
 
 export function p95(values: number[]): number {
   const sorted = [...values].sort((left, right) => left - right);
   return sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)] ?? 0;
 }
 
-export function chunk(delta: object, finishReason: string | null = null): string {
-  return `data: ${JSON.stringify({
-    id: "chatcmpl-side-agent-e2e",
-    object: "chat.completion.chunk",
-    created: 1,
-    model: "test-model",
-    choices: [{ index: 0, delta, finish_reason: finishReason }],
-  })}\n\n`;
+export function textResponse(text: string, usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number }): CompletionResponse {
+  return completion({ content: text }, usage);
 }
 
-export function usageChunk(promptTokens: number, completionTokens: number, cachedTokens = 0): string {
-  return `data: ${JSON.stringify({
-    id: "chatcmpl-side-agent-e2e",
-    object: "chat.completion.chunk",
-    created: 1,
-    model: "test-model",
-    choices: [],
-    usage: {
-      prompt_tokens: promptTokens,
-      completion_tokens: completionTokens,
-      total_tokens: promptTokens + completionTokens,
-      prompt_tokens_details: { cached_tokens: cachedTokens },
-    },
-  })}\n\n`;
+export function assistantResponse(message: Record<string, unknown>, usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number }): CompletionResponse {
+  return completion(message, usage);
 }
 
-export function textResponse(text: string, usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number }): string[] {
-  return [chunk({ role: "assistant", content: text }), chunk({}, "stop"),
-    ...(usage ? [usageChunk(usage.promptTokens, usage.completionTokens, usage.cachedTokens)] : []), "data: [DONE]\n\n"];
+export function toolResponse(code: string, id = "call-chrome-e2e", usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number }): CompletionResponse {
+  return completion({ tool_calls: [{ id, type: "function", function: { name: "run", arguments: JSON.stringify({ code }) } }] }, usage);
 }
 
-export function streamingTextResponse(parts: string[], usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number }): string[] {
-  return [
-    ...parts.map((content, index) => chunk({ ...(index === 0 ? { role: "assistant" } : {}), content })),
-    chunk({}, "stop"),
-    ...(usage ? [usageChunk(usage.promptTokens, usage.completionTokens, usage.cachedTokens)] : []),
-    "data: [DONE]\n\n",
-  ];
+export function pageResponse(code: string, tabId: number, id = "call-page-e2e"): CompletionResponse {
+  return toolResponse(`{ const page = await browser.page(${tabId}); ${code} }`, id);
 }
 
-export function toolResponse(code: string, id = "call-chrome-e2e", usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number }): string[] {
-  const input = { code };
-  return [
-    chunk({
-      role: "assistant",
-      tool_calls: [{
-        index: 0,
-        id,
-        type: "function",
-        function: { name: "run", arguments: JSON.stringify(input) },
-      }],
-    }),
-    chunk({}, "tool_calls"),
-    ...(usage ? [usageChunk(usage.promptTokens, usage.completionTokens, usage.cachedTokens)] : []),
-    "data: [DONE]\n\n",
-  ];
+export function commandResponse(name: string, input: object, id: string): CompletionResponse {
+  return completion({ tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(input) } }] });
 }
 
-export function pageResponse(code: string, tabId: number, id = "call-page-e2e"): string[] {
-  return [
-    chunk({
-      role: "assistant",
-      tool_calls: [{ index: 0, id, type: "function", function: { name: "run", arguments: JSON.stringify({ code: `{ const page = await browser.page(${tabId}); ${code} }` }) } }],
-    }),
-    chunk({}, "tool_calls"),
-    "data: [DONE]\n\n",
-  ];
+export function queuedToolResponse(firstCode: string, secondCode: string): CompletionResponse {
+  return completion({ tool_calls: [firstCode, secondCode].map((code, index) => ({
+    id: `call-queued-${index}`,
+    type: "function",
+    function: { name: "run", arguments: JSON.stringify({ code }) },
+  })) });
 }
 
-export function commandResponse(name: string, input: object, id: string): string[] {
-  return [
-    chunk({ role: "assistant", tool_calls: [{ index: 0, id, type: "function", function: { name, arguments: JSON.stringify(input) } }] }),
-    chunk({}, "tool_calls"), "data: [DONE]\n\n",
-  ];
+export type MockResponse = CompletionResponse | { status: number; error: string } | {
+  response: CompletionResponse; delayMs?: number; startAfter?: Promise<void>;
+} | ((request: any) => CompletionResponse);
+
+export function delayedResponse(response: CompletionResponse, delayMs: number, startAfter?: Promise<void>) {
+  return { response, delayMs, ...(startAfter ? { startAfter } : {}) };
 }
 
-export function queuedToolResponse(firstCode: string, secondCode: string): string[] {
-  return [
-    chunk({
-      role: "assistant",
-      tool_calls: [firstCode, secondCode].map((code, index) => ({
-        index,
-        id: `call-queued-${index}`,
-        type: "function",
-        function: { name: "run", arguments: JSON.stringify({ code }) },
-      })),
-    }),
-    chunk({}, "tool_calls"),
-    "data: [DONE]\n\n",
-  ];
-}
-
-export type MockResponse = string[] | { status: number; error: string } | {
-  parts: string[]; delayMs: number; partDelayMs?: number; disconnect?: boolean; startAfter?: Promise<void>;
-} | ((request: any) => string[]);
+const providerRequests: any[][] = [];
 
 export async function startProvider(responses: MockResponse[], delayMs = 0, summaryText?: string, supportedEfforts = ["minimal", "low", "medium", "high", "xhigh"], summaryDelayMs = 0, summaryFailures = 0): Promise<{
   baseURL: string;
   origin: string;
   requests: any[];
   server: Server;
-  stats: { abortedResponses: number; disconnectedResponses: number; summaryCalls: number; summaryFailures: number };
+  stats: { abortedResponses: number; summaryCalls: number; summaryFailures: number };
 }> {
   const requests: any[] = [];
-  const stats = { abortedResponses: 0, disconnectedResponses: 0, summaryCalls: 0, summaryFailures };
+  providerRequests.push(requests);
+  const stats = { abortedResponses: 0, summaryCalls: 0, summaryFailures };
   const server = createServer((request, response) => {
     const pathname = new URL(request.url ?? "/", "http://fixture.local").pathname;
     if (request.method === "OPTIONS") {
@@ -221,56 +198,49 @@ export async function startProvider(responses: MockResponse[], delayMs = 0, summ
     request.on("end", () => {
       const requestBody = JSON.parse(Buffer.concat(body).toString("utf8"));
       requests.push(requestBody);
-      if (summaryText && requestBody.stream !== true) {
+      const isSummary = summaryText && JSON.stringify(requestBody).includes("Summarize the entire supplied conversation faithfully for continuing the browser task");
+      if (isSummary) {
         stats.summaryCalls += 1;
         if (stats.summaryFailures > 0) {
           stats.summaryFailures -= 1;
-          response.writeHead(400, { "access-control-allow-origin": "*", "content-type": "application/json" });
+          response.writeHead(400, JSON_HEADERS);
           response.end(JSON.stringify({ error: { message: "Summary generation rejected for this test" } }));
           return;
         }
         setTimeout(() => {
-          response.writeHead(200, { "access-control-allow-origin": "*", "content-type": "application/json" });
-          response.end(JSON.stringify({ id: "summary", object: "chat.completion", created: 1, model: "test-model",
-            choices: [{ index: 0, message: { role: "assistant", content: summaryText }, finish_reason: "stop" }],
-            usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 } }));
+          response.writeHead(200, JSON_HEADERS);
+          response.end(JSON.stringify(completion({ content: summaryText }, { promptTokens: 100, completionTokens: 20 })));
         }, summaryDelayMs);
         return;
       }
       const queued = responses.shift();
       if (!queued) {
-        response.writeHead(500, { "content-type": "application/json" });
+        response.writeHead(500, JSON_HEADERS);
         response.end(JSON.stringify({ error: { message: "No mock response remains" } }));
         return;
       }
       const output = typeof queued === "function" ? queued(requestBody) : queued;
-      if (!Array.isArray(output) && !("parts" in output)) {
-        response.writeHead(output.status, { "access-control-allow-origin": "*", "content-type": "application/json" });
+      if ("status" in output) {
+        response.writeHead(output.status, JSON_HEADERS);
         response.end(JSON.stringify({ error: { message: output.error } }));
         return;
       }
-      const parts = Array.isArray(output) ? output : output.parts;
-      response.writeHead(200, SSE_HEADERS);
+      const wrapped = "response" in output ? output : undefined;
+      const finalResponse = wrapped?.response ?? output as CompletionResponse;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       response.on("close", () => {
-        if (!response.writableEnded) stats.abortedResponses += 1;
-      });
-      let index = 0;
-      const write = () => {
-        if (response.destroyed || index >= parts.length) {
-          if (!response.destroyed) {
-            if (!Array.isArray(output) && output.disconnect) {
-              stats.disconnectedResponses += 1;
-              response.destroy();
-            } else response.end();
-          }
-          return;
+        if (!response.writableEnded) {
+          stats.abortedResponses += 1;
+          if (timer !== undefined) clearTimeout(timer);
         }
-        response.write(parts[index]);
-        index += 1;
-        setTimeout(write, !Array.isArray(output) ? output.partDelayMs ?? delayMs : delayMs);
-      };
-      if (Array.isArray(output)) write();
-      else void (output.startAfter ?? Promise.resolve()).then(() => setTimeout(write, output.delayMs), () => response.destroy());
+      });
+      void (wrapped?.startAfter ?? Promise.resolve()).then(() => {
+        timer = setTimeout(() => {
+          if (response.destroyed) return;
+          response.writeHead(200, JSON_HEADERS);
+          response.end(JSON.stringify(finalResponse));
+        }, wrapped?.delayMs ?? delayMs);
+      }, () => response.destroy());
     });
   });
   server.listen(0, "127.0.0.1");
@@ -306,6 +276,11 @@ export const test = base.extend<{ _profileCleanup: void }>({
     }
     testProfiles.clear();
   }, { auto: true }],
+});
+
+test.afterEach(() => {
+  const requests = providerRequests.splice(0).flat();
+  expect(requests.filter((request) => request.stream === true)).toEqual([]);
 });
 
 export async function openExtension(existingDirectory?: string, settings: { extensionPath?: string; executablePath?: string; deviceScaleFactor?: number; args?: string[] } = {}): Promise<{
@@ -476,7 +451,7 @@ export async function enableUserScripts(context: BrowserContext, extensionId: st
 }
 
 export async function readEvents(page: Page): Promise<any[]> {
-  return page.evaluate(() => new Promise((resolveEvents, reject) => {
+  const events = await page.evaluate<any[]>(() => new Promise((resolveEvents, reject) => {
     const request = indexedDB.open("side-agent-runtime");
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
@@ -486,6 +461,8 @@ export async function readEvents(page: Page): Promise<any[]> {
       all.onsuccess = () => resolveEvents(all.result);
     };
   }));
+  expect(events.filter((event) => event.type === "conversation.stream.chunk")).toEqual([]);
+  return events;
 }
 
 export async function attachTarget(browserSession: CDPSession, targetId: string) {
@@ -595,7 +572,7 @@ export async function submitNative(panel: Awaited<ReturnType<typeof attachTarget
 }
 
 export async function readNativeEvents(panel: Awaited<ReturnType<typeof attachTarget>>): Promise<any[]> {
-  return panel.evaluate(`new Promise((resolve, reject) => {
+  const events = await panel.evaluate<any[]>(`new Promise((resolve, reject) => {
     const request = indexedDB.open('side-agent-runtime');
     request.onerror = () => reject(request.error);
     request.onsuccess = () => {
@@ -605,4 +582,6 @@ export async function readNativeEvents(panel: Awaited<ReturnType<typeof attachTa
       all.onsuccess = () => { db.close(); resolve(all.result); };
     };
   })`);
+  expect(events.filter((event) => event.type === "conversation.stream.chunk")).toEqual([]);
+  return events;
 }

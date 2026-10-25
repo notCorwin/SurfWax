@@ -231,7 +231,7 @@ function ConversationView({ config, logger, threadId, drafts }: { config: ModelC
       setCompactionError(JSON.stringify(fromLogValue(event.error)) ?? "模型未能生成摘要");
     } else if (event.type === "context.compaction.aborted") {
       setContextStatus({ message: "上下文压缩已停止；原始历史已保留。", error: false });
-    } else if (["request.retry", "conversation.stream.retry", "model.request.retrying", "model.stream.retrying"].includes(event.type)) {
+    } else if (event.type === "model.request.retrying") {
       const value = fromLogValue(event.retry) as { attempt?: number; delayMs?: number } | undefined;
       const content = fromLogValue(event.content) as { status?: number; reason?: string } | undefined;
       setRetry({ attempt: value?.attempt ?? 1, delayMs: value?.delayMs ?? 0,

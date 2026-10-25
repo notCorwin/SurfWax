@@ -64,8 +64,8 @@ export function measureRenderTrace(events: any[], frames: number) {
 }
 
 /** Software 120Hz input cadence; native RAF and Chrome rendering remain real. */
-export async function installSoftwareCadence(page: Page, endpoint: string, frames: number, warmupMs: number) {
-  await page.evaluate(({ endpoint, frames, warmupMs }) => {
+export async function installSoftwareCadence(page: Page, frames: number, warmupFrames = 120) {
+  await page.evaluate(({ frames, warmupFrames }) => {
     // Request a real Chrome animation frame at software 120Hz, sharing it
     // across app callbacks. Uncapped headless Chrome otherwise busy-spins at
     // thousands of RAFs per second, which is a different workload than 120Hz.
@@ -93,53 +93,31 @@ export async function installSoftwareCadence(page: Page, endpoint: string, frame
     };
     globalThis.requestAnimationFrame = (callback) => { const id = ++nextId; callbacks.set(id, callback); schedule(); return id; };
     globalThis.cancelAnimationFrame = (id) => { callbacks.delete(id); };
-    const originalFetch = globalThis.fetch.bind(globalThis);
-    let used = false;
-    Object.assign(globalThis, { __renderTraceLoad: { done: false, supplied: 0, measured: 0 } });
-    globalThis.fetch = async (input, init) => {
-      const request = input instanceof Request ? input : new Request(input, init);
-      const response = await originalFetch(request);
-      if (used || request.url !== endpoint || !response.ok) return response;
-      const reader = response.body!.getReader();
-      const decoder = new TextDecoder(); const encoder = new TextEncoder();
-      let buffer = "", eof = false; const queue: string[] = []; const waiters: (() => void)[] = [];
-      const pump = async () => { while (true) {
-        const part = await reader.read(); if (part.done) { eof = true; for (const wake of waiters.splice(0)) wake(); return; }
-        buffer += decoder.decode(part.value, { stream: true });
-        let end: number; while ((end = buffer.indexOf("\n\n")) >= 0) { queue.push(buffer.slice(0, end + 2)); buffer = buffer.slice(end + 2); }
-        for (const wake of waiters.splice(0)) wake();
-      } };
-      void pump();
-      while (!queue.length && !eof) await new Promise<void>((resolve) => waiters.push(resolve));
-      // Tool exchanges and metadata keep their real native stream behavior.
-      if (!queue[0]?.includes("TRACE_LOAD")) return new Response(new ReadableStream({ async start(controller) {
-        while (!eof || queue.length) { if (!queue.length) await new Promise<void>((resolve) => waiters.push(resolve)); while (queue.length) controller.enqueue(encoder.encode(queue.shift()!)); }
-        if (buffer) controller.enqueue(encoder.encode(buffer)); controller.close();
-      } }), { status: response.status, headers: response.headers });
-      used = true;
-      const state = (globalThis as any).__renderTraceLoad;
-      const warmupFrames = Math.ceil(warmupMs * 120 / 1000);
-      const body = new ReadableStream({ async start(controller) {
-        for (let index = 0; index < warmupFrames + frames; index++) {
-          if (index >= warmupFrames) measuredFrame = index - warmupFrames;
+    const state = {
+      done: false,
+      measured: 0,
+      warmupFrames,
+      run: async () => {
+        const input = document.querySelector<HTMLTextAreaElement>("[data-testid=composer-input]");
+        const viewport = document.querySelector<HTMLElement>("[data-testid=thread-viewport]");
+        if (!input || !viewport) throw new Error("The completed response view is not mounted");
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
+        // Warm up the same input/scroll workload before measuring steady frames.
+        for (let index = -warmupFrames; index < frames; index++) {
+          measuredFrame = index < 0 ? undefined : index;
           await new Promise<void>((resolve) => requestAnimationFrame(() => {
-            // Stream + scrolling + editable draft exercise the real app in each
-            // frame. Completed code/math blocks stay in the virtual transcript.
-            const input = document.querySelector<HTMLTextAreaElement>("[data-testid=composer-input]")!;
-            const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!;
-            setter.call(input, `draft ${index}`); input.dispatchEvent(new Event("input", { bubbles: true }));
-            const viewport = document.querySelector<HTMLElement>("[data-testid=thread-viewport]")!;
+            // Exercise the completed transcript with draft edits and scrolling.
+            setter.call(input, `draft ${index}`);
+            input.dispatchEvent(new Event("input", { bubbles: true }));
             viewport.scrollTop = viewport.scrollHeight - viewport.clientHeight - (index % 8);
-            if (queue.length) { controller.enqueue(encoder.encode(queue.shift()!)); state.supplied++; }
             resolve();
           }));
         }
         measuredFrame = frames;
         await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-        while (!eof || queue.length) { if (!queue.length) await new Promise<void>((resolve) => waiters.push(resolve)); while (queue.length) controller.enqueue(encoder.encode(queue.shift()!)); }
-        if (buffer) controller.enqueue(encoder.encode(buffer)); controller.close(); state.done = true;
-      } });
-      return new Response(body, { status: response.status, headers: response.headers });
+        state.done = true;
+      },
     };
-  }, { endpoint, frames, warmupMs });
+    Object.assign(globalThis, { __renderTraceLoad: state });
+  }, { frames, warmupFrames });
 }

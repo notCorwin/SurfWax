@@ -7,10 +7,10 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 
-import { test, SSE_HEADERS, p95, chunk, usageChunk, textResponse, streamingTextResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
+import { test, p95, textResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
 
 test("keeps 100 semantic locate-and-action operations at p95 <= 100ms", { tag: "@performance" }, async () => {
-  const responses: string[][] = [];
+  const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
   try {
@@ -36,26 +36,29 @@ test("keeps 100 semantic locate-and-action operations at p95 <= 100ms", { tag: "
 });
 
 
-test("stress profile: dense stream and long canonical log stay interactive", { tag: "@performance" }, async () => {
-  const parts = [
-    chunk({ role: "assistant", content: "# Stress\n\n" }),
-    ...Array.from({ length: 1_500 }, (_, index) => chunk({
-      content: index % 25 === 0
-        ? `\n\n- row ${index} with **bold** and $x_${index}^2$\n\n`
-        : `token-${index} `,
-    })),
-    chunk({ content: "STREAM_STRESS_DONE" }),
-    chunk({}, "stop"),
-    "data: [DONE]\n\n",
-  ];
-  const provider = await startProvider([parts, textResponse("压力测试")]);
+test("stress profile: dense complete response and long canonical history stay interactive", { tag: "@performance" }, async () => {
+  const stressReply = "# Stress\n\n" + Array.from({ length: 1_500 }, (_, index) => index % 25 === 0
+    ? `\n\n- row ${index} with **bold** and $x_${index}^2$\n\n`
+    : `token-${index} `).join("") + "\n\nFULL_RESPONSE_STRESS_DONE";
+  const provider = await startProvider([textResponse(stressReply), textResponse("压力测试")]);
   const opened = await openExtension();
   try {
     await opened.page.setViewportSize({ width: 430, height: 850 });
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("stress rendering of a complete response");
+    const initialFullRenderStarted = Date.now();
+    await composer.press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FULL_RESPONSE_STRESS_DONE");
+    const initialFullRenderMs = Date.now() - initialFullRenderStarted;
+
+    const viewport = opened.page.getByTestId("thread-viewport");
+    const box = await viewport.boundingBox();
+    if (!box) throw new Error("stress viewport has no bounding box");
+    await opened.page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await opened.page.evaluate(() => {
-      const metrics = { frameGaps: [] as number[], longTasks: [] as number[], inputLatencies: [] as number[], running: true };
+      const metrics = { frameGaps: [] as number[], frameCount: 0, longTasks: [] as number[], inputLatencies: [] as number[], running: true };
       document.addEventListener('input', event => {
         const started = event.timeStamp;
         requestAnimationFrame(() => metrics.inputLatencies.push(performance.now() - started));
@@ -66,30 +69,41 @@ test("stress profile: dense stream and long canonical log stay interactive", { t
           metrics.longTasks.push(...list.getEntries().map((entry) => entry.duration));
         }).observe({ type: "longtask", buffered: true });
       }
-      let previous = performance.now();
+      let previous: number | null = null;
       const frame = (now: number) => {
         if (!metrics.running) return;
-        metrics.frameGaps.push(now - previous);
+        metrics.frameCount += 1;
+        if (previous !== null && now > previous) metrics.frameGaps.push(now - previous);
         previous = now;
         requestAnimationFrame(frame);
       };
       requestAnimationFrame(frame);
     });
 
-    const composer = opened.page.getByTestId("composer-input");
-    await composer.fill("stress the streaming renderer");
-    await composer.press("Enter");
-    await expect(opened.page.locator(".markdown-body").last()).toHaveAttribute("data-status", "running");
-    const inputStarted = Date.now();
-    await composer.pressSequentially("responsive-typing-".repeat(12));
-    const inputMs = Date.now() - inputStarted;
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("STREAM_STRESS_DONE");
+    const activeWorkloadStarted = Date.now();
+    const inputPhaseDeadline = activeWorkloadStarted + 1_500;
+    const scrollPhaseDeadline = activeWorkloadStarted + 3_000;
+    let inputMs = 0;
+    while (Date.now() < inputPhaseDeadline) {
+      const inputStarted = Date.now();
+      await composer.pressSequentially("responsive-typing-".repeat(12));
+      if (inputMs === 0) inputMs = Date.now() - inputStarted;
+    }
+    let scrollDirection = 1;
+    while (Date.now() < scrollPhaseDeadline) {
+      await opened.page.mouse.wheel(0, scrollDirection * 400);
+      scrollDirection *= -1;
+      // Allow each real wheel action to produce its browser scroll frame before the next one.
+      await opened.page.waitForTimeout(16);
+    }
+    const activeWorkloadMs = Date.now() - activeWorkloadStarted;
     const metrics = await opened.page.evaluate(() => {
-      const state = (globalThis as typeof globalThis & { __stressMetrics?: { frameGaps: number[]; longTasks: number[]; inputLatencies: number[]; running: boolean } }).__stressMetrics;
-      if (!state) return { frameGaps: [] as number[], inputLatencies: [] as number[], maxLongTask: 0, longTaskCount: 0 };
+      const state = (globalThis as typeof globalThis & { __stressMetrics?: { frameGaps: number[]; frameCount: number; longTasks: number[]; inputLatencies: number[]; running: boolean } }).__stressMetrics;
+      if (!state) return { frameGaps: [] as number[], frameCount: 0, inputLatencies: [] as number[], maxLongTask: 0, longTaskCount: 0 };
       state.running = false;
       return {
         frameGaps: state.frameGaps,
+        frameCount: state.frameCount,
         inputLatencies: state.inputLatencies,
         maxLongTask: Math.max(0, ...state.longTasks),
         longTaskCount: state.longTasks.length,
@@ -98,7 +112,8 @@ test("stress profile: dense stream and long canonical log stay interactive", { t
     const events = await readEvents(opened.page);
     const conversationId = events.find((event) => event.type === "conversation.created")?.conversationId;
     if (!conversationId) throw new Error("stress conversation was not created");
-    const streamEvents = events.filter((event) => event.type === "conversation.stream.chunk").length;
+    const finalAssistant = events.filter((event) => event.type === "conversation.message" && event.content?.role === "assistant").at(-1);
+    expect(finalAssistant.content.parts.filter((part: any) => part.type === "text").map((part: any) => part.text).join("")).toBe(stressReply);
 
     await opened.page.evaluate(async ({ id }) => {
       const db = await new Promise<IDBDatabase>((resolveDb, reject) => {
@@ -109,15 +124,6 @@ test("stress profile: dense stream and long canonical log stay interactive", { t
       const transaction = db.transaction("events", "readwrite");
       const store = transaction.objectStore("events");
       const timestamp = new Date().toISOString();
-      for (let index = 0; index < 100_000; index += 1) {
-        store.add({
-          type: "conversation.stream.chunk",
-          timestamp,
-          conversationId: id,
-          runId: "completed-stress-run",
-          content: { type: "text-delta", id: "stress", delta: "x" },
-        });
-      }
       let parentId: string | null = null;
       for (let index = 0; index < 500; index += 1) {
         const userId = `stress-user-${index}`;
@@ -175,18 +181,15 @@ test("stress profile: dense stream and long canonical log stay interactive", { t
     await opened.page.evaluate(() => {
       const state = { gaps: [] as number[], running: true };
       (globalThis as typeof globalThis & { __scrollStress?: typeof state }).__scrollStress = state;
-      let previous = performance.now();
+      let previous: number | null = null;
       const frame = (now: number) => {
         if (!state.running) return;
-        state.gaps.push(now - previous);
+        if (previous !== null && now > previous) state.gaps.push(now - previous);
         previous = now;
         requestAnimationFrame(frame);
       };
       requestAnimationFrame(frame);
     });
-    const viewport = opened.page.getByTestId("thread-viewport");
-    const box = await viewport.boundingBox();
-    if (!box) throw new Error("stress viewport has no bounding box");
     await opened.page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     for (let index = 0; index < 30; index += 1) {
       await opened.page.mouse.wheel(0, -1_000);
@@ -206,21 +209,23 @@ test("stress profile: dense stream and long canonical log stay interactive", { t
     await expect(jump).toBeVisible();
     await jump.click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("HISTORY_MARKER_499");
-    const measured = { inputMs, restoredInputMs, reloadMs, maxFrameGap, p95FrameGap, scrollMaxFrameGap, scrollP95FrameGap,
-      inputToFrameP95: p95(metrics.inputLatencies), restoredInputToFrameP95: p95(restoredInputLatencies), streamEvents, ...dom,
+    const measured = { initialFullRenderMs, activeWorkloadMs, inputMs, restoredInputMs, reloadMs, maxFrameGap, p95FrameGap, scrollMaxFrameGap, scrollP95FrameGap,
+      inputToFrameP95: p95(metrics.inputLatencies), restoredInputToFrameP95: p95(restoredInputLatencies), ...dom,
       maxLongTask: metrics.maxLongTask, longTaskCount: metrics.longTaskCount,
-      samples: { frameGaps: metrics.frameGaps, inputToFrame: metrics.inputLatencies, restoredInputToFrame: restoredInputLatencies, scrollFrameGaps } };
+      samples: { frameCount: metrics.frameCount, frameGaps: metrics.frameGaps, inputToFrame: metrics.inputLatencies, restoredInputToFrame: restoredInputLatencies, scrollFrameGaps } };
     console.log('stress metrics', measured);
     const evidence = test.info().outputPath("local-performance-metrics.json");
     await writeFile(evidence, JSON.stringify(measured, null, 2));
     await test.info().attach('local-performance-metrics', { path: evidence, contentType: 'application/json' });
 
-    expect(streamEvents).toBeGreaterThanOrEqual(1_500);
+    expect(initialFullRenderMs).toBeLessThan(2_000);
+    expect(activeWorkloadMs).toBeGreaterThanOrEqual(3_000);
     expect(inputMs).toBeLessThan(500);
     expect(restoredInputMs).toBeLessThan(500);
     expect(reloadMs).toBeLessThan(2_000);
     expect(dom.messages).toBeLessThan(50);
     expect(dom.elements).toBeLessThan(1_000);
+    expect(metrics.frameCount).toBeGreaterThanOrEqual(120);
     expect(metrics.frameGaps.length).toBeGreaterThan(30);
     expect(metrics.inputLatencies.length).toBeGreaterThan(10);
     expect(restoredInputLatencies.length).toBeGreaterThan(5);
