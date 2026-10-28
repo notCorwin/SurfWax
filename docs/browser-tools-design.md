@@ -1,18 +1,19 @@
 # Surf Wax：世界一流 LLM Browser Tools 技术设计
 
-状态：提案，尚未实现或通过本文验收。研究日期：2026-10-27。仓库基线：`54d16cc371dd0375278a3f81b869e066736a9e84`。
+状态：提案，尚未实现或通过本文验收。修订日期：2026-10-28。实现基线：`54d16cc371dd0375278a3f81b869e066736a9e84`。
 
 本文设计 Surf Wax 下一代浏览器工具内核与模型接口，目标同时满足：大部分具备基础工具调用能力的 LLM 能可靠操作；常见任务的总 Token 成本低；强模型能够完成跨站、多阶段、长时间、数据密集的复杂任务。本文不把工具数量少、单次返回短或某个强模型的演示成功当作目标达成。
 
 ## 1. 核心决策
 
-采用**共享内核上的声明式操作与程序化操作**：普通任务使用 `inspect / act / read`，复杂任务按需使用 `run / jobs`。两条路径共享观察、定位、调度、验证、产物和事件日志，不能形成两套浏览器实现。
+采用**一个明确动作对应一个独立工具，所有工具共享执行内核**。例如 `click`、`fill`、`read_text` 各有自己的名称、输入 schema、回执和管理项；不再用带 `op` 枚举的 `act` 包装常用动作。`execute_program` 是独立的高级组合入口，可在本地编排相同的原子能力，适合循环、条件分支和数据处理。
 
 1. **模型决定意图，内核解决机械问题。** 模型不必编写 JavaScript 才能点击、填表、读取结果；等待、唯一定位、命中检测、回执与结果裁剪由确定性代码完成。
 2. **先获取可复用事实，再按任务投影。** 每个文档只有一份受失效机制约束的页面事实图；观察、定位、抽取和验证共同使用，按变化更新，按需输出。
 3. **压缩传输，不丢失证据。** 完整数据保存在有来源的产物中；模型读取摘要、相关区域和增量。预算不足、未读取范围和内容失效必须显式表达。
 4. **动作完成与业务成功分开。** 已派发但结果未知的写操作不自动重放。业务成功必须有任务对应的可核验证据。
 5. **复杂能力按需展开，执行能力不设人工天花板。** 保留 JavaScript、CDP、页面与扩展网络、原生输入、用户脚本等能力，不设置全局智能体步数上限或额外权限审批。
+6. **工具可单独管理。** 默认公开全部工具；用户可在高级设置中调整下一次运行的工具目录，运行期间的目录和上下文前缀保持稳定。工具可见性不是权限隔离边界。
 
 “前 1%”在本文中是需要专门验证的复杂任务集合，不是已经证明覆盖真实世界任务分布的统计结论。纯像素且无语义、无可读数据、无视觉模型的任务存在信息边界，工具不能凭空补足视觉或推理能力。
 
@@ -22,7 +23,7 @@
 
 | 领域 | 当前实现与证据 | 设计处理 |
 | --- | --- | --- |
-| 模型入口 | [tool.ts](../src/chrome/tool.ts) 暴露 `inspect / run / jobs`；常用操作也要写 JavaScript | 增加结构化 `act / read`，共享执行内核；不恢复旧的几十个入口 |
+| 模型入口 | [tool.ts](../src/chrome/tool.ts) 暴露 `inspect / run / jobs`；常用操作也要写 JavaScript | 替换为按动作独立注册的工具和可选组合程序，复用同一浏览器内核 |
 | 页面观察 | [automation.ts](../src/chrome/automation.ts) 的 `captureSnapshot` 每次对各会话抓全量 AX 树；区域选择、差分在之后发生 | 建立按文档/帧管理的事实图与增量采集；输出增量不能冒充采集增量 |
 | 定位语义 | 简单 role/label 使用 Chrome AX，组合定位使用手写 DOM 语义；部分路径唯一性检查后再次查询对象 | 统一语义来源；将候选选择绑定到同一节点身份，避免检查和执行之间换对象 |
 | 上下文 | [runner.ts](../src/agent/runner.ts) 与 `prepareToolMessages` 临时插入浏览器状态/图片，下一步可能移除 | 将实际发送内容固化为日志驱动、仅追加的模型上下文投影 |
@@ -51,7 +52,7 @@
 
 ```mermaid
 flowchart TB
-  L[LLM：规划、选择、判断] --> T[固定工具协议 inspect / act / read / run / jobs]
+  L[LLM：规划、选择、判断] --> T[工具目录：每个动作独立注册]
   T --> O[观察与读取服务]
   T --> E[执行与作业服务]
   O <--> G[文档事实图：AX / DOM / 状态 / 数据索引]
@@ -71,82 +72,116 @@ flowchart TB
 
 Side Panel 中的协调器管理活动执行、能力句柄和取消。Service Worker 负责扩展事件、路由、注册协调及必要的 Chrome API 桥接；即使调试会话可能延长 Worker 生命周期，也不假定永不退出。[Chrome 生命周期文档](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle) 明确要求持久状态不能只放在全局变量中。
 
-## 5. 模型接口：常用操作不写代码，复杂操作不受 DSL 限制
+## 5. 独立工具目录与协议
 
-### 5.1 固定的五个入口
+### 5.1 边界与管理
 
-| 工具 | 模型要解决的问题 | 默认返回 | 不承担的工作 |
-| --- | --- | --- | --- |
-| `inspect` | 当前页面有哪些可读内容、对象和状态？ | 语义区域、短 ref、状态、完整性、观察 ID | 不执行动作，不自动截图 |
-| `act` | 对哪个对象做什么，并等待什么结果？ | 分步回执、验证结果、必要的局部变化 | 不运行隐藏 LLM，不自动重放写操作 |
-| `read` | 从哪个已有来源读取、查询或抽取什么数据？ | 指定字段、结果集、游标和来源 | 不默默发起网络请求或执行任意页面 JS |
-| `run` | 用代码组合分支、循环、网络、浏览器和计算 | 返回值摘要、产物、断言与回执 | 不维护持久 JS 栈，不自行选择替代目标 |
-| `jobs` | 长任务进展如何，如何等待或取消？ | 游标之后的新事件和终态 | 不重复返回整段历史，不表示回滚 |
+每个工具对应一个可命名的动作或读取目的，独立注册 `name / description / inputSchema / handler`。参数表达目标、数据与选项，不再用 `act({op:...})`、`read({source:...})` 或 `jobs({action:...})` 充当通用分发器。`fill` 替换字段内容，`type_text` 逐键输入，`clear` 清空字段；这些动作各有独立语义。分类只用于管理和展示，模型调用仍使用具体工具名。
 
-固定五个入口是待验证的设计选择，不是“五个一定优于三个”的结论。`act / read` 的新增 schema 成本必须由减少的代码、错误、观察和模型往返抵消，见第 13、16 节消融试验。
+以下是与可视化方案对齐，并补全字段状态、帧、事件、原生输入、PDF、产物及协议发现后的 **71 项首版候选目录**。数字用于明确评测对象，不是必须凑足或不能扩展的上限；最终名称、字段及描述由真实 registry 一次定义并生成文档、模型 schema 和管理界面。公共字段及核心必填参数见下节；这是提案而非现有可执行 API。
 
-所有模型使用同一目录与参数语义。仅适配 Provider 支持的 JSON Schema 表达方式，避免复杂递归、深层 `oneOf` 和大规模嵌套。执行前统一严格验证；只能做无歧义的语法归一化，不能猜测目标、补写意图或调用另一个 LLM 修复参数。
+| 分组 | 工具与用途 |
+| --- | --- |
+| 页面观察与验证（12） | `inspect_page` 观察语义页面；`find_elements` 查找候选；`list_frames` 列出帧；`read_text` 读原文；`read_table` 读表格；`read_value` 读字段值；`read_attribute` 读属性；`read_checked` 读勾选状态；`wait_for_element` 等待元素状态；`wait_for_url` 等待地址；`verify_state` 验证事实；`take_screenshot` 显式截图。 |
+| 元素与原生输入（17） | `click` 点击；`double_click` 双击；`hover` 悬停；`fill` 替换输入；`clear` 清空；`type_text` 逐键输入；`press_key` 按键；`key_down` 按住键；`key_up` 释放键；`check` 勾选；`uncheck` 取消勾选；`select_option` 选择选项；`scroll` 滚动；`drag` 拖拽；`move_pointer` 移动指针；`press_pointer` 按下指针；`release_pointer` 释放指针。 |
+| 导航与标签页（8） | `navigate` 导航；`reload` 刷新；`go_back` 后退；`go_forward` 前进；`list_tabs` 列出；`open_tab` 打开；`switch_tab` 显式切换绑定；`close_tab` 关闭。 |
+| 文件、对话框与事件（10） | `upload_file` 上传已有文件；`list_downloads` 列出下载；`read_download` 读取下载；`create_pdf` 生成内部 PDF 产物；`save_artifact` 导出产物；`accept_dialog` 接受；`dismiss_dialog` 取消；`subscribe_event` 先订阅事件；`wait_event` 等待事件；`unsubscribe_event` 释放订阅。 |
+| 数据与诊断（7） | `read_artifact` 读取产物；`create_text_artifact` 创建文本产物；`read_events` 读取历史；`list_requests` 查已捕获请求；`read_response` 读已捕获响应；`read_console` 读已捕获日志；`read_api_reference` 查 registry 中的高级 API 文档。 |
+| 用户脚本（7） | `list_scripts` 列出；`read_script` 读取；`create_script` 创建；`update_script` 编辑；`enable_script` 启用；`disable_script` 停用；`delete_script` 删除。 |
+| 长任务（4） | `list_jobs` 列出；`get_job` 读取增量状态；`wait_job` 等待进展；`cancel_job` 取消。 |
+| 高级与组合（6） | `evaluate_js` 页面求值；`fetch_page` 在页面上下文请求；`fetch_extension` 在扩展上下文请求；`list_cdp_sessions` 列出可用协议会话；`send_cdp` 发送协议命令；`execute_program` 组合原子能力、本地计算并可启动后台作业。 |
 
-系统提示词末尾附加全部工具的简明定位、核心调用范例与不变量。高级 API 的详细文档通过 `read({source:"api", id:"frames"})` 按需获取；目录和文档从同一个 registry 生成。获取文档只追加消息，不改变已发送 schema 或系统提示词。
+默认所有工具对模型可见，不依据模型名称、当前任务或内容自动隐藏能力。用户可在高级设置中逐项调整**对模型暴露的目录**：设置保存为期望配置，下一次运行生成有序的、带版本和 hash 的目录快照；当前运行及已发出的调用不受影响。每个工具的启停、名称、用途及输入定义可单独查看；普通界面不主动展示高级设置。
 
-### 5.2 核心形状与默认值
+工具开关只改变模型可调用名称，不是安全或权限边界。例如，即使 `click` 从目录移除，仍可通过 `evaluate_js` 或 `send_cdp` 实现相似效果。`execute_program` 的 `tools.*` 原子接口只包含本次快照中的工具；高级脚本、网络与 CDP 本身的能力重叠必须如实说明，不声称开关能阻止所有等价行为。Chrome 自身的限制仍适用，不引入额外的智能体步数或权限限制。
 
-下列为协议契约草案，参数名称和语义应由实现阶段的统一类型与 registry 生成；不是声称当前代码已经支持。
+### 5.2 公共契约
+
+单一 registry 为每个工具生成简洁、稳定、按名称排序的 schema 和摘要，所有摘要拼接在用户系统提示词后。描述只解释工具职责、必要的关键限制和返回语义；详细的长尾 API 与示例使用 `read_api_reference({topic})` 按需读取。避免重复的大段公共说明，不为省 Token 删除可执行工具的 schema。
+
+首版所有工具默认暴露；不按任务临时切换 schema，也不在一轮内动态添加工具。若 Provider 不支持目录大小或某类 schema，返回准确的兼容性错误并允许用户在高级设置中调整目录；不静默隐藏工具或退回旧协议。不同 Provider 的 schema 适配必须保持字段含义一致。模型在中途获取参考资料时仅追加内容，不更改现有工具定义或系统提示词。
 
 ```ts
 type Target =
   | { ref: string }
-  | { role: string; name: string; within?: string; frame?: string }
-  | { label: string; within?: string; frame?: string };
-
-type Condition =
-  | { target: Target; state: "visible" | "hidden" | "enabled" }
-  | { target: Target; valueEquals: string }
-  | { target: Target; textIncludes: string }
-  | { urlEquals: string };
-
-inspect({
-  tabId?, region?: Target, view?: "outline" | "controls" | "content" | "table",
-  query?: string, since?: string, cursor?: string,
-  tokenBudget?: number, image?: boolean
-});
-
-act({
-  tabId?, steps: Step[], expect?: Condition[],
-  return?: "receipt" | "changes", timeoutMs?: number
-});
-
-read({
-  source: "tabs" | "artifact" | "events" | "api" | "network" | "console" | "scripts" | "page",
-  tabId?, id?: string, target?: Target, query?: string,
-  fields?: string[], cursor?: string, tokenBudget?: number
-});
-
-run({ code: string, background?: boolean, timeoutMs?: number });
-jobs({ action: "list" | "status" | "wait" | "cancel", id?, after?, limit?, waitMs? });
+  | { role: string; name?: string; within?: string }
+  | { label: string; within?: string }
+  | { text: string; within?: string }
+  | { css: string; within?: string };
 ```
 
-`Step` 是扁平的 `{op, target?, value?, url?, tabId?, files?, condition?}`，`op` 包括点击、双击、悬停、填写、按键、选择、勾选/取消、滚动、导航、打开/关闭/选择标签、上传和条件等待。每个 op 有明确必填和互斥字段，不能把无效字段静默忽略。文件使用产物 ID；大文件内容不进入参数。复杂指针轨迹、拖拽、对话框事件、精确 frame/CDP 等通过 `run` 获得，避免将所有能力塞进基础 schema。
+```text
+// 适用的工具可共同接收 tabId、frameRef 和 timeoutMs。
+inspect_page({ tabId?, frameRef?, region?: Target, view?, query?, since?, cursor?, tokenBudget? });
+find_elements({ tabId?, frameRef?, target: Target, cursor?, tokenBudget? });
+click({ tabId?, frameRef?, target: Target, timeoutMs? });
+fill({ tabId?, frameRef?, target: Target, value: string, timeoutMs? });
+read_text({ tabId?, frameRef?, target: Target, cursor?, tokenBudget? });
+verify_state({ tabId?, frameRef?, target: Target, textIncludes?: string, valueEquals?: string, state?: string });
+subscribe_event({ tabId?, kind: "dialog" | "popup" | "download" | "filechooser" | "request" | "response" | "console" });
+wait_event({ subscriptionId: string, timeoutMs? });
+unsubscribe_event({ subscriptionId: string });
+execute_program({ code: string, background?: boolean, timeoutMs? });
+get_job({ jobId: string, after?, limit? });
+wait_job({ jobId: string, after?, waitMs?, limit? });
+cancel_job({ jobId: string });
+```
 
-约定：
+以上是核心形状，不是最终 JSON Schema；每个工具各有独立的扁平 schema 和动作特定必填字段。`Target` 各分支互斥，`verify_state` 的三个条件恰好选择一个；`within` 引用已观察区域。`frameRef` 是工具返回的帧引用，不能与 Chrome 的 frame ID、CDP session ID 或 scripting document ID 混用。模型只需在需要跨页/跨帧时显式指定：省略 `tabId / frameRef` 使用本次运行确定的绑定，不能每步重新选择 active tab。目标失效时返回错误，禁止静默切页或接管相似节点。
 
-- 默认绑定当前运行开始时确定的标签；`tabId` 省略不意味着每步重查 active tab。初始绑定和显式切换都写入日志。
-- 默认 `inspect` 是 `outline`，建议目标 1,200 Token；`read` 建议目标 1,200；`act` 默认只回执，建议目标 300。它们是返回预算目标，不是任务、步数或能力上限。
-- `query` 为确定性的文本/字段检索，不解释自然语言操作意图，不隐式调用模型。需要语义推理时由当前模型完成。
-- `act.steps` 按序执行，失败后停止未派发步骤，保留部分成功回执。无事务承诺；后续步骤在执行前重新检查。依赖未知分支时停止并观察，或使用 `run`。
-- `expect` 全部满足才记录对应业务验证。批次最后一个断言不自动证明所有前序步骤的业务成功；输出单独列明验证覆盖哪些动作。
-- 操作超时默认按动作类别配置。`timeoutMs` 是本次显式期限，不截断整个会话；高级设置可调整，不能成为隐藏的全局步数限制。
-- 同一调用内不允许后台悄悄扩展任务。发现缺失信息时返回结构化错误、候选与最小恢复建议。
+主要动作字段：`double_click / hover / clear / check / uncheck / read_value / read_checked` 使用 `target`；`read_attribute` 使用 `target, name`；`type_text` 使用 `target, text`；`press_key / key_down / key_up` 使用 `key` 与可选目标；`select_option` 使用 `target, value`；`scroll` 使用 `deltaY` 和可选区域；`drag` 使用 `source, destination`。`move_pointer` 使用 `x, y` 与观察 ID，`press_pointer / release_pointer` 使用指针按键；移动坐标绑定观察 ID 和视口版本，视口变化时拒绝旧坐标。释放键/指针的操作与取消清理共享输入状态，不得留下卡住的按键。`navigate / open_tab` 使用 `url`，`switch_tab / close_tab` 使用 `tabId`。`upload_file` 使用 `artifactId` 和互斥的 `target` 或 `chooserId`；`accept_dialog / dismiss_dialog` 使用已捕获的 `dialogId`，前者可提供 prompt 文本。
 
-`read.source` 的语义需要固定：`tabs` 列出标签；`artifact` 读取不可变产物；`events` 检索当前会话/分支可达的历史调用、回执和原文；`api` 读取 registry 文档；`network / console` 只读取已捕获记录；`scripts` 读定义和启停状态；`page` 读取指定目标的文本、值或表格。`id` 是该来源的稳定记录 ID，不接受“最新一条”这样的变化索引。每个来源声明允许的字段；`query` 仅做确定性的字面文本匹配，不隐式解释为 SQL 或程序。来源无数据时返回缺失或未捕获，不能改成实时请求。新增网络采集由明确的 `run` 订阅发起，作用域、开始和结束均留痕。
+`read_artifact / read_download / read_response / read_script / get_job` 使用各自的稳定 ID，支持适用的字段投影和游标；`create_text_artifact` 使用文件名、MIME 与文本，返回可复用 ID；`create_pdf` 返回内部产物，用户明确要求导出时再调用 `save_artifact`。`list_frames` 返回与目标 tab、文档和调试会话绑定的帧引用与可用状态。`list_requests / read_response / read_console` 只读已捕获的数据，`read_events` 只读当前会话和分支可达历史，不默默发起新的网络请求。`subscribe_event` 在触发动作前建立订阅，覆盖 popup、dialog、download、filechooser 和网络/console 事件；`wait_event` 返回对应事件及句柄，`unsubscribe_event` 结束捕获。网络采集的范围、持续时间和响应体是否保存由订阅明确指定；未捕获的响应不能被假装读取。对话框回应不排到被其阻塞的点击之后。脚本创建与更新接收明确的定义、匹配范围和执行世界，启停操作持久化期望状态。
 
-### 5.3 完整的普通任务例子
+下列签名列出各工具的核心参数；`?` 表示可选，公共的绑定、期限和输出预算字段按工具类别适用。实际实现以 registry 的完整 schema 为准：
+
+```text
+inspect_page(view?, region?, query?, since?, cursor?)
+find_elements(target, cursor?)   list_frames()   read_text(target, cursor?)
+read_table(target, fields?, cursor?)   read_value(target)   read_attribute(target, name)   read_checked(target)
+wait_for_element(target, state)   wait_for_url(url)   verify_state(target, textIncludes?|valueEquals?|state?)
+take_screenshot(region?)
+
+click(target)   double_click(target)   hover(target)   fill(target, value)   clear(target)
+type_text(target, text)   press_key(key, target?)   key_down(key)   key_up(key)
+check(target)   uncheck(target)   select_option(target, value)   scroll(deltaY, target?)
+drag(source, destination)   move_pointer(observationId, x, y)   press_pointer(button)   release_pointer(button)
+
+navigate(url)   reload()   go_back()   go_forward()   list_tabs()
+open_tab(url?)   switch_tab(tabId)   close_tab(tabId)
+
+upload_file(artifactId, target?|chooserId?)   list_downloads()   read_download(downloadId)
+create_pdf()   save_artifact(artifactId, filename?)   accept_dialog(dialogId, prompt?)   dismiss_dialog(dialogId)
+subscribe_event(kind, options?)   wait_event(subscriptionId)   unsubscribe_event(subscriptionId)
+
+read_artifact(artifactId, fields?, cursor?)   create_text_artifact(filename, mimeType, text)
+read_events(after?, limit?)   list_requests(filter?, cursor?)   read_response(requestId, cursor?)
+read_console(filter?, cursor?)   read_api_reference(topic)
+
+list_scripts()   read_script(scriptId)   create_script(definition)   update_script(scriptId, definition)
+enable_script(scriptId)   disable_script(scriptId)   delete_script(scriptId)
+list_jobs()   get_job(jobId, after?, limit?)   wait_job(jobId, after?, waitMs?, limit?)   cancel_job(jobId)
+
+evaluate_js(code, world, arg?)   fetch_page(url, init?)   fetch_extension(url, init?)
+list_cdp_sessions(tabId?)   send_cdp(tabId, method, params?, sessionId?)
+execute_program(code, background?, timeoutMs?)
+```
+
+`verify_state` 必须恰选一个条件，`upload_file` 必须恰选一个目标。`world`、网络上下文和 CDP 会话由相应工具显式表达，不因失败自动替换。`open_tab` 省略地址时创建空白标签；`background` 默认 false；未提供事件/作业游标时从该来源的起始位置读取；`waitMs` 只约束本次等待。其余默认值、返回字段和错误枚举在实现 registry 时按上述语义冻结，避免参数缺失时猜测用户意图。
+
+每个已接受调用都有唯一的 Tool Result，包含成功、错误或中断；动作的紧凑结果至少携带 `operationId`、目标归属、派发状态、验证状态和必要的证据/错误引用。`returned` 仅说明操作返回；`verification: "not-requested"` 不代表业务完成。默认读取和观察建议约 1,200 Token，动作回执建议约 300 Token；预算是可调的输出目标，不是任务步数或能力上限。大结果留在产物中并返回来源与稳定游标；截图仅由显式 `take_screenshot` 或高级能力请求，不自动发送给模型。
+
+参数校验在任何派发前完成；无效参数、`stale-ref` 和多个匹配目标返回明确错误、`dispatchState: "not-dispatched"` 及必要候选。派发后失联或超时返回 `dispatchState: "uncertain"`，包含 `operationId` 和已有证据，提示先检查业务状态。错误的可重试性不能仅根据超时推断，已经可能产生副作用的操作不自动重放。
+
+模型可在一次响应中提出多个独立工具调用；有副作用的调用在同一 tab 内按模型输出顺序串行，冲突资源受第 8 节调度。同一响应中排在触发动作之前的 `subscribe_event` 必须完成注册，才可派发该动作；已经建立的 `wait_event` 在动作队列外等待，不能挡住会触发事件的动作。若一个调用失败，同一响应内该 tab 尚未派发的后续写动作停止，并各自返回 `not-dispatched` 的 Tool Result；读取、事件订阅与对话框响应按各自职责继续或明确取消，不由执行器猜测业务依赖。每个合法 call ID 都必须得到结果。跨 tab 读取可并发；不得将并行调用视作事务或保证业务成功。复杂循环与批量数据处理使用 `execute_program`，逐项调用同一原子 handler 并写分步回执。
+
+### 5.3 普通任务示例
 
 ```json
-{"tool":"inspect","input":{"view":"controls"}}
+{"tool":"inspect_page","input":{"view":"controls"}}
 ```
 
-示意返回，其中短 ref 只在本次运行的绑定文档中有意义，服务端映射包含完整身份：
+示意返回，其中短 ref 只在其绑定的标签、文档和运行上下文中有效：
 
 ```text
 observation=o17 tab=12 document=d4 revision=81 complete=true
@@ -157,20 +192,16 @@ dialog "创建联系人"
 ```
 
 ```json
-{
-  "tool":"act",
-  "input":{
-    "steps":[
-      {"op":"fill","target":{"ref":"n8"},"value":"王明"},
-      {"op":"fill","target":{"ref":"n9"},"value":"wang@example.com"},
-      {"op":"click","target":{"ref":"n10"}}
-    ],
-    "expect":[{"target":{"role":"row","name":"王明 wang@example.com"},"textIncludes":"wang@example.com"}]
-  }
-}
+[
+  {"tool":"fill","input":{"target":{"ref":"n8"},"value":"王明"}},
+  {"tool":"fill","input":{"target":{"ref":"n9"},"value":"wang@example.com"}},
+  {"tool":"click","input":{"target":{"ref":"n10"}}},
+  {"tool":"verify_state","input":{"target":{"role":"row","name":"王明 wang@example.com"},"textIncludes":"wang@example.com"}}
+]
 ```
 
-该断言只在页面确实出现唯一匹配记录时成立；保存按钮点击返回、Toast 出现和后台对象持久化不是同一种证明。任务需要持久化时继续读取详情或重新加载验证。结果无法确认时不得报告“已创建”。
+数组每项代表独立调用与对应 Tool Result，不是一个批处理工具的参数。填表动作可以在同一模型响应中提出，由执行器按序调度；保存后的验证只有在页面实际出现唯一匹配记录时才成立。Toast、点击返回与持久化是不同的证据；任务要求持久化时继续读取详情或重新加载验证。
+
 
 ## 6. 统一页面事实图与观察协议
 
@@ -178,7 +209,7 @@ dialog "创建联系人"
 
 内部身份至少包含：
 
-```ts
+```text
 DocumentKey: { tabId, tabIncarnation, sessionEpoch, frameId, loaderId, generation }
 NodeKey: { documentKey, backendDOMNodeId }
 AXNodeKey: { documentKey, sessionEpoch, axNodeId, optionalDOMNodeKey }
@@ -278,7 +309,7 @@ AX 不完整时补充 DOM 事实，明确标记推导来源；不能手写一套
 
 默认等待目标可操作；动作后只等待必要状态，不默认抓全页或等待全站 `networkidle`。页面使用 WebSocket、轮询、动画时，网络安静不能代表业务完成。
 
-显式条件覆盖 URL、目标可见/消失、字段值、文本、业务对象读取、下载、popup、dialog 和应用响应。事件先订阅再触发动作；原生对话框回复不能排到被该对话框阻塞的动作之后。高级断言可通过 `run` 完成，证据必须对应具体来源，不能只记录一个模型生成的 `check(true)`。
+显式条件覆盖 URL、目标可见/消失、字段值、文本、业务对象读取、下载、popup、dialog 和应用响应。事件先订阅再触发动作；原生对话框回复不能排到被该对话框阻塞的动作之后。高级断言可通过 `execute_program` 完成，证据必须对应具体来源，不能只记录一个模型生成的 `check(true)`。
 
 默认回执应包括：`operationId / document / resolvedTarget / dispatchState / verification / evidenceIds / changedRegions / error`。`verification` 使用 `not-requested / passed / failed / unknown`，`passed` 附带具体条件与证据，不自动升级整项任务为成功。
 
@@ -290,7 +321,7 @@ AX 不完整时补充 DOM 事实，明确标记推导来源；不能手写一套
 
 - 同一 tab 的输入、导航、DOM/脚本写操作串行；事件监听注册与对话框处理可在必要时推进，避免死锁。
 - 多 tab 的独立读取可以并行，但 foreground/focus、浏览器窗口选择、剪贴板和原生输入设备等共享资源单独排队。
-- 无法静态判断副作用的 `evaluate / protocol.send / fetch` 按有副作用处理。不能让程序用一个自报 `readonly=true` 绕过调度。
+- 无法静态判断副作用的 `evaluate_js / send_cdp / fetch_page / fetch_extension` 按有副作用处理。不能让程序用一个自报 `readonly=true` 绕过调度。
 - 跨 tab 同一业务实体的写入可能在浏览器之外冲突；任务程序显式串行并验证，内核不声称分布式事务。
 - 租约带 owner、epoch 和取消栅栏；在最终能力仲裁/Chrome 派发处再次校验，取消后排队操作及旧 owner 消息不得派发，晚到结果仍记录其真实状态。
 - 绑定标签关闭、移动或失效返回 `target-unavailable` 及当前标签清单入口；只有显式选择新标签才改变绑定。popup 与导航按已订阅事件绑定，不能猜。
@@ -319,7 +350,7 @@ Interaction Blocker 在页面操作期间覆盖目标文档和需要的子帧，
 
 ### 9.2 大数据留在数据层
 
-`read` 支持字段投影、确定性文本匹配、按 ID 精确读取与稳定分页；条件过滤、排序、聚合、连接和计算使用 `run`，在本地处理产物，模型只看到必要结论与证据。数据层提供这些确定性查询原语及中间结果复用，基础工具不再设计一套查询语言。例如读取一万行记录，先选取 ID、状态、金额，再用程序汇总异常，将异常行交给模型判断，不把全部行逐页塞入对话。
+`read_text / read_table / read_artifact` 等工具分别支持适用的字段投影、确定性文本匹配、按 ID 精确读取与稳定分页；条件过滤、排序、聚合、连接和计算使用 `execute_program`，在本地处理产物，模型只看到必要结论与证据。数据层提供这些确定性查询原语及中间结果复用，基础工具不再设计一套查询语言。例如读取一万行记录，先选取 ID、状态、金额，再用程序汇总异常，将异常行交给模型判断，不把全部行逐页塞入对话。
 
 每份抽取结果标记：URL/文档/帧、观察 revision 或响应 ID、采集时间、字段来源、页面覆盖、分页终止原因、抽取失败与缺失值。`null`、空字符串、未读取和解析失败分开表达。无限滚动和虚拟列表只声明已经观察到的范围；没有稳定业务键时不能声称全局去重或完整收集。
 
@@ -337,7 +368,9 @@ Interaction Blocker 在页面操作期间覆盖目标文档和需要的子帧，
 
 ## 10. 程序化执行与超级复杂任务
 
-`run` 保留异步 JavaScript 程序，能力对象包括 `page / browser / net / protocol / artifacts / emit / check / signal`。浏览器操作仍经同一中介，不把任意模型字符串直接放入 MV3 Service Worker eval。可销毁、opaque-origin 沙箱 Worker 只负责计算，持有可撤销能力句柄。
+`execute_program` 接受异步 JavaScript 程序，能力对象包括 `tools / artifacts / emit / check / checkpoint / signal`：`tools` 使用本次运行目录快照中的原子工具名称，产物查询与本地计算不需要逐行调用模型。每次 `tools.*` 调用都走与模型直接调用一致的参数校验、执行内核、回执与资源调度；程序只组合，不复制一套浏览器实现。高级工具如 `send_cdp` 的使用受同一快照控制，但其底层能力可能与其他工具重叠，目录开关并非权限边界。
+
+程序在可销毁、opaque-origin 沙箱 Worker 中计算，浏览器能力由 Side Panel 中介，不把模型字符串直接放入 MV3 Service Worker eval。`checkpoint`、`emit`、`check` 是程序运行时能力而非隐藏的浏览器动作；对页面进行观察、输入、网络和脚本管理仍通过对应原子 handler。
 
 不新增隐藏的规划模型、自动子智能体或页面代办代理。当前模型负责规划；循环、筛选、数据处理和条件分支由程序执行，避免一行数据一次 LLM 往返。未来若增加模型委派，必须显式计入成本、来源及并发语义，不能计为工具“免费”能力。
 
@@ -345,7 +378,7 @@ Interaction Blocker 在页面操作期间覆盖目标文档和需要的子帧，
 
 复杂任务在分阶段完成后调用新增的 `checkpoint` 能力，写入：
 
-```ts
+```text
 Checkpoint = {
   taskId, programHash, stage, lastEventId,
   completedItemsArtifactId, pendingItemsArtifactId,
@@ -366,7 +399,7 @@ Checkpoint = {
 - 长作业通过真实完成项、已读字节、事件与检查点报告进展；单纯心跳不能证明业务推进。
 - 纯计算在隔离 Worker 内运行，可强制销毁；资源调度可以限并发、内存和单次返回大小，但不设全局任务步数或复杂度上限。
 - 不再依赖“未知循环按一次”的静态时长估计决定整个作业生死。已有调用方显式给出的期限仍严格遵守；没有明确总期限时，停滞诊断返回状态，运行可由用户或模型取消。
-- `jobs.wait` 通过事件通知和游标返回新进展；等待期限只是本次等候时长。完成、失败、中断、取消均可追溯。
+- `wait_job` 通过事件通知和游标返回新进展；等待期限只是本次等候时长。完成、失败、中断、取消均可追溯。
 
 Side Panel 关闭意味着宿主丢失，任务不能保证继续。取消撤销能力、销毁计算、清理监听和输入、释放阻挡器；已经发出的 HTTP/Chrome 命令可能继续产生效果。扩展重开后从业务检查点恢复，不伪装成从断点续跑任意 JavaScript。
 
@@ -374,9 +407,9 @@ Side Panel 关闭意味着宿主丢失，任务不能保证继续。取消撤销
 
 例：跨三个业务系统核对大量订单、识别不一致、更新满足规则的记录，最后导出差异报告。
 
-1. 明确验收条件、稳定订单键、允许的业务变化及无法自动判断的例外；`read` 确定已有标签和产物。
+1. 明确验收条件、稳定订单键、允许的业务变化及无法自动判断的例外；`list_tabs / read_artifact` 确定已有标签和产物。
 2. 各站独立收集可读表格/响应，记录分页、版本与覆盖；产物共享给本地连接和聚合，避免每页交给模型。
-3. `run` 计算差异，模型只判断规则未覆盖的例外；读取局部证据后回到程序执行。
+3. `execute_program` 计算差异，模型只判断规则未覆盖的例外；读取局部证据后回到程序执行。
 4. 按冲突实体排序写入，每次写入前核对输入版本，完成后读取业务结果；按业务键保存阶段检查点。
 5. 若第二站写入后断线，该操作保持 unknown；恢复先查订单状态，不从整批起点重做。
 6. 输出差异、已完成、失败、未确认和未覆盖数据；报告引用产物及证据，不把“程序结束”写成“所有订单正确”。
@@ -397,7 +430,7 @@ returned → verification-passed / verification-failed / verification-unknown
 
 宿主启动时获取恢复所有权，按调用 ID 找到已接受但无结果的调用，追加唯一 interrupted Tool Result，关联已有回执和未知操作。迟到的旧 owner 不能再补发第二个结果，但迟到的外部效果/诊断仍可作为后续证据追加。恢复补齐本身也要幂等。参数解析失败和未知工具也产生匹配的错误结果；并行工具调用即使部分失败或取消，也必须配齐所有合法 ID 的结果后才能发起下一次模型请求。
 
-后台 `run` 的 Tool Result 是带 job ID 的 accepted；后续作业终态通过 `jobs` 读取。接受并不等于执行完成，job completed 也不自动表示所有业务断言通过。UI 从同一事件流显示进展和取消状态。
+后台 `execute_program` 的 Tool Result 是带 job ID 的 accepted；后续作业终态通过 `get_job / wait_job` 读取。接受并不等于执行完成，job completed 也不自动表示所有业务断言通过。UI 从同一事件流显示进展和取消状态。
 
 ## 12. 上下文：稳定前缀与有证据的压缩
 
@@ -414,6 +447,8 @@ history(request[k+1]) = history(request[k]) + newlyCommittedMessages
 浏览器状态变化、能力检测结果、图片和增量都作为持久消息追加；不得在每个 prepareStep 重写“当前浏览器状态”或移除之前图片。工具结果与对应 assistant tool call 保持合法配对；不把工具数据随意提升为用户指令。
 
 保留图片会增加上下文占用；需要淘汰时，在显式压缩检查点开启新 epoch，而非悄悄改写旧请求。只为日志保留原图而从实际请求移除它，也不能称为前缀稳定。配置、用户系统提示词、工具版本、分支或模型变化同样开启新 epoch，并记录原因。
+
+旧会话中的消息、工具调用、工具结果和历史目录文本原样留在 canonical log；历史名称不因此重新成为可执行工具。继续、重试或分支时追加当前目录快照与版本变更，开启新的上下文 epoch。投影须按目标 Provider 的历史消息协议保留工具调用与结果配对；若格式不被目标 Provider 接受，明确报告兼容性错误，不能重写权威历史或悄悄执行旧名称。
 
 实现一个请求投影器，从 canonical 事件产生固定序列，持久化投影版本与内容 hash；在 Provider transport 边界记录实际发送内容的指纹。测试覆盖最终 HTTP 请求中相邻历史的完整公共前缀、image/tool 配对、签名及并行调用原序，不能只检查 SDK 输入或 system prompt。模型/Provider 切换开启新 epoch，按目标协议重新构造可用历史；不支持的签名等保留为历史证据，不直接回传给另一个模型。
 
@@ -454,8 +489,8 @@ Cost = Σ Provider 对未缓存输入、缓存读取、缓存写入、输出等�
 
 | 项目 | 初始工程目标，待实测校准 | 超出后的行为 |
 | --- | --- | --- |
-| 默认 schema + 常驻工具说明 | 参考 tokenizer 下合计 ≤2,500 Token | 精简/去重说明，详细 API 按需读取；不得删关键契约 |
-| 普通 outline / read | 每次约 1,200 Token | 保留区域与完整性，返回稳定游标；允许显式增加 |
+| 完整启用目录的 schema + 常驻摘要 | 先实测全部工具，再评估参考 tokenizer 下 ≤2,500 Token 是否可行 | 精简/去重说明，详细 API 按需读取；保留每个启用工具的 schema 和关键契约 |
+| 普通页面观察 / 读取 | 每次约 1,200 Token | 保留区域与完整性，返回稳定游标；允许显式增加 |
 | 默认动作回执 | 每次约 300 Token | 大证据转产物，错误候选局部返回 |
 | 无页面变化的再次观察 | ≤100 Token 的状态元信息目标 | 返回 unchanged 与基线，不重复正文 |
 | 长程序输出 | 小进展 + 终态摘要 | 中间数据产物化，只增量读进展 |
@@ -478,7 +513,7 @@ Cost = Σ Provider 对未缓存输入、缓存读取、缓存写入、输出等�
 | 登录、验证码、硬件验证 | 使用现有会话；报告真实阻碍 | 用户参与的外部状态无法由通用工具保证完成 |
 | 受限 URL、企业策略、调试器被占用 | 启动能力检测与结构化错误 | 不宣称扩展可获得 Chrome 未授予的能力 |
 
-`protocol.send` 可以覆盖 Chrome 向扩展开放的 CDP 方法，不能承诺完整 DevTools 协议。[Chrome debugger](https://developer.chrome.com/docs/extensions/reference/api/debugger) 有可用域限制和策略约束。OS 或 Chrome 的限制与项目“不额外限制智能体权限”是两件事，必须报告事实。
+`send_cdp` 可以覆盖 Chrome 向扩展开放的 CDP 方法，不能承诺完整 DevTools 协议。[Chrome debugger](https://developer.chrome.com/docs/extensions/reference/api/debugger) 有可用域限制和策略约束。OS 或 Chrome 的限制与项目“不额外限制智能体权限”是两件事，必须报告事实。
 
 ## 15. 方案依据与被放弃的取舍
 
@@ -486,16 +521,18 @@ Cost = Σ Provider 对未缓存输入、缓存读取、缓存写入、输出等�
 
 | 官方资料 | 可借鉴之处 | 对 Surf Wax 的决策 |
 | --- | --- | --- |
+| [Browser Use 页面采集](https://github.com/browser-use/browser-use/blob/2cc71890e65056b67fdb29d98bb407749c15bb08/browser_use/dom/service.py#L570) | 当前 Python 实现通过 CDP 合并 DOM、AX 与布局数据 | 利用多源事实形成模型可读的语义观察；增量采集和 Token 收益另行验证 |
+| [Playwright Locator](https://playwright.dev/docs/locators) | 按用户可感知语义定位，在操作时重新解析目标 | 借鉴定位、唯一性和自动等待；仍须保留 Surf Wax 自己的 ref 与身份失效规则 |
 | [Playwright MCP](https://github.com/microsoft/playwright-mcp) | 结构化可访问性观察可服务非视觉模型；文档讨论工具/观察常驻成本 | 文本语义为默认，详细能力按需读取；扩展不引入本地 CLI 依赖 |
 | [agent-browser](https://github.com/vercel-labs/agent-browser) | ref、面向智能体的简短命令、批处理、schema 按需读取 | 采用身份引用与小回执，不采用其进程/CLI 架构作为扩展必需项 |
-| [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp) | 自动化之外仍需要网络、Console 和性能诊断，存在精简工具配置 | 保留深层诊断，但不全部放入默认上下文 |
+| [Chrome DevTools MCP](https://github.com/ChromeDevTools/chrome-devtools-mcp) | 自动化之外仍需要网络、Console 和性能诊断，存在精简工具配置 | 保留深层诊断工具；默认目录完整暴露，详细说明按需读取 |
 | [BrowserGym](https://github.com/ServiceNow/BrowserGym) | 多种网页任务环境和统一评测基础 | 借用环境和判分，不依赖它执行 Surf Wax 工具 |
 | [WorkArena](https://servicenow.github.io/WorkArena/) | 企业任务同时需要导航、数据提取、表单、记忆与领域判断 | 增加真实业务状态判分和组合任务，不只测点击 |
 
 不采用：
 
 - **所有任务只暴露代码。** 当前执行内核可保留，但把语言语法、API 记忆和异步编排作为所有模型的前置能力，会压低弱模型下限。
-- **几十个常驻细粒度工具。** 易发现，但增加选择歧义、schema 和说明成本；常见动作收敛为结构化入口，长尾按需展开。
+- **用一个 `act` 的操作枚举替代独立动作工具。** 会让单项动作的名称、参数、管理项和调用结果失去清晰边界。采用独立工具后，必须用跨模型实测评估目录选择和 schema 成本，而非假设工具越多越好。
 - **只留一个自然语言 do-task 工具。** 隐藏推理和重试成本，难以定位失败、控制来源及恢复未知副作用。
 - **每步全量 DOM/AX 或默认截图。** 已知无变化仍重复采集、传输，且文本模型无法消费纯视觉信息。
 - **只返回相关内容却声称完整。** 低 Token 不能建立在漏数据、错对象或过期事实上。
@@ -505,7 +542,9 @@ Cost = Σ Provider 对未缓存输入、缓存读取、缓存写入、输出等�
 
 ### 16.1 固定实验条件
 
-基线 A 为当前 `inspect / run / jobs` 版本；B 为新观察内核但保留三工具；C 为 B 加 `act / read`；D 为 C 加按需 API、稳定前缀和数据产物策略。先验证 B/C 的独立收益，再评估完整组合；不能把多项变化叠加后只展示一个成功例子。
+基线 A 为当前 `inspect / run / jobs` 版本；B 在该基线上验证共享事实图与增量采集；C 使用与 B 相同的观察/执行内核并换为完整启用的细分工具目录；D 在 C 上增加按需参考资料、稳定前缀和产物策略。四组使用相同任务、模型和浏览器条件，分别测量观察内核、工具接口与上下文优化的收益。B 中旧接口只是隔离变量的实验对照，不是要保留的生产兼容层；C、D 都提供同一完整目录，不能通过减少默认工具数量制造成本优势。
+
+比较每个目录实际发送的完整 schema、系统摘要及每步请求，报告工具选择正确率、参数校验失败率、跨步骤总 Token、缓存读写、每个成功任务的成本和业务成功率。若某 Provider 无法承载完整目录，将该模型记为兼容性失败并说明原因，不能事后移出测试分母。全部启用目录可见性是实验条件；用户手动修改目录的体验另行评测。
 
 每次记录仓库 SHA、Chrome/扩展/依赖、环境/数据 seed、模型 ID/Provider/上下文与输出配置、提示词和 schema hash、缓存冷热条件、实际 usage。模型对照使用相同任务、初始状态、提示词中立任务描述和对应配置。任务有随机种子、可复位环境、外部业务判分器及故障注入点。
 
@@ -548,9 +587,12 @@ Cost = Σ Provider 对未缓存输入、缓存读取、缓存写入、输出等�
 - 节点在唯一性检查后移除、同名对象出现、虚拟行复用、导航中 AX 结果晚到。
 - 分页期间页面改变、增量未读完、基线被压缩、游标过期、事件丢失与缓存重新 attach。
 - scope 外 aria-labelledby 文本变化、未请求子树变化、IDL 属性变化，以及不同 view/query 误用 since；最低与当前 Chrome 均验证。
+- 字段值、属性、勾选状态和多层帧的独立读取；截图、PDF、下载与产物只按显式调用获取或导出。
 - 点击已提交但响应丢失、日志 intent 后崩溃、终态写入失败、取消与返回同时发生。
 - tab 关闭或被其他窗口激活、OOPIF 多层 attach、dialog 阻塞、共享焦点并发。
+- 同轮事件订阅先于触发动作就绪，等待不阻塞触发与对话框回应；网络事件读取不悄悄补发请求。
 - 阻挡器安装失败/被移除，用户同时键入，代理输入不能被误挡，也不能放行旁路输入。
+- 修改工具可见性只影响下一次运行；目录与 schema 在当前 epoch 不变，程序中的原子工具遵守同一快照，高级 CDP/脚本的重叠能力如实提示。
 - 侧栏关闭后作业中断、恢复补结果两次启动、旧 owner 晚到、产物配额耗尽。
 - 暂存产物写入后同时 GC、引用提交前崩溃、pin 转换冲突；无 DOM 关联的 AX 节点不得生成动作 ref。
 - 长任务读取进度不扫描全日志、无变化观察不全抓、相同响应不反复解析、摘要不重复生成。
@@ -573,7 +615,7 @@ src/agent/context/       canonical 请求投影、epoch、预算与压缩
 | --- | --- | --- |
 | P0：可度量基线 | 固定任务/模型、真实 usage、逐请求指纹、现状能力清单 | A 的任务结果和成本可复现；历史 49 工具预算不再被引用为当前成绩 |
 | P1：正确性 | 目标/文档身份、统一定位、阻挡器就绪、日志与未知副作用语义、稳定请求前缀 | 核心不变量和故障注入全部通过 |
-| P2：高下限接口 | `act / read`、简明核心说明、同源生成 API 文档、部分成功回执 | 弱模型组收益成立，强模型能力不退化；失败诊断可定位 |
+| P2：高下限接口 | 独立工具 registry、完整目录、单工具管理、同源生成参考文档与回执 | 弱模型组收益成立，强模型能力不退化；失败诊断可定位 |
 | P3：数据与成本 | 共享事实图、按域失效、局部刷新、稳定分页、产物查询、single-flight | B/C/D 消融和常见任务 Token/费用门槛通过 |
 | P4：复杂任务 | 资源并发、事件等待、业务检查点、恢复、索引化 jobs | 长尾集合、长时运行、千次操作及宿主中断验收通过 |
 | P5：竞争性验证 | 锁定主流对照、公开基准适配、失败案例回归 | 可复现报告包含成功率/成本/延迟与能力边界，才能评价世界一流水平 |
@@ -584,7 +626,7 @@ src/agent/context/       canonical 请求投影、epoch、预算与压缩
 
 ## 18. 需要实验解决的设计问题
 
-1. `act / read` 的 schema 增量是否在弱模型提升与总 Token 成本上同时获益？若不是，精简参数或改变边界，不能只为维持“五工具”形式保留接口。
+1. 完整细分工具目录的 schema 增量是否在弱模型成功率和每任务总 Token 上同时获益？若不是，优先精简描述、参数和返回量，并优化观察复用；保留每个动作的独立工具与可管理性，再重新测量。
 2. Chrome 138 与当前 Chrome 的局部 AX/事件差异有多大？以采集正确性和实际字节验证，再决定各版本的采集策略。
 3. 默认 outline 的相关区域排序是否漏掉任务所需信息？用完整性误判和额外往返衡量，不能只优化首屏大小。
 4. 图片历史保留、压缩频率与 Provider 缓存之间的实际成本关系如何？分别测无缓存、冷缓存和暖缓存，不假定缓存免费。
