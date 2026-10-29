@@ -51,6 +51,7 @@ function harness(
       if (params.expression.includes("({width:innerWidth")) return { result: { value: { width: 100, height: 50 } } };
       return { result: { value: true } };
     }
+    if (method === "Runtime.callFunctionOn" && params.functionDeclaration === "function(){ return this.isConnected; }") return { result: { value: (states[0] as any)?.connected ?? false } };
     if (method === "Runtime.callFunctionOn") { latestState = states.length > 1 ? states.shift() : states[0]; return { result: { value: latestState } }; }
     if (method === "DOM.getContentQuads") return { quads: [[latestState.x - 1, latestState.y - 1, latestState.x + 1, latestState.y - 1, latestState.x + 1, latestState.y + 1, latestState.x - 1, latestState.y + 1]] };
     if (method === "DOM.resolveNode") return { object: { objectId: "node-1" } };
@@ -73,6 +74,45 @@ function harness(
 }
 
 describe("AutomationRuntime", () => {
+  it("does not report a missing checked target as unchecked", async () => {
+    const { runtime } = harness([]);
+    const page = await runtime.createPage(3);
+    await expect(page.getByRole("checkbox", { name: "Missing" }).isChecked()).rejects.toMatchObject({ code: "not-found" });
+    await runtime.abortSessions();
+  });
+
+  it("preserves protocol failures and rejects unverifiable or stale reference resolutions", async () => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    const inspection = await page.inspect() as any;
+    const ref = inspection.items.find((item: any) => item.ref)?.ref;
+    expect(ref).toBeDefined();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.resolveNode") throw new Error("Debugger connection closed");
+      return original(source, method, params);
+    });
+    await expect(page.ref(ref).textContent()).rejects.toThrow("Debugger connection closed");
+    await expect(page.ref(ref).count()).rejects.toThrow("Debugger connection closed");
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.resolveNode") throw new DOMException("node removed", "AbortError");
+      return original(source, method, params);
+    });
+    await expect(page.ref(ref).textContent()).rejects.toMatchObject({ name: "AbortError" });
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration === "function(){ return this.isConnected; }") return { result: {} };
+      return original(source, method, params);
+    });
+    await expect(page.ref(ref).textContent()).rejects.toMatchObject({ code: "ref-unavailable" });
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration === "function(){ return this.isConnected; }") {
+        runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "root" } });
+      }
+      return original(source, method, params);
+    });
+    await expect(page.ref(ref).textContent()).rejects.toMatchObject({ code: "stale-ref" });
+    await runtime.abortSessions();
+  });
   it("surfaces navigation permission errors while retrying transient context replacement", async () => {
     const { runtime, command } = harness();
     const original = command.getMockImplementation()!;

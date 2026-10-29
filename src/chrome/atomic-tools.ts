@@ -91,7 +91,7 @@ export const ATOMIC_TOOL_REGISTRY: readonly AtomicToolDefinition[] = Object.free
   define("release_pointer", "Release a pointer button at its current position.", z.object({ ...pageFields, button: z.enum(["left", "middle", "right"]).optional() }).strict(), "return await currentPage.mouse.up(input.button);", page),
   targetAction("read_text", "Read an element's visible text.", "innerText"),
   targetAction("read_value", "Read a form element's current value.", "inputValue"),
-  targetAction("read_checked", "Read an element's checked state.", "isChecked"),
+  targetAction("read_checked", "Read an element's checked state; missing or unsupported states are errors.", "isChecked"),
   define("read_attribute", "Read an element's named attribute.", z.object({ ...targetFields, name: z.string().min(1) }).strict(), "return await locate(currentPage, input.target).getAttribute(input.name);", locator),
   define("verify_state", "Verify one element condition immediately or wait for it to become true; a timed-out wait returns verified=false and timedOut=true.", z.object({
     tabId, target, timeoutMs: z.number().int().nonnegative().optional(),

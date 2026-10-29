@@ -50,6 +50,7 @@ type ObservationRecord = {
 type Session = {
   tabId: number;
   token: string;
+  lifetime: AbortController;
   debuggee: Debuggee;
   ready?: Promise<void>;
   generation: number;
@@ -116,6 +117,11 @@ class AutomationError extends Error {
 
 function automationError(code: string, detail: Record<string, unknown>): AutomationError {
   return new AutomationError(code, detail);
+}
+
+function isDetachedNodeError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return /(?:node.*(?:not found|not exist|detached|removed)|could not find node|no node with given|cannot find node)/i.test(message);
 }
 
 const INTERACTIVE_ROLES = new Set([
@@ -408,6 +414,7 @@ export class AutomationRuntime {
       const session = this.sessions.get(source.tabId!);
       if (session) this.invalidateFrames(session);
       this.sessions.delete(source.tabId!);
+      session?.lifetime.abort();
     }
   }
 
@@ -416,6 +423,7 @@ export class AutomationRuntime {
     this.frameLists.clear();
     this.clearFrameDocuments();
     this.sessions.clear();
+    for (const session of sessions) session.lifetime.abort();
     this.clearSearches();
     this.objectDebuggees.clear();
     this.observations.clear();
@@ -772,10 +780,16 @@ export class AutomationRuntime {
       }
       if (["isVisible", "isEnabled", "isChecked"].includes(operation)) {
         const matches = await this.resolveMetadata(session, spec);
-        if (!matches.length) return false;
+        if (!matches.length) {
+          if (operation === "isChecked") throw automationError("not-found", { locator: spec });
+          return false;
+        }
         this.assertStrict(spec, matches);
         const objectId = await this.resolveOnce(session, spec);
-        if (!objectId) return false;
+        if (!objectId) {
+          if (operation === "isChecked") throw automationError("not-found", { locator: spec, reason: "target-disappeared" });
+          return false;
+        }
         const state = await this.elementState(this.objectSession(session, objectId), objectId);
         if (operation === "isChecked" && state.checked === null) throw automationError("invalid-checked-state", { reason: "unsupported-or-indeterminate" });
         return operation === "isVisible" ? state.visible : operation === "isEnabled" ? state.enabled : state.checked;
@@ -989,6 +1003,7 @@ export class AutomationRuntime {
       session = {
         tabId,
         token: crypto.randomUUID().replace(/-/g, "").slice(0, 12),
+        lifetime: new AbortController(),
         debuggee: { tabId },
         generation: 0,
         nextRef: 1,
@@ -1213,7 +1228,6 @@ export class AutomationRuntime {
           const byIndex = new Map((properties.result ?? []).filter((property: any) => /^(0|[1-9]\d*)$/.test(property.name)).map((property: any) => [Number(property.name), property.value?.objectId]));
           objects = Array.from({ length: end - offset }, (_, index) => ({ objectId: byIndex.get(index) as string | undefined }));
         }
-        const isGone = (error: unknown) => /(?:node.*(?:not found|not exist|detached)|could not find node|no node with given|cannot find node)/i.test(error instanceof Error ? error.message : String(error));
         const results = await Promise.allSettled(objects.map(async ({ objectId, candidate }) => {
           pageGuard();
           let nodeObject = objectId;
@@ -1222,7 +1236,7 @@ export class AutomationRuntime {
             try {
               const resolved = await this.options.command(current.debuggee, "DOM.resolveNode", { backendNodeId: candidate.backendNodeId, objectGroup: current.group });
               nodeObject = resolved.object?.objectId;
-            } catch (error) { pageGuard(); if (isGone(error)) return { status: "detached" }; throw error; }
+            } catch (error) { pageGuard(); if (isDetachedNodeError(error)) return { status: "detached" }; throw error; }
           }
           if (!nodeObject) throw automationError("search-unavailable", { reason: "missing-node-object" });
           temporary.add(nodeObject);
@@ -1236,7 +1250,7 @@ export class AutomationRuntime {
           let backendNodeId = candidate?.backendNodeId;
           if (!backendNodeId) {
             try { backendNodeId = (await this.options.command(current.debuggee, "DOM.describeNode", { objectId: nodeObject })).node?.backendNodeId; }
-            catch (error) { pageGuard(); if (isGone(error)) return { status: "detached" }; throw error; }
+            catch (error) { pageGuard(); if (isDetachedNodeError(error)) return { status: "detached" }; throw error; }
           }
           pageGuard();
           if (!Number.isSafeInteger(backendNodeId) || !backendNodeId) throw automationError("search-unavailable", { reason: "missing-backend-node-id" });
@@ -1270,16 +1284,32 @@ export class AutomationRuntime {
     });
   }
 
+  private async resolveRef(session: Session, refId: string): Promise<{ ref: RefRecord; objectId: string }> {
+    const ref = session.refs.get(refId);
+    if (!ref || ref.generation !== session.generation) throw automationError("stale-ref", { ref: refId, reason: "expired-document" });
+    try {
+      const response = await this.options.command(ref.debuggee, "DOM.resolveNode", { backendNodeId: ref.backendNodeId, objectGroup: "surf-wax-automation" });
+      const objectId = response.object?.objectId;
+      if (typeof objectId !== "string" || !objectId) throw automationError("ref-unavailable", { ref: refId, reason: "missing-object-id" });
+      const connected = await this.options.command(ref.debuggee, "Runtime.callFunctionOn", { objectId, functionDeclaration: "function(){ return this.isConnected; }", returnByValue: true });
+      if (connected.exceptionDetails) throw new Error(connected.exceptionDetails.exception?.description || connected.exceptionDetails.text || "Could not inspect node connection");
+      if (connected.result?.value === false) throw automationError("detached", { ref: refId, reason: "node-removed" });
+      if (connected.result?.value !== true) throw automationError("ref-unavailable", { ref: refId, reason: "missing-connection-state" });
+      if (this.sessions.get(session.tabId) !== session || session.generation !== ref.generation || session.refs.get(refId) !== ref)
+        throw automationError("stale-ref", { ref: refId, reason: "document-or-reference-changed" });
+      this.objectDebuggees.set(objectId, ref.debuggee);
+      return { ref, objectId };
+    } catch (error) {
+      if (error && typeof error === "object" && "name" in error && error.name === "AbortError") throw error;
+      if (isDetachedNodeError(error) && !(error instanceof AutomationError)) throw automationError("detached", { ref: refId, reason: "node-removed" });
+      throw error;
+    }
+  }
+
   private async resolveMetadata(session: Session, spec: LocatorSpec): Promise<Candidate[]> {
     if (spec.ref) {
-      const ref = session.refs.get(spec.ref);
-      if (!ref || ref.generation !== session.generation) throw automationError("stale-ref", { ref: spec.ref, reason: "expired-document" });
-      try {
-        await this.options.command(ref.debuggee, "DOM.resolveNode", { backendNodeId: ref.backendNodeId });
-        return [{ role: ref.role, name: ref.name, ref: spec.ref }];
-      } catch {
-        throw automationError("detached", { ref: spec.ref, reason: "node-removed" });
-      }
+      const { ref } = await this.resolveRef(session, spec.ref);
+      return [{ role: ref.role, name: ref.name, ref: spec.ref }];
     }
     const scoped = await this.locatorScope(session, spec);
     if (this.usesNativeAccessibility(scoped.spec)) return this.resolveAccessibility(scoped.debuggee, scoped.spec, scoped.rootObjectId);
@@ -1300,19 +1330,9 @@ export class AutomationRuntime {
 
   private async resolveOnce(session: Session, spec: LocatorSpec, observe?: (matches: Candidate[]) => void): Promise<string | undefined> {
     if (spec.ref) {
-      const ref = session.refs.get(spec.ref);
-      if (!ref || ref.generation !== session.generation) throw automationError("stale-ref", { ref: spec.ref, reason: "expired-document" });
+      const { ref, objectId } = await this.resolveRef(session, spec.ref);
       observe?.([{ role: ref.role, name: ref.name, ref: spec.ref }]);
-      try {
-        const response = await this.options.command(ref.debuggee, "DOM.resolveNode", { backendNodeId: ref.backendNodeId, objectGroup: "surf-wax-automation" });
-        if (!response.object?.objectId) throw new Error("missing objectId");
-        this.objectDebuggees.set(response.object.objectId, ref.debuggee);
-        const connected = await this.options.command(ref.debuggee, "Runtime.callFunctionOn", { objectId: response.object.objectId, functionDeclaration: "function(){ return this.isConnected; }", returnByValue: true });
-        if (connected.result?.value === false) throw new Error("node removed");
-        return response.object.objectId;
-      } catch {
-        throw automationError("detached", { ref: spec.ref, reason: "node-removed" });
-      }
+      return objectId;
     }
     const scoped = await this.locatorScope(session, spec);
     if (this.usesNativeAccessibility(scoped.spec)) {
@@ -1677,12 +1697,46 @@ export class AutomationRuntime {
   }
 
   private async captureSnapshot(session: Session, region?: LocatorSpec): Promise<{ url: string; title: string; lines: SnapshotLine[] }> {
+    const signal = this.context.signal;
+    const guard = () => {
+      throwIfAborted(signal);
+      if (this.sessions.get(session.tabId) !== session) throw automationError("stale-session", { reason: "session-changed-during-capture" });
+    };
+    const waitForCapture = async <T>(task: Promise<T>): Promise<T> => {
+      // The command promises are already started by the caller. If the
+      // session or signal changed synchronously, still consume a late failure.
+      void task.catch(() => undefined);
+      guard();
+      let onAbort!: () => void;
+      try {
+        const result = await Promise.race([task, new Promise<never>((_resolve, reject) => {
+          onAbort = () => { try { guard(); } catch (error) { reject(error); } };
+          signal?.addEventListener("abort", onAbort, { once: true });
+          session.lifetime.signal.addEventListener("abort", onAbort, { once: true });
+          if (signal?.aborted || session.lifetime.signal.aborted) onAbort();
+        })]);
+        guard();
+        return result;
+      } finally {
+        if (onAbort) { signal?.removeEventListener("abort", onAbort); session.lifetime.signal.removeEventListener("abort", onAbort); }
+      }
+    };
     while (true) {
-      throwIfAborted(this.context.signal);
-      const generation = session.generation;
-      const regionObject = region ? await this.resolveOnce(session, region) : undefined;
+      guard();
+      const generation = session.generation, frameRevision = session.frameRevision;
+      const changed = () => generation !== session.generation || frameRevision !== session.frameRevision;
+      const regionTask = region ? this.resolveOnce(session, region) : undefined;
+      if (regionTask) void regionTask.then(async (objectId) => {
+        if (!objectId || !signal?.aborted && !session.lifetime.signal.aborted && this.sessions.get(session.tabId) === session) return;
+        const debuggee = this.objectDebuggees.get(objectId) ?? session.debuggee;
+        this.objectDebuggees.delete(objectId);
+        try { await this.options.command(debuggee, "Runtime.releaseObject", { objectId }); } catch { /* Context cleanup or detach may already have released it. */ }
+      }).catch(() => undefined);
+      const regionObject = regionTask ? await waitForCapture(regionTask) : undefined;
       const regionDebuggee = regionObject ? this.objectDebuggees.get(regionObject) ?? session.debuggee : undefined;
-      const regionNode = regionObject ? await this.options.command(regionDebuggee!, "DOM.describeNode", { objectId: regionObject }) : undefined;
+      const regionNode = regionObject ? await waitForCapture(this.options.command(regionDebuggee!, "DOM.describeNode", { objectId: regionObject })) : undefined;
+      guard();
+      if (changed()) { await delay(0, signal); continue; }
       if (region && !regionNode?.node?.backendNodeId) throw automationError("not-found", { locator: region });
       const depthOf = (frameId: string) => { let depth = 0; let current = session.frameParents.get(frameId); while (current) { depth += 1; current = session.frameParents.get(current); } return depth; };
       const childFrames = [...session.frames]
@@ -1690,15 +1744,32 @@ export class AutomationRuntime {
         .map(([frameId, debuggee]) => ({ frameId, debuggee, depth: depthOf(frameId) }))
         .filter((item, index, all) => all.findIndex((other) => other.debuggee.sessionId === item.debuggee.sessionId) === index)
         .sort((left, right) => left.depth - right.depth);
-      const debuggees = [{ debuggee: session.debuggee, frameId: undefined as string | undefined, depth: 0 }, ...childFrames];
-      const [trees, info] = await Promise.all([
-        Promise.all(debuggees.map(async (item) => ({ ...item, tree: await this.options.command(item.debuggee, "Accessibility.getFullAXTree", {}) }))),
-        this.pageValue(session.tabId, "({url:location.href,title:document.title})") as Promise<{ url: string; title: string }>,
-      ]);
-      if (generation !== session.generation) { await delay(0, this.context.signal); continue; }
+      const sameDebuggee = (left: Debuggee, right: Debuggee) => left.tabId === right.tabId && left.sessionId === right.sessionId;
+      const debuggees = [{ debuggee: session.debuggee, frameId: undefined as string | undefined, depth: 0 }, ...childFrames]
+        .filter(({ debuggee }) => !regionDebuggee || sameDebuggee(debuggee, regionDebuggee));
+      if (regionDebuggee && !debuggees.length) throw automationError("frame-unavailable", { reason: "region-session-detached" });
+      let trees: Array<{ debuggee: Debuggee; frameId: string | undefined; depth: number; tree: any }>;
+      let info: { url: string; title: string };
+      try {
+        // A newly attached iframe must finish enabling its domains before AX
+        // capture. Scoped requests wait only on the selected target.
+        await waitForCapture(Promise.all(debuggees.map(({ debuggee }) => debuggee.sessionId ? session.frameReady.get(debuggee.sessionId) : undefined)));
+        guard();
+        if (changed()) { await delay(0, signal); continue; }
+        [trees, info] = await waitForCapture(Promise.all([
+          Promise.all(debuggees.map(async (item) => ({ ...item, tree: await this.options.command(item.debuggee, "Accessibility.getFullAXTree", {}) }))),
+          this.pageValue(session.tabId, "({url:location.href,title:document.title})") as Promise<{ url: string; title: string }>,
+        ]));
+      } catch (error) {
+        guard();
+        if (!changed()) throw error;
+        await delay(0, signal); continue;
+      }
+      guard();
+      if (changed()) { await delay(0, signal); continue; }
       const lines: SnapshotLine[] = [];
       const render = (nodes: any[], debuggee: Debuggee, frameLabel?: string, frameDepth = 0) => {
-        if (regionDebuggee && JSON.stringify(regionDebuggee) !== JSON.stringify(debuggee)) return;
+        if (regionDebuggee && !sameDebuggee(regionDebuggee, debuggee)) return;
         const byId = new Map(nodes.map((node) => [node.nodeId, node]));
         const scope = debuggee.sessionId ?? session.rootFrameId ?? "root";
         if (frameLabel) lines.push({ id: `${scope}:frame`, line: `${"  ".repeat(frameDepth)}- iframe [frame=${frameLabel}]` });
@@ -1743,7 +1814,7 @@ export class AutomationRuntime {
         if (ids.has(id)) throw automationError("snapshot-unavailable", { reason: "duplicate-semantic-id", id });
         ids.add(id);
       }
-      if (generation === session.generation) return { ...info, lines };
+      if (!changed()) return { ...info, lines };
     }
   }
 

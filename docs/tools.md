@@ -26,7 +26,7 @@
 | `release_pointer` | Release a pointer button at its current position. |
 | `read_text` | Read an element's visible text. |
 | `read_value` | Read a form element's current value. |
-| `read_checked` | Read an element's checked state. |
+| `read_checked` | Read an element's checked state; missing or unsupported states are errors. |
 | `read_attribute` | Read an element's named attribute. |
 | `verify_state` | Verify one element condition immediately or wait for it to become true; a timed-out wait returns verified=false and timedOut=true. |
 | `wait_for_url` | Wait until the page URL contains the given text. |
