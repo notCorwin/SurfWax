@@ -28,6 +28,10 @@ function harness() {
     if (method === "Runtime.evaluate" && params.expression.includes("({url:")) return { result: { value: { url: "https://example.test/", title: "Test" } } };
     if (method === "Runtime.evaluate" && params.expression.includes("({x:scrollX")) return { result: { value: { x: 0, y: 0, width: 100, height: 50, scale: 1 } } };
     if (method === "Accessibility.queryAXTree") return { nodes: order.map(id => nodes.get(id)!).filter(node => node.connected).map(node => ({ backendDOMNodeId: node.id, role: { value: node.role }, name: { value: node.name } })) };
+    if (method === "Accessibility.getPartialAXTree") {
+      const node = nodes.get(params.backendNodeId);
+      return { nodes: node?.connected ? [{ backendDOMNodeId: node.id, role: { value: node.role }, name: { value: node.name } }] : [] };
+    }
     if (method === "Runtime.evaluate" && params.expression.includes('"nodes"')) return { result: { objectId: arraysFor(params.objectGroup, order.filter(id => nodes.get(id)?.connected)) } };
     if (method === "Runtime.callFunctionOn" && params.functionDeclaration === "function(){return this.length}") return { result: { value: arrays.get(params.objectId)?.length } };
     if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("this.slice(start,end)")) {
@@ -40,7 +44,7 @@ function harness() {
     if (method === "Runtime.callFunctionOn" && params.objectId?.startsWith("node:")) {
       const node = nodes.get(Number(params.objectId.split(":")[1]));
       if (params.functionDeclaration === "function(){ return this.isConnected; }") return { result: { value: node?.connected ?? false } };
-      if (params.functionDeclaration.includes("const el = this")) return { result: { value: { connected: node?.connected ?? false, role: node?.role, name: node?.name.slice(0, 160), text: node?.name.slice(0, 120), tag: "button", ...(node && node.name.length > 160 ? { nameTruncated: true } : {}), ...(node && node.name.length > 120 ? { textTruncated: true } : {}) } } };
+      if (params.functionDeclaration.includes("const el = this")) return { result: { value: { connected: node?.connected ?? false, identityRole: node?.role, identityName: node?.name, role: node?.role, name: node?.name.slice(0, 160), text: node?.name.slice(0, 120), tag: "button", ...(node && node.name.length > 160 ? { nameTruncated: true } : {}), ...(node && node.name.length > 120 ? { textTruncated: true } : {}) } } };
       return { result: { value: node?.name } };
     }
     if (method === "Runtime.releaseObjectGroup") { for (const id of groupArrays.get(params.objectGroup) ?? []) arrays.delete(id); groupArrays.delete(params.objectGroup); return {}; }
@@ -54,6 +58,82 @@ function harness() {
 }
 
 describe("findElements", () => {
+  it("does not retarget an old AX ref after the node's visible name changes", async () => {
+    const h = harness(); const page = await h.runtime.createPage(3);
+    const before: any = await page.inspect();
+    const old = before.items.find((item: any) => item.line.includes('button "First"')).ref;
+    h.nodes.get(1)!.name = "Replacement";
+    await expect(page.ref(old).textContent()).rejects.toMatchObject({ code: "stale-ref", detail: { reason: "visible-identity-changed" } });
+    const after: any = await page.inspect();
+    const current = after.items.find((item: any) => item.line.includes('button "Replacement"')).ref;
+    expect(current).not.toBe(old);
+    await expect(page.ref(old).textContent()).rejects.toMatchObject({ code: "stale-ref" });
+    await expect(page.ref(current).textContent()).resolves.toBe("Replacement");
+    await h.runtime.abortSessions();
+  });
+
+  it("marks an AX search candidate changed if it is recycled before its page is read", async () => {
+    const h = harness(); const page = await h.runtime.createPage(3); const target = page.getByRole("button");
+    const first: any = await h.runtime.findElements(3, target, { limit: 1 });
+    h.nodes.get(2)!.name = "Recycled";
+    const next: any = await h.runtime.findElements(3, target, { cursor: first.nextCursor, limit: 1 });
+    expect(next.elements).toEqual([{ status: "changed" }]);
+    const again: any = await h.runtime.findElements(3, target, { limit: 2 });
+    expect(again.elements[1]).toMatchObject({ name: "Recycled", ref: expect.any(String) });
+    await h.runtime.abortSessions();
+  });
+
+  it("detects changed AX identity beyond the displayed name prefix", async () => {
+    const h = harness(); const page = await h.runtime.createPage(3); const target = page.getByRole("button");
+    h.nodes.get(2)!.name = `${"x".repeat(200)}A`;
+    const first: any = await h.runtime.findElements(3, target, { limit: 1 });
+    h.nodes.get(2)!.name = `${"x".repeat(200)}B`;
+    const next: any = await h.runtime.findElements(3, target, { cursor: first.nextCursor, limit: 1 });
+    expect(next.elements).toEqual([{ status: "changed" }]);
+    await h.runtime.abortSessions();
+  });
+
+  it("reports unknown without a reference when retained AX identity exceeds its budget", async () => {
+    const h = harness(); const page = await h.runtime.createPage(3);
+    h.nodes.get(1)!.name = "x".repeat(2_000_001);
+    const result: any = await h.runtime.findElements(3, page.getByRole("button"), { limit: 1 });
+    expect(result.elements).toEqual([{ status: "identity-unknown", reason: "identity-budget" }]);
+    await h.runtime.abortSessions();
+  });
+
+  it("does not retarget a CSS search ref after the node's visible name changes", async () => {
+    const h = harness(); const page = await h.runtime.createPage(3); const target = page.locator("button");
+    const before: any = await h.runtime.findElements(3, target, { limit: 1 });
+    const old = before.elements[0].ref;
+    h.nodes.get(1)!.name = "Replacement";
+    await expect(page.ref(old).textContent()).rejects.toMatchObject({ code: "stale-ref", detail: { reason: "visible-identity-changed" } });
+    const after: any = await h.runtime.findElements(3, target, { limit: 1 });
+    expect(after.elements[0].ref).not.toBe(old);
+    await expect(page.ref(old).textContent()).rejects.toMatchObject({ code: "stale-ref" });
+    await expect(page.ref(after.elements[0].ref).textContent()).resolves.toBe("Replacement");
+    await h.runtime.abortSessions();
+  });
+
+  it("does not emit an expired ref from a frozen inspection continuation", async () => {
+    const h = harness(); const page = await h.runtime.createPage(3);
+    const first: any = await page.inspect({ limit: 1 });
+    expect(first.nextCursor).toEqual(expect.any(String));
+    h.nodes.get(1)!.name = "Replacement";
+    await page.inspect();
+    await expect(page.inspect({ cursor: first.nextCursor, limit: 1 })).rejects.toMatchObject({ code: "stale-observation", detail: { reason: "reference-identity-changed" } });
+    await h.runtime.abortSessions();
+  });
+
+  it("keeps a CSS ref's DOM identity when it is used as a search target", async () => {
+    const h = harness(); const page = await h.runtime.createPage(3);
+    const before: any = await h.runtime.findElements(3, page.locator("button"), { limit: 1 });
+    const ref = before.elements[0].ref;
+    const fromRef: any = await h.runtime.findElements(3, page.ref(ref));
+    expect(fromRef.elements).toMatchObject([{ ref, name: "First" }]);
+    h.nodes.get(1)!.name = "Replacement";
+    await expect(h.runtime.findElements(3, page.ref(ref))).rejects.toMatchObject({ code: "stale-ref" });
+    await h.runtime.abortSessions();
+  });
   it("paginates the original DOM nodes after reordering, removal and insertion", async () => {
     const h = harness(); const page = await h.runtime.createPage(3); const target = page.locator("button");
     const first: any = await h.runtime.findElements(3, target, { limit: 1 });

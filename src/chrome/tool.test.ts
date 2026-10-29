@@ -435,6 +435,14 @@ describe("browser tools", () => {
     expect(new TextEncoder().encode(JSON.stringify({ ok: true, result: frames.slice(0, result.access.limit) })).byteLength).toBeLessThan(8192);
   });
 
+  it("preserves event closure, overflow and continuation when a result is compacted", async () => {
+    const logger = { append: async (event: any) => ({ ...event, id: 21 }) } as EventLogger;
+    const events = Array.from({ length: 80 }, (_, index) => ({ cursor: index + 4, kind: "console", payload: "x".repeat(200) }));
+    const value = { subscriptionId: "subscription", events, nextCursor: 83, hasMore: true, overflow: { from: 1, through: 3 }, closed: "tab-closed" };
+    const result = await compactToolResult(value, { logger, preserveEventStatus: true });
+    expect(result).toMatchObject({ $ref: 21, subscriptionId: "subscription", nextCursor: 83, hasMore: true, eventCount: 80, cursorNote: expect.stringContaining("all events"), closed: "tab-closed", overflow: { from: 1, through: 3 }, access: { artifactId: 21, path: ["events"], offset: 0 } });
+  });
+
   it("keeps long inspection continuation and fragment access visible", async () => {
     const logger = { append: async (event: any) => ({ ...event, id: 18 }) } as EventLogger;
     const items = Array.from({ length: 50 }, (_, index) => ({ id: `node-${index}`, line: "x".repeat(250) }));

@@ -1,6 +1,6 @@
 import type { EventLogger } from "../logging";
 import type { BrowserTarget, PageExecutionTarget } from "../types";
-import { AutomationRuntime, FILE_UPLOAD_FUNCTION } from "./automation";
+import { AutomationRuntime, FILE_UPLOAD_FUNCTION, LocatorFacade } from "./automation";
 import { requireDebuggee } from "./debuggee";
 import { downloadArtifact } from "./downloads";
 import { listDownloads as queryDownloads, type DownloadListInput } from "./download-query";
@@ -30,6 +30,7 @@ const RESULTS_KEY = "__surfWaxResults";
 type ExecutionContext = { runSignal?: AbortSignal; conversationId?: string; toolCallId?: string; visualEnabled?: boolean; logIdentity?: { runId?: string; toolCallId: string; toolCallIdCanonical: true } };
 type ArtifactRef = { id: number; filename: string; mimeType: string; byteLength: number; saved: boolean; downloadId?: number };
 type BrowserState = { windowId: number; tabId?: number };
+type ProgramPages = { get(tabId: number, initial?: any): Promise<any>; invalidate(tabId: number): void; dispose(): void };
 export type BrowserContext = {
   windowId: number;
   tabs: Array<{ index: number; tabId?: number; windowId?: number; current: boolean; title?: string; url?: string }>;
@@ -446,6 +447,7 @@ export class ChromeExecutor {
       } : undefined;
       const scope = new ProgramScope(programSignal, jobId, jobContext, this.logger!, observer);
       this.programScope = scope;
+      let pages: ProgramPages | undefined;
       let stoppedBrowser = false;
       const stopBrowser = async () => {
         if (stoppedBrowser) return;
@@ -459,8 +461,9 @@ export class ChromeExecutor {
         if (Number.isSafeInteger(state.tabId)) {
           await scope.call("page.bind", async () => { raw = await this.pageFor(state); return { tabId: raw.tabId }; }, false, false, false, false, { tabId: state.tabId! });
         } else raw = await this.pageFor(state);
-        const page = await this.programPage(raw!, scope);
-        const capabilities = this.programCapabilities(page, state, scope);
+        pages = this.programPages(scope, state);
+        const page = await pages.get(raw!.tabId, raw);
+        const capabilities = this.programCapabilities(page, state, scope, pages);
         scope.guard();
         if (input.background) this.runOwnerFor(context);
         const result = await this.programHost(input.code, capabilities, programSignal);
@@ -484,6 +487,7 @@ export class ChromeExecutor {
         if (scope.effectUnknown) Object.assign(failure, { effectUnknown: true });
         throw failure;
       } finally {
+        pages?.dispose();
         scope.revoke(); lifetime.abort("program-ended");
         if (blocker) this.blockers.settle(blocker);
         this.blockerContexts.delete(jobId);
@@ -890,9 +894,73 @@ export class ChromeExecutor {
     return this.pageFor({ windowId: tab.windowId!, tabId });
   }
 
-  private async programPage(raw: any, scope: ProgramScope): Promise<any> {
-    const page = scope.wrap(raw);
-    const call = (name: string, invoke: () => Promise<unknown>) => scope.call(name, invoke, true, false, false, true, { tabId: raw.tabId });
+  /** Program page handles belong to a debugger-session incarnation, never just a tab ID. */
+  private programPages(scope: ProgramScope, state: BrowserState): ProgramPages {
+    type Entry = { live: boolean; session?: object; promise: Promise<any> };
+    const entries = new Map<number, Entry>();
+    let disposed = false;
+    const invalidate = (tabId: number) => { const entry = entries.get(tabId); if (entry) { entry.live = false; entries.delete(tabId); } };
+    const onRemoved = (tabId: number) => invalidate(tabId);
+    this.chromeApi.tabs?.onRemoved?.addListener(onRemoved);
+    const dispose = () => {
+      if (disposed) return;
+      disposed = true;
+      this.chromeApi.tabs?.onRemoved?.removeListener(onRemoved);
+      scope.signal.removeEventListener("abort", dispose);
+      for (const entry of entries.values()) entry.live = false;
+      entries.clear();
+    };
+    scope.signal.addEventListener("abort", dispose, { once: true });
+    const get = async (tabId: number, initial?: any): Promise<any> => {
+      scope.guard();
+      const tab = await this.chromeApi.tabs.get(tabId).catch(() => undefined);
+      scope.guard();
+      if (!tab || !Number.isInteger(tab.windowId)) {
+        invalidate(tabId);
+        throw new Error("CommandError[invalid-tab-id]: Tab is unavailable");
+      }
+      const prior = entries.get(tabId);
+      if (prior && prior.live && (!prior.session || prior.session === this.automation.sessionIdentity(tabId))) return prior.promise;
+      invalidate(tabId);
+      const entry: Entry = { live: true, promise: Promise.resolve(undefined) };
+      entries.set(tabId, entry);
+      entry.promise = (async () => {
+        const raw = initial ?? await this.boundPage(tabId, state);
+        scope.guard();
+        if (!entry.live || entries.get(tabId) !== entry) throw new Error("CommandError[stale-page]: Tab was closed while acquiring a page handle");
+        const identity = this.automation.sessionIdentity(tabId);
+        if (!identity) throw new Error("CommandError[stale-page]: Browser session is unavailable");
+        entry.session = identity;
+        const assertLive = () => {
+          scope.guard();
+          if (!entry.live || this.automation.sessionIdentity(tabId) !== identity)
+            throw new Error("CommandError[stale-page]: Browser session changed; acquire a new page handle");
+        };
+        const page = await this.programPage(raw, scope, assertLive, get);
+        assertLive();
+        return page;
+      })().catch((error) => { if (entries.get(tabId) === entry) invalidate(tabId); throw error; });
+      return entry.promise;
+    };
+    if (scope.signal.aborted) dispose();
+    return { get, invalidate, dispose };
+  }
+
+  private async programPage(raw: any, scope: ProgramScope, assertLive: () => void, getPage: (tabId: number) => Promise<any>): Promise<any> {
+    // Locator chains are created lazily in the worker. Guard both the page and
+    // each derived locator at invocation, including queued calls after detach.
+    const guarded = <T extends object>(subject: T): T => new Proxy(subject, { get(target, key) {
+      if (target instanceof LocatorFacade && key === "spec") assertLive();
+      const value = Reflect.get(target, key, target);
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => {
+        assertLive();
+        const result = Reflect.apply(value, target, args);
+        return result instanceof LocatorFacade ? guarded(result) : result;
+      };
+    } });
+    const page = scope.wrap(guarded(raw));
+    const call = (name: string, invoke: () => Promise<unknown>) => scope.call(name, () => { assertLive(); return invoke(); }, true, false, false, true, { tabId: raw.tabId });
     const keyboard = {
       press: (key: string) => page.press(key), insertText: (text: string) => page.insertText(text),
       down: (key: string) => call("keyboard.down", () => this.automation.keyState(raw.tabId, "keydown", key)),
@@ -905,16 +973,16 @@ export class ChromeExecutor {
       wheel: (dx: number, dy: number) => call("mouse.wheel", () => this.bridgeCommand({ tabId: raw.tabId }, "Input.dispatchMouseEvent", { type: "mouseWheel", deltaX: dx, deltaY: dy })),
     };
     return new Proxy(page, { get: (target, key) => {
-      if (key === "snapshot") return () => scope.call("page.snapshot", () => raw.inspect({ budget: Number.MAX_SAFE_INTEGER }), false, false, false, false, { tabId: raw.tabId });
+      if (key === "snapshot") return () => scope.call("page.snapshot", () => { assertLive(); return raw.inspect({ budget: Number.MAX_SAFE_INTEGER }); }, false, false, false, false, { tabId: raw.tabId });
       if (key === "observe") return (detail = "semantic", since?: string) => detail === "visual" ? call("page.observe.visual", async () => {
         if (!this.activeContext.visualEnabled) throw new Error("AutomationError[visual-unavailable]: Image input unavailable");
         return this.captureScreenshot(raw, {});
-      }) : scope.call("page.observe", () => raw.inspect({ since }), false, false, false, false, { tabId: raw.tabId });
-      if (key === "inspect") return (options = {}, region?: unknown) => scope.call("page.inspect", () => raw.inspect(options, scope.unwrap(region)), false, false, false, false, { tabId: raw.tabId });
-      if (key === "waitForEvent") return (kind: "dialog" | "popup" | "download" | "filechooser") => scope.call("page.waitForEvent", () => raw.waitForEvent(kind).then(async (event: any) => {
-        if (kind === "popup") return this.programPage(await this.boundPage(event.tabId, await this.currentBrowserState()), scope);
+      }) : scope.call("page.observe", () => { assertLive(); return raw.inspect({ since }); }, false, false, false, false, { tabId: raw.tabId });
+      if (key === "inspect") return (options = {}, region?: unknown) => scope.call("page.inspect", () => { assertLive(); return raw.inspect(options, scope.unwrap(region)); }, false, false, false, false, { tabId: raw.tabId });
+      if (key === "waitForEvent") return (kind: "dialog" | "popup" | "download" | "filechooser") => scope.call("page.waitForEvent", () => { assertLive(); return raw.waitForEvent(kind).then(async (event: any) => {
+        if (kind === "popup") return getPage(event.tabId);
         return event && typeof event === "object" && (event.setFiles || event.accept) ? scope.wrap(event, "event") : event;
-      }), false, false, true);
+      }); }, false, false, true);
       if (key === "keyboard") return keyboard;
       if (key === "mouse") return mouse;
       if (key === "screenshot") return (options = {}) => call("page.screenshot", async () => {
@@ -934,18 +1002,18 @@ export class ChromeExecutor {
     } });
   }
 
-  private programCapabilities(page: any, state: BrowserState, scope: ProgramScope) {
+  private programCapabilities(page: any, state: BrowserState, scope: ProgramScope, pages: ProgramPages) {
     const call = (name: string, effect: boolean, invoke: () => unknown | Promise<unknown>, source?: { tabId: number; sessionId?: string }) => scope.call(name, invoke, effect, false, false, effect, source);
     const sourceFor = (tabId: number | undefined, sessionId?: string) => Number.isSafeInteger(tabId) ? { tabId: tabId!, ...(sessionId ? { sessionId } : {}) } : undefined;
     const scripts = Object.fromEntries(["list", "read", "create", "edit", "setEnabled", "delete"].map((method) => [method, (...args: any[]) => call(`scripts.${method}`, !["list", "read"].includes(method),
       () => callUserScript(method, method === "edit" ? [{ id: args[0], changes: args[1] }] : method === "setEnabled" ? [{ id: args[0], enabled: args[1] }] : method === "delete" ? [{ id: args[0] }] : args, scope.signal, () => scope.dispatched()))]));
     const browser = {
-      page: (tabId: number) => call("browser.page", false, async () => this.programPage(await this.boundPage(tabId, state), scope), sourceFor(tabId)),
+      page: (tabId: number) => call("browser.page", false, () => pages.get(tabId), sourceFor(tabId)),
       tabs: {
         list: () => call("tabs.list", false, () => this.tabsOf(state)),
-        open: (url?: string) => call("tabs.open", true, async () => { await scope.dispatched(); const tab = await this.chromeApi.tabs.create({ windowId: state.windowId, active: true, ...(url ? { url } : {}) }); return this.programPage(await this.boundPage(tab.id!, state), scope); }),
+        open: (url?: string) => call("tabs.open", true, async () => { await scope.dispatched(); const tab = await this.chromeApi.tabs.create({ windowId: state.windowId, active: true, ...(url ? { url } : {}) }); return pages.get(tab.id!); }),
         select: (tabId: number) => call("tabs.select", true, async () => { await this.boundPage(tabId, state); await scope.dispatched(); return this.selectTab(state, tabId); }),
-        close: (tabId: number) => call("tabs.close", true, async () => { await this.boundPage(tabId, state); await scope.dispatched(); return this.closeTab(state, tabId); }),
+        close: (tabId: number) => call("tabs.close", true, async () => { await this.boundPage(tabId, state); await scope.dispatched(); const result = await this.closeTab(state, tabId); pages.invalidate(tabId); return result; }),
       },
       scripts,
       runIn: (target: PageExecutionTarget, code: string) => call("browser.runIn", true, async () => {

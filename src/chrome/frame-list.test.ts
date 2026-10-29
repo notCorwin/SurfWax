@@ -13,6 +13,7 @@ function harness() {
     if (method === "Page.createIsolatedWorld") return { executionContextId: params.frameId === "same" ? 31 : params.frameId === "cross" ? 32 : 33 };
     if (method === "Runtime.evaluate" && params.expression === "document") return { result: { objectId: `doc-${params.contextId}` } };
     if (method === "Accessibility.queryAXTree") return { nodes: [{ nodeId: "node", backendDOMNodeId: 8, role: { value: "button" }, name: { value: params.objectId ?? "wrong-root" } }] };
+    if (method === "Accessibility.getPartialAXTree") return { nodes: [{ backendDOMNodeId: 8, role: { value: "button" }, name: { value: "doc-31" } }] };
     if (method === "DOM.resolveNode") return { object: { objectId: "node-object" } };
     if (method === "Runtime.callFunctionOn") return { result: { value: { connected: true, role: "button", name: "Open", tag: "button", text: "Open" } } };
     return {};

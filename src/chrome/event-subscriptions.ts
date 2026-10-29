@@ -8,6 +8,7 @@ export type EventRead = {
   subscriptionId: string;
   events: SubscriptionEvent[];
   nextCursor: number;
+  hasMore: boolean;
   overflow?: { from: number; through: number };
   timedOut?: boolean;
   closed?: string;
@@ -94,7 +95,7 @@ export class EventSubscriptions {
   publish(owner: EventOwner, event: BrowserEvent): void {
     integer(event.source.tabId, "tab ID", 0);
     if (event.source.sessionId !== undefined && event.source.sessionId.length > 1024) throw new Error("Event session ID is too long");
-    const targets = [...this.subscriptions.values()].filter((subscription) => sameOwner(subscription.owner, owner) && subscription.tabId === event.source.tabId && subscription.kinds.has(event.kind));
+    const targets = [...this.subscriptions.values()].filter((subscription) => !subscription.closed && sameOwner(subscription.owner, owner) && subscription.tabId === event.source.tabId && subscription.kinds.has(event.kind));
     if (!targets.length) return;
     let encoded: string | undefined;
     try { encoded = JSON.stringify(event); } catch { throw new Error("Event must be JSON serializable"); }
@@ -129,7 +130,8 @@ export class EventSubscriptions {
     const oldest = subscription.events[0]?.cursor ?? subscription.cursor + 1;
     const overflow = after + 1 < oldest ? { from: after + 1, through: oldest - 1 } : undefined;
     const events = subscription.events.filter((event) => event.cursor > after).slice(0, limit);
-    return { subscriptionId: subscription.id, events: structuredClone(events), nextCursor: events.at(-1)?.cursor ?? after,
+    const nextCursor = events.at(-1)?.cursor ?? after;
+    return { subscriptionId: subscription.id, events: structuredClone(events), nextCursor, hasMore: nextCursor < subscription.cursor,
       ...(overflow ? { overflow } : {}), ...(subscription.closed ? { closed: subscription.closed } : {}) };
   }
 
@@ -163,15 +165,17 @@ export class EventSubscriptions {
     }
   }
 
-  private close(subscription: Subscription, reason: string): void {
-    if (subscription.closed) return;
-    subscription.closed = reason;
-    this.subscriptions.delete(subscription.id);
-    for (const wake of [...subscription.waiters]) wake();
+  private close(subscription: Subscription, reason: string, release = false): void {
+    if (!subscription.closed) {
+      subscription.closed = reason;
+      for (const wake of [...subscription.waiters]) wake();
+    }
+    if (release) this.subscriptions.delete(subscription.id);
   }
 
   unsubscribe(owner: EventOwner, subscriptionId: string): void {
-    this.close(this.subscription(owner, subscriptionId), "unsubscribed");
+    const subscription = this.subscription(owner, subscriptionId);
+    this.close(subscription, "unsubscribed", true);
   }
 
   closeTab(owner: EventOwner, tabId: number, reason = "tab-closed"): void {
@@ -181,7 +185,7 @@ export class EventSubscriptions {
   }
 
   closeOwner(owner: EventOwner, reason = "run-ended"): void {
-    for (const subscription of this.subscriptions.values()) if (sameOwner(owner, subscription.owner)) this.close(subscription, reason);
+    for (const subscription of this.subscriptions.values()) if (sameOwner(owner, subscription.owner)) this.close(subscription, reason, true);
     for (const dialog of this.dialogs.values()) if (sameOwner(owner, dialog.owner)) this.dialogs.delete(dialog.id);
     for (const chooser of this.choosers.values()) if (sameOwner(owner, chooser.owner)) this.choosers.delete(chooser.id);
   }

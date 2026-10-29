@@ -18,7 +18,7 @@ type Query = {
 };
 type LocatorSpec = { queries: Query[]; index?: number; ref?: string; hasText?: string; has?: LocatorSpec };
 type WaitState = "attached" | "detached" | "visible" | "hidden" | "enabled" | "editable" | "checked";
-type RefRecord = { backendNodeId: number; frameId?: string; debuggee: Debuggee; role: string; name: string; generation: number };
+type RefRecord = { backendNodeId: number; frameId?: string; debuggee: Debuggee; role: string; name: string; generation: number; identitySource: "ax" | "dom" };
 type FrameRefRecord = { frameId: string; debuggee: Debuggee; generation: number; revision: number; conversationId?: string; runId?: string };
 type FrameDocument = { session: Session; frame: FrameRefRecord; promise: Promise<string>; objectId?: string };
 type FrameListSnapshot = { id: string; session: Session; generation: number; revision: number; conversationId?: string; runId?: string; frames: Array<Record<string, unknown>> };
@@ -69,7 +69,7 @@ type Session = {
   lastSnapshot?: SnapshotLine[];
 };
 
-type Candidate = { role: string; name: string; tag?: string; text?: string; ref?: string; backendNodeId?: number; debuggee?: Debuggee; roleTruncated?: boolean; nameTruncated?: boolean };
+type Candidate = { role: string; name: string; tag?: string; text?: string; ref?: string; backendNodeId?: number; debuggee?: Debuggee; roleTruncated?: boolean; nameTruncated?: boolean; identityUnavailable?: boolean };
 type ElementState = {
   x: number;
   y: number;
@@ -123,6 +123,8 @@ function isDetachedNodeError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
   return /(?:node.*(?:not found|not exist|detached|removed)|could not find node|no node with given|cannot find node)/i.test(message);
 }
+
+const semanticName = (value: string): string => value.replace(/\s+/g, " ").trim();
 
 const INTERACTIVE_ROLES = new Set([
   "button", "checkbox", "combobox", "gridcell", "link", "listbox", "menuitem", "menuitemcheckbox",
@@ -214,7 +216,7 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument) {
   return result.map(el => ({ role: roleOf(el), name: nameOf(el), tag: el.tagName.toLowerCase(), text: visibleText(el).slice(0, 120) }));
 }`;
 
-const SEARCH_META_SOURCE = String.raw`function() {
+const SEARCH_META_SOURCE = String.raw`function(includeIdentity) {
   const el = this;
   const normalize = value => String(value ?? "").replace(/\s+/g, " ").trim();
   const role = el.getAttribute("role") || ({
@@ -223,7 +225,8 @@ const SEARCH_META_SOURCE = String.raw`function() {
   }[el.tagName] || (el.tagName === "INPUT" ? ({checkbox:"checkbox",radio:"radio",range:"slider",number:"spinbutton",search:"searchbox",button:"button",submit:"button",reset:"button"}[el.type] || "textbox") : "generic"));
   const name = normalize(el.getAttribute("aria-label") || (() => { const ids = el.getAttribute("aria-labelledby"); return ids && ids.split(/\s+/).map(id => el.getRootNode().getElementById?.(id)?.textContent || "").join(" "); })() || (el.labels ? [...el.labels].map(label => label.textContent).join(" ") : "") || el.getAttribute("alt") || el.getAttribute("title") || el.textContent || el.value);
   const text = normalize(el.innerText === undefined ? el.textContent : el.innerText);
-  return { connected: el.isConnected, role: String(role).slice(0, 80), name: name.slice(0, 160), text: text.slice(0, 120), tag: el.tagName.toLowerCase(),
+  const identityTooLarge = String(role).length + name.length > 2_000_000;
+  return { connected: el.isConnected, role: String(role).slice(0, 80), name: name.slice(0, 160), ...(includeIdentity ? identityTooLarge ? { identityTooLarge: true } : { identityRole: String(role), identityName: name } : {}), text: text.slice(0, 120), tag: el.tagName.toLowerCase(),
     ...(String(role).length > 80 ? {roleTruncated:true} : {}), ...(name.length > 160 ? {nameTruncated:true} : {}), ...(text.length > 120 ? {textTruncated:true} : {}) };
 }`;
 
@@ -275,6 +278,7 @@ export class AutomationRuntime {
 
   setContext(context: RunContext): void { this.context = context; }
   hasSession(tabId: number): boolean { return this.sessions.has(tabId); }
+  sessionIdentity(tabId: number): object | undefined { return this.sessions.get(tabId); }
   async clearContext(): Promise<void> {
     this.context = {};
     // Invalidate before releasing the group: in-flight evaluations can create
@@ -573,6 +577,8 @@ export class AutomationRuntime {
       let page;
       try { page = paginateSnapshot(saved.source, { budget, limit: options.limit, position }); }
       catch (error) { throw automationError("stale-observation", { reason: error instanceof Error ? error.message : String(error) }); }
+      if (page.fragments.some((item) => item.ref && !session.refs.has(item.ref)))
+        throw automationError("stale-observation", { observationId: saved.id, reason: "reference-identity-changed" });
       if (saved.expected && saved.expected.index === position.index && saved.expected.charOffset === position.charOffset) {
         saved.expected = page.next;
         if (!page.hasMore && saved.eligibleForBaseline) saved.record.incomplete = false;
@@ -1172,15 +1178,23 @@ export class AutomationRuntime {
             if (!item || item.generation !== generation) throw automationError("stale-ref", { ref: locator.spec.ref, reason: "expired-document" });
             debuggee = item.debuggee;
             snapshot = { id, tabId, generation, session, key, conversationId, runId, debuggee, total: 1,
-              candidates: [{ backendNodeId: item.backendNodeId, role: item.role, name: item.name, debuggee }], group };
+              candidates: [{ backendNodeId: item.backendNodeId, role: item.role, name: item.name, debuggee, ref: locator.spec.ref }], group };
           } else {
             const scoped = await this.locatorScope(session, locator.spec);
             guard(); debuggee = scoped.debuggee;
             if (this.usesNativeAccessibility(scoped.spec)) {
               const matches = await this.resolveAccessibility(debuggee, scoped.spec, scoped.rootObjectId);
               guard();
-              const candidates = matches.map((candidate) => ({ ...candidate, role: candidate.role.slice(0, 80), name: candidate.name.slice(0, 160),
-                ...(candidate.role.length > 80 ? { roleTruncated: true } : {}), ...(candidate.name.length > 160 ? { nameTruncated: true } : {}) }));
+              // Freeze full semantic names, so a virtualized node whose visible
+              // identity changes between pages cannot silently acquire a new ref.
+              // Bound retained metadata independently of the number of matches.
+              let remainingIdentityChars = 2_000_000;
+              const candidates = matches.map((candidate) => {
+                const size = candidate.role.length + candidate.name.length;
+                if (size > remainingIdentityChars) return { ...candidate, role: candidate.role.slice(0, 80), name: candidate.name.slice(0, 160), identityUnavailable: true };
+                remainingIdentityChars -= size;
+                return candidate;
+              });
               snapshot = { id, tabId, generation, session, key, conversationId, runId, debuggee, total: candidates.length, candidates, group };
             } else {
               const response = await this.resolveLocator(debuggee, scoped.spec, "nodes", scoped.rootObjectId, group);
@@ -1211,6 +1225,7 @@ export class AutomationRuntime {
       };
       try {
         const end = Math.min(offset + limit, current.total);
+        let remainingIdentityChars = 2_000_000;
         let objects: Array<{ objectId?: string; candidate?: Candidate }>;
         if (current.candidates) {
           objects = current.candidates.slice(offset, end).map((candidate) => ({ candidate }));
@@ -1232,16 +1247,20 @@ export class AutomationRuntime {
           pageGuard();
           let nodeObject = objectId;
           if (candidate) {
+            if (candidate.identityUnavailable) return { status: "identity-unknown", reason: "identity-budget" };
             if (!candidate.backendNodeId) return { status: "detached" };
             try {
-              const resolved = await this.options.command(current.debuggee, "DOM.resolveNode", { backendNodeId: candidate.backendNodeId, objectGroup: current.group });
-              nodeObject = resolved.object?.objectId;
+              if (candidate.ref) nodeObject = (await this.resolveRef(session, candidate.ref)).objectId;
+              else {
+                const resolved = await this.options.command(current.debuggee, "DOM.resolveNode", { backendNodeId: candidate.backendNodeId, objectGroup: current.group });
+                nodeObject = resolved.object?.objectId;
+              }
             } catch (error) { pageGuard(); if (isDetachedNodeError(error)) return { status: "detached" }; throw error; }
           }
           if (!nodeObject) throw automationError("search-unavailable", { reason: "missing-node-object" });
           temporary.add(nodeObject);
           const description = await this.options.command(current.debuggee, "Runtime.callFunctionOn", { objectId: nodeObject,
-            functionDeclaration: SEARCH_META_SOURCE, returnByValue: true });
+            functionDeclaration: SEARCH_META_SOURCE, arguments: [{ value: !candidate }], returnByValue: true });
           pageGuard();
           if (description.exceptionDetails) throw new Error(description.exceptionDetails.exception?.description || description.exceptionDetails.text);
           const metadata = description.result?.value;
@@ -1254,15 +1273,37 @@ export class AutomationRuntime {
           }
           pageGuard();
           if (!Number.isSafeInteger(backendNodeId) || !backendNodeId) throw automationError("search-unavailable", { reason: "missing-backend-node-id" });
+          let identitySource: RefRecord["identitySource"] = "dom";
+          let identityRole: string, identityName: string;
+          if (candidate?.ref) {
+            const existing = session.refs.get(candidate.ref);
+            if (!existing) throw automationError("stale-ref", { ref: candidate.ref, reason: "expired-document" });
+            identitySource = existing.identitySource; identityRole = existing.role; identityName = existing.name;
+          } else if (candidate) {
+            identitySource = "ax";
+            const currentIdentity = await this.axIdentity(current.debuggee, backendNodeId!);
+            pageGuard();
+            if (!currentIdentity) return { status: "identity-unknown", reason: "identity-unavailable" };
+            if (currentIdentity.role !== candidate.role || currentIdentity.name !== semanticName(candidate.name)) return { status: "changed" };
+            identityRole = currentIdentity.role; identityName = currentIdentity.name;
+          } else {
+            if (metadata.identityTooLarge) return { status: "identity-unknown", reason: "identity-budget" };
+            if (typeof metadata.identityRole !== "string" || typeof metadata.identityName !== "string") return { status: "identity-unknown", reason: "identity-unavailable" };
+            identityRole = metadata.identityRole; identityName = metadata.identityName;
+            if (identityRole.length + identityName.length > remainingIdentityChars) return { status: "identity-unknown", reason: "identity-budget" };
+            remainingIdentityChars -= identityRole.length + identityName.length;
+          }
           const roleText = String(candidate?.role ?? metadata.role ?? "");
           const nameText = String(candidate?.name ?? metadata.name ?? "");
           const role = roleText.slice(0, 80), name = nameText.slice(0, 160);
           const scope = current.debuggee.sessionId ?? session.rootFrameId ?? "root";
           const identity = `${scope}:${backendNodeId}`;
-          const short = session.refsByNode.get(identity) ?? `e${session.nextRef++}`;
+          const short = candidate?.ref ? candidate.ref.replace(/^t\d+s[a-f0-9]+d\d+/, "") : this.rememberRef(session, identity,
+            { backendNodeId: backendNodeId!, debuggee: current.debuggee, role: identityRole, name: identityName, generation, identitySource });
           const ref = `t${tabId}s${session.token}d${generation}${short}`;
-          const record = { backendNodeId: backendNodeId!, debuggee: current.debuggee, role, name, generation };
-          session.refsByNode.set(identity, short); session.refs.set(short, record); session.refs.set(ref, record);
+          const record = session.refs.get(short);
+          if (!record) throw automationError("stale-ref", { ref, reason: "expired-document" });
+          session.refs.set(ref, record);
           return { ref, role, name, ...(metadata.tag ? { tag: metadata.tag } : {}), ...(metadata.text ? { text: metadata.text } : {}),
             ...(roleText.length > 80 || candidate?.roleTruncated || !candidate && metadata.roleTruncated ? { roleTruncated: true } : {}),
             ...(nameText.length > 160 || candidate?.nameTruncated || !candidate && metadata.nameTruncated ? { nameTruncated: true } : {}), ...(metadata.textTruncated ? { textTruncated: true } : {}) };
@@ -1270,7 +1311,10 @@ export class AutomationRuntime {
         pageGuard();
         const failure = results.find((result) => result.status === "rejected");
         if (failure?.status === "rejected") throw failure.reason;
-        const elements = results.map((result) => (result as PromiseFulfilledResult<Record<string, unknown>>).value);
+        const elements = results.map((result) => {
+          const value = (result as PromiseFulfilledResult<Record<string, unknown>>).value;
+          return typeof value.ref === "string" && !session.refs.has(value.ref) ? { status: "changed" } : value;
+        });
         const hasMore = end < current.total;
         if (!hasMore && options.cursor === undefined) this.releaseSearch(current);
         return { tabId, documentId: generation, total: current.total, elements, hasMore, ...(hasMore ? { nextCursor: `${current.id}:${end}` } : {}) };
@@ -1284,6 +1328,32 @@ export class AutomationRuntime {
     });
   }
 
+  private rememberRef(session: Session, identity: string, record: RefRecord): string {
+    // A DOM-derived identity and an AX-derived identity are different
+    // observations; neither may overwrite the other's existing binding.
+    const sourceIdentity = `${identity}\u0000${record.identitySource}`;
+    const previous = session.refsByNode.get(sourceIdentity);
+    const old = previous ? session.refs.get(previous) : undefined;
+    if (old && old.generation === record.generation && old.identitySource === record.identitySource
+      && old.role === record.role && old.name === record.name) return previous!;
+    if (previous && old) {
+      // Retire both aliases rather than retargeting an already issued ref.
+      session.refs.delete(previous);
+      session.refs.delete(`t${session.tabId}s${session.token}d${old.generation}${previous}`);
+    }
+    const next = `e${session.nextRef++}`;
+    session.refsByNode.set(sourceIdentity, next);
+    session.refs.set(next, record);
+    return next;
+  }
+
+  private async axIdentity(debuggee: Debuggee, backendNodeId: number): Promise<{ role: string; name: string } | undefined> {
+    const response = await this.options.command(debuggee, "Accessibility.getPartialAXTree", { backendNodeId, fetchRelatives: false });
+    const node = response?.nodes?.find((item: any) => item.backendDOMNodeId === backendNodeId);
+    if (!node || node.ignored) return undefined;
+    return { role: axValue(node.role), name: semanticName(axValue(node.name)) };
+  }
+
   private async resolveRef(session: Session, refId: string): Promise<{ ref: RefRecord; objectId: string }> {
     const ref = session.refs.get(refId);
     if (!ref || ref.generation !== session.generation) throw automationError("stale-ref", { ref: refId, reason: "expired-document" });
@@ -1295,6 +1365,19 @@ export class AutomationRuntime {
       if (connected.exceptionDetails) throw new Error(connected.exceptionDetails.exception?.description || connected.exceptionDetails.text || "Could not inspect node connection");
       if (connected.result?.value === false) throw automationError("detached", { ref: refId, reason: "node-removed" });
       if (connected.result?.value !== true) throw automationError("ref-unavailable", { ref: refId, reason: "missing-connection-state" });
+      let identity: { role: string; name: string } | undefined;
+      if (ref.identitySource === "ax") identity = await this.axIdentity(ref.debuggee, ref.backendNodeId);
+      else {
+        const result = await this.options.command(ref.debuggee, "Runtime.callFunctionOn", { objectId, functionDeclaration: SEARCH_META_SOURCE, arguments: [{ value: true }], returnByValue: true });
+        if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description || result.exceptionDetails.text || "Could not inspect node identity");
+        const value = result.result?.value;
+        if (value?.connected === false) throw automationError("detached", { ref: refId, reason: "node-removed" });
+        if (value?.identityTooLarge) throw automationError("stale-ref", { ref: refId, reason: "visible-identity-changed" });
+        if (value?.connected === true && typeof value.identityRole === "string" && typeof value.identityName === "string")
+          identity = { role: value.identityRole, name: value.identityName };
+      }
+      if (!identity) throw automationError("ref-unavailable", { ref: refId, reason: "identity-unavailable" });
+      if (identity.role !== ref.role || identity.name !== ref.name) throw automationError("stale-ref", { ref: refId, reason: "visible-identity-changed" });
       if (this.sessions.get(session.tabId) !== session || session.generation !== ref.generation || session.refs.get(refId) !== ref)
         throw automationError("stale-ref", { ref: refId, reason: "document-or-reference-changed" });
       this.objectDebuggees.set(objectId, ref.debuggee);
@@ -1784,9 +1867,7 @@ export class AutomationRuntime {
             let ref = "";
             const identity = `${scope}:${node.backendDOMNodeId ?? node.nodeId}`;
             if (node.backendDOMNodeId && (INTERACTIVE_ROLES.has(role) || node.properties?.some((property: any) => property.name === "focusable" && property.value?.value))) {
-              ref = session.refsByNode.get(identity) ?? `e${session.nextRef++}`;
-              session.refsByNode.set(identity, ref);
-              session.refs.set(ref, { backendNodeId: node.backendDOMNodeId, frameId: node.frameId, debuggee, role, name, generation });
+              ref = this.rememberRef(session, identity, { backendNodeId: node.backendDOMNodeId, frameId: node.frameId, debuggee, role, name: semanticName(name), generation, identitySource: "ax" });
             }
             const properties = Object.fromEntries((node.properties ?? []).map((property: any) => [property.name, property.value?.value]));
             const state: Partial<Record<SnapshotStateName, unknown>> = Object.fromEntries(["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly"].filter((key) => properties[key] !== undefined).map((key) => [key, properties[key]]));

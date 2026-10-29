@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventLogger, fromLogValue, type LogEvent } from "../logging";
 import { ChromeExecutor } from "./executor";
+import { LocatorFacade } from "./automation";
 import { ProgramScope } from "./program";
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
@@ -61,13 +62,16 @@ function programHarness(work: (capabilities: any, signal: AbortSignal) => Promis
   const log = memoryLog();
   let runIdentity: { runId: string; ownerId: string; generation: number } | undefined = { runId: "run", ownerId: "owner", generation: 1 };
   const tabs = [{ id: 41, windowId: 7, active: true, title: "Current" }, { id: 42, windowId: 7, active: false }, { id: 99, windowId: 9 }] as chrome.tabs.Tab[];
+  const sessions = new Map<number, object>();
+  const listeners = new Set<(tabId: number) => void>();
+  const onRemoved = { addListener: vi.fn((listener: (tabId: number) => void) => listeners.add(listener)), removeListener: vi.fn((listener: (tabId: number) => void) => listeners.delete(listener)), emit: (id: number) => { sessions.delete(id); for (const listener of listeners) listener(id); } };
   Object.assign(fake.chromeApi, {
     windows: { getCurrent: vi.fn(async () => ({ id: 7, tabs })), get: vi.fn(async () => ({ id: 7 })), update: vi.fn(), create: vi.fn(), remove: vi.fn() },
     tabs: { get: vi.fn(async (id: number) => tabs.find(tab => tab.id === id)), query: vi.fn(async () => tabs,
       ),
       update: vi.fn(async (id: number) => { tabs.forEach(tab => { tab.active = tab.id === id; }); }),
       create: vi.fn(async (input: any) => { const tab = { id: 43, ...input }; tabs.push(tab); return tab; }),
-      remove: vi.fn(async (id: number) => { const index = tabs.findIndex(tab => tab.id === id); if (index >= 0) tabs.splice(index, 1); }),
+      remove: vi.fn(async (id: number) => { const index = tabs.findIndex(tab => tab.id === id); if (index >= 0) tabs.splice(index, 1); onRemoved.emit(id); }), onRemoved,
     },
   });
   const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, logger: log.logger, runIdentity: () => runIdentity, programHost: async (_code, caps, signal) => work(caps, signal) });
@@ -79,10 +83,89 @@ function programHarness(work: (capabilities: any, signal: AbortSignal) => Promis
     evaluate: vi.fn(async () => { await (executor as any).programScope.dispatched(); return 42; }),
   };
   (executor as any).pageFor = vi.fn(async (state: any) => ({ ...raw, tabId: state.tabId }));
-  return { ...log, fake, tabs, raw, executor, setRunIdentity: (value: typeof runIdentity) => { runIdentity = value; }, run: (signal?: AbortSignal, input: { timeoutMs?: number; background?: boolean } = {}) => executor.runProgram({ code: "fixture program", ...input }, signal, { conversationId: "conversation", visualEnabled: true, ...(input.background ? { logIdentity: { runId: "run", toolCallId: "1:program", toolCallIdCanonical: true as const } } : {}) }) };
+  (executor as any).automation.sessionIdentity = (id: number) => { if (!tabs.some(tab => tab.id === id)) return undefined; if (!sessions.has(id)) sessions.set(id, {}); return sessions.get(id); };
+  return { ...log, fake, tabs, raw, executor, sessions, onRemoved, listeners, setRunIdentity: (value: typeof runIdentity) => { runIdentity = value; }, run: (signal?: AbortSignal, input: { timeoutMs?: number; background?: boolean } = {}) => executor.runProgram({ code: "fixture program", ...input }, signal, { conversationId: "conversation", visualEnabled: true, ...(input.background ? { logIdentity: { runId: "run", toolCallId: "1:program", toolCallIdCanonical: true as const } } : {}) }) };
 }
 
 describe("ChromeExecutor programs", () => {
+  it("reuses each live page within a program, including concurrent requests, but not across programs", async () => {
+    let previous: unknown;
+    const h = programHarness(async ({ page, browser }) => {
+      expect(await browser.page(41)).toBe(page);
+      const concurrent = await Promise.all(Array.from({ length: 30 }, () => browser.page(42)));
+      expect(concurrent.every(value => value === concurrent[0])).toBe(true);
+      for (let i = 0; i < 30; i++) expect(await browser.page(42)).toBe(concurrent[0]);
+      if (previous) expect(concurrent[0]).not.toBe(previous);
+      previous = concurrent[0];
+      return true;
+    });
+    expect(await h.run()).toMatchObject({ ok: true, result: true });
+    expect(await h.run()).toMatchObject({ ok: true, result: true });
+    expect((h.executor as any).pageFor.mock.calls.map(([state]: any[]) => state.tabId)).toEqual([41, 42, 41, 42]);
+    expect(h.listeners.size).toBe(0);
+    h.executor.dispose();
+  });
+
+  it("rejects page and locator handles after a session changes", async () => {
+    const h = programHarness(async ({ browser }) => {
+      const old = await browser.page(42);
+      const locator = old.locator("button");
+      const url = old.url;
+      h.sessions.set(42, {});
+      await expect(url()).rejects.toThrow("stale-page");
+      await expect(locator.count()).rejects.toThrow("stale-page");
+      const fresh = await browser.page(42);
+      expect(fresh).not.toBe(old);
+      expect(await fresh.url()).toBe("https://example.com");
+      return true;
+    });
+    h.raw.locator = () => new LocatorFacade((h.executor as any).automation, 42, { queries: [{ kind: "css", value: "button" }] });
+    expect(await h.run()).toMatchObject({ ok: true, result: true });
+    h.executor.dispose();
+  });
+
+  it("invalidates a removed tab and never reuses its old handle for a replacement", async () => {
+    const h = programHarness(async ({ browser }) => {
+      const old = await browser.page(42);
+      h.tabs.splice(h.tabs.findIndex(tab => tab.id === 42), 1);
+      // The Chrome removal event may arrive after the tab is already gone.
+      await expect(browser.page(42)).rejects.toThrow("invalid-tab-id");
+      await expect(old.url()).rejects.toThrow("stale-page");
+      h.onRemoved.emit(42);
+      h.tabs.push({ id: 42, windowId: 7 } as chrome.tabs.Tab);
+      const fresh = await browser.page(42);
+      expect(fresh).not.toBe(old);
+      await expect(old.url()).rejects.toThrow("stale-page");
+      return true;
+    });
+    expect(await h.run()).toMatchObject({ ok: true, result: true });
+    h.executor.dispose();
+  });
+
+  it("rejects an acquisition if the tab closes while its page is binding", async () => {
+    let start!: () => void; let release!: () => void;
+    const started = new Promise<void>(resolve => { start = resolve; });
+    const hold = new Promise<void>(resolve => { release = resolve; });
+    const h = programHarness(async ({ browser }) => {
+      const pending = browser.page(42);
+      await started;
+      h.onRemoved.emit(42);
+      release();
+      await expect(pending).rejects.toThrow("stale-page");
+      const fresh = await browser.page(42);
+      expect(await fresh.url()).toBe("https://example.com");
+      return true;
+    });
+    const original = (h.executor as any).pageFor;
+    let blocked = false;
+    (h.executor as any).pageFor = vi.fn(async (state: any) => {
+      if (state.tabId === 42 && !blocked) { blocked = true; start(); await hold; }
+      return original(state);
+    });
+    expect(await h.run()).toMatchObject({ ok: true, result: true });
+    h.executor.dispose();
+  });
+
   it.each(["navigation", "redirect"] as const)("rejects a response body if %s invalidates its request while CDP is in flight", async (change) => {
     const h = programHarness(async () => undefined);
     const diagnostics = (h.executor as any).diagnostics;

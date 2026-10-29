@@ -43,6 +43,38 @@ async function submit(page: any) {
   await page.getByTestId("composer-input").press("Enter");
 }
 
+test("reuses live program pages and rejects handles after their tab closes", async () => {
+  const provider = await startProvider([
+    commandResponse("execute_program", { timeoutMs: 20000, code: `
+const other = await browser.tabs.open(${JSON.stringify("about:blank")});
+const id = other.tabId;
+const pages = await Promise.all(Array.from({length: 20}, () => browser.page(id)));
+for (const current of pages) await check(await current.url() === 'about:blank');
+for (let i = 0; i < 30; i++) await browser.page(id);
+const locator = other.locator('body');
+await browser.tabs.close(id);
+let pageStale = false, locatorStale = false;
+try { await other.url(); } catch (error) { pageStale = String(error.message).includes('stale-page'); }
+try { await locator.count(); } catch (error) { locatorStale = String(error.message).includes('stale-page'); }
+await check(pageStale && locatorStale, 'closed page and locator must be stale');
+return {pageStale, locatorStale};` }, "page-lifetime"),
+    (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: { pageStale: true, locatorStale: true } }); return textResponse("PAGE_LIFETIME_OK"); },
+  ]);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/automation`);
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await target.bringToFront();
+    await submit(opened.page);
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("PAGE_LIFETIME_OK", { timeout: 30000 });
+  } finally {
+    await evidence(opened.page, provider);
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
 test("completes after a race abandons a pending browser RPC", async () => {
   const provider = await startProvider([
     commandResponse("execute_program", { code: "return await Promise.race([page.waitForEvent('popup'), sleep(50).then(() => 'timeout')]);" }, "race"),

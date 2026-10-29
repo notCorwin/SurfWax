@@ -86,7 +86,7 @@ describe("run-owned browser event subscriptions", () => {
     const waiting = stream.read({ owner, subscriptionId: first.subscriptionId, waitMs: 60_000 });
     stream.closeTab(owner, 7);
     expect(await waiting).toMatchObject({ closed: "tab-closed", events: [] });
-    await expect(stream.read({ owner, subscriptionId: first.subscriptionId })).rejects.toThrow("unavailable");
+    expect(await stream.read({ owner, subscriptionId: first.subscriptionId })).toMatchObject({ closed: "tab-closed", hasMore: false, events: [] });
     stream.publish(owner, { kind: "dialog", source: { tabId: 8 }, payload: "other tab" });
     expect(await stream.read({ owner, subscriptionId: second.subscriptionId })).toMatchObject({ events: [{ payload: "other tab" }] });
     stream.publish(other, { kind: "dialog", source, payload: "other run" });
@@ -97,6 +97,22 @@ describe("run-owned browser event subscriptions", () => {
     expect((await stream.read({ owner: other, subscriptionId: third.subscriptionId })).events).toHaveLength(1);
     stream.unsubscribe(other, third.subscriptionId);
     await expect(stream.read({ owner: other, subscriptionId: third.subscriptionId })).rejects.toThrow("unavailable");
+  });
+
+  it("retains bounded unread events and the close reason until explicitly released", async () => {
+    const stream = events({ capacity: 2 });
+    const { subscriptionId } = stream.subscribe({ owner, tabId: 7, kinds: ["console"] });
+    for (let index = 1; index <= 3; index++) stream.publish(owner, { kind: "console", source, payload: { index } });
+    stream.closeTab(owner, 7, "debugger-detached");
+    stream.publish(owner, { kind: "console", source, payload: { index: 4 } });
+    const first = await stream.read({ owner, subscriptionId, after: 0, limit: 1 });
+    expect(first).toMatchObject({ closed: "debugger-detached", overflow: { from: 1, through: 1 }, hasMore: true, nextCursor: 2, events: [{ payload: { index: 2 } }] });
+    const second = await stream.read({ owner, subscriptionId, after: first.nextCursor, limit: 1 });
+    expect(second).toMatchObject({ closed: "debugger-detached", hasMore: false, nextCursor: 3, events: [{ payload: { index: 3 } }] });
+    expect(await stream.read({ owner, subscriptionId, after: second.nextCursor })).toMatchObject({ closed: "debugger-detached", hasMore: false, events: [] });
+    await expect(stream.read({ owner: other, subscriptionId })).rejects.toThrow("unavailable");
+    stream.unsubscribe(owner, subscriptionId);
+    await expect(stream.read({ owner, subscriptionId })).rejects.toThrow("unavailable");
   });
 });
 

@@ -10,7 +10,7 @@ const elementTargetObject = z.union([
   z.object({ ref: z.string().min(1) }).strict(),
   z.object({ by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testId", "css"]), value: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional(), index: z.number().int().optional(), frame: z.union([z.object({ by: z.literal("css"), value: z.string().min(1) }).strict(), z.object({ ref: z.string().min(1) }).strict()]).optional() }).strict(),
 ]);
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v11";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v12";
 export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetObject]).optional(),
   fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional(), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
@@ -35,13 +35,13 @@ const handleDialogInputSchema = z.object({ dialogId: z.string().min(1), accept: 
 
 type ToolDefinition = { name: string; inputSchema: z.ZodType<any>; summary: string; description: string; program?: (input: any) => { code: string; timeoutMs?: number; background?: boolean } };
 export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
-  { name: "inspect_page", inputSchema: inspectInputSchema, summary: "Read the semantic page and element refs", description: "Inspect semantic items with id, line and optional ref. For since, remove removed ids and upsert added, updated or moved items immediately after their after id (null means first). Reassemble split items using their UTF-16 fragment offsets before applying changes. A ref identifies a DOM node, which may be reused for different business data; verify relevant row and page state before acting. region and fields narrow results. budget limits UTF-8 JSON items bytes. Continue a frozen snapshot with nextCursor using cursor, tabId, budget and limit only. Use take_screenshot for visual input." },
-  { name: "find_elements", inputSchema: findElementsInputSchema, summary: "Find candidates and return element refs", description: "Find matching elements with refs for actions. A ref identifies a DOM node, which may be reused for different business data; verify relevant row and page state before acting. limit defaults to 25, max 100; repeat the same target and tab with nextCursor to page a fixed node list. Details may change or become stale between pages; removed elements are marked detached. Cursors expire on run or document changes or eviction." },
+  { name: "inspect_page", inputSchema: inspectInputSchema, summary: "Read the semantic page and element refs", description: "Inspect semantic items with id, line and optional ref. For since, remove removed ids and upsert added, updated or moved items immediately after their after id (null means first). Reassemble split items using their UTF-16 fragment offsets before applying changes. Ref use checks visible role/name, but a DOM node may be reused for different business data with the same name; verify relevant row and page state before acting. region and fields narrow results. budget limits UTF-8 JSON items bytes. Continue a frozen snapshot with nextCursor using cursor, tabId, budget and limit only. Use take_screenshot for visual input." },
+  { name: "find_elements", inputSchema: findElementsInputSchema, summary: "Find candidates and return element refs", description: "Find matching elements with refs for actions. Ref use checks visible role/name but cannot prove business identity for reused nodes; verify relevant row and page state before acting. limit defaults to 25, max 100; repeat target and tab with nextCursor to page a fixed node list. Candidates may report detached, changed or identity-unknown without a ref. Details may change between pages; cursors expire on run or document changes or eviction." },
   { name: "list_frames", inputSchema: listFramesInputSchema, summary: "List frames and their document-bound refs", description: "List the selected tab's frame tree with refs usable as target.frame.ref. limit defaults to 25, max 100; pass nextCursor to continue a fixed snapshot. References and cursors expire on document or frame changes." },
   ...ATOMIC_TOOL_REGISTRY,
   { name: "list_downloads", inputSchema: listDownloadsInputSchema, summary: "Read Chrome's current download records", description: "List download metadata across the Chrome profile. limit defaults to 100; 0 requests all records. hasMore reports truncation. The list is live and Chrome's exists field may be stale; metadata does not provide file bytes." },
   { name: "subscribe_event", inputSchema: subscribeEventInputSchema, summary: "Subscribe to browser events before triggering them", description: "Subscribe to a tab's dialog, popup, download, filechooser, request, response or console events. Returns a run-scoped subscription and cursor. Filechooser events include a chooserId for upload_file." },
-  { name: "wait_event", inputSchema: waitEventInputSchema, summary: "Read or wait for subscribed events", description: "Read events after a subscription cursor, or wait up to waitMs. Use the returned nextCursor. Overflow, truncation and ended subscriptions are explicit." },
+  { name: "wait_event", inputSchema: waitEventInputSchema, summary: "Read or wait for subscribed events", description: "Read events after a subscription cursor, or wait up to waitMs. Use nextCursor and hasMore. Overflow, truncation and closure are explicit; a closed tab's bounded unread events remain available until unsubscribe or run end." },
   { name: "unsubscribe_event", inputSchema: unsubscribeEventInputSchema, summary: "Stop a browser event subscription", description: "Stop a subscription and release its resources." },
   { name: "handle_dialog", inputSchema: handleDialogInputSchema, summary: "Accept or dismiss a captured browser dialog", description: "Respond to a captured dialog by ID. prompt is allowed only when accepting a prompt dialog. An uncertain response must not be blindly retried." },
   { name: "read_api_reference", inputSchema: emptyInputSchema, summary: "Read the advanced program API reference", description: "Read the available execute_program capabilities and usage details." },
@@ -51,7 +51,7 @@ export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
   { name: "cancel_job", inputSchema: cancelJobInputSchema, summary: "Request cancellation of a job", description: "Cancel a job in the current conversation. Cancellation does not roll back dispatched effects." },
 ]);
 export const PROGRAM_API = `execute_program API (async JavaScript body; no function wrapper required):
-page: tabId; inspect(options?, regionLocator?); snapshot(); observe('semantic'|'visual'); ref/locator/frameLocator/frameRef/getByRole/getByText/getByLabel/getByPlaceholder/getByAltText/getByTitle/getByTestId; goto/reload/goBack/goForward; url/title; evaluate(functionOrString,arg?); waitForURL/waitForLoadState/waitForEvent('dialog'|'popup'|'download'|'filechooser'); point(observationId,x,y,'click'|'dblclick'|'hover',options?); upload(files); drop(target,{files?,data?}); screenshot(options?); pdf({filename?,save?}); keyboard.press/insertText/down/up; mouse.move/down/up/wheel. inspect, snapshot and semantic observe return items with AX ids. For delta remove removed ids; upsert added/updated/moved immediately after after (null=first). Reassemble split items using UTF-16 fragment offsets before applying. Element refs identify DOM nodes, not business records: a reused node may represent different data. waitForLoadState throws load-state-unknown when lifecycle cannot be verified after attaching; inspect the target element or wait for a new navigation.
+page: tabId; inspect(options?, regionLocator?); snapshot(); observe('semantic'|'visual'); ref/locator/frameLocator/frameRef/getByRole/getByText/getByLabel/getByPlaceholder/getByAltText/getByTitle/getByTestId; goto/reload/goBack/goForward; url/title; evaluate(functionOrString,arg?); waitForURL/waitForLoadState/waitForEvent('dialog'|'popup'|'download'|'filechooser'); point(observationId,x,y,'click'|'dblclick'|'hover',options?); upload(files); drop(target,{files?,data?}); screenshot(options?); pdf({filename?,save?}); keyboard.press/insertText/down/up; mouse.move/down/up/wheel. inspect, snapshot and semantic observe return items with AX ids. For delta remove removed ids; upsert added/updated/moved immediately after after (null=first). Reassemble split items using UTF-16 fragment offsets before applying. Ref use checks visible role/name, but reused DOM nodes can still represent different business data. waitForLoadState throws load-state-unknown when lifecycle cannot be verified after attaching; inspect the target element or wait for a new navigation.
 locators: chain/filter/first/last/nth, count/waitFor/click/dblclick/hover/fill/clear/press/pressSequentially/check/uncheck/selectOption/dragTo/setInputFiles/focus/blur/scrollIntoViewIfNeeded/textContent/innerText/inputValue/getAttribute/isVisible/isEnabled/isChecked/evaluate. dragTo supports pointer drags; native HTML5 draggable sources are unavailable while the interaction blocker is active. Files: {name,mimeType?,text|base64|url}; artifacts.read supplies existing file data. Event handles: chooser.isMultiple()/setFiles(files), dialog.type()/message()/defaultValue()/accept(prompt?)/dismiss(), popup is a page. Start event waits before the action, then await them.
 browser: page(tabId); tabs.list()/open(url?)/select(tabId)/close(tabId); scripts.list()/read(id)/create(definition)/edit(id,changes)/setEnabled(id,enabled)/delete(id). Scripts use Chrome RegisteredUserScript fields including matches, js:[{code|file}], world:MAIN|USER_SCRIPT, runAt, allFrames, include/excludeGlobs/Matches, worldId. Persisted enablement is restored at startup/upgrade; Allow User Scripts must already be enabled.
 browser.runIn({kind:'page',tabId,world:'MAIN'|'ISOLATED'|'USER_SCRIPT',frameId?,documentId?},codeBody): explicit execution domain. MAIN/ISOLATED root only; USER_SCRIPT supports Chrome frameId or documentId. Use frameLocator.evaluate for arbitrary supported frames. No automatic context substitution.
@@ -135,7 +135,7 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
           const failure = (result as any)?.ok === false ? (result as any).error ?? (result as any).failed?.error ?? (result as any).result?.error : undefined;
           const artifact = (result as any)?.result?.artifact;
           const normalized = failure ? { ...result as object, ...(artifact ? { artifact } : {}), error: { ...failure, retryable: false } } : result;
-          output = await compactToolResult(normalized, { ...options, toolCallId, ...identity, preserveVerification: definition.name === "verify_state", preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job", preserveSearchStatus: definition.name === "find_elements" || definition.name === "list_frames", preserveInspectionStatus: definition.name === "inspect_page", preserveDiagnosticStatus: definition.name === "list_requests" || definition.name === "read_console" });
+          output = await compactToolResult(normalized, { ...options, toolCallId, ...identity, preserveVerification: definition.name === "verify_state", preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job", preserveSearchStatus: definition.name === "find_elements" || definition.name === "list_frames", preserveInspectionStatus: definition.name === "inspect_page", preserveDiagnosticStatus: definition.name === "list_requests" || definition.name === "read_console", preserveEventStatus: definition.name === "wait_event" });
           if ((definition.name === "get_job" || definition.name === "cancel_job") && (result as any)?.terminal === true && typeof (result as any).id === "string") observedTerminalJob = (result as any).id;
         } catch (error) {
           output = await failureFor(error, executing);
@@ -247,6 +247,22 @@ function searchMetadata(record: Record<string, unknown>): Record<string, unknown
   for (const field of ["tabId", "documentId", "total"]) if (Number.isSafeInteger(record[field]) && Number(record[field]) >= 0) result[field] = record[field];
   if (typeof record.hasMore === "boolean") result.hasMore = record.hasMore;
   const cursor = exactText(record.nextCursor, 512); if (cursor !== undefined) result.nextCursor = cursor;
+  return result;
+}
+function eventMetadata(record: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const field of ["subscriptionId", "closed"]) { const value = exactText(record[field], 512); if (value !== undefined) result[field] = value; }
+  for (const field of ["hasMore", "timedOut"]) if (typeof record[field] === "boolean") result[field] = record[field];
+  if (Number.isSafeInteger(record.nextCursor) && Number(record.nextCursor) >= 0) result.nextCursor = record.nextCursor;
+  if (Array.isArray(record.events)) {
+    result.eventCount = record.events.length;
+    result.cursorNote = "Read all events from the artifact before advancing nextCursor.";
+  }
+  if (record.overflow && typeof record.overflow === "object" && !Array.isArray(record.overflow)) {
+    const overflow = record.overflow as Record<string, unknown>;
+    if (Number.isSafeInteger(overflow.from) && Number(overflow.from) >= 0 && Number.isSafeInteger(overflow.through) && Number(overflow.through) >= Number(overflow.from))
+      result.overflow = { from: overflow.from, through: overflow.through };
+  }
   return result;
 }
 function inspectionMetadata(record: Record<string, unknown>): Record<string, unknown> {
@@ -378,7 +394,7 @@ function previewOf(value: unknown, path?: readonly (string | number)[]): unknown
   return preview;
 }
 
-export async function compactToolResult(value: unknown, options: { logger?: EventLogger; conversationId?: string; toolCallId?: string; runId?: string; toolCallIdCanonical?: boolean; preserveVerification?: boolean; preserveJobStatus?: boolean; preserveSearchStatus?: boolean; preserveInspectionStatus?: boolean; preserveDiagnosticStatus?: boolean }): Promise<unknown> {
+export async function compactToolResult(value: unknown, options: { logger?: EventLogger; conversationId?: string; toolCallId?: string; runId?: string; toolCallIdCanonical?: boolean; preserveVerification?: boolean; preserveJobStatus?: boolean; preserveSearchStatus?: boolean; preserveInspectionStatus?: boolean; preserveDiagnosticStatus?: boolean; preserveEventStatus?: boolean }): Promise<unknown> {
   if ((value && typeof value === "object" && "$ref" in value) || !options.logger) return value;
   let serialized: string | undefined;
   try { serialized = JSON.stringify(value); } catch { return value; }
@@ -391,12 +407,13 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
   const job = options.preserveJobStatus ? root : undefined;
   const search = options.preserveSearchStatus ? root : undefined;
   const inspection = options.preserveInspectionStatus ? root : undefined;
+  const browserEvents = options.preserveEventStatus ? root : undefined;
   const diagnostic = options.preserveDiagnosticStatus && root?.result && typeof root.result === "object" && !Array.isArray(root.result) ? root.result as Record<string, unknown> : undefined;
   const visual = visualEvidence(value);
   const failure = root?.ok === false || root?.type === "tool-error";
   const errorPath = root && Object.hasOwn(root, "error") ? ["error"] : ["result", "error"];
   const error = failure ? valueAt(value, errorPath) : undefined;
-  const path = diagnostic && Array.isArray(diagnostic.requests) ? ["result", "requests"] : diagnostic && Array.isArray(diagnostic.messages) ? ["result", "messages"] : job && Array.isArray(job.events) ? ["events"] : search && Array.isArray(search.elements) ? ["elements"] : search && Array.isArray(search.frames) ? ["frames"]
+  const path = diagnostic && Array.isArray(diagnostic.requests) ? ["result", "requests"] : diagnostic && Array.isArray(diagnostic.messages) ? ["result", "messages"] : browserEvents && Array.isArray(browserEvents.events) ? ["events"] : job && Array.isArray(job.events) ? ["events"] : search && Array.isArray(search.elements) ? ["elements"] : search && Array.isArray(search.frames) ? ["frames"]
     : inspection && Array.isArray(inspection.items) ? ["items"] : readablePathOf(value);
   const selected = path ? valueAt(value, path) : value;
   const { access, oversizedItem } = artifactAccess(event.id, path, selected);
@@ -409,6 +426,7 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
     ...(job ? jobMetadata(job) : {}),
     ...(search ? searchMetadata(search) : {}),
     ...(inspection ? inspectionMetadata(inspection) : {}),
+    ...(browserEvents ? eventMetadata(browserEvents) : {}),
     ...(diagnostic ? { ...(diagnostic.integrity === "complete" || diagnostic.integrity === "incomplete" ? { integrity: diagnostic.integrity } : {}),
       ...(typeof diagnostic.hasMore === "boolean" || diagnostic.hasMore === null ? { hasMore: diagnostic.hasMore } : {}),
       ...(Number.isSafeInteger(diagnostic.nextOffset) && Number(diagnostic.nextOffset) >= 0 ? { nextOffset: diagnostic.nextOffset } : {}),

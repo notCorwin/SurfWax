@@ -43,6 +43,10 @@ function harness(
     if (method === "Accessibility.queryAXTree") return { nodes: metadata.map((item: any, index) => ({
       nodeId: `node-${index}`, backendDOMNodeId: 7 + index, role: { value: item.role }, name: { value: item.name },
     })) };
+    if (method === "Accessibility.getPartialAXTree") {
+      const item = metadata[params.backendNodeId - 7] as any;
+      return { nodes: item ? [{ backendDOMNodeId: params.backendNodeId, role: { value: item.role }, name: { value: item.name } }] : [] };
+    }
     if (method === "Runtime.evaluate") {
       if (params.returnByValue === false) return { result: { objectId: "node-1" } };
       if (params.expression.includes("metadata")) return { result: { value: metadata } };
@@ -52,6 +56,10 @@ function harness(
       return { result: { value: true } };
     }
     if (method === "Runtime.callFunctionOn" && params.functionDeclaration === "function(){ return this.isConnected; }") return { result: { value: (states[0] as any)?.connected ?? false } };
+    if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("identityRole")) {
+      const item = metadata[0] as any;
+      return { result: { value: { connected: true, identityRole: item?.role ?? "", identityName: item?.name ?? "", role: item?.role ?? "", name: item?.name ?? "" } } };
+    }
     if (method === "Runtime.callFunctionOn") { latestState = states.length > 1 ? states.shift() : states[0]; return { result: { value: latestState } }; }
     if (method === "DOM.getContentQuads") return { quads: [[latestState.x - 1, latestState.y - 1, latestState.x + 1, latestState.y - 1, latestState.x + 1, latestState.y + 1, latestState.x - 1, latestState.y + 1]] };
     if (method === "DOM.resolveNode") return { object: { objectId: "node-1" } };
