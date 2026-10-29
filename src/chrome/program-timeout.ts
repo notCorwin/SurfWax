@@ -88,6 +88,7 @@ const OPERATION_BUDGETS = new Map<string, number>([
     "isVisible",
     "isEnabled",
     "isChecked",
+    "readCondition",
     "list",
     "read",
     "requests",

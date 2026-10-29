@@ -103,14 +103,47 @@ describe("atomic browser tool programs", () => {
     expect(setInputFiles).toHaveBeenCalledWith([expect.objectContaining({ name: "a.txt" }), expect.objectContaining({ name: "a.txt" })]);
   });
 
-  it("does not confuse a missing or ambiguous element with an unchecked one", async () => {
-    const count = vi.fn(async () => 0);
-    const page = { ref: () => ({ count }) };
+  it("verifies a single bound observation without confusing missing targets with false states", async () => {
+    const readCondition = vi.fn(async () => ({ present: false, actual: null as string | boolean | null }));
+    const page = { ref: () => ({ readCondition }) };
     const target = { ref: "e1" };
     expect(await execute("verify_state", { target, state: "unchecked" }, { page })).toEqual({ verified: false, actual: null, present: false });
+    expect(readCondition).toHaveBeenLastCalledWith("checked");
+    expect(await execute("verify_state", { target, state: "disabled" }, { page })).toEqual({ verified: false, actual: null, present: false });
+    expect(readCondition).toHaveBeenLastCalledWith("enabled");
     expect(await execute("verify_state", { target, state: "hidden" }, { page })).toEqual({ verified: true, actual: null, present: false });
-    count.mockResolvedValueOnce(2);
+    expect(readCondition).toHaveBeenLastCalledWith("visible");
+    expect(await execute("verify_state", { target, textIncludes: "" }, { page })).toEqual({ verified: false, actual: null, present: false });
+    expect(readCondition).toHaveBeenLastCalledWith("text");
+    readCondition.mockResolvedValueOnce({ present: true, actual: false });
+    expect(await execute("verify_state", { target, state: "disabled" }, { page })).toEqual({ verified: true, actual: false, present: true });
+    readCondition.mockResolvedValueOnce({ present: true, actual: "saved" });
+    expect(await execute("verify_state", { target, valueEquals: "saved" }, { page })).toEqual({ verified: true, actual: "saved", present: true });
+    expect(readCondition).toHaveBeenLastCalledWith("value");
+    readCondition.mockRejectedValueOnce(new Error("AutomationError[strict-mode]"));
     await expect(execute("verify_state", { target, state: "visible" }, { page })).rejects.toThrow("strict-mode");
+  });
+
+  it("waits for one condition and reports missing timeout without treating it as success", async () => {
+    let now = 1_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const readCondition = vi.fn(async () => ({ present: false, actual: null }));
+      const sleep = vi.fn(async (ms: number) => { now += ms; });
+      const page = { ref: () => ({ readCondition }) };
+      expect(await execute("verify_state", { target: { ref: "e1" }, state: "disabled", timeoutMs: 125 }, { page, sleep }))
+        .toEqual({ verified: false, actual: null, present: false, timedOut: true });
+      expect(readCondition).toHaveBeenCalledTimes(3);
+      expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([100, 25]);
+
+      const eventually = vi.fn()
+        .mockResolvedValueOnce({ present: false, actual: null })
+        .mockResolvedValueOnce({ present: true, actual: true });
+      expect(await execute("verify_state", { target: { ref: "e2" }, state: "checked", timeoutMs: 500 },
+        { page: { ref: () => ({ readCondition: eventually }) }, sleep }))
+        .toEqual({ verified: true, actual: true, present: true });
+      expect(eventually).toHaveBeenCalledTimes(2);
+    } finally { clock.mockRestore(); }
   });
 
   it("reads a response only with its captured request reference", async () => {

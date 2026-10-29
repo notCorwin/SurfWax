@@ -91,23 +91,34 @@ function harness(
 }
 
 describe("AutomationRuntime", () => {
-  it("rejects composed and nested refs instead of silently broadening their target", async () => {
-    const { runtime, calls } = harness();
+  it("applies filters and indexes at their position in a locator chain", async () => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    document.body.innerHTML = '<article><span>chosen</span><button>One</button><button>Two</button></article><article><span>other</span><button>Three</button></article>';
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params: any) => {
+      if (method === "Runtime.evaluate" && params?.expression?.includes("function(spec, metadata, rootDocument, refs)"))
+        return { result: { value: window.eval(params.expression) } };
+      return original(source, method, params);
+    });
+    try {
+      await expect(page.locator("article").filter({ hasText: "chosen" }).locator("button").count()).resolves.toBe(2);
+      await expect(page.locator("article").nth(1).first().locator("button").count()).resolves.toBe(1);
+      await expect(page.locator("article").filter({ hasText: "chosen" }).filter({ hasText: "other" }).locator("button").count()).resolves.toBe(0);
+    } finally {
+      document.body.innerHTML = "";
+      await runtime.abortSessions();
+    }
+  });
+
+  it("rejects an expired reference in a nested locator", async () => {
+    const { runtime } = harness();
     const page = await runtime.createPage(3);
     const inspection = await page.inspect() as any;
     const ref = inspection.items.find((item: any) => item.ref).ref;
     const nested = page.locator("div").filter({ has: page.ref(ref) });
-    const framed = page.frameLocator("iframe").locator("div").filter({ has: page.ref(ref) });
-    const before = calls.length;
-    await expect(nested.count()).rejects.toMatchObject({ code: "unsupported-target", detail: { reason: "reference-composition-unavailable" } });
-    await expect(framed.count()).rejects.toMatchObject({ code: "unsupported-target" });
-    await expect(page.ref(ref).locator("button").count()).rejects.toMatchObject({ code: "unsupported-target" });
-    await expect(page.locator("button").dragTo(nested)).rejects.toMatchObject({ code: "unsupported-target" });
-    await expect(runtime.findElements(3, nested)).rejects.toMatchObject({ code: "unsupported-target" });
-    await expect(page.inspect({}, nested)).rejects.toMatchObject({ code: "unsupported-target" });
-    expect(calls).toHaveLength(before);
     runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "root" } });
-    await expect(nested.count()).rejects.toMatchObject({ code: "unsupported-target" });
+    await expect(nested.count()).rejects.toMatchObject({ code: "stale-ref" });
     await runtime.abortSessions();
   });
 
@@ -131,6 +142,52 @@ describe("AutomationRuntime", () => {
     const { runtime } = harness([]);
     const page = await runtime.createPage(3);
     await expect(page.getByRole("checkbox", { name: "Missing" }).isChecked()).rejects.toMatchObject({ code: "not-found" });
+    await runtime.abortSessions();
+  });
+
+  it("reads a condition from the node selected by the same uniqueness check", async () => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    const original = command.getMockImplementation()!;
+    let resolutions = 0;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.evaluate" && params.expression.includes('"nodes"')) {
+        resolutions++;
+        return { result: { objectId: "frozen-array" } };
+      }
+      if (method === "Runtime.callFunctionOn" && params.objectId === "frozen-array") {
+        if (params.functionDeclaration === "function(){return this.length}") return { result: { value: 1 } };
+        if (params.functionDeclaration === "function(){return this[0]}") return { result: { objectId: "original-node" } };
+      }
+      if (method === "Runtime.callFunctionOn" && params.objectId === "original-node" && params.functionDeclaration.includes("invalidChecked"))
+        return { result: { value: { present: false, actual: null } } };
+      return original(source, method, params);
+    });
+    await expect(page.locator("button").readCondition("enabled")).resolves.toEqual({ present: false, actual: null });
+    expect(resolutions).toBe(1);
+    expect(command).toHaveBeenCalledWith(expect.anything(), "Runtime.releaseObject", { objectId: "frozen-array" });
+    await runtime.abortSessions();
+  });
+
+  it("rejects an ambiguous condition before reading either matching node", async () => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.evaluate" && params.expression.includes('"nodes"')) return { result: { objectId: "two-nodes" } };
+      if (method === "Runtime.callFunctionOn" && params.objectId === "two-nodes" && params.functionDeclaration === "function(){return this.length}")
+        return { result: { value: 2 } };
+      return original(source, method, params);
+    });
+    await expect(page.locator("button").readCondition("enabled")).rejects.toMatchObject({ code: "strict-mode", detail: { count: 2 } });
+    expect(command.mock.calls.some(([, method, params]) => method === "Runtime.callFunctionOn" && params?.functionDeclaration === "function(){return this[0]}" )).toBe(false);
+    await runtime.abortSessions();
+  });
+
+  it("rejects an unchecked reading if the selected node becomes disconnected", async () => {
+    const { runtime } = harness(undefined, [{ connected: false, checked: false }]);
+    const page = await runtime.createPage(3);
+    await expect(page.getByRole("button", { name: "Sign in" }).isChecked()).rejects.toMatchObject({ code: "not-found" });
     await runtime.abortSessions();
   });
 

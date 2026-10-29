@@ -1,4 +1,4 @@
-import { isLoopFinished, ToolLoopAgent, wrapLanguageModel } from "ai";
+import { isLoopFinished, simulateStreamingMiddleware, ToolLoopAgent, wrapLanguageModel } from "ai";
 import type { LanguageModel, LanguageModelCallEndEvent } from "ai";
 import { createProgramTools, prepareToolMessages, repairProgramToolCall, PROGRAM_TOOL_REGISTRY } from "../chrome/tool";
 import { ToolScheduler } from "../chrome/tool-scheduler";
@@ -11,6 +11,7 @@ import { resolvedBaseURL, sdkFor } from "./model-sdks";
 import { estimatePromptInput, type ContextCompactor } from "./compaction";
 import type { ReasoningEffort } from "./reasoning";
 import { dsmlMiddleware } from "./dsml";
+import { completionToolChoiceMiddleware, completionToolsMiddleware } from "./completion-tools";
 
 export { DEFAULT_INSTRUCTIONS } from "./prompt";
 import { createPromptSnapshot, PROMPT_TOOLS, type PromptSnapshot } from "./prompt";
@@ -110,9 +111,13 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
   const activeTools = () => currentTools().map(({ name }) => name);
   let browserDigest: string | undefined;
   let loggedGuard: string | undefined;
+  const completion = options.model.endpointType === "openai-completions"
+    || !options.model.endpointType && options.model.modelProvider?.shape === "completion";
   return new ToolLoopAgent<never, BrowserAgentTools>({
     model: typeof options.languageModel === "string" ? options.languageModel
-      : wrapLanguageModel({ model: options.languageModel, middleware: dsmlMiddleware(logger, options.conversationId) }),
+      : wrapLanguageModel({ model: options.languageModel, middleware: completion
+        ? [simulateStreamingMiddleware(), completionToolChoiceMiddleware(), dsmlMiddleware(logger, options.conversationId), completionToolsMiddleware()]
+        : dsmlMiddleware(logger, options.conversationId) }),
     ...(options.reasoning ? { reasoning: options.reasoning === "max" ? "xhigh" : options.reasoning } : {}),
     instructions: wireInstructions(),
     tools,

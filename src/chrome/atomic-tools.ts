@@ -100,20 +100,19 @@ export const ATOMIC_TOOL_REGISTRY: readonly AtomicToolDefinition[] = Object.free
   }).strict().refine((input) => [input.textIncludes, input.valueEquals, input.state].filter((value) => value !== undefined).length === 1,
     "Specify exactly one condition"), `const element = locate(currentPage, input.target);
     const deadline = Date.now() + (input.timeoutMs ?? 0);
+    const condition = input.textIncludes !== undefined ? 'text'
+      : input.valueEquals !== undefined ? 'value'
+      : input.state === 'visible' || input.state === 'hidden' ? 'visible'
+      : input.state === 'enabled' || input.state === 'disabled' ? 'enabled'
+      : 'checked';
     while (true) {
-      const count = await element.count();
-      if (count > 1) throw new Error('AutomationError[strict-mode]: Verification target matches multiple elements');
-      let actual = count === 0 ? null : input.textIncludes !== undefined ? await element.innerText()
-        : input.valueEquals !== undefined ? await element.inputValue()
-        : input.state === 'visible' || input.state === 'hidden' ? await element.isVisible()
-        : input.state === 'enabled' || input.state === 'disabled' ? await element.isEnabled()
-        : await element.isChecked();
-      const verified = input.textIncludes !== undefined ? typeof actual === 'string' && actual.includes(input.textIncludes)
+      const { present, actual } = await element.readCondition(condition);
+      const verified = input.state === 'hidden' && !present ? true : !present ? false
+        : input.textIncludes !== undefined ? typeof actual === 'string' && actual.includes(input.textIncludes)
         : input.valueEquals !== undefined ? actual === input.valueEquals
-        : input.state === 'hidden' ? actual === false || count === 0
-        : input.state === 'disabled' || input.state === 'unchecked' ? actual === false
+        : input.state === 'hidden' || input.state === 'disabled' || input.state === 'unchecked' ? actual === false
         : actual === true;
-      if (verified || Date.now() >= deadline) return { verified, actual, present: count === 1, ...(!verified && (input.timeoutMs ?? 0) > 0 ? { timedOut: true } : {}) };
+      if (verified || Date.now() >= deadline) return { verified, actual, present, ...(!verified && (input.timeoutMs ?? 0) > 0 ? { timedOut: true } : {}) };
       await sleep(Math.min(100, Math.max(0, deadline - Date.now())));
     }`, locator),
   define("wait_for_url", "Wait until the page URL contains the given text.", z.object({ ...pageFields, url: z.string().min(1) }).strict(), "return await currentPage.waitForURL(input.url);", page),

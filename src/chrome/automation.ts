@@ -11,10 +11,13 @@ type Waiter = { resolve: (value: any) => void; reject: (error: Error) => void };
 type FileChooserRecord = { backendNodeId: number; debuggee: Debuggee; mode: string };
 type FileChooserClaim = { assert: () => void; finish: (outcome: "handled" | "not-dispatched" | "uncertain") => void };
 type Query = {
-  kind: "role" | "text" | "label" | "placeholder" | "alt" | "title" | "testId" | "css" | "frame" | "frameRef";
+  kind: "role" | "text" | "label" | "placeholder" | "alt" | "title" | "testId" | "css" | "frame" | "frameRef" | "filter" | "index";
   value: string;
   name?: string;
   exact?: boolean;
+  hasText?: string;
+  has?: LocatorSpec;
+  index?: number;
 };
 type LocatorSpec = { queries: Query[]; index?: number; ref?: string; hasText?: string; has?: LocatorSpec };
 type WaitState = "attached" | "detached" | "visible" | "hidden" | "enabled" | "editable" | "checked";
@@ -121,15 +124,39 @@ function automationError(code: string, detail: Record<string, unknown>): Automat
 }
 
 function validateLocator(spec: LocatorSpec): void {
+  const visited = new Set<LocatorSpec>(), active = new Set<LocatorSpec>();
+  const visit = (current: LocatorSpec) => {
+    if (active.has(current)) throw automationError("invalid-target", { reason: "cyclic-locator" });
+    if (visited.has(current)) return;
+    active.add(current);
+    if (current.has) visit(current.has);
+    for (const query of current.queries) if (query.has) visit(query.has);
+    active.delete(current); visited.add(current);
+  };
+  visit(spec);
+}
+
+function standaloneRef(spec: LocatorSpec): boolean {
+  return Boolean(spec.ref) && !spec.queries.length && !spec.has && spec.hasText === undefined && spec.index === undefined;
+}
+
+/** Preserve filter/index order when another locator operation follows. */
+function flushLocator(spec: LocatorSpec): LocatorSpec {
+  const queries = [...spec.queries];
+  if (spec.has || spec.hasText !== undefined) queries.push({ kind: "filter", value: "", ...(spec.has ? { has: spec.has } : {}), ...(spec.hasText === undefined ? {} : { hasText: spec.hasText }) });
+  if (spec.index !== undefined) queries.push({ kind: "index", value: "", index: spec.index });
+  return { queries, ...(spec.ref ? { ref: spec.ref } : {}) };
+}
+
+function visitLocators(spec: LocatorSpec, visit: (current: LocatorSpec) => void): void {
   const seen = new Set<LocatorSpec>();
-  let nested = false;
-  for (let current: LocatorSpec | undefined = spec; current; current = current.has) {
-    if (seen.has(current)) throw automationError("invalid-target", { reason: "cyclic-locator" });
-    seen.add(current);
-    if (current.ref && (nested || current.queries.length || current.has || current.hasText || current.index !== undefined))
-      throw automationError("unsupported-target", { reason: "reference-composition-unavailable" });
-    nested = true;
-  }
+  const walk = (current: LocatorSpec) => {
+    if (seen.has(current)) return;
+    seen.add(current); visit(current);
+    if (current.has) walk(current.has);
+    for (const query of current.queries) if (query.has) walk(query.has);
+  };
+  walk(spec);
 }
 
 function isDetachedNodeError(error: unknown): boolean {
@@ -170,7 +197,7 @@ export const FILE_UPLOAD_FUNCTION = `function(files){
   this.files = transfer.files; this.dispatchEvent(new view.Event("input", { bubbles: true })); this.dispatchEvent(new view.Event("change", { bubbles: true }));
 }`;
 
-const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument) {
+const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument, refs) {
   const normalize = value => String(value ?? "").replace(/\s+/g, " ").trim();
   const roleOf = el => el.getAttribute("role") || ({
     A: el.hasAttribute("href") ? "link" : "generic", BUTTON: "button", SELECT: "combobox", TEXTAREA: "textbox",
@@ -210,13 +237,30 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument) {
     : all(root).filter(el => matches(el, item));
   const resolve = (root, locator) => {
     let current = [root];
+    if (locator.ref) {
+      const node = refs?.[locator.ref];
+      if (!node || !node.isConnected) throw new Error("AutomationError[detached]: Referenced element is no longer connected");
+      let ancestor = node;
+      while (ancestor && ancestor !== root) ancestor = ancestor.parentNode || ancestor.host || null;
+      current = ancestor === root && node !== root ? [node] : [];
+    }
     for (const item of locator.queries) {
+      if (item.kind === "filter") {
+        if (item.hasText !== undefined) current = current.filter(el => visibleText(el).toLowerCase().includes(normalize(item.hasText).toLowerCase()));
+        if (item.has) current = current.filter(el => resolve(el, item.has).length > 0);
+        continue;
+      }
+      if (item.kind === "index") {
+        const index = item.index < 0 ? current.length + item.index : item.index;
+        current = index >= 0 && index < current.length ? [current[index]] : [];
+        continue;
+      }
       const found = current.flatMap(node => query(node, item));
       if (item.kind === "frame") {
         current = found.map(frame => { try { return frame.contentDocument; } catch { return null; } });
         if (metadata === "nodes" && current.some(frame => !frame)) throw new Error("AutomationError[frame-unavailable]: Frame document is not available");
-        current = current.filter(Boolean);
-      } else current = found;
+        current = [...new Set(current.filter(Boolean))];
+      } else current = [...new Set(found)];
     }
     if (locator.hasText) current = current.filter(el => visibleText(el).toLowerCase().includes(normalize(locator.hasText).toLowerCase()));
     if (locator.has) current = current.filter(el => resolve(el, locator.has).length > 0);
@@ -805,6 +849,33 @@ export class AutomationRuntime {
       }
       const session = await this.session(tabId);
       if (operation === "count") return (await this.resolveMetadata(session, spec)).length;
+      if (operation === "readCondition") {
+        const condition = args[0];
+        if (!["text", "value", "visible", "enabled", "checked"].includes(String(condition))) throw automationError("invalid-condition", { condition });
+        const objectId = await this.resolveConditionTarget(session, spec);
+        if (!objectId) return { present: false, actual: null };
+        const observation = await this.callOn(this.objectSession(session, objectId), objectId, `function(condition) {
+          if (!this.isConnected) return { present: false, actual: null };
+          let actual, invalidChecked = false;
+          if (condition === "text") actual = typeof this.innerText === "string" ? this.innerText : null;
+          else if (condition === "value") actual = typeof this.value === "string" ? this.value : null;
+          else if (condition === "visible") {
+            const rect = this.getBoundingClientRect(), style = getComputedStyle(this);
+            actual = rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+          } else if (condition === "enabled") actual = !Boolean(this.disabled || this.matches(":disabled") || this.closest('[aria-disabled="true"]'));
+          else {
+            const state = (${CHECKED_STATE_SOURCE}).call(this);
+            actual = state.value;
+            invalidChecked = !state.supported || state.value === null;
+          }
+          if (!this.isConnected) return { present: false, actual: null };
+          return { present: true, actual, invalidChecked };
+        }`, [condition]);
+        if (!observation || typeof observation.present !== "boolean" || !Object.hasOwn(observation, "actual"))
+          throw automationError("state-unavailable", { reason: "invalid-condition-observation" });
+        if (observation.invalidChecked) throw automationError("invalid-checked-state", { reason: "unsupported-or-indeterminate" });
+        return { present: observation.present, actual: observation.actual };
+      }
       if (operation === "waitFor") {
         await this.waitForLocatorState(session, spec, ((args[0] as { state?: WaitState } | undefined)?.state ?? "visible"));
         return this.afterAction(session);
@@ -822,6 +893,7 @@ export class AutomationRuntime {
           return false;
         }
         const state = await this.elementState(this.objectSession(session, objectId), objectId);
+        if (operation === "isChecked" && !state.connected) throw automationError("not-found", { locator: spec, reason: "target-disappeared" });
         if (operation === "isChecked" && state.checked === null) throw automationError("invalid-checked-state", { reason: "unsupported-or-indeterminate" });
         return operation === "isVisible" ? state.visible : operation === "isEnabled" ? state.enabled : state.checked;
       }
@@ -1202,7 +1274,7 @@ export class AutomationRuntime {
         const group = `surf-wax-search-${id}`;
         let debuggee = session.debuggee;
         try {
-          if (locator.spec.ref) {
+          if (locator.spec.ref && standaloneRef(locator.spec)) {
             const item = session.refs.get(locator.spec.ref);
             if (!item || item.generation !== generation) throw automationError("stale-ref", { ref: locator.spec.ref, reason: "expired-document" });
             debuggee = item.debuggee;
@@ -1211,7 +1283,7 @@ export class AutomationRuntime {
           } else {
             const scoped = await this.locatorScope(session, locator.spec);
             guard(); debuggee = scoped.debuggee;
-            if (this.usesNativeAccessibility(scoped.spec)) {
+            if (!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) {
               const matches = await this.resolveAccessibility(debuggee, scoped.spec, scoped.rootObjectId);
               guard();
               // Freeze full semantic names, so a virtualized node whose visible
@@ -1226,7 +1298,7 @@ export class AutomationRuntime {
               });
               snapshot = { id, tabId, generation, session, key, conversationId, runId, debuggee, total: candidates.length, candidates, group };
             } else {
-              const response = await this.resolveLocator(debuggee, scoped.spec, "nodes", scoped.rootObjectId, group);
+              const response = await this.resolveLocator(debuggee, scoped.spec, "nodes", scoped.rootObjectId, group, session);
               guard();
               const arrayId = response?.objectId;
               if (!arrayId) throw automationError("search-unavailable", { reason: "missing-result-array" });
@@ -1370,11 +1442,7 @@ export class AutomationRuntime {
     // A whole capture may exceed this soft limit. Never evict during an
     // operation or between pages of the same observation; the next independent
     // capture/search can reclaim older references when the tab is otherwise idle.
-    const seen = new Set<LocatorSpec>();
-    for (let current = preserve; current && !seen.has(current); current = current.has) {
-      seen.add(current);
-      if (current.ref) this.touchRef(session, current.ref);
-    }
+    if (preserve) visitLocators(preserve, (current) => { if (current.ref) this.touchRef(session, current.ref); });
     if ((this.activeActions.get(session.tabId) ?? 0) !== 1 || session.refUsage.size <= 32_768) return;
     while (session.refUsage.size > 24_576) {
       const [short, identity] = session.refUsage.entries().next().value!;
@@ -1454,13 +1522,13 @@ export class AutomationRuntime {
   }
 
   private async resolveMetadata(session: Session, spec: LocatorSpec): Promise<Candidate[]> {
-    if (spec.ref) {
+    if (spec.ref && standaloneRef(spec)) {
       const { ref } = await this.resolveRef(session, spec.ref);
       return [{ role: ref.role, name: ref.name, ref: spec.ref }];
     }
     const scoped = await this.locatorScope(session, spec);
-    if (this.usesNativeAccessibility(scoped.spec)) return this.resolveAccessibility(scoped.debuggee, scoped.spec, scoped.rootObjectId);
-    return (await this.resolveLocator(scoped.debuggee, scoped.spec, true, scoped.rootObjectId))?.value as Candidate[];
+    if (!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) return this.resolveAccessibility(scoped.debuggee, scoped.spec, scoped.rootObjectId);
+    return (await this.resolveLocator(scoped.debuggee, scoped.spec, true, scoped.rootObjectId, undefined, session))?.value as Candidate[];
   }
 
   private async resolveOne(session: Session, spec: LocatorSpec): Promise<string> {
@@ -1475,14 +1543,66 @@ export class AutomationRuntime {
     }
   }
 
+  /** Resolve once without waiting, keeping the selected node bound to the uniqueness check. */
+  private async resolveConditionTarget(session: Session, spec: LocatorSpec): Promise<string | undefined> {
+    if (spec.ref && standaloneRef(spec)) return (await this.resolveRef(session, spec.ref)).objectId;
+    let scoped: Awaited<ReturnType<AutomationRuntime["locatorScope"]>>;
+    try { scoped = await this.locatorScope(session, spec, true); }
+    catch (error) {
+      if (error instanceof AutomationError && error.code === "frame-not-found") return undefined;
+      throw error;
+    }
+    if (!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) {
+      const matches = await this.resolveAccessibility(scoped.debuggee, scoped.spec, scoped.rootObjectId);
+      this.assertStrict(spec, matches);
+      const node = matches[0]?.backendNodeId;
+      if (!node) return undefined;
+      try {
+        const resolved = await this.options.command(scoped.debuggee, "DOM.resolveNode", { backendNodeId: node, objectGroup: "surf-wax-automation" });
+        const objectId = resolved.object?.objectId;
+        if (!objectId) throw automationError("state-unavailable", { reason: "missing-node-object" });
+        this.objectDebuggees.set(objectId, scoped.debuggee);
+        return objectId;
+      } catch (error) {
+        if (isDetachedNodeError(error) && !(error instanceof AutomationError)) return undefined;
+        throw error;
+      }
+    }
+    return this.resolveDomOnce(session, scoped.debuggee, scoped.spec, scoped.rootObjectId);
+  }
+
+  private async resolveDomOnce(session: Session, debuggee: Debuggee, spec: LocatorSpec, rootObjectId?: string): Promise<string | undefined> {
+    const result = await this.resolveLocator(debuggee, spec, "nodes", rootObjectId, undefined, session);
+    const arrayId = result?.objectId;
+    if (!arrayId) throw automationError("state-unavailable", { reason: "missing-result-array" });
+    try {
+      const length = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: arrayId,
+        functionDeclaration: "function(){return this.length}", returnByValue: true });
+      if (length.exceptionDetails) throw new Error(length.exceptionDetails.exception?.description || length.exceptionDetails.text);
+      const count = length.result?.value;
+      if (!Number.isSafeInteger(count) || count < 0) throw automationError("state-unavailable", { reason: "invalid-result-count" });
+      if (count > 1) throw automationError("strict-mode", { locator: spec, count });
+      if (!count) return undefined;
+      const first = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: arrayId,
+        functionDeclaration: "function(){return this[0]}", returnByValue: false, objectGroup: "surf-wax-automation" });
+      if (first.exceptionDetails) throw new Error(first.exceptionDetails.exception?.description || first.exceptionDetails.text);
+      const objectId = first.result?.objectId;
+      if (!objectId) throw automationError("state-unavailable", { reason: "missing-node-object" });
+      this.objectDebuggees.set(objectId, debuggee);
+      return objectId;
+    } finally {
+      void this.options.command(debuggee, "Runtime.releaseObject", { objectId: arrayId }).catch(() => undefined);
+    }
+  }
+
   private async resolveOnce(session: Session, spec: LocatorSpec, observe?: (matches: Candidate[]) => void): Promise<string | undefined> {
-    if (spec.ref) {
+    if (spec.ref && standaloneRef(spec)) {
       const { ref, objectId } = await this.resolveRef(session, spec.ref);
       observe?.([{ role: ref.role, name: ref.name, ref: spec.ref }]);
       return objectId;
     }
     const scoped = await this.locatorScope(session, spec);
-    if (this.usesNativeAccessibility(scoped.spec)) {
+    if (!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) {
       const matches = await this.resolveAccessibility(scoped.debuggee, scoped.spec, scoped.rootObjectId);
       observe?.(matches);
       this.assertStrict(spec, matches);
@@ -1495,11 +1615,11 @@ export class AutomationRuntime {
         return response.object.objectId;
       } catch { return undefined; }
     }
-    const matches = (await this.resolveLocator(scoped.debuggee, scoped.spec, true, scoped.rootObjectId))?.value as Candidate[];
+    const matches = (await this.resolveLocator(scoped.debuggee, scoped.spec, true, scoped.rootObjectId, undefined, session))?.value as Candidate[];
     observe?.(matches);
     this.assertStrict(spec, matches);
     if (!matches.length) return undefined;
-    const result = await this.resolveLocator(scoped.debuggee, scoped.spec, false, scoped.rootObjectId);
+    const result = await this.resolveLocator(scoped.debuggee, scoped.spec, false, scoped.rootObjectId, undefined, session);
     if (!result?.objectId) return undefined;
     this.objectDebuggees.set(result.objectId, scoped.debuggee);
     return result.objectId;
@@ -1603,13 +1723,21 @@ export class AutomationRuntime {
     return objectId;
   }
 
-  private async locatorScope(session: Session, spec: LocatorSpec): Promise<{ debuggee: Debuggee; spec: LocatorSpec; rootObjectId?: string }> {
+  private async locatorScope(session: Session, spec: LocatorSpec, immediate = false): Promise<{ debuggee: Debuggee; spec: LocatorSpec; rootObjectId?: string; rootIsElement?: boolean }> {
     let debuggee = session.debuggee;
     let scoped = spec;
     let rootObjectId: string | undefined;
+    let rootIsElement = false;
+    if (spec.ref) {
+      const resolved = await this.resolveRef(session, spec.ref);
+      debuggee = resolved.ref.debuggee;
+      rootObjectId = resolved.objectId;
+      rootIsElement = true;
+      scoped = { ...scoped, ref: undefined };
+    }
     const frameRefIndex = scoped.queries.findIndex((query) => query.kind === "frameRef");
     if (frameRefIndex >= 0) {
-      if (frameRefIndex !== 0) throw automationError("invalid-target", { reason: "frame-ref-must-be-root" });
+      if (rootIsElement || frameRefIndex !== 0) throw automationError("invalid-target", { reason: "frame-ref-must-be-root" });
       const ref = scoped.queries[0]!.value;
       const frame = session.frameRefs.get(ref);
       if (!frame || frame.generation !== session.generation || frame.revision !== session.frameRevision
@@ -1631,22 +1759,57 @@ export class AutomationRuntime {
     }
     while (true) {
       const frameIndex = scoped.queries.findIndex((query) => query.kind === "frame");
-      if (frameIndex < 0) return { debuggee, spec: scoped, ...(rootObjectId ? { rootObjectId } : {}) };
+      if (frameIndex < 0) return { debuggee, spec: scoped, ...(rootObjectId ? { rootObjectId } : {}), ...(rootIsElement ? { rootIsElement } : {}) };
       const frame = scoped.queries[frameIndex]!;
       const ownerSpec: LocatorSpec = { queries: [...scoped.queries.slice(0, frameIndex), { ...frame, kind: "css" }] };
-      const ownerId = await this.resolveDirect(debuggee, ownerSpec, rootObjectId);
+      const ownerId = immediate ? await this.resolveDomOnce(session, debuggee, ownerSpec, rootObjectId) : await this.resolveDirect(debuggee, ownerSpec, rootObjectId, session);
+      if (!ownerId) throw automationError("frame-not-found", { locator: ownerSpec });
       const owner = (await this.options.command(debuggee, "DOM.describeNode", { objectId: ownerId })).node;
       const child = owner?.frameId ? session.frames.get(owner.frameId) : undefined;
-      if (!child?.sessionId) return { debuggee, spec: scoped, ...(rootObjectId ? { rootObjectId } : {}) };
+      if (!child?.sessionId) return { debuggee, spec: scoped, ...(rootObjectId ? { rootObjectId } : {}), ...(rootIsElement ? { rootIsElement } : {}) };
       await session.frameReady.get(child.sessionId);
       debuggee = child;
       rootObjectId = undefined;
+      rootIsElement = false;
       scoped = { ...scoped, queries: scoped.queries.slice(frameIndex + 1) };
     }
   }
 
-  private async resolveLocator(debuggee: Debuggee, spec: LocatorSpec, metadata: boolean | "nodes", rootObjectId?: string, objectGroup = "surf-wax-automation"): Promise<any> {
+  private async resolveLocator(debuggee: Debuggee, spec: LocatorSpec, metadata: boolean | "nodes", rootObjectId?: string, objectGroup = "surf-wax-automation", session?: Session): Promise<any> {
     const returnByValue = metadata === true;
+    const keys: string[] = [];
+    visitLocators(spec, (nested) => { if (nested !== spec && nested.ref && !keys.includes(nested.ref)) keys.push(nested.ref); });
+    if (keys.length) {
+      if (!session) throw automationError("invalid-target", { reason: "missing-reference-session" });
+      const objects = await Promise.all(keys.map(async (key) => {
+        const resolved = await this.resolveRef(session, key);
+        if (resolved.ref.debuggee.tabId !== debuggee.tabId || resolved.ref.debuggee.sessionId !== debuggee.sessionId)
+          throw automationError("unsupported-target", { reason: "cross-frame-reference-context", ref: key });
+        return resolved.objectId;
+      }));
+      let temporaryRoot: string | undefined;
+      try {
+        if (!rootObjectId) {
+          const document = await this.options.command(debuggee, "Runtime.evaluate", { expression: "document", objectGroup });
+          temporaryRoot = document.result?.objectId;
+          if (!temporaryRoot) throw automationError("frame-unavailable", { reason: "missing-document-root" });
+        }
+        let response: any;
+        try {
+          response = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: rootObjectId ?? temporaryRoot,
+            functionDeclaration: `function(spec, metadata, keys, ...nodes){return (${RESOLVER_SOURCE})(spec, metadata, this, Object.fromEntries(keys.map((key, i) => [key, nodes[i]])))}`,
+            arguments: [{ value: spec }, { value: metadata }, { value: keys }, ...objects.map((objectId) => ({ objectId }))], returnByValue, objectGroup });
+        } catch (error) {
+          if (/same.*(world|context)|different.*(world|context)|different JavaScript world/i.test(error instanceof Error ? error.message : String(error)))
+            throw automationError("unsupported-target", { reason: "cross-frame-reference-context" });
+          throw error;
+        }
+        if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+        return response.result;
+      } finally {
+        if (temporaryRoot) void this.options.command(debuggee, "Runtime.releaseObject", { objectId: temporaryRoot }).catch(() => undefined);
+      }
+    }
     const response = rootObjectId
       ? await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: rootObjectId,
           functionDeclaration: `function(spec, metadata){return (${RESOLVER_SOURCE})(spec, metadata, this)}`,
@@ -1656,13 +1819,13 @@ export class AutomationRuntime {
     return response.result;
   }
 
-  private async resolveDirect(debuggee: Debuggee, spec: LocatorSpec, rootObjectId?: string): Promise<string> {
+  private async resolveDirect(debuggee: Debuggee, spec: LocatorSpec, rootObjectId?: string, session?: Session): Promise<string> {
     while (true) {
       throwIfAborted(this.context.signal);
-      const matches = (await this.resolveLocator(debuggee, spec, true, rootObjectId))?.value as any[];
+      const matches = (await this.resolveLocator(debuggee, spec, true, rootObjectId, undefined, session))?.value as any[];
       if (matches.length > 1) throw automationError("strict-mode", { locator: spec, count: matches.length, candidates: matches.slice(0, 10) });
       if (matches.length === 1) {
-        const result = await this.resolveLocator(debuggee, spec, false, rootObjectId);
+        const result = await this.resolveLocator(debuggee, spec, false, rootObjectId, undefined, session);
         if (result?.objectId) return result.objectId;
       }
       await delay(50, this.context.signal);
@@ -1711,7 +1874,7 @@ export class AutomationRuntime {
         while (hit?.shadowRoot) { const nested = hit.shadowRoot.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); if (!nested || nested === hit) break; hit = nested; }
         if (guard) guard.style.setProperty("pointer-events", pointerEvents || "auto", pointerPriority || "important");
       }
-      const disabled = Boolean(this.disabled || this.closest("fieldset:disabled") || this.closest('[aria-disabled="true"]'));
+      const disabled = Boolean(this.disabled || this.matches(":disabled") || this.closest('[aria-disabled="true"]'));
       const editable = !disabled && !this.readOnly && this.getAttribute("aria-readonly") !== "true" && (this.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(this.tagName));
       return { connected: true, x, y, width: rect.width, height: rect.height, visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none", stable: true, enabled: !disabled, editable, receivesEvents: Boolean(hit && (hit === this || this.contains(hit))), checked: (${CHECKED_STATE_SOURCE}).call(this).value };
     }`, [scroll, pointer], pointer);
@@ -2043,7 +2206,7 @@ export class LocatorFacade {
   static belongsTo(locator: unknown, runtime: AutomationRuntime, tabId: number): locator is LocatorFacade {
     return locator instanceof LocatorFacade && locator.runtime === runtime && locator.tabId === tabId;
   }
-  private chain(query: Query) { return new LocatorFacade(this.runtime, this.tabId, { ...this.spec, queries: [...this.spec.queries, query] }); }
+  private chain(query: Query) { const spec = flushLocator(this.spec); return new LocatorFacade(this.runtime, this.tabId, { ...spec, queries: [...spec.queries, query] }); }
   locator(value: string) { return this.chain({ kind: "css", value }); }
   frameLocator(value: string) { return this.chain({ kind: "frame", value }); }
   getByRole(value: string, options: { name?: string; exact?: boolean } = {}) { return this.chain({ kind: "role", value, ...options }); }
@@ -2055,12 +2218,13 @@ export class LocatorFacade {
   getByTestId(value: string) { return this.chain({ kind: "testId", value, exact: true }); }
   filter(options: { hasText?: string; has?: LocatorFacade }) {
     if (options.has && (options.has.tabId !== this.tabId || options.has.runtime !== this.runtime)) throw automationError("invalid-target", { reason: "cross-tab-filter" });
-    return new LocatorFacade(this.runtime, this.tabId, { ...this.spec, hasText: options.hasText, has: options.has?.spec });
+    return new LocatorFacade(this.runtime, this.tabId, { ...flushLocator(this.spec), hasText: options.hasText, has: options.has?.spec });
   }
   first() { return this.nth(0); }
   last() { return this.nth(-1); }
-  nth(index: number) { return new LocatorFacade(this.runtime, this.tabId, { ...this.spec, index }); }
+  nth(index: number) { return new LocatorFacade(this.runtime, this.tabId, { ...flushLocator(this.spec), index }); }
   count() { return this.run("count"); }
+  readCondition(condition: "text" | "value" | "visible" | "enabled" | "checked") { return this.run("readCondition", condition); }
   waitFor(options: { state?: WaitState } = {}) { return this.run("waitFor", options); }
   click(options?: { button?: "left" | "right" | "middle"; modifiers?: string[] }) { return this.run("click", options); }
   dblclick(options?: { button?: "left" | "right" | "middle"; modifiers?: string[] }) { return this.run("dblclick", options); }
