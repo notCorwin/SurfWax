@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { EventLogger, IndexedDbEventStore, fromLogValue, rebuildConversation, stringifyLogSafe, toLogValue, upgradeEventStore, type LogEvent } from "./logging";
+import { EventLogger, IndexedDbEventStore, fromLogValue, nextArtifactBucket, rebuildConversation, stringifyLogSafe, toLogValue, upgradeEventStore, type LogEvent } from "./logging";
 
 function memoryStore(onBatch?: (size: number) => void) {
   const events: LogEvent[] = [];
@@ -20,6 +20,14 @@ function memoryStore(onBatch?: (size: number) => void) {
       return events.filter((event) => event.artifactPart?.key === key && event.artifactPart.node === node
         && (section === undefined || event.artifactPart.section === section)
         && (first === undefined || event.artifactPart.part >= first) && (last === undefined || event.artifactPart.part <= last));
+    },
+    async artifactBucketParts(key: string, node: number, prefix: "i:" | "e:", first: number, last: number) {
+      return events.filter((event) => {
+        const part = event.artifactPart;
+        if (!part || part.key !== key || part.node !== node || !part.section.startsWith(prefix)) return false;
+        const bucket = Number(part.section.slice(prefix.length));
+        return Number.isSafeInteger(bucket) && bucket >= first && bucket <= last;
+      });
     },
     async appendArtifactAnd(artifact: Omit<LogEvent, "id">, terminal: Omit<LogEvent, "id">, link: "resultArtifactId", parts: readonly Omit<LogEvent, "id">[] = []) {
       for (const part of parts) await append(part);
@@ -51,6 +59,18 @@ function memoryStore(onBatch?: (size: number) => void) {
 }
 
 describe("canonical event log", () => {
+  it("seeks decimal bucket keys in lexical order without visiting buckets outside the numeric interval", () => {
+    for (const [first, last] of [[0, 500], [8, 23], [99, 105], [1500, 2315], [100_000, 100_123]]) {
+      const expected = Array.from({ length: last! - first! + 1 }, (_, index) => String(first! + index)).sort();
+      const actual: string[] = [];
+      let next = nextArtifactBucket(undefined, first!, last!);
+      while (next !== undefined) { actual.push(next); next = nextArtifactBucket(next, first!, last!); }
+      expect(actual).toEqual(expected);
+      for (const probe of ["0", "1", "11", "19", "20", "50", "99", "100", "101", "999", "1000", "10000", "999999"]) {
+        expect(nextArtifactBucket(probe, first!, last!)).toBe(expected.find((bucket) => bucket > probe));
+      }
+    }
+  });
   it("atomically links a durable job result and respects state and clear epochs", async () => {
     const store = memoryStore();
     const logger = new EventLogger({ store });

@@ -60,6 +60,7 @@ type EventStore = {
   appendArtifactAnd?(artifact: Omit<LogEvent, "id">, terminal: Omit<LogEvent, "id">, link: "resultArtifactId", parts?: readonly Omit<LogEvent, "id">[]): Promise<{ artifact: LogEvent; terminal: LogEvent }>;
   appendPartitioned?(artifact: Omit<LogEvent, "id">, parts: readonly Omit<LogEvent, "id">[]): Promise<LogEvent>;
   artifactParts?(key: string, node: number, section?: string, first?: number, last?: number): Promise<LogEvent[]>;
+  artifactBucketParts?(key: string, node: number, prefix: "i:" | "e:", first: number, last: number): Promise<LogEvent[]>;
   get?(id: number): Promise<LogEvent | undefined>;
   getMany?(ids: readonly number[]): Promise<Array<LogEvent | undefined>>;
   latestByType?(type: string): Promise<LogEvent | undefined>;
@@ -174,6 +175,26 @@ function indexEventsAfter(index: IDBIndex, key: IDBValidKey, afterId: number, li
   });
 }
 
+/** Existing bucket sections use unpadded decimal strings. Find the next
+ * numeric bucket in the interval in IndexedDB's lexicographic key order. */
+export function nextArtifactBucket(after: string | undefined, first: number, last: number): string | undefined {
+  let best: string | undefined;
+  for (let length = 1; length <= String(last).length; length++) {
+    const min = Math.max(first, length === 1 ? 0 : 10 ** (length - 1));
+    const max = Math.min(last, 10 ** length - 1);
+    if (min > max) continue;
+    let candidate = min;
+    if (after !== undefined) {
+      const bound = length <= after.length ? Number(after.slice(0, length)) + 1 : Number(after.padEnd(length, "0"));
+      candidate = Math.max(candidate, bound);
+    }
+    if (!Number.isSafeInteger(candidate) || candidate > max) continue;
+    const text = String(candidate);
+    if ((after === undefined || text > after) && (best === undefined || text < best)) best = text;
+  }
+  return best;
+}
+
 export class IndexedDbEventStore implements EventStore {
   readonly supportsArtifactParts = true;
   private dbPromise?: Promise<IDBDatabase>;
@@ -253,6 +274,50 @@ export class IndexedDbEventStore implements EventStore {
     const lower = [key, node, section ?? "", first ?? 0];
     const upper = [key, node, section ?? "\uffff", last ?? Number.MAX_SAFE_INTEGER];
     const ids = await requestResult<IDBValidKey[]>(transaction.objectStore(ARTIFACT_INDEX_STORE).getAll(IDBKeyRange.bound(lower, upper)));
+    const store = transaction.objectStore(EVENT_STORE);
+    const values = await Promise.all(ids.map((id) => requestResult<LogEvent | undefined>(store.get(id))));
+    await done;
+    if (values.some((value) => !value)) throw new Error("Artifact index points to a missing event");
+    return values as LogEvent[];
+  }
+
+  async artifactBucketParts(key: string, node: number, prefix: "i:" | "e:", first: number, last: number): Promise<LogEvent[]> {
+    const query = JSON.stringify(["buckets", key, node, prefix, first, last]);
+    let task = this.artifactPartLoads.get(query);
+    if (!task) {
+      task = this.readArtifactBucketParts(key, node, prefix, first, last);
+      this.artifactPartLoads.set(query, task);
+    }
+    try { return await task; }
+    finally { if (this.artifactPartLoads.get(query) === task) this.artifactPartLoads.delete(query); }
+  }
+
+  private async readArtifactBucketParts(key: string, node: number, prefix: "i:" | "e:", first: number, last: number): Promise<LogEvent[]> {
+    if (!Number.isSafeInteger(first) || !Number.isSafeInteger(last) || first < 0 || last < first) throw new Error("Invalid artifact bucket range");
+    const initial = nextArtifactBucket(undefined, first, last);
+    if (initial === undefined) return [];
+    const db = await this.open();
+    const transaction = db.transaction([EVENT_STORE, ARTIFACT_INDEX_STORE], "readonly");
+    const done = transactionDone(transaction);
+    const index = transaction.objectStore(ARTIFACT_INDEX_STORE);
+    const ids = await new Promise<IDBValidKey[]>((resolve, reject) => {
+      const found: IDBValidKey[] = [];
+      const request = index.openCursor(IDBKeyRange.bound([key, node, prefix + initial, 0], [key, node, prefix + "\uffff", Number.MAX_SAFE_INTEGER]));
+      request.onerror = () => reject(request.error ?? new Error("Artifact index cursor failed"));
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) { resolve(found); return; }
+        const section = (cursor.key as IDBValidKey[])[2];
+        if (typeof section !== "string" || !section.startsWith(prefix)) { resolve(found); return; }
+        const suffix = section.slice(prefix.length);
+        const bucket = Number(suffix);
+        if (!/^(?:0|[1-9]\d*)$/.test(suffix) || !Number.isSafeInteger(bucket)) { cursor.continue(); return; }
+        if (bucket >= first && bucket <= last) { found.push(cursor.value as IDBValidKey); cursor.continue(); return; }
+        const next = nextArtifactBucket(suffix, first, last);
+        if (next === undefined) { resolve(found); return; }
+        cursor.continue([key, node, prefix + next, 0]);
+      };
+    });
     const store = transaction.objectStore(EVENT_STORE);
     const values = await Promise.all(ids.map((id) => requestResult<LogEvent | undefined>(store.get(id))));
     await done;
@@ -948,7 +1013,7 @@ export class EventLogger {
           accepted.push(event);
         }
         const stored: LogEvent[] = [];
-        if (artifactParts.length && (!store.supportsArtifactParts || !store.artifactParts)) throw new Error("Event store does not support partitioned artifacts");
+        if (artifactParts.length && (!store.supportsArtifactParts || !store.artifactParts || !store.artifactBucketParts)) throw new Error("Event store does not support partitioned artifacts");
         if (artifactLink && accepted.length) {
           if (accepted.length !== 2 || !store.appendArtifactAnd) throw new Error("Event store does not support atomic artifact and job state writes");
           const pair = await store.appendArtifactAnd(accepted[0]!, accepted[1]!, artifactLink, artifactParts);
@@ -1255,18 +1320,27 @@ export class EventLogger {
       const event = await this.loadArtifact(store, floor, id);
       if (!event || conversationId !== undefined && event.conversationId !== conversationId) throw new Error(`Tool result ${id} is unavailable`);
       if (!event.graph) return { partitioned: false as const, value: event.value };
-      if (!store.artifactParts) throw new Error("Event store does not support partitioned artifact reads");
+      if (!store.artifactParts || !store.artifactBucketParts) throw new Error("Event store does not support partitioned artifact reads");
       const graph = event.graph;
+      const validate = (rows: LogEvent[], node: number, matches: (part: NonNullable<LogEvent["artifactPart"]>) => boolean): ArtifactPart[] => rows.map((row) => {
+        const part = row.artifactPart;
+        if (row.type !== "artifact.part" || row.id <= floor || row.id >= id || !part || part.key !== graph.key || part.owner !== event.conversationId
+          || part.node !== node || !matches(part)) throw new Error("Invalid artifact part");
+        return { node: part.node, section: part.section, part: part.part, value: row.output };
+      });
       const value = await readPartitionedArtifact(graph, async (node, section, first, last) => {
         const rows = await store.artifactParts!(graph.key, node, section, first, last);
-        return rows.map((row): ArtifactPart => {
-          const part = row.artifactPart;
-          if (row.type !== "artifact.part" || row.id <= floor || row.id >= id || !part || part.key !== graph.key || part.owner !== event.conversationId
-            || part.node !== node || section !== undefined && part.section !== section || first !== undefined && part.part < first || last !== undefined && part.part > last)
-            throw new Error("Invalid artifact part");
-          return { node: part.node, section: part.section, part: part.part, value: row.output };
+        return validate(rows, node, (part) => (section === undefined || part.section === section)
+          && (first === undefined || part.part >= first) && (last === undefined || part.part <= last));
+      }, selection, id, async (node, prefix, first, last) => {
+        const rows = await store.artifactBucketParts!(graph.key, node, prefix, first, last);
+        return validate(rows, node, (part) => {
+          const suffix = part.section.slice(prefix.length);
+          const bucket = Number(suffix);
+          return part.section.startsWith(prefix) && /^(?:0|[1-9]\d*)$/.test(suffix)
+            && Number.isSafeInteger(bucket) && bucket >= first && bucket <= last;
         });
-      }, selection, id);
+      });
       return { partitioned: true as const, value };
     });
     if (loaded.partitioned) return loaded.value;

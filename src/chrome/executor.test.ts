@@ -3,7 +3,7 @@ import { EventLogger, fromLogValue, type LogEvent } from "../logging";
 import { ChromeExecutor } from "./executor";
 import { LocatorFacade } from "./automation";
 import { ProgramScope } from "./program";
-import { ProgramHandles } from "./program-handles";
+import { DeferredProgramPage, ProgramHandles } from "./program-handles";
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 function fakeChrome(responses: Array<object | (() => Promise<object>)> = []) {
@@ -59,7 +59,7 @@ function memoryLog() {
   } });
   return { logger, events };
 }
-function programHarness(work: (capabilities: any, signal: AbortSignal) => Promise<unknown>, fake = fakeChrome()) {
+function programHarness(work: (capabilities: any, signal: AbortSignal) => Promise<unknown>, fake = fakeChrome(), lazy = false) {
   const log = memoryLog();
   let runIdentity: { runId: string; ownerId: string; generation: number } | undefined = { runId: "run", ownerId: "owner", generation: 1 };
   const tabs = [{ id: 41, windowId: 7, active: true, title: "Current" }, { id: 42, windowId: 7, active: false }, { id: 99, windowId: 9 }] as chrome.tabs.Tab[];
@@ -75,7 +75,10 @@ function programHarness(work: (capabilities: any, signal: AbortSignal) => Promis
       remove: vi.fn(async (id: number) => { const index = tabs.findIndex(tab => tab.id === id); if (index >= 0) tabs.splice(index, 1); onRemoved.emit(id); }), onRemoved,
     },
   });
-  const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, logger: log.logger, runIdentity: () => runIdentity, programHost: async (_code, caps, signal) => work(caps, signal) });
+  const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, logger: log.logger, runIdentity: () => runIdentity, programHost: async (_code, caps, signal) => {
+    if (!lazy && caps.page instanceof DeferredProgramPage) caps = { ...caps, page: await caps.page.bind() };
+    return work(caps, signal);
+  } });
   const raw: any = {
     tabId: 41, inspect: vi.fn(async () => ({ snapshot: "Current [ref=t41d1e1]" })),
     url: vi.fn(async () => "https://example.com"), title: vi.fn(async () => "Current"),
@@ -89,6 +92,24 @@ function programHarness(work: (capabilities: any, signal: AbortSignal) => Promis
 }
 
 describe("ChromeExecutor programs", () => {
+  it("runs page-independent operations without a bound tab or a live bound window", async () => {
+    let action: "artifact" | "open" | "page" = "artifact";
+    const h = programHarness(async ({ page, browser, artifacts }) => {
+      if (action === "artifact") return artifacts.text("report.txt", "data", "text/plain");
+      if (action === "open") return browser.tabs.open("https://example.com");
+      return page.bind();
+    }, fakeChrome(), true);
+    (h.executor as any).browserState = { windowId: 7, tabId: undefined };
+    (h.fake.chromeApi as any).windows.get.mockRejectedValue(new Error("window closed"));
+    expect(await h.run()).toMatchObject({ ok: true, result: { filename: "report.txt" } });
+    expect((h.executor as any).pageFor).not.toHaveBeenCalled();
+    action = "open";
+    expect(await h.run()).toMatchObject({ ok: false, result: { error: { code: "window-closed" } } });
+    expect((h.fake.chromeApi as any).tabs.create).not.toHaveBeenCalled();
+    action = "page";
+    expect(await h.run()).toMatchObject({ ok: false, result: { error: { code: "no-bound-tab" } } });
+    h.executor.dispose();
+  });
   it("reuses each live page within a program, including concurrent requests, but not across programs", async () => {
     let previous: unknown;
     const h = programHarness(async ({ page, browser }) => {

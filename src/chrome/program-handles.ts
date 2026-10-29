@@ -2,6 +2,21 @@
 export const PROGRAM_HANDLE_ASSERT_LIVE = Symbol("program-handle-assert-live");
 export const PROGRAM_HANDLE_SESSION = Symbol("program-handle-session");
 
+/** A program's initial page is acquired only when a page capability is used. */
+export class DeferredProgramPage {
+  private pending?: Promise<object>;
+  private page?: object;
+  constructor(readonly tabId: number | undefined, private readonly acquire: () => Promise<object>) {}
+  bind(): Promise<object> {
+    if (!this.pending) this.pending = this.acquire().then((page) => { this.page = page; return page; }, (error) => { this.pending = undefined; throw error; });
+    return this.pending;
+  }
+  bound(): object {
+    if (!this.page) throw new Error("Program page has not been bound");
+    return this.page;
+  }
+}
+
 /** Strongly held bridge capabilities, indexed by the tab that owns them. */
 export class ProgramHandles {
   private readonly objects = new Map<string, object>();

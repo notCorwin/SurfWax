@@ -12,7 +12,7 @@ import { ForegroundBlockers, type BlockerJob, type BlockerOperation } from "./fo
 import type { InspectOptions } from "./automation";
 import { callUserScript } from "./script-client";
 import { executeSandboxProgram } from "./program-host";
-import { PROGRAM_HANDLE_ASSERT_LIVE, PROGRAM_HANDLE_SESSION } from "./program-handles";
+import { DeferredProgramPage, PROGRAM_HANDLE_ASSERT_LIVE, PROGRAM_HANDLE_SESSION } from "./program-handles";
 import { estimateProgramTimeoutMs } from "./program-timeout";
 import { EventSubscriptions, type BrowserEventKind, type EventOwner } from "./event-subscriptions";
 
@@ -456,13 +456,15 @@ export class ChromeExecutor {
       };
       try {
         scope.guard();
-        const state = await this.currentBrowserState();
-        let raw: Awaited<ReturnType<ChromeExecutor["pageFor"]>>;
-        if (Number.isSafeInteger(state.tabId)) {
-          await scope.call("page.bind", async () => { raw = await this.pageFor(state); return { tabId: raw.tabId }; }, false, false, false, false, { tabId: state.tabId! });
-        } else raw = await this.pageFor(state);
+        const state = await this.currentBrowserState(true);
         pages = this.programPages(scope, state);
-        const page = await pages.get(raw!.tabId, raw);
+        const initial = { ...state };
+        const page = new DeferredProgramPage(initial.tabId, async () => {
+          if (!Number.isSafeInteger(initial.tabId)) throw new Error("CommandError[no-bound-tab]: Select a tab before interacting with a page");
+          let raw: Awaited<ReturnType<ChromeExecutor["pageFor"]>>;
+          await scope.call("page.bind", async () => { raw = await this.pageFor(initial); return { tabId: raw.tabId }; }, false, false, false, false, { tabId: initial.tabId! });
+          return pages!.get(initial.tabId!, raw!);
+        });
         const capabilities = this.programCapabilities(page, state, scope, pages);
         scope.guard();
         if (input.background) this.runOwnerFor(context);
@@ -889,6 +891,7 @@ export class ChromeExecutor {
   }
 
   private async boundPage(tabId: number, state: BrowserState): Promise<any> {
+    if (!Number.isSafeInteger(tabId)) throw new Error("CommandError[no-bound-tab]: Select a tab before interacting with a page");
     const tab = await this.chromeApi.tabs.get(tabId);
     if (!tab || !Number.isInteger(tab.windowId)) throw new Error("CommandError[invalid-tab-id]: Tab is unavailable");
     return this.pageFor({ windowId: tab.windowId!, tabId });
@@ -1013,9 +1016,15 @@ export class ChromeExecutor {
       page: (tabId: number) => call("browser.page", false, () => pages.get(tabId), sourceFor(tabId)),
       tabs: {
         list: () => call("tabs.list", false, () => this.tabsOf(state)),
-        open: (url?: string) => call("tabs.open", true, async () => { await scope.dispatched(); const tab = await this.chromeApi.tabs.create({ windowId: state.windowId, active: true, ...(url ? { url } : {}) }); return pages.get(tab.id!); }),
-        select: (tabId: number) => call("tabs.select", true, async () => { await this.boundPage(tabId, state); await scope.dispatched(); return this.selectTab(state, tabId); }),
-        close: (tabId: number) => call("tabs.close", true, async () => { await this.boundPage(tabId, state); await scope.dispatched(); const result = await this.closeTab(state, tabId); pages.invalidate(tabId); return result; }),
+        open: (url?: string) => call("tabs.open", true, async () => {
+          if (!await this.chromeApi.windows.get(state.windowId).catch(() => undefined)) throw new Error("CommandError[window-closed]: The bound Chrome window was closed");
+          await scope.dispatched();
+          const tab = await this.chromeApi.tabs.create({ windowId: state.windowId, active: true, ...(url ? { url } : {}) });
+          if (!Number.isSafeInteger(tab.id)) throw new Error("CommandError[invalid-tab-id]: Created tab has no identifier");
+          return new DeferredProgramPage(tab.id, () => pages.get(tab.id!));
+        }),
+        select: (tabId: number) => call("tabs.select", true, async () => { await this.requireTab(tabId); await scope.dispatched(); return this.selectTab(state, tabId); }),
+        close: (tabId: number) => call("tabs.close", true, async () => { await this.requireTab(tabId); await scope.dispatched(); const result = await this.closeTab(state, tabId); pages.invalidate(tabId); return result; }),
       },
       scripts,
       runIn: (target: PageExecutionTarget, code: string) => call("browser.runIn", true, async () => {
@@ -1146,9 +1155,10 @@ export class ChromeExecutor {
     }, signal, timeoutMs);
   }
 
-  private async currentBrowserState(): Promise<BrowserState> {
+  private async currentBrowserState(allowClosed = false): Promise<BrowserState> {
     const existing = this.browserState;
     if (existing) {
+      if (allowClosed) return existing;
       const window = await this.chromeApi.windows.get(existing.windowId).catch(() => undefined);
       if (window) return existing;
       throw new Error("CommandError[window-closed]: The bound Chrome window was closed");
@@ -1175,6 +1185,10 @@ export class ChromeExecutor {
     if (Number.isInteger(tab.windowId)) state.windowId = tab.windowId!;
     state.tabId = tab.id;
     return this.tabsOf(state);
+  }
+
+  private async requireTab(tabId: number): Promise<void> {
+    if (!await this.chromeApi.tabs.get(tabId).catch(() => undefined)) throw new Error(`CommandError[invalid-tab-id]: ${tabId}`);
   }
 
   private async closeTab(state: BrowserState, tabId: number): Promise<unknown> {

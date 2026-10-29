@@ -11,7 +11,13 @@ function fixture(value: unknown) {
     reads.push(...found);
     return found;
   };
-  return { get: (selection = {}) => readPartitionedArtifact(graph, read, selection, 1), reads: () => reads, reset: () => { reads = []; }, parts };
+  const readBuckets = async (node: number, prefix: "i:" | "e:", first: number, last: number) => {
+    const found = parts.filter((part) => part.node === node && part.section.startsWith(prefix)
+      && Number(part.section.slice(prefix.length)) >= first && Number(part.section.slice(prefix.length)) <= last);
+    reads.push(...found);
+    return found;
+  };
+  return { get: (selection = {}) => readPartitionedArtifact(graph, read, selection, 1, readBuckets), reads: () => reads, reset: () => { reads = []; }, parts };
 }
 
 describe("partitioned artifact graphs", () => {
@@ -22,6 +28,20 @@ describe("partitioned artifact graphs", () => {
     store.reset();
     expect(await store.get({ path: ["text"], offset: 90000, limit: 5 })).toBe("abcab");
     expect(store.reads().filter((row) => row.section === "text").length).toBe(1);
+  });
+  it("reads only occupied buckets in a wide sparse page", async () => {
+    const sparse: number[] = new Array(20_000_000);
+    for (let bucket = 0; bucket < 1000; bucket++) sparse[bucket * 16_384] = bucket;
+    const store = fixture({ sparse });
+    const page = await store.get({ path: ["sparse"], offset: 5_000_000, limit: 200_000 }) as number[];
+    expect(page.length).toBe(200_000);
+    expect(page[5_013_504 - 5_000_000]).toBe(306);
+    const rows = store.reads().filter((part) => part.section.startsWith("i:"));
+    expect(rows).toHaveLength(12);
+    expect(rows.every((part) => {
+      const bucket = Number(part.section.slice(2));
+      return bucket >= Math.floor(5_000_000 / 128) && bucket <= Math.floor(5_199_999 / 128);
+    })).toBe(true);
   });
   it("preserves sparse holes, aliases, cycles, and shared backing buffers", async () => {
     const buffer = new ArrayBuffer(40000), left = new Uint16Array(buffer, 4, 4), right = new DataView(buffer, 2, 5);

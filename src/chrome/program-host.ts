@@ -1,5 +1,5 @@
 import { LocatorFacade, PageFacade } from "./automation";
-import { ProgramHandles } from "./program-handles";
+import { DeferredProgramPage, ProgramHandles } from "./program-handles";
 import { createProgramCodec } from "./program-codec";
 
 /** Control stays in the Side Panel. Arbitrary program computation runs only in a disposable sandbox worker. */
@@ -27,6 +27,8 @@ export async function executeSandboxProgram(
   const idOf = (value: object, tabId?: number) => objects.remember(value, tabId);
   const { encode, decode } = createProgramCodec((value) => {
     if (typeof value === "function") return { value: { $remoteFunction: idOf(value) } };
+    if (value instanceof DeferredProgramPage)
+      return { value: { $remoteObject: { id: idOf(value, value.tabId), ...(value.tabId === undefined ? {} : { tabId: value.tabId }) } } };
     if (value instanceof PageFacade || value instanceof LocatorFacade)
       return { value: { $remoteObject: { id: idOf(value, value.tabId), ...(value.tabId === undefined ? {} : { tabId: value.tabId }) } } };
     if (typeof value.accept === "function" || typeof value.setFiles === "function") {
@@ -46,6 +48,7 @@ export async function executeSandboxProgram(
     steps?: Array<{ key: string; args?: any[] }>;
   }): any => {
     let subject = objects.resolve(reference.id);
+    if (subject instanceof DeferredProgramPage) subject = subject.bound();
     for (const { key, args } of reference.steps ?? []) {
       if (
         key.startsWith("_") ||
@@ -62,6 +65,25 @@ export async function executeSandboxProgram(
           : member;
     }
     return subject;
+  };
+  // Locator arguments may themselves refer to the initial page, including
+  // references nested in a cyclic bridge value. Bind before synchronous decode.
+  const bindReferences = async (reference: { id: string; steps?: unknown }, args: unknown): Promise<void> => {
+    const pages = new Set<DeferredProgramPage>();
+    const consider = (id: string) => { const object = objects.resolve(id); if (object instanceof DeferredProgramPage) pages.add(object); };
+    consider(reference.id);
+    const seen = new WeakSet<object>();
+    const visit = (value: unknown): void => {
+      if (!value || typeof value !== "object" || seen.has(value) || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return;
+      seen.add(value);
+      if ("$remoteArgument" in value) {
+        const remote = (value as { $remoteArgument: { id: string } }).$remoteArgument;
+        consider(remote.id);
+      }
+      for (const child of Object.values(value)) visit(child);
+    };
+    visit(reference.steps); visit(args);
+    await Promise.all([...pages].map((page) => page.bind()));
   };
   let disposed = false;
   let abortTimer: ReturnType<typeof setTimeout> | undefined;
@@ -128,6 +150,8 @@ export async function executeSandboxProgram(
         if (message.type === "rpc") {
           const task = (async () => {
             try {
+              signal.throwIfAborted();
+              await bindReferences(message.reference, message.args);
               signal.throwIfAborted();
               const operation = resolve(message.reference);
               if (

@@ -33,6 +33,14 @@ export function testEventStore(events: LogEvent[] = []) {
         && (section === undefined || event.artifactPart.section === section)
         && (first === undefined || event.artifactPart.part >= first) && (last === undefined || event.artifactPart.part <= last));
     },
+    async artifactBucketParts(key: string, node: number, prefix: "i:" | "e:", first: number, last: number) {
+      return events.filter((event) => {
+        const part = event.artifactPart;
+        if (!part || part.key !== key || part.node !== node || !part.section.startsWith(prefix)) return false;
+        const bucket = Number(part.section.slice(prefix.length));
+        return Number.isSafeInteger(bucket) && bucket >= first && bucket <= last;
+      });
+    },
     async all() { return [...events]; },
     async clear() { events.length = 0; },
   };

@@ -5,6 +5,7 @@ export type ArtifactPart = { node: number; section: string; part: number; value:
 export type ArtifactGraph = { version: 1; key: string; root: any };
 export type ArtifactSelection = { path?: string | Array<string | number>; offset?: number; limit?: number };
 type Reader = (node: number, section?: string, first?: number, last?: number) => Promise<ArtifactPart[]>;
+type BucketReader = (node: number, prefix: "i:" | "e:", first: number, last: number) => Promise<ArtifactPart[]>;
 const TEXT = 8192;
 const ENTRIES = 128;
 const isText = (value: any): value is { s: number; l: number } => value !== null && typeof value === "object" && !Array.isArray(value) && Number.isSafeInteger(value.s) && Number.isSafeInteger(value.l) && Object.keys(value).length === 2;
@@ -48,7 +49,7 @@ export function partitionArtifact(value: unknown): { graph: ArtifactGraph; parts
 }
 
 /** Read only selected sections; reconstruct the reachable V5 graph when values contain aliases or cycles. */
-export async function readPartitionedArtifact(graph: ArtifactGraph, read: Reader, selection: ArtifactSelection, id: number): Promise<unknown> {
+export async function readPartitionedArtifact(graph: ArtifactGraph, read: Reader, selection: ArtifactSelection, id: number, readBuckets: BucketReader): Promise<unknown> {
   let synthetic: any;
   const requests = new Map<string, Promise<ArtifactPart[]>>();
   const parts = (node: number, section?: string, first?: number, last?: number) => {
@@ -184,12 +185,12 @@ export async function readPartitionedArtifact(graph: ArtifactGraph, read: Reader
   if (!Array.isArray(token) || token[0] !== 1) throw new Error("offset/limit requires an array, string, Map, Set, ArrayBuffer or binary view");
   const node = token[1], info = await header(node);
   if (["array", "map", "set"].includes(info.type)) {
-    const prefix = info.type === "array" ? "i:" : "e:";
+    const prefix = info.type === "array" ? "i:" as const : "e:" as const;
     const size = info.type === "array" ? info.length : info.size;
     const first = Math.min(size, offset), last = Math.min(size, end);
     const firstBucket = Math.floor(first / ENTRIES), lastBucket = Math.floor((last - 1) / ENTRIES);
     const all = last <= first ? [] : node === -1 && synthetic ? [{ node, section: "i:0", part: 0, value: synthetic.entries.map((entry: any, ordinal: number) => [ordinal, entry]) }]
-      : lastBucket - firstBucket > 1024 ? await parts(node)
+      : lastBucket > firstBucket ? await readBuckets(node, prefix, firstBucket, lastBucket)
       : (await Promise.all(Array.from({ length: lastBucket - firstBucket + 1 }, (_, index) => parts(node, `${prefix}${firstBucket + index}`)))).flat();
     const rows = all.filter((row) => row.section.startsWith(prefix)).flatMap((row) => row.value);
     const chosen = rows.filter(([ordinal, entry]: any) => {
