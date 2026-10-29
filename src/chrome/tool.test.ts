@@ -324,10 +324,39 @@ describe("browser tools", () => {
     const logger = { append: async (event: any) => { appended.push(event); return { ...event, id: 15 }; } } as EventLogger;
     const value = { ok: true, result: [{ operation: "emit", output: "large".repeat(20_000) }] };
     const result = await compactToolResult(value, { logger }) as any;
-    expect(result).toMatchObject({ $ref: 15, access: { artifactId: 15, path: ["result"], offset: 0, limit: 50 } });
+    expect(result).toMatchObject({ $ref: 15, access: { artifactId: 15, path: ["result"], offset: 0, limit: 1 }, oversizedItem: { path: ["result", 0], guidance: expect.stringContaining("execute_program") }, resultOversizedItem: { path: ["result", 0] } });
     expect(new TextEncoder().encode(JSON.stringify(result.preview)).byteLength).toBeLessThanOrEqual(4096);
     expect(JSON.stringify(result.preview)).not.toContain("large".repeat(100));
     expect(appended[0].output).toBe(value);
+  });
+
+  it("recommends array slices sized by actual JSON bytes and identifies an oversized item", async () => {
+    const logger = { append: async (event: any) => ({ ...event, id: 21 }) } as EventLogger;
+    const values = Array.from({ length: 50 }, (_, index) => ({ id: index, text: "汉\n\u0000".repeat(70) }));
+    const result = await compactToolResult({ ok: true, result: values }, { logger }) as any;
+    const limit = result.access.limit;
+    expect(limit).toBeGreaterThan(0); expect(limit).toBeLessThan(50);
+    expect(result.resultAccess.limit).toBe(limit);
+    const selected = { ok: true, result: values.slice(0, limit) };
+    expect(new TextEncoder().encode(JSON.stringify(selected)).byteLength).toBeLessThan(8192);
+    expect(await compactToolResult(selected, { logger })).toEqual(selected);
+
+    const huge = { id: "long", line: "字".repeat(30_000) };
+    const oversized = await compactToolResult({ ok: true, result: [huge] }, { logger }) as any;
+    expect(oversized).toMatchObject({ access: { path: ["result"], limit: 1 }, oversizedItem: { path: ["result", 0], guidance: expect.stringContaining("bounded substrings") }, resultOversizedItem: { path: ["result", 0] } });
+  });
+
+  it("recommends a JSON-byte-bounded string prefix without splitting a Unicode pair", async () => {
+    const logger = { append: async (event: any) => ({ ...event, id: 22 }) } as EventLogger;
+    const value = "汉\n\u0000😀".repeat(4000);
+    const result = await compactToolResult({ ok: true, result: value }, { logger }) as any;
+    expect(result.access.limit).toBeGreaterThan(0); expect(result.access.limit).toBeLessThan(4000);
+    expect(result.resultAccess.limit).toBe(result.access.limit);
+    const prefix = value.slice(0, result.access.limit);
+    expect(prefix).not.toMatch(/[\uD800-\uDBFF]$/);
+    const selected = { ok: true, result: prefix };
+    expect(new TextEncoder().encode(JSON.stringify(selected)).byteLength).toBeLessThan(8192);
+    expect(await compactToolResult(selected, { logger })).toEqual(selected);
   });
 
   it("bounds a failed job while retaining error identity, cursor and artifact access", async () => {
@@ -400,30 +429,32 @@ describe("browser tools", () => {
   it("keeps frame pagination visible when a large frame list is compacted", async () => {
     const logger = { append: async (event: any) => ({ ...event, id: 17 }) } as EventLogger;
     const frames = Array.from({ length: 100 }, (_, index) => ({ frameRef: `frame-${index}`, url: "x".repeat(160) }));
-    const result = await compactToolResult({ tabId: 41, documentId: 2, total: 200, frames, hasMore: true, nextCursor: "cursor" }, { logger, preserveSearchStatus: true });
-    expect(result).toMatchObject({ $ref: 17, tabId: 41, documentId: 2, total: 200, hasMore: true, nextCursor: "cursor", access: { artifactId: 17, path: ["frames"], offset: 0, limit: 50 } });
+    const result = await compactToolResult({ tabId: 41, documentId: 2, total: 200, frames, hasMore: true, nextCursor: "cursor" }, { logger, preserveSearchStatus: true }) as any;
+    expect(result).toMatchObject({ $ref: 17, tabId: 41, documentId: 2, total: 200, hasMore: true, nextCursor: "cursor", access: { artifactId: 17, path: ["frames"], offset: 0, limit: expect.any(Number) } });
+    expect(result.access.limit).toBeLessThan(50);
+    expect(new TextEncoder().encode(JSON.stringify({ ok: true, result: frames.slice(0, result.access.limit) })).byteLength).toBeLessThan(8192);
   });
 
   it("keeps long inspection continuation and fragment access visible", async () => {
     const logger = { append: async (event: any) => ({ ...event, id: 18 }) } as EventLogger;
-    const fragments = Array.from({ length: 50 }, (_, index) => ({ index, id: `node-${index}`, start: 0, end: 250, total: 250, complete: true, line: "x".repeat(250) }));
-    const value = { observationId: "obs", tabId: 41, documentId: 3, mode: "full", fragments, nextCursor: "cursor", truncation: { truncated: true, total: 100, returned: 50, budget: 15000, used: 14000, reason: "budget", baselineComplete: false } };
+    const items = Array.from({ length: 50 }, (_, index) => ({ id: `node-${index}`, line: "x".repeat(250) }));
+    const value = { observationId: "obs", tabId: 41, documentId: 3, mode: "full", items, nextCursor: "cursor", truncation: { truncated: true, total: 100, returned: 50, budget: 15000, used: 14000, reason: "budget", baselineComplete: false } };
     const result = await compactToolResult(value, { logger, preserveInspectionStatus: true });
-    expect(result).toMatchObject({ $ref: 18, observationId: "obs", tabId: 41, documentId: 3, mode: "full", nextCursor: "cursor", truncation: { truncated: true, reason: "budget", baselineComplete: false }, access: { artifactId: 18, path: ["fragments"], offset: 0, limit: 50 } });
+    expect(result).toMatchObject({ $ref: 18, observationId: "obs", tabId: 41, documentId: 3, mode: "full", nextCursor: "cursor", truncation: { truncated: true, reason: "budget", baselineComplete: false }, access: { artifactId: 18, path: ["items"], offset: 0, limit: expect.any(Number) } });
   });
 
   it("keeps request history integrity and access visible after compaction", async () => {
     const logger = { append: async (event: any) => ({ ...event, id: 19 }) } as EventLogger;
     const requests = Array.from({ length: 100 }, (_, index) => ({ requestRef: `request-${index}`, url: "x".repeat(160) }));
     const result = await compactToolResult({ ok: true, result: { requests, integrity: "incomplete", hasMore: null, reason: "diagnostic-log-incomplete" } }, { logger, preserveDiagnosticStatus: true });
-    expect(result).toMatchObject({ $ref: 19, integrity: "incomplete", hasMore: null, reason: "diagnostic-log-incomplete", access: { artifactId: 19, path: ["result", "requests"], offset: 0, limit: 50 } });
+    expect(result).toMatchObject({ $ref: 19, integrity: "incomplete", hasMore: null, reason: "diagnostic-log-incomplete", access: { artifactId: 19, path: ["result", "requests"], offset: 0, limit: expect.any(Number) } });
   });
 
   it("keeps console history integrity and access visible after compaction", async () => {
     const logger = { append: async (event: any) => ({ ...event, id: 20 }) } as EventLogger;
     const messages = Array.from({ length: 100 }, (_, index) => ({ index, text: "x".repeat(160) }));
     const result = await compactToolResult({ ok: true, result: { messages, integrity: "incomplete", hasMore: true, nextOffset: 100, reason: "diagnostic-log-incomplete" } }, { logger, preserveDiagnosticStatus: true });
-    expect(result).toMatchObject({ $ref: 20, integrity: "incomplete", hasMore: true, nextOffset: 100, reason: "diagnostic-log-incomplete", access: { artifactId: 20, path: ["result", "messages"], offset: 0, limit: 50 } });
+    expect(result).toMatchObject({ $ref: 20, integrity: "incomplete", hasMore: true, nextOffset: 100, reason: "diagnostic-log-incomplete", access: { artifactId: 20, path: ["result", "messages"], offset: 0, limit: expect.any(Number) } });
   });
 
   it("keeps a large search page's scope and continuation visible", async () => {
@@ -431,7 +462,7 @@ describe("browser tools", () => {
     const elements = Array.from({ length: 100 }, (_, index) => ({ ref: `ref-${index}`, role: "button", name: "x".repeat(160) }));
     const value = { tabId: 41, documentId: 2, total: 200, elements, hasMore: true, nextCursor: "cursor" };
     const result = await compactToolResult(value, { logger, preserveSearchStatus: true });
-    expect(result).toMatchObject({ $ref: 16, tabId: 41, documentId: 2, total: 200, hasMore: true, nextCursor: "cursor", access: { artifactId: 16, path: ["elements"], offset: 0, limit: 50 } });
+    expect(result).toMatchObject({ $ref: 16, tabId: 41, documentId: 2, total: 200, hasMore: true, nextCursor: "cursor", access: { artifactId: 16, path: ["elements"], offset: 0, limit: expect.any(Number) } });
     expect(new TextEncoder().encode(JSON.stringify(result)).byteLength).toBeLessThan(6000);
   });
 
@@ -439,7 +470,7 @@ describe("browser tools", () => {
     const logger = { append: async (event: any) => ({ ...event, id: 12 }) } as EventLogger;
     const value = { id: "job", state: "succeeded", terminal: true, ok: true, result: "done", nextCursor: 42, hasMore: false, events: [{ output: "x".repeat(10_000) }] };
     const result = await compactToolResult(value, { logger, preserveJobStatus: true });
-    expect(result).toMatchObject({ $ref: 12, id: "job", state: "succeeded", terminal: true, ok: true, nextCursor: 42, hasMore: false, preview: { eventCount: 1 }, access: { artifactId: 12, path: ["events"], offset: 0, limit: 50 }, resultAccess: { artifactId: 12, path: ["result"], offset: 0, limit: 4000 } });
+    expect(result).toMatchObject({ $ref: 12, id: "job", state: "succeeded", terminal: true, ok: true, nextCursor: 42, hasMore: false, preview: { eventCount: 1 }, access: { artifactId: 12, path: ["events"], offset: 0, limit: 1 }, oversizedItem: { path: ["events", 0] }, resultAccess: { artifactId: 12, path: ["result"], offset: 0, limit: 4000 } });
     expect(JSON.stringify(result)).not.toContain("x".repeat(100));
   });
 

@@ -67,12 +67,12 @@ test("uses a large observation from the real side panel before acting on its ref
       (request) => {
         const message = request.messages.findLast((entry: any) => entry.role === "tool");
         const ref = JSON.parse(message.content).$ref;
-        return commandResponse("execute_program", { code: `return await artifacts.read(${JSON.stringify(ref)}, {path:["snapshot"],offset:0,limit:4000});` }, "call-read-snapshot");
+        return commandResponse("execute_program", { code: `return await artifacts.read(${JSON.stringify(ref)}, {path:["items"],offset:0,limit:5});` }, "call-read-snapshot");
       },
       (request) => {
         const message = request.messages.findLast((entry: any) => entry.role === "tool");
-        const snapshot = JSON.parse(message.content).result;
-        const ref = /button "Run exact action" \[ref=(t\d+s[a-f0-9]+d\d+e\d+)\]/.exec(snapshot)?.[1];
+        const items = JSON.parse(message.content).result;
+        const ref = items.find((item: any) => item.line.includes('button "Run exact action"'))?.ref;
         if (!ref) throw new Error("The selected snapshot did not contain the target ref");
         return commandResponse("execute_program", { code: `await page.ref(${JSON.stringify(ref)}).click(); await page.locator('body[data-clicked=yes]').waitFor({state:'attached'});` }, "call-act-from-ref");
       },
@@ -89,7 +89,7 @@ test("uses a large observation from the real side panel before acting on its ref
       await new Promise((resolve) => setTimeout(resolve, 0));
       input.closest('form').requestSubmit();
     })()`);
-    await expect.poll(() => panel!.evaluate<string>('Array.from(document.querySelectorAll(".markdown-body")).at(-1)?.textContent || ""')).toContain("REAL_SIDE_PANEL_OK");
+    await expect.poll(() => panel!.evaluate<string>('Array.from(document.querySelectorAll(".markdown-body")).at(-1)?.textContent || ""'), { timeout: 45_000 }).toContain("REAL_SIDE_PANEL_OK");
     await expect.poll(() => target.locator("body").getAttribute("data-clicked")).toBe("yes");
 
     const events = await panel.evaluate<any[]>(`new Promise((resolve, reject) => {
@@ -102,9 +102,9 @@ test("uses a large observation from the real side panel before acting on its ref
     })`);
     const data = events.filter((event) => event.type === "tool.result.data");
     expect(data).toHaveLength(1);
-    expect(data[0].output.snapshot.length).toBeGreaterThan(9_000);
+    expect(data[0].output.items.length).toBeGreaterThan(100);
     expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-large-observe")?.output).toMatchObject({ $ref: data[0].id });
-    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-read-snapshot")?.output.result).toContain('button "Run exact action" [ref=');
+    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-read-snapshot")?.output.result).toEqual(expect.arrayContaining([expect.objectContaining({ line: expect.stringContaining('button "Run exact action"'), ref: expect.any(String) })]));
     expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-act-from-ref")?.output).toMatchObject({ ok: true });
   } finally {
     await panel?.close();

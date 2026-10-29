@@ -35,14 +35,14 @@ const programActions: Readonly<Record<string, string>> = { doubleClick: "dblclic
  */
 export function renderSnapshotNode(
   node: SnapshotNode,
-  options: { fields?: readonly SnapshotField[]; actionNames?: "raw" | "program" } = {},
+  options: { fields?: readonly SnapshotField[]; actionNames?: "raw" | "program"; inlineRef?: boolean } = {},
 ): RenderedSnapshotNode {
   if (!Number.isSafeInteger(node.depth) || node.depth < 0) throw new RangeError("Snapshot depth must be a nonnegative integer");
   const fields = new Set(options.fields ?? allFields);
   const name = node.name ?? "";
   const value = node.value ?? "";
   let line = `${"  ".repeat(node.depth)}- ${node.role}${fields.has("text") && name ? ` ${quote(name)}` : ""}`;
-  if (fields.has("ref") && node.ref) line += ` [ref=${node.ref}]`;
+  if (fields.has("ref") && node.ref && options.inlineRef !== false) line += ` [ref=${node.ref}]`;
   if (fields.has("actions") && node.actions?.length) {
     const actions = options.actionNames === "program" ? node.actions.map((action) => programActions[action] ?? action) : node.actions;
     line += ` [actions=${actions.join(",")}]`;

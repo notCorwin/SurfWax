@@ -119,7 +119,7 @@ test("publishes atomic tools, defaults vision inspection to text, and captures p
       ).output,
     ).toMatchObject({
       mode: "full",
-      snapshot: expect.any(String),
+      items: expect.any(Array),
       tabId: expect.any(Number),
       documentId: expect.any(Number),
     });
@@ -306,6 +306,7 @@ return await artifacts.save(artifact.id);
 
 test("keeps network domains explicit, exposes protocol and tabs, and rejects stale document refs", async () => {
   let baseline: any;
+  let ref = "";
   const responses: any[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -313,15 +314,33 @@ test("keeps network domains explicit, exposes protocol and tabs, and rejects sta
     commandResponse("inspect_page", {}, "owned-baseline"),
     (request: any) => {
       baseline = lastTool(request);
-      const ref = /button "Sign in" \[ref=([^\]]+)\]/.exec(
-        baseline.snapshot,
-      )![1];
+      ref = baseline.items.find((item: any) => item.line.includes('button "Sign in"')).ref;
+      return commandResponse(
+        "execute_program",
+        {
+          timeoutMs: 20000,
+          code: `let denied = false; try { await net.fetch({context:'page',url:${JSON.stringify(provider.origin.replace("127.0.0.1", "localhost") + "/frame")}}); } catch { denied = true; } await check(denied,'page CORS must reject'); return denied;`,
+        },
+        "page-cors-unknown",
+      );
+    },
+    (request: any) => {
+      expect(lastTool(request)).toMatchObject({ ok: false, error: { effectUnknown: true } });
+      return commandResponse("click", { target: { ref } }, "ref-after-unknown");
+    },
+    (request: any) => {
+      expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "stale-ref" } });
+      return commandResponse("inspect_page", {}, "owned-rebaseline");
+    },
+    (request: any) => {
+      baseline = lastTool(request);
+      ref = baseline.items.find((item: any) => item.line.includes('button "Sign in"')).ref;
       return commandResponse(
         "execute_program",
         {
           timeoutMs: 20000,
           code: `
-let denied = false; try { await net.fetch({context:'page',url:${JSON.stringify(provider.origin.replace("127.0.0.1", "localhost") + "/frame")}}); } catch { denied = true; } await check(denied,'page CORS must reject');
+await check(await page.ref(${JSON.stringify(ref)}).isVisible(), 'the new baseline ref is valid before navigation');
 const fetched = await net.fetch({context:'extension',url:${JSON.stringify(provider.origin.replace("127.0.0.1", "localhost") + "/frame")}}); await check(fetched.ok && fetched.body.includes('Frame action'));
 const isolated = await browser.runIn({kind:'page',tabId:page.tabId,world:'ISOLATED'}, "globalThis.onlyIsolated=7; return onlyIsolated;");
 let worldRequired = false; try { await browser.runIn({kind:'page',tabId:page.tabId},'return true;'); } catch(error) { worldRequired = error.message.includes('explicit'); } await check(worldRequired);
@@ -721,16 +740,12 @@ test("composes form operations and returns only text changes with owned referenc
     commandResponse("inspect_page", {}, "form-before"),
     (request) => {
       const observation = lastTool(request);
-      const email = /textbox "Email" \[ref=([^\]]+)\]/.exec(
-        observation.snapshot,
-      )![1];
-      const button = /button "Sign in" \[ref=([^\]]+)\]/.exec(
-        observation.snapshot,
-      )![1];
+      const email = observation.items.find((item: any) => item.line.includes('textbox "Email"')).ref;
+      const button = observation.items.find((item: any) => item.line.includes('button "Sign in"')).ref;
       return commandResponse(
         "execute_program",
         {
-          code: `const full=await page.snapshot(); await check(full.tabId === page.tabId && full.snapshot.includes(${JSON.stringify(`[ref=${email}]`)}) && !full.snapshot.includes('[ref=e')); await page.ref(${JSON.stringify(email)}).fill('me@example.com'); await page.ref(${JSON.stringify(button)}).click(); await check((await page.locator('output').innerText()).includes('Welcome me@example.com')); return await page.inspect({ since: ${JSON.stringify(observation.observationId)} });`,
+          code: `const full=await page.snapshot(); await check(full.tabId === page.tabId && full.items.some(item => item.ref === ${JSON.stringify(email)})); await page.ref(${JSON.stringify(email)}).fill('me@example.com'); await page.ref(${JSON.stringify(button)}).click(); await check((await page.locator('output').innerText()).includes('Welcome me@example.com')); return await page.inspect({ since: ${JSON.stringify(observation.observationId)} });`,
         },
         "form-batch",
       );
@@ -760,12 +775,12 @@ test("composes form operations and returns only text changes with owned referenc
       ok: true,
       result: {
         mode: "delta",
-        changes: expect.any(Array),
+        items: expect.any(Array),
         truncation: { truncated: false },
       },
     });
     expect(result.result).not.toHaveProperty("snapshot");
-    expect(JSON.stringify(result.result.changes)).toContain(
+    expect(JSON.stringify(result.result.items)).toContain(
       "Welcome me@example.com",
     );
     expect(

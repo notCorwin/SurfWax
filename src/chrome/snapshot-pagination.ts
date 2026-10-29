@@ -13,35 +13,59 @@ export type SnapshotPosition = Readonly<{ index: number; charOffset: number }>;
 
 /** Compare frozen snapshots in linear time, preserving their order and identity. */
 export function diffSnapshot(before: readonly SnapshotItem[], after: readonly SnapshotItem[]): SnapshotItem[] {
-  const prior = new Map<string, { line: string; predecessor?: string }>();
-  for (let index = 0; index < before.length; index++) {
-    const item = before[index]!;
-    const existing = prior.get(item.id);
-    if (existing) existing.line = item.line;
-    else prior.set(item.id, { line: item.line, predecessor: before[index - 1]?.id });
+  type Link = { id: string; item?: SnapshotItem; previous?: Link; next?: Link };
+  const head: Link = { id: "" };
+  const prior = new Map<string, Link>();
+  const current = new Set<string>();
+  for (const item of after) {
+    if (current.has(item.id)) throw new Error(`Duplicate semantic snapshot id: ${item.id}`);
+    current.add(item.id);
   }
-  const current = new Set(after.map(({ id }) => id));
-  const removed: SnapshotItem[] = [], changed: SnapshotItem[] = [], moved: SnapshotItem[] = [];
-  for (const item of before) if (!current.has(item.id)) removed.push({ ...item, change: "removed" });
-  for (let index = 0; index < after.length; index++) {
-    const item = after[index]!, previous = prior.get(item.id), predecessor = after[index - 1]?.id;
-    if (previous?.line !== item.line) changed.push({ ...item, change: previous ? "updated" : "added", after: predecessor ?? null });
-    if (previous && previous.predecessor !== predecessor) moved.push({ ...item, change: "moved", after: predecessor ?? null });
+  const changes: SnapshotItem[] = [];
+  let tail = head;
+  for (const item of before) {
+    if (prior.has(item.id)) throw new Error(`Duplicate semantic snapshot id: ${item.id}`);
+    const node: Link = { id: item.id, item };
+    prior.set(item.id, node);
+    if (!current.has(item.id)) { changes.push({ ...item, change: "removed" }); continue; }
+    node.previous = tail; tail.next = node; tail = node;
   }
-  return [...removed, ...changed, ...moved];
+  let predecessor = head;
+  for (const item of after) {
+    const node = prior.get(item.id);
+    if (!node) {
+      const added: Link = { id: item.id, item, previous: predecessor, next: predecessor.next };
+      if (added.next) added.next.previous = added;
+      predecessor.next = added;
+      changes.push({ ...item, change: "added", after: predecessor === head ? null : predecessor.id });
+      predecessor = added;
+      continue;
+    }
+    const changed = node.item!.line !== item.line || node.item!.ref !== item.ref;
+    const moved = node.previous !== predecessor;
+    if (changed || moved) {
+      changes.push({ ...item, change: changed ? "updated" : "moved", after: predecessor === head ? null : predecessor.id });
+      if (moved) {
+        node.previous!.next = node.next;
+        if (node.next) node.next.previous = node.previous;
+        node.previous = predecessor; node.next = predecessor.next;
+        if (node.next) node.next.previous = node;
+        predecessor.next = node;
+      }
+    }
+    predecessor = node;
+  }
+  return changes;
 }
 
 export type SnapshotFragment = Readonly<{
-  index: number;
   id: string;
   ref?: string;
   change?: SnapshotItem["change"];
   after?: string | null;
-  start: number;
-  end: number;
-  total: number;
-  complete: boolean;
   line: string;
+  /** Present only when this is part of a line, with UTF-16 offsets. */
+  fragment?: Readonly<{ index: number; start: number; end: number; total: number }>;
 }>;
 
 export type SnapshotPage = Readonly<{
@@ -100,30 +124,40 @@ export function paginateSnapshot(
   while (index < items.length && fragments.length < limit) {
     const item = items[index]!;
     const makeFragment = (end: number): SnapshotFragment => ({
-      index, id: item.id, ...(item.ref === undefined ? {} : { ref: item.ref }), ...(item.change === undefined ? {} : { change: item.change }),
-      ...(item.after === undefined ? {} : { after: item.after }),
-      start: charOffset, end, total: item.line.length, complete: end === item.line.length,
-      line: item.line.slice(charOffset, end),
+      id: item.id, ...(item.ref === undefined ? {} : { ref: item.ref }), ...(item.change === undefined ? {} : { change: item.change }),
+      ...(item.after === undefined ? {} : { after: item.after }), line: item.line.slice(charOffset, end),
+      ...(charOffset === 0 && end === item.line.length ? {} : { fragment: { index, start: charOffset, end, total: item.line.length } }),
     });
     const separator = fragments.length ? 1 : 0;
     const fits = (end: number): boolean => usedBytes + separator + jsonBytes(makeFragment(end)) <= budget;
     // A UTF-16 code unit costs at least one UTF-8 JSON byte; this bound avoids
     // repeatedly encoding an enormous line when the requested budget is small.
-    let low = charOffset, high = Math.min(item.line.length, charOffset + budget);
-    while (low < high) {
-      const middle = Math.ceil((low + high) / 2);
-      if (fits(boundaryBefore(item.line, middle))) low = middle;
-      else high = middle - 1;
+    let end: number;
+    // A complete line omits fragment metadata and can fit even where a
+    // nearly-complete fragment cannot. Check it separately before searching.
+    if (item.line.length - charOffset <= budget && fits(item.line.length)) end = item.line.length;
+    else {
+      let low = charOffset, high = Math.min(item.line.length - 1, charOffset + budget);
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        if (fits(boundaryBefore(item.line, middle))) low = middle;
+        else high = middle - 1;
+      }
+      end = boundaryBefore(item.line, low);
     }
-    const end = boundaryBefore(item.line, low);
     if (!fits(end) || end === charOffset && charOffset < item.line.length) {
-      if (!fragments.length) requiredBudget = 2 + jsonBytes(makeFragment(nextBoundary(item.line, charOffset)));
+      if (!fragments.length) {
+        const first = 2 + jsonBytes(makeFragment(nextBoundary(item.line, charOffset)));
+        // A short whole line can cost less than its first fragment because it
+        // does not require fragment metadata.
+        requiredBudget = item.line.length - charOffset <= first ? Math.min(first, 2 + jsonBytes(makeFragment(item.line.length))) : first;
+      }
       break;
     }
     const fragment = makeFragment(end);
     fragments.push(fragment);
     usedBytes += separator + jsonBytes(fragment);
-    if (fragment.complete) { index += 1; charOffset = 0; }
+    if (end === item.line.length) { index += 1; charOffset = 0; }
     else { charOffset = end; break; }
   }
   const hasMore = index < items.length;

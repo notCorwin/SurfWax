@@ -49,11 +49,11 @@ test("continues a frozen long semantic line without interpreting page text as a 
     await expect(opened.page.locator(".markdown-body").last()).toContainText("SEMANTIC_CONTINUATION_OK", { timeout: 45_000 });
     const events = await readEvents(opened.page);
     const outputs = events.filter((event) => ["tool.finished", "tool.result.data"].includes(event.type))
-      .map((event) => event.output).filter((output) => output?.observationId === observationId && Array.isArray(output.fragments));
-    const fragments = outputs.flatMap((output) => output.fragments);
+      .map((event) => event.output).filter((output) => output?.observationId === observationId && Array.isArray(output.items));
+    const fragments = outputs.flatMap((output) => output.items);
     const start = fragments.find((fragment) => fragment.line.includes("SURF_LONG_START"));
     expect(start?.ref).toMatch(/^t\d+s[a-f0-9]+d\d+e\d+$/);
-    const pieces = fragments.filter((fragment) => fragment.id === start.id).sort((a, b) => a.start - b.start);
+    const pieces = fragments.filter((fragment) => fragment.id === start.id).sort((a, b) => a.fragment.start - b.fragment.start);
     const reconstructed = pieces.map((fragment) => fragment.line).join("");
     expect(reconstructed).toContain(original);
     expect(reconstructed).not.toContain("CHANGED_AFTER_CAPTURE");

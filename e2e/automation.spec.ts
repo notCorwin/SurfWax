@@ -88,8 +88,8 @@ test("inspects the page and fills and clicks with atomic tools", async () => {
     const events = await readEvents(opened.page);
     const observation = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-snapshot")?.output;
     const verified = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-verify")?.output;
-    expect(observation).toMatchObject({ snapshot: expect.stringMatching(/\[ref=t\d+s[a-f0-9]+d\d+e\d+/) });
-    expect(verified).toMatchObject({ snapshot: expect.stringContaining("Welcome me@example.com") });
+    expect(observation.items).toEqual(expect.arrayContaining([expect.objectContaining({ ref: expect.stringMatching(/^t\d+s[a-f0-9]+d\d+e\d+$/) })]));
+    expect(verified.items).toEqual(expect.arrayContaining([expect.objectContaining({ line: expect.stringContaining("Welcome me@example.com") })]));
     await expect.poll(() => target.locator("output").textContent()).toBe("Welcome me@example.com");
     expect(events.some((event) => event.type === "automation.action.finished" && event.toolCallId === "call-click")).toBe(true);
     const toolNames = provider.requests[0].tools.map((tool: any) => tool.function.name);
@@ -1107,7 +1107,7 @@ test("rejects detached snapshot references and negative locator indexes below th
     commandResponse("inspect_page", {}, "original-ref"),
     (request) => {
       const message = request.messages.findLast((message: any) => message.role === "tool");
-      ref = /button "Sign in" \[ref=(t\d+s[a-f0-9]+d\d+e\d+)\]/.exec(JSON.parse(message.content).snapshot)![1]!;
+      ref = JSON.parse(message.content).items.find((item: any) => item.line.includes('button "Sign in"')).ref;
       return commandResponse("execute_program", { code: `return await (page.getByRole('button', { name: 'Sign in' }).evaluate("button => { const replacement = button.cloneNode(true); replacement.onclick = () => document.body.dataset.replacementClicked = 'yes'; button.replaceWith(replacement); }"));` }, "replace-ref");
     },
     () => commandResponse("execute_program", { code: `return await page.ref(${JSON.stringify(ref)}).click();`, timeoutMs: 1000 }, "detached-ref"),
@@ -1201,7 +1201,7 @@ for (const format of ["legacy-user-tools", "system-tools"] as const) test(`conti
     expect(events.some(event => event.type === "automation.action.started" && event.toolCallId === "removed-old-entry")).toBe(false);
     expect(events.find(event => event.type === "tool.finished" && event.toolCallId === "current-entry")?.output).toMatchObject({ ok: true, state: "succeeded", result: 1 });
     expect(events.some(event => event.type === "browser.job.progress" && event.toolCallId === "current-entry" && event.content.operation === "check" && event.content.state === "verified")).toBe(true);
-    expect(events.filter(event => event.type === "context.prompt.updated").at(-1)?.content).toMatchObject({ migratedFrom: "formal-49-v2", prompt: { catalogVersion: "atomic-tools-v9", format: "system-tools" } });
+    expect(events.filter(event => event.type === "context.prompt.updated").at(-1)?.content).toMatchObject({ migratedFrom: "formal-49-v2", prompt: { catalogVersion: "atomic-tools-v10", format: "system-tools" } });
     const requests = provider.requests.filter(request => request.tools);
     expect(requests).toHaveLength(3);
     for (const request of requests) expect(request.tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "execute_program", "list_jobs", "get_job", "cancel_job"]));

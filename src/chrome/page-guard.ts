@@ -21,8 +21,15 @@ export async function guardActivePage(signal: AbortSignal): Promise<() => void> 
     catch { pending.delete(id); resolve(); }
   });
   const bridge = {
-    mark: (tabId: number) => request(tabId),
+    mark: async (tabId: number) => {
+      await request(tabId);
+      // A document replacement may already have scheduled a repair when a
+      // subsequent action marks the same tab. Do not dispatch that action
+      // until all changes observed during the repair have been processed.
+      while (repairs.has(tabId)) await repairs.get(tabId)!.promise;
+    },
     refresh: (tabId: number): Promise<void> => {
+      if (!connected || signal.aborted || !Number.isInteger(tabId)) return Promise.resolve();
       let repair = repairs.get(tabId);
       if (repair) { repair.dirty = true; return repair.promise; }
       repair = { dirty: true, promise: Promise.resolve() };

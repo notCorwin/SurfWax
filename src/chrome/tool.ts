@@ -10,7 +10,7 @@ const elementTargetObject = z.union([
   z.object({ ref: z.string().min(1) }).strict(),
   z.object({ by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testId", "css"]), value: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional(), index: z.number().int().optional(), frame: z.union([z.object({ by: z.literal("css"), value: z.string().min(1) }).strict(), z.object({ ref: z.string().min(1) }).strict()]).optional() }).strict(),
 ]);
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v9";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v10";
 export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetObject]).optional(),
   fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional(), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
@@ -35,8 +35,8 @@ const handleDialogInputSchema = z.object({ dialogId: z.string().min(1), accept: 
 
 type ToolDefinition = { name: string; inputSchema: z.ZodType<any>; summary: string; description: string; program?: (input: any) => { code: string; timeoutMs?: number; background?: boolean } };
 export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
-  { name: "inspect_page", inputSchema: inspectInputSchema, summary: "Read the semantic page with stable element refs", description: "Inspect semantic text and stable refs. region and fields narrow the result; since reads changes. budget limits UTF-8 JSON fragment bytes. Continue a frozen snapshot with nextCursor using cursor, tabId, budget and limit only; split lines return fragments with offsets. Use take_screenshot for visual input." },
-  { name: "find_elements", inputSchema: findElementsInputSchema, summary: "Find candidates and return stable element refs", description: "Find matching elements with stable refs for actions. limit defaults to 25, max 100; repeat the same target and tab with nextCursor to read a fixed snapshot. Removed elements are marked detached. Cursors expire on run or document changes or eviction." },
+  { name: "inspect_page", inputSchema: inspectInputSchema, summary: "Read the semantic page and element refs", description: "Inspect semantic items with id, line and optional ref. For since, remove removed ids and upsert added, updated or moved items immediately after their after id (null means first). Reassemble split items using their UTF-16 fragment offsets before applying changes. A ref identifies a DOM node, which may be reused for different business data; verify relevant row and page state before acting. region and fields narrow results. budget limits UTF-8 JSON items bytes. Continue a frozen snapshot with nextCursor using cursor, tabId, budget and limit only. Use take_screenshot for visual input." },
+  { name: "find_elements", inputSchema: findElementsInputSchema, summary: "Find candidates and return element refs", description: "Find matching elements with refs for actions. A ref identifies a DOM node, which may be reused for different business data; verify relevant row and page state before acting. limit defaults to 25, max 100; repeat the same target and tab with nextCursor to page a fixed node list. Details may change or become stale between pages; removed elements are marked detached. Cursors expire on run or document changes or eviction." },
   { name: "list_frames", inputSchema: listFramesInputSchema, summary: "List frames and their document-bound refs", description: "List the selected tab's frame tree with refs usable as target.frame.ref. limit defaults to 25, max 100; pass nextCursor to continue a fixed snapshot. References and cursors expire on document or frame changes." },
   ...ATOMIC_TOOL_REGISTRY,
   { name: "list_downloads", inputSchema: listDownloadsInputSchema, summary: "Read Chrome's current download records", description: "List download metadata across the Chrome profile. limit defaults to 100; 0 requests all records. hasMore reports truncation. The list is live and Chrome's exists field may be stale; metadata does not provide file bytes." },
@@ -51,7 +51,7 @@ export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
   { name: "cancel_job", inputSchema: cancelJobInputSchema, summary: "Request cancellation of a job", description: "Cancel a job in the current conversation. Cancellation does not roll back dispatched effects." },
 ]);
 export const PROGRAM_API = `execute_program API (async JavaScript body; no function wrapper required):
-page: tabId; inspect(options?, regionLocator?); snapshot(); observe('semantic'|'visual'); ref/locator/frameLocator/frameRef/getByRole/getByText/getByLabel/getByPlaceholder/getByAltText/getByTitle/getByTestId; goto/reload/goBack/goForward; url/title; evaluate(functionOrString,arg?); waitForURL/waitForLoadState/waitForEvent('dialog'|'popup'|'download'|'filechooser'); point(observationId,x,y,'click'|'dblclick'|'hover',options?); upload(files); drop(target,{files?,data?}); screenshot(options?); pdf({filename?,save?}); keyboard.press/insertText/down/up; mouse.move/down/up/wheel.
+page: tabId; inspect(options?, regionLocator?); snapshot(); observe('semantic'|'visual'); ref/locator/frameLocator/frameRef/getByRole/getByText/getByLabel/getByPlaceholder/getByAltText/getByTitle/getByTestId; goto/reload/goBack/goForward; url/title; evaluate(functionOrString,arg?); waitForURL/waitForLoadState/waitForEvent('dialog'|'popup'|'download'|'filechooser'); point(observationId,x,y,'click'|'dblclick'|'hover',options?); upload(files); drop(target,{files?,data?}); screenshot(options?); pdf({filename?,save?}); keyboard.press/insertText/down/up; mouse.move/down/up/wheel. inspect, snapshot and semantic observe return items with AX ids. For delta remove removed ids; upsert added/updated/moved immediately after after (null=first). Reassemble split items using UTF-16 fragment offsets before applying. Element refs identify DOM nodes, not business records: a reused node may represent different data. waitForLoadState throws load-state-unknown when lifecycle cannot be verified after attaching; inspect the target element or wait for a new navigation.
 locators: chain/filter/first/last/nth, count/waitFor/click/dblclick/hover/fill/clear/press/pressSequentially/check/uncheck/selectOption/dragTo/setInputFiles/focus/blur/scrollIntoViewIfNeeded/textContent/innerText/inputValue/getAttribute/isVisible/isEnabled/isChecked/evaluate. dragTo supports pointer drags; native HTML5 draggable sources are unavailable while the interaction blocker is active. Files: {name,mimeType?,text|base64|url}; artifacts.read supplies existing file data. Event handles: chooser.isMultiple()/setFiles(files), dialog.type()/message()/defaultValue()/accept(prompt?)/dismiss(), popup is a page. Start event waits before the action, then await them.
 browser: page(tabId); tabs.list()/open(url?)/select(tabId)/close(tabId); scripts.list()/read(id)/create(definition)/edit(id,changes)/setEnabled(id,enabled)/delete(id). Scripts use Chrome RegisteredUserScript fields including matches, js:[{code|file}], world:MAIN|USER_SCRIPT, runAt, allFrames, include/excludeGlobs/Matches, worldId. Persisted enablement is restored at startup/upgrade; Allow User Scripts must already be enabled.
 browser.runIn({kind:'page',tabId,world:'MAIN'|'ISOLATED'|'USER_SCRIPT',frameId?,documentId?},codeBody): explicit execution domain. MAIN/ISOLATED root only; USER_SCRIPT supports Chrome frameId or documentId. Use frameLocator.evaluate for arbitrary supported frames. No automatic context substitution.
@@ -332,6 +332,34 @@ function previewString(value: string, maxCharacters: number, maxBytes: number): 
   }
   return value.slice(0, low);
 }
+
+/** Recommend a slice small enough for a normal tool-result envelope as well. */
+function artifactAccess(artifactId: number, path: readonly (string | number)[] | undefined, value: unknown): {
+  access: { artifactId: number; path?: readonly (string | number)[]; offset?: number; limit?: number };
+  oversizedItem?: { path: readonly (string | number)[]; guidance: string };
+} {
+  const access: { artifactId: number; path?: readonly (string | number)[]; offset?: number; limit?: number } = { artifactId, ...(path ? { path } : {}) };
+  if (typeof value === "string") {
+    let length = previewString(value, 4000, PREVIEW_BYTES).length;
+    if (length && length < value.length && /[\uD800-\uDBFF]/.test(value[length - 1]!) && /[\uDC00-\uDFFF]/.test(value[length]!)) length -= 1;
+    return { access: { ...access, offset: 0, limit: length === value.length ? 4000 : length } };
+  }
+  if (!Array.isArray(value)) return { access };
+  let used = 2, count = 0;
+  for (const item of value.slice(0, 50)) {
+    // JSON arrays encode undefined values as null; count the actual wire bytes.
+    const bytes = previewEncoder.encode(JSON.stringify(item) ?? "null").byteLength;
+    if (used + (count ? 1 : 0) + bytes > PREVIEW_BYTES) break;
+    used += (count ? 1 : 0) + bytes;
+    count += 1;
+  }
+  const limit = count === value.length ? 50 : Math.max(1, count);
+  if (count || value.length === 0) return { access: { ...access, offset: 0, limit } };
+  return { access: { ...access, offset: 0, limit: 1 }, oversizedItem: {
+    path: [...(path ?? []), 0],
+    guidance: "The first item exceeds the recommended byte budget. Use execute_program with artifacts.read on this item and return only selected fields or bounded substrings; do not return the entire item.",
+  } };
+}
 function previewOf(value: unknown, path?: readonly (string | number)[]): unknown {
   const selected = path ? valueAt(value, path) : value;
   if (typeof selected === "string") return previewString(selected, 4000, PREVIEW_BYTES);
@@ -369,14 +397,15 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
   const errorPath = root && Object.hasOwn(root, "error") ? ["error"] : ["result", "error"];
   const error = failure ? valueAt(value, errorPath) : undefined;
   const path = diagnostic && Array.isArray(diagnostic.requests) ? ["result", "requests"] : diagnostic && Array.isArray(diagnostic.messages) ? ["result", "messages"] : job && Array.isArray(job.events) ? ["events"] : search && Array.isArray(search.elements) ? ["elements"] : search && Array.isArray(search.frames) ? ["frames"]
-    : inspection && Array.isArray(inspection.fragments) ? ["fragments"] : inspection && Array.isArray(inspection.changes) ? ["changes"] : readablePathOf(value);
+    : inspection && Array.isArray(inspection.items) ? ["items"] : readablePathOf(value);
   const selected = path ? valueAt(value, path) : value;
-  const access = { artifactId: event.id, ...(path ? { path } : {}), ...(typeof selected === "string" ? { offset: 0, limit: 4000 } : Array.isArray(selected) ? { offset: 0, limit: 50 } : {}) };
+  const { access, oversizedItem } = artifactAccess(event.id, path, selected);
+  const resultRead = root && Object.hasOwn(root, "result") ? artifactAccess(event.id, ["result"], root.result) : undefined;
   const verification = options.preserveVerification && value && typeof value === "object" && "result" in value
     ? (value as { result?: { verified?: unknown; timedOut?: unknown; present?: unknown } }).result : undefined;
   const handoff = value && typeof value === "object" && (value as any).accepted === true && (value as any).complete === false && typeof (value as any).jobId === "string" ? value as Record<string, any> : undefined;
   const blocked = handoff?.blockedBy;
-  return { $ref: event.id, bytes, preview: job ? { eventCount: Array.isArray(job.events) ? job.events.length : 0 } : handoff || visual && typeof selected !== "string" ? undefined : previewOf(value, path), access, type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value,
+  return { $ref: event.id, bytes, preview: job ? { eventCount: Array.isArray(job.events) ? job.events.length : 0 } : handoff || visual && typeof selected !== "string" ? undefined : previewOf(value, path), access, ...(oversizedItem ? { oversizedItem } : {}), type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value,
     ...(job ? jobMetadata(job) : {}),
     ...(search ? searchMetadata(search) : {}),
     ...(inspection ? inspectionMetadata(inspection) : {}),
@@ -384,8 +413,7 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
       ...(typeof diagnostic.hasMore === "boolean" || diagnostic.hasMore === null ? { hasMore: diagnostic.hasMore } : {}),
       ...(Number.isSafeInteger(diagnostic.nextOffset) && Number(diagnostic.nextOffset) >= 0 ? { nextOffset: diagnostic.nextOffset } : {}),
       ...(exactText(diagnostic.reason, 128) !== undefined ? { reason: diagnostic.reason } : {}) } : {}),
-    ...(root && Object.hasOwn(root, "result") ? { resultAccess: { artifactId: event.id, path: ["result"],
-      ...(typeof root.result === "string" ? { offset: 0, limit: 4000 } : Array.isArray(root.result) ? { offset: 0, limit: 50 } : {}) } } : {}),
+    ...(resultRead ? { resultAccess: resultRead.access, ...(resultRead.oversizedItem ? { resultOversizedItem: resultRead.oversizedItem } : {}) } : {}),
     ...(failure ? { ...(root?.ok === false ? { ok: false } : {}), ...(root?.type === "tool-error" ? { type: "tool-error" } : {}),
       ...failureMetadata(root!),
       ...(Object.hasOwn(root!, "receipts") ? { receiptsAccess: { artifactId: event.id, path: ["receipts"] } } : {}),

@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { AutomationRuntime } from "./automation";
 import { EventSubscriptions } from "./event-subscriptions";
 
+const inspectText = (value: any) => value.items.map((item: any) => item.line).join("\n");
+
 function event<T extends (...args: any[]) => void>() {
   const listeners = new Set<T>();
   return {
@@ -17,6 +19,7 @@ function harness(
   logger?: { record: ReturnType<typeof vi.fn> },
   onDispatch = vi.fn(async (): Promise<void> => undefined),
   claimChooser?: (chooser: any) => { assert: () => void; finish: (outcome: "handled" | "not-dispatched" | "uncertain") => void },
+  refreshGuard?: (tabId: number) => Promise<void>,
 ) {
   metadata ??= [{ role: "button", name: "Sign in", tag: "button", text: "Sign in" }];
   const calls: Array<{ method: string; params?: any }> = [];
@@ -25,6 +28,7 @@ function harness(
   const downloadsCreated = event<(item: chrome.downloads.DownloadItem) => void>();
   const command = vi.fn(async (_debuggee: chrome.debugger.Debuggee, method: string, params?: any): Promise<any> => {
     calls.push({ method, params });
+    if (method === "Performance.getMetrics") return { metrics: [{ name: "Timestamp", value: 0 }] };
     if (method === "Accessibility.getFullAXTree") return { nodes: [
       { nodeId: "root", role: { value: "RootWebArea" }, name: { value: "Test" }, childIds: metadata.map((_, index) => `node-${index}`) },
       ...metadata.map((item: any, index) => ({
@@ -60,6 +64,7 @@ function harness(
     command,
     detach,
     mark: vi.fn(async () => undefined),
+    refreshGuard,
     onDispatch,
     claimChooser,
     logger: logger as never,
@@ -84,24 +89,17 @@ describe("AutomationRuntime", () => {
     await expect(page.goto("about:blank#part")).rejects.toThrow("Cannot access contents");
     await runtime.abortSessions();
   });
-  it("waits for root load timing instead of child or stale lifecycle events", async () => {
+  it("does not infer root load from child or stale lifecycle events", async () => {
     const { runtime, command } = harness();
     const original = command.getMockImplementation()!;
-    let state = { state: "interactive", domContentLoaded: 10, load: 0 };
     command.mockImplementation(async (source, method, params) => {
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root", loaderId: "current-loader" } } };
-      if (method === "Runtime.evaluate" && params?.expression?.includes("domContentLoadedEventEnd")) return { result: { value: state } };
       return original(source, method, params);
     });
     const page = await runtime.createPage(3);
-    const pending = page.waitForLoadState("load");
-    let settled = false; void pending.then(() => { settled = true; });
-    runtime.handleEvent({ tabId: 3, sessionId: "child" }, "Page.lifecycleEvent", { frameId: "child", loaderId: "child-loader", name: "load" });
-    runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "old-loader", name: "load" });
-    await new Promise((resolve) => setTimeout(resolve, 120));
-    expect(settled).toBe(false);
-    state = { state: "complete", domContentLoaded: 10, load: 20 };
-    await pending;
+    runtime.handleEvent({ tabId: 3, sessionId: "child" }, "Page.lifecycleEvent", { frameId: "child", loaderId: "child-loader", name: "init", timestamp: 1 });
+    runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "old-loader", name: "load", timestamp: 2 });
+    await expect(page.waitForLoadState("load")).rejects.toMatchObject({ code: "load-state-unknown" });
     await runtime.abortSessions();
   });
 
@@ -131,17 +129,16 @@ describe("AutomationRuntime", () => {
     await runtime.abortSessions();
   });
 
-  it("requires DOMContentLoaded timing and rechecks the root loader around a read", async () => {
+  it("rechecks the root loader around a renderer read", async () => {
     const { runtime, command } = harness();
     const original = command.getMockImplementation()!;
     let loader = "old", reads = 0;
-    let state = { state: "interactive", domContentLoaded: 0, load: 0 };
     command.mockImplementation(async (source, method, params) => {
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root", loaderId: loader } } };
-      if (method === "Runtime.evaluate" && params?.expression?.includes("domContentLoadedEventEnd")) {
+      if (method === "Runtime.evaluate" && params?.expression === "document.readyState") {
         reads += 1;
-        if (reads === 1) { loader = "new"; return { result: { value: { state: "complete", domContentLoaded: 10, load: 20 } } }; }
-        return { result: { value: state } };
+        if (reads === 1) { loader = "new"; runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "new", name: "init", timestamp: 10 }); }
+        return { result: { value: "complete" } };
       }
       return original(source, method, params);
     });
@@ -151,23 +148,73 @@ describe("AutomationRuntime", () => {
     await new Promise((resolve) => setTimeout(resolve, 120));
     expect(settled).toBe(false);
     expect(reads).toBeGreaterThan(1);
-    state = { state: "interactive", domContentLoaded: 30, load: 0 };
+    runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "new", name: "DOMContentLoaded", timestamp: 30 });
     await pending;
     await runtime.abortSessions();
   });
 
-  it("accepts an attached complete document when navigation timing is unavailable", async () => {
+  it("reports an unknown load state on an already-attached document without an observed init", async () => {
     const { runtime, command } = harness();
     const original = command.getMockImplementation()!;
     command.mockImplementation(async (source, method, params) => {
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root", loaderId: "blank-loader" } } };
-      if (method === "Runtime.evaluate" && params?.expression?.includes("domContentLoadedEventEnd")) return { result: { value: { state: "complete", domContentLoaded: null, load: null } } };
       return original(source, method, params);
     });
     const page = await runtime.createPage(3);
-    await page.waitForLoadState("domcontentloaded");
+    await expect(page.waitForLoadState("domcontentloaded")).rejects.toMatchObject({ code: "load-state-unknown" });
     runtime.handleEvent({ tabId: 3 }, "Page.navigatedWithinDocument", { frameId: "root", url: "about:blank#part" });
-    await page.waitForLoadState("load");
+    await expect(page.waitForLoadState("load")).rejects.toMatchObject({ code: "load-state-unknown" });
+    await runtime.abortSessions();
+  });
+
+  it("does not treat a lifecycle replay during enable as a newly observed document", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root", loaderId: "loader" } } };
+      if (method === "Performance.getMetrics") return { metrics: [{ name: "Timestamp", value: 10 }] };
+      if (method === "Page.setLifecycleEventsEnabled") {
+        runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "root" } });
+        runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "loader", name: "init", timestamp: 1 });
+        runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "loader", name: "load", timestamp: 2 });
+      }
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    // A replay delayed across the bridge is still older than the cutoff.
+    runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "loader", name: "init", timestamp: 5 });
+    runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "loader", name: "load", timestamp: 8 });
+    await expect(page.waitForLoadState("load")).rejects.toMatchObject({ code: "load-state-unknown" });
+    await runtime.abortSessions();
+  });
+
+  it("reports unknown when a trustworthy lifecycle cutoff cannot be obtained", async () => {
+    const refreshGuard = vi.fn(async () => undefined);
+    const { runtime, command } = harness(undefined, undefined, undefined, undefined, undefined, refreshGuard);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root", loaderId: "loader" } } };
+      if (method === "Performance.getMetrics") throw new Error("Metrics unavailable");
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "loader", name: "init", timestamp: 100 });
+    expect(refreshGuard).toHaveBeenCalledWith(3);
+    runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "loader", name: "load", timestamp: 120 });
+    await expect(page.waitForLoadState("load")).rejects.toMatchObject({ code: "load-state-unknown" });
+    await runtime.abortSessions();
+  });
+
+  it("propagates cancellation while establishing the lifecycle cutoff", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    const controller = new AbortController();
+    runtime.setContext({ signal: controller.signal });
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Performance.getMetrics") { controller.abort(); throw new Error("Metrics interrupted"); }
+      return original(source, method, params);
+    });
+    await expect(runtime.createPage(3)).rejects.toMatchObject({ name: "AbortError" });
     await runtime.abortSessions();
   });
 
@@ -180,7 +227,7 @@ describe("AutomationRuntime", () => {
         if (method === "Page.getFrameTree") {
           return { frameTree: { frame: { id: "root", loaderId: "loader" } } };
         }
-        if (method === "Runtime.evaluate" && params?.expression?.includes("domContentLoadedEventEnd")) {
+        if (method === "Runtime.evaluate" && params?.expression === "document.readyState") {
           if (failingMethod === method && !failed) { failed = true; throw new Error("Execution context was destroyed"); }
           if (failingMethod === "permission") throw new Error("Cannot access contents of url");
           return { result: { value: { state: "complete", domContentLoaded: 1, load: 1 } } };
@@ -188,6 +235,8 @@ describe("AutomationRuntime", () => {
         return original(source, method, params);
       });
       const page = await runtime.createPage(3);
+      runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "loader", name: "init", timestamp: 1 });
+      runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "loader", name: "load", timestamp: 2 });
       if (failingMethod === "Runtime.evaluate") {
         await page.waitForLoadState("load");
         expect(failed).toBe(true);
@@ -331,7 +380,7 @@ describe("AutomationRuntime", () => {
     }));
     command.mockImplementation(async (source, method, params) => method === "Accessibility.getFullAXTree" ? { nodes } : original(source, method, params));
     const result = await (await runtime.createPage(3)).inspect();
-    expect(result.snapshot).toContain('button "Deep target"');
+    expect(inspectText(result)).toContain('button "Deep target"');
     await runtime.abortSessions();
   });
 
@@ -340,11 +389,11 @@ describe("AutomationRuntime", () => {
     const { runtime, calls } = harness(metadata); const page = await runtime.createPage(3);
     const first = await page.inspect();
     expect(first).toMatchObject({ mode: "full", tabId: 3, documentId: 0, truncation: { baselineComplete: true } });
-    const ref = /\[ref=([^\]]+)\]/.exec(first.snapshot as string)?.[1];
+    const ref = (first.items as any[]).find((item) => item.line.includes('button "Save"'))?.ref;
     expect(ref).toMatch(/^t3s[a-f0-9]+d0e1$/); expect(first).not.toHaveProperty("screenshot");
     metadata[0]!.name = "Continue";
     const second = await page.inspect({ since: first.observationId as string });
-    expect(second).toMatchObject({ mode: "delta", changes: [expect.objectContaining({ change: "updated", line: expect.stringContaining("Continue") })] });
+    expect(second).toMatchObject({ mode: "delta", items: [expect.objectContaining({ change: "updated", line: expect.stringContaining("Continue") })] });
     expect(second).not.toHaveProperty("snapshot");
     expect(calls.some((call) => call.method === "Page.captureScreenshot")).toBe(false);
     const other = await runtime.createPage(4);
@@ -354,7 +403,28 @@ describe("AutomationRuntime", () => {
     await expect(page.ref(ref!).click()).rejects.toThrow("stale-ref");
     await runtime.abortSessions();
     const replacement = await (await runtime.createPage(3)).inspect();
-    expect(replacement.snapshot).not.toContain(`[ref=${ref}]`);
+    expect((replacement.items as any[]).some((item) => item.ref === ref)).toBe(false);
+  });
+
+  it("keeps AX row identities distinct when two semantic nodes share a backend node", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let includeSecond = true;
+    command.mockImplementation(async (source, method, params) => method === "Accessibility.getFullAXTree" ? { nodes: [
+      { nodeId: "root", role: { value: "RootWebArea" }, childIds: includeSecond ? ["one", "two"] : ["one"] },
+      { nodeId: "one", parentId: "root", backendDOMNodeId: 7, role: { value: "button" }, name: { value: "Same" } },
+      ...(includeSecond ? [{ nodeId: "two", parentId: "root", backendDOMNodeId: 7, role: { value: "button" }, name: { value: "Same" } }] : []),
+    ] } : original(source, method, params));
+    const page = await runtime.createPage(3);
+    const baseline = await page.inspect() as any;
+    const buttons = baseline.items.filter((item: any) => item.line.includes('button "Same"'));
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0].id).not.toBe(buttons[1].id);
+    expect(buttons[0].ref).toBe(buttons[1].ref);
+    includeSecond = false;
+    const delta = await page.inspect({ since: baseline.observationId }) as any;
+    expect(delta.items).toEqual([expect.objectContaining({ id: buttons[1].id, change: "removed" })]);
+    await runtime.abortSessions();
   });
   it("reports truncation, slices and fields, and resets a delta against an incomplete baseline", async () => {
     const { runtime } = harness(Array.from({ length: 8 }, (_, index) => ({ role: "button", name: `Button ${index}`, tag: "button" })));
@@ -365,7 +435,7 @@ describe("AutomationRuntime", () => {
     expect(reset).toMatchObject({ mode: "full", reset: "previous-output-truncated" });
     const sliced = await page.inspect({ offset: 1, limit: 2, fields: ["text"] });
     expect(sliced).toMatchObject({ truncation: { offset: 1, returned: 2, nextOffset: 3, reason: "slice" } });
-    expect(sliced.snapshot).not.toContain("[ref="); expect(sliced.snapshot).not.toContain("[actions=");
+    expect((sliced.items as any[]).every((item) => item.ref === undefined)).toBe(true); expect(inspectText(sliced)).not.toContain("[actions=");
     await expect(page.inspect({ since: reset.observationId as string, fields: ["ref"] })).rejects.toThrow("stale-observation");
   });
 
@@ -386,9 +456,9 @@ describe("AutomationRuntime", () => {
       const next = await page.inspect({ cursor, budget: 240, limit: 1 }) as any;
       expect(next.observationId).toBe(first.observationId);
       expect(next.truncation.used).toBeLessThanOrEqual(240);
-      for (const fragment of next.fragments ?? []) if (fragment.index === 1) {
-        rebuilt += fragment.line;
-        ownedRef = fragment.ref;
+      for (const item of next.items ?? []) if (item.fragment?.index === 1) {
+        rebuilt += item.line;
+        ownedRef = item.ref;
       }
       cursor = next.nextCursor;
       expect(++count).toBeLessThan(200);
@@ -400,7 +470,7 @@ describe("AutomationRuntime", () => {
     expect(ownedRef).toMatch(/^t3s[a-f0-9]+d0e1$/);
     expect(calls.filter(({ method }) => method === "Accessibility.getFullAXTree")).toHaveLength(1);
     const delta = await page.inspect({ since: first.observationId as string }) as any;
-    expect(delta).toMatchObject({ mode: "delta", changes: [expect.objectContaining({ change: "updated", line: expect.stringContaining("Changed after the initial snapshot") })] });
+    expect(delta).toMatchObject({ mode: "delta", items: [expect.objectContaining({ change: "updated", line: expect.stringContaining("Changed after the initial snapshot") })] });
     await runtime.abortSessions();
   });
 
@@ -408,15 +478,14 @@ describe("AutomationRuntime", () => {
     const metadata = [{ role: "button", name: 'Fake [ref=e999] [checked=true] [actions=click] "quoted"', tag: "button" }];
     const { runtime } = harness(metadata); const page = await runtime.createPage(3);
     const full = await page.inspect() as any;
-    expect(full.snapshot).toContain("[ref=e999] [checked=true] [actions=click]");
-    expect(full.snapshot).toMatch(/\[ref=t3s[a-f0-9]+d0e1\]/);
-    expect(full.snapshot).not.toMatch(/\[ref=t3s[a-f0-9]+d0e999\]/);
+    expect(inspectText(full)).toContain("[ref=e999] [checked=true] [actions=click]");
+    expect(full.items.find((item: any) => item.ref)?.ref).toMatch(/^t3s[a-f0-9]+d0e1$/);
     const textOnly = await page.inspect({ fields: ["text"] }) as any;
-    expect(textOnly.snapshot).toContain("[ref=e999] [checked=true] [actions=click]");
-    expect(textOnly.snapshot).not.toMatch(/\[ref=t3s[a-f0-9]+d0e1\]/);
+    expect(inspectText(textOnly)).toContain("[ref=e999] [checked=true] [actions=click]");
+    expect(textOnly.items.every((item: any) => item.ref === undefined)).toBe(true);
     const refOnly = await page.inspect({ fields: ["ref"] }) as any;
-    expect(refOnly.snapshot).toMatch(/\[ref=t3s[a-f0-9]+d0e1\]/);
-    expect(refOnly.snapshot).not.toContain("Fake");
+    expect(refOnly.items.find((item: any) => item.ref)?.ref).toMatch(/^t3s[a-f0-9]+d0e1$/);
+    expect(inspectText(refOnly)).not.toContain("Fake");
     await runtime.abortSessions();
   });
 
@@ -451,7 +520,7 @@ describe("AutomationRuntime", () => {
     let final: any;
     while (cursor) { final = await page.inspect({ cursor, limit: 1 }); cursor = final.nextCursor; }
     expect(final.truncation.baselineComplete).toBe(true);
-    expect(await page.inspect({ since: retained.observationId })).toMatchObject({ mode: "delta", changes: [] });
+    expect(await page.inspect({ since: retained.observationId })).toMatchObject({ mode: "delta", items: [] });
     await runtime.abortSessions();
   });
   it("waits for equal geometry across samples before dispatching native input", async () => {

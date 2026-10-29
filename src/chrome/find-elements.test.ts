@@ -74,7 +74,7 @@ describe("findElements", () => {
     const h = harness(); const page = await h.runtime.createPage(3);
     h.nodes.get(1)!.name = "x".repeat(500);
     const inspection = await page.inspect();
-    const inspectedRef = /\[ref=([^\]]+)\]/.exec(inspection.snapshot as string)?.[1];
+    const inspectedRef = (inspection.items as any[]).find((item) => item.ref)?.ref;
     const result: any = await h.runtime.findElements(3, page.getByRole("button"), { limit: 1 });
     expect(result.elements[0]).toMatchObject({ name: "x".repeat(160), nameTruncated: true, text: "x".repeat(120), textTruncated: true, ref: inspectedRef });
     expect(result.elements[0].ref).toMatch(/^t3s[a-f0-9]+d0e\d+$/);

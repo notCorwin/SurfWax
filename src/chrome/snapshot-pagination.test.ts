@@ -11,9 +11,6 @@ describe("semantic snapshot differences", () => {
       { id: "b", line: "B", change: "removed" },
       { id: "c", line: "new C", ref: "ref-c", change: "updated", after: null },
       { id: "e", line: "E", change: "added", after: "a" },
-      { id: "c", line: "new C", ref: "ref-c", change: "moved", after: null },
-      { id: "a", line: "A", change: "moved", after: "c" },
-      { id: "d", line: "D", change: "moved", after: "e" },
     ]);
   });
 
@@ -22,6 +19,55 @@ describe("semantic snapshot differences", () => {
     const after = before.map((item) => ({ ...item }));
     after[39_999]!.line = "updated";
     expect(diffSnapshot(before, after)).toEqual([{ id: "node-39999", line: "updated", change: "updated", after: "node-39998" }]);
+  });
+
+  it("provides identities that reconstruct duplicate lines, embedded newlines and reordered content", () => {
+    const before = [{ id: "one", line: "same\nvalue" }, { id: "two", line: "same\nvalue" }, { id: "three", line: "other" }];
+    const after = [{ id: "two", line: "same\nvalue" }, { id: "three", line: "changed\nvalue" }, { id: "four", line: "same\nvalue" }];
+    const original = paginateSnapshot(before, { budget: 10000 }).fragments;
+    const delta = paginateSnapshot(diffSnapshot(before, after), { budget: 10000 }).fragments;
+    const state = original.map(({ id, line }) => ({ id, line }));
+    for (const item of delta) {
+      const index = state.findIndex(({ id }) => id === item.id);
+      if (item.change === "removed") { if (index >= 0) state.splice(index, 1); continue; }
+      if (index >= 0) state.splice(index, 1);
+      const position = item.after === null ? 0 : state.findIndex(({ id }) => id === item.after) + 1;
+      state.splice(position, 0, { id: item.id, line: item.line });
+    }
+    expect(state).toEqual(after);
+  });
+
+  it("reports an updated ref even when visible text is unchanged", () => {
+    expect(diffSnapshot([{ id: "a", line: "same", ref: "old" }], [{ id: "a", line: "same", ref: "new" }]))
+      .toEqual([{ id: "a", line: "same", ref: "new", change: "updated", after: null }]);
+  });
+
+  it("reconstructs seeded combinations of additions, removals, updates and reorders", () => {
+    let seed = 0x13579bdf;
+    const random = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed; };
+    for (let run = 0; run < 1000; run++) {
+      const pool = Array.from({ length: 12 }, (_, index) => `node-${index}`);
+      const shuffled = () => {
+        const values = [...pool];
+        for (let index = values.length - 1; index > 0; index--) {
+          const other = random() % (index + 1);
+          [values[index], values[other]] = [values[other]!, values[index]!];
+        }
+        return values;
+      };
+      const before = shuffled().filter(() => random() % 3 !== 0).map((id) => ({ id, line: `${id}-old`, ref: `ref-${id}` }));
+      const after = shuffled().filter(() => random() % 3 !== 0).map((id) => ({ id, line: `${id}-${random() % 3 ? "old" : "new"}`, ref: `ref-${id}` }));
+      const actual = before.map((item) => ({ ...item }));
+      for (const change of diffSnapshot(before, after)) {
+        const index = actual.findIndex((item) => item.id === change.id);
+        if (index >= 0) actual.splice(index, 1);
+        if (change.change === "removed") continue;
+        const predecessor = change.after === null ? -1 : actual.findIndex((item) => item.id === change.after);
+        expect(change.after === null || predecessor >= 0).toBe(true);
+        actual.splice(predecessor + 1, 0, { id: change.id, line: change.line, ref: change.ref! });
+      }
+      expect(actual).toEqual(after);
+    }
   });
 });
 
@@ -39,8 +85,8 @@ describe("immutable semantic snapshot pagination", () => {
       expect(page.usedBytes).toBeLessThanOrEqual(2048);
       expect(page.fragments).toHaveLength(1);
       const fragment = page.fragments[0]!;
-      expect(fragment.start).toBe(recovered.length);
-      expect(fragment.end).toBeGreaterThan(fragment.start);
+      expect(fragment.fragment?.start ?? 0).toBe(recovered.length);
+      expect(fragment.fragment?.end ?? fragment.line.length).toBeGreaterThan(fragment.fragment?.start ?? 0);
       expect(fragment.line).not.toMatch(/[\uD800-\uDBFF]$/);
       expect(fragment.line).not.toMatch(/^[\uDC00-\uDFFF]/);
       recovered += fragment.line;
@@ -67,12 +113,11 @@ describe("immutable semantic snapshot pagination", () => {
       fragments.push(...page.fragments);
       position = page.next;
     } while (position);
-    expect(fragments.map(({ index }) => index)).toEqual([...fragments.map(({ index }) => index)].sort((a, b) => a - b));
-    for (const [index, item] of items.entries()) {
-      const parts = fragments.filter((fragment) => fragment.index === index);
+    for (const item of items) {
+      const parts = fragments.filter((fragment) => fragment.id === item.id);
       expect(parts.map((part) => part.line).join("")).toBe(item.line);
       expect(parts.every((part) => part.id === item.id && part.ref === item.ref && part.change === item.change && part.after === item.after)).toBe(true);
-      expect(parts.at(-1)?.complete).toBe(true);
+      expect(parts.at(-1)?.fragment?.end ?? item.line.length).toBe(item.line.length);
     }
   });
 
@@ -89,8 +134,9 @@ describe("immutable semantic snapshot pagination", () => {
   it("honors the item limit and distinguishes it from a partially returned item", () => {
     const items = [{ id: "a", line: "A" }, { id: "b", line: "B" }];
     const page = paginateSnapshot(items, { budget: 1000, limit: 1 });
-    expect(page).toMatchObject({ reason: "limit", next: { index: 1, charOffset: 0 }, fragments: [{ line: "A", complete: true }] });
-    expect(paginateSnapshot([{ id: "a", line: "x".repeat(1000) }], { budget: 120, limit: 1 })).toMatchObject({ reason: "budget", fragments: [{ complete: false }] });
+    expect(page).toMatchObject({ reason: "limit", next: { index: 1, charOffset: 0 }, fragments: [{ id: "a", line: "A" }] });
+    expect(page.fragments[0]).not.toHaveProperty("fragment");
+    expect(paginateSnapshot([{ id: "a", line: "x".repeat(1000) }], { budget: 120, limit: 1 })).toMatchObject({ reason: "budget", fragments: [{ fragment: { start: 0 } }] });
   });
 
   it("uses the available budget without cutting escaped characters or Unicode pairs", () => {
@@ -104,11 +150,12 @@ describe("immutable semantic snapshot pagination", () => {
         continue;
       }
       const fragment = page.fragments[0]!;
-      expect(fragment.line).toBe(line.slice(fragment.start, fragment.end));
-      if (!fragment.complete) {
-        const following = Array.from(line.slice(fragment.end))[0]!;
-        const end = fragment.end + following.length;
-        const bigger = { ...fragment, end, complete: end === line.length, line: line.slice(fragment.start, end) };
+      const start = fragment.fragment?.start ?? 0, currentEnd = fragment.fragment?.end ?? line.length;
+      expect(fragment.line).toBe(line.slice(start, currentEnd));
+      if (currentEnd < line.length) {
+        const following = Array.from(line.slice(currentEnd))[0]!;
+        const end = currentEnd + following.length;
+        const bigger = { id: fragment.id, line: line.slice(start, end), ...(end === line.length && start === 0 ? {} : { fragment: { index: 0, start, end, total: line.length } }) };
         expect(bytes([bigger])).toBeGreaterThan(budget);
       }
     }

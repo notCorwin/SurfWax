@@ -62,6 +62,7 @@ type Session = {
   frameRevision: number;
   frameRefs: Map<string, FrameRefRecord>;
   frameRefsById: Map<string, string>;
+  lifecycleCutoff?: number;
   rootLifecycle?: { frameId: string; loaderId: string; initializedAt: number; domContentLoaded: boolean; load: boolean };
   rootFrameId?: string;
   lastSnapshot?: SnapshotLine[];
@@ -349,15 +350,20 @@ export class AutomationRuntime {
       }
       this.invalidate(session);
     }
-    if (session && session.rootFrameId !== undefined && !source.sessionId && method === "Page.lifecycleEvent" && params?.frameId === session.rootFrameId
-      && typeof params.loaderId === "string" && typeof params.timestamp === "number" && Number.isFinite(params.timestamp)) {
+    if (session && session.rootFrameId !== undefined && !source.sessionId && method === "Page.lifecycleEvent" && params?.name === "init" && params?.frameId === session.rootFrameId
+      && (session.lifecycleCutoff === undefined || typeof params.timestamp === "number" && params.timestamp > session.lifecycleCutoff)) {
+      // Guard recovery must not depend on Performance.getMetrics succeeding:
+      // lifecycle verification may be unknown while the document still needs protection.
+      void this.options.refreshGuard?.(tabId!).catch(() => undefined);
+    }
+    if (session && session.lifecycleCutoff !== undefined && session.rootFrameId !== undefined && !source.sessionId && method === "Page.lifecycleEvent" && params?.frameId === session.rootFrameId
+      && typeof params.loaderId === "string" && typeof params.timestamp === "number" && Number.isFinite(params.timestamp) && params.timestamp > session.lifecycleCutoff) {
       const current = session.rootLifecycle;
       if (params.name === "init") {
         // document.open() reuses the loader and Document. Its init is the
         // only observed boundary separating old lifecycle events from new.
         if (!current || params.timestamp > current.initializedAt) {
           session.rootLifecycle = { frameId: params.frameId, loaderId: params.loaderId, initializedAt: params.timestamp, domContentLoaded: false, load: false };
-          void this.options.refreshGuard?.(tabId!).catch(() => undefined);
         }
       } else if (current && current.frameId === params.frameId && current.loaderId === params.loaderId && params.timestamp >= current.initializedAt) {
         if (params.name === "DOMContentLoaded") current.domContentLoaded = true;
@@ -535,7 +541,7 @@ export class AutomationRuntime {
             const owned = node.ref ? `t${tabId}s${session.token}d${generation}${node.ref}` : undefined;
             const refRecord = node.ref ? session.refs.get(node.ref) : undefined;
             if (owned && refRecord) session.refs.set(owned, refRecord);
-            const rendered = renderSnapshotNode({ ...node, ...(owned ? { ref: owned } : {}) }, { fields, actionNames: "program" });
+            const rendered = renderSnapshotNode({ ...node, ...(owned ? { ref: owned } : {}) }, { fields, actionNames: "program", inlineRef: false });
             return { id, line: rendered.line, ...(rendered.ref ? { ref: rendered.ref } : {}) };
           });
         const viewport = await this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})") as ObservationRecord["viewport"];
@@ -563,14 +569,11 @@ export class AutomationRuntime {
         saved.expected = page.next;
         if (!page.hasMore && saved.eligibleForBaseline) saved.record.incomplete = false;
       }
-      const partiallyReturned = position.charOffset > 0 || page.fragments.some((fragment) => !fragment.complete);
       const truncated = position.index > 0 || position.charOffset > 0 || page.hasMore;
       const reason = page.reason === "budget" ? "budget" : "slice";
       return { observationId: saved.id, tabId, documentId: generation, url: saved.record.url, title: saved.record.title, viewport: saved.record.viewport,
         mode: saved.mode, ...(saved.reset ? { reset: saved.reset } : {}),
-        ...(partiallyReturned ? { fragments: page.fragments } : saved.mode === "delta"
-          ? { changes: page.fragments.map(({ id, line, ref, change, after }) => ({ id, line, ...(ref ? { ref } : {}), change, ...(after === undefined ? {} : { after }) })) }
-          : { snapshot: page.fragments.map(({ line }) => line).join("\n") }),
+        items: page.fragments,
         ...(page.next ? { nextCursor: `${saved.id}:${page.next.index}:${page.next.charOffset}` } : {}),
         truncation: { truncated, total: saved.source.length, returned: page.fragments.length, offset: position.index, charOffset: position.charOffset,
           nextOffset: page.next?.index ?? saved.source.length, nextCharOffset: page.next?.charOffset ?? 0, budget, used: page.usedBytes,
@@ -685,34 +688,27 @@ export class AutomationRuntime {
       const generation = session.generation;
       const frame = async () => (await this.options.command(session.debuggee, "Page.getFrameTree", {})).frameTree?.frame as { id?: string; loaderId?: string } | undefined;
       let before: { id?: string; loaderId?: string } | undefined, after: { id?: string; loaderId?: string } | undefined;
-      let ready: { state?: string; domContentLoaded?: number | null; load?: number | null } | undefined;
       try {
         before = await frame();
         if (!before?.id || !before.loaderId) throw automationError("frame-unavailable", { reason: "missing-root-loader" });
-        ready = await this.pageValue(tabId, `(() => {
-          let navigation;
-          try { navigation = performance.getEntriesByType('navigation')[0]; } catch { /* No timing support. */ }
-          return { state: document.readyState, domContentLoaded: navigation?.domContentLoadedEventEnd ?? null, load: navigation?.loadEventEnd ?? null };
-        })()`) as typeof ready;
+        // A renderer round trip is a synchronization barrier; the returned
+        // readyState is not evidence of the lifecycle of document.open().
+        await this.pageValue(tabId, "document.readyState");
         after = await frame();
       } catch (error) {
         if (isTransientNavigationError(error)) return false;
         throw error;
       }
       if (this.sessions.get(tabId) !== session) throw automationError("stale-session", { reason: "session-changed-during-load-wait" });
-      if (session.generation !== generation || !ready || after?.id !== before.id || after.loaderId !== before.loaderId) return false;
+      if (session.generation !== generation || after?.id !== before.id || after.loaderId !== before.loaderId) return false;
       const lifecycle = session.rootLifecycle;
       if (lifecycle && lifecycle.frameId === before.id && lifecycle.loaderId === before.loaderId)
         return state === "domcontentloaded" ? lifecycle.domContentLoaded : lifecycle.load;
-      // The root document's readyState alone becomes interactive before
-      // DOMContentLoaded and complete before load. Navigation Timing tells us
-      // when the corresponding event has finished, including when attached
-      // after it fired. Child-frame lifecycle events are not root evidence.
-      const timing = state === "domcontentloaded" ? ready.domContentLoaded : ready.load;
-      const stateReady = state === "domcontentloaded" ? ready.state === "interactive" || ready.state === "complete" : ready.state === "complete";
-      if (typeof timing === "number") return stateReady && timing > 0;
-      // Some non-network documents do not expose a navigation entry.
-      return ready.state === "complete";
+      // Chrome can reuse the Document, loader, readyState and navigation
+      // timing across document.open(). A late attach also replays the prior
+      // lifecycle, so none can prove that the current document is loaded.
+      throw automationError("load-state-unknown", { reason: "current-document-init-not-observed", state,
+        recovery: "Inspect or verify the required page content, or wait for a navigation observed after attachment." });
     });
   }
 
@@ -1009,8 +1005,23 @@ export class AutomationRuntime {
     }
     await this.options.mark(tabId);
     session.ready ??= (async () => {
+      const signal = this.context.signal;
+      session!.lifecycleCutoff = undefined;
+      session!.rootLifecycle = undefined;
       for (const domain of ["Page", "Runtime", "DOM", "Accessibility"]) await this.options.command(session!.debuggee, `${domain}.enable`, {});
       await this.options.command(session!.debuggee, "Page.setLifecycleEventsEnabled", { enabled: true });
+      // CDP may replay lifecycle events from before attachment, potentially
+      // delivered late through another process. Only accept events newer than
+      // a renderer-provided timestamp in the same monotonic clock domain.
+      try {
+        await this.options.command(session!.debuggee, "Performance.enable", {});
+        const metrics = await this.options.command(session!.debuggee, "Performance.getMetrics", {});
+        const cutoff = metrics?.metrics?.find((metric: { name?: string }) => metric.name === "Timestamp")?.value;
+        if (typeof cutoff === "number" && Number.isFinite(cutoff)) session!.lifecycleCutoff = cutoff;
+      } catch (error) {
+        throwIfAborted(signal);
+        if (error instanceof Error && error.name === "AbortError") throw error;
+      }
       await this.options.command(session!.debuggee, "Target.setAutoAttach", { autoAttach: true, flatten: true, waitForDebuggerOnStart: false, filter: [{ type: "iframe", exclude: false }] });
       const tree = await this.options.command(session!.debuggee, "Page.getFrameTree", {});
       const add = (item: any, parentId?: string) => {
@@ -1711,9 +1722,12 @@ export class AutomationRuntime {
             const actions = !ref ? [] : ["textbox", "searchbox", "spinbutton"].includes(role) ? ["click", "fill", "clear", "press", "insertText"]
               : ["checkbox", "radio", "switch"].includes(role) ? ["click", "check"]
               : ["combobox", "listbox"].includes(role) ? ["click", "select"] : ["click", "doubleClick", "hover"];
-            const snapshotNode: SnapshotNode = { id: identity, depth, role, name, value, ...(ref ? { ref, actions } : {}), state };
+            // AX node IDs identify semantic rows; multiple AX rows can refer
+            // to the same backend DOM node and therefore share an action ref.
+            const snapshotId = `${scope}:ax:${node.nodeId}`;
+            const snapshotNode: SnapshotNode = { id: snapshotId, depth, role, name, value, ...(ref ? { ref, actions } : {}), state };
             const rendered = renderSnapshotNode(snapshotNode);
-            lines.push({ id: identity, line: rendered.line, ...(rendered.ref ? { ref: rendered.ref } : {}), node: snapshotNode });
+            lines.push({ id: snapshotId, line: rendered.line, ...(rendered.ref ? { ref: rendered.ref } : {}), node: snapshotNode });
             childDepth += 1;
           }
           const children: string[] = node.childIds ?? [];
@@ -1724,6 +1738,11 @@ export class AutomationRuntime {
         }
       };
       for (const { debuggee, frameId, depth, tree } of trees) render(tree.nodes ?? [], debuggee, frameId, depth);
+      const ids = new Set<string>();
+      for (const { id } of lines) {
+        if (ids.has(id)) throw automationError("snapshot-unavailable", { reason: "duplicate-semantic-id", id });
+        ids.add(id);
+      }
       if (generation === session.generation) return { ...info, lines };
     }
   }
