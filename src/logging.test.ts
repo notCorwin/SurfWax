@@ -245,6 +245,20 @@ describe("canonical event log", () => {
     expect(after.events).toEqual([]);
     expect(await first.jobEventsByIds("c", [saved!.id], before.epoch)).toBeNull();
   });
+  it("returns diagnostic snapshots and their canonical epoch consistently across another writer's clear", async () => {
+    const store = memoryStore();
+    const first = new EventLogger({ store });
+    const second = new EventLogger({ store });
+    await first.append({ type: "browser.diagnostic", conversationId: "c", content: { revision: 1 } });
+    const before = await first.diagnosticEventsSnapshot("c");
+    expect(before.value).toHaveLength(1);
+    expect(await first.canonicalEpoch()).toBe(before.epoch);
+    await second.clear();
+    const after = await first.diagnosticEventsSnapshot("c");
+    expect(after.value).toEqual([]);
+    expect(after.epoch).not.toBe(before.epoch);
+    expect(await first.canonicalEpoch()).toBe(after.epoch);
+  });
   it("settles the writer handshake and refuses queued writes when background initialization fails", async () => {
     const store = memoryStore();
     const onError = vi.fn();
