@@ -1,6 +1,6 @@
 # Surf Wax：世界一流 LLM Browser Tools 技术设计
 
-状态：提案，尚未实现或通过本文验收。修订日期：2026-10-28。实现基线：`54d16cc371dd0375278a3f81b869e066736a9e84`。
+状态：提案，尚未实现或通过本文验收。修订日期：2026-10-29。实现基线：`54d16cc371dd0375278a3f81b869e066736a9e84`。
 
 本文设计 Surf Wax 下一代浏览器工具内核与模型接口，目标同时满足：大部分具备基础工具调用能力的 LLM 能可靠操作；常见任务的总 Token 成本低；强模型能够完成跨站、多阶段、长时间、数据密集的复杂任务。本文不把工具数量少、单次返回短或某个强模型的演示成功当作目标达成。
 
@@ -76,20 +76,32 @@ Side Panel 中的协调器管理活动执行、能力句柄和取消。Service W
 
 ### 5.1 边界与管理
 
-每个工具对应一个可命名的动作或读取目的，独立注册 `name / description / inputSchema / handler`。参数表达目标、数据与选项，不再用 `act({op:...})`、`read({source:...})` 或 `jobs({action:...})` 充当通用分发器。`fill` 替换字段内容，`type_text` 逐键输入，`clear` 清空字段；这些动作各有独立语义。分类只用于管理和展示，模型调用仍使用具体工具名。
+每个工具对应一个明确的动作或读取目的，独立注册 `name / description / inputSchema / handler`。同一操作只因目标值、执行上下文或等待时间不同而变化时，用参数表达，不再注册语义重复的工具。`fill` 替换字段内容，空字符串表示清空；`type_text` 逐键追加，保留独立的输入事件语义。分类只用于管理和展示，模型调用仍使用具体工具名。
 
-以下是与可视化方案对齐，并补全字段状态、帧、事件、原生输入、PDF、产物及协议发现后的 **71 项首版候选目录**。数字用于明确评测对象，不是必须凑足或不能扩展的上限；最终名称、字段及描述由真实 registry 一次定义并生成文档、模型 schema 和管理界面。公共字段及核心必填参数见下节；这是提案而非现有可执行 API。
+以下是在原 71 项候选目录中合并语义重复操作后的 **64 项候选目录**。数字用于明确评测对象，不是必须凑足或不能扩展的上限；最终名称、字段及描述由真实 registry 一次定义并生成文档、模型 schema 和管理界面。公共字段及核心必填参数见下节；这是提案而非现有可执行 API。
 
 | 分组 | 工具与用途 |
 | --- | --- |
-| 页面观察与验证（12） | `inspect_page` 观察语义页面；`find_elements` 查找候选；`list_frames` 列出帧；`read_text` 读原文；`read_table` 读表格；`read_value` 读字段值；`read_attribute` 读属性；`read_checked` 读勾选状态；`wait_for_element` 等待元素状态；`wait_for_url` 等待地址；`verify_state` 验证事实；`take_screenshot` 显式截图。 |
-| 元素与原生输入（17） | `click` 点击；`double_click` 双击；`hover` 悬停；`fill` 替换输入；`clear` 清空；`type_text` 逐键输入；`press_key` 按键；`key_down` 按住键；`key_up` 释放键；`check` 勾选；`uncheck` 取消勾选；`select_option` 选择选项；`scroll` 滚动；`drag` 拖拽；`move_pointer` 移动指针；`press_pointer` 按下指针；`release_pointer` 释放指针。 |
+| 页面观察与验证（11） | `inspect_page` 观察语义页面；`find_elements` 查找候选；`list_frames` 列出帧；`read_text` 读原文；`read_table` 读表格；`read_value` 读字段值；`read_attribute` 读属性；`read_checked` 读勾选状态；`wait_for_url` 等待地址；`verify_state` 验证或等待元素状态；`take_screenshot` 显式截图。 |
+| 元素与原生输入（15） | `click` 点击；`double_click` 双击；`hover` 悬停；`fill` 替换或清空输入；`type_text` 逐键输入；`press_key` 按键；`key_down` 按住键；`key_up` 释放键；`set_checked` 设置勾选状态；`select_option` 选择选项；`scroll` 滚动；`drag` 拖拽；`move_pointer` 移动指针；`press_pointer` 按下指针；`release_pointer` 释放指针。 |
 | 导航与标签页（8） | `navigate` 导航；`reload` 刷新；`go_back` 后退；`go_forward` 前进；`list_tabs` 列出；`open_tab` 打开；`switch_tab` 显式切换绑定；`close_tab` 关闭。 |
-| 文件、对话框与事件（10） | `upload_file` 上传已有文件；`list_downloads` 列出下载；`read_download` 读取下载；`create_pdf` 生成内部 PDF 产物；`save_artifact` 导出产物；`accept_dialog` 接受；`dismiss_dialog` 取消；`subscribe_event` 先订阅事件；`wait_event` 等待事件；`unsubscribe_event` 释放订阅。 |
+| 文件、对话框与事件（9） | `upload_file` 上传已有文件；`list_downloads` 查询下载；`read_download` 按下载 ID 读取可用内容；`create_pdf` 生成内部 PDF 产物；`save_artifact` 导出产物；`handle_dialog` 回应对话框；`subscribe_event` 先订阅事件；`wait_event` 等待事件；`unsubscribe_event` 释放订阅。 |
 | 数据与诊断（7） | `read_artifact` 读取产物；`create_text_artifact` 创建文本产物；`read_events` 读取历史；`list_requests` 查已捕获请求；`read_response` 读已捕获响应；`read_console` 读已捕获日志；`read_api_reference` 查 registry 中的高级 API 文档。 |
-| 用户脚本（7） | `list_scripts` 列出；`read_script` 读取；`create_script` 创建；`update_script` 编辑；`enable_script` 启用；`disable_script` 停用；`delete_script` 删除。 |
-| 长任务（4） | `list_jobs` 列出；`get_job` 读取增量状态；`wait_job` 等待进展；`cancel_job` 取消。 |
-| 高级与组合（6） | `evaluate_js` 页面求值；`fetch_page` 在页面上下文请求；`fetch_extension` 在扩展上下文请求；`list_cdp_sessions` 列出可用协议会话；`send_cdp` 发送协议命令；`execute_program` 组合原子能力、本地计算并可启动后台作业。 |
+| 用户脚本（6） | `list_scripts` 列出；`read_script` 读取；`create_script` 创建；`update_script` 编辑；`set_script_enabled` 设置启停状态；`delete_script` 删除。 |
+| 长任务（3） | `list_jobs` 列出；`get_job` 读取或等待增量状态；`cancel_job` 取消。 |
+| 高级与组合（5） | `evaluate_js` 页面求值；`fetch` 在指定上下文请求；`list_cdp_sessions` 列出可用协议会话；`send_cdp` 发送协议命令；`execute_program` 组合原子能力、本地计算并可启动后台作业。 |
+
+| 已移除的重复入口 | 唯一入口与语义 |
+| --- | --- |
+| `clear` | `fill` 的 `value: ""` 清空字段，使用与替换输入一致的检查、事件和回执。 |
+| `check / uncheck` | `set_checked` 的必填布尔值 `checked` 表示期望状态；状态已满足时不额外点击。 |
+| `enable_script / disable_script` | `set_script_enabled` 的必填布尔值 `enabled` 表示期望状态，并协调持久化与 Chrome 注册。 |
+| `wait_for_element` | `verify_state` 检查同一元素条件；`timeoutMs: 0` 立即检查，正数等待条件成立。 |
+| `wait_job` | `get_job` 默认立即读取；传入正数 `waitMs` 时等待游标之后的新事件或终态。 |
+| `accept_dialog / dismiss_dialog` | `handle_dialog` 使用必填的 `accept` 布尔值；只有接受 prompt 时可传 `prompt`。 |
+| `fetch_page / fetch_extension` | `fetch` 的必填 `context` 为 `page` 或 `extension`，分别保持原有权限、凭据和 CORS 语义。 |
+
+这些名称不作为兼容别名注册。保留不同的输入事件、资源来源与业务意图：例如 `fill` 与 `type_text`、一次点击与双击、按住与释放键、读取网页文字与读取表单值，以及读取下载、捕获的网络响应和已有产物，不能仅因输出或部分实现相似而合并。`read_download / read_response` 分别通过下载 ID、请求 ID 按需读取并可物化数据；`read_artifact` 读取已物化的不可变产物。
 
 默认所有工具对模型可见，不依据模型名称、当前任务或内容自动隐藏能力。用户可在高级设置中逐项调整**对模型暴露的目录**：设置保存为期望配置，下一次运行生成有序的、带版本和 hash 的目录快照；当前运行及已发出的调用不受影响。每个工具的启停、名称、用途及输入定义可单独查看；普通界面不主动展示高级设置。
 
@@ -116,22 +128,23 @@ inspect_page({ tabId?, frameRef?, region?: Target, view?, query?, since?, cursor
 find_elements({ tabId?, frameRef?, target: Target, cursor?, tokenBudget? });
 click({ tabId?, frameRef?, target: Target, timeoutMs? });
 fill({ tabId?, frameRef?, target: Target, value: string, timeoutMs? });
+set_checked({ tabId?, frameRef?, target: Target, checked: boolean, timeoutMs? });
 read_text({ tabId?, frameRef?, target: Target, cursor?, tokenBudget? });
-verify_state({ tabId?, frameRef?, target: Target, textIncludes?: string, valueEquals?: string, state?: string });
+verify_state({ tabId?, frameRef?, target: Target, textIncludes?: string, valueEquals?: string, state?: string, timeoutMs? });
 subscribe_event({ tabId?, kind: "dialog" | "popup" | "download" | "filechooser" | "request" | "response" | "console" });
 wait_event({ subscriptionId: string, timeoutMs? });
 unsubscribe_event({ subscriptionId: string });
 execute_program({ code: string, background?: boolean, timeoutMs? });
-get_job({ jobId: string, after?, limit? });
-wait_job({ jobId: string, after?, waitMs?, limit? });
+get_job({ jobId: string, after?, limit?, waitMs? });
 cancel_job({ jobId: string });
+fetch({ context: "page" | "extension", url: string, init?, tabId? });
 ```
 
 以上是核心形状，不是最终 JSON Schema；每个工具各有独立的扁平 schema 和动作特定必填字段。`Target` 各分支互斥，`verify_state` 的三个条件恰好选择一个；`within` 引用已观察区域。`frameRef` 是工具返回的帧引用，不能与 Chrome 的 frame ID、CDP session ID 或 scripting document ID 混用。模型只需在需要跨页/跨帧时显式指定：省略 `tabId / frameRef` 使用本次运行确定的绑定，不能每步重新选择 active tab。目标失效时返回错误，禁止静默切页或接管相似节点。
 
-主要动作字段：`double_click / hover / clear / check / uncheck / read_value / read_checked` 使用 `target`；`read_attribute` 使用 `target, name`；`type_text` 使用 `target, text`；`press_key / key_down / key_up` 使用 `key` 与可选目标；`select_option` 使用 `target, value`；`scroll` 使用 `deltaY` 和可选区域；`drag` 使用 `source, destination`。`move_pointer` 使用 `x, y` 与观察 ID，`press_pointer / release_pointer` 使用指针按键；移动坐标绑定观察 ID 和视口版本，视口变化时拒绝旧坐标。释放键/指针的操作与取消清理共享输入状态，不得留下卡住的按键。`navigate / open_tab` 使用 `url`，`switch_tab / close_tab` 使用 `tabId`。`upload_file` 使用 `artifactId` 和互斥的 `target` 或 `chooserId`；`accept_dialog / dismiss_dialog` 使用已捕获的 `dialogId`，前者可提供 prompt 文本。
+主要动作字段：`double_click / hover / read_value / read_checked` 使用 `target`；`set_checked` 使用 `target, checked`；`read_attribute` 使用 `target, name`；`type_text` 使用 `target, text`；`press_key / key_down / key_up` 使用 `key` 与可选目标；`select_option` 使用 `target, value`；`scroll` 使用 `deltaY` 和可选区域；`drag` 使用 `source, destination`。`move_pointer` 使用 `x, y` 与观察 ID，`press_pointer / release_pointer` 使用指针按键；移动坐标绑定观察 ID 和视口版本，视口变化时拒绝旧坐标。释放键/指针的操作与取消清理共享输入状态，不得留下卡住的按键。`navigate / open_tab` 使用 `url`，`switch_tab / close_tab` 使用 `tabId`。`upload_file` 使用 `artifactId` 和互斥的 `target` 或 `chooserId`；`handle_dialog` 使用已捕获的 `dialogId` 和 `accept`，可在接受 prompt 时提供文本。
 
-`read_artifact / read_download / read_response / read_script / get_job` 使用各自的稳定 ID，支持适用的字段投影和游标；`create_text_artifact` 使用文件名、MIME 与文本，返回可复用 ID；`create_pdf` 返回内部产物，用户明确要求导出时再调用 `save_artifact`。`list_frames` 返回与目标 tab、文档和调试会话绑定的帧引用与可用状态。`list_requests / read_response / read_console` 只读已捕获的数据，`read_events` 只读当前会话和分支可达历史，不默默发起新的网络请求。`subscribe_event` 在触发动作前建立订阅，覆盖 popup、dialog、download、filechooser 和网络/console 事件；`wait_event` 返回对应事件及句柄，`unsubscribe_event` 结束捕获。网络采集的范围、持续时间和响应体是否保存由订阅明确指定；未捕获的响应不能被假装读取。对话框回应不排到被其阻塞的点击之后。脚本创建与更新接收明确的定义、匹配范围和执行世界，启停操作持久化期望状态。
+`read_artifact / read_download / read_response / read_script / get_job` 使用各自的稳定 ID，支持适用的字段投影和游标；`create_text_artifact` 使用文件名、MIME 与文本，返回可复用 ID；`create_pdf` 返回内部产物，用户明确要求导出时再调用 `save_artifact`。`list_downloads` 可按下载 ID 查状态；`read_download` 按下载 ID 读取 Chrome 已提供给扩展的内容并在需要时物化为产物。若原生下载字节不可读取，明确返回内容不可用，不从文件路径猜测内容，也不重新请求下载 URL。`list_frames` 返回与目标 tab、文档和调试会话绑定的帧引用与可用状态。`list_requests / read_response / read_console` 只读已捕获的数据，`read_events` 只读当前会话和分支可达历史，不默默发起新的网络请求。`read_response` 按请求 ID 从捕获会话按需取响应正文，必要时将其物化为产物；它与按产物 ID 读取已有数据的 `read_artifact` 具有不同来源和失效条件。`subscribe_event` 在触发动作前建立订阅，覆盖 popup、dialog、download、filechooser 和网络/console 事件；`wait_event` 返回对应事件及句柄，`unsubscribe_event` 结束捕获。网络采集的范围、持续时间和响应体是否保存由订阅明确指定；未捕获的响应不能被假装读取。对话框回应不排到被其阻塞的点击之后。脚本创建与更新接收明确的定义、匹配范围和执行世界，启停操作持久化期望状态。
 
 下列签名列出各工具的核心参数；`?` 表示可选，公共的绑定、期限和输出预算字段按工具类别适用。实际实现以 registry 的完整 schema 为准：
 
@@ -139,19 +152,19 @@ cancel_job({ jobId: string });
 inspect_page(view?, region?, query?, since?, cursor?)
 find_elements(target, cursor?)   list_frames()   read_text(target, cursor?)
 read_table(target, fields?, cursor?)   read_value(target)   read_attribute(target, name)   read_checked(target)
-wait_for_element(target, state)   wait_for_url(url)   verify_state(target, textIncludes?|valueEquals?|state?)
+wait_for_url(url)   verify_state(target, textIncludes?|valueEquals?|state?, timeoutMs?)
 take_screenshot(region?)
 
-click(target)   double_click(target)   hover(target)   fill(target, value)   clear(target)
+click(target)   double_click(target)   hover(target)   fill(target, value)
 type_text(target, text)   press_key(key, target?)   key_down(key)   key_up(key)
-check(target)   uncheck(target)   select_option(target, value)   scroll(deltaY, target?)
+set_checked(target, checked)   select_option(target, value)   scroll(deltaY, target?)
 drag(source, destination)   move_pointer(observationId, x, y)   press_pointer(button)   release_pointer(button)
 
 navigate(url)   reload()   go_back()   go_forward()   list_tabs()
 open_tab(url?)   switch_tab(tabId)   close_tab(tabId)
 
-upload_file(artifactId, target?|chooserId?)   list_downloads()   read_download(downloadId)
-create_pdf()   save_artifact(artifactId, filename?)   accept_dialog(dialogId, prompt?)   dismiss_dialog(dialogId)
+upload_file(artifactId, target?|chooserId?)   list_downloads(downloadId?)   read_download(downloadId, cursor?)
+create_pdf()   save_artifact(artifactId, filename?)   handle_dialog(dialogId, accept, prompt?)
 subscribe_event(kind, options?)   wait_event(subscriptionId)   unsubscribe_event(subscriptionId)
 
 read_artifact(artifactId, fields?, cursor?)   create_text_artifact(filename, mimeType, text)
@@ -159,21 +172,21 @@ read_events(after?, limit?)   list_requests(filter?, cursor?)   read_response(re
 read_console(filter?, cursor?)   read_api_reference(topic)
 
 list_scripts()   read_script(scriptId)   create_script(definition)   update_script(scriptId, definition)
-enable_script(scriptId)   disable_script(scriptId)   delete_script(scriptId)
-list_jobs()   get_job(jobId, after?, limit?)   wait_job(jobId, after?, waitMs?, limit?)   cancel_job(jobId)
+set_script_enabled(scriptId, enabled)   delete_script(scriptId)
+list_jobs()   get_job(jobId, after?, waitMs?, limit?)   cancel_job(jobId)
 
-evaluate_js(code, world, arg?)   fetch_page(url, init?)   fetch_extension(url, init?)
+evaluate_js(code, world, arg?)   fetch(context, url, init?, tabId?)
 list_cdp_sessions(tabId?)   send_cdp(tabId, method, params?, sessionId?)
 execute_program(code, background?, timeoutMs?)
 ```
 
-`verify_state` 必须恰选一个条件，`upload_file` 必须恰选一个目标。`world`、网络上下文和 CDP 会话由相应工具显式表达，不因失败自动替换。`open_tab` 省略地址时创建空白标签；`background` 默认 false；未提供事件/作业游标时从该来源的起始位置读取；`waitMs` 只约束本次等待。其余默认值、返回字段和错误枚举在实现 registry 时按上述语义冻结，避免参数缺失时猜测用户意图。
+`verify_state` 必须恰选一个条件，`upload_file` 必须恰选一个目标。`verify_state.timeoutMs` 默认 0，立即检查；正数持续等待所选条件，超时返回明确的 timeout 和可验证的实际状态，事实不可确认时为 unknown。`get_job.waitMs` 默认 0，正数通过事件通知等待新增事件或终态，订阅后重新检查游标以防错过事件；超时只结束本次等待，不取消作业。`set_checked` 确保目标状态，已满足时不再点击；目标类型不支持所需状态时返回错误，例如不能取消已选中的原生 radio。`set_script_enabled` 分别记录持久期望状态与实际注册结果，不把注册失败写成已启用。`handle_dialog` 的 `accept` 必填；`prompt` 仅对接受 prompt 对话框有效。`fetch.context` 必填，`page` 必须绑定目标页面，`extension` 使用扩展 host permissions；失败不自动切换上下文。`world` 和 CDP 会话也由相应工具显式表达，不因失败自动替换。`open_tab` 省略地址时创建空白标签；`background` 默认 false；未提供事件/作业游标时从该来源的起始位置读取。其余默认值、返回字段和错误枚举在实现 registry 时按上述语义冻结，避免参数缺失时猜测用户意图。
 
 每个已接受调用都有唯一的 Tool Result，包含成功、错误或中断；动作的紧凑结果至少携带 `operationId`、目标归属、派发状态、验证状态和必要的证据/错误引用。`returned` 仅说明操作返回；`verification: "not-requested"` 不代表业务完成。默认读取和观察建议约 1,200 Token，动作回执建议约 300 Token；预算是可调的输出目标，不是任务步数或能力上限。大结果留在产物中并返回来源与稳定游标；截图仅由显式 `take_screenshot` 或高级能力请求，不自动发送给模型。
 
 参数校验在任何派发前完成；无效参数、`stale-ref` 和多个匹配目标返回明确错误、`dispatchState: "not-dispatched"` 及必要候选。派发后失联或超时返回 `dispatchState: "uncertain"`，包含 `operationId` 和已有证据，提示先检查业务状态。错误的可重试性不能仅根据超时推断，已经可能产生副作用的操作不自动重放。
 
-模型可在一次响应中提出多个独立工具调用；有副作用的调用在同一 tab 内按模型输出顺序串行，冲突资源受第 8 节调度。同一响应中排在触发动作之前的 `subscribe_event` 必须完成注册，才可派发该动作；已经建立的 `wait_event` 在动作队列外等待，不能挡住会触发事件的动作。若一个调用失败，同一响应内该 tab 尚未派发的后续写动作停止，并各自返回 `not-dispatched` 的 Tool Result；读取、事件订阅与对话框响应按各自职责继续或明确取消，不由执行器猜测业务依赖。每个合法 call ID 都必须得到结果。跨 tab 读取可并发；不得将并行调用视作事务或保证业务成功。复杂循环与批量数据处理使用 `execute_program`，逐项调用同一原子 handler 并写分步回执。
+模型可在一次响应中提出多个独立工具调用；有副作用的调用在同一 tab 内按模型输出顺序串行，冲突资源受第 8 节调度。同一响应中排在写动作之后的同 tab 观察与验证，必须等前序写动作返回或失败后再读取，不能以旧状态提前通过。排在触发动作之前的 `subscribe_event` 必须完成注册，才可派发该动作；已经建立的 `wait_event` 在动作队列外等待，不能挡住会触发事件的动作。若一个调用失败，同一响应内该 tab 尚未派发的后续写动作停止，并各自返回 `not-dispatched` 的 Tool Result；读取、事件订阅与对话框响应按各自职责继续或明确取消，不由执行器猜测业务依赖。每个合法 call ID 都必须得到结果。跨 tab 读取可并发；不得将并行调用视作事务或保证业务成功。复杂循环与批量数据处理使用 `execute_program`，逐项调用同一原子 handler 并写分步回执。
 
 ### 5.3 普通任务示例
 
@@ -196,7 +209,7 @@ dialog "创建联系人"
   {"tool":"fill","input":{"target":{"ref":"n8"},"value":"王明"}},
   {"tool":"fill","input":{"target":{"ref":"n9"},"value":"wang@example.com"}},
   {"tool":"click","input":{"target":{"ref":"n10"}}},
-  {"tool":"verify_state","input":{"target":{"role":"row","name":"王明 wang@example.com"},"textIncludes":"wang@example.com"}}
+  {"tool":"verify_state","input":{"target":{"role":"row","name":"王明 wang@example.com"},"textIncludes":"wang@example.com","timeoutMs":10000}}
 ]
 ```
 
@@ -297,9 +310,9 @@ AX 不完整时补充 DOM 事实，明确标记推导来源；不能手写一套
 → 等待显式条件 → 保存证据与验证覆盖 → 返回小回执
 ```
 
-不同动作使用不同检查：click 检查可见、稳定、enabled、命中；fill 检查 editable；select/check 检查原生语义与目标值。稳定以目标局部状态为准，不能要求整个动态页面静止。[Playwright actionability](https://playwright.dev/docs/actionability) 可作为行为参考，但 Surf Wax 必须验证自己的实现，不能因 API 名称相似声称等价。
+不同动作使用不同检查：click 检查可见、稳定、enabled、命中；fill 检查 editable；select/set_checked 检查原生语义与目标值。稳定以目标局部状态为准，不能要求整个动态页面静止。[Playwright actionability](https://playwright.dev/docs/actionability) 可作为行为参考，但 Surf Wax 必须验证自己的实现，不能因 API 名称相似声称等价。
 
-派发前可以重复只读解析和等待；一旦写操作可能发出，不能因超时而自动再发。`fill / check` 也可能触发自动保存或站点事件，不应普遍认定无副作用、可盲目重试。
+派发前可以重复只读解析和等待；一旦写操作可能发出，不能因超时而自动再发。`fill / set_checked` 也可能触发自动保存或站点事件，不应普遍认定无副作用、可盲目重试。
 
 通过 CDP 原生输入路径完成需要真实输入语义的操作；不能在点击失败后默默改为 `element.click()`、直接改 DOM 或页面请求。模型可显式选择这些高级手段，其执行方式和验证责任必须在回执中可见。
 
@@ -321,7 +334,7 @@ AX 不完整时补充 DOM 事实，明确标记推导来源；不能手写一套
 
 - 同一 tab 的输入、导航、DOM/脚本写操作串行；事件监听注册与对话框处理可在必要时推进，避免死锁。
 - 多 tab 的独立读取可以并行，但 foreground/focus、浏览器窗口选择、剪贴板和原生输入设备等共享资源单独排队。
-- 无法静态判断副作用的 `evaluate_js / send_cdp / fetch_page / fetch_extension` 按有副作用处理。不能让程序用一个自报 `readonly=true` 绕过调度。
+- 无法静态判断副作用的 `evaluate_js / send_cdp / fetch` 按有副作用处理。不能让程序用一个自报 `readonly=true` 绕过调度。
 - 跨 tab 同一业务实体的写入可能在浏览器之外冲突；任务程序显式串行并验证，内核不声称分布式事务。
 - 租约带 owner、epoch 和取消栅栏；在最终能力仲裁/Chrome 派发处再次校验，取消后排队操作及旧 owner 消息不得派发，晚到结果仍记录其真实状态。
 - 绑定标签关闭、移动或失效返回 `target-unavailable` 及当前标签清单入口；只有显式选择新标签才改变绑定。popup 与导航按已订阅事件绑定，不能猜。
@@ -399,7 +412,7 @@ Checkpoint = {
 - 长作业通过真实完成项、已读字节、事件与检查点报告进展；单纯心跳不能证明业务推进。
 - 纯计算在隔离 Worker 内运行，可强制销毁；资源调度可以限并发、内存和单次返回大小，但不设全局任务步数或复杂度上限。
 - 不再依赖“未知循环按一次”的静态时长估计决定整个作业生死。已有调用方显式给出的期限仍严格遵守；没有明确总期限时，停滞诊断返回状态，运行可由用户或模型取消。
-- `wait_job` 通过事件通知和游标返回新进展；等待期限只是本次等候时长。完成、失败、中断、取消均可追溯。
+- `get_job` 传入正数 `waitMs` 时通过事件通知和游标返回新进展；等待期限只是本次等候时长。完成、失败、中断、取消均可追溯。
 
 Side Panel 关闭意味着宿主丢失，任务不能保证继续。取消撤销能力、销毁计算、清理监听和输入、释放阻挡器；已经发出的 HTTP/Chrome 命令可能继续产生效果。扩展重开后从业务检查点恢复，不伪装成从断点续跑任意 JavaScript。
 
@@ -430,7 +443,7 @@ returned → verification-passed / verification-failed / verification-unknown
 
 宿主启动时获取恢复所有权，按调用 ID 找到已接受但无结果的调用，追加唯一 interrupted Tool Result，关联已有回执和未知操作。迟到的旧 owner 不能再补发第二个结果，但迟到的外部效果/诊断仍可作为后续证据追加。恢复补齐本身也要幂等。参数解析失败和未知工具也产生匹配的错误结果；并行工具调用即使部分失败或取消，也必须配齐所有合法 ID 的结果后才能发起下一次模型请求。
 
-后台 `execute_program` 的 Tool Result 是带 job ID 的 accepted；后续作业终态通过 `get_job / wait_job` 读取。接受并不等于执行完成，job completed 也不自动表示所有业务断言通过。UI 从同一事件流显示进展和取消状态。
+后台 `execute_program` 的 Tool Result 是带 job ID 的 accepted；后续作业进度和终态通过 `get_job` 读取或等待。接受并不等于执行完成，job completed 也不自动表示所有业务断言通过。UI 从同一事件流显示进展和取消状态。
 
 ## 12. 上下文：稳定前缀与有证据的压缩
 
@@ -588,6 +601,11 @@ Cost = Σ Provider 对未缓存输入、缓存读取、缓存写入、输出等�
 - 分页期间页面改变、增量未读完、基线被压缩、游标过期、事件丢失与缓存重新 attach。
 - scope 外 aria-labelledby 文本变化、未请求子树变化、IDL 属性变化，以及不同 view/query 误用 since；最低与当前 Chrome 均验证。
 - 字段值、属性、勾选状态和多层帧的独立读取；截图、PDF、下载与产物只按显式调用获取或导出。
+- `fill` 空值与普通替换使用相同事件语义；`set_checked` 的 true/false、已满足状态与不支持取消的 radio 均返回正确结果。
+- `verify_state` 立即检查与等待分别覆盖成功、timeout、歧义和 unknown；`get_job` 覆盖立即读取、订阅后复查、等待超时与终态。
+- 同轮点击后的 `verify_state` 不得在点击返回前读取旧状态；事件等待与对话框响应不被触发动作阻塞。
+- `set_script_enabled` 两种状态均正确持久化并与实际注册协调；`handle_dialog` 的接受、拒绝及 prompt 参数分别可验证。
+- `fetch` 两种上下文保留各自的权限、凭据和 CORS；下载、响应与已物化产物保留来源和失效区别，不补发网络请求。
 - 点击已提交但响应丢失、日志 intent 后崩溃、终态写入失败、取消与返回同时发生。
 - tab 关闭或被其他窗口激活、OOPIF 多层 attach、dialog 阻塞、共享焦点并发。
 - 同轮事件订阅先于触发动作就绪，等待不阻塞触发与对话框回应；网络事件读取不悄悄补发请求。
