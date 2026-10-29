@@ -19,6 +19,25 @@ const HISTORY_CACHE_LIMIT = 128;
 const PAGE_CACHE_LIMIT = 16;
 const IDENTITY_LIMIT = 16_384;
 const INVALIDATION_LIMIT = 4096;
+// Keep a bounded reusable projection. Larger captures still use the indexed
+// canonical log and never grow this cache without limit.
+const REPLAY_CACHE_LIMIT = 5000;
+const REPLAY_CACHE_BYTES = 4 * 1024 * 1024;
+function replayFits(state: State): boolean {
+  if (state.network.length > REPLAY_CACHE_LIMIT || state.console.length > REPLAY_CACHE_LIMIT || state.pendingHeaders.size > CACHE_LIMIT) return false;
+  let size = 0;
+  const addHeaders = (headers?: Record<string, string>) => {
+    if (headers) for (const [key, value] of Object.entries(headers)) size += 2 * (key.length + String(value).length);
+  };
+  for (const record of state.network) {
+    size += 256 + 2 * (record.requestRef.length + record.requestId.length + record.url.length + (record.requestBody?.length ?? 0));
+    addHeaders(record.requestHeaders); addHeaders(record.responseHeaders);
+    if (size > REPLAY_CACHE_BYTES) return false;
+  }
+  for (const record of state.console) { size += 128 + 2 * record.text.length; if (size > REPLAY_CACHE_BYTES) return false; }
+  for (const headers of state.pendingHeaders.values()) { addHeaders(headers.request); addHeaders(headers.response); if (size > REPLAY_CACHE_BYTES) return false; }
+  return true;
+}
 const requestRef = (epoch: string, index: number) => `request:${epoch}:${index}`;
 const sourceKey = (sessionId: string | undefined, requestId: string) => JSON.stringify([sessionId ?? null, requestId]);
 function staleRequest(): Error {
@@ -50,6 +69,7 @@ async function waitFor<T>(task: Promise<T>, signal?: AbortSignal): Promise<T> {
 export class BrowserDiagnostics {
   private readonly tabs = new Map<number, State>();
   private readonly restorations = new WeakMap<State, { revision: number; conversationId: string; task: Promise<State> }>();
+  private readonly replays = new WeakMap<State, { revision: number; conversationId: string; lastId: number; logEpoch: string; state: State }>();
   private context: { conversationId?: string; toolCallId?: string; logIdentity?: { runId?: string; toolCallId: string; toolCallIdCanonical: true } } = {};
   constructor(private readonly logger?: EventLogger) {}
   bind(context: typeof this.context): void {
@@ -159,11 +179,19 @@ export class BrowserDiagnostics {
       let flight = this.restorations.get(current);
       if (!flight || flight.revision !== revision || flight.conversationId !== conversationId) {
         const task = (async () => {
-          const restored: State = { ...current, network: [], console: [], pendingHeaders: new Map(), historical: new Map(), pages: new Map(), replayComplete: true };
-          const snapshot = await this.logger!.diagnosticEventsSnapshot(conversationId);
+          let cache = this.replays.get(current);
+          if (cache?.conversationId !== conversationId || cache.revision > revision) cache = undefined;
+          let snapshot = await this.logger!.diagnosticEventsSnapshot(conversationId, { tabId, epoch: current.epoch, afterId: cache?.lastId });
+          if (cache && snapshot.epoch !== cache.logEpoch) {
+            cache = undefined;
+            snapshot = await this.logger!.diagnosticEventsSnapshot(conversationId, { tabId, epoch: current.epoch });
+          }
+          const restored: State = cache ? { ...current, network: structuredClone(cache.state.network), console: structuredClone(cache.state.console), pendingHeaders: structuredClone(cache.state.pendingHeaders), historical: new Map(), pages: new Map(), replayComplete: true }
+            : { ...current, network: [], console: [], pendingHeaders: new Map(), historical: new Map(), pages: new Map(), replayComplete: true };
           restored.replayEpoch = snapshot.epoch;
-          let expectedRevision = 1;
+          let expectedRevision = (cache?.revision ?? 0) + 1, lastId = cache?.lastId ?? -1;
           for (const event of snapshot.value) {
+            lastId = Math.max(lastId, event.id);
             const content = fromLogValue(event.content) as { tabId?: number; source: Debuggee; method: string; epoch?: string; index?: number; revision?: number };
             if (content.tabId !== tabId || content.epoch !== current.epoch) continue;
             if (!Number.isSafeInteger(content.revision) || content.revision! !== expectedRevision) restored.replayComplete = false;
@@ -172,6 +200,10 @@ export class BrowserDiagnostics {
             this.apply(restored, content.source, content.method, fromLogValue(event.output), content.index);
           }
           if (expectedRevision !== revision + 1) restored.replayComplete = false;
+          if (restored.replayComplete && replayFits(restored)
+            && this.tabs.get(tabId) === current && current.revision === revision && this.context.conversationId === conversationId) {
+            this.replays.set(current, { revision, conversationId, lastId, logEpoch: snapshot.epoch, state: restored });
+          }
           return restored;
         })();
         flight = { revision, conversationId, task };

@@ -380,7 +380,7 @@ describe("canonical event log", () => {
     const existing = new Set(["typeId", "conversationTypeId", "runTypeId", "conversationIdId"]);
     const store = { indexNames: { contains: (name: string) => existing.has(name) }, createIndex, deleteIndex };
     const db = {
-      objectStoreNames: { contains: () => true },
+      objectStoreNames: { contains: (name: string) => name === "events" },
       createObjectStore: vi.fn(),
       deleteObjectStore: vi.fn(() => { legacyRecords.length = 0; }),
     };
@@ -389,6 +389,7 @@ describe("canonical event log", () => {
     upgradeEventStore(db as unknown as IDBDatabase, transaction as unknown as IDBTransaction);
 
     expect(transaction.objectStore).toHaveBeenCalledWith("events");
+    expect(db.createObjectStore).toHaveBeenCalledWith("diagnosticCaptureIndex");
     expect(createIndex).toHaveBeenCalledWith("conversationId", "conversationId");
     expect(createIndex).toHaveBeenCalledWith("type", "type");
     expect(createIndex).toHaveBeenCalledWith("conversationType", ["conversationId", "type"]);

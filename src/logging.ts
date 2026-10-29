@@ -55,6 +55,7 @@ type EventStore = {
   appendMany?(events: readonly Omit<LogEvent, "id">[]): Promise<LogEvent[]>;
   all(): Promise<LogEvent[]>;
   byTypes?(types: readonly string[], conversationId?: string, afterId?: number, limit?: number): Promise<LogEvent[]>;
+  diagnosticsByCapture?(conversationId: string, tabId: number, epoch: string, afterId: number): Promise<LogEvent[]>;
   byRunTypes?(runIds: readonly string[], types: readonly string[], afterId?: number): Promise<LogEvent[]>;
   conversation?(conversationId: string, afterId?: number): Promise<LogEvent[]>;
   /** Legacy test capability; canonical runtime never invokes destructive clearing. */
@@ -62,8 +63,9 @@ type EventStore = {
 };
 
 const DB_NAME = "side-agent-runtime";
-const DB_VERSION = 8;
+const DB_VERSION = 9;
 const EVENT_STORE = "events";
+const DIAGNOSTIC_INDEX_STORE = "diagnosticCaptureIndex";
 const CONVERSATION_INDEX = "conversationId";
 const TYPE_INDEX = "type";
 const CONVERSATION_TYPE_INDEX = "conversationType";
@@ -114,6 +116,10 @@ export function upgradeEventStore(db: IDBDatabase, transaction: IDBTransaction):
   // duplicate keys by primary key, so cursor seeking provides the same range
   // reads without copying every historical event during an upgrade.
   for (const name of OBSOLETE_ID_INDEXES) if (store.indexNames.contains(name)) store.deleteIndex(name);
+  // New captures are ephemeral and cannot survive an extension reload, so an
+  // empty index is sufficient for old databases: no expensive backfill or
+  // scan of historical event payloads is needed during the upgrade.
+  if (!db.objectStoreNames.contains(DIAGNOSTIC_INDEX_STORE)) db.createObjectStore(DIAGNOSTIC_INDEX_STORE);
 }
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
@@ -206,12 +212,28 @@ class IndexedDbEventStore implements EventStore {
 
   async appendMany(events: readonly Omit<LogEvent, "id">[]): Promise<LogEvent[]> {
     const db = await this.open();
-    const transaction = db.transaction(EVENT_STORE, "readwrite");
+    const transaction = db.transaction([EVENT_STORE, DIAGNOSTIC_INDEX_STORE], "readwrite");
     const done = transactionDone(transaction);
     const store = transaction.objectStore(EVENT_STORE);
-    const ids = await Promise.all(events.map((event) => requestResult<IDBValidKey>(store.add(event))));
-    await done;
-    return events.map((event, index) => ({ ...event, id: Number(ids[index]) }));
+    try {
+      const ids = await Promise.all(events.map((event) => requestResult<IDBValidKey>(store.add(event))));
+      const diagnosticIndex = transaction.objectStore(DIAGNOSTIC_INDEX_STORE);
+      for (const [index, event] of events.entries()) {
+        const content = event.content && typeof event.content === "object" && !Array.isArray(event.content) ? event.content : undefined;
+        if (event.type === "browser.diagnostic" && typeof event.conversationId === "string" && typeof content?.tabId === "number" && typeof content.epoch === "string") {
+          const id = Number(ids[index]);
+          diagnosticIndex.put(id, [event.conversationId, content.tabId, content.epoch, id]);
+        }
+      }
+      await done;
+      return events.map((event, index) => ({ ...event, id: Number(ids[index]) }));
+    } catch (error) {
+      // A synchronous key/clone error must not leave canonical events written
+      // without their corresponding diagnostic index entries.
+      try { transaction.abort(); } catch { /* Transaction may already have aborted. */ }
+      await done.catch(() => undefined);
+      throw error;
+    }
   }
 
   async all(): Promise<LogEvent[]> {
@@ -241,6 +263,17 @@ class IndexedDbEventStore implements EventStore {
       indexEventsAfter(index, [runId, type], afterId))));
     await done;
     return batches.flat().sort((left, right) => left.id - right.id);
+  }
+
+  async diagnosticsByCapture(conversationId: string, tabId: number, epoch: string, afterId: number): Promise<LogEvent[]> {
+    const db = await this.open();
+    const transaction = db.transaction([EVENT_STORE, DIAGNOSTIC_INDEX_STORE], "readonly");
+    const done = transactionDone(transaction);
+    const range = IDBKeyRange.bound([conversationId, tabId, epoch, Math.max(0, afterId + 1)], [conversationId, tabId, epoch, Number.MAX_SAFE_INTEGER]);
+    const ids = await requestResult<number[]>(transaction.objectStore(DIAGNOSTIC_INDEX_STORE).getAll(range));
+    const events = await Promise.all(ids.map((id) => requestResult<LogEvent | undefined>(transaction.objectStore(EVENT_STORE).get(id))));
+    await done;
+    return events.filter((event): event is LogEvent => Boolean(event));
   }
 
   async conversation(conversationId: string, afterId = -1): Promise<LogEvent[]> {
@@ -745,8 +778,13 @@ export class EventLogger {
   }
 
   /** Diagnostic replay and its log epoch must be observed together. */
-  diagnosticEventsSnapshot(conversationId: string): Promise<{ value: LogEvent[]; epoch: string }> {
-    return this.readCanonicalSnapshot((store, floor) => this.eventsByTypesAt(store, floor, ["browser.diagnostic"], conversationId));
+  diagnosticEventsSnapshot(conversationId: string, capture?: { tabId: number; epoch: string; afterId?: number }): Promise<{ value: LogEvent[]; epoch: string }> {
+    return this.readCanonicalSnapshot(async (store, floor) => {
+      const afterId = Math.max(floor, capture?.afterId ?? -1);
+      if (capture && store.diagnosticsByCapture) return store.diagnosticsByCapture(conversationId, capture.tabId, capture.epoch, afterId);
+      if (store.byTypes) return (await store.byTypes(["browser.diagnostic"], conversationId, afterId)).filter((event) => event.id > afterId);
+      return (await store.all()).filter((event) => event.id > afterId && event.type === "browser.diagnostic" && event.conversationId === conversationId);
+    });
   }
 
   /** Validate derived data against the current log-clear/writer epoch. */

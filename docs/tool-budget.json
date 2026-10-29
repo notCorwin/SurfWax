@@ -1,35 +1,22 @@
 {
-  "method": "UTF-8 JSON of ordered name, description, Zod JSON inputSchema; raw TOOL_SUMMARY. Fixed BPE token counts are not provider billing usage.",
+  "method": "UTF-8 JSON of ordered name, description, Zod JSON inputSchema plus the catalog context actually sent in the system prompt. On-demand reference responses are excluded. Fixed BPE token counts are not provider billing usage.",
   "records": [
     {
-      "label": "baseline",
-      "count": 80,
-      "definitionsBytes": 63544,
-      "summaryBytes": 5983,
-      "tokens": {
-        "cl100k_base": {
-          "definitions": 15033,
-          "summary": 1246
-        },
-        "o200k_base": {
-          "definitions": 15569,
-          "summary": 1257
-        }
-      }
-    },
-    {
       "label": "current",
-      "count": 49,
-      "definitionsBytes": 46022,
-      "summaryBytes": 2946,
+      "count": 61,
+      "definitionsBytes": 47362,
+      "contextBytes": 4160,
+      "combinedBytes": 51523,
       "tokens": {
         "cl100k_base": {
-          "definitions": 11048,
-          "summary": 645
+          "definitions": 11397,
+          "context": 866,
+          "combined": 12263
         },
         "o200k_base": {
-          "definitions": 11429,
-          "summary": 647
+          "definitions": 11679,
+          "context": 868,
+          "combined": 12547
         }
       }
     }

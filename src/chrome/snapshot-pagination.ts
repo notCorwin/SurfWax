@@ -11,6 +11,26 @@ export type SnapshotItem = Readonly<{
 /** The caller must bind this position to its snapshot, owner, tab and document. */
 export type SnapshotPosition = Readonly<{ index: number; charOffset: number }>;
 
+/** Compare frozen snapshots in linear time, preserving their order and identity. */
+export function diffSnapshot(before: readonly SnapshotItem[], after: readonly SnapshotItem[]): SnapshotItem[] {
+  const prior = new Map<string, { line: string; predecessor?: string }>();
+  for (let index = 0; index < before.length; index++) {
+    const item = before[index]!;
+    const existing = prior.get(item.id);
+    if (existing) existing.line = item.line;
+    else prior.set(item.id, { line: item.line, predecessor: before[index - 1]?.id });
+  }
+  const current = new Set(after.map(({ id }) => id));
+  const removed: SnapshotItem[] = [], changed: SnapshotItem[] = [], moved: SnapshotItem[] = [];
+  for (const item of before) if (!current.has(item.id)) removed.push({ ...item, change: "removed" });
+  for (let index = 0; index < after.length; index++) {
+    const item = after[index]!, previous = prior.get(item.id), predecessor = after[index - 1]?.id;
+    if (previous?.line !== item.line) changed.push({ ...item, change: previous ? "updated" : "added", after: predecessor ?? null });
+    if (previous && previous.predecessor !== predecessor) moved.push({ ...item, change: "moved", after: predecessor ?? null });
+  }
+  return [...removed, ...changed, ...moved];
+}
+
 export type SnapshotFragment = Readonly<{
   index: number;
   id: string;

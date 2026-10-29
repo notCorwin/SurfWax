@@ -18,7 +18,7 @@
 | `key_down` | Hold a key until key_up or run cleanup. |
 | `key_up` | Release a held key. |
 | `set_checked` | Set a checkbox or radio button to the requested checked state. |
-| `select_option` | Select option values or labels on a select element. |
+| `select_option` | Select option values or labels on a select element. An empty array clears selection; missing, disabled or ambiguous options fail without changing selection. |
 | `drag` | Drag one element to another. |
 | `scroll` | Scroll the page by a horizontal and vertical delta at the current pointer. |
 | `move_pointer` | Move the pointer to coordinates bound to a current observation. |

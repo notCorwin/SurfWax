@@ -1,7 +1,7 @@
 import type { EventLogger } from "../logging";
 import { waitForDocumentFrame } from "./dom-frame";
 import { abortError, axValue, delay, imageSize, keyboardParams, modifierMask, throwIfAborted } from "./automation-utils";
-import { paginateSnapshot, type SnapshotItem, type SnapshotPosition } from "./snapshot-pagination";
+import { diffSnapshot, paginateSnapshot, type SnapshotItem, type SnapshotPosition } from "./snapshot-pagination";
 import { renderSnapshotNode, type SnapshotNode, type SnapshotStateName } from "./snapshot-render";
 
 type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
@@ -530,14 +530,7 @@ export class AutomationRuntime {
         guard();
         const observationId = crypto.randomUUID();
         const baseline = previous && !previous.incomplete ? previous : undefined;
-        const before = new Map(baseline?.lines.map((item) => [item.id, item.line]));
-        const after = new Map(lines.map((item) => [item.id, item.line]));
-        const changes: SnapshotItem[] | undefined = baseline ? [
-          ...baseline.lines.filter(({ id }) => !after.has(id)).map((item) => ({ ...item, change: "removed" as const })),
-          ...lines.filter(({ id, line }) => before.get(id) !== line).map((item) => ({ ...item, change: before.has(item.id) ? "updated" as const : "added" as const, after: lines[lines.indexOf(item) - 1]?.id ?? null })),
-          ...lines.filter((item, index) => before.has(item.id) && baseline.lines[baseline.lines.findIndex((prior) => prior.id === item.id) - 1]?.id !== lines[index - 1]?.id)
-            .map((item) => ({ ...item, change: "moved" as const, after: lines[lines.indexOf(item) - 1]?.id ?? null })),
-        ] : undefined;
+        const changes = baseline ? diffSnapshot(baseline.lines, lines) : undefined;
         const source = changes ?? lines;
         const index = options.offset ?? 0;
         if (!Number.isSafeInteger(index) || index < 0 || index > source.length) throw automationError("invalid-offset", { offset: index, total: source.length });
@@ -804,12 +797,40 @@ export class AutomationRuntime {
       if (operation === "selectOption") {
         const { objectId, targetSession } = await this.waitActionableLocator(session, spec, false, false);
         const values = Array.isArray(args[0]) ? args[0].map(String) : [String(args[0])];
+        // Validate before recording dispatch, and again in the same page task
+        // as the mutation: the options can change while dispatch is recorded.
+        const select = `function(values, apply){
+          if (!(this instanceof HTMLSelectElement)) return { error: 'not-select' };
+          if (!this.isConnected) return { error: 'detached' };
+          if (this.matches(':disabled')) return { error: 'select-disabled' };
+          const options = [...this.options], selected = [];
+          for (const value of values) {
+            let matches = options.filter(option => option.value === value);
+            if (!matches.length) matches = options.filter(option => option.label === value);
+            if (!matches.length) return { error: 'option-not-found', value };
+            if (matches.length > 1) return { error: 'ambiguous-option', value };
+            const option = matches[0];
+            if (option.disabled || (option.parentElement?.localName === 'optgroup' && option.parentElement.disabled))
+              return { error: 'option-disabled', value };
+            if (!selected.includes(option)) selected.push(option);
+          }
+          if (!this.multiple && selected.length > 1) return { error: 'multiple-options-for-single-select' };
+          if (apply) {
+            if (this.multiple) for (const option of options) option.selected = selected.includes(option);
+            else this.selectedIndex = selected.length ? options.indexOf(selected[0]) : -1;
+            this.dispatchEvent(new Event('input', { bubbles: true }));
+            this.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          return { selected: [...this.selectedOptions].map(option => option.value) };
+        }`;
+        const validate = async (apply: boolean) => {
+          const result = await this.callOn(targetSession, objectId, select, [values, apply]);
+          if (result.error) throw automationError("invalid-option", { reason: result.error, ...(result.value === undefined ? {} : { value: result.value }) });
+          return result.selected;
+        };
+        await validate(false);
         await this.options.onDispatch?.();
-        const selected = await this.callOn(targetSession, objectId, `function(values){
-          for (const option of this.options) option.selected = values.includes(option.value) || values.includes(option.label);
-          this.dispatchEvent(new Event("input", { bubbles: true })); this.dispatchEvent(new Event("change", { bubbles: true }));
-          return [...this.selectedOptions].map(option => option.value);
-        }`, [values]);
+        const selected = await validate(true);
         return { selected, ...(await this.afterAction(session)) };
       }
       if (operation === "setInputFiles") {
@@ -1419,24 +1440,27 @@ export class AutomationRuntime {
     return response.result?.value;
   }
 
-  private async elementState(session: Session, objectId: string, pointer = false): Promise<ElementState> {
+  private async elementState(session: Session, objectId: string, pointer = false, scroll = false): Promise<ElementState> {
     // Child-frame RAF and timers can both be suspended by Chrome. Read real
     // geometry synchronously on each side of two frames of the live harness.
     const read = async () => {
-      const value = await this.callOn(session, objectId, `function(){
+      const value = await this.callOn(session, objectId, `function(scroll, pointer){
       if (!this.isConnected) return { connected: false, x: 0, y: 0, visible: false, stable: false, enabled: false, editable: false, receivesEvents: false, checked: false };
-      this.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+      if (scroll) this.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
       const rect = this.getBoundingClientRect();
       const style = getComputedStyle(this); let x = rect.left + rect.width / 2; let y = rect.top + rect.height / 2;
-      const guard = document.getElementById("__surf-wax-page-guard"); const pointerEvents = guard?.style.getPropertyValue("pointer-events"); const pointerPriority = guard?.style.getPropertyPriority("pointer-events");
-      if (guard) guard.style.setProperty("pointer-events", "none", "important");
-      let hit = this.ownerDocument.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-      while (hit?.shadowRoot) { const nested = hit.shadowRoot.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); if (!nested || nested === hit) break; hit = nested; }
-      if (guard) guard.style.setProperty("pointer-events", pointerEvents || "auto", pointerPriority || "important");
+      let hit = null;
+      if (pointer) {
+        const guard = document.getElementById("__surf-wax-page-guard"); const pointerEvents = guard?.style.getPropertyValue("pointer-events"); const pointerPriority = guard?.style.getPropertyPriority("pointer-events");
+        if (guard) guard.style.setProperty("pointer-events", "none", "important");
+        hit = this.ownerDocument.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        while (hit?.shadowRoot) { const nested = hit.shadowRoot.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); if (!nested || nested === hit) break; hit = nested; }
+        if (guard) guard.style.setProperty("pointer-events", pointerEvents || "auto", pointerPriority || "important");
+      }
       const disabled = Boolean(this.disabled || this.closest("fieldset:disabled") || this.closest('[aria-disabled="true"]'));
       const editable = !disabled && !this.readOnly && this.getAttribute("aria-readonly") !== "true" && (this.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(this.tagName));
       return { connected: true, x, y, width: rect.width, height: rect.height, visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none", stable: true, enabled: !disabled, editable, receivesEvents: Boolean(hit && (hit === this || this.contains(hit))), checked: (${CHECKED_STATE_SOURCE}).call(this).value };
-    }`, [], true);
+    }`, [scroll, pointer], pointer);
       if (!pointer || !value.connected || !value.visible) return value as ElementState;
       // CDP quads are relative to this debugger target's viewport and already
       // include same-process iframe transforms, borders, and nested offsets.
@@ -1494,7 +1518,7 @@ export class AutomationRuntime {
       attempt += 1;
       if (!objectId) { this.recordAttempt(session, spec, attempt, "no-candidate", candidates); await delay(50, this.context.signal); continue; }
       const targetSession = this.objectSession(session, objectId);
-      const state = await this.elementState(targetSession, objectId, pointer).catch((error) => {
+      const state = await this.elementState(targetSession, objectId, pointer, true).catch((error) => {
         if (spec.ref) throw automationError("detached", { ref: spec.ref, reason: error instanceof Error ? error.message : String(error) });
         return undefined;
       });
@@ -1590,9 +1614,13 @@ export class AutomationRuntime {
         const byId = new Map(nodes.map((node) => [node.nodeId, node]));
         const scope = debuggee.sessionId ?? session.rootFrameId ?? "root";
         if (frameLabel) lines.push({ id: `${scope}:frame`, line: `${"  ".repeat(frameDepth)}- iframe [frame=${frameLabel}]` });
-        const visit = (node: any, depth: number) => {
-          if (!node || node.ignored) { for (const child of node?.childIds ?? []) visit(byId.get(child), depth); return; }
-          const role = axValue(node.role); const name = axValue(node.name); const value = axValue(node.value);
+        const root = regionNode ? nodes.find((node) => node.backendDOMNodeId === regionNode.node.backendNodeId) : nodes.find((node) => !node.parentId) ?? nodes[0];
+        if (regionNode && !root) throw automationError("snapshot-region-unavailable", { locator: region });
+        const pending: Array<{ node: any; depth: number }> = root ? [{ node: root, depth: frameLabel ? frameDepth + 1 : 0 }] : [];
+        while (pending.length) {
+          const { node, depth } = pending.pop()!;
+          let childDepth = depth;
+          const role = node.ignored ? "" : axValue(node.role); const name = axValue(node.name); const value = axValue(node.value);
           if (role && role !== "none" && role !== "generic" && role !== "InlineTextBox") {
             let ref = "";
             const identity = `${scope}:${node.backendDOMNodeId ?? node.nodeId}`;
@@ -1609,13 +1637,14 @@ export class AutomationRuntime {
             const snapshotNode: SnapshotNode = { id: identity, depth, role, name, value, ...(ref ? { ref, actions } : {}), state };
             const rendered = renderSnapshotNode(snapshotNode);
             lines.push({ id: identity, line: rendered.line, ...(rendered.ref ? { ref: rendered.ref } : {}), node: snapshotNode });
-            depth += 1;
+            childDepth += 1;
           }
-          for (const child of node.childIds ?? []) visit(byId.get(child), depth);
-        };
-        const root = regionNode ? nodes.find((node) => node.backendDOMNodeId === regionNode.node.backendNodeId) : nodes.find((node) => !node.parentId) ?? nodes[0];
-        if (regionNode && !root) throw automationError("snapshot-region-unavailable", { locator: region });
-        visit(root, frameLabel ? frameDepth + 1 : 0);
+          const children: string[] = node.childIds ?? [];
+          for (let index = children.length - 1; index >= 0; index--) {
+            const child = byId.get(children[index]);
+            if (child) pending.push({ node: child, depth: childDepth });
+          }
+        }
       };
       for (const { debuggee, frameId, depth, tree } of trees) render(tree.nodes ?? [], debuggee, frameId, depth);
       if (generation === session.generation) return { ...info, lines };

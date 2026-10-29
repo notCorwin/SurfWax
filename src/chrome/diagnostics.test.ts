@@ -167,6 +167,59 @@ describe("BrowserDiagnostics", () => {
     expect(reads).toHaveBeenCalledTimes(2);
   });
 
+  it("replays only newly committed capture events after a complete cached projection", async () => {
+    const events: LogEvent[] = [];
+    const queries: number[] = [];
+    const logger = new EventLogger({ store: {
+      async append(event) { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; },
+      async all() { return [...events]; },
+      async latestByType(type) { return [...events].reverse().find((event) => event.type === type); },
+      async byTypes(types, conversationId, afterId = -1) { return events.filter((event) => event.id > afterId && types.includes(event.type) && (!conversationId || event.conversationId === conversationId)); },
+      async diagnosticsByCapture(conversationId, tabId, epoch, afterId) {
+        queries.push(afterId);
+        return events.filter((event) => event.id > afterId && event.type === "browser.diagnostic" && event.conversationId === conversationId && (event.content as any)?.tabId === tabId && (event.content as any)?.epoch === epoch);
+      },
+    } });
+    const diagnostics = new BrowserDiagnostics(logger);
+    diagnostics.bind({ conversationId: "conversation" });
+    for (let index = 1; index <= 1001; index++) diagnostics.handle({ tabId: 1 }, "Network.requestWillBeSent", request(index));
+    const first = await diagnostics.requests(1, { limit: 1 }) as any;
+    expect(first).toMatchObject({ integrity: "complete", requests: [{ url: "https://test/1" }] });
+    diagnostics.handle({ tabId: 1 }, "Network.responseReceived", { requestId: "1", response: { status: 207, headers: {} } });
+    diagnostics.handle({ tabId: 1 }, "Network.requestWillBeSent", request(1002));
+    const updated = await diagnostics.requests(1, { limit: 1 }) as any;
+    expect(updated).toMatchObject({ integrity: "complete", requests: [{ url: "https://test/1", status: 207 }] });
+    expect(queries).toEqual([-1, 1001]);
+  });
+
+  it("marks an indexed capture incomplete if an indexed event is missing", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: {
+      async append(event) { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; },
+      async all() { return [...events]; },
+      async latestByType(type) { return [...events].reverse().find((event) => event.type === type); },
+      async diagnosticsByCapture(conversationId, tabId, epoch, afterId) {
+        return events.filter((event) => event.id > afterId && event.id !== 500 && event.type === "browser.diagnostic" && event.conversationId === conversationId && (event.content as any)?.tabId === tabId && (event.content as any)?.epoch === epoch);
+      },
+    } });
+    const diagnostics = new BrowserDiagnostics(logger);
+    diagnostics.bind({ conversationId: "conversation" });
+    for (let index = 1; index <= 1001; index++) diagnostics.handle({ tabId: 1 }, "Network.requestWillBeSent", request(index));
+    expect(await diagnostics.requests(1, { limit: 1 })).toMatchObject({ integrity: "incomplete", reason: "diagnostic-log-incomplete" });
+  });
+
+  it("does not retain a replay projection with oversized request bodies", async () => {
+    const { diagnostics, logger } = harness();
+    diagnostics.handle({ tabId: 1 }, "Network.requestWillBeSent", { ...request(1), request: { ...request(1).request, postData: "x".repeat(3 * 1024 * 1024) } });
+    for (let index = 2; index <= 1001; index++) diagnostics.handle({ tabId: 1 }, "Network.requestWillBeSent", request(index));
+    const reads = vi.spyOn(logger, "diagnosticEventsSnapshot");
+    await diagnostics.requests(1, { limit: 1 });
+    diagnostics.handle({ tabId: 1 }, "Network.requestWillBeSent", request(1002));
+    await diagnostics.requests(1, { limit: 1 });
+    expect(reads).toHaveBeenCalledTimes(2);
+    expect(reads.mock.calls[1]?.[1]?.afterId).toBeUndefined();
+  });
+
   it("cancels a waiting historical replay without cancelling shared work", async () => {
     const { diagnostics, logger } = harness();
     diagnostics.handle({ tabId: 1 }, "Network.requestWillBeSent", request(1));

@@ -67,6 +67,29 @@ function harness(
 }
 
 describe("AutomationRuntime", () => {
+  it("validates selection before dispatch and revalidates after the dispatch barrier", async () => {
+    const { runtime, command, onDispatch } = harness([{ role: "combobox", name: "Choice", tag: "select" }]);
+    const original = command.getMockImplementation()!;
+    const selections: boolean[] = [];
+    let invalidInitially = true;
+    command.mockImplementation(async (debuggee, method, params?: any) => {
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("function(values, apply)")) {
+        const apply = params.arguments[1].value;
+        selections.push(apply);
+        return { result: { value: invalidInitially || apply ? { error: "option-not-found", value: "missing" } : { selected: [] } } };
+      }
+      return original(debuggee, method, params);
+    });
+    const page = await runtime.createPage(3);
+    await expect(page.getByRole("combobox", { name: "Choice" }).selectOption("missing")).rejects.toMatchObject({ code: "invalid-option", detail: { reason: "option-not-found" } });
+    expect(onDispatch).not.toHaveBeenCalled();
+    expect(selections).toEqual([false]);
+    invalidInitially = false;
+    await expect(page.getByRole("combobox", { name: "Choice" }).selectOption("missing")).rejects.toMatchObject({ code: "invalid-option" });
+    expect(onDispatch).toHaveBeenCalledOnce();
+    expect(selections).toEqual([false, false, true]);
+    await runtime.dispose();
+  });
   it("shares the chooser claim with program uploads until file dispatch completes", async () => {
     const stream = new EventSubscriptions();
     const owner = { conversationId: "conversation", runId: "run" };
@@ -121,6 +144,22 @@ describe("AutomationRuntime", () => {
     await page.evaluate(() => true); expect(onDispatch).toHaveBeenCalledTimes(1);
     await page.inspect(); expect(onDispatch).toHaveBeenCalledTimes(1);
   });
+  it("inspects a deeply nested accessibility tree without exhausting the call stack", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    const depth = 20_000;
+    const nodes = Array.from({ length: depth }, (_, index) => ({
+      nodeId: `deep-${index}`, ...(index ? { parentId: `deep-${index - 1}` } : {}),
+      ignored: index < depth - 1, role: { value: index === depth - 1 ? "button" : "generic" },
+      name: { value: index === depth - 1 ? "Deep target" : "" },
+      childIds: index < depth - 1 ? [`deep-${index + 1}`] : [], backendDOMNodeId: index + 1,
+    }));
+    command.mockImplementation(async (source, method, params) => method === "Accessibility.getFullAXTree" ? { nodes } : original(source, method, params));
+    const result = await (await runtime.createPage(3)).inspect();
+    expect(result.snapshot).toContain('button "Deep target"');
+    await runtime.abortSessions();
+  });
+
   it("inspects text by default, qualifies references, and returns changes without repeating the full snapshot", async () => {
     const metadata = [{ role: "button", name: "Save", tag: "button", text: "Save" }];
     const { runtime, calls } = harness(metadata); const page = await runtime.createPage(3);

@@ -1,7 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { paginateSnapshot, type SnapshotItem, type SnapshotPosition } from "./snapshot-pagination";
+import { diffSnapshot, paginateSnapshot, type SnapshotItem, type SnapshotPosition } from "./snapshot-pagination";
 
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+
+describe("semantic snapshot differences", () => {
+  it("keeps removals, updates, insertions and moves in their respective snapshot order", () => {
+    const before = [{ id: "a", line: "A" }, { id: "b", line: "B" }, { id: "c", line: "C" }, { id: "d", line: "D" }];
+    const after = [{ id: "c", line: "new C", ref: "ref-c" }, { id: "a", line: "A" }, { id: "e", line: "E" }, { id: "d", line: "D" }];
+    expect(diffSnapshot(before, after)).toEqual([
+      { id: "b", line: "B", change: "removed" },
+      { id: "c", line: "new C", ref: "ref-c", change: "updated", after: null },
+      { id: "e", line: "E", change: "added", after: "a" },
+      { id: "c", line: "new C", ref: "ref-c", change: "moved", after: null },
+      { id: "a", line: "A", change: "moved", after: "c" },
+      { id: "d", line: "D", change: "moved", after: "e" },
+    ]);
+  });
+
+  it("handles large unchanged snapshots and a change at the end", () => {
+    const before = Array.from({ length: 40_000 }, (_, index) => ({ id: `node-${index}`, line: `row ${index}` }));
+    const after = before.map((item) => ({ ...item }));
+    after[39_999]!.line = "updated";
+    expect(diffSnapshot(before, after)).toEqual([{ id: "node-39999", line: "updated", change: "updated", after: "node-39998" }]);
+  });
+});
 
 describe("immutable semantic snapshot pagination", () => {
   it("recovers a very large line losslessly under a fixed JSON byte budget", () => {
