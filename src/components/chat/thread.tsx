@@ -11,7 +11,7 @@ import { LocalComposer } from "./local-composer";
 import { MessageRow, type MessageView, type WorkView } from "./message-row";
 import { workLabel } from "./work-time";
 import type { ModelConfig } from "@/types";
-import type { EventLogger, LogEvent } from "@/logging";
+import { fromLogValue, type EventLogger, type LogEvent } from "@/logging";
 
 export function completedWork(events: readonly LogEvent[]): Map<string, number> {
   const started = new Map<string, number>();
@@ -20,7 +20,7 @@ export function completedWork(events: readonly LogEvent[]): Map<string, number> 
     if (!event.runId) continue;
     if (event.type === "conversation.submitted") started.set(event.runId, Date.parse(event.timestamp));
     if (event.type !== "conversation.finished") continue;
-    const messageId = (event.content as { messageId?: unknown } | null)?.messageId;
+    const messageId = (fromLogValue(event.content, event.valueEncoding) as { messageId?: unknown } | null)?.messageId;
     const start = started.get(event.runId);
     if (typeof messageId === "string" && start !== undefined && Number.isFinite(start)) {
       completed.set(messageId, Math.max(0, Math.floor((Date.parse(event.timestamp) - start) / 1000)));

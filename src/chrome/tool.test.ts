@@ -94,6 +94,75 @@ describe("browser tools", () => {
     release(); executor.dispose();
   });
 
+  it("reports absent artifact paths and preserves the distinction between undefined, null and objects", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: {
+      append: async (event) => { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+      all: async () => [...events], clear: async () => { events.length = 0; },
+    } });
+    const artifact = await logger.append({ type: "tool.result.data", conversationId: "c", output: {
+      rows: ["first", null, undefined], object: { result: null, resultType: "undefined" }, literal: { $type: "undefined", value: null },
+    } });
+    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
+    const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
+    const read = async (path: (string | number)[]) => tools.read_artifact.execute({ artifactId: artifact!.id, path }, { toolCallId: crypto.randomUUID() });
+    expect(await read(["rows", 0])).toEqual({ ok: true, result: "first" });
+    expect(await read(["rows", 1])).toEqual({ ok: true, result: null });
+    expect(await read(["rows", 2])).toEqual({ ok: true, result: null, resultType: "undefined" });
+    expect(await read(["object"])).toEqual({ ok: true, result: { result: null, resultType: "undefined" } });
+    expect(await read(["literal"])).toEqual({ ok: true, result: { $type: "undefined", value: null } });
+    for (const path of [["rows", 3], ["rows", "map"], ["missing"]])
+      expect(await read(path)).toMatchObject({ ok: false, error: { code: "result-path-not-found" } });
+    executor.dispose();
+  });
+
+  it("sends nested undefined and sparse array holes as paths relative to the returned slice", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: {
+      append: async (event) => { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+      all: async () => [...events], clear: async () => { events.length = 0; },
+    } });
+    const rows = ["a", undefined, , null, { undefinedPaths: undefined, holePaths: [undefined, null] }];
+    const artifact = await logger.append({ type: "tool.result.data", conversationId: "c", output: { rows } });
+    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
+    const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
+    const read = async (selection: object) => tools.read_artifact.execute({ artifactId: artifact!.id, ...selection }, { toolCallId: crypto.randomUUID() });
+    const output = await read({ path: ["rows"], offset: 1, limit: 4 });
+    expect(JSON.parse(JSON.stringify(output))).toEqual({ ok: true,
+      result: [null, null, null, { undefinedPaths: null, holePaths: [null, null] }],
+      undefinedPaths: [[0], [3, "undefinedPaths"], [3, "holePaths", 0]], holePaths: [[1]] });
+    // Existing JavaScript program consumers still receive the original values and holes.
+    const original = await logger.result(artifact!.id, { path: ["rows"], offset: 1, limit: 4 }, "c") as any[];
+    expect(Object.hasOwn(original, 0)).toBe(true); expect(original[0]).toBeUndefined();
+    expect(Object.hasOwn(original, 1)).toBe(false); expect(original[2]).toBeNull();
+    executor.dispose();
+  });
+
+  it("retains paginated sidecar access when a large artifact read is compacted", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: {
+      append: async (event) => { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+      all: async () => [...events], clear: async () => { events.length = 0; },
+    } });
+    const values = new Array(3000); for (let index = 1; index < values.length; index += 2) values[index] = undefined;
+    const artifact = await logger.append({ type: "tool.result.data", conversationId: "c", output: { values } });
+    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
+    const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
+    const execute = (input: object) => tools.read_artifact.execute(input, { toolCallId: crypto.randomUUID() });
+    const compacted = await execute({ artifactId: artifact!.id, path: ["values"], offset: 100, limit: 2000 });
+    expect(compacted).toMatchObject({ $ref: expect.any(Number), undefinedCount: 1000, holeCount: 1000,
+      undefinedPathsAccess: { path: ["undefinedPaths"], offset: 0 }, holePathsAccess: { path: ["holePaths"], offset: 0 } });
+    expect(compacted.pathsNote).toContain("relative");
+    expect(await execute({ ...compacted.undefinedPathsAccess, limit: 2 })).toEqual({ ok: true, result: [[1], [3]] });
+    expect(await execute({ ...compacted.holePathsAccess, limit: 2 })).toEqual({ ok: true, result: [[0], [2]] });
+    const longKey = "x".repeat(10000);
+    const hugePath = await logger.append({ type: "tool.result.data", conversationId: "c", output: { [longKey]: undefined } });
+    const huge = await execute({ artifactId: hugePath!.id });
+    expect(huge).toMatchObject({ undefinedCount: 1, undefinedPathsOversizedItem: { path: ["undefinedPaths", 0] } });
+    expect(await execute({ artifactId: huge.$ref, path: ["undefinedPaths", 0, 0], offset: 0, limit: 5 })).toEqual({ ok: true, result: "xxxxx" });
+    executor.dispose();
+  });
+
   it("cancels a stalled artifact read when only the run signal is aborted", async () => {
     const logger = { result: vi.fn(() => new Promise(() => {})), append: vi.fn(async () => ({ id: 1 })) } as unknown as EventLogger;
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });

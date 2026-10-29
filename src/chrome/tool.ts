@@ -10,7 +10,7 @@ const elementTargetObject = z.union([
   z.object({ ref: z.string().min(1) }).strict(),
   z.object({ by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testId", "css"]), value: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional(), index: z.number().int().optional(), frame: z.union([z.object({ by: z.literal("css"), value: z.string().min(1) }).strict(), z.object({ ref: z.string().min(1) }).strict()]).optional() }).strict(),
 ]);
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v14";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v15";
 export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetObject]).optional(),
   fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional(), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
@@ -52,7 +52,7 @@ export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
 ]);
 export const PROGRAM_API = `execute_program API (async JavaScript body; no function wrapper required):
 page: tabId; inspect(options?, regionLocator?); snapshot(); observe('semantic'|'visual'); ref/locator/frameLocator/frameRef/getByRole/getByText/getByLabel/getByPlaceholder/getByAltText/getByTitle/getByTestId; goto/reload/goBack/goForward; url/title; evaluate(functionOrString,arg?); waitForURL/waitForLoadState/waitForEvent('dialog'|'popup'|'download'|'filechooser'); point(observationId,x,y,'click'|'dblclick'|'hover',options?); upload(files); drop(target,{files?,data?}); screenshot(options?); pdf({filename?,save?}); keyboard.press/insertText/down/up; mouse.move/down/up/wheel. inspect, snapshot and semantic observe return items with AX ids. For delta remove removed ids; upsert added/updated/moved immediately after after (null=first). Reassemble split items using UTF-16 fragment offsets before applying. Ref use checks visible role/name, but reused DOM nodes can still represent different business data. Older refs may expire after later independent observations or searches; affected continuations return stale-observation. waitForLoadState throws load-state-unknown when lifecycle cannot be verified after attaching; inspect the target element or wait for a new navigation.
-locators: chain/filter/first/last/nth, count/waitFor/click/dblclick/hover/fill/clear/press/pressSequentially/check/uncheck/selectOption/dragTo/setInputFiles/focus/blur/scrollIntoViewIfNeeded/textContent/innerText/inputValue/getAttribute/isVisible/isEnabled/isChecked/readCondition/evaluate. readCondition takes text, value, visible, enabled or checked and returns present and actual for one bound node. Ref composition requires a shared JavaScript execution context; cross-context combinations fail explicitly. Chained and filtered role/name matching uses DOM-derived semantics. dragTo supports pointer drags; native HTML5 draggable sources are unavailable while the interaction blocker is active. Files: {name,mimeType?,text|base64|url}; artifacts.read supplies existing file data. Event handles: chooser.isMultiple()/setFiles(files), dialog.type()/message()/defaultValue()/accept(prompt?)/dismiss(), popup is a page. Start event waits before the action, then await them.
+locators: chain/filter/first/last/nth, count/waitFor/click/dblclick/hover/fill/clear/press/pressSequentially/check/uncheck/selectOption/dragTo/setInputFiles/focus/blur/scrollIntoViewIfNeeded/textContent/innerText/inputValue/getAttribute/isVisible/isEnabled/isChecked/readCondition/evaluate. readCondition takes text, value, visible, enabled or checked and returns present and actual for one bound node. pressSequentially inserts characters without keydown or keyup events. Ref composition requires a shared JavaScript execution context; cross-context combinations fail explicitly. Chained and filtered role/name matching uses DOM-derived semantics. dragTo supports pointer drags; native HTML5 draggable sources are unavailable while the interaction blocker is active. Files: {name,mimeType?,text|base64|url}; artifacts.read supplies existing file data. Event handles: chooser.isMultiple()/setFiles(files), dialog.type()/message()/defaultValue()/accept(prompt?)/dismiss(), popup is a page. Start event waits before the action, then await them.
 browser: page(tabId); tabs.list()/open(url?)/select(tabId)/close(tabId); scripts.list()/read(id)/create(definition)/edit(id,changes)/setEnabled(id,enabled)/delete(id). Scripts use Chrome RegisteredUserScript fields including matches, js:[{code|file}], world:MAIN|USER_SCRIPT, runAt, allFrames, include/excludeGlobs/Matches, worldId. Persisted enablement is restored at startup/upgrade; Allow User Scripts must already be enabled.
 browser.runIn({kind:'page',tabId,world:'MAIN'|'ISOLATED'|'USER_SCRIPT',frameId?,documentId?},codeBody): explicit execution domain. MAIN/ISOLATED root only; USER_SCRIPT supports Chrome frameId or documentId. Use frameLocator.evaluate for arbitrary supported frames. No automatic context substitution.
 net.fetch({context:'page'|'extension',url,tabId?,init?}) returns {url,status,ok,headers,body}; no page-to-extension fallback. Page fetch obeys page origin/cookies/CORS; extension fetch uses extension host permissions. net.requests(options?,tabId?) returns {requests,integrity,hasMore,nextOffset?} for captured history (not all traffic); net.console(options?,tabId?) returns the same metadata with messages instead of requests. hasMore can be null when unknown and offsets refer to a live list. net.request(requestRef,tabId?) and net.responseBody(requestRef,tabId?) read captured requests.
@@ -134,8 +134,10 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
             : await executor.runProgram(definition.program!(value), abortSignal, context);
           const failure = (result as any)?.ok === false ? (result as any).error ?? (result as any).failed?.error ?? (result as any).result?.error : undefined;
           const artifact = (result as any)?.result?.artifact;
-          const normalized = failure ? { ...result as object, ...(artifact ? { artifact } : {}), error: { ...failure, retryable: false } } : result;
-          output = await compactToolResult(normalized, { ...options, toolCallId, ...identity, preserveVerification: definition.name === "verify_state", preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job", preserveSearchStatus: definition.name === "find_elements" || definition.name === "list_frames", preserveInspectionStatus: definition.name === "inspect_page", preserveDiagnosticStatus: definition.name === "list_requests" || definition.name === "read_console", preserveEventStatus: definition.name === "wait_event" });
+          const normalized = failure ? { ...result as object, ...(artifact ? { artifact } : {}), error: { ...failure, retryable: false } }
+            : definition.name === "read_artifact" && result && typeof result === "object" && "result" in result
+              ? normalizeArtifactResult(result as Record<string, unknown>) : result;
+          output = await compactToolResult(normalized, { ...options, toolCallId, ...identity, preserveVerification: definition.name === "verify_state", preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job", preserveSearchStatus: definition.name === "find_elements" || definition.name === "list_frames", preserveInspectionStatus: definition.name === "inspect_page", preserveDiagnosticStatus: definition.name === "list_requests" || definition.name === "read_console", preserveEventStatus: definition.name === "wait_event", preserveArtifactValue: definition.name === "read_artifact" });
           if ((definition.name === "get_job" || definition.name === "cancel_job") && (result as any)?.terminal === true && typeof (result as any).id === "string") observedTerminalJob = (result as any).id;
         } catch (error) {
           output = await failureFor(error, executing);
@@ -394,7 +396,46 @@ function previewOf(value: unknown, path?: readonly (string | number)[]): unknown
   return preview;
 }
 
-export async function compactToolResult(value: unknown, options: { logger?: EventLogger; conversationId?: string; toolCallId?: string; runId?: string; toolCallIdCanonical?: boolean; preserveVerification?: boolean; preserveJobStatus?: boolean; preserveSearchStatus?: boolean; preserveInspectionStatus?: boolean; preserveDiagnosticStatus?: boolean; preserveEventStatus?: boolean }): Promise<unknown> {
+/** Preserve JavaScript-only values in a JSON result using paths relative to the returned slice. */
+function normalizeArtifactResult(record: Record<string, unknown>): Record<string, unknown> {
+  if (record.result === undefined) return { ...record, result: null, resultType: "undefined" };
+  const undefinedPaths: Array<Array<string | number>> = [];
+  const holePaths: Array<Array<string | number>> = [];
+  const visit = (value: unknown, path: Array<string | number>): unknown => {
+    if (value === undefined) { undefinedPaths.push([...path]); return null; }
+    if (Array.isArray(value)) {
+      let copy: unknown[] | undefined;
+      for (let index = 0; index < value.length; index++) {
+        if (!Object.hasOwn(value, index)) {
+          holePaths.push([...path, index]);
+          copy ??= value.slice(); copy[index] = null;
+          continue;
+        }
+        path.push(index);
+        const next = visit(value[index], path);
+        path.pop();
+        if (next !== value[index]) { copy ??= value.slice(); copy[index] = next; }
+      }
+      return copy ?? value;
+    }
+    if (!value || typeof value !== "object") return value;
+    let copy: Record<string, unknown> | undefined;
+    for (const [key, item] of Object.entries(value)) {
+      path.push(key);
+      const next = visit(item, path);
+      path.pop();
+      if (next !== item) {
+        copy ??= { ...value as Record<string, unknown> };
+        Object.defineProperty(copy, key, { value: next, enumerable: true, configurable: true, writable: true });
+      }
+    }
+    return copy ?? value;
+  };
+  const result = visit(record.result, []);
+  return { ...record, result, ...(undefinedPaths.length ? { undefinedPaths } : {}), ...(holePaths.length ? { holePaths } : {}) };
+}
+
+export async function compactToolResult(value: unknown, options: { logger?: EventLogger; conversationId?: string; toolCallId?: string; runId?: string; toolCallIdCanonical?: boolean; preserveVerification?: boolean; preserveJobStatus?: boolean; preserveSearchStatus?: boolean; preserveInspectionStatus?: boolean; preserveDiagnosticStatus?: boolean; preserveEventStatus?: boolean; preserveArtifactValue?: boolean }): Promise<unknown> {
   if ((value && typeof value === "object" && "$ref" in value) || !options.logger) return value;
   let serialized: string | undefined;
   try { serialized = JSON.stringify(value); } catch { return value; }
@@ -418,6 +459,10 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
   const selected = path ? valueAt(value, path) : value;
   const { access, oversizedItem } = artifactAccess(event.id, path, selected);
   const resultRead = root && Object.hasOwn(root, "result") ? artifactAccess(event.id, ["result"], root.result) : undefined;
+  const undefinedPaths = options.preserveArtifactValue && Array.isArray(root?.undefinedPaths) ? root.undefinedPaths : undefined;
+  const holePaths = options.preserveArtifactValue && Array.isArray(root?.holePaths) ? root.holePaths : undefined;
+  const undefinedPathsRead = undefinedPaths?.length ? artifactAccess(event.id, ["undefinedPaths"], undefinedPaths) : undefined;
+  const holePathsRead = holePaths?.length ? artifactAccess(event.id, ["holePaths"], holePaths) : undefined;
   const verification = options.preserveVerification && value && typeof value === "object" && "result" in value
     ? (value as { result?: { verified?: unknown; timedOut?: unknown; present?: unknown } }).result : undefined;
   const handoff = value && typeof value === "object" && (value as any).accepted === true && (value as any).complete === false && typeof (value as any).jobId === "string" ? value as Record<string, any> : undefined;
@@ -432,6 +477,11 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
       ...(Number.isSafeInteger(diagnostic.nextOffset) && Number(diagnostic.nextOffset) >= 0 ? { nextOffset: diagnostic.nextOffset } : {}),
       ...(exactText(diagnostic.reason, 128) !== undefined ? { reason: diagnostic.reason } : {}) } : {}),
     ...(resultRead ? { resultAccess: resultRead.access, ...(resultRead.oversizedItem ? { resultOversizedItem: resultRead.oversizedItem } : {}) } : {}),
+    ...(undefinedPathsRead ? { undefinedCount: undefinedPaths!.length, undefinedPathsAccess: undefinedPathsRead.access,
+      ...(undefinedPathsRead.oversizedItem ? { undefinedPathsOversizedItem: undefinedPathsRead.oversizedItem } : {}) } : {}),
+    ...(holePathsRead ? { holeCount: holePaths!.length, holePathsAccess: holePathsRead.access,
+      ...(holePathsRead.oversizedItem ? { holePathsOversizedItem: holePathsRead.oversizedItem } : {}) } : {}),
+    ...(undefinedPaths?.length || holePaths?.length ? { pathsNote: "Paths are relative to this returned result, including its requested slice; read the sidecars before interpreting null values." } : {}),
     ...(failure ? { ...(root?.ok === false ? { ok: false } : {}), ...(root?.type === "tool-error" ? { type: "tool-error" } : {}),
       ...failureMetadata(root!),
       ...(Object.hasOwn(root!, "receipts") ? { receiptsAccess: { artifactId: event.id, path: ["receipts"] } } : {}),

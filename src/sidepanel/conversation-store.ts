@@ -120,7 +120,7 @@ export class ConversationStore {
     this.repository = repository;
     this.preferredChildren.clear();
     for (const event of events) if (event.type === "conversation.branch.selected") {
-      const head = (fromLogValue(event.content) as { headId?: string })?.headId;
+      const head = (fromLogValue(event.content, event.valueEncoding) as { headId?: string })?.headId;
       if (head) this.remember(head);
     }
     this.remember(this.repository.headId);

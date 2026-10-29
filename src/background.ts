@@ -28,7 +28,7 @@ const bootReady = (async () => {
   const inputRecovery = await recoverBrowserInput(inputEvents, inputRunIds, chrome.debugger);
   const latestInput = new Map<string, { runId: string; state: { tabId: number; debuggee: chrome.debugger.Debuggee & { sessionId?: string }; keys?: unknown[]; buttons?: unknown[] } }>();
   for (const event of inputEvents) {
-    const state = fromLogValue(event.content) as { tabId: number; debuggee: chrome.debugger.Debuggee & { sessionId?: string }; keys?: unknown[]; buttons?: unknown[] } | null;
+    const state = fromLogValue(event.content, event.valueEncoding) as { tabId: number; debuggee: chrome.debugger.Debuggee & { sessionId?: string }; keys?: unknown[]; buttons?: unknown[] } | null;
     if (!event.runId || !state || !Number.isInteger(state.tabId) || !state.debuggee) continue;
     latestInput.set(JSON.stringify([event.runId, state.tabId, state.debuggee.sessionId]), { runId: event.runId, state });
   }

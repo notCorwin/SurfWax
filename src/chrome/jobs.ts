@@ -231,7 +231,7 @@ export class BrowserJobs {
   private applyEvent(projection: JobProjection, event: LogEvent): void {
     if (event.id <= projection.cursor) return;
     projection.cursor = event.id;
-    const content = fromLogValue(event.content) as {
+    const content = fromLogValue(event.content, event.valueEncoding) as {
       jobId?: unknown;
       state?: unknown;
     } | null;
@@ -453,7 +453,7 @@ export class BrowserJobs {
       for (const event of page.events) {
         if (event.id > upper) break;
         cursor = event.id;
-        if ((fromLogValue(event.content) as any)?.jobId === id)
+        if ((fromLogValue(event.content, event.valueEncoding) as any)?.jobId === id)
           ids.push(event.id);
         if (ids.length > limit)
           return { ids: ids.slice(0, limit), hasMore: true };
@@ -511,7 +511,7 @@ export class BrowserJobs {
         if (event.id > upper) break;
         cursor = event.id;
         if (event.type !== "browser.job.state") continue;
-        const content = fromLogValue(event.content) as { jobId?: unknown; state?: unknown } | null;
+        const content = fromLogValue(event.content, event.valueEncoding) as { jobId?: unknown; state?: unknown } | null;
         if (typeof content?.jobId !== "string" || typeof content.state !== "string") continue;
         let job = selected.get(content.jobId);
         // BrowserJobs.start persists one queued state before any other state.
@@ -561,7 +561,7 @@ export class BrowserJobs {
               )
             )
               return;
-            if ((fromLogValue(event.content) as any)?.jobId === input.id)
+            if ((fromLogValue(event.content, event.valueEncoding) as any)?.jobId === input.id)
               notify();
           })
         : undefined;
@@ -607,7 +607,7 @@ export class BrowserJobs {
         if (id && !job?.state) {
           let rebuilt: ProjectedJob | undefined;
           const valid = await this.scan(conversationId, epoch, upper, signal, (event) => {
-            const content = fromLogValue(event.content) as { jobId?: unknown; state?: unknown } | null;
+            const content = fromLogValue(event.content, event.valueEncoding) as { jobId?: unknown; state?: unknown } | null;
             if (content?.jobId !== id) return;
             rebuilt ??= { lastEventId: event.id, eventIds: null };
             rebuilt.lastEventId = event.id;
@@ -668,7 +668,7 @@ export class BrowserJobs {
           : undefined;
         if (
           records.some(
-            (event) => (fromLogValue(event.content) as any)?.jobId !== id,
+            (event) => (fromLogValue(event.content, event.valueEncoding) as any)?.jobId !== id,
           )
         )
           throw new Error("Job event belongs to another job");
@@ -679,19 +679,19 @@ export class BrowserJobs {
           ...(stateEvent
             ? {
                 ok: state.state === "succeeded",
-                result: fromLogValue(stateEvent.output),
+                result: fromLogValue(stateEvent.output, stateEvent.valueEncoding),
               }
             : {}),
           events: entries.map((event) => ({
             cursor: event.id,
             type: event.type,
-            ...(fromLogValue(event.content) as object),
+            ...(fromLogValue(event.content, event.valueEncoding) as object),
             ...(event.output === undefined
               ? {}
-              : { output: fromLogValue(event.output) }),
+              : { output: fromLogValue(event.output, event.valueEncoding) }),
             ...(event.error === undefined
               ? {}
-              : { error: fromLogValue(event.error) }),
+              : { error: fromLogValue(event.error, event.valueEncoding) }),
           })),
           nextCursor: entries.at(-1)?.id ?? input.after ?? 0,
           hasMore: page.hasMore,

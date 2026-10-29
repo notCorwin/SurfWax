@@ -18,7 +18,7 @@ export function buildMessageSearchIndex(events: readonly LogEvent[]): Map<string
   const messages = new Map<string, Map<string, string>>();
   for (const event of events) {
     if (!event.conversationId || event.type !== "conversation.message") continue;
-    const message = fromLogValue(event.content);
+    const message = fromLogValue(event.content, event.valueEncoding);
     if (!isConversationMessage(message) || (message.role !== "user" && message.role !== "assistant")) continue;
     const text = message.parts.flatMap((part) => part && typeof part === "object"
       && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string"
@@ -48,7 +48,7 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
   const cachedMessages = useRef(new Map<string, Map<string, LogEvent>>());
   const ingest = (event: LogEvent) => {
     if (!event.conversationId) return;
-    const message = fromLogValue(event.content);
+    const message = fromLogValue(event.content, event.valueEncoding);
     if (!isConversationMessage(message)) return;
     const entries = cachedMessages.current.get(event.conversationId) ?? new Map<string, LogEvent>();
     if ((entries.get(message.id)?.id ?? -1) < event.id) entries.set(message.id, event);
@@ -95,7 +95,7 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
       }
     }
     if (event.type === "conversation.deleted") {
-      const id = event.conversationId ?? (fromLogValue(event.content) as { conversationId?: string } | null)?.conversationId;
+      const id = event.conversationId ?? (fromLogValue(event.content, event.valueEncoding) as { conversationId?: string } | null)?.conversationId;
       setIndex((previous) => { const next = new Map(previous); if (id) next.delete(id); return next; });
     }
     if (event.type === "conversation.restored" && event.conversationId) {

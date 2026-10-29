@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { EventLogger, rebuildConversation, upgradeEventStore, type LogEvent } from "./logging";
+import { EventLogger, fromLogValue, rebuildConversation, upgradeEventStore, type LogEvent } from "./logging";
 
 function memoryStore(onBatch?: (size: number) => void) {
   const events: LogEvent[] = [];
@@ -440,6 +440,60 @@ describe("canonical event log", () => {
     await expect(logger.result(result!.id, {}, "first")).resolves.toEqual({ value: "private" });
     await expect(logger.result(result!.id, {}, "second")).rejects.toThrow("unavailable");
     await expect(logger.result(result!.id, {}, "")).rejects.toThrow("unavailable");
+  });
+
+  it("distinguishes missing paths from stored null and undefined without traversing prototypes", async () => {
+    const logger = new EventLogger({ store: memoryStore() });
+    const value = Object.fromEntries([["rows", ["zero", null, undefined]], ["nothing", undefined], ["__proto__", "literal"]]);
+    const event = await logger.append({ type: "tool.result.data", conversationId: "c", output: value });
+    const id = event!.id;
+    await expect(logger.result(id, { path: ["rows", 0] }, "c")).resolves.toBe("zero");
+    await expect(logger.result(id, { path: ["rows", 1] }, "c")).resolves.toBeNull();
+    await expect(logger.result(id, { path: ["rows", 2] }, "c")).resolves.toBeUndefined();
+    await expect(logger.result(id, { path: ["nothing"] }, "c")).resolves.toBeUndefined();
+    await expect(logger.result(id, { path: ["__proto__"] }, "c")).resolves.toBe("literal");
+    await expect(logger.result(id, { path: ["rows"], offset: 3, limit: 2 }, "c")).resolves.toEqual([]);
+    await expect(logger.result(id, { path: ["rows", 0], offset: 2, limit: 2 }, "c")).resolves.toBe("ro");
+    for (const path of [["missing"], ["rows", 3], ["rows", "map"], ["constructor"], ["rows", 1, "x"], ["nothing", "x"]])
+      await expect(logger.result(id, { path }, "c")).rejects.toMatchObject({ code: "result-path-not-found" });
+  });
+
+  it("preserves reserved-looking user objects in every new event field and leaves old events untouched", async () => {
+    const store = memoryStore();
+    const logger = new EventLogger({ store });
+    const tags = ["undefined", "number", "bigint", "symbol", "function", "circular-reference", "error", "date", "array-buffer", "typed-array", "map", "set", "escaped-object"];
+    const input = { markers: tags.map(($type) => ({ $type, value: null })),
+      nested: { $type: "escaped-object", entries: [["$type", "undefined"], ["value", null]] }, actualUndefined: undefined };
+    const event = await logger.append({ type: "tool.result.data", conversationId: "c", content: input, input, output: input,
+      error: input, retry: input, abort: input, usage: input, stopReason: input, providerMetadata: input });
+    expect(event!.valueEncoding).toBe(2);
+    for (const field of ["content", "input", "output", "error", "retry", "abort", "usage", "stopReason", "providerMetadata"] as const)
+      expect(fromLogValue(event![field], event!.valueEncoding)).toEqual(input);
+    await expect(logger.result(event!.id, {}, "c")).resolves.toEqual(input);
+    const legacyLiteral = { $type: "escaped-object", entries: [["value", 1]] };
+    const legacy = await store.append({ type: "tool.result.data", timestamp: new Date().toISOString(), conversationId: "c", content: null, output: legacyLiteral });
+    await expect(logger.result(legacy.id, {}, "c")).resolves.toEqual(legacyLiteral);
+    expect((await store.all()).find((item) => item.id === legacy.id)).toEqual(legacy);
+  });
+
+  it("replays a new conversation message containing reserved-looking data", async () => {
+    const logger = new EventLogger({ store: memoryStore() });
+    const message = { id: "message", role: "user" as const, $type: "undefined", value: null,
+      parts: [{ type: "data", data: { $type: "undefined", value: null } }] };
+    await logger.appendMessage("c", message);
+    await expect(logger.messages("c")).resolves.toEqual([message]);
+  });
+
+  it("preserves explicitly undefined event fields separately from absent fields", async () => {
+    const logger = new EventLogger({ store: memoryStore() });
+    const explicit = await logger.append({ type: "tool.result.data", conversationId: "c", content: undefined, output: undefined });
+    const absent = await logger.append({ type: "tool.result.data", conversationId: "c" });
+    expect(explicit!.content).toEqual({ $type: "undefined", value: null });
+    expect(explicit!.output).toEqual({ $type: "undefined", value: null });
+    expect(fromLogValue(explicit!.content, explicit!.valueEncoding)).toBeUndefined();
+    expect(fromLogValue(explicit!.output, explicit!.valueEncoding)).toBeUndefined();
+    expect(absent!.content).toBeNull();
+    expect(Object.hasOwn(absent!, "output")).toBe(false);
   });
 
   it("rebuilds messages only from the append-only conversation events and clears them", async () => {

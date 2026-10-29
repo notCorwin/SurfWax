@@ -4,6 +4,8 @@ export type LogEvent = {
   id: number;
   type: string;
   timestamp: string;
+  /** Version of the value encoding, separate from user-controlled payloads. */
+  valueEncoding?: 2;
   content: JsonValue;
   conversationId?: string;
   runId?: string;
@@ -219,7 +221,8 @@ class IndexedDbEventStore implements EventStore {
       const ids = await Promise.all(events.map((event) => requestResult<IDBValidKey>(store.add(event))));
       const diagnosticIndex = transaction.objectStore(DIAGNOSTIC_INDEX_STORE);
       for (const [index, event] of events.entries()) {
-        const content = event.content && typeof event.content === "object" && !Array.isArray(event.content) ? event.content : undefined;
+        const decoded = fromLogValue(event.content, event.valueEncoding);
+        const content = decoded && typeof decoded === "object" && !Array.isArray(decoded) ? decoded as Record<string, unknown> : undefined;
         if (event.type === "browser.diagnostic" && typeof event.conversationId === "string" && typeof content?.tabId === "number" && typeof content.epoch === "string") {
           const id = Number(ids[index]);
           diagnosticIndex.put(id, [event.conversationId, content.tabId, content.epoch, id]);
@@ -291,11 +294,11 @@ const TERMINAL_EVENT_TYPES = ["tool.finished", "tool.failed", "conversation.fini
 let localTerminalWrite: Promise<unknown> = Promise.resolve();
 let localJobStateWrite: Promise<unknown> = Promise.resolve();
 
-function terminalKey(event: Pick<LogEvent, "type" | "runId" | "toolCallId" | "content">): string | undefined {
+function terminalKey(event: Pick<LogEvent, "type" | "runId" | "toolCallId" | "content" | "valueEncoding">): string | undefined {
   if (!event.runId || !TERMINAL_EVENT_TYPES.includes(event.type)) return undefined;
   if (event.type.startsWith("conversation.")) return JSON.stringify(["run", event.runId]);
   if (!event.toolCallId) return undefined;
-  const content = fromLogValue(event.content) as { callId?: unknown } | null;
+  const content = fromLogValue(event.content, event.valueEncoding) as { callId?: unknown } | null;
   return JSON.stringify(["tool", event.runId, content?.callId ?? "", event.toolCallId]);
 }
 
@@ -330,7 +333,9 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-export function toLogValue(value: unknown, active = new WeakSet<object>()): JsonValue {
+const RESERVED_LOG_TYPES = new Set(["undefined", "number", "bigint", "symbol", "function", "circular-reference", "error", "date", "array-buffer", "typed-array", "map", "set", "escaped-object"]);
+
+export function toLogValue(value: unknown, active = new WeakSet<object>(), version?: 2): JsonValue {
   if (value === null) return null;
   if (value === undefined) return { $type: "undefined", value: null };
   if (typeof value === "string" || typeof value === "boolean") return value;
@@ -347,10 +352,10 @@ export function toLogValue(value: unknown, active = new WeakSet<object>()): Json
       for (const key of ["statusCode", "status", "responseBody", "responseText", "headers", "requestId", "data", "cause", "providerMetadata"]) {
         try {
           const item = (value as unknown as Record<string, unknown>)[key];
-          if (item !== undefined) details[key] = item instanceof Headers ? toLogValue(Object.fromEntries(item.entries()), active) : toLogValue(item, active);
+          if (item !== undefined) details[key] = item instanceof Headers ? toLogValue(Object.fromEntries(item.entries()), active, version) : toLogValue(item, active, version);
         } catch { /* Ignore throwing provider error getters. */ }
       }
-      for (const [key, item] of Object.entries(value)) if (!(key in details)) details[key] = toLogValue(item, active);
+      for (const [key, item] of Object.entries(value)) if (!(key in details)) details[key] = toLogValue(item, active, version);
       return details;
     }
     if (value instanceof Date) return { $type: "date", value: Number.isNaN(value.getTime()) ? "Invalid Date" : value.toISOString() };
@@ -359,24 +364,33 @@ export function toLogValue(value: unknown, active = new WeakSet<object>()): Json
       const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
       return { $type: "typed-array", name: value.constructor.name, byteLength: value.byteLength, base64: bytesToBase64(bytes) };
     }
-    if (value instanceof Map) return { $type: "map", entries: [...value].map(([key, item]) => [toLogValue(key, active), toLogValue(item, active)]) };
-    if (value instanceof Set) return { $type: "set", values: [...value].map((item) => toLogValue(item, active)) };
-    if (Array.isArray(value)) return value.map((item) => toLogValue(item, active));
+    if (value instanceof Map) return { $type: "map", entries: [...value].map(([key, item]) => [toLogValue(key, active, version), toLogValue(item, active, version)]) };
+    if (value instanceof Set) return { $type: "set", values: [...value].map((item) => toLogValue(item, active, version)) };
+    if (Array.isArray(value)) return value.map((item) => toLogValue(item, active, version));
 
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, toLogValue(item, active)]),
-    );
+    const entries = Object.entries(value).map(([key, item]) => [key, toLogValue(item, active, version)] as const);
+    const tag = entries.find(([key]) => key === "$type")?.[1];
+    if (version === 2 && typeof tag === "string" && RESERVED_LOG_TYPES.has(tag))
+      return { $type: "escaped-object", entries: entries.map(([key, item]) => [key, item]) };
+    return Object.fromEntries(entries);
   } finally {
     active.delete(value);
   }
 }
 
-export function fromLogValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(fromLogValue);
+export function fromLogValue(value: unknown, version?: 2): unknown {
+  if (Array.isArray(value)) return value.map((item) => fromLogValue(item, version));
   if (!value || typeof value !== "object") return value;
   const record = value as Record<string, unknown>;
+  if (version === 2 && record.$type === "escaped-object") {
+    if (Object.keys(record).length !== 2 || !Array.isArray(record.entries)
+      || record.entries.some((entry) => !Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string")
+      || new Set(record.entries.map((entry) => entry[0])).size !== record.entries.length)
+      throw new Error("Invalid escaped log object");
+    return Object.fromEntries(record.entries.map(([key, item]) => [key, fromLogValue(item, version)]));
+  }
   if (record.$type === "undefined" && record.value === null && Object.keys(record).length === 2) return undefined;
-  return Object.fromEntries(Object.entries(record).map(([key, item]) => [key, fromLogValue(item)]));
+  return Object.fromEntries(Object.entries(record).map(([key, item]) => [key, fromLogValue(item, version)]));
 }
 
 export function isConversationMessage(value: unknown): value is ConversationMessage {
@@ -390,7 +404,7 @@ export function isConversationMessage(value: unknown): value is ConversationMess
 export function rebuildConversation(events: readonly LogEvent[]): ConversationMessage[] {
   return events.flatMap((event) => {
     if (event.type !== "conversation.message") return [];
-    const message = fromLogValue(event.content);
+    const message = fromLogValue(event.content, event.valueEncoding);
     return isConversationMessage(message) ? [message] : [];
   });
 }
@@ -416,7 +430,7 @@ export class ConversationListProjection {
   apply(event: LogEvent): boolean {
     if (!event.conversationId) return false;
     if (event.type === "conversation.created") {
-      const content = fromLogValue(event.content) as { title?: unknown };
+      const content = fromLogValue(event.content, event.valueEncoding) as { title?: unknown };
       this.conversations.set(event.conversationId, { id: event.conversationId,
         title: typeof content?.title === "string" && content.title.trim() ? content.title : "新对话",
         runStatus: "idle", createdAt: event.timestamp, lastMessageAt: event.timestamp });
@@ -428,7 +442,7 @@ export class ConversationListProjection {
     if (event.type === "conversation.restored") { this.deleted.delete(event.conversationId); return true; }
     if (event.type !== "conversation.selected") conversation.lastMessageAt = event.timestamp;
     if (event.type === "conversation.title.updated") {
-      const content = fromLogValue(event.content) as { title?: unknown };
+      const content = fromLogValue(event.content, event.valueEncoding) as { title?: unknown };
       if (typeof content?.title === "string" && content.title.trim()) conversation.title = content.title.trim();
     }
     if (event.type === "conversation.submitted") conversation.runStatus = "running";
@@ -464,7 +478,10 @@ export function selectedHeadId(
   const createdAt = new Map<string, number>();
   for (const event of events) {
     if (event.type !== "conversation.message") continue;
-    const id = event.content && typeof event.content === "object" && !Array.isArray(event.content) ? event.content.id : undefined;
+    const raw = event.content;
+    const content = event.valueEncoding === 2 && raw && typeof raw === "object" && !Array.isArray(raw) && raw.$type === "escaped-object"
+      ? fromLogValue(raw, event.valueEncoding) : raw;
+    const id = content && typeof content === "object" && !Array.isArray(content) ? (content as Record<string, unknown>).id : undefined;
     if (typeof id !== "string" || !stored.has(id)) continue;
     createdAt.set(id, Math.min(createdAt.get(id) ?? event.id, event.id));
   }
@@ -481,7 +498,7 @@ export function selectedHeadId(
   const selectionFloor = latest.eventId;
   for (const event of events) {
     if (event.type !== "conversation.branch.selected") continue;
-    const content = fromLogValue(event.content) as { headId?: unknown };
+    const content = fromLogValue(event.content, event.valueEncoding) as { headId?: unknown };
     if (typeof content?.headId === "string" && stored.has(content.headId) && event.id > selectionFloor && event.id > latest.eventId) {
       latest.id = content.headId;
       latest.eventId = event.id;
@@ -494,7 +511,7 @@ export function rebuildConversationRepository(events: readonly LogEvent[]): Conv
   const stored = new Map<string, { eventId: number; firstEventId: number; parentId: string | null; message: ConversationMessage }>();
   for (const event of events) {
     if (event.type !== "conversation.message") continue;
-    const message = fromLogValue(event.content);
+    const message = fromLogValue(event.content, event.valueEncoding);
     if (!isConversationMessage(message)) continue;
     stored.set(message.id, { eventId: event.id, firstEventId: stored.get(message.id)?.firstEventId ?? event.id, parentId: event.parentId ?? null, message });
   }
@@ -591,19 +608,20 @@ export class EventLogger {
     return {
       timestamp: (this.options.now?.() ?? new Date()).toISOString(),
       type: record.type,
-      content: toLogValue(record.content ?? null),
+      valueEncoding: 2,
+      content: toLogValue(Object.hasOwn(record, "content") ? record.content : null, undefined, 2),
       ...(record.conversationId ? { conversationId: record.conversationId } : {}),
       ...(record.parentId !== undefined ? { parentId: record.parentId } : {}),
       ...(run ? { runId: run } : {}),
-      ...(record.stopReason !== undefined ? { stopReason: toLogValue(record.stopReason) } : {}),
-      ...(record.usage !== undefined ? { usage: toLogValue(record.usage) } : {}),
-      ...(record.providerMetadata !== undefined ? { providerMetadata: toLogValue(record.providerMetadata) } : {}),
+      ...(Object.hasOwn(record, "stopReason") ? { stopReason: toLogValue(record.stopReason, undefined, 2) } : {}),
+      ...(Object.hasOwn(record, "usage") ? { usage: toLogValue(record.usage, undefined, 2) } : {}),
+      ...(Object.hasOwn(record, "providerMetadata") ? { providerMetadata: toLogValue(record.providerMetadata, undefined, 2) } : {}),
       ...(record.toolCallId !== undefined ? { toolCallId: !record.toolCallIdCanonical && phase !== undefined && phase > 0 ? `${phase}:${record.toolCallId}` : record.toolCallId } : {}),
-      ...(record.input !== undefined ? { input: toLogValue(record.input) } : {}),
-      ...(record.output !== undefined ? { output: toLogValue(record.output) } : {}),
-      ...(record.error !== undefined ? { error: toLogValue(record.error) } : {}),
-      ...(record.retry !== undefined ? { retry: toLogValue(record.retry) } : {}),
-      ...(record.abort !== undefined ? { abort: toLogValue(record.abort) } : {}),
+      ...(Object.hasOwn(record, "input") ? { input: toLogValue(record.input, undefined, 2) } : {}),
+      ...(Object.hasOwn(record, "output") ? { output: toLogValue(record.output, undefined, 2) } : {}),
+      ...(Object.hasOwn(record, "error") ? { error: toLogValue(record.error, undefined, 2) } : {}),
+      ...(Object.hasOwn(record, "retry") ? { retry: toLogValue(record.retry, undefined, 2) } : {}),
+      ...(Object.hasOwn(record, "abort") ? { abort: toLogValue(record.abort, undefined, 2) } : {}),
       ...(record.latencyMs !== undefined ? { latencyMs: record.latencyMs } : {}),
     };
   }
@@ -621,17 +639,17 @@ export class EventLogger {
         if (expectedEpoch !== undefined && JSON.stringify([this.generation ?? null, floor]) !== expectedEpoch) return [];
         if (expectedJobStateId !== undefined) {
           const requested = events[0];
-          const jobId = (fromLogValue(requested?.content) as { jobId?: unknown } | null)?.jobId;
+          const jobId = (fromLogValue(requested?.content, requested?.valueEncoding) as { jobId?: unknown } | null)?.jobId;
           if (!requested?.conversationId || typeof jobId !== "string" || expectedJobStateId <= (floor ?? -1)) return [];
           const original = store.get ? await store.get(expectedJobStateId) : (await store.all()).find((event) => event.id === expectedJobStateId);
           if (!original || original.type !== "browser.job.state" || original.conversationId !== requested.conversationId
-            || (fromLogValue(original.content) as { jobId?: unknown } | null)?.jobId !== jobId) return [];
+            || (fromLogValue(original.content, original.valueEncoding) as { jobId?: unknown } | null)?.jobId !== jobId) return [];
           let cursor = expectedJobStateId;
           while (true) {
             const rows = store.byTypes ? await store.byTypes(["browser.job.state"], requested.conversationId, cursor, 256)
               : (await store.all()).filter((event) => event.type === "browser.job.state" && event.conversationId === requested.conversationId && event.id > cursor);
             const newer = rows.filter((event) => event.id > cursor).sort((a, b) => a.id - b.id).slice(0, 256);
-            if (newer.some((event) => (fromLogValue(event.content) as { jobId?: unknown } | null)?.jobId === jobId)) return [];
+            if (newer.some((event) => (fromLogValue(event.content, event.valueEncoding) as { jobId?: unknown } | null)?.jobId === jobId)) return [];
             if (newer.length < 256) break;
             cursor = newer.at(-1)!.id;
           }
@@ -892,10 +910,13 @@ export class EventLogger {
     const event = await this.readCanonical(async (store, floor) => id > floor
       ? (store.get ? await store.get(id) : (await store.all()).find((item) => item.id === id)) : undefined);
     if (event?.type !== "tool.result.data" || conversationId !== undefined && event.conversationId !== conversationId) throw new Error(`Tool result ${id} is unavailable`);
-    let value = fromLogValue(event.output);
+    let value = fromLogValue(event.output, event.valueEncoding);
     const path = typeof selection.path === "string" ? [selection.path] : selection.path ?? [];
+    if (!Array.isArray(path) || path.some((part) => typeof part !== "string" && (!Number.isSafeInteger(part) || part < 0)))
+      throw new Error("Tool result path must contain only strings and nonnegative integer indices");
     for (const part of path) {
-      if (value === null || typeof value !== "object" && typeof value !== "string") throw new Error(`Tool result ${id} has no path ${path.join(".")}`);
+      if (value === null || typeof value !== "object" && typeof value !== "string" || !Object.hasOwn(Object(value), part))
+        throw Object.assign(new Error(`Tool result ${id} has no path ${JSON.stringify(path)}`), { code: "result-path-not-found" });
       value = (value as any)[part];
     }
     if (selection.offset !== undefined || selection.limit !== undefined) {
@@ -927,19 +948,19 @@ export class EventLogger {
     const store = source?.store ?? this.options.store ?? getEventStore();
     const floor = source?.floor ?? await this.latestClearIdFresh(store);
     let stored = [...events].reverse().find((item) => item.type === "tool.result.data" && item.toolCallId === event.toolCallId && item.id > event.id && item.id > floor
-      && typeof (fromLogValue(item.content) as { filename?: unknown } | null)?.filename === "string");
+      && typeof (fromLogValue(item.content, item.valueEncoding) as { filename?: unknown } | null)?.filename === "string");
     const referenced = [...events].reverse().find(item => item.type === "browser.artifact.used" && item.toolCallId === event.toolCallId && item.id > event.id && item.id > floor);
-    const referencedId = (fromLogValue(referenced?.content) as { artifactId?: number } | null)?.artifactId;
+    const referencedId = (fromLogValue(referenced?.content, referenced?.valueEncoding) as { artifactId?: number } | null)?.artifactId;
     if (!stored && Number.isSafeInteger(referencedId) && referencedId! > floor) {
       const saved = store.get ? await store.get(referencedId!) : (await store.all()).find(item => item.id === referencedId);
-      if (saved?.type === "tool.result.data" && saved.conversationId === event.conversationId && typeof (fromLogValue(saved.content) as { filename?: unknown } | null)?.filename === "string") stored = saved;
+      if (saved?.type === "tool.result.data" && saved.conversationId === event.conversationId && typeof (fromLogValue(saved.content, saved.valueEncoding) as { filename?: unknown } | null)?.filename === "string") stored = saved;
     }
-    const input = fromLogValue(event.input) as { id?: number } | null;
-    if (!stored && (fromLogValue(event.content) as { toolName?: string })?.toolName === "artifact-save" && Number.isSafeInteger(input?.id) && input!.id! > floor) {
+    const input = fromLogValue(event.input, event.valueEncoding) as { id?: number } | null;
+    if (!stored && (fromLogValue(event.content, event.valueEncoding) as { toolName?: string })?.toolName === "artifact-save" && Number.isSafeInteger(input?.id) && input!.id! > floor) {
       const saved = store.get ? await store.get(input!.id!) : (await store.all()).find((item) => item.id === input!.id);
-      if (saved?.type === "tool.result.data" && saved.conversationId === event.conversationId && typeof (fromLogValue(saved.content) as { filename?: unknown } | null)?.filename === "string") stored = saved;
+      if (saved?.type === "tool.result.data" && saved.conversationId === event.conversationId && typeof (fromLogValue(saved.content, saved.valueEncoding) as { filename?: unknown } | null)?.filename === "string") stored = saved;
     }
-    return stored ? { id: stored.id, ...(fromLogValue(stored.content) as object) } : undefined;
+    return stored ? { id: stored.id, ...(fromLogValue(stored.content, stored.valueEncoding) as object) } : undefined;
   }
 
   async toolArtifact(conversationId: string, identity: { runId?: string; toolCallId: string }): Promise<{ id: number } | undefined> {
@@ -959,15 +980,15 @@ export class EventLogger {
     const snapshot = await this.readCanonicalSnapshot((store, floor) => this.eventsByRunTypesAt(store, floor, [runId], ["conversation.message", "tool.started", "tool.finished", "tool.failed", "tool.progress", "tool.result.data", "browser.artifact.used"]));
     if (requiredEpoch !== undefined && snapshot.epoch !== requiredEpoch) return false;
     const { value: events, epoch } = snapshot;
-    const key = (event: LogEvent) => `${(fromLogValue(event.content) as { callId?: string })?.callId ?? ""}\0${event.toolCallId}`;
+    const key = (event: LogEvent) => `${(fromLogValue(event.content, event.valueEncoding) as { callId?: string })?.callId ?? ""}\0${event.toolCallId}`;
     const terminal = new Set(events.filter((event) => ["tool.finished", "tool.failed"].includes(event.type)).map(key));
     for (const event of events) {
       if (event.type !== "tool.started" || !event.toolCallId || terminal.has(key(event))) continue;
       terminal.add(key(event));
       const progress = [...events].reverse().find((item) => item.type === "tool.progress" && item.toolCallId === event.toolCallId);
-      const progressContent = progress ? fromLogValue(progress.content) as { nextIndex: number; steps: unknown[] } : undefined;
-      const progressOutput = progress ? fromLogValue(progress.output) as { completed: unknown[]; elapsedMs: number } : undefined;
-      const input = fromLogValue(event.input) as { steps?: unknown[] } | undefined;
+      const progressContent = progress ? fromLogValue(progress.content, progress.valueEncoding) as { nextIndex: number; steps: unknown[] } : undefined;
+      const progressOutput = progress ? fromLogValue(progress.output, progress.valueEncoding) as { completed: unknown[]; elapsedMs: number } : undefined;
+      const input = fromLogValue(event.input, event.valueEncoding) as { steps?: unknown[] } | undefined;
       const steps = progressContent?.steps ?? input?.steps;
       const index = progressContent?.nextIndex ?? 0;
       const completedAll = Boolean(steps && index === steps.length);
@@ -979,15 +1000,15 @@ export class EventLogger {
         elapsedMs: progressOutput?.elapsedMs ?? 0,
       } : { ok: false, error: failure };
       const saved = await this.appendIfEpoch({ type: completedAll ? "tool.finished" : "tool.failed", conversationId, runId, toolCallId: event.toolCallId, toolCallIdCanonical: true,
-        content: { ...((fromLogValue(event.content) as object) ?? {}), status: completedAll ? "completed" : "interrupted", effectUnknown: !completedAll },
-        input: fromLogValue(event.input), output: { ...output, ...(artifact ? { artifact } : {}) },
+        content: { ...((fromLogValue(event.content, event.valueEncoding) as object) ?? {}), status: completedAll ? "completed" : "interrupted", effectUnknown: !completedAll },
+        input: fromLogValue(event.input, event.valueEncoding), output: { ...output, ...(artifact ? { artifact } : {}) },
         ...(completedAll ? {} : { error: failure, abort: { reason } }) }, epoch);
       if (!saved) return false;
     }
     const started = new Set(events.filter((event) => event.type === "tool.started" || event.type === "tool.finished" || event.type === "tool.failed").map((event) => event.toolCallId));
     const messages = new Map<string, ConversationMessage>();
     for (const event of events) if (event.type === "conversation.message") {
-      const message = fromLogValue(event.content);
+      const message = fromLogValue(event.content, event.valueEncoding);
       if (isConversationMessage(message)) messages.set(message.id, message);
     }
     // A complete response can contain several calls. Cancellation before their

@@ -49,7 +49,7 @@ const usageLabel = (usage: ContextUsage) => usage.state === "ready"
 function sumTokenUsage(events: readonly LogEvent[]): TokenUsage {
   const total: TokenUsage = { input: 0, output: 0, cacheRead: 0 };
   for (const event of events) {
-    const usage = fromLogValue(event.usage) as {
+    const usage = fromLogValue(event.usage, event.valueEncoding) as {
       inputTokens?: unknown;
       outputTokens?: unknown;
       inputTokenDetails?: { cacheReadTokens?: unknown };

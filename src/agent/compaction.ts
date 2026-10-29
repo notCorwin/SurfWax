@@ -74,7 +74,7 @@ function isBranchPrefix(prefix: readonly string[], branch: readonly string[]): b
 export async function currentSummary(events: readonly LogEvent[], branchIds: readonly string[], messages: readonly ModelMessage[]): Promise<AppliedSummary | undefined> {
   for (const event of [...events].reverse()) {
     if (event.type !== "context.compacted") continue;
-    const decoded = fromLogValue(event.content);
+    const decoded = fromLogValue(event.content, event.valueEncoding);
     if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) continue;
     const value = decoded as Partial<SummaryCheckpoint>;
     if (value.strategy !== undefined && value.strategy !== "summary" || !Array.isArray(value.branchIds)
@@ -106,7 +106,7 @@ export function pendingContextChoice(events: readonly LogEvent[], branchIds: rea
   let pending = false;
   for (const event of events) {
     if (event.type !== "context.choice.required" && event.type !== "context.choice.resolved") continue;
-    const content = fromLogValue(event.content) as { branchIds?: string[] };
+    const content = fromLogValue(event.content, event.valueEncoding) as { branchIds?: string[] };
     if (Array.isArray(content?.branchIds) && isBranchPrefix(content.branchIds, branchIds)) pending = event.type === "context.choice.required";
   }
   return pending;
@@ -124,7 +124,7 @@ export async function contextPressure(options: {
   const contextVersion = checkpoint?.eventId ?? 0;
   const calibrated = [...options.events].reverse().find((event) => {
     if (event.type !== "context.estimate.calibrated") return false;
-    const value = fromLogValue(event.content) as Partial<EstimateCalibration> | undefined;
+    const value = fromLogValue(event.content, event.valueEncoding) as Partial<EstimateCalibration> | undefined;
     if (!value) return false;
     return Array.isArray(value.branchIds)
       && value.branchIds.every((id): id is string => typeof id === "string")
@@ -135,7 +135,7 @@ export async function contextPressure(options: {
       && typeof value.promptEstimate === "number" && Number.isFinite(value.promptEstimate)
       && value.promptEstimate > 0;
   });
-  const calibration = fromLogValue(calibrated?.content) as Partial<EstimateCalibration> | undefined;
+  const calibration = fromLogValue(calibrated?.content, calibrated?.valueEncoding) as Partial<EstimateCalibration> | undefined;
   const anchor = typeof calibration?.inputTokens === "number" && Number.isFinite(calibration.inputTokens) && calibration.inputTokens > 0
     ? calibration.inputTokens : calibration?.promptEstimate;
   const snapshot = readPromptSnapshot(options.events, options.branchIds) ?? createPromptSnapshot();

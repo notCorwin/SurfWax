@@ -49,8 +49,8 @@ export function generateConversationTitle(logger: EventLogger, config: ModelConf
     try {
       await waitForCompletedRun(logger, conversationId, abortController.signal);
       const manual = [...await logger.summaryEvents(conversationId)].reverse().find((event) =>
-        event.type === "conversation.title.updated" && (fromLogValue(event.content) as { source?: string }).source === "manual");
-      if (manual) return (fromLogValue(manual.content) as { title: string }).title;
+        event.type === "conversation.title.updated" && (fromLogValue(event.content, event.valueEncoding) as { source?: string }).source === "manual");
+      if (manual) return (fromLogValue(manual.content, manual.valueEncoding) as { title: string }).title;
       const repository = await logger.repository(conversationId);
       const firstUser = repository.messages.find(({ message }) => message.role === "user")?.message;
       const firstAssistant = repository.messages.find(({ message }) => message.role === "assistant")?.message;
@@ -77,7 +77,7 @@ export function generateConversationTitle(logger: EventLogger, config: ModelConf
         providerMetadata: result.providerMetadata,
       });
       const manuallyNamed = (await logger.summaryEvents(conversationId)).some((event) =>
-        event.type === "conversation.title.updated" && (fromLogValue(event.content) as { source?: string }).source === "manual");
+        event.type === "conversation.title.updated" && (fromLogValue(event.content, event.valueEncoding) as { source?: string }).source === "manual");
       if (!manuallyNamed) await logger.append({ type: "conversation.title.updated", conversationId, content: { title } });
       return title;
     } catch (error) {
@@ -116,8 +116,8 @@ function normalizeInterruptedMessage(message: ConversationMessage, events: reado
     if (!toolEvent && ["output-available", "output-error", "output-denied"].includes(String(value.state))) return [part];
     if (!toolEvent) return [{ ...value, state: "output-error", errorText: "工具调用已中断，此操作未执行。" }];
     return toolEvent.output !== undefined
-      ? [{ ...value, state: "output-available", output: fromLogValue(toolEvent.output) }]
-      : [{ ...value, state: "output-error", errorText: String((fromLogValue(toolEvent.error) as { message?: string })?.message ?? fromLogValue(toolEvent.error) ?? "工具调用已中断。") }];
+      ? [{ ...value, state: "output-available", output: fromLogValue(toolEvent.output, toolEvent.valueEncoding) }]
+      : [{ ...value, state: "output-error", errorText: String((fromLogValue(toolEvent.error, toolEvent.valueEncoding) as { message?: string })?.message ?? fromLogValue(toolEvent.error, toolEvent.valueEncoding) ?? "工具调用已中断。") }];
   });
   const metadata = message.metadata && typeof message.metadata === "object" && !Array.isArray(message.metadata)
     ? message.metadata as Record<string, unknown>
@@ -126,7 +126,7 @@ function normalizeInterruptedMessage(message: ConversationMessage, events: reado
     ...metadata,
     ...(terminal.type === "conversation.aborted" ? { interrupted: true } : {
       custom: { ...(metadata.custom && typeof metadata.custom === "object" ? metadata.custom : {}),
-        failure: fromLogValue(terminal.error) ?? "模型请求失败" },
+        failure: fromLogValue(terminal.error, terminal.valueEncoding) ?? "模型请求失败" },
     }),
   } };
 }
@@ -138,14 +138,14 @@ export async function restoreConversationRepository(events: readonly LogEvent[])
     .map((event) => event.runId!));
   for (const event of events) {
     if (event.type !== "conversation.message") continue;
-    const message = fromLogValue(event.content);
+    const message = fromLogValue(event.content, event.valueEncoding);
     if (!isConversationMessage(message)) continue;
     stored.set(message.id, { eventId: event.id, firstEventId: stored.get(message.id)?.firstEventId ?? event.id, runId: event.runId, parentId: event.parentId ?? null, message });
   }
   for (const terminal of events.filter((event) => event.runId && (event.type === "conversation.aborted" || event.type === "conversation.failed"))) {
     if (completedRuns.has(terminal.runId!)) continue;
     const submitted = [...events].reverse().find((event) => event.runId === terminal.runId && event.type === "conversation.submitted");
-    const content = submitted ? fromLogValue(submitted.content) as { messageId?: unknown } : undefined;
+    const content = submitted ? fromLogValue(submitted.content, submitted.valueEncoding) as { messageId?: unknown } : undefined;
     const parentId = typeof content?.messageId === "string" ? content.messageId : null;
     const persistedPartial = [...stored.values()].find((item) => item.runId === terminal.runId && item.parentId === parentId && item.message.role === "assistant");
     if (persistedPartial) {
@@ -167,7 +167,7 @@ export async function restoreConversationRepository(events: readonly LogEvent[])
       parts: [],
       metadata: terminal.type === "conversation.aborted"
         ? { custom: { interrupted: true, syntheticTerminal: true } }
-        : { custom: { failure: fromLogValue(terminal.error) ?? "模型请求失败", syntheticTerminal: true } },
+        : { custom: { failure: fromLogValue(terminal.error, terminal.valueEncoding) ?? "模型请求失败", syntheticTerminal: true } },
     };
     stored.set(restored.id, {
       eventId: previousSynthetic?.eventId ?? terminal.id,

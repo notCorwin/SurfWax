@@ -495,6 +495,27 @@ function modelDefaultsFetch(config: ModelConfig, fetch: typeof globalThis.fetch)
   };
 }
 
+/** The OpenAI Completion SDK prepends a synthetic role delimiter to every stop
+ * list. It can truncate ordinary answers containing "\nuser:" with an
+ * indistinguishable successful finish. Preserve only caller-supplied stops. */
+function completionStopFetch(fetch: typeof globalThis.fetch): typeof globalThis.fetch {
+  return async (input, init) => {
+    const request = new Request(input, init);
+    const path = new URL(request.url).pathname;
+    if (request.method !== "POST" || !path.endsWith("/completions") || path.endsWith("/chat/completions") || !request.body)
+      return fetch(request);
+    const body = await request.clone().json();
+    if (!body || typeof body !== "object" || Array.isArray(body) || !Array.isArray(body.stop) || body.stop[0] !== "\nuser:")
+      return fetch(request);
+    const stops = body.stop.slice(1);
+    if (stops.length) body.stop = stops;
+    else delete body.stop;
+    const headers = new Headers(request.headers);
+    headers.delete("content-length");
+    return fetch(new Request(request, { headers, body: JSON.stringify(body) }));
+  };
+}
+
 function azureInferenceFetch(config: ModelConfig, fetch: typeof globalThis.fetch): typeof globalThis.fetch {
   const settings = settingsFor(config);
   return async (input, init) => {
@@ -533,7 +554,10 @@ export async function createModel(config: ModelConfig, logger?: EventLogger, con
   const azureCompatibleAuth = adapter.auth === "azure-api-key";
   const transportFetch = vertexCompatibleAuth ? googleServiceAccountFetch(config, retryingFetch, baseRetryingFetch)
     : azureCompatibleAuth ? azureInferenceFetch(config, retryingFetch) : adapter.protocol === "openai-compatible" ? retryingFetch : baseRetryingFetch;
-  const modelFetch = modelDefaultsFetch(config, transportFetch);
+  const defaultFetch = modelDefaultsFetch(config, transportFetch);
+  const completion = sdk === "@ai-sdk/openai" && (config.endpointType === "openai-completions"
+    || !config.endpointType && config.modelProvider?.shape === "completion");
+  const modelFetch = completion ? completionStopFetch(defaultFetch) : defaultFetch;
   const common = { headers: modelDefaultHeaders(config), apiKey: vertexCompatibleAuth ? "service-account" : settings.apiKey, ...(baseURL ? { baseURL } : {}), fetch: modelFetch };
   let model: LanguageModel;
 

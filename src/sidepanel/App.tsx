@@ -228,12 +228,12 @@ function ConversationView({ config, logger, threadId, drafts }: { config: ModelC
       setContextStatus({ message: "无法取得模型上下文窗口；自动压缩暂不可用，可在设置中手动指定。", error: true });
     } else if (event.type === "context.compaction.failed") {
       setContextStatus({ message: "上下文压缩失败；请检查模型响应或设置中的窗口大小。", error: true });
-      setCompactionError(JSON.stringify(fromLogValue(event.error)) ?? "模型未能生成摘要");
+      setCompactionError(JSON.stringify(fromLogValue(event.error, event.valueEncoding)) ?? "模型未能生成摘要");
     } else if (event.type === "context.compaction.aborted") {
       setContextStatus({ message: "上下文压缩已停止；原始历史已保留。", error: false });
     } else if (event.type === "model.request.retrying") {
-      const value = fromLogValue(event.retry) as { attempt?: number; delayMs?: number } | undefined;
-      const content = fromLogValue(event.content) as { status?: number; reason?: string } | undefined;
+      const value = fromLogValue(event.retry, event.valueEncoding) as { attempt?: number; delayMs?: number } | undefined;
+      const content = fromLogValue(event.content, event.valueEncoding) as { status?: number; reason?: string } | undefined;
       setRetry({ attempt: value?.attempt ?? 1, delayMs: value?.delayMs ?? 0,
         reason: content?.status ? `服务返回 ${content.status}` : content?.reason === "network" ? "网络连接中断" : content?.reason ?? "暂时无法完成请求" });
     } else if (["request.completed", "request.aborted", "request.failed", "conversation.finished", "conversation.aborted", "conversation.failed"].includes(event.type)) {

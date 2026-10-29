@@ -113,8 +113,8 @@ describe("ChromeExecutor programs", () => {
       const locator = old.locator("button");
       const url = old.url;
       const handles = new ProgramHandles();
-      handles.remember(old, 42);
-      handles.remember(locator, 42);
+      const oldId = handles.remember(old, 42);
+      const locatorId = handles.remember(locator, 42);
       h.sessions.set(42, {});
       await expect(url()).rejects.toThrow("stale-page");
       await expect(locator.count()).rejects.toThrow("stale-page");
@@ -122,6 +122,10 @@ describe("ChromeExecutor programs", () => {
       expect(() => handles.remember(locator, 42)).toThrow("stale-page");
       const fresh = await browser.page(42);
       expect(fresh).not.toBe(old);
+      const freshId = handles.remember(fresh, 42);
+      expect(() => handles.resolve(oldId)).toThrow("stale-page");
+      expect(() => handles.resolve(locatorId)).toThrow("stale-page");
+      expect(handles.resolve(freshId)).toBe(fresh);
       expect(await fresh.url()).toBe("https://example.com");
       return true;
     });

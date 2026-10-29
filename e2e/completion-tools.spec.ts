@@ -46,6 +46,7 @@ test("runs an atomic tool through the text completions endpoint and returns its 
     await expect(opened.page.locator(".markdown-body").last()).toContainText("COMPLETION_TASK_DONE", { timeout: 60_000 });
     await expect(target.locator("body")).toHaveAttribute("data-completion-clicks", "1");
     expect(requests[0].prompt).toContain('"name":"click"');
+    expect(requests[0].stop).toBeUndefined();
     expect(requests[1].prompt).toContain("SURFWAX_TOOL_RESULTS:");
     expect(requests[1].prompt.startsWith(requests[0].prompt)).toBe(true);
     const events = await readEvents(opened.page);

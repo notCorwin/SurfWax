@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PROGRAM_HANDLE_ASSERT_LIVE, ProgramHandles } from "./program-handles";
+import { PROGRAM_HANDLE_ASSERT_LIVE, PROGRAM_HANDLE_SESSION, ProgramHandles } from "./program-handles";
 
 describe("program capability lifetime", () => {
   it("releases page and locator handles for a closed tab without touching other capabilities", () => {
@@ -48,5 +48,36 @@ describe("program capability lifetime", () => {
     open = false;
     expect(() => handles.remember(page, 42)).toThrow("stale-page");
     expect(handles.size).toBe(0);
+  });
+
+  it("reclaims old session handles when a new session for the same tab is encoded", () => {
+    const handles = new ProgramHandles();
+    const first = {}, second = {}, other = {};
+    let current = first;
+    const capability = (session: object) => ({
+      [PROGRAM_HANDLE_SESSION]: session,
+      [PROGRAM_HANDLE_ASSERT_LIVE]: () => { if (current !== session) throw new Error("stale-page"); },
+    });
+    const page = capability(first), locator = capability(first);
+    const pageId = handles.remember(page, 7), locatorId = handles.remember(locator, 7);
+    const otherId = handles.remember({ [PROGRAM_HANDLE_SESSION]: other }, 8);
+    current = second;
+    const fresh = capability(second), freshId = handles.remember(fresh, 7);
+    expect(handles.size).toBe(2);
+    expect(() => handles.resolve(pageId)).toThrow("stale-page");
+    expect(() => handles.resolve(locatorId)).toThrow("stale-page");
+    expect(() => handles.remember(page, 7)).toThrow("stale-page");
+    expect(handles.resolve(freshId)).toBe(fresh);
+    expect(handles.resolve(otherId)).toBeDefined();
+  });
+
+  it("does not accumulate handles through repeated session replacement", () => {
+    const handles = new ProgramHandles();
+    for (let i = 0; i < 2_000; i++) {
+      const session = {};
+      handles.remember({ [PROGRAM_HANDLE_SESSION]: session }, 7);
+      handles.remember({ [PROGRAM_HANDLE_SESSION]: session }, 7);
+    }
+    expect(handles.size).toBe(2);
   });
 });

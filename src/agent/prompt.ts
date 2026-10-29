@@ -42,7 +42,7 @@ export function readPromptSnapshot(events: readonly LogEvent[], branchIds: reado
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]!;
     if (event.type !== "context.prompt.updated" && event.type !== "context.compacted") continue;
-    const content = fromLogValue(event.content) as { prompt?: PromptSnapshot; branchIds?: string[] } | undefined;
+    const content = fromLogValue(event.content, event.valueEncoding) as { prompt?: PromptSnapshot; branchIds?: string[] } | undefined;
     if (event.type === "context.compacted" && (!content?.branchIds || !content.branchIds.every((id, i) => branchIds[i] === id))) continue;
     const prompt = content?.prompt;
     if (prompt && (prompt.version === 1 || prompt.version === 2) && typeof prompt.instructions === "string" && typeof prompt.source === "string") return prompt;

@@ -100,6 +100,14 @@ describe("text completion browser tool protocol", () => {
     expect(h.runProgram).not.toHaveBeenCalled();
   });
 
+  it("preserves a fenced literal tool-call example as text without dispatch", async () => {
+    const example = `\`\`\`text\n${call("execute_program", { code: "return 1;" })}\n\`\`\``;
+    const h = harness([example]);
+    expect((await h.agent.generate({ prompt: "Show a literal tool-call example; do not execute it" })).text).toBe(example);
+    expect(h.runProgram).not.toHaveBeenCalled();
+    expect(h.requests[0]!.body.prompt).toContain("enclose it in a Markdown code fence");
+  });
+
   it("rejects non-text input before any provider request or tool effect", async () => {
     const h = harness([]);
     await expect(h.agent.generate({ messages: [{ role: "user", content: [

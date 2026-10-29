@@ -12,7 +12,7 @@ export async function recoverBrowserInput(events: readonly LogEvent[], orphanRun
   const latest = new Map<string, InputState>();
   for (const event of events) {
     if (event.type !== "browser.input.state" || !event.runId || !orphaned.has(event.runId)) continue;
-    const state = fromLogValue(event.content) as InputState;
+    const state = fromLogValue(event.content, event.valueEncoding) as InputState;
     if (!state || !Number.isInteger(state.tabId) || !state.debuggee) continue;
     latest.set(JSON.stringify([event.runId, state.tabId, state.debuggee.sessionId]), state);
   }

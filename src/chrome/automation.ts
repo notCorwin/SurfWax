@@ -881,12 +881,6 @@ export class AutomationRuntime {
         return this.afterAction(session);
       }
       if (["isVisible", "isEnabled", "isChecked"].includes(operation)) {
-        const matches = await this.resolveMetadata(session, spec);
-        if (!matches.length) {
-          if (operation === "isChecked") throw automationError("not-found", { locator: spec });
-          return false;
-        }
-        this.assertStrict(spec, matches);
         const objectId = await this.resolveOnce(session, spec);
         if (!objectId) {
           if (operation === "isChecked") throw automationError("not-found", { locator: spec, reason: "target-disappeared" });
@@ -1033,20 +1027,33 @@ export class AutomationRuntime {
         }
       }
       if (operation === "check" || operation === "uncheck") {
-        const { objectId, targetSession } = await this.waitActionableLocator(session, spec, false, true);
+        const target = await this.waitActionableLocator(session, spec, false, true);
         const desired = operation === "check";
-        const checked = await this.callOn(targetSession, objectId, CHECKED_STATE_SOURCE) as { supported: boolean; radio: boolean; value: boolean | null };
+        const read = () => this.callOn(target.targetSession, target.objectId, `function(){
+          if (!this.isConnected) return { connected: false };
+          const checked = (${CHECKED_STATE_SOURCE}).call(this);
+          return { ...checked, connected: this.isConnected };
+        }`) as Promise<{ connected: boolean; supported: boolean; radio: boolean; value: boolean | null }>;
+        const checked = await read();
+        if (!checked.connected) throw automationError("detached", { reason: "checked-target-removed" });
         if (!checked.supported) throw automationError("invalid-checked-state", { reason: "unsupported" });
         if (checked.radio && checked.value === true && !desired) throw automationError("invalid-state", { reason: "cannot-uncheck-selected-radio" });
-        if (checked.value !== desired) await this.pointer(session, spec, "click");
-        await this.waitForLocatorState(session, spec, "checked", desired);
+        if (checked.value !== desired) await this.pointer(session, spec, "click", {}, target);
+        while (true) {
+          throwIfAborted(operationSignal);
+          const current = await read();
+          if (!current.connected) throw automationError("detached", { reason: "checked-target-removed" });
+          if (!current.supported) throw automationError("invalid-checked-state", { reason: "unsupported" });
+          if (current.value === desired) break;
+          await delay(50, operationSignal);
+        }
         return this.afterAction(session);
       }
       if (operation === "dragTo") {
         const target = args[0] as LocatorFacade;
         // Resolve both ends before dispatching anything, but measure the source
         // last: scrolling the destination into view invalidates earlier points.
-        await this.waitActionableLocator(session, target.spec, false, true, true, false);
+        const destination = await this.waitActionableLocator(session, target.spec, false, true, true, false);
         const from = await this.waitActionableLocator(session, spec, false, true, true, false);
         const nativeDrag = await this.callOn(from.targetSession, from.objectId, `function(){
           let element = this;
@@ -1073,7 +1080,7 @@ export class AutomationRuntime {
           // Cross the browser's drag threshold before scrolling the destination.
           point = moved;
           await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", ...moved, button: "left", buttons: 1 });
-          const to = await this.waitActionableLocator(session, target.spec, false, true, true, false);
+          const to = await this.waitBoundActionable(destination, false);
           const end = await this.toRootPoint(session, to.targetSession, to.state);
           point = end;
           await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", ...end, button: "left", buttons: 1 });
@@ -1571,24 +1578,44 @@ export class AutomationRuntime {
     return this.resolveDomOnce(session, scoped.debuggee, scoped.spec, scoped.rootObjectId);
   }
 
-  private async resolveDomOnce(session: Session, debuggee: Debuggee, spec: LocatorSpec, rootObjectId?: string): Promise<string | undefined> {
+  private async resolveDomOnce(session: Session, debuggee: Debuggee, spec: LocatorSpec, rootObjectId?: string, observe?: (matches: Candidate[]) => void): Promise<string | undefined> {
     const result = await this.resolveLocator(debuggee, spec, "nodes", rootObjectId, undefined, session);
     const arrayId = result?.objectId;
     if (!arrayId) throw automationError("state-unavailable", { reason: "missing-result-array" });
     try {
+      throwIfAborted(this.context.signal);
       const length = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: arrayId,
         functionDeclaration: "function(){return this.length}", returnByValue: true });
       if (length.exceptionDetails) throw new Error(length.exceptionDetails.exception?.description || length.exceptionDetails.text);
+      throwIfAborted(this.context.signal);
       const count = length.result?.value;
       if (!Number.isSafeInteger(count) || count < 0) throw automationError("state-unavailable", { reason: "invalid-result-count" });
-      if (count > 1) throw automationError("strict-mode", { locator: spec, count });
-      if (!count) return undefined;
+      if (count > 1) {
+        const details = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: arrayId,
+          functionDeclaration: `function(){return this.slice(0,10).map(element => (${SEARCH_META_SOURCE}).call(element, false))}`, returnByValue: true });
+        if (details.exceptionDetails) throw new Error(details.exceptionDetails.exception?.description || details.exceptionDetails.text);
+        throwIfAborted(this.context.signal);
+        const candidates = Array.isArray(details.result?.value) ? details.result.value : [];
+        throw automationError("strict-mode", { locator: spec, count, candidates });
+      }
+      if (!count) { observe?.([]); return undefined; }
       const first = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: arrayId,
         functionDeclaration: "function(){return this[0]}", returnByValue: false, objectGroup: "surf-wax-automation" });
       if (first.exceptionDetails) throw new Error(first.exceptionDetails.exception?.description || first.exceptionDetails.text);
+      throwIfAborted(this.context.signal);
       const objectId = first.result?.objectId;
       if (!objectId) throw automationError("state-unavailable", { reason: "missing-node-object" });
       this.objectDebuggees.set(objectId, debuggee);
+      if (observe) {
+        const details = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId,
+          functionDeclaration: SEARCH_META_SOURCE, arguments: [{ value: false }], returnByValue: true });
+        if (details.exceptionDetails) throw new Error(details.exceptionDetails.exception?.description || details.exceptionDetails.text);
+        throwIfAborted(this.context.signal);
+        const value = details.result?.value;
+        if (!value || typeof value.role !== "string" || typeof value.name !== "string")
+          throw automationError("state-unavailable", { reason: "missing-node-metadata" });
+        observe([value]);
+      }
       return objectId;
     } finally {
       void this.options.command(debuggee, "Runtime.releaseObject", { objectId: arrayId }).catch(() => undefined);
@@ -1613,16 +1640,13 @@ export class AutomationRuntime {
         if (!response.object?.objectId) return undefined;
         this.objectDebuggees.set(response.object.objectId, scoped.debuggee);
         return response.object.objectId;
-      } catch { return undefined; }
+      } catch (error) {
+        if (error && typeof error === "object" && "name" in error && error.name === "AbortError") throw error;
+        if (isDetachedNodeError(error) && !(error instanceof AutomationError)) return undefined;
+        throw error;
+      }
     }
-    const matches = (await this.resolveLocator(scoped.debuggee, scoped.spec, true, scoped.rootObjectId, undefined, session))?.value as Candidate[];
-    observe?.(matches);
-    this.assertStrict(spec, matches);
-    if (!matches.length) return undefined;
-    const result = await this.resolveLocator(scoped.debuggee, scoped.spec, false, scoped.rootObjectId, undefined, session);
-    if (!result?.objectId) return undefined;
-    this.objectDebuggees.set(result.objectId, scoped.debuggee);
-    return result.objectId;
+    return this.resolveDomOnce(session, scoped.debuggee, scoped.spec, scoped.rootObjectId, observe);
   }
 
   private assertStrict(spec: LocatorSpec, matches: Candidate[]): void {
@@ -1819,15 +1843,11 @@ export class AutomationRuntime {
     return response.result;
   }
 
-  private async resolveDirect(debuggee: Debuggee, spec: LocatorSpec, rootObjectId?: string, session?: Session): Promise<string> {
+  private async resolveDirect(debuggee: Debuggee, spec: LocatorSpec, rootObjectId: string | undefined, session: Session): Promise<string> {
     while (true) {
       throwIfAborted(this.context.signal);
-      const matches = (await this.resolveLocator(debuggee, spec, true, rootObjectId, undefined, session))?.value as any[];
-      if (matches.length > 1) throw automationError("strict-mode", { locator: spec, count: matches.length, candidates: matches.slice(0, 10) });
-      if (matches.length === 1) {
-        const result = await this.resolveLocator(debuggee, spec, false, rootObjectId, undefined, session);
-        if (result?.objectId) return result.objectId;
-      }
+      const objectId = await this.resolveDomOnce(session, debuggee, spec, rootObjectId);
+      if (objectId) return objectId;
       await delay(50, this.context.signal);
     }
   }
@@ -1900,28 +1920,29 @@ export class AutomationRuntime {
     let attempt = 0;
     while (true) {
       throwIfAborted(this.context.signal);
-      let matches: Candidate[];
-      try { matches = await this.resolveMetadata(session, spec); }
+      let matches: Candidate[] = [];
+      let objectId: string | undefined;
+      try { objectId = await this.resolveOnce(session, spec, (found) => { matches = found; }); }
       catch (error) {
         if (error instanceof AutomationError && error.code === "detached" && (state === "detached" || state === "hidden")) return;
         throw error;
       }
-      this.assertStrict(spec, matches);
       attempt += 1;
-      if (!matches.length) {
+      if (!objectId) {
         this.recordAttempt(session, spec, attempt, "no-candidate", matches);
         if (state === "detached" || state === "hidden") return;
         await delay(50, this.context.signal);
         continue;
       }
-      if (state === "attached") { this.recordAttempt(session, spec, attempt, "attached", matches); return; }
-      const objectId = await this.resolveOnce(session, spec);
-      if (!objectId) { await delay(50, this.context.signal); continue; }
-      const value = await this.elementState(this.objectSession(session, objectId), objectId).catch(() => undefined);
+      const value = await this.elementState(this.objectSession(session, objectId), objectId).catch((error) => {
+        if (error && typeof error === "object" && "name" in error && error.name === "AbortError") throw error;
+        if (isDetachedNodeError(error)) return undefined;
+        throw error;
+      });
       this.recordAttempt(session, spec, attempt, value?.connected ? `checking-${state}` : "detached", matches, value);
       if (!value?.connected) {
         if (state === "detached" || state === "hidden") return;
-      } else if (state === "visible" && value.visible || state === "hidden" && !value.visible || state === "enabled" && value.enabled || state === "editable" && value.editable || state === "checked" && value.checked === checked) return;
+      } else if (state === "attached" || state === "visible" && value.visible || state === "hidden" && !value.visible || state === "enabled" && value.enabled || state === "editable" && value.editable || state === "checked" && value.checked === checked) return;
       await delay(50, this.context.signal);
     }
   }
@@ -1936,6 +1957,8 @@ export class AutomationRuntime {
       if (!objectId) { this.recordAttempt(session, spec, attempt, "no-candidate", candidates); await delay(50, this.context.signal); continue; }
       const targetSession = this.objectSession(session, objectId);
       const state = await this.elementState(targetSession, objectId, pointer, true).catch((error) => {
+        if (error && typeof error === "object" && "name" in error && error.name === "AbortError") throw error;
+        if (!isDetachedNodeError(error)) throw error;
         if (spec.ref) throw automationError("detached", { ref: spec.ref, reason: error instanceof Error ? error.message : String(error) });
         return undefined;
       });
@@ -1943,6 +1966,17 @@ export class AutomationRuntime {
       this.recordAttempt(session, spec, attempt, reason, candidates, state);
       if (spec.ref && !state?.connected) throw automationError("detached", { ref: spec.ref, reason: "node-removed" });
       if (state?.connected && state.visible && (!stable || state.stable) && (!enabled || state.enabled) && (!editable || state.editable) && (!pointer || state.receivesEvents)) return { objectId, targetSession, state };
+      await delay(50, this.context.signal);
+    }
+  }
+
+  /** Recheck an already selected node without ever retargeting the operation. */
+  private async waitBoundActionable(target: { objectId: string; targetSession: Session; state: ElementState }, enabled = true): Promise<{ objectId: string; targetSession: Session; state: ElementState }> {
+    while (true) {
+      throwIfAborted(this.context.signal);
+      const state = await this.elementState(target.targetSession, target.objectId, true, true);
+      if (!state.connected) throw automationError("detached", { reason: "bound-target-removed" });
+      if (state.visible && state.stable && (!enabled || state.enabled) && state.receivesEvents) return { ...target, state };
       await delay(50, this.context.signal);
     }
   }
@@ -1974,8 +2008,8 @@ export class AutomationRuntime {
     return this.options.command(debuggee, "Input.dispatchMouseEvent", { ...params, type: "mouseReleased" });
   }
 
-  private async pointer(session: Session, spec: LocatorSpec, operation: string, options: { button?: "left" | "right" | "middle"; modifiers?: string[] } = {}): Promise<void> {
-    const target = await this.waitActionableLocator(session, spec, false, true, true, operation !== "hover");
+  private async pointer(session: Session, spec: LocatorSpec, operation: string, options: { button?: "left" | "right" | "middle"; modifiers?: string[] } = {}, bound?: { objectId: string; targetSession: Session; state: ElementState }): Promise<void> {
+    const target = bound ? await this.waitBoundActionable(bound, operation !== "hover") : await this.waitActionableLocator(session, spec, false, true, true, operation !== "hover");
     const state = await this.toRootPoint(session, target.targetSession, target.state);
     if (operation === "hover") {
       await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", x: state.x, y: state.y });

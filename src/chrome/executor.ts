@@ -12,7 +12,7 @@ import { ForegroundBlockers, type BlockerJob, type BlockerOperation } from "./fo
 import type { InspectOptions } from "./automation";
 import { callUserScript } from "./script-client";
 import { executeSandboxProgram } from "./program-host";
-import { PROGRAM_HANDLE_ASSERT_LIVE } from "./program-handles";
+import { PROGRAM_HANDLE_ASSERT_LIVE, PROGRAM_HANDLE_SESSION } from "./program-handles";
 import { estimateProgramTimeoutMs } from "./program-timeout";
 import { EventSubscriptions, type BrowserEventKind, type EventOwner } from "./event-subscriptions";
 
@@ -937,7 +937,7 @@ export class ChromeExecutor {
           if (!entry.live || this.automation.sessionIdentity(tabId) !== identity)
             throw new Error("CommandError[stale-page]: Browser session changed; acquire a new page handle");
         };
-        const page = await this.programPage(raw, scope, assertLive, get);
+        const page = await this.programPage(raw, scope, assertLive, get, identity);
         assertLive();
         return page;
       })().catch((error) => { if (entries.get(tabId) === entry) invalidate(tabId); throw error; });
@@ -947,11 +947,12 @@ export class ChromeExecutor {
     return { get, invalidate, dispose };
   }
 
-  private async programPage(raw: any, scope: ProgramScope, assertLive: () => void, getPage: (tabId: number) => Promise<any>): Promise<any> {
+  private async programPage(raw: any, scope: ProgramScope, assertLive: () => void, getPage: (tabId: number) => Promise<any>, identity: object): Promise<any> {
     // Locator chains are created lazily in the worker. Guard both the page and
     // each derived locator at invocation, including queued calls after detach.
     const guarded = <T extends object>(subject: T): T => new Proxy(subject, { get(target, key) {
       if (key === PROGRAM_HANDLE_ASSERT_LIVE) return assertLive;
+      if (key === PROGRAM_HANDLE_SESSION) return identity;
       if (target instanceof LocatorFacade && key === "spec") assertLive();
       const value = Reflect.get(target, key, target);
       if (typeof value !== "function") return value;

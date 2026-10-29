@@ -16,7 +16,7 @@ export function rebuildFollowups(events: readonly LogEvent[]): FollowupMessage[]
   const pending = new Map<string, FollowupMessage>();
   for (const event of events) {
     if (!FOLLOWUP_EVENT_TYPES.includes(event.type as typeof FOLLOWUP_EVENT_TYPES[number])) continue;
-    const content = fromLogValue(event.content) as { id?: unknown; text?: unknown; createdAt?: unknown } | null;
+    const content = fromLogValue(event.content, event.valueEncoding) as { id?: unknown; text?: unknown; createdAt?: unknown } | null;
     if (!content || typeof content.id !== "string") continue;
     if (event.type === "conversation.followup.queued") {
       if (typeof content.text !== "string" || typeof content.createdAt !== "string") continue;

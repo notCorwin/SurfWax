@@ -194,13 +194,13 @@ export class BrowserDiagnostics {
           let expectedRevision = (cache?.revision ?? 0) + 1, lastId = cache?.lastId ?? -1;
           for (const event of snapshot.value) {
             lastId = Math.max(lastId, event.id);
-            const content = fromLogValue(event.content) as { tabId?: number; source: Debuggee; method: string; epoch?: string; index?: number; revision?: number; consoleGeneration?: number };
+            const content = fromLogValue(event.content, event.valueEncoding) as { tabId?: number; source: Debuggee; method: string; epoch?: string; index?: number; revision?: number; consoleGeneration?: number };
             if (content.tabId !== tabId || content.epoch !== current.epoch) continue;
             if (!Number.isSafeInteger(content.revision) || content.revision! !== expectedRevision) restored.replayComplete = false;
             if (!Number.isSafeInteger(content.revision) || content.revision! < expectedRevision) continue;
             expectedRevision = content.revision! + 1;
             if ((content.method === "console.clear" || content.method === "Runtime.consoleAPICalled" || content.method === "Log.entryAdded") && content.consoleGeneration !== current.consoleGeneration) continue;
-            this.apply(restored, content.source, content.method, fromLogValue(event.output), content.index);
+            this.apply(restored, content.source, content.method, fromLogValue(event.output, event.valueEncoding), content.index);
           }
           if (expectedRevision !== revision + 1) restored.replayComplete = false;
           if (restored.replayComplete && replayFits(restored)

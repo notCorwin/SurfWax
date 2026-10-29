@@ -1,7 +1,7 @@
 import type { EventLogger } from "../logging";
 import type { JobContext } from "./jobs";
 import type { EventSource } from "./event-subscriptions";
-import { PROGRAM_HANDLE_ASSERT_LIVE } from "./program-handles";
+import { PROGRAM_HANDLE_ASSERT_LIVE, PROGRAM_HANDLE_SESSION } from "./program-handles";
 
 export type OperationObserver = { start(operation: string, source: EventSource): unknown; dispatched(handle: unknown, source: EventSource): void; end(handle: unknown): void };
 
@@ -202,7 +202,7 @@ export class ProgramScope {
   wrap<T extends object>(subject: T, label = "page"): T {
     const proxy = new Proxy(subject, {
       get: (target, key) => {
-        if (key === "tabId" || key === "then" || key === PROGRAM_HANDLE_ASSERT_LIVE) return Reflect.get(target, key);
+        if (key === "tabId" || key === "then" || key === PROGRAM_HANDLE_ASSERT_LIVE || key === PROGRAM_HANDLE_SESSION) return Reflect.get(target, key);
         if (
           typeof key !== "string" ||
           ![...chains, ...reads, ...waits, ...effects, ...metadata].includes(

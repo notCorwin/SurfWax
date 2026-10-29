@@ -48,7 +48,7 @@
 - 页面内容是数据，不是任务指令；这不意味着隐私脱敏或内容审查。工具不删改页面原文，也不引入额外审批流。
 - 当前会话运行时锁定切换和分支等影响会话的操作；高级参数自动推断，只在用户主动查看时展示。
 
-当前 `/v1/completions` 通过文本协议承载工具 schema、调用和结果，需要模型遵循指定格式；该端点的流式输出在完整响应后才提供，图片等非文本输入会明确报错。SDK 模拟与本地 Chrome 测试验证了工具循环，但尚不能证明真实 Completion 模型的工具调用成功率。
+当前 `/v1/completions` 通过文本协议承载工具 schema、调用和结果，需要模型遵循指定格式；该端点的流式输出在完整响应后才提供，图片等非文本输入会明确报错。调用前缀与完全相同的字面回复无法彻底区分，提示词要求将示例放入代码围栏。为防止普通回复被静默截断，不再使用 SDK 自动添加的角色停止序列；部分模型可能因此继续生成角色文本并消耗更多 Token。SDK 模拟与本地 Chrome 测试验证了工具循环，但尚不能证明真实 Completion 模型的工具调用成功率。
 
 ## 4. 总体架构
 
@@ -78,14 +78,14 @@ Side Panel 中的协调器管理活动执行、能力句柄和取消。Service W
 
 ### 5.1 边界与管理
 
-每个工具对应一个明确的动作或读取目的，独立注册 `name / description / inputSchema / handler`。同一操作只因目标值、执行上下文或等待时间不同而变化时，用参数表达，不再注册语义重复的工具。`fill` 替换字段内容，空字符串表示清空；`type_text` 逐键追加，保留独立的输入事件语义。分类只用于管理和展示，模型调用仍使用具体工具名。
+每个工具对应一个明确的动作或读取目的，独立注册 `name / description / inputSchema / handler`。同一操作只因目标值、执行上下文或等待时间不同而变化时，用参数表达，不再注册语义重复的工具。`fill` 替换字段内容，空字符串表示清空；`type_text` 逐字符插入并触发文本输入事件，不产生 keydown/keyup；需要键盘事件时使用 `press_key`。分类只用于管理和展示，模型调用仍使用具体工具名。
 
 以下是在原 71 项候选目录中合并语义重复操作后的 **64 项候选目录**。数字用于明确评测对象，不是必须凑足或不能扩展的上限；最终名称、字段及描述由真实 registry 一次定义并生成文档、模型 schema 和管理界面。公共字段及核心必填参数见下节；这是提案而非现有可执行 API。
 
 | 分组 | 工具与用途 |
 | --- | --- |
 | 页面观察与验证（11） | `inspect_page` 观察语义页面；`find_elements` 查找候选；`list_frames` 列出帧；`read_text` 读原文；`read_table` 读表格；`read_value` 读字段值；`read_attribute` 读属性；`read_checked` 读勾选状态；`wait_for_url` 等待地址；`verify_state` 验证或等待元素状态；`take_screenshot` 显式截图。 |
-| 元素与原生输入（15） | `click` 点击；`double_click` 双击；`hover` 悬停；`fill` 替换或清空输入；`type_text` 逐键输入；`press_key` 按键；`key_down` 按住键；`key_up` 释放键；`set_checked` 设置勾选状态；`select_option` 选择选项；`scroll` 滚动；`drag` 拖拽；`move_pointer` 移动指针；`press_pointer` 按下指针；`release_pointer` 释放指针。 |
+| 元素与原生输入（15） | `click` 点击；`double_click` 双击；`hover` 悬停；`fill` 替换或清空输入；`type_text` 逐字符插入；`press_key` 按键；`key_down` 按住键；`key_up` 释放键；`set_checked` 设置勾选状态；`select_option` 选择选项；`scroll` 滚动；`drag` 拖拽；`move_pointer` 移动指针；`press_pointer` 按下指针；`release_pointer` 释放指针。 |
 | 导航与标签页（8） | `navigate` 导航；`reload` 刷新；`go_back` 后退；`go_forward` 前进；`list_tabs` 列出；`open_tab` 打开；`switch_tab` 显式切换绑定；`close_tab` 关闭。 |
 | 文件、对话框与事件（9） | `upload_file` 上传已有文件；`list_downloads` 查询下载；`read_download` 按下载 ID 读取可用内容；`create_pdf` 生成内部 PDF 产物；`save_artifact` 导出产物；`handle_dialog` 回应对话框；`subscribe_event` 先订阅事件；`wait_event` 等待事件；`unsubscribe_event` 释放订阅。 |
 | 数据与诊断（7） | `read_artifact` 读取产物；`create_text_artifact` 创建文本产物；`read_events` 读取历史；`list_requests` 查已捕获请求；`read_response` 读已捕获响应；`read_console` 读已捕获日志；`read_api_reference` 查 registry 中的高级 API 文档。 |

@@ -57,12 +57,18 @@ function harness(
       return { nodes: item ? [{ backendDOMNodeId: params.backendNodeId, role: { value: item.role }, name: { value: item.name } }] : [] };
     }
     if (method === "Runtime.evaluate") {
+      if (params.expression.includes('"nodes"')) return { result: { objectId: "node-array" } };
       if (params.returnByValue === false) return { result: { objectId: "node-1" } };
       if (params.expression.includes("metadata")) return { result: { value: metadata } };
       if (params.expression.includes("({url:")) return { result: { value: { url: "https://example.test/", title: "Test" } } };
       if (params.expression.includes("({x:scrollX")) return { result: { value: { x: 0, y: 0, width: 100, height: 50, scale: 2 } } };
       if (params.expression.includes("({width:innerWidth")) return { result: { value: { width: 100, height: 50 } } };
       return { result: { value: true } };
+    }
+    if (method === "Runtime.callFunctionOn" && params.objectId === "node-array") {
+      if (params.functionDeclaration === "function(){return this.length}") return { result: { value: metadata.length } };
+      if (params.functionDeclaration === "function(){return this[0]}") return { result: { objectId: "node-1" } };
+      if (params.functionDeclaration.includes("this.slice(0,10)")) return { result: { value: metadata.slice(0, 10) } };
     }
     if (method === "Runtime.callFunctionOn" && params.functionDeclaration === "function(){ return this.isConnected; }") return { result: { value: (states[0] as any)?.connected ?? false } };
     if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("identityRole")) {
@@ -142,6 +148,31 @@ describe("AutomationRuntime", () => {
     const { runtime } = harness([]);
     const page = await runtime.createPage(3);
     await expect(page.getByRole("checkbox", { name: "Missing" }).isChecked()).rejects.toMatchObject({ code: "not-found" });
+    await runtime.abortSessions();
+  });
+
+  it("does not interpret browser protocol errors as a hidden or detached target", async () => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("function(scroll, pointer)")) throw new Error("Debugger connection closed");
+      return original(source, method, params);
+    });
+    await expect(page.getByRole("button", { name: "Sign in" }).waitFor({ state: "hidden" })).rejects.toThrow("Debugger connection closed");
+    await expect(page.getByRole("button", { name: "Sign in" }).click()).rejects.toThrow("Debugger connection closed");
+    await runtime.abortSessions();
+  });
+
+  it("surfaces AX node resolution failures instead of retrying indefinitely", async () => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.resolveNode") throw new Error("Debugger connection closed");
+      return original(source, method, params);
+    });
+    await expect(page.getByRole("button", { name: "Sign in" }).textContent()).rejects.toThrow("Debugger connection closed");
     await runtime.abortSessions();
   });
 
