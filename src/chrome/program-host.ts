@@ -1,4 +1,5 @@
 import { LocatorFacade, PageFacade } from "./automation";
+import { ProgramHandles } from "./program-handles";
 
 /** Control stays in the Side Panel. Arbitrary program computation runs only in a disposable sandbox worker. */
 export async function executeSandboxProgram(
@@ -18,18 +19,11 @@ export async function executeSandboxProgram(
     ? `${__SURF_WAX_DEV_SERVER__}/@surf-wax/program-sandbox#${token}`
     : `${chrome.runtime.getURL("program-sandbox.html")}#${token}`;
   const channel = new MessageChannel();
-  const objects = new Map<string, any>();
-  const ids = new WeakMap<object, string>();
+  const objects = new ProgramHandles();
+  const onTabRemoved = (tabId: number) => objects.closeTab(tabId);
+  chrome.tabs.onRemoved.addListener(onTabRemoved);
   const inflight = new Set<Promise<unknown>>();
-  const idOf = (value: object) => {
-    let id = ids.get(value);
-    if (!id) {
-      id = crypto.randomUUID();
-      ids.set(value, id);
-      objects.set(id, value);
-    }
-    return id;
-  };
+  const idOf = (value: object, tabId?: number) => objects.remember(value, tabId);
   const encode = (value: any, seen = new WeakSet<object>()): any => {
     if (typeof value === "function") return { $remoteFunction: idOf(value) };
     if (!value || typeof value !== "object") return value;
@@ -40,7 +34,7 @@ export async function executeSandboxProgram(
     if (value instanceof PageFacade || value instanceof LocatorFacade)
       return {
         $remoteObject: {
-          id: idOf(value),
+          id: idOf(value, value.tabId),
           ...(value.tabId === undefined ? {} : { tabId: value.tabId }),
         },
       };
@@ -70,9 +64,7 @@ export async function executeSandboxProgram(
     id: string;
     steps?: Array<{ key: string; args?: any[] }>;
   }): any => {
-    if (!objects.has(reference.id))
-      throw new Error("Program capability handle expired");
-    let subject = objects.get(reference.id);
+    let subject = objects.resolve(reference.id);
     for (const { key, args } of reference.steps ?? []) {
       if (
         key.startsWith("_") ||
@@ -114,6 +106,7 @@ export async function executeSandboxProgram(
     channel.port1.close();
     frame.remove();
     objects.clear();
+    chrome.tabs.onRemoved.removeListener(onTabRemoved);
     signal.removeEventListener("abort", abort);
   };
   let reject!: (error: unknown) => void;

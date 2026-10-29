@@ -57,6 +57,7 @@ type Session = {
   nextRef: number;
   refs: Map<string, RefRecord>;
   refsByNode: Map<string, string>;
+  refUsage: Map<string, string>;
   frames: Map<string, Debuggee>;
   frameReady: Map<string, Promise<void>>;
   frameParents: Map<string, string | undefined>;
@@ -117,6 +118,18 @@ class AutomationError extends Error {
 
 function automationError(code: string, detail: Record<string, unknown>): AutomationError {
   return new AutomationError(code, detail);
+}
+
+function validateLocator(spec: LocatorSpec): void {
+  const seen = new Set<LocatorSpec>();
+  let nested = false;
+  for (let current: LocatorSpec | undefined = spec; current; current = current.has) {
+    if (seen.has(current)) throw automationError("invalid-target", { reason: "cyclic-locator" });
+    seen.add(current);
+    if (current.ref && (nested || current.queries.length || current.has || current.hasText || current.index !== undefined))
+      throw automationError("unsupported-target", { reason: "reference-composition-unavailable" });
+    nested = true;
+  }
 }
 
 function isDetachedNodeError(error: unknown): boolean {
@@ -232,6 +245,7 @@ const SEARCH_META_SOURCE = String.raw`function(includeIdentity) {
 
 export class AutomationRuntime {
   private readonly sessions = new Map<number, Session>();
+  private readonly activeActions = new Map<number, number>();
   private readonly objectDebuggees = new Map<string, Debuggee>();
   private context: RunContext = {};
   private readonly waiters = new Map<number, Map<string, Set<Waiter>>>();
@@ -405,6 +419,7 @@ export class AutomationRuntime {
     this.clearInspections(session.tabId);
     session.refs.clear();
     session.refsByNode.clear();
+    session.refUsage.clear();
     session.lastSnapshot = undefined;
     this.objectDebuggees.clear();
     this.axRoots.clear();
@@ -450,6 +465,7 @@ export class AutomationRuntime {
   async snapshot(tabId: number): Promise<{ url: string; title: string; snapshot: string }> {
     return this.action(tabId, "snapshot", null, async () => {
       const session = await this.session(tabId);
+      this.pruneRefs(session);
       const captured = await this.captureSnapshot(session);
       session.lastSnapshot = captured.lines;
       return { url: captured.url, title: captured.title, documentId: session.generation, snapshot: captured.lines.map(({ line }) => line).join("\n") };
@@ -459,6 +475,7 @@ export class AutomationRuntime {
   async observe(tabId: number, detail: "auto" | "semantic" | "visual" = "auto", since?: string, captureOptions: Record<string, any> = {}): Promise<Record<string, unknown>> {
     return this.action(tabId, "observe", null, async () => {
       const session = await this.session(tabId);
+      this.pruneRefs(session);
       const generation = session.generation;
       const captured = await this.captureSnapshot(session);
       const viewport = await this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})") as ObservationRecord["viewport"];
@@ -514,7 +531,9 @@ export class AutomationRuntime {
 
   async inspect(tabId: number, options: InspectOptions = {}, region?: LocatorSpec): Promise<Record<string, unknown>> {
     return this.action(tabId, "inspect", region ?? null, async () => {
+      if (region) validateLocator(region);
       const session = await this.session(tabId);
+      if (options.cursor === undefined) this.pruneRefs(session, region);
       const generation = session.generation;
       const signal = this.context.signal;
       const conversationId = this.context.conversationId, runId = this.context.logIdentity?.runId;
@@ -579,6 +598,7 @@ export class AutomationRuntime {
       catch (error) { throw automationError("stale-observation", { reason: error instanceof Error ? error.message : String(error) }); }
       if (page.fragments.some((item) => item.ref && !session.refs.has(item.ref)))
         throw automationError("stale-observation", { observationId: saved.id, reason: "reference-identity-changed" });
+      for (const item of page.fragments) if (item.ref) this.touchRef(session, item.ref);
       if (saved.expected && saved.expected.index === position.index && saved.expected.charOffset === position.charOffset) {
         saved.expected = page.next;
         if (!page.hasMore && saved.eligibleForBaseline) saved.record.incomplete = false;
@@ -777,8 +797,13 @@ export class AutomationRuntime {
 
   async locatorValue(tabId: number, spec: LocatorSpec, operation: string, args: unknown[] = [], fileChooser?: FileChooserRecord): Promise<unknown> {
     const operationSignal = this.context.signal;
-    const session = await this.session(tabId);
     return this.action(tabId, operation, spec, async () => {
+      validateLocator(spec);
+      if (operation === "dragTo") {
+        if (!LocatorFacade.belongsTo(args[0], this, tabId)) throw automationError("invalid-target", { reason: "cross-tab-drag-target" });
+        validateLocator(args[0].spec);
+      }
+      const session = await this.session(tabId);
       if (operation === "count") return (await this.resolveMetadata(session, spec)).length;
       if (operation === "waitFor") {
         await this.waitForLocatorState(session, spec, ((args[0] as { state?: WaitState } | undefined)?.state ?? "visible"));
@@ -1015,6 +1040,7 @@ export class AutomationRuntime {
         nextRef: 1,
         refs: new Map(),
         refsByNode: new Map(),
+        refUsage: new Map(),
         frames: new Map(),
         frameReady: new Map(),
         frameParents: new Map(),
@@ -1143,6 +1169,8 @@ export class AutomationRuntime {
   /** Capture the ordered set of actual nodes once; continuation never re-runs the locator. */
   async findElements(tabId: number, locator: LocatorFacade, options: FindOptions = {}): Promise<Record<string, unknown>> {
     return this.action(tabId, "find_elements", locator.spec, async () => {
+      if (!LocatorFacade.belongsTo(locator, this, tabId)) throw automationError("invalid-target", { reason: "cross-tab-locator" });
+      validateLocator(locator.spec);
       const session = await this.session(tabId);
       const generation = session.generation;
       const signal = this.context.signal;
@@ -1156,6 +1184,7 @@ export class AutomationRuntime {
         if (this.sessions.get(tabId) !== session || session.generation !== generation) throw automationError("stale-search", { reason: "document-or-session-changed" });
       };
       guard();
+      if (options.cursor === undefined) this.pruneRefs(session, locator.spec);
       let snapshot: SearchSnapshot | undefined;
       let offset = 0;
       if (options.cursor !== undefined) {
@@ -1328,6 +1357,35 @@ export class AutomationRuntime {
     });
   }
 
+  private touchRef(session: Session, refId: string): void {
+    if (!session.refs.has(refId)) return;
+    const short = refId.replace(/^t\d+s[a-f0-9]+d\d+/, "");
+    const identity = session.refUsage.get(short);
+    if (identity === undefined) return;
+    session.refUsage.delete(short);
+    session.refUsage.set(short, identity);
+  }
+
+  private pruneRefs(session: Session, preserve?: LocatorSpec): void {
+    // A whole capture may exceed this soft limit. Never evict during an
+    // operation or between pages of the same observation; the next independent
+    // capture/search can reclaim older references when the tab is otherwise idle.
+    const seen = new Set<LocatorSpec>();
+    for (let current = preserve; current && !seen.has(current); current = current.has) {
+      seen.add(current);
+      if (current.ref) this.touchRef(session, current.ref);
+    }
+    if ((this.activeActions.get(session.tabId) ?? 0) !== 1 || session.refUsage.size <= 32_768) return;
+    while (session.refUsage.size > 24_576) {
+      const [short, identity] = session.refUsage.entries().next().value!;
+      session.refUsage.delete(short);
+      const record = session.refs.get(short);
+      if (session.refsByNode.get(identity) === short) session.refsByNode.delete(identity);
+      session.refs.delete(short);
+      if (record) session.refs.delete(`t${session.tabId}s${session.token}d${record.generation}${short}`);
+    }
+  }
+
   private rememberRef(session: Session, identity: string, record: RefRecord): string {
     // A DOM-derived identity and an AX-derived identity are different
     // observations; neither may overwrite the other's existing binding.
@@ -1335,15 +1393,20 @@ export class AutomationRuntime {
     const previous = session.refsByNode.get(sourceIdentity);
     const old = previous ? session.refs.get(previous) : undefined;
     if (old && old.generation === record.generation && old.identitySource === record.identitySource
-      && old.role === record.role && old.name === record.name) return previous!;
+      && old.role === record.role && old.name === record.name) {
+      this.touchRef(session, previous!);
+      return previous!;
+    }
     if (previous && old) {
       // Retire both aliases rather than retargeting an already issued ref.
       session.refs.delete(previous);
       session.refs.delete(`t${session.tabId}s${session.token}d${old.generation}${previous}`);
+      session.refUsage.delete(previous);
     }
     const next = `e${session.nextRef++}`;
     session.refsByNode.set(sourceIdentity, next);
     session.refs.set(next, record);
+    session.refUsage.set(next, sourceIdentity);
     return next;
   }
 
@@ -1357,6 +1420,7 @@ export class AutomationRuntime {
   private async resolveRef(session: Session, refId: string): Promise<{ ref: RefRecord; objectId: string }> {
     const ref = session.refs.get(refId);
     if (!ref || ref.generation !== session.generation) throw automationError("stale-ref", { ref: refId, reason: "expired-document" });
+    this.touchRef(session, refId);
     try {
       const response = await this.options.command(ref.debuggee, "DOM.resolveNode", { backendNodeId: ref.backendNodeId, objectGroup: "surf-wax-automation" });
       const objectId = response.object?.objectId;
@@ -1910,6 +1974,7 @@ export class AutomationRuntime {
     this.lastAttemptLog = undefined;
     const context = this.context;
     this.options.logger?.record({ type: "automation.action.started", conversationId: context.conversationId, toolCallId: context.toolCallId, ...context.logIdentity, content: { tabId, operation, locator } });
+    this.activeActions.set(tabId, (this.activeActions.get(tabId) ?? 0) + 1);
     try {
       const result = await run();
       this.options.logger?.record({ type: "automation.action.finished", conversationId: context.conversationId, toolCallId: context.toolCallId, ...context.logIdentity, content: { tabId, operation, locator }, output: result, latencyMs: performance.now() - startedAt });
@@ -1929,6 +1994,10 @@ export class AutomationRuntime {
         latencyMs: performance.now() - startedAt,
       });
       throw failure;
+    } finally {
+      const remaining = (this.activeActions.get(tabId) ?? 1) - 1;
+      if (remaining > 0) this.activeActions.set(tabId, remaining);
+      else this.activeActions.delete(tabId);
     }
   }
 }
@@ -1936,7 +2005,10 @@ export class AutomationRuntime {
 export class PageFacade {
   constructor(private readonly runtime: AutomationRuntime, readonly tabId: number) {}
   snapshot() { return this.runtime.snapshot(this.tabId); }
-  inspect(options: InspectOptions = {}, region?: LocatorFacade) { return this.runtime.inspect(this.tabId, options, region?.spec); }
+  inspect(options: InspectOptions = {}, region?: LocatorFacade) {
+    if (region && !LocatorFacade.belongsTo(region, this.runtime, this.tabId)) throw automationError("invalid-target", { reason: "cross-tab-region" });
+    return this.runtime.inspect(this.tabId, options, region?.spec);
+  }
   observe(detail: "auto" | "semantic" | "visual" = "auto", since?: string, captureOptions?: Record<string, any>) { return this.runtime.observe(this.tabId, detail, since, captureOptions); }
   ensureObservation(observationId: string) { return this.runtime.ensureObservation(this.tabId, observationId); }
   point(observationId: string, x: number, y: number, operation: "click" | "dblclick" | "hover", options?: { button?: "left" | "right" | "middle"; modifiers?: string[] }) { return this.runtime.point(this.tabId, observationId, x, y, operation, options); }
@@ -1968,6 +2040,9 @@ export class PageFacade {
 
 export class LocatorFacade {
   constructor(private readonly runtime: AutomationRuntime, readonly tabId: number, readonly spec: LocatorSpec) {}
+  static belongsTo(locator: unknown, runtime: AutomationRuntime, tabId: number): locator is LocatorFacade {
+    return locator instanceof LocatorFacade && locator.runtime === runtime && locator.tabId === tabId;
+  }
   private chain(query: Query) { return new LocatorFacade(this.runtime, this.tabId, { ...this.spec, queries: [...this.spec.queries, query] }); }
   locator(value: string) { return this.chain({ kind: "css", value }); }
   frameLocator(value: string) { return this.chain({ kind: "frame", value }); }
@@ -1978,7 +2053,10 @@ export class LocatorFacade {
   getByAltText(value: string, options: { exact?: boolean } = {}) { return this.chain({ kind: "alt", value, ...options }); }
   getByTitle(value: string, options: { exact?: boolean } = {}) { return this.chain({ kind: "title", value, ...options }); }
   getByTestId(value: string) { return this.chain({ kind: "testId", value, exact: true }); }
-  filter(options: { hasText?: string; has?: LocatorFacade }) { return new LocatorFacade(this.runtime, this.tabId, { ...this.spec, hasText: options.hasText, has: options.has?.spec }); }
+  filter(options: { hasText?: string; has?: LocatorFacade }) {
+    if (options.has && (options.has.tabId !== this.tabId || options.has.runtime !== this.runtime)) throw automationError("invalid-target", { reason: "cross-tab-filter" });
+    return new LocatorFacade(this.runtime, this.tabId, { ...this.spec, hasText: options.hasText, has: options.has?.spec });
+  }
   first() { return this.nth(0); }
   last() { return this.nth(-1); }
   nth(index: number) { return new LocatorFacade(this.runtime, this.tabId, { ...this.spec, index }); }

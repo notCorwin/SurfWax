@@ -3,6 +3,7 @@ import { EventLogger, fromLogValue, type LogEvent } from "../logging";
 import { ChromeExecutor } from "./executor";
 import { LocatorFacade } from "./automation";
 import { ProgramScope } from "./program";
+import { ProgramHandles } from "./program-handles";
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 function fakeChrome(responses: Array<object | (() => Promise<object>)> = []) {
@@ -111,9 +112,14 @@ describe("ChromeExecutor programs", () => {
       const old = await browser.page(42);
       const locator = old.locator("button");
       const url = old.url;
+      const handles = new ProgramHandles();
+      handles.remember(old, 42);
+      handles.remember(locator, 42);
       h.sessions.set(42, {});
       await expect(url()).rejects.toThrow("stale-page");
       await expect(locator.count()).rejects.toThrow("stale-page");
+      expect(() => handles.remember(old, 42)).toThrow("stale-page");
+      expect(() => handles.remember(locator, 42)).toThrow("stale-page");
       const fresh = await browser.page(42);
       expect(fresh).not.toBe(old);
       expect(await fresh.url()).toBe("https://example.com");

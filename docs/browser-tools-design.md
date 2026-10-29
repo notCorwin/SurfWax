@@ -34,7 +34,7 @@
 | 交互阻挡 | 已有跨帧遮罩和授权输入；安装失败路径可能只告警后继续 | 将阻挡器就绪纳入输入操作前置条件，故障时不继续派发输入 |
 | 数据与脚本 | 已有 Canonical Event Log、产物、用户脚本持久化及启动协调 | 复用，不再建第二份权威会话、任务或脚本状态 |
 
-当前真实工具预算通过 `npm run measure:tools -- --output=.dev/browser-tools-current-budget.json` 测得：3 个工具，定义 **4,204 UTF-8 字节**，完整 API 上下文 **3,698 字节**，组合 **7,903 字节**，包含中间换行。测量环境没有 tokenizer，因此不声称对应多少 Token 或真实费用。[tool-budget.json](tool-budget.json) 的 49 工具记录是历史数据，不能代表当前版本。现有模拟 Provider 与网页夹具测试也不能证明跨模型任务成功率。
+研究基线有 3 个工具；该数字和本节表格描述的是研究时的版本，不代表当前实现。当前目录和静态预算分别见生成的 [工具参考](tools.md) 与 [tool-budget.json](tool-budget.json)。预算记录工具定义和摘要的序列化字节数及 tokenizer 估算，不包含 Provider 封装、对话历史、页面结果或实际计费；运行 `npm run measure:tools` 可重新测量。现有模拟 Provider 与网页夹具测试也不能证明跨模型任务成功率。
 
 ## 3. 产品边界与不变量
 

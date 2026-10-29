@@ -4,6 +4,15 @@ import { EventSubscriptions } from "./event-subscriptions";
 
 const inspectText = (value: any) => value.items.map((item: any) => item.line).join("\n");
 
+function fillReferencePool(runtime: AutomationRuntime, count: number) {
+  const session = (runtime as any).sessions.get(3);
+  for (let index = 0; index < count; index++) (runtime as any).rememberRef(session, `seed:${index}`, {
+    backendNodeId: index + 100_000, debuggee: session.debuggee, role: "button", name: `seed-${index}`,
+    generation: session.generation, identitySource: "ax",
+  });
+  return session;
+}
+
 function event<T extends (...args: any[]) => void>() {
   const listeners = new Set<T>();
   return {
@@ -82,6 +91,42 @@ function harness(
 }
 
 describe("AutomationRuntime", () => {
+  it("rejects composed and nested refs instead of silently broadening their target", async () => {
+    const { runtime, calls } = harness();
+    const page = await runtime.createPage(3);
+    const inspection = await page.inspect() as any;
+    const ref = inspection.items.find((item: any) => item.ref).ref;
+    const nested = page.locator("div").filter({ has: page.ref(ref) });
+    const framed = page.frameLocator("iframe").locator("div").filter({ has: page.ref(ref) });
+    const before = calls.length;
+    await expect(nested.count()).rejects.toMatchObject({ code: "unsupported-target", detail: { reason: "reference-composition-unavailable" } });
+    await expect(framed.count()).rejects.toMatchObject({ code: "unsupported-target" });
+    await expect(page.ref(ref).locator("button").count()).rejects.toMatchObject({ code: "unsupported-target" });
+    await expect(page.locator("button").dragTo(nested)).rejects.toMatchObject({ code: "unsupported-target" });
+    await expect(runtime.findElements(3, nested)).rejects.toMatchObject({ code: "unsupported-target" });
+    await expect(page.inspect({}, nested)).rejects.toMatchObject({ code: "unsupported-target" });
+    expect(calls).toHaveLength(before);
+    runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "root" } });
+    await expect(nested.count()).rejects.toMatchObject({ code: "unsupported-target" });
+    await runtime.abortSessions();
+  });
+
+  it("rejects cross-tab filters, regions and search locators", async () => {
+    const { runtime } = harness();
+    const first = await runtime.createPage(3), second = await runtime.createPage(4);
+    const otherRuntime = harness().runtime, sameTabOtherRuntime = await otherRuntime.createPage(3);
+    expect(() => first.locator("div").filter({ has: second.locator("button") })).toThrow("invalid-target");
+    expect(() => first.locator("div").filter({ has: sameTabOtherRuntime.locator("button") })).toThrow("invalid-target");
+    expect(() => first.inspect({}, second.locator("button"))).toThrow("invalid-target");
+    expect(() => first.inspect({}, sameTabOtherRuntime.locator("button"))).toThrow("invalid-target");
+    await expect(runtime.findElements(3, second.locator("button"))).rejects.toMatchObject({ code: "invalid-target" });
+    await expect(runtime.findElements(3, sameTabOtherRuntime.locator("button"))).rejects.toMatchObject({ code: "invalid-target" });
+    await expect(first.locator("button").dragTo(second.locator("button"))).rejects.toMatchObject({ code: "invalid-target" });
+    await expect(first.locator("button").dragTo(sameTabOtherRuntime.locator("button"))).rejects.toMatchObject({ code: "invalid-target" });
+    await runtime.abortSessions();
+    await otherRuntime.abortSessions();
+  });
+
   it("does not report a missing checked target as unchecked", async () => {
     const { runtime } = harness([]);
     const page = await runtime.createPage(3);
@@ -519,6 +564,86 @@ describe("AutomationRuntime", () => {
     expect(calls.filter(({ method }) => method === "Accessibility.getFullAXTree")).toHaveLength(1);
     const delta = await page.inspect({ since: first.observationId as string }) as any;
     expect(delta).toMatchObject({ mode: "delta", items: [expect.objectContaining({ change: "updated", line: expect.stringContaining("Changed after the initial snapshot") })] });
+    await runtime.abortSessions();
+  });
+
+  it("bounds historical references at a new batch and rejects a continuation whose refs were reclaimed", async () => {
+    const { runtime } = harness([{ role: "button", name: "First" }, { role: "button", name: "Second" }]);
+    const page = await runtime.createPage(3);
+    const first = await page.inspect({ limit: 1 }) as any;
+    const session = fillReferencePool(runtime, 32_769);
+    const second = await page.inspect({ cursor: first.nextCursor, limit: 1 }) as any;
+    expect(session.refUsage.size).toBeGreaterThan(32_768);
+    const retainedRef = second.items[0].ref;
+    expect(retainedRef).toEqual(expect.any(String));
+    await page.inspect();
+    expect(session.refUsage.size).toBeLessThanOrEqual(24_578);
+    expect(session.refsByNode.size).toBe(session.refUsage.size);
+    await expect(page.ref(retainedRef).count()).resolves.toBe(1);
+    await expect(page.inspect({ cursor: second.nextCursor })).rejects.toMatchObject({ code: "stale-observation" });
+    await runtime.abortSessions();
+  });
+
+  it("does not evict refs during a concurrent action and reclaims them on the next independent capture", async () => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    const initial = await page.inspect() as any;
+    const ref = initial.items.find((item: any) => item.ref).ref;
+    const original = command.getMockImplementation()!;
+    let release!: () => void, started!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const resolved = new Promise<void>((resolve) => { started = resolve; });
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.resolveNode") { started(); await blocked; }
+      return original(source, method, params);
+    });
+    const action = page.ref(ref).count();
+    await resolved;
+    const session = fillReferencePool(runtime, 32_769);
+    await page.inspect();
+    expect(session.refUsage.size).toBeGreaterThan(32_768);
+    release();
+    await expect(action).resolves.toBe(1);
+    await page.inspect();
+    expect(session.refUsage.size).toBeLessThanOrEqual(24_577);
+    await runtime.abortSessions();
+  });
+
+  it("protects an element operation while its session is still being marked", async () => {
+    const { runtime } = harness();
+    const page = await runtime.createPage(3);
+    const initial = await page.inspect() as any;
+    const ref = initial.items.find((item: any) => item.ref).ref;
+    const options = (runtime as any).options;
+    const originalMark = options.mark;
+    let release!: () => void, started!: () => void, first = true;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const marking = new Promise<void>((resolve) => { started = resolve; });
+    options.mark = async (tabId: number) => {
+      if (first) { first = false; started(); await blocked; }
+      return originalMark(tabId);
+    };
+    const action = page.ref(ref).count();
+    await marking;
+    const session = fillReferencePool(runtime, 32_769);
+    await page.inspect();
+    expect(session.refUsage.size).toBeGreaterThan(32_768);
+    release();
+    await expect(action).resolves.toBe(1);
+    await runtime.abortSessions();
+  });
+
+  it("keeps a single oversized frozen capture usable across continuation pages", async () => {
+    const metadata = Array.from({ length: 32_769 }, (_, index) => ({ role: "button", name: `Item ${index}` }));
+    const { runtime } = harness(metadata);
+    const page = await runtime.createPage(3);
+    const first = await page.inspect({ limit: 1 }) as any;
+    const second = await page.inspect({ cursor: first.nextCursor, limit: 1 }) as any;
+    expect(second.items[0].line).toContain('button "Item 0"');
+    await expect(page.ref(second.items[0].ref).count()).resolves.toBe(1);
+    const third = await page.inspect({ cursor: second.nextCursor, limit: 1 }) as any;
+    expect(third.items[0].line).toContain('button "Item 1"');
+    await expect(page.ref(third.items[0].ref).count()).resolves.toBe(1);
     await runtime.abortSessions();
   });
 

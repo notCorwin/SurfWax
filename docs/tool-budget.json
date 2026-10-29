@@ -4,19 +4,19 @@
     {
       "label": "current",
       "count": 61,
-      "definitionsBytes": 48214,
+      "definitionsBytes": 48410,
       "contextBytes": 4432,
-      "combinedBytes": 52647,
+      "combinedBytes": 52843,
       "tokens": {
         "cl100k_base": {
-          "definitions": 11563,
+          "definitions": 11593,
           "context": 919,
-          "combined": 12482
+          "combined": 12512
         },
         "o200k_base": {
-          "definitions": 11844,
+          "definitions": 11874,
           "context": 921,
-          "combined": 12765
+          "combined": 12795
         }
       }
     }

@@ -58,6 +58,23 @@ function harness() {
 }
 
 describe("findElements", () => {
+  it("does not reclaim earlier search refs just because the search is continued", async () => {
+    const h = harness(); const page = await h.runtime.createPage(3); const target = page.getByRole("button");
+    const first: any = await h.runtime.findElements(3, target, { limit: 1 });
+    const session = (h.runtime as any).sessions.get(3);
+    for (let index = 0; index < 32_769; index++) (h.runtime as any).rememberRef(session, `seed:${index}`, {
+      backendNodeId: index + 100_000, debuggee: session.debuggee, role: "button", name: `seed-${index}`,
+      generation: session.generation, identitySource: "ax",
+    });
+    const second: any = await h.runtime.findElements(3, target, { cursor: first.nextCursor, limit: 1 });
+    expect(session.refUsage.size).toBeGreaterThan(32_768);
+    expect(second.elements[0]).toMatchObject({ name: "Second", ref: expect.any(String) });
+    await expect(page.ref(first.elements[0].ref).textContent()).resolves.toBe("First");
+    await h.runtime.findElements(3, target, { limit: 1 });
+    expect(session.refUsage.size).toBeLessThanOrEqual(24_577);
+    await h.runtime.abortSessions();
+  });
+
   it("does not retarget an old AX ref after the node's visible name changes", async () => {
     const h = harness(); const page = await h.runtime.createPage(3);
     const before: any = await page.inspect();

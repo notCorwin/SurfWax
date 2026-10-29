@@ -35,8 +35,8 @@ type Batch = {
 
 const bypass = new Set(["list_jobs", "get_job", "cancel_job", "read_api_reference", "wait_event", "unsubscribe_event"]);
 const reads = new Set([
-  "inspect_page", "find_elements", "list_frames", "read_text", "read_table", "read_value", "read_attribute", "read_checked", "verify_state", "wait_for_url", "take_screenshot",
-  "list_tabs", "list_downloads", "read_download", "read_artifact", "read_events", "list_requests", "read_response", "read_console", "list_scripts", "read_script", "list_cdp_sessions", "subscribe_event",
+  "inspect_page", "find_elements", "list_frames", "read_text", "read_value", "read_attribute", "read_checked", "verify_state", "wait_for_url", "take_screenshot",
+  "list_tabs", "list_downloads", "read_artifact", "list_requests", "read_response", "read_console", "list_scripts", "read_script", "list_cdp_sessions", "subscribe_event",
 ]);
 // Releasing held input must stay possible after an earlier action failed.
 const cleanup = new Set(["key_up", "release_pointer"]);
