@@ -62,6 +62,28 @@ function harness(
 }
 
 describe("AutomationRuntime", () => {
+  it("cleans event waiters against their original signal after context changes or session cleanup", async () => {
+    const { runtime } = harness();
+    const first = new AbortController();
+    const second = new AbortController();
+    const firstRemove = vi.spyOn(first.signal, "removeEventListener");
+    const secondRemove = vi.spyOn(second.signal, "removeEventListener");
+    runtime.setContext({ signal: first.signal });
+    const received = runtime.waitForEvent(3, "dialog");
+    runtime.setContext({ signal: second.signal });
+    runtime.handleEvent({ tabId: 3 }, "Page.javascriptDialogOpening", { type: "alert", message: "hello" });
+    await expect(received).resolves.toBeDefined();
+    expect(firstRemove).toHaveBeenCalledWith("abort", expect.any(Function));
+    expect(secondRemove).not.toHaveBeenCalled();
+    runtime.setContext({ signal: first.signal });
+    const abandoned = runtime.waitForEvent(3, "download");
+    runtime.setContext({ signal: second.signal });
+    const rejected = expect(abandoned).rejects.toMatchObject({ name: "AbortError" });
+    await runtime.abortSessions();
+    await rejected;
+    expect(firstRemove).toHaveBeenCalledTimes(2);
+    expect(secondRemove).not.toHaveBeenCalled();
+  });
   it("marks page evaluation at dispatch and leaves rejected locator preconditions undispatched", async () => {
     const {runtime,onDispatch} = harness([{role:"button",name:"Save"},{role:"button",name:"Save"}]);
     const page = await runtime.createPage(3);

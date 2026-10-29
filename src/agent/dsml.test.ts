@@ -22,6 +22,11 @@ async function generated(content: any[], logger?: EventLogger) {
 }
 
 describe("DSML model middleware", () => {
+  it("rejects duplicate and missing tool call IDs before execution", async () => {
+    const call = { type: "tool-call", toolCallId: "same", toolName: "inspect_page", input: "{}", dynamic: true };
+    await expect(generated([call, call])).rejects.toMatchObject({ code: "invalid-tool-call-id" });
+    await expect(generated([{ ...call, toolCallId: "" }])).rejects.toMatchObject({ code: "invalid-tool-call-id" });
+  });
   it("recovers V4.1 and legacy V4 calls from complete responses", async () => {
     const multiple = v41.replace("</｜DSML｜ calls>", '<｜DSML｜ invoke name="inspect_page"></｜DSML｜ invoke></｜DSML｜ calls>');
     const result = await generated([{ type: "text", text: multiple }]);

@@ -16,6 +16,7 @@ function memoryStore(onBatch?: (size: number) => void) {
       return Promise.all(batch.map(append));
     },
     async all() { return [...events]; },
+    async latestByType(type: string) { return [...events].reverse().find((event) => event.type === type); },
     async byTypes(types: readonly string[], conversationId?: string) {
       return events.filter((event) => types.includes(event.type) && (!conversationId || event.conversationId === conversationId));
     },
@@ -33,6 +34,217 @@ function memoryStore(onBatch?: (size: number) => void) {
 }
 
 describe("canonical event log", () => {
+  it("does not restore a started tool after another logger clears its snapshot", async () => {
+    const store = memoryStore();
+    const first = new EventLogger({ store });
+    const second = new EventLogger({ store });
+    await first.append({ type: "tool.started", conversationId: "c", runId: "run", toolCallId: "call", content: { toolName: "click" } });
+    const original = (first as any).artifactForCall.bind(first);
+    let reached!: () => void, release!: () => void;
+    const ready = new Promise<void>((resolve) => { reached = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(first as any, "artifactForCall").mockImplementation(async (...args: any[]) => { reached(); await gate; return original(...args); });
+    const recovering = first.closePendingTools("run", "c", "interrupted");
+    await ready;
+    await second.clear();
+    release();
+    await recovering;
+    expect(await second.conversation("c")).toEqual([]);
+    expect((await store.all()).map((event) => event.type)).toEqual(["tool.started", "log.cleared"]);
+  });
+
+  it("does not restore pending message tool calls after their epoch is cleared", async () => {
+    const store = memoryStore();
+    const first = new EventLogger({ store });
+    const second = new EventLogger({ store });
+    await first.appendMessage("c", { id: "a", role: "assistant", parts: [{ type: "dynamic-tool", toolName: "click", toolCallId: "call", state: "input-available", input: {} }] }, { runId: "run" });
+    const original = first.appendIfEpoch.bind(first);
+    let reached!: () => void, release!: () => void;
+    const ready = new Promise<void>((resolve) => { reached = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(first, "appendIfEpoch").mockImplementation(async (...args) => { reached(); await gate; return original(...args); });
+    const recovering = first.closePendingTools("run", "c", "interrupted");
+    await ready;
+    await second.clear();
+    release();
+    await recovering;
+    expect(await second.conversation("c")).toEqual([]);
+    expect((await store.all()).map((event) => event.type)).toEqual(["conversation.message", "log.cleared"]);
+  });
+
+  it("stops restoring remaining tools if clear happens between terminal results", async () => {
+    const store = memoryStore();
+    const first = new EventLogger({ store });
+    const second = new EventLogger({ store });
+    for (const toolCallId of ["one", "two"]) await first.append({ type: "tool.started", conversationId: "c", runId: "run", toolCallId });
+    const original = first.appendIfEpoch.bind(first);
+    let reached!: () => void, release!: () => void, calls = 0;
+    const ready = new Promise<void>((resolve) => { reached = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(first, "appendIfEpoch").mockImplementation(async (...args) => { if (++calls === 2) { reached(); await gate; } return original(...args); });
+    const recovering = first.closePendingTools("run", "c", "interrupted");
+    await ready;
+    await second.clear();
+    release();
+    await recovering;
+    const events = await store.all();
+    expect(events.map((event) => event.type)).toEqual(["tool.started", "tool.started", "tool.failed", "log.cleared"]);
+    expect(await second.conversation("c")).toEqual([]);
+  });
+
+  it("does not resurrect a dangling run when clear occurs while checking its owner", async () => {
+    const store = memoryStore();
+    const first = new EventLogger({ store });
+    const second = new EventLogger({ store });
+    await first.append({ type: "conversation.submitted", conversationId: "c", runId: "run" });
+    await first.append({ type: "tool.started", conversationId: "c", runId: "run", toolCallId: "call" });
+    let reached!: () => void, release!: () => void;
+    const ready = new Promise<void>((resolve) => { reached = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const recovering = first.recoverDanglingRuns(async () => { reached(); await gate; return []; });
+    await ready;
+    await second.clear();
+    release();
+    await recovering;
+    expect((await store.all()).map((event) => event.type)).toEqual(["conversation.submitted", "tool.started", "log.cleared"]);
+  });
+
+  it("serializes a conditional terminal append with cross-logger clear", async () => {
+    const base = memoryStore();
+    let reached!: () => void, release!: () => void;
+    const ready = new Promise<void>((resolve) => { reached = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const store = { ...base, async appendMany(batch: readonly Omit<LogEvent, "id">[]) {
+      if (batch.some((event) => event.type === "tool.failed")) { reached(); await gate; }
+      return base.appendMany(batch);
+    } };
+    const first = new EventLogger({ store });
+    const second = new EventLogger({ store });
+    await first.append({ type: "tool.started", conversationId: "c", runId: "run", toolCallId: "call" });
+    const recovering = first.closePendingTools("run", "c", "interrupted");
+    await ready;
+    let cleared = false;
+    const clearing = second.clear().then(() => { cleared = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(cleared).toBe(false);
+    release();
+    await Promise.all([recovering, clearing]);
+    expect((await store.all()).map((event) => event.type)).toEqual(["tool.started", "tool.failed", "log.cleared"]);
+    expect(await second.conversation("c")).toEqual([]);
+  });
+
+  it("does not deduplicate a new terminal against an old one before the clear marker", async () => {
+    const store = memoryStore();
+    const logger = new EventLogger({ store });
+    await logger.append({ type: "tool.failed", conversationId: "c", runId: "run", toolCallId: "call", output: "old" });
+    await logger.clear();
+    await logger.append({ type: "tool.started", conversationId: "c", runId: "run", toolCallId: "call" });
+    await logger.closePendingTools("run", "c", "interrupted");
+    expect((await logger.conversation("c")).map((event) => event.type)).toEqual(["tool.started", "tool.failed"]);
+  });
+  it("invalidates every canonical projection when a different logger clears the store", async () => {
+    const store = memoryStore();
+    const first = new EventLogger({ store });
+    const second = new EventLogger({ store });
+    await first.append({ type: "conversation.created", conversationId: "c", content: { title: "old" } });
+    await first.appendMessage("c", { id: "old-message", role: "user", parts: [{ type: "text", text: "old" }] });
+    await first.append({ type: "conversation.submitted", conversationId: "c", runId: "run" });
+    await first.append({ type: "conversation.failed", conversationId: "c", runId: "run" });
+    await first.append({ type: "tool.started", conversationId: "c", runId: "run", toolCallId: "call" });
+    const artifact = await first.append({ type: "tool.result.data", conversationId: "c", runId: "run", toolCallId: "call", content: { filename: "old.txt" }, output: "old" });
+    expect(await first.summaryEvents("c")).not.toEqual([]);
+    expect((await first.repository("c")).messages).toHaveLength(1);
+    expect(await first.result(artifact!.id, {}, "c")).toBe("old");
+    await second.clear();
+    expect(await first.summaryEvents("c")).toEqual([]);
+    expect((await first.repository("c")).messages).toEqual([]);
+    expect(await first.conversation("c")).toEqual([]);
+    expect(await first.restorationEvents("c")).toEqual([]);
+    expect(await first.toolArtifact("c", { runId: "run", toolCallId: "call" })).toBeUndefined();
+    await expect(first.result(artifact!.id, {}, "c")).rejects.toThrow("unavailable");
+  });
+
+  it.each(["eventsByTypes", "conversation", "result", "restorationEvents", "toolArtifact"] as const)("retries %s when clear commits during its store read", async (kind) => {
+    const base = memoryStore();
+    let reached!: () => void, release!: () => void;
+    const ready = new Promise<void>((resolve) => { reached = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let blocked = false, armed = false;
+    const delayOnce = async <T>(value: T): Promise<T> => {
+      if (!blocked) { blocked = true; reached(); await gate; }
+      return value;
+    };
+    const store = {
+      ...base,
+      async byTypes(types: readonly string[], conversationId?: string) {
+        const value = await base.byTypes(types, conversationId);
+        return armed && kind === "eventsByTypes" && types.includes("conversation.created") ? delayOnce(value) : value;
+      },
+      async byRunTypes(runIds: readonly string[], types: readonly string[]) {
+        const value = await base.byRunTypes(runIds, types);
+        return armed && (kind === "restorationEvents" || kind === "toolArtifact") ? delayOnce(value) : value;
+      },
+      async conversation(conversationId: string) {
+        const value = await base.conversation(conversationId);
+        return armed && kind === "conversation" ? delayOnce(value) : value;
+      },
+      async get(id: number) {
+        const value = (await base.all()).find((event) => event.id === id);
+        return armed && kind === "result" ? delayOnce(value) : value;
+      },
+    };
+    const first = new EventLogger({ store });
+    const second = new EventLogger({ store });
+    await first.append({ type: "conversation.created", conversationId: "c" });
+    await first.append({ type: "conversation.submitted", conversationId: "c", runId: "run" });
+    await first.append({ type: "conversation.failed", conversationId: "c", runId: "run" });
+    await first.append({ type: "tool.started", conversationId: "c", runId: "run", toolCallId: "call" });
+    const artifact = await first.append({ type: "tool.result.data", conversationId: "c", runId: "run", toolCallId: "call", content: { filename: "old.txt" }, output: "old" });
+    armed = true;
+    const reading = kind === "eventsByTypes" ? first.summaryEvents("c")
+      : kind === "conversation" ? first.conversation("c")
+      : kind === "result" ? first.result(artifact!.id, {}, "c")
+      : kind === "restorationEvents" ? first.restorationEvents("c")
+      : first.toolArtifact("c", { runId: "run", toolCallId: "call" });
+    await ready;
+    await second.clear();
+    release();
+    if (kind === "result") await expect(reading).rejects.toThrow("unavailable");
+    else if (kind === "toolArtifact") await expect(reading).resolves.toBeUndefined();
+    else await expect(reading).resolves.toEqual([]);
+  });
+
+  it("does not return a pre-clear artifact referenced by a post-clear tool call", async () => {
+    const store = memoryStore();
+    const logger = new EventLogger({ store });
+    const artifact = await logger.append({ type: "tool.result.data", conversationId: "c", content: { filename: "old.txt" }, output: "old" });
+    await logger.clear();
+    await logger.append({ type: "tool.started", conversationId: "c", runId: "new", toolCallId: "call" });
+    await logger.append({ type: "browser.artifact.used", conversationId: "c", runId: "new", toolCallId: "call", content: { artifactId: artifact!.id } });
+    expect(await logger.toolArtifact("c", { runId: "new", toolCallId: "call" })).toBeUndefined();
+  });
+  it("refuses job-state writes and clearing in an extension without Web Locks", async () => {
+    vi.stubGlobal("navigator", {});
+    vi.stubGlobal("chrome", { runtime: { id: "extension" } });
+    const store = memoryStore();
+    const logger = new EventLogger({ store });
+    await expect(logger.append({ type: "browser.job.state", conversationId: "c", content: { jobId: "j", state: "running" } })).rejects.toThrow("Web Locks are required");
+    await expect(new EventLogger({ store }).clear()).rejects.toThrow("Web Locks are required");
+    expect(await store.all()).toEqual([]);
+  });
+  it("invalidates job snapshots when another logger clears the shared store", async () => {
+    const store = memoryStore();
+    const first = new EventLogger({ store });
+    const second = new EventLogger({ store });
+    const saved = await first.append({ type: "browser.job.state", conversationId: "c", content: { jobId: "j", state: "running" } });
+    const before = await first.jobEventsSince("c", -1);
+    expect(before.events).toHaveLength(1);
+    await second.clear();
+    const after = await first.jobEventsSince("c", -1);
+    expect(after.epoch).not.toBe(before.epoch);
+    expect(after.events).toEqual([]);
+    expect(await first.jobEventsByIds("c", [saved!.id], before.epoch)).toBeNull();
+  });
   it("settles the writer handshake and refuses queued writes when background initialization fails", async () => {
     const store = memoryStore();
     const onError = vi.fn();
@@ -230,22 +442,19 @@ describe("canonical event log", () => {
     expect(await logger.messages()).toEqual([]);
   });
 
-  it("reads the clear boundary once across repeated indexed queries", async () => {
+  it("checks the latest indexed clear marker around each canonical read", async () => {
     const base = memoryStore();
-    let clearQueries = 0;
-    const store = { ...base, async byTypes(types: readonly string[], conversationId?: string) {
-      if (types.length === 1 && types[0] === "log.cleared") clearQueries += 1;
-      return base.byTypes(types, conversationId);
-    } };
+    const latestByType = vi.fn(base.latestByType);
+    const store = { ...base, latestByType };
     const logger = new EventLogger({ store });
     await logger.append({ type: "conversation.created", conversationId: "one" });
     await logger.summaryEvents();
     await logger.summaryEvents("one");
     await logger.restorationEvents("one");
-    expect(clearQueries).toBe(1);
+    expect(latestByType).toHaveBeenCalledTimes(6);
     await logger.clear();
     await logger.summaryEvents();
-    expect(clearQueries).toBe(1);
+    expect(latestByType).toHaveBeenCalledTimes(8);
   });
 
   it("does not accept late events after a session is stopped for clearing", async () => {

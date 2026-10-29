@@ -59,6 +59,7 @@ function memoryLog() {
 }
 function programHarness(work: (capabilities: any, signal: AbortSignal) => Promise<unknown>, fake = fakeChrome()) {
   const log = memoryLog();
+  let runIdentity: { runId: string; ownerId: string; generation: number } | undefined = { runId: "run", ownerId: "owner", generation: 1 };
   const tabs = [{ id: 41, windowId: 7, active: true, title: "Current" }, { id: 42, windowId: 7, active: false }, { id: 99, windowId: 9 }] as chrome.tabs.Tab[];
   Object.assign(fake.chromeApi, {
     windows: { getCurrent: vi.fn(async () => ({ id: 7, tabs })), get: vi.fn(async () => ({ id: 7 })), update: vi.fn(), create: vi.fn(), remove: vi.fn() },
@@ -69,7 +70,7 @@ function programHarness(work: (capabilities: any, signal: AbortSignal) => Promis
       remove: vi.fn(async (id: number) => { const index = tabs.findIndex(tab => tab.id === id); if (index >= 0) tabs.splice(index, 1); }),
     },
   });
-  const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, logger: log.logger, programHost: async (_code, caps, signal) => work(caps, signal) });
+  const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, logger: log.logger, runIdentity: () => runIdentity, programHost: async (_code, caps, signal) => work(caps, signal) });
   const raw: any = {
     tabId: 41, inspect: vi.fn(async () => ({ snapshot: "Current [ref=t41d1e1]" })),
     url: vi.fn(async () => "https://example.com"), title: vi.fn(async () => "Current"),
@@ -78,10 +79,20 @@ function programHarness(work: (capabilities: any, signal: AbortSignal) => Promis
     evaluate: vi.fn(async () => { await (executor as any).programScope.dispatched(); return 42; }),
   };
   (executor as any).pageFor = vi.fn(async (state: any) => ({ ...raw, tabId: state.tabId }));
-  return { ...log, fake, tabs, raw, executor, run: (signal?: AbortSignal, input: { timeoutMs?: number; background?: boolean } = {}) => executor.runProgram({ code: "fixture program", ...input }, signal, { conversationId: "conversation", visualEnabled: true }) };
+  return { ...log, fake, tabs, raw, executor, setRunIdentity: (value: typeof runIdentity) => { runIdentity = value; }, run: (signal?: AbortSignal, input: { timeoutMs?: number; background?: boolean } = {}) => executor.runProgram({ code: "fixture program", ...input }, signal, { conversationId: "conversation", visualEnabled: true, ...(input.background ? { logIdentity: { runId: "run", toolCallId: "1:program", toolCallIdCanonical: true as const } } : {}) }) };
 }
 
 describe("ChromeExecutor programs", () => {
+  it("awaits foreground completion without rescanning the job log for every progress receipt", async () => {
+    const h = programHarness(async ({ emit }) => {
+      for (let index = 0; index < 50; index++) await emit(index);
+      return "finished";
+    });
+    const reads = vi.spyOn(h.logger, "jobEvents");
+    expect(await h.run()).toMatchObject({ ok: true, state: "succeeded", result: "finished" });
+    expect(reads.mock.calls.length).toBeLessThanOrEqual(3);
+    h.executor.dispose();
+  });
   it.each(["screenshot", "pdf"] as const)("saves %s after durable capture through the program facade", async (name) => {
     const h = programHarness(async ({ page }) => name === "screenshot" ? page.screenshot({ filename: "capture.png", save: true }) : page.pdf({ filename: "capture.pdf", save: true }));
     h.fake.debuggerApi.sendCommand.mockImplementation(async (_debuggee, method) => method === "Page.printToPDF" ? { data: "eA==" } : {});
@@ -492,4 +503,269 @@ describe("ChromeExecutor programs", () => {
     executor.dispose();
   });
 
+});
+
+describe("cross-call browser events", () => {
+  const owner = { conversationId: "conversation", logIdentity: { runId: "run", toolCallId: "1:event", toolCallIdCanonical: true as const } };
+  const otherOwner = { conversationId: "conversation", logIdentity: { runId: "other-run", toolCallId: "1:event", toolCallIdCanonical: true as const } };
+
+  it("subscribes after page readiness and routes CDP events by kind and owner", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    let ready!: () => void;
+    const original = (h.executor as any).pageFor;
+    (h.executor as any).pageFor = vi.fn(async (state: unknown) => { await new Promise<void>((resolve) => { ready = resolve; }); return original(state); });
+    const creating = h.executor.subscribeEvent({ kind: "request" }, undefined, owner) as Promise<any>;
+    await vi.waitFor(() => expect(ready).toBeTypeOf("function"));
+    let completed = false;
+    void creating.then(() => { completed = true; });
+    expect(completed).toBe(false);
+    ready();
+    const subscription = await creating;
+    expect(subscription).toMatchObject({ tabId: 41, kind: "request", cursor: 0 });
+    const pending = h.executor.waitEvent({ subscriptionId: subscription.subscriptionId, waitMs: 5_000 }, undefined, owner);
+    await (h.executor as any).handleCommandEvent({ tabId: 42 }, "Network.requestWillBeSent", { requestId: "wrong", request: { url: "https://other.test" } });
+    await (h.executor as any).handleCommandEvent({ tabId: 41, sessionId: "child" }, "Network.requestWillBeSent", { requestId: "request-1", request: { url: "https://example.test" } });
+    expect(await pending).toMatchObject({ events: [{ kind: "request", source: { tabId: 41, sessionId: "child" }, payload: { requestId: "request-1" } }] });
+    expect(() => h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, otherOwner)).toThrow("ownership expired");
+    await h.executor.unsubscribeEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner);
+    await expect(h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner)).rejects.toThrow("unavailable");
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("handles a dialog in its source session while a background program occupies the action queue", async () => {
+    let finish!: () => void;
+    const h = programHarness(async () => new Promise<void>((resolve) => { finish = resolve; }));
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "dialog" }, undefined, owner);
+    const job: any = await h.run(undefined, { background: true });
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    const waiting = h.executor.waitEvent({ subscriptionId: subscription.subscriptionId, waitMs: 5_000 }, undefined, owner);
+    await (h.executor as any).handleCommandEvent({ tabId: 41, sessionId: "frame" }, "Page.javascriptDialogOpening", { type: "prompt", message: "Name?", defaultPrompt: "Ada" });
+    const event: any = await waiting;
+    const dialogId = event.events[0].payload.dialogId;
+    h.fake.debuggerApi.sendCommand.mockImplementation(async (_source: any, method: string) => {
+      if (method === "Page.handleJavaScriptDialog") expect(h.events.some((entry) => entry.type === "browser.dialog.progress" && (entry.content as any)?.state === "dispatched-unknown")).toBe(true);
+      return {};
+    });
+    await expect(h.executor.handleDialog({ dialogId, accept: true, prompt: "Grace" }, undefined, owner)).resolves.toMatchObject({ accepted: true, state: "completed" });
+    expect(h.fake.debuggerApi.sendCommand).toHaveBeenCalledWith({ tabId: 41, sessionId: "frame" }, "Page.handleJavaScriptDialog", { accept: true, promptText: "Grace" });
+    expect(h.events.filter((entry) => entry.type === "browser.dialog.progress").map((entry) => (entry.content as any).state)).toEqual(["dispatched-unknown", "completed"]);
+    finish();
+    await vi.waitFor(async () => {
+      const terminal = await h.executor.queryJobs({ action: "status", id: job.jobId }, undefined, owner);
+      expect(terminal).toMatchObject({ terminal: true, ok: true });
+    });
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("rejects invalid prompt and refuses replay after an uncertain dialog response", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "dialog" }, undefined, owner);
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.javascriptDialogOpening", { type: "confirm", message: "Proceed?" });
+    const event: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner);
+    const dialogId = event.events[0].payload.dialogId;
+    await expect(h.executor.handleDialog({ dialogId, accept: true, prompt: "invalid" }, undefined, owner)).rejects.toThrow("invalid-dialog-prompt");
+    expect(h.fake.debuggerApi.sendCommand).not.toHaveBeenCalled();
+    h.fake.debuggerApi.sendCommand.mockRejectedValueOnce(new Error("bridge disconnected"));
+    await expect(h.executor.handleDialog({ dialogId, accept: true }, undefined, owner)).rejects.toMatchObject({ message: "bridge disconnected", effectUnknown: true });
+    await expect(h.executor.handleDialog({ dialogId, accept: true }, undefined, owner)).rejects.toThrow("uncertain");
+    expect(h.fake.debuggerApi.sendCommand).toHaveBeenCalledTimes(1);
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("prevents program and independent tool from responding to the same dialog", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "dialog" }, undefined, owner);
+    const source = { tabId: 41, sessionId: "frame" };
+    await (h.executor as any).handleCommandEvent(source, "Page.javascriptDialogOpening", { type: "confirm", message: "Proceed?" });
+    const event: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner);
+    let complete!: () => void;
+    h.fake.debuggerApi.sendCommand.mockImplementation(async (_debuggee, method) => method === "Page.handleJavaScriptDialog" ? new Promise<void>((resolve) => { complete = resolve; }) : {});
+    const handling = (h.executor as any).bridgeCommand(source, "Page.handleJavaScriptDialog", { accept: true });
+    await vi.waitFor(() => expect(complete).toBeTypeOf("function"));
+    await expect(h.executor.handleDialog({ dialogId: event.events[0].payload.dialogId, accept: true }, undefined, owner)).rejects.toThrow("handling");
+    complete();
+    await handling;
+    expect(h.fake.debuggerApi.sendCommand.mock.calls.filter(([, method]) => method === "Page.handleJavaScriptDialog")).toHaveLength(1);
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("does not allow an old dialogClosed event to invalidate a later dialog", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "dialog" }, undefined, owner);
+    const source = { tabId: 41, sessionId: "frame" };
+    await (h.executor as any).handleCommandEvent(source, "Page.javascriptDialogOpening", { type: "confirm", message: "First" });
+    const first: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner);
+    await h.executor.handleDialog({ dialogId: first.events[0].payload.dialogId, accept: true }, undefined, owner);
+    await (h.executor as any).handleCommandEvent(source, "Page.javascriptDialogOpening", { type: "confirm", message: "Second" });
+    await (h.executor as any).handleCommandEvent(source, "Page.javascriptDialogClosed", {});
+    const second: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId, after: 1 }, undefined, owner);
+    await expect(h.executor.handleDialog({ dialogId: second.events[0].payload.dialogId, accept: false }, undefined, owner)).resolves.toMatchObject({ accepted: false });
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("does not install a late subscription after its run ends while page attachment is pending", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    let ready!: () => void;
+    (h.executor as any).pageFor = vi.fn(async () => { await new Promise<void>((resolve) => { ready = resolve; }); return h.raw; });
+    const creating = h.executor.subscribeEvent({ kind: "dialog" }, undefined, owner);
+    await vi.waitFor(() => expect(ready).toBeTypeOf("function"));
+    await h.executor.endRun();
+    ready();
+    await expect(creating).rejects.toThrow("event-owner-expired");
+    expect((h.executor as any).eventOwner).toBeUndefined();
+    h.executor.dispose();
+  });
+
+  it("invalidates a child-frame dialog on CDP target detach", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "dialog" }, undefined, owner);
+    await (h.executor as any).handleCommandEvent({ tabId: 41, sessionId: "child" }, "Page.javascriptDialogOpening", { type: "confirm", message: "Question" });
+    const observed: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner);
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Target.detachedFromTarget", { sessionId: "child" });
+    await expect(h.executor.handleDialog({ dialogId: observed.events[0].payload.dialogId, accept: true }, undefined, owner)).rejects.toThrow("unavailable");
+    expect(h.fake.debuggerApi.sendCommand).not.toHaveBeenCalled();
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("rejects old run contexts after endRun, including after a new run begins", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    await h.executor.subscribeEvent({ kind: "dialog" }, undefined, owner);
+    await h.executor.endRun();
+    // The coordinator can still hold the old lease while cleanup returns.
+    await expect(h.executor.subscribeEvent({ kind: "dialog" }, undefined, owner)).rejects.toThrow("event-owner-expired");
+    h.setRunIdentity(undefined);
+    await expect(h.executor.subscribeEvent({ kind: "dialog" }, undefined, owner)).rejects.toThrow("event-owner-expired");
+    h.setRunIdentity({ runId: "next-run", ownerId: "next-owner", generation: 2 });
+    await h.executor.beginRun();
+    await expect(h.executor.subscribeEvent({ kind: "dialog" }, undefined, owner)).rejects.toThrow("event-owner-expired");
+    const nextOwner = { conversationId: "conversation", logIdentity: { runId: "next-run", toolCallId: "1:next", toolCallIdCanonical: true as const } };
+    await expect(h.executor.subscribeEvent({ kind: "dialog" }, undefined, nextOwner)).resolves.toMatchObject({ kind: "dialog", tabId: 41 });
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("wakes pending readers and unregisters popup and tab listeners when the run ends", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    let onCreated!: (tab: chrome.tabs.Tab) => void;
+    let onRemoved!: (tabId: number) => void;
+    const created = { addListener: vi.fn((listener) => { onCreated = listener; }), removeListener: vi.fn() };
+    const removed = { addListener: vi.fn((listener) => { onRemoved = listener; }), removeListener: vi.fn() };
+    Object.assign((h.fake.chromeApi as any).tabs, { onCreated: created, onRemoved: removed });
+    const subscription: any = await h.executor.subscribeEvent({ kind: "popup" }, undefined, owner);
+    onCreated({ id: 50, openerTabId: 41, windowId: 7 } as chrome.tabs.Tab);
+    expect(await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner)).toMatchObject({ events: [{ kind: "popup", source: { tabId: 41 }, payload: { tabId: 50 } }] });
+    const pending = h.executor.waitEvent({ subscriptionId: subscription.subscriptionId, after: 1, waitMs: 5_000 }, undefined, owner);
+    onRemoved(41);
+    expect(await pending).toMatchObject({ closed: "tab-closed" });
+    await h.executor.endRun();
+    expect(created.removeListener).toHaveBeenCalledWith(onCreated);
+    expect(removed.removeListener).toHaveBeenCalledWith(onRemoved);
+    h.executor.dispose();
+  });
+});
+
+describe("background-job observation fence", () => {
+  const context = { conversationId: "conversation" };
+
+  it("keeps completed background jobs fenced until a terminal result is explicitly read", async () => {
+    let finish!: () => void;
+    const h = programHarness(async () => new Promise<void>((resolve) => { finish = resolve; }));
+    await h.executor.beginRun();
+    const accepted: any = await h.run(undefined, { background: true });
+    expect(h.executor.pendingBackgroundJobs()).toEqual([accepted.jobId]);
+    expect(h.executor.acknowledgeBackgroundJob(accepted.jobId, "conversation")).toBe(false);
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    finish();
+    expect(await (h.executor as any).jobs.completion(accepted.jobId, "conversation")).toMatchObject({ terminal: true, ok: true });
+    expect(h.executor.pendingBackgroundJobs()).toEqual([accepted.jobId]);
+    await h.executor.queryJobs({ action: "list" }, undefined, context);
+    expect(h.executor.pendingBackgroundJobs()).toEqual([accepted.jobId]);
+    await expect(h.executor.queryJobs({ action: "status", id: accepted.jobId }, undefined, { conversationId: "other" })).rejects.toThrow("unavailable");
+    expect(h.executor.pendingBackgroundJobs()).toEqual([accepted.jobId]);
+    expect(await h.executor.queryJobs({ action: "status", id: accepted.jobId }, undefined, context)).toMatchObject({ terminal: true, ok: true });
+    expect(h.executor.pendingBackgroundJobs()).toEqual([accepted.jobId]);
+    expect(h.executor.acknowledgeBackgroundJob(accepted.jobId, "other")).toBe(false);
+    expect(h.executor.pendingBackgroundJobs()).toEqual([accepted.jobId]);
+    expect(h.executor.acknowledgeBackgroundJob(accepted.jobId, "conversation")).toBe(true);
+    expect(h.executor.pendingBackgroundJobs()).toEqual([]);
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("keeps cancelled work fenced until cleanup completes and its terminal result is observed", async () => {
+    let finish!: () => void;
+    const h = programHarness(async (_capabilities, signal) => {
+      await new Promise<void>((resolve) => { finish = resolve; });
+      signal.throwIfAborted();
+    });
+    await h.executor.beginRun();
+    const accepted: any = await h.run(undefined, { background: true });
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    expect(await h.executor.queryJobs({ action: "cancel", id: accepted.jobId }, undefined, context)).toMatchObject({ terminal: false, cancellationRequested: true });
+    expect(h.executor.pendingBackgroundJobs()).toEqual([accepted.jobId]);
+    finish();
+    expect(await (h.executor as any).jobs.completion(accepted.jobId, "conversation")).toMatchObject({ terminal: true, ok: false });
+    expect(h.executor.pendingBackgroundJobs()).toEqual([accepted.jobId]);
+    expect(await h.executor.queryJobs({ action: "status", id: accepted.jobId }, undefined, context)).toMatchObject({ terminal: true, ok: false });
+    expect(h.executor.pendingBackgroundJobs()).toEqual([accepted.jobId]);
+    expect(h.executor.acknowledgeBackgroundJob(accepted.jobId, "conversation")).toBe(true);
+    expect(h.executor.pendingBackgroundJobs()).toEqual([]);
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("retains the fence for a failed background job until its failure is read", async () => {
+    const h = programHarness(async () => { throw new Error("failed after dispatch"); });
+    await h.executor.beginRun();
+    const accepted: any = await h.run(undefined, { background: true });
+    expect(await (h.executor as any).jobs.completion(accepted.jobId, "conversation")).toMatchObject({ terminal: true, ok: false });
+    expect(h.executor.pendingBackgroundJobs()).toEqual([accepted.jobId]);
+    expect(await h.executor.queryJobs({ action: "wait", id: accepted.jobId, waitMs: 5_000 }, undefined, context)).toMatchObject({ terminal: true, ok: false });
+    expect(h.executor.pendingBackgroundJobs()).toEqual([accepted.jobId]);
+    expect(h.executor.acknowledgeBackgroundJob(accepted.jobId, "conversation")).toBe(true);
+    expect(h.executor.pendingBackgroundJobs()).toEqual([]);
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("clears the fence on run end and rejects late background acceptance", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const append = h.logger.append.bind(h.logger);
+    let resume!: () => void;
+    let notify!: () => void;
+    const entered = new Promise<void>((resolve) => { notify = resolve; });
+    const held = new Promise<void>((resolve) => { resume = resolve; });
+    vi.spyOn(h.logger, "append").mockImplementation(async (record) => {
+      if (record.type === "browser.job.state" && (record.content as any)?.state === "queued") { notify(); await held; }
+      return append(record);
+    });
+    const creating = h.run(undefined, { background: true });
+    await entered;
+    const ending = h.executor.endRun();
+    expect(h.executor.pendingBackgroundJobs()).toEqual([]);
+    h.setRunIdentity({ runId: "next-run", ownerId: "next-owner", generation: 2 });
+    let newRunReady = false;
+    const beginning = h.executor.beginRun().then((value) => { newRunReady = true; return value; });
+    await Promise.resolve();
+    expect(newRunReady).toBe(false);
+    resume();
+    await expect(creating).rejects.toMatchObject({ name: "AbortError" });
+    await ending;
+    await beginning;
+    expect(h.executor.pendingBackgroundJobs()).toEqual([]);
+    await expect(h.run(undefined, { background: true })).rejects.toThrow("event-owner-expired");
+    const next = await h.executor.runProgram({ code: "fixture program", background: true }, undefined, {
+      conversationId: "conversation", logIdentity: { runId: "next-run", toolCallId: "1:next", toolCallIdCanonical: true },
+    }) as any;
+    expect(h.executor.pendingBackgroundJobs()).toEqual([next.jobId]);
+    await h.executor.endRun();
+    expect(h.executor.pendingBackgroundJobs()).toEqual([]);
+    h.executor.dispose();
+  });
 });

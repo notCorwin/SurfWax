@@ -56,7 +56,7 @@ type ElementState = {
   enabled: boolean;
   editable: boolean;
   receivesEvents: boolean;
-  checked: boolean;
+  checked: boolean | null;
   connected: boolean;
 };
 
@@ -75,6 +75,19 @@ const INTERACTIVE_ROLES = new Set([
   "button", "checkbox", "combobox", "gridcell", "link", "listbox", "menuitem", "menuitemcheckbox",
   "menuitemradio", "option", "radio", "searchbox", "slider", "spinbutton", "switch", "tab", "textbox", "treeitem",
 ]);
+
+// Shared by reads and mutations so ARIA controls and native inputs use the
+// same checked-state semantics. Mixed or missing state is never treated as false.
+const CHECKED_STATE_SOURCE = `function() {
+  if (this.localName === 'input' && (this.type === 'checkbox' || this.type === 'radio')) {
+    return { supported: true, radio: this.type === 'radio', value: this.type === 'checkbox' && this.indeterminate ? null : Boolean(this.checked) };
+  }
+  const role = (this.getAttribute('role') || '').trim().split(/\\s+/)[0];
+  if (!['checkbox', 'radio', 'switch', 'menuitemcheckbox', 'menuitemradio'].includes(role)) return { supported: false, radio: false, value: null };
+  const value = (this.getAttribute('aria-checked') || '').trim().toLowerCase();
+  const mixed = value === 'mixed' && (role === 'checkbox' || role === 'menuitemcheckbox');
+  return { supported: value === 'true' || value === 'false' || mixed, radio: role === 'radio' || role === 'menuitemradio', value: value === 'true' ? true : value === 'false' ? false : null };
+}`;
 
 const RESOLVER_SOURCE = String.raw`function(spec, metadata) {
   const normalize = value => String(value ?? "").replace(/\s+/g, " ").trim();
@@ -513,14 +526,16 @@ export class AutomationRuntime {
       event.addListener(created as never);
     });
     return new Promise((resolve, reject) => {
+      const signal = this.context.signal;
       const events = this.waiters.get(tabId) ?? new Map();
       const waiters = events.get(kind) ?? new Set<Waiter>();
       const done = (value: any) => { cleanup(); resolve(kind === "dialog" ? this.dialog(tabId, value) : kind === "filechooser" ? { isMultiple: () => value.mode === "selectMultiple", setFiles: (files: unknown) => this.upload(tabId, files, value) } : value); };
       const abort = () => { cleanup(); reject(abortError()); };
-      const waiter = { resolve: done, reject };
-      const cleanup = () => { waiters.delete(waiter); this.context.signal?.removeEventListener("abort", abort); };
+      const waiter = { resolve: done, reject: (error: Error) => { cleanup(); reject(error); } };
+      const cleanup = () => { waiters.delete(waiter); signal?.removeEventListener("abort", abort); };
       waiters.add(waiter); events.set(kind, waiters); this.waiters.set(tabId, events);
-      this.context.signal?.addEventListener("abort", abort, { once: true });
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
     });
   }
 
@@ -555,6 +570,7 @@ export class AutomationRuntime {
         const objectId = await this.resolveOnce(session, spec);
         if (!objectId) return false;
         const state = await this.elementState(this.objectSession(session, objectId), objectId);
+        if (operation === "isChecked" && state.checked === null) throw automationError("invalid-checked-state", { reason: "unsupported-or-indeterminate" });
         return operation === "isVisible" ? state.visible : operation === "isEnabled" ? state.enabled : state.checked;
       }
       if (["textContent", "innerText", "inputValue", "getAttribute"].includes(operation)) {
@@ -663,8 +679,10 @@ export class AutomationRuntime {
       if (operation === "check" || operation === "uncheck") {
         const { objectId, targetSession } = await this.waitActionableLocator(session, spec, false, true);
         const desired = operation === "check";
-        const checked = await this.callOn(targetSession, objectId, "function(){ return Boolean(this.checked); }");
-        if (checked !== desired) await this.pointer(session, spec, "click");
+        const checked = await this.callOn(targetSession, objectId, CHECKED_STATE_SOURCE) as { supported: boolean; radio: boolean; value: boolean | null };
+        if (!checked.supported) throw automationError("invalid-checked-state", { reason: "unsupported" });
+        if (checked.radio && checked.value === true && !desired) throw automationError("invalid-state", { reason: "cannot-uncheck-selected-radio" });
+        if (checked.value !== desired) await this.pointer(session, spec, "click");
         await this.waitForLocatorState(session, spec, "checked", desired);
         return this.afterAction(session);
       }
@@ -910,7 +928,7 @@ export class AutomationRuntime {
       while (view?.frameElement) { const frame = view.frameElement.getBoundingClientRect(); x += frame.left; y += frame.top; view = view.parent; }
       const disabled = Boolean(this.disabled || this.closest("fieldset:disabled") || this.closest('[aria-disabled="true"]'));
       const editable = !disabled && !this.readOnly && this.getAttribute("aria-readonly") !== "true" && (this.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(this.tagName));
-      return { connected: true, x, y, width: rect.width, height: rect.height, visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none", stable: true, enabled: !disabled, editable, receivesEvents: Boolean(hit && (hit === this || this.contains(hit))), checked: Boolean(this.checked) };
+      return { connected: true, x, y, width: rect.width, height: rect.height, visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none", stable: true, enabled: !disabled, editable, receivesEvents: Boolean(hit && (hit === this || this.contains(hit))), checked: (${CHECKED_STATE_SOURCE}).call(this).value };
     }`, [], true);
     const first = await read();
     if (!first.connected) return first;

@@ -4,13 +4,14 @@ import { AutomationRuntime } from "./automation";
 import { requireDebuggee } from "./debuggee";
 import { downloadArtifact } from "./downloads";
 import { BrowserDiagnostics } from "./diagnostics";
-import { getRunIdentity } from "../agent/coordinator";
+import { getRunIdentity, type RunIdentity } from "../agent/coordinator";
 import { BrowserJobs, type JobQuery } from "./jobs";
 import { ProgramScope } from "./program";
 import type { InspectOptions } from "./automation";
 import { callUserScript } from "./script-client";
 import { executeSandboxProgram } from "./program-host";
 import { estimateProgramTimeoutMs } from "./program-timeout";
+import { EventSubscriptions, type BrowserEventKind, type EventOwner } from "./event-subscriptions";
 
 type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
 type DebuggerTarget = chrome.debugger.TargetInfo;
@@ -31,6 +32,10 @@ export type BrowserContext = {
   windowId: number;
   tabs: Array<{ index: number; tabId?: number; windowId?: number; current: boolean; title?: string; url?: string }>;
 };
+
+function dialogSourceKey(source: Debuggee): string {
+  return JSON.stringify([source.tabId, source.sessionId ?? null]);
+}
 
 function abortError(): DOMException {
   return new DOMException("Operation aborted", "AbortError");
@@ -177,16 +182,27 @@ export class ChromeExecutor {
   private activeContext: ExecutionContext = {};
   private browserState?: BrowserState;
   private endingRun?: Promise<void>;
+  private runFinishing?: Promise<void>;
   private readonly diagnostics: BrowserDiagnostics;
   private readonly networkEnabled = new Set<number>();
-  private readonly dialogs = new Map<number, { type: string; message: string; defaultPrompt?: string }>();
+  private readonly eventSubscriptions = new EventSubscriptions();
+  private eventOwner?: EventOwner;
+  private eventLease?: RunIdentity;
+  private eventEpoch = 0;
+  private readonly readRunIdentity: () => RunIdentity | undefined;
+  private readonly dialogQueues = new Map<string, string[]>();
+  private popupListener?: (tab: chrome.tabs.Tab) => void;
+  private tabRemovedListener?: (tabId: number) => void;
   private readonly heldInput = new Map<number, { x: number; y: number; buttons: Set<string>; keys: Map<string, Record<string, unknown>> }>();
   private readonly jobs: BrowserJobs;
+  private readonly pendingBackground = new Map<string, { conversationId: string; terminalObserved: boolean }>();
+  private backgroundEpoch = 0;
   private programScope?: ProgramScope;
   private readonly programEvaluations = new Map<string, { debuggee: Debuggee; count: number }>();
   private readonly programHost: typeof executeSandboxProgram;
 
-  constructor(options: { chromeApi?: ExecutorChrome; logger?: EventLogger; programHost?: typeof executeSandboxProgram } = {}) {
+  constructor(options: { chromeApi?: ExecutorChrome; logger?: EventLogger; programHost?: typeof executeSandboxProgram; runIdentity?: () => RunIdentity | undefined } = {}) {
+    this.readRunIdentity = options.runIdentity ?? getRunIdentity;
     this.chromeApi = options.chromeApi ?? globalThis.chrome as ExecutorChrome;
     this.logger = options.logger;
     this.jobs = new BrowserJobs(this.logger);
@@ -279,6 +295,10 @@ export class ChromeExecutor {
     listeners.onDetach.add((source) => {
       this.bridgedDebuggees.delete(JSON.stringify(source));
       this.automation.handleDetach(source);
+      if (this.eventOwner && Number.isInteger(source.tabId)) {
+        if (!source.sessionId) this.closeEventTab(source.tabId!, "debugger-detached");
+        else this.closeEventSource(source.tabId!, source.sessionId);
+      }
     });
     (globalThis as Record<string, unknown>)[BRIDGE_KEY] = this.bridge;
   }
@@ -302,11 +322,14 @@ export class ChromeExecutor {
 
   async runProgram(input: { code: string; background?: boolean; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
     if (!context.conversationId || !this.logger) throw new Error("Programs require a conversation and canonical event log");
+    if (input.background) this.runOwnerFor(context);
+    const epoch = this.backgroundEpoch;
     const jobContext = { conversationId: context.conversationId, logIdentity: context.logIdentity };
     const jobSignal = input.background ? undefined : signal;
     const timeoutMs = input.timeoutMs ?? estimateProgramTimeoutMs(input.code);
     const id = await this.jobs.start(jobContext, jobSignal, (combined, jobId, started) => this.enqueueAbortable(async (deadline) => {
       if (this.disposed) throw new Error("Chrome executor has been disposed");
+      if (input.background) this.runOwnerFor(context);
       await started();
       const lifetime = new AbortController();
       const programSignal = AbortSignal.any([deadline ?? combined, lifetime.signal]);
@@ -320,6 +343,7 @@ export class ChromeExecutor {
         const page = await this.programPage(await this.pageFor(state), scope);
         const capabilities = this.programCapabilities(page, state, scope);
         scope.guard();
+        if (input.background) this.runOwnerFor(context);
         const result = await this.programHost(input.code, capabilities, programSignal);
         // User code may intentionally abandon a losing Promise.race branch.
         // Revoke and abort those RPCs instead of waiting forever for them.
@@ -341,17 +365,157 @@ export class ChromeExecutor {
         await this.automation.clearContext();
       }
     }, combined, timeoutMs, false, true));
-    if (input.background) return { jobId: id, state: "queued", accepted: true, complete: false, timeoutMs, timeoutSource: input.timeoutMs === undefined ? "estimated" : "explicit" };
-    while (true) {
-      const status = await this.jobs.query({ action: "wait", id, waitMs: 1000 }, context.conversationId, signal) as any;
-      if (status.terminal) return { jobId: id, ok: status.ok, state: status.state, result: status.result, timeoutMs, timeoutSource: input.timeoutMs === undefined ? "estimated" : "explicit", receipts: { tool: "get_job", jobId: id, after: 0 } };
+    if (input.background) {
+      if (this.disposed || epoch !== this.backgroundEpoch) throw new DOMException("Run ended before the background job was accepted", "AbortError");
+      this.runOwnerFor(context);
+      this.pendingBackground.set(id, { conversationId: context.conversationId, terminalObserved: false });
+      return { jobId: id, state: "queued", accepted: true, complete: false, timeoutMs, timeoutSource: input.timeoutMs === undefined ? "estimated" : "explicit" };
+    }
+    const status = await this.jobs.completion(id, context.conversationId, signal) as any;
+    if (!status.terminal) throw new Error("CommandError[job-not-terminal]: Program host ended without a terminal receipt");
+    return { jobId: id, ok: status.ok, state: status.state, result: status.result, timeoutMs, timeoutSource: input.timeoutMs === undefined ? "estimated" : "explicit", receipts: { tool: "get_job", jobId: id, after: 0 } };
+  }
+
+  pendingBackgroundJobs(): readonly string[] {
+    return [...this.pendingBackground.keys()];
+  }
+
+  acknowledgeBackgroundJob(jobId: string, conversationId: string): boolean {
+    const pending = this.pendingBackground.get(jobId);
+    if (!pending || pending.conversationId !== conversationId || !pending.terminalObserved) return false;
+    return this.pendingBackground.delete(jobId);
+  }
+
+  async queryJobs(input: JobQuery, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+    if (!context.conversationId) throw new Error("Jobs require a conversation");
+    // Deliberately bypass tail: a running program must never block status/wait/cancel.
+    const result = await this.jobs.query(input, context.conversationId, signal);
+    const pending = input.id ? this.pendingBackground.get(input.id) : undefined;
+    if (input.action !== "list" && pending?.conversationId === context.conversationId
+      && result && typeof result === "object" && "terminal" in result && result.terminal === true) pending.terminalObserved = true;
+    return result;
+  }
+
+  private runOwnerFor(context: ExecutionContext): EventOwner {
+    const runId = context.logIdentity?.runId;
+    if (!context.conversationId || !runId) throw new Error("CommandError[event-owner-unavailable]: Event subscriptions require a conversation and active run");
+    const identity = this.readRunIdentity();
+    const lease = this.eventLease;
+    if (!identity || !lease || identity.runId !== runId || lease.runId !== runId || identity.ownerId !== lease.ownerId || identity.generation !== lease.generation)
+      throw new Error("CommandError[event-owner-expired]: Event run ownership expired");
+    return { conversationId: context.conversationId, runId };
+  }
+
+  private eventOwnerFor(context: ExecutionContext, initialize = false): EventOwner {
+    const owner = this.runOwnerFor(context);
+    if (this.eventOwner && (this.eventOwner.conversationId !== owner.conversationId || this.eventOwner.runId !== owner.runId)) throw new Error("CommandError[event-owner-expired]: Event run ownership expired");
+    if (initialize && !this.eventOwner) this.eventOwner = owner;
+    return owner;
+  }
+
+  private ensureEventListeners(kind: BrowserEventKind): void {
+    if (kind === "popup" && !this.popupListener) {
+      if (!this.chromeApi.tabs?.onCreated) throw new Error("CommandError[event-unavailable]: Popup events are unavailable");
+      this.popupListener = (tab) => {
+        const owner = this.eventOwner;
+        if (!owner || !Number.isInteger(tab.id) || !Number.isInteger(tab.openerTabId)) return;
+        this.eventSubscriptions.publish(owner, { kind: "popup", source: { tabId: tab.openerTabId! }, payload: { tabId: tab.id, windowId: tab.windowId, url: tab.url } });
+      };
+      this.chromeApi.tabs.onCreated.addListener(this.popupListener);
+    }
+    if (!this.tabRemovedListener && this.chromeApi.tabs?.onRemoved) {
+      this.tabRemovedListener = (tabId) => this.closeEventTab(tabId, "tab-closed");
+      this.chromeApi.tabs.onRemoved.addListener(this.tabRemovedListener);
     }
   }
 
-  queryJobs(input: JobQuery, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
-    if (!context.conversationId) return Promise.reject(new Error("Jobs require a conversation"));
-    // Deliberately bypass tail: a running program must never block status/wait/cancel.
-    return this.jobs.query(input, context.conversationId, signal);
+  subscribeEvent(input: { tabId?: number; kind: BrowserEventKind; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+    const epoch = this.eventEpoch;
+    return this.enqueueAbortable(async (combined) => {
+      const owner = this.eventOwnerFor(context);
+      const state = await this.currentBrowserState();
+      throwIfAborted(combined);
+      const tabId = input.tabId ?? state.tabId;
+      if (!Number.isInteger(tabId)) throw new Error("CommandError[no-bound-tab]: Select a tab before subscribing");
+      if (input.tabId === undefined) await this.pageFor(state); else await this.boundPage(tabId!, state);
+      throwIfAborted(combined);
+      const tab = await this.chromeApi.tabs.get(tabId!).catch(() => undefined);
+      throwIfAborted(combined);
+      if (!tab) throw new Error("CommandError[invalid-tab-id]: Tab closed before event subscription");
+      if (this.eventEpoch !== epoch || this.disposed) throw new Error("CommandError[event-owner-expired]: Event run ownership expired");
+      this.eventOwnerFor(context, true);
+      this.ensureEventListeners(input.kind);
+      const subscription = this.eventSubscriptions.subscribe({ owner, tabId: tabId!, kinds: [input.kind] });
+      return { ...subscription, tabId, kind: input.kind };
+    }, signal, input.timeoutMs, false);
+  }
+
+  waitEvent(input: { subscriptionId: string; after?: number; limit?: number; waitMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+    const owner = this.eventOwnerFor(context);
+    return this.eventSubscriptions.read({ owner, ...input, signal });
+  }
+
+  async unsubscribeEvent(input: { subscriptionId: string }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+    throwIfAborted(signal);
+    const owner = this.eventOwnerFor(context);
+    this.eventSubscriptions.unsubscribe(owner, input.subscriptionId);
+    return { subscriptionId: input.subscriptionId, closed: "unsubscribed" };
+  }
+
+  async handleDialog(input: { dialogId: string; accept: boolean; prompt?: string }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+    throwIfAborted(signal);
+    const owner = this.eventOwnerFor(context);
+    if (!this.logger || !context.logIdentity) throw new Error("CommandError[dialog-log-unavailable]: Dialog handling requires a canonical event log");
+    const dialog = this.eventSubscriptions.claimDialog(owner, input.dialogId);
+    let dispatched = false;
+    try {
+      if (input.prompt !== undefined && (!input.accept || dialog.type !== "prompt")) throw new Error("CommandError[invalid-dialog-prompt]: prompt is only valid when accepting a prompt dialog");
+      const receipt = await this.logger.append({ type: "browser.dialog.progress", conversationId: owner.conversationId, ...context.logIdentity,
+        content: { dialogId: dialog.id, source: dialog.source, state: "dispatched-unknown", accept: input.accept } });
+      if (!receipt) throw new DOMException("Could not persist dialog dispatch intent", "AbortError");
+      throwIfAborted(signal);
+      this.eventOwnerFor(context);
+      if (!this.eventOwner || this.disposed) throw new Error("CommandError[event-owner-expired]: Event run ownership expired");
+      const params = { accept: input.accept, ...(input.prompt === undefined ? {} : { promptText: input.prompt }) };
+      dispatched = true;
+      const pending = (this.bridge.call as any)("sendCommand", [dialog.source, "Page.handleJavaScriptDialog", params]) as Promise<unknown>;
+      await this.awaitAbort(pending, signal, true);
+      this.eventSubscriptions.finishDialog(owner, dialog.id, dialog.claimId, "handled");
+      const finished = await this.logger.append({ type: "browser.dialog.progress", conversationId: owner.conversationId, ...context.logIdentity,
+        content: { dialogId: dialog.id, source: dialog.source, state: "completed", accept: input.accept } });
+      if (!finished) throw new Error("Could not persist dialog completion");
+      return { dialogId: dialog.id, accepted: input.accept, state: "completed" };
+    } catch (error) {
+      this.eventSubscriptions.finishDialog(owner, dialog.id, dialog.claimId, dispatched ? "uncertain" : "not-dispatched");
+      if (dispatched && error && typeof error === "object") Object.assign(error, { effectUnknown: true });
+      throw error;
+    }
+  }
+
+  private closeEventSource(tabId: number, sessionId?: string): void {
+    const owner = this.eventOwner;
+    const key = dialogSourceKey({ tabId, ...(sessionId ? { sessionId } : {}) });
+    const ids = this.dialogQueues.get(key) ?? [];
+    if (owner) for (const id of ids) this.eventSubscriptions.closeDialog(owner, id);
+    this.dialogQueues.delete(key);
+  }
+
+  private closeEventTab(tabId: number, reason: string): void {
+    const owner = this.eventOwner;
+    if (owner) this.eventSubscriptions.closeTab(owner, tabId, reason);
+    for (const key of this.dialogQueues.keys()) if (JSON.parse(key)[0] === tabId) this.dialogQueues.delete(key);
+  }
+
+  private closeEventRun(): void {
+    this.eventEpoch += 1;
+    this.eventLease = undefined;
+    if (this.eventOwner) this.eventSubscriptions.closeOwner(this.eventOwner);
+    this.eventOwner = undefined;
+    this.dialogQueues.clear();
+    if (this.popupListener) this.chromeApi.tabs.onCreated.removeListener(this.popupListener);
+    if (this.tabRemovedListener) this.chromeApi.tabs.onRemoved.removeListener(this.tabRemovedListener);
+    this.popupListener = undefined;
+    this.tabRemovedListener = undefined;
   }
 
   private async boundPage(tabId: number, state: BrowserState): Promise<any> {
@@ -502,13 +666,21 @@ export class ChromeExecutor {
   }
 
   async beginRun(): Promise<BrowserContext> {
+    if (this.runFinishing) await this.runFinishing;
+    if (this.disposed) throw new Error("Chrome executor has been disposed");
+    const epoch = this.eventEpoch;
+    const identity = this.readRunIdentity();
     const window = await this.chromeApi.windows.getCurrent({ populate: true });
+    const currentIdentity = this.readRunIdentity();
+    if (epoch !== this.eventEpoch || identity && (!currentIdentity || identity.runId !== currentIdentity.runId || identity.ownerId !== currentIdentity.ownerId || identity.generation !== currentIdentity.generation))
+      throw new Error("CommandError[event-owner-expired]: Run ownership expired during initialization");
     if (!Number.isInteger(window.id)) throw new Error("CommandError[no-window]: Could not resolve the current Chrome window");
     const selected = window.tabs?.find((tab) => tab.active) ?? window.tabs?.[0];
     this.browserState = {
       windowId: window.id!,
       tabId: selected?.id,
     };
+    this.eventLease = identity;
     return this.browserContext();
   }
 
@@ -688,8 +860,26 @@ export class ChromeExecutor {
   private async handleCommandEvent(source: Debuggee, method: string, params: any): Promise<void> {
     const tabId = source.tabId;
     if (!Number.isInteger(tabId)) return;
-    if (method === "Page.javascriptDialogOpening") this.dialogs.set(tabId!, { type: params.type, message: params.message, defaultPrompt: params.defaultPrompt });
-    if (method === "Page.javascriptDialogClosed") this.dialogs.delete(tabId!);
+    const owner = this.eventOwner;
+    const eventSource = { tabId: tabId!, ...(source.sessionId ? { sessionId: source.sessionId } : {}) };
+    const sourceKey = dialogSourceKey(eventSource);
+    if (method === "Target.detachedFromTarget" && typeof params?.sessionId === "string") this.closeEventSource(tabId!, params.sessionId);
+    if (method === "Page.javascriptDialogOpening" && owner) {
+      const dialog = this.eventSubscriptions.registerDialog({ owner, source: eventSource, type: params.type, message: params.message, defaultPrompt: params.defaultPrompt });
+      const queue = this.dialogQueues.get(sourceKey) ?? [];
+      queue.push(dialog.id); this.dialogQueues.set(sourceKey, queue);
+      this.eventSubscriptions.publish(owner, { kind: "dialog", source: eventSource, payload: { dialogId: dialog.id, type: dialog.type, message: dialog.message, defaultPrompt: dialog.defaultPrompt } });
+    }
+    if (method === "Page.javascriptDialogClosed") {
+      const queue = this.dialogQueues.get(sourceKey);
+      const id = queue?.shift();
+      if (id && owner) this.eventSubscriptions.closeDialog(owner, id);
+      if (!queue?.length) this.dialogQueues.delete(sourceKey);
+    }
+    const kind: BrowserEventKind | undefined = method === "Page.downloadWillBegin" ? "download" : method === "Page.fileChooserOpened" ? "filechooser"
+      : method === "Network.requestWillBeSent" ? "request" : method === "Network.responseReceived" ? "response"
+      : method === "Runtime.consoleAPICalled" || method === "Log.entryAdded" ? "console" : undefined;
+    if (kind && owner) this.eventSubscriptions.publish(owner, { kind, source: eventSource, payload: params });
     if (!this.networkEnabled.has(tabId!)) return;
     this.diagnostics.handle(source, method, params);
     if (method === "Target.attachedToTarget" && params?.targetInfo?.type === "iframe") {
@@ -719,7 +909,8 @@ export class ChromeExecutor {
       this.bridgeCommand({ tabId }, "Log.disable", {}).catch(() => undefined),
       this.bridgeCommand({ tabId }, "Page.setInterceptFileChooserDialog", { enabled: false }).catch(() => undefined),
     ]);
-    this.diagnostics.remove(tabId); this.dialogs.delete(tabId); this.networkEnabled.delete(tabId);
+    this.closeEventTab(tabId, "debugger-detached");
+    this.diagnostics.remove(tabId); this.networkEnabled.delete(tabId);
   }
 
   private async stopBrowserOperations(): Promise<void> {
@@ -736,10 +927,18 @@ export class ChromeExecutor {
   }
 
   async endRun(): Promise<void> {
-    this.jobs.cancelAll("run-ended");
-    await this.jobs.settle();
-    await this.stopBrowserOperations();
-    this.browserState = undefined;
+    if (this.runFinishing) return this.runFinishing;
+    this.backgroundEpoch += 1;
+    this.pendingBackground.clear();
+    this.closeEventRun();
+    const closing = (async () => {
+      this.jobs.cancelAll("run-ended");
+      await this.jobs.settle();
+      await this.stopBrowserOperations();
+      this.browserState = undefined;
+    })();
+    this.runFinishing = closing;
+    try { await closing; } finally { if (this.runFinishing === closing) this.runFinishing = undefined; }
   }
 
   dispose(): void {
@@ -824,11 +1023,19 @@ export class ChromeExecutor {
       }
     }
     const key = JSON.stringify(debuggee);
+    const dialogOwner = method === "Page.handleJavaScriptDialog" ? this.eventOwner : undefined;
+    const dialogId = dialogOwner ? this.dialogQueues.get(dialogSourceKey(debuggee))?.[0] : undefined;
+    const dialogClaim = dialogOwner && dialogId ? this.eventSubscriptions.claimDialog(dialogOwner, dialogId) : undefined;
     const tracked = Boolean(this.programScope && ["Runtime.evaluate", "Runtime.callFunctionOn"].includes(method));
     if (tracked) this.programEvaluations.set(key, {debuggee,count:(this.programEvaluations.get(key)?.count ?? 0)+1});
     let result: any;
-    try { result = await (this.bridge.call as any)("sendCommand", [debuggee, method, input]); }
-    finally { if (tracked) {
+    try {
+      result = await (this.bridge.call as any)("sendCommand", [debuggee, method, input]);
+      if (dialogOwner && dialogClaim) this.eventSubscriptions.finishDialog(dialogOwner, dialogClaim.id, dialogClaim.claimId, "handled");
+    } catch (error) {
+      if (dialogOwner && dialogClaim) this.eventSubscriptions.finishDialog(dialogOwner, dialogClaim.id, dialogClaim.claimId, "uncertain");
+      throw error;
+    } finally { if (tracked) {
       const entry = this.programEvaluations.get(key);
       if (entry && entry.count > 1) entry.count--; else this.programEvaluations.delete(key);
     } }

@@ -22,6 +22,73 @@ function memoryLog() {
 function browserExecutor(extra = {}) { return { browserContext: vi.fn(async () => ({ windowId: 7, tabs: [] })), ...extra } as unknown as ChromeExecutor; }
 
 describe("createAgent", () => {
+  it("executes concurrent SDK tool calls in model order and waits for the prior result to be recorded", async () => {
+    const { events, logger } = memoryLog();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const order: string[] = [];
+    const executor = browserExecutor({
+      browserContext: async () => ({ windowId: 7, tabs: [{ current: true, tabId: 41 }] }),
+      runProgram: vi.fn(async () => { order.push("click-start"); await gate; order.push("click-end"); return { ok: true }; }),
+      inspect: vi.fn(async () => {
+        expect(events.some((event) => event.type === "tool.finished" && event.toolCallId === "click")).toBe(true);
+        order.push("inspect"); return { snapshot: "updated" };
+      }),
+    });
+    let step = 0;
+    const model = new MockLanguageModelV4({ doGenerate: async () => ++step === 1 ? {
+      content: [
+        { type: "tool-call" as const, toolCallId: "click", toolName: "click", input: JSON.stringify({ target: { ref: "e1" } }) },
+        { type: "tool-call" as const, toolCallId: "inspect", toolName: "inspect_page", input: "{}" },
+      ], finishReason: { unified: "tool-calls" as const, raw: "tool_calls" }, usage, warnings: [],
+    } : text() });
+    const pending = createAgent({ model: config, languageModel: model, executor, logger, conversationId: "conversation" }).generate({ prompt: "act" });
+    await vi.waitFor(() => expect(order).toEqual(["click-start"]));
+    release();
+    await pending;
+    expect(order).toEqual(["click-start", "click-end", "inspect"]);
+  });
+
+  it("does not dispatch later writes on a failed tab but still returns a result and permits reading", async () => {
+    const { events, logger } = memoryLog();
+    const runProgram = vi.fn(async () => ({ ok: false, error: { code: "stale-ref", message: "stale" } }));
+    const inspect = vi.fn(async () => ({ snapshot: "current" }));
+    const executor = browserExecutor({ browserContext: async () => ({ windowId: 7, tabs: [{ current: true, tabId: 41 }] }), runProgram, inspect });
+    let step = 0;
+    const model = new MockLanguageModelV4({ doGenerate: async () => ++step === 1 ? {
+      content: [
+        { type: "tool-call" as const, toolCallId: "first", toolName: "click", input: JSON.stringify({ target: { ref: "e1" } }) },
+        { type: "tool-call" as const, toolCallId: "second", toolName: "fill", input: JSON.stringify({ target: { ref: "e2" }, value: "x" }) },
+        { type: "tool-call" as const, toolCallId: "read", toolName: "inspect_page", input: "{}" },
+      ], finishReason: { unified: "tool-calls" as const, raw: "tool_calls" }, usage, warnings: [],
+    } : text() });
+    await createAgent({ model: config, languageModel: model, executor, logger, conversationId: "conversation" }).generate({ prompt: "act" });
+    expect(runProgram).toHaveBeenCalledOnce();
+    expect(inspect).toHaveBeenCalledOnce();
+    const terminal = events.filter((event) => ["tool.finished", "tool.failed"].includes(event.type));
+    expect(terminal).toHaveLength(3);
+    expect(terminal.find((event) => event.toolCallId === "second")).toMatchObject({ type: "tool.failed", output: { ok: false, error: { code: "prior-action-failed" } } });
+  });
+
+  it("does not dispatch later writes when a preceding model call has invalid arguments", async () => {
+    const { events, logger } = memoryLog();
+    const runProgram = vi.fn(async () => ({ ok: true }));
+    const inspect = vi.fn(async () => ({ snapshot: "current" }));
+    const executor = browserExecutor({ browserContext: async () => ({ windowId: 7, tabs: [{ current: true, tabId: 41 }] }), runProgram, inspect });
+    let step = 0;
+    const model = new MockLanguageModelV4({ doGenerate: async () => ++step === 1 ? {
+      content: [
+        { type: "tool-call" as const, toolCallId: "invalid", toolName: "click", input: "{}" },
+        { type: "tool-call" as const, toolCallId: "write", toolName: "fill", input: JSON.stringify({ target: { ref: "e2" }, value: "x" }) },
+        { type: "tool-call" as const, toolCallId: "read", toolName: "inspect_page", input: "{}" },
+      ], finishReason: { unified: "tool-calls" as const, raw: "tool_calls" }, usage, warnings: [],
+    } : text() });
+    await createAgent({ model: config, languageModel: model, executor, logger, conversationId: "conversation" }).generate({ prompt: "act" });
+    expect(runProgram).not.toHaveBeenCalled();
+    expect(inspect).toHaveBeenCalledOnce();
+    expect(events.find((event) => event.toolCallId === "write" && event.type === "tool.failed")?.output).toMatchObject({ error: { code: "prior-action-failed" } });
+  });
+
   it("records one interrupted result when tool execution is aborted", async () => {
     const { events, logger } = memoryLog();
     const controller = new AbortController();

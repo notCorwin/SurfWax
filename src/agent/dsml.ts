@@ -70,6 +70,15 @@ export function dsmlMiddleware(logger?: EventLogger, conversationId?: string): L
     specificationVersion: "v4",
     wrapGenerate: async ({ doGenerate, params }) => {
       const result = await doGenerate();
+      // The SDK's notification callbacks intentionally swallow exceptions. Reject
+      // malformed identities here, before it can schedule any local tool calls.
+      const ids = new Set<string>();
+      for (const part of result.content) if (part.type === "tool-call") {
+        if (typeof part.toolCallId !== "string" || !part.toolCallId.trim() || ids.has(part.toolCallId)) {
+          throw Object.assign(new Error("Missing or duplicate tool call ID in model response"), { code: "invalid-tool-call-id" });
+        }
+        ids.add(part.toolCallId);
+      }
       if (!params.tools?.some((tool) => tool.type === "function") || params.toolChoice?.type === "none") return result;
       const textParts = result.content.filter((part) => part.type === "text");
       if (!textParts.length) return result;

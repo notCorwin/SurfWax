@@ -180,6 +180,24 @@ describe("browser tools", () => {
     ]);
     expect(queryJobs.mock.calls.every(([, , context]) => context?.conversationId === "conversation")).toBe(true);
   });
+  it("acknowledges a background terminal result only after its tool result is durable", async () => {
+    const order: string[] = [];
+    let failTerminal = false;
+    const logger = { append: async (event: any) => {
+      order.push(event.type);
+      if (failTerminal && event.type === "tool.finished") throw new Error("storage failure");
+      return { ...event, id: 1 };
+    }, toolIdentity: () => ({ runId: "run", toolCallId: "call", toolCallIdCanonical: true }) } as unknown as EventLogger;
+    const acknowledgeBackgroundJob = vi.fn(() => { order.push("acknowledged"); });
+    const executor = { queryJobs: async () => ({ id: "job", terminal: true, state: "succeeded", ok: true }), acknowledgeBackgroundJob } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor, { logger, conversationId: "conversation" }) as Record<string, any>;
+    await tools.get_job.execute({ jobId: "job" }, { toolCallId: "call" });
+    expect(order).toEqual(["tool.started", "tool.finished", "acknowledged"]);
+    expect(acknowledgeBackgroundJob).toHaveBeenCalledWith("job", "conversation");
+    order.length = 0; acknowledgeBackgroundJob.mockClear(); failTerminal = true;
+    await expect(tools.get_job.execute({ jobId: "job" }, { toolCallId: "call" })).rejects.toThrow("storage failure");
+    expect(acknowledgeBackgroundJob).not.toHaveBeenCalled();
+  });
   it("preserves historical user content and never injects an executable old catalogue", async () => {
     const messages = [{ role: "user", content: "Task\n\nAvailable tools:\n- run-code: historical" }, { role: "assistant", content: "Working" }];
     expect(await prepareToolMessages(messages, 0)).toEqual(messages);
@@ -208,6 +226,20 @@ describe("browser tools", () => {
     });
     expect(appended).toHaveLength(1);
     expect(appended[0].output).toBe(value);
+  });
+
+  it("keeps a failed verification visible when its evidence is compacted", async () => {
+    const logger = { append: async (event: any) => ({ ...event, id: 11 }) } as EventLogger;
+    const result = await compactToolResult({ ok: true, result: { verified: false, timedOut: true, present: true, actual: "x".repeat(10_000) } }, { logger, preserveVerification: true });
+    expect(result).toMatchObject({ $ref: 11, verification: { verified: false, timedOut: true, present: true }, access: { path: ["result", "actual"] }, preview: "x".repeat(4000) });
+  });
+
+  it("keeps terminal job status and cursor visible without repeating large receipt payloads", async () => {
+    const logger = { append: async (event: any) => ({ ...event, id: 12 }) } as EventLogger;
+    const value = { id: "job", state: "succeeded", terminal: true, ok: true, nextCursor: 42, hasMore: false, events: [{ output: "x".repeat(10_000) }] };
+    const result = await compactToolResult(value, { logger, preserveJobStatus: true });
+    expect(result).toMatchObject({ $ref: 12, id: "job", state: "succeeded", terminal: true, ok: true, nextCursor: 42, hasMore: false, preview: { eventCount: 1 } });
+    expect(JSON.stringify(result)).not.toContain("x".repeat(100));
   });
 
   it("accepts refs, CSS, documented locators, and structured targets", () => {

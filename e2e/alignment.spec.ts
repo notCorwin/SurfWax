@@ -1,6 +1,26 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, delayedResponse, startProvider, openExtension, configure, nameCurrentConversation, readEvents, dispose } from "./fixtures";
 
+test("shares the job-state Web Lock between the side panel and service worker", async () => {
+  const provider = await startProvider([]);
+  const opened = await openExtension();
+  try {
+    const worker = opened.context.serviceWorkers()[0] ?? await opened.context.waitForEvent("serviceworker");
+    await worker.evaluate(async () => {
+      let ready!: () => void;
+      const acquired = new Promise<void>((resolve) => { ready = resolve; });
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      (globalThis as any).__surfWaxTestReleaseJobLock = release;
+      void navigator.locks.request("surf-wax:job-state-log", async () => { ready(); await held; });
+      await acquired;
+    });
+    expect(await opened.page.evaluate(() => navigator.locks.request("surf-wax:job-state-log", { ifAvailable: true }, (lock) => lock === null))).toBe(true);
+    await worker.evaluate(() => (globalThis as any).__surfWaxTestReleaseJobLock());
+    await expect.poll(() => opened.page.evaluate(() => navigator.locks.request("surf-wax:job-state-log", { ifAvailable: true }, (lock) => Boolean(lock)))).toBe(true);
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});
+
 test("executes more than 100 program operations and records a single tool result", async () => {
   const responses = [commandResponse("execute_program", { timeoutMs: 30000, code: "for (let i=0;i<121;i++) await page.getByRole('button',{name:'Increment'}).click(); await check(await page.locator('output').innerText()==='121');" }, "over-100"), textResponse("ALL_121_DONE")];
   const provider = await startProvider(responses); const opened = await openExtension();

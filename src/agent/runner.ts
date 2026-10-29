@@ -1,6 +1,7 @@
 import { isLoopFinished, ToolLoopAgent, wrapLanguageModel } from "ai";
 import type { LanguageModel, LanguageModelCallEndEvent } from "ai";
-import { createProgramTools, prepareToolMessages, repairProgramToolCall } from "../chrome/tool";
+import { createProgramTools, prepareToolMessages, repairProgramToolCall, PROGRAM_TOOL_REGISTRY } from "../chrome/tool";
+import { ToolScheduler } from "../chrome/tool-scheduler";
 import { ChromeExecutor } from "../chrome/executor";
 import type { BrowserContext } from "../chrome/executor";
 import type { EventLogger } from "../logging";
@@ -72,9 +73,11 @@ export function stagnationReason(steps: readonly any[]): string | undefined {
 export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, BrowserAgentTools> {
   const logger = options.logger;
   let callId: string | undefined;
+  let boundTabId: number | undefined;
+  const scheduler = new ToolScheduler(PROGRAM_TOOL_REGISTRY.map(({ name }) => name), () => options.executor.pendingBackgroundJobs?.() ?? []);
   const initialPrompt = createPromptSnapshot(options.prompt?.source ?? options.instructions);
   const toolOptions = {
-    logger, conversationId: options.conversationId,
+    logger, conversationId: options.conversationId, scheduler,
     callId: () => callId,
     visualEnabled: (() => {
       let supported: Promise<boolean> | undefined;
@@ -98,10 +101,15 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     toolOrder,
     activeTools: activeTools(),
     repairToolCall: repairProgramToolCall as any,
-    onLanguageModelCallEnd: options.onResponse,
+    onLanguageModelCallEnd: async (event) => {
+      const failure = scheduler.prepare(event.content, boundTabId, options.signal);
+      if (failure) logger?.record({ type: "agent.tool-schedule.invalid", conversationId: options.conversationId, error: failure });
+      await options.onResponse?.(event);
+    },
     prepareStep: async ({ messages, initialMessages, responseMessages, stepNumber, steps }) => {
       let prepared = await options.compactor?.prepare(messages, stepNumber) ?? messages;
       const browserContext = await options.executor.browserContext();
+      boundTabId = browserContext.tabs.find((tab) => tab.current)?.tabId;
       const nextBrowserDigest = JSON.stringify(browserContext.tabs);
       const browserChanged = stepNumber === 0 || nextBrowserDigest !== browserDigest;
       browserDigest = nextBrowserDigest;

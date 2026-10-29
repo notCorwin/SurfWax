@@ -768,7 +768,30 @@ test("composes form operations and returns only text changes with owned referenc
 
 test("queries and cancels a synchronous infinite program while preserving prior effects", async () => {
   let jobId: string;
-  const provider = await startProvider([
+  let terminalCallId = "job-cancel";
+  let sequence = 0;
+  const responses: MockResponse[] = [];
+  const afterTerminal: MockResponse = (request) => {
+    const job = lastTool(request);
+    if (!job.terminal) {
+      responses.unshift(afterTerminal);
+      terminalCallId = `job-terminal-${++sequence}`;
+      return commandResponse("get_job", { jobId, after: job.nextCursor, waitMs: 1000 }, terminalCallId);
+    }
+    return commandResponse("execute_program", {
+      code: "await check(await page.locator('output').innerText() === '1'); return await page.inspect();",
+    }, "job-recovery");
+  };
+  const afterProgress: MockResponse = (request) => {
+    const job = lastTool(request);
+    expect(job.terminal).toBe(false);
+    if (!job.events.some((event: any) => event.operation === "emit" && event.output === "first input completed")) {
+      responses.unshift(afterProgress);
+      return commandResponse("get_job", { jobId, after: job.nextCursor, waitMs: 1000 }, `job-progress-${++sequence}`);
+    }
+    return commandResponse("cancel_job", { jobId }, "job-cancel");
+  };
+  responses.push(
     commandResponse(
       "execute_program",
       {
@@ -783,21 +806,11 @@ test("queries and cancels a synchronous infinite program while preserving prior 
         "job-responsive",
       );
     },
-    () =>
-      commandResponse("cancel_job", { jobId: jobId }, "job-cancel"),
-    () =>
-      commandResponse("get_job", { jobId: jobId, waitMs: 1000 },
-        "job-terminal",
-      ),
-    commandResponse(
-      "execute_program",
-      {
-        code: "await check(await page.locator('output').innerText() === '1'); return await page.inspect();",
-      },
-      "job-recovery",
-    ),
+    afterProgress,
+    afterTerminal,
     textResponse("CANCELLED_WITHOUT_ROLLBACK"),
-  ]);
+  );
+  const provider = await startProvider(responses);
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage();
@@ -820,11 +833,11 @@ test("queries and cancels a synchronous infinite program while preserving prior 
           event.type === "tool.finished" &&
           event.toolCallId === "job-responsive",
       ).output,
-    ).toMatchObject({ id: jobId!, state: "running", terminal: false });
+    ).toMatchObject({ id: jobId!, terminal: false });
     expect(
       events.find(
         (event) =>
-          event.type === "tool.failed" && event.toolCallId === "job-terminal",
+          event.type === "tool.failed" && event.toolCallId === terminalCallId,
       ).output,
     ).toMatchObject({
       id: jobId!,

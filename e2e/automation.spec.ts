@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 
-import { test, p95, textResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, delayedResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, nativePanel, submitNative, readNativeEvents, type MockResponse } from './fixtures';
+import { test, p95, textResponse, assistantResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, delayedResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, nativePanel, submitNative, readNativeEvents, type MockResponse } from './fixtures';
 
 test("selects large tool output without creating another reference", async () => {
   const responses: MockResponse[] = [];
@@ -101,6 +101,253 @@ test("inspects the page and fills and clicks with atomic tools", async () => {
     expect(toolNames.filter((name: string) => ["open", "attach", "close", "detach", "show", "list", "close-all", "kill-all"].includes(name))).toEqual([]);
     expect(await opened.page.evaluate(async () => (await chrome.windows.getAll()).length)).toBe(windowCount);
     expect(provider.requests.filter((request) => request.tools)).toHaveLength(5);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("uploads a stored artifact through an independent tool", async () => {
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/automation`);
+    await target.evaluate(() => {
+      const input = document.createElement("input");
+      input.type = "file";
+      input.id = "upload-target";
+      input.onchange = async () => {
+        const file = input.files?.[0];
+        document.body.dataset.uploadedName = file?.name ?? "";
+        document.body.dataset.uploadedContent = await file?.text() ?? "";
+      };
+      document.body.append(input);
+    });
+    responses.push(
+      commandResponse("create_text_artifact", { filename: "report.txt", text: "hello from artifact", mimeType: "text/plain" }, "create-upload"),
+      (request) => {
+        const result = JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
+        return commandResponse("upload_file", { target: { by: "css", value: "#upload-target" }, artifactId: result.result.id }, "upload-artifact");
+      },
+      textResponse("ARTIFACT_UPLOAD_OK"), textResponse("上传产物"),
+    );
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("upload the created report");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("ARTIFACT_UPLOAD_OK");
+    await expect.poll(() => target.locator("body").getAttribute("data-uploaded-content")).toBe("hello from artifact");
+    expect(await target.locator("body").getAttribute("data-uploaded-name")).toBe("report.txt");
+    expect((await readEvents(opened.page)).find((event) => event.toolCallId === "upload-artifact" && event.type === "tool.finished")?.output).toMatchObject({ ok: true });
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("reads and sets ARIA checked state without toggling an already satisfied control", async () => {
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/automation`);
+    await target.evaluate(() => {
+      const toggle = document.createElement("button");
+      toggle.id = "aria-switch";
+      toggle.setAttribute("role", "switch");
+      toggle.setAttribute("aria-checked", "true");
+      toggle.textContent = "Notifications";
+      toggle.onclick = () => {
+        document.body.dataset.switchClicks = String(Number(document.body.dataset.switchClicks ?? 0) + 1);
+        toggle.setAttribute("aria-checked", toggle.getAttribute("aria-checked") === "true" ? "false" : "true");
+      };
+      const radio = document.createElement("input");
+      radio.id = "selected-radio";
+      radio.type = "radio";
+      radio.checked = true;
+      const invalid = document.createElement("button");
+      invalid.id = "unknown-switch";
+      invalid.setAttribute("role", "switch");
+      invalid.textContent = "Unknown state";
+      invalid.onclick = () => { document.body.dataset.invalidClicks = "yes"; };
+      document.body.append(toggle, radio, invalid);
+    });
+    const toggle = { by: "css", value: "#aria-switch" };
+    responses.push(
+      commandResponse("read_checked", { target: toggle }, "read-initial"),
+      commandResponse("set_checked", { target: toggle, checked: true }, "already-checked"),
+      commandResponse("set_checked", { target: toggle, checked: false }, "uncheck-switch"),
+      commandResponse("read_checked", { target: toggle }, "read-final"),
+      commandResponse("set_checked", { target: { by: "css", value: "#selected-radio" }, checked: false }, "uncheck-radio"),
+      commandResponse("set_checked", { target: { by: "css", value: "#unknown-switch" }, checked: true }, "unknown-switch"),
+      textResponse("CHECKED_STATE_OK"), textResponse("勾选状态"),
+    );
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("check and update the controls");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("CHECKED_STATE_OK");
+    const events = await readEvents(opened.page);
+    expect(events.find((event) => event.toolCallId === "read-initial" && event.type === "tool.finished")?.output.result).toBe(true);
+    expect(events.find((event) => event.toolCallId === "read-final" && event.type === "tool.finished")?.output.result).toBe(false);
+    expect(events.find((event) => event.toolCallId === "uncheck-radio" && event.type === "tool.failed")?.output.error.code).toBe("invalid-state");
+    expect(events.find((event) => event.toolCallId === "unknown-switch" && event.type === "tool.failed")?.output.error.code).toBe("invalid-checked-state");
+    expect(await target.locator("body").getAttribute("data-switch-clicks")).toBe("1");
+    expect(await target.locator("body").getAttribute("data-invalid-clicks")).toBeNull();
+    expect(await target.locator("#selected-radio").isChecked()).toBe(true);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("handles a dialog raised by a background atomic click across tool calls", async () => {
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/automation`);
+    target.on("dialog", () => {});
+    await target.evaluate(() => {
+      const button = document.createElement("button");
+      button.id = "open-dialog";
+      button.textContent = "Open prompt";
+      button.onclick = () => { document.body.dataset.answer = prompt("Your answer?", "default") ?? "cancelled"; };
+      document.body.append(button);
+    });
+    let subscriptionId = "";
+    let jobId = "";
+    let pollCount = 0;
+    const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
+    const poll: MockResponse = (request) => {
+      const job = lastTool(request);
+      if (job.terminal) {
+        expect(job).toMatchObject({ ok: true, state: "succeeded" });
+        return textResponse("DIALOG_TOOLS_OK");
+      }
+      responses.unshift(poll);
+      return commandResponse("get_job", { jobId, after: job.nextCursor, waitMs: 10_000 }, `wait-job-${++pollCount}`);
+    };
+    responses.push(
+      commandResponse("subscribe_event", { kind: "dialog" }, "subscribe-dialog"),
+      (request) => {
+        subscriptionId = lastTool(request).subscriptionId;
+        expect(subscriptionId).toBeTruthy();
+        return commandResponse("click", { target: { by: "css", value: "#open-dialog" }, background: true, timeoutMs: 30_000 }, "background-click");
+      },
+      (request) => {
+        const job = lastTool(request);
+        expect(job).toMatchObject({ accepted: true, complete: false });
+        jobId = job.jobId;
+        return assistantResponse({ tool_calls: [
+          { id: "blocked-read", type: "function", function: { name: "inspect_page", arguments: "{}" } },
+          { id: "wait-dialog", type: "function", function: { name: "wait_event", arguments: JSON.stringify({ subscriptionId, waitMs: 10_000 }) } },
+        ] });
+      },
+      (request) => {
+        const blocked = JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool" && entry.tool_call_id === "blocked-read").content);
+        expect(blocked).toMatchObject({ ok: false, error: { code: "background-job-pending" } });
+        const observed = JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool" && entry.tool_call_id === "wait-dialog").content);
+        const event = observed.events.find((item: any) => item.kind === "dialog");
+        expect(event.payload).toMatchObject({ type: "prompt", message: "Your answer?" });
+        return commandResponse("handle_dialog", { dialogId: event.payload.dialogId, accept: true, prompt: "confirmed" }, "answer-dialog");
+      },
+      (request) => {
+        expect(lastTool(request)).toMatchObject({ accepted: true, state: "completed" });
+        return commandResponse("get_job", { jobId }, "read-job");
+      },
+      poll,
+      textResponse("处理对话框"),
+    );
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("open the prompt and enter confirmed");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("DIALOG_TOOLS_OK", { timeout: 30_000 });
+    expect(await target.locator("body").getAttribute("data-answer")).toBe("confirmed");
+    const events = await readEvents(opened.page);
+    for (const id of ["subscribe-dialog", "background-click", "wait-dialog", "answer-dialog"]) {
+      expect(events.filter((event) => event.toolCallId === id && ["tool.finished", "tool.failed"].includes(event.type))).toHaveLength(1);
+    }
+    expect(events.find((event) => event.toolCallId === "blocked-read" && event.type === "tool.failed")?.output.error.code).toBe("background-job-pending");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("verifies current and asynchronously changing element state", async () => {
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/automation`);
+    await target.evaluate(() => {
+      const button = document.createElement("button");
+      button.id = "start-verification";
+      button.textContent = "Start";
+      button.onclick = () => setTimeout(() => { document.querySelector("#verification-result")!.textContent = "Finished"; }, 300);
+      const result = document.createElement("output");
+      result.id = "verification-result";
+      result.textContent = "Waiting";
+      document.body.append(button, result);
+    });
+    const resultTarget = { by: "css", value: "#verification-result" };
+    responses.push(
+      commandResponse("click", { target: { by: "css", value: "#start-verification" } }, "start-verification"),
+      commandResponse("verify_state", { target: resultTarget, textIncludes: "Finished", timeoutMs: 5_000 }, "wait-verification"),
+      commandResponse("verify_state", { target: resultTarget, textIncludes: "Missing" }, "immediate-verification"),
+      textResponse("STATE_VERIFIED"), textResponse("验证状态"),
+    );
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("start and verify the result");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("STATE_VERIFIED");
+    const events = await readEvents(opened.page);
+    expect(events.find((event) => event.toolCallId === "wait-verification" && event.type === "tool.finished")?.output.result).toMatchObject({ verified: true, actual: "Finished", present: true });
+    expect(events.find((event) => event.toolCallId === "immediate-verification" && event.type === "tool.finished")?.output.result).toMatchObject({ verified: false, actual: "Finished", present: true });
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("moves a held pointer across independent observation-bound tools", async () => {
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/automation`);
+    await target.evaluate(() => {
+      document.addEventListener("pointermove", (event) => {
+        if (event.buttons & 1) document.body.dataset.dragPosition = `${event.clientX},${event.clientY}`;
+      });
+      document.addEventListener("pointerup", () => { document.body.dataset.pointerReleased = "yes"; });
+    });
+    responses.push(
+      commandResponse("inspect_page", {}, "pointer-observation"),
+      (request) => {
+        const observation = JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
+        responses.unshift(
+          commandResponse("press_pointer", { button: "left" }, "pointer-down"),
+          commandResponse("move_pointer", { observationId: observation.observationId, x: 80, y: 90 }, "pointer-move"),
+          commandResponse("release_pointer", { button: "left" }, "pointer-up"),
+        );
+        return commandResponse("move_pointer", { observationId: observation.observationId, x: 20, y: 30 }, "pointer-start");
+      },
+      textResponse("POINTER_TOOLS_OK"), textResponse("指针工具"),
+    );
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("drag the pointer");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("POINTER_TOOLS_OK");
+    const failures = (await readEvents(opened.page)).filter((event) => ["pointer-start", "pointer-down", "pointer-move", "pointer-up"].includes(event.toolCallId) && event.type === "tool.failed");
+    expect(failures).toEqual([]);
+    expect(await target.locator("body").getAttribute("data-drag-position")).toBe("80,90");
+    expect(await target.locator("body").getAttribute("data-pointer-released")).toBe("yes");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -692,7 +939,7 @@ for (const format of ["legacy-user-tools", "system-tools"] as const) test(`conti
     expect(events.some(event => event.type === "automation.action.started" && event.toolCallId === "removed-old-entry")).toBe(false);
     expect(events.find(event => event.type === "tool.finished" && event.toolCallId === "current-entry")?.output).toMatchObject({ ok: true, state: "succeeded", result: 1 });
     expect(events.some(event => event.type === "browser.job.progress" && event.toolCallId === "current-entry" && event.content.operation === "check" && event.content.state === "verified")).toBe(true);
-    expect(events.filter(event => event.type === "context.prompt.updated").at(-1)?.content).toMatchObject({ migratedFrom: "formal-49-v2", prompt: { catalogVersion: "atomic-tools-v1", format: "system-tools" } });
+    expect(events.filter(event => event.type === "context.prompt.updated").at(-1)?.content).toMatchObject({ migratedFrom: "formal-49-v2", prompt: { catalogVersion: "atomic-tools-v2", format: "system-tools" } });
     const requests = provider.requests.filter(request => request.tools);
     expect(requests).toHaveLength(3);
     for (const request of requests) expect(request.tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "execute_program", "list_jobs", "get_job", "cancel_job"]));

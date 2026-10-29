@@ -40,17 +40,53 @@ describe("atomic browser tool programs", () => {
     expect(nth).toHaveBeenCalledWith(1);
   });
 
-  it("does not dispatch an impossible uncheck of a selected native radio", async () => {
-    const uncheck = vi.fn();
-    const page = { ref: () => ({ isChecked: async () => true, getAttribute: async () => "radio", uncheck }) };
-    await expect(execute("set_checked", { target: { ref: "e1" }, checked: false }, { page })).rejects.toThrow("Cannot uncheck a selected radio");
-    expect(uncheck).not.toHaveBeenCalled();
+  it("binds pointer movement to the observation used for its coordinates", async () => {
+    const point = vi.fn(async () => "moved");
+    expect(await execute("move_pointer", { observationId: "obs", x: 12, y: 34 }, { page: { point } })).toBe("moved");
+    expect(point).toHaveBeenCalledWith("obs", 12, 34, "hover");
+    expect(() => definition("move_pointer").program({ x: 12, y: 34 })).toThrow();
+  });
+
+  it("passes the requested checked state to the shared browser operation", async () => {
+    const check = vi.fn(async () => "checked");
+    const uncheck = vi.fn(async () => "unchecked");
+    const page = { ref: () => ({ check, uncheck }) };
+    expect(await execute("set_checked", { target: { ref: "e1" }, checked: true }, { page })).toBe("checked");
+    expect(await execute("set_checked", { target: { ref: "e1" }, checked: false }, { page })).toBe("unchecked");
+    expect(check).toHaveBeenCalledOnce();
+    expect(uncheck).toHaveBeenCalledOnce();
   });
 
   it("validates input before creating a program and retains an explicit timeout", () => {
     expect(() => definition("fill").program({ target: { ref: "e1" }, value: "x", extra: true })).toThrow();
     expect(() => definition("fetch").program({ url: "https://example.com" })).toThrow();
     expect(definition("click").program({ target: { ref: "e1" }, timeoutMs: 500 }).timeoutMs).toBe(500);
+    expect(definition("click").program({ target: { ref: "e1" }, background: true })).toMatchObject({ background: true });
+    expect(() => definition("read_text").program({ target: { ref: "e1" }, background: true })).toThrow();
+    expect(() => definition("verify_state").program({ target: { ref: "e1" } })).toThrow();
+    expect(() => definition("verify_state").program({ target: { ref: "e1" }, valueEquals: "x", state: "visible" })).toThrow();
+  });
+
+  it("uploads only the bytes of the requested artifact and rejects unavailable content before dispatch", async () => {
+    const setInputFiles = vi.fn(async () => "uploaded");
+    const page = { ref: () => ({ setInputFiles }) };
+    const read = vi.fn(async () => ({ filename: "report.txt", mimeType: "text/plain", base64: "aGVsbG8=" }));
+    expect(await execute("upload_file", { target: { ref: "e1" }, artifactId: 7 }, { page, artifacts: { read } })).toBe("uploaded");
+    expect(read).toHaveBeenCalledWith(7);
+    expect(setInputFiles).toHaveBeenCalledWith([{ name: "report.txt", mimeType: "text/plain", base64: "aGVsbG8=" }]);
+    read.mockResolvedValueOnce({ filename: "report.txt", mimeType: "text/plain" } as never);
+    await expect(execute("upload_file", { target: { ref: "e1" }, artifactId: 8 }, { page, artifacts: { read } })).rejects.toThrow("invalid-artifact");
+    expect(setInputFiles).toHaveBeenCalledOnce();
+  });
+
+  it("does not confuse a missing or ambiguous element with an unchecked one", async () => {
+    const count = vi.fn(async () => 0);
+    const page = { ref: () => ({ count }) };
+    const target = { ref: "e1" };
+    expect(await execute("verify_state", { target, state: "unchecked" }, { page })).toEqual({ verified: false, actual: null, present: false });
+    expect(await execute("verify_state", { target, state: "hidden" }, { page })).toEqual({ verified: true, actual: null, present: false });
+    count.mockResolvedValueOnce(2);
+    await expect(execute("verify_state", { target, state: "visible" }, { page })).rejects.toThrow("strict-mode");
   });
 
   it("passes script definitions and explicit fetch contexts without substituting them", async () => {

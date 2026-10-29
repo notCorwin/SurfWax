@@ -37,17 +37,29 @@ export type AtomicToolDefinition = {
   summary: string;
   description: string;
   inputSchema: z.ZodType<any>;
-  program: (input: unknown) => { code: string; timeoutMs?: number };
+  program: (input: unknown) => { code: string; timeoutMs?: number; background?: boolean };
 };
 
+// Actions that can cause dialogs, navigation, downloads or other long-lived
+// browser work may return a job so another tool can respond to those events.
+const BACKGROUND_ACTIONS = new Set([
+  "click", "double_click", "hover", "fill", "type_text", "press_key", "key_down", "key_up", "set_checked", "select_option",
+  "drag", "scroll", "move_pointer", "press_pointer", "release_pointer", "navigate", "reload", "go_back", "go_forward", "open_tab", "close_tab",
+  "upload_file", "fetch", "evaluate_js", "send_cdp",
+]);
 function define(name: string, summary: string, inputSchema: z.ZodType<any>, body: string, options: { page?: boolean; locators?: boolean } = {}): AtomicToolDefinition {
+  const schema = BACKGROUND_ACTIONS.has(name) ? (inputSchema as z.ZodObject).extend({ background: z.boolean().optional() }) : inputSchema;
   return {
-    name, summary, description: summary, inputSchema,
+    name, summary, description: summary, inputSchema: schema,
     program(input) {
-      const parsed = inputSchema.parse(input);
+      const parsed = schema.parse(input);
       const encoded = JSON.stringify(JSON.stringify(parsed));
       const code = `const input = JSON.parse(${encoded});\n${options.locators ? selector : ""}\n${options.page ? "const currentPage = input.tabId === undefined ? page : await browser.page(input.tabId);" : ""}\n${body}`;
-      return { code, ...(parsed.timeoutMs === undefined ? {} : { timeoutMs: parsed.timeoutMs }) };
+      // Verification's timeout bounds the condition wait, not page setup or cleanup.
+      const programTimeout = name === "verify_state" && parsed.timeoutMs !== undefined
+        ? parsed.timeoutMs === 0 ? undefined : parsed.timeoutMs + 10_000
+        : parsed.timeoutMs;
+      return { code, ...(programTimeout === undefined ? {} : { timeoutMs: programTimeout }), ...(parsed.background ? { background: true } : {}) };
     },
   };
 }
@@ -69,17 +81,40 @@ export const ATOMIC_TOOL_REGISTRY: readonly AtomicToolDefinition[] = Object.free
   define("key_down", "Hold a key until key_up or run cleanup.", z.object({ ...pageFields, key: z.string().min(1) }).strict(), "return await currentPage.keyboard.down(input.key);", page),
   define("key_up", "Release a held key.", z.object({ ...pageFields, key: z.string().min(1) }).strict(), "return await currentPage.keyboard.up(input.key);", page),
   define("set_checked", "Set a checkbox or radio button to the requested checked state.", z.object({ ...targetFields, checked: z.boolean() }).strict(), `const element = locate(currentPage, input.target);
-    if (!input.checked && await element.isChecked() && (await element.getAttribute('type'))?.toLowerCase() === 'radio') throw new Error('AutomationError[invalid-state]: Cannot uncheck a selected radio button');
     return input.checked ? await element.check() : await element.uncheck();`, locator),
   define("select_option", "Select option values or labels on a select element.", z.object({ ...targetFields, value: z.union([z.string(), z.array(z.string()).min(1)]) }).strict(), "return await locate(currentPage, input.target).selectOption(input.value);", locator),
   define("drag", "Drag one element to another.", z.object({ ...pageFields, source: target, destination: target }).strict(), "return await locate(currentPage, input.source).dragTo(locate(currentPage, input.destination));", locator),
   define("scroll", "Scroll the page by a horizontal and vertical delta at the current pointer.", z.object({ ...pageFields, deltaX: z.number().optional(), deltaY: z.number() }).strict(), "return await currentPage.mouse.wheel(input.deltaX ?? 0, input.deltaY);", page),
+  define("move_pointer", "Move the pointer to coordinates bound to a current observation.", z.object({ ...pageFields, observationId: z.string().min(1), x: z.number().nonnegative(), y: z.number().nonnegative() }).strict(), "return await currentPage.point(input.observationId, input.x, input.y, 'hover');", page),
   define("press_pointer", "Press a pointer button at its current position.", z.object({ ...pageFields, button: z.enum(["left", "middle", "right"]).optional() }).strict(), "return await currentPage.mouse.down(input.button);", page),
   define("release_pointer", "Release a pointer button at its current position.", z.object({ ...pageFields, button: z.enum(["left", "middle", "right"]).optional() }).strict(), "return await currentPage.mouse.up(input.button);", page),
   targetAction("read_text", "Read an element's visible text.", "innerText"),
   targetAction("read_value", "Read a form element's current value.", "inputValue"),
   targetAction("read_checked", "Read an element's checked state.", "isChecked"),
   define("read_attribute", "Read an element's named attribute.", z.object({ ...targetFields, name: z.string().min(1) }).strict(), "return await locate(currentPage, input.target).getAttribute(input.name);", locator),
+  define("verify_state", "Verify one element condition immediately or wait for it to become true; a timed-out wait returns verified=false and timedOut=true.", z.object({
+    tabId, target, timeoutMs: z.number().int().nonnegative().optional(),
+    textIncludes: z.string().optional(), valueEquals: z.string().optional(),
+    state: z.enum(["visible", "hidden", "enabled", "disabled", "checked", "unchecked"]).optional(),
+  }).strict().refine((input) => [input.textIncludes, input.valueEquals, input.state].filter((value) => value !== undefined).length === 1,
+    "Specify exactly one condition"), `const element = locate(currentPage, input.target);
+    const deadline = Date.now() + (input.timeoutMs ?? 0);
+    while (true) {
+      const count = await element.count();
+      if (count > 1) throw new Error('AutomationError[strict-mode]: Verification target matches multiple elements');
+      let actual = count === 0 ? null : input.textIncludes !== undefined ? await element.innerText()
+        : input.valueEquals !== undefined ? await element.inputValue()
+        : input.state === 'visible' || input.state === 'hidden' ? await element.isVisible()
+        : input.state === 'enabled' || input.state === 'disabled' ? await element.isEnabled()
+        : await element.isChecked();
+      const verified = input.textIncludes !== undefined ? typeof actual === 'string' && actual.includes(input.textIncludes)
+        : input.valueEquals !== undefined ? actual === input.valueEquals
+        : input.state === 'hidden' ? actual === false || count === 0
+        : input.state === 'disabled' || input.state === 'unchecked' ? actual === false
+        : actual === true;
+      if (verified || Date.now() >= deadline) return { verified, actual, present: count === 1, ...(!verified && (input.timeoutMs ?? 0) > 0 ? { timedOut: true } : {}) };
+      await sleep(Math.min(100, Math.max(0, deadline - Date.now())));
+    }`, locator),
   define("wait_for_url", "Wait until the page URL contains the given text.", z.object({ ...pageFields, url: z.string().min(1) }).strict(), "return await currentPage.waitForURL(input.url);", page),
   define("navigate", "Navigate the selected page to a URL.", z.object({ ...pageFields, url: z.string().min(1) }).strict(), "return await currentPage.goto(input.url);", page),
   define("reload", "Reload the selected page.", pageArgs, "return await currentPage.reload();", page),
@@ -89,6 +124,10 @@ export const ATOMIC_TOOL_REGISTRY: readonly AtomicToolDefinition[] = Object.free
   define("open_tab", "Open a tab in the bound browser window.", z.object({ timeoutMs, url: z.string().min(1).optional() }).strict(), "const opened = await browser.tabs.open(input.url); return { tabId: opened.tabId };"),
   define("switch_tab", "Switch the bound page to a tab.", z.object({ timeoutMs, tabId: z.number().int().nonnegative() }).strict(), "return await browser.tabs.select(input.tabId);"),
   define("close_tab", "Close a tab.", z.object({ timeoutMs, tabId: z.number().int().nonnegative() }).strict(), "return await browser.tabs.close(input.tabId);"),
+  define("upload_file", "Upload an existing artifact to a file input.", z.object({ ...targetFields, artifactId: z.number().int().positive() }).strict(), `const artifact = await artifacts.read(input.artifactId);
+    if (!artifact || typeof artifact.filename !== 'string' || typeof artifact.mimeType !== 'string' || typeof artifact.base64 !== 'string')
+      throw new Error('AutomationError[invalid-artifact]: The artifact has no available file bytes');
+    return await locate(currentPage, input.target).setInputFiles([{name:artifact.filename,mimeType:artifact.mimeType,base64:artifact.base64}]);`, locator),
   define("take_screenshot", "Capture a screenshot when visual input is enabled.", z.object({ ...pageFields, target: target.optional() }).strict(), "return await currentPage.screenshot(input.target ? { target: input.target } : {});", page),
   define("create_pdf", "Create a PDF artifact of the selected page.", pageArgs, "return await currentPage.pdf();", page),
   define("read_artifact", "Read a stored artifact or large tool result by ID.", z.object({ timeoutMs, artifactId: z.number().int().positive(), path: z.array(z.union([z.string(), z.number().int().nonnegative()])).optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional() }).strict(), "return await artifacts.read(input.artifactId, {path:input.path, offset:input.offset, limit:input.limit});"),

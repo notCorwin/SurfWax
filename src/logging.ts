@@ -50,9 +50,11 @@ export type ConversationMessage = {
 type EventStore = {
   append(event: Omit<LogEvent, "id">): Promise<LogEvent>;
   get?(id: number): Promise<LogEvent | undefined>;
+  getMany?(ids: readonly number[]): Promise<Array<LogEvent | undefined>>;
+  latestByType?(type: string): Promise<LogEvent | undefined>;
   appendMany?(events: readonly Omit<LogEvent, "id">[]): Promise<LogEvent[]>;
   all(): Promise<LogEvent[]>;
-  byTypes?(types: readonly string[], conversationId?: string, afterId?: number): Promise<LogEvent[]>;
+  byTypes?(types: readonly string[], conversationId?: string, afterId?: number, limit?: number): Promise<LogEvent[]>;
   byRunTypes?(runIds: readonly string[], types: readonly string[], afterId?: number): Promise<LogEvent[]>;
   conversation?(conversationId: string, afterId?: number): Promise<LogEvent[]>;
   /** Legacy test capability; canonical runtime never invokes destructive clearing. */
@@ -129,7 +131,7 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
   });
 }
 
-function indexEventsAfter(index: IDBIndex, key: IDBValidKey, afterId: number): Promise<LogEvent[]> {
+function indexEventsAfter(index: IDBIndex, key: IDBValidKey, afterId: number, limit = Infinity): Promise<LogEvent[]> {
   return new Promise((resolve, reject) => {
     const events: LogEvent[] = [];
     const request = index.openCursor(IDBKeyRange.only(key));
@@ -147,6 +149,7 @@ function indexEventsAfter(index: IDBIndex, key: IDBValidKey, afterId: number): P
         }
       }
       if (Number(cursor.primaryKey) > afterId) events.push(cursor.value as LogEvent);
+      if (events.length >= limit) { resolve(events); return; }
       cursor.continue();
     };
   });
@@ -180,6 +183,27 @@ class IndexedDbEventStore implements EventStore {
     return event;
   }
 
+  async getMany(ids: readonly number[]): Promise<Array<LogEvent | undefined>> {
+    if (!ids.length) return [];
+    const db = await this.open();
+    const transaction = db.transaction(EVENT_STORE, "readonly");
+    const done = transactionDone(transaction);
+    const store = transaction.objectStore(EVENT_STORE);
+    const events = await Promise.all(ids.map((id) => requestResult<LogEvent | undefined>(store.get(id))));
+    await done;
+    return events;
+  }
+
+  async latestByType(type: string): Promise<LogEvent | undefined> {
+    const db = await this.open();
+    const transaction = db.transaction(EVENT_STORE, "readonly");
+    const done = transactionDone(transaction);
+    const cursor = await requestResult(transaction.objectStore(EVENT_STORE).index(TYPE_INDEX).openCursor(IDBKeyRange.only(type), "prev"));
+    const event = cursor?.value as LogEvent | undefined;
+    await done;
+    return event;
+  }
+
   async appendMany(events: readonly Omit<LogEvent, "id">[]): Promise<LogEvent[]> {
     const db = await this.open();
     const transaction = db.transaction(EVENT_STORE, "readwrite");
@@ -198,14 +222,14 @@ class IndexedDbEventStore implements EventStore {
     return events.sort((left, right) => left.id - right.id);
   }
 
-  async byTypes(types: readonly string[], conversationId?: string, afterId = -1): Promise<LogEvent[]> {
+  async byTypes(types: readonly string[], conversationId?: string, afterId = -1, limit = Infinity): Promise<LogEvent[]> {
     const db = await this.open();
     const transaction = db.transaction(EVENT_STORE, "readonly");
     const done = transactionDone(transaction);
     const index = transaction.objectStore(EVENT_STORE).index(conversationId ? CONVERSATION_TYPE_INDEX : TYPE_INDEX);
-    const batches = await Promise.all(types.map((type) => indexEventsAfter(index, conversationId ? [conversationId, type] : type, afterId)));
+    const batches = await Promise.all(types.map((type) => indexEventsAfter(index, conversationId ? [conversationId, type] : type, afterId, limit)));
     await done;
-    return batches.flat().sort((left, right) => left.id - right.id);
+    return batches.flat().sort((left, right) => left.id - right.id).slice(0, limit);
   }
 
   async byRunTypes(runIds: readonly string[], types: readonly string[], afterId = -1): Promise<LogEvent[]> {
@@ -232,6 +256,7 @@ class IndexedDbEventStore implements EventStore {
 let sharedStore: EventStore | undefined;
 const TERMINAL_EVENT_TYPES = ["tool.finished", "tool.failed", "conversation.finished", "conversation.failed", "conversation.aborted"];
 let localTerminalWrite: Promise<unknown> = Promise.resolve();
+let localJobStateWrite: Promise<unknown> = Promise.resolve();
 
 function terminalKey(event: Pick<LogEvent, "type" | "runId" | "toolCallId" | "content">): string | undefined {
   if (!event.runId || !TERMINAL_EVENT_TYPES.includes(event.type)) return undefined;
@@ -246,6 +271,16 @@ function withTerminalWriteLock<T>(write: () => Promise<T>): Promise<T> {
   // Tests and environments without Web Locks still serialize all local writers.
   const task = localTerminalWrite.then(write, write);
   localTerminalWrite = task.catch(() => undefined);
+  return task;
+}
+
+function withJobStateWriteLock<T>(write: () => Promise<T>, allowLocalFallback: boolean): Promise<T> {
+  if (typeof navigator !== "undefined" && navigator.locks) return navigator.locks.request("surf-wax:job-state-log", write);
+  if (!allowLocalFallback || (typeof chrome !== "undefined" && Boolean(chrome.runtime?.id))) {
+    return Promise.reject(new Error("Web Locks are required for cross-context job state and log clearing"));
+  }
+  const task = localJobStateWrite.then(write, write);
+  localJobStateWrite = task.catch(() => undefined);
   return task;
 }
 
@@ -446,7 +481,6 @@ export class EventLogger {
   private generation: number | undefined = 0;
   private handshakePaused = false;
   private listeners = new Set<(event: LogEvent) => void>();
-  private clearFloor?: Promise<number>;
 
   constructor(private readonly options: {
     store?: EventStore;
@@ -541,7 +575,7 @@ export class EventLogger {
     };
   }
 
-  private enqueue(events: readonly Omit<LogEvent, "id">[]): Promise<LogEvent[]> {
+  private enqueue(events: readonly Omit<LogEvent, "id">[], expectedEpoch?: string, expectedJobStateId?: number): Promise<LogEvent[]> {
     const generation = this.generation;
     const task = this.pending.then(async () => {
       await this.ready;
@@ -550,11 +584,31 @@ export class EventLogger {
         // Recheck after the cross-page lock: maintenance may have advanced while
         // this writer was waiting for another page's terminal transaction.
         if (generation === undefined ? this.handshakePaused : generation !== this.generation) return [];
+        const floor = expectedEpoch === undefined ? undefined : await this.latestClearIdFresh(store);
+        if (expectedEpoch !== undefined && JSON.stringify([this.generation ?? null, floor]) !== expectedEpoch) return [];
+        if (expectedJobStateId !== undefined) {
+          const requested = events[0];
+          const jobId = (fromLogValue(requested?.content) as { jobId?: unknown } | null)?.jobId;
+          if (!requested?.conversationId || typeof jobId !== "string" || expectedJobStateId <= (floor ?? -1)) return [];
+          const original = store.get ? await store.get(expectedJobStateId) : (await store.all()).find((event) => event.id === expectedJobStateId);
+          if (!original || original.type !== "browser.job.state" || original.conversationId !== requested.conversationId
+            || (fromLogValue(original.content) as { jobId?: unknown } | null)?.jobId !== jobId) return [];
+          let cursor = expectedJobStateId;
+          while (true) {
+            const rows = store.byTypes ? await store.byTypes(["browser.job.state"], requested.conversationId, cursor, 256)
+              : (await store.all()).filter((event) => event.type === "browser.job.state" && event.conversationId === requested.conversationId && event.id > cursor);
+            const newer = rows.filter((event) => event.id > cursor).sort((a, b) => a.id - b.id).slice(0, 256);
+            if (newer.some((event) => (fromLogValue(event.content) as { jobId?: unknown } | null)?.jobId === jobId)) return [];
+            if (newer.length < 256) break;
+            cursor = newer.at(-1)!.id;
+          }
+        }
         const runIds = [...new Set(events.filter((event) => terminalKey(event)).map((event) => event.runId!))];
+        const terminalFloor = runIds.length ? floor ?? await this.latestClearIdFresh(store) : -1;
         const prior = runIds.length ? store.byRunTypes
           ? await store.byRunTypes(runIds, TERMINAL_EVENT_TYPES)
           : (await store.all()).filter((event) => event.runId && runIds.includes(event.runId) && TERMINAL_EVENT_TYPES.includes(event.type)) : [];
-        const existing = new Map(prior.map((event) => [terminalKey(event), event]));
+        const existing = new Map(prior.filter((event) => event.id > terminalFloor).map((event) => [terminalKey(event), event]));
         const accepted: Omit<LogEvent, "id">[] = [];
         const keys = new Set(existing.keys());
         for (const event of events) {
@@ -567,7 +621,6 @@ export class EventLogger {
         if (accepted.length && store.appendMany) stored.push(...await store.appendMany(accepted));
         else for (const event of accepted) stored.push(await store.append(event));
         for (const event of stored) {
-          if (event.type === "log.cleared") this.clearFloor = Promise.resolve(event.id);
           for (const listener of this.listeners) listener(event);
         }
         // Return the accepted durable terminal to a competing callback, without
@@ -577,7 +630,9 @@ export class EventLogger {
         return events.map((event) => terminalKey(event) ? existing.get(terminalKey(event)!)! : appended.get(event)!)
           .filter((event): event is LogEvent => Boolean(event));
       };
-      return events.some((event) => terminalKey(event)) ? withTerminalWriteLock(write) : write();
+      const terminalWrite = () => events.some((event) => terminalKey(event)) ? withTerminalWriteLock(write) : write();
+      return expectedEpoch !== undefined || events.some((event) => event.type === "browser.job.state" || event.type === "log.cleared")
+        ? withJobStateWriteLock(terminalWrite, Boolean(this.options.store)) : terminalWrite();
     });
     this.pending = task.catch((error) => {
       this.options.onError?.(error);
@@ -603,6 +658,13 @@ export class EventLogger {
     if (!this.accepting) return Promise.resolve(undefined);
     this.flushBuffer();
     return this.enqueue([this.event(record)]).then(([event]) => event);
+  }
+
+  /** Conditional append for recovery derived from a particular clear/writer epoch. */
+  appendIfEpoch(record: LogRecord, epoch: string, expectedJobStateId?: number): Promise<LogEvent | undefined> {
+    if (!this.accepting) return Promise.resolve(undefined);
+    this.flushBuffer();
+    return this.enqueue([this.event(record)], epoch, expectedJobStateId).then(([event]) => event);
   }
 
   /** Best-effort diagnostics only. State restoration must never depend on it. */
@@ -639,21 +701,35 @@ export class EventLogger {
   }
 
   private async eventsByTypes(types: readonly string[], conversationId?: string): Promise<LogEvent[]> {
-    await this.flush();
-    const store = this.options.store ?? getEventStore();
-    const floor = await this.latestClearId(store);
+    return this.readCanonical((store, floor) => this.eventsByTypesAt(store, floor, types, conversationId));
+  }
+
+  private async eventsByTypesAt(store: EventStore, floor: number, types: readonly string[], conversationId?: string): Promise<LogEvent[]> {
     if (store.byTypes) return (await store.byTypes(types, conversationId, floor)).filter((event) => event.id > floor);
     return (await store.all()).filter((event) => event.id > floor && types.includes(event.type) && (!conversationId || event.conversationId === conversationId));
   }
 
-  private async latestClearId(store: EventStore): Promise<number> {
-    this.clearFloor ??= (async () => {
-      const clears = store.byTypes
-        ? await store.byTypes(["log.cleared"])
-        : (await store.all()).filter((event) => event.type === "log.cleared");
-      return clears.at(-1)?.id ?? -1;
-    })();
-    return this.clearFloor;
+  private async latestClearIdFresh(store: EventStore): Promise<number> {
+    const latest = store.latestByType ? await store.latestByType("log.cleared")
+      : store.byTypes ? (await store.byTypes(["log.cleared"])).at(-1)
+      : (await store.all()).filter((event) => event.type === "log.cleared").at(-1);
+    return latest?.id ?? -1;
+  }
+
+  /** A cross-writer clear may race any read; discard that read and retry. */
+  private async readCanonicalSnapshot<T>(read: (store: EventStore, floor: number) => Promise<T>): Promise<{ value: T; epoch: string }> {
+    while (true) {
+      await this.flush();
+      const store = this.options.store ?? getEventStore();
+      const generation = this.generation;
+      const floor = await this.latestClearIdFresh(store);
+      const value = await read(store, floor);
+      if (generation === this.generation && floor === await this.latestClearIdFresh(store)) return { value, epoch: JSON.stringify([generation ?? null, floor]) };
+    }
+  }
+
+  private async readCanonical<T>(read: (store: EventStore, floor: number) => Promise<T>): Promise<T> {
+    return (await this.readCanonicalSnapshot(read)).value;
   }
 
   summaryEvents(conversationId?: string): Promise<LogEvent[]> {
@@ -672,6 +748,45 @@ export class EventLogger {
     return this.eventsByTypes(["browser.job.state", "browser.job.progress"], conversationId);
   }
 
+  /** Incremental, bounded reads of canonical job events. The epoch changes on log maintenance. */
+  async jobEventsSince(conversationId: string, afterId: number, limit = 256): Promise<{ epoch: string; floor: number; events: LogEvent[]; hasMore: boolean }> {
+    if (!Number.isSafeInteger(afterId) || afterId < -1 || !Number.isSafeInteger(limit) || limit < 1) throw new Error("Invalid job event cursor or limit");
+    const types = ["browser.job.state", "browser.job.progress"];
+    while (true) {
+      await this.flush();
+      const store = this.options.store ?? getEventStore();
+      const generation = this.generation;
+      const floor = await this.latestClearIdFresh(store);
+      const start = Math.max(floor, afterId);
+      const values = store.byTypes
+        ? await store.byTypes(types, conversationId, start, limit + 1)
+        : (await store.all()).filter((event) => event.id > start && event.conversationId === conversationId && types.includes(event.type));
+      const nextFloor = await this.latestClearIdFresh(store);
+      if (generation !== this.generation || floor !== nextFloor) continue;
+      const events = values.filter((event) => event.id > start && event.conversationId === conversationId && types.includes(event.type))
+        .sort((left, right) => left.id - right.id);
+      return { epoch: JSON.stringify([generation ?? null, floor]), floor, events: events.slice(0, limit), hasMore: events.length > limit };
+    }
+  }
+
+  /** Read a bounded page by canonical IDs; return null if log maintenance changed its epoch. */
+  async jobEventsByIds(conversationId: string, ids: readonly number[], epoch: string): Promise<LogEvent[] | null> {
+    if (ids.some((id) => !Number.isSafeInteger(id) || id < 1)) throw new Error("Invalid job event ID");
+    await this.flush();
+    const store = this.options.store ?? getEventStore();
+    const generation = this.generation;
+    const floor = await this.latestClearIdFresh(store);
+    if (JSON.stringify([generation ?? null, floor]) !== epoch) return null;
+    const values = store.getMany ? await store.getMany(ids) : store.get ? await Promise.all(ids.map((id) => store.get!(id)))
+      : await store.all().then((all) => ids.map((id) => all.find((event) => event.id === id)));
+    if (generation !== this.generation || floor !== await this.latestClearIdFresh(store)) return null;
+    return values.map((event, index) => {
+      if (!event || event.id !== ids[index] || event.id <= floor || event.conversationId !== conversationId
+        || !["browser.job.state", "browser.job.progress"].includes(event.type)) throw new Error(`Job event ${ids[index]} is unavailable`);
+      return event;
+    });
+  }
+
   inputStateEvents(): Promise<LogEvent[]> { return this.eventsByTypes(["browser.input.state"]); }
 
   modelUsageEvents(conversationId: string): Promise<LogEvent[]> {
@@ -687,28 +802,31 @@ export class EventLogger {
   }
 
   private async eventsByRunTypes(runIds: readonly string[], types: readonly string[]): Promise<LogEvent[]> {
-    await this.flush();
-    const store = this.options.store ?? getEventStore();
-    const floor = await this.latestClearId(store);
+    return this.readCanonical((store, floor) => this.eventsByRunTypesAt(store, floor, runIds, types));
+  }
+
+  private async eventsByRunTypesAt(store: EventStore, floor: number, runIds: readonly string[], types: readonly string[]): Promise<LogEvent[]> {
     if (store.byRunTypes) return (await store.byRunTypes(runIds, types, floor)).filter((event) => event.id > floor);
     return (await store.all()).filter((event) => event.id > floor && event.runId && runIds.includes(event.runId) && types.includes(event.type));
   }
 
   async restorationEvents(conversationId: string): Promise<LogEvent[]> {
-    const lifecycle = await this.eventsByTypes([...RUN_EVENT_TYPES, "conversation.message", "conversation.branch.selected"], conversationId);
-    const completed = new Set(lifecycle.filter((event) => event.type === "conversation.finished" && event.runId).map((event) => event.runId));
-    const interrupted = [...new Set(lifecycle
-      .filter((event) => (event.type === "conversation.failed" || event.type === "conversation.aborted")
-        && event.runId
-        && !completed.has(event.runId))
-      .map((event) => event.runId!))];
-    if (interrupted.length === 0) return lifecycle;
-    const replay = await this.eventsByRunTypes(interrupted, [
-      "tool.started",
-      "tool.finished",
-      "tool.failed",
-    ]);
-    return [...lifecycle, ...replay].sort((left, right) => left.id - right.id);
+    return this.readCanonical(async (store, floor) => {
+      const lifecycle = await this.eventsByTypesAt(store, floor, [...RUN_EVENT_TYPES, "conversation.message", "conversation.branch.selected"], conversationId);
+      const completed = new Set(lifecycle.filter((event) => event.type === "conversation.finished" && event.runId).map((event) => event.runId));
+      const interrupted = [...new Set(lifecycle
+        .filter((event) => (event.type === "conversation.failed" || event.type === "conversation.aborted")
+          && event.runId
+          && !completed.has(event.runId))
+        .map((event) => event.runId!))];
+      if (interrupted.length === 0) return lifecycle;
+      const replay = await this.eventsByRunTypesAt(store, floor, interrupted, [
+        "tool.started",
+        "tool.finished",
+        "tool.failed",
+      ]);
+      return [...lifecycle, ...replay].sort((left, right) => left.id - right.id);
+    });
   }
 
   async messages(conversationId?: string): Promise<ConversationMessage[]> {
@@ -723,10 +841,8 @@ export class EventLogger {
 
   async result(id: number, selection: { path?: string | Array<string | number>; offset?: number; limit?: number } = {}, conversationId?: string): Promise<unknown> {
     if (!Number.isSafeInteger(id) || id < 1) throw new Error("Invalid result event ID");
-    await this.flush();
-    const store = this.options.store ?? getEventStore();
-    const floor = await this.latestClearId(store);
-    const event = id > floor ? (store.get ? await store.get(id) : (await store.all()).find((item) => item.id === id)) : undefined;
+    const event = await this.readCanonical(async (store, floor) => id > floor
+      ? (store.get ? await store.get(id) : (await store.all()).find((item) => item.id === id)) : undefined);
     if (event?.type !== "tool.result.data" || conversationId !== undefined && event.conversationId !== conversationId) throw new Error(`Tool result ${id} is unavailable`);
     let value = fromLogValue(event.output);
     const path = typeof selection.path === "string" ? [selection.path] : selection.path ?? [];
@@ -746,11 +862,9 @@ export class EventLogger {
   }
 
   async conversation(conversationId: string): Promise<LogEvent[]> {
-    await this.flush();
-    const store = this.options.store ?? getEventStore();
-    const floor = await this.latestClearId(store);
-    if (store.conversation) return (await store.conversation(conversationId, floor)).filter((event) => event.id > floor);
-    return (await store.all()).filter((event) => event.id > floor && event.conversationId === conversationId);
+    return this.readCanonical(async (store, floor) => store.conversation
+      ? (await store.conversation(conversationId, floor)).filter((event) => event.id > floor)
+      : (await store.all()).filter((event) => event.id > floor && event.conversationId === conversationId));
   }
 
   async deleteConversation(conversationId: string): Promise<void> {
@@ -761,20 +875,20 @@ export class EventLogger {
     await this.append({ type: "conversation.restored", conversationId, content: null });
   }
 
-  private async artifactForCall(event: LogEvent, events: readonly LogEvent[]): Promise<{ id: number } | undefined> {
-    let stored = [...events].reverse().find((item) => item.type === "tool.result.data" && item.toolCallId === event.toolCallId && item.id > event.id
+  private async artifactForCall(event: LogEvent, events: readonly LogEvent[], source?: { store: EventStore; floor: number }): Promise<{ id: number } | undefined> {
+    const store = source?.store ?? this.options.store ?? getEventStore();
+    const floor = source?.floor ?? await this.latestClearIdFresh(store);
+    let stored = [...events].reverse().find((item) => item.type === "tool.result.data" && item.toolCallId === event.toolCallId && item.id > event.id && item.id > floor
       && typeof (fromLogValue(item.content) as { filename?: unknown } | null)?.filename === "string");
-    const referenced = [...events].reverse().find(item => item.type === "browser.artifact.used" && item.toolCallId === event.toolCallId && item.id > event.id);
+    const referenced = [...events].reverse().find(item => item.type === "browser.artifact.used" && item.toolCallId === event.toolCallId && item.id > event.id && item.id > floor);
     const referencedId = (fromLogValue(referenced?.content) as { artifactId?: number } | null)?.artifactId;
-    if (!stored && Number.isSafeInteger(referencedId)) {
-      const store = this.options.store ?? getEventStore();
-      const saved = store.get ? await store.get(referencedId!) : (await this.conversation(event.conversationId!)).find(item => item.id === referencedId);
+    if (!stored && Number.isSafeInteger(referencedId) && referencedId! > floor) {
+      const saved = store.get ? await store.get(referencedId!) : (await store.all()).find(item => item.id === referencedId);
       if (saved?.type === "tool.result.data" && saved.conversationId === event.conversationId && typeof (fromLogValue(saved.content) as { filename?: unknown } | null)?.filename === "string") stored = saved;
     }
     const input = fromLogValue(event.input) as { id?: number } | null;
-    if (!stored && (fromLogValue(event.content) as { toolName?: string })?.toolName === "artifact-save" && Number.isSafeInteger(input?.id)) {
-      const store = this.options.store ?? getEventStore();
-      const saved = store.get ? await store.get(input!.id!) : (await this.conversation(event.conversationId!)).find((item) => item.id === input!.id);
+    if (!stored && (fromLogValue(event.content) as { toolName?: string })?.toolName === "artifact-save" && Number.isSafeInteger(input?.id) && input!.id! > floor) {
+      const saved = store.get ? await store.get(input!.id!) : (await store.all()).find((item) => item.id === input!.id);
       if (saved?.type === "tool.result.data" && saved.conversationId === event.conversationId && typeof (fromLogValue(saved.content) as { filename?: unknown } | null)?.filename === "string") stored = saved;
     }
     return stored ? { id: stored.id, ...(fromLogValue(stored.content) as object) } : undefined;
@@ -782,13 +896,21 @@ export class EventLogger {
 
   async toolArtifact(conversationId: string, identity: { runId?: string; toolCallId: string }): Promise<{ id: number } | undefined> {
     if (!identity.runId) return undefined;
-    const events = await this.eventsByRunTypes([identity.runId], ["tool.started", "tool.result.data", "browser.artifact.used"]);
-    const started = [...events].reverse().find((event) => event.type === "tool.started" && event.conversationId === conversationId && event.toolCallId === identity.toolCallId);
-    return started ? this.artifactForCall(started, events) : undefined;
+    return this.readCanonical(async (store, floor) => {
+      const events = await this.eventsByRunTypesAt(store, floor, [identity.runId!], ["tool.started", "tool.result.data", "browser.artifact.used"]);
+      const started = [...events].reverse().find((event) => event.type === "tool.started" && event.conversationId === conversationId && event.toolCallId === identity.toolCallId);
+      return started ? this.artifactForCall(started, events, { store, floor }) : undefined;
+    });
   }
 
   async closePendingTools(runId: string, conversationId: string, reason: unknown): Promise<void> {
-    const events = await this.eventsByRunTypes([runId], ["conversation.message", "tool.started", "tool.finished", "tool.failed", "tool.progress", "tool.result.data", "browser.artifact.used"]);
+    await this.closePendingToolsInEpoch(runId, conversationId, reason);
+  }
+
+  private async closePendingToolsInEpoch(runId: string, conversationId: string, reason: unknown, requiredEpoch?: string): Promise<boolean> {
+    const snapshot = await this.readCanonicalSnapshot((store, floor) => this.eventsByRunTypesAt(store, floor, [runId], ["conversation.message", "tool.started", "tool.finished", "tool.failed", "tool.progress", "tool.result.data", "browser.artifact.used"]));
+    if (requiredEpoch !== undefined && snapshot.epoch !== requiredEpoch) return false;
+    const { value: events, epoch } = snapshot;
     const key = (event: LogEvent) => `${(fromLogValue(event.content) as { callId?: string })?.callId ?? ""}\0${event.toolCallId}`;
     const terminal = new Set(events.filter((event) => ["tool.finished", "tool.failed"].includes(event.type)).map(key));
     for (const event of events) {
@@ -808,10 +930,11 @@ export class EventLogger {
         ...(completedAll ? {} : { error: failure, failed: { index, step: steps[index], error: failure }, notRun: steps.slice(index + 1) }),
         elapsedMs: progressOutput?.elapsedMs ?? 0,
       } : { ok: false, error: failure };
-      await this.append({ type: completedAll ? "tool.finished" : "tool.failed", conversationId, runId, toolCallId: event.toolCallId, toolCallIdCanonical: true,
+      const saved = await this.appendIfEpoch({ type: completedAll ? "tool.finished" : "tool.failed", conversationId, runId, toolCallId: event.toolCallId, toolCallIdCanonical: true,
         content: { ...((fromLogValue(event.content) as object) ?? {}), status: completedAll ? "completed" : "interrupted", effectUnknown: !completedAll },
         input: fromLogValue(event.input), output: { ...output, ...(artifact ? { artifact } : {}) },
-        ...(completedAll ? {} : { error: failure, abort: { reason } }) });
+        ...(completedAll ? {} : { error: failure, abort: { reason } }) }, epoch);
+      if (!saved) return false;
     }
     const started = new Set(events.filter((event) => event.type === "tool.started" || event.type === "tool.finished" || event.type === "tool.failed").map((event) => event.toolCallId));
     const messages = new Map<string, ConversationMessage>();
@@ -830,24 +953,27 @@ export class EventLogger {
       const invalid = part.state === "output-error";
       const error = { code: invalid ? "invalid-tool-call" : "interrupted",
         message: invalid && "errorText" in part ? String(part.errorText) : "工具调用已中断，此操作未执行。", effectUnknown: false };
-      await this.append({ type: "tool.failed", conversationId, runId, toolCallId: part.toolCallId, toolCallIdCanonical: true,
+      const saved = await this.appendIfEpoch({ type: "tool.failed", conversationId, runId, toolCallId: part.toolCallId, toolCallIdCanonical: true,
         content: { toolName, status: invalid ? "failed" : "interrupted", effectUnknown: false }, input, output: { ok: false, error }, error,
-        ...(invalid ? {} : { abort: { reason } }) });
+        ...(invalid ? {} : { abort: { reason } }) }, epoch);
+      if (!saved) return false;
     }
+    return true;
   }
 
   async recoverDanglingRuns(activeRunIds: readonly string[] | (() => Promise<readonly string[]>) = [], reason = "owner-disconnected"): Promise<void> {
     const recover = async () => {
-      const events = await this.eventsByTypes(RUN_EVENT_TYPES);
+      const { value: events, epoch } = await this.readCanonicalSnapshot((store, floor) => this.eventsByTypesAt(store, floor, RUN_EVENT_TYPES));
       const terminal = new Set(events.filter((event) => event.runId && event.type !== "conversation.submitted").map((event) => event.runId));
       for (const event of events) {
         if (event.type !== "conversation.submitted" || !event.runId || !event.conversationId || terminal.has(event.runId)) continue;
         const owners = typeof activeRunIds === "function" ? await activeRunIds() : activeRunIds;
         if (owners.includes(event.runId)) continue;
         terminal.add(event.runId);
-        await this.closePendingTools(event.runId, event.conversationId, reason);
-        await this.append({ type: "conversation.aborted", conversationId: event.conversationId, runId: event.runId,
-          content: null, abort: { reason } });
+        if (!await this.closePendingToolsInEpoch(event.runId, event.conversationId, reason, epoch)) return;
+        const saved = await this.appendIfEpoch({ type: "conversation.aborted", conversationId: event.conversationId, runId: event.runId,
+          content: null, abort: { reason } }, epoch);
+        if (!saved) return;
       }
     };
     if (typeof navigator !== "undefined" && navigator.locks) await navigator.locks.request("surf-wax:log-recovery", recover);
@@ -857,9 +983,8 @@ export class EventLogger {
   async clear(): Promise<void> {
     await this.flush();
     const event = this.event({ type: "log.cleared", content: null });
-    const stored = await (this.options.store ?? getEventStore()).append(event);
-    this.clearFloor = Promise.resolve(stored.id);
-    for (const listener of this.listeners) listener(stored);
+    const [stored] = await this.enqueue([event]);
+    if (!stored) throw new Error("Could not persist log clear");
   }
 
   resume(): void { this.accepting = true; }
