@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
+import { createAnthropic } from "@ai-sdk/anthropic";
 import type { ChromeExecutor } from "../chrome/executor";
 import { PROGRAM_TOOL_CONTEXT, PROGRAM_TOOL_REGISTRY } from "../chrome/tool";
 import { EventLogger, fromLogValue, type LogEvent } from "../logging";
@@ -164,6 +165,7 @@ describe("createAgent", () => {
     const step = (toolName: string, output: unknown) => ({ toolResults: [{ toolName, input: {}, output }] });
     expect(stagnationReason([step("execute_program", { ok: false }), step("execute_program", { ok: false })])).toBe("repeated-failure");
     expect(stagnationReason([step("inspect_page", { text: "same" }), step("inspect_page", { text: "same" }), step("inspect_page", { text: "same" })])).toBe("repeated-read");
+    for (const name of ["find_elements", "list_frames", "list_downloads"]) expect(stagnationReason([step(name, { value: "same" }), step(name, { value: "same" }), step(name, { value: "same" })])).toBe("repeated-read");
     expect(stagnationReason([step("execute_program", { ok: true }), step("execute_program", { ok: true }), step("execute_program", { ok: true })])).toBeUndefined();
     expect(stagnationReason(Array.from({ length: 6 }, (_, index) => step(index % 2 ? "fill" : "click", { ok: true })))).toBeUndefined();
     expect(stagnationReason(Array.from({ length: 6 }, (_, index) => step(index % 2 ? "read_text" : "inspect_page", { text: "same" })))).toBe("two-call-cycle");
@@ -193,6 +195,106 @@ describe("createAgent", () => {
     expect(result.text).toBe("done");
     await logger.flush();
     expect(events).toEqual(expect.arrayContaining([expect.objectContaining({ type: "model.started", content: expect.objectContaining({ toolCount: PROGRAM_TOOL_REGISTRY.length }) })]));
+  });
+
+  it.each(["generate", "stream"] as const)("keeps browser updates and screenshot messages as an append-only SDK prompt prefix (%s)", async (mode) => {
+    const { logger } = memoryLog();
+    let step = 0; let contexts = 0; const prompts: any[][] = [];
+    const executor = browserExecutor({
+      browserContext: async () => ({ windowId: 7, tabs: [{ current: true, tabId: 41, title: ++contexts === 1 ? "Before" : "After", url: "https://test/" }] }),
+      inspect: vi.fn(async () => step === 1 ? { snapshot: "first", screenshot: { mediaType: "image/png", data: "aW1hZ2U=" } } : { snapshot: "second" }),
+    });
+    const next = (options: any) => {
+      prompts.push(structuredClone(options.prompt));
+      return ++step < 3 ? tool(`inspect-${step}`, "inspect_page", {}) : text();
+    };
+    const model = new MockLanguageModelV4({ doGenerate: async (options) => next(options), doStream: async (options) => {
+      const result = next(options);
+      const parts = result.content[0]!.type === "tool-call" ? [result.content[0], { type: "finish", finishReason: result.finishReason, usage }]
+        : [{ type: "text-start", id: "text" }, { type: "text-delta", id: "text", delta: "done" }, { type: "text-end", id: "text" }, { type: "finish", finishReason: result.finishReason, usage }];
+      return { stream: new ReadableStream({ start(controller) { for (const part of parts) controller.enqueue(part); controller.close(); } }) as any };
+    } });
+    const agent = createAgent({ model: { ...config, imageInput: "enabled" }, languageModel: model, executor, logger, conversationId: "conversation" });
+    if (mode === "generate") await agent.generate({ prompt: "inspect" });
+    else await (await agent.stream({ prompt: "inspect" })).consumeStream();
+    expect(prompts).toHaveLength(3);
+    expect(prompts[1]!.slice(0, prompts[0]!.length)).toEqual(prompts[0]);
+    expect(prompts[2]!.slice(0, prompts[1]!.length)).toEqual(prompts[1]);
+    expect(JSON.stringify(prompts[0])).toContain("Before");
+    expect(JSON.stringify(prompts[1])).toContain("After");
+    const files = prompts[1]!.flatMap((message: any) => Array.isArray(message.content) ? message.content : []).filter((part: any) => part.type === "file");
+    expect(files).toHaveLength(1);
+    expect(JSON.stringify(prompts[2])).toContain('"mediaType":"image/png"');
+  });
+
+  it("sends stable tool and system cache breakpoints to the first-party Claude API", async () => {
+    const requests: any[] = [];
+    const fetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      requests.push(JSON.parse(String(init?.body)));
+      const first = requests.length === 1;
+      return new Response(JSON.stringify({ id: `message-${requests.length}`, type: "message", role: "assistant", model: "claude-sonnet-4-5",
+        content: first ? [{ type: "tool_use", id: "tool-1", name: "read_api_reference", input: {} }] : [{ type: "text", text: "done" }],
+        stop_reason: first ? "tool_use" : "end_turn", stop_sequence: null,
+        usage: { input_tokens: 12000, output_tokens: 10, cache_creation_input_tokens: first ? 10000 : 0, cache_read_input_tokens: first ? 0 : 10000 },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const languageModel = createAnthropic({ apiKey: "test-key", fetch })("claude-sonnet-4-5");
+    const model = { providerId: "anthropic", sdk: "@ai-sdk/anthropic", baseURL: "https://api.anthropic.com/v1", model: "claude-sonnet-4-5", contextWindowOverride: 256_000 } as ModelConfig;
+    const result = await createAgent({ model, languageModel, executor: browserExecutor(), instructions: "Custom guidance." }).generate({ prompt: "inspect" });
+    expect(result.text).toBe("done"); expect(requests).toHaveLength(2);
+    expect(requests[0].tools).toEqual(requests[1].tools);
+    expect(requests[0].tools).toHaveLength(PROGRAM_TOOL_REGISTRY.length);
+    expect(requests[0].tools.slice(0, -1).every((item: any) => item.cache_control === undefined)).toBe(true);
+    expect(requests[0].tools.at(-1).cache_control).toEqual({ type: "ephemeral" });
+    expect(requests[0].system).toEqual(requests[1].system);
+    expect(requests[0].system).toEqual([{ type: "text", text: `Custom guidance.\n\n${PROGRAM_TOOL_CONTEXT}`, cache_control: { type: "ephemeral" } }]);
+    expect(result.steps[1]?.usage.inputTokenDetails.cacheReadTokens).toBe(10000);
+  });
+
+  it("preserves custom instructions and cache breakpoints after context compaction", async () => {
+    const { logger, events } = memoryLog();
+    const requests: any[] = []; let agentCalls = 0;
+    const fetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)); requests.push(request);
+      const summary = JSON.stringify(request.system).includes("Summarize the entire supplied conversation faithfully");
+      const first = !summary && ++agentCalls === 1;
+      return new Response(JSON.stringify({ id: `message-${requests.length}`, type: "message", role: "assistant", model: "claude-sonnet-4-5",
+        content: first ? [{ type: "tool_use", id: "tool-1", name: "read_api_reference", input: {} }] : [{ type: "text", text: summary ? "Summary of earlier work." : "done" }],
+        stop_reason: first ? "tool_use" : "end_turn", stop_sequence: null, usage: { input_tokens: 12000, output_tokens: 10 },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const instructions = createPromptSnapshot("Custom guidance.");
+    const estimated = estimatePromptInput({ instructions: instructions.instructions, tools: PROMPT_TOOLS, messages: [{ role: "user", content: "inspect" }] });
+    const model = { providerId: "anthropic", sdk: "@ai-sdk/anthropic", baseURL: "https://api.anthropic.com/v1", model: "claude-sonnet-4-5", contextWindowOverride: Math.ceil(estimated / 0.85), maxTokensOverride: 4096 } as ModelConfig;
+    const languageModel = createAnthropic({ apiKey: "test-key", fetch })("claude-sonnet-4-5");
+    const compactor = new ContextCompactor({ model, logger, conversationId: "conversation", branchIds: ["u"], signal: new AbortController().signal, prompt: instructions });
+    const result = await createAgent({ model, languageModel, executor: browserExecutor(), instructions: "Custom guidance.", logger, conversationId: "conversation", compactor }).generate({ prompt: "inspect" });
+    expect(result.text).toBe("done");
+    expect(events.some((event) => event.type === "context.compacted")).toBe(true);
+    const agentRequests = requests.filter((request) => Array.isArray(request.tools));
+    expect(agentRequests).toHaveLength(2);
+    for (const request of agentRequests) {
+      expect(request.tools.at(-1).cache_control).toEqual({ type: "ephemeral" });
+      expect(request.system).toEqual([{ type: "text", text: `Custom guidance.\n\n${PROGRAM_TOOL_CONTEXT}`, cache_control: { type: "ephemeral" } }]);
+      expect(JSON.stringify(request.messages)).toContain("Summary of earlier work.");
+    }
+    expect(agentRequests[0].tools).toEqual(agentRequests[1].tools);
+    expect(agentRequests[0].system).toEqual(agentRequests[1].system);
+  });
+
+  it.each([
+    { providerId: "minimax", sdk: "@ai-sdk/anthropic", baseURL: "https://api.minimax.io/anthropic/v1", model: "claude-compatible" },
+    { providerId: "custom", sdk: "@ai-sdk/anthropic", baseURL: "https://proxy.example/v1", model: "claude-custom" },
+    { providerId: "anthropic", sdk: "@ai-sdk/anthropic", baseURL: "https://api.anthropic.com/v1", baseURLOverride: "https://proxy.example/v1", model: "claude-custom" },
+    { providerId: "anthropic", sdk: "@ai-sdk/anthropic", baseURL: "https://api.anthropic.com/v1", model: "custom" },
+  ] as ModelConfig[])("does not impose Claude cache fields on %j", async (model) => {
+    const languageModel = new MockLanguageModelV4({ doGenerate: async (options) => {
+      expect(options.tools?.every((item) => (item as { providerOptions?: { anthropic?: { cacheControl?: unknown } } }).providerOptions?.anthropic?.cacheControl === undefined)).toBe(true);
+      const system = options.prompt.find((message) => message.role === "system");
+      expect(system?.providerOptions?.anthropic?.cacheControl).toBeUndefined();
+      return text();
+    } });
+    await createAgent({ model: { ...model, contextWindowOverride: 256_000 }, languageModel, executor: browserExecutor() }).generate({ prompt: "hello" });
   });
 
   it("executes a complete DSML program and continues with its result", async () => {

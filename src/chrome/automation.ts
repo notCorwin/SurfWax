@@ -9,7 +9,7 @@ type Waiter = { resolve: (value: any) => void; reject: (error: Error) => void };
 type FileChooserRecord = { backendNodeId: number; debuggee: Debuggee; mode: string };
 type FileChooserClaim = { assert: () => void; finish: (outcome: "handled" | "not-dispatched" | "uncertain") => void };
 type Query = {
-  kind: "role" | "text" | "label" | "placeholder" | "alt" | "title" | "testId" | "css" | "frame";
+  kind: "role" | "text" | "label" | "placeholder" | "alt" | "title" | "testId" | "css" | "frame" | "frameRef";
   value: string;
   name?: string;
   exact?: boolean;
@@ -17,6 +17,8 @@ type Query = {
 type LocatorSpec = { queries: Query[]; index?: number; ref?: string; hasText?: string; has?: LocatorSpec };
 type WaitState = "attached" | "detached" | "visible" | "hidden" | "enabled" | "editable" | "checked";
 type RefRecord = { backendNodeId: number; frameId?: string; debuggee: Debuggee; role: string; name: string; generation: number };
+type FrameRefRecord = { frameId: string; debuggee: Debuggee; generation: number; revision: number; conversationId?: string; runId?: string };
+type FrameListSnapshot = { id: string; session: Session; generation: number; revision: number; conversationId?: string; runId?: string; frames: Array<Record<string, unknown>> };
 type SnapshotLine = { id: string; line: string };
 export type FindOptions = { cursor?: string; limit?: number };
 type SearchSnapshot = {
@@ -49,6 +51,9 @@ type Session = {
   frames: Map<string, Debuggee>;
   frameReady: Map<string, Promise<void>>;
   frameParents: Map<string, string | undefined>;
+  frameRevision: number;
+  frameRefs: Map<string, FrameRefRecord>;
+  frameRefsById: Map<string, string>;
   lifecycle: Set<string>;
   rootFrameId?: string;
   lastSnapshot?: SnapshotLine[];
@@ -109,7 +114,7 @@ export const FILE_UPLOAD_FUNCTION = `function(files){
   this.files = transfer.files; this.dispatchEvent(new view.Event("input", { bubbles: true })); this.dispatchEvent(new view.Event("change", { bubbles: true }));
 }`;
 
-const RESOLVER_SOURCE = String.raw`function(spec, metadata) {
+const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument) {
   const normalize = value => String(value ?? "").replace(/\s+/g, " ").trim();
   const roleOf = el => el.getAttribute("role") || ({
     A: el.hasAttribute("href") ? "link" : "generic", BUTTON: "button", SELECT: "combobox", TEXTAREA: "textbox",
@@ -161,7 +166,7 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata) {
     if (locator.index !== undefined) { const index = locator.index < 0 ? current.length + locator.index : locator.index; current = index >= 0 && index < current.length ? [current[index]] : []; }
     return [...new Set(current)];
   };
-  const result = resolve(document, spec);
+  const result = resolve(rootDocument || document, spec);
   if (metadata === "nodes") return result;
   if (!metadata) return result[0] || null;
   return result.map(el => ({ role: roleOf(el), name: nameOf(el), tag: el.tagName.toLowerCase(), text: visibleText(el).slice(0, 120) }));
@@ -191,6 +196,7 @@ export class AutomationRuntime {
   private readonly axRoots = new Map<string, number>();
   private readonly fileChoosers = new Map<number, FileChooserRecord>();
   private readonly searches = new Map<string, SearchSnapshot>();
+  private readonly frameLists = new Map<string, FrameListSnapshot>();
 
   private waitDiagnostic() { return this.lastWait; }
 
@@ -255,21 +261,27 @@ export class AutomationRuntime {
     if (method === "Target.attachedToTarget" && params?.targetInfo?.type === "iframe" && session) {
       const debuggee = { tabId, sessionId: params.sessionId } as Debuggee;
       session.frames.set(params.targetInfo.targetId, debuggee);
+      this.invalidateFrames(session);
       const ready = (async () => {
         for (const domain of ["Page", "Runtime", "DOM", "Accessibility"]) await this.options.command(debuggee, `${domain}.enable`, {});
         await this.options.command(debuggee, "Page.setLifecycleEventsEnabled", { enabled: true });
+        // Each out-of-process iframe is its own target. Recursively attach its
+        // iframe targets so deeper cross-process descendants can be discovered.
+        await this.options.command(debuggee, "Target.setAutoAttach", { autoAttach: true, flatten: true, waitForDebuggerOnStart: false, filter: [{ type: "iframe", exclude: false }] });
       })();
       void ready.catch(() => undefined);
       session.frameReady.set(params.sessionId, ready);
     }
     if (method === "Page.frameAttached" && params?.frameId && session) {
-      session.frames.set(params.frameId, source);
+      if (!session.frames.get(params.frameId)?.sessionId || source.sessionId === session.frames.get(params.frameId)?.sessionId) session.frames.set(params.frameId, source);
       session.frameParents.set(params.frameId, params.parentFrameId);
+      this.invalidateFrames(session);
     }
     if (method === "Page.frameNavigated" && params?.frame?.id && session) {
-      session.frames.set(params.frame.id, source);
-      session.frameParents.set(params.frame.id, params.frame.parentId);
-      if (!params.frame.parentId) session.rootFrameId = params.frame.id;
+      if (!session.frames.get(params.frame.id)?.sessionId || source.sessionId === session.frames.get(params.frame.id)?.sessionId) session.frames.set(params.frame.id, source);
+      const parentId = params.frame.parentId ?? session.frameParents.get(params.frame.id);
+      session.frameParents.set(params.frame.id, parentId);
+      if (!parentId && !source.sessionId) session.rootFrameId = params.frame.id;
       this.invalidate(session);
     }
     if (method === "Page.navigatedWithinDocument" && session) {
@@ -310,8 +322,16 @@ export class AutomationRuntime {
     if (kind) this.resolveWaiters(tabId!, kind, kind === "dialog" ? { ...params, source: { ...source } } : params);
   }
 
+  private invalidateFrames(session: Session): void {
+    session.frameRevision += 1;
+    session.frameRefs.clear();
+    session.frameRefsById.clear();
+    for (const [id, snapshot] of this.frameLists) if (snapshot.session === session) this.frameLists.delete(id);
+  }
+
   private invalidate(session: Session, preserveChooser = false): void {
     session.generation += 1;
+    this.invalidateFrames(session);
     this.clearSearches(session.tabId);
     session.refs.clear();
     session.refsByNode.clear();
@@ -322,11 +342,17 @@ export class AutomationRuntime {
   }
 
   handleDetach(source: Debuggee): void {
-    if (Number.isInteger(source.tabId)) { this.clearSearches(source.tabId!); this.sessions.delete(source.tabId!); }
+    if (Number.isInteger(source.tabId)) {
+      this.clearSearches(source.tabId!);
+      const session = this.sessions.get(source.tabId!);
+      if (session) this.invalidateFrames(session);
+      this.sessions.delete(source.tabId!);
+    }
   }
 
   async abortSessions(): Promise<void> {
     const sessions = [...this.sessions.values()];
+    this.frameLists.clear();
     this.sessions.clear();
     this.clearSearches();
     this.objectDebuggees.clear();
@@ -786,6 +812,9 @@ export class AutomationRuntime {
         frames: new Map(),
         frameReady: new Map(),
         frameParents: new Map(),
+        frameRevision: 0,
+        frameRefs: new Map(),
+        frameRefsById: new Map(),
         lifecycle: new Set(),
       };
       this.sessions.set(tabId, session);
@@ -799,7 +828,7 @@ export class AutomationRuntime {
       const add = (item: any, parentId?: string) => {
         const frameId = item?.frame?.id;
         if (!frameId) return;
-        session!.frames.set(frameId, session!.debuggee);
+        if (!session!.frames.get(frameId)?.sessionId) session!.frames.set(frameId, session!.debuggee);
         session!.frameParents.set(frameId, parentId);
         if (!parentId) session!.rootFrameId = frameId;
         for (const child of item.childFrames ?? []) add(child, frameId);
@@ -808,6 +837,78 @@ export class AutomationRuntime {
     })().catch((error) => { session!.ready = undefined; throw error; });
     await session.ready;
     return session;
+  }
+
+  /** Capture a bounded page of a stable, run-scoped frame-tree snapshot. */
+  async listFrames(tabId: number, options: { cursor?: string; limit?: number } = {}): Promise<Record<string, unknown>> {
+    return this.action(tabId, "list_frames", null, async () => {
+      const session = await this.session(tabId);
+      const generation = session.generation, revision = session.frameRevision;
+      const signal = this.context.signal, conversationId = this.context.conversationId, runId = this.context.logIdentity?.runId;
+      const limit = options.limit ?? 25;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw automationError("invalid-limit", { limit });
+      const guard = () => {
+        throwIfAborted(signal);
+        if (this.sessions.get(tabId) !== session || session.generation !== generation || session.frameRevision !== revision)
+          throw automationError("stale-frames", { reason: "document-or-frame-tree-changed" });
+      };
+      guard();
+      let snapshot: FrameListSnapshot | undefined;
+      let offset = 0;
+      if (options.cursor !== undefined) {
+        const match = /^([a-f0-9-]+):(\d+)$/.exec(options.cursor);
+        if (!match || !Number.isSafeInteger(Number(match[2]))) throw automationError("stale-frames", { reason: "invalid-cursor" });
+        snapshot = this.frameLists.get(match[1]!); offset = Number(match[2]);
+        if (!snapshot || snapshot.session !== session || snapshot.generation !== generation || snapshot.revision !== revision
+          || snapshot.conversationId !== conversationId || snapshot.runId !== runId || offset < 0 || offset >= snapshot.frames.length)
+          throw automationError("stale-frames", { reason: "expired-or-mismatched-cursor" });
+        this.frameLists.delete(snapshot.id); this.frameLists.set(snapshot.id, snapshot);
+      } else {
+        await Promise.all([...session.frameReady.values()]); guard();
+        const sources = [...new Map([session.debuggee, ...session.frames.values()].map((source) => [JSON.stringify(source), source])).values()];
+        const trees = await Promise.all(sources.map(async (source) => ({ source, tree: (await this.options.command(source, "Page.getFrameTree", {})).frameTree })));
+        guard();
+        const frames = new Map<string, { frame: any; parent?: string; source: Debuggee }>();
+        const visit = (node: any, source: Debuggee, parent?: string) => {
+          if (!node?.frame || typeof node.frame.id !== "string") return;
+          const frame = node.frame;
+          const knownSource = session.frames.get(frame.id);
+          const actual = knownSource?.sessionId ? knownSource : source;
+          const old = frames.get(frame.id);
+          // The child session's own frame-tree root has more authoritative
+          // metadata than the parent's placeholder for an OOPIF.
+          if (!old || source.sessionId && source.sessionId === actual.sessionId)
+            frames.set(frame.id, { frame, parent: frame.parentId ?? parent ?? session.frameParents.get(frame.id), source: actual });
+          for (const child of node.childFrames ?? []) visit(child, source, frame.id);
+        };
+        for (const { source, tree } of trees) visit(tree, source);
+        if (!frames.size) throw automationError("frame-unavailable", { reason: "missing-frame-tree" });
+        const refs = new Map<string, string>();
+        for (const frameId of frames.keys()) refs.set(frameId, session.frameRefsById.get(JSON.stringify([conversationId, runId, frameId])) ?? `f${crypto.randomUUID()}`);
+        const result = [...frames].map(([frameId, item]) => {
+          const frameRef = refs.get(frameId)!;
+          const url = String(item.frame.url ?? ""); const name = String(item.frame.name ?? "");
+          const metadata = { frameRef, ...(item.parent && refs.has(item.parent) ? { parentFrameRef: refs.get(item.parent) } : {}),
+            ...(item.parent && !refs.has(item.parent) ? { parentUnavailable: true } : {}),
+            url: url.slice(0, 1024), ...(url.length > 1024 ? { urlTruncated: true } : {}),
+            ...(name ? { name: name.slice(0, 160) } : {}), ...(name.length > 160 ? { nameTruncated: true } : {}),
+            source: { tabId, ...(item.source.sessionId ? { sessionId: item.source.sessionId } : {}) } };
+          session.frameRefs.set(frameRef, { frameId, debuggee: item.source, generation, revision, conversationId, runId });
+          session.frameRefsById.set(JSON.stringify([conversationId, runId, frameId]), frameRef);
+          return metadata;
+        });
+        guard();
+        snapshot = { id: crypto.randomUUID(), session, generation, revision, conversationId, runId, frames: result };
+        this.frameLists.set(snapshot.id, snapshot);
+        while (this.frameLists.size > 32) this.frameLists.delete(this.frameLists.keys().next().value!);
+      }
+      const end = Math.min(offset + limit, snapshot.frames.length);
+      guard();
+      const hasMore = end < snapshot.frames.length;
+      if (!hasMore && options.cursor === undefined) this.frameLists.delete(snapshot.id);
+      return { tabId, documentId: generation, total: snapshot.frames.length, frames: snapshot.frames.slice(offset, end), hasMore,
+        ...(hasMore ? { nextCursor: `${snapshot.id}:${end}` } : {}) };
+    });
   }
 
   private releaseSearch(snapshot: SearchSnapshot): void {
@@ -862,17 +963,15 @@ export class AutomationRuntime {
             const scoped = await this.locatorScope(session, locator.spec);
             guard(); debuggee = scoped.debuggee;
             if (this.usesNativeAccessibility(scoped.spec)) {
-              const matches = await this.resolveAccessibility(debuggee, scoped.spec);
+              const matches = await this.resolveAccessibility(debuggee, scoped.spec, scoped.rootObjectId);
               guard();
               const candidates = matches.map((candidate) => ({ ...candidate, role: candidate.role.slice(0, 80), name: candidate.name.slice(0, 160),
                 ...(candidate.role.length > 80 ? { roleTruncated: true } : {}), ...(candidate.name.length > 160 ? { nameTruncated: true } : {}) }));
               snapshot = { id, tabId, generation, session, key, conversationId, runId, debuggee, total: candidates.length, candidates, group };
             } else {
-              const response = await this.options.command(debuggee, "Runtime.evaluate", { expression: `(${RESOLVER_SOURCE})(${JSON.stringify(scoped.spec)}, "nodes")`,
-                returnByValue: false, objectGroup: group });
+              const response = await this.resolveLocator(debuggee, scoped.spec, "nodes", scoped.rootObjectId, group);
               guard();
-              if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
-              const arrayId = response.result?.objectId;
+              const arrayId = response?.objectId;
               if (!arrayId) throw automationError("search-unavailable", { reason: "missing-result-array" });
               const size = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: arrayId,
                 functionDeclaration: "function(){return this.length}", returnByValue: true });
@@ -984,8 +1083,8 @@ export class AutomationRuntime {
       }
     }
     const scoped = await this.locatorScope(session, spec);
-    if (this.usesNativeAccessibility(scoped.spec)) return this.resolveAccessibility(scoped.debuggee, scoped.spec);
-    return await this.evaluateIn(scoped.debuggee, `(${RESOLVER_SOURCE})(${JSON.stringify(scoped.spec)}, true)`) as Candidate[];
+    if (this.usesNativeAccessibility(scoped.spec)) return this.resolveAccessibility(scoped.debuggee, scoped.spec, scoped.rootObjectId);
+    return (await this.resolveLocator(scoped.debuggee, scoped.spec, true, scoped.rootObjectId))?.value as Candidate[];
   }
 
   private async resolveOne(session: Session, spec: LocatorSpec): Promise<string> {
@@ -1018,7 +1117,7 @@ export class AutomationRuntime {
     }
     const scoped = await this.locatorScope(session, spec);
     if (this.usesNativeAccessibility(scoped.spec)) {
-      const matches = await this.resolveAccessibility(scoped.debuggee, scoped.spec);
+      const matches = await this.resolveAccessibility(scoped.debuggee, scoped.spec, scoped.rootObjectId);
       observe?.(matches);
       this.assertStrict(spec, matches);
       const match = matches[0];
@@ -1030,17 +1129,14 @@ export class AutomationRuntime {
         return response.object.objectId;
       } catch { return undefined; }
     }
-    const matches = await this.evaluateIn(scoped.debuggee, `(${RESOLVER_SOURCE})(${JSON.stringify(scoped.spec)}, true)`) as Candidate[];
+    const matches = (await this.resolveLocator(scoped.debuggee, scoped.spec, true, scoped.rootObjectId))?.value as Candidate[];
     observe?.(matches);
     this.assertStrict(spec, matches);
     if (!matches.length) return undefined;
-    const response = await this.options.command(scoped.debuggee, "Runtime.evaluate", {
-      expression: `(${RESOLVER_SOURCE})(${JSON.stringify(scoped.spec)}, false)`, returnByValue: false, objectGroup: "surf-wax-automation",
-    });
-    if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
-    if (!response.result?.objectId) return undefined;
-    this.objectDebuggees.set(response.result.objectId, scoped.debuggee);
-    return response.result.objectId;
+    const result = await this.resolveLocator(scoped.debuggee, scoped.spec, false, scoped.rootObjectId);
+    if (!result?.objectId) return undefined;
+    this.objectDebuggees.set(result.objectId, scoped.debuggee);
+    return result.objectId;
   }
 
   private assertStrict(spec: LocatorSpec, matches: Candidate[]): void {
@@ -1052,18 +1148,23 @@ export class AutomationRuntime {
     return !spec.has && !spec.hasText && spec.queries.length === 1 && ["role", "label"].includes(spec.queries[0]!.kind);
   }
 
-  private async resolveAccessibility(debuggee: Debuggee, spec: LocatorSpec): Promise<Candidate[]> {
+  private async resolveAccessibility(debuggee: Debuggee, spec: LocatorSpec, rootObjectId?: string): Promise<Candidate[]> {
     const query = spec.queries[0]!;
-    const key = JSON.stringify(debuggee);
-    let nodeId = this.axRoots.get(key);
-    if (nodeId === undefined) {
-      nodeId = (await this.options.command(debuggee, "DOM.getDocument", { depth: 0 })).root?.nodeId;
-      if (nodeId === undefined) throw automationError("detached", { reason: "missing-document-root" });
-      this.axRoots.set(key, nodeId);
+    let root: { objectId: string } | { nodeId: number };
+    if (rootObjectId) root = { objectId: rootObjectId };
+    else {
+      const key = JSON.stringify(debuggee);
+      let nodeId = this.axRoots.get(key);
+      if (nodeId === undefined) {
+        nodeId = (await this.options.command(debuggee, "DOM.getDocument", { depth: 0 })).root?.nodeId;
+        if (nodeId === undefined) throw automationError("detached", { reason: "missing-document-root" });
+        this.axRoots.set(key, nodeId);
+      }
+      root = { nodeId };
     }
     const tree = await this.options.command(debuggee, "Accessibility.queryAXTree", query.kind === "role"
-      ? { nodeId, role: query.value, ...(query.name ? { accessibleName: query.name } : {}) }
-      : { nodeId, accessibleName: query.value });
+      ? { ...root, role: query.value, ...(query.name ? { accessibleName: query.name } : {}) }
+      : { ...root, accessibleName: query.value });
     const controls = new Set(["button", "checkbox", "combobox", "listbox", "option", "radio", "searchbox", "slider", "spinbutton", "switch", "textbox"]);
     const normalize = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
     const equal = (actual: string, expected: string) => query.exact ? actual === expected : actual.toLocaleLowerCase().includes(expected.toLocaleLowerCase());
@@ -1083,32 +1184,75 @@ export class AutomationRuntime {
     return matches;
   }
 
-  private async locatorScope(session: Session, spec: LocatorSpec): Promise<{ debuggee: Debuggee; spec: LocatorSpec }> {
+  private async locatorScope(session: Session, spec: LocatorSpec): Promise<{ debuggee: Debuggee; spec: LocatorSpec; rootObjectId?: string }> {
     let debuggee = session.debuggee;
     let scoped = spec;
+    let rootObjectId: string | undefined;
+    const frameRefIndex = scoped.queries.findIndex((query) => query.kind === "frameRef");
+    if (frameRefIndex >= 0) {
+      if (frameRefIndex !== 0) throw automationError("invalid-target", { reason: "frame-ref-must-be-root" });
+      const ref = scoped.queries[0]!.value;
+      const frame = session.frameRefs.get(ref);
+      if (!frame || frame.generation !== session.generation || frame.revision !== session.frameRevision
+        || frame.conversationId !== this.context.conversationId || frame.runId !== this.context.logIdentity?.runId) throw automationError("stale-frame", { ref });
+      const guard = () => {
+        throwIfAborted(this.context.signal);
+        if (this.sessions.get(session.tabId) !== session || session.frameRefs.get(ref) !== frame || frame.generation !== session.generation || frame.revision !== session.frameRevision)
+          throw automationError("stale-frame", { ref });
+      };
+      debuggee = frame.debuggee;
+      try {
+        if (debuggee.sessionId) await session.frameReady.get(debuggee.sessionId);
+        guard();
+        const world = await this.options.command(debuggee, "Page.createIsolatedWorld", { frameId: frame.frameId, worldName: "surf-wax-frame" });
+        guard();
+        if (!Number.isSafeInteger(world?.executionContextId)) throw automationError("frame-unavailable", { ref, reason: "missing-execution-context" });
+        const document = await this.options.command(debuggee, "Runtime.evaluate", { expression: "document", contextId: world.executionContextId, returnByValue: false, objectGroup: "surf-wax-automation" });
+        guard();
+        if (document.exceptionDetails || typeof document.result?.objectId !== "string") throw automationError("frame-unavailable", { ref, reason: "missing-frame-document" });
+        rootObjectId = document.result.objectId;
+      } catch (error) {
+        guard();
+        if (error instanceof AutomationError) throw error;
+        throw automationError("frame-unavailable", { ref, reason: error instanceof Error ? error.message : String(error) });
+      }
+      scoped = { ...scoped, queries: scoped.queries.slice(1) };
+    }
     while (true) {
       const frameIndex = scoped.queries.findIndex((query) => query.kind === "frame");
-      if (frameIndex < 0) return { debuggee, spec: scoped };
+      if (frameIndex < 0) return { debuggee, spec: scoped, ...(rootObjectId ? { rootObjectId } : {}) };
       const frame = scoped.queries[frameIndex]!;
       const ownerSpec: LocatorSpec = { queries: [...scoped.queries.slice(0, frameIndex), { ...frame, kind: "css" }] };
-      const ownerId = await this.resolveDirect(debuggee, ownerSpec);
+      const ownerId = await this.resolveDirect(debuggee, ownerSpec, rootObjectId);
       const owner = (await this.options.command(debuggee, "DOM.describeNode", { objectId: ownerId })).node;
       const child = owner?.frameId ? session.frames.get(owner.frameId) : undefined;
-      if (!child?.sessionId) return { debuggee, spec: scoped };
+      if (!child?.sessionId) return { debuggee, spec: scoped, ...(rootObjectId ? { rootObjectId } : {}) };
       await session.frameReady.get(child.sessionId);
       debuggee = child;
+      rootObjectId = undefined;
       scoped = { ...scoped, queries: scoped.queries.slice(frameIndex + 1) };
     }
   }
 
-  private async resolveDirect(debuggee: Debuggee, spec: LocatorSpec): Promise<string> {
+  private async resolveLocator(debuggee: Debuggee, spec: LocatorSpec, metadata: boolean | "nodes", rootObjectId?: string, objectGroup = "surf-wax-automation"): Promise<any> {
+    const returnByValue = metadata === true;
+    const response = rootObjectId
+      ? await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: rootObjectId,
+          functionDeclaration: `function(spec, metadata){return (${RESOLVER_SOURCE})(spec, metadata, this)}`,
+          arguments: [{ value: spec }, { value: metadata }], returnByValue, objectGroup })
+      : await this.options.command(debuggee, "Runtime.evaluate", { expression: `(${RESOLVER_SOURCE})(${JSON.stringify(spec)}, ${JSON.stringify(metadata)})`, returnByValue, objectGroup });
+    if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+    return response.result;
+  }
+
+  private async resolveDirect(debuggee: Debuggee, spec: LocatorSpec, rootObjectId?: string): Promise<string> {
     while (true) {
       throwIfAborted(this.context.signal);
-      const matches = await this.evaluateIn(debuggee, `(${RESOLVER_SOURCE})(${JSON.stringify(spec)}, true)`) as any[];
+      const matches = (await this.resolveLocator(debuggee, spec, true, rootObjectId))?.value as any[];
       if (matches.length > 1) throw automationError("strict-mode", { locator: spec, count: matches.length, candidates: matches.slice(0, 10) });
       if (matches.length === 1) {
-        const response = await this.options.command(debuggee, "Runtime.evaluate", { expression: `(${RESOLVER_SOURCE})(${JSON.stringify(spec)}, false)`, returnByValue: false, objectGroup: "surf-wax-automation" });
-        if (response.result?.objectId) return response.result.objectId;
+        const result = await this.resolveLocator(debuggee, spec, false, rootObjectId);
+        if (result?.objectId) return result.objectId;
       }
       await delay(50, this.context.signal);
     }
@@ -1388,6 +1532,7 @@ export class PageFacade {
   getByTitle(value: string, options: { exact?: boolean } = {}) { return this.runtime.locator(this.tabId, { kind: "title", value, ...options }); }
   getByTestId(value: string) { return this.runtime.locator(this.tabId, { kind: "testId", value, exact: true }); }
   frameLocator(value: string) { return this.runtime.locator(this.tabId, { kind: "frame", value }); }
+  frameRef(value: string) { return this.runtime.locator(this.tabId, { kind: "frameRef", value }); }
   goto(url: string) { return this.runtime.navigate(this.tabId, "Page.navigate", { url }); }
   reload() { return this.runtime.navigate(this.tabId, "Page.reload"); }
   goBack() { return this.runtime.history(this.tabId, -1); }

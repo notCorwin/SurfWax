@@ -110,7 +110,7 @@ describe("browser tools", () => {
     const tools = createProgramTools({} as ChromeExecutor) as Record<string, any>;
     expect(Object.keys(tools)).toEqual(PROGRAM_TOOL_REGISTRY.map(({ name }) => name));
     expect(new Set(Object.keys(tools)).size).toBe(PROGRAM_TOOL_REGISTRY.length);
-    for (const name of ["inspect_page", "find_elements", "click", "fill", "set_checked", "navigate", "list_tabs", "read_artifact", "execute_program", "list_jobs", "get_job", "cancel_job"]) expect(tools).toHaveProperty(name);
+    for (const name of ["inspect_page", "find_elements", "list_frames", "click", "fill", "set_checked", "navigate", "list_tabs", "read_artifact", "execute_program", "list_jobs", "get_job", "cancel_job"]) expect(tools).toHaveProperty(name);
     for (const name of ["inspect", "run", "jobs", "snapshot", "act", "run-code", "browser", "result", "search-tools", "install"]) expect(tools).not.toHaveProperty(name);
     expect(Object.values(tools).every((tool) => tool.deferLoading !== true)).toBe(true);
     for (const { name, summary } of PROGRAM_TOOL_REGISTRY) expect(PROGRAM_TOOL_CONTEXT).toContain(`- ${name}: ${summary}`);
@@ -209,6 +209,16 @@ describe("browser tools", () => {
     await expect(tools.find_elements.execute(input, { toolCallId: "find" })).resolves.toMatchObject({ elements: [{ ref: "t41d1e1" }], hasMore: false });
     expect(findElements).toHaveBeenCalledWith(input, undefined, expect.objectContaining({ conversationId: "c" }));
     expect(() => tools.find_elements.inputSchema.parse({ ...input, limit: 101 })).toThrow();
+  });
+
+  it("routes paginated frame discovery to the browser executor", async () => {
+    const listFrames = vi.fn(async () => ({ tabId: 41, documentId: 1, total: 1, frames: [{ frameRef: "frame-1" }], hasMore: false }));
+    const tools = createProgramTools({ listFrames } as unknown as ChromeExecutor, { conversationId: "c" }) as Record<string, any>;
+    const input = { tabId: 41, limit: 10 };
+    await expect(tools.list_frames.execute(input, { toolCallId: "frames" })).resolves.toMatchObject({ frames: [{ frameRef: "frame-1" }] });
+    expect(listFrames).toHaveBeenCalledWith(input, undefined, expect.objectContaining({ conversationId: "c" }));
+    expect(() => tools.list_frames.inputSchema.parse({ limit: 101 })).toThrow();
+    expect(tools.find_elements.inputSchema.parse({ target: { by: "role", value: "button", frame: { ref: "frame-1" } } })).toBeTruthy();
   });
 
   it("routes download metadata to the Chrome downloads reader without requiring a page", async () => {
@@ -378,6 +388,13 @@ describe("browser tools", () => {
       expect(readArtifact).toHaveBeenCalledWith(7);
       expect(prepared.at(-1)).toMatchObject({ role: "user", content: [{ type: "file", mediaType: "image/png", data: { type: "data", data: "image-7" } }] });
     }
+  });
+
+  it("keeps frame pagination visible when a large frame list is compacted", async () => {
+    const logger = { append: async (event: any) => ({ ...event, id: 17 }) } as EventLogger;
+    const frames = Array.from({ length: 100 }, (_, index) => ({ frameRef: `frame-${index}`, url: "x".repeat(160) }));
+    const result = await compactToolResult({ tabId: 41, documentId: 2, total: 200, frames, hasMore: true, nextCursor: "cursor" }, { logger, preserveSearchStatus: true });
+    expect(result).toMatchObject({ $ref: 17, tabId: 41, documentId: 2, total: 200, hasMore: true, nextCursor: "cursor", access: { artifactId: 17, path: ["frames"], offset: 0, limit: 50 } });
   });
 
   it("keeps a large search page's scope and continuation visible", async () => {

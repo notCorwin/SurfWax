@@ -40,6 +40,16 @@ describe("atomic browser tool programs", () => {
     expect(nth).toHaveBeenCalledWith(1);
   });
 
+  it("uses a discovered frame reference for an atomic action", async () => {
+    const click = vi.fn(async () => "clicked");
+    const getByRole = vi.fn(() => ({ click }));
+    const frameRef = vi.fn(() => ({ getByRole }));
+    const input = { target: { by: "role", value: "button", name: "Save", frame: { ref: "frame-1" } } };
+    expect(await execute("click", input, { page: { frameRef } })).toBe("clicked");
+    expect(frameRef).toHaveBeenCalledWith("frame-1");
+    expect(getByRole).toHaveBeenCalledWith("button", { name: "Save" });
+  });
+
   it("binds pointer movement to the observation used for its coordinates", async () => {
     const point = vi.fn(async () => "moved");
     expect(await execute("move_pointer", { observationId: "obs", x: 12, y: 34 }, { page: { point } })).toBe("moved");

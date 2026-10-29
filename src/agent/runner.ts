@@ -7,7 +7,7 @@ import type { BrowserContext } from "../chrome/executor";
 import type { EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
 import { inputBudget, modelSupportsImages, resolveModelLimit } from "./model-limits";
-import { sdkFor } from "./model-sdks";
+import { resolvedBaseURL, sdkFor } from "./model-sdks";
 import { estimatePromptInput, type ContextCompactor } from "./compaction";
 import type { ReasoningEffort } from "./reasoning";
 import { dsmlMiddleware } from "./dsml";
@@ -45,9 +45,21 @@ function usesAnthropicMessages(config: ModelConfig): boolean {
     || sdk === "gitlab-ai-provider" && (config.canonicalModelId?.startsWith("anthropic/") === true || config.modelFamily?.toLowerCase().startsWith("claude") === true);
 }
 
+/** Enable supported prompt caching only for Claude's first-party Messages API. */
+function usesClaudePromptCache(config: ModelConfig): boolean {
+  if (sdkFor(config) !== "@ai-sdk/anthropic" || !/^claude-/i.test(config.model.trim())) return false;
+  const endpoint = resolvedBaseURL(config);
+  if (!endpoint) return true; // The Anthropic SDK defaults to api.anthropic.com.
+  try {
+    const url = new URL(endpoint);
+    return url.protocol === "https:" && url.hostname === "api.anthropic.com" && !url.username && !url.password
+      && (!url.port || url.port === "443") && (url.pathname === "/v1" || url.pathname === "/");
+  } catch { return false; }
+}
+
 const READ_ONLY_TOOLS = new Set([
-  "inspect_page", "read_text", "read_value", "read_attribute", "read_checked",
-  "list_tabs", "read_artifact", "list_requests", "read_response", "read_console",
+  "inspect_page", "find_elements", "list_frames", "read_text", "read_value", "read_attribute", "read_checked",
+  "list_tabs", "list_downloads", "read_artifact", "list_requests", "read_response", "read_console",
   "read_api_reference", "list_scripts", "read_script", "list_jobs", "get_job", "list_cdp_sessions",
 ]);
 
@@ -86,8 +98,14 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
   };
   const tools = createProgramTools(options.executor, toolOptions);
   const toolOrder = Object.keys(tools);
+  const cacheClaude = usesClaudePromptCache(options.model);
+  if (cacheClaude && toolOrder.length) {
+    const last = toolOrder.at(-1)!;
+    tools[last] = { ...tools[last]!, providerOptions: { ...tools[last]!.providerOptions, anthropic: { ...tools[last]!.providerOptions?.anthropic, cacheControl: { type: "ephemeral" } } } };
+  }
   let limit: ReturnType<typeof resolveModelLimit> | undefined;
   const currentInstructions = () => createPromptSnapshot(options.compactor?.prompt?.source ?? initialPrompt.source).instructions;
+  const wireInstructions = () => cacheClaude ? { role: "system" as const, content: currentInstructions(), providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } } } : currentInstructions();
   const currentTools = () => PROMPT_TOOLS;
   const activeTools = () => currentTools().map(({ name }) => name);
   let browserDigest: string | undefined;
@@ -96,7 +114,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     model: typeof options.languageModel === "string" ? options.languageModel
       : wrapLanguageModel({ model: options.languageModel, middleware: dsmlMiddleware(logger, options.conversationId) }),
     ...(options.reasoning ? { reasoning: options.reasoning === "max" ? "xhigh" : options.reasoning } : {}),
-    instructions: currentInstructions(),
+    instructions: wireInstructions(),
     tools,
     toolOrder,
     activeTools: activeTools(),
@@ -138,7 +156,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         outgoing = await prepareMessages(prepared);
       }
       return {
-        instructions: currentInstructions(),
+        instructions: wireInstructions(),
         activeTools: activeTools(),
         ...(usesAnthropicMessages(options.model)
           ? { maxOutputTokens: options.model.maxTokensOverride ?? modelLimit?.output ?? 128_000 } : {}),

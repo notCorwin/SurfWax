@@ -361,6 +361,22 @@ export class ChromeExecutor {
     }, signal, input.timeoutMs, false);
   }
 
+  listFrames(input: { tabId?: number; cursor?: string; limit?: number; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+    const signals = [signal, context.runSignal].filter((item): item is AbortSignal => item !== undefined);
+    const effectiveSignal = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
+    return this.enqueueAbortable(async (combined) => {
+      this.activeSignal = combined; this.activeContext = context;
+      this.automation.setContext({ ...context, signal: combined });
+      try {
+        const state = await this.currentBrowserState();
+        throwIfAborted(combined);
+        const page = input.tabId === undefined ? await this.pageFor(state) : await this.boundPage(input.tabId, state);
+        throwIfAborted(combined);
+        return await this.automation.listFrames(page.tabId, { cursor: input.cursor, limit: input.limit });
+      } finally { this.activeSignal = undefined; this.activeContext = {}; await this.automation.clearContext(); }
+    }, effectiveSignal, input.timeoutMs, false);
+  }
+
   findElements(input: { target: unknown; tabId?: number; cursor?: string; limit?: number; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
     const signals = [signal, context.runSignal].filter((item): item is AbortSignal => item !== undefined);
     const effectiveSignal = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
@@ -997,7 +1013,7 @@ export class ChromeExecutor {
     const target = parseLocatorTarget(raw);
     if ("point" in target) return { click: (options?: unknown) => page.point(target.point.observationId, target.point.x, target.point.y, "click", options), dblclick: (options?: unknown) => page.point(target.point.observationId, target.point.x, target.point.y, "dblclick", options), hover: () => page.point(target.point.observationId, target.point.x, target.point.y, "hover") };
     if ("ref" in target) return page.ref(target.ref);
-    let scope = target.frame ? page.frameLocator(target.frame.value) : page;
+    let scope = target.frame ? "ref" in target.frame ? page.frameRef(target.frame.ref) : page.frameLocator(target.frame.value) : page;
     const options = { exact: target.exact };
     let locator = target.by === "role" ? scope.getByRole(target.value, { ...options, name: target.name })
       : target.by === "text" ? scope.getByText(target.value, options)

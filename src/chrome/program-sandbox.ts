@@ -33,6 +33,7 @@ function workerMain() {
     "ref",
     "locator",
     "frameLocator",
+    "frameRef",
     "getByRole",
     "getByText",
     "getByLabel",

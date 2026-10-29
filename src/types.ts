@@ -15,7 +15,7 @@ export type BrowserSelector = {
   name?: string;
   exact?: boolean;
   index?: number;
-  frame?: { by: "css"; value: string };
+  frame?: { by: "css"; value: string } | { ref: string };
 };
 
 export type BrowserTarget =

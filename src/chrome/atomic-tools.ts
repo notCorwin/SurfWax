@@ -4,7 +4,7 @@ import { z } from "zod";
 // as JSON data, never interpolated as JavaScript source.
 const target = z.union([
   z.object({ ref: z.string().min(1) }).strict(),
-  z.object({ by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testId", "css"]), value: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional(), index: z.number().int().optional(), frame: z.object({ by: z.literal("css"), value: z.string().min(1) }).strict().optional() }).strict(),
+  z.object({ by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testId", "css"]), value: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional(), index: z.number().int().optional(), frame: z.union([z.object({ by: z.literal("css"), value: z.string().min(1) }).strict(), z.object({ ref: z.string().min(1) }).strict()]).optional() }).strict(),
 ]);
 const tabId = z.number().int().nonnegative().optional();
 const timeoutMs = z.number().int().positive().optional();
@@ -25,7 +25,7 @@ const pageFields = { tabId, timeoutMs };
 const targetFields = { ...pageFields, target };
 const selector = `function locate(page, target) {
   if (target.ref !== undefined) return page.ref(target.ref);
-  const root = target.frame ? page.frameLocator(target.frame.value) : page;
+  const root = target.frame ? (target.frame.ref !== undefined ? page.frameRef(target.frame.ref) : page.frameLocator(target.frame.value)) : page;
   const methods = { role: 'getByRole', text: 'getByText', label: 'getByLabel', placeholder: 'getByPlaceholder', alt: 'getByAltText', title: 'getByTitle', testId: 'getByTestId', css: 'locator' };
   let result = root[methods[target.by]](target.value, { ...(target.name === undefined ? {} : {name:target.name}), ...(target.exact === undefined ? {} : {exact:target.exact}) });
   if (target.index !== undefined) result = result.nth(target.index);

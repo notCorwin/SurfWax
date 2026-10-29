@@ -8,6 +8,7 @@ const chains = new Set([
   "ref",
   "locator",
   "frameLocator",
+  "frameRef",
   "getByRole",
   "getByText",
   "getByLabel",
