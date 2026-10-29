@@ -5,7 +5,7 @@ export type LogEvent = {
   type: string;
   timestamp: string;
   /** Version of the value encoding, separate from user-controlled payloads. */
-  valueEncoding?: 2 | 3;
+  valueEncoding?: 2 | 3 | 4;
   content: JsonValue;
   conversationId?: string;
   runId?: string;
@@ -335,7 +335,7 @@ function bytesToBase64(bytes: Uint8Array): string {
 
 const RESERVED_LOG_TYPES = new Set(["undefined", "number", "bigint", "symbol", "function", "circular-reference", "error", "date", "array-buffer", "typed-array", "map", "set", "escaped-object", "sparse-array"]);
 
-export function toLogValue(value: unknown, active = new WeakSet<object>(), version?: 2 | 3): JsonValue {
+export function toLogValue(value: unknown, active = new WeakSet<object>(), version?: 2 | 3 | 4): JsonValue {
   if (value === null) return null;
   if (value === undefined) return { $type: "undefined", value: null };
   if (typeof value === "string" || typeof value === "boolean") return value;
@@ -360,6 +360,7 @@ export function toLogValue(value: unknown, active = new WeakSet<object>(), versi
       return details;
     }
     if (value instanceof Date) return { $type: "date", value: Number.isNaN(value.getTime()) ? "Invalid Date" : value.toISOString() };
+    if (version === 4 && value instanceof RegExp) return { $type: "regexp", source: value.source, flags: value.flags, lastIndex: toLogValue(value.lastIndex, active, version) };
     if (value instanceof ArrayBuffer) return { $type: "array-buffer", byteLength: value.byteLength, base64: bytesToBase64(new Uint8Array(value)) };
     if (ArrayBuffer.isView(value)) {
       const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
@@ -368,7 +369,7 @@ export function toLogValue(value: unknown, active = new WeakSet<object>(), versi
     if (value instanceof Map) return { $type: "map", entries: [...value].map(([key, item]) => [toLogValue(key, active, version), toLogValue(item, active, version)]) };
     if (value instanceof Set) return { $type: "set", values: [...value].map((item) => toLogValue(item, active, version)) };
     if (Array.isArray(value)) {
-      if (version === 3 && value.length >= 32768) {
+      if ((version === 3 || version === 4) && value.length >= 32768) {
         const keys = Object.getOwnPropertyNames(value).filter((key) => /^(?:0|[1-9]\d*)$/.test(key) && Number(key) < value.length);
         if (keys.length < value.length * 0.8) return { $type: "sparse-array", length: value.length,
           entries: keys.map((key) => [Number(key), toLogValue(value[Number(key)], active, version)]) };
@@ -378,7 +379,7 @@ export function toLogValue(value: unknown, active = new WeakSet<object>(), versi
 
     const entries = Object.entries(value).map(([key, item]) => [key, toLogValue(item, active, version)] as const);
     const tag = entries.find(([key]) => key === "$type")?.[1];
-    if (version !== undefined && typeof tag === "string" && RESERVED_LOG_TYPES.has(tag))
+    if (version !== undefined && typeof tag === "string" && (RESERVED_LOG_TYPES.has(tag) || version === 4 && tag === "regexp"))
       return { $type: "escaped-object", entries: entries.map(([key, item]) => [key, item]) };
     return Object.fromEntries(entries);
   } finally {
@@ -386,7 +387,7 @@ export function toLogValue(value: unknown, active = new WeakSet<object>(), versi
   }
 }
 
-export function fromLogValue(value: unknown, version?: 2 | 3): unknown {
+export function fromLogValue(value: unknown, version?: 2 | 3 | 4): unknown {
   if (Array.isArray(value)) return value.map((item) => fromLogValue(item, version));
   if (!value || typeof value !== "object") return value;
   const record = value as Record<string, unknown>;
@@ -397,7 +398,7 @@ export function fromLogValue(value: unknown, version?: 2 | 3): unknown {
       throw new Error("Invalid escaped log object");
     return Object.fromEntries(record.entries.map(([key, item]) => [key, fromLogValue(item, version)]));
   }
-  if (version === 3 && record.$type === "sparse-array") {
+  if ((version === 3 || version === 4) && record.$type === "sparse-array") {
     if (Object.keys(record).length !== 3 || !Number.isSafeInteger(record.length) || Number(record.length) < 0 || Number(record.length) > 0xffff_ffff || !Array.isArray(record.entries)) throw new Error("Invalid encoded sparse array");
     const result = new Array(Number(record.length));
     let previous = -1;
@@ -418,6 +419,45 @@ export function fromLogValue(value: unknown, version?: 2 | 3): unknown {
     if (typeof record.value !== "string" || !/^-?(?:0|[1-9]\d*)$/.test(record.value)) throw new Error("Invalid encoded log bigint");
     return BigInt(record.value);
   }
+  if (version !== undefined && record.$type === "date") {
+    if (Object.keys(record).length !== 2 || typeof record.value !== "string") throw new Error("Invalid encoded log date");
+    if (record.value === "Invalid Date") return new Date(NaN);
+    const date = new Date(record.value);
+    if (!Number.isFinite(date.getTime()) || date.toISOString() !== record.value) throw new Error("Invalid encoded log date");
+    return date;
+  }
+  if (version === 4 && record.$type === "regexp") {
+    if (Object.keys(record).length !== 4 || typeof record.source !== "string" || typeof record.flags !== "string" || !Object.hasOwn(record, "lastIndex")) throw new Error("Invalid encoded log regexp");
+    const regexp = new RegExp(record.source, record.flags);
+    regexp.lastIndex = fromLogValue(record.lastIndex, version) as number;
+    return regexp;
+  }
+  if (version !== undefined && (record.$type === "array-buffer" || record.$type === "typed-array")) {
+    const view = record.$type === "typed-array";
+    if (Object.keys(record).length !== (view ? 4 : 3) || typeof record.base64 !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(record.base64)
+      || !Number.isSafeInteger(record.byteLength) || Number(record.byteLength) < 0 || (view && typeof record.name !== "string")) throw new Error("Invalid encoded log buffer");
+    const decoded = atob(record.base64);
+    if (decoded.length !== record.byteLength) throw new Error("Invalid encoded log buffer length");
+    const bytes = Uint8Array.from(decoded, (character) => character.charCodeAt(0));
+    if (!view) return bytes.buffer;
+    if (record.name === "DataView") return new DataView(bytes.buffer);
+    const constructors: Record<string, new (buffer: ArrayBuffer) => ArrayBufferView> = {
+      Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array, Uint32Array,
+      Float32Array, Float64Array, BigInt64Array, BigUint64Array,
+      ...("Float16Array" in globalThis ? { Float16Array: (globalThis as any).Float16Array } : {}),
+    };
+    const constructor = constructors[record.name as string];
+    if (!Object.hasOwn(constructors, record.name as string) || !constructor) throw new Error("Invalid encoded log buffer type");
+    try { return new constructor(bytes.buffer); } catch { throw new Error("Invalid encoded log buffer alignment"); }
+  }
+  if (version !== undefined && record.$type === "map") {
+    if (Object.keys(record).length !== 2 || !Array.isArray(record.entries) || record.entries.some((entry) => !Array.isArray(entry) || entry.length !== 2)) throw new Error("Invalid encoded log map");
+    return new Map(record.entries.map(([key, item]) => [fromLogValue(key, version), fromLogValue(item, version)]));
+  }
+  if (version !== undefined && record.$type === "set") {
+    if (Object.keys(record).length !== 2 || !Array.isArray(record.values)) throw new Error("Invalid encoded log set");
+    return new Set(record.values.map((item) => fromLogValue(item, version)));
+  }
   if (record.$type === "undefined" && record.value === null && Object.keys(record).length === 2) return undefined;
   return Object.fromEntries(Object.entries(record).map(([key, item]) => [key, fromLogValue(item, version)]));
 }
@@ -433,6 +473,80 @@ export function stringifyLogSafe(value: unknown, space?: number): string | undef
   }, space);
   if (!hasSpecial) return ordinary;
   return `[Surf Wax log value encoding v2]\n${JSON.stringify(toLogValue(value, undefined, 2), null, space)}`;
+}
+
+const ARTIFACT_CACHE_BYTES = 8 * 1024 * 1024;
+
+/** Conservative retained-size estimate; large holey arrays may still have dense backing storage. */
+function artifactRetainedBytes(value: unknown): number {
+  let used = 0;
+  const seen = new WeakSet<object>();
+  const visit = (item: unknown, depth: number): void => {
+    if (used > ARTIFACT_CACHE_BYTES) return;
+    if (depth > 100) { used = Infinity; return; }
+    if (typeof item === "string") { used += 64 + item.length * 2; return; }
+    if (typeof item === "bigint") { used += 64 + item.toString().length * 2; return; }
+    if (!item || typeof item !== "object") { used += 16; return; }
+    if (seen.has(item)) return;
+    seen.add(item);
+    used += 128;
+    if (item instanceof ArrayBuffer) { used += item.byteLength; return; }
+    if (ArrayBuffer.isView(item)) { used += item.byteLength; return; }
+    if (item instanceof Date) return;
+    if (item instanceof RegExp) { used += 64 + (item.source.length + item.flags.length) * 2; visit(item.lastIndex, depth + 1); return; }
+    if (Array.isArray(item)) {
+      used += item.length * 8;
+      if (used > ARTIFACT_CACHE_BYTES) return;
+    }
+    if (item instanceof Map) {
+      for (const [key, entry] of item) { used += 64; visit(key, depth + 1); visit(entry, depth + 1); if (used > ARTIFACT_CACHE_BYTES) break; }
+      return;
+    }
+    if (item instanceof Set) {
+      for (const entry of item) { used += 48; visit(entry, depth + 1); if (used > ARTIFACT_CACHE_BYTES) break; }
+      return;
+    }
+    for (const key in item) if (Object.hasOwn(item, key)) {
+      used += 64 + key.length * 2;
+      visit((item as Record<string, unknown>)[key], depth + 1);
+      if (used > ARTIFACT_CACHE_BYTES) break;
+    }
+  };
+  visit(value, 0);
+  return used;
+}
+
+/** Never expose the mutable decoded cache. Preserve sparse holes and native values. */
+function cloneArtifactValue(value: unknown, seen = new WeakMap<object, unknown>()): unknown {
+  if (!value || typeof value !== "object") return value;
+  if (seen.has(value)) return seen.get(value);
+  if (value instanceof Date) { const result = new Date(value.getTime()); seen.set(value, result); return result; }
+  if (value instanceof ArrayBuffer) { const result = value.slice(0); seen.set(value, result); return result; }
+  if (value instanceof DataView) {
+    const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
+    const result = new DataView(bytes.buffer); seen.set(value, result); return result;
+  }
+  if (ArrayBuffer.isView(value)) { const result = (value as Uint8Array).slice(); seen.set(value, result); return result; }
+  if (value instanceof RegExp) {
+    const result = new RegExp(value.source, value.flags); seen.set(value, result);
+    result.lastIndex = cloneArtifactValue(value.lastIndex, seen) as number;
+    return result;
+  }
+  if (value instanceof Map) {
+    const result = new Map(); seen.set(value, result);
+    for (const [key, entry] of value) result.set(cloneArtifactValue(key, seen), cloneArtifactValue(entry, seen));
+    return result;
+  }
+  if (value instanceof Set) {
+    const result = new Set(); seen.set(value, result);
+    for (const entry of value) result.add(cloneArtifactValue(entry, seen));
+    return result;
+  }
+  const result: any = Array.isArray(value) ? new Array(value.length) : {};
+  seen.set(value, result);
+  for (const key in value) if (Object.hasOwn(value, key))
+    Object.defineProperty(result, key, { value: cloneArtifactValue((value as any)[key], seen), enumerable: true, configurable: true, writable: true });
+  return result;
 }
 
 export function isConversationMessage(value: unknown): value is ConversationMessage {
@@ -573,6 +687,11 @@ export class EventLogger {
   private generation: number | undefined = 0;
   private handshakePaused = false;
   private listeners = new Set<(event: LogEvent) => void>();
+  private artifactEpoch: string | undefined;
+  private artifactRevision = 0;
+  private artifactBytes = 0;
+  private artifactCache = new Map<number, { conversationId: string | undefined; value: unknown; bytes: number }>();
+  private artifactLoads = new Map<number, Promise<{ conversationId: string | undefined; value: unknown; bytes: number } | undefined>>();
 
   constructor(private readonly options: {
     store?: EventStore;
@@ -650,20 +769,20 @@ export class EventLogger {
     return {
       timestamp: (this.options.now?.() ?? new Date()).toISOString(),
       type: record.type,
-      valueEncoding: 3,
-      content: toLogValue(Object.hasOwn(record, "content") ? record.content : null, undefined, 3),
+      valueEncoding: 4,
+      content: toLogValue(Object.hasOwn(record, "content") ? record.content : null, undefined, 4),
       ...(record.conversationId ? { conversationId: record.conversationId } : {}),
       ...(record.parentId !== undefined ? { parentId: record.parentId } : {}),
       ...(run ? { runId: run } : {}),
-      ...(Object.hasOwn(record, "stopReason") ? { stopReason: toLogValue(record.stopReason, undefined, 3) } : {}),
-      ...(Object.hasOwn(record, "usage") ? { usage: toLogValue(record.usage, undefined, 3) } : {}),
-      ...(Object.hasOwn(record, "providerMetadata") ? { providerMetadata: toLogValue(record.providerMetadata, undefined, 3) } : {}),
+      ...(Object.hasOwn(record, "stopReason") ? { stopReason: toLogValue(record.stopReason, undefined, 4) } : {}),
+      ...(Object.hasOwn(record, "usage") ? { usage: toLogValue(record.usage, undefined, 4) } : {}),
+      ...(Object.hasOwn(record, "providerMetadata") ? { providerMetadata: toLogValue(record.providerMetadata, undefined, 4) } : {}),
       ...(record.toolCallId !== undefined ? { toolCallId: !record.toolCallIdCanonical && phase !== undefined && phase > 0 ? `${phase}:${record.toolCallId}` : record.toolCallId } : {}),
-      ...(Object.hasOwn(record, "input") ? { input: toLogValue(record.input, undefined, 3) } : {}),
-      ...(Object.hasOwn(record, "output") ? { output: toLogValue(record.output, undefined, 3) } : {}),
-      ...(Object.hasOwn(record, "error") ? { error: toLogValue(record.error, undefined, 3) } : {}),
-      ...(Object.hasOwn(record, "retry") ? { retry: toLogValue(record.retry, undefined, 3) } : {}),
-      ...(Object.hasOwn(record, "abort") ? { abort: toLogValue(record.abort, undefined, 3) } : {}),
+      ...(Object.hasOwn(record, "input") ? { input: toLogValue(record.input, undefined, 4) } : {}),
+      ...(Object.hasOwn(record, "output") ? { output: toLogValue(record.output, undefined, 4) } : {}),
+      ...(Object.hasOwn(record, "error") ? { error: toLogValue(record.error, undefined, 4) } : {}),
+      ...(Object.hasOwn(record, "retry") ? { retry: toLogValue(record.retry, undefined, 4) } : {}),
+      ...(Object.hasOwn(record, "abort") ? { abort: toLogValue(record.abort, undefined, 4) } : {}),
       ...(record.latencyMs !== undefined ? { latencyMs: record.latencyMs } : {}),
     };
   }
@@ -947,24 +1066,74 @@ export class EventLogger {
     return (this.options.store ?? getEventStore()).all();
   }
 
+  private resetArtifactCache(epoch?: string): void {
+    this.artifactEpoch = epoch;
+    this.artifactRevision++;
+    this.artifactBytes = 0;
+    this.artifactCache.clear();
+    this.artifactLoads.clear();
+  }
+
+  private async loadArtifact(store: EventStore, floor: number, id: number): Promise<{ conversationId: string | undefined; value: unknown; bytes: number } | undefined> {
+    const epoch = JSON.stringify([this.generation ?? null, floor]);
+    if (this.artifactEpoch !== epoch) this.resetArtifactCache(epoch);
+    if (id <= floor) return undefined;
+    const cached = this.artifactCache.get(id);
+    if (cached) {
+      this.artifactCache.delete(id);
+      this.artifactCache.set(id, cached);
+      return cached;
+    }
+    let task = this.artifactLoads.get(id);
+    if (!task) {
+      const revision = this.artifactRevision;
+      task = (async () => {
+        const event = store.get ? await store.get(id) : (await store.all()).find((item) => item.id === id);
+        if (event?.type !== "tool.result.data") return undefined;
+        const value = fromLogValue(event.output, event.valueEncoding);
+        const bytes = artifactRetainedBytes(value);
+        const entry = { conversationId: event.conversationId, value, bytes };
+        if (bytes <= ARTIFACT_CACHE_BYTES && this.artifactRevision === revision && this.artifactEpoch === epoch) {
+          while (this.artifactBytes + bytes > ARTIFACT_CACHE_BYTES) {
+            const oldest = this.artifactCache.keys().next().value!;
+            this.artifactBytes -= this.artifactCache.get(oldest)!.bytes;
+            this.artifactCache.delete(oldest);
+          }
+          this.artifactCache.set(id, entry);
+          this.artifactBytes += bytes;
+        }
+        return entry;
+      })();
+      this.artifactLoads.set(id, task);
+    }
+    try { return await task; }
+    finally { if (this.artifactLoads.get(id) === task) this.artifactLoads.delete(id); }
+  }
+
   async result(id: number, selection: { path?: string | Array<string | number>; offset?: number; limit?: number } = {}, conversationId?: string): Promise<unknown> {
     if (!Number.isSafeInteger(id) || id < 1) throw new Error("Invalid result event ID");
-    const event = await this.readCanonical(async (store, floor) => id > floor
-      ? (store.get ? await store.get(id) : (await store.all()).find((item) => item.id === id)) : undefined);
-    if (event?.type !== "tool.result.data" || conversationId !== undefined && event.conversationId !== conversationId) throw new Error(`Tool result ${id} is unavailable`);
-    let value = fromLogValue(event.output, event.valueEncoding);
+    const event = await this.readCanonical((store, floor) => this.loadArtifact(store, floor, id));
+    if (!event || conversationId !== undefined && event.conversationId !== conversationId) throw new Error(`Tool result ${id} is unavailable`);
+    let value = event.value;
     const path = typeof selection.path === "string" ? [selection.path] : selection.path ?? [];
     if (!Array.isArray(path) || path.some((part) => typeof part !== "string" && (!Number.isSafeInteger(part) || part < 0)))
       throw new Error("Tool result path must contain only strings and nonnegative integer indices");
     for (const part of path) {
+      if (typeof part === "number" && (value instanceof Map || value instanceof Set)) {
+        if (part >= value.size) throw Object.assign(new Error(`Tool result ${id} has no path ${JSON.stringify(path)}`), { code: "result-path-not-found" });
+        const iterator = value instanceof Map ? value.entries() : value.values();
+        for (let index = 0; index < part; index++) iterator.next();
+        value = iterator.next().value;
+        continue;
+      }
       if (value === null || typeof value !== "object" && typeof value !== "string" || !Object.hasOwn(Object(value), part))
         throw Object.assign(new Error(`Tool result ${id} has no path ${JSON.stringify(path)}`), { code: "result-path-not-found" });
       value = (value as any)[part];
     }
     if (selection.offset !== undefined || selection.limit !== undefined) {
-      if (!Array.isArray(value) && typeof value !== "string") {
+      if (!Array.isArray(value) && typeof value !== "string" && !(value instanceof Map) && !(value instanceof Set) && !(value instanceof ArrayBuffer) && !ArrayBuffer.isView(value)) {
         const keys = value && typeof value === "object" ? Object.keys(value).slice(0, 16) : [];
-        throw new Error(`offset/limit requires an array or string result${keys.length ? `; select one first with { path: [${JSON.stringify(keys[0])}], offset: 0, limit: 4000 }. Available keys: ${keys.join(", ")}` : ""}`);
+        throw new Error(`offset/limit requires an array, string, Map, Set, ArrayBuffer or binary view${keys.length ? `; select one first with { path: [${JSON.stringify(keys[0])}], offset: 0, limit: 4000 }. Available keys: ${keys.join(", ")}` : ""}`);
       }
       const offset = Math.max(0, selection.offset ?? 0);
       const end = selection.limit === undefined ? undefined : offset + Math.max(0, selection.limit);
@@ -985,9 +1154,30 @@ export class EventLogger {
             value = sliced;
           } else value = array.slice(offset, end);
         } else value = array.slice(offset, end);
+      } else if (value instanceof Map || value instanceof Set) {
+        const first = Math.min(value.size, Math.max(0, Math.trunc(offset) || 0));
+        const last = end === undefined ? value.size : Math.min(value.size, Math.max(0, Math.trunc(end) || 0));
+        const result = value instanceof Map ? new Map() : new Set();
+        let index = 0;
+        for (const item of first < last ? value : []) {
+          if (index >= last) break;
+          if (index++ < first) continue;
+          if (result instanceof Map) result.set((item as [unknown, unknown])[0], (item as [unknown, unknown])[1]);
+          else result.add(item);
+        }
+        value = result;
+      } else if (value instanceof DataView) {
+        const first = Math.min(value.byteLength, Math.max(0, Math.trunc(offset) || 0));
+        const last = end === undefined ? value.byteLength : Math.min(value.byteLength, Math.max(0, Math.trunc(end) || 0));
+        // DataView has no slice; clone only the selected bytes into a new view.
+        const bytes = new Uint8Array(value.buffer, value.byteOffset + first, Math.max(0, last - first)).slice();
+        value = new DataView(bytes.buffer);
+      } else if (ArrayBuffer.isView(value)) {
+        // TypedArray.slice uses element indexes and preserves its constructor.
+        value = (value as Uint8Array).slice(offset, end);
       } else value = value.slice(offset, end);
     }
-    return value;
+    return cloneArtifactValue(value);
   }
 
   async conversation(conversationId: string): Promise<LogEvent[]> {
@@ -1114,6 +1304,7 @@ export class EventLogger {
     const event = this.event({ type: "log.cleared", content: null });
     const [stored] = await this.enqueue([event]);
     if (!stored) throw new Error("Could not persist log clear");
+    this.resetArtifactCache();
   }
 
   resume(): void { this.accepting = true; }
@@ -1121,6 +1312,7 @@ export class EventLogger {
   stop(): void {
     this.accepting = false;
     this.activeRuns.clear();
+    this.resetArtifactCache();
   }
 
   subscribe(listener: (event: LogEvent) => void): () => void {

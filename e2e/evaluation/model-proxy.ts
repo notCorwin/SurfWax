@@ -4,10 +4,6 @@ import { Readable } from "node:stream";
 
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-export function businessScore(orders: unknown, decoyClicks: string | null, order: string, service: string): boolean {
-  return JSON.stringify(orders) === JSON.stringify([{ order, service, confirmed: true }]) && decoyClicks === null;
-}
-
 export interface RequestEvidence {
   kind: "agent" | "auxiliary";
   bytes: number;

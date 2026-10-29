@@ -11,7 +11,7 @@ const elementTargetObject = z.union([
   z.object({ ref: z.string().min(1) }).strict(),
   z.object({ by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testId", "css"]), value: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional(), index: z.number().int().optional(), frame: z.union([z.object({ by: z.literal("css"), value: z.string().min(1) }).strict(), z.object({ ref: z.string().min(1) }).strict()]).optional() }).strict(),
 ]);
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v16";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v17";
 export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetObject]).optional(),
   fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional(), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
@@ -58,8 +58,8 @@ browser: page(tabId); tabs.list()/open(url?)/select(tabId)/close(tabId); scripts
 browser.runIn({kind:'page',tabId,world:'MAIN'|'ISOLATED'|'USER_SCRIPT',frameId?,documentId?},codeBody): explicit execution domain. MAIN/ISOLATED root only; USER_SCRIPT supports Chrome frameId or documentId. Use frameLocator.evaluate for arbitrary supported frames. No automatic context substitution.
 net.fetch({context:'page'|'extension',url,tabId?,init?}) returns {url,status,ok,headers,body}; no page-to-extension fallback. Page fetch obeys page origin/cookies/CORS; extension fetch uses extension host permissions. net.requests(options?,tabId?) returns {requests,integrity,hasMore,nextOffset?} for captured history (not all traffic); net.console(options?,tabId?) returns the same metadata with messages instead of requests. hasMore can be null when unknown and offsets refer to a live list. net.request(requestRef,tabId?) and net.responseBody(requestRef,tabId?) read captured requests.
 protocol.sessions(tabId?) lists root/child CDP handles; protocol.send({tabId,sessionId?},method,params?) sends any Chrome CDP method available to the extension. Arbitrary JS/CDP/fetch are effectful; there is no readonly override. inspect.documentId is the local navigation generation; USER_SCRIPT documentId uses Chrome's native scripting document ID. File URL sources are fetched in extension context.
-artifacts.read(id,{path?,offset?,limit?}); text(filename,text,mimeType?,save=false); save(id,filename?). Files and images stay internal unless the user requested download/export. emit(value) persists incremental output; check(condition,message?) records a verified assertion; sleep(ms) and signal support cancellation. Completed operations only confirm dispatch/return; verify application outcomes. Queued operations are not dispatched, uncertain effects must be inspected before continuing. Program computation uses a disposable opaque-origin sandbox Worker; browser capabilities are mediated by the Side Panel. Closing the panel cancels jobs and revokes capabilities; arbitrary program finally blocks are not guaranteed to run. Only records survive restart, never arbitrary JS stacks.`;
-export const PROGRAM_TOOL_CONTEXT = `Available tools:\n${PROGRAM_TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n")}\nresultType=undefined marks an undefined result. undefinedPaths, holePaths, numberPaths and bigintPaths are relative to result; numberPaths entries hold {path,value} for NaN, Infinity, -Infinity or -0, and bigintPaths hold decimal strings. These replace values with null. Large results provide paged sidecar access. If envelopeWrapped=true, reconstruct the original tool envelope from result and its sidecars; outer fields summarize status.`;
+artifacts.read(id,{path?,offset?,limit?}) pages arrays/strings, Map/Set entries, ArrayBuffer/DataView bytes and TypedArray elements; a numeric path segment selects a Map's [key,value] pair or a Set's item. text(filename,text,mimeType?,save=false); save(id,filename?). Files and images stay internal unless the user requested download/export. emit(value) persists incremental output; check(condition,message?) records a verified assertion; sleep(ms) and signal support cancellation. Functions cannot be serialized as data; evaluate accepts a function as its first argument. Completed operations only confirm dispatch/return; verify application outcomes. Queued operations are not dispatched, uncertain effects must be inspected before continuing. Program computation uses a disposable opaque-origin sandbox Worker; browser capabilities are mediated by the Side Panel. Closing the panel cancels jobs and revokes capabilities; arbitrary program finally blocks are not guaranteed to run. Only records survive restart, never arbitrary JS stacks.`;
+export const PROGRAM_TOOL_CONTEXT = `Available tools:\n${PROGRAM_TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n")}\nresultType=undefined marks an undefined result. undefinedPaths, holePaths, numberPaths and bigintPaths are relative to result; numberPaths entries hold {path,value} for NaN, Infinity, -Infinity or -0, and bigintPaths hold decimal strings. These replace values with null. typePaths marks non-JSON types: date is ISO or null for invalid; array-buffer and typed-array are base64 bytes (typed-array name identifies the view); regexp is {source,flags,lastIndex}; map is key/value pairs; set is an array. Apply the other sidecars first, then typePaths from deepest path to shallowest. Large results provide paged sidecar access. If envelopeWrapped=true, reconstruct the original tool envelope from result and its sidecars; outer fields summarize status.`;
 
 export function createProgramTools(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string; callId?: () => string | undefined; visualEnabled?: () => Promise<boolean>; scheduler?: ToolScheduler; runSignal?: AbortSignal } = {}): Record<string, ReturnType<typeof dynamicTool>> {
   return Object.fromEntries(PROGRAM_TOOL_REGISTRY.map((definition) => [definition.name, dynamicTool({
@@ -341,13 +341,29 @@ function valueAt(value: unknown, path: readonly (string | number)[]): unknown {
   return path.reduce<unknown>((current, part) => current !== null && typeof current === "object" ? (current as any)[part] : undefined, value);
 }
 
+function isPageable(value: unknown): boolean {
+  return typeof value === "string" || Array.isArray(value) || value instanceof Map || value instanceof Set || value instanceof ArrayBuffer || ArrayBuffer.isView(value);
+}
+
+function nativePageLimit(value: unknown): number | undefined {
+  if (value instanceof Map || value instanceof Set || Array.isArray(value)) return 25;
+  if (value instanceof ArrayBuffer || value instanceof DataView) return 3072;
+  if (ArrayBuffer.isView(value)) return Math.max(1, Math.floor(3072 / ((value as any).BYTES_PER_ELEMENT || 1)));
+  return undefined;
+}
+
+function pageValue(nativeValue: unknown, normalizedValue: unknown): unknown {
+  return nativeValue instanceof Map || nativeValue instanceof Set || nativeValue instanceof ArrayBuffer || ArrayBuffer.isView(nativeValue)
+    ? nativeValue : normalizedValue;
+}
+
 function readablePathOf(value: unknown): Array<string | number> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   for (const path of [["result", "snapshot"], ["result", "actual"], ["result"], ["snapshot"], ["observation", "snapshot"], ["text"], ["html"]] as const) {
     const selected = valueAt(value, path);
-    if (typeof selected === "string" || Array.isArray(selected)) return [...path];
+    if (isPageable(selected)) return [...path];
   }
-  const key = Object.keys(value).find((candidate) => typeof (value as Record<string, unknown>)[candidate] === "string" || Array.isArray((value as Record<string, unknown>)[candidate]));
+  const key = Object.keys(value).find((candidate) => isPageable((value as Record<string, unknown>)[candidate]));
   return key ? [key] : undefined;
 }
 
@@ -378,7 +394,7 @@ async function storeUnnormalizedResult(value: unknown, options: { logger?: Event
     : inspection && Array.isArray(inspection.items) ? ["items"] : readablePathOf(value);
   const selected = path ? valueAt(value, path) : value;
   const access = (selectedPath: readonly (string | number)[] | undefined, item: unknown) => ({ artifactId: event.id,
-    ...(selectedPath ? { path: selectedPath } : {}), ...(Array.isArray(item) ? { offset: 0, limit: 25 } : typeof item === "string" ? { offset: 0, limit: 1000 } : {}) });
+    ...(selectedPath ? { path: selectedPath } : {}), ...(nativePageLimit(item) !== undefined ? { offset: 0, limit: nativePageLimit(item) } : typeof item === "string" ? { offset: 0, limit: 1000 } : {}) });
   const failure = root?.ok === false || root?.type === "tool-error";
   const errorPath = root && Object.hasOwn(root, "error") ? ["error"] : ["result", "error"];
   const error = failure ? valueAt(value, errorPath) : undefined;
@@ -419,6 +435,8 @@ function artifactAccess(artifactId: number, path: readonly (string | number)[] |
   oversizedItem?: { path: readonly (string | number)[]; guidance: string };
 } {
   const access: { artifactId: number; path?: readonly (string | number)[]; offset?: number; limit?: number } = { artifactId, ...(path ? { path } : {}) };
+  if (value instanceof Map || value instanceof Set || value instanceof ArrayBuffer || ArrayBuffer.isView(value))
+    return { access: { ...access, offset: 0, limit: nativePageLimit(value) } };
   if (typeof value === "string") {
     let length = previewString(value, 4000, PREVIEW_BYTES).length;
     if (length && length < value.length && /[\uD800-\uDBFF]/.test(value[length - 1]!) && /[\uDC00-\uDFFF]/.test(value[length]!)) length -= 1;
@@ -484,16 +502,18 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
   const path = diagnostic && Array.isArray(diagnostic.requests) ? [...prefix, "result", "requests"] : diagnostic && Array.isArray(diagnostic.messages) ? [...prefix, "result", "messages"] : browserEvents && Array.isArray(browserEvents.events) ? [...prefix, "events"] : job && Array.isArray(job.events) ? [...prefix, "events"] : search && Array.isArray(search.elements) ? [...prefix, "elements"] : search && Array.isArray(search.frames) ? [...prefix, "frames"]
     : inspection && Array.isArray(inspection.items) ? [...prefix, "items"] : readablePathOf(value);
   const selected = path ? valueAt(value, path) : value;
-  const { access, oversizedItem } = artifactAccess(event.id, path, selected);
-  const resultRead = root && Object.hasOwn(root, "result") ? artifactAccess(event.id, ["result"], root.result) : undefined;
+  const { access, oversizedItem } = artifactAccess(event.id, path, pageValue(path ? valueAt(storedValue, path) : storedValue, selected));
+  const resultRead = root && Object.hasOwn(root, "result") ? artifactAccess(event.id, ["result"], pageValue(valueAt(storedValue, ["result"]), root.result)) : undefined;
   const undefinedPaths = options.preserveArtifactValue && Array.isArray(root?.undefinedPaths) ? root.undefinedPaths : undefined;
   const holePaths = options.preserveArtifactValue && Array.isArray(root?.holePaths) ? root.holePaths : undefined;
   const numberPaths = options.preserveArtifactValue && Array.isArray(root?.numberPaths) ? root.numberPaths : undefined;
   const bigintPaths = options.preserveArtifactValue && Array.isArray(root?.bigintPaths) ? root.bigintPaths : undefined;
+  const typePaths = options.preserveArtifactValue && Array.isArray(root?.typePaths) ? root.typePaths : undefined;
   const undefinedPathsRead = undefinedPaths?.length ? artifactAccess(event.id, ["undefinedPaths"], undefinedPaths) : undefined;
   const holePathsRead = holePaths?.length ? artifactAccess(event.id, ["holePaths"], holePaths) : undefined;
   const numberPathsRead = numberPaths?.length ? artifactAccess(event.id, ["numberPaths"], numberPaths) : undefined;
   const bigintPathsRead = bigintPaths?.length ? artifactAccess(event.id, ["bigintPaths"], bigintPaths) : undefined;
+  const typePathsRead = typePaths?.length ? artifactAccess(event.id, ["typePaths"], typePaths) : undefined;
   const verificationEnvelope = !options.preserveVerification ? undefined
     : root?.envelopeWrapped === true && root.result && typeof root.result === "object" ? root.result as Record<string, unknown> : root;
   const verification = verificationEnvelope && "result" in verificationEnvelope
@@ -519,7 +539,9 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
       ...(numberPathsRead.oversizedItem ? { numberPathsOversizedItem: numberPathsRead.oversizedItem } : {}) } : {}),
     ...(bigintPathsRead ? { bigintCount: bigintPaths!.length, bigintPathsAccess: bigintPathsRead.access,
       ...(bigintPathsRead.oversizedItem ? { bigintPathsOversizedItem: bigintPathsRead.oversizedItem } : {}) } : {}),
-    ...(undefinedPaths?.length || holePaths?.length || numberPaths?.length || bigintPaths?.length ? { pathsNote: "Paths are relative to this returned result, including its requested slice; read the sidecars before interpreting null values." } : {}),
+    ...(typePathsRead ? { typeCount: typePaths!.length, typePathsAccess: typePathsRead.access,
+      ...(typePathsRead.oversizedItem ? { typePathsOversizedItem: typePathsRead.oversizedItem } : {}) } : {}),
+    ...(undefinedPaths?.length || holePaths?.length || numberPaths?.length || bigintPaths?.length || typePaths?.length ? { pathsNote: "Paths are relative to this returned result, including its requested slice; read the sidecars before interpreting values." } : {}),
     ...(failure ? { ...(root?.ok === false ? { ok: false } : {}), ...(root?.type === "tool-error" ? { type: "tool-error" } : {}),
       ...failureMetadata(root!),
       ...(Object.hasOwn(root!, "receipts") ? { receiptsAccess: { artifactId: event.id, path: ["receipts"] } } : {}),

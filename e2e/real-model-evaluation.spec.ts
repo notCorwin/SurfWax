@@ -2,8 +2,9 @@ import { execFileSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect } from "@playwright/test";
-import { test, startProvider, openExtension, dispose, configure, readEvents, closeServer } from "./fixtures";
-import { businessScore, modelProxy, usageEvidence } from "./evaluation/model-proxy";
+import { test, openExtension, dispose, configure, readEvents, closeServer } from "./fixtures";
+import { modelProxy, usageEvidence } from "./evaluation/model-proxy";
+import { businessScore, orderFixture } from "./evaluation/order-fixture";
 
 test.use({ trace: "off", screenshot: "off", video: "off" });
 
@@ -22,38 +23,16 @@ test("@real-model cross-frame order", async () => {
   const order = `ORDER-${seed}`;
   const started = Date.now();
   const proxy = await modelProxy(upstream, key);
-  let fixture: Awaited<ReturnType<typeof startProvider>> | undefined;
+  let fixture: Awaited<ReturnType<typeof orderFixture>> | undefined;
   let opened: Awaited<ReturnType<typeof openExtension>> | undefined;
   let events: any[] = [], outcome = "setup_failed", businessVerified = false;
   try {
-    fixture = await startProvider([]);
+    fixture = await orderFixture();
     opened = await openExtension();
     const target = await opened.context.newPage();
-    await target.goto(`${fixture.origin}/complex`);
-    await target.evaluate(() => {
-      const frame = document.querySelector<HTMLIFrameElement>('iframe[src*=localhost]')!;
-      document.querySelector<HTMLIFrameElement>('iframe[src="/same-frame"]')!.style.display = "none";
-      frame.style.cssText = "width:540px;height:360px;transform:none";
-      const decoy = document.createElement("button"); decoy.textContent = "Submit order";
-      decoy.onclick = () => { document.body.dataset.decoyClicks = String(Number(document.body.dataset.decoyClicks || 0) + 1); };
-      document.body.append(decoy);
-    });
+    await target.goto(fixture.origin);
     const frame = target.frames().find((item) => item.url().includes("localhost"));
     if (!frame) throw new Error("Fixture frame missing");
-    await frame.evaluate(() => {
-      document.body.innerHTML = `<label>Order reference <input id="order"></label>
-        <label>Service <select id="service"><option value="standard">Standard</option><option value="express">Express</option><option value="economy">Economy</option></select></label>
-        <label><input type="checkbox" id="confirmed"> Confirm details</label>
-        <button id="submit">Submit order</button><output id="status">Not submitted</output>`;
-      (window as any).businessOrders = [];
-      document.querySelector<HTMLButtonElement>("#submit")!.onclick = () => {
-        const submitted = { order: document.querySelector<HTMLInputElement>("#order")!.value,
-          service: document.querySelector<HTMLSelectElement>("#service")!.value,
-          confirmed: document.querySelector<HTMLInputElement>("#confirmed")!.checked };
-        (window as any).businessOrders.push(submitted);
-        document.querySelector("#status")!.textContent = "Submitted " + submitted.order;
-      };
-    });
     const options = await configure(opened.context, opened.page, proxy.baseURL);
     await options.getByLabel("Model ID", { exact: true }).fill(model);
     await options.getByLabel("API Key", { exact: true }).fill(proxy.token);
@@ -76,9 +55,9 @@ test("@real-model cross-frame order", async () => {
       if (terminal) { outcome = terminal.type; break; }
       await new Promise((resolveWait) => setTimeout(resolveWait, 1000));
     }
-    const orders = await frame.evaluate(() => (window as any).businessOrders);
-    const decoyClicks = await target.locator("body").getAttribute("data-decoy-clicks");
-    businessVerified = businessScore(orders, decoyClicks, order, service);
+    // An unsettled network may still contain a submission or decoy request.
+    const networkSettled = await target.waitForLoadState("networkidle", { timeout: 5000 }).then(() => true, () => false);
+    businessVerified = networkSettled && businessScore(fixture.evidence(), order, service);
   } finally {
     if (opened) events = await readEvents(opened.page).catch(() => events);
     const head = (() => { try { return execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(); } catch { return null; } })();

@@ -36,6 +36,10 @@ test("program bridge preserves ordinary objects that resemble protocol tags and 
       },
       (request) => {
         expect(lastTool(request)).toMatchObject({ ok: true, result: true });
+        return commandResponse("execute_program", { code: "return {value: () => 42};" }, "function-data");
+      },
+      (request) => {
+        expect(lastTool(request)).toMatchObject({ ok: false, error: { message: expect.stringContaining("cannot serialize functions as data") } });
         return textResponse("PROGRAM_BRIDGE_VALUES_OK");
       },
       textResponse("Bridge values"),

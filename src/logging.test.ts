@@ -442,6 +442,95 @@ describe("canonical event log", () => {
     await expect(logger.result(result!.id, {}, "")).rejects.toThrow("unavailable");
   });
 
+  it("deduplicates artifact reads and protects cached native values from caller mutation", async () => {
+    const base = memoryStore();
+    const get = vi.fn(async (id: number) => (await base.all()).find((event) => event.id === id));
+    const logger = new EventLogger({ store: { ...base, get } });
+    const rx = /x/g; rx.lastIndex = NaN;
+    const rows = [, { nested: "original" }];
+    const input = { rows, map: new Map([["key", { nested: "original" }]]), set: new Set([{ nested: "original" }]),
+      bytes: new Uint8Array([1, 2]).buffer, date: new Date(0), rx };
+    const event = await logger.append({ type: "tool.result.data", conversationId: "c", output: input });
+    const [first, same] = await Promise.all([logger.result(event!.id, {}, "c"), logger.result(event!.id, {}, "c")]) as any[];
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(first).not.toBe(same); expect(Object.hasOwn(first.rows, 0)).toBe(false);
+    first.rows[1].nested = "changed"; first.map.get("key").nested = "changed";
+    first.set.values().next().value.nested = "changed"; new Uint8Array(first.bytes)[0] = 99;
+    first.date.setTime(99); first.rx.lastIndex = 3;
+    const next = await logger.result(event!.id, {}, "c") as any;
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(next.rows[1].nested).toBe("original"); expect(Object.hasOwn(next.rows, 0)).toBe(false);
+    expect(next.map.get("key").nested).toBe("original"); expect(next.set.values().next().value.nested).toBe("original");
+    expect([...new Uint8Array(next.bytes)]).toEqual([1, 2]); expect(next.date.getTime()).toBe(0);
+    expect(Number.isNaN(next.rx.lastIndex)).toBe(true);
+    const map = await logger.result(event!.id, { path: ["map"], offset: 0, limit: 1 }, "c") as Map<string, any>;
+    map.get("key").nested = "changed again";
+    await expect(logger.result(event!.id, { path: ["map", 0, 1, "nested"] }, "c")).resolves.toBe("original");
+    await expect(logger.result(event!.id, {}, "other")).rejects.toThrow("unavailable");
+  });
+
+  it("invalidates cached artifacts after another logger clears them and retries racing reads", async () => {
+    const base = memoryStore(); let entered!: () => void, release!: () => void;
+    const ready = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const get = vi.fn(async (id: number) => { const event = (await base.all()).find((row) => row.id === id); entered(); await gate; return event; });
+    const store = { ...base, get }; const first = new EventLogger({ store }); const second = new EventLogger({ store });
+    const event = await first.append({ type: "tool.result.data", conversationId: "c", output: { secret: 1 } });
+    const pending = first.result(event!.id, {}, "c");
+    await ready; await second.clear(); release();
+    await expect(pending).rejects.toThrow("unavailable");
+    expect((first as any).artifactCache.size).toBe(0);
+    await expect(first.result(event!.id, {}, "c")).rejects.toThrow("unavailable");
+    expect(get).toHaveBeenCalledTimes(1);
+    const later = await first.append({ type: "tool.result.data", conversationId: "c", output: { secret: 2 } });
+    await expect(first.result(later!.id, {}, "c")).resolves.toEqual({ secret: 2 });
+    expect((first as any).artifactCache.size).toBe(1);
+    await second.clear();
+    await expect(first.result(later!.id, {}, "c")).rejects.toThrow("unavailable");
+    expect((first as any).artifactCache.size).toBe(0);
+    expect(get).toHaveBeenCalledTimes(2);
+    const newest = await first.append({ type: "tool.result.data", conversationId: "c", output: { secret: 3 } });
+    await first.result(newest!.id, {}, "c");
+    expect((first as any).artifactCache.size).toBe(1);
+    await first.clear();
+    expect((first as any).artifactCache.size).toBe(0);
+  });
+
+  it("retries an artifact load if its writer generation changes while it is in flight", async () => {
+    const base = memoryStore(); let entered!: () => void, release!: () => void; let calls = 0;
+    const ready = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const get = vi.fn(async (id: number) => { if (++calls === 1) { entered(); await gate; } return (await base.all()).find((event) => event.id === id); });
+    const logger = new EventLogger({ store: { ...base, get } });
+    const event = await logger.append({ type: "tool.result.data", conversationId: "c", output: { value: 1 } });
+    const pending = logger.result(event!.id, {}, "c");
+    await ready; (logger as any).generation = 1; release();
+    await expect(pending).resolves.toEqual({ value: 1 });
+    expect(get).toHaveBeenCalledTimes(2);
+  });
+
+  it("evicts least recently used artifacts before exceeding the retained budget", async () => {
+    const base = memoryStore();
+    const get = vi.fn(async (id: number) => (await base.all()).find((event) => event.id === id));
+    const logger = new EventLogger({ store: { ...base, get } });
+    const events = await Promise.all(["a", "b", "c"].map((ch) => logger.append({ type: "tool.result.data", conversationId: "c", output: ch.repeat(2_000_000) })));
+    for (const event of events) await logger.result(event!.id, { offset: 0, limit: 1 }, "c");
+    expect((logger as any).artifactBytes).toBeLessThanOrEqual(8 * 1024 * 1024);
+    await logger.result(events[0]!.id, { offset: 0, limit: 1 }, "c");
+    expect(get).toHaveBeenCalledTimes(4);
+  });
+
+  it("does not retain oversized artifacts or failed loads", async () => {
+    const base = memoryStore(); let fail = true;
+    const get = vi.fn(async (id: number) => { if (fail) { fail = false; throw new Error("temporary read failure"); } return (await base.all()).find((event) => event.id === id); });
+    const logger = new EventLogger({ store: { ...base, get } });
+    const event = await logger.append({ type: "tool.result.data", conversationId: "c", output: { large: "a".repeat(5_000_000) } });
+    await expect(logger.result(event!.id, { path: ["large"], offset: 0, limit: 3 }, "c")).rejects.toThrow("temporary read failure");
+    await expect(logger.result(event!.id, { path: ["large"], offset: 0, limit: 3 }, "c")).resolves.toBe("aaa");
+    await expect(logger.result(event!.id, { path: ["large"], offset: 1, limit: 3 }, "c")).resolves.toBe("aaa");
+    expect(get).toHaveBeenCalledTimes(3); expect((logger as any).artifactCache.size).toBe(0);
+  });
+
   it("distinguishes missing paths from stored null and undefined without traversing prototypes", async () => {
     const logger = new EventLogger({ store: memoryStore() });
     const value = Object.fromEntries([["rows", ["zero", null, undefined]], ["nothing", undefined], ["__proto__", "literal"]]);
@@ -458,15 +547,55 @@ describe("canonical event log", () => {
       await expect(logger.result(id, { path }, "c")).rejects.toMatchObject({ code: "result-path-not-found" });
   });
 
+  it("pages native collections and binary views using their own units and retains their types", async () => {
+    const logger = new EventLogger({ store: memoryStore() });
+    const bytes = new Uint8Array([1, 2, 3, 4, 5]);
+    const input = { map: new Map<unknown, unknown>([["first", 1n], ["second", undefined], ["third", 3]]),
+      set: new Set(["a", "b", "c"]), buffer: bytes.buffer, data: new DataView(bytes.buffer, 1, 3),
+      ints: new Uint32Array([11, 22, 33]), big: new BigInt64Array([-1n, 2n, 3n]) };
+    const event = await logger.append({ type: "tool.result.data", conversationId: "c", output: input });
+    const read = (key: string, offset?: number, limit?: number) => logger.result(event!.id, { path: [key], offset, limit }, "c");
+    expect(await read("map", 1, 2)).toEqual(new Map([["second", undefined], ["third", 3]]));
+    expect(await read("map", 2)).toEqual(new Map([["third", 3]]));
+    expect(await read("set", 1, 1)).toEqual(new Set(["b"]));
+    expect(await read("set", 99)).toEqual(new Set());
+    expect(await read("ints", 1, 1)).toEqual(new Uint32Array([22]));
+    expect(await read("big", 1)).toEqual(new BigInt64Array([2n, 3n]));
+    const buffer = await read("buffer", 1, 3);
+    expect(buffer).toBeInstanceOf(ArrayBuffer);
+    expect([...new Uint8Array(buffer as ArrayBuffer)]).toEqual([2, 3, 4]);
+    const data = await read("data", 1, 2);
+    expect(data).toBeInstanceOf(DataView);
+    expect([...(new Uint8Array((data as DataView).buffer))]).toEqual([3, 4]);
+    const empty = await read("data", 99, 2);
+    expect(empty).toBeInstanceOf(DataView); expect((empty as DataView).byteLength).toBe(0);
+    expect(await read("ints", 1, 0)).toEqual(new Uint32Array());
+  });
+
+  it("addresses Map entries and Set items by insertion index, then traverses their nested values", async () => {
+    const logger = new EventLogger({ store: memoryStore() });
+    const input = { map: new Map<unknown, unknown>([[{ name: "key" }, { nested: ["first", "second"] }], ["undefined", undefined]]),
+      set: new Set([undefined, { nested: ["third", "fourth"] }]) };
+    const event = await logger.append({ type: "tool.result.data", conversationId: "c", output: input });
+    const read = (path: Array<string | number>) => logger.result(event!.id, { path }, "c");
+    await expect(read(["map", 0, 0, "name"])).resolves.toBe("key");
+    await expect(read(["map", 0, 1, "nested", 1])).resolves.toBe("second");
+    await expect(read(["map", 1, 1])).resolves.toBeUndefined();
+    await expect(read(["set", 0])).resolves.toBeUndefined();
+    await expect(read(["set", 1, "nested", 0])).resolves.toBe("third");
+    for (const path of [["map", 2], ["set", 2], ["map", "0"], ["map", 0, 2], ["set", 0, "nested"]])
+      await expect(read(path)).rejects.toMatchObject({ code: "result-path-not-found" });
+  });
+
   it("preserves reserved-looking user objects in every new event field and leaves old events untouched", async () => {
     const store = memoryStore();
     const logger = new EventLogger({ store });
-    const tags = ["undefined", "number", "bigint", "symbol", "function", "circular-reference", "error", "date", "array-buffer", "typed-array", "map", "set", "escaped-object", "sparse-array"];
+    const tags = ["undefined", "number", "bigint", "symbol", "function", "circular-reference", "error", "date", "array-buffer", "typed-array", "map", "set", "escaped-object", "sparse-array", "regexp"];
     const input = { markers: tags.map(($type) => ({ $type, value: null })),
       nested: { $type: "escaped-object", entries: [["$type", "undefined"], ["value", null]] }, actualUndefined: undefined };
     const event = await logger.append({ type: "tool.result.data", conversationId: "c", content: input, input, output: input,
       error: input, retry: input, abort: input, usage: input, stopReason: input, providerMetadata: input });
-    expect(event!.valueEncoding).toBe(3);
+    expect(event!.valueEncoding).toBe(4);
     for (const field of ["content", "input", "output", "error", "retry", "abort", "usage", "stopReason", "providerMetadata"] as const)
       expect(fromLogValue(event![field], event!.valueEncoding)).toEqual(input);
     await expect(logger.result(event!.id, {}, "c")).resolves.toEqual(input);
@@ -474,6 +603,52 @@ describe("canonical event log", () => {
     const legacy = await store.append({ type: "tool.result.data", timestamp: new Date().toISOString(), conversationId: "c", content: null, output: legacyLiteral });
     await expect(logger.result(legacy.id, {}, "c")).resolves.toEqual(legacyLiteral);
     expect((await store.all()).find((item) => item.id === legacy.id)).toEqual(legacy);
+  });
+
+  it("restores native dates, binary views, maps, sets and regexps without interpreting literal tags", async () => {
+    const binary = new Uint8Array([0, 1, 2, 255]).buffer;
+    const regexp = /a+/gi; regexp.lastIndex = NaN;
+    const typedArrays = [new Int8Array([-1, 2]), new Uint8Array([255, 2]), new Uint8ClampedArray([255, 2]),
+      new Int16Array([-1, 2]), new Uint16Array([65535, 2]), new Int32Array([-1, 2]), new Uint32Array([4294967295, 2]),
+      new Float32Array([1.5, -2]), new Float64Array([1.5, -2]), new BigInt64Array([-1n, 2n]), new BigUint64Array([1n, 2n])];
+    const literal = { $type: "regexp", source: "a+", flags: "gi", lastIndex: 0 };
+    const value = { date: new Date("2025-01-02T03:04:05.000Z"), invalidDate: new Date(NaN), binary,
+      view: new DataView(binary, 1, 2), typedArrays, regexp,
+      map: new Map<unknown, unknown>([["key", new Set([1n, undefined])], [false, new Date(0)]]), literal };
+    for (const version of [2, 3, 4] as const) {
+      const restored = fromLogValue(toLogValue(value, undefined, version), version) as typeof value;
+      expect(restored.date).toEqual(value.date);
+      expect(Number.isNaN(restored.invalidDate.getTime())).toBe(true);
+      expect(restored.binary).toBeInstanceOf(ArrayBuffer);
+      expect([...new Uint8Array(restored.binary)]).toEqual([0, 1, 2, 255]);
+      expect(restored.view).toBeInstanceOf(DataView);
+      expect([...new Uint8Array(restored.view.buffer)]).toEqual([1, 2]);
+      expect(restored.typedArrays).toEqual(typedArrays);
+      expect(restored.typedArrays.map((item) => item.constructor.name)).toEqual(typedArrays.map((item) => item.constructor.name));
+      expect(restored.map).toEqual(value.map);
+      expect(restored.literal).toEqual(literal);
+      if (version === 4) { expect(restored.regexp).toBeInstanceOf(RegExp); expect(restored.regexp.source).toBe("a+"); expect(restored.regexp.flags).toBe("gi"); expect(Number.isNaN(restored.regexp.lastIndex)).toBe(true); }
+      else expect(fromLogValue(literal, version)).toEqual(literal);
+    }
+    const logger = new EventLogger({ store: memoryStore() });
+    const event = await logger.append({ type: "tool.result.data", conversationId: "c", output: value });
+    const restored = await logger.result(event!.id, {}, "c") as typeof value;
+    expect(restored.map).toEqual(value.map); expect(restored.regexp).toBeInstanceOf(RegExp);
+    expect(Number.isNaN(restored.regexp.lastIndex)).toBe(true);
+    const legacy = { $type: "date", value: "2025-01-02T03:04:05.000Z" };
+    expect(fromLogValue(legacy)).toEqual(legacy);
+  });
+
+  it("rejects malformed versioned binary and collection records", () => {
+    const malformed = [
+      { $type: "date", value: "not a date" },
+      { $type: "array-buffer", byteLength: 1, base64: "??" },
+      { $type: "array-buffer", byteLength: 1, base64: "AAEA" },
+      { $type: "typed-array", name: "constructor", byteLength: 0, base64: "" },
+      { $type: "typed-array", name: "Uint16Array", byteLength: 1, base64: "AA==" },
+      { $type: "map", entries: [[1]] }, { $type: "set", values: null },
+    ];
+    for (const value of malformed) expect(() => fromLogValue(value, 4)).toThrow();
   });
 
   it("round-trips V2 special numbers and bigint without confusing literal tagged objects", async () => {
@@ -499,7 +674,7 @@ describe("canonical event log", () => {
     rows[3] = undefined; rows[8] = NaN; rows[999_999_999] = 123n;
     const logger = new EventLogger({ store: memoryStore() });
     const event = await logger.append({ type: "tool.result.data", conversationId: "c", output: { rows, literal } });
-    expect(event!.valueEncoding).toBe(3);
+    expect(event!.valueEncoding).toBe(4);
     expect(JSON.stringify(event!.output).length).toBeLessThan(500);
     const selected = await logger.result(event!.id, { path: ["rows"], offset: 2, limit: 8 }, "c") as unknown[];
     expect(selected.length).toBe(8);

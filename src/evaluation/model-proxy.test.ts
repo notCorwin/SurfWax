@@ -1,7 +1,8 @@
 // @vitest-environment node
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { businessScore, evidence, modelProxy, usageEvidence } from "../../e2e/evaluation/model-proxy";
+import { evidence, modelProxy, usageEvidence } from "../../e2e/evaluation/model-proxy";
+import { businessScore } from "../../e2e/evaluation/order-fixture";
 
 const localFetch = globalThis.fetch;
 const servers: ReturnType<typeof createServer>[] = [];
@@ -10,10 +11,10 @@ afterEach(async () => { await Promise.all(servers.splice(0).map((server) => new 
 describe("real model evaluation evidence", () => {
   it("scores fixture state independently and rejects duplicate or decoy submissions", () => {
     const order = { order: "ORDER-17", service: "express", confirmed: true };
-    expect(businessScore([order], null, "ORDER-17", "express")).toBe(true);
-    expect(businessScore([order, order], null, "ORDER-17", "express")).toBe(false);
-    expect(businessScore([order], "1", "ORDER-17", "express")).toBe(false);
-    expect(businessScore([{ ...order, confirmed: false }], null, "ORDER-17", "express")).toBe(false);
+    expect(businessScore({ orders: [order], decoyClicks: 0 }, "ORDER-17", "express")).toBe(true);
+    expect(businessScore({ orders: [order, order], decoyClicks: 0 }, "ORDER-17", "express")).toBe(false);
+    expect(businessScore({ orders: [order], decoyClicks: 1 }, "ORDER-17", "express")).toBe(false);
+    expect(businessScore({ orders: [{ ...order, confirmed: false }], decoyClicks: 0 }, "ORDER-17", "express")).toBe(false);
   });
   it("records schema and exact prefix without retaining prompt text", () => {
     const first = evidence(JSON.stringify({ tools: [{ name: "click" }], messages: [{ role: "system", content: "private prompt" }] }));

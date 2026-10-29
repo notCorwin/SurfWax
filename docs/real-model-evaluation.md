@@ -1,6 +1,6 @@
 # 真实模型评测
 
-`npm run eval:real-model` 使用隔离的 Chrome 配置和扩展实际运行一个跨域 iframe 订单任务。模型自主选择工具；测试检查页面保存的订单和诱饵按钮是否被点击，不依赖模型声称成功。这些状态位于被测页面中，程序工具可以改写它们，因此它不是防篡改的业务裁判。此任务是一个起点，单次通过不代表复杂任务整体能力。
+`npm run eval:real-model` 使用隔离的 Chrome 配置和扩展实际运行一个跨域 iframe 订单任务。模型自主选择工具；测试根据独立本机服务保存的订单与诱饵请求判分，不依赖模型声称成功或页面中的变量。服务只追加记录，没有读取或清除记录的 HTTP 接口。工具仍可直接发送请求，因此结果证明服务收到预期业务请求，不能证明一定通过真实 UI 点击，也不是防恶意绕过的评测。此任务是一个起点，单次通过不代表复杂任务整体能力。
 
 运行前显式设置 `SURFWAX_REAL_MODEL_EVAL=1`、`SURFWAX_EVAL_PROVIDER`（报告中的提供商名称）、`SURFWAX_EVAL_MODEL`、`SURFWAX_EVAL_BASE_URL` 和 `SURFWAX_EVAL_API_KEY`。当前入口支持 OpenAI Chat Completions 兼容协议；Base URL 应包含服务要求的前缀，例如 `https://provider.example/v1`。可选设置 `SURFWAX_EVAL_SEED`（0–999999，默认 17）和 `SURFWAX_EVAL_TIMEOUT_MS`（默认 600000）。运行会请求所配置的服务并可能产生费用，不设置 opt-in 时不会请求模型；CI 不应设置 opt-in。
 

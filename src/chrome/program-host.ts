@@ -27,9 +27,7 @@ export async function executeSandboxProgram(
   const encode = (value: any, seen = new WeakSet<object>()): any => {
     if (typeof value === "function") return { $remoteFunction: idOf(value) };
     if (!value || typeof value !== "object") return value;
-    if (value instanceof RegExp)
-      return { $regexp: { source: value.source, flags: value.flags } };
-    if (value instanceof Date) return { $date: value.toISOString() };
+    if (value instanceof Date) return { $date: Number.isNaN(value.getTime()) ? null : value.toISOString() };
     if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return value;
     if (value instanceof PageFacade || value instanceof LocatorFacade)
       return {
@@ -53,7 +51,13 @@ export async function executeSandboxProgram(
       );
     seen.add(value);
     let result: any;
-    if (Array.isArray(value)) {
+    if (value instanceof RegExp) {
+      result = { $regexp: { source: value.source, flags: value.flags, lastIndex: encode(value.lastIndex, seen) } };
+    } else if (value instanceof Map) {
+      result = { $map: [...value].map(([key, item]) => [encode(key, seen), encode(item, seen)]) };
+    } else if (value instanceof Set) {
+      result = { $set: [...value].map((item) => encode(item, seen)) };
+    } else if (Array.isArray(value)) {
       // Avoid scanning a huge sparse length when crossing the worker boundary.
       const keys = value.length > 32768 ? Object.keys(value).filter((key) => {
         const index = Number(key);
@@ -109,9 +113,14 @@ export async function executeSandboxProgram(
           decode(item),
         ]),
       );
-    if (value?.$regexp)
-      return new RegExp(value.$regexp.source, value.$regexp.flags);
-    if (value?.$date) return new Date(value.$date);
+    if (value?.$regexp) {
+      const regexp = new RegExp(value.$regexp.source, value.$regexp.flags);
+      regexp.lastIndex = decode(value.$regexp.lastIndex);
+      return regexp;
+    }
+    if (value && typeof value === "object" && "$date" in value) return value.$date === null ? new Date(NaN) : new Date(value.$date);
+    if (value && typeof value === "object" && "$map" in value) return new Map(value.$map.map(([key, item]: [unknown, unknown]) => [decode(key), decode(item)]));
+    if (value && typeof value === "object" && "$set" in value) return new Set(value.$set.map(decode));
     if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return value;
     if (value?.$remoteArgument) return resolve(value.$remoteArgument);
     if (value?.$function) return String(value.$function); // Page/locator evaluate takes source; never eval in the Side Panel.

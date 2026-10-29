@@ -158,6 +158,72 @@ describe("browser tools", () => {
       bigintPaths: [{ path: ["big"], value: "123" }] });
   });
 
+  it("represents native values using type paths without confusing literal metadata", async () => {
+    const regexp = /x+/gi; regexp.lastIndex = 4;
+    const value = { date: new Date("2020-01-02T03:04:05.000Z"), invalid: new Date(NaN),
+      buffer: new Uint8Array([0, 255]).buffer, view: new DataView(new Uint8Array([7, 8, 9]).buffer, 1, 2),
+      regexp, map: new Map([[123n, new Set([undefined, new Date("2024-01-01T00:00:00Z")])]]),
+      literal: { typePaths: [{ path: [], type: "date" }], $type: "date", value: "ordinary" } };
+    const tools = createProgramTools({ runProgram: vi.fn(async () => ({ ok: true, result: value })) } as unknown as ChromeExecutor) as Record<string, any>;
+    const output = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "program" });
+    expect(JSON.parse(JSON.stringify(output))).toEqual({ ok: true,
+      result: { date: "2020-01-02T03:04:05.000Z", invalid: null, buffer: "AP8=", view: "CAk=",
+        regexp: { source: "x+", flags: "gi", lastIndex: 4 }, map: [[null, [null, "2024-01-01T00:00:00.000Z"]]], literal: value.literal },
+      undefinedPaths: [["map", 0, 1, 0]], bigintPaths: [{ path: ["map", 0, 0], value: "123" }],
+      typePaths: [{ path: ["date"], type: "date" }, { path: ["invalid"], type: "date" },
+        { path: ["buffer"], type: "array-buffer" }, { path: ["view"], type: "typed-array", name: "DataView" },
+        { path: ["regexp"], type: "regexp" }, { path: ["map"], type: "map" },
+        { path: ["map", 0, 1], type: "set" }, { path: ["map", 0, 1, 1], type: "date" }] });
+  });
+
+  it("retains native values and paged type paths after compaction", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: {
+      append: async (event) => { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+      all: async () => [...events], clear: async () => { events.length = 0; },
+    } });
+    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
+    vi.spyOn(executor, "runProgram").mockResolvedValue({ ok: true, result: { date: new Date("2020-01-01Z"), bytes: new Uint8Array([1, 2]), large: "x".repeat(10000) } });
+    const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
+    const output = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "program" });
+    expect(output).toMatchObject({ $ref: expect.any(Number), typeCount: 2, typePathsAccess: { path: ["typePaths"], offset: 0 } });
+    expect(await tools.read_artifact.execute({ ...output.typePathsAccess, limit: 2 }, { toolCallId: "paths" })).toEqual({ ok: true, result: [
+      { path: ["date"], type: "date" }, { path: ["bytes"], type: "typed-array", name: "Uint8Array" },
+    ] });
+    const original = await logger.result(output.$ref, { path: ["result"] }, "c") as any;
+    expect(original.date).toEqual(new Date("2020-01-01Z")); expect(original.bytes).toEqual(new Uint8Array([1, 2]));
+    executor.dispose();
+  });
+
+  it("offers directly usable pages for large native collections and binary views", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: {
+      append: async (event) => { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+      all: async () => [...events], clear: async () => { events.length = 0; },
+    } });
+    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
+    const run = vi.spyOn(executor, "runProgram");
+    const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
+    run.mockResolvedValueOnce({ ok: true, result: new Map(Array.from({ length: 40000 }, (_, index) => [index, index * 2])) });
+    const map = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "map" });
+    expect(map).toMatchObject({ sidecarsDeferred: true, resultAccess: { path: ["result"], offset: 0, limit: 25 } });
+    expect(await tools.read_artifact.execute({ ...map.resultAccess, offset: 39998, limit: 2 }, { toolCallId: "map-page" }))
+      .toEqual({ ok: true, result: [[39998, 79996], [39999, 79998]], typePaths: [{ path: [], type: "map" }] });
+    const numbers = new Uint16Array(30000); numbers[29000] = 258;
+    run.mockResolvedValueOnce({ ok: true, result: numbers });
+    const binary = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "binary" });
+    expect(binary).toMatchObject({ sidecarsDeferred: true, resultAccess: { path: ["result"], offset: 0, limit: 1536 } });
+    expect(await tools.read_artifact.execute({ ...binary.resultAccess, offset: 29000, limit: 1 }, { toolCallId: "binary-page" }))
+      .toEqual({ ok: true, result: btoa(String.fromCharCode(...new Uint8Array(numbers.buffer, 58000, 2))), typePaths: [{ path: [], type: "typed-array", name: "Uint16Array" }] });
+    const compact = new Uint16Array(10000); compact[9000] = 513;
+    run.mockResolvedValueOnce({ ok: true, result: compact });
+    const compacted = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "compact-binary" });
+    expect(compacted).toMatchObject({ typeCount: 1, resultAccess: { path: ["result"], offset: 0, limit: 1536 } });
+    expect(await tools.read_artifact.execute({ ...compacted.resultAccess, offset: 9000, limit: 1 }, { toolCallId: "compact-binary-page" }))
+      .toEqual({ ok: true, result: btoa(String.fromCharCode(...new Uint8Array(compact.buffer, 18000, 2))), typePaths: [{ path: [], type: "typed-array", name: "Uint16Array" }] });
+    executor.dispose();
+  });
+
   it("retains original native values and paged type sidecars after compaction", async () => {
     const events: LogEvent[] = [];
     const logger = new EventLogger({ store: {
@@ -305,6 +371,7 @@ describe("browser tools", () => {
 
   it("pages program result sidecars after a large result is compacted", async () => {
     const rows = new Array(3000); for (let index = 1; index < rows.length; index += 2) rows[index] = undefined;
+    rows[0] = 123n; rows[2] = NaN;
     const events: LogEvent[] = [];
     const logger = new EventLogger({ store: {
       append: async (event) => { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
@@ -314,12 +381,12 @@ describe("browser tools", () => {
     vi.spyOn(executor, "runProgram").mockResolvedValue({ ok: true, result: rows });
     const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
     const output = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "program" });
-    expect(output).toMatchObject({ $ref: expect.any(Number), undefinedCount: 1500, holeCount: 1500,
+    expect(output).toMatchObject({ $ref: expect.any(Number), undefinedCount: 1500, holeCount: 1498, bigintCount: 1, numberCount: 1,
       undefinedPathsAccess: { path: ["undefinedPaths"], offset: 0 }, holePathsAccess: { path: ["holePaths"], offset: 0 } });
     expect(await tools.read_artifact.execute({ ...output.undefinedPathsAccess, limit: 2 }, { toolCallId: "undefined-paths" }))
       .toEqual({ ok: true, result: [[1], [3]] });
     expect(await tools.read_artifact.execute({ ...output.holePathsAccess, limit: 2 }, { toolCallId: "hole-paths" }))
-      .toEqual({ ok: true, result: [[0], [2]] });
+      .toEqual({ ok: true, result: [[4], [6]] });
     executor.dispose();
   });
 
