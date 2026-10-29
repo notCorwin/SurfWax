@@ -16,6 +16,7 @@
     "release:package": "node scripts/package-release.mjs --build",
     "test:performance": "npm run build && playwright test --grep @performance",
     "measure:tools": "node scripts/measure-tool-budget.mjs",
+    "eval:real-model": "playwright test e2e/real-model-evaluation.spec.ts --retries=0",
     "sdk:check": "node scripts/check-sdk-coverage.mjs",
     "catalog:update": "node scripts/update-model-catalog.mjs",
     "catalog:check": "node scripts/update-model-catalog.mjs --check",

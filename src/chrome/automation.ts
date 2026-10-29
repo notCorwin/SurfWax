@@ -1105,6 +1105,38 @@ export class AutomationRuntime {
     });
   }
 
+  /** Return a target's border box in root document coordinates for CDP capture. */
+  async screenshotClip(tabId: number, spec: LocatorSpec): Promise<{ x: number; y: number; width: number; height: number }> {
+    return this.action(tabId, "screenshotClip", spec, async () => {
+      validateLocator(spec);
+      const session = await this.session(tabId);
+      const generation = session.generation;
+      const objectId = await this.resolveOne(session, spec);
+      const targetSession = this.objectSession(session, objectId);
+      const model = await this.options.command(targetSession.debuggee, "DOM.getBoxModel", { objectId });
+      const quad = model?.model?.border as number[] | undefined;
+      if (!Array.isArray(quad) || quad.length !== 8 || quad.some((value) => !Number.isFinite(value)))
+        throw automationError("not-visible", { reason: "missing-border-quad" });
+      const points = await this.toRootPoints(session, targetSession, Array.from({ length: 4 }, (_, index) => ({ x: quad[index * 2]!, y: quad[index * 2 + 1]! })));
+      // Page.captureScreenshot accepts only an axis-aligned clip; a rotated or
+      // perspective-projected element cannot be represented without including
+      // unrelated pixels, so fail instead of returning misleading evidence.
+      const tolerance = 0.01;
+      const horizontal = (a: typeof points[number], b: typeof points[number]) => Math.abs(a.y - b.y) <= tolerance;
+      const vertical = (a: typeof points[number], b: typeof points[number]) => Math.abs(a.x - b.x) <= tolerance;
+      const [a, b, c, d] = points as [typeof points[number], typeof points[number], typeof points[number], typeof points[number]];
+      if (!(horizontal(a, b) && vertical(b, c) && horizontal(c, d) && vertical(d, a)) &&
+          !(vertical(a, b) && horizontal(b, c) && vertical(c, d) && horizontal(d, a)))
+        throw automationError("unsupported-screenshot-geometry", { reason: "non-axis-aligned-target" });
+      const xs = points.map((point) => point.x), ys = points.map((point) => point.y);
+      const x = Math.min(...xs), y = Math.min(...ys), width = Math.max(...xs) - x, height = Math.max(...ys) - y;
+      if (!(width > 0 && height > 0)) throw automationError("not-visible", { reason: "empty-border-quad" });
+      const scroll = await this.pageValue(tabId, "({x:scrollX,y:scrollY})") as { x: number; y: number };
+      if (generation !== session.generation || this.sessions.get(tabId) !== session) throw automationError("stale-observation", { reason: "document-changed-during-capture" });
+      return { x: x + scroll.x, y: y + scroll.y, width, height };
+    });
+  }
+
   private async session(tabId: number): Promise<Session> {
     let session = this.sessions.get(tabId);
     if (!session) {
@@ -1980,8 +2012,10 @@ export class AutomationRuntime {
   }
 
   private async toRootPoint(session: Session, targetSession: Session, state: ElementState): Promise<{ x: number; y: number }> {
-    let x = state.x;
-    let y = state.y;
+    return (await this.toRootPoints(session, targetSession, [state]))[0]!;
+  }
+
+  private async toRootPoints(session: Session, targetSession: Session, points: Array<{ x: number; y: number }>): Promise<Array<{ x: number; y: number }>> {
     let debuggee = targetSession.debuggee;
     while (debuggee.sessionId) {
       const frameId = [...session.frames].find(([, item]) => item.sessionId === debuggee.sessionId)?.[0];
@@ -1993,10 +2027,10 @@ export class AutomationRuntime {
       const size = await this.evaluateIn(debuggee, "({width:innerWidth,height:innerHeight})") as { width: number; height: number };
       const quad = model?.model?.content as number[] | undefined;
       if (!quad?.length || !size.width || !size.height) throw automationError("frame-detached", { frameId, reason: "missing-frame-geometry" });
-      ({ x, y } = projectQuad(quad, x / size.width, y / size.height));
+      points = points.map(({ x, y }) => projectQuad(quad, x / size.width, y / size.height));
       debuggee = parent;
     }
-    return { x, y };
+    return points;
   }
 
   private async nativeClick(debuggee: Debuggee, params: Record<string, unknown>) {

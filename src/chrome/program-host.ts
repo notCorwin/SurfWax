@@ -52,11 +52,24 @@ export async function executeSandboxProgram(
         "Program bridge requires serializable values or browser capability handles",
       );
     seen.add(value);
-    const result = Array.isArray(value)
-      ? value.map((item) => encode(item, seen))
-      : Object.fromEntries(
-          Object.entries(value).map(([key, item]) => [key, encode(item, seen)]),
-        );
+    let result: any;
+    if (Array.isArray(value)) {
+      // Avoid scanning a huge sparse length when crossing the worker boundary.
+      const keys = value.length > 32768 ? Object.keys(value).filter((key) => {
+        const index = Number(key);
+        return Number.isInteger(index) && index >= 0 && index < value.length && String(index) === key;
+      }) : undefined;
+      result = keys && keys.length < value.length
+        ? { $sparseArray: { length: value.length, entries: keys.map((key) => [Number(key), encode(value[Number(key)], seen)]) } }
+        : value.map((item) => encode(item, seen));
+    } else {
+      result = {
+          $plainObject: Object.entries(value).map(([key, item]) => [
+            key,
+            encode(item, seen),
+          ]),
+        };
+    }
     seen.delete(value);
     return result;
   };
@@ -83,17 +96,25 @@ export async function executeSandboxProgram(
     return subject;
   };
   const decode = (value: any): any => {
+    if (Array.isArray(value)) return value.map(decode);
+    if (value && typeof value === "object" && "$sparseArray" in value) {
+      const result = new Array(value.$sparseArray.length);
+      for (const [index, item] of value.$sparseArray.entries) result[index] = decode(item);
+      return result;
+    }
+    if (value && typeof value === "object" && "$plainObject" in value)
+      return Object.fromEntries(
+        value.$plainObject.map(([key, item]: [string, unknown]) => [
+          key,
+          decode(item),
+        ]),
+      );
     if (value?.$regexp)
       return new RegExp(value.$regexp.source, value.$regexp.flags);
     if (value?.$date) return new Date(value.$date);
     if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return value;
     if (value?.$remoteArgument) return resolve(value.$remoteArgument);
     if (value?.$function) return String(value.$function); // Page/locator evaluate takes source; never eval in the Side Panel.
-    if (Array.isArray(value)) return value.map(decode);
-    if (value && typeof value === "object")
-      return Object.fromEntries(
-        Object.entries(value).map(([key, item]) => [key, decode(item)]),
-      );
     return value;
   };
   let disposed = false;

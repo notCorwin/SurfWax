@@ -59,11 +59,22 @@ function workerMain() {
       remotes.has(value)
     )
       return { $remoteArgument: remotes.get(value) };
-    if (Array.isArray(value)) return value.map(encode);
+    if (Array.isArray(value)) {
+      const keys = value.length > 32768 ? Object.keys(value).filter((key) => {
+        const index = Number(key);
+        return Number.isInteger(index) && index >= 0 && index < value.length && String(index) === key;
+      }) : undefined;
+      return keys && keys.length < value.length
+        ? { $sparseArray: { length: value.length, entries: keys.map((key) => [Number(key), encode(value[Number(key)])]) } }
+        : value.map(encode);
+    }
     if (value && typeof value === "object")
-      return Object.fromEntries(
-        Object.entries(value).map(([key, item]) => [key, encode(item)]),
-      );
+      return {
+        $plainObject: Object.entries(value).map(([key, item]) => [
+          key,
+          encode(item),
+        ]),
+      };
     return value;
   };
   const request = (reference: any, args: any[]) =>
@@ -101,6 +112,19 @@ function workerMain() {
     return result;
   };
   const decode = (value: any): any => {
+    if (Array.isArray(value)) return value.map(decode);
+    if (value && typeof value === "object" && "$sparseArray" in value) {
+      const result = new Array(value.$sparseArray.length);
+      for (const [index, item] of value.$sparseArray.entries) result[index] = decode(item);
+      return result;
+    }
+    if (value && typeof value === "object" && "$plainObject" in value)
+      return Object.fromEntries(
+        value.$plainObject.map(([key, item]: [string, unknown]) => [
+          key,
+          decode(item),
+        ]),
+      );
     if (value?.$regexp)
       return new RegExp(value.$regexp.source, value.$regexp.flags);
     if (value?.$date) return new Date(value.$date);
@@ -112,11 +136,6 @@ function workerMain() {
       remotes.set(fn, { id: value.$remoteFunction, steps: [] });
       return fn;
     }
-    if (Array.isArray(value)) return value.map(decode);
-    if (value && typeof value === "object")
-      return Object.fromEntries(
-        Object.entries(value).map(([key, item]) => [key, decode(item)]),
-      );
     return value;
   };
   self.onmessage = async (event) => {
@@ -166,7 +185,7 @@ function workerMain() {
         signal,
       );
       await new Promise((resolve) => setTimeout(resolve, 0));
-      self.postMessage({ type: "done", value: encode(result ?? null) });
+      self.postMessage({ type: "done", value: encode(result) });
     } catch (error: any) {
       self.postMessage({
         type: "failed",

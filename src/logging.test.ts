@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { EventLogger, fromLogValue, rebuildConversation, stringifyLogSafe, upgradeEventStore, type LogEvent } from "./logging";
+import { EventLogger, fromLogValue, rebuildConversation, stringifyLogSafe, toLogValue, upgradeEventStore, type LogEvent } from "./logging";
 
 function memoryStore(onBatch?: (size: number) => void) {
   const events: LogEvent[] = [];
@@ -461,12 +461,12 @@ describe("canonical event log", () => {
   it("preserves reserved-looking user objects in every new event field and leaves old events untouched", async () => {
     const store = memoryStore();
     const logger = new EventLogger({ store });
-    const tags = ["undefined", "number", "bigint", "symbol", "function", "circular-reference", "error", "date", "array-buffer", "typed-array", "map", "set", "escaped-object"];
+    const tags = ["undefined", "number", "bigint", "symbol", "function", "circular-reference", "error", "date", "array-buffer", "typed-array", "map", "set", "escaped-object", "sparse-array"];
     const input = { markers: tags.map(($type) => ({ $type, value: null })),
       nested: { $type: "escaped-object", entries: [["$type", "undefined"], ["value", null]] }, actualUndefined: undefined };
     const event = await logger.append({ type: "tool.result.data", conversationId: "c", content: input, input, output: input,
       error: input, retry: input, abort: input, usage: input, stopReason: input, providerMetadata: input });
-    expect(event!.valueEncoding).toBe(2);
+    expect(event!.valueEncoding).toBe(3);
     for (const field of ["content", "input", "output", "error", "retry", "abort", "usage", "stopReason", "providerMetadata"] as const)
       expect(fromLogValue(event![field], event!.valueEncoding)).toEqual(input);
     await expect(logger.result(event!.id, {}, "c")).resolves.toEqual(input);
@@ -489,6 +489,33 @@ describe("canonical event log", () => {
     const old = { $type: "number", value: "NaN" };
     const legacy = await store.append({ type: "tool.result.data", timestamp: "old", conversationId: "c", content: null, output: old });
     await expect(logger.result(legacy.id, {}, "c")).resolves.toEqual(old);
+  });
+
+  it("stores huge sparse arrays proportional to their entries without confusing literal V2 or V3 objects", async () => {
+    const literal = { $type: "sparse-array", length: 9, entries: [[2, "value"]] };
+    expect(fromLogValue(literal, 2)).toEqual(literal);
+    expect(fromLogValue(toLogValue(literal, undefined, 3), 3)).toEqual(literal);
+    const rows = new Array(1_000_000_000);
+    rows[3] = undefined; rows[8] = NaN; rows[999_999_999] = 123n;
+    const logger = new EventLogger({ store: memoryStore() });
+    const event = await logger.append({ type: "tool.result.data", conversationId: "c", output: { rows, literal } });
+    expect(event!.valueEncoding).toBe(3);
+    expect(JSON.stringify(event!.output).length).toBeLessThan(500);
+    const selected = await logger.result(event!.id, { path: ["rows"], offset: 2, limit: 8 }, "c") as unknown[];
+    expect(selected.length).toBe(8);
+    expect(Object.hasOwn(selected, 0)).toBe(false);
+    expect(Object.hasOwn(selected, 1)).toBe(true); expect(selected[1]).toBeUndefined();
+    expect(Number.isNaN(selected[6])).toBe(true);
+    await expect(logger.result(event!.id, { path: ["rows", 999_999_999] }, "c")).resolves.toBe(123n);
+    await expect(logger.result(event!.id, { path: ["literal"] }, "c")).resolves.toEqual(literal);
+    const suffix = await logger.result(event!.id, { path: ["rows"], offset: 2 }, "c") as unknown[];
+    expect(suffix.length).toBe(999_999_998);
+    expect(Object.hasOwn(suffix, 0)).toBe(false);
+    expect(Object.hasOwn(suffix, 1)).toBe(true); expect(suffix[1]).toBeUndefined();
+    expect(Number.isNaN(suffix[6])).toBe(true); expect(suffix[999_999_997]).toBe(123n);
+    const limited = await logger.result(event!.id, { path: ["rows"], offset: 2, limit: 900_000_000 }, "c") as unknown[];
+    expect(limited.length).toBe(900_000_000); expect(Object.hasOwn(limited, 1)).toBe(true);
+    expect(Number.isNaN(limited[6])).toBe(true); expect(Object.hasOwn(limited, limited.length - 1)).toBe(false);
   });
 
   it("serializes ordinary JSON unchanged and makes special values explicit for UI and compaction", () => {

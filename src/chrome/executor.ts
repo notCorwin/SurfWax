@@ -1269,7 +1269,9 @@ export class ChromeExecutor {
       const contentSize = metrics.cssContentSize ?? metrics.contentSize;
       if (contentSize) params.clip = { ...contentSize, scale: 1 };
     } else if (input.target) {
-      const box = await this.locatorFor(page, input.target).evaluate("el => { const r = el.getBoundingClientRect(); return {x:r.x + scrollX,y:r.y + scrollY,width:r.width,height:r.height}; }");
+      const locator = this.locatorFor(page, input.target);
+      if (!locator?.spec) throw new Error("AutomationError[invalid-target]: Screenshot requires a locator target");
+      const box = await this.automation.screenshotClip(page.tabId, locator.spec);
       params.clip = { ...box, scale: input.hires ? await page.evaluate("() => devicePixelRatio") : 1 };
     }
     const observation = await page.observe("visual", undefined, params);

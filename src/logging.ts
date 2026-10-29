@@ -5,7 +5,7 @@ export type LogEvent = {
   type: string;
   timestamp: string;
   /** Version of the value encoding, separate from user-controlled payloads. */
-  valueEncoding?: 2;
+  valueEncoding?: 2 | 3;
   content: JsonValue;
   conversationId?: string;
   runId?: string;
@@ -333,13 +333,13 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-const RESERVED_LOG_TYPES = new Set(["undefined", "number", "bigint", "symbol", "function", "circular-reference", "error", "date", "array-buffer", "typed-array", "map", "set", "escaped-object"]);
+const RESERVED_LOG_TYPES = new Set(["undefined", "number", "bigint", "symbol", "function", "circular-reference", "error", "date", "array-buffer", "typed-array", "map", "set", "escaped-object", "sparse-array"]);
 
-export function toLogValue(value: unknown, active = new WeakSet<object>(), version?: 2): JsonValue {
+export function toLogValue(value: unknown, active = new WeakSet<object>(), version?: 2 | 3): JsonValue {
   if (value === null) return null;
   if (value === undefined) return { $type: "undefined", value: null };
   if (typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number") return version === 2 && Object.is(value, -0) ? { $type: "number", value: "-0" }
+  if (typeof value === "number") return version !== undefined && Object.is(value, -0) ? { $type: "number", value: "-0" }
     : Number.isFinite(value) ? value : { $type: "number", value: String(value) };
   if (typeof value === "bigint") return { $type: "bigint", value: value.toString() };
   if (typeof value === "symbol") return { $type: "symbol", value: String(value) };
@@ -367,11 +367,18 @@ export function toLogValue(value: unknown, active = new WeakSet<object>(), versi
     }
     if (value instanceof Map) return { $type: "map", entries: [...value].map(([key, item]) => [toLogValue(key, active, version), toLogValue(item, active, version)]) };
     if (value instanceof Set) return { $type: "set", values: [...value].map((item) => toLogValue(item, active, version)) };
-    if (Array.isArray(value)) return value.map((item) => toLogValue(item, active, version));
+    if (Array.isArray(value)) {
+      if (version === 3 && value.length >= 32768) {
+        const keys = Object.getOwnPropertyNames(value).filter((key) => /^(?:0|[1-9]\d*)$/.test(key) && Number(key) < value.length);
+        if (keys.length < value.length * 0.8) return { $type: "sparse-array", length: value.length,
+          entries: keys.map((key) => [Number(key), toLogValue(value[Number(key)], active, version)]) };
+      }
+      return value.map((item) => toLogValue(item, active, version));
+    }
 
     const entries = Object.entries(value).map(([key, item]) => [key, toLogValue(item, active, version)] as const);
     const tag = entries.find(([key]) => key === "$type")?.[1];
-    if (version === 2 && typeof tag === "string" && RESERVED_LOG_TYPES.has(tag))
+    if (version !== undefined && typeof tag === "string" && RESERVED_LOG_TYPES.has(tag))
       return { $type: "escaped-object", entries: entries.map(([key, item]) => [key, item]) };
     return Object.fromEntries(entries);
   } finally {
@@ -379,25 +386,35 @@ export function toLogValue(value: unknown, active = new WeakSet<object>(), versi
   }
 }
 
-export function fromLogValue(value: unknown, version?: 2): unknown {
+export function fromLogValue(value: unknown, version?: 2 | 3): unknown {
   if (Array.isArray(value)) return value.map((item) => fromLogValue(item, version));
   if (!value || typeof value !== "object") return value;
   const record = value as Record<string, unknown>;
-  if (version === 2 && record.$type === "escaped-object") {
+  if (version !== undefined && record.$type === "escaped-object") {
     if (Object.keys(record).length !== 2 || !Array.isArray(record.entries)
       || record.entries.some((entry) => !Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string")
       || new Set(record.entries.map((entry) => entry[0])).size !== record.entries.length)
       throw new Error("Invalid escaped log object");
     return Object.fromEntries(record.entries.map(([key, item]) => [key, fromLogValue(item, version)]));
   }
-  if (version === 2 && Object.keys(record).length === 2 && record.$type === "number") {
+  if (version === 3 && record.$type === "sparse-array") {
+    if (Object.keys(record).length !== 3 || !Number.isSafeInteger(record.length) || Number(record.length) < 0 || Number(record.length) > 0xffff_ffff || !Array.isArray(record.entries)) throw new Error("Invalid encoded sparse array");
+    const result = new Array(Number(record.length));
+    let previous = -1;
+    for (const entry of record.entries) {
+      if (!Array.isArray(entry) || entry.length !== 2 || !Number.isSafeInteger(entry[0]) || entry[0] <= previous || entry[0] >= result.length) throw new Error("Invalid encoded sparse array entry");
+      previous = entry[0]; result[entry[0]] = fromLogValue(entry[1], version);
+    }
+    return result;
+  }
+  if (version !== undefined && Object.keys(record).length === 2 && record.$type === "number") {
     if (record.value === "NaN") return NaN;
     if (record.value === "Infinity") return Infinity;
     if (record.value === "-Infinity") return -Infinity;
     if (record.value === "-0") return -0;
     throw new Error("Invalid encoded log number");
   }
-  if (version === 2 && Object.keys(record).length === 2 && record.$type === "bigint") {
+  if (version !== undefined && Object.keys(record).length === 2 && record.$type === "bigint") {
     if (typeof record.value !== "string" || !/^-?(?:0|[1-9]\d*)$/.test(record.value)) throw new Error("Invalid encoded log bigint");
     return BigInt(record.value);
   }
@@ -504,7 +521,7 @@ export function selectedHeadId(
   for (const event of events) {
     if (event.type !== "conversation.message") continue;
     const raw = event.content;
-    const content = event.valueEncoding === 2 && raw && typeof raw === "object" && !Array.isArray(raw) && raw.$type === "escaped-object"
+    const content = event.valueEncoding !== undefined && raw && typeof raw === "object" && !Array.isArray(raw) && raw.$type === "escaped-object"
       ? fromLogValue(raw, event.valueEncoding) : raw;
     const id = content && typeof content === "object" && !Array.isArray(content) ? (content as Record<string, unknown>).id : undefined;
     if (typeof id !== "string" || !stored.has(id)) continue;
@@ -633,20 +650,20 @@ export class EventLogger {
     return {
       timestamp: (this.options.now?.() ?? new Date()).toISOString(),
       type: record.type,
-      valueEncoding: 2,
-      content: toLogValue(Object.hasOwn(record, "content") ? record.content : null, undefined, 2),
+      valueEncoding: 3,
+      content: toLogValue(Object.hasOwn(record, "content") ? record.content : null, undefined, 3),
       ...(record.conversationId ? { conversationId: record.conversationId } : {}),
       ...(record.parentId !== undefined ? { parentId: record.parentId } : {}),
       ...(run ? { runId: run } : {}),
-      ...(Object.hasOwn(record, "stopReason") ? { stopReason: toLogValue(record.stopReason, undefined, 2) } : {}),
-      ...(Object.hasOwn(record, "usage") ? { usage: toLogValue(record.usage, undefined, 2) } : {}),
-      ...(Object.hasOwn(record, "providerMetadata") ? { providerMetadata: toLogValue(record.providerMetadata, undefined, 2) } : {}),
+      ...(Object.hasOwn(record, "stopReason") ? { stopReason: toLogValue(record.stopReason, undefined, 3) } : {}),
+      ...(Object.hasOwn(record, "usage") ? { usage: toLogValue(record.usage, undefined, 3) } : {}),
+      ...(Object.hasOwn(record, "providerMetadata") ? { providerMetadata: toLogValue(record.providerMetadata, undefined, 3) } : {}),
       ...(record.toolCallId !== undefined ? { toolCallId: !record.toolCallIdCanonical && phase !== undefined && phase > 0 ? `${phase}:${record.toolCallId}` : record.toolCallId } : {}),
-      ...(Object.hasOwn(record, "input") ? { input: toLogValue(record.input, undefined, 2) } : {}),
-      ...(Object.hasOwn(record, "output") ? { output: toLogValue(record.output, undefined, 2) } : {}),
-      ...(Object.hasOwn(record, "error") ? { error: toLogValue(record.error, undefined, 2) } : {}),
-      ...(Object.hasOwn(record, "retry") ? { retry: toLogValue(record.retry, undefined, 2) } : {}),
-      ...(Object.hasOwn(record, "abort") ? { abort: toLogValue(record.abort, undefined, 2) } : {}),
+      ...(Object.hasOwn(record, "input") ? { input: toLogValue(record.input, undefined, 3) } : {}),
+      ...(Object.hasOwn(record, "output") ? { output: toLogValue(record.output, undefined, 3) } : {}),
+      ...(Object.hasOwn(record, "error") ? { error: toLogValue(record.error, undefined, 3) } : {}),
+      ...(Object.hasOwn(record, "retry") ? { retry: toLogValue(record.retry, undefined, 3) } : {}),
+      ...(Object.hasOwn(record, "abort") ? { abort: toLogValue(record.abort, undefined, 3) } : {}),
       ...(record.latencyMs !== undefined ? { latencyMs: record.latencyMs } : {}),
     };
   }
@@ -950,7 +967,25 @@ export class EventLogger {
         throw new Error(`offset/limit requires an array or string result${keys.length ? `; select one first with { path: [${JSON.stringify(keys[0])}], offset: 0, limit: 4000 }. Available keys: ${keys.join(", ")}` : ""}`);
       }
       const offset = Math.max(0, selection.offset ?? 0);
-      value = value.slice(offset, selection.limit === undefined ? undefined : offset + Math.max(0, selection.limit));
+      const end = selection.limit === undefined ? undefined : offset + Math.max(0, selection.limit);
+      if (Array.isArray(value)) {
+        const array = value;
+        // Array.prototype.slice scans every position, including holes. A native
+        // artifact read can request an unbounded suffix of a huge sparse array.
+        const index = (position: number) => Math.min(array.length, Math.max(0, Math.trunc(position) || 0));
+        const first = index(offset), last = end === undefined ? array.length : index(end);
+        if (last - first > 32768) {
+          const keys = Object.getOwnPropertyNames(array).filter((key) => /^(?:0|[1-9]\d*)$/.test(key) && Number(key) < array.length);
+          if (keys.length < array.length * 0.8) {
+            const sliced = new Array(Math.max(0, last - first));
+            for (const key of keys) {
+              const position = Number(key);
+              if (position >= first && position < last) sliced[position - first] = array[position];
+            }
+            value = sliced;
+          } else value = array.slice(offset, end);
+        } else value = array.slice(offset, end);
+      } else value = value.slice(offset, end);
     }
     return value;
   }

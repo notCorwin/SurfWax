@@ -1,5 +1,35 @@
 const RESULT_SIDECAR_FIELDS = new Set(["resultType", "undefinedPaths", "holePaths", "numberPaths", "bigintPaths", "undefinedCount", "holeCount", "numberCount", "bigintCount", "undefinedPathsAccess", "holePathsAccess", "numberPathsAccess", "bigintPathsAccess", "undefinedPathsOversizedItem", "holePathsOversizedItem", "numberPathsOversizedItem", "bigintPathsOversizedItem", "pathsNote", "envelopeWrapped"]);
 
+/** Bound the work and sidecar allocation before walking a result for JSON output. */
+export function normalizationExceedsBudget(value: unknown, budget = 32768): boolean {
+  const active = new WeakSet<object>();
+  const visit = (item: unknown, depth: number): boolean => {
+    if (--budget < 0 || depth > 100) return true;
+    if (item === undefined || typeof item === "bigint" || typeof item === "number" && (!Number.isFinite(item) || Object.is(item, -0))) {
+      budget -= depth;
+      return budget < 0;
+    }
+    if (!item || typeof item !== "object") return false;
+    if (active.has(item)) return true;
+    active.add(item);
+    try {
+      if (Array.isArray(item)) {
+        // Every position becomes a JSON value, including holes. Do not iterate
+        // an enormous sparse length just to discover that it exceeds budget.
+        if (item.length > budget) return true;
+        for (let i = 0; i < item.length; i++) {
+          if (!Object.hasOwn(item, i)) { budget -= depth + 1; if (budget < 0) return true; }
+          else if (visit(item[i], depth + 1)) return true;
+        }
+        return false;
+      }
+      for (const key in item) if (Object.hasOwn(item, key) && visit((item as Record<string, unknown>)[key], depth + 1)) return true;
+      return false;
+    } finally { active.delete(item); }
+  };
+  return visit(value, 0);
+}
+
 /** Keep existing outer fields distinct from the result sidecar protocol. */
 export function normalizeResultEnvelope(record: Record<string, unknown>): Record<string, unknown> {
   const hasResult = Object.hasOwn(record, "result");

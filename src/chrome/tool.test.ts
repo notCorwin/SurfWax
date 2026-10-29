@@ -323,6 +323,90 @@ describe("browser tools", () => {
     executor.dispose();
   });
 
+  it("stores large sparse values before creating sidecars and normalizes only the requested slice", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: {
+      append: async (event) => { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+      all: async () => [...events],
+    } });
+    const rows = new Array(100_000);
+    for (let i = 1; i < rows.length; i += 2) rows[i] = undefined;
+    rows[2] = NaN; rows[4] = 123n; rows[6] = null;
+    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
+    vi.spyOn(executor, "runProgram").mockResolvedValue({ ok: true, result: rows });
+    const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
+    const output = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "program" });
+    expect(output).toMatchObject({ $ref: expect.any(Number), sidecarsDeferred: true,
+      resultAccess: { path: ["result"], offset: 0, limit: 25 } });
+    expect(JSON.stringify(output).length).toBeLessThan(2000);
+    expect(await tools.read_artifact.execute({ ...output.resultAccess, limit: 8 }, { toolCallId: "slice" }))
+      .toEqual({ ok: true, result: Array(8).fill(null), undefinedPaths: [[1], [3], [5], [7]], holePaths: [[0]],
+        numberPaths: [{ path: [2], value: "NaN" }], bigintPaths: [{ path: [4], value: "123" }] });
+    const native = await logger.result(output.$ref, { path: ["result"], offset: 0, limit: 8 }, "c") as unknown[];
+    expect(Object.hasOwn(native, 0)).toBe(false); expect(Object.hasOwn(native, 1)).toBe(true);
+    expect(Number.isNaN(native[2])).toBe(true); expect(native[4]).toBe(123n); expect(native[6]).toBeNull();
+    executor.dispose();
+  });
+
+  it("retains background job identity when its result exceeds the normalization budget", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: {
+      append: async (event) => { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+      all: async () => [...events],
+    } });
+    const acknowledge = vi.fn();
+    const job = { id: "job", state: "succeeded", terminal: true, ok: true, result: new Array(100_000) };
+    const tools = createProgramTools({ queryJobs: vi.fn(async () => job), acknowledgeBackgroundJob: acknowledge } as unknown as ChromeExecutor, { logger, conversationId: "c" }) as Record<string, any>;
+    const output = await tools.get_job.execute({ jobId: "job" }, { toolCallId: "job-call" });
+    expect(output).toMatchObject({ id: "job", state: "succeeded", terminal: true, ok: true, sidecarsDeferred: true, resultAccess: { path: ["result"] } });
+    expect(acknowledge).toHaveBeenCalledWith("job", "c");
+  });
+
+  it("reads an unbounded suffix of a huge sparse result without losing holes or undefined", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: {
+      append: async (event) => { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+      all: async () => [...events],
+    } });
+    const rows = new Array(1_000_000_000);
+    rows[3] = undefined; rows[8] = NaN; rows[999_999_999] = 123n;
+    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
+    vi.spyOn(executor, "runProgram").mockResolvedValue({ ok: true, result: rows });
+    const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
+    const first = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "first" });
+    const suffix = await tools.read_artifact.execute({ artifactId: first.$ref, path: ["result"], offset: 2 }, { toolCallId: "suffix" });
+    expect(suffix).toMatchObject({ sidecarsDeferred: true, resultAccess: { path: ["result"], offset: 0 } });
+    const page = await tools.read_artifact.execute({ ...suffix.resultAccess, limit: 8 }, { toolCallId: "page" });
+    expect(page).toEqual({ ok: true, result: Array(8).fill(null), undefinedPaths: [[1]], holePaths: [[0], [2], [3], [4], [5], [7]], numberPaths: [{ path: [6], value: "NaN" }] });
+    const native = await logger.result(suffix.$ref, { path: ["result"] }, "c") as unknown[];
+    expect(native.length).toBe(999_999_998); expect(Object.hasOwn(native, 0)).toBe(false);
+    expect(Object.hasOwn(native, 1)).toBe(true); expect(native[1]).toBeUndefined(); expect(native[999_999_997]).toBe(123n);
+    executor.dispose();
+  });
+
+  it("preserves bounded status and evidence when result normalization is deferred", async () => {
+    const logger = { append: vi.fn(async () => ({ id: 7 })) } as unknown as EventLogger;
+    const huge = () => new Array(100_000);
+    const executor = { runProgram: vi.fn()
+      .mockResolvedValueOnce({ ok: true, result: { verified: false, timedOut: true, present: true, actual: huge() } })
+      .mockResolvedValueOnce({ ok: true, result: { requests: huge(), integrity: "incomplete", hasMore: null, nextOffset: 42, reason: "diagnostic-log-incomplete" } })
+      .mockResolvedValueOnce({ accepted: true, complete: false, jobId: "job", blockedBy: { kind: "dialog", dialogId: "dialog-1" }, result: huge() })
+      .mockResolvedValueOnce({ ok: false, state: "failed", error: { code: "timeout", message: "interrupted", effectUnknown: true }, receipts: { jobId: "job", after: 3 }, result: huge() })
+      .mockResolvedValueOnce({ ok: true, artifact: { id: 4, filename: "page.png" }, result: { screenshot: { artifactId: 9, mediaType: "image/png" }, rows: huge() } }),
+    } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor, { logger }) as Record<string, any>;
+    expect(await tools.verify_state.execute({ target: { ref: "e1" }, state: "visible" }, { toolCallId: "verify" }))
+      .toMatchObject({ sidecarsDeferred: true, verification: { verified: false, timedOut: true, present: true } });
+    expect(await tools.list_requests.execute({}, { toolCallId: "requests" }))
+      .toMatchObject({ integrity: "incomplete", hasMore: null, nextOffset: 42, reason: "diagnostic-log-incomplete", access: { path: ["result", "requests"] } });
+    expect(await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "handoff" }))
+      .toMatchObject({ accepted: true, complete: false, jobId: "job", blockedBy: { kind: "dialog", dialogId: "dialog-1" }, blockedByAccess: { path: ["blockedBy"] } });
+    expect(await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "failed" }))
+      .toMatchObject({ ok: false, state: "failed", error: { code: "timeout", effectUnknown: true }, receipts: { jobId: "job", after: 3 }, receiptsAccess: { path: ["receipts"] } });
+    expect(await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "screenshot" }))
+      .toMatchObject({ screenshot: { artifactId: 9, mediaType: "image/png" }, visualAccess: { path: ["result"] }, artifact: { id: 4, filename: "page.png" }, artifactAccess: { path: ["artifact"] } });
+  });
+
   it("retains paginated sidecar access when a large artifact read is compacted", async () => {
     const events: LogEvent[] = [];
     const logger = new EventLogger({ store: {

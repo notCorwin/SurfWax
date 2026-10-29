@@ -1,4 +1,4 @@
-import { normalizeResultEnvelope } from "../tool-result-values";
+import { normalizationExceedsBudget, normalizeResultEnvelope } from "../tool-result-values";
 import { dynamicTool, type ToolCallRepairFunction } from "ai";
 import { z } from "zod";
 import type { EventLogger } from "../logging";
@@ -136,12 +136,20 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
           const failure = (result as any)?.ok === false ? (result as any).error ?? (result as any).failed?.error ?? (result as any).result?.error : undefined;
           const artifact = (result as any)?.result?.artifact;
           const envelope = failure ? { ...result as object, ...(artifact ? { artifact } : {}), error: { ...failure, retryable: false } } : result;
-          const normalized = envelope && typeof envelope === "object" && !Array.isArray(envelope)
-            ? normalizeResultEnvelope(envelope as Record<string, unknown>) : envelope;
-          const originalResult = normalized && typeof normalized === "object" && "envelopeWrapped" in normalized && normalized.envelopeWrapped === true
-            ? envelope : envelope && typeof envelope === "object" && Object.hasOwn(envelope, "result") ? (envelope as Record<string, unknown>).result : undefined;
-          const hasResult = Boolean(normalized && typeof normalized === "object" && Object.hasOwn(normalized, "result"));
-          output = await compactToolResult(normalized, { ...options, toolCallId, ...identity, preserveVerification: definition.name === "verify_state", preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job", preserveSearchStatus: definition.name === "find_elements" || definition.name === "list_frames", preserveInspectionStatus: definition.name === "inspect_page", preserveDiagnosticStatus: definition.name === "list_requests" || definition.name === "read_console", preserveEventStatus: definition.name === "wait_event", preserveArtifactValue: hasResult, ...(hasResult ? { originalResult } : {}) });
+          if (normalizationExceedsBudget(envelope)) {
+            output = await storeUnnormalizedResult(envelope, { ...options, toolCallId, ...identity,
+              preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job",
+              preserveSearchStatus: definition.name === "find_elements" || definition.name === "list_frames",
+              preserveInspectionStatus: definition.name === "inspect_page", preserveEventStatus: definition.name === "wait_event",
+              preserveDiagnosticStatus: definition.name === "list_requests" || definition.name === "read_console", preserveVerification: definition.name === "verify_state" });
+          } else {
+            const normalized = envelope && typeof envelope === "object" && !Array.isArray(envelope)
+              ? normalizeResultEnvelope(envelope as Record<string, unknown>) : envelope;
+            const originalResult = normalized && typeof normalized === "object" && "envelopeWrapped" in normalized && normalized.envelopeWrapped === true
+              ? envelope : envelope && typeof envelope === "object" && Object.hasOwn(envelope, "result") ? (envelope as Record<string, unknown>).result : undefined;
+            const hasResult = Boolean(normalized && typeof normalized === "object" && Object.hasOwn(normalized, "result"));
+            output = await compactToolResult(normalized, { ...options, toolCallId, ...identity, preserveVerification: definition.name === "verify_state", preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job", preserveSearchStatus: definition.name === "find_elements" || definition.name === "list_frames", preserveInspectionStatus: definition.name === "inspect_page", preserveDiagnosticStatus: definition.name === "list_requests" || definition.name === "read_console", preserveEventStatus: definition.name === "wait_event", preserveArtifactValue: hasResult, ...(hasResult ? { originalResult } : {}) });
+          }
           if ((definition.name === "get_job" || definition.name === "cancel_job") && (result as any)?.terminal === true && typeof (result as any).id === "string") observedTerminalJob = (result as any).id;
         } catch (error) {
           output = await failureFor(error, executing);
@@ -345,6 +353,56 @@ function readablePathOf(value: unknown): Array<string | number> | undefined {
 
 const PREVIEW_BYTES = 4096;
 const previewEncoder = new TextEncoder();
+
+/** Persist the native value before constructing potentially enormous sidecars. */
+async function storeUnnormalizedResult(value: unknown, options: { logger?: EventLogger; conversationId?: string; toolCallId?: string; runId?: string; toolCallIdCanonical?: boolean; preserveJobStatus?: boolean; preserveSearchStatus?: boolean; preserveInspectionStatus?: boolean; preserveEventStatus?: boolean; preserveDiagnosticStatus?: boolean; preserveVerification?: boolean }): Promise<unknown> {
+  if (!options.logger) throw new Error("Large result requires a canonical event log for paged access");
+  const event = await options.logger.append({ type: "tool.result.data", conversationId: options.conversationId, toolCallId: options.toolCallId, runId: options.runId, toolCallIdCanonical: options.toolCallIdCanonical, content: { sidecarsDeferred: true }, output: value });
+  if (!event) throw new Error("Could not save large tool result");
+  const root = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  const job = options.preserveJobStatus ? root : undefined;
+  const search = options.preserveSearchStatus ? root : undefined;
+  const inspection = options.preserveInspectionStatus ? root : undefined;
+  const browserEvents = options.preserveEventStatus ? root : undefined;
+  const diagnostic = options.preserveDiagnosticStatus && root?.result && typeof root.result === "object" && !Array.isArray(root.result) ? root.result as Record<string, unknown> : undefined;
+  const verification = options.preserveVerification && root?.result && typeof root.result === "object" && !Array.isArray(root.result) ? root.result as Record<string, unknown> : undefined;
+  const handoff = root?.accepted === true && root.complete === false && typeof root.jobId === "string" ? root : undefined;
+  const blocked = handoff?.blockedBy;
+  const visualRecord = [root?.result, root].find((item) => item && typeof item === "object" && !Array.isArray(item)
+    && (item as Record<string, unknown>).screenshot && typeof (item as Record<string, unknown>).screenshot === "object") as Record<string, unknown> | undefined;
+  const screenshot = visualRecord ? screenshotMetadata(visualRecord.screenshot as Record<string, unknown>) : undefined;
+  const visualPath = visualRecord === root ? [] : ["result"];
+  const path = diagnostic && Array.isArray(diagnostic.requests) ? ["result", "requests"] : diagnostic && Array.isArray(diagnostic.messages) ? ["result", "messages"]
+    : browserEvents && Array.isArray(browserEvents.events) ? ["events"] : job && Array.isArray(job.events) ? ["events"]
+    : search && Array.isArray(search.elements) ? ["elements"] : search && Array.isArray(search.frames) ? ["frames"]
+    : inspection && Array.isArray(inspection.items) ? ["items"] : readablePathOf(value);
+  const selected = path ? valueAt(value, path) : value;
+  const access = (selectedPath: readonly (string | number)[] | undefined, item: unknown) => ({ artifactId: event.id,
+    ...(selectedPath ? { path: selectedPath } : {}), ...(Array.isArray(item) ? { offset: 0, limit: 25 } : typeof item === "string" ? { offset: 0, limit: 1000 } : {}) });
+  const failure = root?.ok === false || root?.type === "tool-error";
+  const errorPath = root && Object.hasOwn(root, "error") ? ["error"] : ["result", "error"];
+  const error = failure ? valueAt(value, errorPath) : undefined;
+  return { $ref: event.id, type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value,
+    access: access(path, selected), sidecarsDeferred: true,
+    pathsNote: "Read a bounded slice with read_artifact; its type sidecars are relative to that slice. For oversized items, select a nested path or use artifacts.read in execute_program.",
+    ...(root && Object.hasOwn(root, "result") ? { resultAccess: access(["result"], root.result) } : {}),
+    ...(job ? jobMetadata(job) : {}), ...(search ? searchMetadata(search) : {}),
+    ...(inspection ? inspectionMetadata(inspection) : {}), ...(browserEvents ? eventMetadata(browserEvents) : {}),
+    ...(diagnostic ? { ...(diagnostic.integrity === "complete" || diagnostic.integrity === "incomplete" ? { integrity: diagnostic.integrity } : {}),
+      ...(typeof diagnostic.hasMore === "boolean" || diagnostic.hasMore === null ? { hasMore: diagnostic.hasMore } : {}),
+      ...(Number.isSafeInteger(diagnostic.nextOffset) && Number(diagnostic.nextOffset) >= 0 ? { nextOffset: diagnostic.nextOffset } : {}),
+      ...(exactText(diagnostic.reason, 128) !== undefined ? { reason: diagnostic.reason } : {}) } : {}),
+    ...(failure ? { ...(root?.ok === false ? { ok: false } : {}), ...(root?.type === "tool-error" ? { type: "tool-error" } : {}),
+      ...failureMetadata(root!), ...(Object.hasOwn(root!, "receipts") ? { receiptsAccess: { artifactId: event.id, path: ["receipts"] } } : {}),
+      ...(error === undefined ? {} : { error: boundedError(error), errorAccess: { artifactId: event.id, path: errorPath } }) } : {}),
+    ...(screenshot && visualRecord ? { ...visualContext(visualRecord), screenshot, visualAccess: { artifactId: event.id, path: visualPath } } : {}),
+    ...(root && Object.hasOwn(root, "artifact") ? { artifact: artifactMetadata(root.artifact), artifactAccess: { artifactId: event.id, path: ["artifact"] } } : {}),
+    ...(handoff ? { accepted: true, complete: false, ...failureMetadata(handoff),
+      ...(blocked && typeof blocked === "object" ? { blockedBy: blockerMetadata(blocked), blockedByAccess: { artifactId: event.id, path: ["blockedBy"] } } : {}) } : {}),
+    ...(typeof verification?.verified === "boolean" ? { verification: { verified: verification.verified,
+      ...(typeof verification.timedOut === "boolean" ? { timedOut: verification.timedOut } : {}),
+      ...(typeof verification.present === "boolean" ? { present: verification.present } : {}) } } : {}) };
+}
 function previewString(value: string, maxCharacters: number, maxBytes: number): string {
   let low = 0, high = Math.min(value.length, maxCharacters);
   while (low < high) {
