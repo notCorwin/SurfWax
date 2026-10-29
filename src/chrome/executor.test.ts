@@ -120,6 +120,55 @@ describe("ChromeExecutor programs", () => {
     expect((h.fake.chromeApi as any).tabs.update).toHaveBeenCalledWith(42, { active: true });
     expect((h.fake.chromeApi as any).windows.update).not.toHaveBeenCalled(); h.executor.dispose();
   });
+  it("keeps the bound tab when closing another, and clears it when closing the bound tab", async () => {
+    let target = 42;
+    const h = programHarness(async ({ browser }) => browser.tabs.close(target));
+    expect(await h.run()).toMatchObject({ ok: true });
+    expect((h.executor as any).browserState.tabId).toBe(41);
+    target = 41;
+    expect(await h.run()).toMatchObject({ ok: true });
+    expect((h.executor as any).browserState.tabId).toBeUndefined();
+    expect(await h.executor.listTabs()).toEqual([expect.objectContaining({ id: 99, current: false })]);
+    await h.executor.switchTab(99);
+    expect((h.executor as any).browserState).toEqual({ windowId: 9, tabId: 99 });
+    h.executor.dispose();
+  });
+  it("lists tabs and explicitly recovers after an externally closed binding or window", async () => {
+    const fake = fakeChrome();
+    const tabs = [{ id: 41, windowId: 7, active: true }, { id: 99, windowId: 9, active: true }] as chrome.tabs.Tab[];
+    Object.assign(fake.chromeApi, {
+      windows: { getCurrent: vi.fn(async () => ({ id: 7, tabs: [tabs[0]] })), get: vi.fn(async () => { throw new Error("window closed"); }) },
+      tabs: { query: vi.fn(async () => tabs), get: vi.fn(async (id: number) => tabs.find(tab => tab.id === id)), update: vi.fn(async () => undefined) },
+    });
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never });
+    (executor as any).browserState = { windowId: 7, tabId: 41 };
+    tabs.shift();
+    await expect(executor.listTabs()).resolves.toEqual([expect.objectContaining({ id: 99, current: false })]);
+    await expect(executor.browserContext()).resolves.toMatchObject({ windowId: 7, tabs: [{ tabId: 99, current: false }] });
+    expect((executor as any).browserState).toEqual({ windowId: 7, tabId: 41 });
+    await expect((executor as any).pageFor((executor as any).browserState)).rejects.toThrow("bound-tab-closed");
+    await expect(executor.switchTab(99)).resolves.toEqual([expect.objectContaining({ id: 99, current: true })]);
+    expect((executor as any).browserState).toEqual({ windowId: 9, tabId: 99 });
+    expect((fake.chromeApi as any).tabs.update).toHaveBeenCalledWith(99, { active: true });
+    executor.dispose();
+  });
+  it("does not change binding when switch is cancelled while tab discovery is pending", async () => {
+    const fake = fakeChrome();
+    let complete!: (tabs: chrome.tabs.Tab[]) => void;
+    Object.assign(fake.chromeApi, { tabs: { query: vi.fn(() => new Promise(resolve => { complete = resolve; })), update: vi.fn() } });
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never });
+    (executor as any).browserState = { windowId: 7, tabId: 41 };
+    const controller = new AbortController();
+    const pending = executor.switchTab(99, controller.signal);
+    await vi.waitFor(() => expect(complete).toBeTypeOf("function"));
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    complete([{ id: 99, windowId: 9 } as chrome.tabs.Tab]);
+    await (executor as any).tail;
+    expect((fake.chromeApi as any).tabs.update).not.toHaveBeenCalled();
+    expect((executor as any).browserState).toEqual({ windowId: 7, tabId: 41 });
+    executor.dispose();
+  });
   it("reports cancellation promptly while delayed tab creation settles, keeping the binding for recovery", async () => {
     let finish!: (tab: chrome.tabs.Tab) => void;
     const h = programHarness(async ({ browser }, signal) => { if (signal.aborted) signal.throwIfAborted(); return browser.tabs.open("https://example.com/next"); });
@@ -354,7 +403,8 @@ describe("ChromeExecutor programs", () => {
 
     tabs.splice(1, 1);
     tabs[0]!.active = true;
-    expect((await executor.browserContext()).tabs[0]!.current).toBe(true);
+    expect((await executor.browserContext()).tabs[0]!.current).toBe(false);
+    await expect((executor as any).pageFor((executor as any).browserState)).rejects.toThrow("bound-tab-closed");
     executor.dispose();
   });
 

@@ -77,12 +77,12 @@ test('reloads a nonstream profile without changing branches, configuration, log 
     await opened.page.getByTestId('composer-input').fill('verify the upgraded runtime');
     await opened.page.getByTestId('composer-input').press('Enter');
     await expect(opened.page.locator('.markdown-body').last()).toContainText('UPGRADED_RUNTIME_READY');
-    expect(provider.requests[0].tools).toHaveLength(3);
+    expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(['inspect_page', 'execute_program']));
   } finally { await dispose(opened.context, profile, provider.server); }
 });
 
 test('download failure retains the artifact and a retry saves it without requesting permission or recapturing', async () => {
-  const responses: Parameters<typeof startProvider>[0] = [commandResponse("run", { code: `return await page.screenshot(${JSON.stringify({ filename: 'retained.png', save: true })});` }, 'failed-save'), textResponse('SAVE_FAILED'), textResponse('保存重试')];
+  const responses: Parameters<typeof startProvider>[0] = [commandResponse("execute_program", { code: `return await page.screenshot(${JSON.stringify({ filename: 'retained.png', save: true })});` }, 'failed-save'), textResponse('SAVE_FAILED'), textResponse('保存重试')];
   const provider = await startProvider(responses);
   const opened = await openExtension();
   try {
@@ -105,7 +105,7 @@ test('download failure retains the artifact and a retry saves it without request
     expect(events.find(event => event.toolCallId === 'failed-save' && event.type === 'tool.failed')?.output)
       .toMatchObject({ artifact: { id: artifact.id, filename: 'retained.png', saved: false } });
     await opened.page.evaluate(() => { (globalThis as any).__downloadTest.fail = false; });
-    responses.push(commandResponse("run", { code: `return await artifacts.save(${JSON.stringify(artifact.id)},${JSON.stringify(undefined)});` }, 'retry-save'), textResponse('SAVE_RETRIED'));
+    responses.push(commandResponse("execute_program", { code: `return await artifacts.save(${JSON.stringify(artifact.id)},${JSON.stringify(undefined)});` }, 'retry-save'), textResponse('SAVE_RETRIED'));
     await opened.page.getByTestId('composer-input').fill('save the stored artifact again');
     await opened.page.getByTestId('composer-input').press('Enter');
     await expect(opened.page.locator('.markdown-body').last()).toContainText('SAVE_RETRIED');
@@ -117,7 +117,7 @@ test('download failure retains the artifact and a retry saves it without request
 });
 
 test('stopping a pending download retains its artifact and closes the tool once', async () => {
-  const provider = await startProvider([commandResponse("run", { code: `return await page.screenshot(${JSON.stringify({ filename: 'pending.png', save: true })});` }, 'pending-save')]);
+  const provider = await startProvider([commandResponse("execute_program", { code: `return await page.screenshot(${JSON.stringify({ filename: 'pending.png', save: true })});` }, 'pending-save')]);
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage(); await target.goto(`${provider.origin}/target`);

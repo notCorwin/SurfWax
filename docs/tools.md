@@ -1,18 +1,66 @@
 # Surf Wax 工具参考
 
-此文件由真实工具 registry 自动生成（npm run docs:tools）。所有新回合公开 3 个入口：inspect 了解页面、run 组合执行、jobs 管理长执行。旧会话的 canonical 历史原样保留；继续、重试、自定义提示词及压缩后的回合统一使用这三个工具，旧工具名称不再可执行。
+此文件由真实工具 registry 自动生成（npm run docs:tools）。新回合公开 51 个工具；每个独立工具对应一个操作，具体参数以工具 schema 为准。旧会话的 canonical 历史原样保留，历史工具名称不会因此重新成为可执行入口。
 
-inspect 默认只返回语义文本，有视觉能力的模型也不会自动截图；图片、布局、Canvas 或歧义才显式请求 image=true。文本支持区域、字段、字符预算、分页、截断说明与 since 增量；增量只返回 changes，不重复全页。ref 带 tab/document 归属，导航和移除不会自动替换成相似元素。AX 数据仍从 Chrome 读取，输出增量不意味着底层 CDP 事件已增量化。
+页面语义观察支持区域、字段、字符预算、分页、截断说明与增量。ref 带 tab/document 归属，导航和移除不会自动替换成相似元素。只有明确请求时才返回截图；AX 数据仍从 Chrome 读取，输出增量不意味着底层 CDP 事件已增量化。
 
-| 入口 | 定位 |
+| 工具 | 功能 |
 | --- | --- |
-| `inspect` | Inspect the bound page as semantic text with stable refs and tab/document ownership. region selects a locator subtree; fields selects text/state/ref/actions; budget limits returned characters with explicit truncation and nextOffset. since returns changes only for the same document/region/fields; a truncated baseline resets to full. image=true explicitly captures a screenshot artifact for images, layout, Canvas, or ambiguity; default never captures pixels. |
-| `run` | Execute an async JavaScript body with page, browser, net, protocol, artifacts, emit, check, sleep, signal. Example: await page.getByLabel('Email').fill('a@example.com'); await check(await page.getByLabel('Email').inputValue() === 'a@example.com'); return await page.inspect(); Supports variables/loops/conditions/filtering, locators/frames, page.evaluate, native input, tabs, persistent scripts, explicit page/extension fetch, CDP, and artifacts. Mutations are ordered and recorded as receipts. Subscribe with page.waitForEvent before triggering actions. background=true starts a cancellable job. Estimate the complete program's wall-clock duration and set timeoutMs with reasonable headroom; when omitted, Surf Wax derives a finite safety deadline from the program. Explicit timeoutMs has no artificial ceiling. jobs reads progress and results. No hidden agent or side-effect retries. See the runtime API appended to the system prompt. |
-| `jobs` | Manage programs in this conversation: list; status(id,after?,limit?); wait(id,waitMs?,after?,limit?); cancel(id). after/nextCursor are canonical event IDs. Job status and output are projections of the canonical log, available independently of the execution queue. accepted/queued is not completion; completed input is not business success. Cancellation is not rollback. Lost hosts become interrupted and are never automatically replayed or resumed from a JavaScript stack. |
+| `inspect_page` | Inspect semantic text and stable refs. region and fields narrow the result; budget and pagination limit output; since reads changes. Use take_screenshot for visual input. |
+| `click` | Click exactly one matching element. |
+| `double_click` | Double-click exactly one matching element. |
+| `hover` | Move the pointer over exactly one matching element. |
+| `fill` | Replace an editable element's value; an empty value clears it. |
+| `type_text` | Enter text character by character into an editable element. |
+| `press_key` | Press a key or chord, optionally focusing an element first. |
+| `key_down` | Hold a key until key_up or run cleanup. |
+| `key_up` | Release a held key. |
+| `set_checked` | Set a checkbox or radio button to the requested checked state. |
+| `select_option` | Select option values or labels on a select element. |
+| `drag` | Drag one element to another. |
+| `scroll` | Scroll the page by a horizontal and vertical delta at the current pointer. |
+| `press_pointer` | Press a pointer button at its current position. |
+| `release_pointer` | Release a pointer button at its current position. |
+| `read_text` | Read an element's visible text. |
+| `read_value` | Read a form element's current value. |
+| `read_checked` | Read an element's checked state. |
+| `read_attribute` | Read an element's named attribute. |
+| `wait_for_url` | Wait until the page URL contains the given text. |
+| `navigate` | Navigate the selected page to a URL. |
+| `reload` | Reload the selected page. |
+| `go_back` | Navigate back in the selected page history. |
+| `go_forward` | Navigate forward in the selected page history. |
+| `list_tabs` | List tabs across browser windows. |
+| `open_tab` | Open a tab in the bound browser window. |
+| `switch_tab` | Switch the bound page to a tab. |
+| `close_tab` | Close a tab. |
+| `take_screenshot` | Capture a screenshot when visual input is enabled. |
+| `create_pdf` | Create a PDF artifact of the selected page. |
+| `read_artifact` | Read a stored artifact or large tool result by ID. |
+| `create_text_artifact` | Store text as an internal artifact. |
+| `save_artifact` | Export an internal artifact to a file. |
+| `list_scripts` | List persisted user scripts and their state. |
+| `read_script` | Read a persisted user script by ID. |
+| `create_script` | Create a persisted user script. |
+| `update_script` | Update a persisted user script. |
+| `set_script_enabled` | Enable or disable a persisted user script. |
+| `delete_script` | Delete a persisted user script. |
+| `list_requests` | Read captured network requests for the selected tab. |
+| `read_response` | Read a captured response body by request index. |
+| `read_console` | Read captured console messages for the selected tab. |
+| `fetch` | Fetch in the explicit page or extension context; contexts have different permissions and credentials. |
+| `evaluate_js` | Execute a JavaScript body in the explicitly selected page world. |
+| `list_cdp_sessions` | List CDP sessions owned by the selected tab. |
+| `send_cdp` | Send a Chrome DevTools Protocol command to an owned tab or session. |
+| `read_api_reference` | Read the available execute_program capabilities and usage details. |
+| `execute_program` | Execute an async JavaScript body with page, browser, net, protocol, artifacts, emit, check, sleep and signal. Use for loops, conditions, event subscriptions and complex multi-step tasks. Call read_api_reference for the complete API. background=true starts a job. Set timeoutMs to accommodate the entire program. Effects are not automatically retried; inspect uncertain outcomes. |
+| `list_jobs` | List jobs belonging to the current conversation. |
+| `get_job` | Read status and paginated receipts for a job. waitMs waits for completion or a timeout; after is a canonical event cursor. A running job is not complete. |
+| `cancel_job` | Cancel a job in the current conversation. Cancellation does not roll back dispatched effects. |
 
 ## 可组合程序
 
-run 接受 async JavaScript 函数体；简单操作直接调用，复杂工作可用变量、循环、条件、等待、过滤和断言。页面动作、脚本、网络、标签页、持久脚本与产物在同一程序中组合。同步循环运行在可销毁的 opaque-origin sandbox Worker，Side Panel 中介浏览器能力，jobs 不进入动作队列。没有新增 Chrome 权限，MV3 service worker 不 eval 模型字符串。
+`execute_program` 接受 async JavaScript 函数体，复杂工作可以使用变量、循环、条件、等待、过滤和断言。页面动作、脚本、网络、标签页、持久脚本与产物可在同一程序中组合。同步循环运行在可销毁的 opaque-origin sandbox Worker，Side Panel 中介浏览器能力，MV3 service worker 不 eval 模型字符串。
 
 ```js
 await page.getByLabel('Email').fill('me@example.com');
@@ -23,10 +71,10 @@ return await page.inspect();
 ```
 
 ```text
-run API (async JavaScript body; no function wrapper required):
+execute_program API (async JavaScript body; no function wrapper required):
 page: tabId; inspect(options?, regionLocator?); snapshot(); observe('semantic'|'visual'); ref/locator/frameLocator/getByRole/getByText/getByLabel/getByPlaceholder/getByAltText/getByTitle/getByTestId; goto/reload/goBack/goForward; url/title; evaluate(functionOrString,arg?); waitForURL/waitForLoadState/waitForEvent('dialog'|'popup'|'download'|'filechooser'); point(observationId,x,y,'click'|'dblclick'|'hover',options?); upload(files); drop(target,{files?,data?}); screenshot(options?); pdf({filename?,save?}); keyboard.press/insertText/down/up; mouse.move/down/up/wheel.
 locators: chain/filter/first/last/nth, count/waitFor/click/dblclick/hover/fill/clear/press/pressSequentially/check/uncheck/selectOption/dragTo/setInputFiles/focus/blur/scrollIntoViewIfNeeded/textContent/innerText/inputValue/getAttribute/isVisible/isEnabled/isChecked/evaluate. Files: {name,mimeType?,text|base64|url}; artifacts.read supplies existing file data. Event handles: chooser.isMultiple()/setFiles(files), dialog.type()/message()/defaultValue()/accept(prompt?)/dismiss(), popup is a page. Start event waits before the action, then await them.
-browser: page(tabId); tabs.list()/open(url?)/select(tabId)/close(tabId); scripts.list()/read(id)/create(definition)/edit(id,changes)/setEnabled(id,enabled). Scripts use Chrome RegisteredUserScript fields including matches, js:[{code|file}], world:MAIN|USER_SCRIPT, runAt, allFrames, include/excludeGlobs/Matches, worldId. Persisted enablement is restored at startup/upgrade; Allow User Scripts must already be enabled.
+browser: page(tabId); tabs.list()/open(url?)/select(tabId)/close(tabId); scripts.list()/read(id)/create(definition)/edit(id,changes)/setEnabled(id,enabled)/delete(id). Scripts use Chrome RegisteredUserScript fields including matches, js:[{code|file}], world:MAIN|USER_SCRIPT, runAt, allFrames, include/excludeGlobs/Matches, worldId. Persisted enablement is restored at startup/upgrade; Allow User Scripts must already be enabled.
 browser.runIn({kind:'page',tabId,world:'MAIN'|'ISOLATED'|'USER_SCRIPT',frameId?,documentId?},codeBody): explicit execution domain. MAIN/ISOLATED root only; USER_SCRIPT supports Chrome frameId or documentId. Use frameLocator.evaluate for arbitrary supported frames. No automatic context substitution.
 net.fetch({context:'page'|'extension',url,tabId?,init?}) returns {url,status,ok,headers,body}; no page-to-extension fallback. Page fetch obeys page origin/cookies/CORS; extension fetch uses extension host permissions. net.requests(options?,tabId?)/request(index,tabId?); net.responseBody(index,tabId?); net.console(options?,tabId?) read captured diagnostics.
 protocol.sessions(tabId?) lists root/child CDP handles; protocol.send({tabId,sessionId?},method,params?) sends any Chrome CDP method available to the extension. Arbitrary JS/CDP/fetch are effectful; there is no readonly override. inspect.documentId is the local navigation generation; USER_SCRIPT documentId uses Chrome's native scripting document ID. File URL sources are fetched in extension context.
@@ -35,8 +83,8 @@ artifacts.read(id,{path?,offset?,limit?}); text(filename,text,mimeType?,save=fal
 
 ## 任务、回执与恢复
 
-run(background=true) 返回 queued/accepted，不代表完成。jobs 的 after/nextCursor 使用 canonical event ID，可分页读取分步回执、emit 与终态结果。effectful 操作从 not-dispatched 到 dispatched-unknown，再到 completed；check 与显式等待通过才记录 verified。completed 表示操作返回，业务结果需要断言。动作在同一程序中排序，即使使用 Promise.all；事件先订阅再派发。原生对话框与选择器的回复可在等待中的点击期间执行。
+后台执行返回 queued/accepted，不代表完成。`list_jobs`、`get_job` 和 `cancel_job` 管理任务；回执使用 canonical event ID 分页。已完成的动作表示操作返回，业务结果需要单独验证。程序内的动作按顺序执行，事件应在触发动作前订阅。原生对话框与选择器的回复可在等待中的点击期间执行。
 
-取消会销毁 Worker、撤销能力、清理浏览器输入和监听器，已经派发的请求可能有未知效果，不会回滚或盲目重试。关闭侧栏会取消全部作业；宿主丢失后持久记录变为 interrupted，不恢复任意 JS 调用栈或自动重放。所有状态、回执与产物来自同一个 canonical event log。
+取消会销毁 Worker、撤销能力、清理浏览器输入和监听器。已经派发的操作可能有未知效果，不会回滚或盲目重试。关闭侧栏会取消全部作业；宿主丢失后持久记录变为 interrupted，不恢复任意 JavaScript 调用栈或自动重放。状态、回执与产物来自同一个 canonical event log。
 
-截图、PDF 与文本默认是会话内部产物；用户明确请求保存或导出才调用 save。网络必须显式选择 page 或 extension 上下文，页面 CORS/凭据和扩展 host permissions 不自动互换。公开 CDP 绑定当前窗口中的页面及其已知子会话，不按 CDP 域限制；任意 JS、CDP 和 fetch 按有副作用处理。
+截图、PDF 与文本默认是会话内部产物；用户明确请求保存或导出时才保存。网络必须显式选择 page 或 extension 上下文，页面 CORS/凭据和扩展 host permissions 不自动互换。公开 CDP 绑定当前窗口中的页面及其已知子会话，不按 CDP 域限制；任意 JavaScript、CDP 和 fetch 按有副作用处理。

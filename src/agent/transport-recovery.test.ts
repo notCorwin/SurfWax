@@ -17,7 +17,7 @@ function logger() {
 }
 const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 5, text: 5, reasoning: 0 } };
 const reply = (text = "Recovered") => ({ content: [{ type: "text" as const, text }], finishReason: { unified: "stop" as const, raw: "stop" }, usage, warnings: [] });
-const call = (id: string, code: string, toolName = "run") => ({ content: [{ type: "text" as const, text: "Ready to act" },
+const call = (id: string, code: string, toolName = "execute_program") => ({ content: [{ type: "text" as const, text: "Ready to act" },
   { type: "tool-call" as const, toolCallId: id, toolName, input: JSON.stringify({ code }) }],
   finishReason: { unified: "tool-calls" as const, raw: "tool_calls" }, usage, warnings: [] });
 const user: SidePanelMessage = { id: "user", role: "user", parts: [{ type: "text", text: "Continue" }] };
@@ -44,7 +44,7 @@ describe("complete-response transport", () => {
       },
       async all() { return [...events]; }, async clear() {},
     } });
-    const { factory, executor } = setup(new MockLanguageModelV4({ doGenerate: async () => call("effect", "return 1;", stage === "invalid-result" ? "missing-tool" : "run") }), log);
+    const { factory, executor } = setup(new MockLanguageModelV4({ doGenerate: async () => call("effect", "return 1;", stage === "invalid-result" ? "missing-tool" : "execute_program") }), log);
     const cleanup = vi.fn(async () => undefined);
     await expect(createChatTransport(factory, log, "thread", cleanup).sendMessages(options())).rejects.toBe(failure);
     expect(executor.runProgram).toHaveBeenCalledTimes(stage === "tool-result" ? 1 : 0);

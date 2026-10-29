@@ -2,7 +2,7 @@ import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, delayedResponse, startProvider, openExtension, configure, nameCurrentConversation, readEvents, dispose } from "./fixtures";
 
 test("executes more than 100 program operations and records a single tool result", async () => {
-  const responses = [commandResponse("run", { timeoutMs: 30000, code: "for (let i=0;i<121;i++) await page.getByRole('button',{name:'Increment'}).click(); await check(await page.locator('output').innerText()==='121');" }, "over-100"), textResponse("ALL_121_DONE")];
+  const responses = [commandResponse("execute_program", { timeoutMs: 30000, code: "for (let i=0;i<121;i++) await page.getByRole('button',{name:'Increment'}).click(); await check(await page.locator('output').innerText()==='121');" }, "over-100"), textResponse("ALL_121_DONE")];
   const provider = await startProvider(responses); const opened = await openExtension();
   try {
     const target = await opened.context.newPage(); await target.goto(`${provider.origin}/performance`);
@@ -19,7 +19,7 @@ test("executes more than 100 program operations and records a single tool result
 });
 
 test("keeps user clicks, keys and paste blocked throughout agent input and iframe work", async () => {
-  const provider = await startProvider([commandResponse("run", { code: `
+  const provider = await startProvider([commandResponse("execute_program", { code: `
     for (let index = 0; index < 30; index++) {
       await page.locator('#agent').focus();
       await page.insertText('海🌊');
@@ -81,8 +81,8 @@ test("applies explicit model and prompt changes next turn and retries user messa
     await expect(opened.page.locator(".markdown-body").last()).toContainText("NEXT_TURN");
     expect(provider.requests[1].model).toBe("next-model");
     expect(provider.requests[1].messages[0].content).toMatch(/^CUSTOM_NEXT_TURN\n\n/);
-    expect(provider.requests[1].messages[0].content).toContain("- inspect:");
-    expect(provider.requests[1].tools.map((tool: any) => tool.function.name)).toEqual(["inspect", "run", "jobs"]);
+    expect(provider.requests[1].messages[0].content).toContain("- inspect_page:");
+    expect(provider.requests[1].tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "execute_program", "list_jobs", "get_job", "cancel_job"]));
     let nextMessage: string | undefined;
     await expect.poll(async () => {
       nextMessage = (await readEvents(opened.page)).find((event) => event.type === "conversation.message" && event.content?.role === "assistant" && event.content.parts?.some((part: any) => part.type === "text" && part.text === "NEXT_TURN"))?.content.id;

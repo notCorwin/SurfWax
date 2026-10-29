@@ -133,7 +133,7 @@ test("collapses adjacent commands into one line without hiding their details", a
 test("starts a new process line after assistant text", async () => {
   const provider = await startProvider([
     toolResponse("return 'FIRST_RESULT'", "call-before-text"),
-    assistantResponse({ content: "BETWEEN_PROCESS_GROUPS", tool_calls: [{ id: "call-after-text", type: "function", function: { name: "run", arguments: JSON.stringify({ code: "return 'SECOND_RESULT';" }) } }] }),
+    assistantResponse({ content: "BETWEEN_PROCESS_GROUPS", tool_calls: [{ id: "call-after-text", type: "function", function: { name: "execute_program", arguments: JSON.stringify({ code: "return 'SECOND_RESULT';" }) } }] }),
     delayedResponse(textResponse("FINAL_AFTER_GROUPS"), 1_500),
     textResponse("分段过程记录"),
   ]);
@@ -167,8 +167,8 @@ test("starts a new process line after assistant text", async () => {
 test("continues the latest activity after earlier progress text", async () => {
   const provider = await startProvider([
     assistantResponse({ content: "PROGRESS_BEFORE_ACTIVITIES", reasoning_content: "PLAN", tool_calls: [
-      { id: "call-queued-0", type: "function", function: { name: "run", arguments: JSON.stringify({ code: "return 'FIRST_RESULT'" }) } },
-      { id: "call-queued-1", type: "function", function: { name: "run", arguments: JSON.stringify({ code: "return 'SECOND_RESULT'" }) } },
+      { id: "call-queued-0", type: "function", function: { name: "execute_program", arguments: JSON.stringify({ code: "return 'FIRST_RESULT'" }) } },
+      { id: "call-queued-1", type: "function", function: { name: "execute_program", arguments: JSON.stringify({ code: "return 'SECOND_RESULT'" }) } },
     ] }),
     delayedResponse(textResponse("NEXT_PROGRESS_TEXT"), 2_500),
     textResponse("活动顺序测试"),
@@ -228,7 +228,7 @@ test("continues the command label while waiting for the next complete response",
 
 test("shows completed reasoning alongside command execution", async () => {
   const provider = await startProvider([
-    assistantResponse({ reasoning_content: "PLAN", tool_calls: [{ id: "call-chrome-e2e", type: "function", function: { name: "run", arguments: JSON.stringify({ code: "return 'DONE'" }) } }] }),
+    assistantResponse({ reasoning_content: "PLAN", tool_calls: [{ id: "call-chrome-e2e", type: "function", function: { name: "execute_program", arguments: JSON.stringify({ code: "return 'DONE'" }) } }] }),
     delayedResponse(textResponse("ANSWER_AFTER_REASONING"), 1_500),
     textResponse("推理测试"),
   ], 600);
@@ -304,7 +304,7 @@ test("stops continued activity when the model request fails", async () => {
 
 test("shows live work, then folds it under elapsed time while keeping the final reply visible after restore", async () => {
   const provider = await startProvider([
-    assistantResponse({ content: "PROGRESS_TEXT", tool_calls: [{ id: "call-chrome-e2e", type: "function", function: { name: "run", arguments: JSON.stringify({ code: "await new Promise((resolve) => setTimeout(resolve, 300)); return 'WORK_RESULT'" }) } }] }),
+    assistantResponse({ content: "PROGRESS_TEXT", tool_calls: [{ id: "call-chrome-e2e", type: "function", function: { name: "execute_program", arguments: JSON.stringify({ code: "await new Promise((resolve) => setTimeout(resolve, 300)); return 'WORK_RESULT'" }) } }] }),
     textResponse("FINAL_REPLY"),
     textResponse("工作摘要标题"),
   ]);

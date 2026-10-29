@@ -21,7 +21,7 @@ test("selects large tool output without creating another reference", async () =>
       (request) => {
         const message = request.messages.findLast((entry: any) => entry.role === "tool");
         const ref = JSON.parse(message.content).$ref;
-        return commandResponse("run", { code: `return await artifacts.read(${JSON.stringify(ref)}, {path:["result","snapshot"],offset:0,limit:11});` }, "call-select-large");
+        return commandResponse("execute_program", { code: `return await artifacts.read(${JSON.stringify(ref)}, {path:["result","snapshot"],offset:0,limit:11});` }, "call-select-large");
       },
       textResponse("DONE_COMPACT"),
       textResponse("引用测试"),
@@ -49,7 +49,7 @@ test("selects large tool output without creating another reference", async () =>
     await opened.page.locator(".conversation-item", {hasText:"引用测试"}).locator(".conversation-select").click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("DONE_COMPACT");
     await target.bringToFront();
-    responses.push(commandResponse("run", { code: `return await artifacts.read(${data.id}, {path:["result","snapshot"],offset:0,limit:11});` }, "read-after-reload"), textResponse("RESTORED_READ"));
+    responses.push(commandResponse("execute_program", { code: `return await artifacts.read(${data.id}, {path:["result","snapshot"],offset:0,limit:11});` }, "read-after-reload"), textResponse("RESTORED_READ"));
     await opened.page.getByTestId("composer-input").fill("read the stored result in this restored conversation");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("RESTORED_READ");
@@ -61,7 +61,7 @@ test("selects large tool output without creating another reference", async () =>
 });
 
 
-test("uses inspect plus composable fill and click programs", async () => {
+test("inspects the page and fills and clicks with atomic tools", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -71,10 +71,10 @@ test("uses inspect plus composable fill and click programs", async () => {
     const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/automation`);
     expect(tab?.id).toBeDefined();
     responses.push(
-      commandResponse("inspect", {}, "call-snapshot"),
-      commandResponse("run", { code: `return await page.getByLabel(${JSON.stringify("Email")}).fill(${JSON.stringify("me@example.com")});` }, "call-fill"),
-      commandResponse("run", { code: `return await page.getByRole('button', { name: 'Sign in' }).click();` }, "call-click"),
-      commandResponse("inspect", {}, "call-verify"),
+      commandResponse("inspect_page", {}, "call-snapshot"),
+      commandResponse("fill", { target: { by: "label", value: "Email" }, value: "me@example.com" }, "call-fill"),
+      commandResponse("click", { target: { by: "role", value: "button", name: "Sign in" } }, "call-click"),
+      commandResponse("inspect_page", {}, "call-verify"),
       textResponse("PAGE_AUTOMATION_OK"),
       textResponse("页面自动化"),
     );
@@ -91,8 +91,12 @@ test("uses inspect plus composable fill and click programs", async () => {
     expect(verified).toMatchObject({ snapshot: expect.stringContaining("Welcome me@example.com") });
     await expect.poll(() => target.locator("output").textContent()).toBe("Welcome me@example.com");
     expect(events.some((event) => event.type === "automation.action.finished" && event.toolCallId === "call-click")).toBe(true);
-    expect(provider.requests[0].tools).toHaveLength(3);
     const toolNames = provider.requests[0].tools.map((tool: any) => tool.function.name);
+    expect(toolNames).toEqual(expect.arrayContaining(["inspect_page", "fill", "click", "execute_program"]));
+    expect(new Set(toolNames).size).toBe(toolNames.length);
+    expect(toolNames).not.toContain("run");
+    expect(toolNames).not.toContain("inspect");
+    expect(toolNames).not.toContain("jobs");
     expect(toolNames).not.toContain("browser");
     expect(toolNames.filter((name: string) => ["open", "attach", "close", "detach", "show", "list", "close-all", "kill-all"].includes(name))).toEqual([]);
     expect(await opened.page.evaluate(async () => (await chrome.windows.getAll()).length)).toBe(windowCount);
@@ -110,7 +114,7 @@ test("moves the trusted pointer before a semantic click and dispatches the click
   try {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/target`);
-    responses.push(commandResponse("run", { code: `
+    responses.push(commandResponse("execute_program", { code: `
       await page.evaluate(() => {
         const button = document.createElement('button');
         button.textContent = 'Pointer target';
@@ -153,13 +157,13 @@ for (const deviceScaleFactor of [1, 2]) test(`injects a screenshot and clicks it
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/visual`);
     responses.push(
-      commandResponse("run", { code: `return await page.screenshot(${JSON.stringify({ type: "jpeg", filename: "internal-visual.jpg" })});` }, "call-visual-observe"),
+      commandResponse("execute_program", { code: `return await page.screenshot(${JSON.stringify({ type: "jpeg", filename: "internal-visual.jpg" })});` }, "call-visual-observe"),
       (request) => {
         const tool = request.messages.findLast((message: any) => message.role === "tool");
         const result = JSON.parse(tool.content).result;
         const observationId = result.observationId;
         if (!observationId) throw new Error("Visual observation id was not returned to the model");
-        return commandResponse("run", { code: `return await page.point(${JSON.stringify(observationId)},${JSON.stringify(50 * result.screenshot.scale)},${JSON.stringify(40 * result.screenshot.scale)},'click');` }, "call-visual-act");
+        return commandResponse("execute_program", { code: `return await page.point(${JSON.stringify(observationId)},${JSON.stringify(50 * result.screenshot.scale)},${JSON.stringify(40 * result.screenshot.scale)},'click');` }, "call-visual-act");
       },
       textResponse("VISUAL_OK"), textResponse("视觉自动化"),
     );
@@ -294,10 +298,10 @@ test("returns a tool result for a removed command and lets the agent recover", a
 
 test("binds each turn to the active tab and supplies all current-window tab metadata", async () => {
   const provider = await startProvider([
-    commandResponse("run", { code: `return await (page.evaluate("() => { document.documentElement.dataset.contextTurn = 'first'; return true; }"));` }, "call-context-first"),
+    commandResponse("execute_program", { code: `return await (page.evaluate("() => { document.documentElement.dataset.contextTurn = 'first'; return true; }"));` }, "call-context-first"),
     textResponse("FIRST_CONTEXT_DONE"),
     textResponse("标签页上下文"),
-    commandResponse("run", { code: `return await (page.evaluate("() => { document.documentElement.dataset.contextTurn = 'second'; return true; }"));` }, "call-context-second"),
+    commandResponse("execute_program", { code: `return await (page.evaluate("() => { document.documentElement.dataset.contextTurn = 'second'; return true; }"));` }, "call-context-second"),
     textResponse("SECOND_CONTEXT_DONE"),
   ]);
   const opened = await openExtension();
@@ -481,16 +485,16 @@ test("uploads through a hidden chooser and preserves held input across independe
       document.body.append(canvas);
     });
     responses.push(
-      commandResponse("run", { code: `return await page.locator(${JSON.stringify("#chooser")}).click();` }, "chooser-open"),
-      commandResponse("run", { code: `return await page.upload(${JSON.stringify([{ name: "first.txt", text: "first" }, { name: "second.txt", text: "second" }])});` }, "chooser-upload"),
-      commandResponse("run", { code: `return await page.getByLabel(${JSON.stringify("Email")}).fill(${JSON.stringify("")});` }, "focus-email"),
-      commandResponse("run", { code: `return await page.keyboard.down(${JSON.stringify("Shift")});` }, "hold-shift"),
-      commandResponse("run", { code: `return await page.keyboard.press(${JSON.stringify("a")});` }, "shift-a"),
-      commandResponse("run", { code: `return await page.keyboard.up(${JSON.stringify("Shift")});` }, "release-shift"),
-      commandResponse("run", { code: `return await page.mouse.move(${JSON.stringify(40)},${JSON.stringify(215)});` }, "move-start"),
-      commandResponse("run", { code: `return await page.mouse.down();` }, "drag-start"),
-      commandResponse("run", { code: `return await page.mouse.move(${JSON.stringify(160)},${JSON.stringify(215)});` }, "drag-move"),
-      commandResponse("run", { code: `return await page.mouse.up();` }, "drag-end"),
+      commandResponse("execute_program", { code: `return await page.locator(${JSON.stringify("#chooser")}).click();` }, "chooser-open"),
+      commandResponse("execute_program", { code: `return await page.upload(${JSON.stringify([{ name: "first.txt", text: "first" }, { name: "second.txt", text: "second" }])});` }, "chooser-upload"),
+      commandResponse("execute_program", { code: `return await page.getByLabel(${JSON.stringify("Email")}).fill(${JSON.stringify("")});` }, "focus-email"),
+      commandResponse("execute_program", { code: `return await page.keyboard.down(${JSON.stringify("Shift")});` }, "hold-shift"),
+      commandResponse("execute_program", { code: `return await page.keyboard.press(${JSON.stringify("a")});` }, "shift-a"),
+      commandResponse("execute_program", { code: `return await page.keyboard.up(${JSON.stringify("Shift")});` }, "release-shift"),
+      commandResponse("execute_program", { code: `return await page.mouse.move(${JSON.stringify(40)},${JSON.stringify(215)});` }, "move-start"),
+      commandResponse("execute_program", { code: `return await page.mouse.down();` }, "drag-start"),
+      commandResponse("execute_program", { code: `return await page.mouse.move(${JSON.stringify(160)},${JSON.stringify(215)});` }, "drag-move"),
+      commandResponse("execute_program", { code: `return await page.mouse.up();` }, "drag-end"),
       textResponse("CHOOSER_AND_INPUT_OK"), textResponse("上传和输入"),
     );
     const options = await configure(opened.context, opened.page, provider.baseURL);
@@ -507,7 +511,7 @@ test("uploads through a hidden chooser and preserves held input across independe
 
 test("restores completed program receipts after a failed form assertion", async () => {
   const provider = await startProvider([
-    commandResponse("run", { code: "await page.getByLabel('Email').fill('saved@example.com'); await check(await page.getByLabel('Email').inputValue() === 'different@example.com', 'expected a different email'); await page.getByRole('button',{name:'Sign in'}).click();" }, "batch-partial"),
+    commandResponse("execute_program", { code: "await page.getByLabel('Email').fill('saved@example.com'); await check(await page.getByLabel('Email').inputValue() === 'different@example.com', 'expected a different email'); await page.getByRole('button',{name:'Sign in'}).click();" }, "batch-partial"),
     textResponse("PARTIAL_BATCH_REPORTED"), textResponse("批次恢复"),
   ]);
   const opened = await openExtension();
@@ -533,7 +537,7 @@ test("restores completed program receipts after a failed form assertion", async 
 });
 
 test("preserves program progress when its native Side Panel closes during a later wait", async () => {
-  const provider = await startProvider([commandResponse("run", { code: "await page.getByLabel('Email').fill('persisted@example.com'); await page.locator('#never-created').waitFor({state:'visible'}); await page.getByRole('button',{name:'Sign in'}).click();", timeoutMs: 300_000 }, "native-partial-act")]);
+  const provider = await startProvider([commandResponse("execute_program", { code: "await page.getByLabel('Email').fill('persisted@example.com'); await page.locator('#never-created').waitFor({state:'visible'}); await page.getByRole('button',{name:'Sign in'}).click();", timeoutMs: 300_000 }, "native-partial-act")]);
   const opened = await openExtension();
   try {
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
@@ -563,8 +567,8 @@ test("preserves program progress when its native Side Panel closes during a late
 
 test("uploads multiple hidden files through a cross-origin frame chooser", async () => {
   const provider = await startProvider([
-    commandResponse("run", { code: `return await (page.frameLocator('iframe[src*=localhost]').getByRole('button', { name: 'Upload frame files' }).click());` }, "frame-chooser"),
-    commandResponse("run", { code: `return await page.upload(${JSON.stringify([{ name: "frame-one.txt", text: "one" }, { name: "frame-two.txt", text: "two" }])});` }, "frame-upload"),
+    commandResponse("execute_program", { code: `return await (page.frameLocator('iframe[src*=localhost]').getByRole('button', { name: 'Upload frame files' }).click());` }, "frame-chooser"),
+    commandResponse("execute_program", { code: `return await page.upload(${JSON.stringify([{ name: "frame-one.txt", text: "one" }, { name: "frame-two.txt", text: "two" }])});` }, "frame-upload"),
     textResponse("FRAME_UPLOAD_OK"), textResponse("框架上传"),
   ]);
   const opened = await openExtension();
@@ -591,14 +595,14 @@ test("uploads multiple hidden files through a cross-origin frame chooser", async
 test("rejects detached snapshot references and negative locator indexes below the beginning", async () => {
   let ref = "";
   const responses: MockResponse[] = [
-    commandResponse("inspect", {}, "original-ref"),
+    commandResponse("inspect_page", {}, "original-ref"),
     (request) => {
       const message = request.messages.findLast((message: any) => message.role === "tool");
       ref = /button "Sign in" \[ref=(t\d+s[a-f0-9]+d\d+e\d+)\]/.exec(JSON.parse(message.content).snapshot)![1]!;
-      return commandResponse("run", { code: `return await (page.getByRole('button', { name: 'Sign in' }).evaluate("button => { const replacement = button.cloneNode(true); replacement.onclick = () => document.body.dataset.replacementClicked = 'yes'; button.replaceWith(replacement); }"));` }, "replace-ref");
+      return commandResponse("execute_program", { code: `return await (page.getByRole('button', { name: 'Sign in' }).evaluate("button => { const replacement = button.cloneNode(true); replacement.onclick = () => document.body.dataset.replacementClicked = 'yes'; button.replaceWith(replacement); }"));` }, "replace-ref");
     },
-    () => commandResponse("run", { code: `return await page.ref(${JSON.stringify(ref)}).click();`, timeoutMs: 1000 }, "detached-ref"),
-    commandResponse("run", { code: `return await ({ css: await page.locator('button').nth(-2).count(), text: await page.getByText('Sign in', { exact: true }).nth(-2).count() });` }, "negative-index"),
+    () => commandResponse("execute_program", { code: `return await page.ref(${JSON.stringify(ref)}).click();`, timeoutMs: 1000 }, "detached-ref"),
+    commandResponse("execute_program", { code: `return await ({ css: await page.locator('button').nth(-2).count(), text: await page.getByText('Sign in', { exact: true }).nth(-2).count() });` }, "negative-index"),
     textResponse("STALE_AND_INDEX_OK"), textResponse("引用与索引"),
   ];
   const provider = await startProvider(responses); const opened = await openExtension();
@@ -623,14 +627,14 @@ test("reads cross-frame response bodies and records complete diagnostic events",
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/complex`);
     responses.push(
-      commandResponse("run", { code: `return await (page.frameLocator('iframe[src*=localhost]').locator('body').evaluate("async () => { console.warn('frame-diagnostic'); return (await fetch('/frame')).status; }"));` }, "frame-fetch"),
-      commandResponse("run", { code: `return await net.requests(${JSON.stringify({ filter: "/frame$", limit: 10 })});` }, "frame-requests"),
+      commandResponse("execute_program", { code: `return await (page.frameLocator('iframe[src*=localhost]').locator('body').evaluate("async () => { console.warn('frame-diagnostic'); return (await fetch('/frame')).status; }"));` }, "frame-fetch"),
+      commandResponse("execute_program", { code: `return await net.requests(${JSON.stringify({ filter: "/frame$", limit: 10 })});` }, "frame-requests"),
       (request) => {
         const tool = request.messages.findLast((message: any) => message.role === "tool");
         const requests = JSON.parse(tool.content).result;
-        return commandResponse("run", { code: `return await net.responseBody(${JSON.stringify(requests.at(-1).index)});` }, "frame-response-body");
+        return commandResponse("execute_program", { code: `return await net.responseBody(${JSON.stringify(requests.at(-1).index)});` }, "frame-response-body");
       },
-      commandResponse("run", { code: `return await net.console(${JSON.stringify({ minLevel: "warning", limit: 10 })});` }, "frame-console"),
+      commandResponse("execute_program", { code: `return await net.console(${JSON.stringify({ minLevel: "warning", limit: 10 })});` }, "frame-console"),
       textResponse("FRAME_DIAGNOSTICS_OK"), textResponse("框架诊断"),
     );
     const options = await configure(opened.context, opened.page, provider.baseURL);
@@ -651,10 +655,10 @@ test("reads cross-frame response bodies and records complete diagnostic events",
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
-for (const format of ["legacy-user-tools", "system-tools"] as const) test(`continues ${format} history with only three tools and rejects old names without rewriting receipts`, async () => {
+for (const format of ["legacy-user-tools", "system-tools"] as const) test(`continues ${format} history with current tools and rejects old names without rewriting receipts`, async () => {
   const provider = await startProvider([
     commandResponse("run-code", { code: "async page => { throw new Error('old entry executed'); }" }, "removed-old-entry"),
-    commandResponse("run", { code: "const count = await page.evaluate(() => { const n = Number(document.body.dataset.migratedEffects || 0) + 1; document.body.dataset.migratedEffects = String(n); return n; }); await check(count === 1); return count;" }, "current-entry"),
+    commandResponse("execute_program", { code: "const count = await page.evaluate(() => { const n = Number(document.body.dataset.migratedEffects || 0) + 1; document.body.dataset.migratedEffects = String(n); return n; }); await check(count === 1); return count;" }, "current-entry"),
     textResponse("MIGRATED_CURRENT_TOOLS"), textResponse("RETRY_CURRENT_TOOLS"),
   ]);
   const opened = await openExtension();
@@ -688,15 +692,15 @@ for (const format of ["legacy-user-tools", "system-tools"] as const) test(`conti
     expect(events.some(event => event.type === "automation.action.started" && event.toolCallId === "removed-old-entry")).toBe(false);
     expect(events.find(event => event.type === "tool.finished" && event.toolCallId === "current-entry")?.output).toMatchObject({ ok: true, state: "succeeded", result: 1 });
     expect(events.some(event => event.type === "browser.job.progress" && event.toolCallId === "current-entry" && event.content.operation === "check" && event.content.state === "verified")).toBe(true);
-    expect(events.filter(event => event.type === "context.prompt.updated").at(-1)?.content).toMatchObject({ migratedFrom: "formal-49-v2", prompt: { catalogVersion: "inspect-run-jobs-v2", format: "system-tools" } });
+    expect(events.filter(event => event.type === "context.prompt.updated").at(-1)?.content).toMatchObject({ migratedFrom: "formal-49-v2", prompt: { catalogVersion: "atomic-tools-v1", format: "system-tools" } });
     const requests = provider.requests.filter(request => request.tools);
     expect(requests).toHaveLength(3);
-    for (const request of requests) expect(request.tools.map((tool: any) => tool.function.name)).toEqual(["inspect", "run", "jobs"]);
+    for (const request of requests) expect(request.tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "execute_program", "list_jobs", "get_job", "cancel_job"]));
     expect(requests[0].messages[0].content).toMatch(/^PERSISTED_CUSTOM_GUIDANCE\n\nAvailable tools:/);
     expect(JSON.stringify(requests[0].messages)).toContain("HISTORICAL_RECEIPT");
     await opened.page.getByTestId("retry-user-message-button").last().click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("RETRY_CURRENT_TOOLS");
-    expect(provider.requests.filter(request => request.tools).at(-1).tools.map((tool: any) => tool.function.name)).toEqual(["inspect", "run", "jobs"]);
+    expect(provider.requests.filter(request => request.tools).at(-1).tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "execute_program", "list_jobs", "get_job", "cancel_job"]));
     await expect(target.locator("body")).toHaveAttribute("data-migrated-effects", "1");
     for (const event of historical) expect((await readEvents(opened.page)).find(current => current.id === event.id)).toEqual(event);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }

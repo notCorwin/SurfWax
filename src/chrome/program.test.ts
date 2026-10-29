@@ -59,6 +59,25 @@ describe("canonical browser jobs", () => {
       jobs.query({ action: "cancel", id }, "other-conversation"),
     ).rejects.toThrow("unavailable");
   });
+  it("honors a wait longer than 30 seconds without cancelling the job", async () => {
+    const { logger } = log();
+    const jobs = new BrowserJobs(logger);
+    let finish!: () => void;
+    const id = await jobs.start(context, undefined, async (_signal, _id, started) => {
+      await started();
+      await new Promise<void>((resolve) => { finish = resolve; });
+    });
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    vi.useFakeTimers();
+    let returned = false;
+    const waiting = jobs.query({ action: "wait", id, waitMs: 60_000 }, context.conversationId).then((value) => { returned = true; return value; });
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(returned).toBe(false);
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(await waiting).toMatchObject({ state: "running", terminal: false });
+    finish();
+    await jobs.settle(context.conversationId);
+  });
   it("keeps cancellation pending until the execution host completes cleanup and never rolls back", async () => {
     const { logger } = log();
     const jobs = new BrowserJobs(logger);

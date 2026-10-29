@@ -71,12 +71,12 @@ test("lets the agent create, inspect, edit and toggle a user script", async () =
     await enableUserScripts(opened.context, opened.extensionId, opened.page);
     const script = { id: "agent-script", matches: [`${provider.origin}/*`], js: [{ code: "document.documentElement.dataset.agentScript = 'first'" }] };
     responses.push(
-      commandResponse("run", { code: `return await browser.scripts.create(${JSON.stringify(script)});` }, "call-script-create"),
-      commandResponse("run", { code: `return await browser.scripts.list();` }, "call-script-list"),
-      commandResponse("run", { code: `return await browser.scripts.read(${JSON.stringify(script.id)});` }, "call-script-read"),
-      commandResponse("run", { code: `return await browser.scripts.edit(${JSON.stringify(script.id)},${JSON.stringify({ js: [{ code: "document.documentElement.dataset.agentScript = 'edited'" }] })});` }, "call-script-edit"),
-      commandResponse("run", { code: `return await browser.scripts.setEnabled(${JSON.stringify(script.id)},${JSON.stringify(false)});` }, "call-script-disable"),
-      commandResponse("run", { code: `return await browser.scripts.setEnabled(${JSON.stringify(script.id)},${JSON.stringify(true)});` }, "call-script-enable"),
+      commandResponse("create_script", { definition: script }, "call-script-create"),
+      commandResponse("list_scripts", {}, "call-script-list"),
+      commandResponse("read_script", { scriptId: script.id }, "call-script-read"),
+      commandResponse("update_script", { scriptId: script.id, changes: { js: [{ code: "document.documentElement.dataset.agentScript = 'edited'" }] } }, "call-script-edit"),
+      commandResponse("set_script_enabled", { scriptId: script.id, enabled: false }, "call-script-disable"),
+      commandResponse("set_script_enabled", { scriptId: script.id, enabled: true }, "call-script-enable"),
       textResponse("SCRIPT_TOOLS_DONE"), textResponse("脚本工具"),
     );
     const options = await configure(opened.context, opened.page, provider.baseURL);
@@ -94,7 +94,7 @@ test("lets the agent create, inspect, edit and toggle a user script", async () =
     expect(result.scripts).toMatchObject([{ id: script.id, js: [{ code: "document.documentElement.dataset.agentScript = 'edited'" }] }]);
     expect(result.disabled).toEqual([]);
     const events = await readEvents(opened.page);
-    expect(events.find((event) => event.type === "model.started")?.content.toolCount).toBe(3);
+    expect(events.find((event) => event.type === "model.started")?.content.toolCount).toBe(provider.requests.find((request) => request.tools)?.tools.length);
     for (const id of ["call-script-create", "call-script-list", "call-script-read", "call-script-edit", "call-script-disable", "call-script-enable"]) {
       expect(events.some((event) => event.toolCallId === id && event.type === "tool.finished")).toBe(true);
     }

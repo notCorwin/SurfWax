@@ -14,7 +14,7 @@ test("120Hz software frames measure a dense complete response with history, inpu
     : `token-${index} ${index % 4 === 0 ? "\n\n" : ""}`);
   const payload = tokens.join("");
   const text = "# TRACE_LOAD\n\n" + payload + "TRACE_COMPLETE";
-  const provider = await startProvider([commandResponse("run", { code: `return await browser.tabs.list();` }, "trace-tool"),
+  const provider = await startProvider([commandResponse("execute_program", { code: `return await browser.tabs.list();` }, "trace-tool"),
     textResponse(text)]);
   const opened = await openExtension(undefined, { args: ["--disable-frame-rate-limit", "--disable-gpu-vsync", "--disable-gpu"] });
   const tracePath = test.info().outputPath("render-trace.json");

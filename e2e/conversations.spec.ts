@@ -137,9 +137,8 @@ test("executes run through the page facade, restores the conversation, and clear
 
     await expect.poll(() => provider.requests.length).toBe(3);
     expect(provider.requests[0].reasoning_effort).toBe("minimal");
-    expect(provider.requests[0].tools).toHaveLength(3);
     expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).not.toContain("browser");
-    expect(provider.requests[0].tools).toContainEqual(expect.objectContaining({ type: "function", function: expect.objectContaining({ name: "run" }) }));
+    expect(provider.requests[0].tools).toContainEqual(expect.objectContaining({ type: "function", function: expect.objectContaining({ name: "execute_program" }) }));
     const events = await readEvents(opened.page);
     const tool = events.find((event) => event.type === "tool.finished");
     expect(tool).toMatchObject({ toolCallId: "call-chrome-e2e", input: { code: expect.stringContaining("await page.title()") }, latencyMs: expect.any(Number) });

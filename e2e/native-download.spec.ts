@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { expect, test, openExtension, reloadUpgradedExtension, configure, configureWithImages, dispose, startProvider, commandResponse, textResponse, readEvents, nativePanel, submitNative, readNativeEvents, type MockResponse } from "./fixtures";
 
 test("closing the native panel during a pending download restores the existing artifact without recapturing it", async () => {
-  const responses: MockResponse[] = [commandResponse("run", { code: `return await page.screenshot(${JSON.stringify({ filename: "pending-close.png", save: true })});` }, "pending-artifact")];
+  const responses: MockResponse[] = [commandResponse("execute_program", { code: `return await page.screenshot(${JSON.stringify({ filename: "pending-close.png", save: true })});` }, "pending-artifact")];
   const provider = await startProvider(responses);
   const opened = await openExtension();
   try {
@@ -29,7 +29,7 @@ test("closing the native panel during a pending download restores the existing a
     await recovery.getByTestId("conversation-menu").click();
     await recovery.locator(".conversation-item").first().locator(".conversation-select").click();
     await expect(recovery.getByTestId("interrupted-message")).toBeVisible();
-    responses.push(commandResponse("run", { code: `return await artifacts.save(${JSON.stringify(artifact.id)},${JSON.stringify(undefined)});` }, "save-restored-artifact"), textResponse("EXISTING_ARTIFACT_ONLY"), textResponse("保存原产物"));
+    responses.push(commandResponse("execute_program", { code: `return await artifacts.save(${JSON.stringify(artifact.id)},${JSON.stringify(undefined)});` }, "save-restored-artifact"), textResponse("EXISTING_ARTIFACT_ONLY"), textResponse("保存原产物"));
     await native.browser.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: resolve(opened.userDataDirectory, "downloads"), eventsEnabled: true });
     await recovery.getByTestId("composer-input").fill("save the already captured artifact");
     await recovery.getByTestId("composer-input").press("Enter");
@@ -68,13 +68,13 @@ for (const installation of ["fresh", "reloaded"] as const) test(`${installation}
     await browser.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: resolve(profile, "downloads"), eventsEnabled: true });
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/target`); await target.bringToFront();
-    responses.push(commandResponse("run", { code: `return await page.screenshot(${JSON.stringify({ filename: "native-artifact.png" })});` }, "native-artifact"), textResponse("CAPTURED_ONCE"), textResponse("保存产物"));
+    responses.push(commandResponse("execute_program", { code: `return await page.screenshot(${JSON.stringify({ filename: "native-artifact.png" })});` }, "native-artifact"), textResponse("CAPTURED_ONCE"), textResponse("保存产物"));
     await opened.page.getByTestId("composer-input").fill("capture an internal screenshot"); await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("CAPTURED_ONCE");
     await expect(opened.page.getByTestId("conversation-menu")).toContainText("保存产物");
     const artifact = (await readEvents(opened.page)).find((event) => event.type === "tool.result.data" && event.content?.filename === "native-artifact.png")!;
     expect(artifact?.output.base64).toEqual(expect.any(String));
-    responses.push(commandResponse("run", { code: `return await artifacts.save(${JSON.stringify(artifact.id)},${JSON.stringify(undefined)});` }, "native-save"), textResponse("NATIVE_SAVE_DONE"));
+    responses.push(commandResponse("execute_program", { code: `return await artifacts.save(${JSON.stringify(artifact.id)},${JSON.stringify(undefined)});` }, "native-save"), textResponse("NATIVE_SAVE_DONE"));
     await opened.page.getByTestId("composer-input").fill("save that existing artifact"); await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("NATIVE_SAVE_DONE");
     await expect(opened.page.getByTestId("download-permission")).toHaveCount(0);
@@ -84,7 +84,7 @@ for (const installation of ["fresh", "reloaded"] as const) test(`${installation}
     const [download] = await opened.page.evaluate((id) => chrome.downloads.search({ id }), downloadId);
     expect(await readFile(download!.filename)).toEqual(Buffer.from(artifact.output.base64, "base64"));
     expect((await readEvents(opened.page)).filter((event) => event.type === "tool.result.data" && event.content?.filename === "native-artifact.png")).toHaveLength(1);
-    responses.push(commandResponse("run", { code: `return await artifacts.save(${JSON.stringify(artifact.id)},${JSON.stringify("native-artifact-copy.png")});` }, "native-save-again"), textResponse("SAVED_AGAIN"));
+    responses.push(commandResponse("execute_program", { code: `return await artifacts.save(${JSON.stringify(artifact.id)},${JSON.stringify("native-artifact-copy.png")});` }, "native-save-again"), textResponse("SAVED_AGAIN"));
     await opened.page.getByTestId("composer-input").fill("save the same artifact again"); await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("SAVED_AGAIN");
     await expect(opened.page.getByTestId("download-permission")).toHaveCount(0);

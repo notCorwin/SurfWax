@@ -71,7 +71,7 @@ const report =
   JSON.stringify(
     {
       method:
-        "UTF-8 JSON of ordered name, description, Zod JSON inputSchema plus the full catalog context, including current run API. Fixed BPE token counts are not provider billing usage.",
+        "UTF-8 JSON of ordered name, description, Zod JSON inputSchema plus the catalog context actually sent in the system prompt. On-demand reference responses are excluded. Fixed BPE token counts are not provider billing usage.",
       records,
     },
     null,

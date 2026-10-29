@@ -5,7 +5,7 @@ import { parseLocatorTarget, ChromeExecutor } from "./executor";
 import { compactToolResult, createProgramTools, prepareToolMessages, repairProgramToolCall, PROGRAM_TOOL_REGISTRY, PROGRAM_TOOL_CONTEXT } from "./tool";
 import { callUserScript } from "./script-client";
 
-describe("three browser tools", () => {
+describe("browser tools", () => {
   it.each(["screenshot", "pdf", "save"])("retains a %s artifact when the abort race settles before its underlying work", async (operation) => {
     const events: LogEvent[] = [];
     const logger = new EventLogger({ store: {
@@ -32,13 +32,13 @@ describe("three browser tools", () => {
     };
     const controller = new AbortController();
     const tools = createProgramTools(executor, { logger, conversationId: "conversation", callId: () => "sdk" }) as Record<string, any>;
-    const pending = tools.run.execute(input, { toolCallId: "capture", abortSignal: controller.signal });
+    const pending = tools.execute_program.execute(input, { toolCallId: "capture", abortSignal: controller.signal });
     await ready; logger.setRunPhase("run", 2); controller.abort("sidepanel-closed");
     const result = await pending;
     expect(workFinished).toBe(false);
     expect(result).toMatchObject({ ok: false, error: { code: "aborted", message: "sidepanel-closed", effectUnknown: true }, artifact: { id: artifactId, ...metadata } });
     expect(result).not.toHaveProperty("artifact.saved"); expect(JSON.stringify(result)).not.toContain("eA==");
-    await logger.append({ type: "tool.failed", conversationId: "conversation", toolCallId: "capture", content: { callId: "sdk", toolName: "run" }, input, output: result, error: result.error });
+    await logger.append({ type: "tool.failed", conversationId: "conversation", toolCallId: "capture", content: { callId: "sdk", toolName: "execute_program" }, input, output: result, error: result.error });
     await logger.closePendingTools("run", "conversation", "owner-disconnected");
     expect(events.filter((event) => event.type === "tool.failed")).toHaveLength(1);
     expect(events.find((event) => event.type === "tool.failed")).toMatchObject({ toolCallId: "1:capture", output: result });
@@ -50,7 +50,7 @@ describe("three browser tools", () => {
     const append = vi.fn(async () => ({ id: 7 }));
     const logger = { append, toolIdentity: () => ({ toolCallId: "call", toolCallIdCanonical: true }) } as unknown as EventLogger;
     const tools = createProgramTools({ runProgram: vi.fn(async () => failed) } as unknown as ChromeExecutor, { logger, conversationId: "conversation" }) as Record<string, any>;
-    const result = await tools.run.execute({ code: "await check(false);" }, { toolCallId: "call" });
+    const result = await tools.execute_program.execute({ code: "await check(false);" }, { toolCallId: "call" });
     expect(result).toEqual({ ...failed, error: { ...failed.result.error, retryable: false } });
     expect(result).not.toHaveProperty("$ref");
     expect(append).toHaveBeenCalledTimes(2);
@@ -65,33 +65,120 @@ describe("three browser tools", () => {
     let finish!: (value: unknown) => void;
     const runProgram = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
     const tools = createProgramTools({ runProgram } as unknown as ChromeExecutor, { logger, conversationId: "conversation" }) as Record<string, any>;
-    const pending = tools.run.execute({ code: "return await page.evaluate(() => null);" }, { toolCallId: "call" });
+    const pending = tools.execute_program.execute({ code: "return await page.evaluate(() => null);" }, { toolCallId: "call" });
     await vi.waitFor(() => expect(runProgram).toHaveBeenCalled());
     phase = 2; finish({ ok: true, result: "original".repeat(2000) });
     await expect(pending).resolves.toMatchObject({ $ref: 7, access: { path: ["result"] } });
     expect(append).toHaveBeenCalledWith(expect.objectContaining({ type: "tool.result.data", runId: "run", toolCallId: "1:call", toolCallIdCanonical: true }));
   });
-  it("registers exactly inspect/run/jobs in stable order, with no old tool aliases or deferred loading", () => {
+  it("registers individual action tools in stable order without old tool aliases", () => {
     const tools = createProgramTools({} as ChromeExecutor) as Record<string, any>;
-    expect(Object.keys(tools)).toEqual(["inspect", "run", "jobs"]);
     expect(Object.keys(tools)).toEqual(PROGRAM_TOOL_REGISTRY.map(({ name }) => name));
-    for (const name of ["snapshot", "act", "run-code", "browser", "result", "userscript-create", "click", "search-tools", "install"]) expect(tools).not.toHaveProperty(name);
+    expect(new Set(Object.keys(tools)).size).toBe(PROGRAM_TOOL_REGISTRY.length);
+    for (const name of ["inspect_page", "click", "fill", "set_checked", "navigate", "list_tabs", "read_artifact", "execute_program", "list_jobs", "get_job", "cancel_job"]) expect(tools).toHaveProperty(name);
+    for (const name of ["inspect", "run", "jobs", "snapshot", "act", "run-code", "browser", "result", "search-tools", "install"]) expect(tools).not.toHaveProperty(name);
     expect(Object.values(tools).every((tool) => tool.deferLoading !== true)).toBe(true);
     for (const { name, summary } of PROGRAM_TOOL_REGISTRY) expect(PROGRAM_TOOL_CONTEXT).toContain(`- ${name}: ${summary}`);
   });
-  it("keeps actual serialized tool metadata and the documented program API within budget", () => {
+  it("provides serializable schemas and a concise summary for every tool", () => {
     const metadata = PROGRAM_TOOL_REGISTRY.map(({ name, description, inputSchema }) => ({ name, description, parameters: z.toJSONSchema(inputSchema) }));
-    expect(new TextEncoder().encode(JSON.stringify(metadata)).byteLength).toBeLessThanOrEqual(5050);
-    expect(new TextEncoder().encode(PROGRAM_TOOL_CONTEXT).byteLength).toBeLessThanOrEqual(6000);
+    expect(metadata.every(({ description, parameters }) => Boolean(description) && parameters.type === "object")).toBe(true);
+    expect(new TextEncoder().encode(PROGRAM_TOOL_CONTEXT).byteLength).toBeLessThanOrEqual(15000);
   });
-  it("strictly validates the three public schemas, including job ownership selectors", () => {
+  it("loads the detailed program API only when requested", async () => {
     const tools = createProgramTools({} as ChromeExecutor) as Record<string, any>;
-    expect(tools.inspect.inputSchema.parse({ region: { by: "label", value: "Email" }, fields: ["text", "ref"], budget: 100 })).toHaveProperty("budget", 100);
-    expect(() => tools.inspect.inputSchema.parse({ image: true, readonly: true })).toThrow();
-    expect(() => tools.run.inputSchema.parse({ code: "return 1;", world: "MAIN" })).toThrow();
-    expect(() => tools.jobs.inputSchema.parse({ action: "cancel" })).toThrow();
-    expect(tools.jobs.inputSchema.parse({ action: "wait", id: "one", waitMs: 30001 })).toMatchObject({ waitMs: 30001 });
-    expect(tools.jobs.inputSchema.parse({ action: "list" })).toEqual({ action: "list" });
+    expect(PROGRAM_TOOL_CONTEXT).not.toContain("locators: chain/filter");
+    await expect(tools.read_api_reference.execute({}, { toolCallId: "reference" })).resolves.toMatchObject({ reference: expect.stringContaining("locators: chain/filter") });
+  });
+  it("strictly validates action and job schemas", () => {
+    const tools = createProgramTools({} as ChromeExecutor) as Record<string, any>;
+    expect(tools.inspect_page.inputSchema.parse({ region: { by: "label", value: "Email" }, fields: ["text", "ref"], budget: 100 })).toHaveProperty("budget", 100);
+    expect(() => tools.inspect_page.inputSchema.parse({ readonly: true })).toThrow();
+    expect(() => tools.execute_program.inputSchema.parse({ code: "return 1;", world: "MAIN" })).toThrow();
+    expect(() => tools.cancel_job.inputSchema.parse({})).toThrow();
+    expect(tools.get_job.inputSchema.parse({ jobId: "one", waitMs: 30001 })).toMatchObject({ waitMs: 30001 });
+    expect(tools.list_jobs.inputSchema.parse({})).toEqual({});
+    expect(() => tools.fill.inputSchema.parse({ target: { by: "label", value: "Email" } })).toThrow();
+    expect(tools.set_checked.inputSchema.parse({ target: { ref: "e1" }, checked: false })).toMatchObject({ checked: false });
+    expect(() => tools.fetch.inputSchema.parse({ url: "https://example.com" })).toThrow();
+  });
+  it("dispatches a fill with arbitrary input as data and logs its result", async () => {
+    const events: any[] = [];
+    const append = vi.fn(async (event) => { events.push(event); return { ...event, id: events.length }; });
+    const logger = { append, toolIdentity: () => ({ runId: "run", toolCallId: "call", toolCallIdCanonical: true }) } as unknown as EventLogger;
+    const fill = vi.fn(async () => "filled");
+    const getByLabel = vi.fn(() => ({ fill }));
+    const runProgram = vi.fn(async ({ code }: { code: string }) => {
+      const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+      const result = await new AsyncFunction("page", "browser", code)({ getByLabel }, {});
+      return { ok: true, state: "completed", result };
+    });
+    const tools = createProgramTools({ runProgram } as unknown as ChromeExecutor, { logger, conversationId: "conversation" }) as Record<string, any>;
+    const value = "email'\n` ${notCode()} \\ value";
+    const input = { target: { by: "label", value: "Email" }, value };
+    const result = await tools.fill.execute(input, { toolCallId: "call" });
+    expect(getByLabel).toHaveBeenCalledWith("Email", {});
+    expect(fill).toHaveBeenCalledWith(value);
+    expect(result).toMatchObject({ ok: true, result: "filled" });
+    expect(events.map((event) => event.type)).toEqual(["tool.started", "tool.finished"]);
+    expect(events[1]).toMatchObject({ content: { toolName: "fill" }, input, output: result });
+  });
+  it("records exactly one failed result for a failed atomic action", async () => {
+    const events: any[] = [];
+    const logger = { append: async (event: any) => { events.push(event); return { ...event, id: events.length }; }, toolIdentity: () => ({ toolCallId: "call", toolCallIdCanonical: true }) } as unknown as EventLogger;
+    const runProgram = vi.fn(async () => ({ ok: false, state: "failed", result: { error: { code: "stale-ref", message: "Element no longer exists" } } }));
+    const tools = createProgramTools({ runProgram } as unknown as ChromeExecutor, { logger, conversationId: "conversation" }) as Record<string, any>;
+    const input = { target: { ref: "e1" } };
+    const result = await tools.click.execute(input, { toolCallId: "call" });
+    expect(result).toMatchObject({ ok: false, error: { code: "stale-ref", retryable: false } });
+    expect(events.map((event) => event.type)).toEqual(["tool.started", "tool.failed"]);
+    expect(events[1]).toMatchObject({ content: { toolName: "click" }, input, output: result });
+  });
+  it.each(["click", "execute_program"])("marks an interrupted %s as effect-unknown after execution begins", async (name) => {
+    const events: any[] = [];
+    const logger = { append: async (event: any) => { events.push(event); return { ...event, id: events.length }; }, toolIdentity: () => ({ toolCallId: "call", toolCallIdCanonical: true }) } as unknown as EventLogger;
+    const controller = new AbortController();
+    const runProgram = vi.fn(async () => { controller.abort("cancelled"); throw new DOMException("cancelled", "AbortError"); });
+    const tools = createProgramTools({ runProgram } as unknown as ChromeExecutor, { logger, conversationId: "conversation" }) as Record<string, any>;
+    const input = name === "click" ? { target: { ref: "e1" } } : { code: "await page.goto('https://example.com');" };
+    const result = await tools[name].execute(input, { toolCallId: "call", abortSignal: controller.signal });
+    expect(result).toMatchObject({ ok: false, error: { code: "aborted", effectUnknown: true, retryable: false } });
+    expect(events.map((event) => event.type)).toEqual(["tool.started", "tool.failed"]);
+    expect(events[1]).toMatchObject({ content: { status: "interrupted", effectUnknown: true }, output: result });
+  });
+  it("does not mark effects unknown when interrupted before an action starts", async () => {
+    const events: any[] = [];
+    const logger = { append: async (event: any) => { events.push(event); return { ...event, id: events.length }; }, toolIdentity: () => ({ toolCallId: "call", toolCallIdCanonical: true }) } as unknown as EventLogger;
+    const controller = new AbortController();
+    const runProgram = vi.fn();
+    const visualEnabled = async () => { controller.abort("cancelled"); throw new DOMException("cancelled", "AbortError"); };
+    const tools = createProgramTools({ runProgram } as unknown as ChromeExecutor, { logger, conversationId: "conversation", visualEnabled }) as Record<string, any>;
+    const result = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "call", abortSignal: controller.signal });
+    expect(runProgram).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: false, error: { code: "aborted", retryable: false } });
+    expect(result.error.effectUnknown).toBeUndefined();
+    expect(events[1]).toMatchObject({ type: "tool.failed", content: { status: "interrupted", effectUnknown: false }, output: result });
+  });
+  it("keeps tab discovery and selection available without an active page", async () => {
+    const listTabs = vi.fn(async () => [{ id: 42, current: false }]);
+    const switchTab = vi.fn(async () => [{ id: 42, current: true }]);
+    const tools = createProgramTools({ listTabs, switchTab } as unknown as ChromeExecutor) as Record<string, any>;
+    await expect(tools.list_tabs.execute({}, { toolCallId: "list" })).resolves.toEqual([{ id: 42, current: false }]);
+    await expect(tools.switch_tab.execute({ tabId: 42 }, { toolCallId: "switch" })).resolves.toEqual([{ id: 42, current: true }]);
+    expect(switchTab).toHaveBeenCalledWith(42, undefined, undefined);
+  });
+  it("maps individual job tools to conversation-owned job operations", async () => {
+    const queryJobs = vi.fn(async (input: unknown, _signal?: AbortSignal, _context?: { conversationId?: string }) => input);
+    const tools = createProgramTools({ queryJobs } as unknown as ChromeExecutor, { conversationId: "conversation" }) as Record<string, any>;
+    await tools.list_jobs.execute({}, { toolCallId: "list" });
+    await tools.get_job.execute({ jobId: "j", after: 2, waitMs: 100 }, { toolCallId: "get" });
+    await tools.cancel_job.execute({ jobId: "j" }, { toolCallId: "cancel" });
+    expect(queryJobs.mock.calls.map(([input]) => input)).toEqual([
+      { action: "list" },
+      { action: "wait", id: "j", after: 2, limit: undefined, waitMs: 100 },
+      { action: "cancel", id: "j" },
+    ]);
+    expect(queryJobs.mock.calls.every(([, , context]) => context?.conversationId === "conversation")).toBe(true);
   });
   it("preserves historical user content and never injects an executable old catalogue", async () => {
     const messages = [{ role: "user", content: "Task\n\nAvailable tools:\n- run-code: historical" }, { role: "assistant", content: "Working" }];
@@ -100,15 +187,15 @@ describe("three browser tools", () => {
   });
   it("repairs only lossless current tool names/stringified JSON and never translates old names", async () => {
     const tools = createProgramTools({} as ChromeExecutor);
-    await expect(repairProgramToolCall({ toolCall: { toolCallId: "1", toolName: "INSPECT", input: JSON.stringify("{}") }, tools } as any)).resolves.toMatchObject({ toolName: "inspect", input: "{}" });
-    for (const name of ["run-code", "RUN_CODE", "act", "snapshot", "click", "userscript-list"]) {
+    await expect(repairProgramToolCall({ toolCall: { toolCallId: "1", toolName: "INSPECT-PAGE", input: JSON.stringify("{}") }, tools } as any)).resolves.toMatchObject({ toolName: "inspect_page", input: "{}" });
+    for (const name of ["run", "jobs", "inspect", "run-code", "RUN_CODE", "act", "snapshot", "userscript-list"]) {
       await expect(repairProgramToolCall({ toolCall: { toolCallId: "old", toolName: name, input: "{}" }, tools } as any)).resolves.toBeNull();
     }
   });
   it("never suggests retrying timed-out programs with uncertain effects", async () => {
     const error = Object.assign(new DOMException("late Chrome response", "TimeoutError"), { effectUnknown: true });
     const tools = createProgramTools({ runProgram: async () => { throw error; } } as unknown as ChromeExecutor) as Record<string, any>;
-    await expect(tools.run.execute({ code: "await browser.tabs.open();" }, { toolCallId: "call" })).resolves.toEqual({
+    await expect(tools.execute_program.execute({ code: "await browser.tabs.open();" }, { toolCallId: "call" })).resolves.toEqual({
       ok: false, error: { code: "timeout", message: "late Chrome response", retryable: false, effectUnknown: true },
     });
   });

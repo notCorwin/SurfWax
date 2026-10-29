@@ -5,12 +5,13 @@ import type { EventLogger } from "../logging";
 import { dsmlMiddleware } from "./dsml";
 
 const tools = [
-  { type: "function", name: "run", inputSchema: { type: "object" } },
-  { type: "function", name: "inspect", inputSchema: { type: "object" } },
+  { type: "function", name: "execute_program", inputSchema: { type: "object" } },
+  { type: "function", name: "inspect_page", inputSchema: { type: "object" } },
+  { type: "function", name: "click", inputSchema: { type: "object" } },
 ] as any;
 const usage = { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } };
-const v41 = '<｜DSML｜ calls><｜DSML｜ invoke name="run"><｜DSML｜ parameter name="code" string="true">await page.mouse.wheel(0,600);</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
-const v4 = '<｜DSML｜tool_calls><｜DSML｜invoke name="inspect"></｜DSML｜invoke></｜DSML｜tool_calls>';
+const v41 = '<｜DSML｜ calls><｜DSML｜ invoke name="execute_program"><｜DSML｜ parameter name="code" string="true">await page.mouse.wheel(0,600);</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
+const v4 = '<｜DSML｜tool_calls><｜DSML｜invoke name="inspect_page"></｜DSML｜invoke></｜DSML｜tool_calls>';
 
 async function generated(content: any[], logger?: EventLogger) {
   const model = wrapLanguageModel({
@@ -22,16 +23,16 @@ async function generated(content: any[], logger?: EventLogger) {
 
 describe("DSML model middleware", () => {
   it("recovers V4.1 and legacy V4 calls from complete responses", async () => {
-    const multiple = v41.replace("</｜DSML｜ calls>", '<｜DSML｜ invoke name="inspect"></｜DSML｜ invoke></｜DSML｜ calls>');
+    const multiple = v41.replace("</｜DSML｜ calls>", '<｜DSML｜ invoke name="inspect_page"></｜DSML｜ invoke></｜DSML｜ calls>');
     const result = await generated([{ type: "text", text: multiple }]);
     expect(result.content).toMatchObject([
-      { type: "tool-call", toolName: "run", input: '{"code":"await page.mouse.wheel(0,600);"}', dynamic: true },
-      { type: "tool-call", toolName: "inspect", input: "{}", dynamic: true },
+      { type: "tool-call", toolName: "execute_program", input: '{"code":"await page.mouse.wheel(0,600);"}', dynamic: true },
+      { type: "tool-call", toolName: "inspect_page", input: "{}", dynamic: true },
     ]);
     expect(result.finishReason.unified).toBe("tool-calls");
 
     const legacy = await generated([{ type: "text", text: v4 }]);
-    expect(legacy.content).toMatchObject([{ type: "tool-call", toolName: "inspect", input: "{}" }]);
+    expect(legacy.content).toMatchObject([{ type: "tool-call", toolName: "inspect_page", input: "{}" }]);
   });
 
   it("preserves normal text and gives native tool calls precedence", async () => {
@@ -40,18 +41,24 @@ describe("DSML model middleware", () => {
 
     const native = await generated([
       { type: "text", text: v41 },
-      { type: "tool-call", toolCallId: "native", toolName: "inspect", input: "{}", dynamic: true },
+      { type: "tool-call", toolCallId: "native", toolName: "inspect_page", input: "{}", dynamic: true },
     ]);
     expect(native.content).toMatchObject([{ type: "tool-call", toolCallId: "native" }]);
   });
 
+  it("validates and recovers atomic tool calls with structured targets", async () => {
+    const text = '<｜DSML｜ calls><｜DSML｜ invoke name="click"><｜DSML｜ parameter name="target" string="false">{"by":"role","value":"button","name":"Save"}</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
+    const result = await generated([{ type: "text", text }]);
+    expect(result.content).toMatchObject([{ type: "tool-call", toolName: "click", input: '{"target":{"by":"role","value":"button","name":"Save"}}' }]);
+  });
+
   it.each([
-    ["unknown tool", v41.replace('name="run"', 'name="invented"')],
+    ["unknown tool", v41.replace('name="execute_program"', 'name="invented"')],
     ["invalid arguments", v41.replace('name="code"', 'name="wrong"')],
     ["incomplete markup", v41.slice(0, -16)],
     ["invalid opener", v41.replace('<｜DSML｜ calls>', '<｜DSML｜ unknown>')],
     ["duplicate parameter", v41.replace('</｜DSML｜ invoke>', '<｜DSML｜ parameter name="code" string="true">return 2;</｜DSML｜ parameter></｜DSML｜ invoke>')],
-    ["removed legacy tool", v41.replace('name="run"', 'name="run-code"')],
+    ["removed legacy tool", v41.replace('name="execute_program"', 'name="run-code"')],
   ])("preserves %s without executing it", async (_label, text) => {
     const record = vi.fn();
     const result = await generated([{ type: "text", text }], { record } as unknown as EventLogger);

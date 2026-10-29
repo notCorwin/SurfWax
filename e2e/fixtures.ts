@@ -59,7 +59,7 @@ export function assistantResponse(message: Record<string, unknown>, usage?: { pr
 }
 
 export function toolResponse(code: string, id = "call-chrome-e2e", usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number }): CompletionResponse {
-  return completion({ tool_calls: [{ id, type: "function", function: { name: "run", arguments: JSON.stringify({ code }) } }] }, usage);
+  return completion({ tool_calls: [{ id, type: "function", function: { name: "execute_program", arguments: JSON.stringify({ code }) } }] }, usage);
 }
 
 export function pageResponse(code: string, tabId: number, id = "call-page-e2e"): CompletionResponse {
@@ -74,7 +74,7 @@ export function queuedToolResponse(firstCode: string, secondCode: string): Compl
   return completion({ tool_calls: [firstCode, secondCode].map((code, index) => ({
     id: `call-queued-${index}`,
     type: "function",
-    function: { name: "run", arguments: JSON.stringify({ code }) },
+    function: { name: "execute_program", arguments: JSON.stringify({ code }) },
   })) });
 }
 

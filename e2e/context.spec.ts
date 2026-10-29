@@ -203,6 +203,7 @@ test('automatically summarizes and retries the same request after provider conte
     expect(events.some(event => event.type === 'context.choice.required')).toBe(false);
     const agentRequests = provider.requests.filter(request => request.tools?.length);
     expect(agentRequests).toHaveLength(2);
-    expect(agentRequests.map(request => request.tools.length)).toEqual([3, 3]);
+    expect(agentRequests[0].tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(['inspect_page', 'execute_program']));
+    expect(agentRequests[1].tools).toEqual(agentRequests[0].tools);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

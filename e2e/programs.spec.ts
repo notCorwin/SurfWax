@@ -45,7 +45,7 @@ async function submit(page: any) {
 
 test("completes after a race abandons a pending browser RPC", async () => {
   const provider = await startProvider([
-    commandResponse("run", { code: "return await Promise.race([page.waitForEvent('popup'), sleep(50).then(() => 'timeout')]);" }, "race"),
+    commandResponse("execute_program", { code: "return await Promise.race([page.waitForEvent('popup'), sleep(50).then(() => 'timeout')]);" }, "race"),
     textResponse("ABANDONED_RPC_OK"),
   ]);
   const opened = await openExtension();
@@ -61,15 +61,15 @@ test("completes after a race abandons a pending browser RPC", async () => {
   }
 });
 
-test("publishes three tools, defaults vision inspection to text, and captures pixels only on demand", async () => {
+test("publishes atomic tools, defaults vision inspection to text, and captures pixels only on demand", async () => {
   const provider = await startProvider([
-    commandResponse("inspect", {}, "text-default"),
+    commandResponse("inspect_page", {}, "text-default"),
     (request) => {
       expect(lastTool(request)).not.toHaveProperty("screenshot");
-      return commandResponse("inspect", { image: true }, "pixels-requested");
+      return commandResponse("take_screenshot", {}, "pixels-requested");
     },
     (request) => {
-      const image = lastTool(request);
+      const image = lastTool(request).result;
       expect(image).toMatchObject({
         tabId: expect.any(Number),
         documentId: expect.any(Number),
@@ -79,7 +79,7 @@ test("publishes three tools, defaults vision inspection to text, and captures pi
           `UNEXPECTED_IMAGE_RESULT: ${JSON.stringify(image)}`,
         );
       return commandResponse(
-        "run",
+        "execute_program",
         {
           code: `await page.point(${JSON.stringify(image.observationId)}, ${50 * image.screenshot.scale}, ${40 * image.screenshot.scale}, 'click'); await check(await page.evaluate(() => document.body.dataset.clicked) === 'yes'); return await page.inspect();`,
         },
@@ -110,7 +110,7 @@ test("publishes three tools, defaults vision inspection to text, and captures pi
     );
     expect(
       provider.requests[0].tools.map((item: any) => item.function.name),
-    ).toEqual(["inspect", "run", "jobs"]);
+    ).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "execute_program", "list_jobs", "get_job", "cancel_job"]));
     const events = await readEvents(opened.page);
     expect(
       events.find(
@@ -209,7 +209,7 @@ test("composes same-process and cross-origin frames, chooser replies, native dia
     await nameCurrentConversation(opened.page, "Program capabilities");
     responses.push(
       commandResponse(
-        "run",
+        "execute_program",
         {
           timeoutMs: 20000,
           code: `
@@ -295,14 +295,14 @@ test("keeps network domains explicit, exposes protocol and tabs, and rejects sta
   const provider = await startProvider(responses);
   const opened = await openExtension();
   responses.push(
-    commandResponse("inspect", {}, "owned-baseline"),
+    commandResponse("inspect_page", {}, "owned-baseline"),
     (request: any) => {
       baseline = lastTool(request);
       const ref = /button "Sign in" \[ref=([^\]]+)\]/.exec(
         baseline.snapshot,
       )![1];
       return commandResponse(
-        "run",
+        "execute_program",
         {
           timeoutMs: 20000,
           code: `
@@ -377,7 +377,7 @@ test("persists MAIN and USER_SCRIPT matching and enablement through extension re
   };
   responses.push(
     commandResponse(
-      "run",
+      "execute_program",
       {
         code: `await browser.scripts.create(${JSON.stringify(main)}); await browser.scripts.create(${JSON.stringify(user)}); await browser.scripts.setEnabled('program-main',false); await browser.scripts.edit('program-main',{js:[{code:"document.documentElement.dataset.mainScript='edited'"}]}); await check((await browser.scripts.read('program-main')).enabled === false); return await browser.scripts.list();`,
       },
@@ -409,7 +409,7 @@ test("persists MAIN and USER_SCRIPT matching and enablement through extension re
     ).toEqual([{ id: "program-user", world: "USER_SCRIPT" }]);
     responses.push(
       commandResponse(
-        "run",
+        "execute_program",
         {
           timeoutMs: 20000,
           code: `const disabled=await browser.scripts.read('program-main'); await check(!disabled.enabled && disabled.script.js[0].code.includes('edited')); await browser.scripts.setEnabled('program-main',true); await page.reload(); for(let i=0;i<100 && await page.evaluate(() => document.documentElement.dataset.userScript) !== 'yes';i++) await sleep(20); await check(await page.evaluate(() => document.documentElement.dataset.mainScript) === 'edited'); await check(await page.evaluate(() => document.documentElement.dataset.userScript) === 'yes'); return await browser.scripts.list();`,
@@ -437,28 +437,28 @@ test("persists MAIN and USER_SCRIPT matching and enablement through extension re
 test("terminates synchronous timeout and abnormal worker exit, then recovers after a partial failed program", async () => {
   const provider = await startProvider([
     commandResponse(
-      "run",
+      "execute_program",
       { timeoutMs: 300, code: "while(true){}" },
       "cpu-timeout",
     ),
     commandResponse(
-      "run",
+      "execute_program",
       {
         timeoutMs: 2000,
         code: "await page.evaluate(() => { document.body.dataset.pagePartial='yes'; while(true){} });",
       },
       "page-loop-timeout",
     ),
-    commandResponse("run", { code: "self.close()" }, "worker-exit"),
+    commandResponse("execute_program", { code: "self.close()" }, "worker-exit"),
     commandResponse(
-      "run",
+      "execute_program",
       {
         code: "await page.getByLabel('Email').fill('kept@example.com'); await check(false,'intentional outcome failure'); await page.getByRole('button',{name:'Sign in'}).click();",
       },
       "partial-program",
     ),
     commandResponse(
-      "run",
+      "execute_program",
       {
         code: "await check(await page.evaluate(() => document.body.dataset.pagePartial) === 'yes'); await check(await page.getByLabel('Email').inputValue() === 'kept@example.com'); await check(await page.locator('output').innerText() === ''); await page.getByRole('button',{name:'Sign in'}).click(); await check(await page.locator('output').innerText() === 'Welcome kept@example.com'); return await page.inspect();",
       },
@@ -532,7 +532,7 @@ test("terminates synchronous timeout and abnormal worker exit, then recovers aft
 test("panel reload interrupts the owned job, preserves receipts, and prevents delayed browser effects", async () => {
   const responses: MockResponse[] = [
     commandResponse(
-      "run",
+      "execute_program",
       {
         background: true,
         code: "await page.evaluate(() => {document.body.dataset.partial='1'}); await emit('ready-to-reload'); await sleep(60000); await page.evaluate(() => {document.body.dataset.late='yes'});",
@@ -573,9 +573,9 @@ test("panel reload interrupts the owned job, preserves receipts, and prevents de
       .locator(".conversation-select")
       .click();
     responses.push(
-      commandResponse("jobs", { action: "status", id: job }, "reloaded-status"),
+      commandResponse("get_job", { jobId: job }, "reloaded-status"),
       commandResponse(
-        "run",
+        "execute_program",
         {
           code: "await check(await page.evaluate(() => document.body.dataset.partial) === '1'); await check(await page.evaluate(() => document.body.dataset.late) === undefined); return await page.inspect();",
         },
@@ -616,7 +616,7 @@ test("panel reload interrupts the owned job, preserves receipts, and prevents de
 test("the real native Side Panel owns a sandbox program and cleans held input when closed", async () => {
   const provider = await startProvider([
     commandResponse(
-      "run",
+      "execute_program",
       {
         background: true,
         code: "await page.getByLabel('Email').fill('native@example.com'); await page.keyboard.down('Shift'); await emit('native-ready'); await page.evaluate(() => { console.log('native-page-loop'); while(true){} });",
@@ -648,7 +648,7 @@ test("the real native Side Panel owns a sandbox program and cleans held input wh
       .toBe(true);
     expect(
       provider.requests[0].tools.map((tool: any) => tool.function.name),
-    ).toEqual(["inspect", "run", "jobs"]);
+    ).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "execute_program", "list_jobs", "get_job", "cancel_job"]));
     await expect
       .poll(async () =>
         (await readNativeEvents(native.panel)).some(
@@ -703,7 +703,7 @@ test("the real native Side Panel owns a sandbox program and cleans held input wh
 
 test("composes form operations and returns only text changes with owned references", async () => {
   const provider = await startProvider([
-    commandResponse("inspect", {}, "form-before"),
+    commandResponse("inspect_page", {}, "form-before"),
     (request) => {
       const observation = lastTool(request);
       const email = /textbox "Email" \[ref=([^\]]+)\]/.exec(
@@ -713,7 +713,7 @@ test("composes form operations and returns only text changes with owned referenc
         observation.snapshot,
       )![1];
       return commandResponse(
-        "run",
+        "execute_program",
         {
           code: `const full=await page.snapshot(); await check(full.tabId === page.tabId && full.snapshot.includes(${JSON.stringify(`[ref=${email}]`)}) && !full.snapshot.includes('[ref=e')); await page.ref(${JSON.stringify(email)}).fill('me@example.com'); await page.ref(${JSON.stringify(button)}).click(); await check((await page.locator('output').innerText()).includes('Welcome me@example.com')); return await page.inspect({ since: ${JSON.stringify(observation.observationId)} });`,
         },
@@ -770,7 +770,7 @@ test("queries and cancels a synchronous infinite program while preserving prior 
   let jobId: string;
   const provider = await startProvider([
     commandResponse(
-      "run",
+      "execute_program",
       {
         background: true,
         code: "await page.getByRole('button', { name: 'Increment' }).click(); await emit('first input completed'); while (true) {}",
@@ -779,22 +779,18 @@ test("queries and cancels a synchronous infinite program while preserving prior 
     ),
     (request) => {
       jobId = lastTool(request).jobId;
-      return commandResponse(
-        "jobs",
-        { action: "wait", id: jobId, waitMs: 1000 },
+      return commandResponse("get_job", { jobId: jobId, waitMs: 1000 },
         "job-responsive",
       );
     },
     () =>
-      commandResponse("jobs", { action: "cancel", id: jobId }, "job-cancel"),
+      commandResponse("cancel_job", { jobId: jobId }, "job-cancel"),
     () =>
-      commandResponse(
-        "jobs",
-        { action: "wait", id: jobId, waitMs: 1000 },
+      commandResponse("get_job", { jobId: jobId, waitMs: 1000 },
         "job-terminal",
       ),
     commandResponse(
-      "run",
+      "execute_program",
       {
         code: "await check(await page.locator('output').innerText() === '1'); return await page.inspect();",
       },

@@ -30,6 +30,7 @@ const scriptSchemas: Record<string, z.ZodTypeAny> = {
   create: z.object({ script: scriptDefinition }).strict(),
   edit: z.object({ id: scriptId, changes: scriptChanges }).strict(),
   setEnabled: z.object({ id: scriptId, enabled: z.boolean() }).strict(),
+  delete: z.object({ id: scriptId }).strict(),
 };
 
 export async function callUserScript(method: string, args: unknown[], signal?: AbortSignal, onDispatch?: () => Promise<void>): Promise<unknown> {

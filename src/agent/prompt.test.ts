@@ -1,7 +1,7 @@
 import { MockLanguageModelV4 } from "ai/test";
 import { describe, expect, it, vi } from "vitest";
 import { EventLogger, fromLogValue, type LogEvent } from "../logging";
-import { PROGRAM_TOOL_CONTEXT as TOOL_CONTEXT, runInputSchema } from "../chrome/tool";
+import { PROGRAM_CATALOG_VERSION, PROGRAM_TOOL_CONTEXT as TOOL_CONTEXT, runInputSchema } from "../chrome/tool";
 import { createPromptSnapshot, ensureConversationPrompt, readPromptSnapshot } from "./prompt";
 import { contextPressure, estimatePromptInput, summarizeContext } from "./compaction";
 import { retryModelOperation } from "./model";
@@ -30,7 +30,7 @@ describe("canonical prompt versions", () => {
     const historical = JSON.stringify(events);
     expect(readPromptSnapshot(events, ["u"])).toEqual(legacy);
     const current = await ensureConversationPrompt(logger, "one", "Custom", ["u"]);
-    expect(current).toMatchObject({ format: "system-tools", catalogVersion: "inspect-run-jobs-v2", instructions: `Custom\n\n${TOOL_CONTEXT}` });
+    expect(current).toMatchObject({ format: "system-tools", catalogVersion: PROGRAM_CATALOG_VERSION, instructions: `Custom\n\n${TOOL_CONTEXT}` });
     expect(JSON.stringify(events.slice(0, 2))).toBe(historical);
     expect(fromLogValue(events[2]!.content)).toMatchObject({ migratedFrom: "formal-49-v2" });
     await ensureConversationPrompt(logger, "one", "Custom", ["other-branch"]);

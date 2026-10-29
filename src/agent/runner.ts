@@ -44,8 +44,11 @@ function usesAnthropicMessages(config: ModelConfig): boolean {
     || sdk === "gitlab-ai-provider" && (config.canonicalModelId?.startsWith("anthropic/") === true || config.modelFamily?.toLowerCase().startsWith("claude") === true);
 }
 
-const READ_ONLY_TOOLS = new Set(["inspect"]);
-const REPEATABLE_TOOLS = new Set(["run", "jobs"]);
+const READ_ONLY_TOOLS = new Set([
+  "inspect_page", "read_text", "read_value", "read_attribute", "read_checked",
+  "list_tabs", "read_artifact", "list_requests", "read_response", "read_console",
+  "read_api_reference", "list_scripts", "read_script", "list_jobs", "get_job", "list_cdp_sessions",
+]);
 
 function signature(value: unknown): string {
   try { return JSON.stringify(value); } catch { return String(value); }
@@ -62,7 +65,7 @@ export function stagnationReason(steps: readonly any[]): string | undefined {
   if (READ_ONLY_TOOLS.has(last.toolName) && calls.slice(-3).length === 3 && calls.slice(-3).every((call) => call.signature === last.signature)) return "repeated-read";
   const cycle = calls.slice(-6);
   if (cycle.length === 6 && cycle.every((call, index) => call.signature === cycle[index % 2]!.signature)
-    && cycle.every((call) => !REPEATABLE_TOOLS.has(call.toolName))) return "two-call-cycle";
+    && cycle.every((call) => READ_ONLY_TOOLS.has(call.toolName))) return "two-call-cycle";
   return undefined;
 }
 

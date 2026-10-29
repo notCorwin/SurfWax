@@ -344,7 +344,7 @@ export class ChromeExecutor {
     if (input.background) return { jobId: id, state: "queued", accepted: true, complete: false, timeoutMs, timeoutSource: input.timeoutMs === undefined ? "estimated" : "explicit" };
     while (true) {
       const status = await this.jobs.query({ action: "wait", id, waitMs: 1000 }, context.conversationId, signal) as any;
-      if (status.terminal) return { jobId: id, ok: status.ok, state: status.state, result: status.result, timeoutMs, timeoutSource: input.timeoutMs === undefined ? "estimated" : "explicit", receipts: { action: "status", id, after: 0 } };
+      if (status.terminal) return { jobId: id, ok: status.ok, state: status.state, result: status.result, timeoutMs, timeoutSource: input.timeoutMs === undefined ? "estimated" : "explicit", receipts: { tool: "get_job", jobId: id, after: 0 } };
     }
   }
 
@@ -406,8 +406,8 @@ export class ChromeExecutor {
 
   private programCapabilities(page: any, state: BrowserState, scope: ProgramScope) {
     const call = (name: string, effect: boolean, invoke: () => unknown | Promise<unknown>) => scope.call(name, invoke, effect);
-    const scripts = Object.fromEntries(["list", "read", "create", "edit", "setEnabled"].map((method) => [method, (...args: any[]) => call(`scripts.${method}`, !["list", "read"].includes(method),
-      () => callUserScript(method, method === "edit" ? [{ id: args[0], changes: args[1] }] : method === "setEnabled" ? [{ id: args[0], enabled: args[1] }] : args, scope.signal, () => scope.dispatched()))]));
+    const scripts = Object.fromEntries(["list", "read", "create", "edit", "setEnabled", "delete"].map((method) => [method, (...args: any[]) => call(`scripts.${method}`, !["list", "read"].includes(method),
+      () => callUserScript(method, method === "edit" ? [{ id: args[0], changes: args[1] }] : method === "setEnabled" ? [{ id: args[0], enabled: args[1] }] : method === "delete" ? [{ id: args[0] }] : args, scope.signal, () => scope.dispatched()))]));
     const browser = {
       page: (tabId: number) => call("browser.page", false, async () => this.programPage(await this.boundPage(tabId, state), scope)),
       tabs: {
@@ -513,9 +513,28 @@ export class ChromeExecutor {
   }
 
   async browserContext(): Promise<BrowserContext> {
-    const state = await this.currentBrowserState();
+    const state = this.browserState ?? await this.currentBrowserState();
     const tabs = await this.tabsOf(state);
     return { windowId: state.windowId, tabs: tabs.map(({ index, id, windowId, current, title, url }) => ({ index, tabId: id, windowId, current, title, url })) };
+  }
+
+  /** Tab management remains available even when the previously bound tab or window disappeared. */
+  listTabs(signal?: AbortSignal, timeoutMs?: number): Promise<unknown> {
+    return this.enqueueAbortable(async (combined) => {
+      throwIfAborted(combined);
+      const state = this.browserState ?? await this.currentBrowserState();
+      throwIfAborted(combined);
+      return this.tabsOf(state);
+    }, signal, timeoutMs, false);
+  }
+
+  switchTab(tabId: number, signal?: AbortSignal, timeoutMs?: number): Promise<unknown> {
+    return this.enqueueAbortable(async (combined) => {
+      throwIfAborted(combined);
+      const state = this.browserState ?? await this.currentBrowserState();
+      throwIfAborted(combined);
+      return this.selectTab(state, tabId, combined);
+    }, signal, timeoutMs);
   }
 
   private async currentBrowserState(): Promise<BrowserState> {
@@ -535,14 +554,12 @@ export class ChromeExecutor {
 
   private async tabsOf(state: BrowserState): Promise<Array<{ index: number; current: boolean; id?: number; windowId?: number; title?: string; url?: string }>> {
     const tabs = await this.chromeApi.tabs.query({});
-    if (state.tabId === undefined || !tabs.some((tab) => tab.id === state.tabId)) {
-      state.tabId = tabs.find((tab) => tab.active)?.id ?? tabs[0]?.id;
-    }
-    return tabs.map((tab, index) => ({ index, current: tab.id === state.tabId || !state.tabId && Boolean(tab.active), id: tab.id, windowId: tab.windowId, title: tab.title, url: tab.url }));
+    return tabs.map((tab, index) => ({ index, current: state.tabId !== undefined && tab.id === state.tabId, id: tab.id, windowId: tab.windowId, title: tab.title, url: tab.url }));
   }
 
-  private async selectTab(state: BrowserState, tabId: number): Promise<unknown> {
+  private async selectTab(state: BrowserState, tabId: number, signal?: AbortSignal): Promise<unknown> {
     const tabs = await this.chromeApi.tabs.query({});
+    throwIfAborted(signal);
     const tab = tabs.find((item) => item.id === tabId);
     if (!tab?.id) throw new Error(`CommandError[invalid-tab-id]: ${tabId}`);
     await this.chromeApi.tabs.update(tab.id, { active: true });
@@ -557,24 +574,16 @@ export class ChromeExecutor {
     if (!tab?.id) throw new Error(`CommandError[invalid-tab-id]: ${tabId}`);
     await this.detachTabRuntime(tab.id);
     await this.chromeApi.tabs.remove(tab.id);
-    const remaining = await this.chromeApi.tabs.query({});
-    state.tabId = remaining.find((item) => item.active)?.id ?? remaining[0]?.id;
+    if (state.tabId === tab.id) state.tabId = undefined;
     return this.tabsOf(state);
   }
 
   private async pageFor(state: BrowserState): Promise<any> {
-    let tabId = state.tabId;
-    if (tabId !== undefined) {
-      const tab = await this.chromeApi.tabs.get(tabId).catch(() => undefined);
-      if (!tab) tabId = undefined;
-    }
-    if (tabId === undefined) {
-      const tabs = await this.chromeApi.tabs.query({ active: true, windowId: state.windowId });
-      tabId = tabs[0]?.id;
-    }
-    if (!Number.isInteger(tabId)) throw new Error("CommandError[no-tab]: The current Chrome window has no controllable tab");
+    const tabId = state.tabId;
+    if (!Number.isInteger(tabId)) throw new Error("CommandError[no-bound-tab]: Select a tab before interacting with a page");
+    const tab = await this.chromeApi.tabs.get(tabId!).catch(() => undefined);
+    if (!tab) throw new Error(`CommandError[bound-tab-closed]: Bound tab ${tabId} is unavailable; list tabs and select one explicitly`);
     const resolvedTabId = tabId as number;
-    state.tabId = resolvedTabId;
     const page = await this.automation.createPage(resolvedTabId);
     await this.enableObservation(resolvedTabId);
     return page;

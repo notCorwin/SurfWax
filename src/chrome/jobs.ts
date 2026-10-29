@@ -217,21 +217,27 @@ export class BrowserJobs {
     signal?: AbortSignal,
   ): Promise<void> {
     if (ms <= 0) return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let abort: (() => void) | undefined;
-    try {
-      await Promise.race([
-        done,
-        new Promise<void>((resolve, reject) => {
-          timer = setTimeout(resolve, Math.min(ms, 30_000));
-          abort = () => reject(signal!.reason);
-          signal?.addEventListener("abort", abort, { once: true });
-          if (signal?.aborted) abort();
-        }),
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
-      if (abort) signal?.removeEventListener("abort", abort);
+    const deadline = Date.now() + ms;
+    while (true) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let abort: (() => void) | undefined;
+      try {
+        const completed = await Promise.race([
+          done.then(() => true),
+          new Promise<false>((resolve, reject) => {
+            timer = setTimeout(() => resolve(false), Math.min(remaining, 2_147_483_647));
+            abort = () => reject(signal!.reason);
+            signal?.addEventListener("abort", abort, { once: true });
+            if (signal?.aborted) abort();
+          }),
+        ]);
+        if (completed) return;
+      } finally {
+        if (timer) clearTimeout(timer);
+        if (abort) signal?.removeEventListener("abort", abort);
+      }
     }
   }
 

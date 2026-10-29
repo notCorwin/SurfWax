@@ -16,7 +16,7 @@ test("keeps 100 semantic locate-and-action operations at p95 <= 100ms", { tag: "
   try {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/performance`);
-    responses.push(commandResponse("run", { timeoutMs: 30000, code: "for(let i=0;i<100;i++) await page.getByRole('button',{name:'Increment'}).click(); const count=await page.locator('output').innerText(); await check(count==='100','all 100 native clicks must change the counter'); return count;" }, "call-performance"), textResponse("PERFORMANCE_OK"), textResponse("性能"));
+    responses.push(commandResponse("execute_program", { timeoutMs: 30000, code: "for(let i=0;i<100;i++) await page.getByRole('button',{name:'Increment'}).click(); const count=await page.locator('output').innerText(); await check(count==='100','all 100 native clicks must change the counter'); return count;" }, "call-performance"), textResponse("PERFORMANCE_OK"), textResponse("性能"));
     const options = await configure(opened.context, opened.page, provider.baseURL); await options.close();
     // This harness opens the panel in a tab; a real Side Panel retains page focus.
     await target.bringToFront();

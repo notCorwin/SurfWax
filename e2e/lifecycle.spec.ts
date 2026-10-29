@@ -63,18 +63,18 @@ test("uses a large observation from the real side panel before acting on its ref
     expect(tab?.id).toBeDefined();
 
     responses.push(
-      commandResponse("inspect", { budget: 100000 }, "call-large-observe"),
+      commandResponse("inspect_page", { budget: 100000 }, "call-large-observe"),
       (request) => {
         const message = request.messages.findLast((entry: any) => entry.role === "tool");
         const ref = JSON.parse(message.content).$ref;
-        return commandResponse("run", { code: `return await artifacts.read(${JSON.stringify(ref)}, {path:["snapshot"],offset:0,limit:4000});` }, "call-read-snapshot");
+        return commandResponse("execute_program", { code: `return await artifacts.read(${JSON.stringify(ref)}, {path:["snapshot"],offset:0,limit:4000});` }, "call-read-snapshot");
       },
       (request) => {
         const message = request.messages.findLast((entry: any) => entry.role === "tool");
         const snapshot = JSON.parse(message.content).result;
         const ref = /button "Run exact action" \[ref=(t\d+s[a-f0-9]+d\d+e\d+)\]/.exec(snapshot)?.[1];
         if (!ref) throw new Error("The selected snapshot did not contain the target ref");
-        return commandResponse("run", { code: `await page.ref(${JSON.stringify(ref)}).click(); await page.locator('body[data-clicked=yes]').waitFor({state:'attached'});` }, "call-act-from-ref");
+        return commandResponse("execute_program", { code: `await page.ref(${JSON.stringify(ref)}).click(); await page.locator('body[data-clicked=yes]').waitFor({state:'attached'});` }, "call-act-from-ref");
       },
       textResponse("REAL_SIDE_PANEL_OK"),
       textResponse("真实侧边栏"),
@@ -114,7 +114,7 @@ test("uses a large observation from the real side panel before acting on its ref
 
 
 test("executes a completed DSML scrolling program in the side panel", async () => {
-  const dsml = '<｜DSML｜ calls><｜DSML｜ invoke name="run"><｜DSML｜ parameter name="code" string="true">await page.mouse.wheel(0,600);</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
+  const dsml = '<｜DSML｜ calls><｜DSML｜ invoke name="execute_program"><｜DSML｜ parameter name="code" string="true">await page.mouse.wheel(0,600);</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
   const provider = await startProvider([
     textResponse(dsml),
     textResponse("SCROLL_OK"),
@@ -132,7 +132,7 @@ test("executes a completed DSML scrolling program in the side panel", async () =
     await expect.poll(() => target.evaluate(() => scrollY)).toBeGreaterThan(0);
     await expect(opened.page.locator('[data-role="assistant"]').last()).not.toContainText("DSML");
     const events = await readEvents(opened.page);
-    expect(events.filter((event) => event.type === "tool.finished" && event.content?.toolName === "run")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "tool.finished" && event.content?.toolName === "execute_program")).toHaveLength(1);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -141,7 +141,7 @@ test("executes a completed DSML scrolling program in the side panel", async () =
 
 test("executes a completed DSML page evaluation program in the side panel", async () => {
   const func = "() => { const txt = document.body.innerText.replace(/\\s+/g,' '); const idx = txt.indexOf('知识点掌握度'); return JSON.stringify({around: txt.slice(idx, idx+500)}); }";
-  const dsml = `\n\n<｜DSML｜ calls><｜DSML｜ invoke name="run"><｜DSML｜ parameter name="code" string="true">return await page.evaluate(${JSON.stringify(func)});</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>`;
+  const dsml = `\n\n<｜DSML｜ calls><｜DSML｜ invoke name="execute_program"><｜DSML｜ parameter name="code" string="true">return await page.evaluate(${JSON.stringify(func)});</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>`;
   const provider = await startProvider([
     textResponse(dsml),
     textResponse("EVAL_OK"),
@@ -159,7 +159,7 @@ test("executes a completed DSML page evaluation program in the side panel", asyn
     await expect(opened.page.locator(".markdown-body").last()).toContainText("EVAL_OK");
     await expect(opened.page.locator('[data-role="assistant"]').last()).not.toContainText("DSML");
     const events = await readEvents(opened.page);
-    const terminal = events.filter((event) => event.type === "tool.finished" && event.content?.toolName === "run");
+    const terminal = events.filter((event) => event.type === "tool.finished" && event.content?.toolName === "execute_program");
     expect(terminal).toHaveLength(1);
     expect(JSON.parse(terminal[0].output.result)).toEqual({ around: "知识点掌握度 72%" });
   } finally {
@@ -357,18 +357,18 @@ test("guards every touched tab while CDP pointer input still reaches the page", 
     expect(firstIndex).toBeGreaterThanOrEqual(0);
     expect(secondIndex).toBeGreaterThanOrEqual(0);
     responses.push(
-      commandResponse("run", { code: `return await browser.tabs.select(${tabs[firstIndex]!.id});` }, "call-select-first"),
-      commandResponse("inspect", {}, "call-snapshot-first"),
-      commandResponse("run", { code: `return await browser.tabs.select(${tabs[secondIndex]!.id});` }, "call-select-second"),
-      commandResponse("run", { code: `return await (page.evaluate(\`() => {
+      commandResponse("execute_program", { code: `return await browser.tabs.select(${tabs[firstIndex]!.id});` }, "call-select-first"),
+      commandResponse("inspect_page", {}, "call-snapshot-first"),
+      commandResponse("execute_program", { code: `return await browser.tabs.select(${tabs[secondIndex]!.id});` }, "call-select-second"),
+      commandResponse("execute_program", { code: `return await (page.evaluate(\`() => {
         const button = document.createElement('button');
         button.textContent = 'CDP target';
         button.style.cssText = 'position:fixed;left:20px;top:20px;width:120px;height:40px';
         button.onclick = () => { document.documentElement.dataset.cdpClicks = String(Number(document.documentElement.dataset.cdpClicks || 0) + 1); };
         document.body.append(button);
       }\`));` }, "call-create-target"),
-      commandResponse("run", { code: `return await page.getByRole('button', { name: 'CDP target' }).click();` }, "call-click-target"),
-      commandResponse("run", { code: ` await new Promise((resolve) => setTimeout(resolve, 1200)); return page.url(); ` }, "call-guard-wait"),
+      commandResponse("execute_program", { code: `return await page.getByRole('button', { name: 'CDP target' }).click();` }, "call-click-target"),
+      commandResponse("execute_program", { code: ` await new Promise((resolve) => setTimeout(resolve, 1200)); return page.url(); ` }, "call-guard-wait"),
       textResponse("MULTI_GUARD_OK"),
       textResponse("页面防护"),
     );
@@ -442,8 +442,8 @@ test("keeps the composer usable when a long data URL cannot be guarded", async (
 
 test('closing a native Side Panel aborts its owner and prevents a queued page mutation', async () => {
   const calls = [
-    { name: 'run', input: { code: "await page.getByLabel('Never exists').fill('waiting');", timeoutMs: 300_000 } },
-    { name: 'run', input: { code: "return await page.evaluate(() => { document.documentElement.dataset.queuedNativeRan = 'yes'; return true; });" } },
+    { name: 'execute_program', input: { code: "await page.getByLabel('Never exists').fill('waiting');", timeoutMs: 300_000 } },
+    { name: 'execute_program', input: { code: "return await page.evaluate(() => { document.documentElement.dataset.queuedNativeRan = 'yes'; return true; });" } },
   ];
   const provider = await startProvider([assistantResponse({ tool_calls: calls.map((call, index) => ({ id: `native-queue-${index}`, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.input) } })) })]);
   const opened = await openExtension();
@@ -467,8 +467,8 @@ test('closing a native Side Panel aborts its owner and prevents a queued page mu
 
 test('a native run stays in its owning window after another window becomes focused', async () => {
   const provider = await startProvider([
-    commandResponse("inspect", {}, 'native-first-snapshot'),
-    delayedResponse(commandResponse('run', { code: "await page.getByLabel('Email').fill('owner@example.com'); await page.getByRole('button',{name:'Sign in'}).click();" }, 'native-owner-act'), 1_000),
+    commandResponse("inspect_page", {}, 'native-first-snapshot'),
+    delayedResponse(commandResponse('execute_program', { code: "await page.getByLabel('Email').fill('owner@example.com'); await page.getByRole('button',{name:'Sign in'}).click();" }, 'native-owner-act'), 1_000),
     textResponse('OWNER_WINDOW_DONE'), textResponse('窗口绑定'),
   ]);
   const opened = await openExtension();
@@ -502,7 +502,7 @@ test('a recoverable complete-response failure retries without repeating a comple
     await submitNative(native.panel, 'record one browser effect and retry a temporary full-response failure');
     await expect.poll(() => nativeAssistantText(native!.panel)).toContain('RETRY_RESPONSE_COMPLETE');
     await expect(native.target.locator('html')).toHaveAttribute('data-retry-effects', '1');
-    const agentRequests = provider.requests.filter(request => request.tools?.length === 3);
+    const agentRequests = provider.requests.filter(request => request.tools?.some((tool: any) => tool.function.name === "execute_program"));
     expect(agentRequests).toHaveLength(3);
     expect(agentRequests[2].messages).toEqual(agentRequests[1].messages);
     const resumedContext = JSON.stringify(agentRequests[2].messages);
@@ -542,7 +542,7 @@ test('two native side panels accept only one owner and closing the non-owner pre
     owner = await nativePanel(opened, `${provider.origin}/automation`);
     await submitNative(owner.panel, 'complete only the owning window task');
     await expect(owner.target.locator('html')).toHaveAttribute('data-owner-effects', '1');
-    await expect.poll(() => provider.requests.filter(request => request.tools?.length === 3).length).toBe(2);
+    await expect.poll(() => provider.requests.filter(request => request.tools?.some((tool: any) => tool.function.name === "execute_program")).length).toBe(2);
     const active = await owner.panel.evaluate<{ identity: { runId: string } }>(`chrome.runtime.sendMessage({ type: 'surf-wax:run-status' })`);
     expect(active.identity.runId).toBeTruthy();
     const secondWindow = await owner.panel.evaluate<{ id: number }>(`chrome.windows.create({ url: ${JSON.stringify(`${provider.origin}/target`)}, focused: true })`);
@@ -550,7 +550,7 @@ test('two native side panels accept only one owner and closing the non-owner pre
     await expect.poll(() => other!.panel.evaluate<string>(`document.querySelector('[data-testid="other-run-busy"]')?.textContent || ''`)).toContain('其他窗口已有任务运行');
     await submitNative(other.panel, 'this second task must not replace the owner');
     await expect.poll(() => other!.panel.evaluate<string>(`document.querySelector('[role="alert"]')?.textContent || ''`)).toContain('已有任务运行');
-    expect(provider.requests.filter(request => request.tools?.length === 3)).toHaveLength(2);
+    expect(provider.requests.filter(request => request.tools?.some((tool: any) => tool.function.name === "execute_program"))).toHaveLength(2);
     expect((await readNativeEvents(owner.panel)).filter(event => event.type === 'conversation.submitted')).toHaveLength(1);
     await other.panel.close();
     expect((await owner.browser.send('Target.closeTarget', { targetId: other.targetId })).success).toBe(true);
