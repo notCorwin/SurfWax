@@ -509,6 +509,175 @@ describe("cross-call browser events", () => {
   const owner = { conversationId: "conversation", logIdentity: { runId: "run", toolCallId: "1:event", toolCallIdCanonical: true as const } };
   const otherOwner = { conversationId: "conversation", logIdentity: { runId: "other-run", toolCallId: "1:event", toolCallIdCanonical: true as const } };
 
+  it("uploads ordered artifacts to a captured chooser while a background action occupies the queue", async () => {
+    let finish!: () => void;
+    const h = programHarness(async () => new Promise<void>((resolve) => { finish = resolve; }));
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "filechooser" }, undefined, owner);
+    const first = await h.logger.append({ type: "tool.result.data", conversationId: "conversation", output: { filename: "one.txt", mimeType: "text/plain", base64: "b25l" } });
+    const second = await h.logger.append({ type: "tool.result.data", conversationId: "conversation", output: { filename: "two.txt", mimeType: "text/plain", base64: "dHdv" } });
+    const job: any = await h.run(undefined, { background: true });
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    const source = { tabId: 41, sessionId: "frame" };
+    await (h.executor as any).handleCommandEvent(source, "Page.fileChooserOpened", { backendNodeId: 77, mode: "selectMultiple" });
+    const event: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner);
+    const chooserId = event.events[0].payload.chooserId;
+    expect(event).toMatchObject({ events: [{ kind: "filechooser", source, payload: { chooserId, mode: "selectMultiple" } }] });
+    h.fake.debuggerApi.sendCommand.mockImplementation(async (_source: any, method: string) => {
+      if (method === "DOM.resolveNode") return { object: { objectId: "input-object" } };
+      if (method === "Runtime.callFunctionOn") expect(h.events.some((entry) => entry.type === "browser.chooser.progress" && (entry.content as any)?.state === "dispatched-unknown")).toBe(true);
+      return { result: { value: null } };
+    });
+    await expect(h.executor.uploadChooser({ chooserId, artifactId: [first!.id, second!.id, first!.id] }, undefined, owner)).resolves.toMatchObject({ chooserId, artifactIds: [first!.id, second!.id, first!.id], state: "completed" });
+    expect(h.fake.debuggerApi.sendCommand).toHaveBeenCalledWith(source, "DOM.resolveNode", expect.objectContaining({ backendNodeId: 77 }));
+    expect(h.fake.debuggerApi.sendCommand).toHaveBeenCalledWith(source, "Runtime.callFunctionOn", expect.objectContaining({ objectId: "input-object", arguments: [{ value: [
+      { name: "one.txt", mimeType: "text/plain", base64: "b25l" }, { name: "two.txt", mimeType: "text/plain", base64: "dHdv" }, { name: "one.txt", mimeType: "text/plain", base64: "b25l" },
+    ] }] }));
+    expect(h.events.filter((entry) => entry.type === "browser.chooser.progress").map((entry) => (entry.content as any).state)).toEqual(["dispatched-unknown", "completed"]);
+    await expect(h.executor.uploadChooser({ chooserId, artifactId: first!.id }, undefined, owner)).rejects.toThrow("handled");
+    finish();
+    await vi.waitFor(async () => expect(await h.executor.queryJobs({ action: "status", id: job.jobId }, undefined, owner)).toMatchObject({ terminal: true, ok: true }));
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("rejects too many files and another conversation's artifact before dispatch", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "filechooser" }, undefined, owner);
+    const own = await h.logger.append({ type: "tool.result.data", conversationId: "conversation", output: { filename: "own", mimeType: "text/plain", base64: "YQ==" } });
+    const foreign = await h.logger.append({ type: "tool.result.data", conversationId: "other", output: { filename: "foreign", mimeType: "text/plain", base64: "Yg==" } });
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.fileChooserOpened", { backendNodeId: 77, mode: "selectSingle" });
+    const event: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner);
+    const chooserId = event.events[0].payload.chooserId;
+    await expect(h.executor.uploadChooser({ chooserId, artifactId: [own!.id, own!.id] }, undefined, owner)).rejects.toThrow("invalid-file-count");
+    await expect(h.executor.uploadChooser({ chooserId, artifactId: foreign!.id }, undefined, owner)).rejects.toThrow("unavailable");
+    expect(h.fake.debuggerApi.sendCommand).not.toHaveBeenCalledWith(expect.anything(), "Runtime.callFunctionOn", expect.anything());
+    expect(h.events.filter((entry) => entry.type === "browser.chooser.progress")).toHaveLength(0);
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("releases a pre-dispatch cancellation and fences a post-dispatch unknown outcome", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "filechooser" }, undefined, owner);
+    const artifact = await h.logger.append({ type: "tool.result.data", conversationId: "conversation", output: { filename: "file", mimeType: "text/plain", base64: "YQ==" } });
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.fileChooserOpened", { backendNodeId: 77, mode: "selectSingle" });
+    const event: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner);
+    const chooserId = event.events[0].payload.chooserId;
+    const result = h.logger.result.bind(h.logger);
+    let resumeRead!: () => void;
+    const held = new Promise<void>((resolve) => { resumeRead = resolve; });
+    const reading = vi.spyOn(h.logger, "result").mockImplementationOnce(async (...args) => { await held; return result(...args); });
+    const before = new AbortController();
+    const pendingRead = h.executor.uploadChooser({ chooserId, artifactId: artifact!.id }, before.signal, owner);
+    await vi.waitFor(() => expect(reading).toHaveBeenCalledOnce());
+    before.abort("before-dispatch");
+    await expect(pendingRead).rejects.toMatchObject({ name: "AbortError" });
+    expect(h.fake.debuggerApi.sendCommand).not.toHaveBeenCalledWith(expect.anything(), "Runtime.callFunctionOn", expect.anything());
+    resumeRead();
+    let finishCommand!: () => void;
+    h.fake.debuggerApi.sendCommand.mockImplementation(async (_source: any, method: string) => {
+      if (method === "DOM.resolveNode") return { object: { objectId: "input" } };
+      if (method === "Runtime.callFunctionOn") return new Promise<object>((resolve) => { finishCommand = () => resolve({ result: { value: null } }); });
+      return {};
+    });
+    const after = new AbortController();
+    const pendingDispatch = h.executor.uploadChooser({ chooserId, artifactId: artifact!.id }, after.signal, owner);
+    await vi.waitFor(() => expect(finishCommand).toBeTypeOf("function"));
+    after.abort("after-dispatch");
+    await expect(pendingDispatch).rejects.toMatchObject({ name: "AbortError", effectUnknown: true });
+    await expect(h.executor.uploadChooser({ chooserId, artifactId: artifact!.id }, undefined, owner)).rejects.toThrow("uncertain");
+    finishCommand();
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("honors chooser timeout while artifact data is still being read", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "filechooser" }, undefined, owner);
+    const artifact = await h.logger.append({ type: "tool.result.data", conversationId: "conversation", output: { filename: "file", mimeType: "text/plain", base64: "YQ==" } });
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.fileChooserOpened", { backendNodeId: 77, mode: "selectSingle" });
+    const event: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner);
+    const chooserId = event.events[0].payload.chooserId;
+    const result = h.logger.result.bind(h.logger);
+    let resume!: () => void;
+    const held = new Promise<void>((resolve) => { resume = resolve; });
+    const read = vi.spyOn(h.logger, "result").mockImplementationOnce(async (...args) => { await held; return result(...args); });
+    vi.useFakeTimers();
+    const pending = h.executor.uploadChooser({ chooserId, artifactId: artifact!.id, timeoutMs: 50 }, undefined, owner).catch((error) => error);
+    await vi.advanceTimersByTimeAsync(51);
+    const error = await pending;
+    expect(error).toMatchObject({ name: "TimeoutError" });
+    expect((error as { effectUnknown?: boolean }).effectUnknown).toBeUndefined();
+    expect(read).toHaveBeenCalledOnce();
+    expect(h.fake.debuggerApi.sendCommand).not.toHaveBeenCalledWith(expect.anything(), "Runtime.callFunctionOn", expect.anything());
+    resume();
+    vi.useRealTimers();
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("invalidates a chooser on navigation, source detach and run end before dispatch", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "filechooser" }, undefined, owner);
+    const artifact = await h.logger.append({ type: "tool.result.data", conversationId: "conversation", output: { filename: "file", mimeType: "text/plain", base64: "YQ==" } });
+    const source = { tabId: 41, sessionId: "frame" };
+    await (h.executor as any).handleCommandEvent(source, "Page.fileChooserOpened", { backendNodeId: 77, mode: "selectSingle" });
+    const event: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner);
+    const chooserId = event.events[0].payload.chooserId;
+    await (h.executor as any).handleCommandEvent(source, "Page.frameNavigated", { frame: { id: "frame" } });
+    await expect(h.executor.uploadChooser({ chooserId, artifactId: artifact!.id }, undefined, owner)).rejects.toThrow("unavailable");
+    await h.executor.endRun();
+    await expect(h.executor.uploadChooser({ chooserId, artifactId: artifact!.id }, undefined, owner)).rejects.toThrow("expired");
+    expect(h.fake.debuggerApi.sendCommand).not.toHaveBeenCalledWith(expect.anything(), "Runtime.callFunctionOn", expect.anything());
+    h.executor.dispose();
+  });
+
+  it("never substitutes a later chooser when the same input opens twice", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "filechooser" }, undefined, owner);
+    const automation = (h.executor as any).automation;
+    const source = { tabId: 41 };
+    const params = { backendNodeId: 77, mode: "selectSingle" };
+    automation.handleEvent(source, "Page.fileChooserOpened", params);
+    await (h.executor as any).handleCommandEvent(source, "Page.fileChooserOpened", params);
+    const first = automation.currentChooser(source, 77);
+    const prior: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner);
+    automation.handleEvent(source, "Page.fileChooserOpened", params);
+    await (h.executor as any).handleCommandEvent(source, "Page.fileChooserOpened", params);
+    const second = automation.currentChooser(source, 77);
+    const next: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId, after: prior.nextCursor }, undefined, owner);
+    expect(next.events[0].payload.chooserId).not.toBe(prior.events[0].payload.chooserId);
+    expect(first).not.toBe(second);
+    expect(() => automation.options.claimChooser(first)).toThrow("unavailable");
+    const claim = automation.options.claimChooser(second);
+    expect(() => claim.assert()).not.toThrow();
+    claim.finish("not-dispatched");
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("does not dispatch an old chooser after its run ends while artifact reading is pending", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "filechooser" }, undefined, owner);
+    const artifact = await h.logger.append({ type: "tool.result.data", conversationId: "conversation", output: { filename: "file", mimeType: "text/plain", base64: "YQ==" } });
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.fileChooserOpened", { backendNodeId: 77, mode: "selectSingle" });
+    const event: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner);
+    const chooserId = event.events[0].payload.chooserId;
+    const result = h.logger.result.bind(h.logger);
+    let resume!: () => void;
+    const held = new Promise<void>((resolve) => { resume = resolve; });
+    const read = vi.spyOn(h.logger, "result").mockImplementationOnce(async (...args) => { await held; return result(...args); });
+    const pending = h.executor.uploadChooser({ chooserId, artifactId: artifact!.id }, undefined, owner);
+    await vi.waitFor(() => expect(read).toHaveBeenCalledOnce());
+    await h.executor.endRun();
+    resume();
+    await expect(pending).rejects.toThrow("run-ended");
+    expect(h.fake.debuggerApi.sendCommand).not.toHaveBeenCalledWith(expect.anything(), "Runtime.callFunctionOn", expect.anything());
+    h.executor.dispose();
+  });
+
   it("subscribes after page readiness and routes CDP events by kind and owner", async () => {
     const h = programHarness(async () => undefined);
     await h.executor.beginRun();
@@ -768,4 +937,307 @@ describe("background-job observation fence", () => {
     expect(h.executor.pendingBackgroundJobs()).toEqual([]);
     h.executor.dispose();
   });
+});
+
+describe("foreground dialog handoff", () => {
+  const context = { conversationId: "conversation", logIdentity: { runId: "run", toolCallId: "1:program", toolCallIdCanonical: true as const } };
+
+  it("hands off a chooser upload whose change handler opens a dialog, then completes the same job", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "filechooser" }, undefined, context);
+    const artifact = await h.logger.append({ type: "tool.result.data", conversationId: "conversation", output: { filename: "file.txt", mimeType: "text/plain", base64: "YQ==" } });
+    const source = { tabId: 41, sessionId: "frame" };
+    await (h.executor as any).handleCommandEvent(source, "Page.fileChooserOpened", { backendNodeId: 77, mode: "selectSingle" });
+    const observed: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, context);
+    let finish!: () => void;
+    h.fake.debuggerApi.sendCommand.mockImplementation(async (_source: any, method: string) => {
+      if (method === "DOM.resolveNode") return { object: { objectId: "input" } };
+      if (method === "Runtime.callFunctionOn") return new Promise(resolve => { finish = () => resolve({ result: { value: null } }); });
+      return {};
+    });
+    const tool = new AbortController();
+    const pending = h.executor.uploadChooser({ chooserId: observed.events[0].payload.chooserId, artifactId: artifact!.id, timeoutMs: 5000 }, tool.signal, context);
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    await (h.executor as any).handleCommandEvent(source, "Page.javascriptDialogOpening", { type: "confirm", message: "continue?" });
+    const result: any = await pending;
+    expect(result).toMatchObject({ accepted: true, complete: false, state: "blocked", blockedBy: { kind: "dialog", source } });
+    expect(h.executor.pendingBackgroundJobs()).toContain(result.jobId);
+    tool.abort("tool-returned");
+    await h.executor.handleDialog({ dialogId: result.blockedBy.dialogId, accept: true }, undefined, context);
+    finish();
+    await vi.waitFor(async () => expect(await h.executor.queryJobs({ action: "status", id: result.jobId }, undefined, context)).toMatchObject({ terminal: true, ok: true, result: { state: "completed" } }));
+    expect(h.fake.debuggerApi.sendCommand.mock.calls.filter((call) => call[1] === "Runtime.callFunctionOn")).toHaveLength(1);
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("retains the chooser timeout after a dialog handoff and reports an uncertain effect", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "filechooser" }, undefined, context);
+    const artifact = await h.logger.append({ type: "tool.result.data", conversationId: "conversation", output: { filename: "file.txt", mimeType: "text/plain", base64: "YQ==" } });
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.fileChooserOpened", { backendNodeId: 77, mode: "selectSingle" });
+    const observed: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, context);
+    let started = false;
+    h.fake.debuggerApi.sendCommand.mockImplementation(async (_source: any, method: string) => {
+      if (method === "DOM.resolveNode") return { object: { objectId: "input" } };
+      if (method === "Runtime.callFunctionOn") { started = true; return new Promise(() => {}); }
+      return {};
+    });
+    const pending = h.executor.uploadChooser({ chooserId: observed.events[0].payload.chooserId, artifactId: artifact!.id, timeoutMs: 200 }, undefined, context);
+    await vi.waitFor(() => expect(started).toBe(true));
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.javascriptDialogOpening", { type: "alert", message: "open" });
+    const result: any = await pending;
+    expect(result).toMatchObject({ accepted: true, state: "blocked" });
+    await vi.waitFor(async () => expect(await h.executor.queryJobs({ action: "status", id: result.jobId }, undefined, context)).toMatchObject({
+      terminal: true, ok: false, result: { error: { code: "timeout", effectUnknown: true } },
+    }));
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it.each(["queued", "running"] as const)("returns promptly on tool cancellation while %s job persistence is stalled", async (state) => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "filechooser" }, undefined, context);
+    const artifact = await h.logger.append({ type: "tool.result.data", conversationId: "conversation", output: { filename: "file.txt", mimeType: "text/plain", base64: "YQ==" } });
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.fileChooserOpened", { backendNodeId: 77, mode: "selectSingle" });
+    const observed: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, context);
+    const append = h.logger.append.bind(h.logger);
+    let resume!: () => void; let entered!: () => void;
+    const hold = new Promise<void>(resolve => { resume = resolve; });
+    const writing = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(h.logger, "append").mockImplementation(async (record) => {
+      if (record.type === "browser.job.state" && (record.content as any)?.state === state) { entered(); await hold; }
+      return append(record);
+    });
+    const tool = new AbortController();
+    const pending = h.executor.uploadChooser({ chooserId: observed.events[0].payload.chooserId, artifactId: artifact!.id }, tool.signal, context);
+    await writing;
+    tool.abort("tool-cancelled");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(h.fake.debuggerApi.sendCommand).not.toHaveBeenCalledWith(expect.anything(), "Runtime.callFunctionOn", expect.anything());
+    resume();
+    await h.executor.endRun();
+    expect(h.fake.debuggerApi.sendCommand).not.toHaveBeenCalledWith(expect.anything(), "Runtime.callFunctionOn", expect.anything());
+    h.executor.dispose();
+  });
+
+  it("returns promptly on run cancellation while the running job receipt is stalled", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "filechooser" }, undefined, context);
+    const artifact = await h.logger.append({ type: "tool.result.data", conversationId: "conversation", output: { filename: "file.txt", mimeType: "text/plain", base64: "YQ==" } });
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.fileChooserOpened", { backendNodeId: 77, mode: "selectSingle" });
+    const observed: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, context);
+    const append = h.logger.append.bind(h.logger);
+    let resume!: () => void; let entered!: () => void;
+    const hold = new Promise<void>(resolve => { resume = resolve; });
+    const writing = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(h.logger, "append").mockImplementation(async (record) => {
+      if (record.type === "browser.job.state" && (record.content as any)?.state === "running") { entered(); await hold; }
+      return append(record);
+    });
+    const run = new AbortController();
+    const pending = h.executor.uploadChooser({ chooserId: observed.events[0].payload.chooserId, artifactId: artifact!.id }, undefined, { ...context, runSignal: run.signal });
+    await writing;
+    run.abort("run-cancelled");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    resume();
+    await h.executor.endRun();
+    expect(h.fake.debuggerApi.sendCommand).not.toHaveBeenCalledWith(expect.anything(), "Runtime.callFunctionOn", expect.anything());
+    h.executor.dispose();
+  });
+
+  it("settles the chooser intent as not dispatched if a dialog arrives before dispatch", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "filechooser" }, undefined, context);
+    const artifact = await h.logger.append({ type: "tool.result.data", conversationId: "conversation", output: { filename: "file.txt", mimeType: "text/plain", base64: "YQ==" } });
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.fileChooserOpened", { backendNodeId: 77, mode: "selectSingle" });
+    const observed: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, context);
+    h.fake.debuggerApi.sendCommand.mockImplementation(async (_source: any, method: string) => method === "DOM.resolveNode" ? { object: { objectId: "input" } } : {});
+    const append = h.logger.append.bind(h.logger);
+    vi.spyOn(h.logger, "append").mockImplementation(async (record) => {
+      const saved = await append(record);
+      if (record.type === "browser.chooser.progress" && (record.content as any)?.state === "dispatched-unknown")
+        await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.javascriptDialogOpening", { type: "alert", message: "open" });
+      return saved;
+    });
+    const pending = h.executor.uploadChooser({ chooserId: observed.events[0].payload.chooserId, artifactId: artifact!.id }, undefined, context);
+    await pending.catch(() => undefined);
+    await vi.waitFor(() => expect(h.events.filter((entry) => entry.type === "browser.chooser.progress").map((entry) => (entry.content as any).state)).toEqual(["dispatched-unknown", "not-dispatched"]));
+    expect(h.fake.debuggerApi.sendCommand).not.toHaveBeenCalledWith(expect.anything(), "Runtime.callFunctionOn", expect.anything());
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("settles a late intent write after cancellation without dispatching", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "filechooser" }, undefined, context);
+    const artifact = await h.logger.append({ type: "tool.result.data", conversationId: "conversation", output: { filename: "file.txt", mimeType: "text/plain", base64: "YQ==" } });
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.fileChooserOpened", { backendNodeId: 77, mode: "selectSingle" });
+    const observed: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, context);
+    h.fake.debuggerApi.sendCommand.mockImplementation(async (_source: any, method: string) => method === "DOM.resolveNode" ? { object: { objectId: "input" } } : {});
+    const append = h.logger.append.bind(h.logger);
+    let resume!: () => void; let entered!: () => void;
+    const hold = new Promise<void>(resolve => { resume = resolve; });
+    const writing = new Promise<void>(resolve => { entered = resolve; });
+    vi.spyOn(h.logger, "append").mockImplementation(async (record) => {
+      if (record.type === "browser.chooser.progress" && (record.content as any)?.state === "dispatched-unknown") { entered(); await hold; }
+      return append(record);
+    });
+    const tool = new AbortController();
+    const pending = h.executor.uploadChooser({ chooserId: observed.events[0].payload.chooserId, artifactId: artifact!.id }, tool.signal, context);
+    await writing;
+    tool.abort("tool-cancelled");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    resume();
+    await vi.waitFor(() => expect(h.events.filter((entry) => entry.type === "browser.chooser.progress").map((entry) => (entry.content as any).state)).toEqual(["dispatched-unknown", "not-dispatched"]));
+    expect(h.fake.debuggerApi.sendCommand).not.toHaveBeenCalledWith(expect.anything(), "Runtime.callFunctionOn", expect.anything());
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("hands off only a matching active tab with durable evidence and retains the job after the call signal ends", async () => {
+    let finish!: () => void;
+    const h = programHarness(async ({ page }) => page.goto("https://example.test"));
+    h.raw.goto = vi.fn(async () => { await (h.executor as any).programScope.dispatched(); await new Promise<void>(resolve => { finish = resolve; }); return "done"; });
+    await h.executor.beginRun();
+    const tool = new AbortController(); const run = new AbortController();
+    const pending = h.executor.runProgram({ code: "test", timeoutMs: 5000 }, tool.signal, { ...context, runSignal: run.signal });
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    await (h.executor as any).handleCommandEvent({ tabId: 42 }, "Page.javascriptDialogOpening", { type: "alert", message: "other" });
+    let completed = false; void pending.then(() => { completed = true; });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(completed).toBe(false);
+    await (h.executor as any).handleCommandEvent({ tabId: 41, sessionId: "frame" }, "Page.javascriptDialogOpening", { type: "confirm", message: "continue?" });
+    const result: any = await pending;
+    expect(result).toMatchObject({ accepted: true, complete: false, state: "blocked", blockedBy: { source: { tabId: 41, sessionId: "frame" }, kind: "dialog" } });
+    expect(h.events.find(event => event.id === result.blockedBy.evidenceId)).toMatchObject({ type: "browser.job.progress", content: { jobId: result.jobId, state: "blocked" } });
+    expect(h.executor.pendingBackgroundJobs()).toContain(result.jobId);
+    tool.abort("tool-returned");
+    h.fake.debuggerApi.sendCommand.mockResolvedValue({});
+    await h.executor.handleDialog({ dialogId: result.blockedBy.dialogId, accept: true }, undefined, context);
+    finish();
+    await vi.waitFor(async () => expect(await h.executor.queryJobs({ action: "status", id: result.jobId }, undefined, context)).toMatchObject({ terminal: true, ok: true }));
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("rejects an already observed open dialog before invoking the page action", async () => {
+    const h = programHarness(async ({ page }) => page.goto("https://example.test"));
+    await h.executor.beginRun();
+    await h.executor.subscribeEvent({ kind: "dialog" }, undefined, context);
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.javascriptDialogOpening", { type: "alert", message: "open" });
+    const result: any = await h.executor.runProgram({ code: "test" }, undefined, context);
+    expect(result).toMatchObject({ ok: false, result: { error: { code: "dialog-open" } } });
+    expect(h.raw.goto).not.toHaveBeenCalled();
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("tracks dynamically selected tabs instead of the initially bound tab", async () => {
+    let finish!: () => void;
+    const h = programHarness(async ({ browser }) => (await browser.page(42)).goto("https://example.test"));
+    h.raw.goto = vi.fn(async () => { await (h.executor as any).programScope.dispatched(); await new Promise<void>(resolve => { finish = resolve; }); });
+    await h.executor.beginRun();
+    const pending = h.executor.runProgram({ code: "test" }, undefined, context);
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    await (h.executor as any).handleCommandEvent({ tabId: 42, sessionId: "child" }, "Page.javascriptDialogOpening", { type: "alert", message: "dynamic" });
+    const result: any = await pending;
+    expect(result).toMatchObject({ accepted: true, blockedBy: { source: { tabId: 42, sessionId: "child" } } });
+    finish(); await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("keeps the handed-off job subject to run cancellation", async () => {
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const h = programHarness(async ({ page }) => page.goto("https://example.test"));
+    h.raw.goto = vi.fn(async () => { await (h.executor as any).programScope.dispatched(); started(); await new Promise<void>((_, reject) => {
+      const signal = (h.executor as any).programScope.signal as AbortSignal;
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }); });
+    await h.executor.beginRun();
+    const run = new AbortController();
+    const pending = h.executor.runProgram({ code: "test" }, undefined, { ...context, runSignal: run.signal });
+    await ready;
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.javascriptDialogOpening", { type: "alert", message: "open" });
+    const result: any = await pending;
+    run.abort("run-cancelled");
+    await vi.waitFor(async () => expect(await h.executor.queryJobs({ action: "status", id: result.jobId }, undefined, context)).toMatchObject({ terminal: true, state: "cancelled" }));
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("lets an in-program dialog subscription handle the dialog without handing off", async () => {
+    let send!: (event: unknown) => void; let finish!: () => void;
+    const h = programHarness(async ({ page }) => {
+      const dialog = page.waitForEvent("dialog");
+      const action = page.goto("https://example.test");
+      await (await dialog).accept();
+      finish();
+      return action;
+    });
+    h.raw.waitForEvent = vi.fn(() => new Promise(resolve => { send = resolve; }));
+    h.raw.goto = vi.fn(async () => { await (h.executor as any).programScope.dispatched(); await new Promise<void>(resolve => { finish = resolve; }); return "done"; });
+    await h.executor.beginRun();
+    const pending = h.executor.runProgram({ code: "test" }, undefined, context);
+    await vi.waitFor(() => { expect(send).toBeTypeOf("function"); expect(finish).toBeTypeOf("function"); });
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.javascriptDialogOpening", { type: "confirm", message: "open" });
+    send({ accept: async () => undefined });
+    expect(await pending).toMatchObject({ ok: true, state: "succeeded", result: "done" });
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+
+  it("retains the original timeout after the handoff", async () => {
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const h = programHarness(async ({ page }) => page.goto("https://example.test"));
+    h.raw.goto = vi.fn(async () => { await (h.executor as any).programScope.dispatched(); started(); await new Promise<void>((_, reject) => {
+      const signal = (h.executor as any).programScope.signal as AbortSignal;
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }); });
+    await h.executor.beginRun();
+    const pending = h.executor.runProgram({ code: "test", timeoutMs: 200 }, undefined, context);
+    await ready;
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.javascriptDialogOpening", { type: "alert", message: "open" });
+    const result: any = await pending;
+    await vi.waitFor(async () => expect(await h.executor.queryJobs({ action: "status", id: result.jobId }, undefined, context)).toMatchObject({ terminal: true, ok: false, result: { error: { code: "timeout" } } }));
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+
+  it("checks an observed dialog after the action queue becomes available", async () => {
+    const h = programHarness(async ({ page }) => page.goto("https://example.test"));
+    await h.executor.beginRun();
+    await h.executor.subscribeEvent({ kind: "dialog" }, undefined, context);
+    let release!: () => void;
+    (h.executor as any).tail = new Promise<void>(resolve => { release = resolve; });
+    const pending = h.executor.runProgram({ code: "test" }, undefined, context);
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.javascriptDialogOpening", { type: "alert", message: "opened while queued" });
+    release();
+    expect(await pending).toMatchObject({ ok: false, result: { error: { code: "dialog-open" } } });
+    expect(h.raw.goto).not.toHaveBeenCalled();
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("does not publish a pending job when blocker evidence cannot be persisted", async () => {
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const h = programHarness(async ({ page }) => page.goto("https://example.test"));
+    h.raw.goto = vi.fn(async () => { await (h.executor as any).programScope.dispatched(); started(); await new Promise<void>((_, reject) => {
+      const signal = (h.executor as any).programScope.signal as AbortSignal;
+      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }); });
+    const append = h.logger.append.bind(h.logger);
+    vi.spyOn(h.logger, "append").mockImplementation(async event => {
+      if (event.type === "browser.job.progress" && (event.content as any)?.state === "blocked") throw new Error("disk failed");
+      return append(event);
+    });
+    await h.executor.beginRun();
+    const pending = h.executor.runProgram({ code: "test" }, undefined, context);
+    await ready;
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.javascriptDialogOpening", { type: "alert", message: "open" });
+    await expect(pending).rejects.toMatchObject({ message: "Could not persist dialog blocker evidence", effectUnknown: true });
+    expect(h.executor.pendingBackgroundJobs()).toEqual([]);
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
 });

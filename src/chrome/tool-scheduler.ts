@@ -8,7 +8,7 @@ export type ScheduledToolCall = {
   providerExecuted?: boolean;
 };
 
-type DialogFence = { failed: boolean; failedSignal: Promise<void>; fail: () => void };
+type DialogFence = { kind: "dialog" | "chooser"; failed: boolean; failedSignal: Promise<void>; fail: () => void };
 
 type Slot = {
   call: ScheduledToolCall;
@@ -152,28 +152,31 @@ export class ToolScheduler {
     }
     let tail = Promise.resolve();
     let dialogTail = Promise.resolve();
+    let chooserTail = Promise.resolve();
     const dialogDependencies: DialogFence[] = [];
     for (const call of calls) {
       if (call.providerExecuted) continue;
-      if (bypass.has(call.toolName ?? "") && !call.invalid && call.toolName && this.names.has(call.toolName)) {
+      const nonblockingRead = call.toolName === "list_downloads" && batch.backgroundJobId !== undefined;
+      if ((bypass.has(call.toolName ?? "") || nonblockingRead) && !call.invalid && call.toolName && this.names.has(call.toolName)) {
         batch.bypassIds.add(call.toolCallId!);
         continue;
       }
       let release!: () => void;
       const done = new Promise<void>((resolve) => { release = resolve; });
-      const isDialog = call.toolName === "handle_dialog";
+      const isChooser = call.toolName === "upload_file" && typeof inputOf(call.input).chooserId === "string";
+      const isDialog = call.toolName === "handle_dialog" || isChooser;
       let dialogFence: DialogFence | undefined;
       if (isDialog) {
         let notifyFailure!: () => void;
         const failedSignal = new Promise<void>((resolve) => { notifyFailure = resolve; });
-        dialogFence = { failed: false, failedSignal, fail() { if (!this.failed) { this.failed = true; notifyFailure(); } } };
+        dialogFence = { kind: isChooser ? "chooser" : "dialog", failed: false, failedSignal, fail() { if (!this.failed) { this.failed = true; notifyFailure(); } } };
       }
-      const slot: Slot = { call, previous: isDialog ? dialogTail : tail, release, invoked: false, settled: false,
-        dialogDependencies: isDialog ? [] : [...dialogDependencies], ...(dialogFence ? { dialogFence } : {}) };
+      const slot: Slot = { call, previous: isChooser ? Promise.all([chooserTail, dialogTail]).then(() => undefined) : isDialog ? dialogTail : tail, release, invoked: false, settled: false,
+        dialogDependencies: isChooser ? dialogDependencies.filter((fence) => fence.kind === "dialog") : isDialog ? [] : [...dialogDependencies], ...(dialogFence ? { dialogFence } : {}) };
       if (dialogFence) {
-        // Dialog handling must run even while the prior browser call is waiting
-        // for that dialog. Later browser calls must observe both completions.
-        dialogTail = done;
+        // A dialog may unblock an earlier chooser; a later chooser must still
+        // observe prior dialog replies. Browser calls observe both completions.
+        if (isChooser) chooserTail = done; else dialogTail = done;
         tail = Promise.all([tail, done]).then(() => undefined);
         dialogDependencies.push(dialogFence);
       } else tail = done;
@@ -218,7 +221,8 @@ export class ToolScheduler {
         ...slot.dialogDependencies.map((fence) => fence.failedSignal.then(() => true)),
       ]), activeSignal);
       if (precedingDialogFailed || slot.dialogDependencies.some((fence) => fence.failed)) {
-        throw Object.assign(new Error("A prior dialog response failed; this call was not dispatched"), { code: "dialog-response-failed" });
+        const kind = slot.dialogDependencies.find((fence) => fence.failed)?.kind ?? "dialog";
+        throw Object.assign(new Error(`A prior ${kind} response failed; this call was not dispatched`), { code: `${kind}-response-failed` });
       }
     } catch (error) {
       if (slot.dialogFence) slot.dialogFence.fail();

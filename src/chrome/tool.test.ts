@@ -167,6 +167,22 @@ describe("browser tools", () => {
     await expect(tools.switch_tab.execute({ tabId: 42 }, { toolCallId: "switch" })).resolves.toEqual([{ id: 42, current: true }]);
     expect(switchTab).toHaveBeenCalledWith(42, undefined, undefined);
   });
+  it("routes download metadata to the Chrome downloads reader without requiring a page", async () => {
+    const listDownloads = vi.fn(async (input: unknown) => ({ downloads: [], input, consistency: "live" }));
+    const tools = createProgramTools({ listDownloads } as unknown as ChromeExecutor) as Record<string, any>;
+    await expect(tools.list_downloads.execute({ state: "complete", limit: 0 }, { toolCallId: "downloads" })).resolves.toMatchObject({ downloads: [], consistency: "live" });
+    expect(listDownloads).toHaveBeenCalledWith({ state: "complete", limit: 0 }, undefined);
+    expect(() => tools.list_downloads.inputSchema.parse({ limit: -1 })).toThrow();
+  });
+  it("routes a chooser upload to its queue-independent handler", async () => {
+    const uploadChooser = vi.fn(async () => ({ chooserId: "chooser", artifactIds: [7, 8], state: "completed" }));
+    const runProgram = vi.fn();
+    const tools = createProgramTools({ uploadChooser, runProgram } as unknown as ChromeExecutor, { conversationId: "c" }) as Record<string, any>;
+    const input = { chooserId: "chooser", artifactId: [7, 8], timeoutMs: 5000 };
+    await expect(tools.upload_file.execute(input, { toolCallId: "upload" })).resolves.toMatchObject({ state: "completed", artifactIds: [7, 8] });
+    expect(uploadChooser).toHaveBeenCalledWith(input, undefined, expect.objectContaining({ conversationId: "c" }));
+    expect(runProgram).not.toHaveBeenCalled();
+  });
   it("maps individual job tools to conversation-owned job operations", async () => {
     const queryJobs = vi.fn(async (input: unknown, _signal?: AbortSignal, _context?: { conversationId?: string }) => input);
     const tools = createProgramTools({ queryJobs } as unknown as ChromeExecutor, { conversationId: "conversation" }) as Record<string, any>;
@@ -232,6 +248,14 @@ describe("browser tools", () => {
     const logger = { append: async (event: any) => ({ ...event, id: 11 }) } as EventLogger;
     const result = await compactToolResult({ ok: true, result: { verified: false, timedOut: true, present: true, actual: "x".repeat(10_000) } }, { logger, preserveVerification: true });
     expect(result).toMatchObject({ $ref: 11, verification: { verified: false, timedOut: true, present: true }, access: { path: ["result", "actual"] }, preview: "x".repeat(4000) });
+  });
+
+  it("keeps the recovery identifiers when a blocked job has an oversized dialog message", async () => {
+    const logger = { append: async (event: any) => ({ ...event, id: 13 }) } as EventLogger;
+    const value = { accepted: true, complete: false, jobId: "job", state: "blocked", blockedBy: { kind: "dialog", dialogId: "dialog", source: { tabId: 4 }, type: "prompt", evidenceId: 8, message: "x".repeat(10_000) } };
+    const result = await compactToolResult(value, { logger });
+    expect(result).toMatchObject({ $ref: 13, accepted: true, complete: false, jobId: "job", state: "blocked", blockedBy: { kind: "dialog", dialogId: "dialog", source: { tabId: 4 }, type: "prompt", evidenceId: 8 } });
+    expect(JSON.stringify(result)).not.toContain("x".repeat(100));
   });
 
   it("keeps terminal job status and cursor visible without repeating large receipt payloads", async () => {

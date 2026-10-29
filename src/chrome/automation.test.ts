@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { AutomationRuntime } from "./automation";
+import { EventSubscriptions } from "./event-subscriptions";
 
 function event<T extends (...args: any[]) => void>() {
   const listeners = new Set<T>();
@@ -14,7 +15,8 @@ function harness(
   metadata: object[] | undefined = [{ role: "button", name: "Sign in", tag: "button", text: "Sign in" }],
   states: object[] = [{ connected: true, x: 10, y: 12, visible: true, stable: true, enabled: true, editable: true, receivesEvents: true, checked: false }],
   logger?: { record: ReturnType<typeof vi.fn> },
-  onDispatch = vi.fn(async () => undefined),
+  onDispatch = vi.fn(async (): Promise<void> => undefined),
+  claimChooser?: (chooser: any) => { assert: () => void; finish: (outcome: "handled" | "not-dispatched" | "uncertain") => void },
 ) {
   metadata ??= [{ role: "button", name: "Sign in", tag: "button", text: "Sign in" }];
   const calls: Array<{ method: string; params?: any }> = [];
@@ -56,12 +58,37 @@ function harness(
     detach,
     mark: vi.fn(async () => undefined),
     onDispatch,
+    claimChooser,
     logger: logger as never,
   });
   return { runtime, calls, command, detach, tabsCreated, onDispatch };
 }
 
 describe("AutomationRuntime", () => {
+  it("shares the chooser claim with program uploads until file dispatch completes", async () => {
+    const stream = new EventSubscriptions();
+    const owner = { conversationId: "conversation", runId: "run" };
+    const source = { tabId: 3, sessionId: "frame" };
+    const chooser = stream.registerChooser({ owner, source, backendNodeId: 77, mode: "selectSingle" });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const onDispatch = vi.fn(async () => held);
+    const claimChooser = (value: any) => {
+      expect(value).toMatchObject({ debuggee: source, backendNodeId: 77 });
+      const claim = stream.claimChooser(owner, chooser.id);
+      return { assert: () => stream.assertChooserClaim(owner, claim.id, claim.claimId), finish: (outcome: "handled" | "not-dispatched" | "uncertain") => stream.finishChooser(owner, claim.id, claim.claimId, outcome) };
+    };
+    const { runtime } = harness(undefined, undefined, undefined, onDispatch, claimChooser);
+    const page = await runtime.createPage(3);
+    runtime.handleEvent(source, "Page.fileChooserOpened", { backendNodeId: 77, mode: "selectSingle" });
+    const pending = page.upload({ name: "one.txt", text: "one" });
+    await vi.waitFor(() => expect(onDispatch).toHaveBeenCalledOnce());
+    expect(() => stream.claimChooser(owner, chooser.id)).toThrow("handling");
+    release();
+    await pending;
+    expect(() => stream.claimChooser(owner, chooser.id)).toThrow("handled");
+    await runtime.dispose();
+  });
   it("cleans event waiters against their original signal after context changes or session cleanup", async () => {
     const { runtime } = harness();
     const first = new AbortController();
@@ -389,6 +416,7 @@ describe("AutomationRuntime", () => {
     try {
       const input = frame.contentDocument!.createElement("input");
       input.type = "file";
+      frame.contentDocument!.body.append(input);
       expect(input instanceof HTMLInputElement).toBe(false);
       const upload = new Function(`return (${declaration})`)();
       expect(() => upload.call(input, [{}, {}])).toThrow("AutomationError[invalid-file-count]");

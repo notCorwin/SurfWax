@@ -38,8 +38,9 @@ type JobProjection = {
   jobs: Map<string, ProjectedJob>;
   unsettled: Set<string>;
   indexedEvents: number;
-  cacheOrder: string[];
-  cacheHead: number;
+  cacheOrder: Set<string>;
+  terminalOrder: Set<string>;
+  historyEvicted: boolean;
   requested: number;
   completed: number;
   flight?: Promise<void>;
@@ -53,11 +54,13 @@ export class BrowserJobs {
   private readonly finishedDuringReads = new Set<string>();
   private readonly projections = new Map<string, JobProjection>();
   private readonly maxIndexedEvents: number;
+  private readonly maxCachedJobs: number;
   constructor(
     private readonly logger?: EventLogger,
-    options: { maxIndexedEvents?: number } = {},
+    options: { maxIndexedEvents?: number; maxCachedJobs?: number } = {},
   ) {
     this.maxIndexedEvents = Math.max(0, options.maxIndexedEvents ?? 100_000);
+    this.maxCachedJobs = Math.max(0, options.maxCachedJobs ?? 1_000);
   }
 
   private releaseFinishedOwners(): void {
@@ -174,8 +177,9 @@ export class BrowserJobs {
         jobs: new Map(),
         unsettled: new Set(),
         indexedEvents: 0,
-        cacheOrder: [],
-        cacheHead: 0,
+        cacheOrder: new Set(),
+        terminalOrder: new Set(),
+        historyEvicted: false,
         requested: 0,
         completed: 0,
       };
@@ -195,8 +199,9 @@ export class BrowserJobs {
     projection.jobs.clear();
     projection.unsettled.clear();
     projection.indexedEvents = 0;
-    projection.cacheOrder = [];
-    projection.cacheHead = 0;
+    projection.cacheOrder.clear();
+    projection.terminalOrder.clear();
+    projection.historyEvicted = false;
   }
 
   private applyEvent(projection: JobProjection, event: LogEvent): void {
@@ -210,9 +215,12 @@ export class BrowserJobs {
     const id = content.jobId;
     let job = projection.jobs.get(id);
     if (!job) {
-      job = { lastEventId: event.id, eventIds: [] };
+      // Queued starts a fresh, unique job ID. Any other unseen event after an
+      // eviction may belong to an older job and cannot establish a full index.
+      const startsJob = event.type === "browser.job.state" && content.state === "queued";
+      job = { lastEventId: event.id, eventIds: projection.historyEvicted && !startsJob ? null : [] };
       projection.jobs.set(id, job);
-      projection.cacheOrder.push(id);
+      if (job.eventIds) projection.cacheOrder.add(id);
     }
     job.lastEventId = event.id;
     if (job.eventIds) {
@@ -232,21 +240,25 @@ export class BrowserJobs {
       if (terminal.has(content.state)) projection.unsettled.delete(id);
       else projection.unsettled.add(id);
     }
+    projection.terminalOrder.delete(id);
+    if (!job.state || terminal.has(job.state.state)) projection.terminalOrder.add(id);
     while (projection.indexedEvents > this.maxIndexedEvents) {
-      const expired = projection.jobs.get(
-        projection.cacheOrder[projection.cacheHead++]!,
-      );
+      const expiredId = projection.cacheOrder.values().next().value!;
+      projection.cacheOrder.delete(expiredId);
+      const expired = projection.jobs.get(expiredId);
       if (expired?.eventIds) {
         projection.indexedEvents -= expired.eventIds.length;
         expired.eventIds = null;
       }
     }
-    if (
-      projection.cacheHead > 1000 &&
-      projection.cacheHead * 2 >= projection.cacheOrder.length
-    ) {
-      projection.cacheOrder = projection.cacheOrder.slice(projection.cacheHead);
-      projection.cacheHead = 0;
+    while (projection.terminalOrder.size > this.maxCachedJobs) {
+      const expiredId = projection.terminalOrder.values().next().value!;
+      projection.terminalOrder.delete(expiredId);
+      const expired = projection.jobs.get(expiredId);
+      if (expired?.eventIds) projection.indexedEvents -= expired.eventIds.length;
+      projection.cacheOrder.delete(expiredId);
+      projection.jobs.delete(expiredId);
+      projection.historyEvicted = true;
     }
   }
 
@@ -431,6 +443,35 @@ export class BrowserJobs {
     }
   }
 
+  /** Rebuild evicted metadata from the authoritative log through one fixed cursor. */
+  private async scan(
+    conversationId: string,
+    epoch: string,
+    upper: number,
+    signal: AbortSignal | undefined,
+    visit: (event: LogEvent) => void,
+  ): Promise<boolean> {
+    let cursor = -1;
+    while (true) {
+      signal?.throwIfAborted();
+      const page = await this.logger!.jobEventsSince(conversationId, cursor);
+      signal?.throwIfAborted();
+      if (page.epoch !== epoch) return false;
+      for (const event of page.events) {
+        if (event.id > upper) break;
+        cursor = event.id;
+        visit(event);
+      }
+      if (!page.hasMore || !page.events.length || cursor >= upper || page.events.at(-1)!.id > upper) {
+        // A clear can commit after the final page was captured but before it
+        // was delivered to us. Validate the epoch once more before returning.
+        const valid = await this.logger!.jobEventsByIds(conversationId, [], epoch);
+        signal?.throwIfAborted();
+        return valid !== null;
+      }
+    }
+  }
+
   async query(
     input: JobQuery,
     conversationId: string,
@@ -467,14 +508,41 @@ export class BrowserJobs {
       while (true) {
         const projection = await this.recoverProjection(conversationId, signal);
         signal?.throwIfAborted();
-        if (input.action === "list")
-          return {
-            jobs: [...projection.jobs].flatMap(([id, job]) =>
+        const epoch = projection.epoch!;
+        const upper = projection.cursor;
+        if (input.action === "list") {
+          if (!projection.historyEvicted) {
+            return { jobs: [...projection.jobs].flatMap(([id, job]) =>
               job.state ? [{ id, state: job.state.state }] : [],
-            ),
-          };
+            ) };
+          }
+          // The existing list contract returns all jobs, so the result itself
+          // is necessarily proportional to history; do not retain it as an index.
+          const states = new Map<string, string>();
+          const valid = await this.scan(conversationId, epoch, upper, signal, (event) => {
+            if (event.type !== "browser.job.state") return;
+            const content = fromLogValue(event.content) as { jobId?: unknown; state?: unknown } | null;
+            if (typeof content?.jobId === "string" && typeof content.state === "string") states.set(content.jobId, content.state);
+          });
+          if (!valid) continue;
+          return { jobs: [...states].map(([id, state]) => ({ id, state })) };
+        }
         const id = input.id;
-        const job = id ? projection.jobs.get(id) : undefined;
+        let job = id ? projection.jobs.get(id) : undefined;
+        if (id && !job?.state) {
+          let rebuilt: ProjectedJob | undefined;
+          const valid = await this.scan(conversationId, epoch, upper, signal, (event) => {
+            const content = fromLogValue(event.content) as { jobId?: unknown; state?: unknown } | null;
+            if (content?.jobId !== id) return;
+            rebuilt ??= { lastEventId: event.id, eventIds: null };
+            rebuilt.lastEventId = event.id;
+            if (event.type === "browser.job.state" && typeof content.state === "string") {
+              rebuilt.state = { id: event.id, state: content.state, runId: event.runId, toolCallId: event.toolCallId };
+            }
+          });
+          if (!valid) continue;
+          job = rebuilt;
+        }
         if (!id || !job?.state)
           throw new Error("Job is unavailable in this conversation");
         const owner = this.live.get(id);
@@ -494,8 +562,6 @@ export class BrowserJobs {
           );
           continue;
         }
-        const epoch = projection.epoch!;
-        const upper = projection.cursor;
         const state = job.state;
         const page = await this.pageIds(
           conversationId,

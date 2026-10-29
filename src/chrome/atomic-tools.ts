@@ -48,11 +48,12 @@ const BACKGROUND_ACTIONS = new Set([
   "upload_file", "fetch", "evaluate_js", "send_cdp",
 ]);
 function define(name: string, summary: string, inputSchema: z.ZodType<any>, body: string, options: { page?: boolean; locators?: boolean } = {}): AtomicToolDefinition {
-  const schema = BACKGROUND_ACTIONS.has(name) ? (inputSchema as z.ZodObject).extend({ background: z.boolean().optional() }) : inputSchema;
+  const schema = BACKGROUND_ACTIONS.has(name) && name !== "upload_file" ? (inputSchema as z.ZodObject).extend({ background: z.boolean().optional() }) : inputSchema;
   return {
     name, summary, description: summary, inputSchema: schema,
     program(input) {
       const parsed = schema.parse(input);
+      if (name === "upload_file" && parsed.chooserId !== undefined) throw new Error("Chooser uploads use the live chooser handler");
       const encoded = JSON.stringify(JSON.stringify(parsed));
       const code = `const input = JSON.parse(${encoded});\n${options.locators ? selector : ""}\n${options.page ? "const currentPage = input.tabId === undefined ? page : await browser.page(input.tabId);" : ""}\n${body}`;
       // Verification's timeout bounds the condition wait, not page setup or cleanup.
@@ -124,10 +125,21 @@ export const ATOMIC_TOOL_REGISTRY: readonly AtomicToolDefinition[] = Object.free
   define("open_tab", "Open a tab in the bound browser window.", z.object({ timeoutMs, url: z.string().min(1).optional() }).strict(), "const opened = await browser.tabs.open(input.url); return { tabId: opened.tabId };"),
   define("switch_tab", "Switch the bound page to a tab.", z.object({ timeoutMs, tabId: z.number().int().nonnegative() }).strict(), "return await browser.tabs.select(input.tabId);"),
   define("close_tab", "Close a tab.", z.object({ timeoutMs, tabId: z.number().int().nonnegative() }).strict(), "return await browser.tabs.close(input.tabId);"),
-  define("upload_file", "Upload an existing artifact to a file input.", z.object({ ...targetFields, artifactId: z.number().int().positive() }).strict(), `const artifact = await artifacts.read(input.artifactId);
-    if (!artifact || typeof artifact.filename !== 'string' || typeof artifact.mimeType !== 'string' || typeof artifact.base64 !== 'string')
-      throw new Error('AutomationError[invalid-artifact]: The artifact has no available file bytes');
-    return await locate(currentPage, input.target).setInputFiles([{name:artifact.filename,mimeType:artifact.mimeType,base64:artifact.base64}]);`, locator),
+  define("upload_file", "Upload one or more artifacts. Supply exactly one target or chooserId; chooser uploads cannot set tabId or background.", z.object({ ...pageFields,
+    target: target.optional(), chooserId: z.string().min(1).optional(),
+    artifactId: z.union([z.number().int().positive(), z.array(z.number().int().positive()).min(1)]), background: z.boolean().optional(),
+  }).strict().refine((input) => (input.target !== undefined) !== (input.chooserId !== undefined)
+    && (input.chooserId === undefined || input.tabId === undefined && input.background === undefined),
+  "Choose exactly one target or chooserId; chooser uploads cannot specify tabId or background"), `const ids = Array.isArray(input.artifactId) ? input.artifactId : [input.artifactId];
+    const values = new Map();
+    for (const id of ids) if (!values.has(id)) values.set(id, artifacts.read(id));
+    const files = await Promise.all(ids.map(async (id) => {
+      const artifact = await values.get(id);
+      if (!artifact || typeof artifact.filename !== 'string' || typeof artifact.mimeType !== 'string' || typeof artifact.base64 !== 'string')
+        throw new Error('AutomationError[invalid-artifact]: The artifact has no available file bytes');
+      return {name:artifact.filename,mimeType:artifact.mimeType,base64:artifact.base64};
+    }));
+    return await locate(currentPage, input.target).setInputFiles(files);`, locator),
   define("take_screenshot", "Capture a screenshot when visual input is enabled.", z.object({ ...pageFields, target: target.optional() }).strict(), "return await currentPage.screenshot(input.target ? { target: input.target } : {});", page),
   define("create_pdf", "Create a PDF artifact of the selected page.", pageArgs, "return await currentPage.pdf();", page),
   define("read_artifact", "Read a stored artifact or large tool result by ID.", z.object({ timeoutMs, artifactId: z.number().int().positive(), path: z.array(z.union([z.string(), z.number().int().nonnegative()])).optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional() }).strict(), "return await artifacts.read(input.artifactId, {path:input.path, offset:input.offset, limit:input.limit});"),

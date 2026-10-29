@@ -34,6 +34,16 @@ type Dialog = {
   claimVersion: number;
 };
 type DialogView = Omit<Dialog, "owner" | "claimVersion">;
+type Chooser = {
+  id: string;
+  owner: EventOwner;
+  source: EventSource;
+  backendNodeId: number;
+  mode: string;
+  state: "active" | "handling" | "uncertain" | "handled";
+  claimVersion: number;
+};
+type ChooserView = Omit<Chooser, "owner" | "claimVersion">;
 
 function sameOwner(a: EventOwner, b: EventOwner): boolean {
   return a.conversationId === b.conversationId && a.runId === b.runId;
@@ -52,6 +62,7 @@ function abortReason(signal: AbortSignal): unknown {
 export class EventSubscriptions {
   private readonly subscriptions = new Map<string, Subscription>();
   private readonly dialogs = new Map<string, Dialog>();
+  private readonly choosers = new Map<string, Chooser>();
   private readonly capacity: number;
   private readonly createId: () => string;
   private readonly maxEventBytes: number;
@@ -66,7 +77,7 @@ export class EventSubscriptions {
 
   private id(): string {
     const id = this.createId();
-    if (!id || this.subscriptions.has(id) || this.dialogs.has(id)) throw new Error("Duplicate or empty event handle");
+    if (!id || this.subscriptions.has(id) || this.dialogs.has(id) || this.choosers.has(id)) throw new Error("Duplicate or empty event handle");
     return id;
   }
 
@@ -92,6 +103,8 @@ export class EventSubscriptions {
     const payload = event.payload && typeof event.payload === "object" ? event.payload as Record<string, unknown> : undefined;
     const critical = event.kind === "dialog" && typeof payload?.dialogId === "string" && payload.dialogId.length <= 1024
       ? { dialogId: payload.dialogId, ...(typeof payload.type === "string" && payload.type.length <= 64 ? { type: payload.type } : {}) }
+      : event.kind === "filechooser" && typeof payload?.chooserId === "string" && payload.chooserId.length <= 1024
+        ? { chooserId: payload.chooserId, ...(typeof payload.mode === "string" && payload.mode.length <= 64 ? { mode: payload.mode } : {}) }
       : event.kind === "popup" && Number.isSafeInteger(payload?.tabId) ? { tabId: payload!.tabId } : null;
     const captured = bytes <= this.maxEventBytes ? JSON.parse(encoded) as BrowserEvent : {
       kind: event.kind, source: { ...event.source }, payload: critical,
@@ -164,11 +177,13 @@ export class EventSubscriptions {
   closeTab(owner: EventOwner, tabId: number, reason = "tab-closed"): void {
     for (const subscription of this.subscriptions.values()) if (sameOwner(owner, subscription.owner) && subscription.tabId === tabId) this.close(subscription, reason);
     for (const dialog of this.dialogs.values()) if (sameOwner(owner, dialog.owner) && dialog.source.tabId === tabId) this.dialogs.delete(dialog.id);
+    this.closeChoosers(owner, tabId);
   }
 
   closeOwner(owner: EventOwner, reason = "run-ended"): void {
     for (const subscription of this.subscriptions.values()) if (sameOwner(owner, subscription.owner)) this.close(subscription, reason);
     for (const dialog of this.dialogs.values()) if (sameOwner(owner, dialog.owner)) this.dialogs.delete(dialog.id);
+    for (const chooser of this.choosers.values()) if (sameOwner(owner, chooser.owner)) this.choosers.delete(chooser.id);
   }
 
   registerDialog(input: { owner: EventOwner; source: EventSource; type: string; message: string; defaultPrompt?: string }): DialogView {
@@ -206,5 +221,47 @@ export class EventSubscriptions {
   closeDialog(owner: EventOwner, id: string): void {
     const dialog = this.dialogs.get(id);
     if (dialog && sameOwner(owner, dialog.owner)) this.dialogs.delete(id);
+  }
+
+  /** A later chooser in the same tab supersedes the previous native chooser. */
+  registerChooser(input: { owner: EventOwner; source: EventSource; backendNodeId: number; mode: string }): ChooserView {
+    const owner = ownerCopy(input.owner);
+    integer(input.source.tabId, "tab ID", 0);
+    integer(input.backendNodeId, "backend node ID", 1);
+    if (!["selectSingle", "selectMultiple"].includes(input.mode)) throw new Error("File chooser mode is unavailable");
+    this.closeChoosers(owner, input.source.tabId);
+    const chooser: Chooser = { id: this.id(), owner, source: { ...input.source }, backendNodeId: input.backendNodeId,
+      mode: input.mode, state: "active", claimVersion: 0 };
+    this.choosers.set(chooser.id, chooser);
+    const { owner: _owner, claimVersion: _version, ...visible } = chooser;
+    return structuredClone(visible);
+  }
+
+  claimChooser(owner: EventOwner, id: string): ChooserView & { claimId: number } {
+    const chooser = this.choosers.get(id);
+    if (!chooser || !sameOwner(owner, chooser.owner)) throw new Error("File chooser unavailable in this run");
+    if (chooser.state !== "active") throw new Error(`File chooser is ${chooser.state}`);
+    chooser.state = "handling";
+    chooser.claimVersion += 1;
+    const { owner: _owner, claimVersion: claimId, ...visible } = chooser;
+    return structuredClone({ ...visible, claimId });
+  }
+
+  assertChooserClaim(owner: EventOwner, id: string, claimId: number): void {
+    const chooser = this.choosers.get(id);
+    if (!chooser || !sameOwner(owner, chooser.owner)) throw new Error("File chooser unavailable in this run");
+    if (chooser.state !== "handling" || chooser.claimVersion !== claimId) throw new Error("File chooser claim is stale");
+  }
+
+  finishChooser(owner: EventOwner, id: string, claimId: number, outcome: "handled" | "not-dispatched" | "uncertain"): void {
+    const chooser = this.choosers.get(id);
+    if (!chooser) return;
+    this.assertChooserClaim(owner, id, claimId);
+    chooser.state = outcome === "not-dispatched" ? "active" : outcome;
+  }
+
+  closeChoosers(owner: EventOwner, tabId: number, sessionId?: string): void {
+    for (const chooser of this.choosers.values()) if (sameOwner(owner, chooser.owner) && chooser.source.tabId === tabId
+      && (sessionId === undefined || chooser.source.sessionId === sessionId)) this.choosers.delete(chooser.id);
   }
 }

@@ -1,5 +1,8 @@
 import type { EventLogger } from "../logging";
 import type { JobContext } from "./jobs";
+import type { EventSource } from "./event-subscriptions";
+
+export type OperationObserver = { start(operation: string, source: EventSource): unknown; dispatched(handle: unknown, source: EventSource): void; end(handle: unknown): void };
 
 const chains = new Set([
   "ref",
@@ -84,6 +87,7 @@ export class ProgramScope {
     readonly jobId: string,
     private readonly context: JobContext,
     private readonly logger: EventLogger,
+    private readonly observer?: OperationObserver,
   ) {}
 
   guard(): void {
@@ -124,18 +128,23 @@ export class ProgramScope {
     verified = false,
     subscribe = false,
     ordered = effect,
+    source?: EventSource,
   ): Promise<T> {
     this.guard();
     const sequence = ++this.sequence;
     const work = async (): Promise<T> => {
+      let tracked: unknown;
       let dispatched = false;
       let dispatching: Promise<void> | undefined;
       const priorDispatch = this.currentDispatch;
       const mark = () =>
         (dispatching ??= (async () => {
           this.guard();
+          // Write ahead before crossing the dispatch boundary. A later
+          // not-dispatched receipt settles an intent that was never sent.
           await this.event(operation, sequence, "dispatched-unknown");
           this.guard();
+          if (source && tracked) this.observer?.dispatched(tracked, source);
           dispatched = true;
           this.uncertain.add(sequence);
         })());
@@ -145,6 +154,7 @@ export class ProgramScope {
         const subscription = subscribe ? Promise.resolve(run()) : undefined;
         await this.event(operation, sequence, "not-dispatched");
         this.guard();
+        if (source && !subscribe) tracked = this.observer?.start(operation, source);
         if (effect) this.currentDispatch = mark;
         const result = await (subscription ?? run());
         this.guard();
@@ -168,6 +178,7 @@ export class ProgramScope {
         );
         throw error;
       } finally {
+        if (tracked) this.observer?.end(tracked);
         if (this.currentDispatch === mark) this.currentDispatch = priorDispatch;
       }
     };
@@ -216,6 +227,8 @@ export class ProgramScope {
             key === "waitForEvent",
             effects.has(key) &&
               !["accept", "dismiss", "setFiles"].includes(key),
+            Number.isSafeInteger(Reflect.get(target, "tabId")) && !["accept", "dismiss", "setFiles"].includes(key)
+              ? { tabId: Reflect.get(target, "tabId") as number } : undefined,
           );
           return key === "waitForEvent"
             ? result.then((event: any) =>

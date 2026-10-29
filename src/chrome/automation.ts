@@ -7,6 +7,7 @@ type Command = (debuggee: Debuggee, method: string, params?: object) => Promise<
 type RunContext = { signal?: AbortSignal; conversationId?: string; toolCallId?: string; logIdentity?: { runId?: string; toolCallId: string; toolCallIdCanonical: true } };
 type Waiter = { resolve: (value: any) => void; reject: (error: Error) => void };
 type FileChooserRecord = { backendNodeId: number; debuggee: Debuggee; mode: string };
+type FileChooserClaim = { assert: () => void; finish: (outcome: "handled" | "not-dispatched" | "uncertain") => void };
 type Query = {
   kind: "role" | "text" | "label" | "placeholder" | "alt" | "title" | "testId" | "css" | "frame";
   value: string;
@@ -87,6 +88,19 @@ const CHECKED_STATE_SOURCE = `function() {
   const value = (this.getAttribute('aria-checked') || '').trim().toLowerCase();
   const mixed = value === 'mixed' && (role === 'checkbox' || role === 'menuitemcheckbox');
   return { supported: value === 'true' || value === 'false' || mixed, radio: role === 'radio' || role === 'menuitemradio', value: value === 'true' ? true : value === 'false' ? false : null };
+}`;
+
+/** Executed in the input's document by CDP. The file bytes are passed as data. */
+export const FILE_UPLOAD_FUNCTION = `function(files){
+  const view = this.ownerDocument && this.ownerDocument.defaultView;
+  if (!this.isConnected || !view || this.localName !== "input" || String(this.type).toLowerCase() !== "file") throw new Error("AutomationError[invalid-upload-target]: Expected a connected file input");
+  if (!this.multiple && files.length > 1) throw new Error("AutomationError[invalid-file-count]: File input does not allow multiple files");
+  const transfer = new view.DataTransfer();
+  for (const file of files) {
+    const bytes = file.base64 ? view.Uint8Array.from(view.atob(file.base64), c => c.charCodeAt(0)) : new view.TextEncoder().encode(file.text || "");
+    transfer.items.add(new view.File([bytes], file.name, { type: file.mimeType || "application/octet-stream" }));
+  }
+  this.files = transfer.files; this.dispatchEvent(new view.Event("input", { bubbles: true })); this.dispatchEvent(new view.Event("change", { bubbles: true }));
 }`;
 
 const RESOLVER_SOURCE = String.raw`function(spec, metadata) {
@@ -180,6 +194,7 @@ export class AutomationRuntime {
     detach: (debuggee: Debuggee) => Promise<void>;
     mark: (tabId: number) => Promise<void>;
     onDispatch?: () => Promise<void>;
+    claimChooser?: (chooser: FileChooserRecord) => FileChooserClaim | undefined;
     logger?: EventLogger;
   }) {}
 
@@ -273,6 +288,7 @@ export class AutomationRuntime {
     session.lastSnapshot = undefined;
     this.objectDebuggees.clear();
     this.axRoots.clear();
+    this.fileChoosers.delete(session.tabId);
   }
 
   handleDetach(source: Debuggee): void {
@@ -460,6 +476,16 @@ export class AutomationRuntime {
     return this.locatorValue(tabId, chooser ? { queries: [] } : { queries: [{ kind: "css", value: "input[type=file]" }] }, "setInputFiles", [files], chooser);
   }
 
+  forgetChooser(source: Debuggee, backendNodeId: number): void {
+    const chooser = source.tabId === undefined ? undefined : this.fileChoosers.get(source.tabId);
+    if (chooser && chooser.backendNodeId === backendNodeId && chooser.debuggee.sessionId === source.sessionId) this.fileChoosers.delete(source.tabId!);
+  }
+
+  currentChooser(source: Debuggee, backendNodeId: number): FileChooserRecord | undefined {
+    const chooser = source.tabId === undefined ? undefined : this.fileChoosers.get(source.tabId);
+    return chooser && chooser.backendNodeId === backendNodeId && chooser.debuggee.sessionId === source.sessionId ? chooser : undefined;
+  }
+
   async keyState(tabId: number, operation: "keydown" | "keyup", chord: string): Promise<void> {
     const session = await this.session(tabId);
     const input = keyboardParams(chord);
@@ -556,6 +582,7 @@ export class AutomationRuntime {
   }
 
   async locatorValue(tabId: number, spec: LocatorSpec, operation: string, args: unknown[] = [], fileChooser?: FileChooserRecord): Promise<unknown> {
+    const operationSignal = this.context.signal;
     const session = await this.session(tabId);
     return this.action(tabId, operation, spec, async () => {
       if (operation === "count") return (await this.resolveMetadata(session, spec)).length;
@@ -635,13 +662,16 @@ export class AutomationRuntime {
       }
       if (operation === "setInputFiles") {
         const chooser = fileChooser ?? this.fileChoosers.get(tabId);
-        let usedChooser = false;
+        const usedChooser = Boolean(chooser && spec.queries.length === 0 && !spec.ref);
+        const claim = usedChooser ? this.options.claimChooser?.(chooser!) : undefined;
+        let dispatched = false;
+        let claimOpen = Boolean(claim);
+        try {
         let objectId: string;
-        if (chooser && spec.queries.length === 0 && !spec.ref) {
-          usedChooser = true;
-          const node = await this.options.command(chooser.debuggee, "DOM.resolveNode", { backendNodeId: chooser.backendNodeId, objectGroup: "surf-wax-automation" });
+        if (usedChooser) {
+          const node = await this.options.command(chooser!.debuggee, "DOM.resolveNode", { backendNodeId: chooser!.backendNodeId, objectGroup: "surf-wax-automation" });
           if (!node.object?.objectId) throw automationError("detached", { reason: "file-chooser-node-removed" });
-          objectId = node.object.objectId; this.objectDebuggees.set(objectId, chooser.debuggee);
+          objectId = node.object.objectId; this.objectDebuggees.set(objectId, chooser!.debuggee);
         } else objectId = await this.resolveOne(session, spec);
         const targetSession = this.objectSession(session, objectId);
         const requested = Array.isArray(args[0]) ? args[0] : [args[0]];
@@ -661,20 +691,21 @@ export class AutomationRuntime {
           }
           return file;
         }));
+        claim?.assert();
         await this.options.onDispatch?.();
-        await this.callOn(targetSession, objectId, `function(files){
-          const view = this.ownerDocument && this.ownerDocument.defaultView;
-          if (!view || this.localName !== "input" || String(this.type).toLowerCase() !== "file") throw new Error("AutomationError[invalid-upload-target]: Expected a file input");
-          if (!this.multiple && files.length > 1) throw new Error("AutomationError[invalid-file-count]: File input does not allow multiple files");
-          const transfer = new view.DataTransfer();
-          for (const file of files) {
-            const bytes = file.base64 ? view.Uint8Array.from(view.atob(file.base64), c => c.charCodeAt(0)) : new view.TextEncoder().encode(file.text || "");
-            transfer.items.add(new view.File([bytes], file.name, { type: file.mimeType || "application/octet-stream" }));
-          }
-          this.files = transfer.files; this.dispatchEvent(new view.Event("input", { bubbles: true })); this.dispatchEvent(new view.Event("change", { bubbles: true }));
-        }`, [files]);
+        claim?.assert();
+        throwIfAborted(operationSignal);
+        dispatched = true;
+        await this.callOn(targetSession, objectId, FILE_UPLOAD_FUNCTION, [files]);
+        claim?.finish("handled");
+        claimOpen = false;
         if (usedChooser && this.fileChoosers.get(tabId) === chooser) this.fileChoosers.delete(tabId);
         return this.afterAction(session);
+        } catch (error) {
+          if (claimOpen) claim?.finish(dispatched ? "uncertain" : "not-dispatched");
+          if (dispatched && error && typeof error === "object") Object.assign(error, { effectUnknown: true });
+          throw error;
+        }
       }
       if (operation === "check" || operation === "uncheck") {
         const { objectId, targetSession } = await this.waitActionableLocator(session, spec, false, true);

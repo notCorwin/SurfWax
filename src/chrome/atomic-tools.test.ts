@@ -79,6 +79,20 @@ describe("atomic browser tool programs", () => {
     expect(setInputFiles).toHaveBeenCalledOnce();
   });
 
+  it("accepts exactly one upload destination and reuses duplicate artifact reads", async () => {
+    const upload = definition("upload_file");
+    expect(() => upload.inputSchema.parse({ artifactId: 1 })).toThrow();
+    expect(() => upload.inputSchema.parse({ artifactId: 1, chooserId: "c", target: { ref: "e1" } })).toThrow();
+    expect(() => upload.inputSchema.parse({ artifactId: 1, chooserId: "c", tabId: 2 })).toThrow();
+    expect(() => upload.inputSchema.parse({ artifactId: 1, chooserId: "c", background: true })).toThrow();
+    expect(upload.inputSchema.parse({ artifactId: [1, 1], chooserId: "c" })).toMatchObject({ chooserId: "c" });
+    const read = vi.fn(async () => ({ filename: "a.txt", mimeType: "text/plain", base64: "YQ==" }));
+    const setInputFiles = vi.fn(async () => "done");
+    await execute("upload_file", { artifactId: [1, 1], target: { ref: "e1" } }, { page: { ref: () => ({ setInputFiles }) }, artifacts: { read } });
+    expect(read).toHaveBeenCalledOnce();
+    expect(setInputFiles).toHaveBeenCalledWith([expect.objectContaining({ name: "a.txt" }), expect.objectContaining({ name: "a.txt" })]);
+  });
+
   it("does not confuse a missing or ambiguous element with an unchecked one", async () => {
     const count = vi.fn(async () => 0);
     const page = { ref: () => ({ count }) };

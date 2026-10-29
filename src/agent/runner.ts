@@ -77,7 +77,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
   const scheduler = new ToolScheduler(PROGRAM_TOOL_REGISTRY.map(({ name }) => name), () => options.executor.pendingBackgroundJobs?.() ?? []);
   const initialPrompt = createPromptSnapshot(options.prompt?.source ?? options.instructions);
   const toolOptions = {
-    logger, conversationId: options.conversationId, scheduler,
+    logger, conversationId: options.conversationId, scheduler, runSignal: options.signal,
     callId: () => callId,
     visualEnabled: (() => {
       let supported: Promise<boolean> | undefined;

@@ -145,6 +145,165 @@ test("uploads a stored artifact through an independent tool", async () => {
   }
 });
 
+test("uploads multiple artifacts to a chooser across independent tool calls", async () => {
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/automation`);
+    await target.evaluate(() => {
+      const input = document.createElement("input");
+      input.type = "file"; input.multiple = true; input.hidden = true;
+      input.onchange = async () => {
+        const files = [...(input.files ?? [])];
+        document.body.dataset.chooserNames = files.map((file) => file.name).join(",");
+        document.body.dataset.chooserContents = (await Promise.all(files.map((file) => file.text()))).join(",");
+      };
+      const button = document.createElement("button");
+      button.id = "open-chooser"; button.textContent = "Choose files";
+      button.onclick = () => input.click();
+      document.body.append(input, button);
+    });
+    let firstId = 0, secondId = 0, subscriptionId = "", jobId = "", pollCount = 0;
+    const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
+    const poll: MockResponse = (request) => {
+      const job = lastTool(request);
+      if (job.terminal) { expect(job).toMatchObject({ ok: true, state: "succeeded" }); return textResponse("CHOOSER_TOOLS_OK"); }
+      responses.unshift(poll);
+      return commandResponse("get_job", { jobId, after: job.nextCursor, waitMs: 10_000 }, `chooser-job-${++pollCount}`);
+    };
+    responses.push(
+      commandResponse("create_text_artifact", { filename: "first.txt", text: "first" }, "chooser-artifact-one"),
+      (request) => { firstId = lastTool(request).result.id; return commandResponse("create_text_artifact", { filename: "second.txt", text: "second" }, "chooser-artifact-two"); },
+      (request) => { secondId = lastTool(request).result.id; return commandResponse("subscribe_event", { kind: "filechooser" }, "subscribe-chooser"); },
+      (request) => { subscriptionId = lastTool(request).subscriptionId; return commandResponse("click", { target: { by: "css", value: "#open-chooser" }, background: true, timeoutMs: 30_000 }, "open-chooser"); },
+      (request) => { jobId = lastTool(request).jobId; return commandResponse("wait_event", { subscriptionId, waitMs: 10_000 }, "wait-chooser"); },
+      (request) => {
+        const event = lastTool(request).events.find((item: any) => item.kind === "filechooser");
+        expect(event.payload).toMatchObject({ mode: "selectMultiple", chooserId: expect.any(String) });
+        return commandResponse("upload_file", { chooserId: event.payload.chooserId, artifactId: [firstId, secondId] }, "answer-chooser");
+      },
+      (request) => { expect(lastTool(request)).toMatchObject({ state: "completed", artifactIds: [firstId, secondId] }); return commandResponse("get_job", { jobId }, "read-chooser-job"); },
+      poll, textResponse("选择文件"),
+    );
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("upload the two files");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("CHOOSER_TOOLS_OK", { timeout: 30_000 });
+    await expect.poll(() => target.locator("body").getAttribute("data-chooser-contents")).toBe("first,second");
+    expect(await target.locator("body").getAttribute("data-chooser-names")).toBe("first.txt,second.txt");
+    const events = await readEvents(opened.page);
+    expect(events.find((event) => event.toolCallId === "answer-chooser" && event.type === "tool.finished")?.output).toMatchObject({ state: "completed", artifactIds: [firstId, secondId] });
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});
+
+test("resumes a chooser upload whose change handler opens a dialog", async () => {
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/automation`);
+    target.on("dialog", () => {});
+    await target.evaluate(() => {
+      const input = document.createElement("input");
+      input.type = "file"; input.hidden = true;
+      input.onchange = () => { document.body.dataset.uploadAnswer = prompt("Upload confirmation?") ?? "cancelled"; document.body.dataset.uploadName = input.files?.[0]?.name; };
+      const button = document.createElement("button");
+      button.id = "chooser-dialog"; button.textContent = "Choose"; button.onclick = () => input.click();
+      document.body.append(input, button);
+    });
+    let artifactId = 0, subscriptionId = "", clickJobId = "", uploadJobId = "", pollCount = 0;
+    const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
+    const pollClick: MockResponse = (request) => {
+      const job = lastTool(request);
+      if (job.terminal) { expect(job).toMatchObject({ ok: true, state: "succeeded" }); return textResponse("CHOOSER_DIALOG_OK"); }
+      responses.unshift(pollClick);
+      return commandResponse("get_job", { jobId: clickJobId, after: job.nextCursor, waitMs: 10_000 }, `chooser-dialog-click-${++pollCount}`);
+    };
+    const pollUpload: MockResponse = (request) => {
+      const job = lastTool(request);
+      if (job.terminal) {
+        expect(job).toMatchObject({ ok: true, state: "succeeded" });
+        responses.unshift(pollClick);
+        return commandResponse("get_job", { jobId: clickJobId }, "chooser-dialog-click-job");
+      }
+      responses.unshift(pollUpload);
+      return commandResponse("get_job", { jobId: uploadJobId, after: job.nextCursor, waitMs: 10_000 }, `chooser-dialog-upload-${++pollCount}`);
+    };
+    responses.push(
+      commandResponse("create_text_artifact", { filename: "confirmation.txt", text: "data" }, "dialog-artifact"),
+      (request) => { artifactId = lastTool(request).result.id; return commandResponse("subscribe_event", { kind: "filechooser" }, "dialog-chooser-subscribe"); },
+      (request) => { subscriptionId = lastTool(request).subscriptionId; return commandResponse("click", { target: { by: "css", value: "#chooser-dialog" }, background: true, timeoutMs: 30_000 }, "dialog-chooser-click"); },
+      (request) => { clickJobId = lastTool(request).jobId; return commandResponse("wait_event", { subscriptionId, waitMs: 10_000 }, "dialog-chooser-wait"); },
+      (request) => { const event = lastTool(request).events.find((item: any) => item.kind === "filechooser"); return commandResponse("upload_file", { chooserId: event.payload.chooserId, artifactId, timeoutMs: 30_000 }, "dialog-chooser-upload"); },
+      (request) => {
+        const result = lastTool(request);
+        expect(result).toMatchObject({ accepted: true, complete: false, state: "blocked", blockedBy: { kind: "dialog", type: "prompt", message: "Upload confirmation?" } });
+        uploadJobId = result.jobId;
+        expect(uploadJobId).toBeTruthy();
+        return commandResponse("handle_dialog", { dialogId: result.blockedBy.dialogId, accept: true, prompt: "yes" }, "dialog-chooser-answer");
+      },
+      (request) => { expect(lastTool(request)).toMatchObject({ state: "completed" }); return commandResponse("get_job", { jobId: uploadJobId }, "chooser-dialog-upload-job"); },
+      pollUpload,
+      textResponse("上传并确认"),
+    );
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("upload the file and confirm the prompt");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("CHOOSER_DIALOG_OK", { timeout: 30_000 });
+    expect(await target.locator("body").getAttribute("data-upload-answer")).toBe("yes");
+    expect(await target.locator("body").getAttribute("data-upload-name")).toBe("confirmation.txt");
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});
+
+test("uploads to a cross-origin frame chooser through its captured session", async () => {
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/complex`);
+    const frame = target.frames().find((item) => item.url().includes("localhost"))!;
+    await frame.evaluate(() => {
+      const input = document.createElement("input"); input.type = "file"; input.hidden = true;
+      input.onchange = async () => { document.body.dataset.uploaded = await input.files?.[0]?.text() ?? ""; };
+      const button = document.createElement("button"); button.id = "frame-chooser"; button.textContent = "Choose file";
+      button.onclick = () => input.click(); document.body.append(input, button);
+    });
+    let artifactId = 0, subscriptionId = "", jobId = "", sequence = 0;
+    const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
+    const poll: MockResponse = (request) => {
+      const job = lastTool(request);
+      if (job.terminal) { expect(job).toMatchObject({ ok: true, state: "succeeded" }); return textResponse("FRAME_CHOOSER_OK"); }
+      responses.unshift(poll);
+      return commandResponse("get_job", { jobId, after: job.nextCursor, waitMs: 10_000 }, `frame-job-${++sequence}`);
+    };
+    responses.push(
+      commandResponse("create_text_artifact", { filename: "frame.txt", text: "frame contents" }, "frame-artifact"),
+      (request) => { artifactId = lastTool(request).result.id; return commandResponse("subscribe_event", { kind: "filechooser" }, "frame-subscribe"); },
+      (request) => { subscriptionId = lastTool(request).subscriptionId; return commandResponse("click", { target: { by: "css", value: "#frame-chooser", frame: { by: "css", value: "iframe[src*=localhost]" } }, background: true, timeoutMs: 30_000 }, "frame-chooser-click"); },
+      (request) => { jobId = lastTool(request).jobId; return commandResponse("wait_event", { subscriptionId, waitMs: 10_000 }, "frame-chooser-event"); },
+      (request) => {
+        const event = lastTool(request).events.find((item: any) => item.kind === "filechooser");
+        expect(event.source.sessionId).toEqual(expect.any(String));
+        return commandResponse("upload_file", { chooserId: event.payload.chooserId, artifactId }, "frame-chooser-upload");
+      },
+      (request) => { expect(lastTool(request)).toMatchObject({ state: "completed", artifactIds: [artifactId] }); return commandResponse("get_job", { jobId }, "frame-job"); },
+      poll, textResponse("跨帧上传"),
+    );
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("upload the frame file");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FRAME_CHOOSER_OK", { timeout: 30_000 });
+    await expect.poll(() => frame.locator("body").getAttribute("data-uploaded")).toBe("frame contents");
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});
+
 test("reads and sets ARIA checked state without toggling an already satisfied control", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
@@ -271,6 +430,63 @@ test("handles a dialog raised by a background atomic click across tool calls", a
       expect(events.filter((event) => event.toolCallId === id && ["tool.finished", "tool.failed"].includes(event.type))).toHaveLength(1);
     }
     expect(events.find((event) => event.toolCallId === "blocked-read" && event.type === "tool.failed")?.output.error.code).toBe("background-job-pending");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("hands a foreground click blocked by a dialog to a resumable job", async () => {
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/automation`);
+    target.on("dialog", () => {});
+    await target.evaluate(() => {
+      const button = document.createElement("button");
+      button.id = "foreground-dialog";
+      button.textContent = "Open prompt";
+      button.onclick = () => { document.body.dataset.answer = prompt("Foreground answer?") ?? "cancelled"; };
+      document.body.append(button);
+    });
+    let jobId = "";
+    let polls = 0;
+    const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
+    const poll: MockResponse = (request) => {
+      const job = lastTool(request);
+      if (job.terminal) {
+        expect(job).toMatchObject({ ok: true, state: "succeeded" });
+        return textResponse("FOREGROUND_DIALOG_OK");
+      }
+      responses.unshift(poll);
+      return commandResponse("get_job", { jobId, after: job.nextCursor, waitMs: 10_000 }, `foreground-poll-${++polls}`);
+    };
+    responses.push(
+      commandResponse("click", { target: { by: "css", value: "#foreground-dialog" }, timeoutMs: 30_000 }, "foreground-click"),
+      (request) => {
+        const result = lastTool(request);
+        expect(result).toMatchObject({ accepted: true, complete: false, state: "blocked", blockedBy: { kind: "dialog", type: "prompt", message: "Foreground answer?" } });
+        jobId = result.jobId;
+        expect(jobId).toBeTruthy();
+        return commandResponse("handle_dialog", { dialogId: result.blockedBy.dialogId, accept: true, prompt: "confirmed" }, "foreground-answer");
+      },
+      (request) => {
+        expect(lastTool(request)).toMatchObject({ accepted: true, state: "completed" });
+        return commandResponse("get_job", { jobId }, "foreground-job");
+      },
+      poll,
+      textResponse("处理前台对话框"),
+    );
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("open the prompt and enter confirmed");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FOREGROUND_DIALOG_OK", { timeout: 30_000 });
+    expect(await target.locator("body").getAttribute("data-answer")).toBe("confirmed");
+    const events = await readEvents(opened.page);
+    expect(events.filter((event) => event.toolCallId === "foreground-click" && event.type === "tool.finished")).toHaveLength(1);
+    expect(events.filter((event) => event.toolCallId === "foreground-answer" && event.type === "tool.finished")).toHaveLength(1);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -939,7 +1155,7 @@ for (const format of ["legacy-user-tools", "system-tools"] as const) test(`conti
     expect(events.some(event => event.type === "automation.action.started" && event.toolCallId === "removed-old-entry")).toBe(false);
     expect(events.find(event => event.type === "tool.finished" && event.toolCallId === "current-entry")?.output).toMatchObject({ ok: true, state: "succeeded", result: 1 });
     expect(events.some(event => event.type === "browser.job.progress" && event.toolCallId === "current-entry" && event.content.operation === "check" && event.content.state === "verified")).toBe(true);
-    expect(events.filter(event => event.type === "context.prompt.updated").at(-1)?.content).toMatchObject({ migratedFrom: "formal-49-v2", prompt: { catalogVersion: "atomic-tools-v2", format: "system-tools" } });
+    expect(events.filter(event => event.type === "context.prompt.updated").at(-1)?.content).toMatchObject({ migratedFrom: "formal-49-v2", prompt: { catalogVersion: "atomic-tools-v3", format: "system-tools" } });
     const requests = provider.requests.filter(request => request.tools);
     expect(requests).toHaveLength(3);
     for (const request of requests) expect(request.tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "execute_program", "list_jobs", "get_job", "cancel_job"]));

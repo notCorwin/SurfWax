@@ -38,6 +38,101 @@ const context = { conversationId: "program-test" };
 afterEach(() => vi.useRealTimers());
 
 describe("canonical browser jobs", () => {
+  it("bounds retained completed metadata while preserving old jobs and the complete list", async () => {
+    const { logger } = indexedLog();
+    const jobs = new BrowserJobs(logger, { maxCachedJobs: 3, maxIndexedEvents: 5 });
+    for (let index = 0; index < 300; index++) {
+      await logger.append({ type: "browser.job.state", ...context, content: { jobId: `job-${index}`, state: "queued" } });
+      await logger.append({ type: "browser.job.progress", ...context, content: { jobId: `job-${index}`, index } });
+      await logger.append({ type: "browser.job.state", ...context, content: { jobId: `job-${index}`, state: "succeeded" }, output: index });
+    }
+    const list: any = await jobs.query({ action: "list" }, context.conversationId);
+    expect(list.jobs).toHaveLength(300);
+    expect(list.jobs[0]).toEqual({ id: "job-0", state: "succeeded" });
+    const projection = (jobs as any).projections.get(context.conversationId);
+    expect(projection.jobs.size).toBeLessThanOrEqual(3);
+    expect(projection.indexedEvents).toBeLessThanOrEqual(5);
+    expect(projection.cacheOrder.size).toBeLessThanOrEqual(3);
+    const first: any = await jobs.query({ action: "status", id: "job-0", limit: 2 }, context.conversationId);
+    expect(first).toMatchObject({ state: "succeeded", result: 0, hasMore: true, events: [{ state: "queued" }, { index: 0 }] });
+    expect(await jobs.query({ action: "status", id: "job-0", after: first.nextCursor }, context.conversationId)).toMatchObject({ events: [{ state: "succeeded" }], hasMore: false });
+    expect(projection.jobs.size).toBeLessThanOrEqual(3);
+  });
+
+  it("does not treat a later event for an evicted job as its complete history", async () => {
+    const { logger } = indexedLog();
+    const jobs = new BrowserJobs(logger, { maxCachedJobs: 1 });
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: "old", state: "succeeded" }, output: "done" });
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: "new", state: "succeeded" } });
+    await jobs.query({ action: "list" }, context.conversationId);
+    await logger.append({ type: "browser.job.progress", ...context, content: { jobId: "old", value: "late" } });
+    const result: any = await jobs.query({ action: "status", id: "old" }, context.conversationId);
+    expect(result).toMatchObject({ state: "succeeded", result: "done", events: [{ state: "succeeded" }, { value: "late" }] });
+  });
+
+  it("indexes newly queued jobs after earlier jobs were evicted", async () => {
+    const { logger } = indexedLog();
+    const jobs = new BrowserJobs(logger, { maxCachedJobs: 1 });
+    for (const id of ["one", "two"]) await logger.append({ type: "browser.job.state", ...context, content: { jobId: id, state: "succeeded" } });
+    await jobs.query({ action: "list" }, context.conversationId);
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: "fresh", state: "queued" } });
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: "fresh", state: "succeeded" } });
+    await jobs.query({ action: "status", id: "fresh" }, context.conversationId);
+    const projection = (jobs as any).projections.get(context.conversationId);
+    expect(projection.jobs.get("fresh").eventIds).toHaveLength(2);
+  });
+
+  it("retries rebuilding an evicted job if the log is cleared during the scan", async () => {
+    const { logger } = indexedLog();
+    const jobs = new BrowserJobs(logger, { maxCachedJobs: 0 });
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: "old", state: "succeeded" }, output: "stale" });
+    await jobs.query({ action: "list" }, context.conversationId);
+    const original = logger.jobEventsSince.bind(logger);
+    let reached!: () => void, release!: () => void;
+    const ready = new Promise<void>((resolve) => { reached = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(logger, "jobEventsSince").mockImplementation(async (...args) => {
+      const page = await original(...args);
+      if (args[1] === -1) { reached(); await gate; }
+      return page;
+    });
+    const querying = jobs.query({ action: "status", id: "old" }, context.conversationId);
+    await ready;
+    await logger.clear();
+    release();
+    await expect(querying).rejects.toThrow("unavailable");
+  });
+
+  it("does not return a stale list when the log is cleared during reconstruction", async () => {
+    const { logger } = indexedLog();
+    const jobs = new BrowserJobs(logger, { maxCachedJobs: 0 });
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: "old", state: "succeeded" } });
+    await jobs.query({ action: "list" }, context.conversationId);
+    const original = logger.jobEventsSince.bind(logger);
+    let reached!: () => void, release!: () => void;
+    const ready = new Promise<void>((resolve) => { reached = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(logger, "jobEventsSince").mockImplementation(async (...args) => {
+      const page = await original(...args);
+      if (args[1] === -1) { reached(); await gate; }
+      return page;
+    });
+    const querying = jobs.query({ action: "list" }, context.conversationId);
+    await ready;
+    await logger.clear();
+    release();
+    expect(await querying).toEqual({ jobs: [] });
+  });
+
+  it("recovers abandoned jobs even when no completed metadata is retained", async () => {
+    const { logger, events } = indexedLog();
+    const jobs = new BrowserJobs(logger, { maxCachedJobs: 0 });
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: "lost", state: "running" } });
+    expect(await jobs.query({ action: "status", id: "lost" }, context.conversationId)).toMatchObject({ state: "interrupted", terminal: true });
+    expect(events.filter((event) => (fromLogValue(event.content) as any)?.state === "interrupted")).toHaveLength(1);
+    expect(await jobs.query({ action: "list" }, context.conversationId)).toEqual({ jobs: [{ id: "lost", state: "interrupted" }] });
+  });
+
   it("catches up incrementally, batches event reads, and coalesces concurrent readers", async () => {
     const { logger, byTypes, getMany } = indexedLog();
     const jobs = new BrowserJobs(logger);

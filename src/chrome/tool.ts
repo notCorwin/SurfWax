@@ -10,7 +10,7 @@ const elementTargetObject = z.union([
   z.object({ ref: z.string().min(1) }).strict(),
   z.object({ by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testId", "css"]), value: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional(), index: z.number().int().optional(), frame: z.object({ by: z.literal("css"), value: z.string().min(1) }).strict().optional() }).strict(),
 ]);
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v2";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v3";
 export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetObject]).optional(),
   fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional(), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
@@ -19,6 +19,7 @@ export const runInputSchema = z.object({ code: z.string().min(1), background: z.
 const listJobsInputSchema = z.object({}).strict();
 const getJobInputSchema = z.object({ jobId: z.string().min(1), after: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), waitMs: z.number().int().nonnegative().optional() }).strict();
 const cancelJobInputSchema = z.object({ jobId: z.string().min(1) }).strict();
+const listDownloadsInputSchema = z.object({ downloadId: z.number().int().nonnegative().optional(), state: z.enum(["in_progress", "interrupted", "complete"]).optional(), limit: z.number().int().min(0).max(2_147_483_647).optional() }).strict();
 const subscribeEventInputSchema = z.object({ tabId: z.number().int().nonnegative().optional(), kind: z.enum(["dialog", "popup", "download", "filechooser", "request", "response", "console"]), timeoutMs }).strict();
 const waitEventInputSchema = z.object({ subscriptionId: z.string().min(1), after: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), waitMs: z.number().int().nonnegative().optional() }).strict();
 const unsubscribeEventInputSchema = z.object({ subscriptionId: z.string().min(1) }).strict();
@@ -29,7 +30,8 @@ type ToolDefinition = { name: string; inputSchema: z.ZodType<any>; summary: stri
 export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
   { name: "inspect_page", inputSchema: inspectInputSchema, summary: "Read the semantic page with stable element refs", description: "Inspect semantic text and stable refs. region and fields narrow the result; budget and pagination limit output; since reads changes. Use take_screenshot for visual input." },
   ...ATOMIC_TOOL_REGISTRY,
-  { name: "subscribe_event", inputSchema: subscribeEventInputSchema, summary: "Subscribe to browser events before triggering them", description: "Subscribe to a tab's dialog, popup, download, filechooser, request, response or console events. Returns a run-scoped subscription and cursor. Filechooser events provide metadata only; to handle a chooser, subscribe, trigger and set files within one execute_program call." },
+  { name: "list_downloads", inputSchema: listDownloadsInputSchema, summary: "Read Chrome's current download records", description: "List download metadata across the Chrome profile. limit defaults to 100; 0 requests all records. hasMore reports truncation. The list is live and Chrome's exists field may be stale; metadata does not provide file bytes." },
+  { name: "subscribe_event", inputSchema: subscribeEventInputSchema, summary: "Subscribe to browser events before triggering them", description: "Subscribe to a tab's dialog, popup, download, filechooser, request, response or console events. Returns a run-scoped subscription and cursor. Filechooser events include a chooserId for upload_file." },
   { name: "wait_event", inputSchema: waitEventInputSchema, summary: "Read or wait for subscribed events", description: "Read events after a subscription cursor, or wait up to waitMs. Use the returned nextCursor. Overflow, truncation and ended subscriptions are explicit." },
   { name: "unsubscribe_event", inputSchema: unsubscribeEventInputSchema, summary: "Stop a browser event subscription", description: "Stop a subscription and release its resources." },
   { name: "handle_dialog", inputSchema: handleDialogInputSchema, summary: "Accept or dismiss a captured browser dialog", description: "Respond to a captured dialog by ID. prompt is allowed only when accepting a prompt dialog. An uncertain response must not be blindly retried." },
@@ -49,7 +51,7 @@ protocol.sessions(tabId?) lists root/child CDP handles; protocol.send({tabId,ses
 artifacts.read(id,{path?,offset?,limit?}); text(filename,text,mimeType?,save=false); save(id,filename?). Files and images stay internal unless the user requested download/export. emit(value) persists incremental output; check(condition,message?) records a verified assertion; sleep(ms) and signal support cancellation. Completed operations only confirm dispatch/return; verify application outcomes. Queued operations are not dispatched, uncertain effects must be inspected before continuing. Program computation uses a disposable opaque-origin sandbox Worker; browser capabilities are mediated by the Side Panel. Closing the panel cancels jobs and revokes capabilities; arbitrary program finally blocks are not guaranteed to run. Only records survive restart, never arbitrary JS stacks.`;
 export const PROGRAM_TOOL_CONTEXT = `Available tools:\n${PROGRAM_TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n")}`;
 
-export function createProgramTools(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string; callId?: () => string | undefined; visualEnabled?: () => Promise<boolean>; scheduler?: ToolScheduler } = {}): Record<string, ReturnType<typeof dynamicTool>> {
+export function createProgramTools(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string; callId?: () => string | undefined; visualEnabled?: () => Promise<boolean>; scheduler?: ToolScheduler; runSignal?: AbortSignal } = {}): Record<string, ReturnType<typeof dynamicTool>> {
   return Object.fromEntries(PROGRAM_TOOL_REGISTRY.map((definition) => [definition.name, dynamicTool({
     description: definition.description, inputSchema: definition.inputSchema, needsApproval: false,
     execute: async (input, { abortSignal, toolCallId }) => {
@@ -83,7 +85,8 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
           ? new DOMException(abortSignal.reason instanceof Error ? abortSignal.reason.message : String(abortSignal.reason ?? error ?? "Operation aborted"), "AbortError")
           : error;
         const failure = toolFailure(cause); failure.error.retryable = false;
-        if (executing && abortSignal?.aborted && (definition.name === "execute_program" || definition.program) && !failure.error.effectUnknown) failure.error.effectUnknown = true;
+        const chooserUpload = definition.name === "upload_file" && input && typeof input === "object" && "chooserId" in input && typeof input.chooserId === "string";
+        if (executing && !chooserUpload && abortSignal?.aborted && (definition.name === "execute_program" || definition.program) && !failure.error.effectUnknown) failure.error.effectUnknown = true;
         if (!failure.artifact && options.logger && identity?.runId) {
           const artifact = await options.logger.toolArtifact(options.conversationId!, identity).catch(() => undefined);
           if (artifact) failure.artifact = artifact;
@@ -98,7 +101,7 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
         let observedTerminalJob: string | undefined;
         try {
           abortSignal?.throwIfAborted();
-          const context = { conversationId: options.conversationId, toolCallId, logIdentity: identity, visualEnabled: await options.visualEnabled?.() ?? false };
+          const context = { conversationId: options.conversationId, toolCallId, logIdentity: identity, runSignal: options.runSignal, visualEnabled: await options.visualEnabled?.() ?? false };
           abortSignal?.throwIfAborted();
           const value = definition.inputSchema.parse(input);
           executing = true;
@@ -107,10 +110,12 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
             : definition.name === "execute_program" ? await executor.runProgram(value as any, abortSignal, context)
             : definition.name === "list_tabs" ? await executor.listTabs(abortSignal, value.timeoutMs)
             : definition.name === "switch_tab" ? await executor.switchTab(value.tabId, abortSignal, value.timeoutMs)
+            : definition.name === "list_downloads" ? await executor.listDownloads(value, abortSignal)
             : definition.name === "subscribe_event" ? await executor.subscribeEvent(value, abortSignal, context)
             : definition.name === "wait_event" ? await executor.waitEvent(value, abortSignal, context)
             : definition.name === "unsubscribe_event" ? await executor.unsubscribeEvent(value, abortSignal, context)
             : definition.name === "handle_dialog" ? await executor.handleDialog(value, abortSignal, context)
+            : definition.name === "upload_file" && value.chooserId ? await executor.uploadChooser(value, abortSignal, context)
             : definition.name === "list_jobs" ? await executor.queryJobs({ action: "list" }, abortSignal, context)
             : definition.name === "get_job" ? await executor.queryJobs({ action: value.waitMs ? "wait" : "status", id: value.jobId, after: value.after, limit: value.limit, waitMs: value.waitMs }, abortSignal, context)
             : definition.name === "cancel_job" ? await executor.queryJobs({ action: "cancel", id: value.jobId }, abortSignal, context)
@@ -180,8 +185,12 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
   const verification = options.preserveVerification && value && typeof value === "object" && "result" in value
     ? (value as { result?: { verified?: unknown; timedOut?: unknown; present?: unknown } }).result : undefined;
   const job = options.preserveJobStatus && value && typeof value === "object" ? value as Record<string, unknown> : undefined;
-  return { $ref: event.id, bytes, preview: job ? { eventCount: Array.isArray(job.events) ? job.events.length : 0 } : previewOf(value, path), access, type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value,
+  const handoff = value && typeof value === "object" && (value as any).accepted === true && (value as any).complete === false && typeof (value as any).jobId === "string" ? value as Record<string, any> : undefined;
+  const blocked = handoff?.blockedBy;
+  return { $ref: event.id, bytes, preview: job ? { eventCount: Array.isArray(job.events) ? job.events.length : 0 } : handoff ? undefined : previewOf(value, path), access, type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value,
     ...(job ? Object.fromEntries(["id", "state", "terminal", "ok", "nextCursor", "hasMore"].filter((key) => Object.hasOwn(job, key)).map((key) => [key, job[key]])) : {}),
+    ...(handoff ? { accepted: true, complete: false, jobId: handoff.jobId, state: handoff.state,
+      ...(blocked && typeof blocked === "object" ? { blockedBy: Object.fromEntries(["kind", "dialogId", "source", "type", "evidenceId"].filter((key) => Object.hasOwn(blocked, key)).map((key) => [key, blocked[key]])) } : {}) } : {}),
     ...(typeof verification?.verified === "boolean" ? { verification: { verified: verification.verified,
       ...(typeof verification.timedOut === "boolean" ? { timedOut: verification.timedOut } : {}),
       ...(typeof verification.present === "boolean" ? { present: verification.present } : {}) } } : {}) };

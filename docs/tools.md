@@ -1,6 +1,6 @@
 # Surf Wax 工具参考
 
-此文件由真实工具 registry 自动生成（npm run docs:tools）。新回合公开 58 个工具；每个独立工具对应一个操作，具体参数以工具 schema 为准。旧会话的 canonical 历史原样保留，历史工具名称不会因此重新成为可执行入口。
+此文件由真实工具 registry 自动生成（npm run docs:tools）。新回合公开 59 个工具；每个独立工具对应一个操作，具体参数以工具 schema 为准。旧会话的 canonical 历史原样保留，历史工具名称不会因此重新成为可执行入口。
 
 页面语义观察支持区域、字段、字符预算、分页、截断说明与增量。ref 带 tab/document 归属，导航和移除不会自动替换成相似元素。只有明确请求时才返回截图；AX 数据仍从 Chrome 读取，输出增量不意味着底层 CDP 事件已增量化。
 
@@ -36,7 +36,7 @@
 | `open_tab` | Open a tab in the bound browser window. |
 | `switch_tab` | Switch the bound page to a tab. |
 | `close_tab` | Close a tab. |
-| `upload_file` | Upload an existing artifact to a file input. |
+| `upload_file` | Upload one or more artifacts. Supply exactly one target or chooserId; chooser uploads cannot set tabId or background. |
 | `take_screenshot` | Capture a screenshot when visual input is enabled. |
 | `create_pdf` | Create a PDF artifact of the selected page. |
 | `read_artifact` | Read a stored artifact or large tool result by ID. |
@@ -55,7 +55,8 @@
 | `evaluate_js` | Execute a JavaScript body in the explicitly selected page world. |
 | `list_cdp_sessions` | List CDP sessions owned by the selected tab. |
 | `send_cdp` | Send a Chrome DevTools Protocol command to an owned tab or session. |
-| `subscribe_event` | Subscribe to a tab's dialog, popup, download, filechooser, request, response or console events. Returns a run-scoped subscription and cursor. Filechooser events provide metadata only; to handle a chooser, subscribe, trigger and set files within one execute_program call. |
+| `list_downloads` | List download metadata across the Chrome profile. limit defaults to 100; 0 requests all records. hasMore reports truncation. The list is live and Chrome's exists field may be stale; metadata does not provide file bytes. |
+| `subscribe_event` | Subscribe to a tab's dialog, popup, download, filechooser, request, response or console events. Returns a run-scoped subscription and cursor. Filechooser events include a chooserId for upload_file. |
 | `wait_event` | Read events after a subscription cursor, or wait up to waitMs. Use the returned nextCursor. Overflow, truncation and ended subscriptions are explicit. |
 | `unsubscribe_event` | Stop a subscription and release its resources. |
 | `handle_dialog` | Respond to a captured dialog by ID. prompt is allowed only when accepting a prompt dialog. An uncertain response must not be blindly retried. |
@@ -92,7 +93,7 @@ artifacts.read(id,{path?,offset?,limit?}); text(filename,text,mimeType?,save=fal
 
 后台执行返回 queued/accepted，不代表完成。`list_jobs`、`get_job` 和 `cancel_job` 管理任务；回执使用 canonical event ID 分页。已完成的动作表示操作返回，业务结果需要单独验证。程序内的动作按顺序执行，事件应在触发动作前订阅。原生对话框与选择器的回复可在等待中的点击期间执行。
 
-独立工具可通过 `subscribe_event`、`wait_event` 和 `unsubscribe_event` 接收运行内事件。处理原生对话框时，先订阅，再以 `background=true` 触发动作，取得 dialogId 后调用 `handle_dialog`，最后用 `get_job` 确认作业终态。未确认终态的后台作业会阻止新的排队浏览器动作；事件等待、对话框应答与作业查询仍可执行。文件选择器事件目前仅提供元数据，需要在同一个 `execute_program` 中订阅、触发并设置文件；已保存产物可直接用 `upload_file` 上传至文件输入框。
+独立工具可通过 `subscribe_event`、`wait_event` 和 `unsubscribe_event` 接收运行内事件。处理原生对话框时，先订阅，再以 `background=true` 触发动作，取得 dialogId 后调用 `handle_dialog`，最后用 `get_job` 确认作业终态。处理文件选择器时先订阅并触发，再用返回的 chooserId 和已有产物调用 `upload_file`。未确认终态的后台作业会阻止新的排队浏览器动作；事件等待、对话框与文件选择器应答及作业查询仍可执行。
 
 取消会销毁 Worker、撤销能力、清理浏览器输入和监听器。已经派发的操作可能有未知效果，不会回滚或盲目重试。关闭侧栏会取消全部作业；宿主丢失后持久记录变为 interrupted，不恢复任意 JavaScript 调用栈或自动重放。状态、回执与产物来自同一个 canonical event log。
 

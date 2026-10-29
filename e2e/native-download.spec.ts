@@ -3,6 +3,37 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { expect, test, openExtension, reloadUpgradedExtension, configure, configureWithImages, dispose, startProvider, commandResponse, textResponse, readEvents, nativePanel, submitNative, readNativeEvents, type MockResponse } from "./fixtures";
 
+test("lists actual Chrome download metadata through its own tool", async () => {
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const browser = await opened.context.browser()!.newBrowserCDPSession();
+    await browser.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: resolve(opened.userDataDirectory, "downloads"), eventsEnabled: true });
+    const downloadId = await opened.page.evaluate(() => chrome.downloads.download({ url: "data:text/plain;base64,aGVsbG8=", filename: "tool-listing.txt", saveAs: false }));
+    await expect.poll(() => opened.page.evaluate(async (id) => (await chrome.downloads.search({ id }))[0]?.state, downloadId)).toBe("complete");
+    const recorded = await opened.page.evaluate(async (id) => (await chrome.downloads.search({ id }))[0], downloadId);
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    responses.push(
+      commandResponse("list_downloads", { limit: 100 }, "list-downloads"),
+      commandResponse("list_downloads", { downloadId }, "read-download-metadata"),
+      textResponse("DOWNLOAD_METADATA_OK"), textResponse("下载记录"),
+    );
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("inspect the completed download");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("DOWNLOAD_METADATA_OK");
+    const events = await readEvents(opened.page);
+    expect(events.filter((event) => ["list-downloads", "read-download-metadata"].includes(event.toolCallId) && event.type === "tool.failed")).toEqual([]);
+    const listing = events.find((event) => event.type === "tool.finished" && event.toolCallId === "list-downloads")?.output;
+    const exact = events.find((event) => event.type === "tool.finished" && event.toolCallId === "read-download-metadata")?.output;
+    expect(listing).toMatchObject({ scope: "chrome-profile", consistency: "live", existence: "may-be-stale", downloads: expect.arrayContaining([expect.objectContaining({ id: downloadId })]) });
+    expect(exact).toMatchObject({ downloads: [expect.objectContaining({ id: downloadId, state: "complete", filename: recorded!.filename, url: recorded!.url })], hasMore: false });
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});
+
 test("closing the native panel during a pending download restores the existing artifact without recapturing it", async () => {
   const responses: MockResponse[] = [commandResponse("execute_program", { code: `return await page.screenshot(${JSON.stringify({ filename: "pending-close.png", save: true })});` }, "pending-artifact")];
   const provider = await startProvider(responses);

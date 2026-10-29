@@ -50,6 +50,9 @@ describe("run-owned browser event subscriptions", () => {
     const dialog = stream.subscribe({ owner, tabId: 7, kinds: ["dialog"] });
     stream.publish(owner, { kind: "dialog", source, payload: { dialogId: "dialog-1", type: "prompt", message: "x".repeat(300) } });
     expect(await stream.read({ owner, subscriptionId: dialog.subscriptionId })).toMatchObject({ events: [{ payload: { dialogId: "dialog-1", type: "prompt" }, payloadTruncated: { reason: "event-too-large" } }] });
+    const chooser = stream.subscribe({ owner, tabId: 7, kinds: ["filechooser"] });
+    stream.publish(owner, { kind: "filechooser", source, payload: { chooserId: "chooser-1", mode: "selectMultiple", extra: "x".repeat(300) } });
+    expect(await stream.read({ owner, subscriptionId: chooser.subscriptionId })).toMatchObject({ events: [{ payload: { chooserId: "chooser-1", mode: "selectMultiple" }, payloadTruncated: { reason: "event-too-large" } }] });
   });
 
   it("wakes on a new event, times out without cancelling the subscription, and supports simultaneous readers", async () => {
@@ -127,5 +130,33 @@ describe("dialog handles", () => {
     stream.closeOwner(other);
     expect(() => stream.claimDialog(other, second.id)).toThrow("unavailable");
     expect(() => stream.finishDialog(other, second.id, claim.claimId, "handled")).not.toThrow();
+  });
+});
+
+describe("file chooser handles", () => {
+  it("isolates source and run, fences concurrent claims, and refuses uncertain replay", () => {
+    const stream = events();
+    const chooser = stream.registerChooser({ owner, source, backendNodeId: 12, mode: "selectMultiple" });
+    expect(() => stream.claimChooser(other, chooser.id)).toThrow("unavailable");
+    const first = stream.claimChooser(owner, chooser.id);
+    expect(first).toMatchObject({ source, backendNodeId: 12, mode: "selectMultiple", state: "handling" });
+    expect(() => stream.claimChooser(owner, chooser.id)).toThrow("handling");
+    stream.finishChooser(owner, chooser.id, first.claimId, "not-dispatched");
+    const second = stream.claimChooser(owner, chooser.id);
+    expect(() => stream.assertChooserClaim(owner, chooser.id, first.claimId)).toThrow("stale");
+    stream.finishChooser(owner, chooser.id, second.claimId, "uncertain");
+    expect(() => stream.claimChooser(owner, chooser.id)).toThrow("uncertain");
+  });
+
+  it("invalidates superseded, navigated and completed chooser handles", () => {
+    const stream = events();
+    const old = stream.registerChooser({ owner, source, backendNodeId: 12, mode: "selectSingle" });
+    const current = stream.registerChooser({ owner, source, backendNodeId: 12, mode: "selectSingle" });
+    expect(() => stream.claimChooser(owner, old.id)).toThrow("unavailable");
+    const claim = stream.claimChooser(owner, current.id);
+    stream.finishChooser(owner, current.id, claim.claimId, "handled");
+    expect(() => stream.claimChooser(owner, current.id)).toThrow("handled");
+    stream.closeChoosers(owner, source.tabId, source.sessionId);
+    expect(() => stream.claimChooser(owner, current.id)).toThrow("unavailable");
   });
 });

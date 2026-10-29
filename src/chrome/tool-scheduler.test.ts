@@ -4,7 +4,7 @@ import { MockLanguageModelV4 } from "ai/test";
 import { z } from "zod";
 import { ToolScheduler } from "./tool-scheduler";
 
-const names = ["click", "fill", "inspect_page", "verify_state", "switch_tab", "key_up", "execute_program", "get_job", "cancel_job", "subscribe_event", "wait_event", "handle_dialog", "read_api_reference"];
+const names = ["click", "fill", "inspect_page", "verify_state", "switch_tab", "key_up", "execute_program", "get_job", "cancel_job", "subscribe_event", "wait_event", "handle_dialog", "upload_file", "list_downloads", "read_api_reference"];
 const call = (toolCallId: string, toolName: string, input: unknown = {}, extra = {}) => ({ type: "tool-call", toolCallId, toolName, input, ...extra });
 function latch() {
   let release!: () => void;
@@ -61,6 +61,67 @@ describe("model response tool scheduling", () => {
     const bad = scheduler.run("bad", async () => ({ ok: false }));
     const subscribe = scheduler.run("subscribe", async () => ({ subscriptionId: "events" }));
     await expect(Promise.all([bad, subscribe])).resolves.toEqual([{ ok: false }, { subscriptionId: "events" }]);
+  });
+
+  it("allows chooser upload while a background job is blocked, and fences later writes on failure", async () => {
+    const scheduler = new ToolScheduler(names, () => ["job"]);
+    scheduler.prepare([call("chooser", "upload_file", { chooserId: "chooser", artifactId: 7 }), call("write", "click")], 1);
+    const chooser = scheduler.run("chooser", async () => ({ ok: false, error: { code: "invalid-artifact" } }));
+    const click = vi.fn(async () => "wrong");
+    const write = scheduler.run("write", click);
+    await expect(chooser).resolves.toMatchObject({ ok: false });
+    await expect(write).rejects.toMatchObject({ code: "chooser-response-failed" });
+    expect(click).not.toHaveBeenCalled();
+  });
+
+  it("lets a dialog reply unblock a chooser upload while later writes wait for both", async () => {
+    const scheduler = new ToolScheduler(names);
+    scheduler.prepare([call("chooser", "upload_file", { chooserId: "chooser", artifactId: 7 }), call("dialog", "handle_dialog"), call("write", "click")], 1);
+    const started = latch(); const unblock = latch(); const dialogDone = latch();
+    const order: string[] = [];
+    const chooser = scheduler.run("chooser", async () => { order.push("chooser"); started.release(); await unblock.promise; order.push("chooser-done"); return { ok: true }; });
+    const dialog = scheduler.run("dialog", async () => { await started.promise; order.push("dialog"); unblock.release(); await dialogDone.promise; order.push("dialog-done"); return { ok: true }; });
+    const write = scheduler.run("write", async () => { order.push("write"); return { ok: true }; });
+    await vi.waitFor(() => expect(order).toEqual(["chooser", "dialog", "chooser-done"]));
+    dialogDone.release();
+    await Promise.all([chooser, dialog, write]);
+    expect(order).toEqual(["chooser", "dialog", "chooser-done", "dialog-done", "write"]);
+  });
+
+  it("waits for an earlier dialog reply before starting a chooser upload", async () => {
+    const scheduler = new ToolScheduler(names);
+    scheduler.prepare([call("dialog", "handle_dialog"), call("chooser", "upload_file", { chooserId: "chooser", artifactId: 7 })], 1);
+    const gate = latch(); const order: string[] = [];
+    const dialog = scheduler.run("dialog", async () => { order.push("dialog"); await gate.promise; return { ok: true }; });
+    const chooser = scheduler.run("chooser", async () => { order.push("chooser"); return { ok: true }; });
+    await vi.waitFor(() => expect(order).toEqual(["dialog"]));
+    gate.release(); await Promise.all([dialog, chooser]);
+    expect(order).toEqual(["dialog", "chooser"]);
+  });
+
+  it("does not dispatch a chooser after an earlier dialog reply fails", async () => {
+    const scheduler = new ToolScheduler(names);
+    scheduler.prepare([call("dialog", "handle_dialog"), call("chooser", "upload_file", { chooserId: "chooser", artifactId: 7 })], 1);
+    const work = vi.fn(async () => ({ ok: true }));
+    const dialog = scheduler.run("dialog", async () => ({ ok: false }));
+    const chooser = scheduler.run("chooser", work);
+    await dialog;
+    await expect(chooser).rejects.toMatchObject({ code: "dialog-response-failed" });
+    expect(work).not.toHaveBeenCalled();
+  });
+
+  it("does not bypass the background fence for target-based upload", async () => {
+    const scheduler = new ToolScheduler(names, () => ["job"]);
+    scheduler.prepare([call("upload", "upload_file", { target: { ref: "e1" }, artifactId: 7 })], 1);
+    const upload = vi.fn(async () => "wrong");
+    await expect(scheduler.run("upload", upload)).rejects.toMatchObject({ code: "background-job-pending" });
+    expect(upload).not.toHaveBeenCalled();
+  });
+
+  it("can read live download metadata while a background job owns the browser queue", async () => {
+    const scheduler = new ToolScheduler(names, () => ["job"]);
+    scheduler.prepare([call("downloads", "list_downloads")], 1);
+    await expect(scheduler.run("downloads", async () => ({ downloads: [], consistency: "live" }))).resolves.toMatchObject({ consistency: "live" });
   });
 
   it("retains a failed verification boundary when the result was compacted", async () => {
