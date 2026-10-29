@@ -109,20 +109,19 @@ function resultEnvelope(): string {
     const seen = new WeakSet();
     const transferable = (value) => {
       if (value === null || typeof value === "string" || typeof value === "boolean") return true;
-      if (typeof value === "number") return Number.isFinite(value);
+      if (typeof value === "number") return Number.isFinite(value) && !Object.is(value, -0);
       if (typeof value !== "object" || seen.has(value)) return false;
       const isArray = Array.isArray(value);
       const prototype = Object.getPrototypeOf(value);
-      if (!isArray && prototype !== Object.prototype && prototype !== null) return false;
+      if (isArray ? prototype !== Array.prototype : prototype !== Object.prototype) return false;
       seen.add(value);
       const keys = Reflect.ownKeys(value);
       const valid = (!isArray || keys.length === value.length + 1) && keys.every((key) => {
-        if (isArray && key === "length") return true;
+        if (isArray && key === "length") return Object.getOwnPropertyDescriptor(value, key)?.writable === true;
         if (typeof key !== "string" || (isArray && (!Object.hasOwn(value, key) || !/^(0|[1-9]\\d*)$/.test(key)))) return false;
         const property = Object.getOwnPropertyDescriptor(value, key);
-        return property?.enumerable && "value" in property && transferable(property.value);
+        return property?.enumerable && property.writable && property.configurable && "value" in property && transferable(property.value);
       });
-      seen.delete(value);
       return valid;
     };
     try {
@@ -132,7 +131,7 @@ function resultEnvelope(): string {
     const id = crypto.randomUUID();
     values.set(id, result);
     let preview;
-    try { preview = String(result); } catch { preview = "[unprintable value]"; }
+    try { preview = Object.is(result, -0) ? "-0" : String(result); } catch { preview = "[unprintable value]"; }
     return { kind: "reference", id, type: typeof result, preview };
   `;
 }

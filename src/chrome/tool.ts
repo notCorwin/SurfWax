@@ -6,13 +6,14 @@ import type { EventLogger } from "../logging";
 import type { ChromeExecutor } from "./executor";
 import { ATOMIC_TOOL_REGISTRY } from "./atomic-tools";
 import type { ToolScheduler } from "./tool-scheduler";
+import { jobResultReferenceInfo } from "./job-result";
 
 const timeoutMs = z.number().int().positive().optional();
 const elementTargetObject = z.union([
   z.object({ ref: z.string().min(1) }).strict(),
   z.object({ by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testId", "css"]), value: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional(), index: z.number().int().optional(), frame: z.union([z.object({ by: z.literal("css"), value: z.string().min(1) }).strict(), z.object({ ref: z.string().min(1) }).strict()]).optional() }).strict(),
 ]);
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v18";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v19";
 export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetObject]).optional(),
   fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional(), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
@@ -49,7 +50,7 @@ export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
   { name: "read_api_reference", inputSchema: emptyInputSchema, summary: "Read the advanced program API reference", description: "Read the available execute_program capabilities and usage details." },
   { name: "execute_program", inputSchema: runInputSchema, summary: "Execute a composable async JavaScript program", description: "Execute an async JavaScript body with page, browser, net, protocol, artifacts, emit, check, sleep and signal. Use for loops, conditions, event subscriptions and complex multi-step tasks. Call read_api_reference for the complete API. background=true starts a job. Set timeoutMs to accommodate the entire program. Effects are not automatically retried; inspect uncertain outcomes." },
   { name: "list_jobs", inputSchema: listJobsInputSchema, summary: "List this conversation's jobs in pages", description: "List jobs in creation order in a fixed snapshot. limit defaults to 25, max 100. If hasMore, pass nextCursor to continue; cursor expires on log maintenance. Job state is as of the first page; get_job reads current state." },
-  { name: "get_job", inputSchema: getJobInputSchema, summary: "Read a job's status and receipts", description: "Read status and paginated receipts for a job. waitMs waits for receipts after the supplied canonical event cursor or for completion; unread receipts return immediately. A terminal event with outputAt:'result' refers to the top-level result rather than repeating it. A running job is not complete." },
+  { name: "get_job", inputSchema: getJobInputSchema, summary: "Read a job's status and receipts", description: "Read status and paginated receipts for a job. waitMs waits for receipts after the supplied canonical event cursor or for completion; unread receipts return immediately. A terminal event with outputAt:'result' or 'resultAccess' refers to that top-level field. A running job is not complete." },
   { name: "cancel_job", inputSchema: cancelJobInputSchema, summary: "Request cancellation of a job", description: "Cancel a job in the current conversation. Cancellation does not roll back dispatched effects." },
 ]);
 export const PROGRAM_API = `execute_program API (async JavaScript body; no function wrapper required):
@@ -134,9 +135,24 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
             : definition.name === "get_job" ? await executor.queryJobs({ action: value.waitMs ? "wait" : "status", id: value.jobId, after: value.after, limit: value.limit, waitMs: value.waitMs }, abortSignal, context)
             : definition.name === "cancel_job" ? await executor.queryJobs({ action: "cancel", id: value.jobId }, abortSignal, context)
             : await executor.runProgram(definition.program!(value), abortSignal, context);
-          const failure = (result as any)?.ok === false ? (result as any).error ?? (result as any).failed?.error ?? (result as any).result?.error : undefined;
+          const jobRef = jobResultReferenceInfo((result as any)?.result);
+          const failure = (result as any)?.ok === false ? (result as any).error ?? (result as any).failed?.error ?? jobRef?.info.error ?? (result as any).result?.error : undefined;
           const artifact = (result as any)?.result?.artifact;
           const envelope = failure ? { ...result as object, ...(artifact ? { artifact } : {}), error: { ...failure, retryable: false } } : result;
+          if (jobRef) {
+            const { result: _result, ...rest } = envelope as Record<string, unknown>;
+            const compact = normalizationExceedsBudget(rest)
+              ? await storeUnnormalizedResult(rest, { ...options, toolCallId, ...identity, preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job" })
+              : await compactToolResult(normalizeResultEnvelope(rest), { ...options, toolCallId, ...identity, preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job" });
+            const visible = compact as Record<string, unknown>;
+            const access = { artifactId: jobRef.id, path: ["result"], ...(jobRef.info.limit === undefined ? {} : { offset: 0, limit: jobRef.info.limit }) };
+            output = { ...visible, ...(visible.$ref ? { receiptsArtifactId: visible.$ref } : {}), $ref: jobRef.id,
+              resultAccess: access, ...(!visible.$ref ? { access } : {}), sidecarsDeferred: true,
+              pathsNote: "Read a bounded slice with read_artifact. Shared or cyclic objects and views with backing buffers require artifacts.read in execute_program to inspect their native identity.",
+              ...(jobRef.info.error ? { error: jobRef.info.error, errorAccess: { artifactId: jobRef.id, path: ["result", "error"] } } : {}),
+              ...(jobRef.info.artifact ? { artifact: jobRef.info.artifact, artifactAccess: { artifactId: jobRef.id, path: ["result", "artifact"] } } : {}),
+              ...(jobRef.info.screenshot ? { ...jobRef.info.visualContext, screenshot: { ...jobRef.info.screenshot, ...(jobRef.info.inlineScreenshot ? { artifactId: jobRef.id, artifactPath: ["result", "screenshot"] } : {}) }, visualAccess: { artifactId: jobRef.id, path: ["result"] } } : {}) };
+          } else
           if (normalizationExceedsBudget(envelope)) {
             output = await storeUnnormalizedResult(envelope, { ...options, toolCallId, ...identity,
               preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job",
@@ -587,7 +603,7 @@ export const repairProgramToolCall: ToolCallRepairFunction<Record<string, Return
   return toolName === toolCall.toolName && repaired === toolCall.input ? null : { ...toolCall, toolName, input: repaired };
 };
 
-type ScreenshotSource = { mediaType: string; data?: string; artifactId?: number };
+type ScreenshotSource = { mediaType: string; data?: string; artifactId?: number; artifactPath?: Array<string | number> };
 
 function scrubScreenshots(value: unknown, found: ScreenshotSource[]): unknown {
   if (Array.isArray(value)) return value.map((item) => scrubScreenshots(item, found));
@@ -599,13 +615,14 @@ function scrubScreenshots(value: unknown, found: ScreenshotSource[]): unknown {
         found.push({ mediaType: typeof screenshot.mediaType === "string" ? screenshot.mediaType : "image/png", data: screenshot.data });
         return [key, { ...screenshot, data: "[stored in canonical event log]" }];
       }
-      if (Number.isSafeInteger(screenshot.artifactId) && Number(screenshot.artifactId) > 0) found.push({ mediaType: typeof screenshot.mediaType === "string" ? screenshot.mediaType : "image/png", artifactId: Number(screenshot.artifactId) });
+      if (Number.isSafeInteger(screenshot.artifactId) && Number(screenshot.artifactId) > 0) found.push({ mediaType: typeof screenshot.mediaType === "string" ? screenshot.mediaType : "image/png", artifactId: Number(screenshot.artifactId),
+        ...(Array.isArray(screenshot.artifactPath) && screenshot.artifactPath.length <= 20 && screenshot.artifactPath.every((part) => typeof part === "string" || Number.isSafeInteger(part) && part >= 0) ? { artifactPath: screenshot.artifactPath } : {}) });
     }
     return [key, scrubScreenshots(item, found)];
   }));
 }
 
-export async function prepareToolMessages(messages: any[], stepNumber: number, browserContext?: string, readArtifact?: (id: number) => Promise<unknown>, injectImages = true): Promise<any[]> {
+export async function prepareToolMessages(messages: any[], stepNumber: number, browserContext?: string, readArtifact?: (id: number, selection?: { path: Array<string | number> }) => Promise<unknown>, injectImages = true): Promise<any[]> {
   const inject = stepNumber > 0 && messages.at(-1)?.role === "tool";
   const current: ScreenshotSource[] = [];
   const prepared = messages.map((message, index) => message.role !== "tool" ? message : { ...message, content: message.content.map((part: any) => {
@@ -616,10 +633,11 @@ export async function prepareToolMessages(messages: any[], stepNumber: number, b
     return { ...part, output: { ...part.output, value } };
   }) });
   const source = current.at(-1);
-  const stored = source?.artifactId !== undefined && readArtifact ? await readArtifact(source.artifactId) as { base64?: unknown; mimeType?: unknown } : undefined;
-  const screenshot = source && (source.data || typeof stored?.base64 === "string") ? {
-    mediaType: typeof stored?.mimeType === "string" ? stored.mimeType : source.mediaType,
-    data: source.data ?? stored!.base64 as string,
+  const stored = source?.artifactId !== undefined && readArtifact ? await (source.artifactPath ? readArtifact(source.artifactId, { path: source.artifactPath }) : readArtifact(source.artifactId)) as { base64?: unknown; data?: unknown; mimeType?: unknown; mediaType?: unknown } : undefined;
+  const storedData = source?.artifactPath ? stored?.data : stored?.base64;
+  const screenshot = source && (source.data || typeof storedData === "string") ? {
+    mediaType: typeof stored?.mimeType === "string" ? stored.mimeType : typeof stored?.mediaType === "string" ? stored.mediaType : source.mediaType,
+    data: source.data ?? storedData as string,
   } : undefined;
   const content = [
     ...(browserContext ? [{ type: "text", text: browserContext }] : []),

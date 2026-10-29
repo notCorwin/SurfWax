@@ -65,7 +65,7 @@
 | `read_api_reference` | Read the available execute_program capabilities and usage details. |
 | `execute_program` | Execute an async JavaScript body with page, browser, net, protocol, artifacts, emit, check, sleep and signal. Use for loops, conditions, event subscriptions and complex multi-step tasks. Call read_api_reference for the complete API. background=true starts a job. Set timeoutMs to accommodate the entire program. Effects are not automatically retried; inspect uncertain outcomes. |
 | `list_jobs` | List jobs in creation order in a fixed snapshot. limit defaults to 25, max 100. If hasMore, pass nextCursor to continue; cursor expires on log maintenance. Job state is as of the first page; get_job reads current state. |
-| `get_job` | Read status and paginated receipts for a job. waitMs waits for receipts after the supplied canonical event cursor or for completion; unread receipts return immediately. A terminal event with outputAt:'result' refers to the top-level result rather than repeating it. A running job is not complete. |
+| `get_job` | Read status and paginated receipts for a job. waitMs waits for receipts after the supplied canonical event cursor or for completion; unread receipts return immediately. A terminal event with outputAt:'result' or 'resultAccess' refers to that top-level field. A running job is not complete. |
 | `cancel_job` | Cancel a job in the current conversation. Cancellation does not roll back dispatched effects. |
 
 ## 可组合程序

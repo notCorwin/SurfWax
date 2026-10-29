@@ -1,4 +1,5 @@
 import { fromLogValue, type EventLogger, type LogEvent } from "../logging";
+import { describeJobResult, jobResultReference, shouldStoreJobResult, type JobResultInfo } from "./job-result";
 
 export type JobContext = {
   conversationId: string;
@@ -20,6 +21,7 @@ type LiveJob = {
   controller: AbortController;
   done: Promise<void>;
   conversationId: string;
+  stateId?: number;
 };
 const terminal = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
 type JobListCursor = { v: 1; conversationId: string; epoch: string; upper: number; after: number };
@@ -182,14 +184,33 @@ export class BrowserJobs {
     state: string,
     output?: unknown,
   ): Promise<void> {
-    const saved = await this.logger?.append({
+    const record = {
       type: "browser.job.state",
       conversationId: context.conversationId,
       ...context.logIdentity,
       content: { jobId: id, state },
-      ...(output === undefined ? {} : { output }),
-    });
+      ...(arguments.length >= 4 ? { output } : {}),
+    };
+    if (terminal.has(state)) {
+      const previous = this.live.get(id)?.stateId;
+      if (previous === undefined) throw new Error("Could not persist browser job state: missing owner state");
+      const epoch = await this.logger!.canonicalEpoch();
+      const large = arguments.length >= 4 && shouldStoreJobResult(output);
+      const saved = large ? (await this.logger!.appendArtifactAnd({
+          artifact: { type: "tool.result.data", conversationId: context.conversationId, ...context.logIdentity,
+            content: { jobId: id }, output: { result: output } },
+          terminal: { type: record.type, conversationId: context.conversationId, ...context.logIdentity,
+            content: { jobId: id, state, resultInfo: describeJobResult(output) } },
+          link: "resultArtifactId", expectedEpoch: epoch, expectedJobStateId: previous,
+        }))?.terminal : await this.logger!.appendIfEpoch(record, epoch, previous);
+      // A recovery or maintenance writer may have won; never replace its terminal state.
+      if (saved) this.live.get(id)!.stateId = saved.id;
+      return;
+    }
+    const saved = await this.logger?.append(record);
     if (!saved) throw new Error("Could not persist browser job state");
+    const owner = this.live.get(id);
+    if (owner) owner.stateId = saved.id;
   }
 
   private projection(conversationId: string): JobProjection {
@@ -666,6 +687,8 @@ export class BrowserJobs {
         const stateEvent = terminal.has(state.state)
           ? byId.get(state.id)!
           : undefined;
+        const stateContent = stateEvent ? fromLogValue(stateEvent.content, stateEvent.valueEncoding) as { resultArtifactId?: unknown; resultInfo?: JobResultInfo } : undefined;
+        const resultArtifactId = Number.isSafeInteger(stateContent?.resultArtifactId) && Number(stateContent?.resultArtifactId) > 0 ? Number(stateContent?.resultArtifactId) : undefined;
         if (
           records.some(
             (event) => (fromLogValue(event.content, event.valueEncoding) as any)?.jobId !== id,
@@ -679,14 +702,14 @@ export class BrowserJobs {
           ...(stateEvent
             ? {
                 ok: state.state === "succeeded",
-                result: fromLogValue(stateEvent.output, stateEvent.valueEncoding),
+                result: resultArtifactId ? jobResultReference(resultArtifactId, stateContent?.resultInfo ?? {}) : fromLogValue(stateEvent.output, stateEvent.valueEncoding),
               }
             : {}),
           events: entries.map((event) => ({
             cursor: event.id,
             type: event.type,
             ...(fromLogValue(event.content, event.valueEncoding) as object),
-            ...(event.output === undefined
+            ...(event.id === stateEvent?.id && resultArtifactId ? { outputAt: "resultAccess" } : event.output === undefined
               ? {}
               : event.id === stateEvent?.id
                 ? { outputAt: "result" }

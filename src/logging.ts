@@ -1,5 +1,6 @@
 import type { JsonValue } from "./types";
 import { arrayBufferLength, arrayViewName, createArrayView, dateISOString, dateValue, decodeLogGraph, encodeLogGraph, graphProperties, isArrayBuffer, isDataView, isDate, isMap, isRegExp, isSet, mapEntries, mapSizeOf, regexpFlagString, regexpSource, requiresLogGraph, setSizeOf, setValues, viewLayout } from "./log-graph";
+import { partitionArtifact, readPartitionedArtifact, type ArtifactGraph, type ArtifactPart } from "./artifact-graph";
 
 export type LogEvent = {
   id: number;
@@ -7,6 +8,9 @@ export type LogEvent = {
   timestamp: string;
   /** Version of the value encoding, separate from user-controlled payloads. */
   valueEncoding?: 2 | 3 | 4 | 5;
+  /** Internal manifest and part coordinates; user payloads cannot set these fields. */
+  artifactGraph?: ArtifactGraph;
+  artifactPart?: { key: string; owner?: string; node: number; section: string; part: number };
   content: JsonValue;
   conversationId?: string;
   runId?: string;
@@ -52,6 +56,10 @@ export type ConversationMessage = {
 
 type EventStore = {
   append(event: Omit<LogEvent, "id">): Promise<LogEvent>;
+  supportsArtifactParts?: boolean;
+  appendArtifactAnd?(artifact: Omit<LogEvent, "id">, terminal: Omit<LogEvent, "id">, link: "resultArtifactId", parts?: readonly Omit<LogEvent, "id">[]): Promise<{ artifact: LogEvent; terminal: LogEvent }>;
+  appendPartitioned?(artifact: Omit<LogEvent, "id">, parts: readonly Omit<LogEvent, "id">[]): Promise<LogEvent>;
+  artifactParts?(key: string, node: number, section?: string, first?: number, last?: number): Promise<LogEvent[]>;
   get?(id: number): Promise<LogEvent | undefined>;
   getMany?(ids: readonly number[]): Promise<Array<LogEvent | undefined>>;
   latestByType?(type: string): Promise<LogEvent | undefined>;
@@ -66,9 +74,10 @@ type EventStore = {
 };
 
 const DB_NAME = "side-agent-runtime";
-const DB_VERSION = 9;
+const DB_VERSION = 10;
 const EVENT_STORE = "events";
 const DIAGNOSTIC_INDEX_STORE = "diagnosticCaptureIndex";
+const ARTIFACT_INDEX_STORE = "artifactPartIndex";
 const CONVERSATION_INDEX = "conversationId";
 const TYPE_INDEX = "type";
 const CONVERSATION_TYPE_INDEX = "conversationType";
@@ -123,6 +132,7 @@ export function upgradeEventStore(db: IDBDatabase, transaction: IDBTransaction):
   // empty index is sufficient for old databases: no expensive backfill or
   // scan of historical event payloads is needed during the upgrade.
   if (!db.objectStoreNames.contains(DIAGNOSTIC_INDEX_STORE)) db.createObjectStore(DIAGNOSTIC_INDEX_STORE);
+  if (!db.objectStoreNames.contains(ARTIFACT_INDEX_STORE)) db.createObjectStore(ARTIFACT_INDEX_STORE);
 }
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
@@ -164,8 +174,10 @@ function indexEventsAfter(index: IDBIndex, key: IDBValidKey, afterId: number, li
   });
 }
 
-class IndexedDbEventStore implements EventStore {
+export class IndexedDbEventStore implements EventStore {
+  readonly supportsArtifactParts = true;
   private dbPromise?: Promise<IDBDatabase>;
+  private artifactPartLoads = new Map<string, Promise<LogEvent[]>>();
 
   private open(): Promise<IDBDatabase> {
     if (this.dbPromise) return this.dbPromise;
@@ -182,6 +194,70 @@ class IndexedDbEventStore implements EventStore {
 
   async append(event: Omit<LogEvent, "id">): Promise<LogEvent> {
     return (await this.appendMany([event]))[0]!;
+  }
+
+  async appendPartitioned(artifact: Omit<LogEvent, "id">, parts: readonly Omit<LogEvent, "id">[]): Promise<LogEvent> {
+    return (await this.writeArtifact(artifact, parts)).artifact;
+  }
+
+  async appendArtifactAnd(artifact: Omit<LogEvent, "id">, terminal: Omit<LogEvent, "id">, link: "resultArtifactId", parts: readonly Omit<LogEvent, "id">[] = []): Promise<{ artifact: LogEvent; terminal: LogEvent }> {
+    const result = await this.writeArtifact(artifact, parts, terminal, link);
+    return { artifact: result.artifact, terminal: result.terminal! };
+  }
+
+  private async writeArtifact(artifact: Omit<LogEvent, "id">, parts: readonly Omit<LogEvent, "id">[], terminal?: Omit<LogEvent, "id">, link?: "resultArtifactId"): Promise<{ artifact: LogEvent; terminal?: LogEvent }> {
+    const db = await this.open();
+    const transaction = db.transaction([EVENT_STORE, ARTIFACT_INDEX_STORE], "readwrite");
+    const done = transactionDone(transaction);
+    const store = transaction.objectStore(EVENT_STORE);
+    try {
+      const index = transaction.objectStore(ARTIFACT_INDEX_STORE);
+      const partIds = await Promise.all(parts.map((part) => requestResult<IDBValidKey>(store.add(part))));
+      for (const [position, part] of parts.entries()) {
+        const coordinates = part.artifactPart;
+        if (!coordinates || coordinates.key !== artifact.artifactGraph?.key) throw new Error("Invalid artifact part coordinates");
+        index.add(Number(partIds[position]), [coordinates.key, coordinates.node, coordinates.section, coordinates.part]);
+      }
+      const artifactId = Number(await requestResult<IDBValidKey>(store.add(artifact)));
+      let linked: Omit<LogEvent, "id"> | undefined, terminalId: number | undefined;
+      if (terminal && link) {
+        const content = fromLogValue(terminal.content, terminal.valueEncoding);
+        if (!content || typeof content !== "object" || Array.isArray(content)) throw new Error("Job terminal content must be an object");
+        linked = { ...terminal, content: toLogValue({ ...content, [link]: artifactId }, undefined, 5) };
+        terminalId = Number(await requestResult<IDBValidKey>(store.add(linked)));
+      }
+      await done;
+      return { artifact: { ...artifact, id: artifactId }, ...(linked && terminalId !== undefined ? { terminal: { ...linked, id: terminalId } } : {}) };
+    } catch (error) {
+      try { transaction.abort(); } catch { /* Transaction may already have aborted. */ }
+      await done.catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async artifactParts(key: string, node: number, section?: string, first?: number, last?: number): Promise<LogEvent[]> {
+    const query = JSON.stringify([key, node, section ?? null, first ?? null, last ?? null]);
+    let task = this.artifactPartLoads.get(query);
+    if (!task) {
+      task = this.readArtifactParts(key, node, section, first, last);
+      this.artifactPartLoads.set(query, task);
+    }
+    try { return await task; }
+    finally { if (this.artifactPartLoads.get(query) === task) this.artifactPartLoads.delete(query); }
+  }
+
+  private async readArtifactParts(key: string, node: number, section?: string, first?: number, last?: number): Promise<LogEvent[]> {
+    const db = await this.open();
+    const transaction = db.transaction([EVENT_STORE, ARTIFACT_INDEX_STORE], "readonly");
+    const done = transactionDone(transaction);
+    const lower = [key, node, section ?? "", first ?? 0];
+    const upper = [key, node, section ?? "\uffff", last ?? Number.MAX_SAFE_INTEGER];
+    const ids = await requestResult<IDBValidKey[]>(transaction.objectStore(ARTIFACT_INDEX_STORE).getAll(IDBKeyRange.bound(lower, upper)));
+    const store = transaction.objectStore(EVENT_STORE);
+    const values = await Promise.all(ids.map((id) => requestResult<LogEvent | undefined>(store.get(id))));
+    await done;
+    if (values.some((value) => !value)) throw new Error("Artifact index points to a missing event");
+    return values as LogEvent[];
   }
 
   async get(id: number): Promise<LogEvent | undefined> {
@@ -483,18 +559,18 @@ export function stringifyLogSafe(value: unknown, space?: number): string | undef
 const ARTIFACT_CACHE_BYTES = 8 * 1024 * 1024;
 
 /** Conservative retained-size estimate; large holey arrays may still have dense backing storage. */
-function artifactRetainedBytes(value: unknown): number {
+function artifactRetainedBytes(value: unknown, limit = ARTIFACT_CACHE_BYTES): number {
   let used = 0;
   const seen = new WeakSet<object>();
   const visitProperties = (item: object, depth: number) => {
     for (const key of graphProperties(item)) {
       used += 64 + key.length * 2;
       visit((item as any)[key], depth + 1);
-      if (used > ARTIFACT_CACHE_BYTES) break;
+      if (used > limit) break;
     }
   };
   const visit = (item: unknown, depth: number): void => {
-    if (used > ARTIFACT_CACHE_BYTES) return;
+    if (used > limit) return;
     if (depth > 100) { used = Infinity; return; }
     if (typeof item === "string") { used += 64 + item.length * 2; return; }
     if (typeof item === "bigint") { used += 64 + item.toString().length * 2; return; }
@@ -502,29 +578,29 @@ function artifactRetainedBytes(value: unknown): number {
     if (seen.has(item)) return;
     seen.add(item);
     used += 128;
-    if (isArrayBuffer(item)) { used += arrayBufferLength(item); if (used <= ARTIFACT_CACHE_BYTES) visitProperties(item, depth); return; }
-    if (ArrayBuffer.isView(item)) { visit(viewLayout(item).buffer, depth + 1); if (used <= ARTIFACT_CACHE_BYTES) visitProperties(item, depth); return; }
+    if (isArrayBuffer(item)) { used += arrayBufferLength(item); if (used <= limit) visitProperties(item, depth); return; }
+    if (ArrayBuffer.isView(item)) { visit(viewLayout(item).buffer, depth + 1); if (used <= limit) visitProperties(item, depth); return; }
     if (isDate(item)) { visitProperties(item, depth); return; }
     if (isRegExp(item)) { used += 64 + (regexpSource(item).length + regexpFlagString(item).length) * 2; visit(item.lastIndex, depth + 1); visitProperties(item, depth); return; }
     if (item instanceof Error) { visit(item.name, depth + 1); visit(item.message, depth + 1); visit(item.stack, depth + 1); if (Object.hasOwn(item, "cause")) visit((item as any).cause, depth + 1); visitProperties(item, depth); return; }
     if (Array.isArray(item)) {
       used += item.length * 8;
-      if (used > ARTIFACT_CACHE_BYTES) return;
+      if (used > limit) return;
     }
     if (isMap(item)) {
-      for (const [key, entry] of mapEntries(item)) { used += 64; visit(key, depth + 1); visit(entry, depth + 1); if (used > ARTIFACT_CACHE_BYTES) break; }
-      if (used <= ARTIFACT_CACHE_BYTES) visitProperties(item, depth);
+      for (const [key, entry] of mapEntries(item)) { used += 64; visit(key, depth + 1); visit(entry, depth + 1); if (used > limit) break; }
+      if (used <= limit) visitProperties(item, depth);
       return;
     }
     if (isSet(item)) {
-      for (const entry of setValues(item)) { used += 48; visit(entry, depth + 1); if (used > ARTIFACT_CACHE_BYTES) break; }
-      if (used <= ARTIFACT_CACHE_BYTES) visitProperties(item, depth);
+      for (const entry of setValues(item)) { used += 48; visit(entry, depth + 1); if (used > limit) break; }
+      if (used <= limit) visitProperties(item, depth);
       return;
     }
     for (const key in item) if (Object.hasOwn(item, key)) {
       used += 64 + key.length * 2;
       visit((item as Record<string, unknown>)[key], depth + 1);
-      if (used > ARTIFACT_CACHE_BYTES) break;
+      if (used > limit) break;
     }
   };
   visit(value, 0);
@@ -722,8 +798,8 @@ export class EventLogger {
   private artifactEpoch: string | undefined;
   private artifactRevision = 0;
   private artifactBytes = 0;
-  private artifactCache = new Map<number, { conversationId: string | undefined; value: unknown; bytes: number }>();
-  private artifactLoads = new Map<number, Promise<{ conversationId: string | undefined; value: unknown; bytes: number } | undefined>>();
+  private artifactCache = new Map<number, { conversationId: string | undefined; value: unknown; bytes: number; graph?: ArtifactGraph }>();
+  private artifactLoads = new Map<number, Promise<{ conversationId: string | undefined; value: unknown; bytes: number; graph?: ArtifactGraph } | undefined>>();
 
   constructor(private readonly options: {
     store?: EventStore;
@@ -819,7 +895,17 @@ export class EventLogger {
     };
   }
 
-  private enqueue(events: readonly Omit<LogEvent, "id">[], expectedEpoch?: string, expectedJobStateId?: number): Promise<LogEvent[]> {
+  private partitionedArtifact(record: LogRecord): { event: Omit<LogEvent, "id">; parts: Omit<LogEvent, "id">[] } {
+    if (record.type !== "tool.result.data" || !Object.hasOwn(record, "output") || artifactRetainedBytes(record.output, 256 * 1024) <= 256 * 1024)
+      return { event: this.event(record), parts: [] };
+    const { graph, parts } = partitionArtifact(record.output);
+    const { output: _output, ...metadata } = record;
+    const event = { ...this.event(metadata), output: null, artifactGraph: graph };
+    return { event, parts: parts.map((part) => ({ type: "artifact.part", timestamp: event.timestamp, content: null,
+      artifactPart: { key: graph.key, owner: event.conversationId, node: part.node, section: part.section, part: part.part }, output: part.value })) };
+  }
+
+  private enqueue(events: readonly Omit<LogEvent, "id">[], expectedEpoch?: string, expectedJobStateId?: number, artifactLink?: "resultArtifactId", artifactParts: readonly Omit<LogEvent, "id">[] = []): Promise<LogEvent[]> {
     const generation = this.generation;
     const task = this.pending.then(async () => {
       await this.ready;
@@ -828,10 +914,10 @@ export class EventLogger {
         // Recheck after the cross-page lock: maintenance may have advanced while
         // this writer was waiting for another page's terminal transaction.
         if (generation === undefined ? this.handshakePaused : generation !== this.generation) return [];
-        const floor = expectedEpoch === undefined ? undefined : await this.latestClearIdFresh(store);
+        const floor = expectedEpoch === undefined && expectedJobStateId === undefined ? undefined : await this.latestClearIdFresh(store);
         if (expectedEpoch !== undefined && JSON.stringify([this.generation ?? null, floor]) !== expectedEpoch) return [];
         if (expectedJobStateId !== undefined) {
-          const requested = events[0];
+          const requested = events.find((event) => event.type === "browser.job.state");
           const jobId = (fromLogValue(requested?.content, requested?.valueEncoding) as { jobId?: unknown } | null)?.jobId;
           if (!requested?.conversationId || typeof jobId !== "string" || expectedJobStateId <= (floor ?? -1)) return [];
           const original = store.get ? await store.get(expectedJobStateId) : (await store.all()).find((event) => event.id === expectedJobStateId);
@@ -862,7 +948,15 @@ export class EventLogger {
           accepted.push(event);
         }
         const stored: LogEvent[] = [];
-        if (accepted.length && store.appendMany) stored.push(...await store.appendMany(accepted));
+        if (artifactParts.length && (!store.supportsArtifactParts || !store.artifactParts)) throw new Error("Event store does not support partitioned artifacts");
+        if (artifactLink && accepted.length) {
+          if (accepted.length !== 2 || !store.appendArtifactAnd) throw new Error("Event store does not support atomic artifact and job state writes");
+          const pair = await store.appendArtifactAnd(accepted[0]!, accepted[1]!, artifactLink, artifactParts);
+          stored.push(pair.artifact, pair.terminal);
+        } else if (artifactParts.length && accepted.length) {
+          if (accepted.length !== 1 || !store.appendPartitioned) throw new Error("Event store does not support atomic partitioned artifact writes");
+          stored.push(await store.appendPartitioned(accepted[0]!, artifactParts));
+        } else if (accepted.length && store.appendMany) stored.push(...await store.appendMany(accepted));
         else for (const event of accepted) stored.push(await store.append(event));
         for (const event of stored) {
           for (const listener of this.listeners) listener(event);
@@ -901,7 +995,19 @@ export class EventLogger {
   append(record: LogRecord): Promise<LogEvent | undefined> {
     if (!this.accepting) return Promise.resolve(undefined);
     this.flushBuffer();
-    return this.enqueue([this.event(record)]).then(([event]) => event);
+    const prepared = this.partitionedArtifact(record);
+    return this.enqueue([prepared.event], undefined, undefined, undefined, prepared.parts).then(([event]) => event);
+  }
+
+  /** Commit a result and its job-state reference as one canonical transaction. */
+  async appendArtifactAnd(input: { artifact: LogRecord; terminal: LogRecord; link: "resultArtifactId"; expectedEpoch?: string; expectedJobStateId?: number }): Promise<{ artifact: LogEvent; terminal: LogEvent } | undefined> {
+    if (!this.accepting) return undefined;
+    if (input.artifact.type !== "tool.result.data" || input.terminal.type !== "browser.job.state"
+      || input.artifact.conversationId !== input.terminal.conversationId || input.link !== "resultArtifactId") throw new Error("Invalid artifact and job state transaction");
+    this.flushBuffer();
+    const prepared = this.partitionedArtifact(input.artifact);
+    const [artifact, terminal] = await this.enqueue([prepared.event, this.event(input.terminal)], input.expectedEpoch, input.expectedJobStateId, input.link, prepared.parts);
+    return artifact && terminal ? { artifact, terminal } : undefined;
   }
 
   /** Conditional append for recovery derived from a particular clear/writer epoch. */
@@ -1106,7 +1212,7 @@ export class EventLogger {
     this.artifactLoads.clear();
   }
 
-  private async loadArtifact(store: EventStore, floor: number, id: number): Promise<{ conversationId: string | undefined; value: unknown; bytes: number } | undefined> {
+  private async loadArtifact(store: EventStore, floor: number, id: number): Promise<{ conversationId: string | undefined; value: unknown; bytes: number; graph?: ArtifactGraph } | undefined> {
     const epoch = JSON.stringify([this.generation ?? null, floor]);
     if (this.artifactEpoch !== epoch) this.resetArtifactCache(epoch);
     if (id <= floor) return undefined;
@@ -1122,9 +1228,10 @@ export class EventLogger {
       task = (async () => {
         const event = store.get ? await store.get(id) : (await store.all()).find((item) => item.id === id);
         if (event?.type !== "tool.result.data") return undefined;
-        const value = fromLogValue(event.output, event.valueEncoding);
-        const bytes = artifactRetainedBytes(value);
-        const entry = { conversationId: event.conversationId, value, bytes };
+        const graph = event.artifactGraph;
+        const value = graph ? undefined : fromLogValue(event.output, event.valueEncoding);
+        const bytes = graph ? artifactRetainedBytes(graph) + 128 + (event.conversationId?.length ?? 0) * 2 : artifactRetainedBytes(value);
+        const entry = { conversationId: event.conversationId, value, bytes, ...(graph ? { graph } : {}) };
         if (bytes <= ARTIFACT_CACHE_BYTES && this.artifactRevision === revision && this.artifactEpoch === epoch) {
           while (this.artifactBytes + bytes > ARTIFACT_CACHE_BYTES) {
             const oldest = this.artifactCache.keys().next().value!;
@@ -1144,9 +1251,26 @@ export class EventLogger {
 
   async result(id: number, selection: { path?: string | Array<string | number>; offset?: number; limit?: number } = {}, conversationId?: string): Promise<unknown> {
     if (!Number.isSafeInteger(id) || id < 1) throw new Error("Invalid result event ID");
-    const event = await this.readCanonical((store, floor) => this.loadArtifact(store, floor, id));
-    if (!event || conversationId !== undefined && event.conversationId !== conversationId) throw new Error(`Tool result ${id} is unavailable`);
-    let value = event.value;
+    const loaded = await this.readCanonical(async (store, floor) => {
+      const event = await this.loadArtifact(store, floor, id);
+      if (!event || conversationId !== undefined && event.conversationId !== conversationId) throw new Error(`Tool result ${id} is unavailable`);
+      if (!event.graph) return { partitioned: false as const, value: event.value };
+      if (!store.artifactParts) throw new Error("Event store does not support partitioned artifact reads");
+      const graph = event.graph;
+      const value = await readPartitionedArtifact(graph, async (node, section, first, last) => {
+        const rows = await store.artifactParts!(graph.key, node, section, first, last);
+        return rows.map((row): ArtifactPart => {
+          const part = row.artifactPart;
+          if (row.type !== "artifact.part" || row.id <= floor || row.id >= id || !part || part.key !== graph.key || part.owner !== event.conversationId
+            || part.node !== node || section !== undefined && part.section !== section || first !== undefined && part.part < first || last !== undefined && part.part > last)
+            throw new Error("Invalid artifact part");
+          return { node: part.node, section: part.section, part: part.part, value: row.output };
+        });
+      }, selection, id);
+      return { partitioned: true as const, value };
+    });
+    if (loaded.partitioned) return loaded.value;
+    let value = loaded.value;
     const path = typeof selection.path === "string" ? [selection.path] : selection.path ?? [];
     if (!Array.isArray(path) || path.some((part) => typeof part !== "string" && (!Number.isSafeInteger(part) || part < 0)))
       throw new Error("Tool result path must contain only strings and nonnegative integer indices");

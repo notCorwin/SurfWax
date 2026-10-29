@@ -360,8 +360,8 @@ chrome.runtime.onConnect.addListener((port) => {
         const target = debuggee?.targetId ? (await chrome.debugger.getTargets()).find((item) => item.id === debuggee.targetId) : undefined;
         const tabId = debuggee?.tabId ?? target?.tabId;
         const command = args[1] as string;
-        const hitTest = method === "sendCommand" && command === "Runtime.callFunctionOn" && Boolean(args[2]?.surfWaxHitTest) && Number.isInteger(tabId);
-        if (command === "Runtime.callFunctionOn" && args[2]?.surfWaxHitTest) { args[2] = { ...args[2] }; delete args[2].surfWaxHitTest; }
+        const hitTest = method === "sendCommand" && ["Runtime.callFunctionOn", "DOM.getNodeForLocation"].includes(command) && Boolean(args[2]?.surfWaxHitTest) && Number.isInteger(tabId);
+        if (hitTest) { args[2] = { ...args[2] }; delete args[2].surfWaxHitTest; }
         const input = method === "sendCommand" && ["Input.dispatchMouseEvent", "Input.dispatchTouchEvent", "Input.dispatchDragEvent", "Input.emulateTouchFromMouseEvent", "Input.dispatchKeyEvent", "Input.insertText"].includes(command) && Number.isInteger(tabId);
         const type = (args[2] as { type?: string } | undefined)?.type;
         const start = input && (type === "mousePressed" || type === "touchStart");

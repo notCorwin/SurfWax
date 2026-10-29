@@ -67,6 +67,7 @@ test("inspects the page and fills and clicks with atomic tools", async () => {
   const provider = await startProvider(responses);
   const opened = await openExtension();
   try {
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/automation`);
     const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/automation`);
@@ -79,8 +80,6 @@ test("inspects the page and fills and clicks with atomic tools", async () => {
       textResponse("PAGE_AUTOMATION_OK"),
       textResponse("页面自动化"),
     );
-    const options = await configure(opened.context, opened.page, provider.baseURL);
-    await options.close();
     const windowCount = await opened.page.evaluate(async () => (await chrome.windows.getAll()).length);
     await opened.page.getByTestId("composer-input").fill("use semantic page automation");
     await opened.page.getByTestId("composer-input").press("Enter");
@@ -749,6 +748,7 @@ test("re-resolves replaced nodes and uses browser semantics through open shadow 
   const provider = await startProvider(responses);
   const opened = await openExtension();
   try {
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/automation-dynamic`);
     const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/automation-dynamic`);
@@ -763,8 +763,6 @@ return {count: await page.getByText('50', {exact:true}).innerText(), shadow: awa
       textResponse("DYNAMIC_AUTOMATION_OK"),
       textResponse("动态页面自动化"),
     );
-    const options = await configure(opened.context, opened.page, provider.baseURL);
-    await options.close();
     await opened.page.getByTestId("composer-input").fill("exercise dynamic semantic automation");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(target.locator("output")).toHaveText("50", { timeout: 30_000 });

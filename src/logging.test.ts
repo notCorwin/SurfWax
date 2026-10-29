@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { EventLogger, fromLogValue, rebuildConversation, stringifyLogSafe, toLogValue, upgradeEventStore, type LogEvent } from "./logging";
+import { EventLogger, IndexedDbEventStore, fromLogValue, rebuildConversation, stringifyLogSafe, toLogValue, upgradeEventStore, type LogEvent } from "./logging";
 
 function memoryStore(onBatch?: (size: number) => void) {
   const events: LogEvent[] = [];
@@ -11,6 +11,23 @@ function memoryStore(onBatch?: (size: number) => void) {
   };
   return {
     append,
+    supportsArtifactParts: true,
+    async appendPartitioned(artifact: Omit<LogEvent, "id">, parts: readonly Omit<LogEvent, "id">[]) {
+      for (const part of parts) await append(part);
+      return append(artifact);
+    },
+    async artifactParts(key: string, node: number, section?: string, first?: number, last?: number) {
+      return events.filter((event) => event.artifactPart?.key === key && event.artifactPart.node === node
+        && (section === undefined || event.artifactPart.section === section)
+        && (first === undefined || event.artifactPart.part >= first) && (last === undefined || event.artifactPart.part <= last));
+    },
+    async appendArtifactAnd(artifact: Omit<LogEvent, "id">, terminal: Omit<LogEvent, "id">, link: "resultArtifactId", parts: readonly Omit<LogEvent, "id">[] = []) {
+      for (const part of parts) await append(part);
+      const savedArtifact = await append(artifact);
+      const content = fromLogValue(terminal.content, terminal.valueEncoding) as Record<string, unknown>;
+      const savedTerminal = await append({ ...terminal, content: toLogValue({ ...content, [link]: savedArtifact.id }, undefined, 5) });
+      return { artifact: savedArtifact, terminal: savedTerminal };
+    },
     async appendMany(batch: readonly Omit<LogEvent, "id">[]) {
       onBatch?.(batch.length);
       return Promise.all(batch.map(append));
@@ -34,6 +51,35 @@ function memoryStore(onBatch?: (size: number) => void) {
 }
 
 describe("canonical event log", () => {
+  it("atomically links a durable job result and respects state and clear epochs", async () => {
+    const store = memoryStore();
+    const logger = new EventLogger({ store });
+    const state = await logger.append({ type: "browser.job.state", conversationId: "c", content: { jobId: "j", state: "running" } });
+    const epoch = await logger.canonicalEpoch();
+    const input = { artifact: { type: "tool.result.data", conversationId: "c", output: { result: [1, 2, 3] } },
+      terminal: { type: "browser.job.state", conversationId: "c", content: { jobId: "j", state: "completed" } },
+      link: "resultArtifactId" as const, expectedEpoch: epoch, expectedJobStateId: state!.id };
+    const pair = await logger.appendArtifactAnd(input);
+    expect(pair).toBeDefined();
+    expect(fromLogValue(pair!.terminal.content, pair!.terminal.valueEncoding)).toEqual({ jobId: "j", state: "completed", resultArtifactId: pair!.artifact.id });
+    expect(await logger.result(pair!.artifact.id, { path: ["result", 1] }, "c")).toBe(2);
+    const count = (await store.all()).length;
+    expect(await logger.appendArtifactAnd(input)).toBeUndefined();
+    expect((await store.all()).length).toBe(count);
+    await logger.clear();
+    expect(await logger.appendArtifactAnd(input)).toBeUndefined();
+    await expect(logger.result(pair!.artifact.id, {}, "c")).rejects.toThrow("unavailable");
+  });
+
+  it("rejects a store that cannot atomically commit artifact and terminal", async () => {
+    const base = memoryStore();
+    const store = { ...base, appendArtifactAnd: undefined };
+    const logger = new EventLogger({ store });
+    await expect(logger.appendArtifactAnd({ artifact: { type: "tool.result.data", conversationId: "c", output: 1 },
+      terminal: { type: "browser.job.state", conversationId: "c", content: { jobId: "j", state: "completed" } },
+      link: "resultArtifactId" })).rejects.toThrow("does not support atomic");
+    expect(await store.all()).toEqual([]);
+  });
   it("does not restore a started tool after another logger clears its snapshot", async () => {
     const store = memoryStore();
     const first = new EventLogger({ store });
@@ -469,6 +515,47 @@ describe("canonical event log", () => {
     await expect(logger.result(event!.id, {}, "other")).rejects.toThrow("unavailable");
   });
 
+  it("reuses partition manifests within the bounded cache and invalidates them on generation or clear", async () => {
+    const base = memoryStore();
+    const get = vi.fn(async (id: number) => (await base.all()).find((event) => event.id === id));
+    const store = { ...base, get }; const logger = new EventLogger({ store }); const clearer = new EventLogger({ store });
+    const artifact = await logger.append({ type: "tool.result.data", conversationId: "c", output: { text: "x".repeat(150000) } });
+    expect(artifact?.artifactGraph).toBeDefined();
+    await expect(logger.result(artifact!.id, { path: ["text"], offset: 0, limit: 3 }, "c")).resolves.toBe("xxx");
+    await expect(logger.result(artifact!.id, { path: ["text"], offset: 10, limit: 2 }, "c")).resolves.toBe("xx");
+    expect(get).toHaveBeenCalledTimes(1);
+    expect((logger as any).artifactBytes).toBeGreaterThan(0);
+    expect((logger as any).artifactBytes).toBeLessThan(8192);
+    (logger as any).generation = 1;
+    await logger.result(artifact!.id, { path: ["text"], offset: 0, limit: 1 }, "c");
+    expect(get).toHaveBeenCalledTimes(2);
+    await clearer.clear();
+    await expect(logger.result(artifact!.id, {}, "c")).rejects.toThrow("unavailable");
+    expect((logger as any).artifactCache.size).toBe(0);
+    expect((logger as any).artifactBytes).toBe(0);
+  });
+
+  it("deduplicates only concurrent identical IndexedDB part queries and forgets success and failure", async () => {
+    const store = new IndexedDbEventStore();
+    let release!: (rows: LogEvent[]) => void;
+    const gate = new Promise<LogEvent[]>((resolve) => { release = resolve; });
+    const read = vi.spyOn(store as any, "readArtifactParts").mockImplementation(() => gate);
+    const first = store.artifactParts("key", 1, "text", 0, 1);
+    const same = store.artifactParts("key", 1, "text", 0, 1);
+    const different = store.artifactParts("key", 1, "text", 0, 2);
+    expect(read).toHaveBeenCalledTimes(2);
+    release([]);
+    await Promise.all([first, same, different]);
+    expect((store as any).artifactPartLoads.size).toBe(0);
+    await store.artifactParts("key", 1, "text", 0, 1);
+    expect(read).toHaveBeenCalledTimes(3);
+    read.mockRejectedValueOnce(new Error("read failed"));
+    await expect(store.artifactParts("key", 1, "text", 0, 1)).rejects.toThrow("read failed");
+    expect((store as any).artifactPartLoads.size).toBe(0);
+    await store.artifactParts("key", 1, "text", 0, 1);
+    expect(read).toHaveBeenCalledTimes(5);
+  });
+
   it("invalidates cached artifacts after another logger clears them and retries racing reads", async () => {
     const base = memoryStore(); let entered!: () => void, release!: () => void;
     const ready = new Promise<void>((resolve) => { entered = resolve; });
@@ -513,7 +600,8 @@ describe("canonical event log", () => {
     const base = memoryStore();
     const get = vi.fn(async (id: number) => (await base.all()).find((event) => event.id === id));
     const logger = new EventLogger({ store: { ...base, get } });
-    const events = await Promise.all(["a", "b", "c"].map((ch) => logger.append({ type: "tool.result.data", conversationId: "c", output: ch.repeat(2_000_000) })));
+    // Exercise large legacy V5 records, whose values themselves occupy the cache.
+    const events = await Promise.all(["a", "b", "c"].map((ch) => base.append({ type: "tool.result.data", timestamp: "", valueEncoding: 5, content: null, conversationId: "c", output: ch.repeat(2_000_000) })));
     for (const event of events) await logger.result(event!.id, { offset: 0, limit: 1 }, "c");
     expect((logger as any).artifactBytes).toBeLessThanOrEqual(8 * 1024 * 1024);
     await logger.result(events[0]!.id, { offset: 0, limit: 1 }, "c");
@@ -524,7 +612,7 @@ describe("canonical event log", () => {
     const base = memoryStore(); let fail = true;
     const get = vi.fn(async (id: number) => { if (fail) { fail = false; throw new Error("temporary read failure"); } return (await base.all()).find((event) => event.id === id); });
     const logger = new EventLogger({ store: { ...base, get } });
-    const event = await logger.append({ type: "tool.result.data", conversationId: "c", output: { large: "a".repeat(5_000_000) } });
+    const event = await base.append({ type: "tool.result.data", timestamp: "", valueEncoding: 5, content: null, conversationId: "c", output: { large: "a".repeat(5_000_000) } });
     await expect(logger.result(event!.id, { path: ["large"], offset: 0, limit: 3 }, "c")).rejects.toThrow("temporary read failure");
     await expect(logger.result(event!.id, { path: ["large"], offset: 0, limit: 3 }, "c")).resolves.toBe("aaa");
     await expect(logger.result(event!.id, { path: ["large"], offset: 1, limit: 3 }, "c")).resolves.toBe("aaa");

@@ -142,7 +142,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         source,
         stepNumber,
         browserChanged ? browserContextMessage(browserContext) : undefined,
-        logger ? (id) => logger.result(id, {}, options.conversationId ?? "") : undefined,
+        logger ? (id, selection) => logger.result(id, selection, options.conversationId ?? "") : undefined,
         await toolOptions.visualEnabled(),
       );
       let outgoing = await prepareMessages(prepared);

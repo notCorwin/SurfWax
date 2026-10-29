@@ -1098,7 +1098,7 @@ export class AutomationRuntime {
           // Cross the browser's drag threshold before scrolling the destination.
           point = moved;
           await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", ...moved, button: "left", buttons: 1 });
-          const to = await this.waitBoundActionable(destination, false);
+          const to = await this.waitBoundActionable(session, destination, false);
           const end = await this.toRootPoint(session, to.targetSession, to.state);
           point = end;
           await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", ...end, button: "left", buttons: 1 });
@@ -2012,6 +2012,8 @@ export class AutomationRuntime {
         if (spec.ref) throw automationError("detached", { ref: spec.ref, reason: error instanceof Error ? error.message : String(error) });
         return undefined;
       });
+      if (state?.connected && state.visible && state.receivesEvents && pointer)
+        state.receivesEvents = await this.frameReceivesEvents(session, targetSession, objectId, state);
       const reason = !state?.connected ? "detached" : !state.visible ? "not-visible" : stable && !state.stable ? "not-stable" : enabled && !state.enabled ? "disabled" : editable && !state.editable ? "not-editable" : pointer && !state.receivesEvents ? "intercepted" : "actionable";
       this.recordAttempt(session, spec, attempt, reason, candidates, state);
       if (spec.ref && !state?.connected) throw automationError("detached", { ref: spec.ref, reason: "node-removed" });
@@ -2021,11 +2023,12 @@ export class AutomationRuntime {
   }
 
   /** Recheck an already selected node without ever retargeting the operation. */
-  private async waitBoundActionable(target: { objectId: string; targetSession: Session; state: ElementState }, enabled = true): Promise<{ objectId: string; targetSession: Session; state: ElementState }> {
+  private async waitBoundActionable(session: Session, target: { objectId: string; targetSession: Session; state: ElementState }, enabled = true): Promise<{ objectId: string; targetSession: Session; state: ElementState }> {
     while (true) {
       throwIfAborted(this.context.signal);
       const state = await this.elementState(target.targetSession, target.objectId, true, true);
       if (!state.connected) throw automationError("detached", { reason: "bound-target-removed" });
+      if (state.visible && state.receivesEvents) state.receivesEvents = await this.frameReceivesEvents(session, target.targetSession, target.objectId, state);
       if (state.visible && state.stable && (!enabled || state.enabled) && state.receivesEvents) return { ...target, state };
       await delay(50, this.context.signal);
     }
@@ -2035,22 +2038,87 @@ export class AutomationRuntime {
     return (await this.toRootPoints(session, targetSession, [state]))[0]!;
   }
 
+  /** A hit inside an OOPIF is actionable only if every embedding frame receives that point. */
+  private async frameReceivesEvents(session: Session, targetSession: Session, objectId: string, point: { x: number; y: number }): Promise<boolean> {
+    let debuggee = targetSession.debuggee;
+    // getNodeForLocation follows same-process frames. The element's own hit
+    // test cannot see an overlay in an embedding document, so compare document
+    // identities before testing the out-of-process frame boundaries.
+    if (point.x < 0 || point.y < 0) return false;
+    let hit: any;
+    try { hit = await this.options.command(debuggee, "DOM.getNodeForLocation", { x: Math.floor(point.x), y: Math.floor(point.y), surfWaxHitTest: true }); }
+    catch (error) {
+      if (error instanceof Error && /No node found at given location/i.test(error.message)) return false;
+      throw error;
+    }
+    const targetNode = await this.describe(targetSession, objectId);
+    if (hit.backendNodeId !== targetNode.backendNodeId) {
+      const objectGroup = `surf-wax-hit-test:${crypto.randomUUID()}`;
+      const found = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: hit.backendNodeId, objectGroup });
+      if (!found.object?.objectId) throw automationError("state-unavailable", { reason: "missing-hit-node" });
+      const documentId = async (node: string) => {
+        const document = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: node,
+          functionDeclaration: "function(){return this.ownerDocument}", objectGroup });
+        if (!document.result?.objectId) throw automationError("state-unavailable", { reason: "missing-hit-document" });
+        return (await this.options.command(debuggee, "DOM.describeNode", { objectId: document.result.objectId })).node?.backendNodeId;
+      };
+      try {
+        const targetDocument = await documentId(objectId);
+        const hitDocument = await documentId(found.object.objectId);
+        if (!targetDocument || !hitDocument) throw automationError("state-unavailable", { reason: "missing-hit-document-identity" });
+        if (targetDocument !== hitDocument) {
+          if (targetNode.nodeName !== "IFRAME" || !hit.frameId) return false;
+          const owner = await this.options.command(debuggee, "DOM.getFrameOwner", { frameId: hit.frameId });
+          if (owner.backendNodeId !== targetNode.backendNodeId) return false;
+        }
+      } finally { void this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup }).catch(() => undefined); }
+    }
+    while (debuggee.sessionId) {
+      const frameId = [...session.frames].find(([, item]) => item.sessionId === debuggee.sessionId)?.[0];
+      if (!frameId) throw automationError("frame-detached", { sessionId: debuggee.sessionId });
+      const { parent, owner, quad, size } = await this.frameGeometry(session, debuggee, frameId);
+      point = projectQuad(quad, point.x / size.width, point.y / size.height);
+      if (point.x < 0 || point.y < 0) return false;
+      try {
+        const hit = await this.options.command(parent, "DOM.getNodeForLocation", { x: Math.floor(point.x), y: Math.floor(point.y), surfWaxHitTest: true });
+        if (hit.backendNodeId !== owner.backendNodeId) return false;
+      } catch (error) {
+        if (error instanceof Error && /No node found at given location/i.test(error.message)) return false;
+        throw error;
+      }
+      debuggee = parent;
+    }
+    return true;
+  }
+
   private async toRootPoints(session: Session, targetSession: Session, points: Array<{ x: number; y: number }>): Promise<Array<{ x: number; y: number }>> {
     let debuggee = targetSession.debuggee;
     while (debuggee.sessionId) {
       const frameId = [...session.frames].find(([, item]) => item.sessionId === debuggee.sessionId)?.[0];
       if (!frameId) throw automationError("frame-detached", { sessionId: debuggee.sessionId });
-      const parentId = session.frameParents.get(frameId);
-      const parent = parentId ? session.frames.get(parentId) ?? session.debuggee : session.debuggee;
-      const owner = await this.options.command(parent, "DOM.getFrameOwner", { frameId });
-      const model = await this.options.command(parent, "DOM.getBoxModel", { backendNodeId: owner.backendNodeId });
-      const size = await this.evaluateIn(debuggee, "({width:innerWidth,height:innerHeight})") as { width: number; height: number };
-      const quad = model?.model?.content as number[] | undefined;
-      if (!quad?.length || !size.width || !size.height) throw automationError("frame-detached", { frameId, reason: "missing-frame-geometry" });
+      const { parent, quad, size } = await this.frameGeometry(session, debuggee, frameId);
       points = points.map(({ x, y }) => projectQuad(quad, x / size.width, y / size.height));
       debuggee = parent;
     }
     return points;
+  }
+
+  private async frameGeometry(session: Session, debuggee: Debuggee, frameId: string): Promise<{ parent: Debuggee; owner: { backendNodeId: number }; quad: number[]; size: { width: number; height: number } }> {
+    const parentId = session.frameParents.get(frameId);
+    const known = parentId && session.frames.get(parentId);
+    const sources = [...new Map([...(known ? [known] : []), session.debuggee, ...session.frames.values()]
+      .filter((source) => source.sessionId !== debuggee.sessionId).map((source) => [JSON.stringify(source), source])).values()];
+    let parent: Debuggee | undefined, owner: { backendNodeId: number } | undefined;
+    for (const source of sources) {
+      try { owner = await this.options.command(source, "DOM.getFrameOwner", { frameId }); parent = source; break; }
+      catch (error) { if (!/Frame with the given id does not belong to the target|No frame with given id found/i.test(error instanceof Error ? error.message : String(error))) throw error; }
+    }
+    if (!parent || !owner?.backendNodeId) throw automationError("frame-detached", { frameId, reason: "missing-frame-owner" });
+    const model = await this.options.command(parent, "DOM.getBoxModel", { backendNodeId: owner.backendNodeId });
+    const size = await this.evaluateIn(debuggee, "({width:innerWidth,height:innerHeight})") as { width: number; height: number };
+    const quad = model?.model?.content as number[] | undefined;
+    if (!quad?.length || !size.width || !size.height) throw automationError("frame-detached", { frameId, reason: "missing-frame-geometry" });
+    return { parent, owner, quad, size };
   }
 
   private async nativeClick(debuggee: Debuggee, params: Record<string, unknown>) {
@@ -2061,7 +2129,7 @@ export class AutomationRuntime {
   }
 
   private async pointer(session: Session, spec: LocatorSpec, operation: string, options: { button?: "left" | "right" | "middle"; modifiers?: string[] } = {}, bound?: { objectId: string; targetSession: Session; state: ElementState }): Promise<void> {
-    const target = bound ? await this.waitBoundActionable(bound, operation !== "hover") : await this.waitActionableLocator(session, spec, false, true, true, operation !== "hover");
+    const target = bound ? await this.waitBoundActionable(session, bound, operation !== "hover") : await this.waitActionableLocator(session, spec, false, true, true, operation !== "hover");
     const state = await this.toRootPoint(session, target.targetSession, target.state);
     if (operation === "hover") {
       await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", x: state.x, y: state.y });

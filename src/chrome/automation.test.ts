@@ -79,6 +79,8 @@ function harness(
     }
     if (method === "Runtime.callFunctionOn") { latestState = states.length > 1 ? states.shift() : states[0]; return { result: { value: latestState } }; }
     if (method === "DOM.getContentQuads") return { quads: [[latestState.x - 1, latestState.y - 1, latestState.x + 1, latestState.y - 1, latestState.x + 1, latestState.y + 1, latestState.x - 1, latestState.y + 1]] };
+    if (method === "DOM.getNodeForLocation") return { backendNodeId: 7 };
+    if (method === "DOM.describeNode") return { node: { backendNodeId: 7 } };
     if (method === "DOM.resolveNode") return { object: { objectId: "node-1" } };
     if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
     if (method === "Page.captureScreenshot") return { data: btoa(String.fromCharCode(0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 0, 100, 0, 200, 3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0)) };

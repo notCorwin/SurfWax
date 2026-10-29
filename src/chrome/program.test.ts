@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { EventLogger, fromLogValue, type LogEvent } from "../logging";
+import { EventLogger, fromLogValue, toLogValue, type LogEvent } from "../logging";
 import { BrowserJobs } from "./jobs";
+import { createProgramTools, prepareToolMessages } from "./tool";
+import type { ChromeExecutor } from "./executor";
 import { ProgramScope } from "./program";
 import { LocatorFacade, PageFacade, type AutomationRuntime } from "./automation";
 
@@ -30,6 +32,13 @@ function indexedLog() {
   const getMany = vi.fn(async (ids: readonly number[]) => ids.map((id) => events.find((event) => event.id === id)));
   const store = {
     async append(event: Omit<LogEvent, "id">) { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; },
+    async appendArtifactAnd(artifact: Omit<LogEvent, "id">, terminal: Omit<LogEvent, "id">, link: "resultArtifactId") {
+      const savedArtifact = { ...artifact, id: events.length + 1 };
+      const content = fromLogValue(terminal.content, terminal.valueEncoding) as object;
+      const savedTerminal = { ...terminal, id: events.length + 2, content: toLogValue({ ...content, [link]: savedArtifact.id }, undefined, 5) };
+      events.push(savedArtifact, savedTerminal);
+      return { artifact: savedArtifact, terminal: savedTerminal };
+    },
     async all() { return [...events]; }, byTypes, getMany,
   };
   const logger = new EventLogger({ store });
@@ -39,6 +48,116 @@ const context = { conversationId: "program-test" };
 afterEach(() => vi.useRealTimers());
 
 describe("canonical browser jobs", () => {
+  it("reuses one large terminal artifact across paginated job reads and enforces conversation isolation", async () => {
+    const { logger, events } = indexedLog();
+    const jobs = new BrowserJobs(logger);
+    const payload = "x".repeat(12_000);
+    const id = await jobs.start(context, undefined, async (_signal, _id, started) => { await started(); return { payload }; });
+    await jobs.waitForOwner(id, context.conversationId);
+    const executor = { queryJobs: (input: any) => jobs.query(input, context.conversationId), acknowledgeBackgroundJob: () => {} } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor, { logger, conversationId: context.conversationId }) as Record<string, any>;
+    const first = await tools.get_job.execute({ jobId: id, limit: 1 }, { toolCallId: "first" });
+    const second = await tools.get_job.execute({ jobId: id, after: first.nextCursor, limit: 10 }, { toolCallId: "second" });
+    expect(first.resultAccess).toEqual(second.resultAccess);
+    expect(second.events.at(-1)).toMatchObject({ state: "succeeded", outputAt: "resultAccess" });
+    expect(second.hasMore).toBe(false);
+    expect(events.filter((event) => event.type === "tool.result.data")).toHaveLength(1);
+    expect(events.find((event) => event.type === "browser.job.state" && (fromLogValue(event.content, event.valueEncoding) as any).state === "succeeded")?.output).toBeUndefined();
+    expect(await logger.result(first.$ref, { path: ["result", "payload"], offset: 0, limit: 3 }, context.conversationId)).toBe("xxx");
+    await expect(logger.result(first.$ref, {}, "other")).rejects.toThrow("unavailable");
+    await expect(jobs.query({ action: "status", id }, "other")).rejects.toThrow("unavailable");
+  });
+
+  it("records an explicitly undefined return in the terminal receipt", async () => {
+    const { logger } = indexedLog();
+    const jobs = new BrowserJobs(logger);
+    const id = await jobs.start(context, undefined, async () => undefined);
+    await jobs.waitForOwner(id, context.conversationId);
+    const result: any = await jobs.query({ action: "status", id }, context.conversationId);
+    expect(result).toHaveProperty("result", undefined);
+    expect(result.events.at(-1)).toMatchObject({ state: "succeeded", outputAt: "result" });
+  });
+
+  it("retains a failed large result and its bounded error across host restart", async () => {
+    const { logger, events } = indexedLog();
+    const jobs = new BrowserJobs(logger);
+    const id = await jobs.start(context, undefined, async () => { throw Object.assign(new Error("e".repeat(12_000)), { effectUnknown: true }); });
+    await jobs.waitForOwner(id, context.conversationId);
+    const restarted = new BrowserJobs(logger);
+    const executor = { queryJobs: (input: any) => restarted.query(input, context.conversationId), acknowledgeBackgroundJob: () => {} } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor, { logger, conversationId: context.conversationId }) as Record<string, any>;
+    const result = await tools.get_job.execute({ jobId: id }, { toolCallId: "failed" });
+    expect(result).toMatchObject({ state: "failed", ok: false, error: { code: "execution-failed", effectUnknown: true }, errorAccess: { artifactId: result.$ref, path: ["result", "error"] } });
+    expect(result.error.message.length).toBe(2000);
+    expect((await logger.result(result.$ref, { path: ["result", "error", "message"] }, context.conversationId) as string).length).toBe(12_000);
+    expect(events.filter((event) => event.type === "tool.result.data")).toHaveLength(1);
+  });
+
+  it("loads an inline screenshot by path after restart with conversation-scoped access", async () => {
+    const { logger } = indexedLog();
+    const jobs = new BrowserJobs(logger);
+    const id = await jobs.start(context, undefined, async () => ({ screenshot: { data: "eA==", mediaType: "image/png" }, payload: "x".repeat(12_000) }));
+    await jobs.waitForOwner(id, context.conversationId);
+    const restarted = new BrowserJobs(logger);
+    const executor = { queryJobs: (input: any) => restarted.query(input, context.conversationId), acknowledgeBackgroundJob: () => {} } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor, { logger, conversationId: context.conversationId }) as Record<string, any>;
+    const result = await tools.get_job.execute({ jobId: id }, { toolCallId: "image" });
+    expect(result.screenshot).toEqual({ artifactId: result.$ref, artifactPath: ["result", "screenshot"], mediaType: "image/png" });
+    const messages = [{ role: "tool", content: [{ type: "tool-result", output: { type: "json", value: result } }] }];
+    const read = (artifactId: number, selection?: { path: Array<string | number> }) => logger.result(artifactId, selection, context.conversationId);
+    const prepared = await prepareToolMessages(messages, 1, undefined, read);
+    expect(prepared.at(-1).content).toContainEqual({ type: "file", mediaType: "image/png", data: { type: "data", data: "eA==" } });
+    await expect(prepareToolMessages(messages, 1, undefined, (artifactId, selection) => logger.result(artifactId, selection, "other"))).rejects.toThrow("unavailable");
+  });
+
+  it("does not replace a recovery terminal that wins the large-result transaction", async () => {
+    const { logger, events } = indexedLog();
+    const jobs = new BrowserJobs(logger);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const id = await jobs.start(context, undefined, async () => { await gate; return "x".repeat(12_000); });
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: id, state: "interrupted" }, output: { ok: false, error: { code: "host-lost" } } });
+    release();
+    await jobs.waitForOwner(id, context.conversationId);
+    const result: any = await jobs.query({ action: "status", id }, context.conversationId);
+    expect(result.state).toBe("interrupted");
+    expect(events.filter((event) => event.type === "tool.result.data")).toHaveLength(0);
+  });
+
+  it.each(["success", "undefined", "failure", "cancelled"] as const)("does not overwrite a recovery terminal with a small %s result", async (outcome) => {
+    const { logger, events } = indexedLog();
+    const jobs = new BrowserJobs(logger);
+    const controller = new AbortController();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const id = await jobs.start(context, controller.signal, async (_signal, _id, started) => {
+      await started();
+      await gate;
+      if (outcome === "failure") throw new Error("small failure");
+      return outcome === "undefined" ? undefined : "small result";
+    });
+    await vi.waitFor(() => expect(events.some((event) => (fromLogValue(event.content, event.valueEncoding) as any)?.state === "running")).toBe(true));
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: id, state: "interrupted" }, output: { ok: false, error: { code: "host-lost" } } });
+    if (outcome === "cancelled") controller.abort("cancelled");
+    release();
+    await jobs.waitForOwner(id, context.conversationId);
+    const result: any = await jobs.query({ action: "status", id }, context.conversationId);
+    expect(result).toMatchObject({ state: "interrupted", result: { error: { code: "host-lost" } } });
+    const states = events.filter((event) => event.type === "browser.job.state").map((event) => (fromLogValue(event.content, event.valueEncoding) as any).state);
+    expect(states).toEqual(["queued", "running", "interrupted"]);
+  });
+
+  it("never publishes a result artifact when the atomic store rejects the transaction", async () => {
+    const { logger, events, store } = indexedLog();
+    vi.spyOn(store, "appendArtifactAnd").mockRejectedValueOnce(new Error("transaction failed"));
+    const jobs = new BrowserJobs(logger);
+    const id = await jobs.start(context, undefined, async () => "x".repeat(12_000));
+    await jobs.waitForOwner(id, context.conversationId);
+    // A broken canonical writer is surfaced instead of publishing a false terminal.
+    await expect(jobs.query({ action: "status", id }, context.conversationId)).rejects.toThrow("transaction failed");
+    expect(events.filter((event) => event.type === "tool.result.data")).toHaveLength(0);
+    expect(events.some((event) => (fromLogValue(event.content, event.valueEncoding) as any)?.state === "succeeded")).toBe(false);
+  });
   it("decodes the current terminal result once and references it from the receipt page", async () => {
     const { logger } = indexedLog();
     const jobs = new BrowserJobs(logger);

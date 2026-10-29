@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { decodeLogGraph, encodeLogGraph, requiresLogGraph } from "./log-graph";
 import { EventLogger, fromLogValue, toLogValue, type LogEvent } from "./logging";
+import { testEventStore } from "./test-event-store";
 
 describe("canonical native object graphs", () => {
   it("round-trips cyclic objects, collection keys, aliases, sparse arrays and shared buffer views", async () => {
@@ -25,7 +26,7 @@ describe("canonical native object graphs", () => {
     expect(decoded.regexp.lastIndex).toBe(decoded); expect(decoded.sparse[999_999_999]).toBe(decoded);
     expect(Object.hasOwn(decoded.sparse, 0)).toBe(false);
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: { append: async (event) => { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; }, all: async () => events, clear: async () => { events.length = 0; } } });
+    const logger = new EventLogger({ store: testEventStore(events) });
     const event = await logger.append({ type: "tool.result.data", conversationId: "c", output: node });
     const first = await logger.result(event!.id, {}, "c") as any;
     expect(first.self).toBe(first); expect(first.view.buffer).toBe(first.buffer); expect(first.alias).toBe(first.view);
@@ -53,17 +54,18 @@ describe("canonical native object graphs", () => {
 
   it("does not cache a tiny view that retains an oversized backing buffer", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: { append: async (event) => { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; }, all: async () => events, clear: async () => { events.length = 0; } } });
+    const logger = new EventLogger({ store: testEventStore(events) });
     const buffer = new ArrayBuffer(9 * 1024 * 1024);
     const event = await logger.append({ type: "tool.result.data", conversationId: "c", output: new Uint8Array(buffer, 7, 1) });
     const result = await logger.result(event!.id, {}, "c") as Uint8Array;
     expect(result.byteOffset).toBe(7); expect(result.buffer.byteLength).toBe(buffer.byteLength);
-    expect((logger as any).artifactCache.size).toBe(0);
+    expect((logger as any).artifactCache.size).toBe(1);
+    expect((logger as any).artifactBytes).toBeLessThan(8192);
   });
 
   it("preserves extra properties, error causes, null prototypes and rejects unsupported objects", async () => {
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: { append: async (event) => { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; }, all: async () => events, clear: async () => { events.length = 0; } } });
+    const logger = new EventLogger({ store: testEventStore(events) });
     const root: any = Object.create(null); root.self = root; root.array = [1]; root.array.label = root;
     root.date = new Date(0); root.date.label = root; root.map = new Map(); root.map.label = root;
     root.buffer = new ArrayBuffer(8); root.buffer.label = root; root.view = new DataView(root.buffer); root.view.label = root;
@@ -83,7 +85,7 @@ describe("canonical native object graphs", () => {
     const view = new Uint8Array([1, 2, 3]);
     Object.defineProperty(view, "constructor", { value: Date, enumerable: true });
     const events: LogEvent[] = [];
-    const logger = new EventLogger({ store: { append: async (event) => { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; }, all: async () => events, clear: async () => { events.length = 0; } } });
+    const logger = new EventLogger({ store: testEventStore(events) });
     const saved = await logger.append({ type: "tool.result.data", output: view });
     const value = await logger.result(saved!.id, { offset: 1, limit: 1 }) as Uint8Array;
     expect(value).toBeInstanceOf(Uint8Array); expect([...value]).toEqual([2]);
