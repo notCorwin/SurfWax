@@ -5,6 +5,7 @@ import { createChatTransport, type SidePanelMessage } from "./transport";
 import { createAgent } from "./runner";
 import type { ChromeExecutor } from "../chrome/executor";
 import { PROGRAM_CATALOG_VERSION } from "../chrome/tool";
+import { restoreConversationRepository } from "../conversations";
 
 vi.mock("./coordinator", () => ({ claimConversationRun: async (_id: string, signal?: AbortSignal) => ({ signal: signal ?? new AbortController().signal, finish: vi.fn() }) }));
 vi.mock("../chrome/page-guard", () => ({ guardActivePage: async () => vi.fn() }));
@@ -31,6 +32,25 @@ function setup(model: MockLanguageModelV4, log = logger(), executor = { browserC
 const options = () => ({ trigger: "submit-message" as const, chatId: "thread", messages: [user], abortSignal: new AbortController().signal });
 
 describe("complete-response transport", () => {
+  it("sends recovered V2 BigInt tool results in the next model request", async () => {
+    const log = logger();
+    await log.appendMessage("thread", user as ConversationMessage, { runId: "old" });
+    await log.append({ type: "conversation.submitted", conversationId: "thread", runId: "old", content: { messageId: user.id } });
+    await log.appendMessage("thread", { id: "assistant-old", role: "assistant", parts: [{ type: "dynamic-tool", toolName: "execute_program", toolCallId: "old-call", state: "input-available", input: { code: "return 123n" } }] } as ConversationMessage, { runId: "old", parentId: user.id });
+    await log.append({ type: "tool.finished", conversationId: "thread", runId: "old", toolCallId: "old-call", output: { ok: true, result: { value: 123n, special: -0 } } });
+    await log.append({ type: "conversation.failed", conversationId: "thread", runId: "old" });
+    const restored = await restoreConversationRepository(await log.conversation("thread"));
+    const messages = restored.messages.map(({ message }) => message as SidePanelMessage);
+    messages.push({ id: "next", role: "user", parts: [{ type: "text", text: "Continue" }] });
+    let prompt = "";
+    const { factory } = setup(new MockLanguageModelV4({ doGenerate: async (request) => { prompt = JSON.stringify(request.prompt); return reply(); } }), log);
+    await createChatTransport(factory, log, "thread").sendMessages({ ...options(), messages });
+    expect(prompt).toContain('"bigintPaths"');
+    expect(prompt).toContain('"123"');
+    expect(prompt).toContain('"numberPaths"');
+    expect(prompt).toContain('"-0"');
+  });
+
   it.each(["response", "tool-start", "tool-result", "invalid-result"])("stops browser work when the canonical %s cannot be persisted", async (stage) => {
     const events: LogEvent[] = [];
     const failure = new Error("Canonical storage write failed");

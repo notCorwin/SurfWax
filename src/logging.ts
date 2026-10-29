@@ -339,7 +339,8 @@ export function toLogValue(value: unknown, active = new WeakSet<object>(), versi
   if (value === null) return null;
   if (value === undefined) return { $type: "undefined", value: null };
   if (typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number") return Number.isFinite(value) ? value : { $type: "number", value: String(value) };
+  if (typeof value === "number") return version === 2 && Object.is(value, -0) ? { $type: "number", value: "-0" }
+    : Number.isFinite(value) ? value : { $type: "number", value: String(value) };
   if (typeof value === "bigint") return { $type: "bigint", value: value.toString() };
   if (typeof value === "symbol") return { $type: "symbol", value: String(value) };
   if (typeof value === "function") return { $type: "function", value: value.name || "anonymous" };
@@ -389,8 +390,32 @@ export function fromLogValue(value: unknown, version?: 2): unknown {
       throw new Error("Invalid escaped log object");
     return Object.fromEntries(record.entries.map(([key, item]) => [key, fromLogValue(item, version)]));
   }
+  if (version === 2 && Object.keys(record).length === 2 && record.$type === "number") {
+    if (record.value === "NaN") return NaN;
+    if (record.value === "Infinity") return Infinity;
+    if (record.value === "-Infinity") return -Infinity;
+    if (record.value === "-0") return -0;
+    throw new Error("Invalid encoded log number");
+  }
+  if (version === 2 && Object.keys(record).length === 2 && record.$type === "bigint") {
+    if (typeof record.value !== "string" || !/^-?(?:0|[1-9]\d*)$/.test(record.value)) throw new Error("Invalid encoded log bigint");
+    return BigInt(record.value);
+  }
   if (record.$type === "undefined" && record.value === null && Object.keys(record).length === 2) return undefined;
   return Object.fromEntries(Object.entries(record).map(([key, item]) => [key, fromLogValue(item, version)]));
+}
+
+/** Keep ordinary JSON byte-for-byte stable; encode JavaScript-only numbers without collisions. */
+export function stringifyLogSafe(value: unknown, space?: number): string | undefined {
+  let hasSpecial = false;
+  const ordinary = JSON.stringify(value, (_key, item) => {
+    if (typeof item === "bigint" || typeof item === "number" && (!Number.isFinite(item) || Object.is(item, -0))) {
+      hasSpecial = true; return null;
+    }
+    return item;
+  }, space);
+  if (!hasSpecial) return ordinary;
+  return `[Surf Wax log value encoding v2]\n${JSON.stringify(toLogValue(value, undefined, 2), null, space)}`;
 }
 
 export function isConversationMessage(value: unknown): value is ConversationMessage {

@@ -12,11 +12,11 @@ function api() {
 describe("orphan browser input recovery", () => {
   it("uses the latest canonical state for each source and releases through a fresh root session", async () => {
     const debuggerApi = api();
-    const events = [event("orphan", 1, [{ key: "Control" }]), event("orphan", 1, [{ key: "Shift", code: "ShiftLeft", modifiers: 8 }], [["left", { clickCount: 1 }]]), event("orphan", 1, [{ key: "a", code: "KeyA", text: "a" }], [], "expired-frame"), event("active", 2, [{ key: "Meta" }])];
+    const events = [event("orphan", 1, [{ key: "Control" }]), event("orphan", 1, [{ key: "Shift", code: "ShiftLeft", modifiers: 8 }], [["left", { clickCount: 1 }]]), event("orphan", 1, [{ key: "a", code: "KeyA", text: "a", commands: ["selectAll"] }], [], "expired-frame"), event("active", 2, [{ key: "Meta" }])];
     expect(await recoverBrowserInput(events, ["orphan"], debuggerApi as never)).toEqual({ recovered: 1, failures: [] });
     expect(debuggerApi.attach).toHaveBeenCalledExactlyOnceWith({ tabId: 1 }, "1.3");
     expect(debuggerApi.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, "Input.dispatchKeyEvent", expect.objectContaining({ key: "Shift", type: "keyUp", modifiers: 0 }));
-    expect(debuggerApi.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, "Input.dispatchKeyEvent", expect.objectContaining({ key: "a", type: "keyUp", text: undefined }));
+    expect(debuggerApi.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, "Input.dispatchKeyEvent", expect.objectContaining({ key: "a", type: "keyUp", text: undefined, commands: undefined }));
     expect(debuggerApi.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, "Input.dispatchMouseEvent", expect.objectContaining({ type: "mouseReleased", button: "left", x: 80, y: 45, buttons: 0 }));
     expect(debuggerApi.sendCommand.mock.calls.some(([, , params]) => (params as any)?.key === "Control")).toBe(false);
     expect(debuggerApi.detach).toHaveBeenCalledExactlyOnceWith({ tabId: 1 });

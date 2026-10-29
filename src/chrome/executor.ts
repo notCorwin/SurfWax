@@ -198,7 +198,7 @@ export class ChromeExecutor {
   private readonly dialogQueues = new Map<string, string[]>();
   private popupListener?: (tab: chrome.tabs.Tab) => void;
   private tabRemovedListener?: (tabId: number) => void;
-  private readonly heldInput = new Map<number, { x: number; y: number; buttons: Set<string>; keys: Map<string, Record<string, unknown>> }>();
+  private readonly heldInput = new Map<number, { x: number; y: number; buttons: Set<string>; keys: Map<string, Record<string, unknown>>; buttonVersions?: Map<string, symbol> }>();
   private readonly jobs: BrowserJobs;
   private readonly blockerContexts = new Map<string, { context: ExecutionContext; owner: EventOwner }>();
   private readonly blockers = new ForegroundBlockers(async (evidence) => {
@@ -1467,15 +1467,26 @@ export class ChromeExecutor {
   private async releaseInput(tabId: number): Promise<void> {
     const state = this.heldInput.get(tabId);
     if (!state) return;
-    for (const [key, params] of [...state.keys]) await this.bridgeCommand({ tabId }, "Input.dispatchKeyEvent", { ...params, type: "keyUp", key }).catch(() => undefined);
-    for (const button of [...state.buttons]) await this.bridgeCommand({ tabId }, "Input.dispatchMouseEvent", { type: "mouseReleased", x: state.x, y: state.y, button, buttons: 0, clickCount: 1 }).catch(() => undefined);
-    this.heldInput.delete(tabId);
+    const failures: Array<{ kind: "key" | "button"; value: string; error: unknown }> = [];
+    for (const [key, params] of [...state.keys]) {
+      try { await this.bridgeCommand({ tabId }, "Input.dispatchKeyEvent", { ...params, type: "keyUp", key, text: undefined, unmodifiedText: undefined, commands: undefined }); }
+      catch (error) { failures.push({ kind: "key", value: key, error }); }
+    }
+    for (const button of [...state.buttons]) {
+      try { await this.bridgeCommand({ tabId }, "Input.dispatchMouseEvent", { type: "mouseReleased", x: state.x, y: state.y, button, buttons: 0, clickCount: 1 }); }
+      catch (error) { failures.push({ kind: "button", value: button, error }); }
+    }
+    if (failures.length) this.logger?.record({ type: "browser.input.cleanup.failed", conversationId: this.activeContext.conversationId,
+      ...this.activeContext.logIdentity, content: { tabId, failures } });
+    if (this.heldInput.get(tabId) === state && !state.keys.size && !state.buttons.size) this.heldInput.delete(tabId);
   }
 
   private async bridgeCommand(debuggee: Debuggee, method: string, params?: object): Promise<any> {
     if (/^(Input\.|DOM\.(focus|scrollIntoViewIfNeeded)|Page\.(navigate|reload|navigateToHistoryEntry|handleJavaScriptDialog))/.test(method) && !this.activeSignal?.aborted) await this.programScope?.dispatched();
     await this.bridgeDebuggee(debuggee);
     let input = params as Record<string, any> | undefined;
+    let releaseKey: { state: ReturnType<ChromeExecutor["inputState"]>; key: string; previous?: Record<string, unknown> } | undefined;
+    let releaseButton: { state: ReturnType<ChromeExecutor["inputState"]>; button: string; version?: symbol } | undefined;
     if (debuggee.tabId !== undefined && input && method.startsWith("Input.")) {
       const state = this.inputState(debuggee.tabId);
       const modifierBit = (key: string) => key === "Alt" ? 1 : key === "Control" ? 2 : key === "Meta" ? 4 : key === "Shift" ? 8 : 0;
@@ -1483,9 +1494,16 @@ export class ChromeExecutor {
       if (method === "Input.dispatchMouseEvent") {
         if (Number.isFinite(input.x)) state.x = input.x;
         if (Number.isFinite(input.y)) state.y = input.y;
-        if (input.type === "mousePressed") state.buttons.add(input.button ?? "left");
-        if (input.type === "mouseReleased") state.buttons.delete(input.button ?? "left");
-        const buttons = [...state.buttons].reduce((mask, button) => mask | (button === "left" ? 1 : button === "right" ? 2 : 4), 0);
+        const button = input.button ?? "left";
+        if (input.type === "mousePressed") {
+          state.buttons.add(button);
+          (state.buttonVersions ??= new Map()).set(button, Symbol());
+          if (input.surfWaxAtomicClick) releaseButton = { state, button, version: state.buttonVersions.get(button) };
+        }
+        if (input.type === "mouseReleased") releaseButton = { state, button, version: state.buttonVersions?.get(button) };
+        const releasing = input.type === "mouseReleased";
+        const buttons = [...state.buttons].filter((held) => !releasing || held !== button)
+          .reduce((mask, held) => mask | (held === "left" ? 1 : held === "right" ? 2 : 4), 0);
         input = { x: state.x, y: state.y, ...input, buttons, modifiers: (input.modifiers ?? 0) | heldModifiers };
       }
       if (method === "Input.dispatchKeyEvent") {
@@ -1494,8 +1512,9 @@ export class ChromeExecutor {
         input = { ...input, modifiers: ((input.modifiers ?? 0) | heldModifiers | ownModifier) & ~released };
         if (input.text && input.modifiers & 7) delete input.text;
         else if (input.text && input.modifiers & 8) input.text = input.text.toUpperCase();
-        if (input.type === "keyUp") state.keys.delete(input.key);
-        else state.keys.set(input.key, { ...input });
+        if (input.type === "keyUp" && typeof input.key === "string") releaseKey = { state, key: input.key, previous: state.keys.get(input.key) };
+        else if ((input.type === "keyDown" || input.type === "rawKeyDown") && typeof input.key === "string" && input.key)
+          state.keys.set(input.key, { ...input });
       }
     }
     const key = JSON.stringify(debuggee);
@@ -1515,7 +1534,13 @@ export class ChromeExecutor {
       const entry = this.programEvaluations.get(key);
       if (entry && entry.count > 1) entry.count--; else this.programEvaluations.delete(key);
     } }
-    if (debuggee.tabId !== undefined && input?.surfWaxAtomicClick) this.inputState(debuggee.tabId).buttons.delete(input.button ?? "left");
+    // A release is not confirmed until the bridge returns successfully. A new
+    // press while it was in flight must not be removed by the older reply.
+    if (releaseKey && releaseKey.state.keys.get(releaseKey.key) === releaseKey.previous) releaseKey.state.keys.delete(releaseKey.key);
+    if (releaseButton && releaseButton.state.buttonVersions?.get(releaseButton.button) === releaseButton.version) {
+      releaseButton.state.buttons.delete(releaseButton.button);
+      releaseButton.state.buttonVersions?.delete(releaseButton.button);
+    }
     return result;
   }
 

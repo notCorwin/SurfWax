@@ -1,3 +1,4 @@
+import { normalizeResultEnvelope } from "../tool-result-values";
 import { dynamicTool, type ToolCallRepairFunction } from "ai";
 import { z } from "zod";
 import type { EventLogger } from "../logging";
@@ -10,7 +11,7 @@ const elementTargetObject = z.union([
   z.object({ ref: z.string().min(1) }).strict(),
   z.object({ by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testId", "css"]), value: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional(), index: z.number().int().optional(), frame: z.union([z.object({ by: z.literal("css"), value: z.string().min(1) }).strict(), z.object({ ref: z.string().min(1) }).strict()]).optional() }).strict(),
 ]);
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v15";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v16";
 export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetObject]).optional(),
   fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional(), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
@@ -58,7 +59,7 @@ browser.runIn({kind:'page',tabId,world:'MAIN'|'ISOLATED'|'USER_SCRIPT',frameId?,
 net.fetch({context:'page'|'extension',url,tabId?,init?}) returns {url,status,ok,headers,body}; no page-to-extension fallback. Page fetch obeys page origin/cookies/CORS; extension fetch uses extension host permissions. net.requests(options?,tabId?) returns {requests,integrity,hasMore,nextOffset?} for captured history (not all traffic); net.console(options?,tabId?) returns the same metadata with messages instead of requests. hasMore can be null when unknown and offsets refer to a live list. net.request(requestRef,tabId?) and net.responseBody(requestRef,tabId?) read captured requests.
 protocol.sessions(tabId?) lists root/child CDP handles; protocol.send({tabId,sessionId?},method,params?) sends any Chrome CDP method available to the extension. Arbitrary JS/CDP/fetch are effectful; there is no readonly override. inspect.documentId is the local navigation generation; USER_SCRIPT documentId uses Chrome's native scripting document ID. File URL sources are fetched in extension context.
 artifacts.read(id,{path?,offset?,limit?}); text(filename,text,mimeType?,save=false); save(id,filename?). Files and images stay internal unless the user requested download/export. emit(value) persists incremental output; check(condition,message?) records a verified assertion; sleep(ms) and signal support cancellation. Completed operations only confirm dispatch/return; verify application outcomes. Queued operations are not dispatched, uncertain effects must be inspected before continuing. Program computation uses a disposable opaque-origin sandbox Worker; browser capabilities are mediated by the Side Panel. Closing the panel cancels jobs and revokes capabilities; arbitrary program finally blocks are not guaranteed to run. Only records survive restart, never arbitrary JS stacks.`;
-export const PROGRAM_TOOL_CONTEXT = `Available tools:\n${PROGRAM_TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n")}`;
+export const PROGRAM_TOOL_CONTEXT = `Available tools:\n${PROGRAM_TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n")}\nresultType=undefined marks an undefined result. undefinedPaths, holePaths, numberPaths and bigintPaths are relative to result; numberPaths entries hold {path,value} for NaN, Infinity, -Infinity or -0, and bigintPaths hold decimal strings. These replace values with null. Large results provide paged sidecar access. If envelopeWrapped=true, reconstruct the original tool envelope from result and its sidecars; outer fields summarize status.`;
 
 export function createProgramTools(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string; callId?: () => string | undefined; visualEnabled?: () => Promise<boolean>; scheduler?: ToolScheduler; runSignal?: AbortSignal } = {}): Record<string, ReturnType<typeof dynamicTool>> {
   return Object.fromEntries(PROGRAM_TOOL_REGISTRY.map((definition) => [definition.name, dynamicTool({
@@ -134,10 +135,13 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
             : await executor.runProgram(definition.program!(value), abortSignal, context);
           const failure = (result as any)?.ok === false ? (result as any).error ?? (result as any).failed?.error ?? (result as any).result?.error : undefined;
           const artifact = (result as any)?.result?.artifact;
-          const normalized = failure ? { ...result as object, ...(artifact ? { artifact } : {}), error: { ...failure, retryable: false } }
-            : definition.name === "read_artifact" && result && typeof result === "object" && "result" in result
-              ? normalizeArtifactResult(result as Record<string, unknown>) : result;
-          output = await compactToolResult(normalized, { ...options, toolCallId, ...identity, preserveVerification: definition.name === "verify_state", preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job", preserveSearchStatus: definition.name === "find_elements" || definition.name === "list_frames", preserveInspectionStatus: definition.name === "inspect_page", preserveDiagnosticStatus: definition.name === "list_requests" || definition.name === "read_console", preserveEventStatus: definition.name === "wait_event", preserveArtifactValue: definition.name === "read_artifact" });
+          const envelope = failure ? { ...result as object, ...(artifact ? { artifact } : {}), error: { ...failure, retryable: false } } : result;
+          const normalized = envelope && typeof envelope === "object" && !Array.isArray(envelope)
+            ? normalizeResultEnvelope(envelope as Record<string, unknown>) : envelope;
+          const originalResult = normalized && typeof normalized === "object" && "envelopeWrapped" in normalized && normalized.envelopeWrapped === true
+            ? envelope : envelope && typeof envelope === "object" && Object.hasOwn(envelope, "result") ? (envelope as Record<string, unknown>).result : undefined;
+          const hasResult = Boolean(normalized && typeof normalized === "object" && Object.hasOwn(normalized, "result"));
+          output = await compactToolResult(normalized, { ...options, toolCallId, ...identity, preserveVerification: definition.name === "verify_state", preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job", preserveSearchStatus: definition.name === "find_elements" || definition.name === "list_frames", preserveInspectionStatus: definition.name === "inspect_page", preserveDiagnosticStatus: definition.name === "list_requests" || definition.name === "read_console", preserveEventStatus: definition.name === "wait_event", preserveArtifactValue: hasResult, ...(hasResult ? { originalResult } : {}) });
           if ((definition.name === "get_job" || definition.name === "cancel_job") && (result as any)?.terminal === true && typeof (result as any).id === "string") observedTerminalJob = (result as any).id;
         } catch (error) {
           output = await failureFor(error, executing);
@@ -396,78 +400,50 @@ function previewOf(value: unknown, path?: readonly (string | number)[]): unknown
   return preview;
 }
 
-/** Preserve JavaScript-only values in a JSON result using paths relative to the returned slice. */
-function normalizeArtifactResult(record: Record<string, unknown>): Record<string, unknown> {
-  if (record.result === undefined) return { ...record, result: null, resultType: "undefined" };
-  const undefinedPaths: Array<Array<string | number>> = [];
-  const holePaths: Array<Array<string | number>> = [];
-  const visit = (value: unknown, path: Array<string | number>): unknown => {
-    if (value === undefined) { undefinedPaths.push([...path]); return null; }
-    if (Array.isArray(value)) {
-      let copy: unknown[] | undefined;
-      for (let index = 0; index < value.length; index++) {
-        if (!Object.hasOwn(value, index)) {
-          holePaths.push([...path, index]);
-          copy ??= value.slice(); copy[index] = null;
-          continue;
-        }
-        path.push(index);
-        const next = visit(value[index], path);
-        path.pop();
-        if (next !== value[index]) { copy ??= value.slice(); copy[index] = next; }
-      }
-      return copy ?? value;
-    }
-    if (!value || typeof value !== "object") return value;
-    let copy: Record<string, unknown> | undefined;
-    for (const [key, item] of Object.entries(value)) {
-      path.push(key);
-      const next = visit(item, path);
-      path.pop();
-      if (next !== item) {
-        copy ??= { ...value as Record<string, unknown> };
-        Object.defineProperty(copy, key, { value: next, enumerable: true, configurable: true, writable: true });
-      }
-    }
-    return copy ?? value;
-  };
-  const result = visit(record.result, []);
-  return { ...record, result, ...(undefinedPaths.length ? { undefinedPaths } : {}), ...(holePaths.length ? { holePaths } : {}) };
-}
-
-export async function compactToolResult(value: unknown, options: { logger?: EventLogger; conversationId?: string; toolCallId?: string; runId?: string; toolCallIdCanonical?: boolean; preserveVerification?: boolean; preserveJobStatus?: boolean; preserveSearchStatus?: boolean; preserveInspectionStatus?: boolean; preserveDiagnosticStatus?: boolean; preserveEventStatus?: boolean; preserveArtifactValue?: boolean }): Promise<unknown> {
+export async function compactToolResult(value: unknown, options: { logger?: EventLogger; conversationId?: string; toolCallId?: string; runId?: string; toolCallIdCanonical?: boolean; preserveVerification?: boolean; preserveJobStatus?: boolean; preserveSearchStatus?: boolean; preserveInspectionStatus?: boolean; preserveDiagnosticStatus?: boolean; preserveEventStatus?: boolean; preserveArtifactValue?: boolean; originalResult?: unknown }): Promise<unknown> {
   if ((value && typeof value === "object" && "$ref" in value) || !options.logger) return value;
   let serialized: string | undefined;
   try { serialized = JSON.stringify(value); } catch { return value; }
   if (serialized === undefined) return value;
   const bytes = new TextEncoder().encode(serialized).byteLength;
   if (bytes <= LARGE_RESULT_BYTES) return value;
-  const event = await options.logger.append({ type: "tool.result.data", conversationId: options.conversationId, toolCallId: options.toolCallId, runId: options.runId, toolCallIdCanonical: options.toolCallIdCanonical, content: { bytes }, output: value });
+  const storedValue = Object.hasOwn(options, "originalResult") && value && typeof value === "object" && !Array.isArray(value)
+    ? { ...value, result: options.originalResult } : value;
+  const event = await options.logger.append({ type: "tool.result.data", conversationId: options.conversationId, toolCallId: options.toolCallId, runId: options.runId, toolCallIdCanonical: options.toolCallIdCanonical, content: { bytes }, output: storedValue });
   if (!event) throw new Error("Could not save large tool result");
   const root = value && typeof value === "object" ? value as Record<string, unknown> : undefined;
   const job = options.preserveJobStatus ? root : undefined;
   const search = options.preserveSearchStatus ? root : undefined;
   const inspection = options.preserveInspectionStatus ? root : undefined;
   const browserEvents = options.preserveEventStatus ? root : undefined;
-  const diagnostic = options.preserveDiagnosticStatus && root?.result && typeof root.result === "object" && !Array.isArray(root.result) ? root.result as Record<string, unknown> : undefined;
+  const original = root?.envelopeWrapped === true && root.result && typeof root.result === "object" && !Array.isArray(root.result) ? root.result as Record<string, unknown> : root;
+  const prefix = original !== root ? ["result"] : [];
+  const diagnostic = options.preserveDiagnosticStatus && original?.result && typeof original.result === "object" && !Array.isArray(original.result) ? original.result as Record<string, unknown> : undefined;
   const visual = visualEvidence(value);
   const failure = root?.ok === false || root?.type === "tool-error";
-  const errorPath = root && Object.hasOwn(root, "error") ? ["error"] : ["result", "error"];
+  const errorPath = original && Object.hasOwn(original, "error") ? [...prefix, "error"] : [...prefix, "result", "error"];
   const error = failure ? valueAt(value, errorPath) : undefined;
-  const path = diagnostic && Array.isArray(diagnostic.requests) ? ["result", "requests"] : diagnostic && Array.isArray(diagnostic.messages) ? ["result", "messages"] : browserEvents && Array.isArray(browserEvents.events) ? ["events"] : job && Array.isArray(job.events) ? ["events"] : search && Array.isArray(search.elements) ? ["elements"] : search && Array.isArray(search.frames) ? ["frames"]
-    : inspection && Array.isArray(inspection.items) ? ["items"] : readablePathOf(value);
+  const path = diagnostic && Array.isArray(diagnostic.requests) ? [...prefix, "result", "requests"] : diagnostic && Array.isArray(diagnostic.messages) ? [...prefix, "result", "messages"] : browserEvents && Array.isArray(browserEvents.events) ? [...prefix, "events"] : job && Array.isArray(job.events) ? [...prefix, "events"] : search && Array.isArray(search.elements) ? [...prefix, "elements"] : search && Array.isArray(search.frames) ? [...prefix, "frames"]
+    : inspection && Array.isArray(inspection.items) ? [...prefix, "items"] : readablePathOf(value);
   const selected = path ? valueAt(value, path) : value;
   const { access, oversizedItem } = artifactAccess(event.id, path, selected);
   const resultRead = root && Object.hasOwn(root, "result") ? artifactAccess(event.id, ["result"], root.result) : undefined;
   const undefinedPaths = options.preserveArtifactValue && Array.isArray(root?.undefinedPaths) ? root.undefinedPaths : undefined;
   const holePaths = options.preserveArtifactValue && Array.isArray(root?.holePaths) ? root.holePaths : undefined;
+  const numberPaths = options.preserveArtifactValue && Array.isArray(root?.numberPaths) ? root.numberPaths : undefined;
+  const bigintPaths = options.preserveArtifactValue && Array.isArray(root?.bigintPaths) ? root.bigintPaths : undefined;
   const undefinedPathsRead = undefinedPaths?.length ? artifactAccess(event.id, ["undefinedPaths"], undefinedPaths) : undefined;
   const holePathsRead = holePaths?.length ? artifactAccess(event.id, ["holePaths"], holePaths) : undefined;
-  const verification = options.preserveVerification && value && typeof value === "object" && "result" in value
-    ? (value as { result?: { verified?: unknown; timedOut?: unknown; present?: unknown } }).result : undefined;
+  const numberPathsRead = numberPaths?.length ? artifactAccess(event.id, ["numberPaths"], numberPaths) : undefined;
+  const bigintPathsRead = bigintPaths?.length ? artifactAccess(event.id, ["bigintPaths"], bigintPaths) : undefined;
+  const verificationEnvelope = !options.preserveVerification ? undefined
+    : root?.envelopeWrapped === true && root.result && typeof root.result === "object" ? root.result as Record<string, unknown> : root;
+  const verification = verificationEnvelope && "result" in verificationEnvelope
+    ? verificationEnvelope.result as { verified?: unknown; timedOut?: unknown; present?: unknown } | undefined : undefined;
   const handoff = value && typeof value === "object" && (value as any).accepted === true && (value as any).complete === false && typeof (value as any).jobId === "string" ? value as Record<string, any> : undefined;
   const blocked = handoff?.blockedBy;
   return { $ref: event.id, bytes, preview: job ? { eventCount: Array.isArray(job.events) ? job.events.length : 0 } : handoff || visual && typeof selected !== "string" ? undefined : previewOf(value, path), access, ...(oversizedItem ? { oversizedItem } : {}), type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value,
+    ...(root?.envelopeWrapped === true ? { envelopeWrapped: true } : {}),
     ...(job ? jobMetadata(job) : {}),
     ...(search ? searchMetadata(search) : {}),
     ...(inspection ? inspectionMetadata(inspection) : {}),
@@ -481,7 +457,11 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
       ...(undefinedPathsRead.oversizedItem ? { undefinedPathsOversizedItem: undefinedPathsRead.oversizedItem } : {}) } : {}),
     ...(holePathsRead ? { holeCount: holePaths!.length, holePathsAccess: holePathsRead.access,
       ...(holePathsRead.oversizedItem ? { holePathsOversizedItem: holePathsRead.oversizedItem } : {}) } : {}),
-    ...(undefinedPaths?.length || holePaths?.length ? { pathsNote: "Paths are relative to this returned result, including its requested slice; read the sidecars before interpreting null values." } : {}),
+    ...(numberPathsRead ? { numberCount: numberPaths!.length, numberPathsAccess: numberPathsRead.access,
+      ...(numberPathsRead.oversizedItem ? { numberPathsOversizedItem: numberPathsRead.oversizedItem } : {}) } : {}),
+    ...(bigintPathsRead ? { bigintCount: bigintPaths!.length, bigintPathsAccess: bigintPathsRead.access,
+      ...(bigintPathsRead.oversizedItem ? { bigintPathsOversizedItem: bigintPathsRead.oversizedItem } : {}) } : {}),
+    ...(undefinedPaths?.length || holePaths?.length || numberPaths?.length || bigintPaths?.length ? { pathsNote: "Paths are relative to this returned result, including its requested slice; read the sidecars before interpreting null values." } : {}),
     ...(failure ? { ...(root?.ok === false ? { ok: false } : {}), ...(root?.type === "tool-error" ? { type: "tool-error" } : {}),
       ...failureMetadata(root!),
       ...(Object.hasOwn(root!, "receipts") ? { receiptsAccess: { artifactId: event.id, path: ["receipts"] } } : {}),

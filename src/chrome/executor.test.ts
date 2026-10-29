@@ -719,6 +719,76 @@ describe("ChromeExecutor programs", () => {
     executor.dispose();
   });
 
+  it("retains failed key and button releases for cleanup retry", async () => {
+    const fake = fakeChrome();
+    const { logger, events } = memoryLog();
+    let failRelease = true;
+    fake.debuggerApi.sendCommand.mockImplementation(async (_source: any, method: string, params: any) => {
+      if (failRelease && (method === "Input.dispatchKeyEvent" && params?.type === "keyUp"
+        || method === "Input.dispatchMouseEvent" && params?.type === "mouseReleased")) throw new Error("release failed");
+      return {};
+    });
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, logger });
+    const send = (method: string, params: object) => (executor as any).bridgeCommand({ tabId: 41 }, method, params);
+    await send("Input.dispatchKeyEvent", { type: "keyDown", key: "a", code: "KeyA", text: "a", commands: ["selectAll"] });
+    await send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", x: 8, y: 9 });
+    await expect(send("Input.dispatchKeyEvent", { type: "keyUp", key: "a" })).rejects.toThrow("release failed");
+    await expect(send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left" })).rejects.toThrow("release failed");
+    const state = (executor as any).heldInput.get(41);
+    expect(state.keys.has("a")).toBe(true);
+    expect(state.buttons.has("left")).toBe(true);
+    expect(fake.debuggerApi.sendCommand).toHaveBeenLastCalledWith({ tabId: 41 }, "Input.dispatchMouseEvent", expect.objectContaining({ type: "mouseReleased", buttons: 0 }));
+    await (executor as any).releaseInput(41);
+    await logger.flush();
+    expect((executor as any).heldInput.get(41)).toBe(state);
+    expect(events.some(event => event.type === "browser.input.cleanup.failed")).toBe(true);
+    expect(fake.debuggerApi.sendCommand).toHaveBeenCalledWith({ tabId: 41 }, "Input.dispatchKeyEvent", expect.objectContaining({ type: "keyUp", key: "a", text: undefined, commands: undefined }));
+    failRelease = false;
+    await (executor as any).releaseInput(41);
+    expect((executor as any).heldInput.has(41)).toBe(false);
+    await executor.endRun(); executor.dispose();
+  });
+
+  it("does not let an old release acknowledgement erase a newer press", async () => {
+    const fake = fakeChrome();
+    let completeKey!: () => void, completeButton!: () => void;
+    let startedKey!: () => void, startedButton!: () => void;
+    const keyStarted = new Promise<void>(resolve => { startedKey = resolve; });
+    const buttonStarted = new Promise<void>(resolve => { startedButton = resolve; });
+    fake.debuggerApi.sendCommand.mockImplementation(async (_source: any, method: string, params: any) => {
+      if (method === "Input.dispatchKeyEvent" && params?.type === "keyUp") {
+        startedKey(); await new Promise<void>(resolve => { completeKey = resolve; });
+      }
+      if (method === "Input.dispatchMouseEvent" && params?.type === "mouseReleased") {
+        startedButton(); await new Promise<void>(resolve => { completeButton = resolve; });
+      }
+      return {};
+    });
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never });
+    const send = (method: string, params: object) => (executor as any).bridgeCommand({ tabId: 41 }, method, params);
+    await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Shift", code: "ShiftLeft" });
+    await send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left" });
+    const keyUp = send("Input.dispatchKeyEvent", { type: "keyUp", key: "Shift" });
+    const mouseUp = send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left" });
+    await Promise.all([keyStarted, buttonStarted]);
+    await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Shift", code: "ShiftLeft" });
+    await send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left" });
+    completeKey(); completeButton(); await Promise.all([keyUp, mouseUp]);
+    const state = (executor as any).heldInput.get(41);
+    expect(state.keys.has("Shift")).toBe(true);
+    expect(state.buttons.has("left")).toBe(true);
+    fake.debuggerApi.sendCommand.mockResolvedValue({});
+    await executor.endRun(); executor.dispose();
+  });
+
+  it("does not retain char-only input as a held key", async () => {
+    const fake = fakeChrome();
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never });
+    await (executor as any).bridgeCommand({ tabId: 41 }, "Input.dispatchKeyEvent", { type: "char", text: "é" });
+    expect((executor as any).heldInput.get(41).keys.size).toBe(0);
+    await executor.endRun(); executor.dispose();
+  });
+
   it("routes agent debugger calls through a panel-owned background port", async () => {
     const fake = fakeChrome();
     const { port } = fakePort();

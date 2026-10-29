@@ -48,6 +48,15 @@ function inputOf(input: unknown): Record<string, unknown> {
   return input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
 }
 
+function verificationOf(value: unknown): unknown {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (Object.hasOwn(record, "verification")) return record.verification;
+  const result = record.result;
+  if (record.envelopeWrapped === true && result && typeof result === "object") return (result as Record<string, unknown>).result;
+  return result;
+}
+
 function resource(call: ScheduledToolCall, batch: Batch): string {
   const name = call.toolName ?? "";
   const input = inputOf(call.input);
@@ -234,8 +243,7 @@ export class ToolScheduler {
       if (pendingJob) throw Object.assign(new Error(`A background job may still occupy the browser queue (${pendingJob}); inspect its status or handle its events before dispatching more browser work`), { code: "background-job-pending" });
       if (!slot.dialogFence && blocked(batch, slot.call)) throw Object.assign(new Error("A previous action on this resource failed; this action was not dispatched"), { code: "prior-action-failed" });
       const result = await task();
-      const verification = slot.call.toolName === "verify_state" && result && typeof result === "object"
-        ? "result" in result ? result.result : "verification" in result ? result.verification : undefined : undefined;
+      const verification = slot.call.toolName === "verify_state" ? verificationOf(result) : undefined;
       const unsuccessful = result && typeof result === "object" && "ok" in result && result.ok === false
         || verification && typeof verification === "object" && "verified" in verification && verification.verified === false;
       if (unsuccessful) {

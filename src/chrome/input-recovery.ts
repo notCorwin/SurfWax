@@ -33,7 +33,7 @@ export async function recoverBrowserInput(events: readonly LogEvent[], orphanRun
       try { await debuggerApi.attach(debuggee, "1.3"); } catch (error) {
         if (!/already attached/i.test(String(error))) throw error;
       }
-      for (const params of state.keys.values()) await debuggerApi.sendCommand(debuggee, "Input.dispatchKeyEvent", { ...params, text: undefined, unmodifiedText: undefined, type: "keyUp", modifiers: 0 });
+      for (const params of state.keys.values()) await debuggerApi.sendCommand(debuggee, "Input.dispatchKeyEvent", { ...params, text: undefined, unmodifiedText: undefined, commands: undefined, type: "keyUp", modifiers: 0 });
       for (const [button, params] of state.buttons) await debuggerApi.sendCommand(debuggee, "Input.dispatchMouseEvent", { ...params, type: "mouseReleased", x: state.x, y: state.y, button, buttons: 0, modifiers: 0 });
       await debuggerApi.sendCommand(debuggee, "Input.cancelDragging", {});
       recovered += 1;

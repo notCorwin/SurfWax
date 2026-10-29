@@ -40,6 +40,24 @@ it("does not send a queued title request after the user renames the running conv
 });
 
 describe("conversation restoration", () => {
+  it("restores old V2 tool results as JSON-safe, unambiguous sidecars", async () => {
+    const raw = { ok: true, result: { big: 123n, nan: NaN, literal: { $type: "bigint", value: "123" } } };
+    const events = [
+      event(1, "conversation.message", { runId: "r", valueEncoding: 2, content: toLogValue({ id: "u", role: "user", parts: [] }, undefined, 2) }),
+      event(2, "conversation.submitted", { runId: "r", content: { messageId: "u" } }),
+      event(3, "conversation.message", { runId: "r", parentId: "u", valueEncoding: 2, content: toLogValue({ id: "a", role: "assistant", parts: [{ type: "dynamic-tool", toolCallId: "t", toolName: "execute_program", state: "input-available", input: { code: "return 1" } }] }, undefined, 2) }),
+      event(4, "tool.finished", { runId: "r", toolCallId: "t", valueEncoding: 2, output: toLogValue(raw, undefined, 2) }),
+      event(5, "conversation.failed", { runId: "r" }),
+    ];
+    const before = JSON.stringify(events);
+    const restored = await restoreConversationRepository(events);
+    expect(restored.messages[1]!.message.parts[0]).toMatchObject({ output: { ok: true,
+      result: { big: null, nan: null, literal: { $type: "bigint", value: "123" } },
+      bigintPaths: [{ path: ["big"], value: "123" }], numberPaths: [{ path: ["nan"], value: "NaN" }] } });
+    expect(() => JSON.stringify(restored)).not.toThrow();
+    expect(JSON.stringify(events)).toBe(before);
+  });
+
   it("shows a failed completed response as an error instead of a user cancellation", async () => {
     const repository = await restoreConversationRepository([
       event(1, "conversation.message", { content: { id: "user", role: "user", parts: [] } }),

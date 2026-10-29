@@ -97,6 +97,99 @@ function harness(
 }
 
 describe("AutomationRuntime", () => {
+  it("rejects redirected focus before sending input to a different element", async () => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.describeNode") return { node: { backendNodeId: 7 } };
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("document.hasFocus()"))
+        return { result: { value: { connected: true, focused: false } } };
+      return original(source, method, params);
+    });
+    await expect(page.getByRole("button", { name: "Sign in" }).fill("secret"))
+      .rejects.toMatchObject({ code: "focus-lost", effectUnknown: true });
+    expect(command.mock.calls.some(([, method]) => method.startsWith("Input."))).toBe(false);
+    await runtime.abortSessions();
+  });
+
+  it("stops sequential insertion after focus moves and reports the partial effect", async () => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    const original = command.getMockImplementation()!;
+    let focused = true;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.describeNode") return { node: { backendNodeId: 7 } };
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("document.hasFocus()"))
+        return { result: { value: { connected: true, focused } } };
+      if (method === "Input.insertText") { focused = false; return {}; }
+      return original(source, method, params);
+    });
+    await expect(page.getByRole("button", { name: "Sign in" }).pressSequentially("abc"))
+      .rejects.toMatchObject({ code: "focus-lost", effectUnknown: true });
+    expect(command.mock.calls.filter(([, method]) => method === "Input.insertText").map(([, , params]) => params.text)).toEqual(["a"]);
+    await runtime.abortSessions();
+  });
+
+  it("releases a dispatched key and stops fill if a keydown moves focus", async () => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    const original = command.getMockImplementation()!;
+    let focused = true;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.describeNode") return { node: { backendNodeId: 7 } };
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("document.hasFocus()"))
+        return { result: { value: { connected: true, focused } } };
+      if (method === "Input.dispatchKeyEvent" && params.type === "rawKeyDown") focused = false;
+      return original(source, method, params);
+    });
+    await expect(page.getByRole("button", { name: "Sign in" }).fill("replacement"))
+      .rejects.toMatchObject({ code: "focus-lost", effectUnknown: true });
+    expect(command.mock.calls.filter(([, method]) => method === "Input.dispatchKeyEvent").map(([, , params]) => [params.type, params.key]))
+      .toEqual([["rawKeyDown", "a"], ["keyUp", "a"]]);
+    expect(command.mock.calls.some(([, method]) => method === "Input.insertText")).toBe(false);
+    await runtime.abortSessions();
+  });
+
+  it("attempts key release when a targeted keydown has an uncertain outcome", async () => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.describeNode") return { node: { backendNodeId: 7 } };
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("document.hasFocus()"))
+        return { result: { value: { connected: true, focused: true } } };
+      if (method === "Input.dispatchKeyEvent" && params.type === "keyDown") throw new Error("uncertain keydown");
+      return original(source, method, params);
+    });
+    await expect(page.getByRole("button", { name: "Sign in" }).press("x"))
+      .rejects.toMatchObject({ message: "uncertain keydown", effectUnknown: true });
+    expect(command.mock.calls.filter(([, method]) => method === "Input.dispatchKeyEvent").map(([, , params]) => [params.type, params.key]))
+      .toEqual([["keyDown", "x"], ["keyUp", "x"]]);
+    await runtime.abortSessions();
+  });
+
+  it("releases a held key and sends no later fill input after cancellation", async () => {
+    const { runtime, command } = harness();
+    const controller = new AbortController();
+    runtime.setContext({ signal: controller.signal });
+    const page = await runtime.createPage(3);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.describeNode") return { node: { backendNodeId: 7 } };
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("document.hasFocus()"))
+        return { result: { value: { connected: true, focused: true } } };
+      if (method === "Input.dispatchKeyEvent" && params.type === "rawKeyDown") controller.abort();
+      return original(source, method, params);
+    });
+    await expect(page.getByRole("button", { name: "Sign in" }).fill("replacement"))
+      .rejects.toMatchObject({ name: "AbortError", effectUnknown: true });
+    expect(command.mock.calls.filter(([, method]) => method === "Input.dispatchKeyEvent").map(([, , params]) => [params.type, params.key]))
+      .toEqual([["rawKeyDown", "a"], ["keyUp", "a"]]);
+    expect(command.mock.calls.some(([, method]) => method === "Input.insertText")).toBe(false);
+    await runtime.abortSessions();
+  });
+
   it("applies filters and indexes at their position in a locator chain", async () => {
     const { runtime, command } = harness();
     const page = await runtime.createPage(3);

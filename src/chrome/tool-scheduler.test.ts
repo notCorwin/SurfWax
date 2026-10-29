@@ -153,6 +153,22 @@ describe("model response tool scheduling", () => {
     expect(click).not.toHaveBeenCalled();
   });
 
+  it("fences writes when a wrapped verification is false", async () => {
+    for (const output of [
+      { ok: true, envelopeWrapped: true, result: { ok: true, result: { verified: false } } },
+      { $ref: 7, envelopeWrapped: true, verification: { verified: false } },
+    ]) {
+      const scheduler = new ToolScheduler(names);
+      scheduler.prepare([call("verify", "verify_state"), call("write", "click")], 1);
+      const verify = scheduler.run("verify", async () => output);
+      const write = vi.fn(async () => "wrong");
+      const next = scheduler.run("write", write);
+      await verify;
+      await expect(next).rejects.toMatchObject({ code: "prior-action-failed" });
+      expect(write).not.toHaveBeenCalled();
+    }
+  });
+
   it("consumes invalid and unknown calls without waiting for an SDK callback", async () => {
     const scheduler = new ToolScheduler(names);
     scheduler.prepare([call("invalid", "click", { tabId: 1 }, { invalid: true }), call("read", "inspect_page", { tabId: 1 }), call("write", "fill", { tabId: 1 }), call("unknown", "missing", {}, { invalid: true }), call("other", "click", { tabId: 2 })], 1);
@@ -334,6 +350,26 @@ describe("model response tool scheduling", () => {
     await expect(event).resolves.toBe("event");
     expect(writeWork).not.toHaveBeenCalled();
     expect(readWork).not.toHaveBeenCalled();
+  });
+
+  it("preserves background fencing and terminal observation for wrapped job results", async () => {
+    let pending: string[] = [];
+    const scheduler = new ToolScheduler(names, () => pending);
+    scheduler.prepare([call("start", "click", { background: true }), call("write", "fill")], 1);
+    const start = scheduler.run("start", async () => ({ accepted: true, complete: false, jobId: "job", envelopeWrapped: true, result: { accepted: true } }));
+    const write = vi.fn(async () => "wrong");
+    const blocked = scheduler.run("write", write);
+    await start;
+    await expect(blocked).rejects.toMatchObject({ code: "background-job-pending" });
+    expect(write).not.toHaveBeenCalled();
+    pending = ["job"];
+    scheduler.prepare([call("status", "get_job"), call("same-response", "click")], 1);
+    const status = scheduler.run("status", async () => { pending = []; return { terminal: true, state: "succeeded", envelopeWrapped: true, result: { terminal: true } }; });
+    const same = scheduler.run("same-response", async () => "wrong");
+    await expect(status).resolves.toMatchObject({ terminal: true });
+    await expect(same).rejects.toMatchObject({ code: "background-job-pending" });
+    scheduler.prepare([call("next", "click")], 1);
+    await expect(scheduler.run("next", async () => "done")).resolves.toBe("done");
   });
 
   it("keeps a run-level background fence across responses until the model sees terminal status", async () => {

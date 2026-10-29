@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { EventLogger, fromLogValue, rebuildConversation, upgradeEventStore, type LogEvent } from "./logging";
+import { EventLogger, fromLogValue, rebuildConversation, stringifyLogSafe, upgradeEventStore, type LogEvent } from "./logging";
 
 function memoryStore(onBatch?: (size: number) => void) {
   const events: LogEvent[] = [];
@@ -474,6 +474,31 @@ describe("canonical event log", () => {
     const legacy = await store.append({ type: "tool.result.data", timestamp: new Date().toISOString(), conversationId: "c", content: null, output: legacyLiteral });
     await expect(logger.result(legacy.id, {}, "c")).resolves.toEqual(legacyLiteral);
     expect((await store.all()).find((item) => item.id === legacy.id)).toEqual(legacy);
+  });
+
+  it("round-trips V2 special numbers and bigint without confusing literal tagged objects", async () => {
+    const store = memoryStore(); const logger = new EventLogger({ store });
+    const value = { nan: NaN, positive: Infinity, negative: -Infinity, zero: -0, bigint: 123n,
+      literalNumber: { $type: "number", value: "NaN" }, literalBigint: { $type: "bigint", value: "123" } };
+    const event = await logger.append({ type: "tool.result.data", conversationId: "c", output: value });
+    const decoded = await logger.result(event!.id, {}, "c") as typeof value;
+    expect(Number.isNaN(decoded.nan)).toBe(true);
+    expect(decoded.positive).toBe(Infinity); expect(decoded.negative).toBe(-Infinity);
+    expect(Object.is(decoded.zero, -0)).toBe(true); expect(decoded.bigint).toBe(123n);
+    expect(decoded.literalNumber).toEqual(value.literalNumber); expect(decoded.literalBigint).toEqual(value.literalBigint);
+    const old = { $type: "number", value: "NaN" };
+    const legacy = await store.append({ type: "tool.result.data", timestamp: "old", conversationId: "c", content: null, output: old });
+    await expect(logger.result(legacy.id, {}, "c")).resolves.toEqual(old);
+  });
+
+  it("serializes ordinary JSON unchanged and makes special values explicit for UI and compaction", () => {
+    const ordinary = { x: 1, tag: { $type: "bigint", value: "123" } };
+    expect(stringifyLogSafe(ordinary)).toBe(JSON.stringify(ordinary));
+    const value = { n: 123n, z: -0, literal: { $type: "bigint", value: "123" } };
+    const serialized = stringifyLogSafe(value)!;
+    expect(serialized).toMatch(/^\[Surf Wax log value encoding v2\]\n/);
+    const recovered = fromLogValue(JSON.parse(serialized.split("\n").slice(1).join("\n")), 2) as typeof value;
+    expect(recovered.n).toBe(123n); expect(Object.is(recovered.z, -0)).toBe(true); expect(recovered.literal).toEqual(value.literal);
   });
 
   it("replays a new conversation message containing reserved-looking data", async () => {

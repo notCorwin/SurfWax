@@ -922,22 +922,20 @@ export class AutomationRuntime {
       if (operation === "fill" || operation === "clear") {
         const { objectId, targetSession } = await this.waitActionableLocator(session, spec, true, false);
         const value = operation === "clear" ? "" : String(args[0] ?? "");
-        const node = await this.describe(targetSession, objectId);
-        await this.options.command(targetSession.debuggee, "DOM.focus", { backendNodeId: node.backendNodeId });
-        await this.options.command(targetSession.debuggee, "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "a", code: "KeyA", commands: ["selectAll"] });
-        await this.options.command(targetSession.debuggee, "Input.dispatchKeyEvent", { type: "keyUp", key: "a", code: "KeyA" });
-        await this.options.command(targetSession.debuggee, "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Backspace", code: "Backspace" });
-        await this.options.command(targetSession.debuggee, "Input.dispatchKeyEvent", { type: "keyUp", key: "Backspace", code: "Backspace" });
-        if (value) await this.options.command(targetSession.debuggee, "Input.insertText", { text: value });
+        await this.withFocusedTarget(targetSession, objectId, operationSignal, async (assertFocus) => {
+          await this.focusedKey(targetSession, { key: "a", code: "KeyA", commands: ["selectAll"] }, assertFocus);
+          await this.focusedKey(targetSession, { key: "Backspace", code: "Backspace" }, assertFocus);
+          if (value) { await assertFocus(); await this.options.command(targetSession.debuggee, "Input.insertText", { text: value }); }
+        });
         return this.afterAction(session);
       }
       if (operation === "press" || operation === "pressSequentially") {
         const { objectId, targetSession } = await this.waitActionableLocator(session, spec, operation === "pressSequentially", false, false, operation === "pressSequentially");
-        const node = await this.describe(targetSession, objectId);
-        await this.options.command(targetSession.debuggee, "DOM.focus", { backendNodeId: node.backendNodeId });
-        if (operation === "pressSequentially") {
-          for (const character of String(args[0] ?? "")) await this.options.command(targetSession.debuggee, "Input.insertText", { text: character });
-        } else await this.press(targetSession, String(args[0] ?? ""));
+        await this.withFocusedTarget(targetSession, objectId, operationSignal, async (assertFocus) => {
+          if (operation === "pressSequentially") {
+            for (const character of String(args[0] ?? "")) { await assertFocus(); await this.options.command(targetSession.debuggee, "Input.insertText", { text: character }); }
+          } else { await assertFocus(); await this.press(targetSession, String(args[0] ?? ""), operationSignal); }
+        });
         return this.afterAction(session);
       }
       if (operation === "selectOption") {
@@ -2023,10 +2021,62 @@ export class AutomationRuntime {
     }
   }
 
-  private async press(session: Session, chord: string): Promise<void> {
+  /** Check the bound node, its shadow hosts and the containing frame before input. */
+  private async assertFocused(session: Session, objectId: string, signal?: AbortSignal): Promise<void> {
+    throwIfAborted(signal);
+    const value = await this.callOn(session, objectId, `function(){
+      if (!this.isConnected) return { connected: false, focused: false };
+      const document = this.ownerDocument;
+      let node = this, root = node.getRootNode();
+      while (root) {
+        if (root.activeElement !== node) return { connected: this.isConnected, focused: false };
+        if (!root.host) break;
+        node = root.host;
+        root = node.getRootNode();
+      }
+      return { connected: this.isConnected, focused: root === document && document.hasFocus() };
+    }`);
+    throwIfAborted(signal);
+    if (!value || typeof value.connected !== "boolean" || typeof value.focused !== "boolean")
+      throw automationError("focus-unavailable", { reason: "missing-focus-state" });
+    if (!value.connected) throw automationError("detached", { reason: "focused-target-removed" });
+    if (!value.focused) throw automationError("focus-lost", { reason: "focused-target-changed" });
+  }
+
+  private async withFocusedTarget(session: Session, objectId: string, signal: AbortSignal | undefined, run: (assertFocus: () => Promise<void>) => Promise<void>): Promise<void> {
+    const node = await this.describe(session, objectId);
+    if (!node?.backendNodeId) throw automationError("focus-unavailable", { reason: "missing-backend-node-id" });
+    let focusAttempted = false;
+    try {
+      throwIfAborted(signal);
+      // Focusing can itself run page handlers, so later failures cannot claim no effect.
+      focusAttempted = true;
+      await this.options.command(session.debuggee, "DOM.focus", { backendNodeId: node.backendNodeId });
+      const assertFocus = () => this.assertFocused(session, objectId, signal);
+      await assertFocus();
+      await run(assertFocus);
+    } catch (error) {
+      if (focusAttempted && error && typeof error === "object") Object.assign(error, { effectUnknown: true });
+      throw error;
+    }
+  }
+
+  private async focusedKey(session: Session, input: { key: string; code: string; commands?: string[] }, assertFocus: () => Promise<void>): Promise<void> {
+    await assertFocus();
+    const release = () => this.options.command(session.debuggee, "Input.dispatchKeyEvent", { type: "keyUp", key: input.key, code: input.code });
+    try { await this.options.command(session.debuggee, "Input.dispatchKeyEvent", { type: "rawKeyDown", ...input }); }
+    catch (error) { await release().catch(() => undefined); throw error; }
+    await release();
+  }
+
+  private async press(session: Session, chord: string, signal = this.context.signal): Promise<void> {
     const input = keyboardParams(chord);
-    await this.options.command(session.debuggee, "Input.dispatchKeyEvent", { ...input, type: input.text ? "keyDown" : "rawKeyDown" });
-    try { throwIfAborted(this.context.signal); } finally {
+    try { await this.options.command(session.debuggee, "Input.dispatchKeyEvent", { ...input, type: input.text ? "keyDown" : "rawKeyDown" }); }
+    catch (error) {
+      await this.options.command(session.debuggee, "Input.dispatchKeyEvent", { ...input, text: undefined, type: "keyUp" }).catch(() => undefined);
+      throw error;
+    }
+    try { throwIfAborted(signal); } finally {
       await this.options.command(session.debuggee, "Input.dispatchKeyEvent", { ...input, text: undefined, type: "keyUp" });
     }
   }

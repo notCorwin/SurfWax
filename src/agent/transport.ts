@@ -1,5 +1,6 @@
 import { convertToModelMessages, type Agent, type ContentPart, type LanguageModelCallEndEvent, type UIMessage } from "ai";
 import { fromLogValue, type ConversationMessage, type EventLogger } from "../logging";
+import { normalizeRecoveredToolOutput } from "../tool-result-values";
 import { claimConversationRun } from "./coordinator";
 import { guardActivePage } from "../chrome/page-guard";
 import { ensureConversationPrompt } from "./prompt";
@@ -105,7 +106,7 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
         for (const part of response.parts) {
           if (!("toolCallId" in part) || part.state !== "input-available") continue;
           const terminal = terminals.get(part.toolCallId);
-          if (terminal?.output !== undefined) updateTool(part.toolCallId, { state: "output-available", output: fromLogValue(terminal.output, terminal.valueEncoding) });
+          if (terminal?.output !== undefined) updateTool(part.toolCallId, { state: "output-available", output: normalizeRecoveredToolOutput(fromLogValue(terminal.output, terminal.valueEncoding)) });
           else updateTool(part.toolCallId, { state: "output-error", errorText: terminal ? errorText(fromLogValue(terminal.error, terminal.valueEncoding)) : "工具调用已中断，此操作未执行。" });
         }
         await publish();

@@ -11,7 +11,7 @@ import { generateConversationTitle } from "../conversations";
 import { activeContext, ensureAutomaticContextSummary } from "../agent/context-choice";
 import { contextPressure, pendingContextChoice } from "../agent/compaction";
 import { activeRunIdentity, claimConversationRun, registerBackgroundRequest, withIdleConversation } from "../agent/coordinator";
-import { EventLogger, fromLogValue, rebuildConversationList } from "../logging";
+import { EventLogger, fromLogValue, rebuildConversationList, stringifyLogSafe } from "../logging";
 import type { ModelConfig } from "../types";
 import { useSidePanelRuntime } from "./useSidePanelRuntime";
 import { useRunState } from "./useRunState";
@@ -228,7 +228,7 @@ function ConversationView({ config, logger, threadId, drafts }: { config: ModelC
       setContextStatus({ message: "无法取得模型上下文窗口；自动压缩暂不可用，可在设置中手动指定。", error: true });
     } else if (event.type === "context.compaction.failed") {
       setContextStatus({ message: "上下文压缩失败；请检查模型响应或设置中的窗口大小。", error: true });
-      setCompactionError(JSON.stringify(fromLogValue(event.error, event.valueEncoding)) ?? "模型未能生成摘要");
+      setCompactionError(stringifyLogSafe(fromLogValue(event.error, event.valueEncoding)) ?? "模型未能生成摘要");
     } else if (event.type === "context.compaction.aborted") {
       setContextStatus({ message: "上下文压缩已停止；原始历史已保留。", error: false });
     } else if (event.type === "model.request.retrying") {

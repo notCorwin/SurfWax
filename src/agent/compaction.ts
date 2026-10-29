@@ -1,5 +1,5 @@
 import { generateText, type LanguageModel, type ModelMessage } from "ai";
-import { fromLogValue, type EventLogger, type LogEvent } from "../logging";
+import { fromLogValue, stringifyLogSafe, type EventLogger, type LogEvent } from "../logging";
 import type { ModelConfig } from "../types";
 import { createPromptSnapshot, readPromptSnapshot, PROMPT_TOOLS, type PromptSnapshot } from "./prompt";
 import { inputBudget, resolveModelLimit, type ModelLimit } from "./model-limits";
@@ -32,7 +32,7 @@ type EstimateCalibration = {
 };
 
 function estimateValue(value: unknown): number {
-  return 1024 + Math.ceil(new TextEncoder().encode(JSON.stringify(value)).length / 3);
+  return 1024 + Math.ceil(new TextEncoder().encode(stringifyLogSafe(value)).length / 3);
 }
 
 export function estimateInput(messages: readonly ModelMessage[]): number {
@@ -46,7 +46,7 @@ export function estimatePromptInput(prompt: {
 }
 
 async function digestValue(value: unknown): Promise<string> {
-  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  const bytes = new TextEncoder().encode(stringifyLogSafe(value));
   const hash = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -217,7 +217,7 @@ async function generateSummary(messages: ModelMessage[], languageModel: Language
       }
       return parts;
     };
-    const source = JSON.stringify(messages);
+    const source = stringifyLogSafe(messages)!;
     const completePrompt = `Complete conversation:\n${source}`;
     if (fits(completePrompt)) return await generate(completePrompt, "complete");
     const prompts = split(source, "Serialized conversation source");

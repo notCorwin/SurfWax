@@ -21,4 +21,17 @@ describe("debugger input state", () => {
     expect(state.keys.size).toBe(0); expect(state.buttons.size).toBe(0);
     expect(shouldPersistInputState(state, "mouseReleased")).toBe(true);
   });
+
+  it("does not track char events or key events without a real key", () => {
+    const state = createHeldInputState({ tabId: 7 }, 7, "run");
+    updateHeldInputState(state, "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Shift" });
+    updateHeldInputState(state, "Input.dispatchKeyEvent", { type: "char", text: "é" });
+    updateHeldInputState(state, "Input.dispatchKeyEvent", { type: "char", key: "Shift", text: "é" });
+    updateHeldInputState(state, "Input.dispatchKeyEvent", { type: "keyDown" });
+    updateHeldInputState(state, "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "" });
+    updateHeldInputState(state, "Input.dispatchKeyEvent", { type: "keyUp" });
+    expect([...state.keys.keys()]).toEqual(["Shift"]);
+    updateHeldInputState(state, "Input.dispatchKeyEvent", { type: "keyUp", key: "Shift" });
+    expect(state.keys.size).toBe(0);
+  });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { ATOMIC_TOOL_REGISTRY } from "./atomic-tools";
+import { createProgramTools, PROGRAM_TOOL_CONTEXT } from "./tool";
 
 const definition = (name: string) => {
   const found = ATOMIC_TOOL_REGISTRY.find((tool) => tool.name === name);
@@ -170,6 +171,32 @@ describe("atomic browser tool programs", () => {
 
   it("exports schemas representable as JSON schema", () => {
     for (const { inputSchema } of ATOMIC_TOOL_REGISTRY) expect(() => z.toJSONSchema(inputSchema)).not.toThrow();
+  });
+
+  it("keeps system tool positions concise while retaining full model-facing descriptions and schemas", () => {
+    const tools = createProgramTools({} as never);
+    const positions = [
+      ["select_option", "Select option values or labels on a select element.", "An empty array clears selection; missing, disabled or ambiguous options fail without changing selection."],
+      ["drag", "Drag one element to another using pointer events.", "Native HTML5 draggable sources are unavailable while the interaction blocker is active."],
+      ["upload_file", "Upload artifacts to a file input or captured chooser.", "Supply exactly one target or chooserId; chooser uploads cannot set tabId or background."],
+      ["read_artifact", "Read a stored artifact or large tool result by ID, including during a background job.", "nested undefined and array holes are null with undefinedPaths and holePaths;"],
+      ["list_requests", "List captured network requests and requestRef identifiers.", "integrity describes captured history, not all network traffic"],
+      ["read_console", "Read captured console messages.", "nextOffset paginates a live, possibly changing list."],
+    ] as const;
+    for (const [name, summary, detail] of positions) {
+      const item = definition(name);
+      expect(item.summary).toBe(summary);
+      expect(PROGRAM_TOOL_CONTEXT).toContain(`- ${name}: ${summary}`);
+      expect(PROGRAM_TOOL_CONTEXT).not.toContain(detail);
+      expect(tools[name]!.description).toBe(item.description);
+      expect(item.description).toContain(detail);
+      expect(tools[name]!.inputSchema).toBe(item.inputSchema);
+    }
+    expect(definition("select_option").inputSchema.safeParse({ target: { ref: "e1" }, value: [], background: true }).success).toBe(true);
+    expect(definition("drag").inputSchema.safeParse({ source: { ref: "e1" }, destination: { ref: "e2" } }).success).toBe(true);
+    expect(definition("upload_file").inputSchema.safeParse({ chooserId: "c1", artifactId: 1, tabId: 2 }).success).toBe(false);
+    expect(definition("read_artifact").inputSchema.safeParse({ artifactId: 1, path: ["rows", -1] }).success).toBe(false);
+    for (const name of ["list_requests", "read_console"]) expect(definition(name).inputSchema.safeParse({ limit: 101 }).success).toBe(false);
   });
 
   it("keeps the registry free of duplicate actions and unsupported event subscriptions", () => {

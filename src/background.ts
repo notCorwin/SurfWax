@@ -282,11 +282,17 @@ chrome.runtime.onConnect.addListener((port) => {
       if (state.tabId !== undefined) await bypassPageGuard(state.tabId, true);
       try {
         for (const [heldKey, params] of [...state.keys]) {
-          try { await authorizedNativeInput(state.debuggee, state.tabId!, state.runId!, "Input.dispatchKeyEvent", { ...params, text: undefined, unmodifiedText: undefined, type: "keyUp", modifiers: 0 }); state.keys.delete(heldKey); }
+          try {
+            await authorizedNativeInput(state.debuggee, state.tabId!, state.runId!, "Input.dispatchKeyEvent", { ...params, text: undefined, unmodifiedText: undefined, commands: undefined, type: "keyUp", modifiers: 0 });
+            if (state.keys.get(heldKey) === params) state.keys.delete(heldKey);
+          }
           catch (error) { failures.push(String(error)); }
         }
         for (const [button, params] of [...state.buttons]) {
-          try { await authorizedNativeInput(state.debuggee, state.tabId!, state.runId!, "Input.dispatchMouseEvent", { ...params, type: "mouseReleased", x: state.x, y: state.y, button, buttons: 0, modifiers: 0 }); state.buttons.delete(button); }
+          try {
+            await authorizedNativeInput(state.debuggee, state.tabId!, state.runId!, "Input.dispatchMouseEvent", { ...params, type: "mouseReleased", x: state.x, y: state.y, button, buttons: 0, modifiers: 0 });
+            if (state.buttons.get(button) === params) state.buttons.delete(button);
+          }
           catch (error) { failures.push(String(error)); }
         }
         await chrome.debugger.sendCommand(state.debuggee, "Input.cancelDragging", {}).catch((error) => { failures.push(String(error)); });
@@ -296,7 +302,7 @@ chrome.runtime.onConnect.addListener((port) => {
           if (failures.length) await eventLogger.append({ type: "browser.input.release-failed", runId: state.runId, content: { tabId: state.tabId, debuggee: state.debuggee }, error: failures });
         }
       } finally {
-        heldInput.delete(inputKey);
+        if (heldInput.get(inputKey) === state && !state.keys.size && !state.buttons.size) heldInput.delete(inputKey);
         if (state.tabId !== undefined) await bypassPageGuard(state.tabId, false);
       }
     })();
@@ -368,6 +374,7 @@ chrome.runtime.onConnect.addListener((port) => {
         if (input && pointerGestures.has(tabId!)) keepGesture(tabId!);
         let succeeded = false;
         let persistedInput: (() => Promise<unknown>) | undefined;
+        let confirmRelease: (() => void) | undefined;
         try {
           if (!cleanup) { if (closed) throw new DOMException("Side Panel 已关闭", "AbortError"); runs.validate(message as RunIdentity); }
           if (input && ["Input.dispatchKeyEvent", "Input.dispatchMouseEvent"].includes(command)) {
@@ -378,7 +385,15 @@ chrome.runtime.onConnect.addListener((port) => {
             const params = args[2] ?? {};
             const beforeKeys = new Map(state.keys);
             const beforeButtons = new Map(state.buttons);
-            updateHeldInputState(state, command, params);
+            updateHeldInputState(state, command, params, true);
+            if (command === "Input.dispatchKeyEvent" && params.type === "keyUp" && typeof params.key === "string" && params.key) {
+              const key = params.key, previous = beforeKeys.get(key);
+              confirmRelease = () => { if (previous && state.keys.get(key) === previous) state.keys.delete(key); };
+            } else if (command === "Input.dispatchMouseEvent" && (params.type === "mouseReleased" || params.type === "mousePressed" && params.surfWaxAtomicClick)) {
+              const button = params.button ?? "left";
+              const previous = params.type === "mouseReleased" ? beforeButtons.get(button) : state.buttons.get(button);
+              confirmRelease = () => { if (previous && state.buttons.get(button) === previous) state.buttons.delete(button); };
+            }
             if (state.runId && (command === "Input.dispatchKeyEvent" || shouldPersistInputState(state, type))) {
               const saved = state;
               const record = (keys: Map<string, Record<string, any>>, buttons: Map<string, Record<string, any>>) => eventLogger.append({
@@ -415,7 +430,7 @@ chrome.runtime.onConnect.addListener((port) => {
               if (entry && entry.count > 1) entry.count--; else runtimeEvaluations.delete(evaluationKey);
             } }
           }
-          if (args[2]?.surfWaxAtomicClick) heldInput.get(JSON.stringify(debuggee))?.buttons.delete(args[2].button ?? "left");
+          confirmRelease?.();
           await persistedInput?.();
           succeeded = true;
         } finally {

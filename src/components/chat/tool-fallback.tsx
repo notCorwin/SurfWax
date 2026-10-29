@@ -2,10 +2,11 @@
 
 import { memo, useContext, useState } from "react";
 import { ActivityPhaseContext, toolActivity } from "./process-group";
+import { stringifyLogSafe } from "../../logging";
 
 function format(value: unknown): string {
   try {
-    return JSON.stringify(value, null, 2) ?? String(value);
+    return stringifyLogSafe(value, 2) ?? String(value);
   } catch {
     return String(value);
   }

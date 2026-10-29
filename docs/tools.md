@@ -41,7 +41,7 @@
 | `upload_file` | Upload one or more artifacts. Supply exactly one target or chooserId; chooser uploads cannot set tabId or background. |
 | `take_screenshot` | Capture a screenshot when visual input is enabled. |
 | `create_pdf` | Create a PDF artifact of the selected page. |
-| `read_artifact` | Read a stored artifact or large tool result by ID, including during a background job. Missing paths fail. Undefined is null with resultType=undefined; nested undefined and array holes are null with undefinedPaths and holePaths relative to the returned slice. Large results expose paged sidecar access. |
+| `read_artifact` | Read a stored artifact or large tool result by ID, including during a background job. Missing paths fail. Undefined is null with resultType=undefined; nested undefined and array holes are null with undefinedPaths and holePaths; non-finite numbers, negative zero and bigints use numberPaths and bigintPaths. Paths are relative to the returned slice; large results expose paged sidecar access. |
 | `create_text_artifact` | Store text as an internal artifact. |
 | `save_artifact` | Export an internal artifact to a file. |
 | `list_scripts` | List persisted user scripts and their state. |

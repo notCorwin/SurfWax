@@ -11,6 +11,7 @@ import {
 import { registerBackgroundRequest } from "./agent/coordinator";
 import { createModel, retryModelOperation } from "./agent/model";
 import type { ModelConfig } from "./types";
+import { normalizeRecoveredToolOutput } from "./tool-result-values";
 
 function visibleText(message: ConversationMessage | undefined): string {
   if (!message) return "";
@@ -116,7 +117,7 @@ function normalizeInterruptedMessage(message: ConversationMessage, events: reado
     if (!toolEvent && ["output-available", "output-error", "output-denied"].includes(String(value.state))) return [part];
     if (!toolEvent) return [{ ...value, state: "output-error", errorText: "工具调用已中断，此操作未执行。" }];
     return toolEvent.output !== undefined
-      ? [{ ...value, state: "output-available", output: fromLogValue(toolEvent.output, toolEvent.valueEncoding) }]
+      ? [{ ...value, state: "output-available", output: normalizeRecoveredToolOutput(fromLogValue(toolEvent.output, toolEvent.valueEncoding)) }]
       : [{ ...value, state: "output-error", errorText: String((fromLogValue(toolEvent.error, toolEvent.valueEncoding) as { message?: string })?.message ?? fromLogValue(toolEvent.error, toolEvent.valueEncoding) ?? "工具调用已中断。") }];
   });
   const metadata = message.metadata && typeof message.metadata === "object" && !Array.isArray(message.metadata)
@@ -140,7 +141,9 @@ export async function restoreConversationRepository(events: readonly LogEvent[])
     if (event.type !== "conversation.message") continue;
     const message = fromLogValue(event.content, event.valueEncoding);
     if (!isConversationMessage(message)) continue;
-    stored.set(message.id, { eventId: event.id, firstEventId: stored.get(message.id)?.firstEventId ?? event.id, runId: event.runId, parentId: event.parentId ?? null, message });
+    const parts = message.parts.map((part) => part && typeof part === "object" && "toolCallId" in part && "output" in part
+      ? { ...part, output: normalizeRecoveredToolOutput(part.output) } : part);
+    stored.set(message.id, { eventId: event.id, firstEventId: stored.get(message.id)?.firstEventId ?? event.id, runId: event.runId, parentId: event.parentId ?? null, message: { ...message, parts } });
   }
   for (const terminal of events.filter((event) => event.runId && (event.type === "conversation.aborted" || event.type === "conversation.failed"))) {
     if (completedRuns.has(terminal.runId!)) continue;
