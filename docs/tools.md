@@ -39,7 +39,7 @@
 | `upload_file` | Upload one or more artifacts. Supply exactly one target or chooserId; chooser uploads cannot set tabId or background. |
 | `take_screenshot` | Capture a screenshot when visual input is enabled. |
 | `create_pdf` | Create a PDF artifact of the selected page. |
-| `read_artifact` | Read a stored artifact or large tool result by ID. |
+| `read_artifact` | Read a stored artifact or large tool result by ID, including while a background job runs. |
 | `create_text_artifact` | Store text as an internal artifact. |
 | `save_artifact` | Export an internal artifact to a file. |
 | `list_scripts` | List persisted user scripts and their state. |
@@ -62,7 +62,7 @@
 | `handle_dialog` | Respond to a captured dialog by ID. prompt is allowed only when accepting a prompt dialog. An uncertain response must not be blindly retried. |
 | `read_api_reference` | Read the available execute_program capabilities and usage details. |
 | `execute_program` | Execute an async JavaScript body with page, browser, net, protocol, artifacts, emit, check, sleep and signal. Use for loops, conditions, event subscriptions and complex multi-step tasks. Call read_api_reference for the complete API. background=true starts a job. Set timeoutMs to accommodate the entire program. Effects are not automatically retried; inspect uncertain outcomes. |
-| `list_jobs` | List jobs belonging to the current conversation. |
+| `list_jobs` | List jobs in creation order in a fixed snapshot. limit defaults to 25, max 100. If hasMore, pass nextCursor to continue; cursor expires on log maintenance. Job state is as of the first page; get_job reads current state. |
 | `get_job` | Read status and paginated receipts for a job. waitMs waits for receipts after the supplied canonical event cursor or for completion; unread receipts return immediately. A running job is not complete. |
 | `cancel_job` | Cancel a job in the current conversation. Cancellation does not roll back dispatched effects. |
 
@@ -91,9 +91,9 @@ artifacts.read(id,{path?,offset?,limit?}); text(filename,text,mimeType?,save=fal
 
 ## 任务、回执与恢复
 
-后台执行返回 queued/accepted，不代表完成。`list_jobs`、`get_job` 和 `cancel_job` 管理任务；回执使用 canonical event ID 分页。已完成的动作表示操作返回，业务结果需要单独验证。程序内的动作按顺序执行，事件应在触发动作前订阅。原生对话框与选择器的回复可在等待中的点击期间执行。
+后台执行返回 queued/accepted，不代表完成。`list_jobs`、`get_job` 和 `cancel_job` 管理任务；`list_jobs` 默认每页 25 条，最多 100 条；返回 nextCursor 时可继续读取固定快照，日志维护后游标失效，`get_job` 则读取最新状态。回执使用 canonical event ID 分页。已完成的动作表示操作返回，业务结果需要单独验证。程序内的动作按顺序执行，事件应在触发动作前订阅。原生对话框与选择器的回复可在等待中的点击期间执行。
 
-独立工具可通过 `subscribe_event`、`wait_event` 和 `unsubscribe_event` 接收运行内事件。处理原生对话框时，先订阅，再以 `background=true` 触发动作，取得 dialogId 后调用 `handle_dialog`，最后用 `get_job` 确认作业终态。处理文件选择器时先订阅并触发，再用返回的 chooserId 和已有产物调用 `upload_file`。未确认终态的后台作业会阻止新的排队浏览器动作；事件等待、对话框与文件选择器应答及作业查询仍可执行。
+独立工具可通过 `subscribe_event`、`wait_event` 和 `unsubscribe_event` 接收运行内事件。处理原生对话框时，先订阅，再以 `background=true` 触发动作，取得 dialogId 后调用 `handle_dialog`，最后用 `get_job` 确认作业终态。处理文件选择器时先订阅并触发，再用返回的 chooserId 和已有产物调用 `upload_file`。前台操作遇到弹窗可能返回 blocked 任务；程序可能仍在自行处理该弹窗，可先查询作业，再按需回应并确认终态。未确认终态的后台作业会阻止新的排队浏览器动作；事件等待、对话框与文件选择器应答、作业查询和读取已有产物仍可执行。较大回执提供可直接传给 `read_artifact` 的 access；终态结果另有 resultAccess。
 
 取消会销毁 Worker、撤销能力、清理浏览器输入和监听器。已经派发的操作可能有未知效果，不会回滚或盲目重试。关闭侧栏会取消全部作业；宿主丢失后持久记录变为 interrupted，不恢复任意 JavaScript 调用栈或自动重放。状态、回执与产物来自同一个 canonical event log。
 

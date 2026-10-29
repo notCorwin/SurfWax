@@ -156,7 +156,7 @@ export class ToolScheduler {
     const dialogDependencies: DialogFence[] = [];
     for (const call of calls) {
       if (call.providerExecuted) continue;
-      const nonblockingRead = call.toolName === "list_downloads" && batch.backgroundJobId !== undefined;
+      const nonblockingRead = (call.toolName === "list_downloads" || call.toolName === "read_artifact") && batch.backgroundJobId !== undefined;
       if ((bypass.has(call.toolName ?? "") || nonblockingRead) && !call.invalid && call.toolName && this.names.has(call.toolName)) {
         batch.bypassIds.add(call.toolCallId!);
         continue;

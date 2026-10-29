@@ -207,6 +207,18 @@ test("composes same-process and cross-origin frames, chooser replies, native dia
       await configure(opened.context, opened.page, provider.baseURL)
     ).close();
     await nameCurrentConversation(opened.page, "Program capabilities");
+    let jobId = "", polls = 0;
+    let completed: any;
+    const poll: MockResponse = (request) => {
+      const job = lastTool(request);
+      if (job.terminal) {
+        expect(job).toMatchObject({ ok: true, state: "succeeded" });
+        completed = job;
+        return textResponse("CAPABILITIES_VERIFIED");
+      }
+      responses.unshift(poll);
+      return commandResponse("get_job", { jobId, after: job.nextCursor, limit: 1, waitMs: 10_000 }, `capabilities-poll-${++polls}`);
+    };
     responses.push(
       commandResponse(
         "execute_program",
@@ -243,7 +255,16 @@ return await artifacts.save(artifact.id);
         },
         "all-capabilities",
       ),
-      textResponse("CAPABILITIES_VERIFIED"),
+      (request: any) => {
+        const result = lastTool(request);
+        if (result.state === "blocked") {
+          jobId = result.jobId;
+          responses.unshift(poll);
+          return commandResponse("get_job", { jobId, limit: 1 }, "capabilities-job");
+        }
+        completed = result;
+        return textResponse("CAPABILITIES_VERIFIED");
+      },
     );
     await target.bringToFront();
     await submit(opened.page);
@@ -273,13 +294,7 @@ return await artifacts.save(artifact.id);
     expect(
       saves.filter((event) => event.content.state === "dispatched-unknown"),
     ).toHaveLength(1);
-    expect(
-      events.find(
-        (event) =>
-          event.type === "tool.finished" &&
-          event.toolCallId === "all-capabilities",
-      ).output,
-    ).toMatchObject({
+    expect(completed).toMatchObject({
       ok: true,
       result: { artifact: { saved: true, downloadId: expect.any(Number) } },
     });

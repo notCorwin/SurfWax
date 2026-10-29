@@ -4,7 +4,7 @@ import { MockLanguageModelV4 } from "ai/test";
 import { z } from "zod";
 import { ToolScheduler } from "./tool-scheduler";
 
-const names = ["click", "fill", "inspect_page", "verify_state", "switch_tab", "key_up", "execute_program", "get_job", "cancel_job", "subscribe_event", "wait_event", "handle_dialog", "upload_file", "list_downloads", "read_api_reference"];
+const names = ["click", "fill", "inspect_page", "verify_state", "switch_tab", "key_up", "execute_program", "get_job", "cancel_job", "subscribe_event", "wait_event", "handle_dialog", "upload_file", "list_downloads", "read_artifact", "read_api_reference"];
 const call = (toolCallId: string, toolName: string, input: unknown = {}, extra = {}) => ({ type: "tool-call", toolCallId, toolName, input, ...extra });
 function latch() {
   let release!: () => void;
@@ -108,6 +108,24 @@ describe("model response tool scheduling", () => {
     await dialog;
     await expect(chooser).rejects.toMatchObject({ code: "dialog-response-failed" });
     expect(work).not.toHaveBeenCalled();
+  });
+
+  it("reads an existing artifact during a pending background job", async () => {
+    const scheduler = new ToolScheduler(names, () => ["job"]);
+    scheduler.prepare([call("artifact", "read_artifact", { artifactId: 7 }), call("write", "click")], 1);
+    await expect(scheduler.run("artifact", async () => ({ ok: true, result: "partial" }))).resolves.toMatchObject({ result: "partial" });
+    await expect(scheduler.run("write", async () => "wrong")).rejects.toMatchObject({ code: "background-job-pending" });
+  });
+
+  it("orders artifact reads after earlier writes when no background job is pending", async () => {
+    const scheduler = new ToolScheduler(names);
+    scheduler.prepare([call("write", "click"), call("artifact", "read_artifact", { artifactId: 7 })], 1);
+    const gate = latch(); const order: string[] = [];
+    const write = scheduler.run("write", async () => { order.push("write"); await gate.promise; return { ok: true }; });
+    const read = scheduler.run("artifact", async () => { order.push("artifact"); return { ok: true }; });
+    await vi.waitFor(() => expect(order).toEqual(["write"]));
+    gate.release(); await Promise.all([write, read]);
+    expect(order).toEqual(["write", "artifact"]);
   });
 
   it("does not bypass the background fence for target-based upload", async () => {

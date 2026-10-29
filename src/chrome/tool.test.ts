@@ -4,6 +4,7 @@ import { EventLogger, type LogEvent } from "../logging";
 import { parseLocatorTarget, ChromeExecutor } from "./executor";
 import { compactToolResult, createProgramTools, prepareToolMessages, repairProgramToolCall, PROGRAM_TOOL_REGISTRY, PROGRAM_TOOL_CONTEXT } from "./tool";
 import { callUserScript } from "./script-client";
+import { ToolScheduler } from "./tool-scheduler";
 
 describe("browser tools", () => {
   it.each(["screenshot", "pdf", "save"])("retains a %s artifact when the abort race settles before its underlying work", async (operation) => {
@@ -71,6 +72,37 @@ describe("browser tools", () => {
     await expect(pending).resolves.toMatchObject({ $ref: 7, access: { path: ["result"] } });
     expect(append).toHaveBeenCalledWith(expect.objectContaining({ type: "tool.result.data", runId: "run", toolCallId: "1:call", toolCallIdCanonical: true }));
   });
+  it("reads a conversation-owned artifact while browser work is blocked", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: {
+      append: async (event) => { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+      all: async () => [...events], clear: async () => { events.length = 0; },
+    } });
+    const artifact = await logger.append({ type: "tool.result.data", conversationId: "c", output: { text: "partial result" } });
+    const foreign = await logger.append({ type: "tool.result.data", conversationId: "other", output: { text: "secret" } });
+    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
+    let release!: () => void; (executor as any).tail = new Promise<void>((resolve) => { release = resolve; });
+    const scheduler = new ToolScheduler(PROGRAM_TOOL_REGISTRY.map(({ name }) => name), () => ["job"]);
+    const tools = createProgramTools(executor, { logger, conversationId: "c", scheduler }) as Record<string, any>;
+    scheduler.prepare([{ type: "tool-call", toolCallId: "read", toolName: "read_artifact", input: { artifactId: artifact!.id } }]);
+    await expect(tools.read_artifact.execute({ artifactId: artifact!.id, path: ["text"], offset: 0, limit: 7 }, { toolCallId: "read" })).resolves.toEqual({ ok: true, result: "partial" });
+    scheduler.prepare([{ type: "tool-call", toolCallId: "foreign", toolName: "read_artifact", input: { artifactId: foreign!.id } }]);
+    await expect(tools.read_artifact.execute({ artifactId: foreign!.id }, { toolCallId: "foreign" })).resolves.toMatchObject({ ok: false, error: { message: expect.stringContaining("unavailable") } });
+    release(); executor.dispose();
+  });
+
+  it("cancels a stalled artifact read when only the run signal is aborted", async () => {
+    const logger = { result: vi.fn(() => new Promise(() => {})), append: vi.fn(async () => ({ id: 1 })) } as unknown as EventLogger;
+    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
+    const run = new AbortController();
+    const tools = createProgramTools(executor, { conversationId: "c", runSignal: run.signal }) as Record<string, any>;
+    const result = tools.read_artifact.execute({ artifactId: 1 }, { toolCallId: "read" });
+    await vi.waitFor(() => expect(logger.result).toHaveBeenCalled());
+    run.abort("run cancelled");
+    await expect(result).resolves.toMatchObject({ ok: false, error: { code: "aborted" } });
+    executor.dispose();
+  });
+
   it("registers individual action tools in stable order without old tool aliases", () => {
     const tools = createProgramTools({} as ChromeExecutor) as Record<string, any>;
     expect(Object.keys(tools)).toEqual(PROGRAM_TOOL_REGISTRY.map(({ name }) => name));
@@ -190,7 +222,7 @@ describe("browser tools", () => {
     await tools.get_job.execute({ jobId: "j", after: 2, waitMs: 100 }, { toolCallId: "get" });
     await tools.cancel_job.execute({ jobId: "j" }, { toolCallId: "cancel" });
     expect(queryJobs.mock.calls.map(([input]) => input)).toEqual([
-      { action: "list" },
+      { action: "list", limit: undefined, cursor: undefined },
       { action: "wait", id: "j", after: 2, limit: undefined, waitMs: 100 },
       { action: "cancel", id: "j" },
     ]);
@@ -238,7 +270,7 @@ describe("browser tools", () => {
     const logger = { append: async (event: any) => { appended.push(event); return { ...event, id: 9 }; } } as EventLogger;
     const value = { snapshot: "x".repeat(9_000) };
     await expect(compactToolResult(value, { logger, conversationId: "c", toolCallId: "t" })).resolves.toMatchObject({
-      $ref: 9, bytes: expect.any(Number), preview: "x".repeat(4000), access: { id: 9, path: ["snapshot"], offset: 0, limit: 4000 },
+      $ref: 9, bytes: expect.any(Number), preview: "x".repeat(4000), access: { artifactId: 9, path: ["snapshot"], offset: 0, limit: 4000 },
     });
     expect(appended).toHaveLength(1);
     expect(appended[0].output).toBe(value);
@@ -258,11 +290,22 @@ describe("browser tools", () => {
     expect(JSON.stringify(result)).not.toContain("x".repeat(100));
   });
 
+  it("bounds previews of nested large receipts and keeps the original event accessible", async () => {
+    const appended: any[] = [];
+    const logger = { append: async (event: any) => { appended.push(event); return { ...event, id: 15 }; } } as EventLogger;
+    const value = { ok: true, result: [{ operation: "emit", output: "large".repeat(20_000) }] };
+    const result = await compactToolResult(value, { logger }) as any;
+    expect(result).toMatchObject({ $ref: 15, access: { artifactId: 15, path: ["result"], offset: 0, limit: 50 } });
+    expect(new TextEncoder().encode(JSON.stringify(result.preview)).byteLength).toBeLessThanOrEqual(4096);
+    expect(JSON.stringify(result.preview)).not.toContain("large".repeat(100));
+    expect(appended[0].output).toBe(value);
+  });
+
   it("keeps terminal job status and cursor visible without repeating large receipt payloads", async () => {
     const logger = { append: async (event: any) => ({ ...event, id: 12 }) } as EventLogger;
-    const value = { id: "job", state: "succeeded", terminal: true, ok: true, nextCursor: 42, hasMore: false, events: [{ output: "x".repeat(10_000) }] };
+    const value = { id: "job", state: "succeeded", terminal: true, ok: true, result: "done", nextCursor: 42, hasMore: false, events: [{ output: "x".repeat(10_000) }] };
     const result = await compactToolResult(value, { logger, preserveJobStatus: true });
-    expect(result).toMatchObject({ $ref: 12, id: "job", state: "succeeded", terminal: true, ok: true, nextCursor: 42, hasMore: false, preview: { eventCount: 1 } });
+    expect(result).toMatchObject({ $ref: 12, id: "job", state: "succeeded", terminal: true, ok: true, nextCursor: 42, hasMore: false, preview: { eventCount: 1 }, access: { artifactId: 12, path: ["events"], offset: 0, limit: 50 }, resultAccess: { artifactId: 12, path: ["result"], offset: 0, limit: 4000 } });
     expect(JSON.stringify(result)).not.toContain("x".repeat(100));
   });
 

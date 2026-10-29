@@ -20,8 +20,9 @@ test("selects large tool output without creating another reference", async () =>
       toolResponse("return { url: 'https://example.com', snapshot: 'LARGE_START' + 'zx'.repeat(6000) }", "call-large"),
       (request) => {
         const message = request.messages.findLast((entry: any) => entry.role === "tool");
-        const ref = JSON.parse(message.content).$ref;
-        return commandResponse("execute_program", { code: `return await artifacts.read(${JSON.stringify(ref)}, {path:["result","snapshot"],offset:0,limit:11});` }, "call-select-large");
+        const output = JSON.parse(message.content);
+        expect(output.access.artifactId).toBe(output.$ref);
+        return commandResponse("read_artifact", { ...output.access, limit: 11 }, "call-select-large");
       },
       textResponse("DONE_COMPACT"),
       textResponse("引用测试"),
@@ -143,6 +144,51 @@ test("uploads a stored artifact through an independent tool", async () => {
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
+});
+
+test("reads an incremental artifact while its background program is still running", async () => {
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/automation`);
+    let jobId = "", count = 0;
+    const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
+    const readProgress: MockResponse = (request) => {
+      const job = lastTool(request);
+      expect(job, JSON.stringify(job)).toHaveProperty("events");
+      const emitted = job.events.find((event: any) => event.operation === "emit" && event.output?.artifactId);
+      if (emitted) {
+        expect(job.terminal).toBe(false);
+        return commandResponse("read_artifact", { artifactId: emitted.output.artifactId, path: ["base64"] }, "read-running-artifact");
+      }
+      expect(job.terminal).toBe(false);
+      responses.unshift(readProgress);
+      return commandResponse("get_job", { jobId, after: job.nextCursor, waitMs: 10_000 }, `wait-artifact-progress-${++count}`);
+    };
+    const readCancelled: MockResponse = (request) => {
+      const job = lastTool(request);
+      if (job.terminal) { expect(job.state).toBe("cancelled"); return textResponse("RUNNING_ARTIFACT_OK"); }
+      responses.unshift(readCancelled);
+      return commandResponse("get_job", { jobId, after: job.nextCursor, waitMs: 10_000 }, `wait-artifact-cancel-${++count}`);
+    };
+    responses.push(
+      commandResponse("execute_program", { code: "const file = await artifacts.text('partial.txt', 'partial data'); await emit({artifactId:file.id}); await sleep(30000);", background: true, timeoutMs: 60000 }, "start-artifact-job"),
+      (request) => { jobId = lastTool(request).jobId; return commandResponse("get_job", { jobId, waitMs: 10_000 }, "get-artifact-progress"); },
+      readProgress,
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: "cGFydGlhbCBkYXRh" }); return commandResponse("cancel_job", { jobId }, "cancel-artifact-job"); },
+      readCancelled,
+      textResponse("读取任务的中间产物"),
+    );
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("read the partial artifact before the task finishes");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("RUNNING_ARTIFACT_OK", { timeout: 30_000 });
+    const events = await readEvents(opened.page);
+    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "read-running-artifact")?.output).toMatchObject({ ok: true, result: "cGFydGlhbCBkYXRh" });
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
 test("uploads multiple artifacts to a chooser across independent tool calls", async () => {
@@ -1155,7 +1201,7 @@ for (const format of ["legacy-user-tools", "system-tools"] as const) test(`conti
     expect(events.some(event => event.type === "automation.action.started" && event.toolCallId === "removed-old-entry")).toBe(false);
     expect(events.find(event => event.type === "tool.finished" && event.toolCallId === "current-entry")?.output).toMatchObject({ ok: true, state: "succeeded", result: 1 });
     expect(events.some(event => event.type === "browser.job.progress" && event.toolCallId === "current-entry" && event.content.operation === "check" && event.content.state === "verified")).toBe(true);
-    expect(events.filter(event => event.type === "context.prompt.updated").at(-1)?.content).toMatchObject({ migratedFrom: "formal-49-v2", prompt: { catalogVersion: "atomic-tools-v3", format: "system-tools" } });
+    expect(events.filter(event => event.type === "context.prompt.updated").at(-1)?.content).toMatchObject({ migratedFrom: "formal-49-v2", prompt: { catalogVersion: "atomic-tools-v4", format: "system-tools" } });
     const requests = provider.requests.filter(request => request.tools);
     expect(requests).toHaveLength(3);
     for (const request of requests) expect(request.tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "execute_program", "list_jobs", "get_job", "cancel_job"]));

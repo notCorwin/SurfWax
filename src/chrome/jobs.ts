@@ -14,6 +14,7 @@ export type JobQuery = {
   after?: number;
   limit?: number;
   waitMs?: number;
+  cursor?: string;
 };
 type LiveJob = {
   controller: AbortController;
@@ -21,6 +22,28 @@ type LiveJob = {
   conversationId: string;
 };
 const terminal = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
+type JobListCursor = { v: 1; conversationId: string; epoch: string; upper: number; after: number };
+const LIST_LIMIT = 25;
+const MAX_LIST_LIMIT = 100;
+
+function encodeListCursor(cursor: JobListCursor): string {
+  return btoa(encodeURIComponent(JSON.stringify(cursor)));
+}
+function decodeListCursor(value: string, conversationId: string): JobListCursor {
+  try {
+    if (value.length > 4096) throw new Error("too long");
+    const cursor = JSON.parse(decodeURIComponent(atob(value))) as JobListCursor;
+    if (!cursor || cursor.v !== 1 || cursor.conversationId !== conversationId || typeof cursor.epoch !== "string"
+      || !Number.isSafeInteger(cursor.upper) || cursor.upper < 0 || !Number.isSafeInteger(cursor.after)
+      || cursor.after < 0 || cursor.after > cursor.upper) throw new Error("invalid cursor");
+    return cursor;
+  } catch {
+    throw Object.assign(new Error("Invalid job list cursor for this conversation"), { code: "invalid-job-cursor" });
+  }
+}
+function expiredListCursor(): Error {
+  return Object.assign(new Error("Job list snapshot expired after log maintenance; start a new list"), { code: "job-cursor-expired" });
+}
 type StateEntry = {
   id: number;
   state: string;
@@ -28,6 +51,7 @@ type StateEntry = {
   toolCallId?: string;
 };
 type ProjectedJob = {
+  queuedId?: number;
   state?: StateEntry;
   lastEventId: number;
   eventIds: number[] | null;
@@ -231,6 +255,7 @@ export class BrowserJobs {
       event.type === "browser.job.state" &&
       typeof content.state === "string"
     ) {
+      if (content.state === "queued" && job.queuedId === undefined) job.queuedId = event.id;
       job.state = {
         id: event.id,
         state: content.state,
@@ -472,6 +497,43 @@ export class BrowserJobs {
     }
   }
 
+  /** List one snapshot page in creation order with only page-sized state in memory. */
+  private async listPage(conversationId: string, epoch: string, upper: number, after: number, limit: number, signal?: AbortSignal): Promise<{ jobs: { id: string; state: string }[]; hasMore: boolean; nextCursor?: string } | null> {
+    const selected = new Map<string, { id: string; state: string; created: number }>();
+    let cursor = after;
+    let hasMore = false;
+    while (cursor < upper) {
+      signal?.throwIfAborted();
+      const page = await this.logger!.jobEventsSince(conversationId, cursor);
+      signal?.throwIfAborted();
+      if (page.epoch !== epoch) return null;
+      for (const event of page.events) {
+        if (event.id > upper) break;
+        cursor = event.id;
+        if (event.type !== "browser.job.state") continue;
+        const content = fromLogValue(event.content) as { jobId?: unknown; state?: unknown } | null;
+        if (typeof content?.jobId !== "string" || typeof content.state !== "string") continue;
+        let job = selected.get(content.jobId);
+        // BrowserJobs.start persists one queued state before any other state.
+        // Its unique event ID provides a stable creation-order pagination key.
+        if (!job && content.state === "queued" && !hasMore) {
+          if (selected.size === limit) hasMore = true;
+          else {
+            job = { id: content.jobId, state: content.state, created: event.id };
+            selected.set(content.jobId, job);
+          }
+        }
+        if (job) job.state = content.state;
+      }
+      if (!page.hasMore || !page.events.length || cursor >= upper || page.events.at(-1)!.id > upper) break;
+    }
+    if (!await this.logger!.jobEventsByIds(conversationId, [], epoch)) return null;
+    signal?.throwIfAborted();
+    const entries = [...selected.values()];
+    return { jobs: entries.map(({ id, state }) => ({ id, state })), hasMore,
+      ...(hasMore ? { nextCursor: encodeListCursor({ v: 1, conversationId, epoch, upper, after: entries.at(-1)!.created }) } : {}) };
+  }
+
   async query(
     input: JobQuery,
     conversationId: string,
@@ -511,21 +573,34 @@ export class BrowserJobs {
         const epoch = projection.epoch!;
         const upper = projection.cursor;
         if (input.action === "list") {
-          if (!projection.historyEvicted) {
-            return { jobs: [...projection.jobs].flatMap(([id, job]) =>
-              job.state ? [{ id, state: job.state.state }] : [],
-            ) };
+          const limit = input.limit ?? LIST_LIMIT;
+          if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_LIST_LIMIT) throw new Error("Job list limit must be between 1 and 100");
+          const continuation = input.cursor === undefined ? undefined : decodeListCursor(input.cursor, conversationId);
+          if (continuation && continuation.epoch !== epoch) throw expiredListCursor();
+          const snapshotEpoch = continuation?.epoch ?? epoch;
+          const snapshotUpper = continuation?.upper ?? upper;
+          // A complete in-memory projection already reflects this high-water
+          // mark; reuse it for the first page instead of rereading history.
+          if (!continuation && !projection.historyEvicted) {
+            const entries: { id: string; state: string; created: number }[] = [];
+            for (const [id, job] of projection.jobs) {
+              if (job.state && job.queuedId !== undefined) entries.push({ id, state: job.state.state, created: job.queuedId });
+              if (entries.length > limit) break;
+            }
+            const hasMore = entries.length > limit;
+            if (hasMore) entries.pop();
+            const result = { jobs: entries.map(({ id, state }) => ({ id, state })), hasMore,
+              ...(hasMore ? { nextCursor: encodeListCursor({ v: 1, conversationId, epoch, upper, after: entries.at(-1)!.created }) } : {}) };
+            if (!await this.logger!.jobEventsByIds(conversationId, [], epoch)) continue;
+            signal?.throwIfAborted();
+            return result;
           }
-          // The existing list contract returns all jobs, so the result itself
-          // is necessarily proportional to history; do not retain it as an index.
-          const states = new Map<string, string>();
-          const valid = await this.scan(conversationId, epoch, upper, signal, (event) => {
-            if (event.type !== "browser.job.state") return;
-            const content = fromLogValue(event.content) as { jobId?: unknown; state?: unknown } | null;
-            if (typeof content?.jobId === "string" && typeof content.state === "string") states.set(content.jobId, content.state);
-          });
-          if (!valid) continue;
-          return { jobs: [...states].map(([id, state]) => ({ id, state })) };
+          const result = await this.listPage(conversationId, snapshotEpoch, snapshotUpper, continuation?.after ?? -1, limit, signal);
+          if (!result) {
+            if (continuation) throw expiredListCursor();
+            continue;
+          }
+          return result;
         }
         const id = input.id;
         let job = id ? projection.jobs.get(id) : undefined;
@@ -628,6 +703,12 @@ export class BrowserJobs {
     } finally {
       unsubscribe?.();
     }
+  }
+
+  /** Wait only for the local execution owner to exit; this does not read job state. */
+  waitForOwner(id: string, conversationId: string): Promise<void> {
+    const owner = this.live.get(id);
+    return owner?.conversationId === conversationId ? owner.done : Promise.resolve();
   }
 
   /** Await terminal completion without repeatedly waking on every progress receipt. */

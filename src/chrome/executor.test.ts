@@ -91,6 +91,8 @@ describe("ChromeExecutor programs", () => {
     const reads = vi.spyOn(h.logger, "jobEvents");
     expect(await h.run()).toMatchObject({ ok: true, state: "succeeded", result: "finished" });
     expect(reads.mock.calls.length).toBeLessThanOrEqual(3);
+    const binding = h.events.find((event) => event.type === "browser.job.progress" && (fromLogValue(event.content) as any)?.operation === "page.bind" && (fromLogValue(event.content) as any)?.state === "completed");
+    expect(fromLogValue(binding?.output)).toEqual({ tabId: 41 });
     h.executor.dispose();
   });
   it.each(["screenshot", "pdf"] as const)("saves %s after durable capture through the program facade", async (name) => {
@@ -320,6 +322,73 @@ describe("ChromeExecutor programs", () => {
     expect(pageValue).not.toHaveBeenCalled(); world = "MAIN";
     expect(await h.run()).toMatchObject({ ok: false, result: { error: { message: "page failed" } } }); expect(pageValue).toHaveBeenCalledTimes(1); h.executor.dispose();
   });
+  it.each([
+    ["queued", "tool", false], ["running", "tool", false],
+    ["queued", "run", false], ["running", "run", false],
+    ["queued", "tool", true], ["queued", "run", true],
+  ] as const)("returns on %s persistence stalled when the %s is cancelled (background=%s)", async (state, source, background) => {
+    const host = vi.fn(async () => "unexpected");
+    const h = programHarness(host);
+    if (background) await h.executor.beginRun();
+    const append = h.logger.append.bind(h.logger);
+    let resume!: () => void; let notify!: () => void;
+    const held = new Promise<void>((resolve) => { resume = resolve; });
+    const entered = new Promise<void>((resolve) => { notify = resolve; });
+    vi.spyOn(h.logger, "append").mockImplementation(async (record) => {
+      if (record.type === "browser.job.state" && (record.content as any)?.state === state) { notify(); await held; }
+      return append(record);
+    });
+    const tool = new AbortController(); const run = new AbortController();
+    const pending = h.executor.runProgram({ code: "test", background }, tool.signal, {
+      conversationId: "conversation", runSignal: run.signal,
+      logIdentity: { runId: "run", toolCallId: "1:test", toolCallIdCanonical: true },
+    });
+    await entered;
+    (source === "tool" ? tool : run).abort("cancelled");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(host).not.toHaveBeenCalled();
+    resume();
+    await h.executor.endRun();
+    expect(host).not.toHaveBeenCalled();
+    expect(h.executor.pendingBackgroundJobs()).toEqual([]);
+    expect(h.events.filter((event) => event.type === "browser.job.state").map((event) => (fromLogValue(event.content) as any).state)).toContain("cancelled");
+    h.executor.dispose();
+  });
+
+  it("detaches the tool signal after background acceptance while keeping the run signal", async () => {
+    let release!: () => void;
+    const h = programHarness(async (_caps, signal) => { await new Promise<void>((resolve) => { release = resolve; }); signal.throwIfAborted(); return "done"; });
+    await h.executor.beginRun();
+    const tool = new AbortController(); const run = new AbortController();
+    const accepted = await h.executor.runProgram({ code: "test", background: true }, tool.signal, {
+      conversationId: "conversation", runSignal: run.signal,
+      logIdentity: { runId: "run", toolCallId: "1:test", toolCallIdCanonical: true },
+    }) as any;
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    tool.abort(); release();
+    await expect((h.executor as any).jobs.completion(accepted.jobId, "conversation")).resolves.toMatchObject({ state: "succeeded" });
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("cancels an accepted background job when its run signal aborts", async () => {
+    let started!: () => void;
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const h = programHarness(async (_caps, signal) => {
+      started();
+      await new Promise<void>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    });
+    await h.executor.beginRun();
+    const run = new AbortController();
+    const accepted: any = await h.executor.runProgram({ code: "test", background: true }, undefined, {
+      conversationId: "conversation", runSignal: run.signal,
+      logIdentity: { runId: "run", toolCallId: "1:test", toolCallIdCanonical: true },
+    });
+    await ready;
+    run.abort("cancel-run");
+    await expect((h.executor as any).jobs.completion(accepted.jobId, "conversation")).resolves.toMatchObject({ state: "cancelled", terminal: true });
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
   it("does not start queued programs when their owner aborts", async () => {
     const controller = new AbortController(); let finish!: () => void; const host = vi.fn(async (_caps: any, signal: AbortSignal) => { await new Promise<void>(resolve => { finish = resolve; }); signal.throwIfAborted(); });
     const h = programHarness(host); const first = h.run(controller.signal); const second = h.run(controller.signal);
@@ -1165,7 +1234,7 @@ describe("foreground dialog handoff", () => {
     await h.executor.endRun(); h.executor.dispose();
   });
 
-  it("lets an in-program dialog subscription handle the dialog without handing off", async () => {
+  it("lets an in-program dialog subscription complete after a blocked handoff", async () => {
     let send!: (event: unknown) => void; let finish!: () => void;
     const h = programHarness(async ({ page }) => {
       const dialog = page.waitForEvent("dialog");
@@ -1181,10 +1250,118 @@ describe("foreground dialog handoff", () => {
     await vi.waitFor(() => { expect(send).toBeTypeOf("function"); expect(finish).toBeTypeOf("function"); });
     await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.javascriptDialogOpening", { type: "confirm", message: "open" });
     send({ accept: async () => undefined });
-    expect(await pending).toMatchObject({ ok: true, state: "succeeded", result: "done" });
+    const result: any = await pending;
+    expect(result).toMatchObject({ accepted: true, state: "blocked" });
+    await vi.waitFor(async () => expect(await h.executor.queryJobs({ action: "status", id: result.jobId }, undefined, context)).toMatchObject({ terminal: true, ok: true, result: "done" }));
     await h.executor.endRun(); h.executor.dispose();
   });
 
+
+  it("hands off when a program abandons its dialog waiter", async () => {
+    let finish!: () => void;
+    const h = programHarness(async ({ page }) => {
+      void page.waitForEvent("dialog").catch(() => undefined);
+      return page.goto("https://example.test");
+    });
+    h.raw.waitForEvent = (kind: string) => (h.executor as any).automation.waitForEvent(41, kind);
+    h.raw.goto = vi.fn(async () => { await (h.executor as any).programScope.dispatched(); await new Promise<void>(resolve => { finish = resolve; }); return "done"; });
+    h.fake.debuggerApi.sendCommand.mockImplementation(async (_source, method) => { if (method === "Page.handleJavaScriptDialog") finish(); return {}; });
+    await h.executor.beginRun();
+    const pending = h.executor.runProgram({ code: "test" }, undefined, context);
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    const params = { type: "confirm", message: "open" };
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.javascriptDialogOpening", params);
+    (h.executor as any).automation.handleEvent({ tabId: 41 }, "Page.javascriptDialogOpening", params);
+    const result: any = await pending;
+    expect(result).toMatchObject({ accepted: true, state: "blocked", blockedBy: { kind: "dialog" } });
+    await h.executor.handleDialog({ dialogId: result.blockedBy.dialogId, accept: true }, undefined, context);
+    await vi.waitFor(async () => expect(await h.executor.queryJobs({ action: "status", id: result.jobId }, undefined, context)).toMatchObject({ terminal: true, ok: true, result: "done" }));
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it.each([false, true])("binds a program dialog response to the observed child session (background=%s)", async (background) => {
+    let finish!: () => void;
+    const h = programHarness(async ({ page }) => {
+      const waiting = page.waitForEvent("dialog");
+      const action = page.goto("https://example.test");
+      await (await waiting).accept("answer");
+      return action;
+    });
+    h.raw.waitForEvent = (kind: string) => (h.executor as any).automation.waitForEvent(41, kind);
+    h.raw.goto = vi.fn(async () => { await (h.executor as any).programScope.dispatched(); await new Promise<void>(resolve => { finish = resolve; }); return "done"; });
+    h.fake.debuggerApi.sendCommand.mockImplementation(async (_source, method) => { if (method === "Page.handleJavaScriptDialog") finish(); return {}; });
+    await h.executor.beginRun();
+    const pending = h.executor.runProgram({ code: "test", background }, undefined, context);
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    const source = { tabId: 41, sessionId: "child" };
+    const params = { type: "prompt", message: "open" };
+    await (h.executor as any).handleCommandEvent(source, "Page.javascriptDialogOpening", params);
+    (h.executor as any).automation.handleEvent(source, "Page.javascriptDialogOpening", params);
+    const result: any = await pending;
+    if (result.state === "blocked" || result.state === "queued") await vi.waitFor(async () => expect(await h.executor.queryJobs({ action: "status", id: result.jobId }, undefined, context)).toMatchObject({ terminal: true, ok: true, result: "done" }));
+    else expect(result).toMatchObject({ ok: true, result: "done" });
+    expect(h.fake.debuggerApi.sendCommand).toHaveBeenCalledWith(source, "Page.handleJavaScriptDialog", { accept: true, promptText: "answer" });
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("allows only one dispatch when program and external dialog replies race", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    await h.executor.subscribeEvent({ kind: "dialog" }, undefined, context);
+    (h.executor as any).activeContext = context;
+    const automation = (h.executor as any).automation;
+    const waiting = automation.waitForEvent(41, "dialog");
+    const source = { tabId: 41, sessionId: "child" };
+    const params = { type: "prompt", message: "race" };
+    await (h.executor as any).handleCommandEvent(source, "Page.javascriptDialogOpening", params);
+    automation.handleEvent(source, "Page.javascriptDialogOpening", params);
+    const dialog = await waiting;
+    let sent!: () => void; let finish!: () => void;
+    const sentPromise = new Promise<void>(resolve => { sent = resolve; });
+    const held = new Promise<void>(resolve => { finish = resolve; });
+    h.fake.debuggerApi.sendCommand.mockImplementation(async (_source, method) => {
+      if (method === "Page.handleJavaScriptDialog") { sent(); await held; }
+      return {};
+    });
+    const external = h.executor.handleDialog({ dialogId: (params as any).surfWaxDialogId, accept: true, prompt: "external" }, undefined, context);
+    await sentPromise;
+    await expect(dialog.accept("program")).rejects.toThrow("handling");
+    finish();
+    await expect(external).resolves.toMatchObject({ state: "completed" });
+    expect(h.fake.debuggerApi.sendCommand.mock.calls.filter(([, method]) => method === "Page.handleJavaScriptDialog")).toHaveLength(1);
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("cannot use an old program dialog handle to answer a later dialog", async () => {
+    let finish!: () => void; let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const h = programHarness(async ({ page }) => {
+      const waiting = page.waitForEvent("dialog");
+      const action = page.goto("https://example.test");
+      const dialog = await waiting;
+      await gate;
+      await dialog.accept();
+      return action;
+    });
+    h.raw.waitForEvent = (kind: string) => (h.executor as any).automation.waitForEvent(41, kind);
+    h.raw.goto = vi.fn(async () => { await (h.executor as any).programScope.dispatched(); await new Promise<void>(resolve => { finish = resolve; }); return "done"; });
+    h.fake.debuggerApi.sendCommand.mockImplementation(async (_source, method) => { if (method === "Page.handleJavaScriptDialog") finish(); return {}; });
+    await h.executor.beginRun();
+    const pending = h.executor.runProgram({ code: "test" }, undefined, context);
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    const source = { tabId: 41, sessionId: "child" };
+    const first = { type: "confirm", message: "first" };
+    await (h.executor as any).handleCommandEvent(source, "Page.javascriptDialogOpening", first);
+    (h.executor as any).automation.handleEvent(source, "Page.javascriptDialogOpening", first);
+    const result: any = await pending;
+    await h.executor.handleDialog({ dialogId: result.blockedBy.dialogId, accept: true }, undefined, context);
+    await (h.executor as any).handleCommandEvent(source, "Page.javascriptDialogClosed", {});
+    await (h.executor as any).handleCommandEvent(source, "Page.javascriptDialogOpening", { type: "confirm", message: "second" });
+    release();
+    await vi.waitFor(async () => expect(await h.executor.queryJobs({ action: "status", id: result.jobId }, undefined, context)).toMatchObject({ terminal: true, ok: false }));
+    expect(h.fake.debuggerApi.sendCommand.mock.calls.filter(([, method]) => method === "Page.handleJavaScriptDialog")).toHaveLength(1);
+    await h.executor.endRun(); h.executor.dispose();
+  });
 
   it("retains the original timeout after the handoff", async () => {
     let started!: () => void;

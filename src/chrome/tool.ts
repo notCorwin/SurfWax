@@ -10,13 +10,14 @@ const elementTargetObject = z.union([
   z.object({ ref: z.string().min(1) }).strict(),
   z.object({ by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testId", "css"]), value: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional(), index: z.number().int().optional(), frame: z.object({ by: z.literal("css"), value: z.string().min(1) }).strict().optional() }).strict(),
 ]);
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v3";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v4";
 export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetObject]).optional(),
   fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional(), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
   since: z.string().min(1).optional() }).strict();
 export const runInputSchema = z.object({ code: z.string().min(1), background: z.boolean().optional(), timeoutMs }).strict();
-const listJobsInputSchema = z.object({}).strict();
+const emptyInputSchema = z.object({}).strict();
+const listJobsInputSchema = z.object({ limit: z.number().int().min(1).max(100).optional(), cursor: z.string().min(1).max(4096).optional() }).strict();
 const getJobInputSchema = z.object({ jobId: z.string().min(1), after: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), waitMs: z.number().int().nonnegative().optional() }).strict();
 const cancelJobInputSchema = z.object({ jobId: z.string().min(1) }).strict();
 const listDownloadsInputSchema = z.object({ downloadId: z.number().int().nonnegative().optional(), state: z.enum(["in_progress", "interrupted", "complete"]).optional(), limit: z.number().int().min(0).max(2_147_483_647).optional() }).strict();
@@ -35,9 +36,9 @@ export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
   { name: "wait_event", inputSchema: waitEventInputSchema, summary: "Read or wait for subscribed events", description: "Read events after a subscription cursor, or wait up to waitMs. Use the returned nextCursor. Overflow, truncation and ended subscriptions are explicit." },
   { name: "unsubscribe_event", inputSchema: unsubscribeEventInputSchema, summary: "Stop a browser event subscription", description: "Stop a subscription and release its resources." },
   { name: "handle_dialog", inputSchema: handleDialogInputSchema, summary: "Accept or dismiss a captured browser dialog", description: "Respond to a captured dialog by ID. prompt is allowed only when accepting a prompt dialog. An uncertain response must not be blindly retried." },
-  { name: "read_api_reference", inputSchema: listJobsInputSchema, summary: "Read the advanced program API reference", description: "Read the available execute_program capabilities and usage details." },
+  { name: "read_api_reference", inputSchema: emptyInputSchema, summary: "Read the advanced program API reference", description: "Read the available execute_program capabilities and usage details." },
   { name: "execute_program", inputSchema: runInputSchema, summary: "Execute a composable async JavaScript program", description: "Execute an async JavaScript body with page, browser, net, protocol, artifacts, emit, check, sleep and signal. Use for loops, conditions, event subscriptions and complex multi-step tasks. Call read_api_reference for the complete API. background=true starts a job. Set timeoutMs to accommodate the entire program. Effects are not automatically retried; inspect uncertain outcomes." },
-  { name: "list_jobs", inputSchema: listJobsInputSchema, summary: "List this conversation's program jobs", description: "List jobs belonging to the current conversation." },
+  { name: "list_jobs", inputSchema: listJobsInputSchema, summary: "List this conversation's jobs in pages", description: "List jobs in creation order in a fixed snapshot. limit defaults to 25, max 100. If hasMore, pass nextCursor to continue; cursor expires on log maintenance. Job state is as of the first page; get_job reads current state." },
   { name: "get_job", inputSchema: getJobInputSchema, summary: "Read a job's status and receipts", description: "Read status and paginated receipts for a job. waitMs waits for receipts after the supplied canonical event cursor or for completion; unread receipts return immediately. A running job is not complete." },
   { name: "cancel_job", inputSchema: cancelJobInputSchema, summary: "Request cancellation of a job", description: "Cancel a job in the current conversation. Cancellation does not roll back dispatched effects." },
 ]);
@@ -86,7 +87,7 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
           : error;
         const failure = toolFailure(cause); failure.error.retryable = false;
         const chooserUpload = definition.name === "upload_file" && input && typeof input === "object" && "chooserId" in input && typeof input.chooserId === "string";
-        if (executing && !chooserUpload && abortSignal?.aborted && (definition.name === "execute_program" || definition.program) && !failure.error.effectUnknown) failure.error.effectUnknown = true;
+        if (executing && !chooserUpload && definition.name !== "read_artifact" && abortSignal?.aborted && (definition.name === "execute_program" || definition.program) && !failure.error.effectUnknown) failure.error.effectUnknown = true;
         if (!failure.artifact && options.logger && identity?.runId) {
           const artifact = await options.logger.toolArtifact(options.conversationId!, identity).catch(() => undefined);
           if (artifact) failure.artifact = artifact;
@@ -111,12 +112,13 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
             : definition.name === "list_tabs" ? await executor.listTabs(abortSignal, value.timeoutMs)
             : definition.name === "switch_tab" ? await executor.switchTab(value.tabId, abortSignal, value.timeoutMs)
             : definition.name === "list_downloads" ? await executor.listDownloads(value, abortSignal)
+            : definition.name === "read_artifact" ? await executor.readArtifact(value, abortSignal, context)
             : definition.name === "subscribe_event" ? await executor.subscribeEvent(value, abortSignal, context)
             : definition.name === "wait_event" ? await executor.waitEvent(value, abortSignal, context)
             : definition.name === "unsubscribe_event" ? await executor.unsubscribeEvent(value, abortSignal, context)
             : definition.name === "handle_dialog" ? await executor.handleDialog(value, abortSignal, context)
             : definition.name === "upload_file" && value.chooserId ? await executor.uploadChooser(value, abortSignal, context)
-            : definition.name === "list_jobs" ? await executor.queryJobs({ action: "list" }, abortSignal, context)
+            : definition.name === "list_jobs" ? await executor.queryJobs({ action: "list", limit: value.limit, cursor: value.cursor }, abortSignal, context)
             : definition.name === "get_job" ? await executor.queryJobs({ action: value.waitMs ? "wait" : "status", id: value.jobId, after: value.after, limit: value.limit, waitMs: value.waitMs }, abortSignal, context)
             : definition.name === "cancel_job" ? await executor.queryJobs({ action: "cancel", id: value.jobId }, abortSignal, context)
             : await executor.runProgram(definition.program!(value), abortSignal, context);
@@ -162,12 +164,33 @@ function readablePathOf(value: unknown): Array<string | number> | undefined {
   return key ? [key] : undefined;
 }
 
+const PREVIEW_BYTES = 4096;
+const previewEncoder = new TextEncoder();
+function previewString(value: string, maxCharacters: number, maxBytes: number): string {
+  let low = 0, high = Math.min(value.length, maxCharacters);
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (previewEncoder.encode(JSON.stringify(value.slice(0, middle))).byteLength <= maxBytes) low = middle;
+    else high = middle - 1;
+  }
+  return value.slice(0, low);
+}
 function previewOf(value: unknown, path?: readonly (string | number)[]): unknown {
   const selected = path ? valueAt(value, path) : value;
-  if (typeof selected === "string") return selected.slice(0, 4000);
-  if (Array.isArray(selected)) return selected.slice(0, 50);
-  if (selected && typeof selected === "object") return Object.fromEntries(Object.entries(selected).slice(0, 16));
-  return selected;
+  if (typeof selected === "string") return previewString(selected, 4000, PREVIEW_BYTES);
+  let remaining = 60;
+  const visit = (item: unknown, depth: number): unknown => {
+    if (--remaining < 0 || depth > 4) return "[truncated]";
+    if (typeof item === "string") return item.length > 256 ? `${item.slice(0, 256)}…` : item;
+    if (Array.isArray(item)) return item.slice(0, 10).map((entry) => visit(entry, depth + 1));
+    if (item && typeof item === "object") return Object.fromEntries(Object.entries(item).slice(0, 10).map(([key, entry]) => [key, visit(entry, depth + 1)]));
+    return item;
+  };
+  const preview = visit(selected, 0);
+  const json = JSON.stringify(preview);
+  if (json !== undefined && previewEncoder.encode(json).byteLength > PREVIEW_BYTES)
+    return { truncated: true, sample: previewString(json, 2000, PREVIEW_BYTES - 64) };
+  return preview;
 }
 
 export async function compactToolResult(value: unknown, options: { logger?: EventLogger; conversationId?: string; toolCallId?: string; runId?: string; toolCallIdCanonical?: boolean; preserveVerification?: boolean; preserveJobStatus?: boolean }): Promise<unknown> {
@@ -179,16 +202,18 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
   if (bytes <= LARGE_RESULT_BYTES) return value;
   const event = await options.logger.append({ type: "tool.result.data", conversationId: options.conversationId, toolCallId: options.toolCallId, runId: options.runId, toolCallIdCanonical: options.toolCallIdCanonical, content: { bytes }, output: value });
   if (!event) throw new Error("Could not save large tool result");
-  const path = readablePathOf(value);
+  const job = options.preserveJobStatus && value && typeof value === "object" ? value as Record<string, unknown> : undefined;
+  const path = job && Array.isArray(job.events) ? ["events"] : readablePathOf(value);
   const selected = path ? valueAt(value, path) : value;
-  const access = { id: event.id, ...(path ? { path } : {}), ...(typeof selected === "string" ? { offset: 0, limit: 4000 } : Array.isArray(selected) ? { offset: 0, limit: 50 } : {}) };
+  const access = { artifactId: event.id, ...(path ? { path } : {}), ...(typeof selected === "string" ? { offset: 0, limit: 4000 } : Array.isArray(selected) ? { offset: 0, limit: 50 } : {}) };
   const verification = options.preserveVerification && value && typeof value === "object" && "result" in value
     ? (value as { result?: { verified?: unknown; timedOut?: unknown; present?: unknown } }).result : undefined;
-  const job = options.preserveJobStatus && value && typeof value === "object" ? value as Record<string, unknown> : undefined;
   const handoff = value && typeof value === "object" && (value as any).accepted === true && (value as any).complete === false && typeof (value as any).jobId === "string" ? value as Record<string, any> : undefined;
   const blocked = handoff?.blockedBy;
   return { $ref: event.id, bytes, preview: job ? { eventCount: Array.isArray(job.events) ? job.events.length : 0 } : handoff ? undefined : previewOf(value, path), access, type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value,
     ...(job ? Object.fromEntries(["id", "state", "terminal", "ok", "nextCursor", "hasMore"].filter((key) => Object.hasOwn(job, key)).map((key) => [key, job[key]])) : {}),
+    ...(job && Object.hasOwn(job, "result") ? { resultAccess: { artifactId: event.id, path: ["result"],
+      ...(typeof job.result === "string" ? { offset: 0, limit: 4000 } : Array.isArray(job.result) ? { offset: 0, limit: 50 } : {}) } } : {}),
     ...(handoff ? { accepted: true, complete: false, jobId: handoff.jobId, state: handoff.state,
       ...(blocked && typeof blocked === "object" ? { blockedBy: Object.fromEntries(["kind", "dialogId", "source", "type", "evidenceId"].filter((key) => Object.hasOwn(blocked, key)).map((key) => [key, blocked[key]])) } : {}) } : {}),
     ...(typeof verification?.verified === "boolean" ? { verification: { verified: verification.verified,

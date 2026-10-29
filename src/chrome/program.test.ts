@@ -38,6 +38,24 @@ const context = { conversationId: "program-test" };
 afterEach(() => vi.useRealTimers());
 
 describe("canonical browser jobs", () => {
+  it("waits for the local owner without reading job state or retaining other conversations", async () => {
+    const { logger } = indexedLog();
+    const jobs = new BrowserJobs(logger);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const id = await jobs.start(context, undefined, async (_signal, _id, started) => { await started(); await gate; return "done"; });
+    const reads = vi.spyOn(logger, "jobEventsSince");
+    let done = false;
+    const waiting = jobs.waitForOwner(id, context.conversationId).then(() => { done = true; });
+    await jobs.waitForOwner(id, "other");
+    expect(done).toBe(false);
+    release();
+    await waiting;
+    expect(reads).not.toHaveBeenCalled();
+    await jobs.waitForOwner(id, context.conversationId);
+    expect(reads).not.toHaveBeenCalled();
+  });
+
   it("bounds retained completed metadata while preserving old jobs and the complete list", async () => {
     const { logger } = indexedLog();
     const jobs = new BrowserJobs(logger, { maxCachedJobs: 3, maxIndexedEvents: 5 });
@@ -46,9 +64,16 @@ describe("canonical browser jobs", () => {
       await logger.append({ type: "browser.job.progress", ...context, content: { jobId: `job-${index}`, index } });
       await logger.append({ type: "browser.job.state", ...context, content: { jobId: `job-${index}`, state: "succeeded" }, output: index });
     }
-    const list: any = await jobs.query({ action: "list" }, context.conversationId);
-    expect(list.jobs).toHaveLength(300);
-    expect(list.jobs[0]).toEqual({ id: "job-0", state: "succeeded" });
+    const listed: any[] = [];
+    let cursor: string | undefined;
+    do {
+      const page: any = await jobs.query({ action: "list", limit: 25, cursor }, context.conversationId);
+      expect(page.jobs.length).toBeLessThanOrEqual(25);
+      listed.push(...page.jobs);
+      cursor = page.nextCursor;
+    } while (cursor);
+    expect(listed).toHaveLength(300);
+    expect(listed[0]).toEqual({ id: "job-0", state: "succeeded" });
     const projection = (jobs as any).projections.get(context.conversationId);
     expect(projection.jobs.size).toBeLessThanOrEqual(3);
     expect(projection.indexedEvents).toBeLessThanOrEqual(5);
@@ -57,6 +82,89 @@ describe("canonical browser jobs", () => {
     expect(first).toMatchObject({ state: "succeeded", result: 0, hasMore: true, events: [{ state: "queued" }, { index: 0 }] });
     expect(await jobs.query({ action: "status", id: "job-0", after: first.nextCursor }, context.conversationId)).toMatchObject({ events: [{ state: "succeeded" }], hasMore: false });
     expect(projection.jobs.size).toBeLessThanOrEqual(3);
+  });
+
+  it("pages a stable snapshot while jobs change and new jobs are created", async () => {
+    const { logger } = indexedLog();
+    const jobs = new BrowserJobs(logger, { maxCachedJobs: 1 });
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: "first", state: "queued" } });
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: "first", state: "succeeded" } });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const active = await jobs.start(context, undefined, async (_signal, _id, started) => { await started(); await gate; return "done"; });
+    await vi.waitFor(async () => expect(await jobs.query({ action: "status", id: active }, context.conversationId)).toMatchObject({ state: "running" }));
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: "third", state: "queued" } });
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: "third", state: "succeeded" } });
+    const first: any = await jobs.query({ action: "list", limit: 1 }, context.conversationId);
+    expect(first).toMatchObject({ jobs: [{ id: "first", state: "succeeded" }], hasMore: true, nextCursor: expect.any(String) });
+    release();
+    await jobs.completion(active, context.conversationId);
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: "later", state: "queued" } });
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: "later", state: "succeeded" } });
+    const second: any = await jobs.query({ action: "list", cursor: first.nextCursor, limit: 1 }, context.conversationId);
+    expect(second).toMatchObject({ jobs: [{ id: active, state: "running" }], hasMore: true });
+    const third: any = await jobs.query({ action: "list", cursor: second.nextCursor, limit: 1 }, context.conversationId);
+    expect(third).toEqual({ jobs: [{ id: "third", state: "succeeded" }], hasMore: false });
+    expect(await jobs.query({ action: "status", id: active }, context.conversationId)).toMatchObject({ state: "succeeded" });
+  });
+
+  it("rejects wrong-conversation, malformed and expired list cursors", async () => {
+    const { logger } = indexedLog();
+    const jobs = new BrowserJobs(logger);
+    for (const id of ["one", "two"]) {
+      await logger.append({ type: "browser.job.state", ...context, content: { jobId: id, state: "queued" } });
+      await logger.append({ type: "browser.job.state", ...context, content: { jobId: id, state: "succeeded" } });
+    }
+    const first: any = await jobs.query({ action: "list", limit: 1 }, context.conversationId);
+    await expect(jobs.query({ action: "list", cursor: first.nextCursor }, "different-conversation")).rejects.toMatchObject({ code: "invalid-job-cursor" });
+    await expect(jobs.query({ action: "list", cursor: "garbage" }, context.conversationId)).rejects.toMatchObject({ code: "invalid-job-cursor" });
+    await logger.clear();
+    await expect(jobs.query({ action: "list", cursor: first.nextCursor }, context.conversationId)).rejects.toMatchObject({ code: "job-cursor-expired" });
+  });
+
+  it("fails a continuation if the log is cleared during its page scan", async () => {
+    const { logger } = indexedLog();
+    const jobs = new BrowserJobs(logger, { maxCachedJobs: 0 });
+    for (const id of ["one", "two", "three"]) {
+      await logger.append({ type: "browser.job.state", ...context, content: { jobId: id, state: "queued" } });
+      await logger.append({ type: "browser.job.state", ...context, content: { jobId: id, state: "succeeded" } });
+    }
+    const first: any = await jobs.query({ action: "list", limit: 1 }, context.conversationId);
+    const original = logger.jobEventsSince.bind(logger);
+    let reached!: () => void, release!: () => void;
+    const ready = new Promise<void>((resolve) => { reached = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(logger, "jobEventsSince").mockImplementation(async (...args) => {
+      const page = await original(...args);
+      if (args[1] > 0 && args[1] < 6) { reached(); await gate; }
+      return page;
+    });
+    const pending = jobs.query({ action: "list", limit: 1, cursor: first.nextCursor }, context.conversationId);
+    await ready;
+    await logger.clear();
+    release();
+    await expect(pending).rejects.toMatchObject({ code: "job-cursor-expired" });
+  });
+
+  it("validates the bounded list size at the job layer", async () => {
+    const { logger } = indexedLog();
+    const jobs = new BrowserJobs(logger);
+    for (const limit of [0, -1, 101, 1.5]) {
+      await expect(jobs.query({ action: "list", limit }, context.conversationId)).rejects.toThrow("limit");
+    }
+  });
+
+  it("reuses a complete projection for the first page", async () => {
+    const { logger, byTypes } = indexedLog();
+    const jobs = new BrowserJobs(logger);
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: "one", state: "queued" } });
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: "one", state: "succeeded" } });
+    await jobs.query({ action: "list" }, context.conversationId);
+    byTypes.mockClear();
+    expect(await jobs.query({ action: "list" }, context.conversationId)).toEqual({ jobs: [{ id: "one", state: "succeeded" }], hasMore: false });
+    const jobReads = byTypes.mock.calls.filter(([types]) => types.includes("browser.job.state"));
+    expect(jobReads).toHaveLength(1);
+    expect(jobReads[0][2]).toBeGreaterThan(0);
   });
 
   it("does not treat a later event for an evicted job as its complete history", async () => {
@@ -121,16 +229,17 @@ describe("canonical browser jobs", () => {
     await ready;
     await logger.clear();
     release();
-    expect(await querying).toEqual({ jobs: [] });
+    expect(await querying).toEqual({ jobs: [], hasMore: false });
   });
 
   it("recovers abandoned jobs even when no completed metadata is retained", async () => {
     const { logger, events } = indexedLog();
     const jobs = new BrowserJobs(logger, { maxCachedJobs: 0 });
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: "lost", state: "queued" } });
     await logger.append({ type: "browser.job.state", ...context, content: { jobId: "lost", state: "running" } });
     expect(await jobs.query({ action: "status", id: "lost" }, context.conversationId)).toMatchObject({ state: "interrupted", terminal: true });
     expect(events.filter((event) => (fromLogValue(event.content) as any)?.state === "interrupted")).toHaveLength(1);
-    expect(await jobs.query({ action: "list" }, context.conversationId)).toEqual({ jobs: [{ id: "lost", state: "interrupted" }] });
+    expect(await jobs.query({ action: "list" }, context.conversationId)).toEqual({ jobs: [{ id: "lost", state: "interrupted" }], hasMore: false });
   });
 
   it("catches up incrementally, batches event reads, and coalesces concurrent readers", async () => {
@@ -303,7 +412,7 @@ describe("canonical browser jobs", () => {
     const starting = jobs.start(context, undefined, execute);
     await queued;
     const id = (fromLogValue(events[0]!.content) as any).jobId;
-    expect(await jobs.query({ action: "list" }, context.conversationId)).toEqual({ jobs: [{ id, state: "queued" }] });
+    expect(await jobs.query({ action: "list" }, context.conversationId)).toEqual({ jobs: [{ id, state: "queued" }], hasMore: false });
     expect(await jobs.query({ action: "cancel", id }, context.conversationId)).toMatchObject({ state: "queued", terminal: false });
     release();
     expect(await starting).toBe(id);

@@ -195,6 +195,7 @@ export class AutomationRuntime {
     mark: (tabId: number) => Promise<void>;
     onDispatch?: () => Promise<void>;
     claimChooser?: (chooser: FileChooserRecord) => FileChooserClaim | undefined;
+    respondDialog?: (id: string | undefined, source: Debuggee, accept: boolean, promptText?: string) => Promise<unknown>;
     logger?: EventLogger;
   }) {}
 
@@ -248,7 +249,12 @@ export class AutomationRuntime {
       if (!params.frame.parentId) session.rootFrameId = params.frame.id;
       this.invalidate(session);
     }
-    if ((method === "Page.navigatedWithinDocument" || method === "DOM.documentUpdated" || method === "Runtime.executionContextsCleared") && session) {
+    if (method === "Page.navigatedWithinDocument" && session) {
+      // History/hash navigation invalidates snapshots, but retains the same
+      // input node and therefore must not discard an open file chooser.
+      this.invalidate(session, true);
+    }
+    if ((method === "DOM.documentUpdated" || method === "Runtime.executionContextsCleared") && session) {
       this.invalidate(session);
     }
     if (method === "Page.frameDetached" && params?.frameId && session) {
@@ -278,17 +284,17 @@ export class AutomationRuntime {
       this.resolveWaiters(tabId!, "filechooser", chooser);
     }
     const kind = method === "Page.javascriptDialogOpening" ? "dialog" : method === "Page.downloadWillBegin" ? "download" : undefined;
-    if (kind) this.resolveWaiters(tabId!, kind, params);
+    if (kind) this.resolveWaiters(tabId!, kind, kind === "dialog" ? { ...params, source: { ...source } } : params);
   }
 
-  private invalidate(session: Session): void {
+  private invalidate(session: Session, preserveChooser = false): void {
     session.generation += 1;
     session.refs.clear();
     session.refsByNode.clear();
     session.lastSnapshot = undefined;
     this.objectDebuggees.clear();
     this.axRoots.clear();
-    this.fileChoosers.delete(session.tabId);
+    if (!preserveChooser) this.fileChoosers.delete(session.tabId);
   }
 
   handleDetach(source: Debuggee): void {
@@ -570,8 +576,12 @@ export class AutomationRuntime {
       type: () => event.type,
       message: () => event.message,
       defaultValue: () => event.defaultPrompt,
-      accept: (promptText?: string) => this.session(tabId).then((s) => this.options.command(s.debuggee, "Page.handleJavaScriptDialog", { accept: true, ...(promptText === undefined ? {} : { promptText }) })),
-      dismiss: () => this.session(tabId).then((s) => this.options.command(s.debuggee, "Page.handleJavaScriptDialog", { accept: false })),
+      accept: (promptText?: string) => this.options.respondDialog
+        ? this.options.respondDialog(event.surfWaxDialogId, event.source, true, promptText)
+        : this.options.command(event.source ?? { tabId }, "Page.handleJavaScriptDialog", { accept: true, ...(promptText === undefined ? {} : { promptText }) }),
+      dismiss: () => this.options.respondDialog
+        ? this.options.respondDialog(event.surfWaxDialogId, event.source, false)
+        : this.options.command(event.source ?? { tabId }, "Page.handleJavaScriptDialog", { accept: false }),
     };
   }
 
