@@ -1153,7 +1153,7 @@ test("reads cross-frame response bodies and records complete diagnostic events",
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FRAME_DIAGNOSTICS_OK");
     const events = await readEvents(opened.page);
     expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "frame-response-body")?.output.result).toContain("Cross Origin Frame");
-    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "frame-console")?.output.result).toEqual(expect.arrayContaining([expect.objectContaining({ text: "frame-diagnostic" })]));
+    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "frame-console")?.output.result.messages).toEqual(expect.arrayContaining([expect.objectContaining({ text: "frame-diagnostic" })]));
     const raw = events.find((event) => event.type === "browser.diagnostic" && event.content.method === "Network.responseReceived" && event.output.response?.url.endsWith("/frame"));
     expect(raw?.content.source.sessionId).toEqual(expect.any(String));
     expect(raw?.output.response).toMatchObject({ status: 200, headers: expect.any(Object) });
@@ -1201,7 +1201,7 @@ for (const format of ["legacy-user-tools", "system-tools"] as const) test(`conti
     expect(events.some(event => event.type === "automation.action.started" && event.toolCallId === "removed-old-entry")).toBe(false);
     expect(events.find(event => event.type === "tool.finished" && event.toolCallId === "current-entry")?.output).toMatchObject({ ok: true, state: "succeeded", result: 1 });
     expect(events.some(event => event.type === "browser.job.progress" && event.toolCallId === "current-entry" && event.content.operation === "check" && event.content.state === "verified")).toBe(true);
-    expect(events.filter(event => event.type === "context.prompt.updated").at(-1)?.content).toMatchObject({ migratedFrom: "formal-49-v2", prompt: { catalogVersion: "atomic-tools-v8", format: "system-tools" } });
+    expect(events.filter(event => event.type === "context.prompt.updated").at(-1)?.content).toMatchObject({ migratedFrom: "formal-49-v2", prompt: { catalogVersion: "atomic-tools-v9", format: "system-tools" } });
     const requests = provider.requests.filter(request => request.tools);
     expect(requests).toHaveLength(3);
     for (const request of requests) expect(request.tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "execute_program", "list_jobs", "get_job", "cancel_job"]));

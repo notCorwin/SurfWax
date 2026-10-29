@@ -892,14 +892,52 @@ export class AutomationRuntime {
       }
       if (operation === "dragTo") {
         const target = args[0] as LocatorFacade;
+        // Resolve both ends before dispatching anything, but measure the source
+        // last: scrolling the destination into view invalidates earlier points.
+        await this.waitActionableLocator(session, target.spec, false, true, true, false);
         const from = await this.waitActionableLocator(session, spec, false, true, true, false);
-        const to = await this.waitActionableLocator(session, target.spec, false, true, true, false);
+        const nativeDrag = await this.callOn(from.targetSession, from.objectId, `function(){
+          let element = this;
+          while (element instanceof Element) {
+            if (element instanceof HTMLElement && element.draggable) return true;
+            const root = element.getRootNode();
+            element = element.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
+          }
+          return false;
+        }`);
+        if (nativeDrag === true) throw automationError("native-drag-unavailable", { reason: "interaction-blocker-prevents-native-drag-events" });
         const start = await this.toRootPoint(session, from.targetSession, from.state);
-        const end = await this.toRootPoint(session, to.targetSession, to.state);
-        await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", ...start });
-        await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mousePressed", ...start, button: "left", clickCount: 1 });
-        await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", ...end, button: "left" });
-        await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseReleased", ...end, button: "left", clickCount: 1 });
+        const viewport = await this.pageValue(tabId, "({width:innerWidth,height:innerHeight})") as { width: number; height: number };
+        const inside = (point: { x: number; y: number }) => Number.isFinite(point.x) && Number.isFinite(point.y)
+          && point.x >= 0 && point.y >= 0 && point.x < viewport?.width && point.y < viewport?.height;
+        const moved = [{ x: start.x + 10, y: start.y }, { x: start.x - 10, y: start.y }, { x: start.x, y: start.y + 10 }, { x: start.x, y: start.y - 10 }].find(inside);
+        if (!inside(start) || !moved) throw automationError("drag-unavailable", { reason: "insufficient-visible-space-to-start-drag" });
+        let pressAttempted = false, releaseAttempted = false;
+        let point = start;
+        try {
+          await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", ...start, button: "none", buttons: 0 });
+          pressAttempted = true;
+          await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mousePressed", ...start, button: "left", buttons: 1, clickCount: 1 });
+          // Cross the browser's drag threshold before scrolling the destination.
+          point = moved;
+          await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", ...moved, button: "left", buttons: 1 });
+          const to = await this.waitActionableLocator(session, target.spec, false, true, true, false);
+          const end = await this.toRootPoint(session, to.targetSession, to.state);
+          point = end;
+          await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", ...end, button: "left", buttons: 1 });
+          releaseAttempted = true;
+          await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseReleased", ...end, button: "left", buttons: 0, clickCount: 1 });
+        } catch (error) {
+          if (pressAttempted && error && typeof error === "object") Object.assign(error, { effectUnknown: true });
+          throw error;
+        } finally {
+          if (pressAttempted && !releaseAttempted) {
+            // Cancellation is best effort and can itself have page effects.
+            // Do not retry an uncertain release after it was dispatched.
+            await this.options.command(session.debuggee, "Input.cancelDragging", {}).catch(() => undefined);
+            await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseReleased", ...point, button: "left", buttons: 0, clickCount: 1 }).catch(() => undefined);
+          }
+        }
         return this.afterAction(session);
       }
       if (["click", "dblclick", "hover"].includes(operation)) {

@@ -10,6 +10,7 @@ function harness() {
   return { diagnostics, logger, events };
 }
 function request(index: number) { return { requestId: `${index}`, request: { method: "POST", url: `https://test/${index}`, headers: { secret: "raw" }, postData: `body ${index}` }, type: "Fetch" }; }
+function message(text: string) { return { type: "log", args: [{ value: text }] }; }
 
 describe("BrowserDiagnostics", () => {
   it("keeps diagnostic events in the operation's original phase", async () => {
@@ -39,6 +40,31 @@ describe("BrowserDiagnostics", () => {
     ]);
     expect(await diagnostics.request(1, listed[0].requestRef)).toMatchObject({ requestBody: "body 1", requestHeaders: { secret: "raw" } });
   });
+  it("replays a large mixed capture with late responses, redirects and distinct frame sessions", async () => {
+    const { diagnostics } = harness();
+    for (let index = 1; index <= 8000; index++) diagnostics.handle({ tabId: 1 }, "Network.requestWillBeSent", request(index));
+    for (let index = 1; index <= 1500; index++) diagnostics.handle({ tabId: 1 }, "Runtime.consoleAPICalled", message(`log ${index}`));
+    diagnostics.handle({ tabId: 1 }, "Network.responseReceived", { requestId: "1", response: { status: 202, headers: {} } });
+    diagnostics.handle({ tabId: 1 }, "Network.requestWillBeSent", { ...request(1), redirectResponse: { status: 302 } });
+    diagnostics.handle({ tabId: 1, sessionId: "frame" }, "Network.requestWillBeSent", request(1));
+    const first = await diagnostics.requests(1, { limit: 1 }) as any;
+    expect(first).toMatchObject({ integrity: "complete", requests: [{ url: "https://test/1", status: 202, superseded: true }] });
+    const end = await diagnostics.requests(1, { offset: 8000, limit: 2 }) as any;
+    expect(end).toMatchObject({ integrity: "complete", hasMore: false, requests: [{ url: "https://test/1" }, { url: "https://test/1" }] });
+    expect(end.requests[0].requestRef).not.toBe(end.requests[1].requestRef);
+    expect(await diagnostics.console(1, { limit: 1 })).toMatchObject({ integrity: "complete", messages: [{ text: "log 1" }] });
+    expect((diagnostics as any).tabs.get(1).networkLatest.size).toBeLessThanOrEqual(1000);
+  });
+  it("retains the newest request index while trimming redirects and resets it on navigation", async () => {
+    const { diagnostics } = harness();
+    for (let index = 0; index < 1001; index++) diagnostics.handle({ tabId: 1 }, "Network.requestWillBeSent", request(1));
+    diagnostics.handle({ tabId: 1 }, "Network.responseReceived", { requestId: "1", response: { status: 204, headers: {} } });
+    const state = (diagnostics as any).tabs.get(1);
+    expect(state.networkLatest.size).toBe(1);
+    expect(state.networkLatest.values().next().value).toMatchObject({ index: 1001, status: 204 });
+    diagnostics.handle({ tabId: 1 }, "Page.frameNavigated", { frame: { id: "root" } });
+    expect((diagnostics as any).tabs.get(1).networkLatest.size).toBe(0);
+  });
   it("keeps identical request IDs in distinct frame sessions separate and clears only the active epoch", async () => {
     const { diagnostics } = harness();
     diagnostics.handle({ tabId: 1, sessionId: "frame-a" }, "Network.requestWillBeSent", request(1));
@@ -59,9 +85,114 @@ describe("BrowserDiagnostics", () => {
     const params = { type: "warning", timestamp: 1, args: [{ value: "raw" }, { type: "object", description: "Object", objectId: "remote" }] };
     diagnostics.handle({ tabId: 1 }, "Runtime.consoleAPICalled", params);
     diagnostics.handle({ tabId: 1 }, "Log.entryAdded", { entry: { level: "error", text: "failure", timestamp: 2 } });
-    expect(await diagnostics.console(1, { minLevel: "error", limit: 1 })).toEqual([{ index: 2, level: "error", text: "failure", timestamp: 2 }]);
+    expect(await diagnostics.console(1, { minLevel: "error", limit: 1 })).toEqual({ messages: [{ index: 2, level: "error", text: "failure", timestamp: 2 }], integrity: "complete", hasMore: false });
     await logger.flush();
     expect(events[0]?.output).toEqual(params);
+  });
+
+  it("reports incomplete console history without a logger while retaining the live tail", async () => {
+    const diagnostics = new BrowserDiagnostics();
+    for (let index = 1; index <= 1001; index++) diagnostics.handle({ tabId: 1 }, "Runtime.consoleAPICalled", message(`message ${index}`));
+    const first = await diagnostics.console(1, { limit: 1 });
+    expect(first).toMatchObject({ integrity: "incomplete", reason: "diagnostic-log-incomplete", hasMore: true, nextOffset: 1, messages: [{ index: 2, text: "message 2" }] });
+    expect(await diagnostics.console(1, { offset: 1000 })).toMatchObject({ integrity: "incomplete", hasMore: null, messages: [] });
+    await expect(diagnostics.console(1, { limit: 101 })).rejects.toThrow("limit");
+  });
+
+  it("reports log gaps and merges console messages that are still live", async () => {
+    const { diagnostics, logger } = harness();
+    for (let index = 1; index <= 1001; index++) diagnostics.handle({ tabId: 1 }, "Runtime.consoleAPICalled", message(`message ${index}`));
+    await logger.flush();
+    const original = logger.diagnosticEventsSnapshot.bind(logger);
+    vi.spyOn(logger, "diagnosticEventsSnapshot").mockImplementation(async (conversation, capture) => {
+      const snapshot = await original(conversation, capture);
+      return { ...snapshot, value: snapshot.value.filter((event) => (event.content as any)?.revision !== 1001) };
+    });
+    expect(await diagnostics.console(1, { offset: 1000, limit: 2 })).toMatchObject({ integrity: "incomplete", reason: "diagnostic-log-incomplete", hasMore: null, messages: [{ index: 1001, text: "message 1001" }] });
+  });
+
+  it.each([false, true])("does not mix cleared messages into console replay when clear telemetry is missing=%s", async (omitClear) => {
+    const { diagnostics, logger } = harness();
+    diagnostics.handle({ tabId: 1 }, "Runtime.consoleAPICalled", message("old message"));
+    await diagnostics.console(1, { clear: true });
+    for (let index = 1; index <= 1001; index++) diagnostics.handle({ tabId: 1 }, "Runtime.consoleAPICalled", message(`new ${index}`));
+    await logger.flush();
+    const original = logger.diagnosticEventsSnapshot.bind(logger);
+    if (omitClear) vi.spyOn(logger, "diagnosticEventsSnapshot").mockImplementation(async (conversation, capture) => {
+      const snapshot = await original(conversation, capture);
+      return { ...snapshot, value: snapshot.value.filter((event) => (event.content as any)?.method !== "console.clear") };
+    });
+    expect(await diagnostics.console(1, { limit: 1 })).toMatchObject({ integrity: omitClear ? "incomplete" : "complete", hasMore: true, messages: [{ index: 1, text: "new 1" }] });
+  });
+
+  it("deduplicates console replays and honors cancellation without canceling the other reader", async () => {
+    const { diagnostics, logger } = harness();
+    for (let index = 1; index <= 1001; index++) diagnostics.handle({ tabId: 1 }, "Runtime.consoleAPICalled", message(`message ${index}`));
+    await logger.flush();
+    const original = logger.diagnosticEventsSnapshot.bind(logger);
+    let entered!: () => void; let release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const reads = vi.spyOn(logger, "diagnosticEventsSnapshot").mockImplementation(async (conversation, capture) => { entered(); await held; return original(conversation, capture); });
+    const controller = new AbortController();
+    const canceled = diagnostics.console(1, { limit: 1 }, controller.signal);
+    await started;
+    const other = diagnostics.console(1, { limit: 1 });
+    controller.abort();
+    await expect(canceled).rejects.toMatchObject({ name: "AbortError" });
+    release();
+    expect(await other).toMatchObject({ integrity: "complete", messages: [{ index: 1, text: "message 1" }] });
+    expect(reads).toHaveBeenCalledOnce();
+  });
+
+  it("restarts console replay if it is cleared while the log read is in flight", async () => {
+    const { diagnostics, logger } = harness();
+    for (let index = 1; index <= 1001; index++) diagnostics.handle({ tabId: 1 }, "Runtime.consoleAPICalled", message(`old ${index}`));
+    await logger.flush();
+    const original = logger.diagnosticEventsSnapshot.bind(logger);
+    let entered!: () => void; let release!: () => void;
+    const started = new Promise<void>((resolve) => { entered = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    vi.spyOn(logger, "diagnosticEventsSnapshot").mockImplementation(async (conversation, capture) => {
+      const snapshot = await original(conversation, capture);
+      if (++calls === 1) { entered(); await held; }
+      return snapshot;
+    });
+    const pending = diagnostics.console(1, { limit: 1 });
+    await started;
+    await diagnostics.console(1, { clear: true });
+    for (let index = 1; index <= 1001; index++) diagnostics.handle({ tabId: 1 }, "Runtime.consoleAPICalled", message(`new ${index}`));
+    release();
+    expect(await pending).toMatchObject({ integrity: "complete", messages: [{ index: 1, text: "new 1" }] });
+    expect(calls).toBeGreaterThanOrEqual(2);
+  });
+
+  it("invalidates cached console history after another logger clears the canonical log", async () => {
+    const { diagnostics, logger, events } = harness();
+    const other = new EventLogger({ store: { async append(event) { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; }, async all() { return events; } } });
+    for (let index = 1; index <= 1001; index++) diagnostics.handle({ tabId: 1 }, "Runtime.consoleAPICalled", message(`message ${index}`));
+    await logger.flush();
+    expect(await diagnostics.console(1, { limit: 1 })).toMatchObject({ integrity: "complete", messages: [{ index: 1 }] });
+    await other.clear();
+    expect(await diagnostics.console(1, { limit: 1 })).toMatchObject({ integrity: "incomplete", reason: "diagnostic-log-incomplete", messages: [{ index: 2 }] });
+  });
+
+  it("reports an unavailable console log rather than losing the live tail", async () => {
+    const { diagnostics, logger } = harness();
+    for (let index = 1; index <= 1001; index++) diagnostics.handle({ tabId: 1 }, "Runtime.consoleAPICalled", message(`message ${index}`));
+    vi.spyOn(logger, "diagnosticEventsSnapshot").mockRejectedValue(new Error("log unavailable"));
+    expect(await diagnostics.console(1, { limit: 1 })).toMatchObject({ integrity: "incomplete", reason: "diagnostic-log-unavailable", messages: [{ index: 2 }] });
+  });
+
+  it("separates console history by tab and conversation", async () => {
+    const { diagnostics } = harness();
+    diagnostics.handle({ tabId: 1 }, "Runtime.consoleAPICalled", message("tab one"));
+    diagnostics.handle({ tabId: 2 }, "Runtime.consoleAPICalled", message("tab two"));
+    expect(await diagnostics.console(1, {})).toMatchObject({ messages: [{ text: "tab one" }], integrity: "complete" });
+    expect(await diagnostics.console(2, {})).toMatchObject({ messages: [{ text: "tab two" }], integrity: "complete" });
+    diagnostics.bind({ conversationId: "other" });
+    expect(await diagnostics.console(1, {})).toMatchObject({ messages: [], integrity: "complete" });
   });
   it("retains extra headers delivered before the request event in the originating frame session", async () => {
     const { diagnostics } = harness();

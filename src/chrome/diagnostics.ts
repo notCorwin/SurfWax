@@ -10,8 +10,9 @@ export type NetworkRecord = {
 export type ConsoleRecord = { index: number; level: string; text: string; timestamp?: number };
 type PendingHeaders = { request?: Record<string, string>; response?: Record<string, string> };
 type RequestList = { requests: Array<Record<string, unknown>>; integrity: "complete" | "incomplete"; hasMore: boolean | null; nextOffset?: number; reason?: string };
-type CachedPage = { value: RequestList; logEpoch?: string; conversationId?: string; revision: number };
-type State = { epoch: string; revision: number; nextRequest: number; nextConsole: number; network: NetworkRecord[]; console: ConsoleRecord[]; pendingHeaders: Map<string, PendingHeaders>;
+type ConsoleList = { messages: ConsoleRecord[]; integrity: "complete" | "incomplete"; hasMore: boolean | null; nextOffset?: number; reason?: string };
+type CachedPage = { value: RequestList | ConsoleList; logEpoch?: string; conversationId?: string; revision: number };
+type State = { epoch: string; revision: number; nextRequest: number; nextConsole: number; consoleGeneration: number; network: NetworkRecord[]; networkLatest: Map<string, NetworkRecord>; console: ConsoleRecord[]; pendingHeaders: Map<string, PendingHeaders>;
   historical: Map<string, NetworkRecord>; pages: Map<string, CachedPage>; latest: Map<string, number>; invalidations: Map<string, number>; invalidBefore: number;
   replayComplete?: boolean; replayEpoch?: string };
 const CACHE_LIMIT = 1000;
@@ -43,13 +44,6 @@ const sourceKey = (sessionId: string | undefined, requestId: string) => JSON.str
 function staleRequest(): Error {
   return Object.assign(new Error("Request reference is unavailable or belongs to an expired capture"), { code: "stale-request" });
 }
-function latestRequest(records: readonly NetworkRecord[], requestId: string, source: Debuggee): NetworkRecord | undefined {
-  for (let index = records.length - 1; index >= 0; index--) {
-    const item = records[index]!;
-    if (item.requestId === requestId && item.debuggee.sessionId === source.sessionId) return item;
-  }
-  return undefined;
-}
 async function waitFor<T>(task: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return task;
   signal.throwIfAborted();
@@ -80,7 +74,7 @@ export class BrowserDiagnostics {
   }
   private state(tabId: number): State {
     let state = this.tabs.get(tabId);
-    if (!state) { state = { epoch: crypto.randomUUID(), revision: 0, nextRequest: 0, nextConsole: 0, network: [], console: [], pendingHeaders: new Map(), historical: new Map(), pages: new Map(), latest: new Map(), invalidations: new Map(), invalidBefore: 0 }; this.tabs.set(tabId, state); }
+    if (!state) { state = { epoch: crypto.randomUUID(), revision: 0, nextRequest: 0, nextConsole: 0, consoleGeneration: 0, network: [], networkLatest: new Map(), console: [], pendingHeaders: new Map(), historical: new Map(), pages: new Map(), latest: new Map(), invalidations: new Map(), invalidBefore: 0 }; this.tabs.set(tabId, state); }
     return state;
   }
   remove(tabId: number): void { this.tabs.delete(tabId); }
@@ -94,7 +88,7 @@ export class BrowserDiagnostics {
       || method === "Page.frameDetached" || method === "Target.detachedFromTarget";
     if (!lifecycle && !method.startsWith("Network.") && method !== "Runtime.consoleAPICalled" && method !== "Log.entryAdded") return;
     const state = this.state(tabId);
-    const existing = latestRequest(state.network, params.requestId, source);
+    const existing = typeof params?.requestId === "string" ? state.networkLatest.get(sourceKey(source.sessionId, params.requestId)) : undefined;
     const index = method === "Network.requestWillBeSent" ? ++state.nextRequest
       : method === "Runtime.consoleAPICalled" || method === "Log.entryAdded" ? ++state.nextConsole : existing?.index;
     if (method === "Network.requestWillBeSent" && typeof params?.requestId === "string") {
@@ -123,9 +117,14 @@ export class BrowserDiagnostics {
         || (method === "Page.frameDetached" && params?.frameId === record.frameId)
         || (method === "Target.detachedFromTarget" && params?.sessionId === record.debuggee.sessionId)) state.historical.delete(ref);
     }
-    this.logger?.record({ type: "browser.diagnostic", ...this.context, ...this.context.logIdentity, content: { tabId, source, method, epoch: state.epoch, revision: state.revision, index }, output: params });
+    this.logger?.record({ type: "browser.diagnostic", ...this.context, ...this.context.logIdentity, content: { tabId, source, method, epoch: state.epoch, revision: state.revision, index, consoleGeneration: state.consoleGeneration }, output: params });
     this.apply(state, source, method, params, index);
-    if (state.network.length > CACHE_LIMIT) state.network.splice(0, state.network.length - CACHE_LIMIT);
+    if (state.network.length > CACHE_LIMIT) {
+      for (const record of state.network.splice(0, state.network.length - CACHE_LIMIT)) {
+        const key = sourceKey(record.debuggee.sessionId, record.requestId);
+        if (state.networkLatest.get(key) === record) state.networkLatest.delete(key);
+      }
+    }
     if (state.console.length > CACHE_LIMIT) state.console.splice(0, state.console.length - CACHE_LIMIT);
   }
   private apply(state: State, source: Debuggee, method: string, params: any, index?: number): void {
@@ -140,7 +139,7 @@ export class BrowserDiagnostics {
       return;
     }
     const key = JSON.stringify([source.sessionId, params?.requestId]);
-    const existing = latestRequest(state.network, params.requestId, source);
+    const existing = typeof params?.requestId === "string" ? state.networkLatest.get(sourceKey(source.sessionId, params.requestId)) : undefined;
     if (method === "Network.requestWillBeSent") {
       // CDP deliberately reuses requestId across redirects. Each request event
       // needs its own identity: an earlier hop must never read the later body.
@@ -152,6 +151,7 @@ export class BrowserDiagnostics {
       if (headers?.response) record.responseHeaders = headers.response;
       state.pendingHeaders.delete(key);
       state.network.push(record);
+      state.networkLatest.set(sourceKey(source.sessionId, record.requestId), record);
     } else if (method === "Network.responseReceived" && existing) {
       if (existing.loaderId && params.loaderId && existing.loaderId !== params.loaderId) return;
       Object.assign(existing, { status: params.response.status, statusText: params.response.statusText, responseHeaders: existing.responseHeaders ?? params.response.headers ?? {}, resourceType: params.type ?? existing.resourceType });
@@ -186,17 +186,20 @@ export class BrowserDiagnostics {
             cache = undefined;
             snapshot = await this.logger!.diagnosticEventsSnapshot(conversationId, { tabId, epoch: current.epoch });
           }
-          const restored: State = cache ? { ...current, network: structuredClone(cache.state.network), console: structuredClone(cache.state.console), pendingHeaders: structuredClone(cache.state.pendingHeaders), historical: new Map(), pages: new Map(), replayComplete: true }
-            : { ...current, network: [], console: [], pendingHeaders: new Map(), historical: new Map(), pages: new Map(), replayComplete: true };
+          const network = cache ? structuredClone(cache.state.network) : [];
+          const networkLatest = new Map(network.map((record) => [sourceKey(record.debuggee.sessionId, record.requestId), record]));
+          const restored: State = cache ? { ...current, network, networkLatest, console: cache.state.consoleGeneration === current.consoleGeneration ? structuredClone(cache.state.console) : [], pendingHeaders: structuredClone(cache.state.pendingHeaders), historical: new Map(), pages: new Map(), replayComplete: true }
+            : { ...current, network, networkLatest, console: [], pendingHeaders: new Map(), historical: new Map(), pages: new Map(), replayComplete: true };
           restored.replayEpoch = snapshot.epoch;
           let expectedRevision = (cache?.revision ?? 0) + 1, lastId = cache?.lastId ?? -1;
           for (const event of snapshot.value) {
             lastId = Math.max(lastId, event.id);
-            const content = fromLogValue(event.content) as { tabId?: number; source: Debuggee; method: string; epoch?: string; index?: number; revision?: number };
+            const content = fromLogValue(event.content) as { tabId?: number; source: Debuggee; method: string; epoch?: string; index?: number; revision?: number; consoleGeneration?: number };
             if (content.tabId !== tabId || content.epoch !== current.epoch) continue;
             if (!Number.isSafeInteger(content.revision) || content.revision! !== expectedRevision) restored.replayComplete = false;
             if (!Number.isSafeInteger(content.revision) || content.revision! < expectedRevision) continue;
             expectedRevision = content.revision! + 1;
+            if ((content.method === "console.clear" || content.method === "Runtime.consoleAPICalled" || content.method === "Log.entryAdded") && content.consoleGeneration !== current.consoleGeneration) continue;
             this.apply(restored, content.source, content.method, fromLogValue(event.output), content.index);
           }
           if (expectedRevision !== revision + 1) restored.replayComplete = false;
@@ -293,10 +296,50 @@ export class BrowserDiagnostics {
   }
   async console(tabId: number, input: { clear?: boolean; minLevel?: string; offset?: number; limit?: number }, signal?: AbortSignal): Promise<unknown> {
     signal?.throwIfAborted();
-    const state = this.state(tabId);
-    if (input.clear) { state.console = []; state.nextConsole = 0; state.revision += 1; state.pages.clear(); this.logger?.record({ type: "browser.diagnostic", ...this.context, ...this.context.logIdentity, content: { tabId, source: { tabId }, method: "console.clear", epoch: state.epoch, revision: state.revision }, output: null }); return { cleared: true }; }
+    if (input.clear) { const state = this.state(tabId); state.console = []; state.nextConsole = 0; state.consoleGeneration += 1; state.revision += 1; state.pages.clear(); this.logger?.record({ type: "browser.diagnostic", ...this.context, ...this.context.logIdentity, content: { tabId, source: { tabId }, method: "console.clear", epoch: state.epoch, revision: state.revision, consoleGeneration: state.consoleGeneration }, output: null }); return { cleared: true }; }
+    const offset = input.offset ?? 0, limit = input.limit ?? 100;
+    if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Console list offset must be nonnegative and limit must be between 1 and 100");
     const rank: Record<string, number> = { debug: 0, info: 1, log: 1, warning: 2, warn: 2, error: 3, assert: 3 };
-    const records = state.nextConsole > CACHE_LIMIT ? (await this.restored(tabId, signal)).console : state.console;
-    return records.filter((message) => (rank[message.level] ?? 1) >= (rank[input.minLevel ?? "info"] ?? 1)).slice(input.offset ?? 0, (input.offset ?? 0) + (input.limit ?? 100));
+    while (true) {
+      signal?.throwIfAborted();
+      const state = this.state(tabId), revision = state.revision, conversationId = this.context.conversationId;
+      const key = JSON.stringify(["console", input.minLevel ?? "info", offset, limit]);
+      const cached = state.pages.get(key);
+      if (cached && cached.revision === revision && cached.conversationId === conversationId) {
+        try {
+          const valid = cached.logEpoch === undefined || this.logger && await waitFor(this.logger.canonicalEpoch(), signal) === cached.logEpoch;
+          if (this.tabs.get(tabId) !== state || state.revision !== revision || this.context.conversationId !== conversationId) continue;
+          if (valid) return structuredClone(cached.value);
+          state.pages.delete(key);
+        } catch (error) { if (signal?.aborted) throw error; state.pages.delete(key); }
+      }
+      let records = state.console, integrity: ConsoleList["integrity"] = "complete", reason: string | undefined, logEpoch: string | undefined;
+      if (state.nextConsole > CACHE_LIMIT) {
+        try {
+          const replay = await this.restored(tabId, signal);
+          if (this.tabs.get(tabId) !== state || state.revision !== revision || this.context.conversationId !== conversationId) continue;
+          logEpoch = replay.replayEpoch;
+          integrity = replay.replayComplete === true ? "complete" : "incomplete";
+          if (integrity === "incomplete") reason = "diagnostic-log-incomplete";
+          const merged = new Map(replay.console.map((record) => [record.index, record]));
+          for (const record of state.console) merged.set(record.index, record);
+          records = [...merged.values()].sort((a, b) => a.index - b.index);
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          if (this.tabs.get(tabId) !== state || state.revision !== revision || this.context.conversationId !== conversationId) continue;
+          integrity = "incomplete"; reason = "diagnostic-log-unavailable";
+        }
+      }
+      const filtered = records.filter((message) => (rank[message.level] ?? 1) >= (rank[input.minLevel ?? "info"] ?? 1));
+      const messages = filtered.slice(offset, offset + limit);
+      const hasKnownMore = filtered.length > offset + limit;
+      const result: ConsoleList = { messages, integrity, hasMore: hasKnownMore ? true : integrity === "complete" ? false : null,
+        ...(hasKnownMore ? { nextOffset: offset + limit } : {}), ...(reason ? { reason } : {}) };
+      if (state.nextConsole <= CACHE_LIMIT || logEpoch !== undefined) {
+        state.pages.set(key, { value: structuredClone(result), logEpoch, conversationId, revision });
+        while (state.pages.size > PAGE_CACHE_LIMIT) state.pages.delete(state.pages.keys().next().value!);
+      }
+      return result;
+    }
   }
 }

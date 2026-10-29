@@ -415,8 +415,15 @@ describe("browser tools", () => {
   it("keeps request history integrity and access visible after compaction", async () => {
     const logger = { append: async (event: any) => ({ ...event, id: 19 }) } as EventLogger;
     const requests = Array.from({ length: 100 }, (_, index) => ({ requestRef: `request-${index}`, url: "x".repeat(160) }));
-    const result = await compactToolResult({ ok: true, result: { requests, integrity: "incomplete", hasMore: null, reason: "diagnostic-log-incomplete" } }, { logger, preserveRequestStatus: true });
+    const result = await compactToolResult({ ok: true, result: { requests, integrity: "incomplete", hasMore: null, reason: "diagnostic-log-incomplete" } }, { logger, preserveDiagnosticStatus: true });
     expect(result).toMatchObject({ $ref: 19, integrity: "incomplete", hasMore: null, reason: "diagnostic-log-incomplete", access: { artifactId: 19, path: ["result", "requests"], offset: 0, limit: 50 } });
+  });
+
+  it("keeps console history integrity and access visible after compaction", async () => {
+    const logger = { append: async (event: any) => ({ ...event, id: 20 }) } as EventLogger;
+    const messages = Array.from({ length: 100 }, (_, index) => ({ index, text: "x".repeat(160) }));
+    const result = await compactToolResult({ ok: true, result: { messages, integrity: "incomplete", hasMore: true, nextOffset: 100, reason: "diagnostic-log-incomplete" } }, { logger, preserveDiagnosticStatus: true });
+    expect(result).toMatchObject({ $ref: 20, integrity: "incomplete", hasMore: true, nextOffset: 100, reason: "diagnostic-log-incomplete", access: { artifactId: 20, path: ["result", "messages"], offset: 0, limit: 50 } });
   });
 
   it("keeps a large search page's scope and continuation visible", async () => {

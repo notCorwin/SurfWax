@@ -44,6 +44,7 @@ function harness(
       if (params.expression.includes("metadata")) return { result: { value: metadata } };
       if (params.expression.includes("({url:")) return { result: { value: { url: "https://example.test/", title: "Test" } } };
       if (params.expression.includes("({x:scrollX")) return { result: { value: { x: 0, y: 0, width: 100, height: 50, scale: 2 } } };
+      if (params.expression.includes("({width:innerWidth")) return { result: { value: { width: 100, height: 50 } } };
       return { result: { value: true } };
     }
     if (method === "Runtime.callFunctionOn") { latestState = states.length > 1 ? states.shift() : states[0]; return { result: { value: latestState } }; }
@@ -67,6 +68,48 @@ function harness(
 }
 
 describe("AutomationRuntime", () => {
+  it("rejects an identified native draggable before mouse input is dispatched", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.callFunctionOn" && params?.functionDeclaration?.includes("element.draggable")) return { result: { value: true } };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    await expect(page.locator("#source").dragTo(page.locator("#target"))).rejects.toMatchObject({ code: "native-drag-unavailable" });
+    expect(command.mock.calls.filter(([, method]) => method === "Input.dispatchMouseEvent")).toHaveLength(0);
+    await runtime.abortSessions();
+  });
+  it("fails before pressing when the viewport cannot contain a drag-threshold movement", async () => {
+    const { runtime, command } = harness(undefined, [{ connected: true, x: 2, y: 2, visible: true, stable: true, enabled: true, editable: true, receivesEvents: true, checked: false }]);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => method === "Runtime.evaluate" && params?.expression?.includes("({width:innerWidth")
+      ? { result: { value: { width: 5, height: 5 } } } : original(source, method, params));
+    const page = await runtime.createPage(3);
+    await expect(page.locator("#source").dragTo(page.locator("#target"))).rejects.toMatchObject({ code: "drag-unavailable" });
+    expect(command.mock.calls.filter(([, method]) => method === "Input.dispatchMouseEvent")).toHaveLength(0);
+    await runtime.abortSessions();
+  });
+  it("cancels a failed drag and releases the pointer without replaying an uncertain release", async () => {
+    for (const failAt of ["move", "release"] as const) {
+      const { runtime, command } = harness();
+      const original = command.getMockImplementation()!;
+      const input: Array<{ method: string; type?: string; buttons?: number }> = [];
+      command.mockImplementation(async (source, method, params) => {
+        if (method === "Input.dispatchMouseEvent" || method === "Input.cancelDragging") {
+          input.push({ method, type: params?.type, buttons: params?.buttons });
+          if (failAt === "move" && params?.type === "mouseMoved" && params?.buttons === 1 || failAt === "release" && params?.type === "mouseReleased") throw new Error("uncertain dispatch");
+        }
+        return original(source, method, params);
+      });
+      const page = await runtime.createPage(3);
+      await expect(page.locator("#source").dragTo(page.locator("#target"))).rejects.toMatchObject({ effectUnknown: true });
+      expect(input.filter((event) => event.type === "mouseReleased")).toHaveLength(1);
+      expect(input.filter((event) => event.method === "Input.cancelDragging")).toHaveLength(failAt === "move" ? 1 : 0);
+      expect(input.find((event) => event.type === "mousePressed")?.buttons).toBe(1);
+      await runtime.abortSessions();
+    }
+  });
   it("validates selection before dispatch and revalidates after the dispatch barrier", async () => {
     const { runtime, command, onDispatch } = harness([{ role: "combobox", name: "Choice", tag: "select" }]);
     const original = command.getMockImplementation()!;
