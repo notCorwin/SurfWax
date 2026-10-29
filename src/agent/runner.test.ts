@@ -118,7 +118,16 @@ describe("createAgent", () => {
     const terminal = events.filter((event) => ["tool.failed", "tool.finished"].includes(event.type) && event.toolCallId === "large-act");
     expect(terminal).toHaveLength(1);
     expect(terminal[0]!.type).toBe("tool.failed");
-    expect(fromLogValue(terminal[0]!.output)).toEqual({ ...failed, error: { ...failed.failed.error, retryable: false } });
+    const output = fromLogValue(terminal[0]!.output) as any;
+    expect(output).toMatchObject({ ok: false, error: { ...failed.failed.error, retryable: false }, $ref: expect.any(Number),
+      access: { artifactId: expect.any(Number), path: ["completed"] } });
+    expect(output.access.artifactId).toBe(output.$ref);
+    expect(JSON.stringify(output).length).toBeLessThan(8192);
+    const stored = events.filter((event) => event.type === "tool.result.data" && event.id === output.$ref);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toMatchObject({ conversationId: "conversation", toolCallId: "large-act" });
+    await expect(logger.result(output.$ref, {}, "conversation")).resolves.toEqual({ ...failed, error: { ...failed.failed.error, retryable: false } });
+    await expect(logger.result(output.$ref, { path: output.access.path }, "conversation")).resolves.toEqual(failed.completed);
   });
 
   it.each([

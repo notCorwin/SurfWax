@@ -10,11 +10,13 @@ const elementTargetObject = z.union([
   z.object({ ref: z.string().min(1) }).strict(),
   z.object({ by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testId", "css"]), value: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional(), index: z.number().int().optional(), frame: z.object({ by: z.literal("css"), value: z.string().min(1) }).strict().optional() }).strict(),
 ]);
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v4";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v5";
 export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetObject]).optional(),
   fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional(), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
   since: z.string().min(1).optional() }).strict();
+const findElementsInputSchema = z.object({ target: elementTargetObject, tabId: z.number().int().nonnegative().optional(), timeoutMs,
+  limit: z.number().int().min(1).max(100).optional(), cursor: z.string().min(1).max(256).optional() }).strict();
 export const runInputSchema = z.object({ code: z.string().min(1), background: z.boolean().optional(), timeoutMs }).strict();
 const emptyInputSchema = z.object({}).strict();
 const listJobsInputSchema = z.object({ limit: z.number().int().min(1).max(100).optional(), cursor: z.string().min(1).max(4096).optional() }).strict();
@@ -30,6 +32,7 @@ const handleDialogInputSchema = z.object({ dialogId: z.string().min(1), accept: 
 type ToolDefinition = { name: string; inputSchema: z.ZodType<any>; summary: string; description: string; program?: (input: any) => { code: string; timeoutMs?: number; background?: boolean } };
 export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
   { name: "inspect_page", inputSchema: inspectInputSchema, summary: "Read the semantic page with stable element refs", description: "Inspect semantic text and stable refs. region and fields narrow the result; budget and pagination limit output; since reads changes. Use take_screenshot for visual input." },
+  { name: "find_elements", inputSchema: findElementsInputSchema, summary: "Find candidates and return stable element refs", description: "Find matching elements with stable refs for actions. limit defaults to 25, max 100; repeat the same target and tab with nextCursor to read a fixed snapshot. Removed elements are marked detached. Cursors expire on run or document changes or eviction." },
   ...ATOMIC_TOOL_REGISTRY,
   { name: "list_downloads", inputSchema: listDownloadsInputSchema, summary: "Read Chrome's current download records", description: "List download metadata across the Chrome profile. limit defaults to 100; 0 requests all records. hasMore reports truncation. The list is live and Chrome's exists field may be stale; metadata does not provide file bytes." },
   { name: "subscribe_event", inputSchema: subscribeEventInputSchema, summary: "Subscribe to browser events before triggering them", description: "Subscribe to a tab's dialog, popup, download, filechooser, request, response or console events. Returns a run-scoped subscription and cursor. Filechooser events include a chooserId for upload_file." },
@@ -108,6 +111,7 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
           executing = true;
           const result = definition.name === "read_api_reference" ? { reference: PROGRAM_API }
             : definition.name === "inspect_page" ? await executor.inspect(value as any, abortSignal, context)
+            : definition.name === "find_elements" ? await executor.findElements(value as any, abortSignal, context)
             : definition.name === "execute_program" ? await executor.runProgram(value as any, abortSignal, context)
             : definition.name === "list_tabs" ? await executor.listTabs(abortSignal, value.timeoutMs)
             : definition.name === "switch_tab" ? await executor.switchTab(value.tabId, abortSignal, value.timeoutMs)
@@ -125,7 +129,7 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
           const failure = (result as any)?.ok === false ? (result as any).error ?? (result as any).failed?.error ?? (result as any).result?.error : undefined;
           const artifact = (result as any)?.result?.artifact;
           const normalized = failure ? { ...result as object, ...(artifact ? { artifact } : {}), error: { ...failure, retryable: false } } : result;
-          output = await compactToolResult(normalized, { ...options, toolCallId, ...identity, preserveVerification: definition.name === "verify_state", preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job" });
+          output = await compactToolResult(normalized, { ...options, toolCallId, ...identity, preserveVerification: definition.name === "verify_state", preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job", preserveSearchStatus: definition.name === "find_elements" });
           if ((definition.name === "get_job" || definition.name === "cancel_job") && (result as any)?.terminal === true && typeof (result as any).id === "string") observedTerminalJob = (result as any).id;
         } catch (error) {
           output = await failureFor(error, executing);
@@ -146,8 +150,142 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
 
 const LARGE_RESULT_BYTES = 8 * 1024;
 
-function hasScreenshot(value: unknown): boolean {
-  return Boolean(value && typeof value === "object" && ("screenshot" in value && (typeof (value as any).screenshot?.data === "string" || Number.isSafeInteger((value as any).screenshot?.artifactId)) || Object.values(value).some(hasScreenshot)));
+type VisualEvidence = { screenshot: Record<string, unknown>; context: Record<string, unknown>; path: Array<string | number> };
+
+function exactText(value: unknown, maxBytes: number): string | undefined {
+  return typeof value === "string" && value.length <= maxBytes && previewEncoder.encode(JSON.stringify(value)).byteLength <= maxBytes ? value : undefined;
+}
+function excerpt(value: string, maxBytes: number): { value: string; truncated: boolean } {
+  const text = previewString(value, 2000, maxBytes - 4);
+  return { value: text.length < value.length ? `${text}…` : text, truncated: text.length < value.length };
+}
+function geometry(value: unknown, fields: readonly string[]): Record<string, number> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  return Object.fromEntries(fields.flatMap((field) => typeof record[field] === "number" && Number.isFinite(record[field]) ? [[field, record[field] as number]] : []));
+}
+function artifactMetadata(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  for (const field of ["id", "byteLength", "downloadId"]) if (Number.isSafeInteger(record[field]) && Number(record[field]) >= 0) result[field] = record[field];
+  if (typeof record.saved === "boolean") result.saved = record.saved;
+  for (const field of ["filename", "mimeType"]) if (typeof record[field] === "string") {
+    const fieldValue = excerpt(record[field] as string, field === "filename" ? 512 : 256);
+    result[field] = fieldValue.value;
+    if (fieldValue.truncated) result[`${field}Truncated`] = true;
+  }
+  return result;
+}
+function visualContext(record: Record<string, unknown>): Record<string, unknown> {
+  const context: Record<string, unknown> = {};
+  const observationId = exactText(record.observationId, 512);
+  if (observationId !== undefined) context.observationId = observationId;
+  for (const field of ["tabId", "documentId"]) if (Number.isSafeInteger(record[field]) && Number(record[field]) >= 0) context[field] = record[field];
+  const viewport = geometry(record.viewport, ["x", "y", "width", "height", "scale"]);
+  if (viewport) context.viewport = viewport;
+  if (record.page && typeof record.page === "object" && !Array.isArray(record.page)) {
+    const page = record.page as Record<string, unknown>; const result: Record<string, unknown> = {};
+    for (const field of ["url", "title"]) if (typeof page[field] === "string") {
+      const fieldValue = excerpt(page[field] as string, field === "url" ? 1024 : 512);
+      result[field] = fieldValue.value;
+      if (fieldValue.truncated) result[`${field}Truncated`] = true;
+    }
+    context.page = result;
+  }
+  const artifact = artifactMetadata(record.artifact);
+  if (artifact) context.artifact = artifact;
+  return context;
+}
+function screenshotMetadata(image: Record<string, unknown>): Record<string, unknown> | undefined {
+  const data = typeof image.data === "string" && image.data.length ? image.data : undefined;
+  const artifactId = Number.isSafeInteger(image.artifactId) && Number(image.artifactId) > 0 ? image.artifactId : undefined;
+  if (data === undefined && artifactId === undefined) return undefined;
+  const mediaType = exactText(image.mediaType, 128);
+  const screenshot: Record<string, unknown> = { ...(data === undefined ? {} : { data }), ...(artifactId === undefined ? {} : { artifactId }), ...(mediaType === undefined ? {} : { mediaType }) };
+  for (const field of ["width", "height", "scale"]) if (typeof image[field] === "number" && Number.isFinite(image[field])) screenshot[field] = image[field];
+  const origin = geometry(image.origin, ["x", "y"]);
+  if (origin) screenshot.origin = origin;
+  return screenshot;
+}
+/** Preserve the last usable screenshot, matching prepareToolMessages' image selection. */
+function visualEvidence(value: unknown): VisualEvidence | undefined {
+  let found: VisualEvidence | undefined;
+  const visit = (item: unknown, path: Array<string | number>): void => {
+    if (!item || typeof item !== "object") return;
+    if (Array.isArray(item)) { item.forEach((entry, index) => visit(entry, [...path, index])); return; }
+    const record = item as Record<string, unknown>;
+    for (const [key, entry] of Object.entries(record)) {
+      if (key === "screenshot" && entry && typeof entry === "object" && !Array.isArray(entry)) {
+        const screenshot = screenshotMetadata(entry as Record<string, unknown>);
+        if (screenshot) { found = { screenshot, context: visualContext(record), path }; continue; }
+      }
+      visit(entry, [...path, key]);
+    }
+  };
+  visit(value, []);
+  return found;
+}
+
+function jobMetadata(record: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const field of ["id", "state"]) {
+    const value = exactText(record[field], 512); if (value !== undefined) result[field] = value;
+  }
+  for (const field of ["terminal", "ok", "hasMore"]) if (typeof record[field] === "boolean") result[field] = record[field];
+  if (Number.isSafeInteger(record.nextCursor) && Number(record.nextCursor) >= 0) result.nextCursor = record.nextCursor;
+  return result;
+}
+function searchMetadata(record: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const field of ["tabId", "documentId", "total"]) if (Number.isSafeInteger(record[field]) && Number(record[field]) >= 0) result[field] = record[field];
+  if (typeof record.hasMore === "boolean") result.hasMore = record.hasMore;
+  const cursor = exactText(record.nextCursor, 512); if (cursor !== undefined) result.nextCursor = cursor;
+  return result;
+}
+function failureMetadata(record: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const field of ["jobId", "state", "timeoutSource"]) {
+    const value = exactText(record[field], 512); if (value !== undefined) result[field] = value;
+  }
+  if (Number.isSafeInteger(record.timeoutMs) && Number(record.timeoutMs) >= 0) result.timeoutMs = record.timeoutMs;
+  const receipt = record.receipts;
+  if (receipt && typeof receipt === "object" && !Array.isArray(receipt)) {
+    const source = receipt as Record<string, unknown>; const output: Record<string, unknown> = {};
+    for (const field of ["tool", "jobId"]) { const value = exactText(source[field], 512); if (value !== undefined) output[field] = value; }
+    if (Number.isSafeInteger(source.after) && Number(source.after) >= 0) output.after = source.after;
+    result.receipts = output;
+  }
+  return result;
+}
+function blockerMetadata(blocked: unknown): Record<string, unknown> | undefined {
+  if (!blocked || typeof blocked !== "object" || Array.isArray(blocked)) return undefined;
+  const record = blocked as Record<string, unknown>; const result: Record<string, unknown> = {};
+  for (const field of ["kind", "dialogId", "type"]) { const value = exactText(record[field], 512); if (value !== undefined) result[field] = value; }
+  if (Number.isSafeInteger(record.evidenceId) && Number(record.evidenceId) >= 0) result.evidenceId = record.evidenceId;
+  if (record.source && typeof record.source === "object" && !Array.isArray(record.source)) {
+    const source = record.source as Record<string, unknown>; const sanitized: Record<string, unknown> = {};
+    if (Number.isSafeInteger(source.tabId) && Number(source.tabId) >= 0) sanitized.tabId = source.tabId;
+    const sessionId = exactText(source.sessionId, 512); if (sessionId !== undefined) sanitized.sessionId = sessionId;
+    result.source = sanitized;
+  }
+  return result;
+}
+
+function boundedError(error: unknown): unknown {
+  if (typeof error === "string") return excerpt(error, 2048).value;
+  if (!error || typeof error !== "object" || Array.isArray(error)) return undefined;
+  const record = error as Record<string, unknown>; const result: Record<string, unknown> = {};
+  for (const field of ["code", "name"]) {
+    const value = exactText(record[field], 256);
+    if (value !== undefined) result[field] = value;
+  }
+  if (typeof record.message === "string") {
+    const message = excerpt(record.message, 2048); result.message = message.value;
+    if (message.truncated) result.messageTruncated = true;
+  }
+  for (const field of ["retryable", "effectUnknown"]) if (typeof record[field] === "boolean") result[field] = record[field];
+  return result;
 }
 
 function valueAt(value: unknown, path: readonly (string | number)[]): unknown {
@@ -193,8 +331,8 @@ function previewOf(value: unknown, path?: readonly (string | number)[]): unknown
   return preview;
 }
 
-export async function compactToolResult(value: unknown, options: { logger?: EventLogger; conversationId?: string; toolCallId?: string; runId?: string; toolCallIdCanonical?: boolean; preserveVerification?: boolean; preserveJobStatus?: boolean }): Promise<unknown> {
-  if ((value && typeof value === "object" && ("$ref" in value || (value as any).ok === false || (value as any).type === "tool-error")) || !options.logger || hasScreenshot(value)) return value;
+export async function compactToolResult(value: unknown, options: { logger?: EventLogger; conversationId?: string; toolCallId?: string; runId?: string; toolCallIdCanonical?: boolean; preserveVerification?: boolean; preserveJobStatus?: boolean; preserveSearchStatus?: boolean }): Promise<unknown> {
+  if ((value && typeof value === "object" && "$ref" in value) || !options.logger) return value;
   let serialized: string | undefined;
   try { serialized = JSON.stringify(value); } catch { return value; }
   if (serialized === undefined) return value;
@@ -202,20 +340,34 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
   if (bytes <= LARGE_RESULT_BYTES) return value;
   const event = await options.logger.append({ type: "tool.result.data", conversationId: options.conversationId, toolCallId: options.toolCallId, runId: options.runId, toolCallIdCanonical: options.toolCallIdCanonical, content: { bytes }, output: value });
   if (!event) throw new Error("Could not save large tool result");
-  const job = options.preserveJobStatus && value && typeof value === "object" ? value as Record<string, unknown> : undefined;
-  const path = job && Array.isArray(job.events) ? ["events"] : readablePathOf(value);
+  const root = value && typeof value === "object" ? value as Record<string, unknown> : undefined;
+  const job = options.preserveJobStatus ? root : undefined;
+  const search = options.preserveSearchStatus ? root : undefined;
+  const visual = visualEvidence(value);
+  const failure = root?.ok === false || root?.type === "tool-error";
+  const errorPath = root && Object.hasOwn(root, "error") ? ["error"] : ["result", "error"];
+  const error = failure ? valueAt(value, errorPath) : undefined;
+  const path = job && Array.isArray(job.events) ? ["events"] : search && Array.isArray(search.elements) ? ["elements"] : readablePathOf(value);
   const selected = path ? valueAt(value, path) : value;
   const access = { artifactId: event.id, ...(path ? { path } : {}), ...(typeof selected === "string" ? { offset: 0, limit: 4000 } : Array.isArray(selected) ? { offset: 0, limit: 50 } : {}) };
   const verification = options.preserveVerification && value && typeof value === "object" && "result" in value
     ? (value as { result?: { verified?: unknown; timedOut?: unknown; present?: unknown } }).result : undefined;
   const handoff = value && typeof value === "object" && (value as any).accepted === true && (value as any).complete === false && typeof (value as any).jobId === "string" ? value as Record<string, any> : undefined;
   const blocked = handoff?.blockedBy;
-  return { $ref: event.id, bytes, preview: job ? { eventCount: Array.isArray(job.events) ? job.events.length : 0 } : handoff ? undefined : previewOf(value, path), access, type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value,
-    ...(job ? Object.fromEntries(["id", "state", "terminal", "ok", "nextCursor", "hasMore"].filter((key) => Object.hasOwn(job, key)).map((key) => [key, job[key]])) : {}),
-    ...(job && Object.hasOwn(job, "result") ? { resultAccess: { artifactId: event.id, path: ["result"],
-      ...(typeof job.result === "string" ? { offset: 0, limit: 4000 } : Array.isArray(job.result) ? { offset: 0, limit: 50 } : {}) } } : {}),
-    ...(handoff ? { accepted: true, complete: false, jobId: handoff.jobId, state: handoff.state,
-      ...(blocked && typeof blocked === "object" ? { blockedBy: Object.fromEntries(["kind", "dialogId", "source", "type", "evidenceId"].filter((key) => Object.hasOwn(blocked, key)).map((key) => [key, blocked[key]])) } : {}) } : {}),
+  return { $ref: event.id, bytes, preview: job ? { eventCount: Array.isArray(job.events) ? job.events.length : 0 } : handoff || visual && typeof selected !== "string" ? undefined : previewOf(value, path), access, type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value,
+    ...(job ? jobMetadata(job) : {}),
+    ...(search ? searchMetadata(search) : {}),
+    ...(root && Object.hasOwn(root, "result") ? { resultAccess: { artifactId: event.id, path: ["result"],
+      ...(typeof root.result === "string" ? { offset: 0, limit: 4000 } : Array.isArray(root.result) ? { offset: 0, limit: 50 } : {}) } } : {}),
+    ...(failure ? { ...(root?.ok === false ? { ok: false } : {}), ...(root?.type === "tool-error" ? { type: "tool-error" } : {}),
+      ...failureMetadata(root!),
+      ...(Object.hasOwn(root!, "receipts") ? { receiptsAccess: { artifactId: event.id, path: ["receipts"] } } : {}),
+      ...(error === undefined ? {} : { error: boundedError(error), errorAccess: { artifactId: event.id, path: errorPath } }) } : {}),
+    ...(visual ? { ...visual.context, screenshot: visual.screenshot,
+      visualAccess: { artifactId: event.id, ...(visual.path.length <= 20 && previewEncoder.encode(JSON.stringify(visual.path)).byteLength <= 2048 ? { path: visual.path } : {}) } } : {}),
+    ...(root && Object.hasOwn(root, "artifact") ? { artifact: artifactMetadata(root.artifact), artifactAccess: { artifactId: event.id, path: ["artifact"] } } : {}),
+    ...(handoff ? { accepted: true, complete: false, ...failureMetadata(handoff),
+      ...(blocked && typeof blocked === "object" ? { blockedBy: blockerMetadata(blocked), blockedByAccess: { artifactId: event.id, path: ["blockedBy"] } } : {}) } : {}),
     ...(typeof verification?.verified === "boolean" ? { verification: { verified: verification.verified,
       ...(typeof verification.timedOut === "boolean" ? { timedOut: verification.timedOut } : {}),
       ...(typeof verification.present === "boolean" ? { present: verification.present } : {}) } } : {}) };
@@ -256,11 +408,11 @@ function scrubScreenshots(value: unknown, found: ScreenshotSource[]): unknown {
   return Object.fromEntries(Object.entries(value).map(([key, item]) => {
     if (key === "screenshot" && item && typeof item === "object") {
       const screenshot = item as Record<string, unknown>;
-      if (typeof screenshot.data === "string") {
+      if (typeof screenshot.data === "string" && screenshot.data.length > 0) {
         found.push({ mediaType: typeof screenshot.mediaType === "string" ? screenshot.mediaType : "image/png", data: screenshot.data });
         return [key, { ...screenshot, data: "[stored in canonical event log]" }];
       }
-      if (Number.isSafeInteger(screenshot.artifactId)) found.push({ mediaType: typeof screenshot.mediaType === "string" ? screenshot.mediaType : "image/png", artifactId: Number(screenshot.artifactId) });
+      if (Number.isSafeInteger(screenshot.artifactId) && Number(screenshot.artifactId) > 0) found.push({ mediaType: typeof screenshot.mediaType === "string" ? screenshot.mediaType : "image/png", artifactId: Number(screenshot.artifactId) });
     }
     return [key, scrubScreenshots(item, found)];
   }));

@@ -45,19 +45,22 @@ describe("browser tools", () => {
     expect(events.find((event) => event.type === "tool.failed")).toMatchObject({ toolCallId: "1:capture", output: result });
     finishWork(); executor.dispose();
   });
-  it("preserves a large failed program and its full partial output without hiding the failure", async () => {
+  it("stores a large failed program without hiding failure or its original partial output", async () => {
     const failed = { ok: false, state: "failed", result: { error: { code: "timeout", message: "interrupted", effectUnknown: true }, completed: "completed".repeat(2000) } };
     expect(JSON.stringify(failed).length).toBeGreaterThan(8000);
     const append = vi.fn(async () => ({ id: 7 }));
     const logger = { append, toolIdentity: () => ({ toolCallId: "call", toolCallIdCanonical: true }) } as unknown as EventLogger;
     const tools = createProgramTools({ runProgram: vi.fn(async () => failed) } as unknown as ChromeExecutor, { logger, conversationId: "conversation" }) as Record<string, any>;
     const result = await tools.execute_program.execute({ code: "await check(false);" }, { toolCallId: "call" });
-    expect(result).toEqual({ ...failed, error: { ...failed.result.error, retryable: false } });
-    expect(result).not.toHaveProperty("$ref");
-    expect(append).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ $ref: 7, ok: false, state: "failed", error: { ...failed.result.error, retryable: false }, resultAccess: { artifactId: 7, path: ["result"] } });
+    expect(JSON.stringify(result).length).toBeLessThan(8000);
+    expect(append).toHaveBeenCalledTimes(3);
     expect(append).toHaveBeenCalledWith(expect.objectContaining({ type: "tool.started" }));
+    expect(append).toHaveBeenCalledWith(expect.objectContaining({ type: "tool.result.data", output: expect.objectContaining({ result: failed.result }) }));
     expect(append).toHaveBeenCalledWith(expect.objectContaining({ type: "tool.failed", output: result }));
-    await expect(compactToolResult({ type: "tool-error", error: "large".repeat(2000) }, { logger })).resolves.toHaveProperty("type", "tool-error");
+    const toolError = await compactToolResult({ type: "tool-error", error: "large".repeat(2000) }, { logger }) as any;
+    expect(toolError).toMatchObject({ type: "tool-error", $ref: 7, errorAccess: { artifactId: 7, path: ["error"] } });
+    expect(toolError.error.length).toBeLessThanOrEqual(2001);
   });
   it("stores a large result with its original identity after a request phase changes", async () => {
     let phase = 1;
@@ -107,7 +110,7 @@ describe("browser tools", () => {
     const tools = createProgramTools({} as ChromeExecutor) as Record<string, any>;
     expect(Object.keys(tools)).toEqual(PROGRAM_TOOL_REGISTRY.map(({ name }) => name));
     expect(new Set(Object.keys(tools)).size).toBe(PROGRAM_TOOL_REGISTRY.length);
-    for (const name of ["inspect_page", "click", "fill", "set_checked", "navigate", "list_tabs", "read_artifact", "execute_program", "list_jobs", "get_job", "cancel_job"]) expect(tools).toHaveProperty(name);
+    for (const name of ["inspect_page", "find_elements", "click", "fill", "set_checked", "navigate", "list_tabs", "read_artifact", "execute_program", "list_jobs", "get_job", "cancel_job"]) expect(tools).toHaveProperty(name);
     for (const name of ["inspect", "run", "jobs", "snapshot", "act", "run-code", "browser", "result", "search-tools", "install"]) expect(tools).not.toHaveProperty(name);
     expect(Object.values(tools).every((tool) => tool.deferLoading !== true)).toBe(true);
     for (const { name, summary } of PROGRAM_TOOL_REGISTRY) expect(PROGRAM_TOOL_CONTEXT).toContain(`- ${name}: ${summary}`);
@@ -199,6 +202,15 @@ describe("browser tools", () => {
     await expect(tools.switch_tab.execute({ tabId: 42 }, { toolCallId: "switch" })).resolves.toEqual([{ id: 42, current: true }]);
     expect(switchTab).toHaveBeenCalledWith(42, undefined, undefined);
   });
+  it("routes bounded element searches to the live browser executor", async () => {
+    const findElements = vi.fn(async () => ({ tabId: 41, documentId: 1, total: 1, elements: [{ ref: "t41d1e1", role: "button", name: "Submit" }], hasMore: false }));
+    const tools = createProgramTools({ findElements } as unknown as ChromeExecutor, { conversationId: "c" }) as Record<string, any>;
+    const input = { target: { by: "role", value: "button", name: "Submit" }, limit: 10 };
+    await expect(tools.find_elements.execute(input, { toolCallId: "find" })).resolves.toMatchObject({ elements: [{ ref: "t41d1e1" }], hasMore: false });
+    expect(findElements).toHaveBeenCalledWith(input, undefined, expect.objectContaining({ conversationId: "c" }));
+    expect(() => tools.find_elements.inputSchema.parse({ ...input, limit: 101 })).toThrow();
+  });
+
   it("routes download metadata to the Chrome downloads reader without requiring a page", async () => {
     const listDownloads = vi.fn(async (input: unknown) => ({ downloads: [], input, consistency: "live" }));
     const tools = createProgramTools({ listDownloads } as unknown as ChromeExecutor) as Record<string, any>;
@@ -301,6 +313,82 @@ describe("browser tools", () => {
     expect(appended[0].output).toBe(value);
   });
 
+  it("bounds a failed job while retaining error identity, cursor and artifact access", async () => {
+    const stored: any[] = [];
+    const logger = { append: async (event: any) => { stored.push(event); return { ...event, id: 16 }; } } as EventLogger;
+    const value = { id: "job", state: "failed", terminal: true, ok: false, nextCursor: 42, hasMore: true,
+      error: { code: "timeout", message: "failure ".repeat(20_000), effectUnknown: true, retryable: false },
+      result: { partial: "data".repeat(30_000) }, events: [{ output: "receipt".repeat(30_000) }] };
+    const result = await compactToolResult(value, { logger, preserveJobStatus: true }) as any;
+    expect(result).toMatchObject({ $ref: 16, ok: false, id: "job", state: "failed", terminal: true, nextCursor: 42, hasMore: true,
+      error: { code: "timeout", effectUnknown: true, retryable: false }, errorAccess: { artifactId: 16, path: ["error"] },
+      access: { artifactId: 16, path: ["events"] }, resultAccess: { artifactId: 16, path: ["result"] } });
+    expect(new TextEncoder().encode(JSON.stringify(result)).byteLength).toBeLessThan(8192);
+    expect(stored[0].output).toBe(value);
+  });
+
+  it("keeps raw image pixels available while compacting other large results and scrubs them on replay", async () => {
+    const value = { ok: true, result: { snapshot: "page".repeat(5000), observationId: "obs", tabId: 7,
+      screenshot: { mediaType: "image/png", data: "image-data", width: 100, height: 50, scale: 1, origin: { x: 0, y: 0 } } } };
+    const logger = { append: async (event: any) => ({ ...event, id: 17 }) } as EventLogger;
+    const compacted = await compactToolResult(value, { logger }) as any;
+    expect(compacted).toMatchObject({ $ref: 17, observationId: "obs", tabId: 7, screenshot: value.result.screenshot });
+    expect(JSON.stringify(compacted)).not.toContain("page".repeat(1100));
+    const messages = [{ role: "tool", content: [{ type: "tool-result", output: { type: "json", value: compacted } }] }];
+    const prepared = await prepareToolMessages(messages, 1);
+    expect(prepared[0].content[0].output.value.screenshot.data).toBe("[stored in canonical event log]");
+    expect(prepared.at(-1)).toMatchObject({ role: "user", content: [{ type: "file", mediaType: "image/png", data: { data: "image-data" } }] });
+    const replay = await prepareToolMessages([...messages, { role: "assistant", content: "continue" }], 2);
+    expect(JSON.stringify(replay)).not.toContain("image-data");
+  });
+
+  it("bounds page-controlled visual and error metadata while retaining the original paths", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: {
+      append: async (event) => { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+      all: async () => [...events], clear: async () => { events.length = 0; },
+    } });
+    const huge = "x".repeat(120_000);
+    const visual = { ok: true, result: { screenshot: { artifactId: 2, mediaType: "image/png", origin: { x: 2, y: 3, extra: huge } },
+      observationId: "obs", tabId: 4, viewport: { width: 100, height: 50, extra: huge }, page: { url: huge, title: huge, extra: huge }, artifact: { id: 2, filename: huge, mimeType: "image/png", extra: huge } } };
+    const compacted = await compactToolResult(visual, { logger, conversationId: "c" }) as any;
+    expect(compacted).toMatchObject({ $ref: 1, screenshot: { artifactId: 2, origin: { x: 2, y: 3 } }, visualAccess: { artifactId: 1, path: ["result"] },
+      viewport: { width: 100, height: 50 }, page: { urlTruncated: true, titleTruncated: true }, artifact: { id: 2, filenameTruncated: true } });
+    expect(new TextEncoder().encode(JSON.stringify(compacted)).byteLength).toBeLessThan(8192);
+    await expect(logger.result(1, { path: ["result", "page", "url"] }, "c")).resolves.toBe(huge);
+    const failed = { ok: false, error: { code: { extra: huge }, message: "\u0000".repeat(2000), retryable: false, effectUnknown: true },
+      artifact: { id: 4, filename: huge }, receipts: { tool: "get_job", jobId: "job", after: 2, extra: huge } };
+    const failure = await compactToolResult(failed, { logger, conversationId: "c" }) as any;
+    expect(failure).toMatchObject({ $ref: 2, ok: false, error: { retryable: false, effectUnknown: true, messageTruncated: true },
+      errorAccess: { artifactId: 2, path: ["error"] }, artifact: { id: 4, filenameTruncated: true }, artifactAccess: { artifactId: 2, path: ["artifact"] },
+      receipts: { tool: "get_job", jobId: "job", after: 2 }, receiptsAccess: { artifactId: 2, path: ["receipts"] } });
+    expect(failure.error).not.toHaveProperty("code");
+    expect(new TextEncoder().encode(JSON.stringify(failure)).byteLength).toBeLessThan(8192);
+    await expect(logger.result(2, { path: ["error", "code", "extra"] }, "c")).resolves.toBe(huge);
+  });
+
+  it("loads the artifact when screenshot data is an empty string", async () => {
+    const logger = { append: async (event: any) => ({ ...event, id: 18 }) } as EventLogger;
+    const compacted = await compactToolResult({ snapshot: "x".repeat(10_000), screenshot: { data: "", artifactId: 7, mediaType: "image/png" } }, { logger }) as any;
+    expect(compacted.screenshot).toEqual({ artifactId: 7, mediaType: "image/png" });
+    for (const value of [compacted, { screenshot: { data: "", artifactId: 7, mediaType: "image/png" } }]) {
+      const readArtifact = vi.fn(async () => ({ mimeType: "image/png", base64: "image-7" }));
+      const messages = [{ role: "tool", content: [{ type: "tool-result", output: { type: "json", value } }] }];
+      const prepared = await prepareToolMessages(messages, 1, undefined, readArtifact);
+      expect(readArtifact).toHaveBeenCalledWith(7);
+      expect(prepared.at(-1)).toMatchObject({ role: "user", content: [{ type: "file", mediaType: "image/png", data: { type: "data", data: "image-7" } }] });
+    }
+  });
+
+  it("keeps a large search page's scope and continuation visible", async () => {
+    const logger = { append: async (event: any) => ({ ...event, id: 16 }) } as EventLogger;
+    const elements = Array.from({ length: 100 }, (_, index) => ({ ref: `ref-${index}`, role: "button", name: "x".repeat(160) }));
+    const value = { tabId: 41, documentId: 2, total: 200, elements, hasMore: true, nextCursor: "cursor" };
+    const result = await compactToolResult(value, { logger, preserveSearchStatus: true });
+    expect(result).toMatchObject({ $ref: 16, tabId: 41, documentId: 2, total: 200, hasMore: true, nextCursor: "cursor", access: { artifactId: 16, path: ["elements"], offset: 0, limit: 50 } });
+    expect(new TextEncoder().encode(JSON.stringify(result)).byteLength).toBeLessThan(6000);
+  });
+
   it("keeps terminal job status and cursor visible without repeating large receipt payloads", async () => {
     const logger = { append: async (event: any) => ({ ...event, id: 12 }) } as EventLogger;
     const value = { id: "job", state: "succeeded", terminal: true, ok: true, result: "done", nextCursor: 42, hasMore: false, events: [{ output: "x".repeat(10_000) }] };
@@ -358,8 +446,16 @@ describe("browser tools", () => {
     expect(prepared[1]).toMatchObject({ role: "user", content: [
       { type: "file", mediaType: "image/png", data: { type: "data", data: "image-7" } },
     ] });
-    const value = { snapshot: "x".repeat(9_000), screenshot: { mediaType: "image/png", artifactId: 7 } };
-    expect(await compactToolResult(value, { logger: { append: () => { throw new Error("must not compact visual results"); } } as unknown as EventLogger })).toBe(value);
+    const value = { snapshot: "x".repeat(9_000), screenshot: { mediaType: "image/png", artifactId: 7 }, observationId: "obs", tabId: 41, documentId: 2, viewport: { width: 100, height: 100 } };
+    const logger = { append: async (event: any) => ({ ...event, id: 9 }) } as EventLogger;
+    const compacted = await compactToolResult(value, { logger }) as any;
+    expect(compacted).toMatchObject({ $ref: 9, screenshot: value.screenshot, observationId: "obs", tabId: 41, documentId: 2, viewport: value.viewport });
+    expect(JSON.stringify(compacted).length).toBeLessThan(8000);
+    const current = [{ role: "tool", content: [{ type: "tool-result", output: { type: "json", value: compacted } }] }];
+    const image = await prepareToolMessages(current, 1, undefined, async (id) => ({ mimeType: "image/png", base64: `image-${id}` }));
+    expect(image.at(-1)).toMatchObject({ role: "user", content: [{ type: "file", mediaType: "image/png", data: { data: "image-7" } }] });
+    const replay = await prepareToolMessages([...current, { role: "assistant", content: "continued" }], 2, undefined, async () => { throw new Error("historical image must not be loaded"); });
+    expect(replay).toHaveLength(2);
   });
 
   it("keeps screenshot artifact metadata without injecting pixels for text-only models", async () => {

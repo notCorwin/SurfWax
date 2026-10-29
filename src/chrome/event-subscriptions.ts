@@ -207,6 +207,13 @@ export class EventSubscriptions {
     return structuredClone({ ...visible, claimId });
   }
 
+  /** Verify the exact claimed dialog is still live immediately before dispatch. */
+  assertDialogClaim(owner: EventOwner, id: string, claimId: number): void {
+    const dialog = this.dialogs.get(id);
+    if (!dialog || !sameOwner(owner, dialog.owner)) throw new Error("Dialog unavailable in this run");
+    if (dialog.state !== "handling" || dialog.claimVersion !== claimId) throw new Error("Dialog claim is stale");
+  }
+
   /** A definite pre-dispatch failure releases the claim; uncertain effects cannot be retried automatically. */
   finishDialog(owner: EventOwner, id: string, claimId: number, outcome: "handled" | "not-dispatched" | "uncertain"): void {
     const dialog = this.dialogs.get(id);

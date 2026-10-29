@@ -109,14 +109,20 @@ describe("dialog handles", () => {
     const claim = stream.claimDialog(owner, dialog.id);
     expect(claim).toMatchObject({ source, state: "handling" });
     expect(() => stream.claimDialog(owner, dialog.id)).toThrow("handling");
+    expect(() => stream.assertDialogClaim(owner, dialog.id, claim.claimId)).not.toThrow();
+    expect(() => stream.assertDialogClaim(other, dialog.id, claim.claimId)).toThrow("unavailable");
     stream.finishDialog(owner, dialog.id, claim.claimId, "not-dispatched");
+    expect(() => stream.assertDialogClaim(owner, dialog.id, claim.claimId)).toThrow("stale");
     const secondClaim = stream.claimDialog(owner, dialog.id);
     expect(secondClaim).toMatchObject({ state: "handling" });
+    expect(() => stream.assertDialogClaim(owner, dialog.id, claim.claimId)).toThrow("stale");
+    expect(() => stream.assertDialogClaim(owner, dialog.id, secondClaim.claimId)).not.toThrow();
     expect(() => stream.finishDialog(owner, dialog.id, claim.claimId, "not-dispatched")).toThrow("stale");
     stream.finishDialog(owner, dialog.id, secondClaim.claimId, "uncertain");
     expect(() => stream.claimDialog(owner, dialog.id)).toThrow("uncertain");
     stream.closeDialog(owner, dialog.id);
     expect(() => stream.claimDialog(owner, dialog.id)).toThrow("unavailable");
+    expect(() => stream.assertDialogClaim(owner, dialog.id, secondClaim.claimId)).toThrow("unavailable");
   });
 
   it("invalidates handles when the tab or owning run ends", () => {

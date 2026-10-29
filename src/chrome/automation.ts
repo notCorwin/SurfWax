@@ -18,6 +18,12 @@ type LocatorSpec = { queries: Query[]; index?: number; ref?: string; hasText?: s
 type WaitState = "attached" | "detached" | "visible" | "hidden" | "enabled" | "editable" | "checked";
 type RefRecord = { backendNodeId: number; frameId?: string; debuggee: Debuggee; role: string; name: string; generation: number };
 type SnapshotLine = { id: string; line: string };
+export type FindOptions = { cursor?: string; limit?: number };
+type SearchSnapshot = {
+  id: string; tabId: number; generation: number; session: Session; key: string;
+  conversationId?: string; runId?: string; debuggee: Debuggee; total: number;
+  candidates?: Candidate[]; arrayId?: string; group?: string;
+};
 export type InspectOptions = { since?: string; fields?: Array<"text" | "state" | "ref" | "actions">; budget?: number; offset?: number; limit?: number; depth?: number };
 type ObservationRecord = {
   observationId: string;
@@ -48,7 +54,7 @@ type Session = {
   lastSnapshot?: SnapshotLine[];
 };
 
-type Candidate = { role: string; name: string; tag?: string; text?: string; ref?: string; backendNodeId?: number; debuggee?: Debuggee };
+type Candidate = { role: string; name: string; tag?: string; text?: string; ref?: string; backendNodeId?: number; debuggee?: Debuggee; roleTruncated?: boolean; nameTruncated?: boolean };
 type ElementState = {
   x: number;
   y: number;
@@ -145,7 +151,9 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata) {
     for (const item of locator.queries) {
       const found = current.flatMap(node => query(node, item));
       if (item.kind === "frame") {
-        current = found.map(frame => { try { return frame.contentDocument; } catch { return null; } }).filter(Boolean);
+        current = found.map(frame => { try { return frame.contentDocument; } catch { return null; } });
+        if (metadata === "nodes" && current.some(frame => !frame)) throw new Error("AutomationError[frame-unavailable]: Frame document is not available");
+        current = current.filter(Boolean);
       } else current = found;
     }
     if (locator.hasText) current = current.filter(el => visibleText(el).toLowerCase().includes(normalize(locator.hasText).toLowerCase()));
@@ -154,8 +162,22 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata) {
     return [...new Set(current)];
   };
   const result = resolve(document, spec);
+  if (metadata === "nodes") return result;
   if (!metadata) return result[0] || null;
   return result.map(el => ({ role: roleOf(el), name: nameOf(el), tag: el.tagName.toLowerCase(), text: visibleText(el).slice(0, 120) }));
+}`;
+
+const SEARCH_META_SOURCE = String.raw`function() {
+  const el = this;
+  const normalize = value => String(value ?? "").replace(/\s+/g, " ").trim();
+  const role = el.getAttribute("role") || ({
+    A: el.hasAttribute("href") ? "link" : "generic", BUTTON:"button", SELECT:"combobox", TEXTAREA:"textbox", OPTION:"option", IMG:"img", SUMMARY:"button", FORM:"form", TABLE:"table", TR:"row", TD:"cell", TH:"columnheader",
+    H1:"heading", H2:"heading", H3:"heading", H4:"heading", H5:"heading", H6:"heading", NAV:"navigation", MAIN:"main", ARTICLE:"article", ASIDE:"complementary", FOOTER:"contentinfo", HEADER:"banner", UL:"list", OL:"list", LI:"listitem", DIALOG:"dialog", PROGRESS:"progressbar"
+  }[el.tagName] || (el.tagName === "INPUT" ? ({checkbox:"checkbox",radio:"radio",range:"slider",number:"spinbutton",search:"searchbox",button:"button",submit:"button",reset:"button"}[el.type] || "textbox") : "generic"));
+  const name = normalize(el.getAttribute("aria-label") || (() => { const ids = el.getAttribute("aria-labelledby"); return ids && ids.split(/\s+/).map(id => el.ownerDocument.getElementById(id)?.textContent || "").join(" "); })() || (el.labels ? [...el.labels].map(label => label.textContent).join(" ") : "") || el.getAttribute("alt") || el.getAttribute("title") || el.textContent || el.value);
+  const text = normalize(el.innerText === undefined ? el.textContent : el.innerText);
+  return { connected: el.isConnected, role: String(role).slice(0, 80), name: name.slice(0, 160), text: text.slice(0, 120), tag: el.tagName.toLowerCase(),
+    ...(String(role).length > 80 ? {roleTruncated:true} : {}), ...(name.length > 160 ? {nameTruncated:true} : {}), ...(text.length > 120 ? {textTruncated:true} : {}) };
 }`;
 
 export class AutomationRuntime {
@@ -168,6 +190,7 @@ export class AutomationRuntime {
   private readonly observations = new Map<string, ObservationRecord>();
   private readonly axRoots = new Map<string, number>();
   private readonly fileChoosers = new Map<number, FileChooserRecord>();
+  private readonly searches = new Map<string, SearchSnapshot>();
 
   private waitDiagnostic() { return this.lastWait; }
 
@@ -289,6 +312,7 @@ export class AutomationRuntime {
 
   private invalidate(session: Session, preserveChooser = false): void {
     session.generation += 1;
+    this.clearSearches(session.tabId);
     session.refs.clear();
     session.refsByNode.clear();
     session.lastSnapshot = undefined;
@@ -298,12 +322,13 @@ export class AutomationRuntime {
   }
 
   handleDetach(source: Debuggee): void {
-    if (Number.isInteger(source.tabId)) this.sessions.delete(source.tabId!);
+    if (Number.isInteger(source.tabId)) { this.clearSearches(source.tabId!); this.sessions.delete(source.tabId!); }
   }
 
   async abortSessions(): Promise<void> {
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
+    this.clearSearches();
     this.objectDebuggees.clear();
     this.observations.clear();
     this.fileChoosers.clear();
@@ -783,6 +808,168 @@ export class AutomationRuntime {
     })().catch((error) => { session!.ready = undefined; throw error; });
     await session.ready;
     return session;
+  }
+
+  private releaseSearch(snapshot: SearchSnapshot): void {
+    this.searches.delete(snapshot.id);
+    if (snapshot.group) void this.options.command(snapshot.debuggee, "Runtime.releaseObjectGroup", { objectGroup: snapshot.group }).catch(() => undefined);
+  }
+
+  private clearSearches(tabId?: number): void {
+    for (const snapshot of this.searches.values()) if (tabId === undefined || snapshot.tabId === tabId) this.releaseSearch(snapshot);
+  }
+
+  /** Capture the ordered set of actual nodes once; continuation never re-runs the locator. */
+  async findElements(tabId: number, locator: LocatorFacade, options: FindOptions = {}): Promise<Record<string, unknown>> {
+    return this.action(tabId, "find_elements", locator.spec, async () => {
+      const session = await this.session(tabId);
+      const generation = session.generation;
+      const signal = this.context.signal;
+      const runId = this.context.logIdentity?.runId;
+      const conversationId = this.context.conversationId;
+      const key = JSON.stringify(locator.spec);
+      const limit = options.limit ?? 25;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw automationError("invalid-limit", { limit });
+      const guard = () => {
+        throwIfAborted(signal);
+        if (this.sessions.get(tabId) !== session || session.generation !== generation) throw automationError("stale-search", { reason: "document-or-session-changed" });
+      };
+      guard();
+      let snapshot: SearchSnapshot | undefined;
+      let offset = 0;
+      if (options.cursor !== undefined) {
+        const match = /^([a-f0-9-]+):(\d+)$/.exec(options.cursor);
+        if (!match || !Number.isSafeInteger(Number(match[2]))) throw automationError("stale-search", { reason: "invalid-cursor" });
+        snapshot = this.searches.get(match[1]!);
+        offset = Number(match[2]);
+        if (!snapshot || snapshot.session !== session || snapshot.generation !== generation || snapshot.tabId !== tabId
+          || snapshot.key !== key || snapshot.conversationId !== conversationId || snapshot.runId !== runId
+          || offset < 0 || offset >= snapshot.total) throw automationError("stale-search", { reason: "expired-or-mismatched-cursor" });
+        // Successful reads update LRU; a stale cursor never revives a snapshot.
+        this.searches.delete(snapshot.id); this.searches.set(snapshot.id, snapshot);
+      } else {
+        const id = crypto.randomUUID();
+        const group = `surf-wax-search-${id}`;
+        let debuggee = session.debuggee;
+        try {
+          if (locator.spec.ref) {
+            const item = session.refs.get(locator.spec.ref);
+            if (!item || item.generation !== generation) throw automationError("stale-ref", { ref: locator.spec.ref, reason: "expired-document" });
+            debuggee = item.debuggee;
+            snapshot = { id, tabId, generation, session, key, conversationId, runId, debuggee, total: 1,
+              candidates: [{ backendNodeId: item.backendNodeId, role: item.role, name: item.name, debuggee }], group };
+          } else {
+            const scoped = await this.locatorScope(session, locator.spec);
+            guard(); debuggee = scoped.debuggee;
+            if (this.usesNativeAccessibility(scoped.spec)) {
+              const matches = await this.resolveAccessibility(debuggee, scoped.spec);
+              guard();
+              const candidates = matches.map((candidate) => ({ ...candidate, role: candidate.role.slice(0, 80), name: candidate.name.slice(0, 160),
+                ...(candidate.role.length > 80 ? { roleTruncated: true } : {}), ...(candidate.name.length > 160 ? { nameTruncated: true } : {}) }));
+              snapshot = { id, tabId, generation, session, key, conversationId, runId, debuggee, total: candidates.length, candidates, group };
+            } else {
+              const response = await this.options.command(debuggee, "Runtime.evaluate", { expression: `(${RESOLVER_SOURCE})(${JSON.stringify(scoped.spec)}, "nodes")`,
+                returnByValue: false, objectGroup: group });
+              guard();
+              if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+              const arrayId = response.result?.objectId;
+              if (!arrayId) throw automationError("search-unavailable", { reason: "missing-result-array" });
+              const size = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: arrayId,
+                functionDeclaration: "function(){return this.length}", returnByValue: true });
+              guard();
+              const total = size.result?.value;
+              if (!Number.isSafeInteger(total) || total < 0) throw automationError("search-unavailable", { reason: "invalid-result-count" });
+              snapshot = { id, tabId, generation, session, key, conversationId, runId, debuggee, total, arrayId, group };
+            }
+          }
+          this.searches.set(id, snapshot);
+          while (this.searches.size > 32) this.releaseSearch(this.searches.values().next().value!);
+        } catch (error) {
+          void this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined);
+          guard();
+          throw error;
+        }
+      }
+      const current = snapshot!;
+      const temporary = new Set<string>();
+      const pageGuard = () => {
+        guard();
+        if (this.searches.get(current.id) !== current) throw automationError("stale-search", { reason: "snapshot-evicted" });
+      };
+      try {
+        const end = Math.min(offset + limit, current.total);
+        let objects: Array<{ objectId?: string; candidate?: Candidate }>;
+        if (current.candidates) {
+          objects = current.candidates.slice(offset, end).map((candidate) => ({ candidate }));
+        } else if (end === offset) objects = [];
+        else {
+          const slice = await this.options.command(current.debuggee, "Runtime.callFunctionOn", { objectId: current.arrayId,
+            functionDeclaration: "function(start,end){return this.slice(start,end)}", arguments: [{ value: offset }, { value: end }],
+            returnByValue: false, objectGroup: current.group });
+          pageGuard();
+          const sliceId = slice.result?.objectId;
+          if (!sliceId) throw automationError("search-unavailable", { reason: "missing-page-array" });
+          temporary.add(sliceId);
+          const properties = await this.options.command(current.debuggee, "Runtime.getProperties", { objectId: sliceId, ownProperties: true });
+          pageGuard();
+          const byIndex = new Map((properties.result ?? []).filter((property: any) => /^(0|[1-9]\d*)$/.test(property.name)).map((property: any) => [Number(property.name), property.value?.objectId]));
+          objects = Array.from({ length: end - offset }, (_, index) => ({ objectId: byIndex.get(index) as string | undefined }));
+        }
+        const isGone = (error: unknown) => /(?:node.*(?:not found|not exist|detached)|could not find node|no node with given|cannot find node)/i.test(error instanceof Error ? error.message : String(error));
+        const results = await Promise.allSettled(objects.map(async ({ objectId, candidate }) => {
+          pageGuard();
+          let nodeObject = objectId;
+          if (candidate) {
+            if (!candidate.backendNodeId) return { status: "detached" };
+            try {
+              const resolved = await this.options.command(current.debuggee, "DOM.resolveNode", { backendNodeId: candidate.backendNodeId, objectGroup: current.group });
+              nodeObject = resolved.object?.objectId;
+            } catch (error) { pageGuard(); if (isGone(error)) return { status: "detached" }; throw error; }
+          }
+          if (!nodeObject) throw automationError("search-unavailable", { reason: "missing-node-object" });
+          temporary.add(nodeObject);
+          const description = await this.options.command(current.debuggee, "Runtime.callFunctionOn", { objectId: nodeObject,
+            functionDeclaration: SEARCH_META_SOURCE, returnByValue: true });
+          pageGuard();
+          if (description.exceptionDetails) throw new Error(description.exceptionDetails.exception?.description || description.exceptionDetails.text);
+          const metadata = description.result?.value;
+          if (metadata?.connected === false) return { status: "detached" };
+          if (metadata?.connected !== true) throw automationError("search-unavailable", { reason: "missing-node-state" });
+          let backendNodeId = candidate?.backendNodeId;
+          if (!backendNodeId) {
+            try { backendNodeId = (await this.options.command(current.debuggee, "DOM.describeNode", { objectId: nodeObject })).node?.backendNodeId; }
+            catch (error) { pageGuard(); if (isGone(error)) return { status: "detached" }; throw error; }
+          }
+          pageGuard();
+          if (!Number.isSafeInteger(backendNodeId) || !backendNodeId) throw automationError("search-unavailable", { reason: "missing-backend-node-id" });
+          const roleText = String(candidate?.role ?? metadata.role ?? "");
+          const nameText = String(candidate?.name ?? metadata.name ?? "");
+          const role = roleText.slice(0, 80), name = nameText.slice(0, 160);
+          const scope = current.debuggee.sessionId ?? session.rootFrameId ?? "root";
+          const identity = `${scope}:${backendNodeId}`;
+          const short = session.refsByNode.get(identity) ?? `e${session.nextRef++}`;
+          const ref = `t${tabId}s${session.token}d${generation}${short}`;
+          const record = { backendNodeId: backendNodeId!, debuggee: current.debuggee, role, name, generation };
+          session.refsByNode.set(identity, short); session.refs.set(short, record); session.refs.set(ref, record);
+          return { ref, role, name, ...(metadata.tag ? { tag: metadata.tag } : {}), ...(metadata.text ? { text: metadata.text } : {}),
+            ...(roleText.length > 80 || candidate?.roleTruncated || !candidate && metadata.roleTruncated ? { roleTruncated: true } : {}),
+            ...(nameText.length > 160 || candidate?.nameTruncated || !candidate && metadata.nameTruncated ? { nameTruncated: true } : {}), ...(metadata.textTruncated ? { textTruncated: true } : {}) };
+        }));
+        pageGuard();
+        const failure = results.find((result) => result.status === "rejected");
+        if (failure?.status === "rejected") throw failure.reason;
+        const elements = results.map((result) => (result as PromiseFulfilledResult<Record<string, unknown>>).value);
+        const hasMore = end < current.total;
+        if (!hasMore && options.cursor === undefined) this.releaseSearch(current);
+        return { tabId, documentId: generation, total: current.total, elements, hasMore, ...(hasMore ? { nextCursor: `${current.id}:${end}` } : {}) };
+      } catch (error) {
+        try { pageGuard(); } finally { if (options.cursor === undefined) this.releaseSearch(current); }
+        throw error;
+      } finally {
+        await Promise.all([...temporary].map((objectId) => this.options.command(current.debuggee, "Runtime.releaseObject", { objectId }).catch(() => undefined)));
+        guard();
+      }
+    });
   }
 
   private async resolveMetadata(session: Session, spec: LocatorSpec): Promise<Candidate[]> {

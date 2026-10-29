@@ -389,6 +389,76 @@ describe("ChromeExecutor programs", () => {
     await h.executor.endRun(); h.executor.dispose();
   });
 
+  it("aborts element search from the run signal before dispatching after slow page binding", async () => {
+    const h = programHarness(async () => undefined);
+    let resume!: () => void; let entered!: () => void;
+    const hold = new Promise<void>((resolve) => { resume = resolve; }); const binding = new Promise<void>((resolve) => { entered = resolve; });
+    (h.executor as any).pageFor = vi.fn(async () => { entered(); await hold; return h.raw; });
+    const search = vi.spyOn((h.executor as any).automation, "findElements");
+    const run = new AbortController();
+    const pending = h.executor.findElements({ target: { by: "css", value: "button" } }, undefined, { conversationId: "conversation", runSignal: run.signal });
+    await binding; run.abort("cancelled");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    resume(); await (h.executor as any).tail;
+    expect(search).not.toHaveBeenCalled(); h.executor.dispose();
+  });
+
+  it("preserves browser sessions and subscriptions after a definite pre-dispatch failure while releasing held input", async () => {
+    const h = programHarness(async ({ page }) => page.goto("https://example.test"));
+    await h.executor.beginRun();
+    const context = { conversationId: "conversation", logIdentity: { runId: "run", toolCallId: "1:test", toolCallIdCanonical: true as const } };
+    const subscription: any = await h.executor.subscribeEvent({ kind: "dialog" }, undefined, context);
+    h.raw.goto = vi.fn(async () => { throw new Error("AutomationError[detached]: target was removed"); });
+    (h.executor as any).heldInput.set(41, { x: 10, y: 20, buttons: new Set(["left"]), keys: new Map([["Shift", { key: "Shift" }]]) });
+    const abortSessions = vi.spyOn((h.executor as any).automation, "abortSessions");
+    const result: any = await h.executor.runProgram({ code: "test" }, undefined, context);
+    expect(result).toMatchObject({ ok: false, state: "failed", result: { error: { code: "detached" } } });
+    expect(result.result.error.effectUnknown).toBeUndefined();
+    expect(abortSessions).not.toHaveBeenCalled();
+    expect(h.fake.debuggerApi.sendCommand).toHaveBeenCalledWith({ tabId: 41 }, "Input.cancelDragging", {});
+    expect(h.fake.debuggerApi.sendCommand).toHaveBeenCalledWith({ tabId: 41 }, "Input.dispatchKeyEvent", expect.objectContaining({ type: "keyUp", key: "Shift" }));
+    expect(h.fake.debuggerApi.sendCommand).toHaveBeenCalledWith({ tabId: 41 }, "Input.dispatchMouseEvent", expect.objectContaining({ type: "mouseReleased", button: "left" }));
+    expect((h.executor as any).heldInput.size).toBe(0);
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.javascriptDialogOpening", { type: "confirm", message: "Still subscribed" });
+    await expect(h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, context)).resolves.toMatchObject({ events: [{ payload: { message: "Still subscribed" } }] });
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("fully stops an abandoned in-flight RPC when the program fails", async () => {
+    let started!: () => void; let release!: () => void;
+    const entered = new Promise<void>((resolve) => { started = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const h = programHarness(async ({ page }) => { void page.goto("https://example.test").catch(() => undefined); await entered; throw new Error("Program failed"); });
+    h.raw.goto = vi.fn(async () => { started(); await held; return "late"; });
+    const stop = vi.spyOn(h.executor as any, "stopBrowserOperations").mockImplementation(async () => { release(); });
+    const result: any = await h.run();
+    expect(result).toMatchObject({ ok: false, state: "failed" });
+    expect(stop).toHaveBeenCalledOnce();
+    stop.mockRestore(); h.executor.dispose();
+  });
+
+  it("fails with uncertain effects when a successful program abandons a dispatched RPC", async () => {
+    let started!: () => void; let release!: () => void;
+    const entered = new Promise<void>((resolve) => { started = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const h = programHarness(async ({ page }) => { void page.goto("https://example.test").catch(() => undefined); await entered; return "finished"; });
+    h.raw.goto = vi.fn(async () => { await (h.executor as any).programScope.dispatched(); started(); await held; return "late"; });
+    const stop = vi.spyOn(h.executor as any, "stopBrowserOperations").mockImplementation(async () => { release(); });
+    const result: any = await h.run();
+    expect(stop).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ ok: false, state: "failed", result: { error: { effectUnknown: true } } });
+    stop.mockRestore(); h.executor.dispose();
+  });
+
+  it("fully stops after an uncertain failure even after its RPC has settled", async () => {
+    const failure = Object.assign(new Error("Unknown browser effect"), { effectUnknown: true });
+    const h = programHarness(async () => { throw failure; });
+    const stop = vi.spyOn(h.executor as any, "stopBrowserOperations").mockImplementation(async () => undefined);
+    expect(await h.run()).toMatchObject({ ok: false, result: { error: { effectUnknown: true } } });
+    expect(stop).toHaveBeenCalledOnce();
+    stop.mockRestore(); h.executor.dispose();
+  });
+
   it("does not start queued programs when their owner aborts", async () => {
     const controller = new AbortController(); let finish!: () => void; const host = vi.fn(async (_caps: any, signal: AbortSignal) => { await new Promise<void>(resolve => { finish = resolve; }); signal.throwIfAborted(); });
     const h = programHarness(host); const first = h.run(controller.signal); const second = h.run(controller.signal);
@@ -794,6 +864,110 @@ describe("cross-call browser events", () => {
       const terminal = await h.executor.queryJobs({ action: "status", id: job.jobId }, undefined, owner);
       expect(terminal).toMatchObject({ terminal: true, ok: true });
     });
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it.each(["tool", "run"] as const)("cancels a dialog intent stalled in persistence using the %s signal", async (source) => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "dialog" }, undefined, owner);
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.javascriptDialogOpening", { type: "confirm", message: "Proceed?" });
+    const event: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner);
+    const dialogId = event.events[0].payload.dialogId;
+    const append = h.logger.append.bind(h.logger);
+    let resume!: () => void; let entered!: () => void; let heldOnce = false;
+    const hold = new Promise<void>((resolve) => { resume = resolve; });
+    const writing = new Promise<void>((resolve) => { entered = resolve; });
+    vi.spyOn(h.logger, "append").mockImplementation(async (record) => {
+      if (!heldOnce && record.type === "browser.dialog.progress" && (record.content as any)?.state === "dispatched-unknown") { heldOnce = true; entered(); await hold; }
+      return append(record);
+    });
+    const tool = new AbortController(); const run = new AbortController();
+    const pending = h.executor.handleDialog({ dialogId, accept: true }, tool.signal, { ...owner, runSignal: run.signal });
+    await writing; (source === "tool" ? tool : run).abort("cancelled");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(h.fake.debuggerApi.sendCommand).not.toHaveBeenCalledWith(expect.anything(), "Page.handleJavaScriptDialog", expect.anything());
+    // The unsent first claim is released; a later legitimate attempt may win.
+    await expect(h.executor.handleDialog({ dialogId, accept: false }, undefined, owner)).resolves.toMatchObject({ state: "completed" });
+    resume();
+    await vi.waitFor(() => expect(h.events.filter((entry) => entry.type === "browser.dialog.progress").map((entry) => fromLogValue(entry.content))).toContainEqual(expect.objectContaining({ state: "not-dispatched", claimId: 1 })));
+    const records = h.events.filter((entry) => entry.type === "browser.dialog.progress").map((entry) => fromLogValue(entry.content) as any);
+    expect(records.filter((entry) => entry.claimId === 1).map((entry) => entry.state)).toEqual(["dispatched-unknown", "not-dispatched"]);
+    expect(records.filter((entry) => entry.claimId === 2).map((entry) => entry.state)).toEqual(["dispatched-unknown", "completed"]);
+    expect(h.fake.debuggerApi.sendCommand.mock.calls.filter(([, method]) => method === "Page.handleJavaScriptDialog")).toHaveLength(1);
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("does not dispatch an old dialog claim after its dialog closes and another opens", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "dialog" }, undefined, owner);
+    const source = { tabId: 41, sessionId: "frame" };
+    await (h.executor as any).handleCommandEvent(source, "Page.javascriptDialogOpening", { type: "confirm", message: "First" });
+    const first: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner);
+    const append = h.logger.append.bind(h.logger);
+    let resume!: () => void; let entered!: () => void; let heldOnce = false;
+    const hold = new Promise<void>((resolve) => { resume = resolve; }); const writing = new Promise<void>((resolve) => { entered = resolve; });
+    vi.spyOn(h.logger, "append").mockImplementation(async (record) => {
+      if (!heldOnce && record.type === "browser.dialog.progress" && (record.content as any)?.state === "dispatched-unknown") { heldOnce = true; entered(); await hold; }
+      return append(record);
+    });
+    const pending = h.executor.handleDialog({ dialogId: first.events[0].payload.dialogId, accept: true }, undefined, owner);
+    await writing;
+    await (h.executor as any).handleCommandEvent(source, "Page.javascriptDialogClosed", {});
+    await (h.executor as any).handleCommandEvent(source, "Page.javascriptDialogOpening", { type: "confirm", message: "Second" });
+    const second: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId, after: first.nextCursor }, undefined, owner);
+    resume(); await expect(pending).rejects.toThrow("unavailable");
+    expect(h.fake.debuggerApi.sendCommand).not.toHaveBeenCalledWith(expect.anything(), "Page.handleJavaScriptDialog", expect.anything());
+    await expect(h.executor.handleDialog({ dialogId: second.events[0].payload.dialogId, accept: false }, undefined, owner)).resolves.toMatchObject({ state: "completed" });
+    const records = h.events.filter((entry) => entry.type === "browser.dialog.progress").map((entry) => fromLogValue(entry.content) as any);
+    expect(records.filter((entry) => entry.dialogId === first.events[0].payload.dialogId).map((entry) => entry.state)).toEqual(["dispatched-unknown", "not-dispatched"]);
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it.each(["tool", "run"] as const)("does not retry an in-flight dialog command cancelled by the %s signal", async (source) => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "dialog" }, undefined, owner);
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.javascriptDialogOpening", { type: "confirm", message: "Proceed?" });
+    const event: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner);
+    const dialogId = event.events[0].payload.dialogId;
+    let resume!: () => void; let entered!: () => void;
+    const hold = new Promise<void>((resolve) => { resume = resolve; }); const sending = new Promise<void>((resolve) => { entered = resolve; });
+    h.fake.debuggerApi.sendCommand.mockImplementation(async (_debuggee, method) => { if (method === "Page.handleJavaScriptDialog") { entered(); await hold; } return {}; });
+    const tool = new AbortController(); const run = new AbortController();
+    const pending = h.executor.handleDialog({ dialogId, accept: true }, tool.signal, { ...owner, runSignal: run.signal });
+    await sending; (source === "tool" ? tool : run).abort("cancelled");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError", effectUnknown: true });
+    await expect(h.executor.handleDialog({ dialogId, accept: true }, undefined, owner)).rejects.toThrow("uncertain");
+    resume(); await Promise.resolve();
+    expect(h.fake.debuggerApi.sendCommand.mock.calls.filter(([, method]) => method === "Page.handleJavaScriptDialog")).toHaveLength(1);
+    const records = h.events.filter((entry) => entry.type === "browser.dialog.progress").map((entry) => fromLogValue(entry.content) as any);
+    expect(records.map((entry) => entry.state)).toEqual(["dispatched-unknown"]);
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it.each(["tool", "run"] as const)("cancels a dialog response during completion persistence using the %s signal", async (source) => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "dialog" }, undefined, owner);
+    await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.javascriptDialogOpening", { type: "confirm", message: "Proceed?" });
+    const event: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner);
+    const dialogId = event.events[0].payload.dialogId;
+    const append = h.logger.append.bind(h.logger);
+    let resume!: () => void; let entered!: () => void;
+    const hold = new Promise<void>((resolve) => { resume = resolve; }); const writing = new Promise<void>((resolve) => { entered = resolve; });
+    vi.spyOn(h.logger, "append").mockImplementation(async (record) => {
+      if (record.type === "browser.dialog.progress" && (record.content as any)?.state === "completed") { entered(); await hold; }
+      return append(record);
+    });
+    const tool = new AbortController(); const run = new AbortController();
+    const pending = h.executor.handleDialog({ dialogId, accept: true }, tool.signal, { ...owner, runSignal: run.signal });
+    await writing; (source === "tool" ? tool : run).abort("cancelled");
+    await expect(pending).rejects.toMatchObject({ name: "AbortError", effectUnknown: true });
+    await expect(h.executor.handleDialog({ dialogId, accept: true }, undefined, owner)).rejects.toThrow("unavailable");
+    resume(); await vi.waitFor(() => expect(h.events.filter((entry) => entry.type === "browser.dialog.progress").map((entry) => (fromLogValue(entry.content) as any).state)).toEqual(["dispatched-unknown", "completed"]));
+    expect(h.fake.debuggerApi.sendCommand.mock.calls.filter(([, method]) => method === "Page.handleJavaScriptDialog")).toHaveLength(1);
     await h.executor.endRun(); h.executor.dispose();
   });
 

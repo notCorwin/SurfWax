@@ -101,6 +101,10 @@ export class ProgramScope {
   get effectUnknown(): boolean {
     return this.uncertain.size > 0;
   }
+  /** Includes abandoned, queued and in-flight capability calls. */
+  get hasPending(): boolean {
+    return this.pending.size > 0;
+  }
 
   private async event(
     operation: string,

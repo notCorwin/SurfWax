@@ -1,12 +1,13 @@
 # Surf Wax 工具参考
 
-此文件由真实工具 registry 自动生成（npm run docs:tools）。新回合公开 59 个工具；每个独立工具对应一个操作，具体参数以工具 schema 为准。旧会话的 canonical 历史原样保留，历史工具名称不会因此重新成为可执行入口。
+此文件由真实工具 registry 自动生成（npm run docs:tools）。新回合公开 60 个工具；每个独立工具对应一个操作，具体参数以工具 schema 为准。旧会话的 canonical 历史原样保留，历史工具名称不会因此重新成为可执行入口。
 
 页面语义观察支持区域、字段、字符预算、分页、截断说明与增量。ref 带 tab/document 归属，导航和移除不会自动替换成相似元素。只有明确请求时才返回截图；AX 数据仍从 Chrome 读取，输出增量不意味着底层 CDP 事件已增量化。
 
 | 工具 | 功能 |
 | --- | --- |
 | `inspect_page` | Inspect semantic text and stable refs. region and fields narrow the result; budget and pagination limit output; since reads changes. Use take_screenshot for visual input. |
+| `find_elements` | Find matching elements with stable refs for actions. limit defaults to 25, max 100; repeat the same target and tab with nextCursor to read a fixed snapshot. Removed elements are marked detached. Cursors expire on run or document changes or eviction. |
 | `click` | Click exactly one matching element. |
 | `double_click` | Double-click exactly one matching element. |
 | `hover` | Move the pointer over exactly one matching element. |

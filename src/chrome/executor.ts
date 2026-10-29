@@ -361,6 +361,24 @@ export class ChromeExecutor {
     }, signal, input.timeoutMs, false);
   }
 
+  findElements(input: { target: unknown; tabId?: number; cursor?: string; limit?: number; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+    const signals = [signal, context.runSignal].filter((item): item is AbortSignal => item !== undefined);
+    const effectiveSignal = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
+    return this.enqueueAbortable(async (combined) => {
+      this.activeSignal = combined; this.activeContext = context;
+      this.automation.setContext({ ...context, signal: combined });
+      try {
+        const state = await this.currentBrowserState();
+        throwIfAborted(combined);
+        const page = input.tabId === undefined ? await this.pageFor(state) : await this.boundPage(input.tabId, state);
+        throwIfAborted(combined);
+        const locator = this.locatorFor(page, input.target);
+        if (!locator?.spec) throw new Error("AutomationError[invalid-target]: Search requires a locator target");
+        return await this.automation.findElements(page.tabId, locator, { cursor: input.cursor, limit: input.limit });
+      } finally { this.activeSignal = undefined; this.activeContext = {}; await this.automation.clearContext(); }
+    }, effectiveSignal, input.timeoutMs, false);
+  }
+
   async runProgram(input: { code: string; background?: boolean; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
     if (!context.conversationId || !this.logger) throw new Error("Programs require a conversation and canonical event log");
     if (input.background) this.runOwnerFor(context);
@@ -407,6 +425,12 @@ export class ChromeExecutor {
       } : undefined;
       const scope = new ProgramScope(programSignal, jobId, jobContext, this.logger!, observer);
       this.programScope = scope;
+      let stoppedBrowser = false;
+      const stopBrowser = async () => {
+        if (stoppedBrowser) return;
+        stoppedBrowser = true;
+        await this.stopBrowserOperations();
+      };
       try {
         scope.guard();
         const state = await this.currentBrowserState();
@@ -419,14 +443,20 @@ export class ChromeExecutor {
         scope.guard();
         if (input.background) this.runOwnerFor(context);
         const result = await this.programHost(input.code, capabilities, programSignal);
-        // User code may intentionally abandon a losing Promise.race branch.
-        // Revoke and abort those RPCs instead of waiting forever for them.
+        // User code may abandon a losing Promise.race branch. Revoke its
+        // capabilities before terminating in-flight browser work.
+        const requiresStop = scope.hasPending || scope.effectUnknown;
         scope.revoke(); lifetime.abort("program-ended");
+        if (requiresStop) await stopBrowser();
         await scope.finish(); (deadline ?? combined).throwIfAborted();
+        if (scope.effectUnknown) throw Object.assign(new Error("Program finished with uncertain browser effects; inspect the page before continuing"), { effectUnknown: true });
         return result;
       } catch (error) {
+        const requiresStop = programSignal.aborted || scope.hasPending || scope.effectUnknown
+          || Boolean(error && typeof error === "object" && "effectUnknown" in error && error.effectUnknown);
         scope.revoke(); lifetime.abort("program-ended");
-        await this.stopBrowserOperations();
+        if (requiresStop) await stopBrowser();
+        else await this.releaseHeldInputs();
         await scope.finish();
         const failure = error && typeof error === "object" ? error
           : Object.assign(new DOMException(String(error ?? programSignal.reason ?? "Operation aborted"), programSignal.aborted ? "AbortError" : "Error"), { cause: error });
@@ -588,30 +618,45 @@ export class ChromeExecutor {
   }
 
   async handleDialog(input: { dialogId: string; accept: boolean; prompt?: string }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
-    throwIfAborted(signal);
+    const signals = [signal, context.runSignal].filter((item): item is AbortSignal => item !== undefined);
+    const combined = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
+    throwIfAborted(combined);
     const owner = this.eventOwnerFor(context);
     if (!this.logger || !context.logIdentity) throw new Error("CommandError[dialog-log-unavailable]: Dialog handling requires a canonical event log");
     const dialog = this.eventSubscriptions.claimDialog(owner, input.dialogId);
     let dispatched = false;
+    let handled = false;
+    let intent: Promise<unknown> | undefined;
+    const progress = (state: string) => ({ type: "browser.dialog.progress" as const, conversationId: owner.conversationId, ...context.logIdentity,
+      content: { dialogId: dialog.id, claimId: dialog.claimId, source: dialog.source, state, accept: input.accept } });
     try {
       if (input.prompt !== undefined && (!input.accept || dialog.type !== "prompt")) throw new Error("CommandError[invalid-dialog-prompt]: prompt is only valid when accepting a prompt dialog");
-      const receipt = await this.logger.append({ type: "browser.dialog.progress", conversationId: owner.conversationId, ...context.logIdentity,
-        content: { dialogId: dialog.id, source: dialog.source, state: "dispatched-unknown", accept: input.accept } });
+      intent = this.logger.append(progress("dispatched-unknown"));
+      const receipt = await this.awaitAbort(intent, combined);
       if (!receipt) throw new DOMException("Could not persist dialog dispatch intent", "AbortError");
-      throwIfAborted(signal);
+      throwIfAborted(combined);
       this.eventOwnerFor(context);
       if (!this.eventOwner || this.disposed) throw new Error("CommandError[event-owner-expired]: Event run ownership expired");
+      // A dialog can close while persistence is pending. Check its exact claim
+      // immediately before sending; never target a later dialog on this source.
+      this.eventSubscriptions.assertDialogClaim(owner, dialog.id, dialog.claimId);
       const params = { accept: input.accept, ...(input.prompt === undefined ? {} : { promptText: input.prompt }) };
       dispatched = true;
       const pending = (this.bridge.call as any)("sendCommand", [dialog.source, "Page.handleJavaScriptDialog", params]) as Promise<unknown>;
-      await this.awaitAbort(pending, signal, true);
+      await this.awaitAbort(pending, combined, true);
       this.eventSubscriptions.finishDialog(owner, dialog.id, dialog.claimId, "handled");
-      const finished = await this.logger.append({ type: "browser.dialog.progress", conversationId: owner.conversationId, ...context.logIdentity,
-        content: { dialogId: dialog.id, source: dialog.source, state: "completed", accept: input.accept } });
+      handled = true;
+      const finished = await this.awaitAbort(this.logger.append(progress("completed")), combined, true);
       if (!finished) throw new Error("Could not persist dialog completion");
       return { dialogId: dialog.id, accepted: input.accept, state: "completed" };
     } catch (error) {
-      this.eventSubscriptions.finishDialog(owner, dialog.id, dialog.claimId, dispatched ? "uncertain" : "not-dispatched");
+      if (!handled) this.eventSubscriptions.finishDialog(owner, dialog.id, dialog.claimId, dispatched ? "uncertain" : "not-dispatched");
+      if (!dispatched && intent) {
+        // An aborted intent may become durable later. Settle it after that write
+        // with the same claim ID, without delaying an already cancelled call.
+        const correction = intent.then((receipt) => receipt ? this.logger!.append(progress("not-dispatched")) : undefined).catch(() => undefined);
+        if (!combined?.aborted) await this.awaitAbort(correction, combined);
+      }
       if (dispatched && error && typeof error === "object") Object.assign(error, { effectUnknown: true });
       throw error;
     }
@@ -1226,6 +1271,14 @@ export class ChromeExecutor {
     ]);
     this.closeEventTab(tabId, "debugger-detached");
     this.diagnostics.remove(tabId); this.networkEnabled.delete(tabId);
+  }
+
+  /** Release physical input after a definite failure without dropping sessions. */
+  private async releaseHeldInputs(): Promise<void> {
+    await Promise.all([...this.heldInput].map(async ([tabId, state]) => {
+      if (state.buttons.size) await this.bridgeCommand({ tabId }, "Input.cancelDragging", {}).catch(() => undefined);
+      await this.releaseInput(tabId);
+    }));
   }
 
   private async stopBrowserOperations(): Promise<void> {
