@@ -744,6 +744,16 @@ export class EventLogger {
     return this.eventsByTypes(["browser.diagnostic"], conversationId);
   }
 
+  /** Diagnostic replay and its log epoch must be observed together. */
+  diagnosticEventsSnapshot(conversationId: string): Promise<{ value: LogEvent[]; epoch: string }> {
+    return this.readCanonicalSnapshot((store, floor) => this.eventsByTypesAt(store, floor, ["browser.diagnostic"], conversationId));
+  }
+
+  /** Validate derived data against the current log-clear/writer epoch. */
+  async canonicalEpoch(): Promise<string> {
+    return (await this.readCanonicalSnapshot(async () => undefined)).epoch;
+  }
+
   jobEvents(conversationId: string): Promise<LogEvent[]> {
     return this.eventsByTypes(["browser.job.state", "browser.job.progress"], conversationId);
   }

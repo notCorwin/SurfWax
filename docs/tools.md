@@ -6,7 +6,7 @@
 
 | 工具 | 功能 |
 | --- | --- |
-| `inspect_page` | Inspect semantic text and stable refs. region and fields narrow the result; budget and pagination limit output; since reads changes. Use take_screenshot for visual input. |
+| `inspect_page` | Inspect semantic text and stable refs. region and fields narrow the result; since reads changes. budget limits UTF-8 JSON fragment bytes. Continue a frozen snapshot with nextCursor using cursor, tabId, budget and limit only; split lines return fragments with offsets. Use take_screenshot for visual input. |
 | `find_elements` | Find matching elements with stable refs for actions. limit defaults to 25, max 100; repeat the same target and tab with nextCursor to read a fixed snapshot. Removed elements are marked detached. Cursors expire on run or document changes or eviction. |
 | `list_frames` | List the selected tab's frame tree with refs usable as target.frame.ref. limit defaults to 25, max 100; pass nextCursor to continue a fixed snapshot. References and cursors expire on document or frame changes. |
 | `click` | Click exactly one matching element. |
@@ -50,8 +50,8 @@
 | `update_script` | Update a persisted user script. |
 | `set_script_enabled` | Enable or disable a persisted user script. |
 | `delete_script` | Delete a persisted user script. |
-| `list_requests` | Read captured network requests for the selected tab. |
-| `read_response` | Read a captured response body by request index. |
+| `list_requests` | List captured network requests and requestRef identifiers. limit defaults to 100, max 100. integrity describes captured history, not all network traffic; hasMore may be null when unknown. nextOffset paginates a live, possibly changing list. |
+| `read_response` | Read the captured response body identified by requestRef from list_requests. |
 | `read_console` | Read captured console messages for the selected tab. |
 | `fetch` | Fetch in the explicit page or extension context; contexts have different permissions and credentials. |
 | `evaluate_js` | Execute a JavaScript body in the explicitly selected page world. |
@@ -86,7 +86,7 @@ page: tabId; inspect(options?, regionLocator?); snapshot(); observe('semantic'|'
 locators: chain/filter/first/last/nth, count/waitFor/click/dblclick/hover/fill/clear/press/pressSequentially/check/uncheck/selectOption/dragTo/setInputFiles/focus/blur/scrollIntoViewIfNeeded/textContent/innerText/inputValue/getAttribute/isVisible/isEnabled/isChecked/evaluate. Files: {name,mimeType?,text|base64|url}; artifacts.read supplies existing file data. Event handles: chooser.isMultiple()/setFiles(files), dialog.type()/message()/defaultValue()/accept(prompt?)/dismiss(), popup is a page. Start event waits before the action, then await them.
 browser: page(tabId); tabs.list()/open(url?)/select(tabId)/close(tabId); scripts.list()/read(id)/create(definition)/edit(id,changes)/setEnabled(id,enabled)/delete(id). Scripts use Chrome RegisteredUserScript fields including matches, js:[{code|file}], world:MAIN|USER_SCRIPT, runAt, allFrames, include/excludeGlobs/Matches, worldId. Persisted enablement is restored at startup/upgrade; Allow User Scripts must already be enabled.
 browser.runIn({kind:'page',tabId,world:'MAIN'|'ISOLATED'|'USER_SCRIPT',frameId?,documentId?},codeBody): explicit execution domain. MAIN/ISOLATED root only; USER_SCRIPT supports Chrome frameId or documentId. Use frameLocator.evaluate for arbitrary supported frames. No automatic context substitution.
-net.fetch({context:'page'|'extension',url,tabId?,init?}) returns {url,status,ok,headers,body}; no page-to-extension fallback. Page fetch obeys page origin/cookies/CORS; extension fetch uses extension host permissions. net.requests(options?,tabId?)/request(index,tabId?); net.responseBody(index,tabId?); net.console(options?,tabId?) read captured diagnostics.
+net.fetch({context:'page'|'extension',url,tabId?,init?}) returns {url,status,ok,headers,body}; no page-to-extension fallback. Page fetch obeys page origin/cookies/CORS; extension fetch uses extension host permissions. net.requests(options?,tabId?) returns {requests,integrity,hasMore,nextOffset?} for captured history (not all traffic); hasMore can be null when unknown and offsets refer to a live list. net.request(requestRef,tabId?), net.responseBody(requestRef,tabId?), net.console(options?,tabId?) read captured diagnostics.
 protocol.sessions(tabId?) lists root/child CDP handles; protocol.send({tabId,sessionId?},method,params?) sends any Chrome CDP method available to the extension. Arbitrary JS/CDP/fetch are effectful; there is no readonly override. inspect.documentId is the local navigation generation; USER_SCRIPT documentId uses Chrome's native scripting document ID. File URL sources are fetched in extension context.
 artifacts.read(id,{path?,offset?,limit?}); text(filename,text,mimeType?,save=false); save(id,filename?). Files and images stay internal unless the user requested download/export. emit(value) persists incremental output; check(condition,message?) records a verified assertion; sleep(ms) and signal support cancellation. Completed operations only confirm dispatch/return; verify application outcomes. Queued operations are not dispatched, uncertain effects must be inspected before continuing. Program computation uses a disposable opaque-origin sandbox Worker; browser capabilities are mediated by the Side Panel. Closing the panel cancels jobs and revokes capabilities; arbitrary program finally blocks are not guaranteed to run. Only records survive restart, never arbitrary JS stacks.
 ```

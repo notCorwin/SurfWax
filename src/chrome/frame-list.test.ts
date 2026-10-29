@@ -24,6 +24,46 @@ function harness() {
 }
 
 describe("frame tree discovery", () => {
+  it("reuses a frame document within one context and invalidates it on context destruction and cleanup", async () => {
+    const { runtime, command } = harness(); const page = await runtime.createPage(3);
+    const frames: any = await runtime.listFrames(3);
+    const same = frames.frames.find((frame: any) => frame.url.endsWith("/same"));
+    const target = page.frameRef(same.frameRef).getByRole("button");
+    await Promise.all([target.count(), target.count(), target.count()]);
+    expect(command.mock.calls.filter(([, method]) => method === "Page.createIsolatedWorld")).toHaveLength(1);
+    expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.evaluate" && params.expression === "document")).toHaveLength(1);
+    runtime.handleEvent({ tabId: 3 }, "Runtime.executionContextDestroyed", { executionContextId: 31 });
+    await target.count();
+    expect(command.mock.calls.filter(([, method]) => method === "Page.createIsolatedWorld")).toHaveLength(2);
+    expect(command).toHaveBeenCalledWith({ tabId: 3 }, "Runtime.releaseObject", { objectId: "doc-31" });
+    await runtime.clearContext();
+    runtime.setContext({ conversationId: "c", logIdentity: { runId: "run", toolCallId: "call", toolCallIdCanonical: true } });
+    await target.count();
+    expect(command.mock.calls.filter(([, method]) => method === "Page.createIsolatedWorld")).toHaveLength(3);
+    await runtime.abortSessions();
+  });
+
+  it("releases a frame document that arrives after context cleanup", async () => {
+    const { runtime, command } = harness(); const page = await runtime.createPage(3);
+    const frames: any = await runtime.listFrames(3);
+    const same = frames.frames.find((frame: any) => frame.url.endsWith("/same"));
+    const original = command.getMockImplementation()!;
+    let resume!: () => void; let notify!: () => void;
+    const hold = new Promise<void>((resolve) => { resume = resolve; });
+    const started = new Promise<void>((resolve) => { notify = resolve; });
+    command.mockImplementation(async (source, method, params: any = {}) => {
+      if (method === "Runtime.evaluate" && params.expression === "document") { notify(); await hold; }
+      return original(source, method, params);
+    });
+    const pending = page.frameRef(same.frameRef).getByRole("button").count();
+    await started;
+    await runtime.clearContext();
+    resume();
+    await expect(pending).rejects.toThrow("stale-frame");
+    expect(command).toHaveBeenCalledWith({ tabId: 3 }, "Runtime.releaseObject", { objectId: "doc-31" });
+    await runtime.abortSessions();
+  });
+
   it("binds stable frame refs to same-process and child-session documents across pages", async () => {
     const { runtime, command } = harness();
     const page = await runtime.createPage(3);

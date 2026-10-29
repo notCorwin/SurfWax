@@ -1140,8 +1140,8 @@ test("reads cross-frame response bodies and records complete diagnostic events",
       commandResponse("execute_program", { code: `return await net.requests(${JSON.stringify({ filter: "/frame$", limit: 10 })});` }, "frame-requests"),
       (request) => {
         const tool = request.messages.findLast((message: any) => message.role === "tool");
-        const requests = JSON.parse(tool.content).result;
-        return commandResponse("execute_program", { code: `return await net.responseBody(${JSON.stringify(requests.at(-1).index)});` }, "frame-response-body");
+        const requests = JSON.parse(tool.content).result.requests;
+        return commandResponse("execute_program", { code: `return await net.responseBody(${JSON.stringify(requests.at(-1).requestRef)});` }, "frame-response-body");
       },
       commandResponse("execute_program", { code: `return await net.console(${JSON.stringify({ minLevel: "warning", limit: 10 })});` }, "frame-console"),
       textResponse("FRAME_DIAGNOSTICS_OK"), textResponse("框架诊断"),
@@ -1201,7 +1201,7 @@ for (const format of ["legacy-user-tools", "system-tools"] as const) test(`conti
     expect(events.some(event => event.type === "automation.action.started" && event.toolCallId === "removed-old-entry")).toBe(false);
     expect(events.find(event => event.type === "tool.finished" && event.toolCallId === "current-entry")?.output).toMatchObject({ ok: true, state: "succeeded", result: 1 });
     expect(events.some(event => event.type === "browser.job.progress" && event.toolCallId === "current-entry" && event.content.operation === "check" && event.content.state === "verified")).toBe(true);
-    expect(events.filter(event => event.type === "context.prompt.updated").at(-1)?.content).toMatchObject({ migratedFrom: "formal-49-v2", prompt: { catalogVersion: "atomic-tools-v6", format: "system-tools" } });
+    expect(events.filter(event => event.type === "context.prompt.updated").at(-1)?.content).toMatchObject({ migratedFrom: "formal-49-v2", prompt: { catalogVersion: "atomic-tools-v7", format: "system-tools" } });
     const requests = provider.requests.filter(request => request.tools);
     expect(requests).toHaveLength(3);
     for (const request of requests) expect(request.tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "execute_program", "list_jobs", "get_job", "cancel_job"]));

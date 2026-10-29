@@ -340,6 +340,10 @@ export class ChromeExecutor {
         if (!source.sessionId) this.closeEventTab(source.tabId!, "debugger-detached");
         else this.closeEventSource(source.tabId!, source.sessionId);
       }
+      if (Number.isInteger(source.tabId)) {
+        if (source.sessionId) this.diagnostics.handle({ tabId: source.tabId }, "Target.detachedFromTarget", { sessionId: source.sessionId });
+        else this.diagnostics.remove(source.tabId!);
+      }
     });
     (globalThis as Record<string, unknown>)[BRIDGE_KEY] = this.bridge;
   }
@@ -961,10 +965,10 @@ export class ChromeExecutor {
         await scope.dispatched();
         return raw.evaluate(`async payload => { const response = await fetch(payload.url, payload.init); return { url:response.url,status:response.status,ok:response.ok,headers:Object.fromEntries(response.headers),body:await response.text() }; }`, { url: input.url, init: input.init });
       }, input.context === "page" ? sourceFor(input.tabId ?? page.tabId) : undefined),
-      requests: (options: Record<string, any> = {}, tabId = page.tabId) => call("net.requests", false, async () => { await this.boundPage(tabId, state); return this.diagnostics.requests(tabId, options); }),
-      request: (index: number, tabId = page.tabId) => call("net.request", false, async () => { await this.boundPage(tabId, state); return this.readRequest(tabId, index); }),
-      responseBody: (index: number, tabId = page.tabId) => call("net.responseBody", false, async () => { await this.boundPage(tabId, state); return this.readRequest(tabId, index, true); }),
-      console: (options: Record<string, any> = {}, tabId = page.tabId) => call("net.console", false, async () => { await this.boundPage(tabId, state); return this.diagnostics.console(tabId, options); }),
+      requests: (options: Record<string, any> = {}, tabId = page.tabId) => call("net.requests", false, async () => { await this.boundPage(tabId, state); return this.diagnostics.requests(tabId, options, scope.signal); }),
+      request: (ref: string, tabId = page.tabId) => call("net.request", false, async () => { await this.boundPage(tabId, state); return this.readRequest(tabId, ref, false, scope.signal); }),
+      responseBody: (ref: string, tabId = page.tabId) => call("net.responseBody", false, async () => { await this.boundPage(tabId, state); return this.readRequest(tabId, ref, true, scope.signal); }),
+      console: (options: Record<string, any> = {}, tabId = page.tabId) => call("net.console", false, async () => { await this.boundPage(tabId, state); return this.diagnostics.console(tabId, options, scope.signal); }),
     };
     const protocol = { sessions: (tabId = page.tabId) => call("protocol.sessions", false, async () => {
       await this.boundPage(tabId,state); return this.automation.observationDebuggees(tabId);
@@ -1267,14 +1271,30 @@ export class ChromeExecutor {
     }
   }
 
-  private async readRequest(tabId: number, index: number, bodyOnly = false): Promise<unknown> {
-    const record = await this.diagnostics.request(tabId, index);
-    if (!record) throw new Error(`CommandError[invalid-request-index]: ${index}`);
+  private async readRequest(tabId: number, ref: string, bodyOnly = false, signal?: AbortSignal): Promise<unknown> {
+    const record = await this.diagnostics.request(tabId, ref, signal);
+    const assertCurrent = async () => {
+      const current = await this.diagnostics.request(tabId, ref, signal);
+      if (current.requestId !== record.requestId || current.debuggee.sessionId !== record.debuggee.sessionId)
+        throw Object.assign(new Error("Request source changed"), { code: "stale-request" });
+      if (record.debuggee.sessionId) {
+        const sources = await this.awaitAbort(this.automation.observationDebuggees(tabId), signal);
+        if (!sources.some((source) => source.sessionId === record.debuggee.sessionId))
+          throw Object.assign(new Error("Request source is no longer attached"), { code: "stale-request" });
+        // The source lookup itself can race with a navigation or redirect.
+        await this.diagnostics.request(tabId, ref, signal);
+      }
+    };
+    await assertCurrent();
+    signal?.throwIfAborted();
     let body: unknown;
     try {
-      const response = await this.bridgeCommand(record.debuggee, "Network.getResponseBody", { requestId: record.requestId });
+      const response = await this.awaitAbort(this.bridgeCommand(record.debuggee, "Network.getResponseBody", { requestId: record.requestId }), signal);
       body = response.base64Encoded ? { base64: response.body } : response.body;
     } catch (error) { body = { unavailable: error instanceof Error ? error.message : String(error) }; }
+    // A CDP reply can arrive after the request was redirected, the page
+    // navigated, or its child session detached. Never return it under an old ref.
+    await assertCurrent();
     return bodyOnly ? body : { ...record, responseBody: body };
   }
 

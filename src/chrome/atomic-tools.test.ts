@@ -113,6 +113,14 @@ describe("atomic browser tool programs", () => {
     await expect(execute("verify_state", { target, state: "visible" }, { page })).rejects.toThrow("strict-mode");
   });
 
+  it("reads a response only with its captured request reference", async () => {
+    const responseBody = vi.fn(async () => "response");
+    const input = { requestRef: "request-epoch:1" };
+    expect(await execute("read_response", input, { page: { tabId: 7 }, net: { responseBody } })).toBe("response");
+    expect(responseBody).toHaveBeenCalledWith("request-epoch:1", 7);
+    expect(() => definition("read_response").inputSchema.parse({ requestIndex: 1 })).toThrow();
+  });
+
   it("passes script definitions and explicit fetch contexts without substituting them", async () => {
     const definition = { id: "script", matches: ["https://example.com/*"], js: [{ code: "alert('ok')" }] };
     const create = vi.fn(async () => "created");

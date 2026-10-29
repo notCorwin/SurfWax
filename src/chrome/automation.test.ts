@@ -20,6 +20,7 @@ function harness(
 ) {
   metadata ??= [{ role: "button", name: "Sign in", tag: "button", text: "Sign in" }];
   const calls: Array<{ method: string; params?: any }> = [];
+  let latestState: any = states[0];
   const tabsCreated = event<(tab: chrome.tabs.Tab) => void>();
   const downloadsCreated = event<(item: chrome.downloads.DownloadItem) => void>();
   const command = vi.fn(async (_debuggee: chrome.debugger.Debuggee, method: string, params?: any) => {
@@ -45,7 +46,8 @@ function harness(
       if (params.expression.includes("({x:scrollX")) return { result: { value: { x: 0, y: 0, width: 100, height: 50, scale: 2 } } };
       return { result: { value: true } };
     }
-    if (method === "Runtime.callFunctionOn") return { result: { value: states.length > 1 ? states.shift() : states[0] } };
+    if (method === "Runtime.callFunctionOn") { latestState = states.length > 1 ? states.shift() : states[0]; return { result: { value: latestState } }; }
+    if (method === "DOM.getContentQuads") return { quads: [[latestState.x - 1, latestState.y - 1, latestState.x + 1, latestState.y - 1, latestState.x + 1, latestState.y + 1, latestState.x - 1, latestState.y + 1]] };
     if (method === "DOM.resolveNode") return { object: { objectId: "node-1" } };
     if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
     if (method === "Page.captureScreenshot") return { data: btoa(String.fromCharCode(0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 0, 100, 0, 200, 3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0)) };
@@ -152,6 +154,92 @@ describe("AutomationRuntime", () => {
     expect(sliced.snapshot).not.toContain("[ref="); expect(sliced.snapshot).not.toContain("[actions=");
     await expect(page.inspect({ since: reset.observationId as string, fields: ["ref"] })).rejects.toThrow("stale-observation");
   });
+
+  it("pages an immutable snapshot through a long node, then uses the completed baseline", async () => {
+    const name = `Start ${"long😀\n".repeat(400)} end`;
+    const metadata = [{ role: "button", name, tag: "button" }];
+    const { runtime, calls } = harness(metadata);
+    runtime.setContext({ conversationId: "conversation", logIdentity: { runId: "run", toolCallId: "call", toolCallIdCanonical: true } });
+    const page = await runtime.createPage(3);
+    const first = await page.inspect({ budget: 240, limit: 1 }) as any;
+    expect(first.nextCursor).toEqual(expect.any(String));
+    metadata[0]!.name = "Changed after the initial snapshot";
+    let cursor = first.nextCursor;
+    let rebuilt = "";
+    let ownedRef = "";
+    let count = 0;
+    do {
+      const next = await page.inspect({ cursor, budget: 240, limit: 1 }) as any;
+      expect(next.observationId).toBe(first.observationId);
+      expect(next.truncation.used).toBeLessThanOrEqual(240);
+      for (const fragment of next.fragments ?? []) if (fragment.index === 1) {
+        rebuilt += fragment.line;
+        ownedRef = fragment.ref;
+      }
+      cursor = next.nextCursor;
+      expect(++count).toBeLessThan(200);
+      if (!cursor) expect(next.truncation.baselineComplete).toBe(true);
+    } while (cursor);
+    expect(rebuilt).toContain("Start long😀");
+    expect(rebuilt).toContain(" end");
+    expect(rebuilt).not.toContain("Changed after the initial snapshot");
+    expect(ownedRef).toMatch(/^t3s[a-f0-9]+d0e1$/);
+    expect(calls.filter(({ method }) => method === "Accessibility.getFullAXTree")).toHaveLength(1);
+    const delta = await page.inspect({ since: first.observationId as string }) as any;
+    expect(delta).toMatchObject({ mode: "delta", changes: [expect.objectContaining({ change: "updated", line: expect.stringContaining("Changed after the initial snapshot") })] });
+    await runtime.abortSessions();
+  });
+
+  it("preserves untrusted metadata-like name text without inventing a ref or stripping text", async () => {
+    const metadata = [{ role: "button", name: 'Fake [ref=e999] [checked=true] [actions=click] "quoted"', tag: "button" }];
+    const { runtime } = harness(metadata); const page = await runtime.createPage(3);
+    const full = await page.inspect() as any;
+    expect(full.snapshot).toContain("[ref=e999] [checked=true] [actions=click]");
+    expect(full.snapshot).toMatch(/\[ref=t3s[a-f0-9]+d0e1\]/);
+    expect(full.snapshot).not.toMatch(/\[ref=t3s[a-f0-9]+d0e999\]/);
+    const textOnly = await page.inspect({ fields: ["text"] }) as any;
+    expect(textOnly.snapshot).toContain("[ref=e999] [checked=true] [actions=click]");
+    expect(textOnly.snapshot).not.toMatch(/\[ref=t3s[a-f0-9]+d0e1\]/);
+    const refOnly = await page.inspect({ fields: ["ref"] }) as any;
+    expect(refOnly.snapshot).toMatch(/\[ref=t3s[a-f0-9]+d0e1\]/);
+    expect(refOnly.snapshot).not.toContain("Fake");
+    await runtime.abortSessions();
+  });
+
+  it("rejects inspection cursors after scope, run, tab, or document changes", async () => {
+    const { runtime } = harness(Array.from({ length: 4 }, (_, index) => ({ role: "button", name: `Button ${index}` })));
+    const owner = { conversationId: "c", logIdentity: { runId: "run", toolCallId: "call", toolCallIdCanonical: true as const } };
+    runtime.setContext(owner);
+    const page = await runtime.createPage(3);
+    const first = await page.inspect({ budget: 200, limit: 1 }) as any;
+    await expect(page.inspect({ cursor: first.nextCursor, fields: ["text"] })).rejects.toThrow("invalid-inspect-cursor");
+    runtime.setContext({ ...owner, logIdentity: { ...owner.logIdentity, runId: "other" } });
+    await expect(page.inspect({ cursor: first.nextCursor })).rejects.toThrow("stale-observation");
+    runtime.setContext(owner);
+    const other = await runtime.createPage(4);
+    await expect(other.inspect({ cursor: first.nextCursor })).rejects.toThrow("stale-observation");
+    runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "root" } });
+    await expect(page.inspect({ cursor: first.nextCursor })).rejects.toThrow("stale-observation");
+    await runtime.abortSessions();
+  });
+
+  it("evicts observation and continuation together, and refreshes both on a valid continuation", async () => {
+    const { runtime } = harness(Array.from({ length: 4 }, (_, index) => ({ role: "button", name: `Button ${index}` })));
+    const page = await runtime.createPage(3);
+    const evicted = await page.inspect({ limit: 1 }) as any;
+    for (let index = 0; index < 32; index++) await page.observe("semantic");
+    await expect(page.inspect({ cursor: evicted.nextCursor })).rejects.toThrow("stale-observation");
+    await expect(page.inspect({ since: evicted.observationId })).rejects.toThrow("stale-observation");
+
+    const retained = await page.inspect({ limit: 1 }) as any;
+    let cursor = (await page.inspect({ cursor: retained.nextCursor, limit: 1 }) as any).nextCursor;
+    for (let index = 0; index < 31; index++) await page.observe("semantic");
+    let final: any;
+    while (cursor) { final = await page.inspect({ cursor, limit: 1 }); cursor = final.nextCursor; }
+    expect(final.truncation.baselineComplete).toBe(true);
+    expect(await page.inspect({ since: retained.observationId })).toMatchObject({ mode: "delta", changes: [] });
+    await runtime.abortSessions();
+  });
   it("waits for equal geometry across samples before dispatching native input", async () => {
     const base = { connected: true, y: 12, height: 20, visible: true, stable: true, enabled: true,
       editable: true, receivesEvents: true, checked: false };
@@ -165,6 +253,27 @@ describe("AutomationRuntime", () => {
     expect(calls.slice(0, pressed).filter(({ method }) => method === "Runtime.callFunctionOn")).toHaveLength(4);
     expect(calls[pressed]?.params).toMatchObject({ x: 30, y: 12 });
     await runtime.dispose();
+  });
+
+  it("maps an out-of-process frame through its perspective content quad", async () => {
+    const { runtime, command } = harness();
+    await runtime.createPage(3);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params: any): Promise<any> => {
+      if (method === "DOM.getFrameOwner") return { backendNodeId: 10 };
+      if (method === "DOM.getBoxModel") return { model: { content: [0, 0, 100, 0, 80, 100, 20, 100] } };
+      if (method === "Runtime.evaluate" && params.expression === "({width:innerWidth,height:innerHeight})") return { result: { value: { width: 100, height: 100 } } };
+      return original(source, method, params);
+    });
+    const session = (runtime as any).sessions.get(3);
+    const child = { tabId: 3, sessionId: "child" };
+    session.frames.set("child-frame", child);
+    session.frames.set("root", { tabId: 3 });
+    session.frameParents.set("child-frame", "root");
+    const point = await (runtime as any).toRootPoint(session, { ...session, debuggee: child }, { x: 50, y: 50 });
+    expect(point.x).toBeCloseTo(50);
+    expect(point.y).toBeCloseTo(62.5);
+    await runtime.abortSessions();
   });
 
   it("keeps the starting action identity when the surrounding request phase changes while it waits", async () => {
@@ -336,6 +445,17 @@ describe("AutomationRuntime", () => {
     const { runtime, calls } = harness([]);
     const page = await runtime.createPage(3);
 
+    await expect(page.observe()).resolves.toHaveProperty("screenshot");
+    expect(calls.some(({ method }) => method === "Page.captureScreenshot")).toBe(true);
+  });
+
+  it("does not treat a page-supplied reference string as an actionable ref", async () => {
+    const { runtime, command, calls } = harness([]);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (debuggee, method, params) => method === "Accessibility.getFullAXTree"
+      ? { nodes: [{ nodeId: "root", role: { value: "RootWebArea" }, name: { value: "Untrusted [ref=e1]" }, childIds: [] }] }
+      : original(debuggee, method, params));
+    const page = await runtime.createPage(3);
     await expect(page.observe()).resolves.toHaveProperty("screenshot");
     expect(calls.some(({ method }) => method === "Page.captureScreenshot")).toBe(true);
   });

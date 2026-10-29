@@ -1,6 +1,8 @@
 import type { EventLogger } from "../logging";
 import { waitForDocumentFrame } from "./dom-frame";
-import { abortError, axValue, delay, imageSize, keyboardParams, modifierMask, quote, throwIfAborted } from "./automation-utils";
+import { abortError, axValue, delay, imageSize, keyboardParams, modifierMask, throwIfAborted } from "./automation-utils";
+import { paginateSnapshot, type SnapshotItem, type SnapshotPosition } from "./snapshot-pagination";
+import { renderSnapshotNode, type SnapshotNode, type SnapshotStateName } from "./snapshot-render";
 
 type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
 type Command = (debuggee: Debuggee, method: string, params?: object) => Promise<any>;
@@ -18,15 +20,21 @@ type LocatorSpec = { queries: Query[]; index?: number; ref?: string; hasText?: s
 type WaitState = "attached" | "detached" | "visible" | "hidden" | "enabled" | "editable" | "checked";
 type RefRecord = { backendNodeId: number; frameId?: string; debuggee: Debuggee; role: string; name: string; generation: number };
 type FrameRefRecord = { frameId: string; debuggee: Debuggee; generation: number; revision: number; conversationId?: string; runId?: string };
+type FrameDocument = { session: Session; frame: FrameRefRecord; promise: Promise<string>; objectId?: string };
 type FrameListSnapshot = { id: string; session: Session; generation: number; revision: number; conversationId?: string; runId?: string; frames: Array<Record<string, unknown>> };
-type SnapshotLine = { id: string; line: string };
+type SnapshotLine = { id: string; line: string; ref?: string; node?: SnapshotNode };
+type InspectSnapshot = {
+  id: string; session: Session; generation: number; conversationId?: string; runId?: string;
+  record: ObservationRecord; source: SnapshotItem[]; mode: "full" | "delta"; reset?: string;
+  expected?: SnapshotPosition; eligibleForBaseline: boolean;
+};
 export type FindOptions = { cursor?: string; limit?: number };
 type SearchSnapshot = {
   id: string; tabId: number; generation: number; session: Session; key: string;
   conversationId?: string; runId?: string; debuggee: Debuggee; total: number;
   candidates?: Candidate[]; arrayId?: string; group?: string;
 };
-export type InspectOptions = { since?: string; fields?: Array<"text" | "state" | "ref" | "actions">; budget?: number; offset?: number; limit?: number; depth?: number };
+export type InspectOptions = { cursor?: string; since?: string; fields?: Array<"text" | "state" | "ref" | "actions">; budget?: number; offset?: number; limit?: number; depth?: number };
 type ObservationRecord = {
   observationId: string;
   tabId: number;
@@ -63,6 +71,8 @@ type Candidate = { role: string; name: string; tag?: string; text?: string; ref?
 type ElementState = {
   x: number;
   y: number;
+  width?: number;
+  height?: number;
   visible: boolean;
   stable: boolean;
   enabled: boolean;
@@ -70,7 +80,31 @@ type ElementState = {
   receivesEvents: boolean;
   checked: boolean | null;
   connected: boolean;
+  quad?: number[];
 };
+
+/** Map a normalized point into a CSS content quad, including perspective. */
+function projectQuad(quad: number[], u: number, v: number): { x: number; y: number } {
+  if (quad.length !== 8 || quad.some((value) => !Number.isFinite(value))) throw automationError("frame-unavailable", { reason: "invalid-quad" });
+  const [x0, y0, x1, y1, x2, y2, x3, y3] = quad as [number, number, number, number, number, number, number, number];
+  const area = x0 * y1 - y0 * x1 + x1 * y2 - y1 * x2 + x2 * y3 - y2 * x3 + x3 * y0 - y3 * x0;
+  if (Math.abs(area) < 1e-9) throw automationError("frame-unavailable", { reason: "degenerate-quad" });
+  const dx1 = x1 - x2, dx2 = x3 - x2, dx3 = x0 - x1 + x2 - x3;
+  const dy1 = y1 - y2, dy2 = y3 - y2, dy3 = y0 - y1 + y2 - y3;
+  let g = 0, h = 0;
+  if (Math.abs(dx3) + Math.abs(dy3) > 1e-9) {
+    const determinant = dx1 * dy2 - dx2 * dy1;
+    if (Math.abs(determinant) < 1e-9) throw automationError("frame-unavailable", { reason: "degenerate-quad" });
+    g = (dx3 * dy2 - dx2 * dy3) / determinant;
+    h = (dx1 * dy3 - dx3 * dy1) / determinant;
+  }
+  const denominator = g * u + h * v + 1;
+  if (!Number.isFinite(denominator) || Math.abs(denominator) < 1e-9) throw automationError("frame-unavailable", { reason: "degenerate-quad" });
+  const x = ((x1 - x0 + g * x1) * u + (x3 - x0 + h * x3) * v + x0) / denominator;
+  const y = ((y1 - y0 + g * y1) * u + (y3 - y0 + h * y3) * v + y0) / denominator;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) throw automationError("frame-unavailable", { reason: "invalid-point" });
+  return { x, y };
+}
 
 class AutomationError extends Error {
   constructor(readonly code: string, readonly detail: Record<string, unknown>) {
@@ -193,10 +227,12 @@ export class AutomationRuntime {
   private lastWait?: { locator: LocatorSpec; state?: ElementState; matches?: number; candidates?: Candidate[]; documentId: number; reason: string; attempt: number };
   private lastAttemptLog?: { reason: string; at: number };
   private readonly observations = new Map<string, ObservationRecord>();
+  private readonly inspectionSnapshots = new Map<string, InspectSnapshot>();
   private readonly axRoots = new Map<string, number>();
   private readonly fileChoosers = new Map<number, FileChooserRecord>();
   private readonly searches = new Map<string, SearchSnapshot>();
   private readonly frameLists = new Map<string, FrameListSnapshot>();
+  private readonly frameDocuments = new Map<string, FrameDocument>();
 
   private waitDiagnostic() { return this.lastWait; }
 
@@ -232,6 +268,9 @@ export class AutomationRuntime {
   hasSession(tabId: number): boolean { return this.sessions.has(tabId); }
   async clearContext(): Promise<void> {
     this.context = {};
+    // Invalidate before releasing the group: in-flight evaluations can create
+    // their object after the group has been released and must clean up late.
+    this.clearFrameDocuments(undefined, undefined, false);
     const debuggees = new Map<string, Debuggee>();
     for (const session of this.sessions.values()) {
       debuggees.set(JSON.stringify(session.debuggee), session.debuggee);
@@ -292,6 +331,7 @@ export class AutomationRuntime {
     if ((method === "DOM.documentUpdated" || method === "Runtime.executionContextsCleared") && session) {
       this.invalidate(session);
     }
+    if (method === "Runtime.executionContextDestroyed" && session) this.clearFrameDocuments(tabId!, source);
     if (method === "Page.frameDetached" && params?.frameId && session) {
       session.frames.delete(params.frameId);
       session.frameParents.delete(params.frameId);
@@ -323,6 +363,7 @@ export class AutomationRuntime {
   }
 
   private invalidateFrames(session: Session): void {
+    this.clearFrameDocuments(session.tabId);
     session.frameRevision += 1;
     session.frameRefs.clear();
     session.frameRefsById.clear();
@@ -333,6 +374,7 @@ export class AutomationRuntime {
     session.generation += 1;
     this.invalidateFrames(session);
     this.clearSearches(session.tabId);
+    this.clearInspections(session.tabId);
     session.refs.clear();
     session.refsByNode.clear();
     session.lastSnapshot = undefined;
@@ -344,6 +386,7 @@ export class AutomationRuntime {
   handleDetach(source: Debuggee): void {
     if (Number.isInteger(source.tabId)) {
       this.clearSearches(source.tabId!);
+      this.clearInspections(source.tabId!);
       const session = this.sessions.get(source.tabId!);
       if (session) this.invalidateFrames(session);
       this.sessions.delete(source.tabId!);
@@ -353,10 +396,12 @@ export class AutomationRuntime {
   async abortSessions(): Promise<void> {
     const sessions = [...this.sessions.values()];
     this.frameLists.clear();
+    this.clearFrameDocuments();
     this.sessions.clear();
     this.clearSearches();
     this.objectDebuggees.clear();
     this.observations.clear();
+    this.inspectionSnapshots.clear();
     this.fileChoosers.clear();
     this.axRoots.clear();
     for (const events of this.waiters.values()) for (const waiters of events.values()) for (const waiter of waiters) waiter.reject(abortError());
@@ -405,7 +450,7 @@ export class AutomationRuntime {
         observationId, documentId: session.generation, url: captured.url, title: captured.title, viewport,
         snapshot: captured.lines.map(({ line }) => line).join("\n"), ...(changes ? { changes } : {}),
       };
-      if (detail === "visual" || detail === "auto" && !captured.lines.some(({ line }) => line.includes("[ref="))) {
+      if (detail === "visual" || detail === "auto" && !captured.lines.some(({ ref }) => Boolean(ref))) {
         const screenshot = await this.options.command(session.debuggee, "Page.captureScreenshot", {
           format: "jpeg", quality: 70, fromSurface: true, captureBeyondViewport: false, ...captureOptions,
         });
@@ -418,68 +463,114 @@ export class AutomationRuntime {
         result.screenshot = { mediaType: `image/${captureOptions.format ?? "jpeg"}`, data: screenshot.data, ...image };
       }
       if (generation !== session.generation) throw automationError("stale-observation", { reason: "document-changed-during-observation" });
-      this.observations.set(observationId, record);
-      while (this.observations.size > 32) this.observations.delete(this.observations.keys().next().value!);
+      this.rememberObservation(record);
       return result;
     });
+  }
+
+  private rememberObservation(record: ObservationRecord): void {
+    this.observations.delete(record.observationId);
+    this.observations.set(record.observationId, record);
+    while (this.observations.size > 32) {
+      const oldest = this.observations.keys().next().value!;
+      this.observations.delete(oldest);
+      this.inspectionSnapshots.delete(oldest);
+    }
+  }
+
+  private clearInspections(tabId: number): void {
+    for (const [id, snapshot] of this.inspectionSnapshots) if (snapshot.session.tabId === tabId) this.inspectionSnapshots.delete(id);
   }
 
   async inspect(tabId: number, options: InspectOptions = {}, region?: LocatorSpec): Promise<Record<string, unknown>> {
     return this.action(tabId, "inspect", region ?? null, async () => {
       const session = await this.session(tabId);
-      const scopeKey = JSON.stringify([region ?? null, options.fields ?? ["text", "state", "ref", "actions"], options.depth ?? null]);
-      const previous = options.since ? this.observations.get(options.since) : undefined;
-      if (options.since && (!previous || previous.tabId !== tabId || previous.documentId !== session.generation || previous.scopeKey !== scopeKey)) {
-        throw automationError("stale-observation", { observationId: options.since, reason: "document-or-scope-changed" });
-      }
-      const captured = await this.captureSnapshot(session, region);
       const generation = session.generation;
-      if (previous && previous.documentId !== session.generation) throw automationError("stale-observation", { observationId: options.since, reason: "document-changed-during-inspection" });
-      const fields = new Set(options.fields ?? ["text", "state", "ref", "actions"]);
-      const qualified = captured.lines.map(({ id, line }) => ({ id, line: line.replace(/\[actions=([^\]]+)\]/g, (_match, value: string) => `[actions=${value.split(",").map((action) => action === "doubleClick" ? "dblclick" : action === "insertText" ? "pressSequentially" : action === "select" ? "selectOption" : action).join(",")}]`).replace(/\[ref=(e\d+)\]/g, (_match, ref: string) => {
-        const owned = `t${tabId}s${session.token}d${session.generation}${ref}`;
-        const record = session.refs.get(ref);
-        if (record) session.refs.set(owned, record);
-        return `[ref=${owned}]`;
-      }) }));
-      const lines = qualified.filter(({ line }) => options.depth === undefined || (line.match(/^ */)?.[0].length ?? 0) / 2 <= options.depth)
-        .map(({ id, line }) => ({ id, line: line.replace(/ \[(ref|actions|checked|disabled|expanded|pressed|selected|required|readonly)=([^\]]*)\]/g,
-          (match, key: string) => fields.has(key === "ref" ? "ref" : key === "actions" ? "actions" : "state") ? match : "")
-          .replace(fields.has("text") ? /(?!)x/ : /("(?:[^"\\]|\\.)*"|: .*?$)/g, "") }));
-      const viewport = await this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})") as ObservationRecord["viewport"];
-      if (generation !== session.generation) throw automationError("stale-observation", { reason: "document-changed-during-inspection" });
-      const observationId = crypto.randomUUID();
-      const baseline = previous && !previous.incomplete ? previous : undefined;
-      const before = new Map(baseline?.lines.map((item) => [item.id, item.line]));
-      const after = new Map(lines.map((item) => [item.id, item.line]));
-      const changes = baseline ? [
-        ...baseline.lines.filter(({ id }) => !after.has(id)).map((item) => ({ ...item, change: "removed" })),
-        ...lines.filter(({ id, line }) => before.get(id) !== line).map((item) => ({ ...item, change: before.has(item.id) ? "updated" : "added", after: lines[lines.indexOf(item) - 1]?.id ?? null })),
-        ...lines.filter((item, index) => before.has(item.id) && baseline.lines[baseline.lines.findIndex((prior) => prior.id === item.id) - 1]?.id !== lines[index - 1]?.id)
-          .map((item) => ({ id: item.id, line: item.line, change: "moved", after: lines[lines.indexOf(item) - 1]?.id ?? null })),
-      ] : undefined;
-      const source = changes ?? lines;
-      const offset = options.offset ?? 0;
-      const limit = options.limit ?? source.length;
-      const budget = options.budget ?? 12000;
-      let used = 0;
-      const selected: typeof source = [];
-      for (const item of source.slice(offset, offset + limit)) {
-        const size = (changes ? JSON.stringify(item).length : item.line.length) + 1;
-        if (used + size > budget) break;
-        used += size; selected.push(item);
+      const signal = this.context.signal;
+      const conversationId = this.context.conversationId, runId = this.context.logIdentity?.runId;
+      const guard = () => {
+        throwIfAborted(signal);
+        if (this.sessions.get(tabId) !== session || session.generation !== generation) throw automationError("stale-observation", { reason: "document-or-session-changed" });
+      };
+      guard();
+      let saved: InspectSnapshot;
+      let position: SnapshotPosition;
+      if (options.cursor !== undefined) {
+        if (region || options.since !== undefined || options.offset !== undefined || options.fields !== undefined || options.depth !== undefined)
+          throw automationError("invalid-inspect-cursor", { reason: "cursor-cannot-change-scope" });
+        const match = /^([a-f0-9-]+):(\d+):(\d+)$/.exec(options.cursor);
+        if (!match || !Number.isSafeInteger(Number(match[2])) || !Number.isSafeInteger(Number(match[3]))) throw automationError("stale-observation", { reason: "invalid-cursor" });
+        const snapshot = this.inspectionSnapshots.get(match[1]!);
+        if (!snapshot || snapshot.session !== session || snapshot.generation !== generation || snapshot.conversationId !== conversationId || snapshot.runId !== runId
+          || this.observations.get(snapshot.id) !== snapshot.record)
+          throw automationError("stale-observation", { reason: "expired-or-mismatched-cursor" });
+        saved = snapshot;
+        this.rememberObservation(saved.record);
+        position = { index: Number(match[2]), charOffset: Number(match[3]) };
+        this.inspectionSnapshots.delete(saved.id); this.inspectionSnapshots.set(saved.id, saved);
+      } else {
+        const scopeKey = JSON.stringify([region ?? null, options.fields ?? ["text", "state", "ref", "actions"], options.depth ?? null]);
+        const previous = options.since ? this.observations.get(options.since) : undefined;
+        if (options.since && (!previous || previous.tabId !== tabId || previous.documentId !== generation || previous.scopeKey !== scopeKey))
+          throw automationError("stale-observation", { observationId: options.since, reason: "document-or-scope-changed" });
+        const captured = await this.captureSnapshot(session, region);
+        guard();
+        if (previous && previous.documentId !== session.generation) throw automationError("stale-observation", { observationId: options.since, reason: "document-changed-during-inspection" });
+        const fields = options.fields ?? ["text", "state", "ref", "actions"];
+        const lines: SnapshotLine[] = captured.lines.filter(({ node, line }) => options.depth === undefined || (node?.depth ?? (line.match(/^ */)?.[0].length ?? 0) / 2) <= options.depth)
+          .map(({ id, line, node }) => {
+            if (!node) return { id, line };
+            const owned = node.ref ? `t${tabId}s${session.token}d${generation}${node.ref}` : undefined;
+            const refRecord = node.ref ? session.refs.get(node.ref) : undefined;
+            if (owned && refRecord) session.refs.set(owned, refRecord);
+            const rendered = renderSnapshotNode({ ...node, ...(owned ? { ref: owned } : {}) }, { fields, actionNames: "program" });
+            return { id, line: rendered.line, ...(rendered.ref ? { ref: rendered.ref } : {}) };
+          });
+        const viewport = await this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})") as ObservationRecord["viewport"];
+        guard();
+        const observationId = crypto.randomUUID();
+        const baseline = previous && !previous.incomplete ? previous : undefined;
+        const before = new Map(baseline?.lines.map((item) => [item.id, item.line]));
+        const after = new Map(lines.map((item) => [item.id, item.line]));
+        const changes: SnapshotItem[] | undefined = baseline ? [
+          ...baseline.lines.filter(({ id }) => !after.has(id)).map((item) => ({ ...item, change: "removed" as const })),
+          ...lines.filter(({ id, line }) => before.get(id) !== line).map((item) => ({ ...item, change: before.has(item.id) ? "updated" as const : "added" as const, after: lines[lines.indexOf(item) - 1]?.id ?? null })),
+          ...lines.filter((item, index) => before.has(item.id) && baseline.lines[baseline.lines.findIndex((prior) => prior.id === item.id) - 1]?.id !== lines[index - 1]?.id)
+            .map((item) => ({ ...item, change: "moved" as const, after: lines[lines.indexOf(item) - 1]?.id ?? null })),
+        ] : undefined;
+        const source = changes ?? lines;
+        const index = options.offset ?? 0;
+        if (!Number.isSafeInteger(index) || index < 0 || index > source.length) throw automationError("invalid-offset", { offset: index, total: source.length });
+        position = { index, charOffset: 0 };
+        const record: ObservationRecord = { observationId, tabId, documentId: generation, ...captured, lines, viewport, scopeKey, incomplete: true };
+        this.rememberObservation(record);
+        saved = { id: observationId, session, generation, conversationId, runId, record, source, mode: changes ? "delta" : "full",
+          ...(previous?.incomplete ? { reset: "previous-output-truncated" } : {}), expected: position, eligibleForBaseline: index === 0 };
+        this.inspectionSnapshots.set(saved.id, saved);
+        while (this.inspectionSnapshots.size > 32) this.inspectionSnapshots.delete(this.inspectionSnapshots.keys().next().value!);
       }
-      const nextOffset = offset + selected.length;
-      const incomplete = offset > 0 || nextOffset < source.length;
-      const record: ObservationRecord = { observationId, tabId, documentId: session.generation, ...captured, lines, viewport, scopeKey, incomplete };
-      this.observations.set(observationId, record);
-      while (this.observations.size > 32) this.observations.delete(this.observations.keys().next().value!);
-      return { observationId, tabId, documentId: session.generation, url: captured.url, title: captured.title, viewport,
-        mode: baseline ? "delta" : "full", ...(previous?.incomplete ? { reset: "previous-output-truncated" } : {}),
-        ...(changes ? { changes: selected } : { snapshot: selected.map(({ line }) => line).join("\n") }),
-        truncation: { truncated: incomplete, total: source.length, returned: selected.length, offset, nextOffset, budget, used,
-          ...(incomplete ? { reason: selected.length < Math.min(limit, source.length - offset) ? "budget" : "slice", baselineComplete: false,
-            ...(selected.length === 0 && source[offset] ? { requiredBudget: (changes ? JSON.stringify(source[offset]).length : source[offset]!.line.length) + 1 } : {}) } : { baselineComplete: true }) } };
+      guard();
+      const budget = options.budget ?? 12000;
+      let page;
+      try { page = paginateSnapshot(saved.source, { budget, limit: options.limit, position }); }
+      catch (error) { throw automationError("stale-observation", { reason: error instanceof Error ? error.message : String(error) }); }
+      if (saved.expected && saved.expected.index === position.index && saved.expected.charOffset === position.charOffset) {
+        saved.expected = page.next;
+        if (!page.hasMore && saved.eligibleForBaseline) saved.record.incomplete = false;
+      }
+      const partiallyReturned = position.charOffset > 0 || page.fragments.some((fragment) => !fragment.complete);
+      const truncated = position.index > 0 || position.charOffset > 0 || page.hasMore;
+      const reason = page.reason === "budget" ? "budget" : "slice";
+      return { observationId: saved.id, tabId, documentId: generation, url: saved.record.url, title: saved.record.title, viewport: saved.record.viewport,
+        mode: saved.mode, ...(saved.reset ? { reset: saved.reset } : {}),
+        ...(partiallyReturned ? { fragments: page.fragments } : saved.mode === "delta"
+          ? { changes: page.fragments.map(({ id, line, ref, change, after }) => ({ id, line, ...(ref ? { ref } : {}), change, ...(after === undefined ? {} : { after }) })) }
+          : { snapshot: page.fragments.map(({ line }) => line).join("\n") }),
+        ...(page.next ? { nextCursor: `${saved.id}:${page.next.index}:${page.next.charOffset}` } : {}),
+        truncation: { truncated, total: saved.source.length, returned: page.fragments.length, offset: position.index, charOffset: position.charOffset,
+          nextOffset: page.next?.index ?? saved.source.length, nextCharOffset: page.next?.charOffset ?? 0, budget, used: page.usedBytes,
+          ...(truncated ? { reason, baselineComplete: !saved.record.incomplete, ...(page.requiredBudget === undefined ? {} : { requiredBudget: page.requiredBudget }) }
+            : { baselineComplete: !saved.record.incomplete }) } };
     });
   }
 
@@ -1184,6 +1275,59 @@ export class AutomationRuntime {
     return matches;
   }
 
+  private clearFrameDocuments(tabId?: number, source?: Debuggee, release = true): void {
+    for (const [key, document] of this.frameDocuments) {
+      if (tabId !== undefined && document.session.tabId !== tabId) continue;
+      if (source && document.frame.debuggee.sessionId !== source.sessionId) continue;
+      this.frameDocuments.delete(key);
+      if (release && document.objectId) {
+        void this.options.command(document.frame.debuggee, "Runtime.releaseObject", { objectId: document.objectId }).catch(() => undefined);
+        document.objectId = undefined;
+      }
+    }
+  }
+
+  /** Share the document handle only within the current execution context. */
+  private async frameDocument(session: Session, frame: FrameRefRecord, guard: () => void): Promise<string> {
+    const key = JSON.stringify([session.tabId, frame.frameId, frame.debuggee.sessionId ?? null]);
+    let document = this.frameDocuments.get(key);
+    if (document && (document.session !== session || document.frame.generation !== frame.generation || document.frame.revision !== frame.revision)) {
+      this.clearFrameDocuments(session.tabId, frame.debuggee);
+      document = undefined;
+    }
+    if (!document) {
+      const entry: FrameDocument = { session, frame, promise: undefined as unknown as Promise<string> };
+      const check = () => {
+        guard();
+        if (this.frameDocuments.get(key) !== entry) throw automationError("stale-frame", { reason: "frame-context-expired" });
+      };
+      entry.promise = Promise.resolve().then(async () => {
+        if (frame.debuggee.sessionId) await session.frameReady.get(frame.debuggee.sessionId);
+        check();
+        const world = await this.options.command(frame.debuggee, "Page.createIsolatedWorld", { frameId: frame.frameId, worldName: "surf-wax-frame" });
+        check();
+        if (!Number.isSafeInteger(world?.executionContextId)) throw automationError("frame-unavailable", { reason: "missing-execution-context" });
+        const response = await this.options.command(frame.debuggee, "Runtime.evaluate", { expression: "document", contextId: world.executionContextId, returnByValue: false, objectGroup: "surf-wax-automation" });
+        if (typeof response.result?.objectId === "string") entry.objectId = response.result.objectId;
+        check();
+        if (response.exceptionDetails || !entry.objectId) throw automationError("frame-unavailable", { reason: "missing-frame-document" });
+        return entry.objectId;
+      }).catch((error) => {
+        if (this.frameDocuments.get(key) === entry) this.frameDocuments.delete(key);
+        // The evaluation can complete after invalidation or group release.
+        if (entry.objectId) void this.options.command(frame.debuggee, "Runtime.releaseObject", { objectId: entry.objectId }).catch(() => undefined);
+        entry.objectId = undefined;
+        throw error;
+      });
+      this.frameDocuments.set(key, entry);
+      document = entry;
+    }
+    const objectId = await document.promise;
+    guard();
+    if (this.frameDocuments.get(key) !== document) throw automationError("stale-frame", { reason: "frame-context-expired" });
+    return objectId;
+  }
+
   private async locatorScope(session: Session, spec: LocatorSpec): Promise<{ debuggee: Debuggee; spec: LocatorSpec; rootObjectId?: string }> {
     let debuggee = session.debuggee;
     let scoped = spec;
@@ -1202,15 +1346,7 @@ export class AutomationRuntime {
       };
       debuggee = frame.debuggee;
       try {
-        if (debuggee.sessionId) await session.frameReady.get(debuggee.sessionId);
-        guard();
-        const world = await this.options.command(debuggee, "Page.createIsolatedWorld", { frameId: frame.frameId, worldName: "surf-wax-frame" });
-        guard();
-        if (!Number.isSafeInteger(world?.executionContextId)) throw automationError("frame-unavailable", { ref, reason: "missing-execution-context" });
-        const document = await this.options.command(debuggee, "Runtime.evaluate", { expression: "document", contextId: world.executionContextId, returnByValue: false, objectGroup: "surf-wax-automation" });
-        guard();
-        if (document.exceptionDetails || typeof document.result?.objectId !== "string") throw automationError("frame-unavailable", { ref, reason: "missing-frame-document" });
-        rootObjectId = document.result.objectId;
+        rootObjectId = await this.frameDocument(session, frame, guard);
       } catch (error) {
         guard();
         if (error instanceof AutomationError) throw error;
@@ -1283,10 +1419,11 @@ export class AutomationRuntime {
     return response.result?.value;
   }
 
-  private async elementState(session: Session, objectId: string): Promise<ElementState> {
+  private async elementState(session: Session, objectId: string, pointer = false): Promise<ElementState> {
     // Child-frame RAF and timers can both be suspended by Chrome. Read real
     // geometry synchronously on each side of two frames of the live harness.
-    const read = () => this.callOn(session, objectId, `function(){
+    const read = async () => {
+      const value = await this.callOn(session, objectId, `function(){
       if (!this.isConnected) return { connected: false, x: 0, y: 0, visible: false, stable: false, enabled: false, editable: false, receivesEvents: false, checked: false };
       this.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
       const rect = this.getBoundingClientRect();
@@ -1296,19 +1433,26 @@ export class AutomationRuntime {
       let hit = this.ownerDocument.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
       while (hit?.shadowRoot) { const nested = hit.shadowRoot.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); if (!nested || nested === hit) break; hit = nested; }
       if (guard) guard.style.setProperty("pointer-events", pointerEvents || "auto", pointerPriority || "important");
-      let view = this.ownerDocument.defaultView;
-      while (view?.frameElement) { const frame = view.frameElement.getBoundingClientRect(); x += frame.left; y += frame.top; view = view.parent; }
       const disabled = Boolean(this.disabled || this.closest("fieldset:disabled") || this.closest('[aria-disabled="true"]'));
       const editable = !disabled && !this.readOnly && this.getAttribute("aria-readonly") !== "true" && (this.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(this.tagName));
       return { connected: true, x, y, width: rect.width, height: rect.height, visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none", stable: true, enabled: !disabled, editable, receivesEvents: Boolean(hit && (hit === this || this.contains(hit))), checked: (${CHECKED_STATE_SOURCE}).call(this).value };
     }`, [], true);
+      if (!pointer || !value.connected || !value.visible) return value as ElementState;
+      // CDP quads are relative to this debugger target's viewport and already
+      // include same-process iframe transforms, borders, and nested offsets.
+      const result = await this.options.command(session.debuggee, "DOM.getContentQuads", { objectId });
+      const quad = (result.quads ?? []).find((candidate: unknown) => Array.isArray(candidate) && candidate.length === 8 && candidate.every(Number.isFinite));
+      if (!quad) throw automationError("not-visible", { reason: "missing-content-quad" });
+      return { ...value, ...projectQuad(quad, 0.5, 0.5), quad } as ElementState;
+    };
     const first = await read();
     if (!first.connected) return first;
     await waitForDocumentFrame(); await waitForDocumentFrame();
     throwIfAborted(this.context.signal);
     const next = await read();
     return { ...next, stable: next.stable && first.x === next.x && first.y === next.y
-      && first.width === next.width && first.height === next.height };
+      && first.width === next.width && first.height === next.height
+      && (!pointer || first.quad?.every((value, index) => value === next.quad?.[index]) === true) };
   }
 
   private async waitForLocatorState(session: Session, spec: LocatorSpec, state: WaitState, checked = true): Promise<void> {
@@ -1350,7 +1494,7 @@ export class AutomationRuntime {
       attempt += 1;
       if (!objectId) { this.recordAttempt(session, spec, attempt, "no-candidate", candidates); await delay(50, this.context.signal); continue; }
       const targetSession = this.objectSession(session, objectId);
-      const state = await this.elementState(targetSession, objectId).catch((error) => {
+      const state = await this.elementState(targetSession, objectId, pointer).catch((error) => {
         if (spec.ref) throw automationError("detached", { ref: spec.ref, reason: error instanceof Error ? error.message : String(error) });
         return undefined;
       });
@@ -1376,9 +1520,7 @@ export class AutomationRuntime {
       const size = await this.evaluateIn(debuggee, "({width:innerWidth,height:innerHeight})") as { width: number; height: number };
       const quad = model?.model?.content as number[] | undefined;
       if (!quad?.length || !size.width || !size.height) throw automationError("frame-detached", { frameId, reason: "missing-frame-geometry" });
-      const u = x / size.width; const v = y / size.height;
-      x = quad[0]! + u * (quad[2]! - quad[0]!) + v * (quad[6]! - quad[0]!);
-      y = quad[1]! + u * (quad[3]! - quad[1]!) + v * (quad[7]! - quad[1]!);
+      ({ x, y } = projectQuad(quad, x / size.width, y / size.height));
       debuggee = parent;
     }
     return { x, y };
@@ -1460,11 +1602,13 @@ export class AutomationRuntime {
               session.refs.set(ref, { backendNodeId: node.backendDOMNodeId, frameId: node.frameId, debuggee, role, name, generation });
             }
             const properties = Object.fromEntries((node.properties ?? []).map((property: any) => [property.name, property.value?.value]));
-            const state = ["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly"].filter((key) => properties[key] !== undefined).map((key) => `${key}=${properties[key]}`).join(" ");
-            const actions = !ref ? "" : ["textbox", "searchbox", "spinbutton"].includes(role) ? "click,fill,clear,press,insertText"
-              : ["checkbox", "radio", "switch"].includes(role) ? "click,check"
-              : ["combobox", "listbox"].includes(role) ? "click,select" : "click,doubleClick,hover";
-            lines.push({ id: identity, line: `${"  ".repeat(depth)}- ${role}${name ? ` ${quote(name)}` : ""}${ref ? ` [ref=${ref}] [actions=${actions}]` : ""}${state ? ` [${state}]` : ""}${value && value !== name ? `: ${value}` : ""}` });
+            const state: Partial<Record<SnapshotStateName, unknown>> = Object.fromEntries(["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly"].filter((key) => properties[key] !== undefined).map((key) => [key, properties[key]]));
+            const actions = !ref ? [] : ["textbox", "searchbox", "spinbutton"].includes(role) ? ["click", "fill", "clear", "press", "insertText"]
+              : ["checkbox", "radio", "switch"].includes(role) ? ["click", "check"]
+              : ["combobox", "listbox"].includes(role) ? ["click", "select"] : ["click", "doubleClick", "hover"];
+            const snapshotNode: SnapshotNode = { id: identity, depth, role, name, value, ...(ref ? { ref, actions } : {}), state };
+            const rendered = renderSnapshotNode(snapshotNode);
+            lines.push({ id: identity, line: rendered.line, ...(rendered.ref ? { ref: rendered.ref } : {}), node: snapshotNode });
             depth += 1;
           }
           for (const child of node.childIds ?? []) visit(byId.get(child), depth);

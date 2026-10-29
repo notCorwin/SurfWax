@@ -10,11 +10,13 @@ const elementTargetObject = z.union([
   z.object({ ref: z.string().min(1) }).strict(),
   z.object({ by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testId", "css"]), value: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional(), index: z.number().int().optional(), frame: z.union([z.object({ by: z.literal("css"), value: z.string().min(1) }).strict(), z.object({ ref: z.string().min(1) }).strict()]).optional() }).strict(),
 ]);
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v6";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v7";
 export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetObject]).optional(),
   fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional(), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
-  since: z.string().min(1).optional() }).strict();
+  since: z.string().min(1).optional(), cursor: z.string().min(1).max(256).optional() }).strict()
+  .refine((input) => input.cursor === undefined || [input.region, input.fields, input.depth, input.since, input.offset].every((value) => value === undefined),
+    "cursor cannot be combined with region, fields, depth, since, or offset");
 const findElementsInputSchema = z.object({ target: elementTargetObject, tabId: z.number().int().nonnegative().optional(), timeoutMs,
   limit: z.number().int().min(1).max(100).optional(), cursor: z.string().min(1).max(256).optional() }).strict();
 const listFramesInputSchema = z.object({ tabId: z.number().int().nonnegative().optional(), timeoutMs,
@@ -33,7 +35,7 @@ const handleDialogInputSchema = z.object({ dialogId: z.string().min(1), accept: 
 
 type ToolDefinition = { name: string; inputSchema: z.ZodType<any>; summary: string; description: string; program?: (input: any) => { code: string; timeoutMs?: number; background?: boolean } };
 export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
-  { name: "inspect_page", inputSchema: inspectInputSchema, summary: "Read the semantic page with stable element refs", description: "Inspect semantic text and stable refs. region and fields narrow the result; budget and pagination limit output; since reads changes. Use take_screenshot for visual input." },
+  { name: "inspect_page", inputSchema: inspectInputSchema, summary: "Read the semantic page with stable element refs", description: "Inspect semantic text and stable refs. region and fields narrow the result; since reads changes. budget limits UTF-8 JSON fragment bytes. Continue a frozen snapshot with nextCursor using cursor, tabId, budget and limit only; split lines return fragments with offsets. Use take_screenshot for visual input." },
   { name: "find_elements", inputSchema: findElementsInputSchema, summary: "Find candidates and return stable element refs", description: "Find matching elements with stable refs for actions. limit defaults to 25, max 100; repeat the same target and tab with nextCursor to read a fixed snapshot. Removed elements are marked detached. Cursors expire on run or document changes or eviction." },
   { name: "list_frames", inputSchema: listFramesInputSchema, summary: "List frames and their document-bound refs", description: "List the selected tab's frame tree with refs usable as target.frame.ref. limit defaults to 25, max 100; pass nextCursor to continue a fixed snapshot. References and cursors expire on document or frame changes." },
   ...ATOMIC_TOOL_REGISTRY,
@@ -53,7 +55,7 @@ page: tabId; inspect(options?, regionLocator?); snapshot(); observe('semantic'|'
 locators: chain/filter/first/last/nth, count/waitFor/click/dblclick/hover/fill/clear/press/pressSequentially/check/uncheck/selectOption/dragTo/setInputFiles/focus/blur/scrollIntoViewIfNeeded/textContent/innerText/inputValue/getAttribute/isVisible/isEnabled/isChecked/evaluate. Files: {name,mimeType?,text|base64|url}; artifacts.read supplies existing file data. Event handles: chooser.isMultiple()/setFiles(files), dialog.type()/message()/defaultValue()/accept(prompt?)/dismiss(), popup is a page. Start event waits before the action, then await them.
 browser: page(tabId); tabs.list()/open(url?)/select(tabId)/close(tabId); scripts.list()/read(id)/create(definition)/edit(id,changes)/setEnabled(id,enabled)/delete(id). Scripts use Chrome RegisteredUserScript fields including matches, js:[{code|file}], world:MAIN|USER_SCRIPT, runAt, allFrames, include/excludeGlobs/Matches, worldId. Persisted enablement is restored at startup/upgrade; Allow User Scripts must already be enabled.
 browser.runIn({kind:'page',tabId,world:'MAIN'|'ISOLATED'|'USER_SCRIPT',frameId?,documentId?},codeBody): explicit execution domain. MAIN/ISOLATED root only; USER_SCRIPT supports Chrome frameId or documentId. Use frameLocator.evaluate for arbitrary supported frames. No automatic context substitution.
-net.fetch({context:'page'|'extension',url,tabId?,init?}) returns {url,status,ok,headers,body}; no page-to-extension fallback. Page fetch obeys page origin/cookies/CORS; extension fetch uses extension host permissions. net.requests(options?,tabId?)/request(index,tabId?); net.responseBody(index,tabId?); net.console(options?,tabId?) read captured diagnostics.
+net.fetch({context:'page'|'extension',url,tabId?,init?}) returns {url,status,ok,headers,body}; no page-to-extension fallback. Page fetch obeys page origin/cookies/CORS; extension fetch uses extension host permissions. net.requests(options?,tabId?) returns {requests,integrity,hasMore,nextOffset?} for captured history (not all traffic); hasMore can be null when unknown and offsets refer to a live list. net.request(requestRef,tabId?), net.responseBody(requestRef,tabId?), net.console(options?,tabId?) read captured diagnostics.
 protocol.sessions(tabId?) lists root/child CDP handles; protocol.send({tabId,sessionId?},method,params?) sends any Chrome CDP method available to the extension. Arbitrary JS/CDP/fetch are effectful; there is no readonly override. inspect.documentId is the local navigation generation; USER_SCRIPT documentId uses Chrome's native scripting document ID. File URL sources are fetched in extension context.
 artifacts.read(id,{path?,offset?,limit?}); text(filename,text,mimeType?,save=false); save(id,filename?). Files and images stay internal unless the user requested download/export. emit(value) persists incremental output; check(condition,message?) records a verified assertion; sleep(ms) and signal support cancellation. Completed operations only confirm dispatch/return; verify application outcomes. Queued operations are not dispatched, uncertain effects must be inspected before continuing. Program computation uses a disposable opaque-origin sandbox Worker; browser capabilities are mediated by the Side Panel. Closing the panel cancels jobs and revokes capabilities; arbitrary program finally blocks are not guaranteed to run. Only records survive restart, never arbitrary JS stacks.`;
 export const PROGRAM_TOOL_CONTEXT = `Available tools:\n${PROGRAM_TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n")}`;
@@ -133,7 +135,7 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
           const failure = (result as any)?.ok === false ? (result as any).error ?? (result as any).failed?.error ?? (result as any).result?.error : undefined;
           const artifact = (result as any)?.result?.artifact;
           const normalized = failure ? { ...result as object, ...(artifact ? { artifact } : {}), error: { ...failure, retryable: false } } : result;
-          output = await compactToolResult(normalized, { ...options, toolCallId, ...identity, preserveVerification: definition.name === "verify_state", preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job", preserveSearchStatus: definition.name === "find_elements" || definition.name === "list_frames" });
+          output = await compactToolResult(normalized, { ...options, toolCallId, ...identity, preserveVerification: definition.name === "verify_state", preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job", preserveSearchStatus: definition.name === "find_elements" || definition.name === "list_frames", preserveInspectionStatus: definition.name === "inspect_page", preserveRequestStatus: definition.name === "list_requests" });
           if ((definition.name === "get_job" || definition.name === "cancel_job") && (result as any)?.terminal === true && typeof (result as any).id === "string") observedTerminalJob = (result as any).id;
         } catch (error) {
           output = await failureFor(error, executing);
@@ -247,6 +249,19 @@ function searchMetadata(record: Record<string, unknown>): Record<string, unknown
   const cursor = exactText(record.nextCursor, 512); if (cursor !== undefined) result.nextCursor = cursor;
   return result;
 }
+function inspectionMetadata(record: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const field of ["observationId", "mode", "nextCursor", "reset"]) { const value = exactText(record[field], 512); if (value !== undefined) result[field] = value; }
+  for (const field of ["tabId", "documentId"]) if (Number.isSafeInteger(record[field]) && Number(record[field]) >= 0) result[field] = record[field];
+  if (record.truncation && typeof record.truncation === "object" && !Array.isArray(record.truncation)) {
+    const source = record.truncation as Record<string, unknown>; const truncation: Record<string, unknown> = {};
+    for (const field of ["truncated", "baselineComplete"]) if (typeof source[field] === "boolean") truncation[field] = source[field];
+    for (const field of ["total", "returned", "offset", "charOffset", "nextOffset", "nextCharOffset", "budget", "used", "requiredBudget"]) if (Number.isSafeInteger(source[field]) && Number(source[field]) >= 0) truncation[field] = source[field];
+    const reason = exactText(source.reason, 128); if (reason !== undefined) truncation.reason = reason;
+    result.truncation = truncation;
+  }
+  return result;
+}
 function failureMetadata(record: Record<string, unknown>): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const field of ["jobId", "state", "timeoutSource"]) {
@@ -335,7 +350,7 @@ function previewOf(value: unknown, path?: readonly (string | number)[]): unknown
   return preview;
 }
 
-export async function compactToolResult(value: unknown, options: { logger?: EventLogger; conversationId?: string; toolCallId?: string; runId?: string; toolCallIdCanonical?: boolean; preserveVerification?: boolean; preserveJobStatus?: boolean; preserveSearchStatus?: boolean }): Promise<unknown> {
+export async function compactToolResult(value: unknown, options: { logger?: EventLogger; conversationId?: string; toolCallId?: string; runId?: string; toolCallIdCanonical?: boolean; preserveVerification?: boolean; preserveJobStatus?: boolean; preserveSearchStatus?: boolean; preserveInspectionStatus?: boolean; preserveRequestStatus?: boolean }): Promise<unknown> {
   if ((value && typeof value === "object" && "$ref" in value) || !options.logger) return value;
   let serialized: string | undefined;
   try { serialized = JSON.stringify(value); } catch { return value; }
@@ -347,11 +362,14 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
   const root = value && typeof value === "object" ? value as Record<string, unknown> : undefined;
   const job = options.preserveJobStatus ? root : undefined;
   const search = options.preserveSearchStatus ? root : undefined;
+  const inspection = options.preserveInspectionStatus ? root : undefined;
+  const requests = options.preserveRequestStatus && root?.result && typeof root.result === "object" && !Array.isArray(root.result) ? root.result as Record<string, unknown> : undefined;
   const visual = visualEvidence(value);
   const failure = root?.ok === false || root?.type === "tool-error";
   const errorPath = root && Object.hasOwn(root, "error") ? ["error"] : ["result", "error"];
   const error = failure ? valueAt(value, errorPath) : undefined;
-  const path = job && Array.isArray(job.events) ? ["events"] : search && Array.isArray(search.elements) ? ["elements"] : search && Array.isArray(search.frames) ? ["frames"] : readablePathOf(value);
+  const path = requests && Array.isArray(requests.requests) ? ["result", "requests"] : job && Array.isArray(job.events) ? ["events"] : search && Array.isArray(search.elements) ? ["elements"] : search && Array.isArray(search.frames) ? ["frames"]
+    : inspection && Array.isArray(inspection.fragments) ? ["fragments"] : inspection && Array.isArray(inspection.changes) ? ["changes"] : readablePathOf(value);
   const selected = path ? valueAt(value, path) : value;
   const access = { artifactId: event.id, ...(path ? { path } : {}), ...(typeof selected === "string" ? { offset: 0, limit: 4000 } : Array.isArray(selected) ? { offset: 0, limit: 50 } : {}) };
   const verification = options.preserveVerification && value && typeof value === "object" && "result" in value
@@ -361,6 +379,11 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
   return { $ref: event.id, bytes, preview: job ? { eventCount: Array.isArray(job.events) ? job.events.length : 0 } : handoff || visual && typeof selected !== "string" ? undefined : previewOf(value, path), access, type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value,
     ...(job ? jobMetadata(job) : {}),
     ...(search ? searchMetadata(search) : {}),
+    ...(inspection ? inspectionMetadata(inspection) : {}),
+    ...(requests ? { ...(requests.integrity === "complete" || requests.integrity === "incomplete" ? { integrity: requests.integrity } : {}),
+      ...(typeof requests.hasMore === "boolean" || requests.hasMore === null ? { hasMore: requests.hasMore } : {}),
+      ...(Number.isSafeInteger(requests.nextOffset) && Number(requests.nextOffset) >= 0 ? { nextOffset: requests.nextOffset } : {}),
+      ...(exactText(requests.reason, 128) !== undefined ? { reason: requests.reason } : {}) } : {}),
     ...(root && Object.hasOwn(root, "result") ? { resultAccess: { artifactId: event.id, path: ["result"],
       ...(typeof root.result === "string" ? { offset: 0, limit: 4000 } : Array.isArray(root.result) ? { offset: 0, limit: 50 } : {}) } } : {}),
     ...(failure ? { ...(root?.ok === false ? { ok: false } : {}), ...(root?.type === "tool-error" ? { type: "tool-error" } : {}),

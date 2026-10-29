@@ -202,6 +202,13 @@ describe("browser tools", () => {
     await expect(tools.switch_tab.execute({ tabId: 42 }, { toolCallId: "switch" })).resolves.toEqual([{ id: 42, current: true }]);
     expect(switchTab).toHaveBeenCalledWith(42, undefined, undefined);
   });
+  it("accepts inspection continuation without mixing it with a new scope", () => {
+    const tools = createProgramTools({} as ChromeExecutor) as Record<string, any>;
+    expect(tools.inspect_page.inputSchema.parse({ cursor: "next", tabId: 41, budget: 500, limit: 5 })).toBeTruthy();
+    for (const extra of [{ since: "old" }, { offset: 1 }, { fields: ["text"] }, { depth: 1 }, { region: "main" }])
+      expect(() => tools.inspect_page.inputSchema.parse({ cursor: "next", ...extra })).toThrow();
+  });
+
   it("routes bounded element searches to the live browser executor", async () => {
     const findElements = vi.fn(async () => ({ tabId: 41, documentId: 1, total: 1, elements: [{ ref: "t41d1e1", role: "button", name: "Submit" }], hasMore: false }));
     const tools = createProgramTools({ findElements } as unknown as ChromeExecutor, { conversationId: "c" }) as Record<string, any>;
@@ -395,6 +402,21 @@ describe("browser tools", () => {
     const frames = Array.from({ length: 100 }, (_, index) => ({ frameRef: `frame-${index}`, url: "x".repeat(160) }));
     const result = await compactToolResult({ tabId: 41, documentId: 2, total: 200, frames, hasMore: true, nextCursor: "cursor" }, { logger, preserveSearchStatus: true });
     expect(result).toMatchObject({ $ref: 17, tabId: 41, documentId: 2, total: 200, hasMore: true, nextCursor: "cursor", access: { artifactId: 17, path: ["frames"], offset: 0, limit: 50 } });
+  });
+
+  it("keeps long inspection continuation and fragment access visible", async () => {
+    const logger = { append: async (event: any) => ({ ...event, id: 18 }) } as EventLogger;
+    const fragments = Array.from({ length: 50 }, (_, index) => ({ index, id: `node-${index}`, start: 0, end: 250, total: 250, complete: true, line: "x".repeat(250) }));
+    const value = { observationId: "obs", tabId: 41, documentId: 3, mode: "full", fragments, nextCursor: "cursor", truncation: { truncated: true, total: 100, returned: 50, budget: 15000, used: 14000, reason: "budget", baselineComplete: false } };
+    const result = await compactToolResult(value, { logger, preserveInspectionStatus: true });
+    expect(result).toMatchObject({ $ref: 18, observationId: "obs", tabId: 41, documentId: 3, mode: "full", nextCursor: "cursor", truncation: { truncated: true, reason: "budget", baselineComplete: false }, access: { artifactId: 18, path: ["fragments"], offset: 0, limit: 50 } });
+  });
+
+  it("keeps request history integrity and access visible after compaction", async () => {
+    const logger = { append: async (event: any) => ({ ...event, id: 19 }) } as EventLogger;
+    const requests = Array.from({ length: 100 }, (_, index) => ({ requestRef: `request-${index}`, url: "x".repeat(160) }));
+    const result = await compactToolResult({ ok: true, result: { requests, integrity: "incomplete", hasMore: null, reason: "diagnostic-log-incomplete" } }, { logger, preserveRequestStatus: true });
+    expect(result).toMatchObject({ $ref: 19, integrity: "incomplete", hasMore: null, reason: "diagnostic-log-incomplete", access: { artifactId: 19, path: ["result", "requests"], offset: 0, limit: 50 } });
   });
 
   it("keeps a large search page's scope and continuation visible", async () => {

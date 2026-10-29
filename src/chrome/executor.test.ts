@@ -83,6 +83,45 @@ function programHarness(work: (capabilities: any, signal: AbortSignal) => Promis
 }
 
 describe("ChromeExecutor programs", () => {
+  it.each(["navigation", "redirect"] as const)("rejects a response body if %s invalidates its request while CDP is in flight", async (change) => {
+    const h = programHarness(async () => undefined);
+    const diagnostics = (h.executor as any).diagnostics;
+    diagnostics.bind({ conversationId: "conversation" });
+    const first = { requestId: "same", request: { method: "GET", url: "https://old.test/", headers: {} }, type: "Fetch" };
+    diagnostics.handle({ tabId: 41 }, "Network.requestWillBeSent", first);
+    const [entry] = (await diagnostics.requests(41, {}) as any).requests;
+    let release!: (value: unknown) => void; let notify!: () => void;
+    const started = new Promise<void>((resolve) => { notify = resolve; });
+    (h.executor as any).bridgeCommand = vi.fn((_source: unknown, method: string) => method === "Network.getResponseBody"
+      ? new Promise((resolve) => { release = resolve; notify(); }) : Promise.resolve({}));
+    const pending = (h.executor as any).readRequest(41, entry.requestRef, true);
+    await started;
+    if (change === "navigation") diagnostics.handle({ tabId: 41 }, "Page.frameNavigated", { frame: { id: "root" } });
+    else diagnostics.handle({ tabId: 41 }, "Network.requestWillBeSent", { ...first, request: { ...first.request, url: "https://new.test/" }, redirectResponse: { status: 302 } });
+    release({ body: "old-or-new", base64Encoded: false });
+    await expect(pending).rejects.toMatchObject({ code: "stale-request" });
+    h.executor.dispose();
+  });
+
+  it("rejects an in-flight response when its originating child session detaches", async () => {
+    const h = programHarness(async () => undefined);
+    const diagnostics = (h.executor as any).diagnostics;
+    diagnostics.bind({ conversationId: "conversation" });
+    diagnostics.handle({ tabId: 41, sessionId: "child" }, "Network.requestWillBeSent", { requestId: "same", request: { method: "GET", url: "https://frame.test/", headers: {} }, type: "Fetch" });
+    const [entry] = (await diagnostics.requests(41, {}) as any).requests;
+    let release!: (value: unknown) => void; let notify!: () => void;
+    const started = new Promise<void>((resolve) => { notify = resolve; });
+    (h.executor as any).automation.observationDebuggees = vi.fn(async () => [{ tabId: 41 }, { tabId: 41, sessionId: "child" }]);
+    (h.executor as any).bridgeCommand = vi.fn((_source: unknown, method: string) => method === "Network.getResponseBody"
+      ? new Promise((resolve) => { release = resolve; notify(); }) : Promise.resolve({}));
+    const pending = (h.executor as any).readRequest(41, entry.requestRef, true);
+    await started;
+    diagnostics.handle({ tabId: 41 }, "Target.detachedFromTarget", { sessionId: "child" });
+    release({ body: "stale", base64Encoded: false });
+    await expect(pending).rejects.toMatchObject({ code: "stale-request" });
+    h.executor.dispose();
+  });
+
   it("awaits foreground completion without rescanning the job log for every progress receipt", async () => {
     const h = programHarness(async ({ emit }) => {
       for (let index = 0; index < 50; index++) await emit(index);
