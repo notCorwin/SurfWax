@@ -23,7 +23,7 @@ function harness(
   let latestState: any = states[0];
   const tabsCreated = event<(tab: chrome.tabs.Tab) => void>();
   const downloadsCreated = event<(item: chrome.downloads.DownloadItem) => void>();
-  const command = vi.fn(async (_debuggee: chrome.debugger.Debuggee, method: string, params?: any) => {
+  const command = vi.fn(async (_debuggee: chrome.debugger.Debuggee, method: string, params?: any): Promise<any> => {
     calls.push({ method, params });
     if (method === "Accessibility.getFullAXTree") return { nodes: [
       { nodeId: "root", role: { value: "RootWebArea" }, name: { value: "Test" }, childIds: metadata.map((_, index) => `node-${index}`) },
@@ -68,6 +68,138 @@ function harness(
 }
 
 describe("AutomationRuntime", () => {
+  it("surfaces navigation permission errors while retrying transient context replacement", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let failure = "Execution context was destroyed.";
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.evaluate" && params.expression === "document.readyState !== 'loading'" && failure) {
+        const message = failure; failure = ""; throw new Error(message);
+      }
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    await expect(page.goto("https://example.test/next")).resolves.toMatchObject({ performed: true });
+    failure = 'Cannot access contents of url "about:blank#part"';
+    await expect(page.goto("about:blank#part")).rejects.toThrow("Cannot access contents");
+    await runtime.abortSessions();
+  });
+  it("waits for root load timing instead of child or stale lifecycle events", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let state = { state: "interactive", domContentLoaded: 10, load: 0 };
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root", loaderId: "current-loader" } } };
+      if (method === "Runtime.evaluate" && params?.expression?.includes("domContentLoadedEventEnd")) return { result: { value: state } };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    const pending = page.waitForLoadState("load");
+    let settled = false; void pending.then(() => { settled = true; });
+    runtime.handleEvent({ tabId: 3, sessionId: "child" }, "Page.lifecycleEvent", { frameId: "child", loaderId: "child-loader", name: "load" });
+    runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "old-loader", name: "load" });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(settled).toBe(false);
+    state = { state: "complete", domContentLoaded: 10, load: 20 };
+    await pending;
+    await runtime.abortSessions();
+  });
+
+  it("treats a new root lifecycle init as a boundary even when document.open reuses its loader", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root", loaderId: "same-loader" } } };
+      if (method === "Runtime.evaluate" && params?.expression?.includes("domContentLoadedEventEnd"))
+        return { result: { value: { state: "complete", domContentLoaded: 10, load: 20 } } };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "same-loader", name: "init", timestamp: 100 });
+    runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "old-loader", name: "init", timestamp: 90 });
+    runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "same-loader", name: "load", timestamp: 99 });
+    runtime.handleEvent({ tabId: 3, sessionId: "child" }, "Page.lifecycleEvent", { frameId: "root", loaderId: "same-loader", name: "load", timestamp: 101 });
+    const pending = page.waitForLoadState("load");
+    let settled = false; void pending.then(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(settled).toBe(false);
+    runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "same-loader", name: "DOMContentLoaded", timestamp: 110 });
+    await page.waitForLoadState("domcontentloaded");
+    expect(settled).toBe(false);
+    runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "same-loader", name: "load", timestamp: 120 });
+    await pending;
+    await runtime.abortSessions();
+  });
+
+  it("requires DOMContentLoaded timing and rechecks the root loader around a read", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let loader = "old", reads = 0;
+    let state = { state: "interactive", domContentLoaded: 0, load: 0 };
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root", loaderId: loader } } };
+      if (method === "Runtime.evaluate" && params?.expression?.includes("domContentLoadedEventEnd")) {
+        reads += 1;
+        if (reads === 1) { loader = "new"; return { result: { value: { state: "complete", domContentLoaded: 10, load: 20 } } }; }
+        return { result: { value: state } };
+      }
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    const pending = page.waitForLoadState("domcontentloaded");
+    let settled = false; void pending.then(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(settled).toBe(false);
+    expect(reads).toBeGreaterThan(1);
+    state = { state: "interactive", domContentLoaded: 30, load: 0 };
+    await pending;
+    await runtime.abortSessions();
+  });
+
+  it("accepts an attached complete document when navigation timing is unavailable", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root", loaderId: "blank-loader" } } };
+      if (method === "Runtime.evaluate" && params?.expression?.includes("domContentLoadedEventEnd")) return { result: { value: { state: "complete", domContentLoaded: null, load: null } } };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    await page.waitForLoadState("domcontentloaded");
+    runtime.handleEvent({ tabId: 3 }, "Page.navigatedWithinDocument", { frameId: "root", url: "about:blank#part" });
+    await page.waitForLoadState("load");
+    await runtime.abortSessions();
+  });
+
+  it("retries a destroyed navigation context but surfaces other load-state errors", async () => {
+    for (const failingMethod of ["Runtime.evaluate", "Page.getFrameTree", "permission"] as const) {
+      const { runtime, command } = harness();
+      const original = command.getMockImplementation()!;
+      let failed = false;
+      command.mockImplementation(async (source, method, params) => {
+        if (method === "Page.getFrameTree") {
+          return { frameTree: { frame: { id: "root", loaderId: "loader" } } };
+        }
+        if (method === "Runtime.evaluate" && params?.expression?.includes("domContentLoadedEventEnd")) {
+          if (failingMethod === method && !failed) { failed = true; throw new Error("Execution context was destroyed"); }
+          if (failingMethod === "permission") throw new Error("Cannot access contents of url");
+          return { result: { value: { state: "complete", domContentLoaded: 1, load: 1 } } };
+        }
+        return original(source, method, params);
+      });
+      const page = await runtime.createPage(3);
+      if (failingMethod === "Runtime.evaluate") {
+        await page.waitForLoadState("load");
+        expect(failed).toBe(true);
+      } else if (failingMethod === "Page.getFrameTree") {
+        command.mockImplementation(async (source, method, params) => method === "Page.getFrameTree"
+          ? Promise.reject(new Error("Debugger connection closed")) : original(source, method, params));
+        await expect(page.waitForLoadState("load")).rejects.toThrow("Debugger connection closed");
+      } else await expect(page.waitForLoadState("load")).rejects.toThrow("Cannot access contents of url");
+      await runtime.abortSessions();
+    }
+  });
+
   it("rejects an identified native draggable before mouse input is dispatched", async () => {
     const { runtime, command } = harness();
     const original = command.getMockImplementation()!;

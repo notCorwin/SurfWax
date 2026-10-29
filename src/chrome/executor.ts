@@ -298,6 +298,7 @@ export class ChromeExecutor {
         this.bridgedDebuggees.delete(JSON.stringify(debuggee));
       },
       mark: async (tabId) => (globalThis as Record<string, any>).__surfWaxGuard?.mark(tabId),
+      refreshGuard: async (tabId) => (globalThis as Record<string, any>).__surfWaxGuard?.refresh(tabId),
       onDispatch: () => this.programScope?.dispatched() ?? Promise.resolve(),
       claimChooser: (chooser) => {
         const owner = this.eventOwner;

@@ -11,6 +11,12 @@ export function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw signalError(signal);
 }
 
+/** Only transient CDP execution-context errors are safe to retry on navigation. */
+export function isTransientNavigationError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return /execution context (?:was destroyed|is not available)|cannot find (?:default )?(?:execution )?context(?: with specified id)?/i.test(message);
+}
+
 export function delay(ms: number, signal?: AbortSignal): Promise<void> {
   if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
   throwIfAborted(signal);

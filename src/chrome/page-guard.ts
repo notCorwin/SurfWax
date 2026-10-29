@@ -9,17 +9,32 @@ export async function guardActivePage(signal: AbortSignal): Promise<() => void> 
   let connected = true;
   let released = false;
   const pending = new Map<string, (value: { error?: string }) => void>();
+  const repairs = new Map<number, { dirty: boolean; promise: Promise<void> }>();
+  const request = (tabId: number, refresh = false) => new Promise<void>((resolve) => {
+    if (!connected || signal.aborted || !Number.isInteger(tabId)) return resolve();
+    const id = crypto.randomUUID();
+    pending.set(id, ({ error }) => {
+      if (error) console.warn(`Surf Wax: ${error}`);
+      resolve();
+    });
+    try { port.postMessage({ id, tabId, ...(refresh ? { refresh: true } : {}), ...getRunIdentity() }); }
+    catch { pending.delete(id); resolve(); }
+  });
   const bridge = {
-    mark: (tabId: number) => new Promise<void>((resolve) => {
-      if (!connected || signal.aborted || !Number.isInteger(tabId)) return resolve();
-      const id = crypto.randomUUID();
-      pending.set(id, ({ error }) => {
-        if (error) console.warn(`Surf Wax: ${error}`);
-        resolve();
-      });
-      try { port.postMessage({ id, tabId, ...getRunIdentity() }); }
-      catch { pending.delete(id); resolve(); }
-    }),
+    mark: (tabId: number) => request(tabId),
+    refresh: (tabId: number): Promise<void> => {
+      let repair = repairs.get(tabId);
+      if (repair) { repair.dirty = true; return repair.promise; }
+      repair = { dirty: true, promise: Promise.resolve() };
+      const current = repair;
+      repair.promise = (async () => {
+        try {
+          while (current.dirty && connected && !signal.aborted) { current.dirty = false; await request(tabId, true); }
+        } finally { if (repairs.get(tabId) === current) repairs.delete(tabId); }
+      })();
+      repairs.set(tabId, repair);
+      return repair.promise;
+    },
   };
   (globalThis as Record<string, unknown>).__surfWaxGuard = bridge;
   const release = () => {

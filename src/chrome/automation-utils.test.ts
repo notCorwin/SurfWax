@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { delay, imageSize, keyboardParams } from "./automation-utils";
+import { delay, imageSize, isTransientNavigationError, keyboardParams } from "./automation-utils";
 
 describe("automation utilities", () => {
+  it("only retries execution-context loss while navigation replaces a document", () => {
+    expect(isTransientNavigationError(new Error("Execution context was destroyed."))).toBe(true);
+    expect(isTransientNavigationError(new Error("Cannot find context with specified id"))).toBe(true);
+    expect(isTransientNavigationError(new Error('Cannot access contents of url "about:blank#part"'))).toBe(false);
+    expect(isTransientNavigationError(new DOMException("Operation aborted", "AbortError"))).toBe(false);
+  });
   it("builds trusted keyboard event parameters", () => {
     expect(keyboardParams("Control+Enter")).toMatchObject({ key: "Enter", code: "Enter", modifiers: 2, windowsVirtualKeyCode: 13, text: "\r" });
     expect(keyboardParams("Shift+A")).toMatchObject({ key: "A", code: "KeyA", modifiers: 8 });

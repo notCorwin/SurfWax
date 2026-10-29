@@ -1,6 +1,6 @@
 import type { EventLogger } from "../logging";
 import { waitForDocumentFrame } from "./dom-frame";
-import { abortError, axValue, delay, imageSize, keyboardParams, modifierMask, throwIfAborted } from "./automation-utils";
+import { abortError, axValue, delay, imageSize, isTransientNavigationError, keyboardParams, modifierMask, throwIfAborted } from "./automation-utils";
 import { diffSnapshot, paginateSnapshot, type SnapshotItem, type SnapshotPosition } from "./snapshot-pagination";
 import { renderSnapshotNode, type SnapshotNode, type SnapshotStateName } from "./snapshot-render";
 
@@ -62,7 +62,7 @@ type Session = {
   frameRevision: number;
   frameRefs: Map<string, FrameRefRecord>;
   frameRefsById: Map<string, string>;
-  lifecycle: Set<string>;
+  rootLifecycle?: { frameId: string; loaderId: string; initializedAt: number; domContentLoaded: boolean; load: boolean };
   rootFrameId?: string;
   lastSnapshot?: SnapshotLine[];
 };
@@ -158,10 +158,11 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument) {
   }[el.tagName] || (el.tagName === "INPUT" ? ({ checkbox: "checkbox", radio: "radio", range: "slider", number: "spinbutton", search: "searchbox", button: "button", submit: "button", reset: "button" }[el.type] || "textbox") : "generic"));
   const nameOf = el => normalize(el.getAttribute("aria-label") || (() => {
     const ids = el.getAttribute("aria-labelledby");
-    return ids && ids.split(/\s+/).map(id => document.getElementById(id)?.textContent || "").join(" ");
+    return ids && ids.split(/\s+/).map(id => el.getRootNode().getElementById?.(id)?.textContent || "").join(" ");
   })() || (el.labels ? [...el.labels].map(label => label.textContent).join(" ") : "") || el.getAttribute("alt") || el.getAttribute("title") || el.textContent || el.value);
   const roots = root => {
     const out = [root];
+    if (root.shadowRoot) out.push(...roots(root.shadowRoot));
     for (const el of root.querySelectorAll?.("*") || []) if (el.shadowRoot) out.push(...roots(el.shadowRoot));
     return out;
   };
@@ -173,7 +174,7 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument) {
     if (query.kind === "text") return equal(visibleText(el), query.value) && ![...el.children].some(child => equal(visibleText(child), query.value));
     if (query.kind === "label") {
       const labelledBy = el.getAttribute("aria-labelledby");
-      const label = el.getAttribute("aria-label") || (labelledBy ? labelledBy.split(/\s+/).map(id => document.getElementById(id)?.textContent || "").join(" ") : "") || (el.labels ? [...el.labels].map(item => item.textContent).join(" ") : "");
+      const label = el.getAttribute("aria-label") || (labelledBy ? labelledBy.split(/\s+/).map(id => el.getRootNode().getElementById?.(id)?.textContent || "").join(" ") : "") || (el.labels ? [...el.labels].map(item => item.textContent).join(" ") : "");
       return Boolean(label) && equal(label, query.value);
     }
     if (query.kind === "placeholder") return equal(el.getAttribute("placeholder"), query.value);
@@ -213,7 +214,7 @@ const SEARCH_META_SOURCE = String.raw`function() {
     A: el.hasAttribute("href") ? "link" : "generic", BUTTON:"button", SELECT:"combobox", TEXTAREA:"textbox", OPTION:"option", IMG:"img", SUMMARY:"button", FORM:"form", TABLE:"table", TR:"row", TD:"cell", TH:"columnheader",
     H1:"heading", H2:"heading", H3:"heading", H4:"heading", H5:"heading", H6:"heading", NAV:"navigation", MAIN:"main", ARTICLE:"article", ASIDE:"complementary", FOOTER:"contentinfo", HEADER:"banner", UL:"list", OL:"list", LI:"listitem", DIALOG:"dialog", PROGRESS:"progressbar"
   }[el.tagName] || (el.tagName === "INPUT" ? ({checkbox:"checkbox",radio:"radio",range:"slider",number:"spinbutton",search:"searchbox",button:"button",submit:"button",reset:"button"}[el.type] || "textbox") : "generic"));
-  const name = normalize(el.getAttribute("aria-label") || (() => { const ids = el.getAttribute("aria-labelledby"); return ids && ids.split(/\s+/).map(id => el.ownerDocument.getElementById(id)?.textContent || "").join(" "); })() || (el.labels ? [...el.labels].map(label => label.textContent).join(" ") : "") || el.getAttribute("alt") || el.getAttribute("title") || el.textContent || el.value);
+  const name = normalize(el.getAttribute("aria-label") || (() => { const ids = el.getAttribute("aria-labelledby"); return ids && ids.split(/\s+/).map(id => el.getRootNode().getElementById?.(id)?.textContent || "").join(" "); })() || (el.labels ? [...el.labels].map(label => label.textContent).join(" ") : "") || el.getAttribute("alt") || el.getAttribute("title") || el.textContent || el.value);
   const text = normalize(el.innerText === undefined ? el.textContent : el.innerText);
   return { connected: el.isConnected, role: String(role).slice(0, 80), name: name.slice(0, 160), text: text.slice(0, 120), tag: el.tagName.toLowerCase(),
     ...(String(role).length > 80 ? {roleTruncated:true} : {}), ...(name.length > 160 ? {nameTruncated:true} : {}), ...(text.length > 120 ? {textTruncated:true} : {}) };
@@ -258,6 +259,7 @@ export class AutomationRuntime {
     hitTest?: (debuggee: Debuggee, params: Record<string, unknown>) => Promise<any>;
     detach: (debuggee: Debuggee) => Promise<void>;
     mark: (tabId: number) => Promise<void>;
+    refreshGuard?: (tabId: number) => Promise<void>;
     onDispatch?: () => Promise<void>;
     claimChooser?: (chooser: FileChooserRecord) => FileChooserClaim | undefined;
     respondDialog?: (id: string | undefined, source: Debuggee, accept: boolean, promptText?: string) => Promise<unknown>;
@@ -347,12 +349,22 @@ export class AutomationRuntime {
       }
       this.invalidate(session);
     }
-    if (session && method === "Page.lifecycleEvent" && params?.name) session.lifecycle.add(params.name);
-    if (session && method === "Page.domContentEventFired") session.lifecycle.add("DOMContentLoaded");
-    if (session && method === "Page.loadEventFired") session.lifecycle.add("load");
-    if (session && method === "Page.frameStartedLoading" && params?.frameId === session.rootFrameId) {
-      session.lifecycle.clear();
+    if (session && session.rootFrameId !== undefined && !source.sessionId && method === "Page.lifecycleEvent" && params?.frameId === session.rootFrameId
+      && typeof params.loaderId === "string" && typeof params.timestamp === "number" && Number.isFinite(params.timestamp)) {
+      const current = session.rootLifecycle;
+      if (params.name === "init") {
+        // document.open() reuses the loader and Document. Its init is the
+        // only observed boundary separating old lifecycle events from new.
+        if (!current || params.timestamp > current.initializedAt) {
+          session.rootLifecycle = { frameId: params.frameId, loaderId: params.loaderId, initializedAt: params.timestamp, domContentLoaded: false, load: false };
+          void this.options.refreshGuard?.(tabId!).catch(() => undefined);
+        }
+      } else if (current && current.frameId === params.frameId && current.loaderId === params.loaderId && params.timestamp >= current.initializedAt) {
+        if (params.name === "DOMContentLoaded") current.domContentLoaded = true;
+        if (params.name === "load") current.load = true;
+      }
     }
+    if (session && !source.sessionId && method === "DOM.documentUpdated") void this.options.refreshGuard?.(tabId!).catch(() => undefined);
     if (method === "Page.fileChooserOpened" && params.backendNodeId) {
       const chooser = { backendNodeId: params.backendNodeId, debuggee: source, mode: params.mode };
       this.fileChoosers.set(tabId!, chooser);
@@ -669,11 +681,38 @@ export class AutomationRuntime {
 
   async waitForLoadState(tabId: number, state: "domcontentloaded" | "load" = "load"): Promise<void> {
     const session = await this.session(tabId);
-    const lifecycle = state === "domcontentloaded" ? "DOMContentLoaded" : "load";
     await this.waitUntil(async () => {
-      if (session.lifecycle.has(lifecycle)) return true;
-      const ready = await this.pageValue(tabId, "document.readyState").catch(() => undefined);
-      return state === "domcontentloaded" ? ready === "interactive" || ready === "complete" : ready === "complete";
+      const generation = session.generation;
+      const frame = async () => (await this.options.command(session.debuggee, "Page.getFrameTree", {})).frameTree?.frame as { id?: string; loaderId?: string } | undefined;
+      let before: { id?: string; loaderId?: string } | undefined, after: { id?: string; loaderId?: string } | undefined;
+      let ready: { state?: string; domContentLoaded?: number | null; load?: number | null } | undefined;
+      try {
+        before = await frame();
+        if (!before?.id || !before.loaderId) throw automationError("frame-unavailable", { reason: "missing-root-loader" });
+        ready = await this.pageValue(tabId, `(() => {
+          let navigation;
+          try { navigation = performance.getEntriesByType('navigation')[0]; } catch { /* No timing support. */ }
+          return { state: document.readyState, domContentLoaded: navigation?.domContentLoadedEventEnd ?? null, load: navigation?.loadEventEnd ?? null };
+        })()`) as typeof ready;
+        after = await frame();
+      } catch (error) {
+        if (isTransientNavigationError(error)) return false;
+        throw error;
+      }
+      if (this.sessions.get(tabId) !== session) throw automationError("stale-session", { reason: "session-changed-during-load-wait" });
+      if (session.generation !== generation || !ready || after?.id !== before.id || after.loaderId !== before.loaderId) return false;
+      const lifecycle = session.rootLifecycle;
+      if (lifecycle && lifecycle.frameId === before.id && lifecycle.loaderId === before.loaderId)
+        return state === "domcontentloaded" ? lifecycle.domContentLoaded : lifecycle.load;
+      // The root document's readyState alone becomes interactive before
+      // DOMContentLoaded and complete before load. Navigation Timing tells us
+      // when the corresponding event has finished, including when attached
+      // after it fired. Child-frame lifecycle events are not root evidence.
+      const timing = state === "domcontentloaded" ? ready.domContentLoaded : ready.load;
+      const stateReady = state === "domcontentloaded" ? ready.state === "interactive" || ready.state === "complete" : ready.state === "complete";
+      if (typeof timing === "number") return stateReady && timing > 0;
+      // Some non-network documents do not expose a navigation entry.
+      return ready.state === "complete";
     });
   }
 
@@ -965,7 +1004,6 @@ export class AutomationRuntime {
         frameRevision: 0,
         frameRefs: new Map(),
         frameRefsById: new Map(),
-        lifecycle: new Set(),
       };
       this.sessions.set(tabId, session);
     }
@@ -1621,7 +1659,8 @@ export class AutomationRuntime {
   private async waitForReady(session: Session): Promise<void> {
     while (true) {
       throwIfAborted(this.context.signal);
-      try { if (await this.pageValue(session.tabId, "document.readyState !== 'loading'")) return; } catch { /* Navigation swaps the context. */ }
+      try { if (await this.pageValue(session.tabId, "document.readyState !== 'loading'")) return; }
+      catch (error) { if (!isTransientNavigationError(error)) throw error; }
       await delay(50, this.context.signal);
     }
   }

@@ -216,14 +216,19 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "surf-wax-page-guard") return;
   const held = new Set<number>();
   const reply = (message: object) => { try { port.postMessage(message); } catch { /* The panel has closed. */ } };
-  port.onMessage.addListener((message: { tabId?: unknown; id?: string } & Partial<RunIdentity>) => {
+  port.onMessage.addListener((message: { tabId?: unknown; id?: string; refresh?: boolean } & Partial<RunIdentity>) => {
     if (message.tabId !== undefined) { try { runs.validate(message as RunIdentity); } catch { reply({ id: message.id, error: "运行所有权已失效。" }); return; } }
     if (!Number.isInteger(message?.tabId)) return;
     const tabId = message.tabId as number;
     if (held.has(tabId)) {
-      reply({ id: message.id, ready: true });
+      if (message.refresh) void updatePageGuard(tabId).then(
+        () => reply({ id: message.id, ready: true }),
+        (error) => reply({ id: message.id, error: warnPageGuard(tabId, error) }),
+      );
+      else reply({ id: message.id, ready: true });
       return;
     }
+    if (message.refresh) { reply({ id: message.id, ready: true }); return; }
     held.add(tabId);
     const holders = guardedTabs.get(tabId) ?? new Set<chrome.runtime.Port>();
     holders.add(port);
