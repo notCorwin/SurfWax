@@ -587,6 +587,31 @@ describe("canonical event log", () => {
       await expect(read(path)).rejects.toMatchObject({ code: "result-path-not-found" });
   });
 
+  it("reads actual native data despite user properties that shadow builtin names", async () => {
+    const logger = new EventLogger({ store: memoryStore() });
+    const array: any = [1, , 3]; array.slice = "user"; array.constructor = "user";
+    const map = new Map([["first", 1], ["second", 2]]);
+    Object.defineProperty(map, "size", { value: 0, enumerable: true });
+    Object.defineProperty(map, Symbol.iterator, { value: function* () { yield ["fake", 0]; } });
+    const set = new Set(["first", "second"]);
+    Object.defineProperty(set, Symbol.iterator, { value: function* () { yield "fake"; } });
+    const date: any = new Date(0); date.getTime = "user";
+    const regex: any = /a/g; Object.defineProperty(regex, "source", { value: "user", enumerable: true });
+    Object.defineProperty(regex, "flags", { value: "user", enumerable: true });
+    const buffer: any = new Uint8Array([1, 2, 3]).buffer; buffer.slice = "user";
+    const event = await logger.append({ type: "tool.result.data", conversationId: "c", output: { array, map, set, date, regex, buffer } });
+    const id = event!.id;
+    const arrayPage = await logger.result(id, { path: ["array"], offset: 0, limit: 3 }, "c") as any[];
+    expect(arrayPage[0]).toBe(1); expect(Object.hasOwn(arrayPage, 1)).toBe(false); expect(arrayPage[2]).toBe(3);
+    expect(await logger.result(id, { path: ["map"], offset: 0, limit: 1 }, "c")).toEqual(new Map([["first", 1]]));
+    expect(await logger.result(id, { path: ["set"], offset: 0, limit: 1 }, "c")).toEqual(new Set(["first"]));
+    expect([...new Uint8Array(await logger.result(id, { path: ["buffer"], offset: 1, limit: 2 }, "c") as ArrayBuffer)]).toEqual([2, 3]);
+    const out = await logger.result(id, {}, "c") as any;
+    expect(Date.prototype.getTime.call(out.date)).toBe(0); expect(out.date.getTime).toBe("user");
+    expect(Object.getOwnPropertyDescriptor(RegExp.prototype, "source")!.get!.call(out.regex)).toBe("a");
+    expect(out.regex.source).toBe("user"); expect(out.regex.flags).toBe("user");
+  });
+
   it("preserves reserved-looking user objects in every new event field and leaves old events untouched", async () => {
     const store = memoryStore();
     const logger = new EventLogger({ store });
@@ -595,7 +620,7 @@ describe("canonical event log", () => {
       nested: { $type: "escaped-object", entries: [["$type", "undefined"], ["value", null]] }, actualUndefined: undefined };
     const event = await logger.append({ type: "tool.result.data", conversationId: "c", content: input, input, output: input,
       error: input, retry: input, abort: input, usage: input, stopReason: input, providerMetadata: input });
-    expect(event!.valueEncoding).toBe(4);
+    expect(event!.valueEncoding).toBe(5);
     for (const field of ["content", "input", "output", "error", "retry", "abort", "usage", "stopReason", "providerMetadata"] as const)
       expect(fromLogValue(event![field], event!.valueEncoding)).toEqual(input);
     await expect(logger.result(event!.id, {}, "c")).resolves.toEqual(input);
@@ -674,7 +699,7 @@ describe("canonical event log", () => {
     rows[3] = undefined; rows[8] = NaN; rows[999_999_999] = 123n;
     const logger = new EventLogger({ store: memoryStore() });
     const event = await logger.append({ type: "tool.result.data", conversationId: "c", output: { rows, literal } });
-    expect(event!.valueEncoding).toBe(4);
+    expect(event!.valueEncoding).toBe(5);
     expect(JSON.stringify(event!.output).length).toBeLessThan(500);
     const selected = await logger.result(event!.id, { path: ["rows"], offset: 2, limit: 8 }, "c") as unknown[];
     expect(selected.length).toBe(8);
@@ -887,7 +912,7 @@ describe("run recovery", () => {
     await logger.recoverDanglingRuns();
     const results = (await logger.all()).filter((event) => event.type === "tool.failed");
     expect(results).toHaveLength(1);
-    expect(results[0].output).toMatchObject({ ok: false, completed: [{ index: 0, result: { performed: true } }], failed: { index: 1, step: steps[1] }, notRun: [steps[2]], elapsedMs: 25 });
+    expect(fromLogValue(results[0].output, results[0].valueEncoding)).toMatchObject({ ok: false, completed: [{ index: 0, result: { performed: true } }], failed: { index: 1, step: steps[1] }, notRun: [steps[2]], elapsedMs: 25 });
   });
 
   it("freezes canonical tool IDs before another request attempt begins", () => {

@@ -1,8 +1,11 @@
 import type { EventLogger } from "../logging";
+import { createLogGraphCodec, decodeLogGraph, encodeLogGraph } from "../log-graph";
 import { waitForDocumentFrame } from "./dom-frame";
 import { abortError, axValue, delay, imageSize, isTransientNavigationError, keyboardParams, modifierMask, throwIfAborted } from "./automation-utils";
 import { diffSnapshot, paginateSnapshot, type SnapshotItem, type SnapshotPosition } from "./snapshot-pagination";
 import { renderSnapshotNode, type SnapshotNode, type SnapshotStateName } from "./snapshot-render";
+
+const EVALUATION_CODEC_FACTORY = `(${createLogGraphCodec.toString()})({ verifyIntrinsics: true })`;
 
 type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
 type Command = (debuggee: Debuggee, method: string, params?: object) => Promise<any>;
@@ -756,6 +759,18 @@ export class AutomationRuntime {
     return response.result?.value;
   }
 
+  /** Evaluate through a pure-JSON graph envelope so CDP preserves native values and aliases. */
+  async evaluatePage(tabId: number, source: string, arg: unknown): Promise<unknown> {
+    const input = encodeLogGraph(arg);
+    const expression = `/* surf-wax:evaluate-graph */(async () => {
+      const codec = ${EVALUATION_CODEC_FACTORY};
+      const argument = codec.decodeLogGraph(${JSON.stringify(input)});
+      return codec.encodeLogGraph(await (\n${source}\n)(argument));
+    })()`;
+    const output = await this.pageValue(tabId, expression, true);
+    return decodeLogGraph(output);
+  }
+
   async waitUntil(test: () => Promise<boolean>): Promise<void> {
     while (!await test()) await delay(50, this.context.signal);
   }
@@ -901,8 +916,13 @@ export class AutomationRuntime {
         const objectId = await this.resolveOne(session, spec);
         const targetSession = this.objectSession(session, objectId);
         const source = typeof args[0] === "function" ? String(args[0]) : String(args[0]);
+        const input = encodeLogGraph(args[1]);
+        const declaration = `function(input) {
+          const codec = ${EVALUATION_CODEC_FACTORY};
+          return (async () => codec.encodeLogGraph(await (\n${source}\n)(this, codec.decodeLogGraph(input))))();
+        }`;
         await this.options.onDispatch?.();
-        return this.callOn(targetSession, objectId, `function(arg){ return (${source})(this,arg); }`, [args[1]]);
+        return decodeLogGraph(await this.callOn(targetSession, objectId, declaration, [input]));
       }
       if (operation === "scrollIntoViewIfNeeded") {
         const { objectId, targetSession } = await this.waitActionableLocator(session, spec, false, false, true, false);
@@ -2316,7 +2336,7 @@ export class PageFacade {
   waitForURL(value: string | RegExp) { return this.runtime.waitUntil(() => this.url().then((url) => typeof value === "string" ? String(url).includes(value) : value.test(String(url)))); }
   waitForLoadState(state: "domcontentloaded" | "load" = "load") { return this.runtime.waitForLoadState(this.tabId, state); }
   waitForEvent(kind: "dialog" | "popup" | "download" | "filechooser") { return this.runtime.waitForEvent(this.tabId, kind); }
-  evaluate(fn: ((arg?: unknown) => unknown) | string, arg?: unknown) { return this.runtime.pageValue(this.tabId, `(${typeof fn === "function" ? String(fn) : fn})(${JSON.stringify(arg)})`, true); }
+  evaluate(fn: ((arg?: unknown) => unknown) | string, arg?: unknown) { return this.runtime.evaluatePage(this.tabId, typeof fn === "function" ? String(fn) : fn, arg); }
 }
 
 export class LocatorFacade {

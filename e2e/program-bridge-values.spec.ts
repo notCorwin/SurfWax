@@ -40,6 +40,10 @@ test("program bridge preserves ordinary objects that resemble protocol tags and 
       },
       (request) => {
         expect(lastTool(request)).toMatchObject({ ok: false, error: { message: expect.stringContaining("cannot serialize functions as data") } });
+        return commandResponse("execute_program", { code: "return {available: signal instanceof AbortSignal, aborted: signal.aborted};" }, "worker-signal");
+      },
+      (request) => {
+        expect(lastTool(request)).toMatchObject({ ok: true, result: { available: true, aborted: false } });
         return textResponse("PROGRAM_BRIDGE_VALUES_OK");
       },
       textResponse("Bridge values"),

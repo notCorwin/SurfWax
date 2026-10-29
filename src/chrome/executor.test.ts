@@ -438,7 +438,7 @@ describe("ChromeExecutor programs", () => {
       for (const name of ["chrome", "__surfWaxBrowser", "__surfWaxDebugger", "__surfWaxResult"]) expect(caps).not.toHaveProperty(name);
       expect(caps.browser).not.toHaveProperty("cdp"); return Object.keys(caps).sort();
     });
-    expect(await h.run()).toMatchObject({ ok: true, result: ["artifacts", "browser", "check", "emit", "net", "page", "protocol", "signal", "sleep"] }); h.executor.dispose();
+    expect(await h.run()).toMatchObject({ ok: true, result: ["artifacts", "browser", "check", "emit", "net", "page", "protocol", "sleep"] }); h.executor.dispose();
   });
   it("applies an estimated program deadline and honors an explicit deadline", async () => {
     const h = programHarness(async () => 1); const timer = vi.spyOn(globalThis, "setTimeout");

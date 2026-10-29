@@ -1,3 +1,4 @@
+import { arrayBufferLength, arrayViewName, assertPlainGraphObject, dateISOString, dateValue, graphProperties, isArrayBuffer, isDate, isMap, isRegExp, isSet, mapEntries, regexpFlagString, regexpSource, setValues, viewLayout } from "./log-graph";
 const RESULT_SIDECAR_FIELDS = new Set(["resultType", "undefinedPaths", "holePaths", "numberPaths", "bigintPaths", "typePaths", "undefinedCount", "holeCount", "numberCount", "bigintCount", "typeCount", "undefinedPathsAccess", "holePathsAccess", "numberPathsAccess", "bigintPathsAccess", "typePathsAccess", "undefinedPathsOversizedItem", "holePathsOversizedItem", "numberPathsOversizedItem", "bigintPathsOversizedItem", "typePathsOversizedItem", "pathsNote", "envelopeWrapped"]);
 
 function bytesBase64(bytes: Uint8Array): string {
@@ -7,9 +8,15 @@ function bytesBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+function copyArray(value: unknown[]): unknown[] {
+  const result = new Array(value.length);
+  for (let index = 0; index < value.length; index++) if (Object.hasOwn(value, index)) result[index] = value[index];
+  return result;
+}
+
 /** Bound the work and sidecar allocation before walking a result for JSON output. */
 export function normalizationExceedsBudget(value: unknown, budget = 65536): boolean {
-  const active = new WeakSet<object>();
+  const seen = new WeakSet<object>();
   const visit = (item: unknown, depth: number, pathCost: number): boolean => {
     if (--budget < 0 || depth > 100) return true;
     if (typeof item === "string") { budget -= item.length; return budget < 0; }
@@ -18,42 +25,54 @@ export function normalizationExceedsBudget(value: unknown, budget = 65536): bool
       return budget < 0;
     }
     if (!item || typeof item !== "object") return false;
-    if (active.has(item)) return true;
-    active.add(item);
-    try {
-      if (item instanceof ArrayBuffer || ArrayBuffer.isView(item)) {
-        budget -= Math.ceil(item.byteLength * 4 / 3) + depth + pathCost;
+    if (seen.has(item)) return true;
+    seen.add(item);
+      if (isArrayBuffer(item) || ArrayBuffer.isView(item)) {
+        if (graphProperties(item).length) return true;
+        const size = isArrayBuffer(item) ? arrayBufferLength(item) : viewLayout(item).byteLength;
+        if (ArrayBuffer.isView(item)) {
+          const layout = viewLayout(item);
+          if (!isArrayBuffer(layout.buffer) || layout.byteOffset !== 0 || layout.byteLength !== arrayBufferLength(layout.buffer) || seen.has(layout.buffer)) return true;
+          seen.add(layout.buffer);
+        }
+        budget -= Math.ceil(size * 4 / 3) + depth + pathCost;
         return budget < 0;
       }
-      if (item instanceof RegExp) {
-        budget -= depth + pathCost + item.source.length + item.flags.length;
+      if (isRegExp(item)) {
+        if (graphProperties(item).length) return true;
+        budget -= depth + pathCost + regexpSource(item).length + regexpFlagString(item).length;
         return budget < 0 || visit(item.lastIndex, depth + 1, pathCost + "lastIndex".length);
       }
-      if (item instanceof Date) {
+      if (isDate(item)) {
+        if (graphProperties(item).length) return true;
         budget -= depth + pathCost;
         return budget < 0;
       }
-      if (item instanceof Map) {
+      if (isMap(item)) {
+        if (graphProperties(item).length) return true;
         budget -= depth + pathCost;
         if (budget < 0) return true;
         let index = 0;
-        for (const [key, value] of item) {
+        for (const [key, value] of mapEntries(item)) {
           const nested = pathCost + String(index++).length + 1;
           if (visit(key, depth + 2, nested) || visit(value, depth + 2, nested)) return true;
         }
         return false;
       }
-      if (item instanceof Set) {
+      if (isSet(item)) {
+        if (graphProperties(item).length) return true;
         budget -= depth + pathCost;
         if (budget < 0) return true;
         let index = 0;
-        for (const value of item) if (visit(value, depth + 1, pathCost + String(index++).length)) return true;
+        for (const value of setValues(item)) if (visit(value, depth + 1, pathCost + String(index++).length)) return true;
         return false;
       }
+      if (item instanceof Error) return true;
       if (Array.isArray(item)) {
         // Every position becomes a JSON value, including holes. Do not iterate
         // an enormous sparse length just to discover that it exceeds budget.
         if (item.length > budget) return true;
+        for (const key of graphProperties(item)) if (!(Number.isInteger(Number(key)) && Number(key) >= 0 && Number(key) < item.length && String(Number(key)) === key)) return true;
         for (let i = 0; i < item.length; i++) {
           const nested = pathCost + String(i).length;
           if (!Object.hasOwn(item, i)) { budget -= depth + 1 + nested; if (budget < 0) return true; }
@@ -61,12 +80,14 @@ export function normalizationExceedsBudget(value: unknown, budget = 65536): bool
         }
         return false;
       }
+      assertPlainGraphObject(item);
+      if (Object.getPrototypeOf(item) === null) return true;
+      if (Object.getOwnPropertySymbols(item).some((symbol) => Object.prototype.propertyIsEnumerable.call(item, symbol))) throw new Error("Cannot serialize enumerable symbol properties");
       for (const key in item) if (Object.hasOwn(item, key)) {
         budget -= key.length;
         if (budget < 0 || visit((item as Record<string, unknown>)[key], depth + 1, pathCost + key.length)) return true;
       }
       return false;
-    } finally { active.delete(item); }
   };
   return visit(value, 0, 0);
 }
@@ -84,7 +105,7 @@ export function normalizeResultEnvelope(record: Record<string, unknown>): Record
 
 function hasNonJsonValues(value: unknown, seen = new WeakSet<object>()): boolean {
   if (value === undefined || typeof value === "bigint" || typeof value === "number" && (!Number.isFinite(value) || Object.is(value, -0))) return true;
-  if (value instanceof Date || value instanceof RegExp || value instanceof ArrayBuffer || ArrayBuffer.isView(value) || value instanceof Map || value instanceof Set) return true;
+  if (isDate(value) || isRegExp(value) || isArrayBuffer(value) || ArrayBuffer.isView(value) || isMap(value) || isSet(value) || value instanceof Error) return true;
   if (!value || typeof value !== "object" || seen.has(value)) return false;
   seen.add(value);
   if (Array.isArray(value)) {
@@ -108,44 +129,45 @@ function normalizeArtifactResult(record: Record<string, unknown>): Record<string
       numberPaths.push({ path: [...path], value: Object.is(value, -0) ? "-0" : String(value) }); return null;
     }
     if (typeof value === "bigint") { bigintPaths.push({ path: [...path], value: String(value) }); return null; }
-    if (value instanceof Date) {
+    if (isDate(value)) {
       typePaths.push({ path: [...path], type: "date" });
-      return Number.isNaN(value.getTime()) ? null : value.toISOString();
+      return Number.isNaN(dateValue(value)) ? null : dateISOString(value);
     }
-    if (value instanceof RegExp) {
+    if (isRegExp(value)) {
       typePaths.push({ path: [...path], type: "regexp" });
       path.push("lastIndex"); const lastIndex = visit(value.lastIndex, path); path.pop();
-      return { source: value.source, flags: value.flags, lastIndex };
+      return { source: regexpSource(value), flags: regexpFlagString(value), lastIndex };
     }
-    if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
-      const bytes = value instanceof ArrayBuffer ? new Uint8Array(value) : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-      typePaths.push({ path: [...path], type: value instanceof ArrayBuffer ? "array-buffer" : "typed-array", ...(value instanceof ArrayBuffer ? {} : { name: value.constructor.name }) });
+    if (isArrayBuffer(value) || ArrayBuffer.isView(value)) {
+      const layout = ArrayBuffer.isView(value) ? viewLayout(value) : undefined;
+      const bytes = layout ? new Uint8Array(layout.buffer, layout.byteOffset, layout.byteLength) : new Uint8Array(value as ArrayBuffer);
+      typePaths.push({ path: [...path], type: layout ? "typed-array" : "array-buffer", ...(layout ? { name: arrayViewName(value as ArrayBufferView) } : {}) });
       return bytesBase64(bytes);
     }
-    if (value instanceof Map) {
+    if (isMap(value)) {
       typePaths.push({ path: [...path], type: "map" });
-      return Array.from(value, ([key, item], index) => {
+      return Array.from(mapEntries(value), ([key, item], index) => {
         path.push(index, 0); const normalizedKey = visit(key, path); path.pop();
         path.push(1); const normalizedValue = visit(item, path); path.pop(); path.pop();
         return [normalizedKey, normalizedValue];
       });
     }
-    if (value instanceof Set) {
+    if (isSet(value)) {
       typePaths.push({ path: [...path], type: "set" });
-      return Array.from(value, (item, index) => { path.push(index); const normalized = visit(item, path); path.pop(); return normalized; });
+      return Array.from(setValues(value), (item, index) => { path.push(index); const normalized = visit(item, path); path.pop(); return normalized; });
     }
     if (Array.isArray(value)) {
       let copy: unknown[] | undefined;
       for (let index = 0; index < value.length; index++) {
         if (!Object.hasOwn(value, index)) {
           holePaths.push([...path, index]);
-          copy ??= value.slice(); copy[index] = null;
+          copy ??= copyArray(value); copy[index] = null;
           continue;
         }
         path.push(index);
         const next = visit(value[index], path);
         path.pop();
-        if (next !== value[index]) { copy ??= value.slice(); copy[index] = next; }
+        if (next !== value[index]) { copy ??= copyArray(value); copy[index] = next; }
       }
       return copy ?? value;
     }

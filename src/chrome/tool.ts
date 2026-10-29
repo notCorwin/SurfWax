@@ -1,4 +1,5 @@
 import { normalizationExceedsBudget, normalizeResultEnvelope } from "../tool-result-values";
+import { isArrayBuffer, viewLayout } from "../log-graph";
 import { dynamicTool, type ToolCallRepairFunction } from "ai";
 import { z } from "zod";
 import type { EventLogger } from "../logging";
@@ -11,7 +12,7 @@ const elementTargetObject = z.union([
   z.object({ ref: z.string().min(1) }).strict(),
   z.object({ by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testId", "css"]), value: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional(), index: z.number().int().optional(), frame: z.union([z.object({ by: z.literal("css"), value: z.string().min(1) }).strict(), z.object({ ref: z.string().min(1) }).strict()]).optional() }).strict(),
 ]);
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v17";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v18";
 export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetObject]).optional(),
   fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional(), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
@@ -48,7 +49,7 @@ export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
   { name: "read_api_reference", inputSchema: emptyInputSchema, summary: "Read the advanced program API reference", description: "Read the available execute_program capabilities and usage details." },
   { name: "execute_program", inputSchema: runInputSchema, summary: "Execute a composable async JavaScript program", description: "Execute an async JavaScript body with page, browser, net, protocol, artifacts, emit, check, sleep and signal. Use for loops, conditions, event subscriptions and complex multi-step tasks. Call read_api_reference for the complete API. background=true starts a job. Set timeoutMs to accommodate the entire program. Effects are not automatically retried; inspect uncertain outcomes." },
   { name: "list_jobs", inputSchema: listJobsInputSchema, summary: "List this conversation's jobs in pages", description: "List jobs in creation order in a fixed snapshot. limit defaults to 25, max 100. If hasMore, pass nextCursor to continue; cursor expires on log maintenance. Job state is as of the first page; get_job reads current state." },
-  { name: "get_job", inputSchema: getJobInputSchema, summary: "Read a job's status and receipts", description: "Read status and paginated receipts for a job. waitMs waits for receipts after the supplied canonical event cursor or for completion; unread receipts return immediately. A running job is not complete." },
+  { name: "get_job", inputSchema: getJobInputSchema, summary: "Read a job's status and receipts", description: "Read status and paginated receipts for a job. waitMs waits for receipts after the supplied canonical event cursor or for completion; unread receipts return immediately. A terminal event with outputAt:'result' refers to the top-level result rather than repeating it. A running job is not complete." },
   { name: "cancel_job", inputSchema: cancelJobInputSchema, summary: "Request cancellation of a job", description: "Cancel a job in the current conversation. Cancellation does not roll back dispatched effects." },
 ]);
 export const PROGRAM_API = `execute_program API (async JavaScript body; no function wrapper required):
@@ -58,7 +59,7 @@ browser: page(tabId); tabs.list()/open(url?)/select(tabId)/close(tabId); scripts
 browser.runIn({kind:'page',tabId,world:'MAIN'|'ISOLATED'|'USER_SCRIPT',frameId?,documentId?},codeBody): explicit execution domain. MAIN/ISOLATED root only; USER_SCRIPT supports Chrome frameId or documentId. Use frameLocator.evaluate for arbitrary supported frames. No automatic context substitution.
 net.fetch({context:'page'|'extension',url,tabId?,init?}) returns {url,status,ok,headers,body}; no page-to-extension fallback. Page fetch obeys page origin/cookies/CORS; extension fetch uses extension host permissions. net.requests(options?,tabId?) returns {requests,integrity,hasMore,nextOffset?} for captured history (not all traffic); net.console(options?,tabId?) returns the same metadata with messages instead of requests. hasMore can be null when unknown and offsets refer to a live list. net.request(requestRef,tabId?) and net.responseBody(requestRef,tabId?) read captured requests.
 protocol.sessions(tabId?) lists root/child CDP handles; protocol.send({tabId,sessionId?},method,params?) sends any Chrome CDP method available to the extension. Arbitrary JS/CDP/fetch are effectful; there is no readonly override. inspect.documentId is the local navigation generation; USER_SCRIPT documentId uses Chrome's native scripting document ID. File URL sources are fetched in extension context.
-artifacts.read(id,{path?,offset?,limit?}) pages arrays/strings, Map/Set entries, ArrayBuffer/DataView bytes and TypedArray elements; a numeric path segment selects a Map's [key,value] pair or a Set's item. text(filename,text,mimeType?,save=false); save(id,filename?). Files and images stay internal unless the user requested download/export. emit(value) persists incremental output; check(condition,message?) records a verified assertion; sleep(ms) and signal support cancellation. Functions cannot be serialized as data; evaluate accepts a function as its first argument. Completed operations only confirm dispatch/return; verify application outcomes. Queued operations are not dispatched, uncertain effects must be inspected before continuing. Program computation uses a disposable opaque-origin sandbox Worker; browser capabilities are mediated by the Side Panel. Closing the panel cancels jobs and revokes capabilities; arbitrary program finally blocks are not guaranteed to run. Only records survive restart, never arbitrary JS stacks.`;
+artifacts.read(id,{path?,offset?,limit?}) pages arrays/strings, Map/Set entries, ArrayBuffer/DataView bytes and TypedArray elements; a numeric path segment selects a Map's [key,value] pair or a Set's item. Native artifacts and page/locator evaluate preserve supported cycles, shared references and binary backing buffers. Own enumerable string properties are preserved, except TypedArray named properties; put such metadata in a containing object. Enumerable symbol properties, custom prototypes and Error subclasses, shared/resizable buffers, DOM nodes, URL and Blob are unsupported; convert them to supported data. Error values from another realm are unsupported. evaluate requires intact page built-ins. text(filename,text,mimeType?,save=false); save(id,filename?). Files and images stay internal unless the user requested download/export. emit(value) persists incremental output; check(condition,message?) records a verified assertion; sleep(ms) and signal support cancellation. Functions cannot be serialized as data; evaluate accepts a function as its first argument. Completed operations only confirm dispatch/return; verify application outcomes. Queued operations are not dispatched, uncertain effects must be inspected before continuing. Program computation uses a disposable opaque-origin sandbox Worker; browser capabilities are mediated by the Side Panel. Closing the panel cancels jobs and revokes capabilities; arbitrary program finally blocks are not guaranteed to run. Only records survive restart, never arbitrary JS stacks.`;
 export const PROGRAM_TOOL_CONTEXT = `Available tools:\n${PROGRAM_TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n")}\nresultType=undefined marks an undefined result. undefinedPaths, holePaths, numberPaths and bigintPaths are relative to result; numberPaths entries hold {path,value} for NaN, Infinity, -Infinity or -0, and bigintPaths hold decimal strings. These replace values with null. typePaths marks non-JSON types: date is ISO or null for invalid; array-buffer and typed-array are base64 bytes (typed-array name identifies the view); regexp is {source,flags,lastIndex}; map is key/value pairs; set is an array. Apply the other sidecars first, then typePaths from deepest path to shallowest. Large results provide paged sidecar access. If envelopeWrapped=true, reconstruct the original tool envelope from result and its sidecars; outer fields summarize status.`;
 
 export function createProgramTools(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string; callId?: () => string | undefined; visualEnabled?: () => Promise<boolean>; scheduler?: ToolScheduler; runSignal?: AbortSignal } = {}): Record<string, ReturnType<typeof dynamicTool>> {
@@ -342,18 +343,21 @@ function valueAt(value: unknown, path: readonly (string | number)[]): unknown {
 }
 
 function isPageable(value: unknown): boolean {
-  return typeof value === "string" || Array.isArray(value) || value instanceof Map || value instanceof Set || value instanceof ArrayBuffer || ArrayBuffer.isView(value);
+  return typeof value === "string" || Array.isArray(value) || value instanceof Map || value instanceof Set || isArrayBuffer(value) || ArrayBuffer.isView(value);
 }
 
 function nativePageLimit(value: unknown): number | undefined {
   if (value instanceof Map || value instanceof Set || Array.isArray(value)) return 25;
-  if (value instanceof ArrayBuffer || value instanceof DataView) return 3072;
-  if (ArrayBuffer.isView(value)) return Math.max(1, Math.floor(3072 / ((value as any).BYTES_PER_ELEMENT || 1)));
+  if (isArrayBuffer(value)) return 3072;
+  if (ArrayBuffer.isView(value)) {
+    const { byteLength, length } = viewLayout(value);
+    return Math.max(1, Math.floor(3072 / (length ? byteLength / length : 1)));
+  }
   return undefined;
 }
 
 function pageValue(nativeValue: unknown, normalizedValue: unknown): unknown {
-  return nativeValue instanceof Map || nativeValue instanceof Set || nativeValue instanceof ArrayBuffer || ArrayBuffer.isView(nativeValue)
+  return nativeValue instanceof Map || nativeValue instanceof Set || isArrayBuffer(nativeValue) || ArrayBuffer.isView(nativeValue)
     ? nativeValue : normalizedValue;
 }
 
@@ -400,7 +404,7 @@ async function storeUnnormalizedResult(value: unknown, options: { logger?: Event
   const error = failure ? valueAt(value, errorPath) : undefined;
   return { $ref: event.id, type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value,
     access: access(path, selected), sidecarsDeferred: true,
-    pathsNote: "Read a bounded slice with read_artifact; its type sidecars are relative to that slice. For oversized items, select a nested path or use artifacts.read in execute_program.",
+    pathsNote: "Read a bounded slice with read_artifact; its type sidecars are relative to that slice. Shared or cyclic objects and views with backing buffers require artifacts.read in execute_program to inspect their native identity. For oversized items, select a nested path or use artifacts.read in execute_program.",
     ...(root && Object.hasOwn(root, "result") ? { resultAccess: access(["result"], root.result) } : {}),
     ...(job ? jobMetadata(job) : {}), ...(search ? searchMetadata(search) : {}),
     ...(inspection ? inspectionMetadata(inspection) : {}), ...(browserEvents ? eventMetadata(browserEvents) : {}),
@@ -435,7 +439,7 @@ function artifactAccess(artifactId: number, path: readonly (string | number)[] |
   oversizedItem?: { path: readonly (string | number)[]; guidance: string };
 } {
   const access: { artifactId: number; path?: readonly (string | number)[]; offset?: number; limit?: number } = { artifactId, ...(path ? { path } : {}) };
-  if (value instanceof Map || value instanceof Set || value instanceof ArrayBuffer || ArrayBuffer.isView(value))
+  if (value instanceof Map || value instanceof Set || isArrayBuffer(value) || ArrayBuffer.isView(value))
     return { access: { ...access, offset: 0, limit: nativePageLimit(value) } };
   if (typeof value === "string") {
     let length = previewString(value, 4000, PREVIEW_BYTES).length;

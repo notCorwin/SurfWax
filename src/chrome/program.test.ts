@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventLogger, fromLogValue, type LogEvent } from "../logging";
 import { BrowserJobs } from "./jobs";
 import { ProgramScope } from "./program";
+import { LocatorFacade, PageFacade, type AutomationRuntime } from "./automation";
 
 function log() {
   const events: LogEvent[] = [];
@@ -38,6 +39,53 @@ const context = { conversationId: "program-test" };
 afterEach(() => vi.useRealTimers());
 
 describe("canonical browser jobs", () => {
+  it("decodes the current terminal result once and references it from the receipt page", async () => {
+    const { logger } = indexedLog();
+    const jobs = new BrowserJobs(logger);
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: "job", state: "queued" } });
+    await logger.append({ type: "browser.job.progress", ...context, content: { jobId: "job", operation: "emit" }, output: { partial: 7 } });
+    const terminal = await logger.append({ type: "browser.job.state", ...context, content: { jobId: "job", state: "succeeded" }, output: { payload: "original" } });
+    let decodes = 0;
+    Object.defineProperty(terminal!.output, "payload", { enumerable: true, get: () => { decodes++; return "original"; } });
+    const first: any = await jobs.query({ action: "status", id: "job", limit: 2 }, context.conversationId);
+    expect(first).toMatchObject({ result: { payload: "original" }, hasMore: true,
+      events: [{ state: "queued" }, { operation: "emit", output: { partial: 7 } }] });
+    expect(decodes).toBe(1);
+    decodes = 0;
+    const second: any = await jobs.query({ action: "status", id: "job", after: first.nextCursor }, context.conversationId);
+    expect(second).toMatchObject({ result: { payload: "original" }, hasMore: false, events: [{ state: "succeeded", outputAt: "result" }] });
+    expect(second.events[0]).not.toHaveProperty("output");
+    expect(decodes).toBe(1);
+  });
+
+  it.each(["failed", "cancelled", "interrupted"])("preserves %s terminal results and prior progress", async (state) => {
+    const { logger } = indexedLog();
+    const jobs = new BrowserJobs(logger);
+    const error = { code: "host-lost", effectUnknown: true };
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: state, state: "running" } });
+    await logger.append({ type: "browser.job.progress", ...context, content: { jobId: state, operation: "emit" }, output: { partial: 7 } });
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: state, state }, output: { ok: false, error } });
+    const result: any = await jobs.query({ action: "status", id: state }, context.conversationId);
+    expect(result).toMatchObject({ ok: false, state, result: { ok: false, error },
+      events: [{ state: "running" }, { operation: "emit", output: { partial: 7 } }, { state, outputAt: "result" }] });
+    expect(result.events[2]).not.toHaveProperty("output");
+  });
+
+  it("distinguishes a missing terminal output from an explicitly recorded undefined", async () => {
+    const { logger } = indexedLog();
+    const jobs = new BrowserJobs(logger);
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: "missing", state: "succeeded" } });
+    await logger.append({ type: "browser.job.state", ...context, content: { jobId: "explicit", state: "succeeded" }, output: undefined });
+    const missing: any = await jobs.query({ action: "status", id: "missing" }, context.conversationId);
+    const explicit: any = await jobs.query({ action: "status", id: "explicit" }, context.conversationId);
+    expect(missing).toHaveProperty("result", undefined);
+    expect(missing.events[0]).not.toHaveProperty("outputAt");
+    expect(missing.events[0]).not.toHaveProperty("output");
+    expect(explicit).toHaveProperty("result", undefined);
+    expect(explicit.events[0]).toHaveProperty("outputAt", "result");
+    expect(explicit.events[0]).not.toHaveProperty("output");
+  });
+
   it("waits for the local owner without reading job state or retaining other conversations", async () => {
     const { logger } = indexedLog();
     const jobs = new BrowserJobs(logger);
@@ -727,6 +775,21 @@ describe("canonical browser jobs", () => {
 });
 
 describe("revocable program capabilities", () => {
+  it("records bounded capability receipts while returning the actual live handles", async () => {
+    const { logger, events } = log();
+    const scope = new ProgramScope(new AbortController().signal, "job", context, logger);
+    const page = new PageFacade({} as AutomationRuntime, 42);
+    const wrapped = scope.wrap(new Proxy(page, {}));
+    const locator = new LocatorFacade({} as AutomationRuntime, 42, { queries: [] });
+    for (const [operation, handle] of [["page.waitForEvent", page], ["browser.page", wrapped], ["tabs.open", new Proxy(wrapped, {})], ["page.locator", locator]] as const)
+      expect(await scope.call(operation, async () => handle, false)).toBe(handle);
+    const ordinary = { type: "browser-capability", kind: "page", tabId: 42, extra: "user data" };
+    expect(await scope.call("page.evaluate", async () => ordinary, false)).toBe(ordinary);
+    const outputs = events.filter((event) => (fromLogValue(event.content, event.valueEncoding) as any)?.state === "completed")
+      .map((event) => fromLogValue(event.output, event.valueEncoding));
+    expect(outputs).toEqual([{ type: "browser-capability", kind: "page", tabId: 42 }, { type: "browser-capability", kind: "page", tabId: 42 },
+      { type: "browser-capability", kind: "page", tabId: 42 }, { type: "browser-capability", kind: "locator", tabId: 42 }, ordinary]);
+  });
   it("serializes mutations, subscribes before them, and separates dispatch from verification", async () => {
     const { logger, events } = log();
     const scope = new ProgramScope(

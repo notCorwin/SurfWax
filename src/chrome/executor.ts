@@ -1055,7 +1055,7 @@ export class ChromeExecutor {
       save: (id: number, filename?: string) => call("artifacts.save", true, () => this.saveArtifact(id, filename)),
       text: (filename: string, text: string, mimeType = "text/plain", save = false) => call("artifacts.text", save, () => this.storeText(filename, text, mimeType, save)),
     };
-    return { page, browser, net, protocol, artifacts, signal: scope.signal,
+    return { page, browser, net, protocol, artifacts,
       emit: (value: unknown) => scope.emit(value), check: (condition: unknown, message?: string) => scope.check(condition, message), sleep: (ms: number) => scope.sleep(ms) };
   }
 

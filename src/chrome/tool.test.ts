@@ -161,7 +161,7 @@ describe("browser tools", () => {
   it("represents native values using type paths without confusing literal metadata", async () => {
     const regexp = /x+/gi; regexp.lastIndex = 4;
     const value = { date: new Date("2020-01-02T03:04:05.000Z"), invalid: new Date(NaN),
-      buffer: new Uint8Array([0, 255]).buffer, view: new DataView(new Uint8Array([7, 8, 9]).buffer, 1, 2),
+      buffer: new Uint8Array([0, 255]).buffer, view: new DataView(new Uint8Array([8, 9]).buffer),
       regexp, map: new Map([[123n, new Set([undefined, new Date("2024-01-01T00:00:00Z")])]]),
       literal: { typePaths: [{ path: [], type: "date" }], $type: "date", value: "ordinary" } };
     const tools = createProgramTools({ runProgram: vi.fn(async () => ({ ok: true, result: value })) } as unknown as ChromeExecutor) as Record<string, any>;

@@ -688,7 +688,9 @@ export class BrowserJobs {
             ...(fromLogValue(event.content, event.valueEncoding) as object),
             ...(event.output === undefined
               ? {}
-              : { output: fromLogValue(event.output, event.valueEncoding) }),
+              : event.id === stateEvent?.id
+                ? { outputAt: "result" }
+                : { output: fromLogValue(event.output, event.valueEncoding) }),
             ...(event.error === undefined
               ? {}
               : { error: fromLogValue(event.error, event.valueEncoding) }),

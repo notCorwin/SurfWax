@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { AutomationRuntime } from "./automation";
+import { encodeLogGraph } from "../log-graph";
 import { EventSubscriptions } from "./event-subscriptions";
 
 const inspectText = (value: any) => value.items.map((item: any) => item.line).join("\n");
@@ -57,6 +58,7 @@ function harness(
       return { nodes: item ? [{ backendDOMNodeId: params.backendNodeId, role: { value: item.role }, name: { value: item.name } }] : [] };
     }
     if (method === "Runtime.evaluate") {
+      if (params.expression.includes("/* surf-wax:evaluate-graph */")) return { result: { value: encodeLogGraph(true) } };
       if (params.expression.includes('"nodes"')) return { result: { objectId: "node-array" } };
       if (params.returnByValue === false) return { result: { objectId: "node-1" } };
       if (params.expression.includes("metadata")) return { result: { value: metadata } };

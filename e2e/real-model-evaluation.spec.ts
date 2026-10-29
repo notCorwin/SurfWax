@@ -5,11 +5,12 @@ import { expect } from "@playwright/test";
 import { test, openExtension, dispose, configure, readEvents, closeServer } from "./fixtures";
 import { modelProxy, usageEvidence } from "./evaluation/model-proxy";
 import { businessScore, orderFixture } from "./evaluation/order-fixture";
+import { claimsFixture, claimsScore } from "./evaluation/claims-fixture";
 
 test.use({ trace: "off", screenshot: "off", video: "off" });
 
 // An explicit opt-in is required: this test may incur provider charges.
-test("@real-model cross-frame order", async () => {
+test("@real-model browser task", async () => {
   test.skip(process.env.SURFWAX_REAL_MODEL_EVAL !== "1", "Explicit real-model opt-in required");
   test.setTimeout(Number(process.env.SURFWAX_EVAL_TIMEOUT_MS ?? 600_000));
   const upstream = process.env.SURFWAX_EVAL_BASE_URL;
@@ -19,15 +20,27 @@ test("@real-model cross-frame order", async () => {
   if (!upstream || !key || !model || !providerName) throw new Error("Set SURFWAX_EVAL_BASE_URL, SURFWAX_EVAL_API_KEY, SURFWAX_EVAL_MODEL and SURFWAX_EVAL_PROVIDER");
   const seed = Number(process.env.SURFWAX_EVAL_SEED ?? 17);
   if (!Number.isSafeInteger(seed) || seed < 0 || seed > 999999) throw new Error("Invalid seed");
+  const scenario = process.env.SURFWAX_EVAL_SCENARIO ?? "cross-frame-order";
+  if (scenario !== "cross-frame-order" && scenario !== "claims-queue") throw new Error("Invalid scenario");
   const service = seed % 2 ? "express" : "economy";
   const order = `ORDER-${seed}`;
   const started = Date.now();
   const proxy = await modelProxy(upstream, key);
-  let fixture: Awaited<ReturnType<typeof orderFixture>> | undefined;
+  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | undefined;
   let opened: Awaited<ReturnType<typeof openExtension>> | undefined;
   let events: any[] = [], outcome = "setup_failed", businessVerified = false;
+  let browserProduct: string | null = null;
   try {
-    fixture = await orderFixture();
+    let prompt: string;
+    let grade: () => boolean;
+    if (scenario === "claims-queue") {
+      const claims = await claimsFixture(seed); fixture = claims; prompt = claims.prompt;
+      grade = () => claimsScore(claims.evidence());
+    } else {
+      const checkout = await orderFixture(); fixture = checkout;
+      prompt = `Submit order ${order} using ${service} service and confirm details.`;
+      grade = () => businessScore(checkout.evidence(), order, service);
+    }
     opened = await openExtension();
     const target = await opened.context.newPage();
     await target.goto(fixture.origin);
@@ -45,7 +58,7 @@ test("@real-model cross-frame order", async () => {
     }, { expectedModel: model, expectedToken: proxy.token, expectedBaseURL: proxy.baseURL })).toBe(true);
     await options.close();
     await target.bringToFront();
-    await opened.page.getByTestId("composer-input").fill(`Submit order ${order} using ${service} service and confirm details.`);
+    await opened.page.getByTestId("composer-input").fill(prompt);
     await opened.page.getByTestId("composer-input").press("Enter");
     outcome = "running";
     const deadline = Date.now() + Number(process.env.SURFWAX_EVAL_TIMEOUT_MS ?? 600_000) - 30_000;
@@ -57,15 +70,21 @@ test("@real-model cross-frame order", async () => {
     }
     // An unsettled network may still contain a submission or decoy request.
     const networkSettled = await target.waitForLoadState("networkidle", { timeout: 5000 }).then(() => true, () => false);
-    businessVerified = networkSettled && businessScore(fixture.evidence(), order, service);
+    events = await readEvents(opened.page);
+    browserProduct = await opened.context.newCDPSession(opened.page).then((session) => session.send("Browser.getVersion")).then((version) => version.product).catch(() => null);
+    // Stop page timers and drain all server requests before reading the ledger.
+    // Otherwise a delayed effect can arrive after the score has been decided.
+    await opened.context.close();
+    await closeServer(fixture.server);
+    businessVerified = networkSettled && grade();
   } finally {
     if (opened) events = await readEvents(opened.page).catch(() => events);
     const head = (() => { try { return execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(); } catch { return null; } })();
     const dirty = (() => { try { return !!execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim(); } catch { return null; } })();
-    const browser = opened ? await opened.context.newCDPSession(opened.page).then((session) => session.send("Browser.getVersion")).catch(() => null) : null;
+    const browser = !browserProduct && opened ? await opened.context.newCDPSession(opened.page).then((session) => session.send("Browser.getVersion")).catch(() => null) : null;
     const terminals = events.filter((event) => ["tool.finished", "tool.failed"].includes(event.type));
     const starts = events.filter((event) => event.type === "tool.started");
-    const report = { scenario: "cross-frame-order", seed, provider: providerName, model, gitHead: head, gitDirty: dirty, browser: browser?.product ?? null,
+    const report = { scenario, seed, provider: providerName, model, gitHead: head, gitDirty: dirty, browser: browserProduct ?? browser?.product ?? null,
       outcome, businessVerified, elapsedMs: Date.now() - started, providerUsageByStep: usageEvidence(events),
       requests: proxy.requests, requestBytes: proxy.requests.reduce((sum, request) => sum + request.bytes, 0),
       toolCalls: starts.length, toolTerminalResults: terminals.length,

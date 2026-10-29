@@ -51,6 +51,28 @@ describe("complete-response transport", () => {
     expect(prompt).toContain('"-0"');
   });
 
+  it("retains a failed SDK tool's readable error in the next model request", async () => {
+    const log = logger();
+    await log.appendMessage("thread", user as ConversationMessage, { runId: "old" });
+    await log.append({ type: "conversation.submitted", conversationId: "thread", runId: "old", content: { messageId: user.id } });
+    await log.appendMessage("thread", { id: "assistant-old", role: "assistant", parts: [{ type: "dynamic-tool", toolName: "missing-tool", toolCallId: "old-call", state: "input-available", input: {} }] } as ConversationMessage, { runId: "old", parentId: user.id });
+    class ProviderFailure extends Error { statusCode = 404; }
+    const error = Object.assign(new ProviderFailure("No such tool: missing-tool"), { name: "NoSuchToolError" });
+    Object.defineProperty(error, Symbol("sdk-marker"), { value: true, enumerable: true });
+    await log.append({ type: "tool.failed", conversationId: "thread", runId: "old", toolCallId: "old-call", output: { ok: false, error }, error });
+    await log.append({ type: "conversation.failed", conversationId: "thread", runId: "old" });
+    const restored = await restoreConversationRepository(await log.conversation("thread"));
+    const messages = restored.messages.map(({ message }) => message as SidePanelMessage);
+    messages.push({ id: "next", role: "user", parts: [{ type: "text", text: "Continue" }] });
+    let prompt = "";
+    const { factory } = setup(new MockLanguageModelV4({ doGenerate: async (request) => { prompt = JSON.stringify(request.prompt); return reply(); } }), log);
+    await createChatTransport(factory, log, "thread").sendMessages({ ...options(), messages });
+    expect(prompt).toContain("missing-tool");
+    expect(prompt).toContain("No such tool: missing-tool");
+    expect(prompt).toContain("NoSuchToolError");
+    expect(prompt).toContain("statusCode");
+  });
+
   it.each(["response", "tool-start", "tool-result", "invalid-result"])("stops browser work when the canonical %s cannot be persisted", async (stage) => {
     const events: LogEvent[] = [];
     const failure = new Error("Canonical storage write failed");

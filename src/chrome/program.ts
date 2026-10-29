@@ -1,6 +1,7 @@
 import type { EventLogger } from "../logging";
 import type { JobContext } from "./jobs";
 import type { EventSource } from "./event-subscriptions";
+import { LocatorFacade, PageFacade } from "./automation";
 import { PROGRAM_HANDLE_ASSERT_LIVE, PROGRAM_HANDLE_SESSION } from "./program-handles";
 
 export type OperationObserver = { start(operation: string, source: EventSource): unknown; dispatched(handle: unknown, source: EventSource): void; end(handle: unknown): void };
@@ -165,11 +166,16 @@ export class ProgramScope {
         if (effect) this.currentDispatch = mark;
         const result = await (subscription ?? run());
         this.guard();
+        // Page and locator capabilities are live objects, not durable user
+        // values. Record only their bounded identity while returning the live
+        // handle to the program unchanged.
+        const receipt = result instanceof PageFacade ? { type: "browser-capability", kind: "page", tabId: result.tabId }
+          : result instanceof LocatorFacade ? { type: "browser-capability", kind: "locator", tabId: result.tabId } : result;
         await this.event(
           operation,
           sequence,
           verified ? "verified" : "completed",
-          result,
+          receipt,
         );
         this.uncertain.delete(sequence);
         return result;

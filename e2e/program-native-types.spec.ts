@@ -6,7 +6,7 @@ const lastTool = (request: any) => {
   return JSON.parse(Array.isArray(content) ? content.find((part: any) => part.type === "text").text : content);
 };
 
-test("round-trips native program values through compacted artifacts and rejects cycles", async () => {
+test("round-trips native program values and cyclic collections through artifacts", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -57,11 +57,21 @@ test("round-trips native program values through compacted artifacts and rejects 
         return commandResponse("execute_program", { code: "const m = new Map(); m.set('self', m); return m;", timeoutMs: 10000 }, "map-cycle");
       },
       (request) => {
-        expect(lastTool(request)).toMatchObject({ ok: false, error: { message: expect.stringContaining("Program bridge requires serializable values") } });
+        const output = lastTool(request);
+        expect(output).toMatchObject({ $ref: expect.any(Number), sidecarsDeferred: true });
+        return commandResponse("execute_program", { code: `const m = await artifacts.read(${output.$ref}, {path:['result']}); return m instanceof Map && m.get('self') === m;` }, "map-cycle-read");
+      },
+      (request) => {
+        expect(lastTool(request)).toMatchObject({ ok: true, result: true });
         return commandResponse("execute_program", { code: "const s = new Set(); s.add(s); return s;", timeoutMs: 10000 }, "set-cycle");
       },
       (request) => {
-        expect(lastTool(request)).toMatchObject({ ok: false, error: { message: expect.stringContaining("Program bridge requires serializable values") } });
+        const output = lastTool(request);
+        expect(output).toMatchObject({ $ref: expect.any(Number), sidecarsDeferred: true });
+        return commandResponse("execute_program", { code: `const s = await artifacts.read(${output.$ref}, {path:['result']}); return s instanceof Set && s.has(s);` }, "set-cycle-read");
+      },
+      (request) => {
+        expect(lastTool(request)).toMatchObject({ ok: true, result: true });
         return textResponse("PROGRAM_NATIVE_TYPES_OK");
       },
       textResponse("Native values"),

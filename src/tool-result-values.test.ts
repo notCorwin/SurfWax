@@ -12,6 +12,15 @@ describe("native result values", () => {
     expect(normalizationExceedsBudget({ result: cycle })).toBe(true);
   });
 
+  it("defers cycles, repeated references, and views with backing data that JSON cannot preserve", () => {
+    const shared = { value: 1 };
+    expect(normalizationExceedsBudget({ result: { a: shared, b: shared } })).toBe(true);
+    const buffer = new ArrayBuffer(16);
+    expect(normalizationExceedsBudget({ result: new Uint8Array(buffer, 3, 2) })).toBe(true);
+    expect(normalizationExceedsBudget({ result: { buffer, view: new Uint8Array(buffer) } })).toBe(true);
+    expect(normalizationExceedsBudget({ result: { a: { value: 1 }, b: { value: 1 } } })).toBe(false);
+  });
+
   it("wraps outer metadata that collides with native type sidecars", () => {
     expect(normalizeResultEnvelope({ ok: true, result: 1, typePaths: ["ordinary"] })).toEqual({
       ok: true, result: { ok: true, result: 1, typePaths: ["ordinary"] }, envelopeWrapped: true,

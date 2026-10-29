@@ -1,5 +1,7 @@
+import { createProgramCodec } from "./program-codec";
+
 /** Opaque-origin sandbox page. The worker is disposable even when model code never yields. */
-function workerMain() {
+function workerMain(codecFactory: typeof createProgramCodec) {
   const pending = new Map<
     string,
     { resolve: (value: any) => void; reject: (reason: any) => void }
@@ -46,52 +48,24 @@ function workerMain() {
     "last",
     "nth",
   ]);
-  const encode = (value: any, seen = new WeakSet<object>(), allowSource = false): any => {
-    if (value instanceof Date) return { $date: Number.isNaN(value.getTime()) ? null : value.toISOString() };
-    if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return value;
-    if (typeof value === "function" && !remotes.has(value)) {
-      if (!allowSource) throw new Error("Program bridge cannot serialize functions as data");
-      return { $function: String(value) };
+  const { encode, decode } = codecFactory((value, allowSource) => {
+    if (remotes.has(value)) return { value: { $remoteArgument: remotes.get(value) } };
+    if (typeof value === "function" && allowSource) return { value: { $function: String(value) } };
+    return undefined;
+  }, (value) => {
+    if ("$remoteObject" in value) return { value: remote(value.$remoteObject) };
+    if ("$remoteFunction" in value) {
+      const fn = (...args: any[]) => request({ id: value.$remoteFunction }, args);
+      remotes.set(fn, { id: value.$remoteFunction, steps: [] });
+      return { value: fn };
     }
-    if (
-      value &&
-      (typeof value === "object" || typeof value === "function") &&
-      remotes.has(value)
-    )
-      return { $remoteArgument: remotes.get(value) };
-    if (!value || typeof value !== "object") return value;
-    if (seen.has(value)) throw new Error("Program bridge requires serializable values or browser capability handles");
-    seen.add(value);
-    let result: any;
-    if (value instanceof RegExp) {
-      result = { $regexp: { source: value.source, flags: value.flags, lastIndex: encode(value.lastIndex, seen) } };
-    } else if (value instanceof Map) {
-      result = { $map: [...value].map(([key, item]) => [encode(key, seen), encode(item, seen)]) };
-    } else if (value instanceof Set) {
-      result = { $set: [...value].map((item) => encode(item, seen)) };
-    } else if (Array.isArray(value)) {
-      const keys = value.length > 32768 ? Object.keys(value).filter((key) => {
-        const index = Number(key);
-        return Number.isInteger(index) && index >= 0 && index < value.length && String(index) === key;
-      }) : undefined;
-      result = keys && keys.length < value.length
-        ? { $sparseArray: { length: value.length, entries: keys.map((key) => [Number(key), encode(value[Number(key)], seen)]) } }
-        : value.map((item) => encode(item, seen));
-    } else {
-      result = {
-        $plainObject: Object.entries(value).map(([key, item]) => [
-          key,
-          encode(item, seen),
-        ]),
-      };
-    }
-    seen.delete(value);
-    return result;
-  };
+    return undefined;
+  });
   const request = (reference: any, args: any[]) =>
     new Promise<any>((resolve, reject) => {
       const isEvaluate = reference.steps?.at(-1)?.key === "evaluate";
-      const encoded = args.map((value, index) => encode(value, new WeakSet(), isEvaluate && index === 0));
+      const seen = new WeakMap<object, any>();
+      const encoded = args.map((value, index) => encode(value, seen, isEvaluate && index === 0));
       const id = String(++requestSequence);
       pending.set(id, { resolve, reject });
       try { self.postMessage({ type: "rpc", id, reference, args: encoded }); }
@@ -124,38 +98,6 @@ function workerMain() {
     );
     remotes.set(result, reference);
     return result;
-  };
-  const decode = (value: any): any => {
-    if (Array.isArray(value)) return value.map(decode);
-    if (value && typeof value === "object" && "$sparseArray" in value) {
-      const result = new Array(value.$sparseArray.length);
-      for (const [index, item] of value.$sparseArray.entries) result[index] = decode(item);
-      return result;
-    }
-    if (value && typeof value === "object" && "$plainObject" in value)
-      return Object.fromEntries(
-        value.$plainObject.map(([key, item]: [string, unknown]) => [
-          key,
-          decode(item),
-        ]),
-      );
-    if (value?.$regexp) {
-      const regexp = new RegExp(value.$regexp.source, value.$regexp.flags);
-      regexp.lastIndex = decode(value.$regexp.lastIndex);
-      return regexp;
-    }
-    if (value && typeof value === "object" && "$date" in value) return value.$date === null ? new Date(NaN) : new Date(value.$date);
-    if (value && typeof value === "object" && "$map" in value) return new Map(value.$map.map(([key, item]: [unknown, unknown]) => [decode(key), decode(item)]));
-    if (value && typeof value === "object" && "$set" in value) return new Set(value.$set.map(decode));
-    if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return value;
-    if (value?.$remoteObject) return remote(value.$remoteObject);
-    if (value?.$remoteFunction) {
-      const fn = (...args: any[]) =>
-        request({ id: value.$remoteFunction }, args);
-      remotes.set(fn, { id: value.$remoteFunction, steps: [] });
-      return fn;
-    }
-    return value;
   };
   self.onmessage = async (event) => {
     const message = event.data;
@@ -225,7 +167,7 @@ const initialize = (event: MessageEvent) => {
     return;
   window.removeEventListener("message", initialize);
   const port = event.ports[0]!;
-  const blob = new Blob([`(${workerMain.toString()})()`], {
+  const blob = new Blob([`(${workerMain.toString()})(${createProgramCodec.toString()})`], {
     type: "text/javascript",
   });
   const url = URL.createObjectURL(blob);
