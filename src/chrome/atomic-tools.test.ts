@@ -188,6 +188,10 @@ describe("atomic browser tool programs", () => {
   it("keeps system tool positions concise while retaining full model-facing descriptions and schemas", () => {
     const tools = createProgramTools({} as never);
     const positions = [
+      ["fill", "Replace an editable element's value; an empty value clears it.", "Does not emit beforeinput or keyboard events."],
+      ["type_text", "Insert text character by character into an editable element.", "does not emit beforeinput, keydown or keyup."],
+      ["press_key", "Press a key or chord, optionally focusing an element first.", "The interaction blocker can reject editing keys with guard-blocked-input and unknown effects."],
+      ["key_down", "Hold a key until key_up or run cleanup.", "The interaction blocker can reject editing keys with guard-blocked-input and unknown effects."],
       ["select_option", "Select option values or labels on a select element.", "An empty array clears selection; missing, disabled or ambiguous options fail without changing selection."],
       ["drag", "Drag one element to another using pointer events.", "Native HTML5 draggable sources are unavailable while the interaction blocker is active."],
       ["upload_file", "Upload artifacts to a file input or captured chooser.", "Supply exactly one target or chooserId; chooser uploads cannot set tabId or background."],

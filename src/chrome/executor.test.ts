@@ -770,7 +770,7 @@ describe("ChromeExecutor programs", () => {
     await executor.endRun(); executor.dispose();
   });
 
-  it("does not let an old release acknowledgement erase a newer press", async () => {
+  it("serializes input releases and later presses within a tab", async () => {
     const fake = fakeChrome();
     let completeKey!: () => void, completeButton!: () => void;
     let startedKey!: () => void, startedButton!: () => void;
@@ -791,14 +791,106 @@ describe("ChromeExecutor programs", () => {
     await send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left" });
     const keyUp = send("Input.dispatchKeyEvent", { type: "keyUp", key: "Shift" });
     const mouseUp = send("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left" });
-    await Promise.all([keyStarted, buttonStarted]);
-    await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Shift", code: "ShiftLeft" });
-    await send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left" });
-    completeKey(); completeButton(); await Promise.all([keyUp, mouseUp]);
+    await keyStarted;
+    const nextKey = send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Shift", code: "ShiftLeft" });
+    const nextButton = send("Input.dispatchMouseEvent", { type: "mousePressed", button: "left" });
+    completeKey();
+    await buttonStarted;
+    completeButton();
+    await Promise.all([keyUp, mouseUp, nextKey, nextButton]);
     const state = (executor as any).heldInput.get(41);
     expect(state.keys.has("Shift")).toBe(true);
     expect(state.buttons.has("left")).toBe(true);
     fake.debuggerApi.sendCommand.mockResolvedValue({});
+    await executor.endRun(); executor.dispose();
+  });
+
+  it("presses chords in order while preserving previously held modifiers", async () => {
+    const fake = fakeChrome(); const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never });
+    const press = (chord: string, signal?: AbortSignal) => (executor as any).pressChord({ tabId: 41 }, chord, signal);
+    const send = (params: object) => (executor as any).bridgeCommand({ tabId: 41 }, "Input.dispatchKeyEvent", params);
+    await press("Control+a");
+    const events = () => fake.debuggerApi.sendCommand.mock.calls.filter(([, method]) => method === "Input.dispatchKeyEvent").map(([, , params]: any[]) => [params.type, params.key, params.modifiers]);
+    expect(events()).toEqual([["rawKeyDown", "Control", 2], ["keyDown", "a", 2], ["keyUp", "a", 2], ["keyUp", "Control", 0]]);
+    fake.debuggerApi.sendCommand.mockClear();
+    await send({ type: "rawKeyDown", key: "Control", code: "ControlLeft" });
+    await press("Control+a");
+    expect(events()).toEqual([["rawKeyDown", "Control", 2], ["keyDown", "a", 2], ["keyUp", "a", 2]]);
+    expect((executor as any).heldInput.get(41).keys.has("Control")).toBe(true);
+    await executor.endRun(); executor.dispose();
+  });
+
+  it("applies Mac native editing commands after resolving held modifiers", async () => {
+    vi.stubGlobal("navigator", { platform: "MacIntel" });
+    const fake = fakeChrome(), executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never });
+    const send = (params: object) => (executor as any).bridgeCommand({ tabId: 41 }, "Input.dispatchKeyEvent", params);
+    await send({ type: "rawKeyDown", key: "Meta", code: "MetaLeft" });
+    await (executor as any).pressChord({ tabId: 41 }, "a");
+    expect(fake.debuggerApi.sendCommand).toHaveBeenCalledWith({ tabId: 41 }, "Input.dispatchKeyEvent", expect.objectContaining({ key: "a", code: "KeyA", modifiers: 4, commands: ["selectAll"] }));
+    const released = fake.debuggerApi.sendCommand.mock.calls.filter(([, method, params]: any[]) => method === "Input.dispatchKeyEvent" && params.type === "keyUp");
+    expect(released.every(([, , params]: any[]) => params.commands === undefined)).toBe(true);
+    await send({ type: "keyDown", key: "z", code: "KeyZ", commands: ["customCommand"] });
+    expect(fake.debuggerApi.sendCommand).toHaveBeenLastCalledWith({ tabId: 41 }, "Input.dispatchKeyEvent", expect.objectContaining({ commands: ["customCommand"] }));
+    await (executor as any).bridgeCommand({ tabId: 41 }, "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "a", code: "KeyA", modifiers: 4 }, true);
+    expect(fake.debuggerApi.sendCommand.mock.lastCall?.[2]).not.toHaveProperty("commands");
+    await executor.endRun(); executor.dispose();
+  });
+
+  it("releases only chord-owned keys after cancellation", async () => {
+    const fake = fakeChrome(); const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never });
+    const controller = new AbortController();
+    fake.debuggerApi.sendCommand.mockImplementation(async (_source: any, method: string, params: any) => {
+      if (method === "Input.dispatchKeyEvent" && params.type === "rawKeyDown" && params.key === "Shift") controller.abort();
+      return {};
+    });
+    await expect((executor as any).pressChord({ tabId: 41 }, "Control+Shift+a", controller.signal)).rejects.toMatchObject({ name: "AbortError", effectUnknown: true });
+    expect(fake.debuggerApi.sendCommand.mock.calls.filter(([, method]) => method === "Input.dispatchKeyEvent").map(([, , params]: any[]) => [params.type, params.key])).toEqual([
+      ["rawKeyDown", "Control"], ["rawKeyDown", "Shift"], ["keyUp", "Shift"], ["keyUp", "Control"],
+    ]);
+    await executor.endRun(); executor.dispose();
+  });
+
+  it("cancels a queued chord promptly without bypassing the earlier input", async () => {
+    const fake = fakeChrome(); const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never });
+    let started!: () => void, finish!: () => void;
+    const pending = new Promise<void>((resolve) => { started = resolve; });
+    fake.debuggerApi.sendCommand.mockImplementation(async (_source: any, method: string, params: any) => {
+      if (method === "Input.dispatchKeyEvent" && params.key === "x" && params.type === "rawKeyDown") {
+        started(); await new Promise<void>((resolve) => { finish = resolve; });
+      }
+      return {};
+    });
+    const send = (params: object) => (executor as any).bridgeCommand({ tabId: 41 }, "Input.dispatchKeyEvent", params);
+    const first = send({ type: "rawKeyDown", key: "x" }); await pending;
+    const controller = new AbortController();
+    const cancelled = (executor as any).pressChord({ tabId: 41 }, "Control+a", controller.signal);
+    controller.abort(); await expect(cancelled).rejects.toMatchObject({ name: "AbortError" });
+    const later = send({ type: "rawKeyDown", key: "z" });
+    expect(fake.debuggerApi.sendCommand.mock.calls.some(([, method, params]: any[]) => method === "Input.dispatchKeyEvent" && params.key === "z")).toBe(false);
+    finish(); await Promise.all([first, later]);
+    expect(fake.debuggerApi.sendCommand.mock.calls.some(([, method, params]: any[]) => method === "Input.dispatchKeyEvent" && params.key === "Control")).toBe(false);
+    await executor.endRun(); executor.dispose();
+  });
+
+  it("preserves a previously held modifier when chord dispatch fails", async () => {
+    const fake = fakeChrome(); const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never });
+    const send = (params: object) => (executor as any).bridgeCommand({ tabId: 41 }, "Input.dispatchKeyEvent", params);
+    await send({ type: "rawKeyDown", key: "Control" });
+    fake.debuggerApi.sendCommand.mockImplementation(async (_source: any, method: string, params: any) => {
+      if (method === "Input.dispatchKeyEvent" && params.key === "a" && params.type === "keyDown") throw new Error("uncertain keydown");
+      return {};
+    });
+    await expect((executor as any).pressChord({ tabId: 41 }, "Control+Shift+a")).rejects.toMatchObject({ message: "uncertain keydown", effectUnknown: true });
+    expect(fake.debuggerApi.sendCommand.mock.calls.filter(([, method, params]: any[]) => method === "Input.dispatchKeyEvent" && params.type === "keyUp").map(([, , params]: any[]) => params.key)).toEqual(["a", "Shift"]);
+    expect([...((executor as any).heldInput.get(41).keys.keys())]).toEqual(["Control"]);
+    fake.debuggerApi.sendCommand.mockResolvedValue({}); await executor.endRun(); executor.dispose();
+  });
+
+  it("does not send the main chord key after its target loses focus", async () => {
+    const fake = fakeChrome(); const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never });
+    const assertFocus = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("focus lost"));
+    await expect((executor as any).pressChord({ tabId: 41 }, "Control+a", undefined, assertFocus)).rejects.toMatchObject({ message: "focus lost", effectUnknown: true });
+    expect(fake.debuggerApi.sendCommand.mock.calls.filter(([, method]: any[]) => method === "Input.dispatchKeyEvent").map(([, , params]: any[]) => [params.type, params.key])).toEqual([["rawKeyDown", "Control"], ["keyUp", "Control"]]);
     await executor.endRun(); executor.dispose();
   });
 

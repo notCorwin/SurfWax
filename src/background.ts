@@ -178,20 +178,68 @@ async function bypassPageGuard(tabId: number, enabled: boolean): Promise<void> {
   if (guardedTabs.has(tabId)) await updatePageGuard(tabId).catch(() => undefined);
 }
 
-async function guardInputTicket(tabId: number, runId: string, timestamp?: number, text?: string, observeBeforeInput = false): Promise<boolean> {
+const inputTickets = new Map<number, Promise<void>>();
+type GuardReceipt = Exclude<ReturnType<typeof authorizeGuardInput>, boolean | undefined>;
+function isGuardReceipt(value: unknown): value is GuardReceipt {
+  if (!value || typeof value !== "object") return false;
+  return ["blockedBeforeInput", "keydown", "keyup", "keypress"].every((key) => typeof (value as Record<string, unknown>)[key] === "boolean");
+}
+
+async function guardInputTicket(tabId: number, runId: string, timestamp?: number, text?: string, observeBeforeInput = false) {
   // A disconnected port leaves the DOM blocker installed until Chrome executes
   // its removal. Authorize the actual run-bound blocker even after map deletion.
-  const results = await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: authorizeGuardInput, args: [runId, timestamp ?? null, text ?? null, observeBeforeInput] as any }).catch(() => []);
-  return results.some(({ result }) => result === true);
+  return chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: authorizeGuardInput, args: [runId, timestamp ?? null, text ?? null, observeBeforeInput] as any });
 }
-async function authorizedNativeInput(debuggee: chrome.debugger.Debuggee, tabId: number, runId: string, command: string, params: Record<string, any>) {
+async function authorizedNativeInput(debuggee: chrome.debugger.Debuggee, tabId: number, runId: string, command: string, params: Record<string, any>, validate = () => {}) {
+  const previous = inputTickets.get(tabId) ?? Promise.resolve();
+  let release!: () => void;
+  const done = new Promise<void>((resolve) => { release = resolve; });
+  inputTickets.set(tabId, done);
+  await previous;
+  try {
+    validate();
+    return await dispatchAuthorizedNativeInput(debuggee, tabId, runId, command, params, validate);
+  } finally {
+    release();
+    if (inputTickets.get(tabId) === done) inputTickets.delete(tabId);
+  }
+}
+
+async function dispatchAuthorizedNativeInput(debuggee: chrome.debugger.Debuggee, tabId: number, runId: string, command: string, params: Record<string, any>, validate: () => void) {
   const timestamp = Date.now() / 1000 + 86400 + Math.random() / 1000;
   const observeBeforeInput = command === "Input.dispatchKeyEvent" && ["keyDown", "rawKeyDown", "char"].includes(params.type);
-  await guardInputTicket(tabId, runId, timestamp, params.text, observeBeforeInput);
+  const guardExpected = guardedTabs.has(tabId) || confirmedGuards.get(tabId) === runId || loadingGuards.get(tabId)?.runId === runId;
+  let authorized: chrome.scripting.InjectionResult<ReturnType<typeof authorizeGuardInput>>[] = [];
+  try { authorized = await guardInputTicket(tabId, runId, timestamp, params.text, observeBeforeInput); }
+  catch (error) {
+    if (guardExpected) {
+      await guardInputTicket(tabId, runId).catch(() => undefined);
+      throw new Error(`AutomationError[guard-context-unavailable]: Unable to authorize input: ${String(error)}`);
+    }
+  }
+  const root = authorized.find((item) => item.frameId === 0) ?? authorized.find((item) => item.frameId === undefined);
+  if (guardExpected && root?.result !== true) {
+    await guardInputTicket(tabId, runId).catch(() => undefined);
+    throw new Error("AutomationError[guard-context-unavailable]: The page guard did not authorize input");
+  }
+  if (guardExpected && observeBeforeInput && authorized.some((frame) => frame.result !== true || !Number.isInteger(frame.frameId) || !frame.documentId)) {
+    await guardInputTicket(tabId, runId).catch(() => undefined);
+    throw new Error("AutomationError[guard-context-unavailable]: A frame could not authorize input");
+  }
+  const hasTicket = authorized.some(({ result }) => result === true);
   let result: unknown;
   let blockedBeforeInput = false;
+  let observedKey = false;
+  const expectedKeyEvent = command !== "Input.dispatchKeyEvent" ? undefined
+    : params.type === "keyDown" || params.type === "rawKeyDown" ? "keydown"
+    : params.type === "keyUp" ? "keyup" : params.type === "char" ? "keypress" : undefined;
+  let dispatched = false;
+  let commandError: unknown;
+  let revokeError: unknown;
   try {
+    validate();
     const { surfWaxAtomicClick, ...nativeParams } = params;
+    dispatched = true;
     if (surfWaxAtomicClick) {
       // Queue the full native click together, using one run-bound ticket. User
       // input has no intervening IPC round trip in which to reset pressed state.
@@ -203,9 +251,44 @@ async function authorizedNativeInput(debuggee: chrome.debugger.Debuggee, tabId: 
     } else {
       result = await chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, timestamp });
     }
+  } catch (error) { commandError = error; }
+  finally {
+    if (hasTicket) {
+      try {
+        const revoked = await guardInputTicket(tabId, runId);
+        const authorizedByFrame = new Map(authorized.map((frame) => [frame.frameId, frame]));
+        const revokedByFrame = new Map(revoked.map((frame) => [frame.frameId, frame]));
+        const rootResult = revoked.find((item) => item.frameId === 0) ?? revoked.find((item) => item.frameId === undefined);
+        if (root?.result === true && !isGuardReceipt(rootResult?.result)) throw new Error("The page guard changed before input completion");
+        if (root?.documentId && rootResult?.documentId !== root.documentId) throw new Error("The page navigated before input completion");
+        if (observeBeforeInput) {
+          // The focused frame may change while the key is being dispatched.
+          // A disappearing ticket can also discard a blocked beforeinput, so
+          // preserve uncertainty unless every authorized document survives.
+          for (const frame of authorized) {
+            if (frame.result !== true) continue;
+            if (!Number.isInteger(frame.frameId) || !frame.documentId) throw new Error("The authorized frame identity is unavailable");
+            const current = revokedByFrame.get(frame.frameId);
+            if (current?.documentId !== frame.documentId || !isGuardReceipt(current.result))
+              throw new Error("An authorized frame changed before input completion");
+          }
+          if (revoked.some((frame) => !authorizedByFrame.has(frame.frameId)))
+            throw new Error("A frame appeared before input completion");
+        }
+        blockedBeforeInput = revoked.some(({ result }) => isGuardReceipt(result) && result.blockedBeforeInput);
+        observedKey = expectedKeyEvent !== undefined && revoked.some(({ frameId, documentId, result }) =>
+          authorizedByFrame.get(frameId)?.result === true && authorizedByFrame.get(frameId)?.documentId === documentId
+          && isGuardReceipt(result) && result[expectedKeyEvent]);
+      } catch (error) { revokeError = error; }
+    }
   }
-  finally { blockedBeforeInput = await guardInputTicket(tabId, runId); }
+  if (commandError) {
+    if (dispatched && typeof commandError === "object") Object.assign(commandError, { effectUnknown: true });
+    throw commandError;
+  }
+  if (revokeError) throw Object.assign(new Error(`AutomationError[guard-context-unavailable]: Unable to confirm input: ${String(revokeError)}`), dispatched ? { effectUnknown: true } : {});
   if (blockedBeforeInput) throw Object.assign(new Error("AutomationError[guard-blocked-input]: A trusted beforeinput event was blocked during key dispatch; the key's effects are unknown."), { effectUnknown: true });
+  if (hasTicket && expectedKeyEvent && !observedKey) throw Object.assign(new Error(`AutomationError[input-unconfirmed]: The ${expectedKeyEvent} event was not observed; the key's effects are unknown.`), { effectUnknown: true });
   return result;
 }
 
@@ -445,7 +528,10 @@ chrome.runtime.onConnect.addListener((port) => {
               if (!text) throw new Error("AutomationError[not-editable]: Empty insertion requires an exact focused target");
               for (const character of text) {
                 if (!cleanup) runs.validate(message as RunIdentity);
-                await authorizedNativeInput(debuggee, tabId!, inputRunId, "Input.dispatchKeyEvent", { type: "char", text: character });
+                await authorizedNativeInput(debuggee, tabId!, inputRunId, "Input.dispatchKeyEvent", { type: "char", text: character }, () => {
+                  if (closed) throw new DOMException("Side Panel 已关闭", "AbortError");
+                  runs.validate(message as RunIdentity);
+                });
               }
             }
             result = {};
@@ -457,7 +543,12 @@ chrome.runtime.onConnect.addListener((port) => {
                 runs.validate(message as RunIdentity);
               });
               result = {};
-            } else result = await authorizedNativeInput(debuggee, tabId!, message.runId ?? validatedRunId!, command, nativeParams);
+            } else result = await authorizedNativeInput(debuggee, tabId!, message.runId ?? validatedRunId!, command, nativeParams, () => {
+              if (!cleanup) {
+                if (closed) throw new DOMException("Side Panel 已关闭", "AbortError");
+                runs.validate(message as RunIdentity);
+              }
+            });
           } else {
             const evaluationKey = JSON.stringify(debuggee);
             const evaluation = method === "sendCommand" && ["Runtime.evaluate","Runtime.callFunctionOn"].includes(command);

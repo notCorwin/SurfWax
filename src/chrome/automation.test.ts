@@ -92,9 +92,11 @@ function harness(
     return {};
   });
   const detach = vi.fn(async () => undefined);
+  const pressChord = vi.fn(async (_debuggee: any, _chord: string, _signal?: AbortSignal) => undefined);
   const runtime = new AutomationRuntime({
     chromeApi: { tabs: { query: async () => [{ id: 3 }], onCreated: tabsCreated }, downloads: { onCreated: downloadsCreated } } as never,
     command,
+    pressChord,
     detach,
     mark: vi.fn(async () => undefined),
     refreshGuard,
@@ -102,10 +104,19 @@ function harness(
     claimChooser,
     logger: logger as never,
   });
-  return { runtime, calls, command, detach, tabsCreated, onDispatch };
+  return { runtime, calls, command, pressChord, detach, tabsCreated, onDispatch };
 }
 
 describe("AutomationRuntime", () => {
+  it("rejects a chord for single-key down and up operations", async () => {
+    const { runtime, command } = harness();
+    await runtime.createPage(3);
+    command.mockClear();
+    await expect(runtime.keyState(3, "keydown", "Control+a")).rejects.toMatchObject({ code: "invalid-key" });
+    await expect(runtime.keyState(3, "keyup", "Control+a")).rejects.toMatchObject({ code: "invalid-key" });
+    expect(command).not.toHaveBeenCalledWith(expect.anything(), "Input.dispatchKeyEvent", expect.anything());
+    await runtime.abortSessions();
+  });
   it("preserves a new OOPIF attachment when its old renderer later reports a swap", async () => {
     const { runtime, command } = harness();
     await runtime.createPage(3);
@@ -531,21 +542,20 @@ describe("AutomationRuntime", () => {
     await runtime.abortSessions();
   });
 
-  it("attempts key release when a targeted keydown has an uncertain outcome", async () => {
-    const { runtime, command } = harness();
+  it("reports uncertain targeted press failures from the chord executor", async () => {
+    const { runtime, command, pressChord } = harness();
     const page = await runtime.createPage(3);
     const original = command.getMockImplementation()!;
     command.mockImplementation(async (source, method, params) => {
       if (method === "DOM.describeNode") return { node: { backendNodeId: 7 } };
       if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("document.hasFocus()"))
         return { result: { value: { connected: true, focused: true, editable: true } } };
-      if (method === "Input.dispatchKeyEvent" && params.type === "keyDown") throw new Error("uncertain keydown");
       return original(source, method, params);
     });
+    pressChord.mockRejectedValueOnce(new Error("uncertain keydown"));
     await expect(page.getByRole("button", { name: "Sign in" }).press("x"))
       .rejects.toMatchObject({ message: "uncertain keydown", effectUnknown: true });
-    expect(command.mock.calls.filter(([, method]) => method === "Input.dispatchKeyEvent").map(([, , params]) => [params.type, params.key]))
-      .toEqual([["keyDown", "x"], ["keyUp", "x"]]);
+    expect(pressChord).toHaveBeenCalledWith(expect.objectContaining({ tabId: 3 }), "x", undefined, expect.any(Function));
     await runtime.abortSessions();
   });
 

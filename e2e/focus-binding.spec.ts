@@ -28,8 +28,8 @@ test("stops targeted keyboard input when page handlers redirect focus", async ()
       commandResponse("fill", { target: css("#redirect"), value: "secret" }, "redirected-fill"),
       (request) => { error(request); return commandResponse("press_key", { target: css("#redirect"), key: "x" }, "redirected-press"); },
       (request) => { error(request); return commandResponse("type_text", { target: css("#typing"), text: "abc" }, "partial-type"); },
-      (request) => { error(request); return commandResponse("fill", { target: css("#keydown"), value: "replacement" }, "partial-fill"); },
-      (request) => { error(request); return textResponse("FOCUS_BINDING_OK"); },
+      (request) => { error(request); return commandResponse("fill", { target: css("#keydown"), value: "replacement" }, "direct-fill"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return textResponse("FOCUS_BINDING_OK"); },
       textResponse("Focus binding"),
     );
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
@@ -42,7 +42,7 @@ test("stops targeted keyboard input when page handlers redirect focus", async ()
       typing: document.querySelector<HTMLInputElement>("#typing")!.value,
       keydown: document.querySelector<HTMLInputElement>("#keydown")!.value,
       otherKeys: document.body.dataset.otherKeys ?? "" })))
-      .toEqual({ redirect: "original", other: "untouched", typing: "a", keydown: "existing", otherKeys: "" });
+      .toEqual({ redirect: "original", other: "untouched", typing: "a", keydown: "replacement", otherKeys: "" });
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 

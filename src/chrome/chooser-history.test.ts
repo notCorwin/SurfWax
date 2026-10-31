@@ -5,6 +5,7 @@ it("keeps the captured chooser across same-document navigation but invalidates i
   const runtime = new AutomationRuntime({
     chromeApi: {} as never,
     command: vi.fn(async () => ({})),
+    pressChord: vi.fn(async () => undefined),
     detach: vi.fn(async () => undefined),
     mark: vi.fn(async () => undefined),
   });

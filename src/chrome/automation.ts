@@ -1,7 +1,7 @@
 import type { EventLogger } from "../logging";
 import { createLogGraphCodec, decodeLogGraph, encodeLogGraph } from "../log-graph";
 import { waitForDocumentFrame } from "./dom-frame";
-import { abortError, axValue, delay, imageSize, isTransientNavigationError, keyboardParams, modifierMask, throwIfAborted } from "./automation-utils";
+import { abortError, axValue, delay, imageSize, isTransientNavigationError, keyboardParams, modifierMask, parseKeyboardChord, throwIfAborted } from "./automation-utils";
 import { diffSnapshot, paginateSnapshot, type SnapshotItem, type SnapshotPosition } from "./snapshot-pagination";
 import { renderSnapshotNode, type SnapshotNode, type SnapshotStateName } from "./snapshot-render";
 import { PROGRAM_EVENT_INVOKE } from "./program-handles";
@@ -284,14 +284,28 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument, refs) 
   };
   const all = root => roots(root).flatMap(item => [...(item.querySelectorAll?.("*") || [])]);
   const visibleText = el => normalize(el.innerText === undefined ? el.textContent : el.innerText);
+  const labelText = root => {
+    if (["SCRIPT", "STYLE", "NOSCRIPT"].includes(root.nodeName) || root.ownerDocument?.head?.contains(root)) return "";
+    if (root.nodeName === "INPUT" && ["button", "submit", "reset"].includes(root.type)) return root.value;
+    let result = "";
+    for (const node of root.childNodes) {
+      if (node.nodeType === 3) result += node.nodeValue || "";
+      else if (node.nodeType === 1) result += labelText(node);
+    }
+    if (root.shadowRoot) result += labelText(root.shadowRoot);
+    return result;
+  };
   const matches = (el, query) => {
     const equal = (actual, expected) => query.exact ? normalize(actual) === normalize(expected) : normalize(actual).toLowerCase().includes(normalize(expected).toLowerCase());
     if (query.kind === "role") return roleOf(el) === query.value && (!query.name || equal(nameOf(el), query.name));
     if (query.kind === "text") return equal(visibleText(el), query.value) && ![...el.children].some(child => equal(visibleText(child), query.value));
     if (query.kind === "label") {
-      const labelledBy = el.getAttribute("aria-labelledby");
-      const label = el.getAttribute("aria-label") || (labelledBy ? labelledBy.split(/\s+/).map(id => el.getRootNode().getElementById?.(id)?.textContent || "").join(" ") : "") || (el.labels ? [...el.labels].map(item => item.textContent).join(" ") : "");
-      return Boolean(label) && equal(label, query.value);
+      const labelledBy = el.getAttribute("aria-labelledby")?.trim();
+      const referenced = labelledBy ? labelledBy.split(/\s+/).map(id => el.getRootNode().getElementById?.(id)).filter(Boolean) : [];
+      if (referenced.length) return referenced.some(label => equal(labelText(label), query.value));
+      const ariaLabel = el.getAttribute("aria-label");
+      if (ariaLabel?.trim()) return equal(ariaLabel, query.value);
+      return el.labels ? [...el.labels].some(label => equal(labelText(label), query.value)) : false;
     }
     if (query.kind === "placeholder") return equal(el.getAttribute("placeholder"), query.value);
     if (query.kind === "alt") return equal(el.getAttribute("alt"), query.value);
@@ -390,6 +404,7 @@ export class AutomationRuntime {
   constructor(private readonly options: {
     chromeApi: typeof chrome;
     command: Command;
+    pressChord: (debuggee: Debuggee, chord: string, signal?: AbortSignal, assertFocus?: () => Promise<void>) => Promise<void>;
     atomicClick?: (debuggee: Debuggee, params: Record<string, unknown>) => Promise<unknown>;
     hitTest?: (debuggee: Debuggee, params: Record<string, unknown>) => Promise<any>;
     detach: (debuggee: Debuggee) => Promise<void>;
@@ -903,6 +918,7 @@ export class AutomationRuntime {
   }
 
   async keyState(tabId: number, operation: "keydown" | "keyup", chord: string): Promise<void> {
+    if (parseKeyboardChord(chord).modifiers.length) throw automationError("invalid-key", { reason: "key-state-requires-single-key" });
     const session = await this.session(tabId);
     const input = keyboardParams(chord);
     await this.options.command(session.debuggee, "Input.dispatchKeyEvent", { ...input, type: operation === "keydown" ? input.text ? "keyDown" : "rawKeyDown" : "keyUp" });
@@ -1176,7 +1192,7 @@ export class AutomationRuntime {
         await this.withFocusedTarget(targetSession, objectId, operationSignal, async (assertFocus, backendNodeId) => {
           if (operation === "pressSequentially") {
             for (const character of String(args[0] ?? "")) { await assertFocus(); await this.options.command(targetSession.debuggee, "Input.insertText", { text: character, surfWaxTargetBackendNodeId: backendNodeId }); }
-          } else { await assertFocus(); await this.press(targetSession, String(args[0] ?? ""), operationSignal); }
+          } else { await this.press(targetSession, String(args[0] ?? ""), operationSignal, assertFocus); }
         }, operation === "pressSequentially");
         return this.afterAction(session);
       }
@@ -1919,7 +1935,7 @@ export class AutomationRuntime {
           continue;
         }
         if (query.kind === "frame" || query.kind === "frameRef") throw automationError("unsupported-target", { reason: "frame-inside-filter" });
-        const groups = await Promise.all(current.map((node) => query.kind === "role" || query.kind === "label" ? semanticStep(node, query) : domStep(node, query)));
+        const groups = await Promise.all(current.map((node) => query.kind === "role" ? semanticStep(node, query) : domStep(node, query)));
         current = unique(groups.flat());
       }
       if (locator.has || locator.hasText !== undefined) await filter(locator.hasText, locator.has);
@@ -2083,7 +2099,7 @@ export class AutomationRuntime {
   }
 
   private usesNativeAccessibility(spec: LocatorSpec): boolean {
-    return !spec.has && !spec.hasText && spec.queries.length === 1 && ["role", "label"].includes(spec.queries[0]!.kind);
+    return !spec.has && !spec.hasText && spec.queries.length === 1 && spec.queries[0]!.kind === "role";
   }
 
   private async resolveAccessibility(debuggee: Debuggee, spec: LocatorSpec, rootObjectId?: string): Promise<Candidate[]> {
@@ -2102,19 +2118,15 @@ export class AutomationRuntime {
     }
     // CDP's accessibleName filter is case-sensitive and exact. Apply matching
     // ourselves so substring, case and whitespace semantics remain consistent.
-    const tree = await this.options.command(debuggee, "Accessibility.queryAXTree", query.kind === "role"
-      ? { ...root, role: query.value }
-      : root);
-    const controls = new Set(["button", "checkbox", "combobox", "listbox", "option", "radio", "searchbox", "slider", "spinbutton", "switch", "textbox"]);
+    const tree = await this.options.command(debuggee, "Accessibility.queryAXTree", { ...root, role: query.value });
     const normalize = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
     const equal = (actual: string, expected: string) => query.exact ? actual === expected : actual.toLocaleLowerCase().includes(expected.toLocaleLowerCase());
     let matches = (tree.nodes ?? []).flatMap((node: any): Candidate[] => {
       if (node.ignored || !node.backendDOMNodeId) return [];
       const role = axValue(node.role);
       const name = normalize(axValue(node.name));
-      const expected = normalize(query.kind === "role" ? query.name ?? "" : query.value);
-      if (query.kind === "role" && (role !== query.value || query.name !== undefined && !equal(name, expected))) return [];
-      if (query.kind === "label" && (!controls.has(role) || !equal(name, expected))) return [];
+      const expected = normalize(query.name ?? "");
+      if (role !== query.value || query.name !== undefined && !equal(name, expected)) return [];
       return [{ role, name, backendNodeId: node.backendDOMNodeId, debuggee }];
     });
     if (spec.index !== undefined) {
@@ -2618,16 +2630,8 @@ export class AutomationRuntime {
     }
   }
 
-  private async press(session: Session, chord: string, signal = this.context.signal): Promise<void> {
-    const input = keyboardParams(chord);
-    try { await this.options.command(session.debuggee, "Input.dispatchKeyEvent", { ...input, type: input.text ? "keyDown" : "rawKeyDown" }); }
-    catch (error) {
-      await this.options.command(session.debuggee, "Input.dispatchKeyEvent", { ...input, text: undefined, type: "keyUp" }).catch(() => undefined);
-      throw error;
-    }
-    try { throwIfAborted(signal); } finally {
-      await this.options.command(session.debuggee, "Input.dispatchKeyEvent", { ...input, text: undefined, type: "keyUp" });
-    }
+  private async press(session: Session, chord: string, signal = this.context.signal, assertFocus?: () => Promise<void>): Promise<void> {
+    await this.options.pressChord(session.debuggee, chord, signal, assertFocus);
   }
 
   private async waitForReady(session: Session): Promise<void> {

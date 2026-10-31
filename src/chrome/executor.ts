@@ -15,6 +15,7 @@ import { executeSandboxProgram } from "./program-host";
 import { DeferredProgramPage, PROGRAM_HANDLE_ASSERT_LIVE, PROGRAM_HANDLE_SESSION } from "./program-handles";
 import { estimateProgramTimeoutMs } from "./program-timeout";
 import { EventSubscriptions, type BrowserEventKind, type EventOwner } from "./event-subscriptions";
+import { keyboardParams, macEditingCommands, parseKeyboardChord } from "./automation-utils";
 
 type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
 type DebuggerTarget = chrome.debugger.TargetInfo;
@@ -198,6 +199,7 @@ export class ChromeExecutor {
   private popupListener?: (tab: chrome.tabs.Tab) => void;
   private tabRemovedListener?: (tabId: number) => void;
   private readonly heldInput = new Map<number, { x: number; y: number; buttons: Set<string>; keys: Map<string, Record<string, unknown>>; buttonVersions?: Map<string, symbol> }>();
+  private readonly inputTails = new Map<number, Promise<void>>();
   private readonly jobs: BrowserJobs;
   private readonly blockerContexts = new Map<string, { context: ExecutionContext; owner: EventOwner }>();
   private readonly blockers = new ForegroundBlockers(async (evidence) => {
@@ -280,6 +282,7 @@ export class ChromeExecutor {
     };
     this.automation = new AutomationRuntime({
       chromeApi: this.chromeApi,
+      pressChord: (debuggee, chord, signal, assertFocus) => this.pressChord(debuggee, chord, signal, assertFocus),
       command: (debuggee, method, params) => {
         const releaseInput = method === "Input.dispatchMouseEvent" && (params as { type?: string } | undefined)?.type === "mouseReleased"
           || method === "Input.dispatchKeyEvent" && (params as { type?: string } | undefined)?.type === "keyUp";
@@ -1060,7 +1063,7 @@ export class ChromeExecutor {
       await this.boundPage(target.tabId, state);
       if (target.sessionId && !(await this.automation.observationDebuggees(target.tabId)).some((item) => item.sessionId === target.sessionId)) throw new Error("CDP session is not owned by the selected tab");
       await scope.dispatched();
-      return this.bridgeCommand(target, method, params);
+      return this.bridgeCommand(target, method, params, true);
     }, method === "Page.handleJavaScriptDialog" ? undefined : sourceFor(target.tabId, target.sessionId)) };
     const artifacts = {
       read: (id: number, selection = {}) => call("artifacts.read", false, () => this.logger!.result(id, selection, this.activeContext.conversationId)),
@@ -1501,7 +1504,77 @@ export class ChromeExecutor {
     if (this.heldInput.get(tabId) === state && !state.keys.size && !state.buttons.size) this.heldInput.delete(tabId);
   }
 
-  private async bridgeCommand(debuggee: Debuggee, method: string, params?: object): Promise<any> {
+  private async withInputLock<T>(tabId: number, task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const previous = this.inputTails.get(tabId) ?? Promise.resolve();
+    let release!: () => void;
+    const done = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.then(() => done);
+    this.inputTails.set(tabId, tail);
+    void tail.then(() => { if (this.inputTails.get(tabId) === tail) this.inputTails.delete(tabId); });
+    let onAbort: (() => void) | undefined;
+    try {
+      throwIfAborted(signal);
+      if (signal) await Promise.race([previous, new Promise<never>((_, reject) => {
+        onAbort = () => reject(abortError());
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      })]);
+      else await previous;
+      throwIfAborted(signal);
+      return await task();
+    }
+    finally {
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+      release();
+    }
+  }
+
+  private async pressChord(debuggee: Debuggee, chord: string, signal?: AbortSignal, assertFocus?: () => Promise<void>): Promise<void> {
+    const parsed = parseKeyboardChord(chord);
+    if (debuggee.tabId === undefined) throw new Error("Cannot send keyboard input without a tab");
+    await this.withInputLock(debuggee.tabId, async () => {
+      throwIfAborted(signal);
+      const held = this.inputState(debuggee.tabId!).keys;
+      const initial = new Set(held.keys());
+      const owned: Array<{ key: string; params: Record<string, unknown> }> = [];
+      let failure: unknown;
+      let attempted = false;
+      try {
+        for (const key of [...parsed.modifiers, parsed.key]) {
+          throwIfAborted(signal);
+          if (initial.has(key) && key !== parsed.key) continue;
+          await assertFocus?.();
+          throwIfAborted(signal);
+          const params = keyboardParams(key);
+          const alreadyHeld = initial.has(key);
+          if (!alreadyHeld) owned.push({ key, params });
+          attempted = true;
+          await this.bridgeCommandUnlocked(debuggee, "Input.dispatchKeyEvent", { ...params,
+            type: params.text ? "keyDown" : "rawKeyDown", ...(alreadyHeld ? { autoRepeat: true } : {}) });
+        }
+        throwIfAborted(signal);
+      } catch (error) { failure = error; }
+      for (const { params } of owned.reverse()) {
+        try { await this.bridgeCommandUnlocked(debuggee, "Input.dispatchKeyEvent", { ...params, type: "keyUp", text: undefined, unmodifiedText: undefined, commands: undefined }); }
+        catch (error) { failure ??= error; }
+      }
+      if (failure) {
+        if (attempted && typeof failure === "object") Object.assign(failure, { effectUnknown: true });
+        throw failure;
+      }
+    }, signal);
+  }
+
+  private async bridgeCommand(debuggee: Debuggee, method: string, params?: object, rawCdp = false): Promise<any> {
+    if (debuggee.tabId !== undefined && method.startsWith("Input.")) {
+      const type = (params as { type?: string } | undefined)?.type;
+      const cleanup = method === "Input.cancelDragging" || method === "Input.dispatchKeyEvent" && type === "keyUp" || method === "Input.dispatchMouseEvent" && type === "mouseReleased";
+      return this.withInputLock(debuggee.tabId, () => this.bridgeCommandUnlocked(debuggee, method, params, rawCdp), cleanup ? undefined : this.activeSignal);
+    }
+    return this.bridgeCommandUnlocked(debuggee, method, params, rawCdp);
+  }
+
+  private async bridgeCommandUnlocked(debuggee: Debuggee, method: string, params?: object, rawCdp = false): Promise<any> {
     if (/^(Input\.|DOM\.(focus|scrollIntoViewIfNeeded)|Page\.(navigate|reload|navigateToHistoryEntry|handleJavaScriptDialog))/.test(method) && !this.activeSignal?.aborted) await this.programScope?.dispatched();
     await this.bridgeDebuggee(debuggee);
     let input = params as Record<string, any> | undefined;
@@ -1532,6 +1605,10 @@ export class ChromeExecutor {
         input = { ...input, modifiers: ((input.modifiers ?? 0) | heldModifiers | ownModifier) & ~released };
         if (input.text && input.modifiers & 7) delete input.text;
         else if (input.text && input.modifiers & 8) input.text = input.text.toUpperCase();
+        if (!rawCdp && (input.type === "keyDown" || input.type === "rawKeyDown") && input.commands === undefined && typeof input.code === "string") {
+          const commands = macEditingCommands(input.code, input.modifiers);
+          if (commands) input.commands = commands;
+        }
         if (input.type === "keyUp" && typeof input.key === "string") releaseKey = { state, key: input.key, previous: state.keys.get(input.key) };
         else if ((input.type === "keyDown" || input.type === "rawKeyDown") && typeof input.key === "string" && input.key)
           state.keys.set(input.key, { ...input });

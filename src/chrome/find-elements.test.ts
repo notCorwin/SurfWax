@@ -51,7 +51,7 @@ function harness() {
     return {};
   });
   const runtime = new AutomationRuntime({ chromeApi: { tabs: { query: async () => [{ id: 3 }] } } as never, command,
-    mark: vi.fn(async () => {}), detach: vi.fn(async () => {}) });
+    pressChord: vi.fn(async () => {}), mark: vi.fn(async () => {}), detach: vi.fn(async () => {}) });
   const identity = (runId: string) => ({ conversationId: "conversation", logIdentity: { runId, toolCallId: "1:test", toolCallIdCanonical: true as const } });
   runtime.setContext(identity("run"));
   return { runtime, command, nodes, arrays, identity, setOrder: (value: number[]) => { order = value; } };
