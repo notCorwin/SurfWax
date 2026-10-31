@@ -130,6 +130,23 @@ async function main() {
   };
 
   await ensurePanel();
+  const { windowId, bounds } = await browserSession.send("Browser.getWindowForTarget", {
+    targetId: tab.targetId,
+  });
+  if (bounds.windowState === "minimized" || bounds.windowState === "fullscreen") {
+    await browserSession.send("Browser.setWindowBounds", {
+      windowId,
+      bounds: { windowState: "normal" },
+    });
+  }
+  await browserSession.send("Browser.setWindowBounds", {
+    windowId,
+    bounds: { windowState: "maximized" },
+  });
+  const { bounds: maximizedBounds } = await browserSession.send("Browser.getWindowBounds", { windowId });
+  if (maximizedBounds.windowState !== "maximized") {
+    throw new Error("无法最大化开发浏览器窗口。");
+  }
   context.on("serviceworker", (nextWorker) => {
     if (new URL(nextWorker.url()).hostname === extensionId) {
       setTimeout(() => void ensurePanel().catch(console.error), 300);
