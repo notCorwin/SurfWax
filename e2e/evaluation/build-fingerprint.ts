@@ -44,7 +44,7 @@ export async function fileFingerprint(path: string): Promise<string> {
 /** Hash the evaluator sources, separately from the extension under test. */
 export async function evaluationFingerprint(root: string): Promise<{ sha256: string; files: number }> {
   const paths = ["e2e/real-model-evaluation.spec.ts", "e2e/fixtures.ts", "playwright.config.ts",
-    "src/logging.ts", "src/log-graph.ts", "src/artifact-graph.ts"];
+    "src/logging.ts", "src/log-graph.ts", "src/artifact-graph.ts", "src/chrome/atomic-tools.ts"];
   const walk = async (parent: string): Promise<void> => {
     for (const entry of await readdir(join(root, parent), { withFileTypes: true })) {
       const path = `${parent}/${entry.name}`;
@@ -55,7 +55,7 @@ export async function evaluationFingerprint(root: string): Promise<{ sha256: str
     }
   };
   await walk("e2e/evaluation");
-  if (paths.length === 6) throw new Error("Evaluation sources missing");
+  if (paths.length === 7) throw new Error("Evaluation sources missing");
   paths.sort();
   const items = await Promise.all(paths.map(async (path) => {
     const file = join(root, path);

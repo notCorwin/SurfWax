@@ -25,7 +25,7 @@ it("only treats all known browser jobs as settled after their terminal states", 
 
 it("cross-checks accepted job handoffs against the same run's canonical states", () => {
   const tool = (id: number, output: unknown, identity = { conversationId: "c", runId: "r" }) => ({
-    id, type: "tool.finished", ...identity, output,
+    id, type: "tool.finished", ...identity, content: { toolName: "read_artifact" }, output,
   });
   const job = (id: number, state: string, identity = { conversationId: "c", runId: "r" }) => ({
     id, type: "browser.job.state", ...identity, content: { jobId: "job-a", state },
@@ -53,12 +53,13 @@ it("cross-checks accepted job handoffs against the same run's canonical states",
 });
 
 it("does not infer background work from synchronous or ordinary tool output", () => {
-  const tool = (output: unknown) => ({ id: 1, type: "tool.finished", conversationId: "c", runId: "r", output });
+  const tool = (output: unknown) => ({ id: 1, type: "tool.finished", conversationId: "c", runId: "r", content: { toolName: "read_artifact" }, output });
   expect(browserJobsSettled([tool({ ok: true, state: "succeeded", jobId: "completed", result: "ok" })])).toBe(true);
   expect(browserJobsSettled([tool({ ok: true, result: { accepted: true, complete: false, jobId: "user-data" } })])).toBe(true);
   expect(browserJobsSettled([tool({ accepted: true, state: "completed" })])).toBe(true);
   expect(browserJobsSettled([tool({ $ref: 42, envelopeWrapped: true })])).toBe(true);
   expect(browserJobsSettled([tool("plain value")])).toBe(true);
+  expect(browserJobsSettled([{ ...tool("plain value"), content: undefined }])).toBeNull();
   expect(browserJobsSettled([{ id: 1, type: "tool.finished", conversationId: "c", runId: "r" }])).toBeNull();
 });
 
@@ -67,11 +68,72 @@ it("does not pass a successful business result when the accepted job log is miss
   const events = [
     { id: 1, type: "conversation.message", ...owner, content: { id: "m", role: "assistant", parts: [{ type: "tool-execute_program", toolCallId: "t" }] } },
     { id: 2, type: "tool.started", ...owner, toolCallId: "t" },
-    { id: 3, type: "tool.finished", ...owner, toolCallId: "t", output: { accepted: true, complete: false, jobId: "j" } },
+    { id: 3, type: "tool.finished", ...owner, toolCallId: "t", content: { toolName: "execute_program" }, output: { accepted: true, complete: false, jobId: "j" } },
   ];
   const lifecycle = toolLifecycleEvidence(events);
   expect(lifecycle.complete).toBe(true);
   expect(evaluateResultEvidence({ outcome: "conversation.finished", networkSettled: true, ledgerDrained: true, logComplete: true,
     business: true, interaction: { applicable: false }, lifecycle: lifecycle.complete, jobsSettled: browserJobsSettled(events) }))
+    .toMatchObject({ classification: "unknown", passed: false, reasons: ["jobs_unknown"] });
+});
+
+it("correlates foreground program results with canonical job states", () => {
+  const owner = { conversationId: "c", runId: "r", toolCallId: "t" };
+  const job = (state: string, identity = owner) => ({ id: 4, type: "browser.job.state", ...identity, content: { jobId: "j", state } });
+  const tool = (name: string, output: unknown, identity = owner) => ({
+    id: 3, type: "tool.finished", ...identity, content: { toolName: name }, output,
+  });
+  const output = { jobId: "j", ok: true, state: "succeeded", result: { jobId: "ordinary", accepted: true, complete: false } };
+  expect(browserJobsSettled([tool("execute_program", output)])).toBeNull();
+  expect(browserJobsSettled([tool("click", output)])).toBeNull();
+  expect(browserJobsSettled([tool("execute_program", output), job("succeeded")])).toBe(true);
+  expect(browserJobsSettled([tool("execute_program", output), job("running")])).toBe(false);
+  expect(browserJobsSettled([tool("execute_program", output), { ...job("failed"), output: { ok: false, error: { code: "known", message: "Known failure" } } }])).toBeNull();
+  expect(browserJobsSettled([tool("execute_program", output), job("succeeded", { ...owner, runId: "other" })])).toBeNull();
+  expect(browserJobsSettled([tool("execute_program", output), job("succeeded", { ...owner, toolCallId: "other" })])).toBeNull();
+  expect(browserJobsSettled([tool("execute_program", output, { ...owner, toolCallId: "" }), job("succeeded")])).toBeNull();
+  expect(browserJobsSettled([tool("execute_program", { ok: true, result: "missing envelope" })])).toBeNull();
+  expect(browserJobsSettled([tool("execute_program", "missing envelope")])).toBeNull();
+  // Ordinary direct-tool return values do not imply a browser job.
+  expect(browserJobsSettled([tool("read_artifact", output)])).toBe(true);
+  expect(browserJobsSettled([tool("list_tabs", output)])).toBe(true);
+  expect(browserJobsSettled([tool("upload_file", { ok: true, result: "chooser upload" })])).toBe(true);
+  expect(browserJobsSettled([tool("execute_program", { ...output, envelopeWrapped: true, result: output }), job("succeeded")])).toBe(true);
+  const encoded = { ...tool("execute_program", toLogValue(output, undefined, 5)), content: toLogValue({ toolName: "execute_program" }, undefined, 5), valueEncoding: 5 };
+  expect(browserJobsSettled([encoded])).toBeNull();
+  expect(browserJobsSettled([encoded, job("succeeded")])).toBe(true);
+});
+
+it("resolves compressed foreground result owners only from matching canonical artifacts", () => {
+  const owner = { conversationId: "c", runId: "r", toolCallId: "t" };
+  const tool = { id: 5, type: "tool.finished", ...owner, content: { toolName: "execute_program" }, output: { $ref: 2, resultAccess: { artifactId: 2, path: ["result"] } } };
+  const artifact = { id: 2, type: "tool.result.data", ...owner, content: { bytes: 9000 }, output: { jobId: "j", ok: true, state: "succeeded", result: "large" } };
+  const job = { id: 4, type: "browser.job.state", ...owner, content: { jobId: "j", state: "succeeded" } };
+  expect(browserJobsSettled([tool])).toBeNull();
+  expect(browserJobsSettled([tool, artifact])).toBeNull();
+  expect(browserJobsSettled([tool, artifact, job])).toBe(true);
+  expect(browserJobsSettled([tool, { ...artifact, toolCallId: "other" }, job])).toBeNull();
+  expect(browserJobsSettled([tool, artifact, artifact, job])).toBeNull();
+  expect(browserJobsSettled([tool, { ...artifact, content: { jobId: "j" }, output: { result: "large" } }, job])).toBe(true);
+  const partitioned = { ...artifact, output: null, artifactGraph: { version: 1, key: "parts", root: [1, 0] } };
+  expect(browserJobsSettled([tool, partitioned, job])).toBe(true);
+  expect(browserJobsSettled([tool, partitioned])).toBeNull();
+  expect(browserJobsSettled([tool, partitioned, { ...job, toolCallId: "other" }])).toBeNull();
+  expect(browserJobsSettled([tool, partitioned, job, { ...job, id: 6, content: { jobId: "other", state: "succeeded" } }])).toBeNull();
+  // A compacted job result may instead preserve jobId in the visible envelope.
+  expect(browserJobsSettled([{ ...tool, output: { $ref: 2, jobId: "j", ok: true, state: "succeeded" } }, job])).toBe(true);
+});
+
+it("does not pass a completed business result when its foreground job state is missing", () => {
+  const owner = { conversationId: "c", runId: "r" };
+  const events = [
+    { id: 1, type: "conversation.message", ...owner, content: { id: "m", role: "assistant", parts: [{ type: "tool-execute_program", toolCallId: "t" }] } },
+    { id: 2, type: "tool.started", ...owner, toolCallId: "t", content: { toolName: "execute_program" } },
+    { id: 3, type: "tool.finished", ...owner, toolCallId: "t", content: { toolName: "execute_program" }, output: { jobId: "j", ok: true, state: "succeeded", result: "done" } },
+  ];
+  const lifecycle = toolLifecycleEvidence(events).complete;
+  expect(lifecycle).toBe(true);
+  expect(evaluateResultEvidence({ outcome: "conversation.finished", networkSettled: true, ledgerDrained: true, logComplete: true,
+    business: true, interaction: { applicable: false }, lifecycle, jobsSettled: browserJobsSettled(events) }))
     .toMatchObject({ classification: "unknown", passed: false, reasons: ["jobs_unknown"] });
 });

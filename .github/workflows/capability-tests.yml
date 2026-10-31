@@ -1,0 +1,124 @@
+name: Tool capability tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: capability-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build extension once
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx vite build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: extension-build
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  build-contract:
+    name: Validate build contract and size
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v8
+        with:
+          name: extension-build
+          path: dist
+      - run: node scripts/validate-build.mjs
+
+  evidence:
+    name: Evaluation evidence and types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: mkdir -p test-results && npm test -- src/evaluation --reporter=default --reporter=junit --outputFile.junit=test-results/evaluation.xml
+      - name: Save evaluation results on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: evaluation-results
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  browser:
+    name: No-model levels (Chrome ${{ matrix.browser }})
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: ['138', current]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v8
+        with:
+          name: extension-build
+          path: dist
+      - name: Install Chrome dependencies
+        run: npx playwright install-deps chromium
+      - name: Install Chrome for Testing
+        id: browser
+        run: node scripts/install-test-browser.mjs '${{ matrix.browser }}'
+      - name: Exercise fixtures and extension tools without an LLM
+        env:
+          SURFWAX_CHROME_138_PATH: ${{ steps.browser.outputs.executable }}
+          SURFWAX_CHROME_PATH: ${{ steps.browser.outputs.executable }}
+          PLAYWRIGHT_HTML_OPEN: never
+        run: >-
+          npx playwright test
+          e2e/evaluation/artifact-handoff-fixture.spec.ts
+          e2e/evaluation/cancel-recovery-fixture.spec.ts
+          e2e/evaluation/claims-fixture.spec.ts
+          e2e/evaluation/closed-event-fixture.spec.ts
+          e2e/evaluation/semantic-delta-fixture.spec.ts
+          e2e/artifact-handoff-tools.spec.ts
+          e2e/cancel-recovery-tools.spec.ts
+          e2e/claims-queue-tools.spec.ts
+          e2e/closed-event-tools.spec.ts
+          e2e/semantic-delta-tools.spec.ts
+          e2e/semantic-alternative-path.spec.ts
+          e2e/real-model-harness.spec.ts
+          --grep 'artifact-handoff|cancel-recovery|claims-fixture|closed-event-fixture|semantic-delta-fixture|claims-queue-tools|closed-event-tools|semantic-delta-tools|semantic-alternative-path|local scripted semantic-delta|local scripted userscript-repair|a completed order with an unfinished background job'
+          --project=current --workers=1 --retries=0 --reporter=list,html
+      - name: Save browser reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-report-${{ matrix.browser }}
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: ignore
+          retention-days: 7

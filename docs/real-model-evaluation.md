@@ -10,12 +10,16 @@
 
 独立的无模型 `artifact-handoff` 测试从跨域页面读取 2,048 条多字节记录，将后台任务的结果通过 `get_job` 和 `read_artifact` 分页取回，重组后经页面提交；两个固定种子的分页边界均切开 Unicode 代理对。服务端核验 UTF-8 字节数、SHA-256 和提交次数；错误或重复提交不可抵消。服务端账本本身不能证明产物读取路径，固定脚本的工具结果和调用检查才验证这一通路；直接 HTTP 可以伪造业务提交。它不是上述真实模型套件中的场景，也不衡量模型成功率。
 
+独立的无模型 `cancel-recovery` 测试让服务端先提交写入，再挂起响应；固定工具通路在服务端确认写入后取消仍在等待的后台任务，并在响应释放前通过页面核验状态，禁止重复提交。释放响应后再次检查账本；测试分别核验任务取消、工具终态和业务结果。已取消的任务仍属效果未知，不能只凭业务账本将其判为正常完成；直接请求可以伪造账本。
+
 已有扩展构建时，可通过以下命令在本机运行这些实际扩展通路，包含用户脚本有效与空脚本绕过两种结果。测试使用本地模拟服务提供固定工具调用，无需真实 LLM 或 API 密钥：
 
 ```sh
 npx playwright test e2e/real-model-harness.spec.ts -g 'local scripted binary-transfer|local scripted userscript-repair|a no-op registered script' --retries=0
-npx playwright test e2e/claims-queue-tools.spec.ts e2e/closed-event-tools.spec.ts e2e/semantic-delta-tools.spec.ts e2e/artifact-handoff-tools.spec.ts --retries=0
+npx playwright test e2e/claims-queue-tools.spec.ts e2e/closed-event-tools.spec.ts e2e/semantic-delta-tools.spec.ts e2e/artifact-handoff-tools.spec.ts e2e/cancel-recovery-tools.spec.ts --retries=0
 ```
+
+GitHub Actions 的工具能力工作流构建一次扩展，分别验证构建预算、评测证据，以及 Chrome 138 和当前版本中的一组无模型关卡。浏览器测试独立于预算门禁运行，以保留关卡结果；预算不合格仍会令工作流失败。已知困难探针保持显式运行，不会被计作常规关卡通过。
 
 在本机复现中，第二个窗口的 `tabs.onCreated.openerTabId` 指向当时激活的第一个弹窗，而 CDP `Target.targetCreated` 的 opener 仍指向实际发起页面；仅以前者匹配原标签会漏掉事件。该观察需要在修复时结合并发窗口、跨域和生命周期竞态验证，不能用第一个新标签作为通用关联依据。
 
@@ -46,4 +50,4 @@ npx playwright test e2e/claims-queue-tools.spec.ts e2e/closed-event-tools.spec.t
 
 将计划保存为 `plan.json`，执行 `npm run eval:suite -- freeze plan.json manifest.json`。清单列出每个样本的 `id`、`scenario`、`seed` 和 `repeat`，以及整体 `planHash`。逐个运行样本时，将 `SURFWAX_EVAL_SUITE_PLAN_HASH`、`SURFWAX_EVAL_SUITE_SAMPLE_ID` 和 `SURFWAX_EVAL_SUITE_REPEAT` 分别设为清单中的 `planHash`、样本 `id` 和 `repeat`；同时设置匹配计划的 provider、model、scenario、seed 和 timeout，以及上述运行所需的凭据和 opt-in。把这些运行的报告放在一个只含 JSON 报告的目录中，执行 `npm run eval:suite -- aggregate manifest.json reports summary.json`。清单和汇总文件不会覆盖已有文件。套件执行本身仍需手动启动每个样本；仅创建清单不会发起付费调用。汇总会拒绝身份不匹配、重复、额外或证据自相矛盾的报告，将缺失样本保留为 unknown，并分别统计超时和缺失。重复运行同一种子并非独立任务。清单身份是归档和防误配机制，并非防篡改签名。
 
-单次报告记录任务起止时限和当前运行的终态事件时间，以持久化终态而非轮询发现的时刻判断是否超时；缺少或冲突的时间证据为 unknown。报告还记录扩展目录构建哈希、评测源码哈希、运行前后哈希是否一致、锁文件哈希和浏览器版本。评测源码哈希覆盖 `e2e/evaluation` 下非测试 TypeScript 文件、评测入口、`e2e/fixtures.ts`、Playwright 配置及日志解码依赖 `src/logging.ts`、`src/log-graph.ts`、`src/artifact-graph.ts`。汇总的 `environment.comparable` 只比较这些扩展构建、评测源码、锁文件和浏览器证据：不同或不稳定为 false，缺少信息为 null，一致且至少两个样本为 true；它不表示实验具有统计可比性。哈希描述的是两次读取时的磁盘内容；模块可能在首次计算哈希前已加载，不能证明运行时代码与磁盘一致，前后哈希一致也不能排除运行中临时修改后还原。上述范围不包括 Node、操作系统或实际安装依赖，锁文件哈希不能证明实际安装的依赖一致。未进行真实模型样本运行时，这些关卡和脚本化通路不能说明模型成功率或关卡难度已经校准。
+单次报告记录任务起止时限和当前运行的终态事件时间，以持久化终态而非轮询发现的时刻判断是否超时；缺少或冲突的时间证据为 unknown。报告还记录扩展目录构建哈希、评测源码哈希、运行前后哈希是否一致、锁文件哈希和浏览器版本。评测源码哈希覆盖 `e2e/evaluation` 下非测试 TypeScript 文件、评测入口、`e2e/fixtures.ts`、Playwright 配置及日志解码依赖 `src/logging.ts`、`src/log-graph.ts`、`src/artifact-graph.ts`，以及任务工具注册表 `src/chrome/atomic-tools.ts`。汇总的 `environment.comparable` 只比较这些扩展构建、评测源码、锁文件和浏览器证据：不同或不稳定为 false，缺少信息为 null，一致且至少两个样本为 true；它不表示实验具有统计可比性。哈希描述的是两次读取时的磁盘内容；模块可能在首次计算哈希前已加载，不能证明运行时代码与磁盘一致，前后哈希一致也不能排除运行中临时修改后还原。上述范围不包括 Node、操作系统或实际安装依赖，锁文件哈希不能证明实际安装的依赖一致。未进行真实模型样本运行时，这些关卡和脚本化通路不能说明模型成功率或关卡难度已经校准。

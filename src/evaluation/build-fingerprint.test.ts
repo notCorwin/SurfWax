@@ -32,15 +32,17 @@ it("fingerprints evaluator and scoring sources separately, and fails closed when
   const root = await mkdtemp(join(tmpdir(), "surfwax-evaluation-fingerprint-"));
   try {
     await mkdir(join(root, "e2e/evaluation"), { recursive: true });
-    await mkdir(join(root, "src"));
-    for (const file of ["e2e/real-model-evaluation.spec.ts", "e2e/fixtures.ts", "playwright.config.ts", "src/logging.ts", "src/log-graph.ts", "src/artifact-graph.ts", "e2e/evaluation/network-level-fixture.ts"]) {
+    await mkdir(join(root, "src/chrome"), { recursive: true });
+    for (const file of ["e2e/real-model-evaluation.spec.ts", "e2e/fixtures.ts", "playwright.config.ts", "src/logging.ts", "src/log-graph.ts", "src/artifact-graph.ts", "src/chrome/atomic-tools.ts", "e2e/evaluation/network-level-fixture.ts"]) {
       await writeFile(join(root, file), file);
     }
     const first = await evaluationFingerprint(root);
-    expect(first).toMatchObject({ files: 7, sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(first).toMatchObject({ files: 8, sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
     await writeFile(join(root, "e2e/evaluation/network-level-fixture.spec.ts"), "test only");
     expect(await evaluationFingerprint(root)).toEqual(first);
     await writeFile(join(root, "e2e/evaluation/network-level-fixture.ts"), "changed score");
+    expect((await evaluationFingerprint(root)).sha256).not.toBe(first.sha256);
+    await writeFile(join(root, "src/chrome/atomic-tools.ts"), "changed registry");
     expect((await evaluationFingerprint(root)).sha256).not.toBe(first.sha256);
     await rm(join(root, "src/logging.ts"));
     await expect(evaluationFingerprint(root)).rejects.toThrow();
