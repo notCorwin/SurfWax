@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { expect, test, commandResponse, delayedResponse, textResponse, startProvider, closeServer, type MockResponse } from "./fixtures";
 import { aggregateSuiteReports, createSuiteManifest } from "./evaluation/suite-manifest";
+import { semanticProgram } from "./evaluation/semantic-program";
 
 async function runHarness(baseURL: string, directory: string, scenario = "cross-frame-order", timeoutMs = 90_000, extraEnv: Record<string, string> = {}) {
   return promisify(execFile)(process.execPath, [resolve("node_modules/@playwright/test/cli.js"), "test", "e2e/real-model-evaluation.spec.ts", "--retries=0", "--reporter=line", "--trace=off", `--output=${resolve(directory, "playwright")}`], {
@@ -81,6 +82,7 @@ test("real-model entry accepts recovery after the intentional response interrupt
 });
 
 for (const scenario of [
+  { name: "semantic-delta", code: semanticProgram() },
   { name: "window-transfer", code: `
     const launcher = page.frameLocator('iframe[title="Window launcher"]');
     const waiting = page.waitForEvent('popup');
@@ -196,7 +198,7 @@ for (const scenario of [
     }
     return textResponse("Done");
   };
-  responses.push(commandResponse("execute_program", { code: scenario.code, timeoutMs: 60_000 }, "local-level"), afterTool, textResponse("Title"));
+  responses.push(commandResponse("execute_program", { code: scenario.code, timeoutMs: scenario.name === "semantic-delta" ? 80_000 : 60_000 }, "local-level"), afterTool, textResponse("Title"));
   const provider = await startProvider(responses);
   const directory = await mkdtemp(resolve(tmpdir(), "surfwax-eval-harness-"));
   try {
@@ -216,6 +218,10 @@ for (const scenario of [
       networkSettled: true, toolsWithExactlyOneTerminal: true });
     if (scenario.name === "rolling-queue") expect(report).toMatchObject({ interactionApplicable: true, interactionVerified: true, classification: "passed" });
     if (scenario.name === "frame-replacement") expect(report).toMatchObject({ interactionApplicable: true, interactionVerified: true, classification: "passed" });
+    if (scenario.name === "semantic-delta") {
+      expect(report).toMatchObject({ interactionApplicable: true, interactionVerified: true, classification: "passed" });
+      expect(report.completedProgramOperations["page.inspect"]).toBeGreaterThan(12);
+    }
     if (scenario.name === "userscript-repair") {
       expect(report).toMatchObject({ scriptExecutionVerified: true, jobsSettled: true });
       expect(report.completedProgramOperations["scripts.edit"]).toBeGreaterThan(0);

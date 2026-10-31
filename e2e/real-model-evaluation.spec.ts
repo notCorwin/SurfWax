@@ -23,6 +23,7 @@ import { verifyUserScript } from "./evaluation/userscript-verification";
 import { frameReplacementFixture, frameReplacementScore, frameReplacementInteractionScore, type FrameReplacementFixture } from "./evaluation/frame-replacement-fixture";
 import { binaryTransferFixture, binaryTransferScore, type BinaryTransferFixture } from "./evaluation/binary-transfer-fixture";
 import { closedEventFixture, closedEventScore, type ClosedEventFixture } from "./evaluation/closed-event-fixture";
+import { semanticDeltaFixture, semanticDeltaScore, semanticDeltaInteractionScore, type SemanticDeltaFixture } from "./evaluation/semantic-delta-fixture";
 import { trackFixtureRequests } from "./evaluation/network-quiescence";
 import { trackServerResponses, type ServerActivity } from "./evaluation/server-quiescence";
 import { waitForEvaluationQuiescence } from "./evaluation/quiescence";
@@ -66,7 +67,7 @@ test("@real-model browser task", async () => {
   const order = `ORDER-${seed}`;
   const started = Date.now();
   const proxy = await modelProxy(upstream, key);
-  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | Awaited<ReturnType<typeof uploadFixture>> | Awaited<ReturnType<typeof pointerFixture>> | Awaited<ReturnType<typeof recoveryFixture>> | Awaited<ReturnType<typeof multitabFixture>> | Awaited<ReturnType<typeof manifestFixture>> | Awaited<ReturnType<typeof rollingFixture>> | Awaited<ReturnType<typeof chooserPromptFixture>> | Awaited<ReturnType<typeof networkFixture>> | UserscriptFixture | FrameReplacementFixture | BinaryTransferFixture | ClosedEventFixture | undefined;
+  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | Awaited<ReturnType<typeof uploadFixture>> | Awaited<ReturnType<typeof pointerFixture>> | Awaited<ReturnType<typeof recoveryFixture>> | Awaited<ReturnType<typeof multitabFixture>> | Awaited<ReturnType<typeof manifestFixture>> | Awaited<ReturnType<typeof rollingFixture>> | Awaited<ReturnType<typeof chooserPromptFixture>> | Awaited<ReturnType<typeof networkFixture>> | UserscriptFixture | FrameReplacementFixture | BinaryTransferFixture | ClosedEventFixture | SemanticDeltaFixture | undefined;
   let scriptLevel: UserscriptFixture | undefined, scriptRegistry: RegistryEvidence | null = null, scriptExecutionVerified: boolean | null = null, scriptLedgerVerified: boolean | null = null;
   let opened: Awaited<ReturnType<typeof openExtension>> | undefined;
   let events: any[] = [], outcome = "setup_failed", business: boolean | null = null, interaction: boolean | null = null;
@@ -88,7 +89,11 @@ test("@real-model browser task", async () => {
     let prompt: string;
     let grade: () => boolean | null;
     let gradeInteraction: (() => boolean) | undefined;
-    if (scenario === "closed-event-ledger") {
+    if (scenario === "semantic-delta") {
+      const semantic = await semanticDeltaFixture(seed); fixture = semantic; prompt = semantic.prompt;
+      grade = () => semanticDeltaScore(semantic.evidence());
+      gradeInteraction = () => semanticDeltaInteractionScore(semantic.evidence());
+    } else if (scenario === "closed-event-ledger") {
       const closed = await closedEventFixture(seed); fixture = closed; prompt = closed.prompt;
       grade = () => closedEventScore(closed.evidence());
     } else if (scenario === "binary-transfer") {

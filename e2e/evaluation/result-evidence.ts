@@ -38,7 +38,7 @@ export type ResultReason =
 
 /** Scenarios that require independently observed trusted user input. */
 export function requiresInteraction(scenario: string): boolean {
-  return ["sequence-editor", "pointer-drag", "rolling-queue", "frame-replacement"].includes(scenario);
+  return ["sequence-editor", "pointer-drag", "rolling-queue", "frame-replacement", "semantic-delta"].includes(scenario);
 }
 
 /** Last agent request observed by the proxy, independent of the task result.

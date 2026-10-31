@@ -41,7 +41,7 @@ describe("offline benchmark suite manifest", () => {
   });
 
   it("requires scenario-specific interaction and settled job evidence", () => {
-    for (const scenario of ["sequence-editor", "pointer-drag", "rolling-queue", "frame-replacement"]) {
+    for (const scenario of ["sequence-editor", "pointer-drag", "rolling-queue", "frame-replacement", "semantic-delta"]) {
       const manifest = createSuiteManifest({ ...plan(), scenarios: [scenario], seeds: [17], repeats: 1 });
       expect(() => aggregateSuiteReports(manifest, [report(manifest, 0, { interactionApplicable: false, interactionVerified: null })])).toThrow(/interaction evidence mismatch/i);
     }
