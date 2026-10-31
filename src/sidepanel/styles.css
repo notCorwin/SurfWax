@@ -231,6 +231,12 @@ p {
   contain: layout style;
 }
 
+.conversation-turn,
+.assistant-message-content,
+.transcript-activity-list {
+  gap: var(--transcript-flow-gap);
+}
+
 .assistant-message {
   max-width: 100%;
   overflow-wrap: anywhere;
@@ -394,6 +400,49 @@ p {
   border-right: 1px solid currentColor; border-top: 1px solid currentColor; transform: rotate(45deg);
 }
 :is(.thinking-item, .activity)[open] > summary::after { transform: rotate(135deg); }
+
+/* Action history and its live state share one quiet, aligned text column. */
+.transcript-activity:not(details),
+.transcript-activity > summary {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  min-width: 0;
+  min-height: calc(var(--spacing) * 6);
+  margin: 0;
+  padding: 0;
+  color: var(--muted-foreground);
+  font-size: var(--type-caption);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  line-height: var(--line-caption);
+}
+
+.transcript-activity:not(details)::before,
+.transcript-activity > summary::before {
+  width: var(--spacing);
+  height: var(--spacing);
+  flex: 0 0 var(--spacing);
+  margin-inline-end: calc(var(--spacing) * 2);
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+}
+
+.transcript-activity[data-status="running"] > summary::before,
+.transcript-activity.transcript-waiting::before {
+  background: var(--brand);
+}
+
+.transcript-activity > summary::after {
+  margin-inline-start: auto;
+}
+
+.transcript-waiting > span,
+.transcript-activity:not(details) > span + span {
+  white-space: pre;
+}
+
 .app-shell > [role="status"], .app-shell > [role="alert"] { margin: calc(var(--spacing) * 2) calc(var(--spacing) * 4); font-size: var(--type-xs); }
 @media (max-height: 600px) {
   .welcome { min-height: 0; padding-block: calc(var(--spacing) * 4); gap: calc(var(--spacing) * 4); }

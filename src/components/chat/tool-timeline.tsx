@@ -60,12 +60,12 @@ export function toolGroupDuration(tools: readonly ToolPart[]): number | undefine
 }
 
 export function ToolGroupView({ group }: { group: ToolGroup }) {
-  if (group.live) return <div data-testid="live-tool-calls" className="flex flex-col">
+  if (group.live) return <div data-testid="live-tool-calls" className="transcript-activity-list flex flex-col">
     {group.tools.slice(-3).map((part) => <ToolFallback key={part.toolCallId} {...part} autoExpandError={false} />)}
   </div>;
   const duration = toolGroupDuration(group.tools);
   const summary = summarizeToolActions(group.tools);
-  return <div data-testid="tool-group-summary" className="thinking-item flex min-w-0 px-2">
+  return <div data-testid="tool-group-summary" className="transcript-activity">
     <span className="truncate" title={summary}>{summary}</span>{duration === undefined ? null : <span className="shrink-0">{` · ${(duration / 1000).toFixed(2)} 秒`}</span>}
   </div>;
 }

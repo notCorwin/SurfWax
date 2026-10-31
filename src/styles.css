@@ -41,6 +41,7 @@
   --syntax-type: #116329;
   --thread-max-width: 44rem;
   --transcript-item-gap: calc(var(--spacing) * 1);
+  --transcript-flow-gap: calc(var(--spacing) * 2);
   --transcript-block-gap: 0.75rem;
   --transcript-turn-gap: 1.25rem;
   --transcript-line-height: 1.5;

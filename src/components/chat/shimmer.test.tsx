@@ -11,7 +11,7 @@ import { ActivityPhaseContext, type ActivityPhase } from "./process-group";
 
 vi.mock("./markdown-text", () => ({ MarkdownText: () => null }));
 
-it("shimmers only active reasoning and tool labels", () => {
+it("distinguishes active reasoning and tool labels", () => {
   const reasoning = (type: "running" | "complete") => renderToStaticMarkup(createElement(Reasoning, {
     status: { type },
   } as ComponentProps<typeof Reasoning>));
@@ -22,7 +22,7 @@ it("shimmers only active reasoning and tool labels", () => {
 
   expect(reasoning("running")).toContain('class="shimmer text-foreground/65">正在思考');
   expect(reasoning("complete")).toContain("<span>思考完成</span>");
-  expect(tool("running")).toContain('class="shimmer text-foreground/65">点击');
+  expect(tool("running")).toContain('<span aria-live="off">点击</span>');
   expect(tool("complete")).toContain('<span aria-live="off">点击</span>');
   expect(tool("incomplete")).toContain('<span aria-live="off">点击 · 未完成</span>');
   expect(reasoning("running")).not.toContain("<svg");
@@ -41,7 +41,7 @@ it("keeps completed activity labels live until text, then settles them", () => {
     createElement(Reasoning, { status: { type: "incomplete" } } as ComponentProps<typeof Reasoning>)))).toContain("思考未完成");
 });
 
-it("settles the shimmer when command execution completes", async () => {
+it("updates the tool state when command execution completes", async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   const container = document.createElement("div");
   const root = createRoot(container);
@@ -53,11 +53,12 @@ it("settles the shimmer when command execution completes", async () => {
   await act(() => root.render(render("running")));
   const activeLabel = container.querySelector("summary span");
   expect(activeLabel?.textContent).toBe("点击");
+  expect(container.querySelector(".activity")?.getAttribute("data-status")).toBe("running");
 
   await act(() => root.render(render("complete")));
   const settledLabel = container.querySelector("summary span");
   expect(settledLabel?.textContent).toBe("点击");
-  expect(activeLabel?.classList.contains("shimmer")).toBe(false);
+  expect(container.querySelector(".activity")?.getAttribute("data-status")).toBe("complete");
   expect(container.querySelectorAll("summary span")).toHaveLength(1);
   await act(() => root.unmount());
 });

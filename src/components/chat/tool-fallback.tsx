@@ -25,9 +25,9 @@ export const ToolFallback = memo(function ToolFallback(part: { toolName: string;
     return () => clearInterval(interval);
   }, [running, part.startedAtMs, part.durationMs]);
   return (
-    <details className="activity" data-status={status} open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
+    <details className="activity transcript-activity" data-status={status} open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
       <summary>
-        <span aria-live="off" className={running ? "shimmer text-foreground/65" : undefined}>{label}</span>
+        <span aria-live="off">{label}</span>
       </summary>
       {expanded && <div className="activity-content">
         <strong>输入</strong>

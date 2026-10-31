@@ -66,5 +66,5 @@ export function WaitingStatus({ logger, conversationId, running, stopping, stopp
   const label = stopping ? "正在停止" : phase ? labels[phase.phase as Exclude<Phase, "terminal">] : "正在处理";
   const startedAt = stopping ? stoppingAt : phase?.startedAt;
   const elapsed = startedAt === undefined ? "" : ` · ${(Math.max(0, now - startedAt) / 1000).toFixed(2)} 秒`;
-  return <p role="status" className="conversation-notice px-2" data-testid="waiting-status">{label}<span aria-live="off">{elapsed}</span></p>;
+  return <p role="status" className="transcript-activity transcript-waiting" data-testid="waiting-status">{label}<span aria-live="off">{elapsed}</span></p>;
 }

@@ -33,7 +33,7 @@ describe("tool timeline", () => {
     const messages = [message("a", [tool("1"), tool("2"), tool("3"), tool("4")])];
     const live = toolGroupAt(projectToolTimeline(messages, true), "a", 0)!;
     const liveHtml = renderToStaticMarkup(createElement(ToolGroupView, { group: live }));
-    expect(liveHtml.match(/class="activity"/g)).toHaveLength(3);
+    expect(liveHtml.match(/class="activity transcript-activity"/g)).toHaveLength(3);
     const settled = toolGroupAt(projectToolTimeline(messages, false), "a", 0)!;
     const settledHtml = renderToStaticMarkup(createElement(ToolGroupView, { group: settled }));
     expect(settledHtml).toContain("tool-group-summary");

@@ -55,7 +55,7 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
                 const turn = turns[item.index]!;
                 const liveTurn = state.isRunning && item.index === turns.length - 1;
                 const timeline = projectToolTimeline(turn.messages, liveTurn);
-                return <div key={item.key} data-index={item.index} ref={virtualizer.measureElement} className="conversation-turn absolute top-0 left-0 flex w-full flex-col gap-3" style={{ transform: `translate3d(0, ${item.start}px, 0)` }}>
+                return <div key={item.key} data-index={item.index} ref={virtualizer.measureElement} className="conversation-turn absolute top-0 left-0 flex w-full flex-col" style={{ transform: `translate3d(0, ${item.start}px, 0)` }}>
                   {turn.messages.map((message) => <MessageRow key={message.id} message={message} messages={turn.messages} latest={message.id === state.messages.at(-1)?.id}
                     running={liveTurn} locked={locked} command={command} timeline={timeline} />)}
                   {liveTurn && <WaitingStatus logger={logger} conversationId={conversationId} running={state.isRunning} stopping={state.isStopping}
