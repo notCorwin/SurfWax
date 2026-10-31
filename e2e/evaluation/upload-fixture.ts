@@ -8,13 +8,13 @@ export interface UploadFixture {
   origin: string;
   server: Server;
   prompt: string;
-  evidence(): { downloads: string[]; attempts: UploadAttempt[]; expected: FileDigest[] };
+  evidence(): { completedSourceResponses: string[]; attempts: UploadAttempt[]; expected: FileDigest[] };
 }
 
 /** Every submission is recorded, including malformed, invalid, or repeated requests. */
 export function uploadScore(evidence: ReturnType<UploadFixture["evidence"]>): boolean {
   if (evidence.attempts.length !== 1 || !evidence.attempts[0]!.accepted) return false;
-  if (evidence.expected.some((file) => !evidence.downloads.includes(file.name))) return false;
+  if (evidence.expected.some((file) => !evidence.completedSourceResponses.includes(file.name))) return false;
   const canonical = (files: FileDigest[]) => JSON.stringify([...files].sort((a, b) => a.name.localeCompare(b.name)));
   return canonical(evidence.attempts[0]!.files) === canonical(evidence.expected);
 }
@@ -35,7 +35,7 @@ export async function uploadFixture(seed: number): Promise<UploadFixture> {
   ];
   const digest = (file: { name: string; bytes: Buffer }): FileDigest => ({ name: file.name, bytes: file.bytes.length, sha256: createHash("sha256").update(file.bytes).digest("hex") });
   const expected = files.map(digest);
-  const downloads: string[] = [];
+  const completedSourceResponses: string[] = [];
   const attempts: UploadAttempt[] = [];
   const server = createServer(async (request, response) => {
     const path = new URL(request.url ?? "/", "http://fixture.local").pathname;
@@ -73,7 +73,9 @@ export async function uploadFixture(seed: number): Promise<UploadFixture> {
     }
     if (request.method === "GET" && /^\/source\/[01]$/.test(path)) {
       const file = files[Number(path.at(-1))]!;
-      downloads.push(file.name);
+      // `finish` means the response was handed to the OS, not that the browser
+      // saved it. A request that disconnects before that point is not evidence.
+      response.once("finish", () => completedSourceResponses.push(file.name));
       response.writeHead(200, { "content-type": file.type, "content-disposition": `attachment; filename="${file.name}"`, "cache-control": "no-store" }).end(file.bytes);
       return;
     }
@@ -91,7 +93,7 @@ export async function uploadFixture(seed: number): Promise<UploadFixture> {
           if (bytes.toString("base64") !== record.base64) throw new Error("invalid base64");
           return digest({name: record.name, bytes});
         });
-        const accepted = uploadScore({ downloads: expected.map((file) => file.name), expected, attempts: [{ files: submitted, accepted: true }] });
+        const accepted = uploadScore({ completedSourceResponses: expected.map((file) => file.name), expected, attempts: [{ files: submitted, accepted: true }] });
         attempts.push({ files: submitted, accepted });
         response.writeHead(accepted ? 201 : 400, { "content-type": "application/json" }).end(JSON.stringify({ status: accepted ? "submitted" : "rejected" }));
       } catch {
@@ -108,6 +110,6 @@ export async function uploadFixture(seed: number): Promise<UploadFixture> {
   return {
     origin: `http://127.0.0.1:${address.port}`, server,
     prompt: "In the document desk, retrieve both source files, then attach both unchanged and submit the dossier once.",
-    evidence: () => ({ downloads: [...downloads], attempts: structuredClone(attempts), expected: structuredClone(expected) }),
+    evidence: () => ({ completedSourceResponses: [...completedSourceResponses], attempts: structuredClone(attempts), expected: structuredClone(expected) }),
   };
 }

@@ -27,6 +27,9 @@ export function trackFixtureRequests(context: BrowserContext, origins: readonly 
   context.on("requestfailed", onEnd);
 
   return {
+    isQuiet(quietMs: number): boolean {
+      return !disposed && active.size === 0 && performance.now() - lastActivity >= quietMs;
+    },
     /** True means no observed in-flight requests for quietMs, not that future timers cannot issue requests. */
     async wait({ quietMs, timeoutMs }: { quietMs: number; timeoutMs: number }): Promise<boolean> {
       if (!Number.isFinite(quietMs) || quietMs < 0 || !Number.isFinite(timeoutMs) || timeoutMs < 0) throw new Error("Invalid quiescence timing");

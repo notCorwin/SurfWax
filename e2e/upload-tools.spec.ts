@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
-import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, closeServer, type MockResponse } from "./fixtures";
+import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, closeServer, readEvents, type MockResponse } from "./fixtures";
 import { uploadFixture, uploadScore } from "./evaluation/upload-fixture";
+import { completedProgramOperations } from "./evaluation/tool-lifecycle";
 
 // This scripted execution checks the tool path; it is not a model benchmark.
 test("extension tools download and upload the dossier through a chooser", async () => {
@@ -57,6 +58,7 @@ test("extension tools download and upload the dossier through a chooser", async 
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("UPLOAD_TOOL_PATH_DONE", { timeout: 100_000 });
     await expect.poll(() => uploadScore(fixture.evidence())).toBe(true);
+    expect(completedProgramOperations(await readEvents(opened.page))["event.setFiles"]).toBe(1);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
     await closeServer(fixture.server);

@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect } from "@playwright/test";
@@ -9,7 +10,12 @@ import { claimsFixture, claimsScore } from "./evaluation/claims-fixture";
 import { sequenceFixture, sequenceInteractionScore, sequenceScore } from "./evaluation/sequence-fixture";
 import { dispatchFixture, dispatchScore } from "./evaluation/dispatch-fixture";
 import { uploadFixture, uploadScore } from "./evaluation/upload-fixture";
+import { pointerFixture, pointerInteractionScore, pointerScore } from "./evaluation/pointer-fixture";
+import { recoveryFixture, recoveryScore } from "./evaluation/recovery-fixture";
 import { trackFixtureRequests } from "./evaluation/network-quiescence";
+import { trackServerResponses, type ServerActivity } from "./evaluation/server-quiescence";
+import { waitForEvaluationQuiescence } from "./evaluation/quiescence";
+import { completedProgramOperations, toolLifecycleEvidence } from "./evaluation/tool-lifecycle";
 
 test.use({ trace: "off", screenshot: "off", video: "off" });
 
@@ -25,22 +31,32 @@ test("@real-model browser task", async () => {
   const seed = Number(process.env.SURFWAX_EVAL_SEED ?? 17);
   if (!Number.isSafeInteger(seed) || seed < 0 || seed > 999999) throw new Error("Invalid seed");
   const scenario = process.env.SURFWAX_EVAL_SCENARIO ?? "cross-frame-order";
-  if (!["cross-frame-order", "claims-queue", "sequence-editor", "dispatch-review", "dossier-upload"].includes(scenario)) throw new Error("Invalid scenario");
+  if (!["cross-frame-order", "claims-queue", "sequence-editor", "dispatch-review", "dossier-upload", "pointer-drag", "uncertain-write"].includes(scenario)) throw new Error("Invalid scenario");
   const service = seed % 2 ? "express" : "economy";
   const order = `ORDER-${seed}`;
   const started = Date.now();
   const proxy = await modelProxy(upstream, key);
-  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | Awaited<ReturnType<typeof uploadFixture>> | undefined;
+  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | Awaited<ReturnType<typeof uploadFixture>> | Awaited<ReturnType<typeof pointerFixture>> | Awaited<ReturnType<typeof recoveryFixture>> | undefined;
   let opened: Awaited<ReturnType<typeof openExtension>> | undefined;
   let events: any[] = [], outcome = "setup_failed", businessVerified = false, interactionVerified: boolean | null = null;
+  let lifecycleVerified = false;
   let networkSettled: boolean | null = null;
   let tracker: ReturnType<typeof trackFixtureRequests> | undefined;
+  let serverTracker: ReturnType<typeof trackServerResponses> | undefined;
+  let serverActivity: ServerActivity | null = null;
   let browserProduct: string | null = null;
   try {
     let prompt: string;
     let grade: () => boolean;
     let gradeInteraction: (() => boolean) | undefined;
-    if (scenario === "dossier-upload") {
+    if (scenario === "uncertain-write") {
+      const recovery = await recoveryFixture(seed); fixture = recovery; prompt = recovery.prompt;
+      grade = () => recoveryScore(recovery.evidence());
+    } else if (scenario === "pointer-drag") {
+      const pointer = await pointerFixture(seed); fixture = pointer; prompt = pointer.prompt;
+      grade = () => pointerScore(pointer.evidence());
+      gradeInteraction = () => pointerInteractionScore(pointer.evidence());
+    } else if (scenario === "dossier-upload") {
       const upload = await uploadFixture(seed); fixture = upload; prompt = upload.prompt;
       grade = () => uploadScore(upload.evidence());
     } else if (scenario === "sequence-editor") {
@@ -58,6 +74,7 @@ test("@real-model browser task", async () => {
       prompt = `Submit order ${order} using ${service} service and confirm details.`;
       grade = () => businessScore(checkout.evidence(), order, service);
     }
+    serverTracker = trackServerResponses(fixture.server);
     opened = await openExtension();
     // The extension handles dialogs; Playwright must not auto-dismiss them.
     opened.context.on("page", (page) => page.on("dialog", () => {}));
@@ -91,39 +108,47 @@ test("@real-model browser task", async () => {
       await new Promise((resolveWait) => setTimeout(resolveWait, 1000));
     }
     // An unsettled network may still contain a submission or decoy request.
-    networkSettled = await tracker.wait({ quietMs: 500, timeoutMs: 5000 });
+    const quiet = await waitForEvaluationQuiescence(tracker, serverTracker, 500, 5000);
+    networkSettled = quiet.settled;
     events = await readEvents(opened.page);
     browserProduct = await opened.context.newCDPSession(opened.page).then((session) => session.send("Browser.getVersion")).then((version) => version.product).catch(() => null);
     // Stop page timers and drain all server requests before reading the ledger.
     // Otherwise a delayed effect can arrive after the score has been decided.
     await opened.context.close();
     await closeServer(fixture.server);
+    serverActivity = serverTracker.snapshot();
+    // Requests observed after the quiet check invalidate that observation.
+    if (serverActivity.active !== quiet.server.active || serverActivity.finished !== quiet.server.finished || serverActivity.interrupted !== quiet.server.interrupted) networkSettled = false;
     businessVerified = networkSettled && grade();
     interactionVerified = networkSettled && gradeInteraction ? gradeInteraction() : null;
   } finally {
     tracker?.dispose();
+    serverActivity ??= serverTracker?.snapshot() ?? null;
+    serverTracker?.dispose();
     if (opened) events = await readEvents(opened.page).catch(() => events);
     const head = (() => { try { return execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(); } catch { return null; } })();
     const dirty = (() => { try { return !!execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim(); } catch { return null; } })();
     const browser = !browserProduct && opened ? await opened.context.newCDPSession(opened.page).then((session) => session.send("Browser.getVersion")).catch(() => null) : null;
     const terminals = events.filter((event) => ["tool.finished", "tool.failed"].includes(event.type));
     const starts = events.filter((event) => event.type === "tool.started");
+    const toolLifecycle = toolLifecycleEvidence(events);
+    lifecycleVerified = toolLifecycle.complete;
     const toolNames = starts.reduce<Record<string, number>>((counts, event) => {
       const name = typeof event.content?.toolName === "string" ? event.content.toolName : "unknown";
       counts[name] = (counts[name] ?? 0) + 1;
       return counts;
     }, {});
     const report = { scenario, seed, provider: providerName, model, gitHead: head, gitDirty: dirty, browser: browserProduct ?? browser?.product ?? null,
-      outcome, businessVerified, interactionVerified, networkSettled, elapsedMs: Date.now() - started, providerUsageByStep: usageEvidence(events),
+      outcome, businessVerified, interactionVerified, networkSettled, serverActivity, elapsedMs: Date.now() - started, providerUsageByStep: usageEvidence(events),
       requests: proxy.requests, requestBytes: proxy.requests.reduce((sum, request) => sum + request.bytes, 0),
-      toolCalls: starts.length, toolNames, toolTerminalResults: terminals.length,
-      toolsWithExactlyOneTerminal: starts.length > 0 && starts.every((start) => terminals.filter((end) => end.runId === start.runId && end.toolCallId === start.toolCallId).length === 1) };
-    const directory = resolve(".dev/verification/model-evals");
+      toolCalls: starts.length, toolNames, completedProgramOperations: completedProgramOperations(events), toolTerminalResults: terminals.length,
+      toolsWithExactlyOneTerminal: lifecycleVerified, toolLifecycle };
+    const directory = resolve(process.env.SURFWAX_EVAL_REPORT_DIR ?? ".dev/verification/model-evals");
     await mkdir(directory, { recursive: true });
-    await writeFile(resolve(directory, `${Date.now()}-${seed}.json`), JSON.stringify(report, null, 2));
+    await writeFile(resolve(directory, `${Date.now()}-${seed}-${randomUUID()}.json`), JSON.stringify(report, null, 2), { flag: "wx" });
     if (opened) await dispose(opened.context, opened.userDataDirectory);
     if (fixture) await closeServer(fixture.server);
     await closeServer(proxy.server);
   }
-  if (outcome !== "conversation.finished" || !businessVerified || interactionVerified === false) throw new Error("Evaluation did not complete with the required results; see the report");
+  if (outcome !== "conversation.finished" || !businessVerified || interactionVerified === false || !lifecycleVerified) throw new Error("Evaluation did not complete with the required results; see the report");
 });
