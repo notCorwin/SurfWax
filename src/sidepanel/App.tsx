@@ -3,7 +3,7 @@ import { CodeXmlIcon, MessageSquarePlusIcon, SettingsIcon, SlidersHorizontalIcon
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ConversationMenu } from "../components/chat/thread-list";
 import { Thread } from "../components/chat/thread";
-import { Empty, EmptyHeader, EmptyTitle, EmptyDescription, EmptyMedia, EmptyContent } from "../components/ui/empty";
+import { Empty, EmptyHeader, EmptyTitle, EmptyMedia, EmptyContent } from "../components/ui/empty";
 import { Button } from "../components/ui/button";
 import { ErrorNotice } from "../components/ui/error-notice";
 import { generateConversationTitle } from "../conversations";
@@ -97,7 +97,6 @@ export function App() {
           <EmptyHeader>
             <EmptyMedia className="welcome-symbol">{session.configReady ? <SlidersHorizontalIcon aria-hidden="true" /> : <LoaderCircleIcon className="animate-spin" aria-hidden="true" />}</EmptyMedia>
             <EmptyTitle><h2>{session.configReady ? "配置模型" : "正在准备对话…"}</h2></EmptyTitle>
-            <EmptyDescription>{session.configReady ? "连接模型后即可阅读页面、整理信息和执行任务" : "正在读取模型配置…"}</EmptyDescription>
           </EmptyHeader>
           <EmptyContent>
             {session.configReady && <Button onClick={() => void chrome.runtime.openOptionsPage()}><SlidersHorizontalIcon data-icon="inline-start" />配置模型</Button>}

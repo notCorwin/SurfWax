@@ -60,7 +60,6 @@ test("restores independent credentials and models when switching Providers", asy
     const [options] = await Promise.all([opened.context.waitForEvent("page"), opened.page.getByTestId("open-settings").click()]);
     await options.waitForLoadState("domcontentloaded");
 
-    await expect(options.getByText(/已载入 \d+ 个内置 Provider；每个 Provider 独立保存配置。/)).toBeVisible();
     await options.getByLabel("Provider", { exact: true }).click();
     await expect(options.getByRole("option", { name: /自定义 Endpoint.*custom/ })).toBeVisible();
     await expect(options.getByRole("option", { name: /Vercel AI Gateway.*vercel/ })).toBeVisible();
@@ -231,7 +230,6 @@ test("uses a global custom system prompt and hides disabled advanced settings", 
   const opened = await openExtension();
   try {
     const options = await configure(opened.context, opened.page, provider.baseURL);
-    await expect(options.getByRole("group", { name: "上下文窗口" })).toBeVisible();
     await expect(options.getByTestId("model-limit-match")).toContainText("256,000 tokens");
     await options.getByText("高级设置", { exact: true }).click();
     await expect(options.locator(".advanced-settings")).not.toHaveAttribute("open", "");

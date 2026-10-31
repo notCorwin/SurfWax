@@ -353,7 +353,7 @@ export async function configure(context: BrowserContext, page: Page, baseURL: st
   await options.getByLabel("Base URL", { exact: true }).fill(baseURL);
   await options.getByLabel("Model ID", { exact: true }).fill("test-model");
   await options.getByLabel("API Key", { exact: true }).fill("test-key");
-  await options.getByLabel("窗口大小（tokens）").fill(String(contextWindow));
+  await options.getByLabel("上下文窗口（tokens）").fill(String(contextWindow));
   await options.getByRole("button", { name: "保存配置" }).click();
   await expect(options.getByRole("status")).toContainText("配置已保存");
   await expect(page.getByTestId("composer-input")).toBeVisible();

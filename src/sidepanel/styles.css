@@ -386,7 +386,6 @@ p {
 .welcome-symbol { color: var(--brand); }
 .welcome-symbol svg { width: calc(var(--spacing) * 10); height: calc(var(--spacing) * 10); stroke-width: 1.2; }
 .welcome [data-slot="empty-title"] { font-size: var(--type-title); letter-spacing: normal; }
-.welcome [data-slot="empty-description"] { font-size: var(--type-body); line-height: var(--line-body); }
 .suggestion { height: auto; min-height: calc(var(--spacing) * 11); padding: calc(var(--spacing) * 3); border-radius: var(--radius-lg); font-size: var(--type-body); text-align: left; }
 .suggestion > svg { color: var(--muted-foreground); }
 .composer-dock { max-width: var(--thread-max-width); width: 100%; margin-inline: auto; }

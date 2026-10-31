@@ -117,7 +117,7 @@ test("contains a long user script restore error without hiding the manager", asy
     await notice.getByText("错误详情").click();
     await expect(notice.locator(".app-error-detail")).toContainText("SCRIPT_ERROR_");
     expect(await notice.locator(".app-error-detail").evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
-    await expect(scripts.getByRole("heading", { name: /已保存脚本/ })).toBeVisible();
+    await expect(scripts.getByLabel("已保存脚本")).toBeVisible();
   } finally {
     await dispose(opened.context, opened.userDataDirectory);
   }
@@ -141,7 +141,7 @@ test("manages, edits and deletes scripts in the native Chrome scripts workbench"
     ]);
     await manager.waitForLoadState("domcontentloaded");
     await expect(manager.getByTestId("user-scripts-panel")).toBeVisible();
-    await expect(manager.getByRole("heading", { name: /已保存脚本/ })).toBeVisible();
+    await expect(manager.getByLabel("已保存脚本")).toBeVisible();
     await expect(manager.getByText("在网页中试运行")).toHaveCount(0);
     const script = { id: "managed", matches: [`${provider.origin}/*`], js: [{ code: "const CSS_TOP='body{color:red}';document.documentElement.dataset.managed = 'first'; 'RUN_OK'" }], world: "USER_SCRIPT" };
     await manager.getByRole("button", { name: "新建脚本" }).click();
@@ -158,7 +158,7 @@ test("manages, edits and deletes scripts in the native Chrome scripts workbench"
     await expect(manager.locator("#script-code .cm-content")).toContainText("CSS_TOP = `");
     await expect(manager.locator("#script-code .cm-line span").filter({ hasText: /^body$/ })).toBeVisible();
     await manager.getByRole("button", { name: "返回列表" }).click();
-    await expect(manager.getByRole("heading", { name: /已保存脚本/ })).toBeVisible();
+    await expect(manager.getByLabel("已保存脚本")).toBeVisible();
     await expect(manager.getByLabel("已保存脚本").locator(".script-item")).toBeVisible();
     expect(await warnsOnLeave(manager)).toBe(false);
     const initialScripts = (await manager.evaluate(async () => chrome.storage.local.get("side-agent:user-scripts")))["side-agent:user-scripts"] as chrome.userScripts.RegisteredUserScript[];
@@ -170,7 +170,7 @@ test("manages, edits and deletes scripts in the native Chrome scripts workbench"
     await expect.poll(() => manager.evaluate(async () => (await chrome.userScripts.getScripts({ ids: ["managed"] })).length)).toBe(0);
     expect((await manager.evaluate(async () => chrome.storage.local.get("side-agent:user-scripts-disabled")))["side-agent:user-scripts-disabled"]).toHaveLength(1);
     await manager.reload();
-    await expect(manager.getByRole("heading", { name: /已保存脚本/ })).toBeVisible();
+    await expect(manager.getByLabel("已保存脚本")).toBeVisible();
     await expect(manager.getByLabel("已保存脚本").getByText("已停用")).toBeVisible();
     await manager.getByLabel("已保存脚本").locator(".script-item").click();
     await manager.locator("#script-code .cm-content").fill(`${script.js[0].code}\n// edited while disabled`);
@@ -209,7 +209,7 @@ test("manages, edits and deletes scripts in the native Chrome scripts workbench"
     expect(savedScript.excludeMatches).toEqual(["https://example.org/*"]);
     expect(savedScript.js?.[0].code).toContain("updated");
     await manager.goBack();
-    await expect(manager.getByRole("heading", { name: /已保存脚本/ })).toBeVisible();
+    await expect(manager.getByLabel("已保存脚本")).toBeVisible();
     await manager.goForward();
     await expect(manager.getByRole("heading", { name: "managed" })).toBeVisible();
     await manager.locator("#script-code .cm-content").fill("// discard this draft");

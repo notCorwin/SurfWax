@@ -198,10 +198,3 @@ body {
   gap: calc(var(--spacing) * 7);
   margin-top: calc(var(--spacing) * 5);
 }
-
-.advanced-settings-content [data-slot="field-set"] {
-  min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}

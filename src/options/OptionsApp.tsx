@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { ChevronRightIcon, LoaderCircleIcon } from "lucide-react";
 import { Tabs } from "radix-ui";
 import { Button } from "../components/ui/button";
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../components/ui/card";
-import { Field, FieldDescription, FieldGroup, FieldLabel, FieldLegend, FieldSet } from "../components/ui/field";
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "../components/ui/card";
+import { Field, FieldDescription, FieldGroup, FieldLabel } from "../components/ui/field";
 import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
@@ -287,7 +287,6 @@ export function OptionsApp() {
         <Card data-testid="options-card">
           <CardHeader>
             <CardTitle>模型与连接</CardTitle>
-            <CardDescription>仅保存在当前扩展的 chrome.storage.local。</CardDescription>
           </CardHeader>
           <CardContent>
             <FieldGroup>
@@ -295,13 +294,12 @@ export function OptionsApp() {
                 <FieldLabel htmlFor="provider-id">Provider</FieldLabel>
                 <SearchCombobox id="provider-id" name="providerId" options={providerOptions} value={providerInput}
                   onValueChange={changeProvider} disabled={busy} placeholder="搜索或选择 Provider…"
-                  aria-invalid={!!fieldErrors.providerId} aria-describedby={fieldErrors.providerId ? "provider-id-error" : "provider-description"} />
-                <FieldDescription id="provider-description">
+                  aria-invalid={!!fieldErrors.providerId} aria-describedby={fieldErrors.providerId ? "provider-id-error" : !ready || catalogError || catalogStale ? "provider-description" : undefined} />
+                {(!ready || catalogError || catalogStale) && <FieldDescription id="provider-description">
                   {!ready ? "正在加载 Models.dev Provider 目录…" : catalogError
                     ? "Models.dev 暂时不可用；仍可选择 custom 使用自定义 Endpoint。"
-                    : catalogStale ? `Models.dev 暂时不可用，正在使用缓存目录（${providers.length.toLocaleString()} 个 Provider）。`
-                    : `已载入 ${providers.length.toLocaleString()} 个内置 Provider；每个 Provider 独立保存配置。`}
-                </FieldDescription>
+                    : `Models.dev 暂时不可用，正在使用缓存目录（${providers.length.toLocaleString()} 个 Provider）。`}
+                </FieldDescription>}
                 {fieldErrors.providerId && <p id="provider-id-error" className="field-error" role="alert">{fieldErrors.providerId}</p>}
               </Field>
               {config && <>
@@ -345,59 +343,47 @@ export function OptionsApp() {
               <details className="advanced-settings">
                 <summary><ChevronRightIcon aria-hidden="true" /><span>高级设置</span></summary>
                 <div className="advanced-settings-content">
-                  <FieldSet>
-                    <FieldLegend>模型端点</FieldLegend>
-                    {customProvider && <Field data-disabled={busy || !config || undefined}>
-                      <FieldLabel htmlFor="endpoint-type">协议</FieldLabel>
-                      <Select value={config?.endpointType ?? "openai-chat-completions"} disabled={busy || !config} onValueChange={(value) => update("endpointType", value)}>
-                        <SelectTrigger id="endpoint-type" aria-label="模型端点协议" className="w-full"><SelectValue /></SelectTrigger>
-                        <SelectContent position="popper"><SelectGroup>
-                          <SelectItem value="openai-chat-completions">OpenAI Chat Completions</SelectItem>
-                          <SelectItem value="openai-completions">OpenAI Completions</SelectItem>
-                          <SelectItem value="openai-responses">OpenAI Responses</SelectItem>
-                          <SelectItem value="anthropic-messages">Anthropic Messages</SelectItem>
-                          <SelectItem value="google-generate-content">Google generateContent</SelectItem>
-                          <SelectItem value="google-interactions">Google Interactions</SelectItem>
-                        </SelectGroup></SelectContent>
-                      </Select>
-                    </Field>}
-                    {!customProvider && baseURLField}
-                  </FieldSet>
-                  <FieldSet>
-                    <FieldLegend>上下文窗口</FieldLegend>
-                    <Field data-disabled={busy || !config || undefined} data-invalid={!!fieldErrors.contextWindowOverride || undefined}>
-                      <FieldLabel htmlFor="context-window">窗口大小（tokens）</FieldLabel>
-                      <Input id="context-window" name="contextWindowOverride" type="number" min="1" step="1" aria-invalid={!!fieldErrors.contextWindowOverride} aria-describedby={fieldErrors.contextWindowOverride ? "context-window-error" : undefined} value={config?.contextWindowOverride ?? ""} disabled={busy || !config}
-                        onChange={(event) => update("contextWindowOverride", event.target.value)} />
-                      {fieldErrors.contextWindowOverride && <p id="context-window-error" className="field-error" role="alert">{fieldErrors.contextWindowOverride}</p>}
-                    </Field>
-                  </FieldSet>
-                  <FieldSet>
-                    <FieldLegend>最大输出</FieldLegend>
-                    <Field data-disabled={busy || !config || undefined} data-invalid={!!fieldErrors.maxTokensOverride || undefined}>
-                      <FieldLabel htmlFor="max-tokens">max_tokens</FieldLabel>
-                      <Input id="max-tokens" name="maxTokensOverride" type="number" min="1" step="1" aria-invalid={!!fieldErrors.maxTokensOverride}
-                        aria-describedby={fieldErrors.maxTokensOverride ? "max-tokens-error" : "max-tokens-description"} value={config?.maxTokensOverride ?? ""} disabled={busy || !config}
-                        onChange={(event) => update("maxTokensOverride", event.target.value)} />
-                      {fieldErrors.maxTokensOverride && <p id="max-tokens-error" className="field-error" role="alert">{fieldErrors.maxTokensOverride}</p>}
-                      <FieldDescription id="max-tokens-description">仅 Anthropic 类端点发送；未知模型默认 128,000。</FieldDescription>
-                    </Field>
-                  </FieldSet>
-                  <FieldSet>
-                    <FieldLegend>图片输入</FieldLegend>
-                    <Field data-disabled={busy || !config || undefined}>
-                      <FieldLabel htmlFor="image-input">视觉能力</FieldLabel>
-                      <Select value={config?.imageInput ?? "auto"} disabled={busy || !config} onValueChange={(value) => update("imageInput", value)}>
-                        <SelectTrigger id="image-input" aria-label="图片输入能力" className="w-full"><SelectValue /></SelectTrigger>
-                        <SelectContent position="popper"><SelectGroup>
-                          <SelectItem value="auto">自动检测</SelectItem>
-                          <SelectItem value="enabled">支持</SelectItem>
-                          <SelectItem value="disabled">不支持</SelectItem>
-                        </SelectGroup></SelectContent>
-                      </Select>
-                      <FieldDescription>自动模式读取模型目录；未知模型默认仅使用语义路径。</FieldDescription>
-                    </Field>
-                  </FieldSet>
+                  {customProvider && <Field data-disabled={busy || !config || undefined}>
+                    <FieldLabel htmlFor="endpoint-type">协议</FieldLabel>
+                    <Select value={config?.endpointType ?? "openai-chat-completions"} disabled={busy || !config} onValueChange={(value) => update("endpointType", value)}>
+                      <SelectTrigger id="endpoint-type" aria-label="模型端点协议" className="w-full"><SelectValue /></SelectTrigger>
+                      <SelectContent position="popper"><SelectGroup>
+                        <SelectItem value="openai-chat-completions">OpenAI Chat Completions</SelectItem>
+                        <SelectItem value="openai-completions">OpenAI Completions</SelectItem>
+                        <SelectItem value="openai-responses">OpenAI Responses</SelectItem>
+                        <SelectItem value="anthropic-messages">Anthropic Messages</SelectItem>
+                        <SelectItem value="google-generate-content">Google generateContent</SelectItem>
+                        <SelectItem value="google-interactions">Google Interactions</SelectItem>
+                      </SelectGroup></SelectContent>
+                    </Select>
+                  </Field>}
+                  {!customProvider && baseURLField}
+                  <Field data-disabled={busy || !config || undefined} data-invalid={!!fieldErrors.contextWindowOverride || undefined}>
+                    <FieldLabel htmlFor="context-window">上下文窗口（tokens）</FieldLabel>
+                    <Input id="context-window" name="contextWindowOverride" type="number" min="1" step="1" aria-invalid={!!fieldErrors.contextWindowOverride} aria-describedby={fieldErrors.contextWindowOverride ? "context-window-error" : undefined} value={config?.contextWindowOverride ?? ""} disabled={busy || !config}
+                      onChange={(event) => update("contextWindowOverride", event.target.value)} />
+                    {fieldErrors.contextWindowOverride && <p id="context-window-error" className="field-error" role="alert">{fieldErrors.contextWindowOverride}</p>}
+                  </Field>
+                  <Field data-disabled={busy || !config || undefined} data-invalid={!!fieldErrors.maxTokensOverride || undefined}>
+                    <FieldLabel htmlFor="max-tokens">max_tokens</FieldLabel>
+                    <Input id="max-tokens" name="maxTokensOverride" type="number" min="1" step="1" aria-invalid={!!fieldErrors.maxTokensOverride}
+                      aria-describedby={fieldErrors.maxTokensOverride ? "max-tokens-error" : "max-tokens-description"} value={config?.maxTokensOverride ?? ""} disabled={busy || !config}
+                      onChange={(event) => update("maxTokensOverride", event.target.value)} />
+                    {fieldErrors.maxTokensOverride && <p id="max-tokens-error" className="field-error" role="alert">{fieldErrors.maxTokensOverride}</p>}
+                    <FieldDescription id="max-tokens-description">仅 Anthropic 类端点发送；未知模型默认 128,000。</FieldDescription>
+                  </Field>
+                  <Field data-disabled={busy || !config || undefined}>
+                    <FieldLabel htmlFor="image-input">视觉能力</FieldLabel>
+                    <Select value={config?.imageInput ?? "auto"} disabled={busy || !config} onValueChange={(value) => update("imageInput", value)}>
+                      <SelectTrigger id="image-input" aria-label="图片输入能力" className="w-full"><SelectValue /></SelectTrigger>
+                      <SelectContent position="popper"><SelectGroup>
+                        <SelectItem value="auto">自动检测</SelectItem>
+                        <SelectItem value="enabled">支持</SelectItem>
+                        <SelectItem value="disabled">不支持</SelectItem>
+                      </SelectGroup></SelectContent>
+                    </Select>
+                    <FieldDescription>自动模式读取模型目录；未知模型默认仅使用语义路径。</FieldDescription>
+                  </Field>
                 </div>
               </details>
             </FieldGroup>
@@ -428,7 +414,6 @@ export function OptionsApp() {
           <Card>
             <CardHeader>
               <CardTitle>数据管理</CardTitle>
-              <CardDescription>事件日志是聊天界面、恢复会话与模型上下文的唯一来源。</CardDescription>
             </CardHeader>
             <CardFooter>
               <Button type="button" variant="destructive" data-testid="event-log-clear" disabled={busy} onClick={() => setClearConfirmationOpen(true)}>
