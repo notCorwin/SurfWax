@@ -42,19 +42,19 @@ export async function reloadDevelopmentExtension(
         await wake.goto(`chrome-extension://${extensionId}/options.html`, {
           waitUntil: "domcontentloaded",
         });
+        await wake.evaluate(() =>
+          chrome.runtime.sendMessage({ type: "surf-wax:run-status" }),
+        );
         break;
       } catch (error) {
         if (
           Date.now() >= deadline ||
-          !/net::ERR_(?:BLOCKED_BY_CLIENT|ABORTED|FAILED)/.test(String(error))
+          !/net::ERR_(?:BLOCKED_BY_CLIENT|ABORTED|FAILED)|Execution context was destroyed/.test(String(error))
         )
           throw error;
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
     }
-    await wake.evaluate(() =>
-      chrome.runtime.sendMessage({ type: "surf-wax:run-status" }),
-    );
     const result = await refreshed;
     if ("error" in result)
       throw new Error(
