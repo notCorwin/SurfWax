@@ -45,38 +45,58 @@ export function activityPhaseAt(boundary: number, partIndex: number, turnPhase: 
 }
 
 type ToolActivityPart = {
+  readonly toolName: string;
   readonly status: { readonly type: string };
   readonly isError?: boolean;
-  readonly args: unknown;
+  readonly result?: unknown;
+  readonly durationMs?: number;
+  readonly timingIncomplete?: boolean;
+  readonly interrupted?: boolean;
 };
 
 export function toolActivity(part: ToolActivityPart, phase: ActivityPhase = "settled"): { status: "running" | "error" | "complete"; label: string } {
-  if (phase === "pending" && part.status.type !== "requires-action") return { status: "running", label: "正在执行命令" };
-  if (part.status.type === "incomplete" || part.isError) return { status: "error", label: "命令执行失败" };
-  if (phase === "cancelled") return { status: "error", label: "回复中断" };
-  if (phase === "failed") return { status: "error", label: "回复失败" };
-  if (phase === "stopped") return { status: "complete", label: "回复未生成" };
-  if (part.status.type === "requires-action") return { status: "running", label: "等待操作" };
-  if (part.status.type === "running") return { status: "running", label: "正在执行命令" };
-  return { status: "complete", label: "命令执行完成" };
+  const name = part.toolName || "未知工具";
+  const duration = typeof part.durationMs === "number" && Number.isFinite(part.durationMs) && part.durationMs >= 0
+    ? ` · ${part.timingIncomplete ? "≥" : ""}${(part.timingIncomplete ? Math.floor(part.durationMs / 10) / 100 : part.durationMs / 1000).toFixed(2)} 秒` : "";
+  const error = part.result && typeof part.result === "object" && "error" in part.result ? part.result.error : undefined;
+  const aborted = error && typeof error === "object" && "code" in error && (error.code === "aborted" || error.code === "interrupted");
+  if (part.interrupted || aborted || (part.status.type === "running" || part.status.type === "requires-action") && phase === "cancelled") {
+    return { status: "error", label: `${name} 已中断${duration}` };
+  }
+  if (part.status.type === "incomplete" || part.isError) return { status: "error", label: `${name} 失败${duration}` };
+  if (part.status.type === "running" || part.status.type === "requires-action") {
+    if (phase === "failed" || phase === "stopped") return { status: "error", label: `${name} 未完成${duration}` };
+    return { status: "running", label: part.status.type === "requires-action" ? `${name} 等待操作` : `正在调用 ${name}` };
+  }
+  return { status: "complete", label: `${name} 已完成${duration}` };
 }
 
 type ProcessPart = {
   readonly type: string;
   readonly status: { readonly type: string };
   readonly isError?: boolean;
-  readonly args?: unknown;
+  readonly toolName?: string;
+  readonly result?: unknown;
+  readonly durationMs?: number;
+  readonly timingIncomplete?: boolean;
+  readonly interrupted?: boolean;
 };
 
 export function processGroupSummary(parts: readonly ProcessPart[], indices: readonly number[], interrupted = false, phase: ActivityPhase = "settled") {
   const grouped = indices.flatMap((index) => parts[index] ? [parts[index]!] : []);
   const tools = grouped.filter((part) => part.type === "tool-call");
+  if (tools.length) {
+    const latestTool = tools.at(-1)!;
+    const latest = toolActivity({ ...latestTool, toolName: latestTool.toolName || "未知工具" }, interrupted && latestTool.status.type === "requires-action" ? "cancelled" : phase);
+    const earlierFailure = tools.slice(0, -1).some((part) => part.status.type === "incomplete" || part.isError);
+    return { status: earlierFailure && latest.status === "complete" ? "error" as const : latest.status,
+      label: `${latest.label}${earlierFailure ? " · 此前有失败" : ""}` };
+  }
   const latest = phase === "pending" ? grouped.at(-1)
     : phase === "settled" ? [...grouped].reverse().find((part) => part.status.type === "running" || part.status.type === "requires-action") : undefined;
   if (latest?.status.type === "requires-action" && !interrupted) return { status: "running" as const, label: "等待操作" };
   if (latest && (phase === "pending" || !latest.isError && latest.status.type === "running")) {
     if (latest.type === "reasoning") return { status: "running" as const, label: "正在思考" };
-    if (latest.type === "tool-call") return toolActivity({ status: latest.status, isError: latest.isError, args: latest.args }, phase);
   }
   if (phase === "cancelled") return { status: "error" as const, label: "回复中断" };
   if (phase === "failed") return { status: "error" as const, label: "回复失败" };
@@ -84,11 +104,11 @@ export function processGroupSummary(parts: readonly ProcessPart[], indices: read
     || interrupted && part.status.type === "requires-action");
   if (failed) return {
     status: "error" as const,
-    label: tools.length ? `${tools.length} 次命令中有失败` : "思考未完成",
+    label: "思考未完成",
   };
   if (phase === "stopped") return { status: "complete" as const, label: "回复未生成" };
   return {
     status: "complete" as const,
-    label: tools.length ? `${grouped.some((part) => part.type === "reasoning") ? "已思考并" : "已"}执行 ${tools.length} 次命令` : "思考完成",
+    label: "思考完成",
   };
 }

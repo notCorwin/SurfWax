@@ -121,7 +121,7 @@ describe("complete-response transport", () => {
     const result = await createChatTransport(factory, log, "thread").sendMessages(options());
     expect(executor.runProgram).not.toHaveBeenCalled();
     expect((await log.all()).filter((event) => event.toolCallId === "invalid" && ["tool.failed", "tool.finished"].includes(event.type)))
-      .toMatchObject([{ type: "tool.failed" }]);
+      .toMatchObject([{ type: "tool.failed", latencyMs: 0 }]);
     expect(result.parts).toEqual(expect.arrayContaining([expect.objectContaining({ toolCallId: "invalid", state: "output-error" })]));
   });
 

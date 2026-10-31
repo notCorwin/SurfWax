@@ -9,24 +9,30 @@ import { Welcome } from "./welcome";
 import { ErrorNotice } from "../ui/error-notice";
 import { LocalComposer } from "./local-composer";
 import { MessageRow, type MessageView, type WorkView } from "./message-row";
-import { workLabel } from "./work-time";
+import { completedWork, workLabel } from "./work-time";
+import { toolActivity } from "./process-group";
+import { ToolFallback } from "./tool-fallback";
 import type { ModelConfig } from "@/types";
-import { fromLogValue, type EventLogger, type LogEvent } from "@/logging";
+import type { EventLogger } from "@/logging";
 
-export function completedWork(events: readonly LogEvent[]): Map<string, number> {
-  const started = new Map<string, number>();
-  const completed = new Map<string, number>();
-  for (const event of events) {
-    if (!event.runId) continue;
-    if (event.type === "conversation.submitted") started.set(event.runId, Date.parse(event.timestamp));
-    if (event.type !== "conversation.finished") continue;
-    const messageId = (fromLogValue(event.content, event.valueEncoding) as { messageId?: unknown } | null)?.messageId;
-    const start = started.get(event.runId);
-    if (typeof messageId === "string" && start !== undefined && Number.isFinite(start)) {
-      completed.set(messageId, Math.max(0, Math.floor((Date.parse(event.timestamp) - start) / 1000)));
-    }
+function LiveToolCalls({ messages }: { messages: readonly MessageView[] }) {
+  const tools = messages.flatMap((message) => message.parts.flatMap((part) => part.type === "tool-call" ? [{ key: `${message.id}:${part.toolCallId}`, part }] : []));
+  const viewport = useRef<HTMLDivElement>(null);
+  const lastKey = tools[tools.length - 1]?.key;
+  useLayoutEffect(() => {
+    if (viewport.current) viewport.current.scrollTop = viewport.current.scrollHeight;
+  }, [lastKey, tools.length]);
+  if (!tools.length) return null;
+  return <div ref={viewport} className="live-tool-calls" data-testid="live-tool-calls" role="region" aria-label="工具调用" tabIndex={0}>
+    {tools.map(({ key, part }) => <ToolFallback key={key} {...part} autoExpandError={false} />)}
+  </div>;
+}
+
+function lastToolCall(messages: readonly MessageView[]) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const parts = messages[i]!.parts;
+    for (let j = parts.length - 1; j >= 0; j--) if (parts[j]!.type === "tool-call") return parts[j];
   }
-  return completed;
 }
 
 export function Thread({ config, logger, conversationId, contextBlocked, draft, onDraftChange }: {
@@ -36,7 +42,7 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
   const { locked } = useRunState();
   const projectTurns = useMemo(createTurnProjection, []);
   const turns = useMemo(() => projectTurns(state.messages), [projectTurns, state.messages]);
-  const [completed, setCompleted] = useState(() => new Map<string, number>());
+  const [completed, setCompleted] = useState(() => new Map<string, number | null>());
   const [warning, setWarning] = useState("");
   const command = useCallback((action: () => void) => {
     if (locked) { setWarning("当前会话尚未结束，请等待完成或先停止运行。"); return; }
@@ -45,7 +51,7 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
   useEffect(() => {
     let active = true;
     const refresh = () => void logger.summaryEvents(conversationId).then((events) => { if (active) setCompleted(completedWork(events)); });
-    const unsubscribe = logger.subscribe((event) => { if (event.conversationId === conversationId && event.type === "conversation.finished") refresh(); });
+    const unsubscribe = logger.subscribe((event) => { if (event.conversationId === conversationId && ["conversation.finished", "conversation.failed", "conversation.aborted"].includes(event.type)) refresh(); });
     refresh();
     return () => { active = false; unsubscribe(); };
   }, [logger, conversationId]);
@@ -77,16 +83,18 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
               {items.map((item) => {
                 const turn = turns[item.index]!;
                 const final = turn.assistants.at(-1);
-                const duration = final ? completed.get(final.id) : undefined;
+                const duration = final?.runId ? completed.get(final.runId) : undefined;
+                const lastTool = lastToolCall(turn.assistants);
+                const liveTurn = state.isRunning && item.index === turns.length - 1;
                 const row = (message: MessageView, work?: WorkView) => <MessageRow key={message.id} message={message} messages={turn.messages} latest={message.id === state.messages.at(-1)?.id}
-                  running={state.isRunning && item.index === turns.length - 1} locked={locked} command={command} work={work} />;
+                  running={liveTurn} locked={locked} command={command} work={work} hideTools={liveTurn} />;
                 return <div key={item.key} data-index={item.index} ref={virtualizer.measureElement} className="conversation-turn absolute top-0 left-0 flex w-full flex-col gap-3" style={{ transform: `translate3d(0, ${item.start}px, 0)` }}>
                   {turn.messages.filter((message) => message.role !== "assistant").map((message) => row(message))}
-                  {duration === undefined || !final ? turn.assistants.map((message) => row(message)) : <>
+                  {duration === undefined || !final || liveTurn ? <>{turn.assistants.map((message) => row(message))}{liveTurn && <LiveToolCalls messages={turn.assistants} />}</> : <>
                     <details className="work-summary thinking-item px-2" data-testid="work-summary" onToggle={(event) => {
                       const element = event.currentTarget.closest<HTMLElement>(".conversation-turn"); if (element) virtualizer.measureElement(element);
                     }}>
-                      <summary><span>{workLabel(duration)}</span></summary>
+                      <summary><span>{duration === null ? "工作已中断" : workLabel(duration)}{lastTool?.type === "tool-call" ? ` · ${toolActivity(lastTool).label}` : ""}</span></summary>
                       <div className="work-summary-content">{turn.assistants.map((message) => row(message, { mode: "process", finalMessageId: final.id }))}</div>
                     </details>
                     {row(final, { mode: "final", finalMessageId: final.id })}

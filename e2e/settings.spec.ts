@@ -80,7 +80,10 @@ test("restores independent credentials and models when switching Providers", asy
       ((await chrome.storage.local.get("side-agent:model-limit"))["side-agent:model-limit"] as any)?.match?.source)).toBe("models.dev");
     await expect(options.getByTestId("model-limit-match")).toHaveCount(0);
 
+    await options.getByText("高级设置", { exact: true }).click();
     await selectProvider(options, "custom", /自定义 Endpoint.*custom/);
+    await expect(options.locator(".advanced-settings")).not.toHaveAttribute("open", "");
+    await expect(options.getByLabel("Base URL", { exact: true })).toBeVisible();
     await options.getByLabel("Base URL", { exact: true }).fill("https://custom.test/v1");
     await options.getByLabel("Model ID", { exact: true }).fill("custom-model");
     await options.getByLabel("API Key", { exact: true }).fill("custom-key");
@@ -93,11 +96,17 @@ test("restores independent credentials and models when switching Providers", asy
     await options.getByRole("option", { name: /Vercel AI Gateway.*vercel/ }).press("Enter");
     await expect(options.getByLabel("Model ID", { exact: true })).toHaveValue("openai/gpt-test");
     await expect(options.getByLabel("API Key", { exact: true })).toHaveValue("vercel-key");
+    await expect(options.getByLabel("Base URL", { exact: true })).toBeHidden();
+    await options.getByText("高级设置", { exact: true }).click();
+    await expect(options.getByLabel("Base URL", { exact: true })).toBeVisible();
     await expect.poll(() => options.evaluate(async () => (await chrome.storage.local.get("side-agent:model-config"))["side-agent:model-config"]))
       .toMatchObject({ profiles: {
         vercel: { providerSettings: { apiKey: "vercel-key" }, model: "openai/gpt-test", sdk: "@ai-sdk/gateway" },
         custom: { providerSettings: { apiKey: "custom-key" }, model: "custom-model", baseURL: "https://custom.test/v1", sdk: "@ai-sdk/openai-compatible" },
       } });
+    await selectProvider(options, "custom", /自定义 Endpoint.*custom/);
+    await expect(options.getByLabel("Base URL", { exact: true })).toHaveCount(1);
+    await expect(options.getByLabel("Base URL", { exact: true })).toHaveValue("https://custom.test/v1");
   } finally {
     await dispose(opened.context, opened.userDataDirectory);
   }
@@ -190,7 +199,7 @@ test("uses the bundled catalog and keeps custom Endpoint available when Models.d
     await expect(options.getByText(/Models.dev 暂时不可用，正在使用缓存目录（\d+ 个 Provider）。/)).toBeVisible();
     await selectProvider(options, "openai", /OpenAI.*openai/);
     await selectProvider(options, "custom", /自定义 Endpoint.*custom/);
-    await options.getByText("高级设置", { exact: true }).click();
+    await expect(options.locator(".advanced-settings")).not.toHaveAttribute("open", "");
     await expect(options.getByLabel("Base URL", { exact: true })).toBeVisible();
   } finally {
     await dispose(opened.context, opened.userDataDirectory);
@@ -268,9 +277,11 @@ test("shows inline settings errors and returns keyboard focus after closing conv
     await expect(disclosure).toHaveAttribute("open", "");
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(options.locator("#provider-id-error")).toHaveText("请选择 Provider");
+    await disclosure.locator("summary").click();
     await selectProvider(options, "custom", /自定义 Endpoint.*custom/);
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(options.locator("#base-url-error")).toHaveText("请输入 Base URL");
+    await expect(disclosure).not.toHaveAttribute("open", "");
     await expect(options.locator("#base-url")).toBeFocused();
     expect(await options.locator("#base-url").evaluate((input) => getComputedStyle(input).outlineStyle)).toBe("solid");
     await expect(options.locator("#base-url")).toHaveAttribute("aria-invalid", "true");

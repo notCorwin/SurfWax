@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { workLabel } from "./work-time";
+import { completedWork, workLabel } from "./work-time";
 import { buildMessageSearchIndex } from "./thread-list";
 import { activityPhaseAt, processGroupSummary, toolActivity, turnActivityBoundary, turnActivityPhase } from "./process-group";
 import { toLogValue, type LogEvent } from "../../logging";
@@ -20,59 +20,45 @@ describe("workLabel", () => {
   });
 });
 
-describe("processGroupSummary", () => {
-  const summary = (...parts: Array<{ type: string; status: { type: string }; args?: unknown; isError?: boolean }>) =>
-    processGroupSummary(parts, parts.map((_, index) => index));
+it("records completed, failed and recovered interrupted work by run even without a terminal message id", () => {
+  const events = ["done", "failed", "aborted"].flatMap((runId, index) => [
+    { id: index * 2 + 1, type: "conversation.submitted", runId, timestamp: "2026-11-01T00:00:00.000Z", content: null },
+    { id: index * 2 + 2, type: `conversation.${runId === "done" ? "finished" : runId}`, runId, timestamp: "2026-11-01T00:00:03.100Z", content: null },
+  ]);
+  expect([...completedWork(events)]).toEqual([["done", 3], ["failed", 3], ["aborted", null]]);
+});
 
-  it("shows the latest live phase", () => {
-    expect(summary({ type: "reasoning", status: { type: "running" } }).label).toBe("正在思考");
-    expect(summary({ type: "tool-call", status: { type: "running" }, args: {} }).label).toBe("正在执行命令");
+describe("tool activity", () => {
+  const tool = (toolName: string, type: string, extra: { isError?: boolean; result?: unknown; durationMs?: number; timingIncomplete?: boolean } = {}) =>
+    ({ type: "tool-call", toolName, status: { type }, ...extra });
+
+  it("uses the most recent tool and its real status even when later reasoning is active", () => {
+    const click = tool("click", "complete", { durationMs: 1234 });
+    const reasoning = { type: "reasoning", status: { type: "running" } };
+    expect(processGroupSummary([click, reasoning], [0, 1], false, "pending"))
+      .toEqual({ status: "complete", label: "click 已完成 · 1.23 秒" });
+    const fill = tool("fill", "running");
+    expect(processGroupSummary([click, fill], [0, 1], false, "pending"))
+      .toEqual({ status: "running", label: "正在调用 fill" });
+    expect(processGroupSummary([{ ...reasoning }], [0], false, "pending").label).toBe("正在思考");
   });
 
-  it("summarizes completed reasoning and commands", () => {
-    expect(summary({ type: "reasoning", status: { type: "complete" } }).label).toBe("思考完成");
-    expect(summary(
-      { type: "tool-call", status: { type: "complete" } },
-      { type: "tool-call", status: { type: "complete" } },
-    ).label).toBe("已执行 2 次命令");
-    expect(summary(
-      { type: "reasoning", status: { type: "complete" } },
-      { type: "tool-call", status: { type: "complete" } },
-    ).label).toBe("已思考并执行 1 次命令");
-  });
-
-  it("reports failures across the whole group", () => {
-    expect(summary(
-      { type: "tool-call", status: { type: "incomplete" } },
-      { type: "tool-call", status: { type: "complete" } },
-    )).toMatchObject({ status: "error", label: "2 次命令中有失败" });
-    expect(processGroupSummary([
-      { type: "tool-call", status: { type: "requires-action" } },
-    ], [0], true)).toMatchObject({ status: "error", label: "1 次命令中有失败" });
-    expect(processGroupSummary([
-      { type: "reasoning", status: { type: "complete" } },
-    ], [0], true)).toMatchObject({ status: "complete", label: "思考完成" });
-  });
-
-  it("continues the latest activity until assistant text arrives", () => {
-    const reasoning = { type: "reasoning", status: { type: "complete" } };
-    const tool = { type: "tool-call", status: { type: "complete" }, args: {} };
-    expect(processGroupSummary([reasoning], [0], false, "pending")).toEqual({ status: "running", label: "正在思考" });
-    expect(processGroupSummary([reasoning, tool], [0, 1], false, "pending")).toEqual({ status: "running", label: "正在执行命令" });
-    expect(toolActivity(tool, "pending")).toEqual({ status: "running", label: "正在执行命令" });
-    expect(processGroupSummary([{ ...tool, isError: true }], [0], false, "pending")).toEqual({ status: "running", label: "正在执行命令" });
-    expect(toolActivity({ ...tool, isError: true }, "pending")).toEqual({ status: "running", label: "正在执行命令" });
-    expect(processGroupSummary([reasoning, tool], [0, 1], false, "settled").label).toBe("已思考并执行 1 次命令");
-    expect(toolActivity(tool, "settled").label).toBe("命令执行完成");
-  });
-
-  it("stops the activity when a run ends without text", () => {
-    const tool = { type: "tool-call", status: { type: "complete" }, args: {} };
-    expect(processGroupSummary([tool], [0], false, "cancelled")).toEqual({ status: "error", label: "回复中断" });
-    expect(processGroupSummary([tool], [0], false, "failed")).toEqual({ status: "error", label: "回复失败" });
-    expect(processGroupSummary([tool], [0], false, "stopped")).toEqual({ status: "complete", label: "回复未生成" });
-    expect(processGroupSummary([{ ...tool, status: { type: "incomplete" } }], [0], true, "cancelled"))
-      .toEqual({ status: "error", label: "回复中断" });
+  it("distinguishes failure, interruption and incomplete timing", () => {
+    expect(toolActivity(tool("click", "incomplete", { isError: true, durationMs: 10 })))
+      .toEqual({ status: "error", label: "click 失败 · 0.01 秒" });
+    expect(toolActivity(tool("fill", "incomplete", { result: { error: { code: "aborted" } }, durationMs: 0, timingIncomplete: true })))
+      .toEqual({ status: "error", label: "fill 已中断 · ≥0.00 秒" });
+    expect(toolActivity(tool("fill", "incomplete", { result: { error: { code: "interrupted" } } })).label)
+      .toBe("fill 已中断");
+    expect(toolActivity({ ...tool("fill", "incomplete"), interrupted: true }).label).toBe("fill 已中断");
+    expect(toolActivity(tool("fill", "incomplete", { durationMs: 25, timingIncomplete: true })).label)
+      .toBe("fill 失败 · ≥0.02 秒");
+    expect(toolActivity(tool("fill", "running"), "cancelled"))
+      .toEqual({ status: "error", label: "fill 已中断" });
+    expect(toolActivity(tool("click", "complete"), "cancelled"))
+      .toEqual({ status: "complete", label: "click 已完成" });
+    expect(processGroupSummary([tool("click", "incomplete"), tool("fill", "complete")], [0, 1]))
+      .toEqual({ status: "error", label: "fill 已完成 · 此前有失败" });
   });
 });
 

@@ -3,7 +3,6 @@ import { CodeXmlIcon, MessageSquarePlusIcon, SettingsIcon, SlidersHorizontalIcon
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ConversationMenu } from "../components/chat/thread-list";
 import { Thread } from "../components/chat/thread";
-import { Badge } from "../components/ui/badge";
 import { Empty, EmptyHeader, EmptyTitle, EmptyDescription, EmptyMedia, EmptyContent } from "../components/ui/empty";
 import { Button } from "../components/ui/button";
 import { ErrorNotice } from "../components/ui/error-notice";
@@ -57,25 +56,13 @@ function Header({ conversation = false, logger }: { conversation?: boolean; logg
   const [warning, setWarning] = useState("");
   return <><a className="skip-link" href="#chat-content">跳转到内容</a>
     <header className="app-header">
-      <div className="flex min-w-0 items-center gap-2.5">
-        <img src="/icons/icon-32.png" className="size-6 shrink-0" alt="" />
-        <h1 translate="no">Surf Wax</h1>
-      </div>
-      <nav aria-label="侧栏工具" className="flex shrink-0 items-center gap-0.5">
+      {conversation && logger && <h1 className="conversation-heading"><ConversationMenu logger={logger} /></h1>}
+      <nav aria-label="侧栏工具" className="header-actions flex shrink-0 items-center gap-0.5">
         {conversation && <NewConversationButton setWarning={setWarning} />}<UserScriptsButton /><SettingsButton />
       </nav>
     </header>
-    {conversation && logger && <div className="conversation-bar"><ConversationMenu logger={logger} /><RunBadge /></div>}
     {warning && <p role="status" className="conversation-notice">{warning}</p>}
   </>;
-}
-
-function RunBadge() {
-  const { locked, localRunning } = useRunState();
-  return <Badge variant="outline" className="run-badge" aria-live="polite">
-    <span className="status-dot" data-running={locked} aria-hidden="true" />
-    {localRunning ? "正在工作" : locked ? "任务进行中" : "就绪"}
-  </Badge>;
 }
 
 export function App() {

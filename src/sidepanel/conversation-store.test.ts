@@ -77,6 +77,53 @@ it("shows structured tool failures without losing the full result", () => {
   expect(projected.parts[0]).toMatchObject({ type: "tool-call", isError: true, status: { type: "incomplete" }, result: output });
 });
 
+it("restores tool durations by run and call id without mixing repeated ids", async () => {
+  const events: LogEvent[] = [];
+  const logger = new EventLogger({ store: {
+    async append(event) { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+    async all() { return [...events]; },
+    async clear() { events.length = 0; },
+  } });
+  const conversationId = "timings";
+  await logger.appendMessage(conversationId, { id: "question-1", role: "user", parts: [{ type: "text", text: "one" }] });
+  for (const [runId, messageId, parentId, durationMs, incomplete] of [
+    ["run-1", "reply-1", "question-1", 1234, false],
+    ["run-2", "reply-2", "question-2", 25, true],
+  ] as const) {
+    if (runId === "run-2") await logger.appendMessage(conversationId, { id: "question-2", role: "user", parts: [{ type: "text", text: "two" }] }, { parentId: "reply-1" });
+    await logger.appendMessage(conversationId, { id: messageId, role: "assistant", parts: [{
+      type: "dynamic-tool", toolName: "click", toolCallId: "same", state: "output-available", input: {}, output: { ok: true },
+    }] }, { runId, parentId });
+    await logger.append({ type: "tool.finished", conversationId, runId, toolCallId: "same", latencyMs: durationMs, content: { timingIncomplete: incomplete } });
+  }
+  const runtime = new ConversationStore(logger, () => { throw new Error("Restoration must not request a model"); });
+  await runtime.threads.switchToThread(conversationId);
+  const parts = runtime.getState().thread.messages.flatMap((message) => message.parts.filter((part) => part.type === "tool-call"));
+  expect(parts).toMatchObject([{ toolName: "click", durationMs: 1234, timingIncomplete: false }, { toolName: "click", durationMs: 25, timingIncomplete: true }]);
+});
+
+it("restores a disconnected run with its tool interruption and incomplete timing", async () => {
+  const events: LogEvent[] = [];
+  const logger = new EventLogger({ store: {
+    async append(event) { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+    async all() { return [...events]; },
+    async clear() { events.length = 0; },
+  } });
+  const conversationId = "interrupted-timing";
+  await logger.appendMessage(conversationId, { id: "question", role: "user", parts: [{ type: "text", text: "run" }] });
+  await logger.append({ type: "conversation.submitted", conversationId, runId: "lost", content: { messageId: "question" } });
+  await logger.appendMessage(conversationId, { id: "partial", role: "assistant", parts: [{
+    type: "dynamic-tool", toolName: "click", toolCallId: "call", state: "input-available", input: {},
+  }] }, { runId: "lost", parentId: "question" });
+  await logger.append({ type: "tool.started", conversationId, runId: "lost", toolCallId: "call", content: { toolName: "click" } });
+  await logger.recoverDanglingRuns([], "worker-restarted");
+  const runtime = new ConversationStore(logger, () => { throw new Error("Restoration must not request a model"); });
+  await runtime.threads.switchToThread(conversationId);
+  const partial = runtime.getState().thread.messages.find((message) => message.id === "partial");
+  expect(partial).toMatchObject({ runId: "lost", parts: [{ toolName: "click", durationMs: 0, timingIncomplete: true, interrupted: true }] });
+  expect(events.find((event) => event.type === "conversation.aborted")?.content).toBeNull();
+});
+
 it("rebuilds an early request failure from the canonical terminal event", async () => {
   const failure = { message: "provider rejected the request", status: 400 };
   const repository = await restoreConversationRepository([

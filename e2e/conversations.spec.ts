@@ -126,7 +126,7 @@ test("executes run through the page facade, restores the conversation, and clear
     await composer.press("Enter");
     const process = opened.page.getByTestId("process-trace");
     await expect(process).toHaveCount(1);
-    await expect(process.locator(":scope > summary")).toContainText("已执行 1 次命令");
+    await expect(process.locator(":scope > summary")).toHaveText(/^execute_program 已完成 · \d+\.\d{2} 秒$/);
     await expect(process.locator(":scope > summary span")).not.toHaveClass(/shimmer/);
     await expect(process).not.toHaveAttribute("open", "");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("META_OK");
@@ -185,6 +185,10 @@ test("queues multiple follow-up messages while running and dispatches them in FI
     await composer.fill("initial request");
     await composer.press("Enter");
     await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
+    await opened.page.setViewportSize({ width: 320, height: 720 });
+    const titleBox = await opened.page.getByTestId("conversation-menu").boundingBox();
+    const actionsBox = await opened.page.locator(".header-actions").boundingBox();
+    expect(titleBox && actionsBox && titleBox.x + titleBox.width <= actionsBox.x).toBe(true);
     await expect(opened.page.getByRole("button", { name: "排队消息", exact: true })).toHaveCount(0);
     await expect(composer).toBeEnabled();
 
@@ -231,7 +235,7 @@ test("sends a selected follow-up immediately, closes interrupted tools and keeps
     await nameCurrentConversation(opened.page, "Follow-up immediate");
     await composer.fill("long running request");
     await composer.press("Enter");
-    await expect(opened.page.locator(".process-trace[data-status=running]")).toBeVisible();
+    await expect(opened.page.getByTestId("live-tool-calls").locator(".activity[data-status=running]")).toBeVisible();
     for (const message of ["later request", "urgent request", "remove request"]) {
       await composer.fill(message);
       await composer.press("Enter");
@@ -425,7 +429,7 @@ test("searches saved messages, renames and lists historical archived conversatio
       await new Promise<void>((resolve, reject) => { transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error); });
       db.close();
     }, id);
-    await opened.page.getByRole("button", { name: "关闭对话列表" }).click();
+    await opened.page.keyboard.press("Escape");
     await opened.page.reload();
     await opened.page.getByTestId("conversation-menu").click();
     await expect(opened.page.getByText("已归档", { exact: true })).toHaveCount(0);
@@ -737,7 +741,6 @@ test("contains a long conversation search error inside the menu", async () => {
     const dialog = opened.page.locator(".conversation-dropdown");
     const notice = dialog.locator(".app-error-notice");
     await expect(notice).toContainText("搜索记录读取失败");
-    await expect(dialog.getByRole("button", { name: "关闭对话列表" })).toBeVisible();
     await notice.getByText("错误详情").click();
     await expect(notice.locator(".app-error-detail")).toContainText("SEARCH_ERROR_");
     expect(await notice.locator(".app-error-detail").evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);

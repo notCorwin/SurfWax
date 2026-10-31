@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { test, configure, dispose, openExtension, startProvider, textResponse } from "./fixtures";
+import { test, configure, dispose, nameCurrentConversation, openExtension, startProvider, textResponse } from "./fixtures";
 
 test("offers editable task suggestions and keeps the redesigned panel usable in narrow light and dark views", async () => {
   const provider = await startProvider([textResponse("## 页面重点\n\n已经整理好当前页面的主要内容。\n\n- 保留关键信息\n- 列出下一步行动"), textResponse("页面重点整理")]);
@@ -41,5 +41,21 @@ test("offers editable task suggestions and keeps the redesigned panel usable in 
     await opened.page.screenshot({ animations: "disabled", path: test.info().outputPath("conversations-drawer.png") });
     await opened.page.keyboard.press("Escape");
     await expect(opened.page.getByTestId("conversation-menu")).toBeFocused();
+
+    const longTitle = "这是一个用于检查窄侧栏会话标题显示的长标题";
+    await nameCurrentConversation(opened.page, longTitle);
+    const header = opened.page.locator(".app-header");
+    const title = header.getByTestId("conversation-menu");
+    await expect(header.getByRole("heading", { name: longTitle })).toBeVisible();
+    await expect(title).toHaveAttribute("title", longTitle);
+    await expect(header.getByText("就绪")).toHaveCount(0);
+    for (const width of [320, 430]) {
+      await opened.page.setViewportSize({ width, height: 820 });
+      const titleBox = await title.boundingBox();
+      const actionsBox = await header.locator(".header-actions").boundingBox();
+      expect(titleBox && actionsBox && titleBox.x + titleBox.width <= actionsBox.x).toBe(true);
+      await expect(header.getByTestId("new-conversation")).toBeInViewport();
+      await expect(header.getByTestId("open-settings")).toBeInViewport();
+    }
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

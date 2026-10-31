@@ -227,6 +227,17 @@ export function OptionsApp() {
   };
 
   const busy = !ready || status === "saving" || status === "clearing";
+  const customProvider = modelSettings.selectedProviderId === "custom";
+  const baseURLField = config && <Field data-disabled={busy || undefined} data-invalid={!!(fieldErrors.baseURL || fieldErrors.baseURLOverride) || undefined}>
+    <FieldLabel htmlFor="base-url">Base URL</FieldLabel>
+    <Input id="base-url" name={customProvider ? "baseURL" : "baseURLOverride"} type="url" autoComplete="url"
+      aria-invalid={!!(fieldErrors.baseURL || fieldErrors.baseURLOverride)} aria-describedby={fieldErrors.baseURL || fieldErrors.baseURLOverride ? "base-url-error" : undefined}
+      value={customProvider ? config.baseURL : config.baseURLOverride ?? ""} disabled={busy}
+      placeholder={customProvider ? "https://provider.example/v1" : resolvedBaseURL({ ...config, baseURLOverride: undefined }) || "由 SDK 自动配置"}
+      onChange={(event) => update(customProvider ? "baseURL" : "baseURLOverride", event.target.value)} />
+    {(fieldErrors.baseURL || fieldErrors.baseURLOverride) && <p id="base-url-error" className="field-error" role="alert">{fieldErrors.baseURL || fieldErrors.baseURLOverride}</p>}
+    <FieldDescription>{customProvider ? "填写所选协议的根地址；可包含 /v1、/v1beta 或 /v1beta/openai。" : "留空使用 Models.dev 绑定地址；填写后覆盖当前 Provider 地址。"}</FieldDescription>
+  </Field>;
 
   return (
     <main className="options-shell">
@@ -258,6 +269,7 @@ export function OptionsApp() {
                 {fieldErrors.providerId && <p id="provider-id-error" className="field-error" role="alert">{fieldErrors.providerId}</p>}
               </Field>
               {config && <>
+                {customProvider && baseURLField}
                 <Field data-disabled={busy || undefined} data-invalid={!!fieldErrors.model || undefined}>
                   <FieldLabel htmlFor="model-id">Model ID</FieldLabel>
                   <SearchCombobox id="model-id" name="model" allowCustom
@@ -299,7 +311,7 @@ export function OptionsApp() {
                 <div className="advanced-settings-content">
                   <FieldSet>
                     <FieldLegend>模型端点</FieldLegend>
-                    {modelSettings.selectedProviderId === "custom" && <Field data-disabled={busy || !config || undefined}>
+                    {customProvider && <Field data-disabled={busy || !config || undefined}>
                       <FieldLabel htmlFor="endpoint-type">协议</FieldLabel>
                       <Select value={config?.endpointType ?? "openai-chat-completions"} disabled={busy || !config} onValueChange={(value) => update("endpointType", value)}>
                         <SelectTrigger id="endpoint-type" aria-label="模型端点协议" className="w-full"><SelectValue /></SelectTrigger>
@@ -313,16 +325,7 @@ export function OptionsApp() {
                         </SelectGroup></SelectContent>
                       </Select>
                     </Field>}
-                    <Field data-disabled={busy || !config || undefined} data-invalid={!!(fieldErrors.baseURL || fieldErrors.baseURLOverride) || undefined}>
-                      <FieldLabel htmlFor="base-url">Base URL</FieldLabel>
-                      <Input id="base-url" name={modelSettings.selectedProviderId === "custom" ? "baseURL" : "baseURLOverride"} type="url" autoComplete="url"
-                        aria-invalid={!!(fieldErrors.baseURL || fieldErrors.baseURLOverride)} aria-describedby={fieldErrors.baseURL || fieldErrors.baseURLOverride ? "base-url-error" : undefined}
-                        value={modelSettings.selectedProviderId === "custom" ? config?.baseURL ?? "" : config?.baseURLOverride ?? ""} disabled={busy || !config}
-                        placeholder={modelSettings.selectedProviderId === "custom" ? "https://provider.example/v1" : config ? resolvedBaseURL({ ...config, baseURLOverride: undefined }) || "由 SDK 自动配置" : ""}
-                        onChange={(event) => update(modelSettings.selectedProviderId === "custom" ? "baseURL" : "baseURLOverride", event.target.value)} />
-                      {(fieldErrors.baseURL || fieldErrors.baseURLOverride) && <p id="base-url-error" className="field-error" role="alert">{fieldErrors.baseURL || fieldErrors.baseURLOverride}</p>}
-                      <FieldDescription>{modelSettings.selectedProviderId === "custom" ? "填写所选协议的根地址；可包含 /v1、/v1beta 或 /v1beta/openai。" : "留空使用 Models.dev 绑定地址；填写后覆盖当前 Provider 地址。"}</FieldDescription>
-                    </Field>
+                    {!customProvider && baseURLField}
                   </FieldSet>
                   <FieldSet>
                     <FieldLegend>系统提示词</FieldLegend>

@@ -20,7 +20,6 @@ test("ships the MV3 Harness and user-script manager", async () => {
     expect(manifest.permissions).toContain("userScripts");
     expect(existsSync(resolve(process.env.SURFWAX_EXTENSION_PATH ?? "dist", "userscripts.html"))).toBe(true);
     await expect(opened.page.getByTestId("open-user-scripts")).toBeVisible();
-    await expect(opened.page.locator("h1")).toHaveText("Surf Wax");
     await expect(opened.page.getByTestId("config-required-state")).toBeVisible();
 
     const options = await configure(opened.context, opened.page, "https://provider.test/v1");

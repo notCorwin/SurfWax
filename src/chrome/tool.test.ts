@@ -508,7 +508,7 @@ describe("browser tools", () => {
     expect(fill).toHaveBeenCalledWith(value);
     expect(result).toMatchObject({ ok: true, result: "filled" });
     expect(events.map((event) => event.type)).toEqual(["tool.started", "tool.finished"]);
-    expect(events[1]).toMatchObject({ content: { toolName: "fill" }, input, output: result });
+    expect(events[1]).toMatchObject({ content: { toolName: "fill" }, input, output: result, latencyMs: expect.any(Number) });
   });
   it("records exactly one failed result for a failed atomic action", async () => {
     const events: any[] = [];
@@ -519,7 +519,7 @@ describe("browser tools", () => {
     const result = await tools.click.execute(input, { toolCallId: "call" });
     expect(result).toMatchObject({ ok: false, error: { code: "stale-ref", retryable: false } });
     expect(events.map((event) => event.type)).toEqual(["tool.started", "tool.failed"]);
-    expect(events[1]).toMatchObject({ content: { toolName: "click" }, input, output: result });
+    expect(events[1]).toMatchObject({ content: { toolName: "click" }, input, output: result, latencyMs: expect.any(Number) });
   });
   it.each(["click", "execute_program"])("marks an interrupted %s as effect-unknown after execution begins", async (name) => {
     const events: any[] = [];
@@ -531,7 +531,7 @@ describe("browser tools", () => {
     const result = await tools[name].execute(input, { toolCallId: "call", abortSignal: controller.signal });
     expect(result).toMatchObject({ ok: false, error: { code: "aborted", effectUnknown: true, retryable: false } });
     expect(events.map((event) => event.type)).toEqual(["tool.started", "tool.failed"]);
-    expect(events[1]).toMatchObject({ content: { status: "interrupted", effectUnknown: true }, output: result });
+    expect(events[1]).toMatchObject({ content: { status: "interrupted", effectUnknown: true }, output: result, latencyMs: expect.any(Number) });
   });
   it("does not mark effects unknown when interrupted before an action starts", async () => {
     const events: any[] = [];

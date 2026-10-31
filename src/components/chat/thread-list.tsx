@@ -1,7 +1,7 @@
 "use client";
 import { usePanelRuntime, usePanelState, type PanelState } from "@/sidepanel/runtime-view";
 
-import { ChevronDownIcon, HistoryIcon, SearchIcon, PencilIcon, Trash2Icon, XIcon } from "lucide-react";
+import { ChevronDownIcon, SearchIcon, PencilIcon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type FC } from "react";
 import { flushSync } from "react-dom";
 import { activeRunIdentity, withIdleConversation } from "../../agent/coordinator";
@@ -112,13 +112,12 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
     || (index.get(item.remoteId ?? item.id) ?? "").includes(needle), [index, needle]);
   const visibleItems = open ? allItems.filter(matches) : [];
   return <Popover open={open} onOpenChange={(value) => { if (value) setOpen(true); else close(); }}>
-    <PopoverTrigger asChild><Button type="button" variant="ghost" className="conversation-trigger" data-testid="conversation-menu"><HistoryIcon data-icon="inline-start" aria-hidden="true" /><span>{title}</span><ChevronDownIcon data-icon="inline-end" aria-hidden="true" /></Button></PopoverTrigger>
-    <PopoverContent className="conversation-dropdown flex min-h-0 flex-col gap-2 overflow-hidden p-3" aria-label="对话列表"
+    <PopoverTrigger asChild><Button type="button" variant="ghost" className="conversation-trigger" data-testid="conversation-menu" title={title}><span>{title}</span><ChevronDownIcon data-icon="inline-end" aria-hidden="true" /></Button></PopoverTrigger>
+    <PopoverContent className="conversation-dropdown flex min-h-0 flex-col gap-1 overflow-hidden p-2" aria-label="对话列表"
       side="bottom" align="start" sideOffset={8} collisionPadding={12}
       onOpenAutoFocus={(event) => { event.preventDefault(); searchInput.current?.focus(); }}
       onEscapeKeyDown={(event) => { if (document.activeElement?.getAttribute("aria-label") === "会话名称") event.preventDefault(); }}>
-      <header className="flex min-h-8 shrink-0 items-center justify-between px-1 py-2"><h2 className="text-base font-semibold">对话列表</h2><Button type="button" variant="ghost" size="icon-sm" aria-label="关闭对话列表" title="关闭" onClick={close}><XIcon aria-hidden="true" /></Button></header>
-      <InputGroup className="shrink-0"><InputGroupAddon><SearchIcon aria-hidden="true" /></InputGroupAddon><InputGroupInput ref={searchInput} type="search" aria-label="搜索会话" placeholder="搜索标题或消息…" value={query} onChange={(event) => setQuery(event.target.value)} /></InputGroup>
+      <InputGroup className="shrink-0"><InputGroupAddon><SearchIcon aria-hidden="true" /></InputGroupAddon><InputGroupInput ref={searchInput} type="search" aria-label="搜索会话" placeholder="搜索会话" value={query} onChange={(event) => setQuery(event.target.value)} /></InputGroup>
       {warning && <p role="status" className="conversation-notice">{warning}</p>}
       {deleted && <div role="status" className="conversation-notice flex items-center justify-between gap-2"><span>已删除“{deleted.title}”</span>
         <Button type="button" variant="ghost" size="sm" disabled={locked} onClick={() => void runtimeCommands.threads.restore(deleted.id).then(async () => {

@@ -790,7 +790,7 @@ test("returns a tool result for a removed command and lets the agent recover", a
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("RECOVERED_AFTER_DEBUGGER_ERROR");
     const activity = opened.page.getByTestId("process-trace");
-    await expect(activity.locator(":scope > summary span")).toHaveText("1 次命令中有失败");
+    await expect(activity.locator(":scope > summary span")).toHaveText(/^install 失败 · \d+\.\d{2} 秒$/);
     await expect(activity).toHaveAttribute("data-status", "error");
     await expect(opened.page.locator(".process-trace[data-status=running]")).toHaveCount(0);
     await expect.poll(() => provider.requests.filter((request) => request.tools).length).toBe(2);

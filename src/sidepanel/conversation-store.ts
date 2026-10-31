@@ -6,9 +6,11 @@ import { ConversationListProjection, fromLogValue, type ConversationRepository, 
 export type PartStatus = { type: "running" | "complete" | "incomplete" | "requires-action"; reason?: string; error?: unknown };
 export type MessagePart =
   | { type: "text" | "reasoning"; text: string; status: PartStatus }
-  | { type: "tool-call"; toolCallId: string; toolName: string; args: unknown; result?: unknown; isError?: boolean; status: PartStatus };
+  | { type: "tool-call"; toolCallId: string; toolName: string; args: unknown; result?: unknown; isError?: boolean; durationMs?: number; timingIncomplete?: boolean; interrupted?: boolean; status: PartStatus };
+type ToolTiming = { durationMs: number; timingIncomplete: boolean; interrupted: boolean };
+const timingKey = (runId: string, toolCallId: string) => JSON.stringify([runId, toolCallId]);
 export type MessageView = {
-  id: string; role: SidePanelMessage["role"]; parts: readonly MessagePart[]; content: readonly MessagePart[];
+  id: string; runId?: string; role: SidePanelMessage["role"]; parts: readonly MessagePart[]; content: readonly MessagePart[];
   metadata: { custom?: Record<string, unknown> }; status: PartStatus;
   branchNumber: number; branchCount: number; source: SidePanelMessage;
 };
@@ -40,8 +42,8 @@ export function createMessageProjection() {
   let cache = new WeakMap<SidePanelMessage, { signature: string; view: MessageView }>();
   return {
     reset() { cache = new WeakMap(); },
-    message(source: SidePanelMessage, running: boolean, siblings: readonly string[]): MessageView {
-      const signature = `${running}:${siblings.join(":")}`;
+    message(source: SidePanelMessage, running: boolean, siblings: readonly string[], runId?: string, timings: ReadonlyMap<string, ToolTiming> = new Map()): MessageView {
+      const signature = JSON.stringify([running, siblings, runId, source.parts.flatMap((part) => "toolCallId" in part && runId ? [timings.get(timingKey(runId, part.toolCallId))] : [])]);
       const previous = cache.get(source);
       if (previous?.signature === signature) return previous.view;
       const interrupted = source.metadata?.interrupted === true || source.metadata?.custom?.interrupted === true;
@@ -57,13 +59,14 @@ export function createMessageProjection() {
         const outputFailure = tool.output && typeof tool.output === "object"
           && ((tool.output as { ok?: unknown }).ok === false || (tool.output as { isError?: unknown }).isError === true);
         const isError = tool.state === "output-error" || tool.state === "output-denied" || Boolean(outputFailure);
+        const timing = runId ? timings.get(timingKey(runId, tool.toolCallId)) : undefined;
         return [{ type: "tool-call", toolCallId: tool.toolCallId,
           toolName: "toolName" in tool ? String(tool.toolName) : tool.type.slice(5),
           args: tool.input, result: complete ? tool.output : "errorText" in tool ? tool.errorText : tool.state === "output-denied" ? "工具操作被拒绝" : undefined,
-          isError,
+          isError, ...(timing ?? {}),
           status: { type: isError ? "incomplete" : complete ? "complete" : running ? "running" : "requires-action" } }];
       });
-      const view: MessageView = { id: source.id, role: source.role, parts, content: parts, source, status,
+      const view: MessageView = { id: source.id, ...(runId ? { runId } : {}), role: source.role, parts, content: parts, source, status,
         metadata: { custom: { ...source.metadata?.custom, ...(interrupted ? { interrupted: true } : {}) } },
         branchNumber: Math.max(1, siblings.indexOf(source.id) + 1), branchCount: Math.max(1, siblings.length) };
       cache.set(source, { signature, view });
@@ -78,6 +81,8 @@ export class ConversationStore {
   private repository: ConversationRepository = { headId: null, messages: [] };
   private preferredChildren = new Map<string | null, string>();
   private projection = createMessageProjection();
+  private messageRuns = new Map<string, string>();
+  private toolTimings = new Map<string, ToolTiming>();
   private controller?: AbortController;
   private loadVersion = 0;
   private listVersion = 0;
@@ -109,7 +114,7 @@ export class ConversationStore {
     this.updateThread({ messages: messages.map((message, index) => {
       const parent = parents.get(message.id) ?? messages[index - 1]?.id ?? null;
       const group = siblings.get(parent) ?? [];
-      return this.projection.message(message, message.id === liveId, group.includes(message.id) ? group : [...group, message.id]);
+      return this.projection.message(message, message.id === liveId, group.includes(message.id) ? group : [...group, message.id], this.messageRuns.get(message.id), this.toolTimings);
     }) });
   }
   private remember(headId: string | null) {
@@ -118,6 +123,9 @@ export class ConversationStore {
   }
   private restoreBranches(repository: ConversationRepository, events: readonly LogEvent[]) {
     this.repository = repository;
+    this.messageRuns.clear();
+    this.toolTimings.clear();
+    for (const event of events) this.ingestTiming(event);
     this.preferredChildren.clear();
     for (const event of events) if (event.type === "conversation.branch.selected") {
       const head = (fromLogValue(event.content, event.valueEncoding) as { headId?: string })?.headId;
@@ -125,6 +133,18 @@ export class ConversationStore {
     }
     this.remember(this.repository.headId);
     this.projection.reset();
+  }
+  private ingestTiming(event: LogEvent): boolean {
+    if (!event.runId) return false;
+    if (event.type === "conversation.message") {
+      const message = fromLogValue(event.content, event.valueEncoding);
+      if (message && typeof message === "object" && typeof (message as { id?: unknown }).id === "string") this.messageRuns.set((message as { id: string }).id, event.runId);
+      return false;
+    }
+    if ((event.type !== "tool.finished" && event.type !== "tool.failed") || !event.toolCallId || typeof event.latencyMs !== "number" || !Number.isFinite(event.latencyMs) || event.latencyMs < 0) return false;
+    const content = fromLogValue(event.content, event.valueEncoding) as { timingIncomplete?: unknown; status?: unknown } | null;
+    this.toolTimings.set(timingKey(event.runId, event.toolCallId), { durationMs: event.latencyMs, timingIncomplete: content?.timingIncomplete === true, interrupted: content?.status === "interrupted" });
+    return true;
   }
   private async restore(id: string): Promise<LogEvent[]> {
     const events = await this.logger.restorationEvents(id);
@@ -136,6 +156,10 @@ export class ConversationStore {
     this.closed = false;
     this.unsubscribe = this.logger.subscribe((event) => {
       if (event.type === "log.cleared") { void this.threads.reload().catch((error) => this.updateThread({ error })); return; }
+      if (event.conversationId === this.state.threadListItem.id && this.ingestTiming(event)) {
+        const messages = this.state.thread.messages;
+        this.display(messages.map((message) => message.source), messages.find((message) => message.status.type === "running")?.id);
+      }
       if (/^conversation\.(created|title\.updated|deleted|restored|submitted|finished|aborted|failed)$/.test(event.type))
         void this.threads.reload().catch((error) => this.updateThread({ error }));
     });

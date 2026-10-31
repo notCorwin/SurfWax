@@ -16,8 +16,8 @@ export type { MessageView } from "@/sidepanel/runtime-view";
 export type WorkView = { mode: "process" | "final"; finalMessageId: string };
 export const CONTINUE_INTERRUPTED_TEXT = "继续上一次被中断的工作。不要重复已经完成的操作；先根据上面的工具结果确认当前状态。";
 type RowProps = { message: MessageView; messages: readonly MessageView[]; running: boolean; locked: boolean;
-  command: (action: () => void) => void; latest: boolean; work?: WorkView };
-export const MessageRow = memo(function MessageRow({ message, messages, running, locked, command, latest, work }: RowProps) {
+  command: (action: () => void) => void; latest: boolean; work?: WorkView; hideTools?: boolean };
+export const MessageRow = memo(function MessageRow({ message, messages, running, locked, command, latest, work, hideTools }: RowProps) {
   const runtimeCommands = usePanelRuntime();
   const runtime = useRuntimeView();
   const client = () => runtime.thread.getMessageById(message.id);
@@ -41,6 +41,7 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
   let answerStart = parts.length;
   if (message.id === work?.finalMessageId) while (answerStart > 0 && parts[answerStart - 1]?.type === "text") answerStart--;
   const shown = parts.map((part, index) => ({ part, index })).filter(({ index }) => {
+    if (hideTools && parts[index]?.type === "tool-call") return false;
     if (!work) return true;
     return work.mode === "final" ? index >= answerStart : message.id !== work.finalMessageId || index < answerStart;
   });
@@ -83,7 +84,7 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
       <Button type="button" variant="ghost" size="icon-xs" disabled={locked || message.branchNumber >= message.branchCount} aria-label="下一个分支" title="下一个分支" onClick={() => command(() => client().switchToBranch({ position: "next" }))}><ChevronRightIcon aria-hidden="true" /></Button>
     </div>}
   </MessageFooter>, [runtimeCommands, runtime, user, message.id, message.branchCount, message.branchNumber, copied, editing, running, locked, command, work?.mode]);
-  if (work && shown.length === 0) return null;
+  if ((work || hideTools) && shown.length === 0 && !(work?.mode === "final" && (message.metadata.custom?.interrupted === true || message.status?.type === "incomplete"))) return null;
   if (work?.mode === "process" && !message.metadata.custom?.interrupted
     && shown.every(({ part }) => part.type === "text" && !part.text.trim())) return null;
   return <Message data-role={message.role} align={user ? "end" : "start"} aria-live={latest && !user ? "polite" : undefined} className={user ? "user-message" : "assistant-message px-2"}>
@@ -102,7 +103,7 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
           })}>保存并重新生成</Button>
         </div>}
       </form> : renderParts()}
-      {!user && message.metadata.custom?.interrupted === true && work?.mode !== "final" && <div className="interrupted-message" data-testid="interrupted-message">
+      {!user && message.metadata.custom?.interrupted === true && work?.mode !== "process" && <div className="interrupted-message" data-testid="interrupted-message">
         <span>回复已中断</span>{latest && <Button type="button" size="sm" variant="outline" disabled={locked} data-testid="continue-interrupted" onClick={() => command(() => runtimeCommands.thread.append(CONTINUE_INTERRUPTED_TEXT))}>继续</Button>}
       </div>}
       {message.status?.type === "incomplete" && message.status.reason === "error" && work?.mode !== "process" && <ErrorNotice summary="模型请求失败。" error={message.status.error} />}
@@ -117,4 +118,4 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
     || turnActivityBoundary(before.messages, before.message.id) === turnActivityBoundary(after.messages, after.message.id)
       && turnActivityPhase(before.messages, before.message.id, before.running) === turnActivityPhase(after.messages, after.message.id, after.running))
   && before.running === after.running && before.locked === after.locked && before.command === after.command
-  && before.latest === after.latest && before.work?.mode === after.work?.mode && before.work?.finalMessageId === after.work?.finalMessageId);
+  && before.latest === after.latest && before.hideTools === after.hideTools && before.work?.mode === after.work?.mode && before.work?.finalMessageId === after.work?.finalMessageId);

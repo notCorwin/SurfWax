@@ -12,10 +12,10 @@ function format(value: unknown): string {
   }
 }
 
-export const ToolFallback = memo(function ToolFallback(part: { status: { type: string }; args: unknown; result?: unknown; isError?: boolean }) {
+export const ToolFallback = memo(function ToolFallback(part: { toolName: string; status: { type: string }; args: unknown; result?: unknown; isError?: boolean; durationMs?: number; timingIncomplete?: boolean; interrupted?: boolean; autoExpandError?: boolean }) {
   const { status, label } = toolActivity(part, useContext(ActivityPhaseContext));
   const running = status === "running";
-  const [expanded, setExpanded] = useState(status === "error");
+  const [expanded, setExpanded] = useState(status === "error" && part.autoExpandError !== false);
   return (
     <details className="activity" data-status={status} open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
       <summary>
@@ -28,5 +28,5 @@ export const ToolFallback = memo(function ToolFallback(part: { status: { type: s
       </div>}
     </details>
   );
-}, (before, after) => before.status.type === after.status.type && before.args === after.args
-  && before.result === after.result && before.isError === after.isError);
+}, (before, after) => before.toolName === after.toolName && before.status.type === after.status.type && before.args === after.args
+  && before.result === after.result && before.isError === after.isError && before.durationMs === after.durationMs && before.timingIncomplete === after.timingIncomplete && before.interrupted === after.interrupted && before.autoExpandError === after.autoExpandError);

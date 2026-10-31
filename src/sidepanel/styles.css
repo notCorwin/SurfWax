@@ -34,28 +34,20 @@ p {
   gap: calc(var(--spacing) * 2);
   min-height: calc(var(--spacing) * 15);
   padding: calc(var(--spacing) * 3) calc(var(--spacing) * 4);
-}
-.app-header h1 { font-size: var(--type-body); font-weight: 600; }
-.app-header nav { color: var(--muted-foreground); }
-.conversation-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: calc(var(--spacing) * 3);
-  padding: 0 calc(var(--spacing) * 4) calc(var(--spacing) * 3);
   border-bottom: 1px solid var(--surface-stroke);
 }
-.run-badge { border: 0; padding: 0; color: var(--muted-foreground); font-size: var(--type-tiny); gap: calc(var(--spacing) * 1.5); }
-.status-dot { width: calc(var(--spacing) * 1.5); height: calc(var(--spacing) * 1.5); border-radius: 50%; background: var(--brand); }
-.status-dot[data-running="true"] { box-shadow: 0 0 0 calc(var(--spacing) * 0.75) var(--surface-selected); }
+.conversation-heading { min-width: 0; flex: 1; font-size: var(--type-body); font-weight: 600; }
+.header-actions { flex: none; margin-left: auto; }
+.app-header nav { color: var(--muted-foreground); }
 
 .conversation-trigger {
+  max-width: 100%;
   min-width: 0;
-  flex-shrink: 1;
   justify-content: flex-start;
 }
 
 .conversation-trigger span {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -63,13 +55,16 @@ p {
 
 .conversation-dropdown {
   width: calc(100vw - var(--spacing) * 6);
-  max-height: min(calc(var(--spacing) * 128), var(--radix-popover-content-available-height));
+  max-height: min(calc(var(--spacing) * 96), var(--radix-popover-content-available-height));
   border-radius: var(--radius-xl);
   overscroll-behavior: contain;
 }
 
 .conversation-dropdown [data-slot="input-group"] {
+  border: 0;
   border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+  box-shadow: none;
 }
 
 .conversation-select,
@@ -137,6 +132,7 @@ p {
   align-items: center;
   gap: calc(var(--spacing) * 2);
   padding: calc(var(--spacing) * 2) calc(var(--spacing) * 3);
+  font-weight: 400;
   text-align: left;
 }
 
@@ -393,10 +389,10 @@ p {
 }
 
 /* Panel layouts consume the shared material and typography tokens. */
-.conversation-trigger { height: auto; padding: 0; gap: calc(var(--spacing) * 2); font-size: var(--type-xs); color: var(--muted-foreground); }
+.conversation-trigger { height: calc(var(--spacing) * 9); padding: 0; gap: calc(var(--spacing) * 2); font-size: var(--type-body); font-weight: inherit; color: var(--foreground); }
 .conversation-trigger > span { max-width: 100%; }
-.conversation-item { min-height: calc(var(--spacing) * 12); }
-.conversation-select { height: auto; min-height: calc(var(--spacing) * 12); }
+.conversation-item { min-height: calc(var(--spacing) * 10); }
+.conversation-select { height: auto; min-height: calc(var(--spacing) * 10); }
 .conversation-dropdown .conversation-notice { margin-inline: calc(var(--spacing) * 1); }
 .welcome { min-height: min(26rem, calc(100dvh - 19rem)); }
 .welcome-symbol { color: var(--brand); }
@@ -411,8 +407,6 @@ p {
 .composer-surface [data-slot="input-group-addon"] { cursor: default; }
 .composer-model { max-width: min(40vw, 16rem); }
 .reasoning-select { font-size: var(--type-xs); color: var(--muted-foreground); border-color: transparent; box-shadow: none; }
-.composer-hint { font-size: var(--type-xs); line-height: var(--line-caption); }
-.composer-hint > :last-child { opacity: 0.65; }
 .user-message [data-slot="bubble-content"] { border-radius: var(--radius-xl); padding: calc(var(--spacing) * 2) calc(var(--spacing) * 3); }
 .assistant-message { padding-inline: 0; }
 :is(.process-trace, .work-summary, .thinking-item, .activity) > summary { gap: calc(var(--spacing) * 2); font-weight: 450; font-size: var(--type-xs); min-height: calc(var(--spacing) * 6); }
@@ -422,6 +416,9 @@ p {
 }
 :is(.process-trace, .work-summary, .thinking-item, .activity)[open] > summary::after { transform: rotate(135deg); }
 .process-trace-content { margin-left: calc(var(--spacing) * 0.5); border-left: 1px solid var(--surface-stroke); }
+.live-tool-calls { max-height: calc(var(--spacing) * 24); overflow-y: auto; overscroll-behavior: contain; padding-inline: calc(var(--spacing) * 2); }
+.live-tool-calls > .activity > summary { min-height: calc(var(--spacing) * 8); }
+.live-tool-calls > .activity > summary span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .app-shell > [role="status"], .app-shell > [role="alert"] { margin: calc(var(--spacing) * 2) calc(var(--spacing) * 4); font-size: var(--type-xs); }
 @media (max-height: 600px) {
   .welcome { min-height: 0; padding-block: calc(var(--spacing) * 4); gap: calc(var(--spacing) * 4); }

@@ -917,13 +917,17 @@ describe("canonical event log", () => {
     const logger = new EventLogger({ store: memoryStore() });
     await logger.appendMessage("one", { id: "u1", role: "user", parts: [] });
     await logger.appendMessage("one", { id: "a1", role: "assistant", parts: [{ type: "text", text: "Complete reply" }] }, { runId: "done", parentId: "u1" });
+    await logger.append({ type: "tool.finished", conversationId: "one", runId: "done", toolCallId: "completed", latencyMs: 123 });
+    await logger.append({ type: "tool.finished", conversationId: "two", runId: "other", toolCallId: "foreign", latencyMs: 456 });
     await logger.append({ type: "conversation.finished", conversationId: "one", runId: "done" });
     await logger.append({ type: "tool.started", conversationId: "one", runId: "stopped", toolCallId: "pending", input: {} });
     await logger.append({ type: "conversation.aborted", conversationId: "one", runId: "stopped" });
     expect(await logger.restorationEvents("one")).toEqual(expect.arrayContaining([
       expect.objectContaining({ type: "conversation.message", content: expect.objectContaining({ id: "a1" }) }),
+      expect.objectContaining({ type: "tool.finished", runId: "done", toolCallId: "completed", latencyMs: 123 }),
       expect.objectContaining({ type: "tool.started", runId: "stopped", toolCallId: "pending" }),
     ]));
+    expect(await logger.restorationEvents("one")).not.toEqual(expect.arrayContaining([expect.objectContaining({ toolCallId: "foreign" })]));
   });
 
   it("records a result for each accepted tool when cancellation precedes execution", async () => {
@@ -934,7 +938,7 @@ describe("canonical event log", () => {
     await logger.closePendingTools("run", "one", "Stopped");
     await logger.closePendingTools("run", "one", "Stopped");
     expect((await logger.all()).filter((event) => event.type === "tool.failed")).toMatchObject([
-      { toolCallId: "waiting", output: { ok: false, error: { effectUnknown: false } } },
+      { toolCallId: "waiting", latencyMs: 0, output: { ok: false, error: { effectUnknown: false } } },
     ]);
   });
 
@@ -1011,15 +1015,18 @@ describe("run recovery", () => {
     expect((await logger.all()).filter((event) => event.type === "tool.result.data")).toHaveLength(1);
   });
   it("restores persisted act progress after its owner disappears", async () => {
-    const logger = new EventLogger({ store: memoryStore() });
+    let now = new Date("2026-01-01T00:00:00Z");
+    const logger = new EventLogger({ store: memoryStore(), now: () => now });
     const steps = [{ type: "click", target: { ref: "e1" } }, { type: "fill", target: { ref: "e2" }, value: "waiting" }, { type: "click", target: { ref: "e3" } }];
     await logger.append({ type: "conversation.submitted", conversationId: "one", runId: "lost" });
     await logger.append({ type: "tool.started", conversationId: "one", runId: "lost", toolCallId: "batch", input: { steps }, content: { callId: "sdk", toolName: "act" } });
     await logger.append({ type: "tool.progress", conversationId: "one", runId: "lost", toolCallId: "batch", content: { nextIndex: 1, steps }, output: { completed: [{ index: 0, step: steps[0], result: { performed: true } }], elapsedMs: 25 } });
+    now = new Date("2026-01-02T00:00:00Z");
     await logger.recoverDanglingRuns();
     await logger.recoverDanglingRuns();
     const results = (await logger.all()).filter((event) => event.type === "tool.failed");
     expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ latencyMs: 25, content: { timingIncomplete: true } });
     expect(fromLogValue(results[0].output, results[0].valueEncoding)).toMatchObject({ ok: false, completed: [{ index: 0, result: { performed: true } }], failed: { index: 1, step: steps[1] }, notRun: [steps[2]], elapsedMs: 25 });
   });
 

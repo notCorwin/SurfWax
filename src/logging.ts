@@ -1247,7 +1247,7 @@ export class EventLogger {
 
   async restorationEvents(conversationId: string): Promise<LogEvent[]> {
     return this.readCanonical(async (store, floor) => {
-      const lifecycle = await this.eventsByTypesAt(store, floor, [...RUN_EVENT_TYPES, "conversation.message", "conversation.branch.selected"], conversationId);
+      const lifecycle = await this.eventsByTypesAt(store, floor, [...RUN_EVENT_TYPES, "conversation.message", "conversation.branch.selected", "tool.finished", "tool.failed"], conversationId);
       const completed = new Set(lifecycle.filter((event) => event.type === "conversation.finished" && event.runId).map((event) => event.runId));
       const interrupted = [...new Set(lifecycle
         .filter((event) => (event.type === "conversation.failed" || event.type === "conversation.aborted")
@@ -1255,11 +1255,7 @@ export class EventLogger {
           && !completed.has(event.runId))
         .map((event) => event.runId!))];
       if (interrupted.length === 0) return lifecycle;
-      const replay = await this.eventsByRunTypesAt(store, floor, interrupted, [
-        "tool.started",
-        "tool.finished",
-        "tool.failed",
-      ]);
+      const replay = await this.eventsByRunTypesAt(store, floor, interrupted, ["tool.started"]);
       return [...lifecycle, ...replay].sort((left, right) => left.id - right.id);
     });
   }
@@ -1482,6 +1478,10 @@ export class EventLogger {
       const progress = [...events].reverse().find((item) => item.type === "tool.progress" && item.toolCallId === event.toolCallId);
       const progressContent = progress ? fromLogValue(progress.content, progress.valueEncoding) as { nextIndex: number; steps: unknown[] } : undefined;
       const progressOutput = progress ? fromLogValue(progress.output, progress.valueEncoding) as { completed: unknown[]; elapsedMs: number } : undefined;
+      // After an owner disappears there is no reliable end instant. Preserve
+      // only elapsed work already observed, rather than counting time offline.
+      const observedMs = typeof progressOutput?.elapsedMs === "number" && Number.isFinite(progressOutput.elapsedMs)
+        ? Math.max(0, progressOutput.elapsedMs) : 0;
       const input = fromLogValue(event.input, event.valueEncoding) as { steps?: unknown[] } | undefined;
       const steps = progressContent?.steps ?? input?.steps;
       const index = progressContent?.nextIndex ?? 0;
@@ -1494,9 +1494,9 @@ export class EventLogger {
         elapsedMs: progressOutput?.elapsedMs ?? 0,
       } : { ok: false, error: failure };
       const saved = await this.appendIfEpoch({ type: completedAll ? "tool.finished" : "tool.failed", conversationId, runId, toolCallId: event.toolCallId, toolCallIdCanonical: true,
-        content: { ...((fromLogValue(event.content, event.valueEncoding) as object) ?? {}), status: completedAll ? "completed" : "interrupted", effectUnknown: !completedAll },
+        content: { ...((fromLogValue(event.content, event.valueEncoding) as object) ?? {}), status: completedAll ? "completed" : "interrupted", effectUnknown: !completedAll, timingIncomplete: true },
         input: fromLogValue(event.input, event.valueEncoding), output: { ...output, ...(artifact ? { artifact } : {}) },
-        ...(completedAll ? {} : { error: failure, abort: { reason } }) }, epoch);
+        latencyMs: observedMs, ...(completedAll ? {} : { error: failure, abort: { reason } }) }, epoch);
       if (!saved) return false;
     }
     const started = new Set(events.filter((event) => event.type === "tool.started" || event.type === "tool.finished" || event.type === "tool.failed").map((event) => event.toolCallId));
@@ -1517,7 +1517,7 @@ export class EventLogger {
       const error = { code: invalid ? "invalid-tool-call" : "interrupted",
         message: invalid && "errorText" in part ? String(part.errorText) : "工具调用已中断，此操作未执行。", effectUnknown: false };
       const saved = await this.appendIfEpoch({ type: "tool.failed", conversationId, runId, toolCallId: part.toolCallId, toolCallIdCanonical: true,
-        content: { toolName, status: invalid ? "failed" : "interrupted", effectUnknown: false }, input, output: { ok: false, error }, error,
+        content: { toolName, status: invalid ? "failed" : "interrupted", effectUnknown: false }, input, output: { ok: false, error }, error, latencyMs: 0,
         ...(invalid ? {} : { abort: { reason } }) }, epoch);
       if (!saved) return false;
     }

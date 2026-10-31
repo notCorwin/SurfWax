@@ -315,11 +315,11 @@ test("closing the panel prevents a queued chrome call from starting", async () =
     await options.close();
     await opened.page.getByTestId("composer-input").fill("queue two calls");
     await opened.page.getByTestId("composer-input").press("Enter");
-    const process = opened.page.getByTestId("process-trace");
+    const process = opened.page.getByTestId("live-tool-calls");
     await expect(process).toHaveCount(1);
     await expect(process.locator(".activity[data-status]")).toHaveCount(2);
-    await expect(process.locator(":scope > summary")).toContainText("正在执行命令");
-    const runningLabel = process.locator(":scope > summary span");
+    await expect(process.locator(".activity > summary").last()).toContainText("正在调用 execute_program");
+    const runningLabel = process.locator(".activity > summary span").last();
     await expect(runningLabel).toHaveClass(/shimmer/);
     await expect.poll(() => runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationPlayState)).toBe("running");
     await opened.page.emulateMedia({ colorScheme: "dark" });
@@ -452,7 +452,7 @@ test('closing a native Side Panel aborts its owner and prevents a queued page mu
     const native = await nativePanel(opened, `${provider.origin}/target`);
     await submitNative(native.panel, 'perform two queued actions');
     await expect(native.target.locator('#__surf-wax-page-guard')).toBeAttached();
-    await expect.poll(() => native.panel.evaluate<boolean>('document.body.textContent.includes("正在执行命令")')).toBe(true);
+    await expect.poll(() => native.panel.evaluate<boolean>('document.body.textContent.includes("正在调用 execute_program")')).toBe(true);
     await expect.poll(async () => (await readNativeEvents(native.panel)).filter(event => event.type === 'tool.started' && event.toolCallId?.startsWith('native-queue-')).length).toBe(2);
     await native.panel.close();
     expect((await native.browser.send('Target.closeTarget', { targetId: native.targetId })).success).toBe(true);

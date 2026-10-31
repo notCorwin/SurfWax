@@ -151,7 +151,7 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
                   const saved = await logger.append({ type: "tool.failed", conversationId, runId: currentRunId,
                     content: { callId: event.callId, toolName: part.toolName },
                     toolCallId: toolId(part.toolCallId), toolCallIdCanonical: true,
-                    input: part.input, error: part.error, output: { ok: false, error: part.error } });
+                    input: part.input, error: part.error, output: { ok: false, error: part.error }, latencyMs: 0 });
                   if (!saved) throw new DOMException("日志维护已阻止工具结果保存。", "AbortError");
                 }
                 await publish();

@@ -537,10 +537,6 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
           </div>
         </InputGroupAddon>
       </InputGroup>
-      <div className="composer-hint mt-2 flex items-center justify-between gap-2 px-1 text-muted-foreground">
-        <span>{isRunning ? "可以继续输入，消息将排队发送" : "Enter 发送 · Shift + Enter 换行"}</span>
-        <span translate="no">Surf Wax</span>
-      </div>
     </form>
   );
 });
