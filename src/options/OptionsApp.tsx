@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { ChevronRightIcon, LoaderCircleIcon } from "lucide-react";
+import { Tabs } from "radix-ui";
 import { Button } from "../components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "../components/ui/card";
 import { Field, FieldDescription, FieldGroup, FieldLabel, FieldLegend, FieldSet } from "../components/ui/field";
@@ -39,8 +40,13 @@ export function OptionsApp() {
   const [matchedLimit, setMatchedLimit] = useState<ModelLimit>();
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<ModelField, string>>>({});
   const [clearConfirmationOpen, setClearConfirmationOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState("model");
+  const [errorFocus, setErrorFocus] = useState<string>();
+  const [clearMessage, setClearMessage] = useState("");
+  const [clearError, setClearError] = useState<unknown>();
   const savedConfig = useRef(JSON.stringify({ modelSettings: EMPTY_MODEL_CONFIG, providerInput: "" }));
   const matchingKey = useRef("");
+  const dirty = ready && JSON.stringify({ modelSettings, providerInput }) !== savedConfig.current;
   const storedProfile = selectedModelConfig(modelSettings);
   const selectedProvider = providers.find((provider) => provider.id === modelSettings.selectedProviderId);
   const providerOptions = useMemo<SearchComboboxOption[]>(() => [
@@ -103,6 +109,14 @@ export function OptionsApp() {
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
   }, [modelSettings, providerInput]);
+
+  useEffect(() => {
+    if (!errorFocus || activeTab !== "model") return;
+    const field = document.getElementById(errorFocus);
+    field?.closest("details")?.setAttribute("open", "");
+    field?.focus();
+    setErrorFocus(undefined);
+  }, [activeTab, errorFocus]);
 
   const update = (field: Exclude<ModelField, "providerId">, value: string) => {
     if (!config) return;
@@ -184,9 +198,8 @@ export function OptionsApp() {
         ? ({ providerId: "provider-id", baseURL: "base-url", baseURLOverride: "base-url", model: "model-id", apiKey: "api-key", contextWindowOverride: "context-window", maxTokensOverride: "max-tokens", imageInput: "image-input" }[firstMainError] ?? `provider-setting-${firstMainError}`)
         : undefined;
       if (firstErrorId) {
-        const field = document.getElementById(firstErrorId);
-        field?.closest("details")?.setAttribute("open", "");
-        field?.focus();
+        setActiveTab("model");
+        setErrorFocus(firstErrorId);
       }
       return;
     }
@@ -215,14 +228,17 @@ export function OptionsApp() {
 
   const clearLog = async () => {
     setStatus("clearing");
-    setMessage("正在清空对话与日志…");
+    setClearMessage("正在清空对话与日志…");
+    setClearError(undefined);
     try {
       const result = await chrome.runtime.sendMessage({ type: "side-agent:clear-log" });
       if (!result?.ok) throw new Error(result?.error ?? "后台未确认日志清空，请重试。");
-      setStatus("saved");
-      setMessage("对话与事件日志已清空");
+      setClearMessage("对话与事件日志已清空");
     } catch (error) {
-      fail("日志清空失败。", error);
+      setClearMessage("日志清空失败。");
+      setClearError(error);
+    } finally {
+      setStatus("idle");
     }
   };
 
@@ -243,14 +259,34 @@ export function OptionsApp() {
     <main className="options-shell">
       <a className="skip-link" href="#options-content">跳转到配置</a>
       <header className="options-header">
-        <h1>模型设置</h1>
-        <p>选择 Models.dev Provider 或配置自定义 Endpoint，并管理本地 canonical event log。</p>
+        <h1>设置</h1>
       </header>
 
-      <Card id="options-content" tabIndex={-1} data-testid="options-card">
-        <form noValidate onSubmit={(event) => void save(event)}>
+      <Tabs.Root id="options-content" tabIndex={-1} className="options-tabs" value={activeTab} onValueChange={setActiveTab}>
+        <Tabs.List className="options-tabs-list" aria-label="设置分类">
+          <Tabs.Trigger className="options-tab" value="model">模型与连接</Tabs.Trigger>
+          <Tabs.Trigger className="options-tab" value="agent">智能体</Tabs.Trigger>
+          <Tabs.Trigger className="options-tab" value="data">数据管理</Tabs.Trigger>
+        </Tabs.List>
+        {(activeTab !== "data" || dirty) && <div className="options-save-area">
+          {status === "error" && (errorDetail !== undefined
+            ? <ErrorNotice summary={message} error={errorDetail} />
+            : <p className="options-status" data-state="error" role="alert">{message}</p>)}
+          <div className="options-actions">
+            <p className="options-status" role="status" aria-live="polite">
+              {!ready ? "正在读取配置…" : status === "saving" ? "正在保存配置…" : dirty ? "有未保存的更改" : status === "saved" ? message : "所有更改已保存"}
+            </p>
+            <Button type="submit" form="options-form" disabled={busy} aria-busy={status === "saving"}>
+              {status === "saving" && <LoaderCircleIcon className="animate-spin" aria-hidden="true" />}
+              保存配置
+            </Button>
+          </div>
+        </div>}
+        <form id="options-form" className="options-form" noValidate onSubmit={(event) => void save(event)}>
+        <Tabs.Content value="model" forceMount hidden={activeTab !== "model"}>
+        <Card data-testid="options-card">
           <CardHeader>
-            <CardTitle>Provider 配置</CardTitle>
+            <CardTitle>模型与连接</CardTitle>
             <CardDescription>仅保存在当前扩展的 chrome.storage.local。</CardDescription>
           </CardHeader>
           <CardContent>
@@ -328,15 +364,6 @@ export function OptionsApp() {
                     {!customProvider && baseURLField}
                   </FieldSet>
                   <FieldSet>
-                    <FieldLegend>系统提示词</FieldLegend>
-                    <Field data-disabled={busy || undefined}>
-                      <FieldLabel htmlFor="system-prompt">自定义系统提示词</FieldLabel>
-                      <Textarea id="system-prompt" name="systemPrompt" autoComplete="off" value={modelSettings.systemPrompt ?? ""} disabled={busy}
-                        onChange={(event) => updateSystemPrompt(event.target.value)} />
-                      <FieldDescription>留空使用内置提示词；填写后将完整替换内置提示词。所有 Provider 共用此设置。</FieldDescription>
-                    </Field>
-                  </FieldSet>
-                  <FieldSet>
                     <FieldLegend>上下文窗口</FieldLegend>
                     <Field data-disabled={busy || !config || undefined} data-invalid={!!fieldErrors.contextWindowOverride || undefined}>
                       <FieldLabel htmlFor="context-window">窗口大小（tokens）</FieldLabel>
@@ -375,41 +402,48 @@ export function OptionsApp() {
               </details>
             </FieldGroup>
           </CardContent>
-          <CardFooter>
-            <Button type="submit" disabled={busy} aria-busy={status === "saving"}>
-              {status === "saving" && <LoaderCircleIcon className="animate-spin" aria-hidden="true" />}
-              保存配置
-            </Button>
-          </CardFooter>
+        </Card>
+        </Tabs.Content>
+
+        <Tabs.Content value="agent" forceMount hidden={activeTab !== "agent"}>
+        <Card>
+          <CardHeader>
+            <CardTitle>智能体</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <Field data-disabled={busy || undefined}>
+              <FieldLabel htmlFor="system-prompt">自定义系统提示词</FieldLabel>
+              <Textarea id="system-prompt" name="systemPrompt" autoComplete="off" value={modelSettings.systemPrompt ?? ""} disabled={busy}
+                onChange={(event) => updateSystemPrompt(event.target.value)} />
+              <FieldDescription>留空使用内置提示词；填写后将完整替换内置提示词。所有 Provider 共用此设置。</FieldDescription>
+            </Field>
+          </CardContent>
+        </Card>
+
+        </Tabs.Content>
+
+
+
+        <Tabs.Content value="data" forceMount hidden={activeTab !== "data"}>
+          <Card>
+            <CardHeader>
+              <CardTitle>数据管理</CardTitle>
+              <CardDescription>事件日志是聊天界面、恢复会话与模型上下文的唯一来源。</CardDescription>
+            </CardHeader>
+            <CardFooter>
+              <Button type="button" variant="destructive" data-testid="event-log-clear" disabled={busy} onClick={() => setClearConfirmationOpen(true)}>
+                {status === "clearing" && <LoaderCircleIcon className="animate-spin" aria-hidden="true" />}
+                清空对话与日志
+              </Button>
+            </CardFooter>
+          </Card>
+          {clearMessage && (clearError !== undefined
+            ? <ErrorNotice summary={clearMessage} error={clearError} />
+            : <p className="options-status" role="status">{clearMessage}</p>)}
+        </Tabs.Content>
         </form>
-      </Card>
+      </Tabs.Root>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>用户脚本</CardTitle>
-          <CardDescription>管理自动运行的脚本、匹配网站和启停状态。</CardDescription>
-        </CardHeader>
-        <CardFooter>
-          <Button asChild variant="outline"><a href="userscripts.html">打开脚本管理</a></Button>
-        </CardFooter>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>本地会话</CardTitle>
-          <CardDescription>事件日志是聊天界面、恢复会话与模型上下文的唯一来源。</CardDescription>
-        </CardHeader>
-        <CardFooter>
-          <Button type="button" variant="destructive" data-testid="event-log-clear" disabled={busy} onClick={() => setClearConfirmationOpen(true)}>
-            {status === "clearing" && <LoaderCircleIcon className="animate-spin" aria-hidden="true" />}
-            清空对话与日志
-          </Button>
-        </CardFooter>
-      </Card>
-
-      {message && (status === "error" && errorDetail !== undefined
-        ? <ErrorNotice summary={message} error={errorDetail} />
-        : <p className="options-status" data-state={status} role={status === "error" ? "alert" : "status"}>{message}</p>)}
       <AlertDialog open={clearConfirmationOpen} onOpenChange={setClearConfirmationOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>

@@ -29,7 +29,6 @@ body {
   letter-spacing: -0.04em;
 }
 
-.options-header p,
 .options-status {
   margin: 0;
   color: var(--muted-foreground);
@@ -37,8 +36,59 @@ body {
   line-height: 1.5;
 }
 
-[data-slot="card"] form {
-  display: contents;
+.options-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--spacing) * 5);
+}
+
+.options-tabs-list {
+  display: flex;
+  gap: calc(var(--spacing) * 1);
+  border-bottom: 1px solid var(--border);
+}
+
+.options-tab {
+  padding: calc(var(--spacing) * 2.5) calc(var(--spacing) * 3);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: var(--type-body);
+}
+
+.options-tab[data-state="active"] {
+  border-bottom-color: var(--foreground);
+  color: var(--foreground);
+}
+
+.options-form {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--spacing) * 5.5);
+}
+
+.options-save-area {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--spacing) * 3);
+}
+
+.options-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: calc(var(--spacing) * 4);
+}
+
+.options-tabs [role="tabpanel"][hidden] {
+  display: none;
+}
+
+.options-tabs [role="tabpanel"] > .options-status,
+.options-tabs [role="tabpanel"] > .app-error-notice {
+  margin-top: calc(var(--spacing) * 5);
 }
 
 [data-slot="card-footer"] {

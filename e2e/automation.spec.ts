@@ -1174,6 +1174,7 @@ for (const format of ["legacy-user-tools", "system-tools"] as const) test(`conti
   try {
     const target = await opened.context.newPage(); await target.goto(`${provider.origin}/target`);
     const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.getByRole("tab", { name: "智能体" }).click();
     await options.getByLabel("自定义系统提示词").fill("PERSISTED_CUSTOM_GUIDANCE");
     await options.getByRole("button", { name: "保存配置" }).click(); await expect(options.getByRole("status")).toContainText("配置已保存"); await options.close();
     await nameCurrentConversation(opened.page, `History ${format}`);

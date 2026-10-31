@@ -233,7 +233,16 @@ test("uses a global custom system prompt and hides disabled advanced settings", 
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await expect(options.getByRole("group", { name: "上下文窗口" })).toBeVisible();
     await expect(options.getByTestId("model-limit-match")).toContainText("256,000 tokens");
+    await options.getByText("高级设置", { exact: true }).click();
+    await expect(options.locator(".advanced-settings")).not.toHaveAttribute("open", "");
+    await options.getByRole("tab", { name: "智能体" }).click();
+    await expect(options.getByLabel("自定义系统提示词")).toBeVisible();
     await options.getByLabel("自定义系统提示词").fill("You are a custom browser agent.");
+    await expect(options.getByRole("status")).toHaveText("有未保存的更改");
+    await options.getByRole("tab", { name: "模型与连接" }).click();
+    await expect(options.getByRole("status")).toHaveText("有未保存的更改");
+    await options.getByRole("tab", { name: "智能体" }).click();
+    await expect(options.getByLabel("自定义系统提示词")).toHaveValue("You are a custom browser agent.");
     await options.getByRole("button", { name: "保存配置" }).click();
     await expect(options.getByRole("status")).toContainText("配置已保存");
     await expect.poll(() => options.evaluate(async () =>
@@ -257,6 +266,32 @@ test("uses a global custom system prompt and hides disabled advanced settings", 
   }
 });
 
+
+
+test("returns to the invalid model field when saving from another settings page", async () => {
+  const opened = await openExtension();
+  try {
+    const [options] = await Promise.all([
+      opened.context.waitForEvent("page"), opened.page.getByTestId("open-settings").click(),
+    ]);
+    await expect(options.getByLabel("Provider", { exact: true })).toBeEnabled();
+    await options.getByRole("tab", { name: "模型与连接" }).focus();
+    await options.keyboard.press("ArrowRight");
+    await expect(options.getByRole("tab", { name: "智能体" })).toHaveAttribute("aria-selected", "true");
+    await options.getByLabel("自定义系统提示词").fill("Draft instructions");
+    await options.getByRole("tab", { name: "数据管理" }).click();
+    await expect(options.getByRole("status")).toHaveText("有未保存的更改");
+    await options.getByRole("tab", { name: "智能体" }).click();
+    await options.getByRole("button", { name: "保存配置" }).click();
+    await expect(options.getByRole("tab", { name: "模型与连接" })).toHaveAttribute("aria-selected", "true");
+    await expect(options.getByLabel("Provider", { exact: true })).toBeFocused();
+    await expect(options.getByRole("status")).toHaveText("有未保存的更改");
+    await options.getByRole("tab", { name: "智能体" }).click();
+    await expect(options.getByLabel("自定义系统提示词")).toHaveValue("Draft instructions");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory);
+  }
+});
 
 
 test("shows inline settings errors and returns keyboard focus after closing conversations", async () => {

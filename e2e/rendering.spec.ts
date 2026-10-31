@@ -92,8 +92,11 @@ test("follows the system color scheme across every visible extension surface wit
         .toBe(colorScheme === "dark" ? "rgb(245, 245, 245)" : "rgb(23, 23, 23)");
       optionSnapshots[colorScheme] = await themeColors(options, ["body", '[data-slot="card"]', '[data-slot="input"]', ".search-combobox-content"]);
       await expectThemeButton(options.getByRole("button", { name: "保存配置" }), colorScheme, "default");
-      await expectThemeButton(options.getByTestId("event-log-clear"), colorScheme, "destructive");
       expect(await options.locator('[data-slot="input"]').first().evaluate((input) => getComputedStyle(input).fontSize)).toBe("14px");
+      await options.getByRole("tab", { name: "数据管理" }).click();
+      await expectThemeButton(options.getByTestId("event-log-clear"), colorScheme, "destructive");
+      await options.getByRole("tab", { name: "模型与连接" }).click();
+      await options.getByLabel("Provider", { exact: true }).click();
     }
     expect(optionSnapshots.light).toEqual({ colorScheme: "light", colors: [
       { background: "rgb(255, 255, 255)", foreground: "rgb(23, 23, 23)" },
