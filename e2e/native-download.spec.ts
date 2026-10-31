@@ -50,7 +50,6 @@ test("closing the native panel during a pending download restores the existing a
     expect(artifact?.output.base64).toEqual(expect.any(String));
     await native.panel.close();
     expect((await native.browser.send("Target.closeTarget", { targetId: native.targetId })).success).toBe(true);
-    await expect(native.target.locator("#__surf-wax-page-guard")).toHaveCount(0);
     const recovery = await opened.context.newPage();
     await recovery.goto(`chrome-extension://${opened.extensionId}/sidepanel.html`);
     await expect.poll(async () => (await readEvents(recovery)).filter(event => event.type === "tool.failed" && event.toolCallId === "pending-artifact").length).toBe(1);

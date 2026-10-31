@@ -3,9 +3,7 @@ import { BackgroundRunCoordinator } from "./agent/background-coordinator";
 import type { RunIdentity } from "./agent/coordinator";
 import { recoverBrowserInput } from "./chrome/input-recovery";
 import { createHeldInputState, debuggeeKey, heldKeyIdentity, shouldPersistInputState, updateHeldInputState, type HeldInputState } from "./chrome/input-state";
-import { installPageGuard, removePageGuard, authorizeGuardInput, targetEditor } from "./chrome/interaction-guard";
-import { GuardedInputContexts } from "./chrome/guarded-input";
-import guardCss from "./design-tokens/interaction.css?raw";
+import { targetEditor } from "./chrome/target-editor";
 import { requireDebuggee } from "./chrome/debuggee";
 import { callUserScripts, restoreUserScripts, serializeUserScripts, USER_SCRIPTS_ERROR_KEY } from "./userscripts/persistence";
 
@@ -16,12 +14,8 @@ const writers = new Set<chrome.runtime.Port>();
 const operations = new Set<Promise<unknown>>();
 const ownerCleanups = new Map<string, Set<() => Promise<void>>>();
 let maintenanceGeneration = 0;
-// A worker restart loses transient owners and ports. Reconcile their durable
-// calls and remove guards left in documents before accepting another owner.
+// A worker restart loses transient owners and ports. Reconcile their durable calls.
 const bootReady = (async () => {
-  const tabs = await chrome.tabs.query({});
-  await Promise.allSettled(tabs.filter((tab) => tab.id !== undefined).map((tab) =>
-    chrome.scripting.executeScript({ target: { tabId: tab.id!, allFrames: true }, func: removePageGuard })));
   const inputEvents = await eventLogger.inputStateEvents();
   // A conversation terminal precedes input cleanup. Recover its input too if
   // the worker stopped between those writes, using the latest canonical state.
@@ -68,7 +62,6 @@ async function clearEventLog(): Promise<void> {
   try {
     await Promise.all([...writers].map(writerBarrier));
     await Promise.allSettled([...operations]);
-    await Promise.allSettled([...guardUpdates.values()]);
     await serializeUserScripts(async () => undefined);
     eventLogger.stop();
     await eventLogger.flush();
@@ -123,256 +116,45 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (sender.id !== chrome.runtime.id) return;
   if (message?.type === "surf-wax:run-status") { void bootReady.then(() => respond({ identity: runs.identity() }), (error) => respond({ error: String(error) })); return true; }
-  if (message?.type === "surf-wax:guard-status") {
-    const tabId = sender.tab?.id;
-    const runId = tabId !== undefined ? confirmedGuards.get(tabId) ?? loadingGuards.get(tabId)?.runId : undefined;
-    respond({ runId, passThrough: runId !== undefined && tabId !== undefined && bypassedTabs.has(tabId) }); return;
-  }
   if (message?.type !== "side-agent:clear-log") return;
   clearing ??= bootReady.then(clearEventLog).finally(() => { clearing = undefined; });
   void clearing.then(() => respond({ ok: true }), (error) => respond({ ok: false, error: String(error) }));
   return true;
 });
-const guardedTabs = new Map<number, Set<chrome.runtime.Port>>();
-const bypassedTabs = new Map<number, number>();
-const guardUpdates = new Map<number, Promise<void>>();
-const confirmedGuards = new Map<number, string>();
-const loadingGuards = new Map<number, { runId: string }>();
-
-function warnPageGuard(tabId: number, error: unknown): string {
-  eventLogger.record({ type: "page-guard.failed", content: { tabId }, error });
-  const detail = `标签页 ${tabId} 无法启用防点击保护；智能体仍可继续运行。`;
-  void chrome.runtime.sendMessage({ type: "surf-wax:guard-warning", tabId }).catch(() => undefined);
-  return detail;
-}
-
-async function updatePageGuard(tabId: number, consumeLoading = false): Promise<void> {
-  const loading = loadingGuards.get(tabId);
-  const task = (guardUpdates.get(tabId) ?? Promise.resolve()).catch(() => undefined).then(async () => {
-    const enabled = guardedTabs.has(tabId);
-    if (!enabled) confirmedGuards.delete(tabId);
-    try {
-      if (enabled) {
-        const runId = runs.identity()?.runId ?? "";
-        await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: targetEditor });
-        await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: installPageGuard, args: [runId, guardCss, bypassedTabs.has(tabId)] });
-        if (guardedTabs.has(tabId) && runs.identity()?.runId === runId) confirmedGuards.set(tabId, runId);
-      }
-      else await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: removePageGuard });
-    } catch (error) {
-      if (enabled) throw error;
-    }
-  });
-  guardUpdates.set(tabId, task);
-  try { await task; }
-  finally {
-    if (guardUpdates.get(tabId) === task) guardUpdates.delete(tabId);
-    if (consumeLoading && loading && loadingGuards.get(tabId) === loading) loadingGuards.delete(tabId);
-  }
-}
-
-async function bypassPageGuard(tabId: number, enabled: boolean): Promise<void> {
-  const count = (bypassedTabs.get(tabId) ?? 0) + (enabled ? 1 : -1);
-  if (count > 0) bypassedTabs.set(tabId, count);
-  else bypassedTabs.delete(tabId);
-  if (guardedTabs.has(tabId)) await updatePageGuard(tabId).catch(() => undefined);
-}
-
-const inputTickets = new Map<number, Promise<void>>();
-type GuardReceipt = Exclude<ReturnType<typeof authorizeGuardInput>, boolean | undefined>;
-function isGuardReceipt(value: unknown): value is GuardReceipt {
-  if (!value || typeof value !== "object") return false;
-  return ["blockedBeforeInput", "keydown", "keyup", "keypress"].every((key) => typeof (value as Record<string, unknown>)[key] === "boolean");
-}
-
-async function guardInputTicket(tabId: number, runId: string, timestamp?: number, text?: string, observeBeforeInput = false) {
-  // A disconnected port leaves the DOM blocker installed until Chrome executes
-  // its removal. Authorize the actual run-bound blocker even after map deletion.
-  return chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: authorizeGuardInput, args: [runId, timestamp ?? null, text ?? null, observeBeforeInput] as any });
-}
-async function withInputTicket<T>(tabId: number, task: () => Promise<T>): Promise<T> {
-  const previous = inputTickets.get(tabId) ?? Promise.resolve();
+const inputQueues = new Map<number, Promise<void>>();
+async function withSerializedInput<T>(tabId: number, task: () => Promise<T>): Promise<T> {
+  const previous = inputQueues.get(tabId) ?? Promise.resolve();
   let release!: () => void;
   const done = new Promise<void>((resolve) => { release = resolve; });
-  inputTickets.set(tabId, done);
+  inputQueues.set(tabId, done);
   await previous;
   try {
     return await task();
   } finally {
     release();
-    if (inputTickets.get(tabId) === done) inputTickets.delete(tabId);
+    if (inputQueues.get(tabId) === done) inputQueues.delete(tabId);
   }
 }
 
-async function dispatchAuthorizedNativeInput(debuggee: chrome.debugger.Debuggee, tabId: number, runId: string, command: string, params: Record<string, any>, validate: () => void, onDispatch = () => {}) {
-  const timestamp = Date.now() / 1000 + 86400 + Math.random() / 1000;
-  const observeBeforeInput = command === "Input.dispatchKeyEvent" && ["keyDown", "rawKeyDown", "char"].includes(params.type);
-  const guardExpected = guardedTabs.has(tabId) || confirmedGuards.get(tabId) === runId || loadingGuards.get(tabId)?.runId === runId;
-  let authorized: chrome.scripting.InjectionResult<ReturnType<typeof authorizeGuardInput>>[] = [];
-  try { authorized = await guardInputTicket(tabId, runId, timestamp, params.text, observeBeforeInput); }
-  catch (error) {
-    if (guardExpected) {
-      await guardInputTicket(tabId, runId).catch(() => undefined);
-      throw new Error(`AutomationError[guard-context-unavailable]: Unable to authorize input: ${String(error)}`);
-    }
+async function dispatchNativeInput(debuggee: chrome.debugger.Debuggee, command: string, params: Record<string, any>, validate: () => void, onDispatch = () => {}) {
+  validate();
+  const { surfWaxAtomicClick, ...nativeParams } = params;
+  onDispatch();
+  if (surfWaxAtomicClick) {
+    const moved = chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, type: "mouseMoved", button: "none", buttons: 0, clickCount: 0 });
+    const pressed = chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, type: "mousePressed" });
+    const released = chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, type: "mouseReleased", buttons: 0 });
+    return (await Promise.all([moved, pressed, released]))[2];
   }
-  const root = authorized.find((item) => item.frameId === 0) ?? authorized.find((item) => item.frameId === undefined);
-  if (guardExpected && root?.result !== true) {
-    await guardInputTicket(tabId, runId).catch(() => undefined);
-    throw new Error("AutomationError[guard-context-unavailable]: The page guard did not authorize input");
-  }
-  if (guardExpected && observeBeforeInput && authorized.some((frame) => frame.result !== true || !Number.isInteger(frame.frameId) || !frame.documentId)) {
-    await guardInputTicket(tabId, runId).catch(() => undefined);
-    throw new Error("AutomationError[guard-context-unavailable]: A frame could not authorize input");
-  }
-  const hasTicket = authorized.some(({ result }) => result === true);
-  let result: unknown;
-  let blockedBeforeInput = false;
-  let observedKey = false;
-  const expectedKeyEvent = command !== "Input.dispatchKeyEvent" ? undefined
-    : params.type === "keyDown" || params.type === "rawKeyDown" ? "keydown"
-    : params.type === "keyUp" ? "keyup" : params.type === "char" ? "keypress" : undefined;
-  let dispatched = false;
-  let commandError: unknown;
-  let revokeError: unknown;
-  try {
-    validate();
-    const { surfWaxAtomicClick, ...nativeParams } = params;
-    if (surfWaxAtomicClick) {
-      // Queue the full native click together, using one run-bound ticket. User
-      // input has no intervening IPC round trip in which to reset pressed state.
-      onDispatch(); dispatched = true;
-      const moved = chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, timestamp, type: "mouseMoved", button: "none", buttons: 0, clickCount: 0 });
-      const pressed = chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, timestamp, type: "mousePressed" });
-      const released = chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, timestamp, type: "mouseReleased", buttons: 0 });
-      const results = await Promise.all([moved, pressed, released]);
-      result = results[2];
-    } else {
-      onDispatch(); dispatched = true;
-      result = await chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, timestamp });
-    }
-  } catch (error) { commandError = error; }
-  finally {
-    if (hasTicket) {
-      try {
-        const revoked = await guardInputTicket(tabId, runId);
-        const authorizedByFrame = new Map(authorized.map((frame) => [frame.frameId, frame]));
-        const revokedByFrame = new Map(revoked.map((frame) => [frame.frameId, frame]));
-        const rootResult = revoked.find((item) => item.frameId === 0) ?? revoked.find((item) => item.frameId === undefined);
-        if (root?.result === true && !isGuardReceipt(rootResult?.result)) throw new Error("The page guard changed before input completion");
-        if (root?.documentId && rootResult?.documentId !== root.documentId) throw new Error("The page navigated before input completion");
-        if (observeBeforeInput) {
-          // The focused frame may change while the key is being dispatched.
-          // A disappearing ticket can also discard a blocked beforeinput, so
-          // preserve uncertainty unless every authorized document survives.
-          for (const frame of authorized) {
-            if (frame.result !== true) continue;
-            if (!Number.isInteger(frame.frameId) || !frame.documentId) throw new Error("The authorized frame identity is unavailable");
-            const current = revokedByFrame.get(frame.frameId);
-            if (current?.documentId !== frame.documentId || !isGuardReceipt(current.result))
-              throw new Error("An authorized frame changed before input completion");
-          }
-          if (revoked.some((frame) => !authorizedByFrame.has(frame.frameId)))
-            throw new Error("A frame appeared before input completion");
-        }
-        blockedBeforeInput = revoked.some(({ result }) => isGuardReceipt(result) && result.blockedBeforeInput);
-        observedKey = expectedKeyEvent !== undefined && revoked.some(({ frameId, documentId, result }) =>
-          authorizedByFrame.get(frameId)?.result === true && authorizedByFrame.get(frameId)?.documentId === documentId
-          && isGuardReceipt(result) && result[expectedKeyEvent]);
-      } catch (error) { revokeError = error; }
-    }
-  }
-  if (commandError) {
-    if (dispatched && typeof commandError === "object") Object.assign(commandError, { effectUnknown: true });
-    throw commandError;
-  }
-  if (revokeError) throw Object.assign(new Error(`AutomationError[guard-context-unavailable]: Unable to confirm input: ${String(revokeError)}`), dispatched ? { effectUnknown: true } : {});
-  if (blockedBeforeInput) throw Object.assign(new Error("AutomationError[guard-blocked-input]: A trusted beforeinput event was blocked during key dispatch; the key's effects are unknown."), { effectUnknown: true });
-  if (hasTicket && expectedKeyEvent && !observedKey) throw Object.assign(new Error(`AutomationError[input-unconfirmed]: The ${expectedKeyEvent} event was not observed; the key's effects are unknown.`), { effectUnknown: true });
-  return result;
+  return chrome.debugger.sendCommand(debuggee, command, nativeParams);
 }
-
-chrome.tabs.onUpdated.addListener((tabId, change) => {
-  if (change.status === "loading") {
-    const runId = guardedTabs.has(tabId) ? runs.identity()?.runId : undefined;
-    if (runId) loadingGuards.set(tabId, { runId });
-    else loadingGuards.delete(tabId);
-    confirmedGuards.delete(tabId);
-  }
-  if (change.status === "complete" && guardedTabs.has(tabId)) void updatePageGuard(tabId, true).catch((error) => {
-    warnPageGuard(tabId, error);
-  });
-});
-
-chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== "surf-wax-page-guard") return;
-  const held = new Set<number>();
-  const reply = (message: object) => { try { port.postMessage(message); } catch { /* The panel has closed. */ } };
-  port.onMessage.addListener((message: { tabId?: unknown; id?: string; refresh?: boolean } & Partial<RunIdentity>) => {
-    if (message.tabId !== undefined) { try { runs.validate(message as RunIdentity); } catch { reply({ id: message.id, error: "运行所有权已失效。" }); return; } }
-    if (!Number.isInteger(message?.tabId)) return;
-    const tabId = message.tabId as number;
-    if (held.has(tabId)) {
-      if (message.refresh) void updatePageGuard(tabId).then(
-        () => reply({ id: message.id, ready: true }),
-        (error) => reply({ id: message.id, error: warnPageGuard(tabId, error) }),
-      );
-      else reply({ id: message.id, ready: true });
-      return;
-    }
-    if (message.refresh) { reply({ id: message.id, ready: true }); return; }
-    held.add(tabId);
-    const holders = guardedTabs.get(tabId) ?? new Set<chrome.runtime.Port>();
-    holders.add(port);
-    guardedTabs.set(tabId, holders);
-    void updatePageGuard(tabId).then(
-      () => reply({ id: message.id, ready: true }),
-      (error) => {
-        reply({ id: message.id, error: warnPageGuard(tabId, error) });
-      },
-    );
-  });
-  port.onDisconnect.addListener(() => {
-    for (const tabId of held) {
-      const holders = guardedTabs.get(tabId);
-      holders?.delete(port);
-      if (holders?.size) continue;
-      guardedTabs.delete(tabId);
-      loadingGuards.delete(tabId);
-      void updatePageGuard(tabId);
-    }
-  });
-});
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "surf-wax-debugger") return;
   const sessions = new Map<string, chrome.debugger.Debuggee>();
   const runtimeEvaluations = new Map<string, {debuggee:chrome.debugger.Debuggee;count:number}>();
-  const guardedInput = new GuardedInputContexts(`chrome-extension://${chrome.runtime.id}`,
-    async (source, method, params) => {
-      const key = JSON.stringify(source);
-      const evaluation = method === "Runtime.callFunctionOn";
-      if (evaluation) runtimeEvaluations.set(key, {debuggee:source,count:(runtimeEvaluations.get(key)?.count ?? 0)+1});
-      try { return await chrome.debugger.sendCommand(source, method, params); }
-      finally { if (evaluation) {
-        const entry = runtimeEvaluations.get(key);
-        if (entry && entry.count > 1) entry.count--; else runtimeEvaluations.delete(key);
-      } }
-    });
-  const pointerGestures = new Set<number>();
   const heldInput = new Map<string, HeldInputState>();
   let validatedRunId: string | undefined;
-  const gestureTimers = new Map<number, ReturnType<typeof setTimeout>>();
-  const endGesture = async (tabId: number) => {
-    if (!pointerGestures.delete(tabId)) return;
-    clearTimeout(gestureTimers.get(tabId));
-    gestureTimers.delete(tabId);
-    await bypassPageGuard(tabId, false).catch(() => undefined);
-  };
-  const keepGesture = (tabId: number) => {
-    clearTimeout(gestureTimers.get(tabId));
-    gestureTimers.set(tabId, setTimeout(() => void endGesture(tabId), 10_000));
-  };
   let closed = false;
   const inputReleases = new Map<string, Promise<void>>();
   function releaseHeldInput(inputKey: string): Promise<void> {
@@ -380,21 +162,20 @@ chrome.runtime.onConnect.addListener((port) => {
     if (pending) return pending;
     const state = heldInput.get(inputKey);
     if (!state) return Promise.resolve();
-    const task = withInputTicket(state.tabId!, async () => {
+    const task = withSerializedInput(state.tabId!, async () => {
       if (heldInput.get(inputKey) !== state) return;
       const failures: string[] = [];
-      if (state.tabId !== undefined) await bypassPageGuard(state.tabId, true);
       try {
         for (const [heldKey, params] of [...state.keys]) {
           try {
-            await dispatchAuthorizedNativeInput(state.debuggee, state.tabId!, state.runId!, "Input.dispatchKeyEvent", { ...params, text: undefined, unmodifiedText: undefined, commands: undefined, type: "keyUp", modifiers: 0 }, () => {});
+            await dispatchNativeInput(state.debuggee, "Input.dispatchKeyEvent", { ...params, text: undefined, unmodifiedText: undefined, commands: undefined, type: "keyUp", modifiers: 0 }, () => {});
             if (state.keys.get(heldKey) === params) state.keys.delete(heldKey);
           }
           catch (error) { failures.push(String(error)); }
         }
         for (const [button, params] of [...state.buttons]) {
           try {
-            await dispatchAuthorizedNativeInput(state.debuggee, state.tabId!, state.runId!, "Input.dispatchMouseEvent", { ...params, type: "mouseReleased", x: state.x, y: state.y, button, buttons: 0, modifiers: 0 }, () => {});
+            await dispatchNativeInput(state.debuggee, "Input.dispatchMouseEvent", { ...params, type: "mouseReleased", x: state.x, y: state.y, button, buttons: 0, modifiers: 0 }, () => {});
             if (state.buttons.get(button) === params) state.buttons.delete(button);
           }
           catch (error) { failures.push(String(error)); }
@@ -407,7 +188,6 @@ chrome.runtime.onConnect.addListener((port) => {
         }
       } finally {
         if (heldInput.get(inputKey) === state && !state.keys.size && !state.buttons.size) heldInput.delete(inputKey);
-        if (state.tabId !== undefined) await bypassPageGuard(state.tabId, false);
       }
     });
     inputReleases.set(inputKey, task);
@@ -416,13 +196,11 @@ chrome.runtime.onConnect.addListener((port) => {
   }
   const onEvent = (source: chrome.debugger.Debuggee, method: string, params?: object) => {
     if (!closed && sessions.has(debuggeeKey(source))) {
-      guardedInput.event(source, method, params);
       port.postMessage({ event: "onEvent", args: [source, method, params] });
     }
   };
   const onDetach = (source: chrome.debugger.Debuggee, reason: string) => {
     if (!sessions.delete(debuggeeKey(source))) return;
-    guardedInput.detach(source);
     if (!closed) port.postMessage({ event: "onDetach", args: [source, reason] });
   };
   chrome.debugger.onEvent.addListener(onEvent);
@@ -439,7 +217,7 @@ chrome.runtime.onConnect.addListener((port) => {
       if (message.rawCdp && method === "sendCommand" && params && typeof params === "object"
         && Object.keys(params).some((key) => key.startsWith("surfWax")))
         throw new Error("AutomationError[invalid-protocol-parameter]: surfWax parameters are reserved for internal automation");
-      const cleanup = method === "detach" || method === "endPointerGestures" || method === "sendCommand" &&
+      const cleanup = method === "detach" || method === "sendCommand" &&
         (["Network.disable", "Log.disable", "Input.cancelDragging", "Runtime.releaseObjectGroup", "Runtime.terminateExecution"].includes(command) ||
          command === "Page.setInterceptFileChooserDialog" && params?.enabled === false ||
          command === "Input.dispatchKeyEvent" && params?.type === "keyUp" ||
@@ -462,10 +240,7 @@ chrome.runtime.onConnect.addListener((port) => {
         requireDebuggee(args[0], method);
         await Promise.all([...heldInput].filter(([, state]) => debuggeeKey(state.debuggee) === debuggeeKey(args[0])).map(([inputKey]) => releaseHeldInput(inputKey)));
         await chrome.debugger.detach(args[0]);
-        guardedInput.detach(args[0]);
         sessions.delete(debuggeeKey(args[0]));
-      } else if (method === "endPointerGestures") {
-        await Promise.all([...pointerGestures].map((tabId) => endGesture(tabId)));
       } else {
         const native = (chrome.debugger as unknown as Record<string, (...params: any[]) => Promise<unknown>>)[method];
         if (typeof native !== "function") throw new Error(`Unknown chrome.debugger method: ${method}`);
@@ -474,20 +249,9 @@ chrome.runtime.onConnect.addListener((port) => {
         const target = debuggee?.targetId ? (await chrome.debugger.getTargets()).find((item) => item.id === debuggee.targetId) : undefined;
         const tabId = debuggee?.tabId ?? target?.tabId;
         const command = args[1] as string;
-        const hitTest = method === "sendCommand" && ["Runtime.callFunctionOn", "DOM.getNodeForLocation"].includes(command) && Boolean(args[2]?.surfWaxHitTest) && Number.isInteger(tabId);
-        if (hitTest) { args[2] = { ...args[2] }; delete args[2].surfWaxHitTest; }
         const input = method === "sendCommand" && ["Input.dispatchMouseEvent", "Input.dispatchTouchEvent", "Input.dispatchDragEvent", "Input.emulateTouchFromMouseEvent", "Input.dispatchKeyEvent", "Input.insertText"].includes(command) && Number.isInteger(tabId);
         const perform = async () => {
         const type = (args[2] as { type?: string } | undefined)?.type;
-        const start = input && (type === "mousePressed" || type === "touchStart");
-        const end = input && (type === "mouseReleased" || type === "touchEnd" || type === "touchCancel" || args[2]?.surfWaxAtomicClick);
-        const temporary = input && !start && !end && !pointerGestures.has(tabId!);
-        if ((start && !pointerGestures.has(tabId!)) || temporary || hitTest) {
-          await bypassPageGuard(tabId!, true);
-          if (start) pointerGestures.add(tabId!);
-        }
-        if (input && pointerGestures.has(tabId!)) keepGesture(tabId!);
-        let succeeded = false;
         let persistedInput: (() => Promise<unknown>) | undefined;
         let confirmRelease: (() => void) | undefined;
         let rollbackInput: (() => Promise<void>) | undefined;
@@ -540,35 +304,23 @@ chrome.runtime.onConnect.addListener((port) => {
               if (!cleanup) runs.validate(message as RunIdentity);
             }
           }
-          if (input && command === "Input.insertText" && guardedTabs.has(tabId!)) {
-            const inputRunId = message.runId ?? validatedRunId!;
-            const text = String(args[2]?.text ?? "");
-            const backendNodeId = args[2]?.surfWaxTargetBackendNodeId;
-            if (backendNodeId !== undefined) {
-              await guardedInput.insert(debuggee, backendNodeId, inputRunId, text, () => {
-                if (closed || !sessions.has(debuggeeKey(debuggee)) || !guardedTabs.has(tabId!)) throw new Error("AutomationError[guard-context-unavailable]: Guard or debugger session expired");
+          if (input) {
+            const { surfWaxTargetBackendNodeId: target, surfWaxReplaceSelection: replace, ...nativeParams } = args[2] ?? {};
+            if (command === "Input.insertText" && target !== undefined) {
+              const resolved = await chrome.debugger.sendCommand(debuggee, "DOM.resolveNode", { backendNodeId: target });
+              const objectId = (resolved as any)?.object?.objectId;
+              if (!objectId) throw new Error("AutomationError[target-unavailable]: Could not resolve the focused node");
+              try {
+                if (closed || !sessions.has(debuggeeKey(debuggee))) throw new Error("AutomationError[target-unavailable]: Debugger session expired");
                 runs.validate(message as RunIdentity);
-              }, args[2]?.surfWaxReplaceSelection === true);
-            } else {
-              if (!text) throw new Error("AutomationError[not-editable]: Empty insertion requires an exact focused target");
-              for (const character of text) {
-                if (!cleanup) runs.validate(message as RunIdentity);
-                await dispatchAuthorizedNativeInput(debuggee, tabId!, inputRunId, "Input.dispatchKeyEvent", { type: "char", text: character }, () => {
-                  if (closed) throw new DOMException("Side Panel 已关闭", "AbortError");
-                  runs.validate(message as RunIdentity);
-                }, () => { nativeInputAttempted = true; });
-              }
-            }
-            result = {};
-          } else if (input) {
-            const { surfWaxTargetBackendNodeId: _target, surfWaxReplaceSelection: _replace, ...nativeParams } = args[2] ?? {};
-            if (command === "Input.insertText" && _target !== undefined) {
-              await guardedInput.insertUnguarded(debuggee, _target, String(nativeParams.text ?? ""), _replace === true, () => {
-                if (closed || !sessions.has(debuggeeKey(debuggee)) || guardedTabs.has(tabId!)) throw new Error("AutomationError[guard-context-unavailable]: Guard or debugger session changed");
-                runs.validate(message as RunIdentity);
-              });
+                const edited = await chrome.debugger.sendCommand(debuggee, "Runtime.callFunctionOn", { objectId,
+                  functionDeclaration: `function(text, replace) { return (${targetEditor.toString()})(this, text, replace); }`,
+                  arguments: [{ value: String(nativeParams.text ?? "") }, { value: replace === true }], returnByValue: true }) as any;
+                if (edited?.exceptionDetails || edited?.result?.value?.ok !== true)
+                  throw new Error(`AutomationError[insert-failed]: ${edited?.result?.value?.reason ?? "edit-rejected"}`);
+              } finally { await chrome.debugger.sendCommand(debuggee, "Runtime.releaseObject", { objectId }).catch(() => undefined); }
               result = {};
-            } else result = await dispatchAuthorizedNativeInput(debuggee, tabId!, message.runId ?? validatedRunId!, command, nativeParams, () => {
+            } else result = await dispatchNativeInput(debuggee, command, nativeParams, () => {
               if (!cleanup) {
                 if (closed) throw new DOMException("Side Panel 已关闭", "AbortError");
                 runs.validate(message as RunIdentity);
@@ -589,7 +341,6 @@ chrome.runtime.onConnect.addListener((port) => {
           }
           confirmRelease?.();
           await persistedInput?.();
-          succeeded = true;
         } catch (error) {
           if (trackedInput && !nativeInputAttempted && rollbackInput) {
             try { await rollbackInput(); }
@@ -598,12 +349,9 @@ chrome.runtime.onConnect.addListener((port) => {
             }
           }
           throw error;
-        } finally {
-          if (temporary || hitTest) await bypassPageGuard(tabId!, false).catch(() => undefined);
-          if (input && (end || (start && !succeeded))) await endGesture(tabId!);
         }
         };
-        if (input) await withInputTicket(tabId!, perform);
+        if (input) await withSerializedInput(tabId!, perform);
         else await perform();
       }
       if (!closed) port.postMessage({ id, result });
@@ -620,13 +368,11 @@ chrome.runtime.onConnect.addListener((port) => {
     closed = true;
     chrome.debugger.onEvent.removeListener(onEvent);
     chrome.debugger.onDetach.removeListener(onDetach);
-    guardedInput.clear();
     const debuggees = [...sessions.values()];
     sessions.clear();
     cleanupTask = track((async () => {
       await Promise.allSettled([...runtimeEvaluations.values()].map(({debuggee}) => chrome.debugger.sendCommand(debuggee,"Runtime.terminateExecution")));
       await Promise.allSettled([...heldInput.keys()].map(releaseHeldInput));
-      await Promise.all([...pointerGestures].map((tabId) => endGesture(tabId)));
       await Promise.all(debuggees.map((debuggee) => chrome.debugger.detach(debuggee).catch(() => undefined)));
     })());
     void cleanupTask.finally(() => { try { port.disconnect(); } catch { /* Already disconnected. */ } });

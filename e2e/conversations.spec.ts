@@ -538,15 +538,12 @@ test("resets conversation UI while retaining only each conversation's own draft"
     await opened.page.mouse.wheel(0, -100_000);
     await expect(opened.page.getByRole("button", { name: "滚动到底部" })).toBeVisible();
     await composer.fill("first unsent draft");
-    await opened.context.serviceWorkers()[0]!.evaluate(() => chrome.runtime.sendMessage({ type: "surf-wax:guard-warning", tabId: 1 }));
-    await expect(opened.page.getByText("标签页 1 无法启用防点击保护；智能体仍可继续运行。")).toBeVisible();
 
     await opened.page.getByTestId("conversation-menu").click();
     await startNewConversation(opened.page);
     await expect(opened.page.getByRole("button", { name: "滚动到底部" })).toHaveCount(0);
     await expect(opened.page.locator(".markdown-body")).toHaveCount(0);
     await expect(composer).toHaveValue("");
-    await expect(opened.page.getByText("标签页 1 无法启用防点击保护；智能体仍可继续运行。")).toHaveCount(0);
     await expect(viewport).toHaveJSProperty("scrollTop", 0);
 
     await opened.page.getByTestId("conversation-menu").click();

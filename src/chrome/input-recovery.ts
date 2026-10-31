@@ -7,7 +7,7 @@ type InputState = {
 };
 type DebuggerApi = Pick<typeof chrome.debugger, "attach" | "sendCommand" | "detach">;
 
-/** Restore only orphaned runs, after their page guards have been released. */
+/** Restore only orphaned runs. */
 export async function recoverBrowserInput(events: readonly LogEvent[], orphanRunIds: readonly string[], debuggerApi: DebuggerApi): Promise<{ recovered: number; failures: { tabId: number; error: string }[] }> {
   const orphaned = new Set(orphanRunIds);
   const latest = new Map<string, InputState>();

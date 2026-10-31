@@ -1,7 +1,7 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
 
-test("presses keys in a cross-origin frame while all frame guards are active", async () => {
+test("presses keys in a cross-origin frame", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();

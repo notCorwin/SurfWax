@@ -2,7 +2,6 @@ import { convertToModelMessages, type Agent, type ContentPart, type LanguageMode
 import { fromLogValue, type ConversationMessage, type EventLogger } from "../logging";
 import { normalizeRecoveredToolOutput } from "../tool-result-values";
 import { claimConversationRun } from "./coordinator";
-import { guardActivePage } from "../chrome/page-guard";
 import { ensureConversationPrompt } from "./prompt";
 import { materializeToolCatalog } from "./tool-catalog";
 import { isContextOverflowError, isRecoverableModelError, retryBackoffDelay, waitForModelRetry } from "./model";
@@ -40,7 +39,6 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
     async sendMessages(options) {
       const currentRunId = crypto.randomUUID();
       const lease = await claimConversationRun(conversationId, options.abortSignal, currentRunId);
-      const releaseGuard = await guardActivePage(lease.signal).catch(() => () => undefined);
       const persistence = new AbortController();
       const signal = AbortSignal.any([lease.signal, persistence.signal]);
       let publicationFailed = false;
@@ -210,7 +208,7 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
         throw error;
       } finally {
         logger.endRun(conversationId, currentRunId);
-        try { await cleanup?.(); } finally { releaseGuard(); lease.finish(); }
+        try { await cleanup?.(); } finally { lease.finish(); }
       }
     },
   };

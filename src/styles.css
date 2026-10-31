@@ -1,6 +1,5 @@
 @import "tailwindcss";
 @import "tw-shimmer";
-@import "./design-tokens/interaction.css";
 @source "../node_modules/streamdown/dist/*.js";
 @source "../node_modules/@streamdown/code/dist/*.js";
 @source "../node_modules/@streamdown/math/dist/*.js";

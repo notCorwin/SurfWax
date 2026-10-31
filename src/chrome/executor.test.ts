@@ -1064,11 +1064,11 @@ describe("ChromeExecutor programs", () => {
 
   it("preserves uncertain effects from debugger bridge errors", async () => {
     const fake = fakeChrome();
-    const { port } = fakePort((message, reply) => reply({ id: message.id, error: "AutomationError[guard-blocked-input]: input blocked", effectUnknown: true }));
+    const { port } = fakePort((message, reply) => reply({ id: message.id, error: "AutomationError[input-failed]: input failed", effectUnknown: true }));
     (fake.chromeApi as any).runtime = { connect: vi.fn(() => port) };
     const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never });
     const bridge = (globalThis as Record<string, any>).__surfWaxDebugger;
-    await expect(bridge.call("getTargets", [])).rejects.toMatchObject({ message: expect.stringContaining("guard-blocked-input"), effectUnknown: true });
+    await expect(bridge.call("getTargets", [])).rejects.toMatchObject({ message: expect.stringContaining("input-failed"), effectUnknown: true });
     executor.dispose();
   });
 

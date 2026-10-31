@@ -186,7 +186,6 @@ function RunOwnershipNotice() {
 function ConversationView({ config, logger, threadId, drafts }: { config: ModelConfig; logger: EventLogger; threadId: string; drafts: Map<string, string> }) {
   const conversationId = usePanelState((state) => state.threadListItem.remoteId ?? state.threadListItem.id);
   const isRunning = usePanelState((state) => state.thread.isRunning);
-  const [guardWarning, setGuardWarning] = useState("");
   const [contextStatus, setContextStatus] = useState<{ message: string; error: boolean }>();
   const [compactionBusy, setCompactionBusy] = useState(false);
   const [compactionError, setCompactionError] = useState("");
@@ -194,15 +193,6 @@ function ConversationView({ config, logger, threadId, drafts }: { config: ModelC
   const refreshing = useRef(false);
   const compactionController = useRef<AbortController | undefined>(undefined);
   const refreshContext = useRef<(forced?: boolean) => Promise<void>>(async () => undefined);
-  useEffect(() => {
-    const onMessage = (message: { type?: string; tabId?: number }) => {
-      if (message?.type === "surf-wax:guard-warning") setGuardWarning(
-        Number.isInteger(message.tabId) ? `标签页 ${message.tabId} 无法启用防点击保护；智能体仍可继续运行。` : "当前标签页无法启用防点击保护；智能体仍可继续运行。",
-      );
-    };
-    chrome.runtime.onMessage.addListener(onMessage);
-    return () => chrome.runtime.onMessage.removeListener(onMessage);
-  }, []);
   useEffect(() => logger.subscribe((event) => {
     if (event.conversationId !== conversationId) return;
     if (event.type === "context.compacted" || event.type === "context.checkpoint.applied") {
@@ -281,7 +271,6 @@ function ConversationView({ config, logger, threadId, drafts }: { config: ModelC
   }, [config, conversationId, isRunning, logger]);
   return (
     <>
-      {guardWarning && <ErrorNotice role="status" summary={guardWarning} />}
       {contextStatus && (contextStatus.error
         ? <ErrorNotice testId="context-status" summary={contextStatus.message} />
         : <p role="status" data-testid="context-status">{contextStatus.message}</p>)}

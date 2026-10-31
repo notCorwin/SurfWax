@@ -167,107 +167,6 @@ test("executes a completed DSML page evaluation program in the side panel", asyn
 });
 
 
-test("keeps the page guard visibly breathing despite website animation overrides", async () => {
-  const provider = await startProvider([toolResponse("await new Promise(() => undefined);")]);
-  const opened = await openExtension();
-  try {
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/target`);
-    await target.emulateMedia({ reducedMotion: "no-preference" });
-    await target.evaluate(() => {
-      document.body.style.cssText = "margin:0;background:white";
-      document.body.replaceChildren();
-      const style = document.createElement("style");
-      style.textContent = "div::before, div::after { content: none !important; animation: none !important; background: transparent !important; border: 0 !important; }";
-      document.head.append(style);
-    });
-    await (await configure(opened.context, opened.page, provider.baseURL)).close();
-    await target.bringToFront();
-    await opened.page.getByTestId("composer-input").fill("keep the page guarded");
-    await opened.page.getByTestId("composer-input").press("Enter");
-    const guard = target.locator("#__surf-wax-page-guard");
-    await expect(guard).toBeAttached();
-
-    // Sample rendered pixels in a blank area, rather than merely checking that
-    // an animation declaration exists. The page's own CSS must not hide it.
-    const sample = async () => {
-      const screenshot = await target.screenshot({ clip: { x: 300, y: 300, width: 1, height: 1 } });
-      return target.evaluate(async (data) => {
-        const image = new Image(); image.src = `data:image/png;base64,${data}`;
-        await image.decode();
-        const canvas = document.createElement("canvas"); canvas.width = canvas.height = 1;
-        const context = canvas.getContext("2d")!;
-        context.drawImage(image, 0, 0);
-        return context.getImageData(0, 0, 1, 1).data[0]!;
-      }, screenshot.toString("base64"));
-    };
-    const pixels: number[] = [];
-    for (let index = 0; index < 12; index++) {
-      pixels.push(await sample());
-      await new Promise((resolve) => setTimeout(resolve, 200));
-    }
-    expect(Math.max(...pixels) - Math.min(...pixels)).toBeGreaterThan(20);
-    expect(Math.min(...pixels)).toBeGreaterThan(180);
-
-    await target.emulateMedia({ reducedMotion: "reduce" });
-    const resting = await sample();
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(Math.abs(await sample() - resting)).toBeLessThanOrEqual(1);
-    expect(resting).toBeLessThan(250);
-    await opened.page.close();
-    await expect(guard).toHaveCount(0);
-  } finally {
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-test("blocks page clicks while the agent runs and removes the guard after navigation and panel close", async () => {
-  const responses: MockResponse[] = [
-    toolResponse("await new Promise((resolve) => setTimeout(resolve, 2500)); return true;"),
-    textResponse("GUARD_DONE"),
-    textResponse("点击防护"),
-  ];
-  const provider = await startProvider(responses);
-  const opened = await openExtension();
-  try {
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/target`);
-    const options = await configure(opened.context, opened.page, provider.baseURL);
-    await options.close();
-    await target.bringToFront();
-    await opened.page.getByTestId("composer-input").fill("test page guard");
-    await opened.page.getByTestId("composer-input").press("Enter");
-    const guard = target.locator("#__surf-wax-page-guard");
-    await expect(guard).toBeAttached();
-    expect(await guard.evaluate((element) => getComputedStyle(element).pointerEvents)).toBe("auto");
-    await target.goto(`${provider.origin}/complex-next`);
-    await expect(guard).toBeAttached();
-    await target.evaluate(() => {
-      const button = document.createElement("button");
-      button.textContent = "page action";
-      button.style.cssText = "position:fixed;left:20px;top:20px;width:120px;height:40px";
-      button.onclick = () => { document.documentElement.dataset.clicks = String(Number(document.documentElement.dataset.clicks || 0) + 1); };
-      document.body.append(button);
-    });
-    await target.mouse.click(40, 40);
-    expect(await target.evaluate(() => document.documentElement.dataset.clicks)).toBeUndefined();
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("GUARD_DONE");
-    await expect(guard).toHaveCount(0);
-    await target.mouse.click(40, 40);
-    expect(await target.evaluate(() => document.documentElement.dataset.clicks)).toBe("1");
-
-    responses.push(toolResponse("await new Promise(() => undefined);"));
-    await opened.page.getByTestId("composer-input").fill("run until panel closes");
-    await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(guard).toBeAttached();
-    await opened.page.close();
-    await expect(guard).toHaveCount(0);
-  } finally {
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-
 test("closing the panel cancels a pending complete response and continues only on request", async () => {
   const provider = await startProvider([delayedResponse(textResponse("CANCELLED_RESPONSE"), 30_000), textResponse("CONTINUED"), textResponse("恢复后的标题")]);
   const opened = await openExtension();
@@ -326,9 +225,7 @@ test("closing the panel prevents a queued chrome call from starting", async () =
     await expect.poll(() => runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationName)).toBe("none");
     await opened.page.emulateMedia({ colorScheme: "light", reducedMotion: "no-preference" });
     await expect.poll(() => runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationName)).toBe("none");
-    await expect(target.locator("#__surf-wax-page-guard")).toBeAttached();
     await opened.page.close();
-    await expect(target.locator("#__surf-wax-page-guard")).toHaveCount(0);
     await expect.poll(() => target.evaluate(() => document.documentElement.dataset.queuedToolRan)).toBeUndefined();
     expect(provider.requests).toHaveLength(1);
   } finally {
@@ -337,7 +234,7 @@ test("closing the panel prevents a queued chrome call from starting", async () =
 });
 
 
-test("guards every touched tab while CDP pointer input still reaches the page", async () => {
+test("operates on a selected tab while user pointer input remains available", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const targetUrl = `${provider.origin}/target`;
@@ -366,76 +263,24 @@ test("guards every touched tab while CDP pointer input still reaches the page", 
         document.body.append(button);
       }\`));` }, "call-create-target"),
       commandResponse("execute_program", { code: `return await page.getByRole('button', { name: 'CDP target' }).click();` }, "call-click-target"),
-      commandResponse("execute_program", { code: ` await new Promise((resolve) => setTimeout(resolve, 1200)); return page.url(); ` }, "call-guard-wait"),
-      textResponse("MULTI_GUARD_OK"),
-      textResponse("页面防护"),
+      commandResponse("execute_program", { code: ` await new Promise((resolve) => setTimeout(resolve, 1200)); return page.url(); ` }, "call-wait"),
+      textResponse("MULTI_TAB_OK"),
+      textResponse("多标签操作"),
     );
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     await first.bringToFront();
     await opened.page.getByTestId("composer-input").fill("operate on another tab");
     await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(first.locator("#__surf-wax-page-guard")).toBeAttached();
-    await expect(second.locator("#__surf-wax-page-guard")).toBeAttached();
     await expect.poll(() => second.evaluate(() => document.documentElement.dataset.cdpClicks)).toBe("1");
     await second.mouse.click(40, 40);
-    expect(await second.evaluate(() => document.documentElement.dataset.cdpClicks)).toBe("1");
+    expect(await second.evaluate(() => document.documentElement.dataset.cdpClicks)).toBe("2");
     await second.goto(otherUrl);
-    await expect(second.locator("#__surf-wax-page-guard")).toBeAttached();
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("MULTI_GUARD_OK");
-    await expect(first.locator("#__surf-wax-page-guard")).toHaveCount(0);
-    await expect(second.locator("#__surf-wax-page-guard")).toHaveCount(0);
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("MULTI_TAB_OK");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
-
-
-test("shows a warning for a Chrome page that cannot be guarded without stopping the agent", async () => {
-  const provider = await startProvider([
-    toolResponse("return chrome.runtime.getManifest().name;"), textResponse("CHROME_PAGE_OK"), textResponse("防护提示"),
-  ]);
-  const opened = await openExtension();
-  try {
-    const options = await configure(opened.context, opened.page, provider.baseURL);
-    await options.close();
-    const restricted = await opened.context.newPage();
-    await restricted.goto("chrome://extensions/");
-    await restricted.bringToFront();
-    await opened.page.getByTestId("composer-input").fill("inspect Chrome");
-    await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.getByRole("status").filter({ hasText: "无法启用防点击保护" })).toBeVisible();
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("CHROME_PAGE_OK");
-  } finally {
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-
-test("keeps the composer usable when a long data URL cannot be guarded", async () => {
-  const provider = await startProvider([textResponse("DATA_PAGE_OK"), textResponse("数据页")]);
-  const opened = await openExtension();
-  try {
-    await opened.page.setViewportSize({ width: 360, height: 700 });
-    const options = await configure(opened.context, opened.page, provider.baseURL);
-    await options.close();
-    const dataPage = await opened.context.newPage();
-    await dataPage.goto(`data:text/html,${encodeURIComponent(`<title>学生成绩表示例表格</title><p>${"成绩".repeat(2000)}</p>`)}`);
-    await dataPage.bringToFront();
-    const composer = opened.page.getByTestId("composer-input");
-    await composer.fill("inspect data page");
-    await composer.press("Enter");
-    const warning = opened.page.getByRole("status").filter({ hasText: "无法启用防点击保护" });
-    await expect(warning).toHaveText(/标签页 \d+ 无法启用防点击保护；智能体仍可继续运行。/);
-    expect((await warning.textContent())!.length).toBeLessThan(80);
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("DATA_PAGE_OK");
-    await expect(composer).toBeVisible();
-    expect(await composer.evaluate((element) => element.getBoundingClientRect().bottom <= innerHeight)).toBe(true);
-  } finally {
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
 
 
 test('closing a native Side Panel aborts its owner and prevents a queued page mutation', async () => {
@@ -449,12 +294,10 @@ test('closing a native Side Panel aborts its owner and prevents a queued page mu
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     const native = await nativePanel(opened, `${provider.origin}/target`);
     await submitNative(native.panel, 'perform two queued actions');
-    await expect(native.target.locator('#__surf-wax-page-guard')).toBeAttached();
     await expect.poll(() => native.panel.evaluate<boolean>('document.body.textContent.includes("执行浏览器操作")')).toBe(true);
     await expect.poll(async () => (await readNativeEvents(native.panel)).filter(event => event.type === 'tool.started' && event.toolCallId?.startsWith('native-queue-')).length).toBe(2);
     await native.panel.close();
     expect((await native.browser.send('Target.closeTarget', { targetId: native.targetId })).success).toBe(true);
-    await expect(native.target.locator('#__surf-wax-page-guard')).toHaveCount(0);
     await expect.poll(() => native.target.evaluate(() => document.documentElement.dataset.queuedNativeRan)).toBeUndefined();
     const recovery = await opened.context.newPage();
     await recovery.goto(`chrome-extension://${opened.extensionId}/sidepanel.html`);
@@ -553,14 +396,12 @@ test('two native side panels accept only one owner and closing the non-owner pre
     await other.panel.close();
     expect((await owner.browser.send('Target.closeTarget', { targetId: other.targetId })).success).toBe(true);
     await expect.poll(() => owner!.panel.evaluate<string>(`chrome.runtime.sendMessage({ type: 'surf-wax:run-status' }).then(result => result.identity?.runId || '')`)).toBe(active.identity.runId);
-    await expect(owner.target.locator('#__surf-wax-page-guard')).toBeAttached();
     expect(provider.stats.abortedResponses).toBe(0);
     // Chrome can suspend animation frames in the unfocused native window.
     // Restore the owner's visible surface before asserting the completed response.
     await owner.panel.evaluate(`chrome.windows.update(${owner.windowId}, { focused: true })`);
     releaseOwner();
     await expect.poll(() => nativeAssistantText(owner!.panel)).toContain('OWNER_SURVIVED_NONOWNER_CLOSE');
-    await expect(owner.target.locator('#__surf-wax-page-guard')).toHaveCount(0);
     const events = await readNativeEvents(owner.panel);
     const submitted = events.filter(event => event.type === 'conversation.submitted');
     expect(submitted).toHaveLength(1);

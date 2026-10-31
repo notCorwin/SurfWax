@@ -7,7 +7,6 @@ it("keeps the captured chooser across same-document navigation but invalidates i
     command: vi.fn(async () => ({})),
     pressChord: vi.fn(async () => undefined),
     detach: vi.fn(async () => undefined),
-    mark: vi.fn(async () => undefined),
   });
   await runtime.createPage(3);
   const source = { tabId: 3, sessionId: "frame" };

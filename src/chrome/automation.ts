@@ -406,10 +406,7 @@ export class AutomationRuntime {
     command: Command;
     pressChord: (debuggee: Debuggee, chord: string, signal?: AbortSignal, assertFocus?: () => Promise<void>) => Promise<void>;
     atomicClick?: (debuggee: Debuggee, params: Record<string, unknown>) => Promise<unknown>;
-    hitTest?: (debuggee: Debuggee, params: Record<string, unknown>) => Promise<any>;
     detach: (debuggee: Debuggee) => Promise<void>;
-    mark: (tabId: number) => Promise<void>;
-    refreshGuard?: (tabId: number) => Promise<void>;
     onDispatch?: () => Promise<void>;
     claimChooser?: (chooser: FileChooserRecord) => FileChooserClaim | undefined;
     respondDialog?: (id: string | undefined, source: Debuggee, accept: boolean, promptText?: string, dispatch?: () => Promise<void>) => Promise<unknown>;
@@ -589,12 +586,6 @@ export class AutomationRuntime {
       this.retireFrameSession(session, params.sessionId);
       this.invalidate(session, preserveChooser);
     }
-    if (session && session.rootFrameId !== undefined && !source.sessionId && method === "Page.lifecycleEvent" && params?.name === "init" && params?.frameId === session.rootFrameId
-      && (session.lifecycleCutoff === undefined || typeof params.timestamp === "number" && params.timestamp > session.lifecycleCutoff)) {
-      // Guard recovery must not depend on Performance.getMetrics succeeding:
-      // lifecycle verification may be unknown while the document still needs protection.
-      void this.options.refreshGuard?.(tabId!).catch(() => undefined);
-    }
     if (session && session.lifecycleCutoff !== undefined && session.rootFrameId !== undefined && !source.sessionId && method === "Page.lifecycleEvent" && params?.frameId === session.rootFrameId
       && typeof params.loaderId === "string" && typeof params.timestamp === "number" && Number.isFinite(params.timestamp) && params.timestamp > session.lifecycleCutoff) {
       const current = session.rootLifecycle;
@@ -609,7 +600,6 @@ export class AutomationRuntime {
         if (params.name === "load") current.load = true;
       }
     }
-    if (session && !source.sessionId && method === "DOM.documentUpdated") void this.options.refreshGuard?.(tabId!).catch(() => undefined);
     if (method === "Page.fileChooserOpened" && params.backendNodeId) {
       const chooser = { backendNodeId: params.backendNodeId, debuggee: source, mode: params.mode,
         ...(typeof params.frameId === "string" ? { frameId: params.frameId } : {}) };
@@ -1314,16 +1304,6 @@ export class AutomationRuntime {
         // last: scrolling the destination into view invalidates earlier points.
         const destination = await this.waitActionableLocator(session, target.spec, false, true, true, false);
         const from = await this.waitActionableLocator(session, spec, false, true, true, false);
-        const nativeDrag = await this.callOn(from.targetSession, from.objectId, `function(){
-          let element = this;
-          while (element instanceof Element) {
-            if (element instanceof HTMLElement && element.draggable) return true;
-            const root = element.getRootNode();
-            element = element.parentElement ?? (root instanceof ShadowRoot ? root.host : null);
-          }
-          return false;
-        }`);
-        if (nativeDrag === true) throw automationError("native-drag-unavailable", { reason: "interaction-blocker-prevents-native-drag-events" });
         const start = await this.toRootPoint(session, from.targetSession, from.state);
         const viewport = await this.pageValue(tabId, "({width:innerWidth,height:innerHeight})") as { width: number; height: number };
         const inside = (point: { x: number; y: number }) => Number.isFinite(point.x) && Number.isFinite(point.y)
@@ -1342,6 +1322,8 @@ export class AutomationRuntime {
           const to = await this.waitBoundActionable(session, destination, false);
           const end = await this.toRootPoint(session, to.targetSession, to.state);
           point = end;
+          await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", ...end, button: "left", buttons: 1 });
+          // Native HTML drag targets receive dragover on a subsequent move.
           await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", ...end, button: "left", buttons: 1 });
           releaseAttempted = true;
           await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseReleased", ...end, button: "left", buttons: 0, clickCount: 1 });
@@ -1423,7 +1405,6 @@ export class AutomationRuntime {
       };
       this.sessions.set(tabId, session);
     }
-    await this.options.mark(tabId);
     session.ready ??= (async () => {
       const signal = this.context.signal;
       session!.lifecycleCutoff = undefined;
@@ -2361,12 +2342,11 @@ export class AutomationRuntime {
     return (await this.options.command(session.debuggee, "DOM.describeNode", { objectId })).node;
   }
 
-  private async callOn(session: Session, objectId: string, functionDeclaration: string, args: unknown[] = [], hitTest = false): Promise<any> {
+  private async callOn(session: Session, objectId: string, functionDeclaration: string, args: unknown[] = []): Promise<any> {
     const params = {
       objectId, functionDeclaration, arguments: args.map((value) => ({ value })), awaitPromise: true, returnByValue: true,
     };
-    const response = hitTest && this.options.hitTest ? await this.options.hitTest(session.debuggee, params)
-      : await this.options.command(session.debuggee, "Runtime.callFunctionOn", params);
+    const response = await this.options.command(session.debuggee, "Runtime.callFunctionOn", params);
     if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
     return response.result?.value;
   }
@@ -2382,17 +2362,14 @@ export class AutomationRuntime {
       const style = getComputedStyle(this); let x = rect.left + rect.width / 2; let y = rect.top + rect.height / 2;
       let hit = null;
       if (pointer) {
-        const guard = document.getElementById("__surf-wax-page-guard"); const pointerEvents = guard?.style.getPropertyValue("pointer-events"); const pointerPriority = guard?.style.getPropertyPriority("pointer-events");
-        if (guard) guard.style.setProperty("pointer-events", "none", "important");
         hit = this.ownerDocument.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
         while (hit?.shadowRoot) { const nested = hit.shadowRoot.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); if (!nested || nested === hit) break; hit = nested; }
-        if (guard) guard.style.setProperty("pointer-events", pointerEvents || "auto", pointerPriority || "important");
       }
       const disabled = (${DISABLED_STATE_SOURCE}).call(this);
       const editKind = (${TEXT_INPUT_KIND_SOURCE}).call(this);
       const editable = !disabled && !this.readOnly && this.getAttribute("aria-readonly") !== "true" && editKind !== "unsupported" && editKind !== "detached";
       return { connected: true, x, y, width: rect.width, height: rect.height, visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none", stable: true, enabled: !disabled, editable, editKind, receivesEvents: Boolean(hit && (hit === this || this.contains(hit))), checked: (${CHECKED_STATE_SOURCE}).call(this).value };
-    }`, [scroll, pointer], pointer);
+    }`, [scroll, pointer]);
       if (!pointer || !value.connected || !value.visible) return value as ElementState;
       // CDP quads are relative to this debugger target's viewport and already
       // include same-process iframe transforms, borders, and nested offsets.
@@ -2491,8 +2468,15 @@ export class AutomationRuntime {
     // test cannot see an overlay in an embedding document, so compare document
     // identities before testing the out-of-process frame boundaries.
     if (point.x < 0 || point.y < 0) return false;
+    const hitAt = async (target: Debuggee, position: { x: number; y: number }) => {
+      const metrics = await this.options.command(target, "Page.getLayoutMetrics", {});
+      const viewport = metrics.cssLayoutViewport ?? metrics.layoutViewport;
+      return this.options.command(target, "DOM.getNodeForLocation", {
+        x: Math.floor(position.x + (viewport?.pageX ?? 0)), y: Math.floor(position.y + (viewport?.pageY ?? 0)),
+      });
+    };
     let hit: any;
-    try { hit = await this.options.command(debuggee, "DOM.getNodeForLocation", { x: Math.floor(point.x), y: Math.floor(point.y), surfWaxHitTest: true }); }
+    try { hit = await hitAt(debuggee, point); }
     catch (error) {
       if (error instanceof Error && /No node found at given location/i.test(error.message)) return false;
       throw error;
@@ -2526,7 +2510,7 @@ export class AutomationRuntime {
       point = projectQuad(quad, point.x / size.width, point.y / size.height);
       if (point.x < 0 || point.y < 0) return false;
       try {
-        const hit = await this.options.command(parent, "DOM.getNodeForLocation", { x: Math.floor(point.x), y: Math.floor(point.y), surfWaxHitTest: true });
+        const hit = await hitAt(parent, point);
         if (hit.backendNodeId !== owner.backendNodeId) return false;
       } catch (error) {
         if (error instanceof Error && /No node found at given location/i.test(error.message)) return false;

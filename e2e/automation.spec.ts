@@ -1057,7 +1057,6 @@ test("preserves program progress when its native Side Panel closes during a late
     await expect.poll(async () => (await readNativeEvents(native.panel)).filter((event) => event.type === "automation.action.started" && event.toolCallId === "native-partial-act" && event.content.operation === "waitFor").length).toBe(1);
     await native.panel.close();
     expect((await native.browser.send("Target.closeTarget", { targetId: native.targetId })).success).toBe(true);
-    await expect(native.target.locator("#__surf-wax-page-guard")).toHaveCount(0);
     const recovery = await opened.context.newPage(); await recovery.goto(`chrome-extension://${opened.extensionId}/sidepanel.html`);
     const results = async () => (await readEvents(recovery)).filter((event) => ["tool.failed", "tool.finished"].includes(event.type) && event.toolCallId === "native-partial-act");
     await expect.poll(async () => (await results()).length).toBe(1);
@@ -1157,7 +1156,6 @@ test("reads cross-frame response bodies and records complete diagnostic events",
     const raw = events.find((event) => event.type === "browser.diagnostic" && event.content.method === "Network.responseReceived" && event.output.response?.url.endsWith("/frame"));
     expect(raw?.content.source.sessionId).toEqual(expect.any(String));
     expect(raw?.output.response).toMatchObject({ status: 200, headers: expect.any(Object) });
-    await expect(target.locator("#__surf-wax-page-guard")).toHaveCount(0);
     const count = (await readEvents(opened.page)).filter((event) => event.type === "browser.diagnostic").length;
     await target.evaluate(async () => { console.warn("after-run"); await fetch("/complex-next"); });
     expect((await readEvents(opened.page)).filter((event) => event.type === "browser.diagnostic")).toHaveLength(count);

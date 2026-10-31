@@ -300,16 +300,10 @@ export class ChromeExecutor {
         throwIfAborted(this.activeSignal);
         return this.bridgeCommand(debuggee, "Input.dispatchMouseEvent", { ...params, type: "mousePressed", surfWaxAtomicClick: true });
       } : undefined,
-      hitTest: typeof this.chromeApi.runtime?.connect === "function" ? (debuggee, params) => {
-        throwIfAborted(this.activeSignal);
-        return this.bridgeCommand(debuggee, "Runtime.callFunctionOn", { ...params, surfWaxHitTest: true });
-      } : undefined,
       detach: async (debuggee) => {
         await (this.bridge.call as any)("detach", [debuggee]);
         this.bridgedDebuggees.delete(JSON.stringify(debuggee));
       },
-      mark: async (tabId) => (globalThis as Record<string, any>).__surfWaxGuard?.mark(tabId),
-      refreshGuard: async (tabId) => (globalThis as Record<string, any>).__surfWaxGuard?.refresh(tabId),
       onDispatch: () => this.programScope?.dispatched() ?? Promise.resolve(),
       claimChooser: (chooser) => {
         const owner = this.eventOwner;
@@ -1463,7 +1457,6 @@ export class ChromeExecutor {
     if (this.disposed) throw new Error("Chrome executor has been disposed");
     throwIfAborted(signal);
     this.logger?.record({ type: "tool.route", conversationId: context.conversationId, content: { target } });
-    await (globalThis as Record<string, any>).__surfWaxGuard?.mark(target.tabId);
     throwIfAborted(signal);
     if (target.world === "USER_SCRIPT") return this.evaluateUserScript(target, code, signal);
     if (target.world === "ISOLATED") return this.evaluateIsolated(target, code, signal);

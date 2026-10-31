@@ -38,42 +38,32 @@ test("executes more than 100 program operations and records a single tool result
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
-test("keeps user clicks, keys and paste blocked throughout agent input and iframe work", async () => {
+test("allows user interaction while the agent is working", async () => {
   const provider = await startProvider([commandResponse("execute_program", { code: `
-    for (let index = 0; index < 30; index++) {
-      await page.locator('#agent').focus();
-      await page.insertText('海🌊');
-      await page.locator('#increment').click();
-      await new Promise(resolve => setTimeout(resolve, 15));
-    }
+    await page.evaluate(() => { document.body.dataset.agentStarted = 'yes'; });
+    await new Promise(resolve => setTimeout(resolve, 4000));
+    await page.locator('#agent').fill('agent value');
     return page.locator('#agent').inputValue();
-  `, timeoutMs: 30000 }, "guard-input"), textResponse("INPUT_GUARDED")]);
+  `, timeoutMs: 30000 }, "concurrent-input"), textResponse("INPUT_DONE")]);
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage(); await target.goto(`${provider.origin}/target`);
-    await target.evaluate((origin) => {
-      document.body.innerHTML = `<input id="agent"><button id="increment" style="position:fixed;left:20px;top:80px" onclick="document.body.dataset.clicks=String(Number(document.body.dataset.clicks||0)+1)">Increment</button><iframe src="${origin}/target"></iframe>`;
-      window.addEventListener('keydown', (event) => { if (event.key === 'U') document.body.dataset.userKey = 'yes'; }, true);
-      window.addEventListener('paste', () => { document.body.dataset.userPaste = 'yes'; }, true);
-    }, provider.origin);
-    await (await configure(opened.context, opened.page, provider.baseURL)).close(); await nameCurrentConversation(opened.page, "Guard tickets"); await target.bringToFront();
-    const user = await opened.context.newCDPSession(target);
-    await opened.page.getByTestId("composer-input").fill("type while preserving the interaction blocker"); await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(target.locator("#__surf-wax-page-guard")).toBeAttached();
-    await expect.poll(() => target.frames()[1]?.locator("#__surf-wax-page-guard").count()).toBe(1);
-    await expect(target.locator("#agent")).not.toHaveValue("");
-    for (let index = 0; index < 20; index++) {
-      await user.send("Input.dispatchMouseEvent", { type: "mousePressed", x: 40, y: 95, button: "left", clickCount: 1 });
-      await user.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: 40, y: 95, button: "left", clickCount: 1 });
-      await user.send("Input.dispatchKeyEvent", { type: "keyDown", key: "U", code: "KeyU", text: "U" });
-      await user.send("Input.dispatchKeyEvent", { type: "keyUp", key: "U", code: "KeyU" });
-      await user.send("Input.insertText", { text: "USER_PASTE" });
-    }
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("INPUT_GUARDED");
-    await expect(target.locator("#agent")).toHaveValue("海🌊".repeat(30));
-    expect(await target.evaluate(() => ({ ...document.body.dataset }))).toEqual({ clicks: "30" });
-    await expect(target.locator("#__surf-wax-page-guard")).toHaveCount(0);
-    const terminals = (await readEvents(opened.page)).filter((event) => ["tool.finished", "tool.failed"].includes(event.type) && event.toolCallId === "guard-input");
+    await target.evaluate(() => {
+      document.body.innerHTML = `<input id="agent"><input id="user"><button id="increment" onclick="document.body.dataset.clicks=String(Number(document.body.dataset.clicks||0)+1)">Increment</button>`;
+    });
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("work while I use the page");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(target.locator("body")).toHaveAttribute("data-agent-started", "yes");
+    await target.locator("#user").click();
+    await target.keyboard.type("user value");
+    await target.locator("#increment").click();
+    await expect(target.locator("#user")).toHaveValue("user value");
+    await expect(target.locator("body")).toHaveAttribute("data-clicks", "1");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("INPUT_DONE");
+    await expect(target.locator("#agent")).toHaveValue("agent value");
+    const terminals = (await readEvents(opened.page)).filter((event) => ["tool.finished", "tool.failed"].includes(event.type) && event.toolCallId === "concurrent-input");
     expect(terminals).toHaveLength(1); expect(terminals[0].type).toBe("tool.finished");
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

@@ -8,7 +8,6 @@ import { PROGRAM_CATALOG_VERSION } from "../chrome/tool";
 import { restoreConversationRepository } from "../conversations";
 
 vi.mock("./coordinator", () => ({ claimConversationRun: async (_id: string, signal?: AbortSignal) => ({ signal: signal ?? new AbortController().signal, finish: vi.fn() }) }));
-vi.mock("../chrome/page-guard", () => ({ guardActivePage: async () => vi.fn() }));
 function logger() {
   const events: LogEvent[] = [];
   return new EventLogger({ store: {

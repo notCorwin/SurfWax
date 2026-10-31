@@ -20,7 +20,7 @@ function harness() {
     return {};
   });
   const runtime = new AutomationRuntime({ chromeApi: { tabs: { query: async () => [{ id: 3 }] } } as never,
-    command, pressChord: async () => {}, detach: async () => {}, mark: async () => {} });
+    command, pressChord: async () => {}, detach: async () => {} });
   runtime.setContext({ conversationId: "c", logIdentity: { runId: "run", toolCallId: "call", toolCallIdCanonical: true } });
   return { runtime, command };
 }

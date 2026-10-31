@@ -739,9 +739,6 @@ test("the real native Side Panel owns a sandbox program and cleans held input wh
         })
       ).success,
     ).toBe(true);
-    await expect(native.target.locator("#__surf-wax-page-guard")).toHaveCount(
-      0,
-    );
     await expect(native.target.locator("body")).toHaveAttribute(
       "data-shift-released",
       "yes",

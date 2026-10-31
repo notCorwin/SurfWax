@@ -56,7 +56,7 @@ test("releases the pointer after a drag is interrupted after pressing", async ()
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
-test("fails before dispatch when native draggable elements cannot be safely dragged", async () => {
+test("dispatches native HTML drag and drop events", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -64,21 +64,20 @@ test("fails before dispatch when native draggable elements cannot be safely drag
     const page = await opened.context.newPage();
     await page.goto(`${provider.origin}/automation`);
     await page.evaluate(() => {
-      document.body.innerHTML = `<div draggable="true" style="position:absolute;top:100px;left:100px;width:80px;height:80px;background:blue"><span id="drag-source">drag</span></div><a id="drag-link" href="#link" style="position:absolute;top:200px;left:100px">link</a><div id="shadow-host" draggable="true" style="position:absolute;top:300px;left:100px;width:80px;height:80px"></div><div id="drag-target" style="position:absolute;top:2400px;left:100px;width:80px;height:80px;background:red">drop</div>`;
-      document.querySelector<HTMLElement>("#shadow-host")!.attachShadow({ mode: "open" }).innerHTML = `<button id="shadow-source">shadow drag</button>`;
-      document.addEventListener("pointerdown", () => { document.body.dataset.pointerdown = "yes"; });
-      document.addEventListener("dragstart", () => { document.body.dataset.dragstart = "yes"; });
+      document.body.innerHTML = `<div id="drag-source" draggable="true" style="position:absolute;top:100px;left:100px;width:80px;height:80px">drag</div><div id="drag-target" style="position:absolute;top:300px;left:100px;width:80px;height:80px">drop</div>`;
+      const source = document.querySelector<HTMLElement>("#drag-source")!;
+      const target = document.querySelector<HTMLElement>("#drag-target")!;
+      source.ondragstart = (event) => { document.body.dataset.dragstart = "yes"; event.dataTransfer!.setData("text/plain", "dragged"); };
+      target.ondragover = (event) => event.preventDefault();
+      target.ondrop = (event) => { event.preventDefault(); document.body.dataset.drop = event.dataTransfer!.getData("text/plain"); };
     });
     responses.push(commandResponse("drag", { source, destination }, "html-drag"),
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: false }); return commandResponse("drag", { source: { by: "css", value: "#drag-link" }, destination }, "implicit-html-drag"); },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: false }); return commandResponse("drag", { source: { by: "css", value: "#shadow-source" }, destination }, "shadow-html-drag"); },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: false }); return textResponse("HTML_DRAG_REJECTED"); }, textResponse("拖放"));
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return textResponse("HTML_DRAG_OK"); }, textResponse("拖放"));
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     await page.bringToFront();
     await opened.page.getByTestId("composer-input").fill("drag the item into the target");
     await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("HTML_DRAG_REJECTED", { timeout: 45_000 });
-    expect(await page.locator("body").evaluate((body) => ({ ...body.dataset }))).not.toHaveProperty("pointerdown");
-    expect(await page.locator("body").evaluate((body) => ({ ...body.dataset }))).not.toHaveProperty("dragstart");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("HTML_DRAG_OK", { timeout: 45_000 });
+    expect(await page.locator("body").evaluate((body) => ({ ...body.dataset }))).toMatchObject({ dragstart: "yes", drop: "dragged" });
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

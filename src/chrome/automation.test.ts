@@ -33,7 +33,6 @@ function harness(
   logger?: { record: ReturnType<typeof vi.fn> },
   onDispatch = vi.fn(async (): Promise<void> => undefined),
   claimChooser?: (chooser: any) => { assert: () => void; finish: (outcome: "handled" | "not-dispatched" | "uncertain") => void },
-  refreshGuard?: (tabId: number) => Promise<void>,
 ) {
   metadata ??= [{ role: "button", name: "Sign in", tag: "button", text: "Sign in" }];
   const calls: Array<{ method: string; params?: any }> = [];
@@ -98,8 +97,6 @@ function harness(
     command,
     pressChord,
     detach,
-    mark: vi.fn(async () => undefined),
-    refreshGuard,
     onDispatch,
     claimChooser,
     logger: logger as never,
@@ -850,8 +847,7 @@ describe("AutomationRuntime", () => {
   });
 
   it("reports unknown when a trustworthy lifecycle cutoff cannot be obtained", async () => {
-    const refreshGuard = vi.fn(async () => undefined);
-    const { runtime, command } = harness(undefined, undefined, undefined, undefined, undefined, refreshGuard);
+    const { runtime, command } = harness();
     const original = command.getMockImplementation()!;
     command.mockImplementation(async (source, method, params) => {
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root", loaderId: "loader" } } };
@@ -860,7 +856,6 @@ describe("AutomationRuntime", () => {
     });
     const page = await runtime.createPage(3);
     runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "loader", name: "init", timestamp: 100 });
-    expect(refreshGuard).toHaveBeenCalledWith(3);
     runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "loader", name: "load", timestamp: 120 });
     await expect(page.waitForLoadState("load")).rejects.toMatchObject({ code: "load-state-unknown" });
     await runtime.abortSessions();
@@ -910,18 +905,6 @@ describe("AutomationRuntime", () => {
     }
   });
 
-  it("rejects an identified native draggable before mouse input is dispatched", async () => {
-    const { runtime, command } = harness();
-    const original = command.getMockImplementation()!;
-    command.mockImplementation(async (source, method, params) => {
-      if (method === "Runtime.callFunctionOn" && params?.functionDeclaration?.includes("element.draggable")) return { result: { value: true } };
-      return original(source, method, params);
-    });
-    const page = await runtime.createPage(3);
-    await expect(page.locator("#source").dragTo(page.locator("#target"))).rejects.toMatchObject({ code: "native-drag-unavailable" });
-    expect(command.mock.calls.filter(([, method]) => method === "Input.dispatchMouseEvent")).toHaveLength(0);
-    await runtime.abortSessions();
-  });
   it("fails before pressing when the viewport cannot contain a drag-threshold movement", async () => {
     const { runtime, command } = harness(undefined, [{ connected: true, x: 2, y: 2, visible: true, stable: true, enabled: true, editable: true, receivesEvents: true, checked: false }]);
     const original = command.getMockImplementation()!;
@@ -1191,30 +1174,6 @@ describe("AutomationRuntime", () => {
     await runtime.abortSessions();
   });
 
-  it("protects an element operation while its session is still being marked", async () => {
-    const { runtime } = harness();
-    const page = await runtime.createPage(3);
-    const initial = await page.inspect() as any;
-    const ref = initial.items.find((item: any) => item.ref).ref;
-    const options = (runtime as any).options;
-    const originalMark = options.mark;
-    let release!: () => void, started!: () => void, first = true;
-    const blocked = new Promise<void>((resolve) => { release = resolve; });
-    const marking = new Promise<void>((resolve) => { started = resolve; });
-    options.mark = async (tabId: number) => {
-      if (first) { first = false; started(); await blocked; }
-      return originalMark(tabId);
-    };
-    const action = page.ref(ref).count();
-    await marking;
-    const session = fillReferencePool(runtime, 32_769);
-    await page.inspect();
-    expect(session.refUsage.size).toBeGreaterThan(32_768);
-    release();
-    await expect(action).resolves.toBe(1);
-    await runtime.abortSessions();
-  });
-
   it("keeps a single oversized frozen capture usable across continuation pages", async () => {
     const metadata = Array.from({ length: 32_769 }, (_, index) => ({ role: "button", name: `Item ${index}` }));
     const { runtime } = harness(metadata);
@@ -1355,6 +1314,21 @@ describe("AutomationRuntime", () => {
     await page.snapshot();
     await expect(page.getByRole("button", { name: "Sign in" }).click()).resolves.toMatchObject({ performed: true });
     expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent").map(({ params }) => params.type)).toEqual(["mouseMoved", "mousePressed", "mouseReleased"]);
+  });
+
+  it("uses document coordinates for hit testing and viewport coordinates for mouse input after scrolling", async () => {
+    const { runtime, command, calls } = harness();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Page.getLayoutMetrics") return { cssLayoutViewport: { pageX: 30, pageY: 400 } };
+      if (method === "DOM.getNodeForLocation" && (params.x !== 40 || params.y !== 412)) throw new Error("No node found at given location");
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    await expect(page.getByRole("button", { name: "Sign in" }).click()).resolves.toMatchObject({ performed: true });
+    expect(command).toHaveBeenCalledWith(expect.anything(), "DOM.getNodeForLocation", { x: 40, y: 412 });
+    expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent").map(({ params }) => [params.x, params.y])).toEqual([[10, 12], [10, 12], [10, 12]]);
+    await runtime.abortSessions();
   });
 
   it("re-resolves a locator when a framework replaces the node during actionability", async () => {

@@ -190,11 +190,11 @@ describe("atomic browser tool programs", () => {
     const positions = [
       ["fill", "Replace an editable element's value; an empty value clears it.", "Does not emit beforeinput or keyboard events."],
       ["type_text", "Insert text character by character into an editable element.", "does not emit beforeinput, keydown or keyup."],
-      ["press_key", "Press a key or chord, optionally focusing an element first.", "The interaction blocker can reject editing keys with guard-blocked-input and unknown effects."],
-      ["key_down", "Hold a key until key_up or run cleanup.", "The interaction blocker can reject editing keys with guard-blocked-input and unknown effects."],
-      ["send_cdp", "Send a Chrome DevTools Protocol command to an owned tab or session.", "Input event timestamps are replaced for isolation; guarded Input.insertText is dispatched as character key events."],
+      ["press_key", "Press a key or chord, optionally focusing an element first."],
+      ["key_down", "Hold a key until key_up or run cleanup."],
+      ["send_cdp", "Send a Chrome DevTools Protocol command to an owned tab or session."],
       ["select_option", "Select option values or labels on a select element.", "An empty array clears selection; missing, disabled or ambiguous options fail without changing selection."],
-      ["drag", "Drag one element to another using pointer events.", "Native HTML5 draggable sources are unavailable while the interaction blocker is active."],
+      ["drag", "Drag one element to another using pointer events."],
       ["upload_file", "Upload artifacts to a file input or captured chooser.", "Supply exactly one target or chooserId; chooser uploads cannot set tabId or background."],
       ["read_artifact", "Read a stored artifact or large tool result by ID, including during a background job.", "nested undefined and array holes are null with undefinedPaths and holePaths;"],
       ["list_requests", "List captured network requests and requestRef identifiers.", "integrity describes captured history, not all network traffic"],
@@ -204,9 +204,9 @@ describe("atomic browser tool programs", () => {
       const item = definition(name);
       expect(item.summary).toBe(summary);
       expect(PROGRAM_TOOL_CONTEXT).toContain(`- ${name}: ${summary}`);
-      expect(PROGRAM_TOOL_CONTEXT).not.toContain(detail);
+      if (detail) expect(PROGRAM_TOOL_CONTEXT).not.toContain(detail);
       expect(tools[name]!.description).toBe(item.description);
-      expect(item.description).toContain(detail);
+      if (detail) expect(item.description).toContain(detail);
       expect(tools[name]!.inputSchema).toBe(item.inputSchema);
     }
     expect(definition("select_option").inputSchema.safeParse({ target: { ref: "e1" }, value: [], background: true }).success).toBe(true);

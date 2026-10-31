@@ -53,7 +53,7 @@ export async function reloadDevelopmentExtension(
       }
     }
     await wake.evaluate(() =>
-      chrome.runtime.sendMessage({ type: "surf-wax:guard-status" }),
+      chrome.runtime.sendMessage({ type: "surf-wax:run-status" }),
     );
     const result = await refreshed;
     if ("error" in result)

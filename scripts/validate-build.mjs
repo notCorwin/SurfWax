@@ -23,12 +23,6 @@ export async function validateBuild(directory = 'dist') {
   if (!/connect-src 'none'/.test(manifest.content_security_policy?.sandbox ?? '')) throw new Error('Program network must use explicit context facades');
   for (const path of manifest.sandbox.pages) await access(join(output, path));
   for (const path of [manifest.background.service_worker, manifest.side_panel.default_path, manifest.options_page, 'userscripts.html', ...Object.values(manifest.icons)]) await access(join(output, path));
-  const guards = manifest.content_scripts?.filter(script => script.run_at === 'document_start' && script.all_frames);
-  if (!guards?.length) throw new Error('Document-start interaction capture is missing');
-  for (const script of guards.flatMap(script => script.js ?? [])) {
-    const code = await readFile(join(output, script), 'utf8');
-    if (/\bimport\s*\(/.test(code)) throw new Error(`Interaction capture must run synchronously: ${script}`);
-  }
   async function walk(path) {
     const entries = await readdir(path, { withFileTypes: true });
     return (await Promise.all(entries.map(async entry => entry.isDirectory() ? walk(join(path, entry.name)) : [join(path, entry.name)]))).flat();

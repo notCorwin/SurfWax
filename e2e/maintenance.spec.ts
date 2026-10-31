@@ -1,6 +1,6 @@
 import { expect, test, openExtension, configure, dispose, startProvider, commandResponse, readEvents, textResponse } from "./fixtures";
 
-test("worker restart closes orphaned calls, releases page protection and never replays an operation", async () => {
+test("worker restart closes orphaned calls, releases held input and never replays an operation", async () => {
   const provider = await startProvider([
     commandResponse("execute_program", { code: `return await page.keyboard.down(${JSON.stringify("Shift")});` }, "restart-held-key"),
     commandResponse("execute_program", { code: `return await page.locator(${JSON.stringify("#missing-until-restart")}).fill(${JSON.stringify("waiting")});`, timeoutMs: 300_000 }, "restart-waiting"),
@@ -23,12 +23,10 @@ test("worker restart closes orphaned calls, releases page protection and never r
     await opened.page.getByTestId("composer-input").fill("hold Shift then wait for an element");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "tool.started" && event.toolCallId === "restart-waiting")).toBe(true);
-    await expect(target.locator("#__surf-wax-page-guard")).toBeAttached();
     await protocol.send("ServiceWorker.stopWorker", { versionId: versionId! });
     await expect(opened.page.getByTestId("fatal-log-error")).toBeVisible();
     await opened.page.getByTestId("reload-sidepanel").click();
     await expect(opened.page.getByTestId("composer-input")).toBeVisible();
-    await expect(target.locator("#__surf-wax-page-guard")).toHaveCount(0);
     await expect.poll(() => target.evaluate(() => document.documentElement.dataset.shiftReleased)).toBe("yes");
     const events = await readEvents(opened.page);
     expect(events.filter((event) => event.type === "tool.finished" && event.toolCallId === "restart-held-key")).toHaveLength(1);
