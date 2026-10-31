@@ -316,9 +316,9 @@ export class ChromeExecutor {
           finish: (outcome) => this.eventSubscriptions.finishChooser(owner, claim.id, claim.claimId, outcome),
         };
       },
-      respondDialog: async (id, _source, accept, prompt) => {
+      respondDialog: async (id, _source, accept, prompt, dispatch) => {
         if (!id) throw new Error("CommandError[dialog-unavailable]: Dialog was not captured in this run");
-        await this.programScope?.dispatched();
+        if (dispatch) await dispatch(); else await this.programScope?.dispatched();
         return this.handleDialog({ dialogId: id, accept, ...(prompt === undefined ? {} : { prompt }) }, this.activeSignal, this.activeContext);
       },
       logger: this.logger,

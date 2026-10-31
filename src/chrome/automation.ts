@@ -4,6 +4,7 @@ import { waitForDocumentFrame } from "./dom-frame";
 import { abortError, axValue, delay, imageSize, isTransientNavigationError, keyboardParams, modifierMask, throwIfAborted } from "./automation-utils";
 import { diffSnapshot, paginateSnapshot, type SnapshotItem, type SnapshotPosition } from "./snapshot-pagination";
 import { renderSnapshotNode, type SnapshotNode, type SnapshotStateName } from "./snapshot-render";
+import { PROGRAM_EVENT_INVOKE } from "./program-handles";
 
 const EVALUATION_CODEC_FACTORY = `(${createLogGraphCodec.toString()})({ verifyIntrinsics: true })`;
 
@@ -13,6 +14,10 @@ type RunContext = { signal?: AbortSignal; conversationId?: string; toolCallId?: 
 type Waiter = { resolve: (value: any) => void; reject: (error: Error) => void };
 type FileChooserRecord = { backendNodeId: number; debuggee: Debuggee; mode: string };
 type FileChooserClaim = { assert: () => void; finish: (outcome: "handled" | "not-dispatched" | "uncertain") => void };
+function eventWithDispatch<T extends object>(event: T, invoke: (operation: string, args: unknown[], dispatch: () => Promise<void>) => unknown): T {
+  Object.defineProperty(event, PROGRAM_EVENT_INVOKE, { value: invoke });
+  return event;
+}
 type Query = {
   kind: "role" | "text" | "label" | "placeholder" | "alt" | "title" | "testId" | "css" | "frame" | "frameRef" | "filter" | "index";
   value: string;
@@ -333,7 +338,7 @@ export class AutomationRuntime {
     refreshGuard?: (tabId: number) => Promise<void>;
     onDispatch?: () => Promise<void>;
     claimChooser?: (chooser: FileChooserRecord) => FileChooserClaim | undefined;
-    respondDialog?: (id: string | undefined, source: Debuggee, accept: boolean, promptText?: string) => Promise<unknown>;
+    respondDialog?: (id: string | undefined, source: Debuggee, accept: boolean, promptText?: string, dispatch?: () => Promise<void>) => Promise<unknown>;
     logger?: EventLogger;
   }) {}
 
@@ -709,8 +714,8 @@ export class AutomationRuntime {
     });
   }
 
-  async upload(tabId: number, files: unknown, chooser = this.fileChoosers.get(tabId)): Promise<unknown> {
-    return this.locatorValue(tabId, chooser ? { queries: [] } : { queries: [{ kind: "css", value: "input[type=file]" }] }, "setInputFiles", [files], chooser);
+  async upload(tabId: number, files: unknown, chooser = this.fileChoosers.get(tabId), dispatch?: () => Promise<void>): Promise<unknown> {
+    return this.locatorValue(tabId, chooser ? { queries: [] } : { queries: [{ kind: "css", value: "input[type=file]" }] }, "setInputFiles", [files], chooser, dispatch);
   }
 
   forgetChooser(source: Debuggee, backendNodeId: number): void {
@@ -824,7 +829,13 @@ export class AutomationRuntime {
       const signal = this.context.signal;
       const events = this.waiters.get(tabId) ?? new Map();
       const waiters = events.get(kind) ?? new Set<Waiter>();
-      const done = (value: any) => { cleanup(); resolve(kind === "dialog" ? this.dialog(tabId, value) : kind === "filechooser" ? { isMultiple: () => value.mode === "selectMultiple", setFiles: (files: unknown) => this.upload(tabId, files, value) } : value); };
+      const done = (value: any) => { cleanup(); resolve(kind === "dialog" ? this.dialog(tabId, value) : kind === "filechooser" ? eventWithDispatch({
+        isMultiple: () => value.mode === "selectMultiple",
+        setFiles: (files: unknown) => this.upload(tabId, files, value),
+      }, (operation, args, dispatch) => {
+          if (operation !== "setFiles") throw new Error("Unsupported chooser operation");
+          return this.upload(tabId, args[0], value, dispatch);
+      }) : value); };
       const abort = () => { cleanup(); reject(abortError()); };
       const waiter = { resolve: done, reject: (error: Error) => { cleanup(); reject(error); } };
       const cleanup = () => { waiters.delete(waiter); signal?.removeEventListener("abort", abort); };
@@ -835,17 +846,22 @@ export class AutomationRuntime {
   }
 
   private dialog(tabId: number, event: any) {
-    return {
+    const respond = async (accept: boolean, promptText?: string, dispatch?: () => Promise<void>) => {
+      if (this.options.respondDialog) return this.options.respondDialog(event.surfWaxDialogId, event.source, accept, promptText, dispatch);
+      await dispatch?.();
+      return this.options.command(event.source ?? { tabId }, "Page.handleJavaScriptDialog", { accept, ...(promptText === undefined ? {} : { promptText }) });
+    };
+    return eventWithDispatch({
       type: () => event.type,
       message: () => event.message,
       defaultValue: () => event.defaultPrompt,
-      accept: (promptText?: string) => this.options.respondDialog
-        ? this.options.respondDialog(event.surfWaxDialogId, event.source, true, promptText)
-        : this.options.command(event.source ?? { tabId }, "Page.handleJavaScriptDialog", { accept: true, ...(promptText === undefined ? {} : { promptText }) }),
-      dismiss: () => this.options.respondDialog
-        ? this.options.respondDialog(event.surfWaxDialogId, event.source, false)
-        : this.options.command(event.source ?? { tabId }, "Page.handleJavaScriptDialog", { accept: false }),
-    };
+      accept: (promptText?: string) => respond(true, promptText),
+      dismiss: () => respond(false),
+    }, (operation, args, dispatch) => {
+        if (operation === "accept") return respond(true, args[0] as string | undefined, dispatch);
+        if (operation === "dismiss") return respond(false, undefined, dispatch);
+        throw new Error("Unsupported dialog operation");
+    });
   }
 
   private resolveWaiters(tabId: number, kind: string, value: unknown): void {
@@ -854,7 +870,7 @@ export class AutomationRuntime {
     for (const waiter of [...waiters]) waiter.resolve(value);
   }
 
-  async locatorValue(tabId: number, spec: LocatorSpec, operation: string, args: unknown[] = [], fileChooser?: FileChooserRecord): Promise<unknown> {
+  async locatorValue(tabId: number, spec: LocatorSpec, operation: string, args: unknown[] = [], fileChooser?: FileChooserRecord, dispatch?: () => Promise<void>): Promise<unknown> {
     const operationSignal = this.context.signal;
     return this.action(tabId, operation, spec, async () => {
       validateLocator(spec);
@@ -935,7 +951,9 @@ export class AutomationRuntime {
         const targetSession = this.objectSession(session, objectId);
         if (operation === "focus") {
           const node = await this.describe(targetSession, objectId);
+          await this.options.onDispatch?.();
           await this.options.command(targetSession.debuggee, "DOM.focus", { backendNodeId: node.backendNodeId });
+          await this.assertFocused(targetSession, objectId, operationSignal);
         } else { await this.options.onDispatch?.(); await this.callOn(targetSession, objectId, "function(){ this.blur(); }"); }
         return this.afterAction(session);
       }
@@ -1019,7 +1037,7 @@ export class AutomationRuntime {
         }
         const files = await Promise.all(requested.map(async (file: any) => {
           if (file?.url) {
-            await this.options.onDispatch?.();
+            await (dispatch ?? this.options.onDispatch)?.();
             const response = await fetch(file.url, { signal: this.context.signal });
             if (!response.ok) throw new Error(`Could not fetch upload URL: ${response.status}`);
             const bytes = new Uint8Array(await response.arrayBuffer());
@@ -1029,7 +1047,7 @@ export class AutomationRuntime {
           return file;
         }));
         claim?.assert();
-        await this.options.onDispatch?.();
+        await (dispatch ?? this.options.onDispatch)?.();
         claim?.assert();
         throwIfAborted(operationSignal);
         dispatched = true;

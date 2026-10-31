@@ -233,11 +233,16 @@ export class IndexedDbEventStore implements EventStore {
     const store = transaction.objectStore(EVENT_STORE);
     try {
       const index = transaction.objectStore(ARTIFACT_INDEX_STORE);
-      const partIds = await Promise.all(parts.map((part) => requestResult<IDBValidKey>(store.add(part))));
-      for (const [position, part] of parts.entries()) {
-        const coordinates = part.artifactPart;
-        if (!coordinates || coordinates.key !== artifact.artifactGraph?.key) throw new Error("Invalid artifact part coordinates");
-        index.add(Number(partIds[position]), [coordinates.key, coordinates.node, coordinates.section, coordinates.part]);
+      // Limit simultaneously queued structured clones while keeping every part,
+      // its derived index entry, and the terminal in one atomic transaction.
+      for (let offset = 0; offset < parts.length; offset += 64) {
+        const batch = parts.slice(offset, offset + 64);
+        const partIds = await Promise.all(batch.map((part) => requestResult<IDBValidKey>(store.add(part))));
+        for (const [position, part] of batch.entries()) {
+          const coordinates = part.artifactPart;
+          if (!coordinates || coordinates.key !== artifact.artifactGraph?.key) throw new Error("Invalid artifact part coordinates");
+          index.add(Number(partIds[position]), [coordinates.key, coordinates.node, coordinates.section, coordinates.part]);
+        }
       }
       const artifactId = Number(await requestResult<IDBValidKey>(store.add(artifact)));
       let linked: Omit<LogEvent, "id"> | undefined, terminalId: number | undefined;

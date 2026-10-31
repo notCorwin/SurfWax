@@ -3,7 +3,7 @@ import { EventLogger, fromLogValue, type LogEvent } from "../logging";
 import { ChromeExecutor } from "./executor";
 import { LocatorFacade } from "./automation";
 import { ProgramScope } from "./program";
-import { DeferredProgramPage, ProgramHandles } from "./program-handles";
+import { DeferredProgramPage, PROGRAM_EVENT_INVOKE, ProgramHandles } from "./program-handles";
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 function fakeChrome(responses: Array<object | (() => Promise<object>)> = []) {
@@ -1646,7 +1646,9 @@ describe("foreground dialog handoff", () => {
     const pending = h.executor.runProgram({ code: "test" }, undefined, context);
     await vi.waitFor(() => { expect(send).toBeTypeOf("function"); expect(finish).toBeTypeOf("function"); });
     await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.javascriptDialogOpening", { type: "confirm", message: "open" });
-    send({ accept: async () => undefined });
+    const dialog = { accept: async () => undefined };
+    Object.defineProperty(dialog, PROGRAM_EVENT_INVOKE, { value: async (_method: string, _args: unknown[], dispatch: () => Promise<void>) => { await dispatch(); return dialog.accept(); } });
+    send(dialog);
     const result: any = await pending;
     expect(result).toMatchObject({ accepted: true, state: "blocked" });
     await vi.waitFor(async () => expect(await h.executor.queryJobs({ action: "status", id: result.jobId }, undefined, context)).toMatchObject({ terminal: true, ok: true, result: "done" }));

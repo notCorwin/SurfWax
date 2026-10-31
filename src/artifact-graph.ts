@@ -1,4 +1,4 @@
-import { createArrayView, decodeLogGraph, encodeLogGraph } from "./log-graph";
+import { createArrayView, decodeLogGraph, visitLogGraph } from "./log-graph";
 
 /** Each part is an event; the lookup table in IndexedDB is only a derived index. */
 export type ArtifactPart = { node: number; section: string; part: number; value: any };
@@ -12,9 +12,8 @@ const isText = (value: any): value is { s: number; l: number } => value !== null
 const indexKey = (key: string) => /^(?:0|[1-9]\d*)$/.test(key) && Number(key) < 0xffff_ffff && String(Number(key)) === key ? Number(key) : undefined;
 function hash(key: string): number { let value = 2166136261; for (let i = 0; i < key.length; i++) value = Math.imul(value ^ key.charCodeAt(i), 16777619); return (value >>> 0) % 256; }
 
-/** Partition V5's native graph without changing its references or value semantics. */
+/** Snapshot directly into the indexed V5 representation, without first building a second complete graph. */
 export function partitionArtifact(value: unknown): { graph: ArtifactGraph; parts: ArtifactPart[] } {
-  const encoded = encodeLogGraph(value) as any;
   const parts: ArtifactPart[] = [];
   let textId = 0;
   const pack = (item: any): any => {
@@ -27,25 +26,50 @@ export function partitionArtifact(value: unknown): { graph: ArtifactGraph; parts
     if (item && typeof item === "object") return Object.fromEntries(Object.entries(item).map(([key, child]) => [key, pack(child)]));
     return item;
   };
+  // Base64 boundaries must be divisible by three bytes so concatenating the
+  // individually encoded pieces exactly matches a whole-buffer encoding.
+  const packBuffer = (bytes: Uint8Array): string | { s: number; l: number } => {
+    const length = Math.ceil(bytes.length / 3) * 4;
+    const encode = (start: number, end: number) => btoa(String.fromCharCode(...bytes.subarray(start, end)));
+    if (length <= 512) return encode(0, bytes.length);
+    const id = textId++;
+    for (let offset = 0; offset < bytes.length; offset += 6144)
+      parts.push({ node: -id - 1, section: "text", part: offset / 6144, value: encode(offset, offset + 6144) });
+    return { s: id, l: length };
+  };
+  let root: any;
   const headers: any[][] = [];
-  for (let node = 0; node < encoded.nodes.length; node++) {
-    const original = encoded.nodes[node];
-    const { entries, properties, ...metadata } = original;
-    (headers[Math.floor(node / 64)] ??= []).push(pack({ ...metadata, ...(["map", "set"].includes(original.type) ? { size: entries.length } : {}) }));
-    const groups = new Map<string, any[]>();
-    const put = (section: string, entry: any) => { const values = groups.get(section) ?? []; values.push(entry); groups.set(section, values); };
-    if (entries) entries.forEach((entry: any, ordinal: number) => {
-      if (original.type === "object" || original.type === "array") {
-        const position = original.type === "array" ? indexKey(entry[0]) : undefined;
-        put(position === undefined ? `k:${hash(entry[0])}` : `i:${Math.floor(position / ENTRIES)}`, [ordinal, pack(entry)]);
-      } else put(`e:${Math.floor(ordinal / ENTRIES)}`, [ordinal, pack(entry)]);
-    });
-    if (properties) properties.forEach((entry: any, ordinal: number) => put(`p:${hash(entry[0])}`, [ordinal, pack(entry)]));
-    for (const [section, values] of groups) for (let offset = 0; offset < values.length; offset += ENTRIES)
-      parts.push({ node, section, part: offset / ENTRIES, value: values.slice(offset, offset + ENTRIES) });
-  }
+  visitLogGraph(value, {
+    root: (token) => { root = pack(token); },
+    buffer: packBuffer,
+    node: (node, metadata, entries, properties) => {
+    const groups = new Map<string, { part: number; entries: any[] }>();
+    const put = (section: string, ordinal: number, entry: any) => {
+      let group = groups.get(section);
+      if (!group) groups.set(section, group = { part: 0, entries: [] });
+      group.entries.push([ordinal, pack(entry)]);
+      if (group.entries.length === ENTRIES) {
+        parts.push({ node, section, part: group.part++, value: group.entries });
+        group.entries = [];
+      }
+    };
+    let ordinal = 0;
+    if (entries) for (const entry of entries) {
+      if (metadata.type === "array" || metadata.type === "object") {
+        const position = metadata.type === "array" ? indexKey(entry[0]) : undefined;
+        put(position === undefined ? `k:${hash(entry[0])}` : `i:${Math.floor(position / ENTRIES)}`, ordinal, entry);
+      } else put(`e:${Math.floor(ordinal / ENTRIES)}`, ordinal, entry);
+      ordinal++;
+    }
+    if (metadata.type === "map" || metadata.type === "set") metadata.size = ordinal;
+    ordinal = 0;
+    if (properties) for (const entry of properties) put(`p:${hash(entry[0])}`, ordinal++, entry);
+    (headers[Math.floor(node / 64)] ??= []).push(pack(metadata));
+    for (const [section, group] of groups) if (group.entries.length) parts.push({ node, section, part: group.part, value: group.entries });
+    },
+  });
   headers.forEach((header, part) => parts.push({ node: part, section: "headers", part: 0, value: header }));
-  return { graph: { version: 1, key: crypto.randomUUID(), root: pack(encoded.root) }, parts };
+  return { graph: { version: 1, key: crypto.randomUUID(), root }, parts };
 }
 
 /** Read only selected sections; reconstruct the reachable V5 graph when values contain aliases or cycles. */

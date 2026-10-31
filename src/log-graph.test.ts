@@ -1,9 +1,53 @@
 import { describe, expect, it } from "vitest";
-import { decodeLogGraph, encodeLogGraph, requiresLogGraph } from "./log-graph";
+import { createLogGraphCodec, decodeLogGraph, encodeLogGraph, requiresLogGraph } from "./log-graph";
 import { EventLogger, fromLogValue, toLogValue, type LogEvent } from "./logging";
 import { testEventStore } from "./test-event-store";
 
 describe("canonical native object graphs", () => {
+  it("rejects an altered generator next method before page graph encoding", () => {
+    const generator = (function* () { yield 1; })();
+    const prototype = Object.getPrototypeOf(Object.getPrototypeOf(generator));
+    const original = Object.getOwnPropertyDescriptor(prototype, "next")!;
+    let caught: unknown;
+    let encoded: unknown;
+    try {
+      Object.defineProperty(prototype, "next", { ...original, value: () => ({ done: true }) });
+      const codec = createLogGraphCodec({ verifyIntrinsics: true });
+      encoded = codec.encodeLogGraph({ important: 42 });
+    } catch (error) { caught = error; }
+    finally { Object.defineProperty(prototype, "next", original); }
+    if (!caught) expect(decodeLogGraph(encoded)).toEqual({ important: 42 });
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain("Generator.prototype.next");
+  });
+  it("rejects an altered generator iterator before page graph encoding", () => {
+    const generator = (function* () { yield 1; })();
+    const prototype = Object.getPrototypeOf(Object.getPrototypeOf(generator));
+    const original = Object.getOwnPropertyDescriptor(prototype, Symbol.iterator);
+    let caught: unknown;
+    try {
+      Object.defineProperty(prototype, Symbol.iterator, { configurable: true, value: function* () {} });
+      createLogGraphCodec({ verifyIntrinsics: true }).encodeLogGraph({ important: 42 });
+    } catch (error) { caught = error; }
+    finally {
+      if (original) Object.defineProperty(prototype, Symbol.iterator, original);
+      else delete prototype[Symbol.iterator];
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain("Generator.prototype[Symbol.iterator]");
+  });
+  it("does not lose object or array entries if a page replaces Array iteration", () => {
+    const original = Array.prototype[Symbol.iterator];
+    const pattern = /test/g; (pattern as any).extra = "metadata";
+    let encoded: unknown;
+    try {
+      Array.prototype[Symbol.iterator] = function* () { /* page-defined iterator */ } as typeof original;
+      encoded = encodeLogGraph({ first: 1, nested: [2, 3], pattern });
+    } finally { Array.prototype[Symbol.iterator] = original; }
+    const value = decodeLogGraph(encoded) as any;
+    expect(value.first).toBe(1); expect(value.nested).toEqual([2, 3]);
+    expect(value.pattern.source).toBe("test"); expect(value.pattern.extra).toBe("metadata");
+  });
   it("round-trips cyclic objects, collection keys, aliases, sparse arrays and shared buffer views", async () => {
     const buffer = new ArrayBuffer(16);
     new Uint8Array(buffer).set([7, 8, 9], 4);

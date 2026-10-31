@@ -4,6 +4,7 @@ import { BrowserJobs } from "./jobs";
 import { createProgramTools, prepareToolMessages } from "./tool";
 import type { ChromeExecutor } from "./executor";
 import { ProgramScope } from "./program";
+import { PROGRAM_EVENT_INVOKE } from "./program-handles";
 import { LocatorFacade, PageFacade, type AutomationRuntime } from "./automation";
 
 function log() {
@@ -966,6 +967,73 @@ describe("revocable program capabilities", () => {
     expect(() => scope.call("late", () => order.push("late"))).toThrow(
       "expired",
     );
+  });
+
+  it.each(["accept", "dismiss", "setFiles"] as const)("isolates concurrent %s dispatch from an ordered action", async (method) => {
+    for (const first of ["action", "event"] as const) for (const finishFirst of ["action", "event"] as const) {
+      const { logger, events } = log();
+      const scope = new ProgramScope(new AbortController().signal, "job", context, logger);
+      let startAction!: () => void, startEvent!: () => void, releaseAction!: () => void, releaseEvent!: () => void;
+      const actionStarted = new Promise<void>((resolve) => { startAction = resolve; });
+      const eventStarted = new Promise<void>((resolve) => { startEvent = resolve; });
+      const actionGate = new Promise<void>((resolve) => { releaseAction = resolve; });
+      const eventGate = new Promise<void>((resolve) => { releaseEvent = resolve; });
+      const target = {
+        [method]: async () => { throw new Error("Event must use isolated invocation"); },
+        [PROGRAM_EVENT_INVOKE]: async (operation: string, _args: unknown[], dispatch: () => Promise<void>) => {
+          expect(operation).toBe(method); startEvent(); await eventGate; await dispatch(); throw new Error("event failed after dispatch");
+        },
+      };
+      const wrapped = scope.wrap(target, "event");
+      const action = () => scope.call("click", async () => { startAction(); await actionGate; await scope.dispatched(); throw new Error("action failed after dispatch"); });
+      let a: Promise<unknown>, b: Promise<unknown>;
+      if (first === "action") { a = action().catch((error) => error); await actionStarted; b = wrapped[method]().catch((error) => error); await eventStarted; }
+      else { b = wrapped[method]().catch((error) => error); await eventStarted; a = action().catch((error) => error); await actionStarted; }
+      if (finishFirst === "action") {
+        releaseAction();
+        expect(await a).toMatchObject({ message: "action failed after dispatch", effectUnknown: true });
+        releaseEvent();
+        expect(await b).toMatchObject({ message: "event failed after dispatch", effectUnknown: true });
+      } else {
+        releaseEvent();
+        expect(await b).toMatchObject({ message: "event failed after dispatch", effectUnknown: true });
+        releaseAction();
+        expect(await a).toMatchObject({ message: "action failed after dispatch", effectUnknown: true });
+      }
+      const receipts = events.map((event) => fromLogValue(event.content) as any);
+      for (const operation of ["click", `event.${method}`]) {
+        expect(receipts.filter((item) => item.operation === operation && item.state === "dispatched-unknown")).toHaveLength(2);
+        expect(receipts.filter((item) => item.operation === operation && item.state === "not-dispatched")).toHaveLength(1);
+      }
+      expect(scope.effectUnknown).toBe(true);
+      // An unrelated later operation must never inherit a finished marker.
+      await scope.dispatched();
+      expect(events.map((event) => fromLogValue(event.content) as any).filter((item) => item.state === "dispatched-unknown")).toHaveLength(4);
+    }
+  });
+  it.each([false, true])("preserves a concurrent event's dispatch state across cancellation (dispatched=%s)", async (dispatched) => {
+    const { logger, events } = log();
+    const controller = new AbortController();
+    const scope = new ProgramScope(controller.signal, "job", context, logger);
+    let started!: () => void, release!: () => void;
+    const running = new Promise<void>((resolve) => { started = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const target = {
+      accept: async () => undefined,
+      [PROGRAM_EVENT_INVOKE]: async (_operation: string, _args: unknown[], mark: () => Promise<void>) => {
+        if (dispatched) await mark();
+        started(); await gate;
+        if (!dispatched) await mark();
+      },
+    };
+    const action = scope.wrap(target, "event").accept().catch((error) => error);
+    await running;
+    controller.abort(); release();
+    const error = await action;
+    expect(Boolean(error.effectUnknown)).toBe(dispatched);
+    const receipts = events.map((event) => fromLogValue(event.content) as any).filter((entry) => entry.operation === "event.accept");
+    expect(receipts.at(-1)?.state).toBe(dispatched ? "dispatched-unknown" : "not-dispatched");
+    expect(scope.effectUnknown).toBe(dispatched);
   });
   it("distinguishes rejected preconditions from uncertain dispatched effects and prevents queued late effects", async () => {
     const { logger, events } = log();

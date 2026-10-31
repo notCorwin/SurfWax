@@ -19,10 +19,35 @@ test("persists large native results in indexed canonical parts and reads pages a
       textResponse("Large artifact"),
     );
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await opened.page.evaluate(() => {
+      const state = globalThis as any;
+      const add = IDBObjectStore.prototype.add;
+      state.__artifactWrites = { active: 0, max: 0, total: 0 };
+      IDBObjectStore.prototype.add = function(value, key) {
+        const request = key === undefined ? add.call(this, value) : add.call(this, value, key);
+        if (this.name === "events" && value?.type === "artifact.part") {
+          const writes = state.__artifactWrites;
+          writes.total++; writes.active++; writes.max = Math.max(writes.max, writes.active);
+          const finished = () => { writes.active--; };
+          request.addEventListener("success", finished, { once: true });
+          request.addEventListener("error", finished, { once: true });
+        }
+        return request;
+      };
+      state.__restoreArtifactWrites = () => { IDBObjectStore.prototype.add = add; };
+    });
     await target.bringToFront();
     await opened.page.getByTestId("composer-input").fill("Store data");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("STORED", { timeout: 60000 });
+    const writePressure = await opened.page.evaluate(() => {
+      const state = globalThis as any;
+      state.__restoreArtifactWrites();
+      return state.__artifactWrites;
+    });
+    expect(writePressure.total).toBeGreaterThan(64);
+    expect(writePressure.max).toBeLessThanOrEqual(64);
+    expect(writePressure.active).toBe(0);
     const persisted = await opened.page.evaluate(async (id) => {
       const db = await new Promise<IDBDatabase>((resolve, reject) => { const request = indexedDB.open("side-agent-runtime"); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
       const tx = db.transaction(["events", "artifactPartIndex"], "readonly");

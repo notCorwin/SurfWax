@@ -16,6 +16,11 @@ if (options.verifyIntrinsics) {
     if (!/\{\s*\[native code\]\s*\}/.test(source)) fail(name);
   };
   check("Function.prototype.toString", inspect);
+  // The graph walker uses generators to stream entries. A page can otherwise
+  // replace their methods and make a successful evaluation silently omit data.
+  const generator: any = (function* () {})();
+  check("Generator.prototype.next", generator.next);
+  check("Generator.prototype[Symbol.iterator]", generator[g.Symbol?.iterator]);
   for (const [name, owner, member] of [
     ["Object.getOwnPropertyDescriptor", g.Object, "getOwnPropertyDescriptor"], ["Object.getPrototypeOf", g.Object, "getPrototypeOf"],
     ["Object.getOwnPropertySymbols", g.Object, "getOwnPropertySymbols"], ["Object.hasOwn", g.Object, "hasOwn"],
@@ -170,11 +175,15 @@ const bytesBase64 = (bytes: Uint8Array): string => {
   return encodeBase64(binary);
 };
 
-/** V5 graph nodes are independent of object property names and can be indexed or chunked later. */
-function encodeLogGraph(value: unknown): JsonValue {
+/** Visit a V5 graph synchronously. Consumers must exhaust each node's iterables
+ * during its callback so token IDs and the input snapshot stay deterministic. */
+function visitLogGraph(value: unknown, visitor: {
+  root(token: any): void;
+  node(id: number, metadata: any, entries?: Iterable<any>, properties?: Iterable<any>): void;
+  buffer?(bytes: Uint8Array): unknown;
+}): void {
   const ids = new WeakMap<object, number>();
   const pending: object[] = [];
-  const nodes: any[] = [];
   const token = (item: any): any => {
     if (item === undefined) return [2];
     if (typeof item === "number" && (!Number.isFinite(item) || Object.is(item, -0))) return [3, Object.is(item, -0) ? "-0" : String(item)];
@@ -182,43 +191,69 @@ function encodeLogGraph(value: unknown): JsonValue {
     if (item === null || typeof item === "string" || typeof item === "boolean" || typeof item === "number") return [0, item];
     if (typeof item !== "object") throw new Error("Cannot persist functions or symbols in a native object graph");
     let id = ids.get(item);
-    if (id === undefined) { id = nodes.length; ids.set(item, id); arrayPush.call(nodes, null); arrayPush.call(pending, item); }
+    if (id === undefined) { id = pending.length; ids.set(item, id); arrayPush.call(pending, item); }
     return [1, id];
   };
-  const root = token(value);
+  visitor.root(token(value));
   for (let i = 0; i < pending.length; i++) {
     const item: any = pending[i];
-    let node: any;
+    let node: any, entries: Iterable<any> | undefined;
     if (isArrayBuffer(item)) {
       if (isResizableBuffer(item)) throw new Error("Resizable ArrayBuffer graphs are not supported");
-      node = { type: "buffer", base64: bytesBase64(new Uint8Array(item)), byteLength: arrayBufferLength(item) };
+      const bytes = new Uint8Array(item);
+      node = { type: "buffer", base64: visitor.buffer ? visitor.buffer(bytes) : bytesBase64(bytes), byteLength: arrayBufferLength(item) };
     } else if (isView(item)) {
       const layout = viewLayout(item);
       if (!isArrayBuffer(layout.buffer) || isResizableBuffer(layout.buffer)) throw new Error("Shared or resizable ArrayBuffer graphs are not supported");
       node = { type: "view", name: arrayViewName(item), buffer: token(layout.buffer), offset: layout.byteOffset, length: layout.length };
     } else if (isDate(item)) node = { type: "date", value: Number.isNaN(dateValue(item)) ? null : dateISOString(item) };
     else if (isRegExp(item)) node = { type: "regexp", source: regexpSource(item), flags: regexpFlagString(item), lastIndex: token(item.lastIndex) };
-    else if (isMap(item)) node = { type: "map", entries: arrayFrom(mapEntries(item), ([key, entry]) => [token(key), token(entry)]) };
-    else if (isSet(item)) node = { type: "set", entries: arrayFrom(setValues(item), token) };
+    else if (isMap(item)) {
+      node = { type: "map" };
+      entries = (function* () { for (const [key, entry] of mapEntries(item)) yield [token(key), token(entry)]; })();
+    } else if (isSet(item)) {
+      node = { type: "set" };
+      entries = (function* () { for (const entry of setValues(item)) yield token(entry); })();
+    }
     else if (item instanceof Error) {
       const kind = arrayFind.call([Error, TypeError, RangeError, SyntaxError, ReferenceError, EvalError, URIError], (constructor) => getPrototypeOf(item) === constructor.prototype)?.name ?? "Error";
       node = { type: "error", kind, name: token(item.name), message: token(item.message), stack: token(item.stack),
         hasCause: Object.hasOwn(item, "cause"), causeEnumerable: Object.prototype.propertyIsEnumerable.call(item, "cause"),
         cause: Object.hasOwn(item, "cause") ? token(item.cause) : null };
-    } else if (isArray(item)) node = { type: "array", length: item.length, entries: arrayMap.call(graphProperties(item), (key) => [key, token((item as any)[key])]) };
-    else { assertPlainGraphObject(item); node = { type: "object", nullPrototype: getPrototypeOf(item) === null, entries: arrayMap.call(graphProperties(item), (key) => [key, token(item[key])]) }; }
-    if (node.type !== "array" && node.type !== "object") {
+    } else if (isArray(item)) {
+      node = { type: "array", length: item.length };
+      entries = (function* () { const keys = graphProperties(item); for (let index = 0; index < keys.length; index++) { const key = keys[index]!; yield [key, token((item as any)[key])]; } })();
+    } else {
+      assertPlainGraphObject(item); node = { type: "object", nullPrototype: getPrototypeOf(item) === null };
+      entries = (function* () { const keys = graphProperties(item); for (let index = 0; index < keys.length; index++) { const key = keys[index]!; yield [key, token(item[key])]; } })();
+    }
+    const properties = node.type === "array" || node.type === "object" ? undefined : (function* () {
       const keys = arrayFilter.call(graphProperties(item), (key) => node.type !== "error" || key !== "cause") as string[];
       if (node.type === "error") for (const key of ["statusCode", "status", "responseBody", "responseText", "headers", "requestId", "data", "providerMetadata"]) {
         try { if (!arrayIncludes.call(keys, key) && item[key] !== undefined) arrayPush.call(keys, key); } catch { /* Provider error getters can throw. */ }
       }
-      node.properties = arrayMap.call(keys, (key) => {
+      for (let index = 0; index < keys.length; index++) {
+        const key = keys[index]!;
         const value = item[key];
-        return [key, token(node.type === "error" && key === "headers" && typeof Headers !== "undefined" && value instanceof Headers ? Object.fromEntries(value.entries()) : value)];
-      });
-    }
-    nodes[ids.get(item)!] = node;
+        yield [key, token(node.type === "error" && key === "headers" && typeof Headers !== "undefined" && value instanceof Headers ? Object.fromEntries(value.entries()) : value)];
+      }
+    })();
+    visitor.node(i, node, entries, properties);
   }
+}
+
+/** V5 graph nodes are independent of object property names and can be indexed or chunked later. */
+function encodeLogGraph(value: unknown): JsonValue {
+  let root: any;
+  const nodes: any[] = [];
+  visitLogGraph(value, {
+    root: (token) => { root = token; },
+    node: (id, metadata, entries, properties) => {
+      if (entries) metadata.entries = arrayFrom(entries);
+      if (properties) metadata.properties = arrayFrom(properties);
+      nodes[id] = metadata;
+    },
+  });
   return { $type: "object-graph", root, nodes } as JsonValue;
 }
 
@@ -293,7 +328,7 @@ function decodeLogGraph(value: any): unknown {
   return read(value.root);
 }
 
-  return { isArrayBuffer, arrayBufferLength, isResizableBuffer, isDataView, arrayViewName, viewLayout, createArrayView, assertPlainGraphObject, graphProperties, isDate, dateValue, dateISOString, isRegExp, regexpSource, regexpFlagString, isMap, mapSizeOf, mapEntries, isSet, setSizeOf, setValues, requiresLogGraph, encodeLogGraph, decodeLogGraph };
+  return { isArrayBuffer, arrayBufferLength, isResizableBuffer, isDataView, arrayViewName, viewLayout, createArrayView, assertPlainGraphObject, graphProperties, isDate, dateValue, dateISOString, isRegExp, regexpSource, regexpFlagString, isMap, mapSizeOf, mapEntries, isSet, setSizeOf, setValues, requiresLogGraph, visitLogGraph, encodeLogGraph, decodeLogGraph };
 }
 
-export const { isArrayBuffer, arrayBufferLength, isResizableBuffer, isDataView, arrayViewName, viewLayout, createArrayView, assertPlainGraphObject, graphProperties, isDate, dateValue, dateISOString, isRegExp, regexpSource, regexpFlagString, isMap, mapSizeOf, mapEntries, isSet, setSizeOf, setValues, requiresLogGraph, encodeLogGraph, decodeLogGraph } = createLogGraphCodec();
+export const { isArrayBuffer, arrayBufferLength, isResizableBuffer, isDataView, arrayViewName, viewLayout, createArrayView, assertPlainGraphObject, graphProperties, isDate, dateValue, dateISOString, isRegExp, regexpSource, regexpFlagString, isMap, mapSizeOf, mapEntries, isSet, setSizeOf, setValues, requiresLogGraph, visitLogGraph, encodeLogGraph, decodeLogGraph } = createLogGraphCodec();

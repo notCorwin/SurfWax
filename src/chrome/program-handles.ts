@@ -1,6 +1,8 @@
 /** Internal lifecycle hook; never sent to the program worker. */
 export const PROGRAM_HANDLE_ASSERT_LIVE = Symbol("program-handle-assert-live");
 export const PROGRAM_HANDLE_SESSION = Symbol("program-handle-session");
+/** Invoke a concurrent event effect with its own write-ahead dispatch marker. */
+export const PROGRAM_EVENT_INVOKE = Symbol("program-event-invoke");
 
 /** A program's initial page is acquired only when a page capability is used. */
 export class DeferredProgramPage {

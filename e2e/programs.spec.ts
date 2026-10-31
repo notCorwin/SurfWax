@@ -311,6 +311,10 @@ return await artifacts.save(artifact.id);
     await expect(target.locator("body")).toHaveAttribute("data-dragged", "160");
     const events = await readEvents(opened.page);
     expect(events.filter((event) => event.type === "tool.failed")).toEqual([]);
+    for (const operation of ["event.accept", "event.setFiles"]) {
+      const receipts = events.filter((event) => event.type === "browser.job.progress" && event.content.operation === operation);
+      expect(receipts.map((event) => event.content.state)).toEqual(["not-dispatched", "dispatched-unknown", "completed"]);
+    }
     const saves = events.filter(
       (event) =>
         event.type === "browser.job.progress" &&

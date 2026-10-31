@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { AutomationRuntime } from "./automation";
 import { encodeLogGraph } from "../log-graph";
 import { EventSubscriptions } from "./event-subscriptions";
+import { ProgramScope } from "./program";
+import type { EventLogger } from "../logging";
 
 const inspectText = (value: any) => value.items.map((item: any) => item.line).join("\n");
 
@@ -101,6 +103,22 @@ function harness(
 }
 
 describe("AutomationRuntime", () => {
+  it("records an uncertain effect when the dispatched focus command fails", async () => {
+    const records: any[] = [];
+    const logger = { append: async (event: any) => { records.push(event); return { id: records.length, ...event }; } } as unknown as EventLogger;
+    const scope = new ProgramScope(new AbortController().signal, "job", { conversationId: "c" }, logger);
+    const { runtime, command } = harness(undefined, undefined, undefined, vi.fn(() => scope.dispatched()));
+    const page = await runtime.createPage(3);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.focus") throw new Error("focus delivery failed");
+      return original(source, method, params);
+    });
+    await expect(scope.call("focus", () => page.getByRole("button", { name: "Sign in" }).focus())).rejects.toMatchObject({ effectUnknown: true });
+    expect(records.filter((event) => event.content.operation === "focus").map((event) => event.content.state)).toEqual(["not-dispatched", "dispatched-unknown", "dispatched-unknown"]);
+    await runtime.abortSessions();
+  });
+
   it("rejects redirected focus before sending input to a different element", async () => {
     const { runtime, command } = harness();
     const page = await runtime.createPage(3);

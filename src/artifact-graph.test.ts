@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { partitionArtifact, readPartitionedArtifact, type ArtifactPart } from "./artifact-graph";
-import { encodeLogGraph } from "./log-graph";
+import { decodeLogGraph, encodeLogGraph } from "./log-graph";
 import { EventLogger, type LogEvent } from "./logging";
 
 function fixture(value: unknown) {
@@ -21,6 +21,64 @@ function fixture(value: unknown) {
 }
 
 describe("partitioned artifact graphs", () => {
+  it("matches the V5 graph for scalar, binary, collection, error and cyclic values", async () => {
+    const lengths = [0, 1, 2, 3, 383, 384, 385, 6143, 6144, 6145, 12289];
+    const buffers = lengths.map((length) => Uint8Array.from({ length }, (_, index) => (index * 13 + 7) % 256).buffer);
+    const sparse: any[] = new Array(501); sparse[2] = undefined; sparse[500] = -0; (sparse as any).long = "a".repeat(9000);
+    const error = new TypeError("bad", { cause: { detail: 9 } });
+    Object.defineProperty(error, "statusCode", { value: 418 });
+    const pattern = /hello/gi; pattern.lastIndex = 7; (pattern as any).extra = "z".repeat(8200);
+    const shared: any = Object.assign(Object.create(null), { undefined, nan: NaN, negativeZero: -0, infinity: Infinity, bigint: 123n });
+    const map = new Map<any, any>(); const set = new Set<any>();
+    const input: any = { shared, alias: shared, buffers, sparse, error, pattern, dates: [new Date(0), new Date(NaN)], map, set,
+      view: new Uint16Array(buffers[8]!, 4, 5), text: "🌊abc".repeat(4000) };
+    input.self = input; map.set(shared, input); map.set("self", map); set.add(shared); set.add(set);
+    const expected: any = decodeLogGraph(encodeLogGraph(input));
+    const result: any = await fixture(input).get();
+    expect(result).toEqual(expected);
+    expect(result.self).toBe(result); expect(result.shared).toBe(result.alias);
+    expect(result.map.get(result.shared)).toBe(result); expect(result.map.get("self")).toBe(result.map);
+    expect(result.set.has(result.set)).toBe(true); expect(result.view.buffer).toBe(result.buffers[8]);
+    expect(Object.getPrototypeOf(result.shared)).toBeNull();
+    expect(Object.is(result.shared.negativeZero, -0)).toBe(true);
+    for (let index = 0; index < lengths.length; index++)
+      expect([...new Uint8Array(result.buffers[index])]).toEqual([...new Uint8Array(expected.buffers[index])]);
+  });
+  it("snapshots input before it can be mutated", async () => {
+    const value = { rows: [1, 2], buffer: Uint8Array.from([3, 4]).buffer };
+    const store = fixture(value);
+    value.rows[0] = 99; new Uint8Array(value.buffer)[0] = 99;
+    const saved: any = await store.get();
+    expect(saved.rows).toEqual([1, 2]); expect([...new Uint8Array(saved.buffer)]).toEqual([3, 4]);
+  });
+  it("reads getters in V5 breadth-first order and propagates their errors", () => {
+    const source = () => {
+      const accesses: string[] = [];
+      const child = { get detail() { accesses.push("child.detail"); return 3; } };
+      const value = { get first() { accesses.push("first"); return child; }, get second() { accesses.push("second"); return 2; } };
+      return { value, accesses };
+    };
+    const legacy = source(); encodeLogGraph(legacy.value);
+    const partitioned = source(); partitionArtifact(partitioned.value);
+    expect(legacy.accesses).toEqual(["first", "second", "child.detail"]);
+    expect(partitioned.accesses).toEqual(legacy.accesses);
+
+    for (const encode of [encodeLogGraph, partitionArtifact]) {
+      const accesses: string[] = [];
+      const value = { get first() { accesses.push("first"); return 1; }, get second() { accesses.push("second"); throw new Error("getter failed"); }, get third() { accesses.push("third"); return 3; } };
+      expect(() => encode(value)).toThrow("getter failed");
+      expect(accesses).toEqual(["first", "second"]);
+    }
+  });
+  it("rejects unsupported graph values with the same errors as V5", () => {
+    const symbol = { [Symbol("unsupported")]: 1 };
+    for (const value of [() => 1, Symbol("unsupported"), new URL("https://example.com"), symbol, new Uint8Array(new SharedArrayBuffer(8))]) {
+      let message = "";
+      try { encodeLogGraph(value); } catch (error) { message = (error as Error).message; }
+      expect(message).not.toBe("");
+      expect(() => partitionArtifact(value)).toThrow(message);
+    }
+  });
   it("paginates large arrays and strings without reading their other chunks", async () => {
     const store = fixture({ rows: Array.from({ length: 20000 }, (_, i) => i), text: "abc".repeat(100000) });
     expect(await store.get({ path: ["rows"], offset: 512, limit: 3 })).toEqual([512, 513, 514]);

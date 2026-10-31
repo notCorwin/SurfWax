@@ -2,7 +2,7 @@ import type { EventLogger } from "../logging";
 import type { JobContext } from "./jobs";
 import type { EventSource } from "./event-subscriptions";
 import { LocatorFacade, PageFacade } from "./automation";
-import { DeferredProgramPage, PROGRAM_HANDLE_ASSERT_LIVE, PROGRAM_HANDLE_SESSION } from "./program-handles";
+import { DeferredProgramPage, PROGRAM_EVENT_INVOKE, PROGRAM_HANDLE_ASSERT_LIVE, PROGRAM_HANDLE_SESSION } from "./program-handles";
 
 export type OperationObserver = { start(operation: string, source: EventSource): unknown; dispatched(handle: unknown, source: EventSource): void; end(handle: unknown): void };
 
@@ -131,7 +131,7 @@ export class ProgramScope {
 
   call<T>(
     operation: string,
-    run: () => T | Promise<T>,
+    run: (dispatch: () => Promise<void>) => T | Promise<T>,
     effect = true,
     verified = false,
     subscribe = false,
@@ -159,12 +159,14 @@ export class ProgramScope {
       try {
         this.guard();
         // Event waits subscribe synchronously before an action can be dispatched. They must not take the mutation queue.
-        const subscription = subscribe ? Promise.resolve(run()) : undefined;
+        const subscription = subscribe ? Promise.resolve(run(mark)) : undefined;
         await this.event(operation, sequence, "not-dispatched");
         this.guard();
         if (source && !subscribe) tracked = this.observer?.start(operation, source);
-        if (effect) this.currentDispatch = mark;
-        const result = await (subscription ?? run());
+        // Only ordered effects own the runtime-wide automation callback. Event
+        // handlers run concurrently and receive their own marker explicitly.
+        if (effect && ordered) this.currentDispatch = mark;
+        const result = await (subscription ?? run(mark));
         this.guard();
         // Page and locator capabilities are live objects, not durable user
         // values. Record only their bounded identity while returning the live
@@ -229,7 +231,15 @@ export class ProgramScope {
               Reflect.apply(value, target, args),
               `${label}.${key}`,
             );
-          const invoke = () => Reflect.apply(value, target, args);
+          const concurrentEvent = effects.has(key) && ["accept", "dismiss", "setFiles"].includes(key);
+          const invoke = (dispatch: () => Promise<void>) => {
+            if (concurrentEvent) {
+              const invokeEvent = Reflect.get(target, PROGRAM_EVENT_INVOKE);
+              if (typeof invokeEvent !== "function") throw new Error("Concurrent event does not support isolated dispatch");
+              return Reflect.apply(invokeEvent, target, [key, args, dispatch]);
+            }
+            return Reflect.apply(value, target, args);
+          };
           const result = this.call(
             `${label}.${key}`,
             invoke,
@@ -238,8 +248,7 @@ export class ProgramScope {
               key === "waitForURL" ||
               key === "waitForLoadState",
             key === "waitForEvent",
-            effects.has(key) &&
-              !["accept", "dismiss", "setFiles"].includes(key),
+            effects.has(key) && !concurrentEvent,
             Number.isSafeInteger(Reflect.get(target, "tabId")) && !["accept", "dismiss", "setFiles"].includes(key)
               ? { tabId: Reflect.get(target, "tabId") as number } : undefined,
           );

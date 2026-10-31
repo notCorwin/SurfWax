@@ -115,3 +115,35 @@ test("evaluate fails before the callback when a required page intrinsic was alre
     await expect(target.locator("body")).not.toHaveAttribute("data-callback-ran", "yes");
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
+
+for (const kind of ["next", "iterator"] as const) test(`evaluate rejects a modified generator ${kind} before running page code`, async () => {
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/automation`);
+    const mutation = kind === "next"
+      ? "prototype.next = function(){return {done:true};};"
+      : "prototype[Symbol.iterator] = function*(){};";
+    const expected = kind === "next" ? "Generator.prototype.next is modified" : "Generator.prototype[Symbol.iterator] is modified";
+    responses.push(
+      commandResponse("execute_program", { code: `return await page.evaluate(() => { const prototype = Object.getPrototypeOf(Object.getPrototypeOf((function*(){})())); ${mutation} return true; });` }, "patch-generator"),
+      (request) => {
+        expect(lastTool(request)).toMatchObject({ ok: true, result: true });
+        return commandResponse("execute_program", { code: "return await page.evaluate(() => { document.body.dataset.callbackRan = 'yes'; return {important:42}; });" }, "blocked-generator");
+      },
+      (request) => {
+        expect(lastTool(request)).toMatchObject({ ok: false, error: { effectUnknown: true, message: expect.stringContaining(expected) } });
+        return textResponse("GENERATOR_CHECK_OK");
+      },
+      textResponse("Generator check"),
+    );
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("Evaluate with changed generator methods");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("GENERATOR_CHECK_OK", { timeout: 60_000 });
+    await expect(target.locator("body")).not.toHaveAttribute("data-callback-ran", "yes");
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});

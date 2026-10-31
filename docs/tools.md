@@ -1,6 +1,6 @@
 # Surf Wax 工具参考
 
-此文件由真实工具 registry 自动生成（npm run docs:tools）。新回合公开 61 个工具；每个独立工具对应一个操作，具体参数以工具 schema 为准。旧会话的 canonical 历史原样保留，历史工具名称不会因此重新成为可执行入口。
+此文件由真实工具 registry 自动生成（npm run docs:tools）。新回合公开 63 个工具；每个独立工具对应一个操作，具体参数以工具 schema 为准。旧会话的 canonical 历史原样保留，历史工具名称不会因此重新成为可执行入口。
 
 页面语义观察支持区域、字段、字符预算、分页、截断说明与增量。ref 带 tab/document 归属，导航和移除不会自动替换成相似元素。只有明确请求时才返回截图；AX 数据仍从 Chrome 读取，输出增量不意味着底层 CDP 事件已增量化。
 
@@ -12,6 +12,8 @@
 | `click` | Click exactly one matching element. |
 | `double_click` | Double-click exactly one matching element. |
 | `hover` | Move the pointer over exactly one matching element. |
+| `focus_element` | Focus exactly one matching element. |
+| `blur_element` | Blur exactly one matching element. |
 | `fill` | Replace an editable element's value; an empty value clears it. |
 | `type_text` | Insert text character by character into an editable element; this does not emit keydown or keyup. |
 | `press_key` | Press a key or chord, optionally focusing an element first. |

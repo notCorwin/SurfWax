@@ -43,7 +43,7 @@ export type AtomicToolDefinition = {
 // Actions that can cause dialogs, navigation, downloads or other long-lived
 // browser work may return a job so another tool can respond to those events.
 const BACKGROUND_ACTIONS = new Set([
-  "click", "double_click", "hover", "fill", "type_text", "press_key", "key_down", "key_up", "set_checked", "select_option",
+  "click", "double_click", "hover", "focus_element", "blur_element", "fill", "type_text", "press_key", "key_down", "key_up", "set_checked", "select_option",
   "drag", "scroll", "move_pointer", "press_pointer", "release_pointer", "navigate", "reload", "go_back", "go_forward", "open_tab", "close_tab",
   "upload_file", "fetch", "evaluate_js", "send_cdp",
 ]);
@@ -76,6 +76,8 @@ export const ATOMIC_TOOL_REGISTRY: readonly AtomicToolDefinition[] = Object.free
   targetAction("click", "Click exactly one matching element.", "click"),
   targetAction("double_click", "Double-click exactly one matching element.", "dblclick"),
   targetAction("hover", "Move the pointer over exactly one matching element.", "hover"),
+  targetAction("focus_element", "Focus exactly one matching element.", "focus"),
+  targetAction("blur_element", "Blur exactly one matching element.", "blur"),
   define("fill", "Replace an editable element's value; an empty value clears it.", z.object({ ...targetFields, value: z.string() }).strict(), "return await locate(currentPage, input.target).fill(input.value);", locator),
   define("type_text", "Insert text character by character into an editable element; this does not emit keydown or keyup.", z.object({ ...targetFields, text: z.string() }).strict(), "return await locate(currentPage, input.target).pressSequentially(input.text);", locator),
   define("press_key", "Press a key or chord, optionally focusing an element first.", z.object({ ...pageFields, target: target.optional(), key: z.string().min(1) }).strict(), "return input.target ? await locate(currentPage, input.target).press(input.key) : await currentPage.keyboard.press(input.key);", locator),

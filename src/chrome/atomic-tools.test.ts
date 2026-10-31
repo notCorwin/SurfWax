@@ -68,6 +68,18 @@ describe("atomic browser tool programs", () => {
     expect(uncheck).toHaveBeenCalledOnce();
   });
 
+  it("allows focusing and blurring as independent background-capable actions", async () => {
+    const focus = vi.fn(async () => "focused");
+    const blur = vi.fn(async () => "blurred");
+    const page = { ref: () => ({ focus, blur }) };
+    for (const [name, result] of [["focus_element", "focused"], ["blur_element", "blurred"]] as const) {
+      expect(await execute(name, { target: { ref: "e1" }, background: true }, { page })).toBe(result);
+      expect(definition(name).program({ target: { ref: "e1" }, background: true })).toMatchObject({ background: true });
+    }
+    expect(focus).toHaveBeenCalledOnce();
+    expect(blur).toHaveBeenCalledOnce();
+  });
+
   it("validates input before creating a program and retains an explicit timeout", () => {
     expect(() => definition("fill").program({ target: { ref: "e1" }, value: "x", extra: true })).toThrow();
     expect(() => definition("fetch").program({ url: "https://example.com" })).toThrow();
