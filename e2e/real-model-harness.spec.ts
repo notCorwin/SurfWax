@@ -9,9 +9,13 @@ import { aggregateSuiteReports, createSuiteManifest } from "./evaluation/suite-m
 import { semanticProgram } from "./evaluation/semantic-program";
 
 async function runHarness(baseURL: string, directory: string, scenario = "cross-frame-order", timeoutMs = 90_000, extraEnv: Record<string, string> = {}) {
+  // The nested evaluator must run once with the outer test's browser. Passing
+  // both matrix variables through would create two nested Playwright projects.
+  const executablePath = test.info().project.use.launchOptions?.executablePath;
   return promisify(execFile)(process.execPath, [resolve("node_modules/@playwright/test/cli.js"), "test", "e2e/real-model-evaluation.spec.ts", "--retries=0", "--reporter=line", "--trace=off", `--output=${resolve(directory, "playwright")}`], {
     timeout: 100_000, maxBuffer: 4 * 1024 * 1024,
-    env: { ...process.env, SURFWAX_REAL_MODEL_EVAL: "1", SURFWAX_EVAL_PROVIDER: "local-mock", SURFWAX_EVAL_MODEL: "test-model",
+    env: { ...process.env, SURFWAX_CHROME_138_PATH: "", ...(executablePath ? { SURFWAX_CHROME_PATH: executablePath } : {}),
+      SURFWAX_REAL_MODEL_EVAL: "1", SURFWAX_EVAL_PROVIDER: "local-mock", SURFWAX_EVAL_MODEL: "test-model",
       SURFWAX_EVAL_BASE_URL: baseURL, SURFWAX_EVAL_API_KEY: "local-test-secret", SURFWAX_EVAL_SCENARIO: scenario,
       SURFWAX_EVAL_SEED: "17", SURFWAX_EVAL_TIMEOUT_MS: String(timeoutMs), SURFWAX_EVAL_REPORT_DIR: resolve(directory, "reports"),
       SURFWAX_EVIDENCE_PATH: resolve(directory, "evidence"), ...extraEnv },
@@ -46,6 +50,13 @@ test("real-model entry records a successful local scripted run", async () => {
     expect(report).toMatchObject({ scenario: "cross-frame-order", seed: 17, provider: "local-mock", outcome: "conversation.finished",
       businessVerified: true, networkSettled: true, toolsWithExactlyOneTerminal: true, toolLifecycle: { complete: true } });
     expect(report.toolCalls).toBeGreaterThan(0);
+    const executablePath = test.info().project.use.launchOptions?.executablePath;
+    if (executablePath) {
+      const { stdout } = await promisify(execFile)(executablePath, ["--version"]);
+      const version = stdout.match(/\d+\.\d+\.\d+\.\d+/)?.[0];
+      expect(version).toBeTruthy();
+      expect(report.browser).toContain(version);
+    }
     expect(report.serverActivity.active).toBe(0);
     expect(report.completedProgramOperations["page.frameLocator.getByRole.click"]).toBeGreaterThan(0);
   } finally {
