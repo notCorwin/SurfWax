@@ -2,7 +2,7 @@ import { EventLogger, fromLogValue } from "./logging";
 import { BackgroundRunCoordinator } from "./agent/background-coordinator";
 import type { RunIdentity } from "./agent/coordinator";
 import { recoverBrowserInput } from "./chrome/input-recovery";
-import { createHeldInputState, debuggeeKey, shouldPersistInputState, updateHeldInputState, type HeldInputState } from "./chrome/input-state";
+import { createHeldInputState, debuggeeKey, heldKeyIdentity, shouldPersistInputState, updateHeldInputState, type HeldInputState } from "./chrome/input-state";
 import { installPageGuard, removePageGuard, authorizeGuardInput, targetEditor } from "./chrome/interaction-guard";
 import { GuardedInputContexts } from "./chrome/guarded-input";
 import guardCss from "./design-tokens/interaction.css?raw";
@@ -190,22 +190,21 @@ async function guardInputTicket(tabId: number, runId: string, timestamp?: number
   // its removal. Authorize the actual run-bound blocker even after map deletion.
   return chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: authorizeGuardInput, args: [runId, timestamp ?? null, text ?? null, observeBeforeInput] as any });
 }
-async function authorizedNativeInput(debuggee: chrome.debugger.Debuggee, tabId: number, runId: string, command: string, params: Record<string, any>, validate = () => {}) {
+async function withInputTicket<T>(tabId: number, task: () => Promise<T>): Promise<T> {
   const previous = inputTickets.get(tabId) ?? Promise.resolve();
   let release!: () => void;
   const done = new Promise<void>((resolve) => { release = resolve; });
   inputTickets.set(tabId, done);
   await previous;
   try {
-    validate();
-    return await dispatchAuthorizedNativeInput(debuggee, tabId, runId, command, params, validate);
+    return await task();
   } finally {
     release();
     if (inputTickets.get(tabId) === done) inputTickets.delete(tabId);
   }
 }
 
-async function dispatchAuthorizedNativeInput(debuggee: chrome.debugger.Debuggee, tabId: number, runId: string, command: string, params: Record<string, any>, validate: () => void) {
+async function dispatchAuthorizedNativeInput(debuggee: chrome.debugger.Debuggee, tabId: number, runId: string, command: string, params: Record<string, any>, validate: () => void, onDispatch = () => {}) {
   const timestamp = Date.now() / 1000 + 86400 + Math.random() / 1000;
   const observeBeforeInput = command === "Input.dispatchKeyEvent" && ["keyDown", "rawKeyDown", "char"].includes(params.type);
   const guardExpected = guardedTabs.has(tabId) || confirmedGuards.get(tabId) === runId || loadingGuards.get(tabId)?.runId === runId;
@@ -239,16 +238,17 @@ async function dispatchAuthorizedNativeInput(debuggee: chrome.debugger.Debuggee,
   try {
     validate();
     const { surfWaxAtomicClick, ...nativeParams } = params;
-    dispatched = true;
     if (surfWaxAtomicClick) {
       // Queue the full native click together, using one run-bound ticket. User
       // input has no intervening IPC round trip in which to reset pressed state.
+      onDispatch(); dispatched = true;
       const moved = chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, timestamp, type: "mouseMoved", button: "none", buttons: 0, clickCount: 0 });
       const pressed = chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, timestamp, type: "mousePressed" });
       const released = chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, timestamp, type: "mouseReleased", buttons: 0 });
       const results = await Promise.all([moved, pressed, released]);
       result = results[2];
     } else {
+      onDispatch(); dispatched = true;
       result = await chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, timestamp });
     }
   } catch (error) { commandError = error; }
@@ -380,20 +380,21 @@ chrome.runtime.onConnect.addListener((port) => {
     if (pending) return pending;
     const state = heldInput.get(inputKey);
     if (!state) return Promise.resolve();
-    const task = (async () => {
+    const task = withInputTicket(state.tabId!, async () => {
+      if (heldInput.get(inputKey) !== state) return;
       const failures: string[] = [];
       if (state.tabId !== undefined) await bypassPageGuard(state.tabId, true);
       try {
         for (const [heldKey, params] of [...state.keys]) {
           try {
-            await authorizedNativeInput(state.debuggee, state.tabId!, state.runId!, "Input.dispatchKeyEvent", { ...params, text: undefined, unmodifiedText: undefined, commands: undefined, type: "keyUp", modifiers: 0 });
+            await dispatchAuthorizedNativeInput(state.debuggee, state.tabId!, state.runId!, "Input.dispatchKeyEvent", { ...params, text: undefined, unmodifiedText: undefined, commands: undefined, type: "keyUp", modifiers: 0 }, () => {});
             if (state.keys.get(heldKey) === params) state.keys.delete(heldKey);
           }
           catch (error) { failures.push(String(error)); }
         }
         for (const [button, params] of [...state.buttons]) {
           try {
-            await authorizedNativeInput(state.debuggee, state.tabId!, state.runId!, "Input.dispatchMouseEvent", { ...params, type: "mouseReleased", x: state.x, y: state.y, button, buttons: 0, modifiers: 0 });
+            await dispatchAuthorizedNativeInput(state.debuggee, state.tabId!, state.runId!, "Input.dispatchMouseEvent", { ...params, type: "mouseReleased", x: state.x, y: state.y, button, buttons: 0, modifiers: 0 }, () => {});
             if (state.buttons.get(button) === params) state.buttons.delete(button);
           }
           catch (error) { failures.push(String(error)); }
@@ -408,7 +409,7 @@ chrome.runtime.onConnect.addListener((port) => {
         if (heldInput.get(inputKey) === state && !state.keys.size && !state.buttons.size) heldInput.delete(inputKey);
         if (state.tabId !== undefined) await bypassPageGuard(state.tabId, false);
       }
-    })();
+    });
     inputReleases.set(inputKey, task);
     void task.finally(() => { if (inputReleases.get(inputKey) === task) inputReleases.delete(inputKey); }).catch(() => undefined);
     return task;
@@ -426,13 +427,18 @@ chrome.runtime.onConnect.addListener((port) => {
   };
   chrome.debugger.onEvent.addListener(onEvent);
   chrome.debugger.onDetach.addListener(onDetach);
-  port.onMessage.addListener((message: { id: string; method: string; args: any[]; operationId?: string } & Partial<RunIdentity>) => {
+  port.onMessage.addListener((message: { id: string; method: string; args: any[]; operationId?: string; rawCdp?: boolean } & Partial<RunIdentity>) => {
     void track((async () => {
     const { id, method, args } = message;
+    const trackedInput = method === "sendCommand" && Array.isArray(args) && ["Input.dispatchKeyEvent", "Input.dispatchMouseEvent"].includes(args[1]);
+    let nativeInputAttempted = false;
     try {
       let result: unknown;
       const command = args[1];
       const params = args[2];
+      if (message.rawCdp && method === "sendCommand" && params && typeof params === "object"
+        && Object.keys(params).some((key) => key.startsWith("surfWax")))
+        throw new Error("AutomationError[invalid-protocol-parameter]: surfWax parameters are reserved for internal automation");
       const cleanup = method === "detach" || method === "endPointerGestures" || method === "sendCommand" &&
         (["Network.disable", "Log.disable", "Input.cancelDragging", "Runtime.releaseObjectGroup", "Runtime.terminateExecution"].includes(command) ||
          command === "Page.setInterceptFileChooserDialog" && params?.enabled === false ||
@@ -471,6 +477,7 @@ chrome.runtime.onConnect.addListener((port) => {
         const hitTest = method === "sendCommand" && ["Runtime.callFunctionOn", "DOM.getNodeForLocation"].includes(command) && Boolean(args[2]?.surfWaxHitTest) && Number.isInteger(tabId);
         if (hitTest) { args[2] = { ...args[2] }; delete args[2].surfWaxHitTest; }
         const input = method === "sendCommand" && ["Input.dispatchMouseEvent", "Input.dispatchTouchEvent", "Input.dispatchDragEvent", "Input.emulateTouchFromMouseEvent", "Input.dispatchKeyEvent", "Input.insertText"].includes(command) && Number.isInteger(tabId);
+        const perform = async () => {
         const type = (args[2] as { type?: string } | undefined)?.type;
         const start = input && (type === "mousePressed" || type === "touchStart");
         const end = input && (type === "mouseReleased" || type === "touchEnd" || type === "touchCancel" || args[2]?.surfWaxAtomicClick);
@@ -483,6 +490,7 @@ chrome.runtime.onConnect.addListener((port) => {
         let succeeded = false;
         let persistedInput: (() => Promise<unknown>) | undefined;
         let confirmRelease: (() => void) | undefined;
+        let rollbackInput: (() => Promise<void>) | undefined;
         try {
           if (!cleanup) { if (closed) throw new DOMException("Side Panel 已关闭", "AbortError"); runs.validate(message as RunIdentity); }
           if (input && ["Input.dispatchKeyEvent", "Input.dispatchMouseEvent"].includes(command)) {
@@ -493,12 +501,29 @@ chrome.runtime.onConnect.addListener((port) => {
             const params = args[2] ?? {};
             const beforeKeys = new Map(state.keys);
             const beforeButtons = new Map(state.buttons);
-            updateHeldInputState(state, command, params, true);
-            if (command === "Input.dispatchKeyEvent" && params.type === "keyUp" && typeof params.key === "string" && params.key) {
-              const key = params.key, previous = beforeKeys.get(key);
-              confirmRelease = () => { if (previous && state.keys.get(key) === previous) state.keys.delete(key); };
+            const beforePosition = { x: state.x, y: state.y };
+            updateHeldInputState(state, command, params, true, message.rawCdp === true);
+            const afterKeys = new Map(state.keys);
+            const afterButtons = new Map(state.buttons);
+            const afterPosition = { x: state.x, y: state.y };
+            rollbackInput = async () => {
+              for (const [key, value] of afterKeys) {
+                if (beforeKeys.get(key) === value || state.keys.get(key) !== value) continue;
+                if (beforeKeys.has(key)) state.keys.set(key, beforeKeys.get(key)!); else state.keys.delete(key);
+              }
+              for (const [button, value] of afterButtons) {
+                if (beforeButtons.get(button) === value || state.buttons.get(button) !== value) continue;
+                if (beforeButtons.has(button)) state.buttons.set(button, beforeButtons.get(button)!); else state.buttons.delete(button);
+              }
+              if (state.x === afterPosition.x && state.y === afterPosition.y) Object.assign(state, beforePosition);
+              if (persistedInput) await persistedInput();
+              if (heldInput.get(inputKey) === state && !state.keys.size && !state.buttons.size) heldInput.delete(inputKey);
+            };
+            if (command === "Input.dispatchKeyEvent" && params.type === "keyUp") {
+              const key = heldKeyIdentity(beforeKeys, params), previous = key ? beforeKeys.get(key) : undefined;
+              confirmRelease = () => { if (key && previous && state.keys.get(key) === previous) state.keys.delete(key); };
             } else if (command === "Input.dispatchMouseEvent" && (params.type === "mouseReleased" || params.type === "mousePressed" && params.surfWaxAtomicClick)) {
-              const button = params.button ?? "left";
+              const button = params.button ?? (message.rawCdp ? "none" : "left");
               const previous = params.type === "mouseReleased" ? beforeButtons.get(button) : state.buttons.get(button);
               confirmRelease = () => { if (previous && state.buttons.get(button) === previous) state.buttons.delete(button); };
             }
@@ -510,8 +535,8 @@ chrome.runtime.onConnect.addListener((port) => {
               });
               // Persist intent before native input. For releases retain the held
               // state until Chrome confirms it, so a worker crash can finish it.
-              await record(new Map([...beforeKeys, ...saved.keys]), new Map([...beforeButtons, ...saved.buttons]));
               persistedInput = () => record(saved.keys, saved.buttons);
+              await record(new Map([...beforeKeys, ...saved.keys]), new Map([...beforeButtons, ...saved.buttons]));
               if (!cleanup) runs.validate(message as RunIdentity);
             }
           }
@@ -528,10 +553,10 @@ chrome.runtime.onConnect.addListener((port) => {
               if (!text) throw new Error("AutomationError[not-editable]: Empty insertion requires an exact focused target");
               for (const character of text) {
                 if (!cleanup) runs.validate(message as RunIdentity);
-                await authorizedNativeInput(debuggee, tabId!, inputRunId, "Input.dispatchKeyEvent", { type: "char", text: character }, () => {
+                await dispatchAuthorizedNativeInput(debuggee, tabId!, inputRunId, "Input.dispatchKeyEvent", { type: "char", text: character }, () => {
                   if (closed) throw new DOMException("Side Panel 已关闭", "AbortError");
                   runs.validate(message as RunIdentity);
-                });
+                }, () => { nativeInputAttempted = true; });
               }
             }
             result = {};
@@ -543,17 +568,20 @@ chrome.runtime.onConnect.addListener((port) => {
                 runs.validate(message as RunIdentity);
               });
               result = {};
-            } else result = await authorizedNativeInput(debuggee, tabId!, message.runId ?? validatedRunId!, command, nativeParams, () => {
+            } else result = await dispatchAuthorizedNativeInput(debuggee, tabId!, message.runId ?? validatedRunId!, command, nativeParams, () => {
               if (!cleanup) {
                 if (closed) throw new DOMException("Side Panel 已关闭", "AbortError");
                 runs.validate(message as RunIdentity);
               }
-            });
+            }, () => { nativeInputAttempted = true; });
           } else {
             const evaluationKey = JSON.stringify(debuggee);
             const evaluation = method === "sendCommand" && ["Runtime.evaluate","Runtime.callFunctionOn"].includes(command);
             if (evaluation) runtimeEvaluations.set(evaluationKey,{debuggee,count:(runtimeEvaluations.get(evaluationKey)?.count ?? 0)+1});
-            try { result = await native.apply(chrome.debugger,args); }
+            try {
+              if (trackedInput) nativeInputAttempted = true;
+              result = await native.apply(chrome.debugger,args);
+            }
             finally { if (evaluation) {
               const entry = runtimeEvaluations.get(evaluationKey);
               if (entry && entry.count > 1) entry.count--; else runtimeEvaluations.delete(evaluationKey);
@@ -562,14 +590,27 @@ chrome.runtime.onConnect.addListener((port) => {
           confirmRelease?.();
           await persistedInput?.();
           succeeded = true;
+        } catch (error) {
+          if (trackedInput && !nativeInputAttempted && rollbackInput) {
+            try { await rollbackInput(); }
+            catch (rollbackError) {
+              throw Object.assign(new Error(`AutomationError[input-state-rollback-failed]: ${String(rollbackError)}`), { cause: error });
+            }
+          }
+          throw error;
         } finally {
           if (temporary || hitTest) await bypassPageGuard(tabId!, false).catch(() => undefined);
           if (input && (end || (start && !succeeded))) await endGesture(tabId!);
         }
+        };
+        if (input) await withInputTicket(tabId!, perform);
+        else await perform();
       }
       if (!closed) port.postMessage({ id, result });
     } catch (error) {
-      if (!closed) port.postMessage({ id, error: error instanceof Error ? error.message : String(error), ...((error as any)?.effectUnknown ? { effectUnknown: true } : {}) });
+      if (!closed) port.postMessage({ id, error: error instanceof Error ? error.message : String(error),
+        ...(trackedInput && !nativeInputAttempted ? { dispatchState: "not-dispatched" } : {}),
+        ...((error as any)?.effectUnknown || trackedInput && nativeInputAttempted ? { effectUnknown: true } : {}) });
     }
     })());
   });

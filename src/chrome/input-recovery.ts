@@ -1,4 +1,5 @@
 import { fromLogValue, type LogEvent } from "../logging";
+import { inputKeyIdentity } from "./input-state";
 
 type InputState = {
   tabId?: number; debuggee: chrome.debugger.Debuggee & { sessionId?: string }; x: number; y: number;
@@ -22,7 +23,10 @@ export async function recoverBrowserInput(events: readonly LogEvent[], orphanRun
     let tab = tabs.get(state.tabId!);
     if (!tab) { tab = { x: state.x, y: state.y, keys: new Map(), buttons: new Map() }; tabs.set(state.tabId!, tab); }
     tab.x = state.x; tab.y = state.y;
-    for (const key of state.keys ?? []) if (typeof key.key === "string") tab.keys.set(key.key, key);
+    for (const key of state.keys ?? []) {
+      const identity = inputKeyIdentity(key);
+      if (identity) tab.keys.set(identity, key);
+    }
     for (const [button, params] of state.buttons ?? []) tab.buttons.set(button, params);
   }
   let recovered = 0;

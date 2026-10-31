@@ -34,6 +34,14 @@ describe("orphan browser input recovery", () => {
     await recoverBrowserInput([event("orphan", 1, [{ key: "Shift" }])], ["orphan"], debuggerApi as never);
     expect(debuggerApi.sendCommand).toHaveBeenCalledWith({ tabId: 1 }, "Input.dispatchKeyEvent", expect.objectContaining({ key: "Shift", type: "keyUp" }));
   });
+  it("recovers code-only keys and both physical modifier keys", async () => {
+    const debuggerApi = api();
+    await recoverBrowserInput([event("orphan", 1, [
+      { key: "Shift", code: "ShiftLeft" }, { key: "Shift", code: "ShiftRight" }, { code: "KeyA", windowsVirtualKeyCode: 65 },
+    ])], ["orphan"], debuggerApi as never);
+    const releases = debuggerApi.sendCommand.mock.calls.filter(([, method]) => method === "Input.dispatchKeyEvent").map(([, , params]: any[]) => params.code);
+    expect(releases).toEqual(["ShiftLeft", "ShiftRight", "KeyA"]);
+  });
   it("recovers held input after the conversation terminal and skips its settled snapshot on later boots", async () => {
     const debuggerApi = api();
     const held = event("finished", 1, [{ key: "Shift" }], [["left", {}]]);

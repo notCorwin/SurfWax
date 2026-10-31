@@ -16,6 +16,7 @@ import { DeferredProgramPage, PROGRAM_HANDLE_ASSERT_LIVE, PROGRAM_HANDLE_SESSION
 import { estimateProgramTimeoutMs } from "./program-timeout";
 import { EventSubscriptions, type BrowserEventKind, type EventOwner } from "./event-subscriptions";
 import { keyboardParams, macEditingCommands, parseKeyboardChord } from "./automation-utils";
+import { heldKeyIdentity, inputKeyIdentity, inputSemanticKey } from "./input-state";
 
 type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
 type DebuggerTarget = chrome.debugger.TargetInfo;
@@ -225,7 +226,7 @@ export class ChromeExecutor {
     this.programHost = options.programHost ?? executeSandboxProgram;
     this.diagnostics = new BrowserDiagnostics(this.logger);
     if (!this.chromeApi?.debugger) throw new Error("Chrome extension debugger API is unavailable");
-    const pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason: Error) => void }>();
+    const pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason: Error) => void; input: boolean }>();
     const listeners = { onEvent: new Set<(...args: any[]) => void>(), onDetach: new Set<(...args: any[]) => void>() };
     const event = (name: keyof typeof listeners) => ({
       addListener: (listener: (...args: any[]) => void) => listeners[name].add(listener),
@@ -237,21 +238,24 @@ export class ChromeExecutor {
       if (this.port !== port) return;
       this.port = undefined;
       this.bridgedDebuggees.clear();
-      for (const request of pending.values()) request.reject(this.disposed ? abortError() : error);
+      for (const request of pending.values()) {
+        const failure = this.disposed ? abortError() : new Error(error.message, { cause: error });
+        request.reject(request.input ? Object.assign(failure, { effectUnknown: true }) : failure);
+      }
       pending.clear();
     };
     const connect = () => {
       const port = this.chromeApi.runtime?.connect?.({ name: "surf-wax-debugger" });
       if (!port) return undefined;
       this.port = port;
-      port.onMessage.addListener((message: { id?: string; event?: keyof typeof listeners; args?: any[]; result?: unknown; error?: string; effectUnknown?: boolean }) => {
+      port.onMessage.addListener((message: { id?: string; event?: keyof typeof listeners; args?: any[]; result?: unknown; error?: string; effectUnknown?: boolean; dispatchState?: "not-dispatched" }) => {
         if (this.port !== port) return;
         if (message.event && listeners[message.event]) {
           for (const listener of listeners[message.event]) listener(...(message.args ?? []));
         } else if (message.id) {
           const request = pending.get(message.id);
           pending.delete(message.id);
-          if (message.error) request?.reject(Object.assign(new Error(message.error), message.effectUnknown ? { effectUnknown: true } : {}));
+          if (message.error) request?.reject(Object.assign(new Error(message.error), message.effectUnknown ? { effectUnknown: true } : {}, message.dispatchState === "not-dispatched" ? { dispatchState: "not-dispatched" } : {}));
           else request?.resolve(message.result);
         }
       });
@@ -261,17 +265,20 @@ export class ChromeExecutor {
     this.bridge = {
       onEvent: event("onEvent"),
       onDetach: event("onDetach"),
-      call: async (method: string, args: unknown[]) => {
-        if (this.disposed) throw abortError();
-        if (["attach", "detach", "sendCommand"].includes(method)) requireDebuggee(args[0], method);
+      call: async (method: string, args: unknown[], rawCdp = false) => {
+        const input = method === "sendCommand" && typeof args[1] === "string" && args[1].startsWith("Input.");
+        if (this.disposed) throw Object.assign(abortError(), input ? { dispatchState: "not-dispatched" } : {});
+        try { if (["attach", "detach", "sendCommand"].includes(method)) requireDebuggee(args[0], method); }
+        catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), input ? { dispatchState: "not-dispatched" } : {}); }
         const port = this.port ?? connect();
         if (!port) {
-          return Reflect.apply((this.chromeApi.debugger as any)[method], this.chromeApi.debugger, args);
+          try { return await Reflect.apply((this.chromeApi.debugger as any)[method], this.chromeApi.debugger, args); }
+          catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), input ? { effectUnknown: true } : {}); }
         }
         return new Promise((resolve, reject) => {
           const id = globalThis.crypto.randomUUID();
-          pending.set(id, { resolve, reject });
-          try { port.postMessage({ id, method, args, ...getRunIdentity(), operationId: crypto.randomUUID() }); }
+          pending.set(id, { resolve, reject, input });
+          try { port.postMessage({ id, method, args, ...getRunIdentity(), operationId: crypto.randomUUID(), ...(rawCdp ? { rawCdp: true } : {}) }); }
           catch (error) {
             disconnect(port, error instanceof Error ? error : new Error(String(error)));
             try { port.disconnect(); } catch { /* The extension context may already be gone. */ }
@@ -1492,7 +1499,7 @@ export class ChromeExecutor {
     if (!state) return;
     const failures: Array<{ kind: "key" | "button"; value: string; error: unknown }> = [];
     for (const [key, params] of [...state.keys]) {
-      try { await this.bridgeCommand({ tabId }, "Input.dispatchKeyEvent", { ...params, type: "keyUp", key, text: undefined, unmodifiedText: undefined, commands: undefined }); }
+      try { await this.bridgeCommand({ tabId }, "Input.dispatchKeyEvent", { ...params, type: "keyUp", text: undefined, unmodifiedText: undefined, commands: undefined }); }
       catch (error) { failures.push({ kind: "key", value: key, error }); }
     }
     for (const button of [...state.buttons]) {
@@ -1535,10 +1542,10 @@ export class ChromeExecutor {
     await this.withInputLock(debuggee.tabId, async () => {
       throwIfAborted(signal);
       const held = this.inputState(debuggee.tabId!).keys;
-      const initial = new Set(held.keys());
+      const initial = new Set([...held.values()].map(inputSemanticKey).filter((key): key is string => key !== undefined));
       const owned: Array<{ key: string; params: Record<string, unknown> }> = [];
       let failure: unknown;
-      let attempted = false;
+      let maybeDispatched = false;
       try {
         for (const key of [...parsed.modifiers, parsed.key]) {
           throwIfAborted(signal);
@@ -1546,11 +1553,19 @@ export class ChromeExecutor {
           await assertFocus?.();
           throwIfAborted(signal);
           const params = keyboardParams(key);
-          const alreadyHeld = initial.has(key);
-          if (!alreadyHeld) owned.push({ key, params });
-          attempted = true;
-          await this.bridgeCommandUnlocked(debuggee, "Input.dispatchKeyEvent", { ...params,
-            type: params.text ? "keyDown" : "rawKeyDown", ...(alreadyHeld ? { autoRepeat: true } : {}) });
+          const alreadyHeld = heldKeyIdentity(held, params) !== undefined;
+          const ownedKey = !alreadyHeld ? { key, params } : undefined;
+          if (ownedKey) owned.push(ownedKey);
+          try {
+            await this.bridgeCommandUnlocked(debuggee, "Input.dispatchKeyEvent", { ...params,
+              type: params.text ? "keyDown" : "rawKeyDown", ...(alreadyHeld ? { autoRepeat: true } : {}) });
+            maybeDispatched = true;
+          } catch (error) {
+            if ((error as any)?.dispatchState === "not-dispatched") {
+              if (ownedKey) owned.splice(owned.indexOf(ownedKey), 1);
+            } else maybeDispatched = true;
+            throw error;
+          }
         }
         throwIfAborted(signal);
       } catch (error) { failure = error; }
@@ -1559,7 +1574,7 @@ export class ChromeExecutor {
         catch (error) { failure ??= error; }
       }
       if (failure) {
-        if (attempted && typeof failure === "object") Object.assign(failure, { effectUnknown: true });
+        if (maybeDispatched && failure && typeof failure === "object") Object.assign(failure, { effectUnknown: true });
         throw failure;
       }
     }, signal);
@@ -1575,43 +1590,69 @@ export class ChromeExecutor {
   }
 
   private async bridgeCommandUnlocked(debuggee: Debuggee, method: string, params?: object, rawCdp = false): Promise<any> {
-    if (/^(Input\.|DOM\.(focus|scrollIntoViewIfNeeded)|Page\.(navigate|reload|navigateToHistoryEntry|handleJavaScriptDialog))/.test(method) && !this.activeSignal?.aborted) await this.programScope?.dispatched();
-    await this.bridgeDebuggee(debuggee);
+    try {
+      if (rawCdp && params && Object.keys(params).some((key) => key.startsWith("surfWax")))
+        throw new Error("AutomationError[invalid-protocol-parameter]: surfWax parameters are reserved for internal automation");
+      if (/^(Input\.|DOM\.(focus|scrollIntoViewIfNeeded)|Page\.(navigate|reload|navigateToHistoryEntry|handleJavaScriptDialog))/.test(method) && !this.activeSignal?.aborted) await this.programScope?.dispatched();
+      await this.bridgeDebuggee(debuggee);
+    } catch (error) {
+      throw Object.assign(error instanceof Error ? error : new Error(String(error)), { dispatchState: "not-dispatched" });
+    }
     let input = params as Record<string, any> | undefined;
     let releaseKey: { state: ReturnType<ChromeExecutor["inputState"]>; key: string; previous?: Record<string, unknown> } | undefined;
     let releaseButton: { state: ReturnType<ChromeExecutor["inputState"]>; button: string; version?: symbol } | undefined;
+    let rollbackKey: { state: ReturnType<ChromeExecutor["inputState"]>; key: string; previous?: Record<string, unknown>; current: Record<string, unknown> } | undefined;
+    let rollbackButton: { state: ReturnType<ChromeExecutor["inputState"]>; button: string; hadButton: boolean; previous?: symbol; current: symbol } | undefined;
+    let rollbackPosition: { state: ReturnType<ChromeExecutor["inputState"]>; x: number; y: number; currentX: number; currentY: number } | undefined;
     if (debuggee.tabId !== undefined && input && method.startsWith("Input.")) {
       const state = this.inputState(debuggee.tabId);
       const modifierBit = (key: string) => key === "Alt" ? 1 : key === "Control" ? 2 : key === "Meta" ? 4 : key === "Shift" ? 8 : 0;
-      const heldModifiers = [...state.keys.keys()].reduce((mask, key) => mask | modifierBit(key), 0);
+      const heldModifiers = [...state.keys.values()].reduce((mask, held) => mask | modifierBit(inputSemanticKey(held) ?? ""), 0);
       if (method === "Input.dispatchMouseEvent") {
+        const beforeX = state.x, beforeY = state.y;
         if (Number.isFinite(input.x)) state.x = input.x;
         if (Number.isFinite(input.y)) state.y = input.y;
-        const button = input.button ?? "left";
-        if (input.type === "mousePressed") {
+        rollbackPosition = { state, x: beforeX, y: beforeY, currentX: state.x, currentY: state.y };
+        const button = input.button ?? (rawCdp ? "none" : "left");
+        if (input.type === "mousePressed" && button !== "none") {
+          const hadButton = state.buttons.has(button), previous = state.buttonVersions?.get(button), current = Symbol();
           state.buttons.add(button);
-          (state.buttonVersions ??= new Map()).set(button, Symbol());
+          (state.buttonVersions ??= new Map()).set(button, current);
+          rollbackButton = { state, button, hadButton, previous, current };
           if (input.surfWaxAtomicClick) releaseButton = { state, button, version: state.buttonVersions.get(button) };
         }
-        if (input.type === "mouseReleased") releaseButton = { state, button, version: state.buttonVersions?.get(button) };
+        if (input.type === "mouseReleased" && button !== "none") releaseButton = { state, button, version: state.buttonVersions?.get(button) };
         const releasing = input.type === "mouseReleased";
         const buttons = [...state.buttons].filter((held) => !releasing || held !== button)
-          .reduce((mask, held) => mask | (held === "left" ? 1 : held === "right" ? 2 : 4), 0);
-        input = { x: state.x, y: state.y, ...input, buttons, modifiers: (input.modifiers ?? 0) | heldModifiers };
+          .reduce((mask, held) => mask | (held === "left" ? 1 : held === "right" ? 2 : held === "middle" ? 4 : held === "back" ? 8 : held === "forward" ? 16 : 0), 0);
+        if (!rawCdp) input = { x: state.x, y: state.y, ...input, buttons, modifiers: (input.modifiers ?? 0) | heldModifiers };
       }
       if (method === "Input.dispatchKeyEvent") {
         const ownModifier = modifierBit(input.key);
-        const released = input.type === "keyUp" ? ownModifier : 0;
-        input = { ...input, modifiers: ((input.modifiers ?? 0) | heldModifiers | ownModifier) & ~released };
-        if (input.text && input.modifiers & 7) delete input.text;
-        else if (input.text && input.modifiers & 8) input.text = input.text.toUpperCase();
+        const releasingKey = input.type === "keyUp" ? heldKeyIdentity(state.keys, input) : undefined;
+        const remainingModifiers = input.type === "keyUp" ? [...state.keys].reduce((mask, [key, held]) =>
+          key === releasingKey ? mask : mask | modifierBit(inputSemanticKey(held) ?? ""), 0) : heldModifiers;
+        const released = input.type === "keyUp" ? ownModifier & ~remainingModifiers : 0;
+        if (!rawCdp) {
+          input = { ...input, modifiers: ((input.modifiers ?? 0) | heldModifiers | ownModifier) & ~released };
+          if (input.text && input.modifiers & 7) delete input.text;
+          else if (input.text && input.modifiers & 8) input.text = input.text.toUpperCase();
+        }
         if (!rawCdp && (input.type === "keyDown" || input.type === "rawKeyDown") && input.commands === undefined && typeof input.code === "string") {
           const commands = macEditingCommands(input.code, input.modifiers);
           if (commands) input.commands = commands;
         }
-        if (input.type === "keyUp" && typeof input.key === "string") releaseKey = { state, key: input.key, previous: state.keys.get(input.key) };
-        else if ((input.type === "keyDown" || input.type === "rawKeyDown") && typeof input.key === "string" && input.key)
-          state.keys.set(input.key, { ...input });
+        if (input.type === "keyUp") {
+          const key = heldKeyIdentity(state.keys, input);
+          if (key) releaseKey = { state, key, previous: state.keys.get(key) };
+        } else if (input.type === "keyDown" || input.type === "rawKeyDown") {
+          const key = inputKeyIdentity(input);
+          if (key) {
+            const previous = state.keys.get(key), current = { ...input };
+            state.keys.set(key, current);
+            rollbackKey = { state, key, previous, current };
+          }
+        }
       }
     }
     const key = JSON.stringify(debuggee);
@@ -1622,10 +1663,24 @@ export class ChromeExecutor {
     if (tracked) this.programEvaluations.set(key, {debuggee,count:(this.programEvaluations.get(key)?.count ?? 0)+1});
     let result: any;
     try {
-      result = await (this.bridge.call as any)("sendCommand", [debuggee, method, input]);
+      result = await (this.bridge.call as any)("sendCommand", [debuggee, method, input], rawCdp);
       if (dialogOwner && dialogClaim) this.eventSubscriptions.finishDialog(dialogOwner, dialogClaim.id, dialogClaim.claimId, "handled");
     } catch (error) {
       if (dialogOwner && dialogClaim) this.eventSubscriptions.finishDialog(dialogOwner, dialogClaim.id, dialogClaim.claimId, "uncertain");
+      if ((error as any)?.dispatchState === "not-dispatched") {
+        if (rollbackKey && rollbackKey.state.keys.get(rollbackKey.key) === rollbackKey.current) {
+          if (rollbackKey.previous) rollbackKey.state.keys.set(rollbackKey.key, rollbackKey.previous);
+          else rollbackKey.state.keys.delete(rollbackKey.key);
+        }
+        if (rollbackButton && rollbackButton.state.buttonVersions?.get(rollbackButton.button) === rollbackButton.current) {
+          if (!rollbackButton.hadButton) rollbackButton.state.buttons.delete(rollbackButton.button);
+          if (rollbackButton.previous) rollbackButton.state.buttonVersions.set(rollbackButton.button, rollbackButton.previous);
+          else rollbackButton.state.buttonVersions.delete(rollbackButton.button);
+        }
+        if (rollbackPosition && rollbackPosition.state.x === rollbackPosition.currentX && rollbackPosition.state.y === rollbackPosition.currentY) {
+          rollbackPosition.state.x = rollbackPosition.x; rollbackPosition.state.y = rollbackPosition.y;
+        }
+      }
       throw error;
     } finally { if (tracked) {
       const entry = this.programEvaluations.get(key);

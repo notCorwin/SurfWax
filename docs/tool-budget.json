@@ -3,20 +3,20 @@
   "records": [
     {
       "label": "current",
-      "count": 61,
-      "definitionsBytes": 48750,
-      "contextBytes": 4310,
-      "combinedBytes": 53061,
+      "count": 63,
+      "definitionsBytes": 52104,
+      "contextBytes": 4685,
+      "combinedBytes": 56790,
       "tokens": {
         "cl100k_base": {
-          "definitions": 11663,
-          "context": 898,
-          "combined": 12561
+          "definitions": 12433,
+          "context": 978,
+          "combined": 13411
         },
         "o200k_base": {
-          "definitions": 11944,
-          "context": 901,
-          "combined": 12845
+          "definitions": 12737,
+          "context": 981,
+          "combined": 13718
         }
       }
     }

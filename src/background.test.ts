@@ -111,12 +111,16 @@ async function inputBridge(sendCommand: ReturnType<typeof vi.fn>) {
   ownerMessage({ type: "claim", runId: "run", ownerId: "owner", conversationId: "conversation" });
   await vi.waitFor(() => expect(owner.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "claimed", runId: "run" })));
   const identity = owner.postMessage.mock.calls.find(([value]) => value.type === "claimed")![0];
-  let dispatch!: (message: unknown) => void, disconnect!: () => void;
-  const bridge = { name: "surf-wax-debugger", onMessage: { addListener: (listener: (message: unknown) => void) => { dispatch = listener; } },
-    onDisconnect: { addListener: (listener: () => void) => { disconnect = listener; } }, postMessage: vi.fn(), disconnect: vi.fn() };
-  connects.forEach(listener => listener(bridge as unknown as chrome.runtime.Port));
-  const send = (id: string, method: string, params: object, tabId = 7) => dispatch({ id, runId: identity.runId, ownerId: identity.ownerId, generation: identity.generation,
-    operationId: `${id}-op`, method: "sendCommand", args: [{ tabId }, method, params] });
+  const connectBridge = () => {
+    let dispatch!: (message: unknown) => void, disconnect!: () => void;
+    const bridge = { name: "surf-wax-debugger", onMessage: { addListener: (listener: (message: unknown) => void) => { dispatch = listener; } },
+      onDisconnect: { addListener: (listener: () => void) => { disconnect = listener; } }, postMessage: vi.fn(), disconnect: vi.fn() };
+    connects.forEach(listener => listener(bridge as unknown as chrome.runtime.Port));
+    const send = (id: string, method: string, params: object, tabId = 7, rawCdp = false) => dispatch({ id, runId: identity.runId, ownerId: identity.ownerId, generation: identity.generation,
+      operationId: `${id}-op`, method: "sendCommand", args: [{ tabId }, method, params], ...(rawCdp ? { rawCdp: true } : {}) });
+    return { bridge, send, disconnect };
+  };
+  const { bridge, send, disconnect } = connectBridge();
   const startGuard = async () => {
     let onMessage!: (message: unknown) => void;
     const port = { name: "surf-wax-page-guard", onMessage: { addListener: (listener: (message: unknown) => void) => { onMessage = listener; } }, onDisconnect: event(), postMessage: vi.fn() };
@@ -124,8 +128,23 @@ async function inputBridge(sendCommand: ReturnType<typeof vi.fn>) {
     onMessage({ ...identity, tabId: 7, id: "guard" });
     await vi.waitFor(() => expect(port.postMessage).toHaveBeenCalledWith({ id: "guard", ready: true }));
   };
-  return { bridge, send, disconnect, startGuard, finishOwner: () => ownerMessage({ type: "finished" }) };
+  return { bridge, send, disconnect, connectBridge, startGuard, finishOwner: () => ownerMessage({ type: "finished" }) };
 }
+
+it("does not interpret internal automation controls supplied by raw CDP", async () => {
+  const sendCommand = vi.fn(async () => ({}));
+  const { bridge, send, disconnect } = await inputBridge(sendCommand);
+  for (const [id, params] of Object.entries({
+    click: { type: "mousePressed", x: 1, y: 2, surfWaxAtomicClick: true },
+    target: { text: "x", surfWaxTargetBackendNodeId: 7 },
+    replace: { text: "x", surfWaxReplaceSelection: true },
+  })) {
+    send(id, id === "click" ? "Input.dispatchMouseEvent" : "Input.insertText", params, 7, true);
+    await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledWith(expect.objectContaining({ id, error: expect.stringContaining("invalid-protocol-parameter") })));
+  }
+  expect(sendCommand).not.toHaveBeenCalled();
+  disconnect();
+});
 
 it("serializes a tab's entire input ticket while allowing another tab to proceed", async () => {
   let release!: () => void;
@@ -251,7 +270,7 @@ it("refuses to dispatch a key when an existing frame did not authorize the expec
   });
   await startGuard();
   send("key", "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "A" });
-  await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledWith({ id: "key", error: expect.stringContaining("guard-context-unavailable") }));
+  await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledWith({ id: "key", error: expect.stringContaining("guard-context-unavailable"), dispatchState: "not-dispatched" }));
   expect(sendCommand).not.toHaveBeenCalled();
   disconnect();
 });
@@ -308,15 +327,81 @@ it("does not treat an unrelated child navigation as a pointer failure", async ()
 it("does not dispatch when an expected guard cannot authorize the input", async () => {
   const sendCommand = vi.fn(async () => ({}));
   const { bridge, send, disconnect, startGuard } = await inputBridge(sendCommand);
+  let failAuthorization = true;
   vi.mocked(chrome.scripting.executeScript).mockImplementation(async ({ func, args = [] }: any) => {
-    if (func.name === "authorizeGuardInput" && args[1] != null) throw new Error("frame unavailable");
+    if (func.name === "authorizeGuardInput" && args[1] != null && failAuthorization) throw new Error("frame unavailable");
     return [{ frameId: 0, documentId: "doc", result: func(...args) }] as any;
   });
   await startGuard();
   send("key", "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "X" });
-  await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledWith({ id: "key", error: expect.stringContaining("guard-context-unavailable") }));
+  await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledWith({ id: "key", error: expect.stringContaining("guard-context-unavailable"), dispatchState: "not-dispatched" }));
   expect(sendCommand).not.toHaveBeenCalled();
-  disconnect();
+  const states = boot.append.mock.calls.map(([entry]) => entry).filter(entry => entry.type === "browser.input.state");
+  expect(states.map((entry) => entry.content.keys)).toEqual([[expect.objectContaining({ key: "X" })], []]);
+  failAuthorization = false;
+  disconnect(); await vi.waitFor(() => expect(bridge.disconnect).toHaveBeenCalled());
+  expect(sendCommand.mock.calls.some(([, method, params]: any[]) => method === "Input.dispatchKeyEvent" && params.type === "keyUp")).toBe(false);
+});
+
+it("serializes same-key intent and rollback before the next press", async () => {
+  let release!: () => void, started!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const waiting = new Promise<void>((resolve) => { started = resolve; });
+  const sendCommand = vi.fn(async (_source: object, _method: string, _params: any) => ({}));
+  const { bridge, send, disconnect, connectBridge, startGuard } = await inputBridge(sendCommand);
+  const second = connectBridge();
+  let attempts = 0;
+  vi.mocked(chrome.scripting.executeScript).mockImplementation(async ({ func, args = [] }: any) => {
+    if (func.name !== "authorizeGuardInput") return [] as any;
+    if (args[1] == null) return [{ frameId: 0, documentId: "doc", result: observedReceipt }] as any;
+    if (++attempts === 1) { started(); await pending; throw new Error("authorization failed"); }
+    return [{ frameId: 0, documentId: "doc", result: true }] as any;
+  });
+  await startGuard();
+  send("first", "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Shift", code: "ShiftLeft", windowsVirtualKeyCode: 1 });
+  await waiting;
+  second.send("second", "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Shift", code: "ShiftLeft", windowsVirtualKeyCode: 2 });
+  const before = boot.append.mock.calls.map(([entry]) => entry).filter(entry => entry.type === "browser.input.state");
+  expect(before.at(-1).content.keys).toEqual([expect.objectContaining({ windowsVirtualKeyCode: 1 })]);
+  release();
+  await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledWith({ id: "first", error: expect.stringContaining("guard-context-unavailable"), dispatchState: "not-dispatched" }));
+  await vi.waitFor(() => expect(second.bridge.postMessage).toHaveBeenCalledWith({ id: "second", result: {} }));
+  const states = boot.append.mock.calls.map(([entry]) => entry).filter(entry => entry.type === "browser.input.state");
+  expect(states.map((entry) => entry.content.keys.map((key: any) => key.windowsVirtualKeyCode))).toEqual([[1], [], [2], [2]]);
+  expect(sendCommand.mock.calls.filter(([, method]) => method === "Input.dispatchKeyEvent")).toHaveLength(1);
+  disconnect(); second.disconnect();
+  await vi.waitFor(() => { expect(bridge.disconnect).toHaveBeenCalled(); expect(second.bridge.disconnect).toHaveBeenCalled(); });
+});
+
+it("does not dispatch or leave a held key if the intent log write fails", async () => {
+  const sendCommand = vi.fn(async (_source: object, _method: string, _params: any) => ({}));
+  const { bridge, send, disconnect } = await inputBridge(sendCommand);
+  boot.append.mockImplementation(async (entry) => {
+    if (entry.type === "browser.input.state" && entry.content.keys.length) throw new Error("intent write failed");
+    return { id: 1 };
+  });
+  send("key", "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Shift", code: "ShiftLeft" });
+  await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledWith({ id: "key", error: "intent write failed", dispatchState: "not-dispatched" }));
+  disconnect(); await vi.waitFor(() => expect(bridge.disconnect).toHaveBeenCalled());
+  expect(sendCommand.mock.calls.some(([, method]) => method === "Input.dispatchKeyEvent")).toBe(false);
+});
+
+it("reports compensation-log failure without sending a phantom release", async () => {
+  const sendCommand = vi.fn(async (_source: object, _method: string, _params: any) => ({}));
+  const { bridge, send, disconnect, startGuard } = await inputBridge(sendCommand);
+  vi.mocked(chrome.scripting.executeScript).mockImplementation(async ({ func, args = [] }: any) => {
+    if (func.name === "authorizeGuardInput" && args[1] != null) throw new Error("authorization failed");
+    return [] as any;
+  });
+  await startGuard();
+  boot.append.mockImplementation(async (entry) => {
+    if (entry.type === "browser.input.state" && !entry.content.keys.length) throw new Error("rollback write failed");
+    return { id: 1 };
+  });
+  send("key", "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Shift", code: "ShiftLeft" });
+  await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledWith({ id: "key", error: expect.stringContaining("input-state-rollback-failed"), dispatchState: "not-dispatched" }));
+  disconnect(); await vi.waitFor(() => expect(bridge.disconnect).toHaveBeenCalled());
+  expect(sendCommand.mock.calls.some(([, method]) => method === "Input.dispatchKeyEvent")).toBe(false);
 });
 
 it("reports blocked edits from key dispatch as uncertain and leaves canceled or non-editing keys alone", async () => {
