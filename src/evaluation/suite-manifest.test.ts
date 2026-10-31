@@ -19,7 +19,7 @@ function report(manifest: ReturnType<typeof createSuiteManifest>, index: number,
     suiteIdentity: { sampleId: sample.id, planHash: manifest.planHash, repeat: sample.repeat },
     outcome, networkSettled: true, ledgerDrained: true, logComplete: true, ...result,
     extensionBuild: { sha256: build }, extensionBuildStable: true, evaluationSource: { sha256: evaluation }, evaluationSourceStable: true, lockfileSha256: lockfile, browser,
-    providerUsageByStep: usage(10, 3), ...changes } };
+    requests: [], lastAgentResponse: null, providerUsageByStep: usage(10, 3), ...changes } };
 }
 
 describe("offline benchmark suite manifest", () => {
@@ -65,6 +65,17 @@ describe("offline benchmark suite manifest", () => {
     expect(result.counts).toEqual({ total: 8, passed: 1, failed: 1, unknown: 6, timedOut: 1, missing: 5 });
     expect(result.usage.totals).toMatchObject({ inputTokens: null, outputTokens: null });
     expect(result.usage.unknownSamples).toMatchObject({ inputTokens: 6, outputTokens: 5 });
+  });
+
+  it("keeps interrupted conversations unknown and checks provider evidence before aggregation", () => {
+    const manifest = createSuiteManifest({ ...plan(), scenarios: ["rolling-queue"], seeds: [17], repeats: 1 });
+    const item = report(manifest, 0, { outcome: "conversation.failed", businessVerified: false, lifecycleVerified: false,
+      requests: [{ kind: "agent", responseStatus: 429, responseComplete: true }], lastAgentResponse: { status: 429, complete: true } });
+    const result = aggregateSuiteReports(manifest, [item]);
+    expect(result.counts).toMatchObject({ total: 1, unknown: 1, failed: 0 });
+    expect(result.samples[0]).toMatchObject({ classification: "unknown", outcome: "conversation.failed", lastAgentResponse: { status: 429, complete: true } });
+    expect(() => aggregateSuiteReports(manifest, [{ ...item, report: { ...(item.report as object), lastAgentResponse: { status: 200, complete: true } } }]))
+      .toThrow(/provider response evidence/);
   });
 
   it("sums usage only when every sample and every step supplies the metric", () => {

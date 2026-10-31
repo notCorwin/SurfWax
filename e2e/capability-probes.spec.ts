@@ -2,16 +2,23 @@ import { expect, type Page } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, closeServer, readEvents, type MockResponse } from "./fixtures";
 import { manifestFixture } from "./evaluation/manifest-fixture";
 import { multitabFixture } from "./evaluation/multitab-fixture";
+import { frameReplacementFixture } from "./evaluation/frame-replacement-fixture";
 
 test.describe("@capability-probe known difficult tool paths", () => {
   test.skip(process.env.SURFWAX_CAPABILITY_PROBES !== "1", "Explicit opt-in: these probes may expose existing tool failures");
 
   async function run(page: Page, target: Page, provider: Awaited<ReturnType<typeof startProvider>>, responses: MockResponse[], code: string) {
     let result: any;
+    let jobId = "", polls = 0;
     const step: MockResponse = (request) => {
       const message = request.messages.findLast((entry: any) => entry.role === "tool");
       if (!message) { responses.unshift(step); return textResponse("Probe"); }
       result = JSON.parse(message.content);
+      if (result.accepted && result.complete === false || result.terminal === false) {
+        jobId = result.jobId ?? jobId;
+        responses.unshift(step);
+        return commandResponse("get_job", { jobId, after: result.nextCursor, waitMs: 1000 }, `probe-poll-${++polls}`);
+      }
       return textResponse("PROBE_FINISHED");
     };
     responses.push(commandResponse("execute_program", { code, timeoutMs: 10_000 }, "capability-probe"), step);
@@ -59,6 +66,33 @@ test.describe("@capability-probe known difficult tool paths", () => {
         await page.frameLocator('iframe[title="Manifest desk"]').getByRole('button', {name:'Deep target'}).click();
         return 'done';`);
       expect(await frame.locator("body").getAttribute("data-probe-clicked")).toBe("yes");
+    } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); await closeServer(fixture.server); }
+  });
+
+  test("click reaches the newly replaced lower cross-origin frame", async () => {
+    test.setTimeout(45_000);
+    const fixture = await frameReplacementFixture(17), responses: MockResponse[] = [];
+    const provider = await startProvider(responses), opened = await openExtension();
+    try {
+      const target = await opened.context.newPage(); await target.goto(fixture.origin);
+      await target.evaluate(() => {
+        (document.querySelector('#slots') as HTMLElement).style.display = 'block';
+        for (const frame of document.querySelectorAll('iframe')) frame.style.width = '540px';
+      });
+      try {
+        await run(opened.page, target, provider, responses, `
+          const progress = page.locator('#progress');
+          await progress.filter({hasText:'Completed 0 of 12'}).waitFor();
+          for (let index = 1; index <= 3; index++) {
+            await page.frameLocator('section[data-next="true"] iframe').getByRole('button', {name:'Confirm', exact:true}).click();
+            await progress.filter({hasText:'Completed ' + index + ' of 12'}).waitFor();
+          }
+          return 'done';`);
+      } catch (cause) {
+        const attempts = fixture.evidence().attempts.map(({ round, slot, accepted, trusted }) => ({ round, slot, accepted, trusted }));
+        throw new Error(`Frame replacement attempts: ${JSON.stringify(attempts)}`, { cause });
+      }
+      expect(fixture.evidence().completed).toHaveLength(3);
     } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); await closeServer(fixture.server); }
   });
 });

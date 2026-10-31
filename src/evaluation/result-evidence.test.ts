@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evaluateResultEvidence, type ResultEvidenceInput } from "../../e2e/evaluation/result-evidence";
+import { evaluateResultEvidence, lastAgentResponse, type ResultEvidenceInput } from "../../e2e/evaluation/result-evidence";
 
 const complete = (): ResultEvidenceInput => ({
   outcome: "conversation.finished", networkSettled: true, ledgerDrained: true, logComplete: true,
@@ -58,15 +58,16 @@ describe("evaluation result evidence", () => {
     });
   });
 
-  it("never reports setup or nonterminal runs as passed and identifies terminal conversation failure", () => {
+  it("keeps every unfinished run unknown, even if no business action or tool was observed", () => {
     for (const outcome of ["setup_failed", "running", "timed_out", "unexpected"]) {
       expect(evaluateResultEvidence({ ...complete(), outcome })).toMatchObject({
         classification: "unknown", passed: false, reasons: ["conversation_outcome_unknown"],
       });
     }
     for (const outcome of ["conversation.failed", "conversation.aborted"]) {
-      expect(evaluateResultEvidence({ ...complete(), outcome })).toMatchObject({
-        classification: "failed", passed: false, reasons: ["conversation_not_finished"],
+      expect(evaluateResultEvidence({ ...complete(), outcome, business: false, lifecycle: false })).toMatchObject({
+        classification: "unknown", passed: false, businessVerified: false, lifecycleVerified: false,
+        reasons: ["conversation_not_finished", "business_incorrect", "lifecycle_invalid"],
       });
     }
     expect(evaluateResultEvidence({ ...complete(), outcome: "setup_failed", networkSettled: null, ledgerDrained: false,
@@ -81,5 +82,14 @@ describe("evaluation result evidence", () => {
       classification: "failed", businessVerified: false, lifecycleVerified: null,
       reasons: ["business_incorrect", "lifecycle_unknown"],
     });
+  });
+
+  it("describes the last observed agent response without inferring a cause", () => {
+    expect(lastAgentResponse([])).toBeNull();
+    expect(lastAgentResponse([{ kind: "agent", responseStatus: 429, responseComplete: true },
+      { kind: "agent", responseStatus: 200, responseComplete: true },
+      { kind: "auxiliary", responseStatus: 500, responseComplete: true }])).toEqual({ status: 200, complete: true });
+    expect(lastAgentResponse([{ kind: "agent", responseStatus: null, responseComplete: false }])).toEqual({ status: null, complete: false });
+    expect(() => lastAgentResponse([{ kind: "agent", responseStatus: "429", responseComplete: true }])).toThrow();
   });
 });

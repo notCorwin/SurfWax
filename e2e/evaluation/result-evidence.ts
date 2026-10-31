@@ -32,6 +32,24 @@ export type ResultReason =
   | "lifecycle_invalid"
   | "lifecycle_unknown";
 
+/** Last agent request observed by the proxy, independent of the task result.
+ * An incomplete response can also be caused by downstream cancellation. */
+export function lastAgentResponse(value: unknown): { status: number | null; complete: boolean } | null {
+  if (!Array.isArray(value)) throw new Error("Invalid provider request evidence");
+  let last: { status: number | null; complete: boolean } | null = null;
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("Invalid provider request evidence");
+    const request = item as Record<string, unknown>;
+    if (request.kind !== "agent" && request.kind !== "auxiliary") throw new Error("Invalid provider request evidence");
+    if (request.responseStatus !== null && (typeof request.responseStatus !== "number" || !Number.isInteger(request.responseStatus)
+      || request.responseStatus < 100 || request.responseStatus > 599) || typeof request.responseComplete !== "boolean") {
+      throw new Error("Invalid provider response evidence");
+    }
+    if (request.kind === "agent") last = { status: request.responseStatus as number | null, complete: request.responseComplete };
+  }
+  return last;
+}
+
 /**
  * Classify the evidence, not the cause of the failure. In particular, an
  * incomplete setup or an unsettled network cannot be recorded as a business
@@ -61,6 +79,10 @@ export function evaluateResultEvidence(input: ResultEvidenceInput) {
   const incorrect = businessVerified === false || interactionApplicable && interactionVerified === false || lifecycleVerified === false;
   const missing = !finished || input.networkSettled !== true || !input.ledgerDrained || businessVerified === null
     || interactionApplicable && interactionVerified === null || lifecycleVerified === null;
-  const classification: "passed" | "failed" | "unknown" = terminalFailure || finished && incorrect ? "failed" : missing ? "unknown" : "passed";
+  // A failed or interrupted conversation can be caused by a provider or
+  // transport error, including before any tool was called. The ledger and
+  // lifecycle remain observable facts, but cannot establish task failure in
+  // a run that did not finish normally.
+  const classification: "passed" | "failed" | "unknown" = !finished ? "unknown" : incorrect ? "failed" : missing ? "unknown" : "passed";
   return { classification, passed: classification === "passed", businessVerified, interactionApplicable, interactionVerified, lifecycleVerified, reasons };
 }

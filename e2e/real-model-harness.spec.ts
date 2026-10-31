@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createServer } from "node:http";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -139,6 +140,14 @@ for (const scenario of [
     }
     for (const [name, code] of Object.entries(values)) await desk.getByLabel(name + ' code', {exact:true}).fill(code);
     await desk.getByRole('button', {name:'Submit codes'}).click(); return 'done';` },
+  { name: "frame-replacement", code: `
+    const progress = page.locator('#progress');
+    await progress.filter({hasText:'Completed 0 of 12'}).waitFor();
+    for (let index = 1; index <= 12; index++) {
+      await page.frameLocator('section[data-next="true"] iframe[title="Work item"]').getByRole('button', {name:'Confirm', exact:true}).click();
+      await progress.filter({hasText: index === 12 ? 'Queue complete' : 'Completed ' + index + ' of 12'}).waitFor();
+    }
+    return 'done';` },
   { name: "userscript-repair", code: `
     const script = await browser.scripts.read('record-stamp');
     if (script.enabled) throw new Error('Expected a disabled script');
@@ -188,6 +197,7 @@ for (const scenario of [
     expect(report).toMatchObject({ scenario: scenario.name, outcome: "conversation.finished", businessVerified: true,
       networkSettled: true, toolsWithExactlyOneTerminal: true });
     if (scenario.name === "rolling-queue") expect(report).toMatchObject({ interactionApplicable: true, interactionVerified: true, classification: "passed" });
+    if (scenario.name === "frame-replacement") expect(report).toMatchObject({ interactionApplicable: true, interactionVerified: true, classification: "passed" });
     if (scenario.name === "userscript-repair") {
       expect(report.completedProgramOperations["scripts.edit"]).toBeGreaterThan(0);
       expect(report.completedProgramOperations["scripts.setEnabled"]).toBeGreaterThan(0);
@@ -297,6 +307,33 @@ test("a task timeout retains incomplete tool evidence as unknown", async () => {
       reasons: expect.arrayContaining(["conversation_outcome_unknown", "lifecycle_unknown"]) });
   } finally {
     await closeServer(provider.server);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+for (const mode of ["unauthorized", "rate-limited", "disconnected"] as const) test(`provider ${mode} remains unknown rather than a tool capability failure`, async () => {
+  test.setTimeout(120_000);
+  const server = createServer((request, response) => {
+    request.resume();
+    request.once("end", () => {
+      if (mode === "disconnected") request.socket.destroy();
+      else response.writeHead(mode === "unauthorized" ? 401 : 429, { "content-type": "application/json" }).end('{"error":{"message":"local simulated failure"}}');
+    });
+  });
+  await new Promise<void>((resolveListen, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolveListen); });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Missing local mock address");
+  const directory = await mkdtemp(resolve(tmpdir(), "surfwax-eval-harness-"));
+  try {
+    const failure = await runHarness(`http://127.0.0.1:${address.port}/v1`, directory, "cross-frame-order", 6_000).then(() => null, (error: unknown) => error);
+    expect(failure).toMatchObject({ code: 1 });
+    const report = await readReport(directory);
+    expect(report).toMatchObject({ classification: "unknown", passed: false, toolCalls: 0 });
+    expect(["conversation.failed", "conversation.aborted", "timed_out"]).toContain(report.outcome);
+    expect(report.lastAgentResponse).toMatchObject({ status: mode === "unauthorized" ? 401 : mode === "rate-limited" ? 429 : null });
+    if (mode === "disconnected") expect(report.lastAgentResponse.complete).toBe(false);
+  } finally {
+    await closeServer(server);
     await rm(directory, { recursive: true, force: true });
   }
 });

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { evaluateResultEvidence } from "./result-evidence.ts";
+import { evaluateResultEvidence, lastAgentResponse } from "./result-evidence.ts";
 import { SCENARIOS } from "./scenarios.ts";
 
 export interface SuitePlan {
@@ -131,7 +131,11 @@ function validatedReport(value: unknown, sample: SuiteSample, plan: SuitePlan, p
   if (value.classification !== expected.classification || value.passed !== expected.passed || value.businessVerified !== expected.businessVerified
     || value.interactionVerified !== expected.interactionVerified || value.lifecycleVerified !== expected.lifecycleVerified
     || JSON.stringify(value.reasons) !== JSON.stringify(expected.reasons)) throw new Error("Inconsistent result evidence");
-  return { classification: expected.classification, outcome: value.outcome, usage: usageTotals(value.providerUsageByStep), environment: environmentEvidence(value) };
+  const providerResponse = lastAgentResponse(value.requests);
+  if (providerResponse === null ? value.lastAgentResponse !== null : !isRecord(value.lastAgentResponse)
+    || value.lastAgentResponse.status !== providerResponse.status || value.lastAgentResponse.complete !== providerResponse.complete
+    || Object.keys(value.lastAgentResponse).sort().join(",") !== "complete,status") throw new Error("Inconsistent provider response evidence");
+  return { classification: expected.classification, outcome: value.outcome, providerResponse, usage: usageTotals(value.providerUsageByStep), environment: environmentEvidence(value) };
 }
 
 /** Validate identities and retain every planned sample, including absent reports. */
@@ -190,7 +194,7 @@ export function aggregateSuiteReports(manifest: SuiteManifest, reports: readonly
         totals[metric] = sum;
       }
     }
-    return { ...sample, classification: result.classification, outcome: result.outcome, missing: false };
+    return { ...sample, classification: result.classification, outcome: result.outcome, lastAgentResponse: result.providerResponse, missing: false };
   });
   const comparable = unstableEnvironmentSamples > 0 || groups.size > 1 ? false
     : unknownEnvironmentSamples > 0 || canonical.samples.length < 2 ? null : true;

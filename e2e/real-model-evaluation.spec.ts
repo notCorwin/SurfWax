@@ -18,11 +18,12 @@ import { rollingFixture, rollingInteractionScore, rollingScore } from "./evaluat
 import { chooserPromptFixture, chooserPromptScore } from "./evaluation/chooser-prompt-fixture";
 import { networkFixture, networkScore } from "./evaluation/network-level-fixture";
 import { userscriptFixture, userscriptScore, type UserscriptFixture, type RegistryEvidence } from "./evaluation/userscript-level-fixture";
+import { frameReplacementFixture, frameReplacementScore, frameReplacementInteractionScore, type FrameReplacementFixture } from "./evaluation/frame-replacement-fixture";
 import { trackFixtureRequests } from "./evaluation/network-quiescence";
 import { trackServerResponses, type ServerActivity } from "./evaluation/server-quiescence";
 import { waitForEvaluationQuiescence } from "./evaluation/quiescence";
 import { completedProgramOperations, toolLifecycleEvidence } from "./evaluation/tool-lifecycle";
-import { evaluateResultEvidence } from "./evaluation/result-evidence";
+import { evaluateResultEvidence, lastAgentResponse } from "./evaluation/result-evidence";
 import { deadlineEvidence } from "./evaluation/deadline-evidence";
 import { SCENARIOS } from "./evaluation/scenarios";
 import { buildFingerprint, evaluationFingerprint, fileFingerprint, type BuildFingerprint } from "./evaluation/build-fingerprint";
@@ -61,11 +62,11 @@ test("@real-model browser task", async () => {
   const order = `ORDER-${seed}`;
   const started = Date.now();
   const proxy = await modelProxy(upstream, key);
-  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | Awaited<ReturnType<typeof uploadFixture>> | Awaited<ReturnType<typeof pointerFixture>> | Awaited<ReturnType<typeof recoveryFixture>> | Awaited<ReturnType<typeof multitabFixture>> | Awaited<ReturnType<typeof manifestFixture>> | Awaited<ReturnType<typeof rollingFixture>> | Awaited<ReturnType<typeof chooserPromptFixture>> | Awaited<ReturnType<typeof networkFixture>> | UserscriptFixture | undefined;
+  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | Awaited<ReturnType<typeof uploadFixture>> | Awaited<ReturnType<typeof pointerFixture>> | Awaited<ReturnType<typeof recoveryFixture>> | Awaited<ReturnType<typeof multitabFixture>> | Awaited<ReturnType<typeof manifestFixture>> | Awaited<ReturnType<typeof rollingFixture>> | Awaited<ReturnType<typeof chooserPromptFixture>> | Awaited<ReturnType<typeof networkFixture>> | UserscriptFixture | FrameReplacementFixture | undefined;
   let scriptLevel: UserscriptFixture | undefined, scriptRegistry: RegistryEvidence | null = null;
   let opened: Awaited<ReturnType<typeof openExtension>> | undefined;
   let events: any[] = [], outcome = "setup_failed", business: boolean | null = null, interaction: boolean | null = null;
-  const interactionApplicable = scenario === "sequence-editor" || scenario === "pointer-drag" || scenario === "rolling-queue";
+  const interactionApplicable = scenario === "sequence-editor" || scenario === "pointer-drag" || scenario === "rolling-queue" || scenario === "frame-replacement";
   let passed = false, ledgerDrained = false, logComplete = false;
   let networkSettled: boolean | null = null;
   let taskStartedAt: number | null = null, taskDeadlineAt: number | null = null, terminalTimestamp: string | null = null;
@@ -82,7 +83,11 @@ test("@real-model browser task", async () => {
     let prompt: string;
     let grade: () => boolean | null;
     let gradeInteraction: (() => boolean) | undefined;
-    if (scenario === "userscript-repair") {
+    if (scenario === "frame-replacement") {
+      const replacement = await frameReplacementFixture(seed); fixture = replacement; prompt = replacement.prompt;
+      grade = () => frameReplacementScore(replacement.evidence());
+      gradeInteraction = () => frameReplacementInteractionScore(replacement.evidence());
+    } else if (scenario === "userscript-repair") {
       scriptLevel = await userscriptFixture(seed); fixture = scriptLevel; prompt = scriptLevel.prompt;
       grade = () => scriptRegistry && scriptLevel ? userscriptScore(scriptLevel.evidence(), scriptRegistry, scriptLevel.preset) : null;
     } else if (scenario === "network-identity") {
@@ -222,11 +227,14 @@ test("@real-model browser task", async () => {
       counts[name] = (counts[name] ?? 0) + 1;
       return counts;
     }, {});
+    // Provider streams can still finish while the report is being written.
+    // Derive every field from the same immutable observation.
+    const requests = structuredClone(proxy.requests);
     const report = { scenario, seed, provider: providerName, model, suiteIdentity, gitHead: head, gitDirty: dirty, browser: browserProduct ?? browser?.product ?? null,
       extensionBuild, extensionBuildStable, evaluationSource, evaluationSourceStable, lockfileSha256,
       outcome, ...result, taskTimeoutMs, taskStartedAt, taskDeadlineAt, terminalTimestamp, deadlineState,
       networkSettled, ledgerDrained, logComplete, serverActivity, elapsedMs: Date.now() - started, providerUsageByStep: usageEvidence(events),
-      requests: proxy.requests, requestBytes: proxy.requests.reduce((sum, request) => sum + request.bytes, 0),
+      requests, lastAgentResponse: lastAgentResponse(requests), requestBytes: requests.reduce((sum, request) => sum + request.bytes, 0),
       toolCalls: starts.length, toolNames, completedProgramOperations: completedProgramOperations(events), toolTerminalResults: terminals.length,
       toolsWithExactlyOneTerminal: result.lifecycleVerified, toolLifecycle };
     const directory = resolve(process.env.SURFWAX_EVAL_REPORT_DIR ?? ".dev/verification/model-evals");
