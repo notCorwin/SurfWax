@@ -1,28 +1,26 @@
 "use client";
-import "katex/dist/katex.min.css";
-import { normalizeMathDelimiters } from "./math-delimiters";
-import { math } from "@streamdown/math";
-import { memo } from "react";
-import { Streamdown } from "streamdown";
-import { createCodeHighlighter } from "./code-highlighter";
+import { Component, lazy, memo, Suspense, type ReactNode } from "react";
 
-// Shiki emits token references; actual colors are owned by styles.css.
-const syntaxTheme = {
-  name: "surf-wax", type: "light" as const,
-  colors: { "editor.background": "var(--code-background)", "editor.foreground": "var(--foreground)" },
-  tokenColors: [
-    { scope: ["comment", "punctuation.definition.comment"], settings: { foreground: "var(--syntax-comment)" } },
-    { scope: ["keyword", "storage", "entity.name.tag"], settings: { foreground: "var(--syntax-keyword)" } },
-    { scope: ["string", "constant.other.symbol"], settings: { foreground: "var(--syntax-string)" } },
-    { scope: ["constant.numeric", "constant.language"], settings: { foreground: "var(--syntax-number)" } },
-    { scope: ["entity.name.function", "support.function"], settings: { foreground: "var(--syntax-function)" } },
-    { scope: ["entity.name.type", "support.type"], settings: { foreground: "var(--syntax-type)" } },
-  ],
-};
-const PLUGINS = { code: createCodeHighlighter([syntaxTheme, { ...syntaxTheme, name: "surf-wax-dark", type: "dark" }]), math };
+const Renderer = lazy(() => import("./markdown-text-renderer").then(({ MarkdownText }) => ({ default: MarkdownText })));
 
+function PlainText({ text }: { text: string }) {
+  return <div className="markdown-body whitespace-pre-wrap wrap-break-word">{text}</div>;
+}
+
+class MarkdownBoundary extends Component<{ text: string; children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  render() {
+    return this.state.failed
+      ? <><p role="alert">无法加载格式化内容，以下为原文。</p><PlainText text={this.props.text} /></>
+      : this.props.children;
+  }
+}
+
+/** Load the Markdown and math renderer only when there is text to display. */
 export const MarkdownText = memo(function MarkdownText({ text }: { text: string }) {
-  const normalized = normalizeMathDelimiters(text);
-  if (!normalized.trim()) return null;
-  return <Streamdown className="markdown-body" mode="static" plugins={PLUGINS} controls>{normalized}</Streamdown>;
+  if (!text.trim()) return null;
+  return <MarkdownBoundary text={text}>
+    <Suspense fallback={<PlainText text={text} />}><Renderer text={text} /></Suspense>
+  </MarkdownBoundary>;
 });

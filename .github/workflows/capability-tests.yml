@@ -57,7 +57,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx tsc --noEmit
-      - run: mkdir -p test-results && npm test -- src/evaluation --reporter=default --reporter=junit --outputFile.junit=test-results/evaluation.xml
+      - run: mkdir -p test-results && npm test -- src/evaluation src/components/chat/markdown-text.test.tsx src/components/chat/markdown-text.loading.test.tsx --reporter=default --reporter=junit --outputFile.junit=test-results/evaluation.xml
       - name: Save evaluation results on failure
         if: failure()
         uses: actions/upload-artifact@v7
@@ -68,13 +68,14 @@ jobs:
           retention-days: 7
 
   browser:
-    name: No-model levels (Chrome ${{ matrix.browser }})
+    name: No-model levels (Chrome ${{ matrix.browser }}, shard ${{ matrix.shard }})
     needs: build
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         browser: ['138', current]
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -101,22 +102,34 @@ jobs:
           e2e/evaluation/artifact-handoff-fixture.spec.ts
           e2e/evaluation/cancel-recovery-fixture.spec.ts
           e2e/evaluation/claims-fixture.spec.ts
+          e2e/evaluation/network-context-fixture.spec.ts
           e2e/evaluation/closed-event-fixture.spec.ts
           e2e/evaluation/semantic-delta-fixture.spec.ts
           e2e/artifact-handoff-tools.spec.ts
           e2e/cancel-recovery-tools.spec.ts
+          e2e/chooser-prompt-tools.spec.ts
+          e2e/dispatch-tools.spec.ts
+          e2e/manifest-tools.spec.ts
+          e2e/multitab-tools.spec.ts
+          e2e/network-context-tools.spec.ts
+          e2e/network-level-tools.spec.ts
+          e2e/recovery-tools.spec.ts
+          e2e/rolling-tools.spec.ts
+          e2e/upload-tools.spec.ts
+          e2e/upload-job-evidence.spec.ts
           e2e/claims-queue-tools.spec.ts
           e2e/closed-event-tools.spec.ts
           e2e/semantic-delta-tools.spec.ts
           e2e/semantic-alternative-path.spec.ts
           e2e/real-model-harness.spec.ts
-          --grep 'artifact-handoff|cancel-recovery|claims-fixture|closed-event-fixture|semantic-delta-fixture|claims-queue-tools|closed-event-tools|semantic-delta-tools|semantic-alternative-path|local scripted semantic-delta|local scripted userscript-repair|a completed order with an unfinished background job'
-          --project=current --workers=1 --retries=0 --reporter=list,html
+          e2e/rendering.spec.ts
+          --grep 'artifact-handoff|cancel-recovery|chooser-prompt-tools|dispatch-tools|manifest-tools|multitab-tools|network-context|network-level-tools|recovery-tools|rolling-tools|upload-tools|upload-job-evidence|claims-fixture|closed-event-fixture|semantic-delta-fixture|claims-queue-tools|closed-event-tools|semantic-delta-tools|semantic-alternative-path|local scripted semantic-delta|local scripted userscript-repair|local scripted binary-transfer|local scripted frame-replacement|local scripted window-transfer|a completed order with an unfinished background job|renders a complete Markdown response'
+          --project=current --shard=${{ matrix.shard }}/2 --workers=1 --retries=0 --reporter=list,html
       - name: Save browser reports on failure
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: browser-report-${{ matrix.browser }}
+          name: browser-report-${{ matrix.browser }}-${{ matrix.shard }}
           path: |
             playwright-report/
             test-results/

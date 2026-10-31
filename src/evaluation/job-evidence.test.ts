@@ -97,7 +97,7 @@ it("correlates foreground program results with canonical job states", () => {
   // Ordinary direct-tool return values do not imply a browser job.
   expect(browserJobsSettled([tool("read_artifact", output)])).toBe(true);
   expect(browserJobsSettled([tool("list_tabs", output)])).toBe(true);
-  expect(browserJobsSettled([tool("upload_file", { ok: true, result: "chooser upload" })])).toBe(true);
+  expect(browserJobsSettled([{ ...tool("upload_file", { ok: true, result: "chooser upload" }), input: { chooserId: "chooser", artifactId: 1 } }])).toBe(true);
   expect(browserJobsSettled([tool("execute_program", { ...output, envelopeWrapped: true, result: output }), job("succeeded")])).toBe(true);
   const encoded = { ...tool("execute_program", toLogValue(output, undefined, 5)), content: toLogValue({ toolName: "execute_program" }, undefined, 5), valueEncoding: 5 };
   expect(browserJobsSettled([encoded])).toBeNull();
@@ -130,6 +130,58 @@ it("does not pass a completed business result when its foreground job state is m
     { id: 1, type: "conversation.message", ...owner, content: { id: "m", role: "assistant", parts: [{ type: "tool-execute_program", toolCallId: "t" }] } },
     { id: 2, type: "tool.started", ...owner, toolCallId: "t", content: { toolName: "execute_program" } },
     { id: 3, type: "tool.finished", ...owner, toolCallId: "t", content: { toolName: "execute_program" }, output: { jobId: "j", ok: true, state: "succeeded", result: "done" } },
+  ];
+  const lifecycle = toolLifecycleEvidence(events).complete;
+  expect(lifecycle).toBe(true);
+  expect(evaluateResultEvidence({ outcome: "conversation.finished", networkSettled: true, ledgerDrained: true, logComplete: true,
+    business: true, interaction: { applicable: false }, lifecycle, jobsSettled: browserJobsSettled(events) }))
+    .toMatchObject({ classification: "unknown", passed: false, reasons: ["jobs_unknown"] });
+});
+
+it("distinguishes target upload jobs from direct chooser uploads by their canonical input", () => {
+  const owner = { conversationId: "c", runId: "r", toolCallId: "upload" };
+  const input = { target: { by: "css", value: "#file" }, artifactId: 7 };
+  const output = { ok: true, state: "succeeded", jobId: "j", result: { performed: true } };
+  const tool = { id: 3, type: "tool.finished", ...owner, content: { toolName: "upload_file" }, input, output };
+  const job = { id: 4, type: "browser.job.state", ...owner, content: { jobId: "j", state: "succeeded" } };
+  expect(browserJobsSettled([tool])).toBeNull();
+  expect(browserJobsSettled([tool, job])).toBe(true);
+  expect(browserJobsSettled([tool, { ...job, toolCallId: "different" }])).toBeNull();
+  const chooser = { ...tool, input: { chooserId: "chooser", artifactId: 7 }, output: { chooserId: "chooser", state: "completed" } };
+  expect(browserJobsSettled([chooser])).toBe(true);
+  for (const bad of [undefined, {}, { chooserId: "", artifactId: 7 }, { target: null, artifactId: 7 }, { target: [], artifactId: 7 }, { ...input, chooserId: "chooser" }]) {
+    expect(browserJobsSettled([{ ...tool, input: bad }])).toBeNull();
+  }
+  const encoded = { ...tool, valueEncoding: 5, content: toLogValue(tool.content, undefined, 5),
+    input: toLogValue(input, undefined, 5), output: toLogValue(output, undefined, 5) };
+  expect(browserJobsSettled([encoded])).toBeNull();
+  expect(browserJobsSettled([encoded, job])).toBe(true);
+  expect(browserJobsSettled([{ ...encoded, input: { $type: "array-buffer", base64: "invalid", byteLength: 1 } }])).toBeNull();
+  const compact = { ...tool, output: { $ref: 2, resultAccess: { artifactId: 2, path: ["result"] } } };
+  const artifact = { id: 2, type: "tool.result.data", ...owner, content: { bytes: 9000 }, output };
+  expect(browserJobsSettled([compact, artifact, job])).toBe(true);
+  expect(browserJobsSettled([compact, artifact])).toBeNull();
+  const graph = { ...artifact, output: null, artifactGraph: { version: 1, key: "parts", root: [1, 0] } };
+  expect(browserJobsSettled([compact, graph, job])).toBe(true);
+  expect(browserJobsSettled([compact, graph])).toBeNull();
+});
+
+it("keeps uncertain tool failures unknown even when no job state is recorded", () => {
+  const owner = { conversationId: "c", runId: "r", toolCallId: "t" };
+  const failure = (error: unknown) => ({ id: 3, type: "tool.failed", ...owner, content: { toolName: "upload_file" }, output: { ok: false, error }, error });
+  const known = { code: "invalid-input", message: "Invalid argument", retryable: false };
+  expect(browserJobsSettled([failure(known)])).toBe(true);
+  expect(browserJobsSettled([failure({ ...known, effectUnknown: false })])).toBe(true);
+  expect(browserJobsSettled([failure({ ...known, effectUnknown: true })])).toBeNull();
+  expect(browserJobsSettled([failure({ ...known, effectUnknown: "yes" })])).toBeNull();
+  expect(browserJobsSettled([failure(undefined)])).toBeNull();
+  expect(browserJobsSettled([{ ...failure(known), error: { ...known, effectUnknown: true } }])).toBeNull();
+  expect(browserJobsSettled([{ ...failure(known), content: { toolName: "upload_file", effectUnknown: true } }])).toBeNull();
+  expect(browserJobsSettled([{ ...failure(known), valueEncoding: 5, output: toLogValue({ ok: false, error: { ...known, effectUnknown: true } }, undefined, 5), error: toLogValue(known, undefined, 5) }])).toBeNull();
+  const events = [
+    { id: 1, type: "conversation.message", conversationId: "c", runId: "r", content: { id: "m", role: "assistant", parts: [{ type: "tool-upload_file", toolCallId: "t" }] } },
+    { id: 2, type: "tool.started", ...owner },
+    failure({ ...known, effectUnknown: true }),
   ];
   const lifecycle = toolLifecycleEvidence(events).complete;
   expect(lifecycle).toBe(true);

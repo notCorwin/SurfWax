@@ -14,14 +14,26 @@ for (const seed of [17, 72]) test(`collects the complete audit log before the so
     await page.getByRole("button", { name: "Open source" }).click();
     const source = await popupWaiting;
     const messages: string[] = [];
-    source.on("console", (message) => messages.push(message.text()));
+    let unrelatedMessages = 0;
+    source.on("console", (message) => {
+      const text = message.text();
+      if (text.startsWith("AUDIT ") || text.startsWith("HEARTBEAT ")) messages.push(text);
+      if (text === "Unrelated browser diagnostic") unrelatedMessages++;
+    });
+    await source.evaluate(() => console.log("Unrelated browser diagnostic"));
+    await expect.poll(() => unrelatedMessages).toBe(1);
     await source.getByRole("button", { name: "Generate audit log" }).click();
     await expect(source.locator("#status")).toHaveText("Ready to close");
-    await expect.poll(() => messages.length).toBe(189);
+    // A browser may emit unrelated console messages. Check the complete ordered
+    // fixture stream, including each heartbeat, so duplicates cannot be hidden.
+    const expected = fixture.evidence().expectedCodes.flatMap((code, index) => [
+      `AUDIT ${code}`, ...(index % 20 === 19 ? [`HEARTBEAT ${index}`] : []),
+    ]);
+    await source.evaluate(() => undefined);
+    await expect.poll(() => messages).toEqual(expected);
     const codes = messages.filter((message) => message.startsWith("AUDIT ")).map((message) => message.slice(6));
     expect(codes).toEqual(fixture.evidence().expectedCodes);
     expect(new Set(codes).size).toBe(180);
-    expect(messages.filter((message) => message.startsWith("HEARTBEAT "))).toHaveLength(9);
     const closed = source.waitForEvent("close");
     await source.getByRole("button", { name: "Close source" }).click();
     await closed;

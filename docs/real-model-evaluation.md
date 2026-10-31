@@ -12,14 +12,16 @@
 
 独立的无模型 `cancel-recovery` 测试让服务端先提交写入，再挂起响应；固定工具通路在服务端确认写入后取消仍在等待的后台任务，并在响应释放前通过页面核验状态，禁止重复提交。释放响应后再次检查账本；测试分别核验任务取消、工具终态和业务结果。已取消的任务仍属效果未知，不能只凭业务账本将其判为正常完成；直接请求可以伪造账本。
 
+独立的无模型 `network-context` 测试将两份动态代码汇合：私有接口需要页面的 HttpOnly 会话，另一来源不提供 CORS 授权；固定程序分别使用页面与扩展网络上下文读取，再通过页面提交。服务端记录未认证读取和重复提交；账本不证明具体执行上下文，工具通路与 CORS 负例分别验证该能力和限制。
+
 已有扩展构建时，可通过以下命令在本机运行这些实际扩展通路，包含用户脚本有效与空脚本绕过两种结果。测试使用本地模拟服务提供固定工具调用，无需真实 LLM 或 API 密钥：
 
 ```sh
 npx playwright test e2e/real-model-harness.spec.ts -g 'local scripted binary-transfer|local scripted userscript-repair|a no-op registered script' --retries=0
-npx playwright test e2e/claims-queue-tools.spec.ts e2e/closed-event-tools.spec.ts e2e/semantic-delta-tools.spec.ts e2e/artifact-handoff-tools.spec.ts e2e/cancel-recovery-tools.spec.ts --retries=0
+npx playwright test e2e/claims-queue-tools.spec.ts e2e/closed-event-tools.spec.ts e2e/semantic-delta-tools.spec.ts e2e/artifact-handoff-tools.spec.ts e2e/cancel-recovery-tools.spec.ts e2e/network-context-tools.spec.ts --retries=0
 ```
 
-GitHub Actions 的工具能力工作流构建一次扩展，分别验证构建预算、评测证据，以及 Chrome 138 和当前版本中的一组无模型关卡。浏览器测试独立于预算门禁运行，以保留关卡结果；预算不合格仍会令工作流失败。已知困难探针保持显式运行，不会被计作常规关卡通过。
+GitHub Actions 的工具能力工作流构建一次扩展，分别验证构建预算、评测证据，以及 Chrome 138 和当前版本中的多组无模型关卡，并按分片并行运行。浏览器测试独立于预算门禁运行，以保留关卡结果；预算不合格仍会令工作流失败。已知困难探针保持显式运行，不会被计作常规关卡通过。
 
 在本机复现中，第二个窗口的 `tabs.onCreated.openerTabId` 指向当时激活的第一个弹窗，而 CDP `Target.targetCreated` 的 opener 仍指向实际发起页面；仅以前者匹配原标签会漏掉事件。该观察需要在修复时结合并发窗口、跨域和生命周期竞态验证，不能用第一个新标签作为通用关联依据。
 

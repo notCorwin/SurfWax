@@ -2,11 +2,10 @@ import { fromLogValue } from "../../src/logging";
 import { ATOMIC_TOOL_REGISTRY } from "../../src/chrome/atomic-tools";
 
 // These registered atomic tools have direct implementations in createProgramTools.
-// Chooser uploads also use a different return envelope, so only their explicit
-// accepted handoffs can be correlated from the tool result.
+// Chooser uploads use a different return envelope; target uploads are jobs.
 const directTools = new Set(["list_tabs", "switch_tab", "read_artifact", "upload_file"]);
 const programTools = new Set(["execute_program", ...ATOMIC_TOOL_REGISTRY.map(({ name }) => name).filter((name) => !directTools.has(name))]);
-type Event = { id?: unknown; type?: unknown; conversationId?: unknown; runId?: unknown; toolCallId?: unknown; content?: unknown; output?: unknown; valueEncoding?: unknown; artifactGraph?: unknown };
+type Event = { id?: unknown; type?: unknown; conversationId?: unknown; runId?: unknown; toolCallId?: unknown; content?: unknown; input?: unknown; output?: unknown; error?: unknown; valueEncoding?: unknown; artifactGraph?: unknown };
 
 function decode(value: unknown, encoding: unknown): unknown {
   if (encoding !== undefined && ![2, 3, 4, 5].includes(encoding as number)) throw new Error("Unknown log encoding");
@@ -55,6 +54,32 @@ export function browserJobsSettled(events: readonly Event[]): boolean | null {
   const ids = new Set<number>();
   const known = new Set(["queued", "running", "blocked", "succeeded", "failed", "cancelled", "interrupted"]);
   for (const event of events) {
+    if (event.type === "tool.failed") {
+      // A failure can report an unknown effect even if its job events are
+      // absent, or when the action (such as a chooser upload) has no job.
+      let output: unknown, recordedError: unknown, content: unknown;
+      try {
+        output = decode(event.output, event.valueEncoding);
+        recordedError = event.error === undefined ? undefined : decode(event.error, event.valueEncoding);
+        content = decode(event.content, event.valueEncoding);
+      } catch { return null; }
+      if (content && typeof content === "object" && !Array.isArray(content)) {
+        const effectUnknown = (content as Record<string, unknown>).effectUnknown;
+        if (effectUnknown !== undefined && effectUnknown !== false) return null;
+      }
+      if (!output || typeof output !== "object" || Array.isArray(output)) return null;
+      const record = output as Record<string, unknown>;
+      if (record.ok !== false) return null;
+      const errors = [record.error, recordedError].filter((value) => value !== undefined);
+      if (!errors.length) return null;
+      for (const error of errors) {
+        if (!error || typeof error !== "object" || Array.isArray(error)) return null;
+        const detail = error as Record<string, unknown>;
+        if (typeof detail.code !== "string" || !detail.code || typeof detail.message !== "string"
+          || detail.effectUnknown !== undefined && detail.effectUnknown !== false) return null;
+      }
+      continue;
+    }
     if (event.type === "tool.finished") {
       if (!Object.hasOwn(event, "output") || event.valueEncoding !== undefined && ![2, 3, 4, 5].includes(event.valueEncoding as number)) return null;
       let output: unknown;
@@ -67,8 +92,19 @@ export function browserJobsSettled(events: readonly Event[]): boolean | null {
       // Without the canonical tool identity an ordinary object cannot be
       // distinguished from a foreground program envelope.
       if (typeof toolName !== "string" || !toolName) return null;
+      let program = programTools.has(toolName);
+      if (toolName === "upload_file") {
+        let input: unknown;
+        try { input = decode(event.input, event.valueEncoding); } catch { return null; }
+        if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+        const { target, chooserId } = input as Record<string, unknown>;
+        const hasTarget = !!target && typeof target === "object" && !Array.isArray(target);
+        const hasChooser = typeof chooserId === "string" && !!chooserId;
+        if (hasTarget && chooserId === undefined) program = true;
+        else if (!(hasChooser && target === undefined)) return null;
+      }
       if (!output || typeof output !== "object" || Array.isArray(output)) {
-        if (typeof toolName === "string" && programTools.has(toolName)) return null;
+        if (program) return null;
         continue;
       }
       const outer = output as Record<string, unknown>;
@@ -90,7 +126,7 @@ export function browserJobsSettled(events: readonly Event[]): boolean | null {
       // A successful foreground program is also a durable job. Its terminal
       // envelope contains jobId even without an accepted background handoff.
       // Look only at the outer tool envelope, never at arbitrary user results.
-      if (typeof toolName === "string" && programTools.has(toolName)) {
+      if (program) {
         let id = outer.jobId;
         if (id === undefined && outer.envelopeWrapped === true && records.length > 1) id = records[1]!.jobId;
         if (id === undefined && outer.$ref !== undefined) id = artifactJobId(outer.$ref, event);
@@ -111,7 +147,7 @@ export function browserJobsSettled(events: readonly Event[]): boolean | null {
         if (typeof event.conversationId !== "string" || !event.conversationId || typeof event.runId !== "string" || !event.runId) return null;
         const key = JSON.stringify([event.conversationId, event.runId, [...jobIds][0]]);
         handoffs.add(key);
-        if (typeof toolName === "string" && programTools.has(toolName)) {
+        if (program) {
           if (typeof event.toolCallId !== "string" || !event.toolCallId) return null;
           const previous = programOwners.get(key);
           if (previous && previous.toolCallId !== event.toolCallId) return null;
