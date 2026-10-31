@@ -995,6 +995,72 @@ describe("cross-call browser events", () => {
     h.executor.dispose();
   });
 
+  it.each(["same-process", "cross-process"])("retains a chooser when an unrelated %s sibling navigates", async (kind) => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "filechooser" }, undefined, owner);
+    const artifact = await h.logger.append({ type: "tool.result.data", conversationId: "conversation", output: { filename: "file", mimeType: "text/plain", base64: "YQ==" } });
+    const runtime = (h.executor as any).automation;
+    const session = { frameParents: new Map(), frames: new Map() };
+    runtime.sessions.set(41, session);
+    const root = { tabId: 41 }, sibling = kind === "same-process" ? root : { tabId: 41, sessionId: "sibling" };
+    const chooserSource = kind === "same-process" ? root : { tabId: 41, sessionId: "chooser" };
+    for (const [frame, parent, debuggee] of [["root", undefined, root], ["sibling", "root", sibling], ["chooser", "root", chooserSource]] as const) {
+      session.frameParents.set(frame, parent); session.frames.set(frame, debuggee);
+    }
+    const opened = { backendNodeId: 77, frameId: "chooser", mode: "selectSingle" };
+    runtime.handleEvent(chooserSource, "Page.fileChooserOpened", opened);
+    await (h.executor as any).handleCommandEvent(chooserSource, "Page.fileChooserOpened", opened);
+    const event: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner);
+    const chooserId = event.events[0].payload.chooserId;
+    const navigation = { frame: { id: "sibling", parentId: "root" } };
+    await (h.executor as any).handleCommandEvent(sibling, "Page.frameNavigated", navigation);
+    h.fake.debuggerApi.sendCommand.mockImplementation(async (_source: any, method: string) => method === "DOM.resolveNode"
+      ? { object: { objectId: "input-object" } } : { result: { value: null } });
+    await expect(h.executor.uploadChooser({ chooserId, artifactId: artifact!.id }, undefined, owner)).resolves.toMatchObject({ state: "completed" });
+    runtime.sessions.delete(41);
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("invalidates a nested chooser when its ancestor frame navigates", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    const subscription: any = await h.executor.subscribeEvent({ kind: "filechooser" }, undefined, owner);
+    const artifact = await h.logger.append({ type: "tool.result.data", conversationId: "conversation", output: { filename: "file", mimeType: "text/plain", base64: "YQ==" } });
+    const runtime = (h.executor as any).automation, session = { frameParents: new Map(), frames: new Map() };
+    runtime.sessions.set(41, session);
+    const root = { tabId: 41 }, parent = { tabId: 41, sessionId: "parent" }, child = { tabId: 41, sessionId: "child" };
+    for (const [frame, ancestor, debuggee] of [["root", undefined, root], ["parent", "root", parent], ["child", "parent", child]] as const) {
+      session.frameParents.set(frame, ancestor); session.frames.set(frame, debuggee);
+    }
+    const opened = { backendNodeId: 77, frameId: "child", mode: "selectSingle" };
+    runtime.handleEvent(child, "Page.fileChooserOpened", opened);
+    await (h.executor as any).handleCommandEvent(child, "Page.fileChooserOpened", opened);
+    const event: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, owner);
+    const navigation = { frame: { id: "parent", parentId: "root" } };
+    await (h.executor as any).handleCommandEvent(parent, "Page.frameNavigated", navigation);
+    await expect(h.executor.uploadChooser({ chooserId: event.events[0].payload.chooserId, artifactId: artifact!.id }, undefined, owner)).rejects.toThrow("unavailable");
+    runtime.sessions.delete(41);
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("uses target ancestry conservatively when OOPIF frame parents are unavailable", async () => {
+    const h = programHarness(async () => undefined);
+    const runtime = (h.executor as any).automation;
+    const session = { frameParents: new Map(), frames: new Map(), targetParents: new Map() };
+    runtime.sessions.set(41, session);
+    const root = { tabId: 41 }, a = { tabId: 41, sessionId: "a" }, b = { tabId: 41, sessionId: "b" }, c = { tabId: 41, sessionId: "c" };
+    session.frames.set("a-frame", a); session.frames.set("b-frame", b); session.frames.set("c-frame", c);
+    session.targetParents.set("a", undefined); session.targetParents.set("b", "a"); session.targetParents.set("c", undefined);
+    const chooser = { frameId: "nested-frame", source: b };
+    expect(runtime.chooserAffected(root, "Target.detachedFromTarget", { sessionId: "a" }, chooser)).toBe(true);
+    expect(runtime.chooserAffected(root, "Target.detachedFromTarget", { sessionId: "c" }, chooser)).toBe(false);
+    expect(runtime.chooserAffected(root, "Target.detachedFromTarget", { sessionId: "a" }, { frameId: "same-process-child", source: a })).toBe(true);
+    session.targetParents.delete("b");
+    expect(runtime.chooserAffected(root, "Target.detachedFromTarget", { sessionId: "c" }, chooser)).toBe(true);
+    runtime.sessions.delete(41); h.executor.dispose();
+  });
+
   it("never substitutes a later chooser when the same input opens twice", async () => {
     const h = programHarness(async () => undefined);
     await h.executor.beginRun();

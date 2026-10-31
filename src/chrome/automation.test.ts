@@ -103,6 +103,69 @@ function harness(
 }
 
 describe("AutomationRuntime", () => {
+  it("keeps same-process frame prefixes inside an OOPIF and finds later target boundaries", async () => {
+    const { runtime, command } = harness();
+    await runtime.createPage(3);
+    const session = (runtime as any).sessions.get(3);
+    const outer = { tabId: 3, sessionId: "outer-session" };
+    const nested = { tabId: 3, sessionId: "nested-session" };
+    session.frames.set("outer-frame", outer);
+    session.frames.set("same-frame", outer);
+    session.frames.set("nested-frame", nested);
+    const resolved: string[][] = [];
+    vi.spyOn(runtime as any, "resolveDirect").mockImplementation(async (_debuggee, spec) => {
+      const values = (spec as { queries: Array<{ value: string }> }).queries.map((query) => query.value);
+      resolved.push(values);
+      return values.at(-1);
+    });
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => method === "DOM.describeNode"
+      ? { node: { frameId: ({ "#outer": "outer-frame", "#same": "same-frame", "#nested": "nested-frame" } as Record<string, string>)[params.objectId] } }
+      : original(source, method, params));
+    const query = (value: string) => ({ kind: "frame", value });
+    try {
+      const same = await (runtime as any).locatorScope(session, { queries: [query("#outer"), query("#same"), { kind: "css", value: "#target" }] });
+      expect(same.debuggee).toEqual(outer);
+      expect(same.spec.queries.map((item: any) => item.value)).toEqual(["#same", "#target"]);
+      const crossing = await (runtime as any).locatorScope(session, { queries: [query("#outer"), query("#same"), query("#nested"), { kind: "css", value: "#target" }] });
+      expect(crossing.debuggee).toEqual(nested);
+      expect(crossing.spec.queries.map((item: any) => item.value)).toEqual(["#target"]);
+      expect(resolved).toContainEqual(["#same", "#nested"]);
+    } finally { await runtime.abortSessions(); }
+  });
+
+  it("uses the flattened tree consistently when reading inherited disabled state", async () => {
+    const host = document.createElement("div");
+    const button = document.createElement("button");
+    button.textContent = "Sign in";
+    host.append(button);
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.innerHTML = '<div aria-disabled="true"><slot></slot></div>';
+    document.body.append(host);
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.callFunctionOn" && (params.functionDeclaration.startsWith("function(condition)")
+        || params.functionDeclaration.startsWith("function(scroll, pointer)"))) {
+        const call = new Function(`return (${params.functionDeclaration})`)();
+        return { result: { value: call.apply(button, params.arguments.map((argument: any) => argument.value)) } };
+      }
+      return original(source, method, params);
+    });
+    try {
+      const locator = page.getByRole("button", { name: "Sign in" });
+      await expect(locator.readCondition("enabled")).resolves.toEqual({ present: true, actual: false });
+      await expect(locator.isEnabled()).resolves.toBe(false);
+      button.setAttribute("aria-disabled", "FALSE");
+      await expect(locator.readCondition("enabled")).resolves.toEqual({ present: true, actual: true });
+      await expect(locator.isEnabled()).resolves.toBe(true);
+      button.disabled = true;
+      await expect(locator.readCondition("enabled")).resolves.toEqual({ present: true, actual: false });
+      await expect(locator.isEnabled()).resolves.toBe(false);
+    } finally { host.remove(); await runtime.abortSessions(); }
+  });
+
   it("records an uncertain effect when the dispatched focus command fails", async () => {
     const records: any[] = [];
     const logger = { append: async (event: any) => { records.push(event); return { id: records.length, ...event }; } } as unknown as EventLogger;

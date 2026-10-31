@@ -39,6 +39,7 @@ type Chooser = {
   id: string;
   owner: EventOwner;
   source: EventSource;
+  frameId?: string;
   backendNodeId: number;
   mode: string;
   state: "active" | "handling" | "uncertain" | "handled";
@@ -235,13 +236,13 @@ export class EventSubscriptions {
   }
 
   /** A later chooser in the same tab supersedes the previous native chooser. */
-  registerChooser(input: { owner: EventOwner; source: EventSource; backendNodeId: number; mode: string }): ChooserView {
+  registerChooser(input: { owner: EventOwner; source: EventSource; frameId?: string; backendNodeId: number; mode: string }): ChooserView {
     const owner = ownerCopy(input.owner);
     integer(input.source.tabId, "tab ID", 0);
     integer(input.backendNodeId, "backend node ID", 1);
     if (!["selectSingle", "selectMultiple"].includes(input.mode)) throw new Error("File chooser mode is unavailable");
     this.closeChoosers(owner, input.source.tabId);
-    const chooser: Chooser = { id: this.id(), owner, source: { ...input.source }, backendNodeId: input.backendNodeId,
+    const chooser: Chooser = { id: this.id(), owner, source: { ...input.source }, ...(input.frameId ? { frameId: input.frameId } : {}), backendNodeId: input.backendNodeId,
       mode: input.mode, state: "active", claimVersion: 0 };
     this.choosers.set(chooser.id, chooser);
     const { owner: _owner, claimVersion: _version, ...visible } = chooser;
@@ -274,5 +275,11 @@ export class EventSubscriptions {
   closeChoosers(owner: EventOwner, tabId: number, sessionId?: string): void {
     for (const chooser of this.choosers.values()) if (sameOwner(owner, chooser.owner) && chooser.source.tabId === tabId
       && (sessionId === undefined || chooser.source.sessionId === sessionId)) this.choosers.delete(chooser.id);
+  }
+
+  closeChoosersMatching(owner: EventOwner, tabId: number, affected: (chooser: ChooserView) => boolean): void {
+    for (const chooser of this.choosers.values()) {
+      if (sameOwner(owner, chooser.owner) && chooser.source.tabId === tabId && affected(chooser)) this.choosers.delete(chooser.id);
+    }
   }
 }

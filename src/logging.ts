@@ -1321,6 +1321,11 @@ export class EventLogger {
 
   async result(id: number, selection: { path?: string | Array<string | number>; offset?: number; limit?: number } = {}, conversationId?: string): Promise<unknown> {
     if (!Number.isSafeInteger(id) || id < 1) throw new Error("Invalid result event ID");
+    for (const field of ["offset", "limit"] as const) {
+      const value = selection[field];
+      if (value !== undefined && (!Number.isSafeInteger(value) || value < 0))
+        throw Object.assign(new Error(`Artifact ${field} must be a non-negative safe integer`), { code: "invalid-result-range" });
+    }
     const loaded = await this.readCanonical(async (store, floor) => {
       const event = await this.loadArtifact(store, floor, id);
       if (!event || conversationId !== undefined && event.conversationId !== conversationId) throw new Error(`Tool result ${id} is unavailable`);

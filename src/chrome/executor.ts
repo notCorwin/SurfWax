@@ -330,6 +330,10 @@ export class ChromeExecutor {
         const captured = { ...params };
         void this.handleCommandEvent(source, method, captured);
         this.automation.handleEvent(source, method, captured);
+      } else if (["Page.frameNavigated", "Page.frameDetached", "DOM.documentUpdated", "Runtime.executionContextsCleared", "Target.detachedFromTarget"].includes(method)) {
+        // Resolve affected chooser documents before automation mutates the frame graph.
+        void this.handleCommandEvent(source, method, params);
+        this.automation.handleEvent(source, method, params);
       } else {
         this.automation.handleEvent(source, method, params);
         void this.handleCommandEvent(source, method, params);
@@ -1316,8 +1320,9 @@ export class ChromeExecutor {
     const owner = this.eventOwner;
     const eventSource = { tabId: tabId!, ...(source.sessionId ? { sessionId: source.sessionId } : {}) };
     const sourceKey = dialogSourceKey(eventSource);
+    if (owner && ["Page.frameNavigated", "Page.frameDetached", "DOM.documentUpdated", "Runtime.executionContextsCleared", "Target.detachedFromTarget"].includes(method))
+      this.eventSubscriptions.closeChoosersMatching(owner, tabId!, (chooser) => this.automation.chooserAffected(source, method, params, chooser));
     if (method === "Target.detachedFromTarget" && typeof params?.sessionId === "string") this.closeEventSource(tabId!, params.sessionId);
-    if (owner && ["Page.frameNavigated", "Page.frameDetached", "DOM.documentUpdated", "Runtime.executionContextsCleared"].includes(method)) this.eventSubscriptions.closeChoosers(owner, tabId!);
     if (method === "Page.javascriptDialogOpening" && owner) {
       const dialog = this.eventSubscriptions.registerDialog({ owner, source: eventSource, type: params.type, message: params.message, defaultPrompt: params.defaultPrompt });
       params.surfWaxDialogId = dialog.id;
@@ -1335,7 +1340,7 @@ export class ChromeExecutor {
     if (method === "Page.fileChooserOpened" && owner) {
       this.eventSubscriptions.closeChoosers(owner, tabId!);
       if (Number.isSafeInteger(params?.backendNodeId) && params.backendNodeId > 0 && ["selectSingle", "selectMultiple"].includes(params.mode)) {
-        const chooser = this.eventSubscriptions.registerChooser({ owner, source: eventSource, backendNodeId: params.backendNodeId, mode: params.mode });
+        const chooser = this.eventSubscriptions.registerChooser({ owner, source: eventSource, ...(typeof params.frameId === "string" ? { frameId: params.frameId } : {}), backendNodeId: params.backendNodeId, mode: params.mode });
         const record = this.automation.currentChooser(eventSource, params.backendNodeId);
         if (record) this.chooserHandles.set(record, chooser.id);
         this.eventSubscriptions.publish(owner, { kind: "filechooser", source: eventSource, payload: { chooserId: chooser.id, mode: chooser.mode } });

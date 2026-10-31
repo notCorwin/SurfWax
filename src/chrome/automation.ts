@@ -12,7 +12,7 @@ type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
 type Command = (debuggee: Debuggee, method: string, params?: object) => Promise<any>;
 type RunContext = { signal?: AbortSignal; conversationId?: string; toolCallId?: string; logIdentity?: { runId?: string; toolCallId: string; toolCallIdCanonical: true } };
 type Waiter = { resolve: (value: any) => void; reject: (error: Error) => void };
-type FileChooserRecord = { backendNodeId: number; debuggee: Debuggee; mode: string };
+type FileChooserRecord = { backendNodeId: number; debuggee: Debuggee; mode: string; frameId?: string };
 type FileChooserClaim = { assert: () => void; finish: (outcome: "handled" | "not-dispatched" | "uncertain") => void };
 function eventWithDispatch<T extends object>(event: T, invoke: (operation: string, args: unknown[], dispatch: () => Promise<void>) => unknown): T {
   Object.defineProperty(event, PROGRAM_EVENT_INVOKE, { value: invoke });
@@ -72,6 +72,7 @@ type Session = {
   frames: Map<string, Debuggee>;
   frameReady: Map<string, Promise<void>>;
   frameParents: Map<string, string | undefined>;
+  targetParents: Map<string, string | undefined>;
   frameRevision: number;
   frameRefs: Map<string, FrameRefRecord>;
   frameRefsById: Map<string, string>;
@@ -178,6 +179,22 @@ const INTERACTIVE_ROLES = new Set([
   "button", "checkbox", "combobox", "gridcell", "link", "listbox", "menuitem", "menuitemcheckbox",
   "menuitemradio", "option", "radio", "searchbox", "slider", "spinbutton", "switch", "tab", "textbox", "treeitem",
 ]);
+
+// ARIA state follows the flattened tree, including slots and shadow hosts.
+// The nearest valid ARIA value wins, while native disabled state cannot be
+// overridden by aria-disabled="false".
+const DISABLED_STATE_SOURCE = `function() {
+  if (this.disabled || this.matches(':disabled')) return true;
+  let element = this;
+  while (element) {
+    const value = element.getAttribute('aria-disabled')?.toLowerCase();
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    const root = element.getRootNode();
+    element = element.assignedSlot || element.parentElement || root.host || null;
+  }
+  return false;
+}`;
 
 // Shared by reads and mutations so ARIA controls and native inputs use the
 // same checked-state semantics. Mixed or missing state is never treated as false.
@@ -372,17 +389,76 @@ export class AutomationRuntime {
     return new PageFacade(this, resolved!);
   }
 
+  private recordFrameTree(session: Session, source: Debuggee, tree: any, parent?: string): void {
+    const frameId = tree?.frame?.id;
+    if (typeof frameId !== "string") return;
+    if (!session.frames.get(frameId)?.sessionId || session.frames.get(frameId)?.sessionId === source.sessionId)
+      session.frames.set(frameId, source);
+    const parentId = tree.frame.parentId ?? parent ?? session.frameParents.get(frameId);
+    if (parentId !== undefined || !source.sessionId) session.frameParents.set(frameId, parentId);
+    if (parentId === undefined && !source.sessionId) session.rootFrameId = frameId;
+    for (const child of tree.childFrames ?? []) this.recordFrameTree(session, source, child, frameId);
+  }
+
+  /** Test document invalidation before the frame graph is updated. Unknown
+   * ancestry is treated as affected so a stale chooser is never reused. */
+  chooserAffected(source: Debuggee, method: string, params: any, chooser: { frameId?: string; source: Debuggee }): boolean {
+    const session = Number.isInteger(source.tabId) ? this.sessions.get(source.tabId!) : undefined;
+    let changed: string | undefined;
+    if (method === "Page.frameNavigated") changed = params?.frame?.id;
+    else if (method === "Page.frameDetached") changed = params?.frameId;
+    else if (method === "Target.detachedFromTarget" && params?.sessionId) {
+      const id = params.sessionId;
+      changed = [...(session?.frames ?? [])].find(([frame, debuggee]) => debuggee.sessionId === id
+        && session?.frames.get(session.frameParents.get(frame) ?? "")?.sessionId !== id)?.[0];
+      if (!changed) return chooser.source.sessionId === id;
+    } else if (method === "DOM.documentUpdated" || method === "Runtime.executionContextsCleared") {
+      if (!source.sessionId) return true;
+      const id = source.sessionId;
+      changed = [...(session?.frames ?? [])].find(([frame, debuggee]) => debuggee.sessionId === id
+        && session?.frames.get(session.frameParents.get(frame) ?? "")?.sessionId !== id)?.[0];
+      if (!changed) return chooser.source.sessionId === id;
+    } else return false;
+    if (typeof changed !== "string" || !chooser.frameId || !session) return true;
+    const unknownFrameAncestry = () => {
+      const ancestorSession = method === "Target.detachedFromTarget" ? params?.sessionId : source.sessionId;
+      let current = chooser.source.sessionId;
+      if (!ancestorSession || !current) return true;
+      const visited = new Set<string>();
+      while (current) {
+        if (current === ancestorSession) return true;
+        if (visited.has(current) || !session.targetParents.has(current)) return true;
+        visited.add(current); current = session.targetParents.get(current);
+      }
+      return false;
+    };
+    let current: string | undefined = chooser.frameId;
+    const seen = new Set<string>();
+    while (current) {
+      if (current === changed) return true;
+      if (seen.has(current) || !session.frameParents.has(current)) return unknownFrameAncestry();
+      seen.add(current);
+      current = session.frameParents.get(current);
+    }
+    return false;
+  }
+
   handleEvent(source: Debuggee, method: string, params: any): void {
     const tabId = source.tabId;
     if (!Number.isInteger(tabId)) return;
     const session = this.sessions.get(tabId!);
+    const chooser = this.fileChoosers.get(tabId!);
+    const preserveChooser = !chooser || !this.chooserAffected(source, method, params, { frameId: chooser.frameId, source: chooser.debuggee });
     if (method === "Target.attachedToTarget" && params?.targetInfo?.type === "iframe" && session) {
       const debuggee = { tabId, sessionId: params.sessionId } as Debuggee;
       session.frames.set(params.targetInfo.targetId, debuggee);
+      session.targetParents.set(params.sessionId, source.sessionId);
       this.invalidateFrames(session);
       const ready = (async () => {
         for (const domain of ["Page", "Runtime", "DOM", "Accessibility"]) await this.options.command(debuggee, `${domain}.enable`, {});
         await this.options.command(debuggee, "Page.setLifecycleEventsEnabled", { enabled: true });
+        const tree = await this.options.command(debuggee, "Page.getFrameTree", {});
+        this.recordFrameTree(session, debuggee, tree?.frameTree);
         // Each out-of-process iframe is its own target. Recursively attach its
         // iframe targets so deeper cross-process descendants can be discovered.
         await this.options.command(debuggee, "Target.setAutoAttach", { autoAttach: true, flatten: true, waitForDebuggerOnStart: false, filter: [{ type: "iframe", exclude: false }] });
@@ -400,7 +476,7 @@ export class AutomationRuntime {
       const parentId = params.frame.parentId ?? session.frameParents.get(params.frame.id);
       session.frameParents.set(params.frame.id, parentId);
       if (!parentId && !source.sessionId) session.rootFrameId = params.frame.id;
-      this.invalidate(session);
+      this.invalidate(session, preserveChooser);
     }
     if (method === "Page.navigatedWithinDocument" && session) {
       // History/hash navigation invalidates snapshots, but retains the same
@@ -408,23 +484,24 @@ export class AutomationRuntime {
       this.invalidate(session, true);
     }
     if ((method === "DOM.documentUpdated" || method === "Runtime.executionContextsCleared") && session) {
-      this.invalidate(session);
+      this.invalidate(session, preserveChooser);
     }
     if (method === "Runtime.executionContextDestroyed" && session) this.clearFrameDocuments(tabId!, source);
     if (method === "Page.frameDetached" && params?.frameId && session) {
       session.frames.delete(params.frameId);
       session.frameParents.delete(params.frameId);
-      this.invalidate(session);
+      this.invalidate(session, preserveChooser);
     }
     if (method === "Target.detachedFromTarget" && params?.sessionId && session) {
       session.frameReady.delete(params.sessionId);
+      session.targetParents.delete(params.sessionId);
       for (const [frameId, debuggee] of session.frames) {
         if (debuggee.sessionId === params.sessionId) {
           session.frames.delete(frameId);
           session.frameParents.delete(frameId);
         }
       }
-      this.invalidate(session);
+      this.invalidate(session, preserveChooser);
     }
     if (session && session.rootFrameId !== undefined && !source.sessionId && method === "Page.lifecycleEvent" && params?.name === "init" && params?.frameId === session.rootFrameId
       && (session.lifecycleCutoff === undefined || typeof params.timestamp === "number" && params.timestamp > session.lifecycleCutoff)) {
@@ -448,7 +525,8 @@ export class AutomationRuntime {
     }
     if (session && !source.sessionId && method === "DOM.documentUpdated") void this.options.refreshGuard?.(tabId!).catch(() => undefined);
     if (method === "Page.fileChooserOpened" && params.backendNodeId) {
-      const chooser = { backendNodeId: params.backendNodeId, debuggee: source, mode: params.mode };
+      const chooser = { backendNodeId: params.backendNodeId, debuggee: source, mode: params.mode,
+        ...(typeof params.frameId === "string" ? { frameId: params.frameId } : {}) };
       this.fileChoosers.set(tabId!, chooser);
       this.resolveWaiters(tabId!, "filechooser", chooser);
     }
@@ -893,7 +971,7 @@ export class AutomationRuntime {
           else if (condition === "visible") {
             const rect = this.getBoundingClientRect(), style = getComputedStyle(this);
             actual = rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-          } else if (condition === "enabled") actual = !Boolean(this.disabled || this.matches(":disabled") || this.closest('[aria-disabled="true"]'));
+          } else if (condition === "enabled") actual = !(${DISABLED_STATE_SOURCE}).call(this);
           else {
             const state = (${CHECKED_STATE_SOURCE}).call(this);
             actual = state.value;
@@ -984,7 +1062,7 @@ export class AutomationRuntime {
         const select = `function(values, apply){
           if (!(this instanceof HTMLSelectElement)) return { error: 'not-select' };
           if (!this.isConnected) return { error: 'detached' };
-          if (this.matches(':disabled')) return { error: 'select-disabled' };
+          if ((${DISABLED_STATE_SOURCE}).call(this)) return { error: 'select-disabled' };
           const options = [...this.options], selected = [];
           for (const value of values) {
             let matches = options.filter(option => option.value === value);
@@ -1191,6 +1269,7 @@ export class AutomationRuntime {
         frames: new Map(),
         frameReady: new Map(),
         frameParents: new Map(),
+        targetParents: new Map(),
         frameRevision: 0,
         frameRefs: new Map(),
         frameRefsById: new Map(),
@@ -1218,15 +1297,7 @@ export class AutomationRuntime {
       }
       await this.options.command(session!.debuggee, "Target.setAutoAttach", { autoAttach: true, flatten: true, waitForDebuggerOnStart: false, filter: [{ type: "iframe", exclude: false }] });
       const tree = await this.options.command(session!.debuggee, "Page.getFrameTree", {});
-      const add = (item: any, parentId?: string) => {
-        const frameId = item?.frame?.id;
-        if (!frameId) return;
-        if (!session!.frames.get(frameId)?.sessionId) session!.frames.set(frameId, session!.debuggee);
-        session!.frameParents.set(frameId, parentId);
-        if (!parentId) session!.rootFrameId = frameId;
-        for (const child of item.childFrames ?? []) add(child, frameId);
-      };
-      add(tree?.frameTree);
+      this.recordFrameTree(session!, session!.debuggee, tree?.frameTree);
     })().catch((error) => { session!.ready = undefined; throw error; });
     await session.ready;
     return session;
@@ -1849,8 +1920,9 @@ export class AutomationRuntime {
       }
       scoped = { ...scoped, queries: scoped.queries.slice(1) };
     }
+    let scanFrom = 0;
     while (true) {
-      const frameIndex = scoped.queries.findIndex((query) => query.kind === "frame");
+      const frameIndex = scoped.queries.findIndex((query, index) => index >= scanFrom && query.kind === "frame");
       if (frameIndex < 0) return { debuggee, spec: scoped, ...(rootObjectId ? { rootObjectId } : {}), ...(rootIsElement ? { rootIsElement } : {}) };
       const frame = scoped.queries[frameIndex]!;
       const ownerSpec: LocatorSpec = { queries: [...scoped.queries.slice(0, frameIndex), { ...frame, kind: "css" }] };
@@ -1858,12 +1930,16 @@ export class AutomationRuntime {
       if (!ownerId) throw automationError("frame-not-found", { locator: ownerSpec });
       const owner = (await this.options.command(debuggee, "DOM.describeNode", { objectId: ownerId })).node;
       const child = owner?.frameId ? session.frames.get(owner.frameId) : undefined;
-      if (!child?.sessionId) return { debuggee, spec: scoped, ...(rootObjectId ? { rootObjectId } : {}), ...(rootIsElement ? { rootIsElement } : {}) };
+      // A same-process child inherits its parent's debugger session, including
+      // when that parent is itself an OOPIF. Keep that frame in the locator
+      // prefix and keep looking for any later cross-process boundary.
+      if (!child?.sessionId || child.sessionId === debuggee.sessionId) { scanFrom = frameIndex + 1; continue; }
       await session.frameReady.get(child.sessionId);
       debuggee = child;
       rootObjectId = undefined;
       rootIsElement = false;
       scoped = { ...scoped, queries: scoped.queries.slice(frameIndex + 1) };
+      scanFrom = 0;
     }
   }
 
@@ -1962,7 +2038,7 @@ export class AutomationRuntime {
         while (hit?.shadowRoot) { const nested = hit.shadowRoot.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); if (!nested || nested === hit) break; hit = nested; }
         if (guard) guard.style.setProperty("pointer-events", pointerEvents || "auto", pointerPriority || "important");
       }
-      const disabled = Boolean(this.disabled || this.matches(":disabled") || this.closest('[aria-disabled="true"]'));
+      const disabled = (${DISABLED_STATE_SOURCE}).call(this);
       const editable = !disabled && !this.readOnly && this.getAttribute("aria-readonly") !== "true" && (this.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(this.tagName));
       return { connected: true, x, y, width: rect.width, height: rect.height, visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none", stable: true, enabled: !disabled, editable, receivesEvents: Boolean(hit && (hit === this || this.contains(hit))), checked: (${CHECKED_STATE_SOURCE}).call(this).value };
     }`, [scroll, pointer], pointer);

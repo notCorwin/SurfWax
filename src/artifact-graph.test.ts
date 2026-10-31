@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { partitionArtifact, readPartitionedArtifact, type ArtifactPart } from "./artifact-graph";
 import { decodeLogGraph, encodeLogGraph } from "./log-graph";
 import { EventLogger, type LogEvent } from "./logging";
+import { testEventStore } from "./test-event-store";
 
 function fixture(value: unknown) {
   const { graph, parts } = partitionArtifact(value);
@@ -21,6 +22,32 @@ function fixture(value: unknown) {
 }
 
 describe("partitioned artifact graphs", () => {
+  it("uses the same safe integer paging contract for partitioned and ordinary results", async () => {
+    const bytes = Uint8Array.from([1, 2, 3, 4]);
+    const data = { array: [1, 2, 3, 4], text: "abcd", map: new Map([[1, "a"], [2, "b"], [3, "c"]]),
+      set: new Set([1, 2, 3]), buffer: bytes.buffer, view: new Uint8Array(bytes.buffer), dataView: new DataView(bytes.buffer) };
+    const store = testEventStore();
+    const logger = new EventLogger({ store });
+    const ordinary = await logger.append({ type: "tool.result.data", conversationId: "c", output: data });
+    const partitioned = await logger.append({ type: "tool.result.data", conversationId: "c", output: { ...data, padding: "x".repeat(300_000) } });
+    expect(ordinary?.artifactGraph).toBeUndefined();
+    expect(partitioned?.artifactGraph).toBeDefined();
+    for (const path of Object.keys(data)) {
+      for (const selection of [{ offset: 0, limit: 0 }, { offset: 0, limit: 2 }, { offset: 1, limit: 2 },
+        { offset: 0, limit: Number.MAX_SAFE_INTEGER }, { offset: Number.MAX_SAFE_INTEGER }]) {
+        expect(await logger.result(partitioned!.id, { path: [path], ...selection }, "c")).toEqual(await logger.result(ordinary!.id, { path: [path], ...selection }, "c"));
+      }
+    }
+    for (const field of ["offset", "limit"] as const) {
+      for (const value of [-1, -0.5, 1.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1, "2", null]) {
+        for (const event of [ordinary!, partitioned!]) {
+          await expect(logger.result(event.id, { path: ["array"], [field]: value } as any, "c")).rejects.toMatchObject({
+            code: "invalid-result-range", message: `Artifact ${field} must be a non-negative safe integer`,
+          });
+        }
+      }
+    }
+  });
   it("matches the V5 graph for scalar, binary, collection, error and cyclic values", async () => {
     const lengths = [0, 1, 2, 3, 383, 384, 385, 6143, 6144, 6145, 12289];
     const buffers = lengths.map((length) => Uint8Array.from({ length }, (_, index) => (index * 13 + 7) % 256).buffer);
