@@ -6,6 +6,8 @@ import { test, openExtension, dispose, configure, readEvents, closeServer } from
 import { modelProxy, usageEvidence } from "./evaluation/model-proxy";
 import { businessScore, orderFixture } from "./evaluation/order-fixture";
 import { claimsFixture, claimsScore } from "./evaluation/claims-fixture";
+import { sequenceFixture, sequenceScore } from "./evaluation/sequence-fixture";
+import { dispatchFixture, dispatchScore } from "./evaluation/dispatch-fixture";
 
 test.use({ trace: "off", screenshot: "off", video: "off" });
 
@@ -21,19 +23,25 @@ test("@real-model browser task", async () => {
   const seed = Number(process.env.SURFWAX_EVAL_SEED ?? 17);
   if (!Number.isSafeInteger(seed) || seed < 0 || seed > 999999) throw new Error("Invalid seed");
   const scenario = process.env.SURFWAX_EVAL_SCENARIO ?? "cross-frame-order";
-  if (scenario !== "cross-frame-order" && scenario !== "claims-queue") throw new Error("Invalid scenario");
+  if (!["cross-frame-order", "claims-queue", "sequence-editor", "dispatch-review"].includes(scenario)) throw new Error("Invalid scenario");
   const service = seed % 2 ? "express" : "economy";
   const order = `ORDER-${seed}`;
   const started = Date.now();
   const proxy = await modelProxy(upstream, key);
-  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | undefined;
+  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | undefined;
   let opened: Awaited<ReturnType<typeof openExtension>> | undefined;
   let events: any[] = [], outcome = "setup_failed", businessVerified = false;
   let browserProduct: string | null = null;
   try {
     let prompt: string;
     let grade: () => boolean;
-    if (scenario === "claims-queue") {
+    if (scenario === "sequence-editor") {
+      const sequence = await sequenceFixture(seed); fixture = sequence; prompt = sequence.prompt;
+      grade = () => sequenceScore(sequence.evidence());
+    } else if (scenario === "dispatch-review") {
+      const dispatch = await dispatchFixture(seed); fixture = dispatch; prompt = dispatch.prompt;
+      grade = () => dispatchScore(dispatch.evidence());
+    } else if (scenario === "claims-queue") {
       const claims = await claimsFixture(seed); fixture = claims; prompt = claims.prompt;
       grade = () => claimsScore(claims.evidence());
     } else {
@@ -84,10 +92,15 @@ test("@real-model browser task", async () => {
     const browser = !browserProduct && opened ? await opened.context.newCDPSession(opened.page).then((session) => session.send("Browser.getVersion")).catch(() => null) : null;
     const terminals = events.filter((event) => ["tool.finished", "tool.failed"].includes(event.type));
     const starts = events.filter((event) => event.type === "tool.started");
+    const toolNames = starts.reduce<Record<string, number>>((counts, event) => {
+      const name = typeof event.content?.toolName === "string" ? event.content.toolName : "unknown";
+      counts[name] = (counts[name] ?? 0) + 1;
+      return counts;
+    }, {});
     const report = { scenario, seed, provider: providerName, model, gitHead: head, gitDirty: dirty, browser: browserProduct ?? browser?.product ?? null,
       outcome, businessVerified, elapsedMs: Date.now() - started, providerUsageByStep: usageEvidence(events),
       requests: proxy.requests, requestBytes: proxy.requests.reduce((sum, request) => sum + request.bytes, 0),
-      toolCalls: starts.length, toolTerminalResults: terminals.length,
+      toolCalls: starts.length, toolNames, toolTerminalResults: terminals.length,
       toolsWithExactlyOneTerminal: starts.length > 0 && starts.every((start) => terminals.filter((end) => end.runId === start.runId && end.toolCallId === start.toolCallId).length === 1) };
     const directory = resolve(".dev/verification/model-evals");
     await mkdir(directory, { recursive: true });
