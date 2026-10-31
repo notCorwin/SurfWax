@@ -8,6 +8,7 @@ import { ensureAutomaticContextSummary } from "../agent/context-choice";
 import { reasoningSettingsFor } from "../agent/reasoning";
 import { createChatTransport } from "../agent/transport";
 import { ChromeExecutor } from "../chrome/executor";
+import { observePageRefreshes } from "../chrome/refresh-observer";
 import { ConversationStore } from "./conversation-store";
 import type { EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
@@ -35,21 +36,27 @@ export function useSidePanelRuntime(config: ModelConfig, systemPrompt: string | 
   latest.current = { config, systemPrompt };
   const runtime = useMemo(() => new ConversationStore(logger, (conversationId) => {
     const { config, systemPrompt } = latest.current;
-    return createChatTransport(async (signal, branchIds, resumed, onResponse) => {
+    return createChatTransport(async (signal, branchIds, _resumed, onResponse, shouldYield) => {
       signal.throwIfAborted();
-      if (!resumed) await executor.beginRun();
       const reasoning = reasoningSettingsFor(config);
       await reasoning.ready;
       const languageModel = await createModel(config, logger, conversationId, { signal });
       signal.throwIfAborted();
       const prompt = await ensureConversationPrompt(logger, conversationId, systemPrompt, branchIds);
       return createAgent({ model: config, languageModel, reasoning: reasoning.snapshot().selected ?? undefined, executor, logger, conversationId,
-        instructions: systemPrompt, prompt, signal, onResponse,
+        instructions: systemPrompt, prompt, signal, onResponse, shouldYield,
         compactor: new ContextCompactor({ model: config, logger, conversationId, branchIds, signal, prompt }) });
     }, logger, conversationId, () => executor.endRun(), async (signal) => {
       const prompt = await ensureConversationPrompt(logger, conversationId, systemPrompt);
       await ensureAutomaticContextSummary(logger, conversationId, config, signal, { forced: true, instructions: prompt.instructions, tools: PROMPT_TOOLS });
-    }, systemPrompt);
+    }, systemPrompt, async (signal) => {
+      const observer = observePageRefreshes(executor, conversationId, signal);
+      try {
+        await executor.beginRun();
+        signal.throwIfAborted();
+        return observer;
+      } catch (error) { observer.dispose(); throw error; }
+    });
   }, initialThreadId), [executor, logger, initialThreadId]);
 
   useEffect(() => runtime.connect(), [runtime]);

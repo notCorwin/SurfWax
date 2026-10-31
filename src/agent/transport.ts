@@ -14,12 +14,13 @@ export type ConversationTransport = {
     messages: SidePanelMessage[];
     abortSignal?: AbortSignal;
     messageId?: string;
-    onMessage?: (message: SidePanelMessage) => void | Promise<void>;
+    onMessage?: (message: SidePanelMessage, priorMessages?: SidePanelMessage[]) => void | Promise<void>;
   }): Promise<SidePanelMessage>;
 };
 type ResponseObserver = (event: LanguageModelCallEndEvent<any>) => void | Promise<void>;
-type AgentFactory = (signal: AbortSignal, branchIds: string[], resumed?: boolean, onResponse?: ResponseObserver) => Agent<never, any, any, any> | Promise<Agent<never, any, any, any>>;
+type AgentFactory = (signal: AbortSignal, branchIds: string[], resumed?: boolean, onResponse?: ResponseObserver, shouldYield?: () => boolean) => Agent<never, any, any, any> | Promise<Agent<never, any, any, any>>;
 type ToolPart = Extract<SidePanelMessage["parts"][number], { toolCallId: string }>;
+export type RefreshObserver = { drain(): Promise<SidePanelMessage[]>; hasPending?(): boolean; dispose(): void };
 
 export function followupDispatch(message: SidePanelMessage | undefined): { id: string; mode: "followup" | "immediate" } | undefined {
   const metadata = message?.metadata;
@@ -34,7 +35,7 @@ export function followupDispatch(message: SidePanelMessage | undefined): { id: s
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
 /** Each publication contains complete model content or a completed tool result. */
-export function createChatTransport(agent: AgentFactory, logger: EventLogger, conversationId: string, cleanup?: () => Promise<void>, onContextOverflow?: (signal: AbortSignal) => Promise<void>, systemPrompt?: string): ConversationTransport {
+export function createChatTransport(agent: AgentFactory, logger: EventLogger, conversationId: string, cleanup?: () => Promise<void>, onContextOverflow?: (signal: AbortSignal) => Promise<void>, systemPrompt?: string, observeRefreshes?: (signal: AbortSignal) => Promise<RefreshObserver>): ConversationTransport {
   return {
     async sendMessages(options) {
       const currentRunId = crypto.randomUUID();
@@ -46,12 +47,14 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
       let response: SidePanelMessage = { id: crypto.randomUUID(), role: "assistant", parts: [] };
       let parentId: string | null = null;
       let published: SidePanelMessage | undefined;
+      let priorMessages: SidePanelMessage[] = [];
+      let refreshObserver: RefreshObserver | undefined;
       const publish = async () => {
         if (!response.parts.length || published === response) return;
         const snapshot = { ...response, parts: [...response.parts] };
         await logger.appendMessage(conversationId, snapshot as ConversationMessage, { runId: currentRunId, parentId });
         published = response;
-        await options.onMessage?.(snapshot);
+        await options.onMessage?.(snapshot, priorMessages);
       };
       // SDK lifecycle callback errors are swallowed. Abort the actual operation
       // as well, so no browser effect can follow a failed canonical write.
@@ -112,13 +115,14 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
       try {
         logger.beginRun(conversationId, currentRunId);
         lease.signal.throwIfAborted();
+        refreshObserver = await observeRefreshes?.(signal);
         await ensureConversationPrompt(logger, conversationId, systemPrompt, options.messages.map((message) => message.id));
         const existing = await logger.repository(conversationId);
         const withSavedMetadata = async (messages: SidePanelMessage[]) => {
           const saved = new Map((await logger.repository(conversationId)).messages.map((entry) => [entry.message.id, entry.message]));
           return messages.map((message) => saved.get(message.id)?.metadata ? { ...message, metadata: saved.get(message.id)!.metadata } : message);
         };
-        const initial = await withSavedMetadata(options.messages);
+        let initial = await withSavedMetadata(options.messages);
         const userMessage = [...initial].reverse().find((message) => message.role === "user");
         parentId = userMessage?.id ?? null;
         if (userMessage && !existing.messages.some(({ message }) => message.id === userMessage.id)) {
@@ -154,7 +158,7 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
                 }
                 await publish();
               } catch (error) { failPublication(error); }
-            });
+            }, () => refreshObserver?.hasPending?.() ?? false);
             resumed = true;
             await runAgent.generate({
               messages: await convertToModelMessages(messages.map(materializeToolCatalog), { tools: runAgent.tools }),
@@ -179,6 +183,25 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
             if (publicationFailed) throw publicationError;
             lease.signal.throwIfAborted();
             await reconcileTools("任务已完成");
+            const refreshes = await refreshObserver?.drain() ?? [];
+            lease.signal.throwIfAborted();
+            if (refreshes.length) {
+              const previous = response.parts.length ? [response] : [];
+              let parent = previous.at(-1)?.id ?? parentId;
+              for (const refresh of refreshes) {
+                lease.signal.throwIfAborted();
+                await logger.appendMessage(conversationId, refresh as ConversationMessage, { runId: currentRunId, parentId: parent });
+                parent = refresh.id;
+              }
+              initial = [...initial, ...previous, ...refreshes];
+              priorMessages = initial.slice(options.messages.length);
+              parentId = parent;
+              response = { id: crypto.randomUUID(), role: "assistant", parts: [] };
+              published = undefined;
+              continue;
+            }
+            refreshObserver?.dispose();
+            refreshObserver = undefined;
             const finished = await logger.append({ type: "conversation.finished", conversationId, runId: currentRunId, content: { messageId: response.id } });
             if (!finished) throw new DOMException("日志维护已阻止任务完成记录。", "AbortError");
             return response;
@@ -207,6 +230,7 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
           ...(aborted ? { abort: { reason: lease.signal.reason ?? errorText(error) } } : { error }) });
         throw error;
       } finally {
+        refreshObserver?.dispose();
         logger.endRun(conversationId, currentRunId);
         try { await cleanup?.(); } finally { lease.finish(); }
       }

@@ -53,6 +53,41 @@ describe("context choices and summary", () => {
       .resolves.toMatchObject({ estimated: 7_000 + estimateInput(extended) - estimateInput(raw) });
   });
 
+  it("updates calibration for each model step without counting earlier tool messages twice", async () => {
+    const { events, logger, model, raw } = fixture();
+    const branchIds = ["u", "a"];
+    const compactor = new ContextCompactor({ model, logger, conversationId: "one", branchIds, signal: new AbortController().signal });
+    await compactor.prepare(raw, 0);
+    const instructions = "system";
+    const tools = [{ name: "page" }];
+    compactor.recordPrompt({ messages: raw, instructions, tools });
+    compactor.recordUsage(10_000, 0);
+    const extended = [...raw, { role: "user", content: "tool result" } as ModelMessage];
+    await compactor.recordBase(extended);
+    compactor.recordPrompt({ messages: extended, instructions, tools });
+    compactor.recordUsage(30_000, 1);
+    await expect(contextPressure({ raw: extended, branchIds, events, model, instructions, tools })).resolves.toMatchObject({ estimated: 30_000 });
+  });
+
+  it("uses calibration only for the same model and unchanged message prefix", async () => {
+    const { events, logger, model, raw } = fixture();
+    const branchIds = ["u", "a"];
+    const instructions = "system";
+    const tools = [{ name: "page" }];
+    const compactor = new ContextCompactor({ model, logger, conversationId: "one", branchIds, signal: new AbortController().signal });
+    await compactor.prepare(raw, 0);
+    compactor.recordPrompt({ instructions, tools, messages: raw });
+    compactor.recordUsage(7_000, 0);
+    await expect(contextPressure({ raw, branchIds, events, model, instructions, tools })).resolves.toMatchObject({ estimated: 7_000 });
+
+    const changedModel = { ...model, model: "another-model" };
+    await expect(contextPressure({ raw, branchIds, events, model: changedModel, instructions, tools }))
+      .resolves.toMatchObject({ estimated: estimatePromptInput({ messages: raw, instructions, tools }) });
+    const changedPrefix = [{ role: "user", content: "Different " + "x".repeat(8_000) } as ModelMessage, raw[1]!];
+    await expect(contextPressure({ raw: changedPrefix, branchIds, events, model, instructions, tools }))
+      .resolves.toMatchObject({ estimated: estimatePromptInput({ messages: changedPrefix, instructions, tools }) });
+  });
+
   it("ignores legacy, unrelated, and pre-compaction calibrations", async () => {
     const { events, logger, languageModel, model, raw } = fixture();
     events.push({ id: 1, type: "context.estimate.calibrated", timestamp: "2026-01-01", content: { scale: 8 } });

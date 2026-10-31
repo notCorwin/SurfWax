@@ -1,4 +1,4 @@
-import { isLoopFinished, simulateStreamingMiddleware, ToolLoopAgent, wrapLanguageModel } from "ai";
+import { simulateStreamingMiddleware, ToolLoopAgent, wrapLanguageModel } from "ai";
 import type { LanguageModel, LanguageModelCallEndEvent } from "ai";
 import { createProgramTools, prepareToolMessages, repairProgramToolCall, PROGRAM_TOOL_REGISTRY } from "../chrome/tool";
 import { ToolScheduler } from "../chrome/tool-scheduler";
@@ -9,6 +9,7 @@ import type { ModelConfig } from "../types";
 import { inputBudget, modelSupportsImages, resolveModelLimit } from "./model-limits";
 import { resolvedBaseURL, sdkFor } from "./model-sdks";
 import { estimatePromptInput, type ContextCompactor } from "./compaction";
+import { activeContext } from "./context-choice";
 import type { ReasoningEffort } from "./reasoning";
 import { dsmlMiddleware } from "./dsml";
 import { completionToolChoiceMiddleware, completionToolsMiddleware } from "./completion-tools";
@@ -28,6 +29,7 @@ export type CreateAgentOptions = {
   prompt?: PromptSnapshot;
   signal?: AbortSignal;
   onResponse?: (event: LanguageModelCallEndEvent<any>) => void | Promise<void>;
+  shouldYield?: () => boolean;
 };
 
 type BrowserAgentTools = ReturnType<typeof createProgramTools>;
@@ -162,6 +164,19 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         prepared = await options.compactor.compact([...initialMessages, ...responseMessages], prepared, stepNumber, options.languageModel, modelLimit);
         outgoing = await prepareMessages(prepared);
       }
+      if (options.compactor) {
+        // The persisted UI projection can represent completed tool calls
+        // differently from the SDK's response messages. Anchor to that
+        // projection only when it describes the same sequence of roles.
+        const canonical = stepNumber > 0 && logger && options.conversationId
+          ? (await activeContext(logger, options.conversationId)).messages : undefined;
+        const persisted = prepared.filter((message) => !(message.role === "user" && Array.isArray(message.content)
+          && message.content.length === 1 && message.content[0]?.type === "text"
+          && message.content[0].text.startsWith("<browser-context>\nSupplemental state only.")));
+        const base = canonical?.length === persisted.length
+          && canonical.every((message, index) => message.role === persisted[index]?.role) ? canonical : prepared;
+        await options.compactor.recordBase(base);
+      }
       return {
         instructions: wireInstructions(),
         activeTools: activeTools(),
@@ -210,7 +225,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         providerMetadata: event.providerMetadata,
       }),
     } : {}),
-    stopWhen: isLoopFinished(),
+    stopWhen: () => options.shouldYield?.() ?? false,
     // The provider fetch owns the unbounded retry policy; disable the SDK's finite retry loop.
     maxRetries: 0,
   });

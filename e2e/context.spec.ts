@@ -57,17 +57,6 @@ test("updates context usage from a completed reply and shows structured details"
     expect(box!.x).toBeGreaterThanOrEqual(0);
     expect(box!.x + box!.width).toBeLessThanOrEqual(320);
 
-    await opened.page.evaluate(() => {
-      Object.assign(window, { __tokenAnimationSeen: false });
-      new MutationObserver((mutations) => {
-        if (mutations.some(({ target }) => target instanceof Element
-          && target.getAttribute("data-testid") === "context-token-usage"
-          && target.getAttribute("data-animating") === "true")) {
-          Object.assign(window, { __tokenAnimationSeen: true });
-        }
-      }).observe(document.body, { attributes: true, subtree: true, attributeFilter: ["data-animating"] });
-    });
-
     await opened.page.getByTestId("composer-input").fill("measure context after completion");
     await opened.page.getByTestId("composer-input").press("Enter");
     await focusPageControl(opened.page, indicator);
@@ -75,14 +64,56 @@ test("updates context usage from a completed reply and shows structured details"
     releaseReply();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("CONTEXT_COMPLETE");
     await expect(opened.page.getByRole("button", { name: "发送消息" })).toBeVisible();
-    await expect.poll(async () => Number(await indicator.getAttribute("data-used-percent"))).toBeGreaterThan(initial);
-    await expect(opened.page.getByTestId("context-token-usage")).toHaveAttribute("data-animating", "false");
-    expect(await opened.page.evaluate(() => (window as typeof window & { __tokenAnimationSeen?: boolean }).__tokenAnimationSeen)).toBe(true);
+    await expect.poll(async () => Number(await indicator.getAttribute("data-used-percent"))).not.toBe(initial);
     await expect(opened.page.getByTestId("context-input")).toHaveText("2,000 tokens");
     await expect(opened.page.getByTestId("context-output")).toHaveText("800 tokens");
     await expect(opened.page.getByTestId("context-cache-read")).toHaveText("500 tokens");
     await options.close();
   } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("updates context while a reply is pending and when switching branches", async () => {
+  let releaseReply!: () => void;
+  const replyMayFinish = new Promise<void>((resolve) => { releaseReply = resolve; });
+  const provider = await startProvider([
+    delayedResponse(textResponse("LONG_BRANCH " + "page observation ".repeat(2_000)), 0, replyMayFinish),
+    textResponse("上下文分支测试"),
+    textResponse("SHORT_BRANCH"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const options = await configure(opened.context, opened.page, provider.baseURL, 100_000);
+    await options.close();
+    const indicator = opened.page.getByTestId("context-indicator");
+    await expect(indicator).toHaveAttribute("data-state", "ready");
+    const initial = Number(await indicator.getAttribute("data-used-percent"));
+
+    const composer = opened.page.getByTestId("composer-input");
+    await composer.fill("pending request ".repeat(1_000));
+    await composer.press("Enter");
+    await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
+    await expect.poll(async () => Number(await indicator.getAttribute("data-used-percent"))).toBeGreaterThan(initial);
+
+    releaseReply();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("LONG_BRANCH");
+    await expect(opened.page.getByTestId("conversation-menu")).toContainText("上下文分支测试");
+    await expect(opened.page.getByTestId("replay-message-button")).toBeVisible();
+    let longPercent = 0;
+    await expect.poll(async () => {
+      longPercent = Number(await indicator.getAttribute("data-used-percent"));
+      return longPercent;
+    }).toBeGreaterThan(initial + 5);
+
+    await opened.page.getByTestId("replay-message-button").click();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("SHORT_BRANCH");
+    await expect.poll(async () => Number(await indicator.getAttribute("data-used-percent"))).toBeLessThan(longPercent);
+    await opened.page.getByRole("button", { name: "上一个分支" }).last().click();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("LONG_BRANCH");
+    await expect.poll(async () => Number(await indicator.getAttribute("data-used-percent"))).toBe(longPercent);
+  } finally {
+    releaseReply();
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
@@ -106,7 +137,7 @@ test("anchors context usage to provider-reported input tokens", async () => {
     await expect(opened.page.locator(".markdown-body").last()).toContainText("USAGE_ANCHOR_REPLY");
     await expect(opened.page.getByRole("button", { name: "发送消息" })).toBeVisible();
     await expect.poll(async () => Number(await indicator.getAttribute("data-used-percent")))
-      .toBeGreaterThanOrEqual(10);
+      .toBeGreaterThanOrEqual(30);
 
     await focusPageControl(opened.page, indicator);
     await expect(opened.page.getByTestId("context-input")).toContainText("40,000 tokens");

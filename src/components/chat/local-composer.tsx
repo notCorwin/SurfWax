@@ -12,7 +12,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { registerBackgroundRequest, waitForConversationRun } from "@/agent/coordinator";
 import { modelMessages } from "@/agent/context-choice";
-import { contextPressure, estimateInput } from "@/agent/compaction";
+import { contextPressure } from "@/agent/compaction";
 import { canAutoDispatchFollowup, FOLLOWUP_EVENT_TYPES, rebuildFollowups, type FollowupMessage } from "@/agent/followups";
 import { contextUsedPercent, inputBudget, resolveModelLimit, type ModelLimit } from "@/agent/model-limits";
 import { reasoningSettingsFor, type ReasoningEffort } from "@/agent/reasoning";
@@ -32,6 +32,7 @@ const CONTEXT_USAGE_EVENTS = new Set([
   "context.compacted",
   "context.checkpoint.applied",
   "context.estimate.calibrated",
+  "context.prompt.updated",
 ]);
 type ContextUsage = { state: "loading" | "unavailable" } | {
   state: "ready";
@@ -41,9 +42,9 @@ type ContextUsage = { state: "loading" | "unavailable" } | {
   usedPercent: number;
 };
 type TokenUsage = { input: number; output: number; cacheRead: number };
-type TokenDisplay = TokenUsage & { animating: boolean };
+const limitSourceLabel = (limit: ModelLimit) => limit.source === "manual" ? "手动设置" : limit.source === "models.dev" ? "Models.dev" : "默认值";
 const usageLabel = (usage: ContextUsage) => usage.state === "ready"
-  ? `上下文已使用约 ${usage.usedPercent}% · ${usage.estimated.toLocaleString("zh-CN")} / ${usage.budget.toLocaleString("zh-CN")} tokens · ${usage.limit.source === "manual" ? "手动设置" : "Models.dev"}`
+  ? `上下文已使用约 ${usage.usedPercent}% · ${usage.estimated.toLocaleString("zh-CN")} / ${usage.budget.toLocaleString("zh-CN")} tokens · ${limitSourceLabel(usage.limit)}`
   : usage.state === "loading" ? "正在估算上下文…" : "无法取得上下文窗口；可在设置中手动指定";
 
 function sumTokenUsage(events: readonly LogEvent[]): TokenUsage {
@@ -109,57 +110,28 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
     setUsage((previous) => !detailsOpen.current && previous.state === "ready" && next.state === "ready"
       && previous.usedPercent === next.usedPercent && previous.budget === next.budget && previous.limit === next.limit ? previous : next);
   }, []);
-  const [tokens, setTokens] = useState<TokenDisplay>({ input: 0, output: 0, cacheRead: 0, animating: false });
+  const [tokens, setTokens] = useState<TokenUsage>({ input: 0, output: 0, cacheRead: 0 });
 
   useEffect(() => {
     let active = true;
-    let loaded = false;
-    let shown: TokenUsage = { input: 0, output: 0, cacheRead: 0 };
-    let frame: number | undefined;
-    setTokens({ ...shown, animating: false });
-    const display = (next: TokenUsage) => {
-      if (!loaded || matchMedia("(prefers-reduced-motion: reduce)").matches) {
-        loaded = true;
-        shown = next;
-        setTokens({ ...next, animating: false });
-        return;
-      }
-      if (frame !== undefined) cancelAnimationFrame(frame);
-      const from = shown;
-      const started = performance.now();
-      const tick = (now: number) => {
-        const progress = Math.min(1, (now - started) / 300);
-        const eased = 1 - (1 - progress) ** 3;
-        shown = {
-          input: Math.round(from.input + (next.input - from.input) * eased),
-          output: Math.round(from.output + (next.output - from.output) * eased),
-          cacheRead: Math.round(from.cacheRead + (next.cacheRead - from.cacheRead) * eased),
-        };
-        setTokens({ ...shown, animating: progress < 1 });
-        frame = progress < 1 ? requestAnimationFrame(tick) : undefined;
-      };
-      frame = requestAnimationFrame(tick);
-    };
+    let version = 0;
+    setTokens({ input: 0, output: 0, cacheRead: 0 });
     const refresh = async () => {
+      const current = ++version;
       const events = await logger.modelUsageEvents(conversationId);
-      if (active) display(sumTokenUsage(events));
+      if (active && current === version) setTokens(sumTokenUsage(events));
     };
     const unsubscribe = logger.subscribe((event) => {
-      if (event.conversationId === conversationId && event.type === "model.step.finished") void refresh();
+      if ((event.conversationId === conversationId && event.type === "model.step.finished") || event.type === "log.cleared") void refresh();
     });
     void refresh();
-    return () => {
-      active = false;
-      if (frame !== undefined) cancelAnimationFrame(frame);
-      unsubscribe();
-    };
+    return () => { active = false; unsubscribe(); };
   }, [conversationId, logger]);
 
   useEffect(() => {
     let active = true;
     let version = 0;
     let frame: number | undefined;
-    let idle: number | undefined;
     let calculating = false;
     let pending = false;
     const initialThread = runtime.getState();
@@ -171,15 +143,9 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
     const limit = resolveModelLimit(config, { signal: controller.signal });
     let events: ReturnType<EventLogger["contextEvents"]> | undefined;
     let repository: ReturnType<EventLogger["repository"]> | undefined;
-    let anchor: { usage: Extract<ContextUsage, { state: "ready" }>; count: number; tail: number } | undefined;
-    const tailEstimate = (current: typeof messages, from: number) => estimateInput(current.slice(from).map((message) => ({
-      role: message.role, content: message.parts,
-    })) as never);
     publishUsage({ state: "loading" });
 
     const refresh = async () => {
-      version += 1;
-      pending = true;
       if (calculating) return;
       calculating = true;
       try {
@@ -218,7 +184,6 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
               limit: pressure.limit,
               usedPercent: contextUsedPercent(pressure.estimated, pressure.limit),
             } : { state: "unavailable" };
-            if (next.state === "ready") anchor = { usage: next, count: currentMessages.length, tail: tailEstimate(currentMessages, Math.max(0, currentMessages.length - 1)) };
             publishUsage(next);
           } catch {
             if (active && current === version) publishUsage({ state: "unavailable" });
@@ -229,44 +194,25 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
       }
     };
 
-    const schedule = (immediate = runtime.thread.getState().isRunning) => {
-      const run = () => {
-        const latest = runtime.getState();
-        messages = latest.messages;
-        loading = latest.isLoading;
-        if (loading) return;
-        if (latest.isRunning && anchor && messages.length >= anchor.count) {
-          // During a response only its appended snapshots change. Estimating
-          // the complete virtualized history after every snapshot blocks rendering.
-          const estimated = anchor.usage.estimated + tailEstimate(messages, Math.max(0, anchor.count - 1)) - anchor.tail;
-          publishUsage({ ...anchor.usage, estimated, usedPercent: contextUsedPercent(estimated, anchor.usage.limit) });
-        } else void refresh();
-      };
-      if (immediate) {
-        if (idle !== undefined) cancelIdleCallback(idle);
-        idle = undefined;
-        if (frame === undefined) frame = requestAnimationFrame(() => {
-          frame = undefined;
-          run();
-        });
-        return;
-      }
-      if (idle !== undefined) cancelIdleCallback(idle);
-      idle = requestIdleCallback(() => {
-        idle = undefined;
-        run();
-      }, { timeout: 1_000 });
+    const schedule = () => {
+      // Invalidate any in-flight calculation as soon as the source changes,
+      // including changes coalesced into the next animation frame.
+      version += 1;
+      const latest = runtime.getState();
+      messages = latest.messages;
+      loading = latest.isLoading;
+      if (loading) { pending = false; return; }
+      pending = true;
+      if (frame === undefined) frame = requestAnimationFrame(() => {
+        frame = undefined;
+        void refresh();
+      });
     };
-    const unsubscribeRuntime = runtime.thread.subscribe(() => {
-      const thread = runtime.thread.getState();
-      if (thread.isLoading) return;
-      schedule(thread.isRunning);
-    });
+    const unsubscribeRuntime = runtime.thread.subscribe(schedule);
     const unsubscribe = logger.subscribe((event) => {
-      if (event.conversationId !== conversationId || !CONTEXT_USAGE_EVENTS.has(event.type)) return;
-      events = logger.contextEvents(conversationId);
-      if (event.type === "conversation.message") repository = undefined;
-      if (event.type === "context.compacted" || event.type === "context.checkpoint.applied" || event.type === "context.estimate.calibrated") anchor = undefined;
+      if (event.type !== "log.cleared" && (event.conversationId !== conversationId || !CONTEXT_USAGE_EVENTS.has(event.type))) return;
+      events = undefined;
+      if (event.type === "conversation.message" || event.type === "log.cleared") repository = undefined;
       schedule();
     });
     if (!loading) schedule();
@@ -275,7 +221,6 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
       controller.abort();
       unregisterRequest();
       if (frame !== undefined) cancelAnimationFrame(frame);
-      if (idle !== undefined) cancelIdleCallback(idle);
       unsubscribeRuntime();
       unsubscribe();
     };
@@ -283,7 +228,7 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
 
   const label = usageLabel(latestUsage.current);
   const usedPercent = usage.state === "ready" ? usage.usedPercent : 0;
-  const source = usage.state === "ready" ? usage.limit.source === "manual" ? "手动设置" : "Models.dev" : undefined;
+  const source = usage.state === "ready" ? limitSourceLabel(usage.limit) : undefined;
 
   return (
     <Tooltip onOpenChange={(open) => { detailsOpen.current = open; if (open) setUsage(latestUsage.current); }}>
@@ -325,12 +270,12 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
           </div>
           {usage.state === "ready" ? <>
             <Progress data-testid="context-detail-progress" aria-label="上下文用量详情" value={usage.usedPercent} className="h-1.5" />
-            <dl data-testid="context-token-usage" data-animating={tokens.animating} className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
-              <dt className="text-muted-foreground">输入</dt>
+            <dl data-testid="context-token-usage" className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
+              <dt className="text-muted-foreground">累计输入</dt>
               <dd data-testid="context-input" className="text-right font-medium tabular-nums">{tokens.input.toLocaleString("zh-CN")} tokens</dd>
-              <dt className="text-muted-foreground">输出</dt>
+              <dt className="text-muted-foreground">累计输出</dt>
               <dd data-testid="context-output" className="text-right font-medium tabular-nums">{tokens.output.toLocaleString("zh-CN")} tokens</dd>
-              <dt className="text-muted-foreground">缓存命中</dt>
+              <dt className="text-muted-foreground">累计缓存命中</dt>
               <dd data-testid="context-cache-read" className="text-right font-medium tabular-nums">{tokens.cacheRead.toLocaleString("zh-CN")} tokens</dd>
             </dl>
           </> : <p className="leading-relaxed text-muted-foreground">

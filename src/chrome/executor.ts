@@ -175,6 +175,11 @@ function evaluationValue(response: any, scope = "extension"): unknown {
 }
 
 export class ChromeExecutor {
+  private readonly boundTabListeners = new Set<() => void>();
+  onBoundTabChanged(listener: () => void): () => void {
+    this.boundTabListeners.add(listener);
+    return () => this.boundTabListeners.delete(listener);
+  }
   private readonly chromeApi: ExecutorChrome;
   private readonly logger?: EventLogger;
   private port?: chrome.runtime.Port;
@@ -1119,6 +1124,8 @@ export class ChromeExecutor {
     return locator;
   }
 
+  get boundTabId(): number | undefined { return this.browserState?.tabId; }
+
   async beginRun(): Promise<BrowserContext> {
     if (this.runFinishing) await this.runFinishing;
     if (this.disposed) throw new Error("Chrome executor has been disposed");
@@ -1134,6 +1141,7 @@ export class ChromeExecutor {
       windowId: window.id!,
       tabId: selected?.id,
     };
+    for (const listener of this.boundTabListeners) listener();
     this.eventLease = identity;
     return this.browserContext();
   }
@@ -1192,6 +1200,7 @@ export class ChromeExecutor {
     await this.chromeApi.tabs.update(tab.id, { active: true });
     if (Number.isInteger(tab.windowId)) state.windowId = tab.windowId!;
     state.tabId = tab.id;
+    for (const listener of this.boundTabListeners) listener();
     return this.tabsOf(state);
   }
 
@@ -1205,7 +1214,10 @@ export class ChromeExecutor {
     if (!tab?.id) throw new Error(`CommandError[invalid-tab-id]: ${tabId}`);
     await this.detachTabRuntime(tab.id);
     await this.chromeApi.tabs.remove(tab.id);
-    if (state.tabId === tab.id) state.tabId = undefined;
+    if (state.tabId === tab.id) {
+      state.tabId = undefined;
+      for (const listener of this.boundTabListeners) listener();
+    }
     return this.tabsOf(state);
   }
 

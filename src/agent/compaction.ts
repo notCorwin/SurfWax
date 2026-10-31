@@ -25,6 +25,9 @@ type AppliedSummary = SummaryCheckpoint & { eventId: number };
 type EstimateCalibration = {
   branchIds: string[];
   contextVersion: number;
+  modelDigest: string;
+  baseCount: number;
+  baseDigest: string;
   baseEstimate: number;
   promptEstimate: number;
   inputTokens?: number;
@@ -65,6 +68,11 @@ function canonicalValue(value: unknown): unknown {
 
 async function digest(messages: readonly ModelMessage[]): Promise<string> {
   return digestValue(canonicalValue(messages));
+}
+
+async function modelDigest(model: ModelConfig): Promise<string> {
+  return digestValue([model.providerId, model.sdk, model.baseURLOverride ?? model.baseURL,
+    model.model, model.endpointType, model.modelProvider, model.imageInput]);
 }
 
 function isBranchPrefix(prefix: readonly string[], branch: readonly string[]): boolean {
@@ -112,28 +120,38 @@ export async function contextPressure(options: {
   const { checkpoint, messages } = await effectiveContext(options.events, options.branchIds, options.raw);
   const currentEstimate = estimateInput(messages);
   const contextVersion = checkpoint?.eventId ?? 0;
-  const calibrated = [...options.events].reverse().find((event) => {
-    if (event.type !== "context.estimate.calibrated") return false;
+  const identity = await modelDigest(options.model);
+  const prefixDigests = new Map<number, string>();
+  let calibration: Partial<EstimateCalibration> | undefined;
+  for (const event of [...options.events].reverse()) {
+    if (event.type !== "context.estimate.calibrated") continue;
     const value = fromLogValue(event.content, event.valueEncoding) as Partial<EstimateCalibration> | undefined;
-    if (!value) return false;
-    return Array.isArray(value.branchIds)
-      && value.branchIds.every((id): id is string => typeof id === "string")
-      && isBranchPrefix(value.branchIds, options.branchIds)
-      && value.contextVersion === contextVersion
-      && typeof value.baseEstimate === "number" && Number.isFinite(value.baseEstimate)
-      && value.baseEstimate > 0 && value.baseEstimate <= currentEstimate
-      && typeof value.promptEstimate === "number" && Number.isFinite(value.promptEstimate)
-      && value.promptEstimate > 0;
-  });
-  const calibration = fromLogValue(calibrated?.content, calibrated?.valueEncoding) as Partial<EstimateCalibration> | undefined;
+    if (!value || !Array.isArray(value.branchIds)
+      || !value.branchIds.every((id): id is string => typeof id === "string")
+      || !isBranchPrefix(value.branchIds, options.branchIds)
+      || value.contextVersion !== contextVersion || value.modelDigest !== identity
+      || !Number.isSafeInteger(value.baseCount) || value.baseCount! < 0 || value.baseCount! > messages.length
+      || typeof value.baseDigest !== "string"
+      || typeof value.baseEstimate !== "number" || !Number.isFinite(value.baseEstimate)
+      || value.baseEstimate <= 0
+      || typeof value.promptEstimate !== "number" || !Number.isFinite(value.promptEstimate)
+      || value.promptEstimate <= 0) continue;
+    const count = value.baseCount!;
+    let prefixDigest = prefixDigests.get(count);
+    if (!prefixDigest) {
+      prefixDigest = await digest(messages.slice(0, count));
+      prefixDigests.set(count, prefixDigest);
+    }
+    if (prefixDigest === value.baseDigest) { calibration = value; break; }
+  }
   const anchor = typeof calibration?.inputTokens === "number" && Number.isFinite(calibration.inputTokens) && calibration.inputTokens > 0
     ? calibration.inputTokens : calibration?.promptEstimate;
   const snapshot = readPromptSnapshot(options.events, options.branchIds) ?? createPromptSnapshot();
   const prompt = { instructions: options.instructions ?? createPromptSnapshot(snapshot.source).instructions, tools: options.tools ?? PROMPT_TOOLS, messages };
   const fixedEstimate = estimatePromptInput(prompt) - currentEstimate;
-  const estimated = Math.ceil(anchor && calibration?.baseEstimate
+  const estimated = Math.max(0, Math.ceil(anchor && calibration?.baseEstimate
     ? anchor + currentEstimate - calibration.baseEstimate + (calibration.fixedEstimate !== undefined ? fixedEstimate - calibration.fixedEstimate : 0)
-    : estimatePromptInput(prompt));
+    : estimatePromptInput(prompt)));
   return { limit, estimated, threshold: Math.floor(inputBudget(limit) * 0.8), messages };
 }
 
@@ -234,8 +252,10 @@ async function generateSummary(messages: ModelMessage[], languageModel: Language
 export class ContextCompactor {
   prompt?: PromptSnapshot;
   private calibration?: EstimateCalibration;
-  private usageRecorded = false;
   private baseEstimate?: number;
+  private baseCount = 0;
+  private baseDigest = "";
+  private modelDigest = "";
   private contextVersion = 0;
   private warned = false;
   private events?: LogEvent[];
@@ -247,22 +267,30 @@ export class ContextCompactor {
   }) { this.prompt = options.prompt; }
 
   recordPrompt(prompt: { instructions?: unknown; messages: readonly ModelMessage[]; tools?: readonly Record<string, unknown>[] }): void {
-    if (this.calibration) return;
+    const promptEstimate = this.estimate(prompt.messages, prompt);
     this.calibration = {
       branchIds: this.options.branchIds,
       contextVersion: this.contextVersion,
+      modelDigest: this.modelDigest,
+      baseCount: this.baseCount,
+      baseDigest: this.baseDigest,
       baseEstimate: this.baseEstimate ?? estimateInput(prompt.messages),
-      promptEstimate: estimatePromptInput(prompt),
+      promptEstimate,
       fixedEstimate: estimatePromptInput(prompt) - estimateInput(prompt.messages),
     };
     void this.options.logger.append({ type: "context.estimate.calibrated", conversationId: this.options.conversationId, content: this.calibration });
   }
 
   recordUsage(inputTokens: number | undefined, stepNumber: number): void {
-    if (!inputTokens || !this.calibration || this.usageRecorded) return;
-    this.usageRecorded = true;
+    if (!inputTokens || !this.calibration) return;
     this.calibration = { ...this.calibration, inputTokens };
     void this.options.logger.append({ type: "context.estimate.calibrated", conversationId: this.options.conversationId, content: { ...this.calibration, stepNumber } });
+  }
+
+  async recordBase(messages: readonly ModelMessage[]): Promise<void> {
+    this.baseEstimate = estimateInput(messages);
+    this.baseCount = messages.length;
+    this.baseDigest = await digest(messages);
   }
 
   estimate(messages: readonly ModelMessage[], prompt?: {
@@ -294,8 +322,9 @@ export class ContextCompactor {
     this.prompt = checkpoint?.prompt ?? this.prompt;
     this.contextVersion = checkpoint?.eventId ?? 0;
     this.calibration = undefined;
-    this.usageRecorded = false;
     this.baseEstimate = estimateInput(messages);
+    this.baseCount = messages.length;
+    [this.baseDigest, this.modelDigest] = await Promise.all([digest(messages), modelDigest(model)]);
     this.compactedBaseEstimate = this.baseEstimate;
     return messages;
   }
@@ -314,6 +343,8 @@ export class ContextCompactor {
     this.prompt = this.prompt ?? readPromptSnapshot(this.events, branchIds);
     this.contextVersion = checkpoint?.eventId ?? 0;
     this.baseEstimate = estimateInput(messages);
+    this.baseCount = messages.length;
+    [this.baseDigest, this.modelDigest] = await Promise.all([digest(messages), modelDigest(model)]);
     this.compactedBaseEstimate = checkpoint ? this.baseEstimate : undefined;
     return messages === rawMessages ? undefined : messages;
   }

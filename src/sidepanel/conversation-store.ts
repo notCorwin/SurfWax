@@ -104,6 +104,7 @@ export class ConversationStore {
   }
   private updateThread(update: Partial<ThreadState>) { this.publish({ thread: { ...this.state.thread, ...update } }); }
   private display(messages: SidePanelMessage[], liveId?: string) {
+    messages = messages.filter((message) => message.metadata?.custom?.pageRefresh !== true);
     const siblings = new Map<string | null, string[]>();
     const parents = new Map<string, string | null>();
     for (const { parentId, message } of this.repository.messages) {
@@ -281,9 +282,8 @@ export class ConversationStore {
         .filter((event) => event.type === "conversation.failed").map((event) => event.id));
       controller.signal.throwIfAborted();
       const modelMessages = messages.filter((message) => !isSyntheticTerminalMessage(message));
-      const response = await this.transport(id).sendMessages({ trigger, chatId: id, messages: modelMessages, abortSignal: controller.signal,
-        onMessage: (message) => { if (!controller.signal.aborted) this.display([...messages, message], message.id); } });
-      if (!controller.signal.aborted) this.display([...messages, response], response.id);
+      await this.transport(id).sendMessages({ trigger, chatId: id, messages: modelMessages, abortSignal: controller.signal,
+        onMessage: (message, prior = []) => { if (!controller.signal.aborted) this.display([...messages, ...prior, message], message.id); } });
     } catch (error) { if (!controller.signal.aborted) failure = error; }
     finally {
       let restoredEvents: LogEvent[] = [];
