@@ -139,14 +139,29 @@ for (const scenario of [
     }
     for (const [name, code] of Object.entries(values)) await desk.getByLabel(name + ' code', {exact:true}).fill(code);
     await desk.getByRole('button', {name:'Submit codes'}).click(); return 'done';` },
+  { name: "userscript-repair", code: `
+    const script = await browser.scripts.read('record-stamp');
+    if (script.enabled) throw new Error('Expected a disabled script');
+    await browser.scripts.edit('record-stamp', {allFrames:true, js:[{code:"document.documentElement.dataset.stamp = document.body.dataset.expectedStamp;"}]});
+    await browser.scripts.setEnabled('record-stamp', true);
+    const frame = page.frameLocator('iframe[title="Record"]');
+    for (const name of ['Atlas','Birch','Coral','Drift','Elm','Finch','Grove','Harbor']) {
+      await page.getByRole('button', {name:'Open ' + name, exact:true}).click();
+      await frame.getByRole('heading', {name:name + ' record', exact:true}).waitFor();
+      await frame.locator('#stamp').filter({hasText:'Ready'}).waitFor();
+    }
+    await page.getByRole('button', {name:'Submit records'}).click();
+    return 'done';` },
 ]) test(`real-model entry grades the local scripted ${scenario.name} level`, async () => {
   test.setTimeout(120_000);
   const responses: MockResponse[] = [];
   let jobId = "", polls = 0;
+  let lastToolResult: unknown;
   const afterTool: MockResponse = (request) => {
     const message = request.messages.findLast((entry: any) => entry.role === "tool");
     if (!message) { responses.unshift(afterTool); return textResponse("Title"); }
     const result = JSON.parse(message.content);
+    lastToolResult = result;
     if (result.accepted && result.complete === false || result.terminal === false) {
       jobId = result.jobId ?? jobId;
       responses.unshift(afterTool);
@@ -167,16 +182,22 @@ for (const scenario of [
       await runHarness(provider.baseURL, directory, scenario.name, 90_000, suiteEnv);
     } catch (error) {
       const failedReport = await readReport(directory).catch(() => null);
-      throw new Error(`Harness failed: ${JSON.stringify(failedReport)}\n${(error as { stdout?: string }).stdout ?? ""}`, { cause: error });
+      throw new Error(`Harness failed: ${JSON.stringify(failedReport)}\nTool result: ${JSON.stringify(lastToolResult)}\n${(error as { stdout?: string }).stdout ?? ""}`, { cause: error });
     }
     const report = await readReport(directory);
     expect(report).toMatchObject({ scenario: scenario.name, outcome: "conversation.finished", businessVerified: true,
       networkSettled: true, toolsWithExactlyOneTerminal: true });
     if (scenario.name === "rolling-queue") expect(report).toMatchObject({ interactionApplicable: true, interactionVerified: true, classification: "passed" });
+    if (scenario.name === "userscript-repair") {
+      expect(report.completedProgramOperations["scripts.edit"]).toBeGreaterThan(0);
+      expect(report.completedProgramOperations["scripts.setEnabled"]).toBeGreaterThan(0);
+    }
     if (scenario.name === "network-identity") {
       expect(report.completedProgramOperations["net.responseBody"]).toBe(6);
       expect(report.extensionBuild).toMatchObject({ sha256: expect.stringMatching(/^[a-f0-9]{64}$/), files: expect.any(Number), manifestVersion: 3 });
       expect(report.extensionBuildStable).toBe(true);
+      expect(report.evaluationSource).toMatchObject({ sha256: expect.stringMatching(/^[a-f0-9]{64}$/), files: expect.any(Number) });
+      expect(report.evaluationSourceStable).toBe(true);
       expect(report.lockfileSha256).toMatch(/^[a-f0-9]{64}$/);
       expect(report.deadlineState).toBe("on_time");
       expect(report.taskDeadlineAt - report.taskStartedAt).toBe(90_000);

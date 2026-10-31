@@ -44,7 +44,7 @@ const metrics = ["inputTokens", "outputTokens", "totalTokens", "cachedInputToken
 const availableScenarios = new Set<string>(SCENARIOS);
 type Metric = typeof metrics[number];
 type Totals = Record<Metric, number | null>;
-type Environment = { extensionBuildSha256: string | null; lockfileSha256: string | null; browser: string | null; stable: boolean | null };
+type Environment = { extensionBuildSha256: string | null; evaluationSourceSha256: string | null; lockfileSha256: string | null; browser: string | null; stable: boolean | null; evaluationStable: boolean | null };
 
 function optionalHash(value: unknown): string | null {
   if (value === undefined || value === null) return null;
@@ -58,10 +58,16 @@ function environmentEvidence(value: Record<string, unknown>): Environment {
   if (build !== undefined && build !== null && !isRecord(build)) throw new Error("Invalid extension build evidence");
   const stable = value.extensionBuildStable;
   if (stable !== undefined && !triState(stable)) throw new Error("Invalid extension stability evidence");
+  const source = value.evaluationSource;
+  if (source !== undefined && source !== null && !isRecord(source)) throw new Error("Invalid evaluation source evidence");
+  const evaluationStable = value.evaluationSourceStable;
+  if (evaluationStable !== undefined && !triState(evaluationStable)) throw new Error("Invalid evaluation stability evidence");
   const browser = value.browser;
   if (browser !== undefined && browser !== null && !identity(browser)) throw new Error("Invalid browser evidence");
   return { extensionBuildSha256: isRecord(build) ? optionalHash(build.sha256) : null,
-    lockfileSha256: optionalHash(value.lockfileSha256), browser: typeof browser === "string" ? browser : null, stable: stable ?? null };
+    evaluationSourceSha256: isRecord(source) ? optionalHash(source.sha256) : null,
+    lockfileSha256: optionalHash(value.lockfileSha256), browser: typeof browser === "string" ? browser : null,
+    stable: stable ?? null, evaluationStable: evaluationStable ?? null };
 }
 
 /** Canonicalize a plan before any run. This function does not access a provider. */
@@ -151,7 +157,7 @@ export function aggregateSuiteReports(manifest: SuiteManifest, reports: readonly
   const counts = { total: canonical.samples.length, passed: 0, failed: 0, unknown: 0, timedOut: 0, missing: 0 };
   const totals = Object.fromEntries(metrics.map((metric) => [metric, 0])) as Totals;
   const unknownUsage = Object.fromEntries(metrics.map((metric) => [metric, 0])) as Record<Metric, number>;
-  const groups = new Map<string, { extensionBuildSha256: string; lockfileSha256: string; browser: string; sampleIds: string[]; unstableSamples: number; unknownStabilitySamples: number }>();
+  const groups = new Map<string, { extensionBuildSha256: string; evaluationSourceSha256: string; lockfileSha256: string; browser: string; sampleIds: string[]; unstableSamples: number; unknownStabilitySamples: number }>();
   let unknownEnvironmentSamples = 0, unstableEnvironmentSamples = 0;
   const samples = canonical.samples.map((sample) => {
     const result = results.get(sample.id);
@@ -164,15 +170,15 @@ export function aggregateSuiteReports(manifest: SuiteManifest, reports: readonly
     counts[result.classification]++;
     if (result.outcome === "timed_out") counts.timedOut++;
     const env = result.environment;
-    if (env.stable === false) unstableEnvironmentSamples++;
-    if (env.stable === null || !env.extensionBuildSha256 || !env.lockfileSha256 || !env.browser) unknownEnvironmentSamples++;
-    if (env.extensionBuildSha256 && env.lockfileSha256 && env.browser) {
-      const key = JSON.stringify([env.extensionBuildSha256, env.lockfileSha256, env.browser]);
-      const group = groups.get(key) ?? { extensionBuildSha256: env.extensionBuildSha256, lockfileSha256: env.lockfileSha256,
+    if (env.stable === false || env.evaluationStable === false) unstableEnvironmentSamples++;
+    if (env.stable === null || env.evaluationStable === null || !env.extensionBuildSha256 || !env.evaluationSourceSha256 || !env.lockfileSha256 || !env.browser) unknownEnvironmentSamples++;
+    if (env.extensionBuildSha256 && env.evaluationSourceSha256 && env.lockfileSha256 && env.browser) {
+      const key = JSON.stringify([env.extensionBuildSha256, env.evaluationSourceSha256, env.lockfileSha256, env.browser]);
+      const group = groups.get(key) ?? { extensionBuildSha256: env.extensionBuildSha256, evaluationSourceSha256: env.evaluationSourceSha256, lockfileSha256: env.lockfileSha256,
         browser: env.browser, sampleIds: [], unstableSamples: 0, unknownStabilitySamples: 0 };
       group.sampleIds.push(sample.id);
-      if (env.stable === false) group.unstableSamples++;
-      if (env.stable === null) group.unknownStabilitySamples++;
+      if (env.stable === false || env.evaluationStable === false) group.unstableSamples++;
+      if (env.stable === null || env.evaluationStable === null) group.unknownStabilitySamples++;
       groups.set(key, group);
     }
     for (const metric of metrics) {
@@ -189,7 +195,7 @@ export function aggregateSuiteReports(manifest: SuiteManifest, reports: readonly
   const comparable = unstableEnvironmentSamples > 0 || groups.size > 1 ? false
     : unknownEnvironmentSamples > 0 || canonical.samples.length < 2 ? null : true;
   return { planHash: canonical.planHash, counts, usage: { totals, unknownSamples: unknownUsage },
-    environment: { comparable, scope: "extension-build-lockfile-browser-only" as const,
+    environment: { comparable, scope: "extension-evaluation-source-lockfile-browser-only" as const,
       groups: [...groups.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([, group]) => group),
       unknownSamples: unknownEnvironmentSamples, unstableSamples: unstableEnvironmentSamples }, samples };
 }

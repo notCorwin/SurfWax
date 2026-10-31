@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect } from "@playwright/test";
-import { test, openExtension, dispose, configure, readEvents, closeServer } from "./fixtures";
+import { test, openExtension, dispose, configure, readEvents, closeServer, enableUserScripts } from "./fixtures";
 import { modelProxy, usageEvidence } from "./evaluation/model-proxy";
 import { businessScore, orderFixture } from "./evaluation/order-fixture";
 import { claimsFixture, claimsScore } from "./evaluation/claims-fixture";
@@ -17,6 +17,7 @@ import { manifestFixture, manifestScore } from "./evaluation/manifest-fixture";
 import { rollingFixture, rollingInteractionScore, rollingScore } from "./evaluation/rolling-fixture";
 import { chooserPromptFixture, chooserPromptScore } from "./evaluation/chooser-prompt-fixture";
 import { networkFixture, networkScore } from "./evaluation/network-level-fixture";
+import { userscriptFixture, userscriptScore, type UserscriptFixture, type RegistryEvidence } from "./evaluation/userscript-level-fixture";
 import { trackFixtureRequests } from "./evaluation/network-quiescence";
 import { trackServerResponses, type ServerActivity } from "./evaluation/server-quiescence";
 import { waitForEvaluationQuiescence } from "./evaluation/quiescence";
@@ -24,7 +25,7 @@ import { completedProgramOperations, toolLifecycleEvidence } from "./evaluation/
 import { evaluateResultEvidence } from "./evaluation/result-evidence";
 import { deadlineEvidence } from "./evaluation/deadline-evidence";
 import { SCENARIOS } from "./evaluation/scenarios";
-import { buildFingerprint, fileFingerprint, type BuildFingerprint } from "./evaluation/build-fingerprint";
+import { buildFingerprint, evaluationFingerprint, fileFingerprint, type BuildFingerprint } from "./evaluation/build-fingerprint";
 
 test.use({ trace: "off", screenshot: "off", video: "off" });
 
@@ -60,7 +61,8 @@ test("@real-model browser task", async () => {
   const order = `ORDER-${seed}`;
   const started = Date.now();
   const proxy = await modelProxy(upstream, key);
-  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | Awaited<ReturnType<typeof uploadFixture>> | Awaited<ReturnType<typeof pointerFixture>> | Awaited<ReturnType<typeof recoveryFixture>> | Awaited<ReturnType<typeof multitabFixture>> | Awaited<ReturnType<typeof manifestFixture>> | Awaited<ReturnType<typeof rollingFixture>> | Awaited<ReturnType<typeof chooserPromptFixture>> | Awaited<ReturnType<typeof networkFixture>> | undefined;
+  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | Awaited<ReturnType<typeof uploadFixture>> | Awaited<ReturnType<typeof pointerFixture>> | Awaited<ReturnType<typeof recoveryFixture>> | Awaited<ReturnType<typeof multitabFixture>> | Awaited<ReturnType<typeof manifestFixture>> | Awaited<ReturnType<typeof rollingFixture>> | Awaited<ReturnType<typeof chooserPromptFixture>> | Awaited<ReturnType<typeof networkFixture>> | UserscriptFixture | undefined;
+  let scriptLevel: UserscriptFixture | undefined, scriptRegistry: RegistryEvidence | null = null;
   let opened: Awaited<ReturnType<typeof openExtension>> | undefined;
   let events: any[] = [], outcome = "setup_failed", business: boolean | null = null, interaction: boolean | null = null;
   const interactionApplicable = scenario === "sequence-editor" || scenario === "pointer-drag" || scenario === "rolling-queue";
@@ -74,11 +76,16 @@ test("@real-model browser task", async () => {
   let browserProduct: string | null = null;
   const extensionDirectory = resolve(process.env.SURFWAX_EXTENSION_PATH ?? "dist");
   let extensionBuild: BuildFingerprint | null = null, lockfileSha256: string | null = null;
+  let evaluationSource: Awaited<ReturnType<typeof evaluationFingerprint>> | null = null;
   try {
+    evaluationSource = await evaluationFingerprint(resolve(".")).catch(() => null);
     let prompt: string;
-    let grade: () => boolean;
+    let grade: () => boolean | null;
     let gradeInteraction: (() => boolean) | undefined;
-    if (scenario === "network-identity") {
+    if (scenario === "userscript-repair") {
+      scriptLevel = await userscriptFixture(seed); fixture = scriptLevel; prompt = scriptLevel.prompt;
+      grade = () => scriptRegistry && scriptLevel ? userscriptScore(scriptLevel.evidence(), scriptRegistry, scriptLevel.preset) : null;
+    } else if (scenario === "network-identity") {
       const network = await networkFixture(seed); fixture = network; prompt = network.prompt;
       grade = () => networkScore(network.evidence());
     } else if (scenario === "chooser-prompt") {
@@ -124,6 +131,12 @@ test("@real-model browser task", async () => {
       buildFingerprint(extensionDirectory).catch(() => null), fileFingerprint(resolve("package-lock.json")).catch(() => null),
     ]);
     opened = await openExtension();
+    if (scriptLevel) {
+      await enableUserScripts(opened.context, opened.extensionId, opened.page);
+      await opened.page.evaluate(async ({ target, decoy }) => chrome.storage.local.set({
+        "side-agent:user-scripts": [], "side-agent:user-scripts-disabled": [target, decoy],
+      }), scriptLevel.preset);
+    }
     // The extension handles dialogs; Playwright must not auto-dismiss them.
     opened.context.on("page", (page) => page.on("dialog", () => {}));
     const alternateOrigin = new URL(fixture.origin);
@@ -132,7 +145,7 @@ test("@real-model browser task", async () => {
     const target = await opened.context.newPage();
     await target.goto(fixture.origin);
     const frame = target.frames().find((item) => item.url().includes("localhost"));
-    if (!frame) throw new Error("Fixture frame missing");
+    if (!frame && !scriptLevel) throw new Error("Fixture frame missing");
     const options = await configure(opened.context, opened.page, proxy.baseURL);
     await options.getByLabel("Model ID", { exact: true }).fill(model);
     await options.getByLabel("API Key", { exact: true }).fill(proxy.token);
@@ -167,6 +180,13 @@ test("@real-model browser task", async () => {
     logComplete = observed.logTerminalPresent;
     outcome = observed.state === "on_time" ? observed.terminal! : observed.state === "unknown" ? "terminal_time_unknown" : "timed_out";
     browserProduct = await opened.context.newCDPSession(opened.page).then((session) => session.send("Browser.getVersion")).then((version) => version.product).catch(() => null);
+    if (scriptLevel) scriptRegistry = await opened.page.evaluate(async () => {
+      const registered = await chrome.userScripts.getScripts();
+      const values = await chrome.storage.local.get(["side-agent:user-scripts", "side-agent:user-scripts-disabled"]);
+      const active = values["side-agent:user-scripts"], disabled = values["side-agent:user-scripts-disabled"];
+      if (!Array.isArray(active) || !Array.isArray(disabled)) throw new Error("Script state unavailable");
+      return { registered, active, disabled };
+    }).catch(() => null);
     // Stop page timers and drain all server requests before reading the ledger.
     // Otherwise a delayed effect can arrive after the score has been decided.
     await opened.context.close();
@@ -185,6 +205,8 @@ test("@real-model browser task", async () => {
     serverTracker?.dispose();
     const extensionBuildAfter = extensionBuild ? await buildFingerprint(extensionDirectory).catch(() => null) : null;
     const extensionBuildStable = extensionBuild && extensionBuildAfter ? extensionBuild.sha256 === extensionBuildAfter.sha256 : null;
+    const evaluationSourceAfter = evaluationSource ? await evaluationFingerprint(resolve(".")).catch(() => null) : null;
+    const evaluationSourceStable = evaluationSource && evaluationSourceAfter ? evaluationSource.sha256 === evaluationSourceAfter.sha256 : null;
     if (opened) events = await readEvents(opened.page).catch(() => events);
     const head = (() => { try { return execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(); } catch { return null; } })();
     const dirty = (() => { try { return !!execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim(); } catch { return null; } })();
@@ -201,7 +223,7 @@ test("@real-model browser task", async () => {
       return counts;
     }, {});
     const report = { scenario, seed, provider: providerName, model, suiteIdentity, gitHead: head, gitDirty: dirty, browser: browserProduct ?? browser?.product ?? null,
-      extensionBuild, extensionBuildStable, lockfileSha256,
+      extensionBuild, extensionBuildStable, evaluationSource, evaluationSourceStable, lockfileSha256,
       outcome, ...result, taskTimeoutMs, taskStartedAt, taskDeadlineAt, terminalTimestamp, deadlineState,
       networkSettled, ledgerDrained, logComplete, serverActivity, elapsedMs: Date.now() - started, providerUsageByStep: usageEvidence(events),
       requests: proxy.requests, requestBytes: proxy.requests.reduce((sum, request) => sum + request.bytes, 0),

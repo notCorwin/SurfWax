@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readdir, readFile } from "node:fs/promises";
+import { lstat, readdir, readFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 
 export interface BuildFingerprint {
@@ -39,4 +39,29 @@ export async function buildFingerprint(directory: string): Promise<BuildFingerpr
 
 export async function fileFingerprint(path: string): Promise<string> {
   return createHash("sha256").update(await readFile(path)).digest("hex");
+}
+
+/** Hash the evaluator sources, separately from the extension under test. */
+export async function evaluationFingerprint(root: string): Promise<{ sha256: string; files: number }> {
+  const paths = ["e2e/real-model-evaluation.spec.ts", "e2e/fixtures.ts", "playwright.config.ts",
+    "src/logging.ts", "src/log-graph.ts", "src/artifact-graph.ts"];
+  const walk = async (parent: string): Promise<void> => {
+    for (const entry of await readdir(join(root, parent), { withFileTypes: true })) {
+      const path = `${parent}/${entry.name}`;
+      if (entry.isSymbolicLink()) throw new Error("Evaluation sources contain a symbolic link");
+      if (entry.isDirectory()) await walk(path);
+      else if (entry.isFile() && path.endsWith(".ts") && !path.endsWith(".spec.ts")) paths.push(path);
+      else if (!entry.isFile()) throw new Error("Evaluation sources contain a non-file entry");
+    }
+  };
+  await walk("e2e/evaluation");
+  if (paths.length === 6) throw new Error("Evaluation sources missing");
+  paths.sort();
+  const items = await Promise.all(paths.map(async (path) => {
+    const file = join(root, path);
+    if (!(await lstat(file)).isFile()) throw new Error("Evaluation source is not a regular file");
+    const bytes = await readFile(file);
+    return [path, bytes.length, createHash("sha256").update(bytes).digest("hex")];
+  }));
+  return { sha256: createHash("sha256").update(JSON.stringify(items)).digest("hex"), files: items.length };
 }

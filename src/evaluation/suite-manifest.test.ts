@@ -5,7 +5,7 @@ import { evaluateResultEvidence } from "../../e2e/evaluation/result-evidence";
 
 const plan = (): SuitePlan => ({ version: 1, provider: "local-mock", model: "test/model", scenarios: ["rolling-queue", "long-manifest"], seeds: [73, 17], repeats: 2, timeoutMs: 30000 });
 const usage = (input: number | null, output: number | null) => [{ inputTokens: input, outputTokens: output, totalTokens: input === null || output === null ? null : input + output, cachedInputTokens: null, reasoningTokens: null }];
-const build = "a".repeat(64), lockfile = "b".repeat(64), browser = "Chrome/151.0.7922.34";
+const build = "a".repeat(64), lockfile = "b".repeat(64), evaluation = "e".repeat(64), browser = "Chrome/151.0.7922.34";
 
 function report(manifest: ReturnType<typeof createSuiteManifest>, index: number, changes: Record<string, unknown> = {}): SuiteReport {
   const sample = manifest.samples[index]!;
@@ -18,7 +18,7 @@ function report(manifest: ReturnType<typeof createSuiteManifest>, index: number,
     provider: manifest.plan.provider, model: manifest.plan.model, taskTimeoutMs: manifest.plan.timeoutMs,
     suiteIdentity: { sampleId: sample.id, planHash: manifest.planHash, repeat: sample.repeat },
     outcome, networkSettled: true, ledgerDrained: true, logComplete: true, ...result,
-    extensionBuild: { sha256: build }, extensionBuildStable: true, lockfileSha256: lockfile, browser,
+    extensionBuild: { sha256: build }, extensionBuildStable: true, evaluationSource: { sha256: evaluation }, evaluationSourceStable: true, lockfileSha256: lockfile, browser,
     providerUsageByStep: usage(10, 3), ...changes } };
 }
 
@@ -84,9 +84,9 @@ describe("offline benchmark suite manifest", () => {
     const first = report(manifest, 0), second = report(manifest, 1);
     const matching = aggregateSuiteReports(manifest, [first, second]);
     expect(matching.counts).toMatchObject({ total: 2, passed: 2 });
-    expect(matching.environment).toMatchObject({ comparable: true, scope: "extension-build-lockfile-browser-only", unknownSamples: 0, unstableSamples: 0,
-      groups: [{ extensionBuildSha256: build, lockfileSha256: lockfile, browser, sampleIds: manifest.samples.map((sample) => sample.id) }] });
-    for (const changes of [{ extensionBuild: { sha256: "c".repeat(64) } }, { lockfileSha256: "d".repeat(64) }, { browser: "Chrome/150" }]) {
+    expect(matching.environment).toMatchObject({ comparable: true, scope: "extension-evaluation-source-lockfile-browser-only", unknownSamples: 0, unstableSamples: 0,
+      groups: [{ extensionBuildSha256: build, evaluationSourceSha256: evaluation, lockfileSha256: lockfile, browser, sampleIds: manifest.samples.map((sample) => sample.id) }] });
+    for (const changes of [{ extensionBuild: { sha256: "c".repeat(64) } }, { evaluationSource: { sha256: "f".repeat(64) } }, { lockfileSha256: "d".repeat(64) }, { browser: "Chrome/150" }]) {
       const mixed = aggregateSuiteReports(manifest, [first, report(manifest, 1, changes)]);
       expect(mixed.environment).toMatchObject({ comparable: false, unknownSamples: 0, unstableSamples: 0 });
       expect(mixed.environment.groups).toHaveLength(2);
@@ -96,12 +96,14 @@ describe("offline benchmark suite manifest", () => {
     expect(unstable.environment).toMatchObject({ comparable: false, unknownSamples: 0, unstableSamples: 1,
       groups: [{ unstableSamples: 1 }] });
     expect(unstable.counts).toEqual(matching.counts);
+    expect(aggregateSuiteReports(manifest, [first, report(manifest, 1, { evaluationSourceStable: false })]).environment)
+      .toMatchObject({ comparable: false, unstableSamples: 1, groups: [{ unstableSamples: 1 }] });
   });
 
   it("reports unknown environment identity without treating absence as a match", () => {
     const manifest = createSuiteManifest({ ...plan(), scenarios: ["rolling-queue"], seeds: [17], repeats: 2 });
     const first = report(manifest, 0);
-    for (const changes of [{ extensionBuild: null }, { extensionBuild: {} }, { extensionBuildStable: null }, { lockfileSha256: null }, { browser: null }]) {
+    for (const changes of [{ extensionBuild: null }, { extensionBuild: {} }, { extensionBuildStable: null }, { evaluationSource: null }, { evaluationSource: {} }, { evaluationSourceStable: null }, { lockfileSha256: null }, { browser: null }]) {
       const result = aggregateSuiteReports(manifest, [first, report(manifest, 1, changes)]);
       expect(result.environment).toMatchObject({ comparable: null, unknownSamples: 1, unstableSamples: 0 });
       expect(result.counts).toMatchObject({ total: 2, passed: 2 });
