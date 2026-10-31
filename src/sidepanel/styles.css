@@ -69,7 +69,7 @@ p {
 }
 
 .conversation-dropdown {
-  width: min(calc(100vw - var(--spacing) * 6), 24rem);
+  width: calc(100vw - var(--spacing) * 6);
   max-height: min(calc(var(--spacing) * 128), var(--radix-popover-content-available-height));
   border-radius: var(--radius-panel);
   overscroll-behavior: contain;
