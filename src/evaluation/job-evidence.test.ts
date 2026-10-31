@@ -189,3 +189,55 @@ it("keeps uncertain tool failures unknown even when no job state is recorded", (
     business: true, interaction: { applicable: false }, lifecycle, jobsSettled: browserJobsSettled(events) }))
     .toMatchObject({ classification: "unknown", passed: false, reasons: ["jobs_unknown"] });
 });
+
+it("requires canonical terminal evidence for a foreground job that failed", () => {
+  const owner = { conversationId: "c", runId: "r", toolCallId: "t" };
+  const error = { code: "execution-failed", message: "Known failure", retryable: false };
+  const output = { jobId: "j", ok: false, state: "failed", error };
+  const failure = { id: 3, type: "tool.failed", ...owner, content: { toolName: "execute_program" }, output, error };
+  const job = { id: 4, type: "browser.job.state", ...owner, content: { jobId: "j", state: "failed" }, output: { ok: false, error } };
+  expect(browserJobsSettled([failure])).toBeNull();
+  expect(browserJobsSettled([failure, job])).toBe(true);
+  expect(browserJobsSettled([failure, { ...job, content: { jobId: "j", state: "succeeded" } }])).toBeNull();
+  expect(browserJobsSettled([failure, { ...job, output: { ok: false, error: { ...error, code: "different" } } }])).toBeNull();
+  expect(browserJobsSettled([{ ...failure, error: { ...error, message: "different" } }, job])).toBeNull();
+  expect(browserJobsSettled([failure, { ...job, toolCallId: "other" }])).toBeNull();
+  expect(browserJobsSettled([failure, { ...job, conversationId: "other" }])).toBeNull();
+  expect(browserJobsSettled([{ ...failure, output: { ...output, jobId: 7 } }, job])).toBeNull();
+  expect(browserJobsSettled([{ ...failure, output: { ...output, state: "succeeded" } }, job])).toBeNull();
+  expect(browserJobsSettled([{ ...failure, output: { ok: false, state: "failed", error } }])).toBeNull();
+  expect(browserJobsSettled([{ ...failure, content: undefined }, job])).toBeNull();
+  expect(browserJobsSettled([{ ...failure, output: { ...output, envelopeWrapped: true, result: { jobId: "other" } } }, job])).toBeNull();
+  // A failure before job creation can still have a known outcome.
+  expect(browserJobsSettled([{ ...failure, output: { ok: false, error } }])).toBe(true);
+  const encoded = { ...failure, valueEncoding: 5, content: toLogValue(failure.content, undefined, 5), output: toLogValue(output, undefined, 5), error: toLogValue(error, undefined, 5) };
+  expect(browserJobsSettled([encoded])).toBeNull();
+  expect(browserJobsSettled([encoded, job])).toBe(true);
+  const events = [
+    { id: 1, type: "conversation.message", conversationId: "c", runId: "r", content: { id: "m", role: "assistant", parts: [{ type: "tool-execute_program", toolCallId: "t" }] } },
+    { id: 2, type: "tool.started", ...owner }, failure,
+  ];
+  const lifecycle = toolLifecycleEvidence(events).complete;
+  expect(lifecycle).toBe(true);
+  expect(evaluateResultEvidence({ outcome: "conversation.finished", networkSettled: true, ledgerDrained: true, logComplete: true,
+    business: true, interaction: { applicable: false }, lifecycle, jobsSettled: browserJobsSettled(events) }))
+    .toMatchObject({ classification: "unknown", passed: false, reasons: ["jobs_unknown"] });
+});
+
+it("correlates compressed failed job results without confusing pre-dispatch errors", () => {
+  const owner = { conversationId: "c", runId: "r", toolCallId: "t" };
+  const error = { code: "execution-failed", message: "Known failure" };
+  const tool = { id: 5, type: "tool.failed", ...owner, content: { toolName: "execute_program" }, output: { ok: false, error, $ref: 2 }, error };
+  const artifact = { id: 2, type: "tool.result.data", ...owner, content: { bytes: 9000 }, output: { jobId: "j", ok: false, state: "failed", error } };
+  const job = { id: 4, type: "browser.job.state", ...owner, content: { jobId: "j", state: "failed" }, output: { ok: false, error } };
+  expect(browserJobsSettled([tool])).toBeNull();
+  expect(browserJobsSettled([tool, artifact])).toBeNull();
+  expect(browserJobsSettled([tool, artifact, job])).toBe(true);
+  expect(browserJobsSettled([tool, { ...artifact, runId: "other" }, job])).toBeNull();
+  const graph = { ...artifact, output: null, artifactGraph: { version: 1, key: "parts", root: [1, 0] } };
+  expect(browserJobsSettled([tool, graph, job])).toBe(true);
+  expect(browserJobsSettled([tool, graph])).toBeNull();
+  expect(browserJobsSettled([tool, graph, job, { ...job, id: 6, content: { jobId: "other", state: "failed" } }])).toBeNull();
+  expect(browserJobsSettled([tool, graph, { ...job, content: { jobId: "j", state: "succeeded" } }])).toBeNull();
+  expect(browserJobsSettled([tool, graph, { ...job, output: { ok: false, error: { ...error, message: "different" } } }])).toBeNull();
+});

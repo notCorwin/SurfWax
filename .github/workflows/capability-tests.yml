@@ -109,6 +109,7 @@ jobs:
           e2e/cancel-recovery-tools.spec.ts
           e2e/chooser-prompt-tools.spec.ts
           e2e/dispatch-tools.spec.ts
+          e2e/failed-job-evidence.spec.ts
           e2e/manifest-tools.spec.ts
           e2e/multitab-tools.spec.ts
           e2e/network-context-tools.spec.ts
@@ -123,7 +124,7 @@ jobs:
           e2e/semantic-alternative-path.spec.ts
           e2e/real-model-harness.spec.ts
           e2e/rendering.spec.ts
-          --grep 'artifact-handoff|cancel-recovery|chooser-prompt-tools|dispatch-tools|manifest-tools|multitab-tools|network-context|network-level-tools|recovery-tools|rolling-tools|upload-tools|upload-job-evidence|claims-fixture|closed-event-fixture|semantic-delta-fixture|claims-queue-tools|closed-event-tools|semantic-delta-tools|semantic-alternative-path|local scripted semantic-delta|local scripted userscript-repair|local scripted binary-transfer|local scripted frame-replacement|local scripted window-transfer|a completed order with an unfinished background job|renders a complete Markdown response'
+          --grep 'artifact-handoff|cancel-recovery|chooser-prompt-tools|dispatch-tools|failed-job-evidence|manifest-tools|multitab-tools|network-context|network-level-tools|recovery-tools|rolling-tools|upload-tools|upload-job-evidence|claims-fixture|closed-event-fixture|semantic-delta-fixture|claims-queue-tools|closed-event-tools|semantic-delta-tools|semantic-alternative-path|local scripted semantic-delta|local scripted userscript-repair|local scripted binary-transfer|local scripted frame-replacement|local scripted window-transfer|a completed order with an unfinished background job|renders a complete Markdown response'
           --project=current --shard=${{ matrix.shard }}/2 --workers=1 --retries=0 --reporter=list,html
       - name: Save browser reports on failure
         if: failure()

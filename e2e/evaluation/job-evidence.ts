@@ -6,6 +6,7 @@ import { ATOMIC_TOOL_REGISTRY } from "../../src/chrome/atomic-tools";
 const directTools = new Set(["list_tabs", "switch_tab", "read_artifact", "upload_file"]);
 const programTools = new Set(["execute_program", ...ATOMIC_TOOL_REGISTRY.map(({ name }) => name).filter((name) => !directTools.has(name))]);
 type Event = { id?: unknown; type?: unknown; conversationId?: unknown; runId?: unknown; toolCallId?: unknown; content?: unknown; input?: unknown; output?: unknown; error?: unknown; valueEncoding?: unknown; artifactGraph?: unknown };
+type Failure = { code: string; message: string };
 
 function decode(value: unknown, encoding: unknown): unknown {
   if (encoding !== undefined && ![2, 3, 4, 5].includes(encoding as number)) throw new Error("Unknown log encoding");
@@ -14,10 +15,10 @@ function decode(value: unknown, encoding: unknown): unknown {
 
 /** Classify whether browser jobs have settled without unknown effects. */
 export function browserJobsSettled(events: readonly Event[]): boolean | null {
-  const states = new Map<string, { id: number; state: string; knownFailure: boolean; toolCallId: unknown }>();
+  const states = new Map<string, { id: number; state: string; knownFailure: boolean; toolCallId: unknown; failure?: Failure }>();
   const handoffs = new Set<string>();
-  const programOwners = new Map<string, { toolCallId: string; terminal: boolean }>();
-  const unresolvedPrograms: Array<{ conversationId: string; runId: string; toolCallId: string }> = [];
+  const programOwners = new Map<string, { toolCallId: string; expected: "succeeded" | "failed" | null; failure?: Failure }>();
+  const unresolvedPrograms: Array<{ conversationId: string; runId: string; toolCallId: string; expected: "succeeded" | "failed"; failure?: Failure }> = [];
   const artifacts = new Map<number, Event | null>();
   for (const event of events) if (event.type === "tool.result.data" && Number.isSafeInteger(event.id) && Number(event.id) > 0) {
     const id = Number(event.id);
@@ -53,6 +54,17 @@ export function browserJobsSettled(events: readonly Event[]): boolean | null {
   };
   const ids = new Set<number>();
   const known = new Set(["queued", "running", "blocked", "succeeded", "failed", "cancelled", "interrupted"]);
+  const recordProgram = (event: Event, id: string, expected: "succeeded" | "failed" | null, failure?: Failure): boolean => {
+    if (typeof event.conversationId !== "string" || !event.conversationId || typeof event.runId !== "string" || !event.runId
+      || typeof event.toolCallId !== "string" || !event.toolCallId) return false;
+    const key = JSON.stringify([event.conversationId, event.runId, id]);
+    const prior = programOwners.get(key);
+    if (prior && (prior.toolCallId !== event.toolCallId || prior.expected && expected && prior.expected !== expected
+      || prior.failure && failure && (prior.failure.code !== failure.code || prior.failure.message !== failure.message))) return false;
+    handoffs.add(key);
+    programOwners.set(key, { toolCallId: event.toolCallId, expected: expected ?? prior?.expected ?? null, failure: failure ?? prior?.failure });
+    return true;
+  };
   for (const event of events) {
     if (event.type === "tool.failed") {
       // A failure can report an unknown effect even if its job events are
@@ -77,6 +89,42 @@ export function browserJobsSettled(events: readonly Event[]): boolean | null {
         const detail = error as Record<string, unknown>;
         if (typeof detail.code !== "string" || !detail.code || typeof detail.message !== "string"
           || detail.effectUnknown !== undefined && detail.effectUnknown !== false) return null;
+      }
+      const first = errors[0] as Failure;
+      if (errors.some((error) => (error as Failure).code !== first.code || (error as Failure).message !== first.message)) return null;
+      const failure = { code: first.code, message: first.message };
+      // A foreground program can fail after a durable job was created. An
+      // error with no job ID can instead arise before dispatch, but a visible
+      // or compacted job ID requires a matching failed terminal state.
+      const toolName = content && typeof content === "object" && !Array.isArray(content) ? (content as Record<string, unknown>).toolName : undefined;
+      if ((Object.hasOwn(record, "jobId") || Object.hasOwn(record, "$ref")) && (typeof toolName !== "string" || !toolName)) return null;
+      let program = typeof toolName === "string" && programTools.has(toolName);
+      if (toolName === "upload_file" && (Object.hasOwn(record, "jobId") || Object.hasOwn(record, "$ref"))) {
+        let input: unknown;
+        try { input = decode(event.input, event.valueEncoding); } catch { return null; }
+        if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+        const { target, chooserId } = input as Record<string, unknown>;
+        if (target && typeof target === "object" && !Array.isArray(target) && chooserId === undefined) program = true;
+        else if (!(typeof chooserId === "string" && !!chooserId && target === undefined)) return null;
+      }
+      if (program) {
+        let id = record.jobId;
+        let state = record.state;
+        if (record.envelopeWrapped === true && record.result && typeof record.result === "object" && !Array.isArray(record.result)) {
+          const wrapped = record.result as Record<string, unknown>, wrappedId = wrapped.jobId;
+          if (id !== undefined && wrappedId !== undefined && id !== wrappedId) return null;
+          if (state !== undefined && wrapped.state !== undefined && state !== wrapped.state) return null;
+          id ??= wrappedId;
+          state ??= wrapped.state;
+        }
+        if (state !== undefined && state !== "failed") return null;
+        if (id === undefined && record.$ref !== undefined) id = artifactJobId(record.$ref, event);
+        if (id === undefined && record.$ref !== undefined) {
+          if (!isOwnedArtifact(record.$ref, event) || typeof event.conversationId !== "string" || !event.conversationId
+            || typeof event.runId !== "string" || !event.runId || typeof event.toolCallId !== "string" || !event.toolCallId) return null;
+          unresolvedPrograms.push({ conversationId: event.conversationId, runId: event.runId, toolCallId: event.toolCallId, expected: "failed", failure });
+        } else if (id !== undefined && (typeof id !== "string" || !id || !recordProgram(event, id, "failed", failure))) return null;
+        else if (id === undefined && (state !== undefined || record.envelopeWrapped === true)) return null;
       }
       continue;
     }
@@ -136,7 +184,7 @@ export function browserJobsSettled(events: readonly Event[]): boolean | null {
           // Partitioned artifacts may not expose their original envelope in
           // event.output. A single job owned by this exact call establishes
           // its identity without materializing the entire large value.
-          unresolvedPrograms.push({ conversationId: event.conversationId, runId: event.runId, toolCallId: event.toolCallId });
+          unresolvedPrograms.push({ conversationId: event.conversationId, runId: event.runId, toolCallId: event.toolCallId, expected: "succeeded" });
         } else {
           if (typeof id !== "string" || !id) return null;
           jobIds.add(id);
@@ -148,10 +196,7 @@ export function browserJobsSettled(events: readonly Event[]): boolean | null {
         const key = JSON.stringify([event.conversationId, event.runId, [...jobIds][0]]);
         handoffs.add(key);
         if (program) {
-          if (typeof event.toolCallId !== "string" || !event.toolCallId) return null;
-          const previous = programOwners.get(key);
-          if (previous && previous.toolCallId !== event.toolCallId) return null;
-          programOwners.set(key, { toolCallId: event.toolCallId, terminal: outer.accepted !== true });
+          if (!recordProgram(event, [...jobIds][0]!, outer.accepted === true ? null : "succeeded")) return null;
         }
       }
       continue;
@@ -166,7 +211,7 @@ export function browserJobsSettled(events: readonly Event[]): boolean | null {
     if (!content || typeof content !== "object" || Array.isArray(content)) return null;
     const { jobId, state } = content as Record<string, unknown>;
     if (typeof jobId !== "string" || !jobId || typeof state !== "string" || !known.has(state)) return null;
-    let knownFailure = false;
+    let knownFailure = false, failure: Failure | undefined;
     if (state === "failed" && Object.hasOwn(event, "output")) {
       try {
         const output = fromLogValue(event.output, event.valueEncoding as 2 | 3 | 4 | 5 | undefined);
@@ -176,13 +221,14 @@ export function browserJobsSettled(events: readonly Event[]): boolean | null {
             const detail = error as Record<string, unknown>;
             knownFailure = typeof detail.code === "string" && !!detail.code && typeof detail.message === "string"
               && (detail.effectUnknown === undefined || detail.effectUnknown === false);
+            if (knownFailure) failure = { code: detail.code as string, message: detail.message as string };
           }
         }
       } catch { /* Missing, detached or invalid result evidence remains unknown. */ }
     }
     const key = JSON.stringify([event.conversationId, event.runId, jobId]);
     const prior = states.get(key);
-    if (!prior || Number(event.id) > prior.id) states.set(key, { id: Number(event.id), state, knownFailure, toolCallId: event.toolCallId });
+    if (!prior || Number(event.id) > prior.id) states.set(key, { id: Number(event.id), state, knownFailure, toolCallId: event.toolCallId, failure });
   }
   const latest = [...states.values()];
   if (latest.some(({ state }) => ["queued", "running", "blocked"].includes(state))) return false;
@@ -190,18 +236,20 @@ export function browserJobsSettled(events: readonly Event[]): boolean | null {
   // that the accepted work finished, even if every other job settled.
   if ([...handoffs].some((key) => !states.has(key))) return null;
   if ([...programOwners].some(([key, owner]) => states.get(key)?.toolCallId !== owner.toolCallId
-    || owner.terminal && states.get(key)?.state !== "succeeded")) return null;
+    || owner.expected && states.get(key)?.state !== owner.expected
+    || owner.failure && (states.get(key)?.failure?.code !== owner.failure.code || states.get(key)?.failure?.message !== owner.failure.message))) return null;
   if (unresolvedPrograms.length) {
-    const byOwner = new Map<string, { count: number; state: string }>();
+    const byOwner = new Map<string, { count: number; state: string; failure?: Failure }>();
     for (const [key, job] of states) {
       const [conversationId, runId] = JSON.parse(key) as string[];
       const ownerKey = JSON.stringify([conversationId, runId, job.toolCallId]);
       const prior = byOwner.get(ownerKey);
-      byOwner.set(ownerKey, { count: (prior?.count ?? 0) + 1, state: job.state });
+      byOwner.set(ownerKey, { count: (prior?.count ?? 0) + 1, state: job.state, failure: job.failure });
     }
     for (const owner of unresolvedPrograms) {
       const match = byOwner.get(JSON.stringify([owner.conversationId, owner.runId, owner.toolCallId]));
-      if (match?.count !== 1 || match.state !== "succeeded") return null;
+      if (match?.count !== 1 || match.state !== owner.expected
+        || owner.failure && (match.failure?.code !== owner.failure.code || match.failure?.message !== owner.failure.message)) return null;
     }
   }
   // Cancellation or host interruption is terminal in the log but does not
