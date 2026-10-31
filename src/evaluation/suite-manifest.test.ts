@@ -10,7 +10,7 @@ const build = "a".repeat(64), lockfile = "b".repeat(64), evaluation = "e".repeat
 function report(manifest: ReturnType<typeof createSuiteManifest>, index: number, changes: Record<string, unknown> = {}): SuiteReport {
   const sample = manifest.samples[index]!;
   const outcome = typeof changes.outcome === "string" ? changes.outcome : "conversation.finished";
-  const business = typeof changes.businessVerified === "boolean" ? changes.businessVerified : true;
+  const business = changes.businessVerified === null ? null : typeof changes.businessVerified === "boolean" ? changes.businessVerified : true;
   const lifecycle = typeof changes.lifecycleVerified === "boolean" ? changes.lifecycleVerified : true;
   const result = evaluateResultEvidence({ outcome, networkSettled: true, ledgerDrained: true, logComplete: true, business,
     interaction: { applicable: false }, lifecycle });
@@ -23,6 +23,21 @@ function report(manifest: ReturnType<typeof createSuiteManifest>, index: number,
 }
 
 describe("offline benchmark suite manifest", () => {
+  it("rejects a user script pass without matching independent execution evidence", () => {
+    const manifest = createSuiteManifest({ ...plan(), scenarios: ["userscript-repair"], seeds: [17], repeats: 1 });
+    const evidence = { scriptLedgerVerified: true, scriptExecutionVerified: true, scriptJobsSettled: true };
+    const valid = report(manifest, 0, evidence);
+    expect(aggregateSuiteReports(manifest, [valid]).counts.passed).toBe(1);
+    for (const changes of [
+      { scriptExecutionVerified: false }, { scriptExecutionVerified: null }, { scriptJobsSettled: false },
+      { scriptJobsSettled: null }, { scriptLedgerVerified: null }, { scriptExecutionVerified: undefined },
+    ]) expect(() => aggregateSuiteReports(manifest, [report(manifest, 0, { ...evidence, ...changes })])).toThrow(/user script/i);
+    const failed = report(manifest, 0, { ...evidence, businessVerified: false, scriptExecutionVerified: false });
+    expect(aggregateSuiteReports(manifest, [failed]).counts.failed).toBe(1);
+    const unknown = report(manifest, 0, { ...evidence, businessVerified: null, scriptExecutionVerified: null, scriptJobsSettled: false });
+    expect(aggregateSuiteReports(manifest, [unknown]).counts.unknown).toBe(1);
+  });
+
   it("canonicalizes the plan and fixes each scenario, seed and repetition once", () => {
     const manifest = createSuiteManifest(plan());
     const same = createSuiteManifest({ ...plan(), scenarios: [...plan().scenarios].reverse(), seeds: [...plan().seeds].reverse() });

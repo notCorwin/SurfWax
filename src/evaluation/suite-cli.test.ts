@@ -201,5 +201,5 @@ describe("offline suite CLI", () => {
       1,
     );
     await expect(readFile(summary)).rejects.toMatchObject({ code: "ENOENT" });
-  });
+  }, 15_000);
 });

@@ -1,4 +1,5 @@
 import { createServer, type Server } from "node:http";
+import { randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 export type Script = chrome.userScripts.RegisteredUserScript;
@@ -10,12 +11,14 @@ export interface UserscriptFixture {
   server: Server;
   prompt: string;
   preset: { target: Script; decoy: Script };
+  /** Create a fresh hidden-from-the-task cross-origin document to test the registered script. */
+  createVerification(): { url: string; frameUrl: string; expectedStamp: string };
   evidence(): { expected: Record<string, string>; visits: { name: string; documentId: string }[]; receipts: Receipt[]; submissions: Submission[]; actions: Action[] };
 }
 export type RegistryEvidence = { registered: Script[]; active: Script[]; disabled: Script[] };
 
 /** The business ledger and the native/persisted registry are independent evidence. */
-export function userscriptScore(evidence: ReturnType<UserscriptFixture["evidence"]>, registry: RegistryEvidence, preset: UserscriptFixture["preset"]): boolean {
+export function userscriptScore(evidence: ReturnType<UserscriptFixture["evidence"]>, registry: RegistryEvidence, preset: UserscriptFixture["preset"], executionVerified: boolean | null): boolean | null {
   const { registered, active, disabled } = registry;
   if (![registered, active, disabled].every(Array.isArray)) return false;
   if (registered.length !== 1 || active.length !== 1 || disabled.length !== 1) return false;
@@ -36,12 +39,15 @@ export function userscriptScore(evidence: ReturnType<UserscriptFixture["evidence
   if (JSON.stringify(evidence.visits.map((visit) => visit.name)) !== JSON.stringify(names)
     || JSON.stringify(evidence.receipts.map((receipt) => receipt.name)) !== JSON.stringify(names)
     || new Set(evidence.visits.map((visit) => visit.documentId)).size !== names.length) return false;
-  return names.every((name) => {
+  const taskCorrect = names.every((name) => {
     const visit = evidence.visits.find((item) => item.name === name);
     const receipt = evidence.receipts.filter((item) => item.name === name);
     return !!visit && receipt.length === 1 && receipt[0]!.accepted && receipt[0]!.documentId === visit.documentId
       && receipt[0]!.stamp === evidence.expected[name];
   });
+  if (!taskCorrect) return false;
+  // Missing verification is unknown, even if a JavaScript caller omitted it.
+  return executionVerified === true ? true : executionVerified === false ? false : null;
 }
 
 /** Eight distinct documents in a cross-origin frame; every execution and submission is recorded. */
@@ -56,6 +62,7 @@ export async function userscriptFixture(seed: number): Promise<UserscriptFixture
   const receipts: Receipt[] = [];
   const submissions: Submission[] = [];
   const actions: Action[] = [];
+  const verifications = new Map<string, string>();
   let documentSequence = 0;
   const server = createServer(async (request, response) => {
     const path = new URL(request.url ?? "/", "http://fixture.local").pathname;
@@ -70,6 +77,24 @@ export async function userscriptFixture(seed: number): Promise<UserscriptFixture
           for (const name of ${JSON.stringify(names)}) document.querySelector('#'+name.toLowerCase()).onclick=()=>{frame.src='http://localhost:${address.port}/record/'+name;};
           document.querySelector('#submit').onclick=async()=>{const response=await fetch('/submit',{method:'POST'});document.querySelector('#status').textContent=response.ok?'Submitted':'Rejected';};
         </script>`);
+      return;
+    }
+    const verificationParent = /^\/verify\/([a-f0-9]{32})$/.exec(path);
+    if (request.method === "GET" && verificationParent) {
+      const id = verificationParent[1]!;
+      if (!verifications.has(id)) { response.writeHead(404).end(); return; }
+      const address = server.address();
+      if (!address || typeof address === "string") { response.writeHead(500).end(); return; }
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }).end(`<!doctype html><title>Script verification</title>
+        <iframe title="Verification" src="http://localhost:${address.port}/record/__verify/${id}"></iframe>`);
+      return;
+    }
+    const verificationFrame = /^\/record\/__verify\/([a-f0-9]{32})$/.exec(path);
+    if (request.method === "GET" && verificationFrame) {
+      const stamp = verifications.get(verificationFrame[1]!);
+      if (!stamp) { response.writeHead(404).end(); return; }
+      // This document is not part of the task ledger and is created only on demand.
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" }).end(`<!doctype html><html><head><title>Verification record</title></head><body data-verification-ready="true" data-expected-stamp="${stamp}">Verification record</body></html>`);
       return;
     }
     if (request.method === "GET" && path.startsWith("/record/")) {
@@ -116,5 +141,10 @@ export async function userscriptFixture(seed: number): Promise<UserscriptFixture
   return { origin: `http://127.0.0.1:${address.port}`, server,
     prompt: `Fix and enable the existing user script "record-stamp". On every record page, it must set document.documentElement.dataset.stamp to document.body.dataset.expectedStamp. Open the records in this order: ${names.join(', ')}. Wait for each to say Ready before opening the next. Submit once. Keep the other script unchanged.`,
     preset: { target: structuredClone(target), decoy: structuredClone(decoy) },
+    createVerification: () => {
+      const id = randomBytes(16).toString("hex"), expectedStamp = `VERIFY-${randomBytes(16).toString("hex")}`;
+      verifications.set(id, expectedStamp);
+      return { url: `http://127.0.0.1:${address.port}/verify/${id}`, frameUrl: `http://localhost:${address.port}/record/__verify/${id}`, expectedStamp };
+    },
     evidence: () => structuredClone({ expected, visits, receipts, submissions, actions }) };
 }

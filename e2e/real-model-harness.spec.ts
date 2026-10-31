@@ -140,6 +140,24 @@ for (const scenario of [
     }
     for (const [name, code] of Object.entries(values)) await desk.getByLabel(name + ' code', {exact:true}).fill(code);
     await desk.getByRole('button', {name:'Submit codes'}).click(); return 'done';` },
+  { name: "binary-transfer", code: `
+    const source = page.frameLocator('iframe[title="Source"]');
+    const destination = page.frameLocator('iframe[title="Destination"]');
+    await source.getByRole('button', {name:'Generate file'}).click();
+    await source.locator('#status').filter({hasText:'Ready'}).waitFor();
+    const file = source.locator('#file');
+    const name = await file.getAttribute('download');
+    const bytes = await file.evaluate(async anchor => new Uint8Array(await (await fetch(anchor.href)).arrayBuffer()));
+    let binary = '';
+    for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+    const waiting = page.waitForEvent('filechooser');
+    const click = destination.getByRole('button', {name:'Choose file'}).click();
+    const chooser = await waiting;
+    await chooser.setFiles([{name, base64:btoa(binary)}]);
+    await click;
+    await destination.locator('#chosen').filter({hasText:name}).waitFor();
+    await destination.getByRole('button', {name:'Submit file'}).click();
+    return 'done';` },
   { name: "frame-replacement", code: `
     const progress = page.locator('#progress');
     await progress.filter({hasText:'Completed 0 of 12'}).waitFor();
@@ -182,7 +200,7 @@ for (const scenario of [
   const provider = await startProvider(responses);
   const directory = await mkdtemp(resolve(tmpdir(), "surfwax-eval-harness-"));
   try {
-    const manifest = scenario.name === "network-identity" ? createSuiteManifest({ version: 1, provider: "local-mock", model: "test-model",
+    const manifest = ["network-identity", "userscript-repair"].includes(scenario.name) ? createSuiteManifest({ version: 1, provider: "local-mock", model: "test-model",
       scenarios: [scenario.name], seeds: [17], repeats: 1, timeoutMs: 90_000 }) : null;
     const sample = manifest?.samples[0];
     const suiteEnv: Record<string, string> = manifest && sample ? { SURFWAX_EVAL_SUITE_PLAN_HASH: manifest.planHash, SURFWAX_EVAL_SUITE_SAMPLE_ID: sample.id,
@@ -199,8 +217,10 @@ for (const scenario of [
     if (scenario.name === "rolling-queue") expect(report).toMatchObject({ interactionApplicable: true, interactionVerified: true, classification: "passed" });
     if (scenario.name === "frame-replacement") expect(report).toMatchObject({ interactionApplicable: true, interactionVerified: true, classification: "passed" });
     if (scenario.name === "userscript-repair") {
+      expect(report).toMatchObject({ scriptExecutionVerified: true, scriptJobsSettled: true });
       expect(report.completedProgramOperations["scripts.edit"]).toBeGreaterThan(0);
       expect(report.completedProgramOperations["scripts.setEnabled"]).toBeGreaterThan(0);
+      expect(aggregateSuiteReports(manifest!, [{ sampleId: sample!.id, planHash: manifest!.planHash, report }]).counts.passed).toBe(1);
     }
     if (scenario.name === "network-identity") {
       expect(report.completedProgramOperations["net.responseBody"]).toBe(6);
@@ -218,6 +238,46 @@ for (const scenario of [
       expect(summary.environment).toMatchObject({ unknownSamples: 0, unstableSamples: 0,
         groups: [{ extensionBuildSha256: report.extensionBuild.sha256, lockfileSha256: report.lockfileSha256, browser: report.browser, sampleIds: [sample!.id] }] });
     }
+  } finally {
+    await closeServer(provider.server);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a no-op registered script cannot pass by writing stamps directly into the task pages", async () => {
+  test.setTimeout(120_000);
+  const responses: MockResponse[] = [];
+  let jobId = "", polls = 0;
+  const afterTool: MockResponse = (request) => {
+    const message = request.messages.findLast((entry: any) => entry.role === "tool");
+    if (!message) { responses.unshift(afterTool); return textResponse("Title"); }
+    const result = JSON.parse(message.content);
+    if (result.accepted && result.complete === false || result.terminal === false) {
+      jobId = result.jobId ?? jobId; responses.unshift(afterTool);
+      return commandResponse("get_job", { jobId, after: result.nextCursor, waitMs: 10_000 }, `noop-poll-${++polls}`);
+    }
+    return textResponse("Done");
+  };
+  responses.push(commandResponse("execute_program", { timeoutMs: 60_000, code: `
+    await browser.scripts.edit('record-stamp', {allFrames:true, js:[{code:'void 0'}]});
+    await browser.scripts.setEnabled('record-stamp', true);
+    const frame = page.frameLocator('iframe[title="Record"]');
+    for (const name of ['Atlas','Birch','Coral','Drift','Elm','Finch','Grove','Harbor']) {
+      await page.getByRole('button', {name:'Open ' + name, exact:true}).click();
+      await frame.getByRole('heading', {name:name + ' record', exact:true}).waitFor();
+      await frame.locator('body').evaluate(body => { body.ownerDocument.documentElement.dataset.stamp = body.dataset.expectedStamp; });
+      await frame.locator('#stamp').filter({hasText:'Ready'}).waitFor();
+    }
+    await page.getByRole('button', {name:'Submit records'}).click();
+    return 'done';` }, "noop-script"), afterTool, textResponse("Title"));
+  const provider = await startProvider(responses);
+  const directory = await mkdtemp(resolve(tmpdir(), "surfwax-eval-harness-"));
+  try {
+    const failure = await runHarness(provider.baseURL, directory, "userscript-repair").then(() => null, (error: unknown) => error);
+    expect(failure).toMatchObject({ code: 1 });
+    const report = await readReport(directory);
+    expect(report).toMatchObject({ outcome: "conversation.finished", classification: "failed", businessVerified: false,
+      scriptLedgerVerified: true, scriptJobsSettled: true, scriptExecutionVerified: false, lifecycleVerified: true });
   } finally {
     await closeServer(provider.server);
     await rm(directory, { recursive: true, force: true });

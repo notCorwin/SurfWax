@@ -18,7 +18,9 @@ import { rollingFixture, rollingInteractionScore, rollingScore } from "./evaluat
 import { chooserPromptFixture, chooserPromptScore } from "./evaluation/chooser-prompt-fixture";
 import { networkFixture, networkScore } from "./evaluation/network-level-fixture";
 import { userscriptFixture, userscriptScore, type UserscriptFixture, type RegistryEvidence } from "./evaluation/userscript-level-fixture";
+import { browserJobsSettled, verifyUserScript } from "./evaluation/userscript-verification";
 import { frameReplacementFixture, frameReplacementScore, frameReplacementInteractionScore, type FrameReplacementFixture } from "./evaluation/frame-replacement-fixture";
+import { binaryTransferFixture, binaryTransferScore, type BinaryTransferFixture } from "./evaluation/binary-transfer-fixture";
 import { trackFixtureRequests } from "./evaluation/network-quiescence";
 import { trackServerResponses, type ServerActivity } from "./evaluation/server-quiescence";
 import { waitForEvaluationQuiescence } from "./evaluation/quiescence";
@@ -62,8 +64,8 @@ test("@real-model browser task", async () => {
   const order = `ORDER-${seed}`;
   const started = Date.now();
   const proxy = await modelProxy(upstream, key);
-  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | Awaited<ReturnType<typeof uploadFixture>> | Awaited<ReturnType<typeof pointerFixture>> | Awaited<ReturnType<typeof recoveryFixture>> | Awaited<ReturnType<typeof multitabFixture>> | Awaited<ReturnType<typeof manifestFixture>> | Awaited<ReturnType<typeof rollingFixture>> | Awaited<ReturnType<typeof chooserPromptFixture>> | Awaited<ReturnType<typeof networkFixture>> | UserscriptFixture | FrameReplacementFixture | undefined;
-  let scriptLevel: UserscriptFixture | undefined, scriptRegistry: RegistryEvidence | null = null;
+  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | Awaited<ReturnType<typeof uploadFixture>> | Awaited<ReturnType<typeof pointerFixture>> | Awaited<ReturnType<typeof recoveryFixture>> | Awaited<ReturnType<typeof multitabFixture>> | Awaited<ReturnType<typeof manifestFixture>> | Awaited<ReturnType<typeof rollingFixture>> | Awaited<ReturnType<typeof chooserPromptFixture>> | Awaited<ReturnType<typeof networkFixture>> | UserscriptFixture | FrameReplacementFixture | BinaryTransferFixture | undefined;
+  let scriptLevel: UserscriptFixture | undefined, scriptRegistry: RegistryEvidence | null = null, scriptExecutionVerified: boolean | null = null, scriptJobsSettled: boolean | null = null, scriptLedgerVerified: boolean | null = null;
   let opened: Awaited<ReturnType<typeof openExtension>> | undefined;
   let events: any[] = [], outcome = "setup_failed", business: boolean | null = null, interaction: boolean | null = null;
   const interactionApplicable = scenario === "sequence-editor" || scenario === "pointer-drag" || scenario === "rolling-queue" || scenario === "frame-replacement";
@@ -83,13 +85,20 @@ test("@real-model browser task", async () => {
     let prompt: string;
     let grade: () => boolean | null;
     let gradeInteraction: (() => boolean) | undefined;
-    if (scenario === "frame-replacement") {
+    if (scenario === "binary-transfer") {
+      const transfer = await binaryTransferFixture(seed); fixture = transfer; prompt = transfer.prompt;
+      grade = () => binaryTransferScore(transfer.evidence());
+    } else if (scenario === "frame-replacement") {
       const replacement = await frameReplacementFixture(seed); fixture = replacement; prompt = replacement.prompt;
       grade = () => frameReplacementScore(replacement.evidence());
       gradeInteraction = () => frameReplacementInteractionScore(replacement.evidence());
     } else if (scenario === "userscript-repair") {
       scriptLevel = await userscriptFixture(seed); fixture = scriptLevel; prompt = scriptLevel.prompt;
-      grade = () => scriptRegistry && scriptLevel ? userscriptScore(scriptLevel.evidence(), scriptRegistry, scriptLevel.preset) : null;
+      grade = () => {
+        if (!scriptRegistry || !scriptLevel) return null;
+        scriptLedgerVerified = userscriptScore(scriptLevel.evidence(), scriptRegistry, scriptLevel.preset, true);
+        return scriptLedgerVerified === false ? false : scriptExecutionVerified;
+      };
     } else if (scenario === "network-identity") {
       const network = await networkFixture(seed); fixture = network; prompt = network.prompt;
       grade = () => networkScore(network.evidence());
@@ -176,14 +185,21 @@ test("@real-model browser task", async () => {
       await new Promise((resolveWait) => setTimeout(resolveWait, remaining));
     }
     // An unsettled network may still contain a submission or decoy request.
-    const quiet = await waitForEvaluationQuiescence(tracker, serverTracker, 500, 5000);
-    networkSettled = quiet.settled;
+    let quiet = await waitForEvaluationQuiescence(tracker, serverTracker, 500, 5000);
+    const initialNetworkSettled = quiet.settled;
     events = await readEvents(opened.page);
     const observed = deadlineEvidence(events, taskStartedAt, taskDeadlineAt);
     deadlineState = observed.state;
     terminalTimestamp = observed.terminalTimestamp;
     logComplete = observed.logTerminalPresent;
     outcome = observed.state === "on_time" ? observed.terminal! : observed.state === "unknown" ? "terminal_time_unknown" : "timed_out";
+    if (scriptLevel) scriptJobsSettled = browserJobsSettled(events);
+    if (scriptLevel && outcome === "conversation.finished" && initialNetworkSettled && scriptJobsSettled === true) {
+      scriptExecutionVerified = await verifyUserScript(opened.context, scriptLevel.createVerification());
+      // The independent verification itself uses the fixture network.
+      quiet = await waitForEvaluationQuiescence(tracker, serverTracker, 500, 5000);
+    }
+    networkSettled = initialNetworkSettled && quiet.settled;
     browserProduct = await opened.context.newCDPSession(opened.page).then((session) => session.send("Browser.getVersion")).then((version) => version.product).catch(() => null);
     if (scriptLevel) scriptRegistry = await opened.page.evaluate(async () => {
       const registered = await chrome.userScripts.getScripts();
@@ -233,7 +249,7 @@ test("@real-model browser task", async () => {
     const report = { scenario, seed, provider: providerName, model, suiteIdentity, gitHead: head, gitDirty: dirty, browser: browserProduct ?? browser?.product ?? null,
       extensionBuild, extensionBuildStable, evaluationSource, evaluationSourceStable, lockfileSha256,
       outcome, ...result, taskTimeoutMs, taskStartedAt, taskDeadlineAt, terminalTimestamp, deadlineState,
-      networkSettled, ledgerDrained, logComplete, serverActivity, elapsedMs: Date.now() - started, providerUsageByStep: usageEvidence(events),
+      networkSettled, ledgerDrained, logComplete, scriptExecutionVerified, scriptJobsSettled, scriptLedgerVerified, serverActivity, elapsedMs: Date.now() - started, providerUsageByStep: usageEvidence(events),
       requests, lastAgentResponse: lastAgentResponse(requests), requestBytes: requests.reduce((sum, request) => sum + request.bytes, 0),
       toolCalls: starts.length, toolNames, completedProgramOperations: completedProgramOperations(events), toolTerminalResults: terminals.length,
       toolsWithExactlyOneTerminal: result.lifecycleVerified, toolLifecycle };

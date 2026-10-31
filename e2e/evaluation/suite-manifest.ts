@@ -131,6 +131,16 @@ function validatedReport(value: unknown, sample: SuiteSample, plan: SuitePlan, p
   if (value.classification !== expected.classification || value.passed !== expected.passed || value.businessVerified !== expected.businessVerified
     || value.interactionVerified !== expected.interactionVerified || value.lifecycleVerified !== expected.lifecycleVerified
     || JSON.stringify(value.reasons) !== JSON.stringify(expected.reasons)) throw new Error("Inconsistent result evidence");
+  if (sample.scenario === "userscript-repair") {
+    if (!triState(value.scriptLedgerVerified) || !triState(value.scriptExecutionVerified) || !triState(value.scriptJobsSettled)
+      || value.scriptExecutionVerified !== null && (value.scriptJobsSettled !== true || value.outcome !== "conversation.finished")) {
+      throw new Error("Invalid user script execution evidence");
+    }
+    const business = value.networkSettled === true && value.ledgerDrained
+      ? value.scriptLedgerVerified === false ? false : value.scriptLedgerVerified === true ? value.scriptExecutionVerified : null
+      : null;
+    if (value.businessVerified !== business) throw new Error("Inconsistent user script execution evidence");
+  }
   const providerResponse = lastAgentResponse(value.requests);
   if (providerResponse === null ? value.lastAgentResponse !== null : !isRecord(value.lastAgentResponse)
     || value.lastAgentResponse.status !== providerResponse.status || value.lastAgentResponse.complete !== providerResponse.complete
