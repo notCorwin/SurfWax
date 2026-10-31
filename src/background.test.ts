@@ -119,6 +119,31 @@ async function inputBridge(sendCommand: ReturnType<typeof vi.fn>) {
   return { bridge, send, disconnect };
 }
 
+it("reports blocked edits from key dispatch as uncertain and leaves canceled or non-editing keys alone", async () => {
+  const prevent = vi.fn();
+  const sendCommand = vi.fn(async (_source: object, method: string, params: any) => {
+    if (method === "Input.dispatchKeyEvent" && ["Backspace", "Delete", "Enter"].includes(params.key)) {
+      (globalThis as any).__surfWaxBlocker.block({ type: "keydown", target: document.body, isTrusted: true,
+        timeStamp: params.timestamp * 1000 - performance.timeOrigin, preventDefault: vi.fn(), stopImmediatePropagation: vi.fn() });
+      (globalThis as any).__surfWaxBlocker.block({ type: "beforeinput", target: document.body, isTrusted: true,
+        timeStamp: performance.now(), preventDefault: prevent, stopImmediatePropagation: vi.fn() });
+    }
+    return {};
+  });
+  const { bridge, send, disconnect } = await inputBridge(sendCommand);
+  installPageGuard("run");
+  vi.mocked(chrome.scripting.executeScript).mockImplementation(async ({ func, args = [] }: any) => [{ result: func(...args) }] as any);
+  for (const key of ["Backspace", "Delete", "Enter"]) {
+    send(key, "Input.dispatchKeyEvent", { type: key === "Enter" ? "keyDown" : "rawKeyDown", key });
+    await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledWith({ id: key, error: expect.stringContaining("AutomationError[guard-blocked-input]"), effectUnknown: true }));
+  }
+  expect(prevent).toHaveBeenCalledTimes(3);
+  // A page-cancelled key or Enter on a non-editable element emits no beforeinput.
+  send("cancelled", "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "cancelled" });
+  await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledWith({ id: "cancelled", result: {} }));
+  disconnect();
+});
+
 it("does not persist char-only input as a held key or release a nonexistent key on disconnect", async () => {
   const sendCommand = vi.fn(async () => ({}));
   const { bridge, send, disconnect } = await inputBridge(sendCommand);

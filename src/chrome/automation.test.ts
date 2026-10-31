@@ -257,13 +257,78 @@ describe("AutomationRuntime", () => {
     attach("old");
     const oldReady = session.frameReady.get("old") as Promise<void>;
     await waiting;
+    runtime.handleEvent({ tabId: 3, sessionId: "old" }, "Target.attachedToTarget", { sessionId: "old-child-session", targetInfo: { type: "iframe", targetId: "old-child-target" } });
+    await session.frameReady.get("old-child-session");
     attach("new");
     await session.frameReady.get("new");
+    expect([...session.frameReady.keys()]).toEqual(["new"]);
+    expect(session.frames.has("old-child-target")).toBe(false);
+    expect(session.targetParents.has("old-child-session")).toBe(false);
+    runtime.handleEvent({ tabId: 3, sessionId: "old" }, "Target.attachedToTarget", { sessionId: "late-child", targetInfo: { type: "iframe", targetId: "late-child-target" } });
+    expect(session.frameReady.has("late-child")).toBe(false);
     release({ frameTree: { frame: { id: "frame", parentId: "old-parent" }, childFrames: [{ frame: { id: "old-child", parentId: "frame" } }] } });
     await expect(oldReady).rejects.toMatchObject({ code: "frame-detached" });
     expect(session.frames.get("frame").sessionId).toBe("new");
     expect(session.frameParents.get("frame")).toBe("root");
     expect(session.frames.has("old-child")).toBe(false);
+    await expect((runtime as any).observationDebuggees(3)).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ sessionId: "new" })]));
+    runtime.handleEvent({ tabId: 3 }, "Target.detachedFromTarget", { sessionId: "old" });
+    expect(session.frameReady.has("new")).toBe(true);
+    expect(session.frames.get("frame").sessionId).toBe("new");
+    await runtime.abortSessions();
+  });
+
+  it("ignores late frame lifecycle events from a retired target session", async () => {
+    const { runtime, command } = harness();
+    await runtime.createPage(3);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Page.getFrameTree" && sessionIdOf(source) === "new") return { frameTree: { frame: { id: "frame", parentId: "root" } } };
+      return original(source, method, params);
+    });
+    const session = (runtime as any).sessions.get(3);
+    for (const id of ["old", "new"]) {
+      runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: id, targetInfo: { type: "iframe", targetId: "frame" } });
+      await session.frameReady.get(id);
+    }
+    const stale = { tabId: 3, sessionId: "old" };
+    runtime.handleEvent(stale, "Page.frameAttached", { frameId: "ghost", parentFrameId: "frame" });
+    runtime.handleEvent(stale, "Page.frameNavigated", { frame: { id: "frame", parentId: "wrong-parent" } });
+    runtime.handleEvent(stale, "Page.frameDetached", { frameId: "frame", reason: "remove" });
+    expect(session.frames.has("ghost")).toBe(false);
+    expect(session.frames.get("frame").sessionId).toBe("new");
+    expect(session.frameParents.get("frame")).toBe("root");
+    await runtime.abortSessions();
+  });
+
+  it("retires pending descendant attachments when their parent target is replaced", async () => {
+    const { runtime, command } = harness();
+    await runtime.createPage(3);
+    const session = (runtime as any).sessions.get(3);
+    runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "parent-old", targetInfo: { type: "iframe", targetId: "parent-frame" } });
+    await session.frameReady.get("parent-old");
+    let requested!: () => void, release!: () => void;
+    const waiting = new Promise<void>((resolve) => { requested = resolve; });
+    const response = new Promise<void>((resolve) => { release = resolve; });
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (sessionIdOf(source) === "child-old" && method === "Page.enable") { requested(); await response; return {}; }
+      return original(source, method, params);
+    });
+    const oldParent = { tabId: 3, sessionId: "parent-old" };
+    runtime.handleEvent(oldParent, "Page.frameAttached", { frameId: "child-frame", parentFrameId: "parent-frame" });
+    runtime.handleEvent(oldParent, "Target.attachedToTarget", { sessionId: "child-old", targetInfo: { type: "iframe", targetId: "child-frame" } });
+    const oldChildReady = session.frameReady.get("child-old") as Promise<void>;
+    await waiting;
+    // Promotion of a same-process child must not retire its parent.
+    expect(session.frameReady.has("parent-old")).toBe(true);
+    runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "parent-new", targetInfo: { type: "iframe", targetId: "parent-frame" } });
+    await session.frameReady.get("parent-new");
+    release();
+    await expect(oldChildReady).rejects.toMatchObject({ code: "frame-detached" });
+    expect([...session.frameReady.keys()]).toEqual(["parent-new"]);
+    expect(session.frames.has("child-frame")).toBe(false);
+    await expect((runtime as any).observationDebuggees(3)).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ sessionId: "parent-new" })]));
     await runtime.abortSessions();
   });
 
@@ -317,7 +382,7 @@ describe("AutomationRuntime", () => {
     await runtime.abortSessions();
   });
 
-  it("keeps same-process frame prefixes inside an OOPIF and finds later target boundaries", async () => {
+  it("scopes same-process frames inside an OOPIF and finds later target boundaries", async () => {
     const { runtime, command } = harness();
     await runtime.createPage(3);
     const session = (runtime as any).sessions.get(3);
@@ -332,6 +397,7 @@ describe("AutomationRuntime", () => {
       resolved.push(values);
       return values.at(-1);
     });
+    vi.spyOn(runtime as any, "frameDocument").mockResolvedValue("same-frame-document");
     const original = command.getMockImplementation()!;
     command.mockImplementation(async (source, method, params) => method === "DOM.describeNode"
       ? { node: { frameId: ({ "#outer": "outer-frame", "#same": "same-frame", "#nested": "nested-frame" } as Record<string, string>)[params.objectId] } }
@@ -340,11 +406,12 @@ describe("AutomationRuntime", () => {
     try {
       const same = await (runtime as any).locatorScope(session, { queries: [query("#outer"), query("#same"), { kind: "css", value: "#target" }] });
       expect(same.debuggee).toEqual(outer);
-      expect(same.spec.queries.map((item: any) => item.value)).toEqual(["#same", "#target"]);
+      expect(same.rootObjectId).toBe("same-frame-document");
+      expect(same.spec.queries.map((item: any) => item.value)).toEqual(["#target"]);
       const crossing = await (runtime as any).locatorScope(session, { queries: [query("#outer"), query("#same"), query("#nested"), { kind: "css", value: "#target" }] });
       expect(crossing.debuggee).toEqual(nested);
       expect(crossing.spec.queries.map((item: any) => item.value)).toEqual(["#target"]);
-      expect(resolved).toContainEqual(["#same", "#nested"]);
+      expect(resolved).toContainEqual(["#nested"]);
     } finally { await runtime.abortSessions(); }
   });
 

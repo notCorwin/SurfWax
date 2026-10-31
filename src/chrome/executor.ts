@@ -242,14 +242,14 @@ export class ChromeExecutor {
       const port = this.chromeApi.runtime?.connect?.({ name: "surf-wax-debugger" });
       if (!port) return undefined;
       this.port = port;
-      port.onMessage.addListener((message: { id?: string; event?: keyof typeof listeners; args?: any[]; result?: unknown; error?: string }) => {
+      port.onMessage.addListener((message: { id?: string; event?: keyof typeof listeners; args?: any[]; result?: unknown; error?: string; effectUnknown?: boolean }) => {
         if (this.port !== port) return;
         if (message.event && listeners[message.event]) {
           for (const listener of listeners[message.event]) listener(...(message.args ?? []));
         } else if (message.id) {
           const request = pending.get(message.id);
           pending.delete(message.id);
-          if (message.error) request?.reject(new Error(message.error));
+          if (message.error) request?.reject(Object.assign(new Error(message.error), message.effectUnknown ? { effectUnknown: true } : {}));
           else request?.resolve(message.result);
         }
       });

@@ -56,7 +56,7 @@ export function installPageGuard(runId: string, css = "", passThrough = false): 
   const visual = document.createElement("div"); visual.className = "guard-visual";
   shadow.append(style, visual);
   const types = ["pointerdown", "pointerup", "pointermove", "pointercancel", "mousedown", "mouseup", "mousemove", "click", "dblclick", "auxclick", "contextmenu", "touchstart", "touchmove", "touchend", "touchcancel", "wheel", "keydown", "keyup", "keypress", "beforeinput", "input", "paste", "cut", "drop", "dragstart", "dragover", "dragenter", "dragleave", "dragend", "compositionstart", "compositionupdate", "compositionend"];
-  let ticket: { stamp: number; expires: number; text?: string } | undefined;
+  let ticket: { stamp: number; expires: number; text?: string; observeBeforeInput?: boolean; blockedBeforeInput: boolean } | undefined;
   let derived: { target: EventTarget | null; text?: string; clipboard?: boolean } | undefined;
   let atomic = false;
   const seen = new WeakSet<Event>();
@@ -77,6 +77,7 @@ export function installPageGuard(runId: string, css = "", passThrough = false): 
         return;
       }
     }
+    if (event.type === "beforeinput" && ticket?.observeBeforeInput) ticket.blockedBeforeInput = true;
     derived = undefined;
     event.preventDefault(); event.stopImmediatePropagation();
   };
@@ -87,11 +88,11 @@ export function installPageGuard(runId: string, css = "", passThrough = false): 
     overlay.remove(); delete scope.__surfWaxBlocker;
   };
   scope.__surfWaxBlocker = { runId, overlay, cleanup, block,
-    authorize(timestamp: number, text?: string) {
-      ticket = { stamp: timestamp * 1000 - performance.timeOrigin, expires: performance.now() + 1000, text };
+    authorize(timestamp: number, text?: string, observeBeforeInput = false) {
+      ticket = { stamp: timestamp * 1000 - performance.timeOrigin, expires: performance.now() + 1000, text, observeBeforeInput, blockedBeforeInput: false };
       derived = undefined;
     },
-    revoke() { ticket = undefined; derived = undefined; },
+    revoke() { const blockedBeforeInput = ticket?.blockedBeforeInput ?? false; ticket = undefined; derived = undefined; return blockedBeforeInput; },
     insertTarget(target: Element, text: string, replace = false) {
       if (typeof scope.__surfWaxTargetEditor !== "function") return { ok: false, reason: "editor-unavailable" };
       // No hardware events can interleave this synchronous editing task.
@@ -109,8 +110,9 @@ export function removePageGuard(): void {
   document.getElementById("__surf-wax-page-guard")?.remove();
 }
 
-export function authorizeGuardInput(runId: string, timestamp?: number, text?: string): void {
+export function authorizeGuardInput(runId: string, timestamp?: number, text?: string, observeBeforeInput = false): boolean | undefined {
   const blocker = (globalThis as any).__surfWaxBlocker;
   if (blocker?.runId !== runId) return;
-  if (timestamp == null) blocker.revoke(); else blocker.authorize(timestamp, text);
+  if (timestamp == null) return blocker.revoke();
+  blocker.authorize(timestamp, text, observeBeforeInput);
 }

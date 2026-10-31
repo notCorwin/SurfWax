@@ -178,14 +178,18 @@ async function bypassPageGuard(tabId: number, enabled: boolean): Promise<void> {
   if (guardedTabs.has(tabId)) await updatePageGuard(tabId).catch(() => undefined);
 }
 
-async function guardInputTicket(tabId: number, runId: string, timestamp?: number, text?: string): Promise<void> {
+async function guardInputTicket(tabId: number, runId: string, timestamp?: number, text?: string, observeBeforeInput = false): Promise<boolean> {
   // A disconnected port leaves the DOM blocker installed until Chrome executes
   // its removal. Authorize the actual run-bound blocker even after map deletion.
-  await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: authorizeGuardInput, args: [runId, timestamp ?? null, text ?? null] as any }).catch(() => undefined);
+  const results = await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: authorizeGuardInput, args: [runId, timestamp ?? null, text ?? null, observeBeforeInput] as any }).catch(() => []);
+  return results.some(({ result }) => result === true);
 }
 async function authorizedNativeInput(debuggee: chrome.debugger.Debuggee, tabId: number, runId: string, command: string, params: Record<string, any>) {
   const timestamp = Date.now() / 1000 + 86400 + Math.random() / 1000;
-  await guardInputTicket(tabId, runId, timestamp, params.text);
+  const observeBeforeInput = command === "Input.dispatchKeyEvent" && ["keyDown", "rawKeyDown", "char"].includes(params.type);
+  await guardInputTicket(tabId, runId, timestamp, params.text, observeBeforeInput);
+  let result: unknown;
+  let blockedBeforeInput = false;
   try {
     const { surfWaxAtomicClick, ...nativeParams } = params;
     if (surfWaxAtomicClick) {
@@ -195,11 +199,14 @@ async function authorizedNativeInput(debuggee: chrome.debugger.Debuggee, tabId: 
       const pressed = chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, timestamp, type: "mousePressed" });
       const released = chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, timestamp, type: "mouseReleased", buttons: 0 });
       const results = await Promise.all([moved, pressed, released]);
-      return results[2];
+      result = results[2];
+    } else {
+      result = await chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, timestamp });
     }
-    return await chrome.debugger.sendCommand(debuggee, command, { ...nativeParams, timestamp });
   }
-  finally { await guardInputTicket(tabId, runId); }
+  finally { blockedBeforeInput = await guardInputTicket(tabId, runId); }
+  if (blockedBeforeInput) throw Object.assign(new Error("AutomationError[guard-blocked-input]: A trusted beforeinput event was blocked during key dispatch; the key's effects are unknown."), { effectUnknown: true });
+  return result;
 }
 
 chrome.tabs.onUpdated.addListener((tabId, change) => {
@@ -471,7 +478,7 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       if (!closed) port.postMessage({ id, result });
     } catch (error) {
-      if (!closed) port.postMessage({ id, error: error instanceof Error ? error.message : String(error) });
+      if (!closed) port.postMessage({ id, error: error instanceof Error ? error.message : String(error), ...((error as any)?.effectUnknown ? { effectUnknown: true } : {}) });
     }
     })());
   });

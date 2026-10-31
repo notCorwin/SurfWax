@@ -57,6 +57,51 @@ describe("run-bound interaction tickets", () => {
     expect(document.getElementById("__surf-wax-page-guard")).toBeNull();
   });
 
+  it("reports blocked trusted edits during an observed key ticket without admitting them", () => {
+    const input = document.createElement("input"); document.body.append(input);
+    installPageGuard("owner");
+    const timestamp = Date.now() / 1000 + 86400;
+    authorizeGuardInput("owner", timestamp, undefined, true);
+    const key = hardware("keydown", input, { timeStamp: timestamp * 1000 - performance.timeOrigin });
+    guard().block(key);
+    expect(key.preventDefault).not.toHaveBeenCalled();
+    const blocked = hardware("beforeinput", input, { inputType: "deleteContentBackward" });
+    guard().block(blocked);
+    expect(blocked.preventDefault).toHaveBeenCalledOnce();
+    expect(blocked.stopImmediatePropagation).toHaveBeenCalledOnce();
+    expect(authorizeGuardInput("other-run")).toBeUndefined();
+    expect(authorizeGuardInput("owner")).toBe(true);
+    expect(authorizeGuardInput("owner")).toBe(false);
+  });
+
+  it("does not report unrelated pointer events or a cancelled key without an edit", () => {
+    const input = document.createElement("input"); document.body.append(input);
+    installPageGuard("owner");
+    const timestamp = Date.now() / 1000 + 86400;
+    authorizeGuardInput("owner", timestamp, undefined, true);
+    const key = hardware("keydown", input, { timeStamp: timestamp * 1000 - performance.timeOrigin });
+    guard().block(key);
+    key.preventDefault(); // The page cancels its own key handler.
+    const user = hardware("pointerdown", input);
+    guard().block(user);
+    expect(user.preventDefault).toHaveBeenCalledOnce();
+    const synthetic = hardware("beforeinput", input, { isTrusted: false });
+    guard().block(synthetic);
+    expect(authorizeGuardInput("owner")).toBe(false);
+  });
+
+  it("conservatively reports an unrelated blocked user edit during a key ticket", () => {
+    const input = document.createElement("input"), other = document.createElement("input");
+    document.body.append(input, other); installPageGuard("owner");
+    const timestamp = Date.now() / 1000 + 86400;
+    authorizeGuardInput("owner", timestamp, undefined, true);
+    guard().block(hardware("keydown", input, { timeStamp: timestamp * 1000 - performance.timeOrigin }));
+    const user = hardware("beforeinput", other, { inputType: "insertText", data: "u" });
+    guard().block(user);
+    expect(user.preventDefault).toHaveBeenCalledOnce();
+    expect(authorizeGuardInput("owner")).toBe(true);
+  });
+
   it("inserts an empty value only into an enabled focused editing context", () => {
     const input = document.createElement("input"); document.body.append(input); input.focus();
     installPageGuard("owner");

@@ -828,6 +828,16 @@ describe("ChromeExecutor programs", () => {
     expect(port.disconnect).toHaveBeenCalled();
   });
 
+  it("preserves uncertain effects from debugger bridge errors", async () => {
+    const fake = fakeChrome();
+    const { port } = fakePort((message, reply) => reply({ id: message.id, error: "AutomationError[guard-blocked-input]: input blocked", effectUnknown: true }));
+    (fake.chromeApi as any).runtime = { connect: vi.fn(() => port) };
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never });
+    const bridge = (globalThis as Record<string, any>).__surfWaxDebugger;
+    await expect(bridge.call("getTargets", [])).rejects.toMatchObject({ message: expect.stringContaining("guard-blocked-input"), effectUnknown: true });
+    executor.dispose();
+  });
+
   it("reconnects after an idle background port disconnects", async () => {
     const fake = fakeChrome();
     const first = fakePort();

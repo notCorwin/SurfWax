@@ -31,7 +31,7 @@ type LocatorSpec = { queries: Query[]; index?: number; ref?: string; hasText?: s
 type WaitState = "attached" | "detached" | "visible" | "hidden" | "enabled" | "editable" | "checked";
 type RefRecord = { backendNodeId: number; frameId?: string; debuggee: Debuggee; role: string; name: string; generation: number; identitySource: "ax" | "dom" };
 type FrameRefRecord = { frameId: string; debuggee: Debuggee; generation: number; revision: number; conversationId?: string; runId?: string };
-type FrameDocument = { session: Session; frame: FrameRefRecord; promise: Promise<string>; objectId?: string };
+type FrameDocument = { session: Session; frame: FrameRefRecord; promise: Promise<string>; objectId?: string; executionContextId?: number };
 type FrameListSnapshot = { id: string; session: Session; generation: number; revision: number; conversationId?: string; runId?: string; frames: Array<Record<string, unknown>> };
 type SnapshotLine = { id: string; line: string; ref?: string; node?: SnapshotNode };
 type InspectSnapshot = {
@@ -73,6 +73,8 @@ type Session = {
   frameReady: Map<string, Promise<void>>;
   frameParents: Map<string, string | undefined>;
   targetParents: Map<string, string | undefined>;
+  targetSessions: Map<string, string>;
+  retiredTargetSessions: Set<string>;
   frameRevision: number;
   frameRefs: Map<string, FrameRefRecord>;
   frameRefsById: Map<string, string>;
@@ -83,6 +85,7 @@ type Session = {
 };
 
 type Candidate = { role: string; name: string; tag?: string; text?: string; ref?: string; backendNodeId?: number; debuggee?: Debuggee; roleTruncated?: boolean; nameTruncated?: boolean; identityUnavailable?: boolean };
+type LocatedNode = { objectId: string; backendNodeId: number; role?: string; name?: string; executionContextId?: number };
 type ElementState = {
   x: number;
   y: number;
@@ -486,13 +489,21 @@ export class AutomationRuntime {
     const tabId = source.tabId;
     if (!Number.isInteger(tabId)) return;
     const session = this.sessions.get(tabId!);
+    // Events already queued by a retired target must not restore stale frames,
+    // overwrite their ancestry, or detach a replacement target.
+    if (source.sessionId && session?.retiredTargetSessions?.has(source.sessionId)) return;
     const chooser = this.fileChoosers.get(tabId!);
     const preserveChooser = !chooser || !this.chooserAffected(source, method, params, { frameId: chooser.frameId, source: chooser.debuggee });
     if (method === "Target.attachedToTarget" && params?.targetInfo?.type === "iframe" && session) {
+      if (source.sessionId && !session.targetParents.has(source.sessionId)) return;
       const debuggee = { tabId, sessionId: params.sessionId } as Debuggee;
       const targetId = params.targetInfo.targetId as string;
       const sessionId = params.sessionId as string;
+      const previous = session.targetSessions.get(targetId);
+      if (previous && previous !== sessionId) this.retireFrameSession(session, previous, targetId);
+      session.retiredTargetSessions.delete(sessionId);
       session.frames.set(targetId, debuggee);
+      session.targetSessions.set(targetId, sessionId);
       session.targetParents.set(sessionId, source.sessionId);
       this.invalidateFrames(session);
       let ready!: Promise<void>;
@@ -560,14 +571,7 @@ export class AutomationRuntime {
       this.invalidate(session, preserveChooser);
     }
     if (method === "Target.detachedFromTarget" && params?.sessionId && session) {
-      session.frameReady.delete(params.sessionId);
-      session.targetParents.delete(params.sessionId);
-      for (const [frameId, debuggee] of session.frames) {
-        if (debuggee.sessionId === params.sessionId) {
-          session.frames.delete(frameId);
-          session.frameParents.delete(frameId);
-        }
-      }
+      this.retireFrameSession(session, params.sessionId);
       this.invalidate(session, preserveChooser);
     }
     if (session && session.rootFrameId !== undefined && !source.sessionId && method === "Page.lifecycleEvent" && params?.name === "init" && params?.frameId === session.rootFrameId
@@ -599,6 +603,31 @@ export class AutomationRuntime {
     }
     const kind = method === "Page.javascriptDialogOpening" ? "dialog" : method === "Page.downloadWillBegin" ? "download" : undefined;
     if (kind) this.resolveWaiters(tabId!, kind, kind === "dialog" ? { ...params, source: { ...source } } : params);
+  }
+
+  private retireFrameSession(session: Session, root: string, preserveFrameId?: string): void {
+    const retired = new Set([root]);
+    // Nested targets belong to their attaching session, even when their frame
+    // tree has not arrived yet. Remove their pending readiness as well.
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const [id, parent] of session.targetParents) {
+        if (parent && retired.has(parent) && !retired.has(id)) { retired.add(id); changed = true; }
+      }
+    }
+    for (const id of retired) {
+      session.retiredTargetSessions.add(id);
+      session.frameReady.delete(id);
+      session.targetParents.delete(id);
+    }
+    for (const [frameId, id] of session.targetSessions) if (retired.has(id)) session.targetSessions.delete(frameId);
+    for (const [frameId, debuggee] of session.frames) {
+      if (debuggee.sessionId && retired.has(debuggee.sessionId)) {
+        session.frames.delete(frameId);
+        if (frameId !== preserveFrameId) session.frameParents.delete(frameId);
+      }
+    }
   }
 
   private invalidateFrames(session: Session): void {
@@ -1367,6 +1396,8 @@ export class AutomationRuntime {
         frameReady: new Map(),
         frameParents: new Map(),
         targetParents: new Map(),
+        targetSessions: new Map(),
+        retiredTargetSessions: new Set(),
         frameRevision: 0,
         frameRefs: new Map(),
         frameRefsById: new Map(),
@@ -1526,8 +1557,13 @@ export class AutomationRuntime {
           } else {
             const scoped = await this.locatorScope(session, locator.spec);
             guard(); debuggee = scoped.debuggee;
-            if (!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) {
-              const matches = await this.resolveAccessibility(debuggee, scoped.spec, scoped.rootObjectId);
+            if ((!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) || this.hasSemanticQueries(scoped.spec)) {
+              const matches: Candidate[] = !scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)
+                ? await this.resolveAccessibility(debuggee, scoped.spec, scoped.rootObjectId)
+                : await Promise.all((await this.resolveSemantic(session, debuggee, scoped.spec, scoped.rootObjectId, false)).map(async (node) => {
+                  const identity = node.role !== undefined && node.name !== undefined ? { role: node.role, name: node.name } : await this.axIdentity(debuggee, node.backendNodeId);
+                  return { backendNodeId: node.backendNodeId, debuggee, role: identity?.role ?? "", name: identity?.name ?? "", ...(!identity ? { identityUnavailable: true } : {}) };
+                }));
               guard();
               // Freeze full semantic names, so a virtualized node whose visible
               // identity changes between pages cannot silently acquire a new ref.
@@ -1764,6 +1800,148 @@ export class AutomationRuntime {
     }
   }
 
+  private hasSemanticQueries(spec: LocatorSpec): boolean {
+    let found = false;
+    visitLocators(spec, (current) => {
+      if (current.queries.some((query) => query.kind === "role" || query.kind === "label")) found = true;
+    });
+    return found;
+  }
+
+  /** Resolve each semantic step through Chrome's accessibility tree, even
+   * when it follows a CSS scope, a filter or an element reference. */
+  private async resolveSemantic(session: Session, debuggee: Debuggee, spec: LocatorSpec, rootObjectId?: string, keepResults = true): Promise<LocatedNode[]> {
+    const owned = new Set<string>();
+    let documentId = rootObjectId;
+    if (!documentId) {
+      const document = await this.options.command(debuggee, "Runtime.evaluate", { expression: "document", objectGroup: "surf-wax-automation" });
+      documentId = document.result?.objectId;
+      if (!documentId) throw automationError("frame-unavailable", { reason: "missing-document-root" });
+      owned.add(documentId);
+    }
+    const describe = async (objectId: string, executionContextId?: number): Promise<LocatedNode> => {
+      const result = await this.options.command(debuggee, "DOM.describeNode", { objectId });
+      const backendNodeId = result.node?.backendNodeId;
+      if (!backendNodeId) throw automationError("detached", { reason: "missing-backend-node" });
+      this.objectDebuggees.set(objectId, debuggee);
+      return { objectId, backendNodeId, ...(executionContextId === undefined ? {} : { executionContextId }) };
+    };
+    const executionContextId = rootObjectId ? [...this.frameDocuments.values()].find((frame) => frame.objectId === rootObjectId)?.executionContextId : undefined;
+    const initial = await describe(documentId, executionContextId);
+    const unique = (nodes: LocatedNode[]) => {
+      const seen = new Set<number>();
+      return nodes.filter((node) => !seen.has(node.backendNodeId) && Boolean(seen.add(node.backendNodeId)));
+    };
+    const domStep = async (root: LocatedNode, query: Query): Promise<LocatedNode[]> => {
+      const result = await this.resolveLocator(debuggee, { queries: [query] }, "nodes", root.objectId, undefined, session);
+      const arrayId = result?.objectId;
+      if (!arrayId) throw automationError("state-unavailable", { reason: "missing-result-array" });
+      try {
+        const properties = await this.options.command(debuggee, "Runtime.getProperties", { objectId: arrayId, ownProperties: true });
+        const entries = (properties.result ?? []).filter((property: any) => /^(0|[1-9]\d*)$/.test(property.name))
+          .sort((a: any, b: any) => Number(a.name) - Number(b.name));
+        return await Promise.all(entries.map((property: any) => {
+          if (!property.value?.objectId) throw automationError("state-unavailable", { reason: "missing-node-object" });
+          owned.add(property.value.objectId);
+          return describe(property.value.objectId, root.executionContextId);
+        }));
+      } finally {
+        void this.options.command(debuggee, "Runtime.releaseObject", { objectId: arrayId }).catch(() => undefined);
+      }
+    };
+    const semanticStep = async (root: LocatedNode, query: Query): Promise<LocatedNode[]> => {
+      const matches = await this.resolveAccessibility(debuggee, { queries: [query] }, root.objectId);
+      return (await Promise.all(matches.filter((candidate) => candidate.backendNodeId && candidate.backendNodeId !== root.backendNodeId).map(async (candidate) => {
+        const response = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: candidate.backendNodeId, objectGroup: "surf-wax-automation",
+          ...(root.executionContextId === undefined ? {} : { executionContextId: root.executionContextId }) });
+        const objectId = response.object?.objectId;
+        if (!objectId) throw automationError("detached", { reason: "missing-node-object" });
+        owned.add(objectId);
+        this.objectDebuggees.set(objectId, debuggee);
+        return { objectId, backendNodeId: candidate.backendNodeId!, role: candidate.role, name: candidate.name,
+          ...(root.executionContextId === undefined ? {} : { executionContextId: root.executionContextId }) };
+      })));
+    };
+    const walk = async (base: LocatedNode, locator: LocatorSpec): Promise<LocatedNode[]> => {
+      let current = [base];
+      if (locator.ref) {
+        const resolved = await this.resolveRef(session, locator.ref);
+        owned.add(resolved.objectId);
+        if (resolved.ref.debuggee.tabId !== debuggee.tabId || resolved.ref.debuggee.sessionId !== debuggee.sessionId)
+          throw automationError("unsupported-target", { reason: "cross-frame-reference-context", ref: locator.ref });
+        let refObjectId = resolved.objectId;
+        if (base.executionContextId !== undefined) {
+          try {
+            const rebound = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: resolved.ref.backendNodeId,
+              executionContextId: base.executionContextId, objectGroup: "surf-wax-automation" });
+            refObjectId = rebound.object?.objectId;
+            if (!refObjectId) throw new Error("missing-node-object");
+            owned.add(refObjectId);
+          } catch {
+            throw automationError("unsupported-target", { reason: "cross-frame-reference-context", ref: locator.ref });
+          }
+        }
+        let contained: any;
+        try {
+          contained = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: base.objectId,
+            functionDeclaration: "function(node){for(let current=node;current;current=current.parentNode||current.host||null)if(current===this)return node!==this;return false}",
+            arguments: [{ objectId: refObjectId }], returnByValue: true });
+        } catch (error) {
+          if (/same.*(world|context)|different.*(world|context)|different JavaScript world/i.test(error instanceof Error ? error.message : String(error)))
+            throw automationError("unsupported-target", { reason: "cross-frame-reference-context", ref: locator.ref });
+          throw error;
+        }
+        if (contained.exceptionDetails) throw automationError("unsupported-target", { reason: "cross-frame-reference-context", ref: locator.ref });
+        current = contained.result?.value ? [{ objectId: refObjectId, backendNodeId: resolved.ref.backendNodeId, role: resolved.ref.role, name: resolved.ref.name,
+          ...(base.executionContextId === undefined ? {} : { executionContextId: base.executionContextId }) }] : [];
+      }
+      const filter = async (hasText?: string, has?: LocatorSpec) => {
+        const filtered: LocatedNode[] = [];
+        for (const node of current) {
+          if (hasText !== undefined) {
+            const text = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: node.objectId,
+              functionDeclaration: "function(){return String(this.innerText===undefined?this.textContent:this.innerText).replace(/\\s+/g,' ').trim()}",
+              returnByValue: true });
+            if (text.exceptionDetails) throw new Error(text.exceptionDetails.exception?.description || text.exceptionDetails.text);
+            if (!String(text.result?.value ?? "").toLowerCase().includes(hasText.replace(/\s+/g, " ").trim().toLowerCase())) continue;
+          }
+          if (has && !(await walk(node, has)).length) continue;
+          filtered.push(node);
+        }
+        current = filtered;
+      };
+      for (const query of locator.queries) {
+        throwIfAborted(this.context.signal);
+        if (query.kind === "filter") { await filter(query.hasText, query.has); continue; }
+        if (query.kind === "index") {
+          const index = query.index! < 0 ? current.length + query.index! : query.index!;
+          current = current[index] ? [current[index]!] : [];
+          continue;
+        }
+        if (query.kind === "frame" || query.kind === "frameRef") throw automationError("unsupported-target", { reason: "frame-inside-filter" });
+        const groups = await Promise.all(current.map((node) => query.kind === "role" || query.kind === "label" ? semanticStep(node, query) : domStep(node, query)));
+        current = unique(groups.flat());
+      }
+      if (locator.has || locator.hasText !== undefined) await filter(locator.hasText, locator.has);
+      if (locator.index !== undefined) {
+        const index = locator.index < 0 ? current.length + locator.index : locator.index;
+        current = current[index] ? [current[index]!] : [];
+      }
+      return current;
+    };
+    let results: LocatedNode[] = [];
+    try {
+      results = await walk(initial, spec);
+      return results;
+    } finally {
+      const retained = new Set(keepResults ? results.map((node) => node.objectId) : []);
+      for (const objectId of owned) if (!retained.has(objectId)) {
+        this.objectDebuggees.delete(objectId);
+        void this.options.command(debuggee, "Runtime.releaseObject", { objectId }).catch(() => undefined);
+      }
+    }
+  }
+
   private async resolveMetadata(session: Session, spec: LocatorSpec): Promise<Candidate[]> {
     if (spec.ref && standaloneRef(spec)) {
       const { ref } = await this.resolveRef(session, spec.ref);
@@ -1771,6 +1949,8 @@ export class AutomationRuntime {
     }
     const scoped = await this.locatorScope(session, spec);
     if (!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) return this.resolveAccessibility(scoped.debuggee, scoped.spec, scoped.rootObjectId);
+    if (this.hasSemanticQueries(scoped.spec)) return (await this.resolveSemantic(session, scoped.debuggee, scoped.spec, scoped.rootObjectId, false))
+      .map((node) => ({ role: node.role ?? "", name: node.name ?? "", backendNodeId: node.backendNodeId, debuggee: scoped.debuggee }));
     return (await this.resolveLocator(scoped.debuggee, scoped.spec, true, scoped.rootObjectId, undefined, session))?.value as Candidate[];
   }
 
@@ -1810,6 +1990,11 @@ export class AutomationRuntime {
         if (isDetachedNodeError(error) && !(error instanceof AutomationError)) return undefined;
         throw error;
       }
+    }
+    if (this.hasSemanticQueries(scoped.spec)) {
+      const matches = await this.resolveSemantic(session, scoped.debuggee, scoped.spec, scoped.rootObjectId);
+      this.assertStrict(spec, matches.map((node) => ({ role: node.role ?? "", name: node.name ?? "" })));
+      return matches[0]?.objectId;
     }
     return this.resolveDomOnce(session, scoped.debuggee, scoped.spec, scoped.rootObjectId);
   }
@@ -1882,6 +2067,13 @@ export class AutomationRuntime {
         throw error;
       }
     }
+    if (this.hasSemanticQueries(scoped.spec)) {
+      const matches = await this.resolveSemantic(session, scoped.debuggee, scoped.spec, scoped.rootObjectId);
+      const candidates = matches.map((node) => ({ role: node.role ?? "", name: node.name ?? "", backendNodeId: node.backendNodeId, debuggee: scoped.debuggee }));
+      observe?.(candidates);
+      this.assertStrict(spec, candidates);
+      return matches[0]?.objectId;
+    }
     return this.resolveDomOnce(session, scoped.debuggee, scoped.spec, scoped.rootObjectId, observe);
   }
 
@@ -1908,9 +2100,11 @@ export class AutomationRuntime {
       }
       root = { nodeId };
     }
+    // CDP's accessibleName filter is case-sensitive and exact. Apply matching
+    // ourselves so substring, case and whitespace semantics remain consistent.
     const tree = await this.options.command(debuggee, "Accessibility.queryAXTree", query.kind === "role"
-      ? { ...root, role: query.value, ...(query.name ? { accessibleName: query.name } : {}) }
-      : { ...root, accessibleName: query.value });
+      ? { ...root, role: query.value }
+      : root);
     const controls = new Set(["button", "checkbox", "combobox", "listbox", "option", "radio", "searchbox", "slider", "spinbutton", "switch", "textbox"]);
     const normalize = (value: unknown) => String(value ?? "").replace(/\s+/g, " ").trim();
     const equal = (actual: string, expected: string) => query.exact ? actual === expected : actual.toLocaleLowerCase().includes(expected.toLocaleLowerCase());
@@ -1919,7 +2113,7 @@ export class AutomationRuntime {
       const role = axValue(node.role);
       const name = normalize(axValue(node.name));
       const expected = normalize(query.kind === "role" ? query.name ?? "" : query.value);
-      if (query.kind === "role" && (role !== query.value || expected && !equal(name, expected))) return [];
+      if (query.kind === "role" && (role !== query.value || query.name !== undefined && !equal(name, expected))) return [];
       if (query.kind === "label" && (!controls.has(role) || !equal(name, expected))) return [];
       return [{ role, name, backendNodeId: node.backendDOMNodeId, debuggee }];
     });
@@ -1962,6 +2156,7 @@ export class AutomationRuntime {
         const world = await this.options.command(frame.debuggee, "Page.createIsolatedWorld", { frameId: frame.frameId, worldName: "surf-wax-frame" });
         check();
         if (!Number.isSafeInteger(world?.executionContextId)) throw automationError("frame-unavailable", { reason: "missing-execution-context" });
+        entry.executionContextId = world.executionContextId;
         const response = await this.options.command(frame.debuggee, "Runtime.evaluate", { expression: "document", contextId: world.executionContextId, returnByValue: false, objectGroup: "surf-wax-automation" });
         if (typeof response.result?.objectId === "string") entry.objectId = response.result.objectId;
         check();
@@ -2023,14 +2218,19 @@ export class AutomationRuntime {
       if (frameIndex < 0) return { debuggee, spec: scoped, ...(rootObjectId ? { rootObjectId } : {}), ...(rootIsElement ? { rootIsElement } : {}) };
       const frame = scoped.queries[frameIndex]!;
       const ownerSpec: LocatorSpec = { queries: [...scoped.queries.slice(0, frameIndex), { ...frame, kind: "css" }] };
-      const ownerId = immediate ? await this.resolveDomOnce(session, debuggee, ownerSpec, rootObjectId) : await this.resolveDirect(debuggee, ownerSpec, rootObjectId, session);
+      let ownerId: string | undefined;
+      if (this.hasSemanticQueries(ownerSpec)) {
+        do {
+          const matches = await this.resolveSemantic(session, debuggee, ownerSpec, rootObjectId);
+          this.assertStrict(ownerSpec, matches.map((node) => ({ role: node.role ?? "", name: node.name ?? "" })));
+          ownerId = matches[0]?.objectId;
+          if (!ownerId && !immediate) await delay(50, this.context.signal);
+        } while (!ownerId && !immediate);
+      } else ownerId = immediate ? await this.resolveDomOnce(session, debuggee, ownerSpec, rootObjectId) : await this.resolveDirect(debuggee, ownerSpec, rootObjectId, session);
       if (!ownerId) throw automationError("frame-not-found", { locator: ownerSpec });
       const owner = (await this.options.command(debuggee, "DOM.describeNode", { objectId: ownerId })).node;
       const child = owner?.frameId ? session.frames.get(owner.frameId) : undefined;
       if (owner?.frameId && (!child?.sessionId || child.sessionId === debuggee.sessionId)) {
-        const accessible = await this.callOn({ ...session, debuggee }, ownerId,
-          "function(){ try { return this.contentDocument !== null; } catch { return false; } }");
-        if (accessible === false) {
           const revision = session.frameRevision, generation = session.generation;
           const frame: FrameRefRecord = { frameId: owner.frameId, debuggee, generation, revision,
             conversationId: this.context.conversationId, runId: this.context.logIdentity?.runId };
@@ -2056,12 +2256,8 @@ export class AutomationRuntime {
           scoped = { ...scoped, queries: scoped.queries.slice(frameIndex + 1) };
           scanFrom = 0;
           continue;
-        }
       }
-      // A same-process child inherits its parent's debugger session, including
-      // when that parent is itself an OOPIF. Keep that frame in the locator
-      // prefix and keep looking for any later cross-process boundary.
-      if (!child?.sessionId || child.sessionId === debuggee.sessionId) { scanFrom = frameIndex + 1; continue; }
+      if (!child?.sessionId) throw automationError("frame-unavailable", { reason: "missing-frame-id" });
       await session.frameReady.get(child.sessionId);
       debuggee = child;
       rootObjectId = undefined;
@@ -2077,10 +2273,21 @@ export class AutomationRuntime {
     visitLocators(spec, (nested) => { if (nested !== spec && nested.ref && !keys.includes(nested.ref)) keys.push(nested.ref); });
     if (keys.length) {
       if (!session) throw automationError("invalid-target", { reason: "missing-reference-session" });
+      const executionContextId = rootObjectId ? [...this.frameDocuments.values()].find((frame) => frame.objectId === rootObjectId)?.executionContextId : undefined;
       const objects = await Promise.all(keys.map(async (key) => {
         const resolved = await this.resolveRef(session, key);
         if (resolved.ref.debuggee.tabId !== debuggee.tabId || resolved.ref.debuggee.sessionId !== debuggee.sessionId)
           throw automationError("unsupported-target", { reason: "cross-frame-reference-context", ref: key });
+        if (executionContextId !== undefined) {
+          try {
+            const rebound = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: resolved.ref.backendNodeId,
+              executionContextId, objectGroup });
+            if (!rebound.object?.objectId) throw new Error("missing-node-object");
+            return rebound.object.objectId;
+          } catch {
+            throw automationError("unsupported-target", { reason: "cross-frame-reference-context", ref: key });
+          }
+        }
         return resolved.objectId;
       }));
       let temporaryRoot: string | undefined;
