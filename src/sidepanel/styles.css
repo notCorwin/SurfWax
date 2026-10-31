@@ -209,7 +209,6 @@ p {
 
 .conversation-turn,
 .assistant-message-content,
-.work-summary-content,
 .thinking-body {
   display: flex;
   flex-direction: column;
@@ -219,10 +218,6 @@ p {
 .conversation-turn {
   padding-bottom: var(--transcript-turn-gap);
   contain: layout style;
-}
-
-.work-summary-content {
-  padding-top: calc(var(--spacing) * 2);
 }
 
 .assistant-message {
@@ -306,15 +301,13 @@ p {
 }
 
 .thinking-item,
-.activity,
-.process-trace {
+.activity {
   border: 0;
   background: transparent;
 }
 
 .thinking-item summary,
-.activity summary,
-.process-trace summary {
+.activity summary {
   display: flex;
   align-items: center;
   cursor: pointer;
@@ -327,8 +320,7 @@ p {
 }
 
 .thinking-item summary::-webkit-details-marker,
-.activity summary::-webkit-details-marker,
-.process-trace summary::-webkit-details-marker {
+.activity summary::-webkit-details-marker {
   display: none;
 }
 
@@ -338,30 +330,6 @@ p {
   padding: var(--transcript-block-gap) 0 0;
   font-size: var(--type-code);
   line-height: var(--transcript-line-height);
-}
-
-.activity[data-status="error"] summary,
-.process-trace[data-status="error"] summary {
-  color: var(--destructive);
-}
-
-.process-trace > summary {
-  min-width: 0;
-}
-
-.process-trace > summary span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.process-trace-content {
-  display: flex;
-  flex-direction: column;
-  gap: var(--transcript-item-gap);
-  padding-left: calc(var(--spacing) * 4);
-  padding-top: var(--transcript-item-gap);
 }
 
 .activity-content strong {
@@ -409,20 +377,14 @@ p {
 .reasoning-select { font-size: var(--type-xs); color: var(--muted-foreground); border-color: transparent; box-shadow: none; }
 .user-message [data-slot="bubble-content"] { border-radius: var(--radius-xl); padding: calc(var(--spacing) * 2) calc(var(--spacing) * 3); }
 .assistant-message { padding-inline: 0; }
-:is(.process-trace, .work-summary, .thinking-item, .activity) > summary { gap: calc(var(--spacing) * 2); font-weight: 450; font-size: var(--type-xs); min-height: calc(var(--spacing) * 6); }
-:is(.process-trace, .work-summary, .thinking-item, .activity) > summary::after {
+:is(.thinking-item, .activity) > summary { gap: calc(var(--spacing) * 2); font-weight: 450; font-size: var(--type-xs); min-height: calc(var(--spacing) * 6); }
+:is(.thinking-item, .activity) > summary::after {
   content: ""; width: calc(var(--spacing) * 1.25); height: calc(var(--spacing) * 1.25); flex-shrink: 0;
   border-right: 1px solid currentColor; border-top: 1px solid currentColor; transform: rotate(45deg);
 }
-:is(.process-trace, .work-summary, .thinking-item, .activity)[open] > summary::after { transform: rotate(135deg); }
-.process-trace-content { margin-left: calc(var(--spacing) * 0.5); border-left: 1px solid var(--surface-stroke); }
-.live-tool-calls { max-height: calc(var(--spacing) * 24); overflow-y: auto; overscroll-behavior: contain; padding-inline: calc(var(--spacing) * 2); }
-.live-tool-calls > .activity > summary { min-height: calc(var(--spacing) * 8); }
-.live-tool-calls > .activity > summary span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+:is(.thinking-item, .activity)[open] > summary::after { transform: rotate(135deg); }
 .app-shell > [role="status"], .app-shell > [role="alert"] { margin: calc(var(--spacing) * 2) calc(var(--spacing) * 4); font-size: var(--type-xs); }
 @media (max-height: 600px) {
   .welcome { min-height: 0; padding-block: calc(var(--spacing) * 4); gap: calc(var(--spacing) * 4); }
   .welcome-symbol { display: none; }
 }
-
-.work-summary { padding-inline: 0; }

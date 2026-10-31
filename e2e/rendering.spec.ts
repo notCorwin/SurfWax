@@ -9,9 +9,9 @@ import { resolve } from "node:path";
 
 import { test, p95, textResponse, assistantResponse, delayedResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
 
-const completedProgram = /^execute_program 已完成 · \d+\.\d{2} 秒$/;
+const completedProgram = /^执行浏览器操作 · \d+\.\d{2} 秒$/;
 
-test("keeps the latest three tool calls visible during a run and folds all calls after interruption", async () => {
+test("keeps at most three recent tool calls and summarizes them after interruption", async () => {
   const calls = ["return 1;", "return 2;", "return 3;", "await new Promise((resolve) => setTimeout(resolve, 60_000)); return 4;"];
   const provider = await startProvider([assistantResponse({ tool_calls: calls.map((code, index) => ({
     id: `rolling-${index}`, type: "function", function: { name: "execute_program", arguments: JSON.stringify({ code }) },
@@ -26,32 +26,24 @@ test("keeps the latest three tool calls visible during a run and folds all calls
     await opened.page.getByTestId("composer-input").press("Enter");
     const list = opened.page.getByTestId("live-tool-calls");
     const rows = list.locator(".activity");
-    await expect(rows).toHaveCount(4);
-    await expect(rows.nth(2).locator(":scope > summary")).toHaveText(completedProgram);
-    await expect(rows.last().locator(":scope > summary")).toHaveText("正在调用 execute_program");
-    expect(await list.evaluate((element) => element.scrollHeight > element.clientHeight && element.scrollTop > 0)).toBe(true);
-    const rowHeight = await rows.last().locator(":scope > summary").evaluate((element) => element.getBoundingClientRect().height);
-    expect((await list.boundingBox())!.height).toBeLessThanOrEqual(rowHeight * 3 + 1);
-    await list.evaluate((element) => { element.scrollTop = 0; });
-    await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(0);
+    await expect(rows).toHaveCount(3);
+    await expect(rows.last().locator(":scope > summary")).toHaveText(/^执行浏览器操作 · \d+\.\d{2} 秒$/);
+    const before = await rows.last().locator(":scope > summary").innerText();
+    await expect.poll(() => rows.last().locator(":scope > summary").innerText()).not.toBe(before);
     await opened.page.getByRole("button", { name: "停止生成" }).click();
     await expect(list).toHaveCount(0);
-    const work = opened.page.getByTestId("work-summary");
-    await expect(work).toHaveCount(1);
-    await expect(work.locator(":scope > summary")).toContainText("execute_program");
+    await expect(opened.page.getByTestId("tool-group-summary")).toHaveCount(1);
+    await expect(opened.page.getByTestId("tool-group-summary")).toContainText("执行浏览器操作");
     await expect(opened.page.getByRole("button", { name: "继续" })).toBeVisible();
-    await work.locator(":scope > summary").click();
-    await expect(work.locator(".activity")).toHaveCount(4);
-    await expect(work.locator(".activity[data-status=running]")).toHaveCount(0);
+    await expect(opened.page.getByTestId("tool-group-summary").locator("summary, button")).toHaveCount(0);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
 
-test("scrolls to each newly added tool without moving on a status-only update", async () => {
+test("keeps completed tools visible while waiting for the next provider response", async () => {
   const provider = await startProvider([
-    ...[1, 2, 3, 4].map((index) => toolResponse(`return ${index};`, `sequential-${index}`)),
-    delayedResponse(toolResponse("await new Promise((resolve) => setTimeout(resolve, 60_000));", "sequential-5"), 1_500),
+    toolResponse("return 'DONE'"), delayedResponse(textResponse("FINAL_AFTER_WAIT"), 2_500), textResponse("等待回复"),
   ]);
   const opened = await openExtension();
   try {
@@ -59,19 +51,16 @@ test("scrolls to each newly added tool without moving on a status-only update", 
     await target.goto(`${provider.origin}/target`);
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
-    await opened.page.getByTestId("composer-input").fill("run sequential tools");
+    await opened.page.getByTestId("composer-input").fill("run then reply");
     await opened.page.getByTestId("composer-input").press("Enter");
-    const list = opened.page.getByTestId("live-tool-calls");
-    const rows = list.locator(".activity");
-    await expect(rows).toHaveCount(4);
-    await expect(rows.last().locator(":scope > summary")).toHaveText(completedProgram);
-    await list.evaluate((element) => { element.scrollTop = 0; });
-    await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(0);
-    await expect(rows).toHaveCount(5);
-    await expect.poll(() => list.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(1);
-    await expect(rows.last().locator(":scope > summary")).toHaveText("正在调用 execute_program");
-    await opened.page.getByRole("button", { name: "停止生成" }).click();
-    await expect(opened.page.getByTestId("work-summary")).toHaveCount(1);
+    await expect(opened.page.getByTestId("live-tool-calls").locator(".activity summary")).toHaveText(completedProgram);
+    const waiting = opened.page.getByTestId("waiting-status");
+    await expect(waiting).toContainText("正在等待推理提供商响应");
+    const before = await waiting.innerText();
+    await expect.poll(() => waiting.innerText()).not.toBe(before);
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FINAL_AFTER_WAIT");
+    await expect(waiting).toHaveCount(0);
+    await expect(opened.page.getByTestId("tool-group-summary")).toHaveText(completedProgram);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -161,11 +150,8 @@ test("follows the system color scheme across every visible extension surface wit
 });
 
 
-test("collapses adjacent commands into one line without hiding their details", async () => {
-  const provider = await startProvider([
-    queuedToolResponse("return 'FIRST_RESULT'", "return 'SECOND_RESULT'"),
-    textResponse("完成"),
-  ], 500);
+test("summarizes adjacent commands in one non-expandable line", async () => {
+  const provider = await startProvider([queuedToolResponse("return 'FIRST_RESULT'", "return 'SECOND_RESULT'"), textResponse("完成")], 500);
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage();
@@ -174,36 +160,22 @@ test("collapses adjacent commands into one line without hiding their details", a
     await options.close();
     await opened.page.getByTestId("composer-input").fill("run two commands");
     await opened.page.getByTestId("composer-input").press("Enter");
-    const group = opened.page.getByTestId("process-trace");
-    const work = opened.page.getByTestId("work-summary");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("完成");
-    await expect(work).toHaveCount(1);
-    await work.locator(":scope > summary").click();
-    await expect(opened.page.locator(".activity[data-status=complete]")).toHaveCount(2);
-    await expect(group).toHaveCount(1);
-    await expect(group.locator(":scope > summary")).toBeVisible();
-    await expect(group.locator("summary svg")).toHaveCount(0);
-    await expect(group.locator(".activity").first()).toBeHidden();
-    await expect(opened.page.locator(".activity[data-status]")).toHaveCount(2);
-    await expect(group.locator(":scope > summary")).toHaveText(completedProgram);
-    await expect(group.locator(".activity")).toHaveCount(2);
-    await expect(group).not.toHaveAttribute("open", "");
-    await group.locator(":scope > summary").click();
-    await group.locator(".activity summary").first().click();
-    await expect(group).toContainText("FIRST_RESULT");
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("完成");
+    const summary = opened.page.getByTestId("tool-group-summary");
+    await expect(summary).toHaveCount(1);
+    await expect(summary).toHaveText(completedProgram);
+    await expect(summary.locator("summary, button")).toHaveCount(0);
+    await expect(opened.page.getByTestId("live-tool-calls")).toHaveCount(0);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
 
-
-test("starts a new process line after assistant text", async () => {
+test("keeps text between tool groups in its chronological position", async () => {
   const provider = await startProvider([
     toolResponse("return 'FIRST_RESULT'", "call-before-text"),
     assistantResponse({ content: "BETWEEN_PROCESS_GROUPS", tool_calls: [{ id: "call-after-text", type: "function", function: { name: "execute_program", arguments: JSON.stringify({ code: "return 'SECOND_RESULT';" }) } }] }),
-    delayedResponse(textResponse("FINAL_AFTER_GROUPS"), 1_500),
-    textResponse("分段过程记录"),
+    delayedResponse(textResponse("FINAL_AFTER_GROUPS"), 1_500), textResponse("分段过程记录"),
   ]);
   const opened = await openExtension();
   try {
@@ -213,33 +185,32 @@ test("starts a new process line after assistant text", async () => {
     await options.close();
     await opened.page.getByTestId("composer-input").fill("split process records around text");
     await opened.page.getByTestId("composer-input").press("Enter");
-    const liveCalls = opened.page.getByTestId("live-tool-calls").locator(".activity");
-    await expect(liveCalls).toHaveCount(2);
-    await expect(liveCalls.nth(0).locator(":scope > summary")).toHaveText(completedProgram);
-    await expect(liveCalls.nth(1).locator(":scope > summary")).toHaveText(completedProgram);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FINAL_AFTER_GROUPS");
-    const work = opened.page.getByTestId("work-summary");
-    await work.locator(":scope > summary").click();
-    const groups = work.getByTestId("process-trace");
-    await expect(groups).toHaveCount(2);
-    await expect(groups.nth(0).locator(":scope > summary")).toHaveText(completedProgram);
-    await expect(groups.nth(1).locator(":scope > summary")).toHaveText(completedProgram);
-    await expect(work).toContainText("BETWEEN_PROCESS_GROUPS");
-    await expect(work).not.toContainText("FINAL_AFTER_GROUPS");
+    const summaries = opened.page.getByTestId("tool-group-summary");
+    await expect(summaries).toHaveCount(2);
+    await expect(summaries.nth(0)).toHaveText(completedProgram);
+    await expect(summaries.nth(1)).toHaveText(completedProgram);
+    const ordered = await opened.page.locator('.conversation-turn').last().evaluate((turn) => {
+      const nodes = [...turn.querySelectorAll('[data-testid="tool-group-summary"], .markdown-body')];
+      return nodes.map((node) => node.textContent ?? "");
+    });
+    const between = ordered.findIndex((value) => value.includes("BETWEEN_PROCESS_GROUPS"));
+    const groups = ordered.flatMap((value, index) => value.includes("执行浏览器操作") ? [index] : []);
+    const final = ordered.findIndex((value) => value.includes("FINAL_AFTER_GROUPS"));
+    expect(groups[0]).toBeLessThan(between);
+    expect(between).toBeLessThan(groups[1]!);
+    expect(groups[1]).toBeLessThan(final);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
 
-
-test("continues the latest activity after earlier progress text", async () => {
+test("keeps reasoning and live tool activity in order", async () => {
   const provider = await startProvider([
     assistantResponse({ content: "PROGRESS_BEFORE_ACTIVITIES", reasoning_content: "PLAN", tool_calls: [
       { id: "call-queued-0", type: "function", function: { name: "execute_program", arguments: JSON.stringify({ code: "return 'FIRST_RESULT'" }) } },
       { id: "call-queued-1", type: "function", function: { name: "execute_program", arguments: JSON.stringify({ code: "return 'SECOND_RESULT'" }) } },
-    ] }),
-    delayedResponse(textResponse("NEXT_PROGRESS_TEXT"), 2_500),
-    textResponse("活动顺序测试"),
+    ] }), delayedResponse(textResponse("NEXT_PROGRESS_TEXT"), 2_500), textResponse("活动顺序测试"),
   ]);
   const opened = await openExtension();
   try {
@@ -250,107 +221,19 @@ test("continues the latest activity after earlier progress text", async () => {
     await opened.page.getByTestId("composer-input").fill("progress then think and run twice");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body", { hasText: "PROGRESS_BEFORE_ACTIVITIES" })).toHaveCount(1);
-    const group = opened.page.getByTestId("process-trace");
+    await expect(opened.page.getByTestId("reasoning-item")).toHaveCount(1);
     const calls = opened.page.getByTestId("live-tool-calls").locator(".activity");
     await expect(calls).toHaveCount(2);
     await expect(calls.first().locator(":scope > summary")).toHaveText(completedProgram);
     await expect(calls.last().locator(":scope > summary")).toHaveText(completedProgram);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("NEXT_PROGRESS_TEXT");
-    await opened.page.getByTestId("work-summary").locator(":scope > summary").click();
-    await expect(group.locator(":scope > summary")).toHaveText(completedProgram);
-    await expect(group.locator(".activity").last().locator(":scope > summary")).toHaveText(completedProgram);
+    await expect(opened.page.getByTestId("tool-group-summary")).toHaveCount(1);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
 
-
-test("shows the completed tool while waiting for the next response", async () => {
-  const provider = await startProvider([
-    toolResponse("return 'DONE'"),
-    delayedResponse(textResponse("FINAL_AFTER_WAIT"), 1_500),
-    textResponse("等待回复"),
-  ]);
-  const opened = await openExtension();
-  try {
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/target`);
-    const options = await configure(opened.context, opened.page, provider.baseURL);
-    await options.close();
-    await opened.page.getByTestId("composer-input").fill("run then reply");
-    await opened.page.getByTestId("composer-input").press("Enter");
-    const group = opened.page.getByTestId("process-trace");
-    await expect(opened.page.getByTestId("live-tool-calls").locator(".activity summary")).toHaveText(completedProgram);
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("FINAL_AFTER_WAIT");
-    await opened.page.getByTestId("work-summary").locator(":scope > summary").click();
-    await expect(group.locator(":scope > summary")).toHaveText(completedProgram);
-    await expect(group.locator(".activity summary")).toHaveText(completedProgram);
-  } finally {
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-
-test("shows completed reasoning alongside command execution", async () => {
-  const provider = await startProvider([
-    assistantResponse({ reasoning_content: "PLAN", tool_calls: [{ id: "call-chrome-e2e", type: "function", function: { name: "execute_program", arguments: JSON.stringify({ code: "return 'DONE'" }) } }] }),
-    delayedResponse(textResponse("ANSWER_AFTER_REASONING"), 1_500),
-    textResponse("推理测试"),
-  ], 600);
-  const opened = await openExtension();
-  try {
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/target`);
-    const options = await configure(opened.context, opened.page, provider.baseURL);
-    await options.close();
-    await opened.page.getByTestId("composer-input").fill("reason then run");
-    await opened.page.getByTestId("composer-input").press("Enter");
-    const group = opened.page.getByTestId("process-trace");
-    await expect(group.locator(":scope > summary")).toHaveText("思考完成");
-    await expect(opened.page.getByTestId("live-tool-calls").locator(".activity summary")).toHaveText(completedProgram);
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("ANSWER_AFTER_REASONING");
-    await opened.page.getByTestId("work-summary").locator(":scope > summary").click();
-    await expect(group.locator(":scope > summary")).toHaveText(completedProgram);
-  } finally {
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-
-test("stops continued activity when a reply is interrupted", async () => {
-  const provider = await startProvider([
-    queuedToolResponse(
-      "await new Promise((resolve) => setTimeout(resolve, 60_000)); return 'TOO_LATE'",
-      "return 'NEVER_STARTED'",
-    ),
-  ]);
-  const opened = await openExtension();
-  try {
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/target`);
-    const options = await configure(opened.context, opened.page, provider.baseURL);
-    await options.close();
-    await opened.page.getByTestId("composer-input").fill("interrupt two commands");
-    await opened.page.getByTestId("composer-input").press("Enter");
-    const calls = opened.page.getByTestId("live-tool-calls");
-    await expect(calls.locator(".activity[data-status=running]")).toHaveCount(2);
-    await opened.page.getByRole("button", { name: "停止生成" }).click();
-    const work = opened.page.getByTestId("work-summary");
-    await expect(work).toHaveCount(1);
-    await work.locator(":scope > summary").click();
-    const group = work.getByTestId("process-trace");
-    await expect(group.locator(":scope > summary")).toContainText("execute_program");
-    await expect(group).toHaveAttribute("data-status", "error");
-    await group.locator(":scope > summary").click();
-    await expect(group.locator(".activity[data-status]")).toHaveCount(2);
-    await expect(group.locator(".activity[data-status=running]")).toHaveCount(0);
-  } finally {
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-
-test("stops continued activity when the model request fails", async () => {
+test("ends activity when the model request fails", async () => {
   const provider = await startProvider([toolResponse("return 'DONE'"), { status: 400, error: "fatal request" }]);
   const opened = await openExtension();
   try {
@@ -360,21 +243,18 @@ test("stops continued activity when the model request fails", async () => {
     await options.close();
     await opened.page.getByTestId("composer-input").fill("run then fail");
     await opened.page.getByTestId("composer-input").press("Enter");
-    const work = opened.page.getByTestId("work-summary");
-    await expect(work.locator(":scope > summary")).toContainText("execute_program 已完成");
+    await expect(opened.page.getByTestId("tool-group-summary")).toHaveText(completedProgram);
     await expect(opened.page.getByTestId("live-tool-calls")).toHaveCount(0);
-    await expect(opened.page.getByTestId("process-trace").locator(":scope > summary")).toHaveText(completedProgram);
+    await expect(opened.page.getByTestId("waiting-status")).toHaveCount(0);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
 
-
-test("shows live work, then folds it under elapsed time while keeping the final reply visible after restore", async () => {
+test("restores the chronological timeline and wall-clock group duration", async () => {
   const provider = await startProvider([
     assistantResponse({ content: "PROGRESS_TEXT", tool_calls: [{ id: "call-chrome-e2e", type: "function", function: { name: "execute_program", arguments: JSON.stringify({ code: "await new Promise((resolve) => setTimeout(resolve, 300)); return 'WORK_RESULT'" }) } }] }),
-    textResponse("FINAL_REPLY"),
-    textResponse("工作摘要标题"),
+    textResponse("FINAL_REPLY"), textResponse("工作摘要标题"),
   ]);
   const opened = await openExtension();
   try {
@@ -384,47 +264,25 @@ test("shows live work, then folds it under elapsed time while keeping the final 
     await options.close();
     await opened.page.getByTestId("composer-input").fill("do the work");
     await opened.page.getByTestId("composer-input").press("Enter");
-    const work = opened.page.getByTestId("work-summary");
-    await expect(work.locator(":scope > summary")).toHaveText(/^工作了 \d+ 秒 · execute_program 已完成 · \d+\.\d{2} 秒$/);
-    await expect(work.locator(":scope > summary svg")).toHaveCount(0);
-    const workLeft = await work.locator(":scope > summary span").evaluate((element) => element.getBoundingClientRect().left);
-    const answerLeft = await opened.page.locator(".conversation-turn").last().locator(".markdown-body p").last()
-      .evaluate((element) => element.getBoundingClientRect().left);
-    expect(workLeft).toBe(answerLeft);
-    await expect(work).not.toHaveAttribute("open", "");
-    await expect(work.locator(".activity")).toBeHidden();
-    await expect(work).toContainText("PROGRESS_TEXT");
-    await expect(work).not.toContainText("FINAL_REPLY");
-    await expect(work.locator(".markdown-body p")).toBeHidden();
-    await expect(opened.page.locator(".conversation-turn").last().locator(".markdown-body").last()).toContainText("FINAL_REPLY");
-    await expect(work.locator(".markdown-body")).toContainText("PROGRESS_TEXT");
-    await expect(opened.page.locator('[data-role="user"]').last()).toContainText("do the work");
+    const summary = opened.page.getByTestId("tool-group-summary");
+    await expect(summary).toHaveText(completedProgram);
+    await expect(opened.page.locator('.markdown-body', { hasText: "PROGRESS_TEXT" })).toHaveCount(1);
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FINAL_REPLY");
     const events = await readEvents(opened.page);
-    const submitted = events.find((event) => event.type === "conversation.submitted");
-    const finished = events.find((event) => event.type === "conversation.finished" && event.runId === submitted?.runId);
-    const seconds = Math.floor((Date.parse(finished.timestamp) - Date.parse(submitted.timestamp)) / 1000);
-    const terminal = events.find((event) => event.type === "tool.finished" && event.runId === submitted?.runId);
-    await expect(work.locator(":scope > summary")).toHaveText(`工作了 ${seconds} 秒 · execute_program 已完成 · ${(terminal.latencyMs / 1000).toFixed(2)} 秒`);
-    await work.locator(":scope > summary").click();
-    await work.getByTestId('process-trace').locator(':scope > summary').click();
-    await work.locator('.activity > summary').click();
-    await expect(work).toContainText("WORK_RESULT");
+    const started = events.find((event) => event.type === "tool.started" && event.toolCallId === "call-chrome-e2e");
+    const ended = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-chrome-e2e");
+    const elapsed = (Math.max(0, Date.parse(ended.timestamp) - Date.parse(started.timestamp)) / 1000).toFixed(2);
+    await expect(summary).toHaveText(`执行浏览器操作 · ${elapsed} 秒`);
     await opened.page.reload();
     await opened.page.getByTestId("conversation-menu").click();
     await opened.page.locator(".conversation-item", { hasText: "工作摘要标题" }).locator(".conversation-select").click();
-    await expect(opened.page.getByTestId("work-summary")).toHaveCount(1);
-    await expect(opened.page.getByTestId("work-summary")).not.toHaveAttribute("open", "");
+    await expect(opened.page.getByTestId("tool-group-summary")).toHaveText(`执行浏览器操作 · ${elapsed} 秒`);
+    await expect(opened.page.locator('.markdown-body', { hasText: "PROGRESS_TEXT" })).toHaveCount(1);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FINAL_REPLY");
-    await opened.page.getByTestId("work-summary").locator(":scope > summary").click();
-    await expect(opened.page.getByTestId("process-trace").locator(":scope > summary")).toHaveText(completedProgram);
-    await opened.page.getByTestId('process-trace').locator(':scope > summary').click();
-    await opened.page.locator('.activity > summary').click();
-    await expect(opened.page.getByTestId('work-summary')).toContainText('WORK_RESULT');
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
-
 
 test("executes complete tool arguments once they arrive", async () => {
   const provider = await startProvider([toolResponse('await sleep(800); return await page.title();', "call-phase"), delayedResponse(textResponse("PHASE_DONE"), 1_000)]);
@@ -437,7 +295,7 @@ test("executes complete tool arguments once they arrive", async () => {
     await opened.page.getByTestId("composer-input").fill("run one complete command");
     await opened.page.getByTestId("composer-input").press("Enter");
     const label = opened.page.getByTestId("live-tool-calls").locator(".activity > summary span");
-    await expect(label).toHaveText("正在调用 execute_program");
+    await expect(label).toHaveText(/^执行浏览器操作(?: · \d+\.\d{2} 秒)?$/);
     await expect(label).toHaveText(completedProgram);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("PHASE_DONE");
     const events = await readEvents(opened.page);
@@ -447,7 +305,6 @@ test("executes complete tool arguments once they arrive", async () => {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
-
 
 test("renders a complete Markdown response without blocking draft input", async () => {
   const markdown = [

@@ -1,64 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { completedWork, workLabel } from "./work-time";
 import { buildMessageSearchIndex } from "./thread-list";
-import { activityPhaseAt, processGroupSummary, toolActivity, turnActivityBoundary, turnActivityPhase } from "./process-group";
+import { activityPhaseAt, toolActivity, turnActivityBoundary, turnActivityPhase } from "./process-group";
 import { toLogValue, type LogEvent } from "../../logging";
-
-describe("workLabel", () => {
-  it.each([
-    [365 * 86400 + 211 * 86400, "工作了 1 年 211 天"],
-    [7 * 86400 + 23 * 3600, "工作了 7 天 23 小时"],
-    [3 * 3600 + 29 * 60, "工作了 3 小时 29 分钟"],
-    [29 * 60 + 38, "工作了 29 分 38 秒"],
-    [60, "工作了 1 分 0 秒"],
-    [3600, "工作了 1 小时 0 分钟"],
-    [86400, "工作了 1 天 0 小时"],
-    [18, "工作了 18 秒"],
-    [0, "工作了 0 秒"],
-  ])("formats %i seconds as %s", (seconds, expected) => {
-    expect(workLabel(seconds)).toBe(expected);
-  });
-});
-
-it("records completed, failed and recovered interrupted work by run even without a terminal message id", () => {
-  const events = ["done", "failed", "aborted"].flatMap((runId, index) => [
-    { id: index * 2 + 1, type: "conversation.submitted", runId, timestamp: "2026-11-01T00:00:00.000Z", content: null },
-    { id: index * 2 + 2, type: `conversation.${runId === "done" ? "finished" : runId}`, runId, timestamp: "2026-11-01T00:00:03.100Z", content: null },
-  ]);
-  expect([...completedWork(events)]).toEqual([["done", 3], ["failed", 3], ["aborted", null]]);
-});
 
 describe("tool activity", () => {
   const tool = (toolName: string, type: string, extra: { isError?: boolean; result?: unknown; durationMs?: number; timingIncomplete?: boolean } = {}) =>
     ({ type: "tool-call", toolName, status: { type }, ...extra });
 
-  it("uses the most recent tool and its real status even when later reasoning is active", () => {
-    const click = tool("click", "complete", { durationMs: 1234 });
-    const reasoning = { type: "reasoning", status: { type: "running" } };
-    expect(processGroupSummary([click, reasoning], [0, 1], false, "pending"))
-      .toEqual({ status: "complete", label: "click 已完成 · 1.23 秒" });
-    const fill = tool("fill", "running");
-    expect(processGroupSummary([click, fill], [0, 1], false, "pending"))
-      .toEqual({ status: "running", label: "正在调用 fill" });
-    expect(processGroupSummary([{ ...reasoning }], [0], false, "pending").label).toBe("正在思考");
-  });
-
   it("distinguishes failure, interruption and incomplete timing", () => {
     expect(toolActivity(tool("click", "incomplete", { isError: true, durationMs: 10 })))
-      .toEqual({ status: "error", label: "click 失败 · 0.01 秒" });
+      .toEqual({ status: "error", label: "点击 · 未完成 · 0.01 秒" });
     expect(toolActivity(tool("fill", "incomplete", { result: { error: { code: "aborted" } }, durationMs: 0, timingIncomplete: true })))
-      .toEqual({ status: "error", label: "fill 已中断 · ≥0.00 秒" });
+      .toEqual({ status: "error", label: "填写 · 已中断 · ≥0.00 秒" });
     expect(toolActivity(tool("fill", "incomplete", { result: { error: { code: "interrupted" } } })).label)
-      .toBe("fill 已中断");
-    expect(toolActivity({ ...tool("fill", "incomplete"), interrupted: true }).label).toBe("fill 已中断");
+      .toBe("填写 · 已中断");
+    expect(toolActivity({ ...tool("fill", "incomplete"), interrupted: true }).label).toBe("填写 · 已中断");
     expect(toolActivity(tool("fill", "incomplete", { durationMs: 25, timingIncomplete: true })).label)
-      .toBe("fill 失败 · ≥0.02 秒");
+      .toBe("填写 · 未完成 · ≥0.02 秒");
     expect(toolActivity(tool("fill", "running"), "cancelled"))
-      .toEqual({ status: "error", label: "fill 已中断" });
+      .toEqual({ status: "error", label: "填写 · 已中断" });
     expect(toolActivity(tool("click", "complete"), "cancelled"))
-      .toEqual({ status: "complete", label: "click 已完成" });
-    expect(processGroupSummary([tool("click", "incomplete"), tool("fill", "complete")], [0, 1]))
-      .toEqual({ status: "error", label: "fill 已完成 · 此前有失败" });
+      .toEqual({ status: "complete", label: "点击" });
   });
 });
 

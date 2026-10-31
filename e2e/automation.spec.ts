@@ -789,10 +789,10 @@ test("returns a tool result for a removed command and lets the agent recover", a
     await opened.page.getByTestId("composer-input").fill("recover from an unsupported extension command");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("RECOVERED_AFTER_DEBUGGER_ERROR");
-    const activity = opened.page.getByTestId("process-trace");
-    await expect(activity.locator(":scope > summary span")).toHaveText(/^install 失败 · \d+\.\d{2} 秒$/);
-    await expect(activity).toHaveAttribute("data-status", "error");
-    await expect(opened.page.locator(".process-trace[data-status=running]")).toHaveCount(0);
+    const activity = opened.page.getByTestId("tool-group-summary");
+    await expect(activity).toHaveText(/^执行浏览器操作(?: · \d+\.\d{2} 秒)?$/);
+    await expect(activity.locator("summary, button")).toHaveCount(0);
+    await expect(opened.page.getByTestId("live-tool-calls")).toHaveCount(0);
     await expect.poll(() => provider.requests.filter((request) => request.tools).length).toBe(2);
     const events = await readEvents(opened.page);
     expect(JSON.stringify(events.find((event) => event.type === "tool.failed" && event.toolCallId === "call-unsupported")?.error))

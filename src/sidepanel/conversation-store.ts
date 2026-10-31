@@ -6,15 +6,15 @@ import { ConversationListProjection, fromLogValue, type ConversationRepository, 
 export type PartStatus = { type: "running" | "complete" | "incomplete" | "requires-action"; reason?: string; error?: unknown };
 export type MessagePart =
   | { type: "text" | "reasoning"; text: string; status: PartStatus }
-  | { type: "tool-call"; toolCallId: string; toolName: string; args: unknown; result?: unknown; isError?: boolean; durationMs?: number; timingIncomplete?: boolean; interrupted?: boolean; status: PartStatus };
-type ToolTiming = { durationMs: number; timingIncomplete: boolean; interrupted: boolean };
+  | { type: "tool-call"; toolCallId: string; toolName: string; args: unknown; result?: unknown; isError?: boolean; durationMs?: number; startedAtMs?: number; finishedAtMs?: number; timingIncomplete?: boolean; interrupted?: boolean; status: PartStatus };
+type ToolTiming = { durationMs?: number; startedAtMs?: number; finishedAtMs?: number; timingIncomplete?: boolean; interrupted?: boolean };
 const timingKey = (runId: string, toolCallId: string) => JSON.stringify([runId, toolCallId]);
 export type MessageView = {
   id: string; runId?: string; role: SidePanelMessage["role"]; parts: readonly MessagePart[]; content: readonly MessagePart[];
   metadata: { custom?: Record<string, unknown> }; status: PartStatus;
   branchNumber: number; branchCount: number; source: SidePanelMessage;
 };
-export type ThreadState = { messages: readonly MessageView[]; isRunning: boolean; isLoading: boolean; isDisabled: boolean; error?: unknown };
+export type ThreadState = { messages: readonly MessageView[]; isRunning: boolean; isStopping: boolean; stoppingAt?: number; isLoading: boolean; isDisabled: boolean; error?: unknown };
 export type ThreadItem = ConversationSummary & { remoteId: string; custom: { runStatus: string } };
 export type PanelState = {
   thread: ThreadState;
@@ -92,7 +92,7 @@ export class ConversationStore {
 
   constructor(private logger: EventLogger, private transport: (id: string) => ConversationTransport, initialId: string = crypto.randomUUID()) {
     this.state = {
-      thread: { messages: [], isRunning: false, isLoading: false, isDisabled: false }, composer: { text: "" },
+      thread: { messages: [], isRunning: false, isStopping: false, isLoading: false, isDisabled: false }, composer: { text: "" },
       threadListItem: { id: initialId }, threads: { mainThreadId: initialId, threadItems: [], threadIds: [] },
     };
   }
@@ -141,9 +141,19 @@ export class ConversationStore {
       if (message && typeof message === "object" && typeof (message as { id?: unknown }).id === "string") this.messageRuns.set((message as { id: string }).id, event.runId);
       return false;
     }
-    if ((event.type !== "tool.finished" && event.type !== "tool.failed") || !event.toolCallId || typeof event.latencyMs !== "number" || !Number.isFinite(event.latencyMs) || event.latencyMs < 0) return false;
+    if (!event.toolCallId || !["tool.started", "tool.finished", "tool.failed"].includes(event.type)) return false;
+    const timestamp = Date.parse(event.timestamp);
+    const key = timingKey(event.runId, event.toolCallId);
+    const previous = this.toolTimings.get(key) ?? {};
+    if (event.type === "tool.started") {
+      if (!Number.isFinite(timestamp)) return false;
+      this.toolTimings.set(key, { ...previous, startedAtMs: timestamp });
+      return true;
+    }
     const content = fromLogValue(event.content, event.valueEncoding) as { timingIncomplete?: unknown; status?: unknown } | null;
-    this.toolTimings.set(timingKey(event.runId, event.toolCallId), { durationMs: event.latencyMs, timingIncomplete: content?.timingIncomplete === true, interrupted: content?.status === "interrupted" });
+    this.toolTimings.set(key, { ...previous, ...(Number.isFinite(timestamp) ? { finishedAtMs: timestamp } : {}),
+      ...(typeof event.latencyMs === "number" && Number.isFinite(event.latencyMs) && event.latencyMs >= 0 ? { durationMs: event.latencyMs } : {}),
+      timingIncomplete: content?.timingIncomplete === true, interrupted: content?.status === "interrupted" });
     return true;
   }
   private async restore(id: string): Promise<LogEvent[]> {
@@ -174,7 +184,7 @@ export class ConversationStore {
   thread = {
     getState: () => this.state.thread,
     subscribe: this.subscribe,
-    cancelRun: () => { this.controller?.abort(); },
+    cancelRun: () => { if (this.controller && !this.controller.signal.aborted) { this.updateThread({ isStopping: true, stoppingAt: Date.now() }); this.controller.abort(); } },
     append: (input: string | { content: readonly { type: "text"; text: string }[]; metadata?: unknown; role?: string; createdAt?: Date }) => {
       const message: SidePanelMessage = { id: crypto.randomUUID(), role: "user",
         parts: typeof input === "string" ? [{ type: "text", text: input }] : [...input.content],
@@ -254,7 +264,7 @@ export class ConversationStore {
     if (this.state.thread.isRunning || this.state.thread.isLoading || this.closed) return;
     const id = this.state.threadListItem.id;
     const controller = this.controller = new AbortController();
-    this.updateThread({ isRunning: true, error: undefined });
+    this.updateThread({ isRunning: true, isStopping: false, stoppingAt: undefined, error: undefined });
     this.display(messages);
     let failure: unknown;
     let priorFailureEventId = 0;
@@ -283,7 +293,7 @@ export class ConversationStore {
         if (!recorded) this.updateThread({ error: failure });
       }
       this.controller = undefined;
-      this.updateThread({ isRunning: false });
+      this.updateThread({ isRunning: false, isStopping: false, stoppingAt: undefined });
     }
   }
 }

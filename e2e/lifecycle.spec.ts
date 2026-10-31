@@ -11,7 +11,6 @@ import { test, p95, textResponse, assistantResponse, delayedResponse, toolRespon
 
 function nativeAssistantText(panel: Awaited<ReturnType<typeof attachTarget>>) {
   return panel.evaluate<string>(`Array.from(document.querySelectorAll('[data-role="assistant"]'))
-    .filter(element => !element.closest('[data-testid="work-summary"]'))
     .map(element => element.textContent || '').join('\\n')`);
 }
 
@@ -287,7 +286,7 @@ test("closing the panel cancels a pending complete response and continues only o
     await resumed.getByTestId("conversation-menu").click();
     await resumed.locator(".conversation-item").first().locator(".conversation-select").click();
     await expect(resumed.getByTestId("interrupted-message")).toBeVisible();
-    await expect(resumed.getByTestId("work-summary")).toHaveCount(0);
+    await expect(resumed.getByTestId("live-tool-calls")).toHaveCount(0);
     expect(JSON.stringify(await readEvents(resumed))).not.toContain("CANCELLED_RESPONSE");
     await resumed.getByTestId("continue-interrupted").click();
     await expect(resumed.locator('[data-role="user"]').last()).toContainText("继续上一次被中断的工作");
@@ -318,7 +317,7 @@ test("closing the panel prevents a queued chrome call from starting", async () =
     const process = opened.page.getByTestId("live-tool-calls");
     await expect(process).toHaveCount(1);
     await expect(process.locator(".activity[data-status]")).toHaveCount(2);
-    await expect(process.locator(".activity > summary").last()).toContainText("正在调用 execute_program");
+    await expect(process.locator(".activity > summary").last()).toContainText("执行浏览器操作");
     const runningLabel = process.locator(".activity > summary span").last();
     await expect(runningLabel).toHaveClass(/shimmer/);
     await expect.poll(() => runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationPlayState)).toBe("running");
@@ -452,7 +451,7 @@ test('closing a native Side Panel aborts its owner and prevents a queued page mu
     const native = await nativePanel(opened, `${provider.origin}/target`);
     await submitNative(native.panel, 'perform two queued actions');
     await expect(native.target.locator('#__surf-wax-page-guard')).toBeAttached();
-    await expect.poll(() => native.panel.evaluate<boolean>('document.body.textContent.includes("正在调用 execute_program")')).toBe(true);
+    await expect.poll(() => native.panel.evaluate<boolean>('document.body.textContent.includes("执行浏览器操作")')).toBe(true);
     await expect.poll(async () => (await readNativeEvents(native.panel)).filter(event => event.type === 'tool.started' && event.toolCallId?.startsWith('native-queue-')).length).toBe(2);
     await native.panel.close();
     expect((await native.browser.send('Target.closeTarget', { targetId: native.targetId })).success).toBe(true);

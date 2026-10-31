@@ -70,12 +70,12 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
       abortSignal?.throwIfAborted();
       const identity = options.conversationId ? options.logger?.toolIdentity(options.conversationId, toolCallId) : undefined;
       const callId = options.callId?.();
+      const startedAt = performance.now();
       if (options.logger) {
         const started = await options.logger.append({ type: "tool.started", conversationId: options.conversationId,
           content: { callId, toolName: definition.name }, input, toolCallId, ...identity });
         if (!started) throw new DOMException("日志维护已阻止工具启动。", "AbortError");
       }
-      const startedAt = performance.now();
       const finish = async (output: unknown) => {
         if (options.logger) {
           const failed = Boolean(output && typeof output === "object" && "ok" in output && output.ok === false);

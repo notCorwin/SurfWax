@@ -124,16 +124,12 @@ test("executes run through the page facade, restores the conversation, and clear
     const composer = opened.page.getByTestId("composer-input");
     await composer.fill("exercise the page facade");
     await composer.press("Enter");
-    const process = opened.page.getByTestId("process-trace");
-    await expect(process).toHaveCount(1);
-    await expect(process.locator(":scope > summary")).toHaveText(/^execute_program 已完成 · \d+\.\d{2} 秒$/);
-    await expect(process.locator(":scope > summary span")).not.toHaveClass(/shimmer/);
-    await expect(process).not.toHaveAttribute("open", "");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("META_OK");
-    await opened.page.getByTestId("work-summary").locator(":scope > summary").click();
-    await process.locator(":scope > summary").click();
-    await process.locator(".activity summary").click();
-    await expect(process.locator(".activity")).toContainText("Side Agent Target");
+    const process = opened.page.getByTestId("tool-group-summary");
+    await expect(process).toHaveCount(1);
+    await expect(process).toHaveText(/^执行浏览器操作 · \d+\.\d{2} 秒$/);
+    await expect(process.locator("summary, button")).toHaveCount(0);
+    expect(await process.evaluate((element) => Boolean(element.compareDocumentPosition(document.querySelector('.markdown-body')!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
 
     await expect.poll(() => provider.requests.length).toBe(3);
     expect(provider.requests[0].reasoning_effort).toBe("minimal");
@@ -593,7 +589,7 @@ test("edits user messages, regenerates replies and restores the selected branch"
     await expect(opened.page.locator(".markdown-body").last()).toContainText("REGENERATED_REPLY");
     await opened.page.getByRole("button", { name: "上一个分支" }).last().click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("ORIGINAL_REPLY");
-    await expect(opened.page.getByTestId("work-summary")).toHaveCount(1);
+    await expect(opened.page.getByTestId("replay-message-button")).toBeVisible();
     await expect.poll(async () => (await readEvents(opened.page)).filter((event) => event.type === "conversation.branch.selected").at(-1)?.content?.headId).toBe(originalReply);
 
     await opened.page.reload();

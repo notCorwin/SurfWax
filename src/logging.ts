@@ -1248,15 +1248,10 @@ export class EventLogger {
   async restorationEvents(conversationId: string): Promise<LogEvent[]> {
     return this.readCanonical(async (store, floor) => {
       const lifecycle = await this.eventsByTypesAt(store, floor, [...RUN_EVENT_TYPES, "conversation.message", "conversation.branch.selected", "tool.finished", "tool.failed"], conversationId);
-      const completed = new Set(lifecycle.filter((event) => event.type === "conversation.finished" && event.runId).map((event) => event.runId));
-      const interrupted = [...new Set(lifecycle
-        .filter((event) => (event.type === "conversation.failed" || event.type === "conversation.aborted")
-          && event.runId
-          && !completed.has(event.runId))
-        .map((event) => event.runId!))];
-      if (interrupted.length === 0) return lifecycle;
-      const replay = await this.eventsByRunTypesAt(store, floor, interrupted, ["tool.started"]);
-      return [...lifecycle, ...replay].sort((left, right) => left.id - right.id);
+      const runIds = [...new Set(lifecycle.flatMap((event) => event.runId ? [event.runId] : []))];
+      if (!runIds.length) return lifecycle;
+      const starts = await this.eventsByRunTypesAt(store, floor, runIds, ["tool.started"]);
+      return [...lifecycle, ...starts.filter((event) => event.conversationId === conversationId)].sort((left, right) => left.id - right.id);
     });
   }
 

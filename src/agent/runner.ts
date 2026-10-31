@@ -125,11 +125,13 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     activeTools: activeTools(),
     repairToolCall: repairProgramToolCall as any,
     onLanguageModelCallEnd: async (event) => {
+      logger?.record({ type: "model.response.received", conversationId: options.conversationId, content: { callId: event.callId } });
       const failure = scheduler.prepare(event.content, boundTabId, options.signal);
       if (failure) logger?.record({ type: "agent.tool-schedule.invalid", conversationId: options.conversationId, error: failure });
       await options.onResponse?.(event);
     },
     prepareStep: async ({ messages, initialMessages, responseMessages, stepNumber, steps }) => {
+      logger?.record({ type: "model.context.preparing", conversationId: options.conversationId, content: { stepNumber } });
       let prepared = await options.compactor?.prepare(messages, stepNumber) ?? messages;
       const browserContext = await options.executor.browserContext();
       boundTabId = browserContext.tabs.find((tab) => tab.current)?.tabId;
@@ -179,7 +181,10 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         conversationId: options.conversationId,
         content: { callId: event.callId, stepNumber: event.stepNumber, provider: event.provider, modelId: event.modelId },
       }),
-      onLanguageModelCallStart: (event) => options.compactor?.recordPrompt(event),
+      onLanguageModelCallStart: (event) => {
+        logger.record({ type: "model.request.started", conversationId: options.conversationId, content: { callId: event.callId } });
+        options.compactor?.recordPrompt(event);
+      },
       onStepEnd: async (event) => {
         options.compactor?.recordUsage(event.usage.inputTokens, event.stepNumber);
         logger.record({

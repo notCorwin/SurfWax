@@ -94,12 +94,13 @@ it("restores tool durations by run and call id without mixing repeated ids", asy
     await logger.appendMessage(conversationId, { id: messageId, role: "assistant", parts: [{
       type: "dynamic-tool", toolName: "click", toolCallId: "same", state: "output-available", input: {}, output: { ok: true },
     }] }, { runId, parentId });
+    await logger.append({ type: "tool.started", conversationId, runId, toolCallId: "same" });
     await logger.append({ type: "tool.finished", conversationId, runId, toolCallId: "same", latencyMs: durationMs, content: { timingIncomplete: incomplete } });
   }
   const runtime = new ConversationStore(logger, () => { throw new Error("Restoration must not request a model"); });
   await runtime.threads.switchToThread(conversationId);
   const parts = runtime.getState().thread.messages.flatMap((message) => message.parts.filter((part) => part.type === "tool-call"));
-  expect(parts).toMatchObject([{ toolName: "click", durationMs: 1234, timingIncomplete: false }, { toolName: "click", durationMs: 25, timingIncomplete: true }]);
+  expect(parts).toMatchObject([{ toolName: "click", startedAtMs: expect.any(Number), finishedAtMs: expect.any(Number), durationMs: 1234, timingIncomplete: false }, { toolName: "click", startedAtMs: expect.any(Number), finishedAtMs: expect.any(Number), durationMs: 25, timingIncomplete: true }]);
 });
 
 it("restores a disconnected run with its tool interruption and incomplete timing", async () => {
