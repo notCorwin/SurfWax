@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { expect, test, commandResponse, delayedResponse, textResponse, startProvider, closeServer, type MockResponse } from "./fixtures";
+import { aggregateSuiteReports, createSuiteManifest } from "./evaluation/suite-manifest";
 
 async function runHarness(baseURL: string, directory: string, scenario = "cross-frame-order", timeoutMs = 90_000, extraEnv: Record<string, string> = {}) {
   return promisify(execFile)(process.execPath, [resolve("node_modules/@playwright/test/cli.js"), "test", "e2e/real-model-evaluation.spec.ts", "--retries=0", "--reporter=line", "--trace=off", `--output=${resolve(directory, "playwright")}`], {
@@ -118,6 +119,26 @@ for (const scenario of [
     const upload = chooser.setFiles([{name, text}]);
     const dialog = await dialogWait; await dialog.accept(answer);
     await upload; await action; return 'done';` },
+  { name: "network-identity", code: `
+    const desk = page.frameLocator('iframe[title="Response desk"]');
+    await desk.getByRole('button', {name:'Run requests'}).count();
+    await net.requests({limit:100});
+    await desk.getByRole('button', {name:'Run requests'}).click();
+    await desk.locator('#state').filter({hasText:'Responses ready'}).waitFor();
+    const captured = await net.requests({limit:100});
+    if (captured.integrity !== 'complete' || captured.hasMore !== false) throw new Error('Network history is incomplete');
+    const refs = captured.requests.filter(item => item.method === 'POST' && item.url.endsWith('/sample'));
+    if (refs.length !== 6 || new Set(refs.map(item => item.requestRef)).size !== 6) throw new Error('Expected six distinct requests');
+    const values = {};
+    for (const entry of refs) {
+      const body = await net.responseBody(entry.requestRef);
+      if (typeof body !== 'string') throw new Error('Response unavailable');
+      const response = JSON.parse(body);
+      if (typeof response.name !== 'string' || typeof response.code !== 'string' || values[response.name]) throw new Error('Invalid response');
+      values[response.name] = response.code;
+    }
+    for (const [name, code] of Object.entries(values)) await desk.getByLabel(name + ' code', {exact:true}).fill(code);
+    await desk.getByRole('button', {name:'Submit codes'}).click(); return 'done';` },
 ]) test(`real-model entry grades the local scripted ${scenario.name} level`, async () => {
   test.setTimeout(120_000);
   const responses: MockResponse[] = [];
@@ -137,11 +158,69 @@ for (const scenario of [
   const provider = await startProvider(responses);
   const directory = await mkdtemp(resolve(tmpdir(), "surfwax-eval-harness-"));
   try {
-    await runHarness(provider.baseURL, directory, scenario.name);
+    const manifest = scenario.name === "network-identity" ? createSuiteManifest({ version: 1, provider: "local-mock", model: "test-model",
+      scenarios: [scenario.name], seeds: [17], repeats: 1, timeoutMs: 90_000 }) : null;
+    const sample = manifest?.samples[0];
+    const suiteEnv: Record<string, string> = manifest && sample ? { SURFWAX_EVAL_SUITE_PLAN_HASH: manifest.planHash, SURFWAX_EVAL_SUITE_SAMPLE_ID: sample.id,
+      SURFWAX_EVAL_SUITE_REPEAT: String(sample.repeat) } : {};
+    try {
+      await runHarness(provider.baseURL, directory, scenario.name, 90_000, suiteEnv);
+    } catch (error) {
+      const failedReport = await readReport(directory).catch(() => null);
+      throw new Error(`Harness failed: ${JSON.stringify(failedReport)}\n${(error as { stdout?: string }).stdout ?? ""}`, { cause: error });
+    }
     const report = await readReport(directory);
     expect(report).toMatchObject({ scenario: scenario.name, outcome: "conversation.finished", businessVerified: true,
       networkSettled: true, toolsWithExactlyOneTerminal: true });
     if (scenario.name === "rolling-queue") expect(report).toMatchObject({ interactionApplicable: true, interactionVerified: true, classification: "passed" });
+    if (scenario.name === "network-identity") {
+      expect(report.completedProgramOperations["net.responseBody"]).toBe(6);
+      expect(report.extensionBuild).toMatchObject({ sha256: expect.stringMatching(/^[a-f0-9]{64}$/), files: expect.any(Number), manifestVersion: 3 });
+      expect(report.extensionBuildStable).toBe(true);
+      expect(report.lockfileSha256).toMatch(/^[a-f0-9]{64}$/);
+      expect(report.deadlineState).toBe("on_time");
+      expect(report.taskDeadlineAt - report.taskStartedAt).toBe(90_000);
+      expect(Date.parse(report.terminalTimestamp)).toBeGreaterThanOrEqual(report.taskStartedAt);
+      expect(Date.parse(report.terminalTimestamp)).toBeLessThanOrEqual(report.taskDeadlineAt);
+      const summary = aggregateSuiteReports(manifest!, [{ sampleId: sample!.id, planHash: manifest!.planHash, report }]);
+      expect(summary.counts).toEqual({ total: 1, passed: 1, failed: 0, unknown: 0, timedOut: 0, missing: 0 });
+      expect(summary.environment).toMatchObject({ unknownSamples: 0, unstableSamples: 0,
+        groups: [{ extensionBuildSha256: report.extensionBuild.sha256, lockfileSha256: report.lockfileSha256, browser: report.browser, sampleIds: [sample!.id] }] });
+    }
+  } finally {
+    await closeServer(provider.server);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("an unfinished network-identity request remains unknown and is drained at shutdown", async () => {
+  test.setTimeout(120_000);
+  const provider = await startProvider([
+    commandResponse("execute_program", { timeoutMs: 30_000, code: `
+      const desk = page.frameLocator('iframe[title="Response desk"]');
+      await desk.getByRole('button', {name:'Run requests'}).count();
+      await net.requests({limit:100});
+      await desk.locator('input').first().evaluate(input => {
+        const name = input.name;
+        void fetch('/sample', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name})}).catch(() => {});
+      });
+      for (let index = 0; index < 100; index++) {
+        const captured = await net.requests({limit:100});
+        if (captured.requests.some(entry => entry.method === 'POST' && entry.url.endsWith('/sample'))) return 'request started';
+        await sleep(50);
+      }
+      throw new Error('Sample request was not observed');`,
+    }, "pending-network"), textResponse("Done"), textResponse("Response desk"),
+  ]);
+  const directory = await mkdtemp(resolve(tmpdir(), "surfwax-eval-harness-"));
+  try {
+    const failure = await runHarness(provider.baseURL, directory, "network-identity").then(() => null, (error: unknown) => error);
+    expect(failure).toMatchObject({ code: 1 });
+    const report = await readReport(directory);
+    expect(report).toMatchObject({ scenario: "network-identity", outcome: "conversation.finished", classification: "unknown", passed: false,
+      networkSettled: false, ledgerDrained: true, businessVerified: null, logComplete: true, lifecycleVerified: true,
+      reasons: expect.arrayContaining(["network_unsettled", "business_unknown"]), serverActivity: { active: 0 } });
+    expect(report.serverActivity.interrupted).toBeGreaterThan(0);
   } finally {
     await closeServer(provider.server);
     await rm(directory, { recursive: true, force: true });

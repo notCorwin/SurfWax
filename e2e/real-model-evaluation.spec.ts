@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect } from "@playwright/test";
@@ -16,11 +16,15 @@ import { multitabFixture, multitabScore } from "./evaluation/multitab-fixture";
 import { manifestFixture, manifestScore } from "./evaluation/manifest-fixture";
 import { rollingFixture, rollingInteractionScore, rollingScore } from "./evaluation/rolling-fixture";
 import { chooserPromptFixture, chooserPromptScore } from "./evaluation/chooser-prompt-fixture";
+import { networkFixture, networkScore } from "./evaluation/network-level-fixture";
 import { trackFixtureRequests } from "./evaluation/network-quiescence";
 import { trackServerResponses, type ServerActivity } from "./evaluation/server-quiescence";
 import { waitForEvaluationQuiescence } from "./evaluation/quiescence";
 import { completedProgramOperations, toolLifecycleEvidence } from "./evaluation/tool-lifecycle";
 import { evaluateResultEvidence } from "./evaluation/result-evidence";
+import { deadlineEvidence } from "./evaluation/deadline-evidence";
+import { SCENARIOS } from "./evaluation/scenarios";
+import { buildFingerprint, fileFingerprint, type BuildFingerprint } from "./evaluation/build-fingerprint";
 
 test.use({ trace: "off", screenshot: "off", video: "off" });
 
@@ -39,26 +43,45 @@ test("@real-model browser task", async () => {
   const seed = Number(process.env.SURFWAX_EVAL_SEED ?? 17);
   if (!Number.isSafeInteger(seed) || seed < 0 || seed > 999999) throw new Error("Invalid seed");
   const scenario = process.env.SURFWAX_EVAL_SCENARIO ?? "cross-frame-order";
-  if (!["cross-frame-order", "claims-queue", "sequence-editor", "dispatch-review", "dossier-upload", "pointer-drag", "uncertain-write", "window-transfer", "long-manifest", "rolling-queue", "chooser-prompt"].includes(scenario)) throw new Error("Invalid scenario");
+  if (!(SCENARIOS as readonly string[]).includes(scenario)) throw new Error("Invalid scenario");
+  const suitePlanHash = process.env.SURFWAX_EVAL_SUITE_PLAN_HASH;
+  const suiteSampleId = process.env.SURFWAX_EVAL_SUITE_SAMPLE_ID;
+  const suiteRepeatText = process.env.SURFWAX_EVAL_SUITE_REPEAT;
+  let suiteIdentity: { planHash: string; sampleId: string; repeat: number } | null = null;
+  if (suitePlanHash !== undefined || suiteSampleId !== undefined || suiteRepeatText !== undefined) {
+    const repeat = Number(suiteRepeatText);
+    if (!suitePlanHash || !/^[a-f0-9]{64}$/.test(suitePlanHash) || !suiteSampleId || !/^[a-f0-9]{64}$/.test(suiteSampleId)
+      || !suiteRepeatText || !/^[1-9]\d*$/.test(suiteRepeatText) || !Number.isSafeInteger(repeat)) throw new Error("Invalid suite sample identity");
+    const expectedId = createHash("sha256").update(JSON.stringify([suitePlanHash, scenario, seed, repeat])).digest("hex");
+    if (suiteSampleId !== expectedId) throw new Error("Suite sample identity does not match this task");
+    suiteIdentity = { planHash: suitePlanHash, sampleId: suiteSampleId, repeat };
+  }
   const service = seed % 2 ? "express" : "economy";
   const order = `ORDER-${seed}`;
   const started = Date.now();
   const proxy = await modelProxy(upstream, key);
-  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | Awaited<ReturnType<typeof uploadFixture>> | Awaited<ReturnType<typeof pointerFixture>> | Awaited<ReturnType<typeof recoveryFixture>> | Awaited<ReturnType<typeof multitabFixture>> | Awaited<ReturnType<typeof manifestFixture>> | Awaited<ReturnType<typeof rollingFixture>> | Awaited<ReturnType<typeof chooserPromptFixture>> | undefined;
+  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | Awaited<ReturnType<typeof uploadFixture>> | Awaited<ReturnType<typeof pointerFixture>> | Awaited<ReturnType<typeof recoveryFixture>> | Awaited<ReturnType<typeof multitabFixture>> | Awaited<ReturnType<typeof manifestFixture>> | Awaited<ReturnType<typeof rollingFixture>> | Awaited<ReturnType<typeof chooserPromptFixture>> | Awaited<ReturnType<typeof networkFixture>> | undefined;
   let opened: Awaited<ReturnType<typeof openExtension>> | undefined;
   let events: any[] = [], outcome = "setup_failed", business: boolean | null = null, interaction: boolean | null = null;
   const interactionApplicable = scenario === "sequence-editor" || scenario === "pointer-drag" || scenario === "rolling-queue";
   let passed = false, ledgerDrained = false, logComplete = false;
   let networkSettled: boolean | null = null;
+  let taskStartedAt: number | null = null, taskDeadlineAt: number | null = null, terminalTimestamp: string | null = null;
+  let deadlineState: "pending" | "on_time" | "late" | "unknown" | null = null;
   let tracker: ReturnType<typeof trackFixtureRequests> | undefined;
   let serverTracker: ReturnType<typeof trackServerResponses> | undefined;
   let serverActivity: ServerActivity | null = null;
   let browserProduct: string | null = null;
+  const extensionDirectory = resolve(process.env.SURFWAX_EXTENSION_PATH ?? "dist");
+  let extensionBuild: BuildFingerprint | null = null, lockfileSha256: string | null = null;
   try {
     let prompt: string;
     let grade: () => boolean;
     let gradeInteraction: (() => boolean) | undefined;
-    if (scenario === "chooser-prompt") {
+    if (scenario === "network-identity") {
+      const network = await networkFixture(seed); fixture = network; prompt = network.prompt;
+      grade = () => networkScore(network.evidence());
+    } else if (scenario === "chooser-prompt") {
       const chooser = await chooserPromptFixture(seed); fixture = chooser; prompt = chooser.prompt;
       grade = () => chooserPromptScore(chooser.evidence());
     } else if (scenario === "rolling-queue") {
@@ -97,6 +120,9 @@ test("@real-model browser task", async () => {
       grade = () => businessScore(checkout.evidence(), order, service);
     }
     serverTracker = trackServerResponses(fixture.server);
+    [extensionBuild, lockfileSha256] = await Promise.all([
+      buildFingerprint(extensionDirectory).catch(() => null), fileFingerprint(resolve("package-lock.json")).catch(() => null),
+    ]);
     opened = await openExtension();
     // The extension handles dialogs; Playwright must not auto-dismiss them.
     opened.context.on("page", (page) => page.on("dialog", () => {}));
@@ -120,21 +146,26 @@ test("@real-model browser task", async () => {
     await options.close();
     await target.bringToFront();
     await opened.page.getByTestId("composer-input").fill(prompt);
+    taskStartedAt = Date.now();
+    taskDeadlineAt = taskStartedAt + taskTimeoutMs;
     await opened.page.getByTestId("composer-input").press("Enter");
     outcome = "running";
-    const deadline = Date.now() + taskTimeoutMs;
-    while (Date.now() < deadline) {
+    while (Date.now() < taskDeadlineAt) {
       events = await readEvents(opened.page);
-      const terminal = events.find((event) => ["conversation.finished", "conversation.failed", "conversation.aborted"].includes(event.type));
-      if (terminal) { outcome = terminal.type; break; }
-      await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(1000, Math.max(0, deadline - Date.now()))));
+      const observed = deadlineEvidence(events, taskStartedAt, taskDeadlineAt);
+      if (observed.state !== "pending") break;
+      const remaining = Math.min(1000, Math.max(0, taskDeadlineAt - Date.now()));
+      await new Promise((resolveWait) => setTimeout(resolveWait, remaining));
     }
-    if (outcome === "running") outcome = "timed_out";
     // An unsettled network may still contain a submission or decoy request.
     const quiet = await waitForEvaluationQuiescence(tracker, serverTracker, 500, 5000);
     networkSettled = quiet.settled;
     events = await readEvents(opened.page);
-    logComplete = ["conversation.finished", "conversation.failed", "conversation.aborted"].includes(outcome);
+    const observed = deadlineEvidence(events, taskStartedAt, taskDeadlineAt);
+    deadlineState = observed.state;
+    terminalTimestamp = observed.terminalTimestamp;
+    logComplete = observed.logTerminalPresent;
+    outcome = observed.state === "on_time" ? observed.terminal! : observed.state === "unknown" ? "terminal_time_unknown" : "timed_out";
     browserProduct = await opened.context.newCDPSession(opened.page).then((session) => session.send("Browser.getVersion")).then((version) => version.product).catch(() => null);
     // Stop page timers and drain all server requests before reading the ledger.
     // Otherwise a delayed effect can arrive after the score has been decided.
@@ -152,6 +183,8 @@ test("@real-model browser task", async () => {
     tracker?.dispose();
     serverActivity ??= serverTracker?.snapshot() ?? null;
     serverTracker?.dispose();
+    const extensionBuildAfter = extensionBuild ? await buildFingerprint(extensionDirectory).catch(() => null) : null;
+    const extensionBuildStable = extensionBuild && extensionBuildAfter ? extensionBuild.sha256 === extensionBuildAfter.sha256 : null;
     if (opened) events = await readEvents(opened.page).catch(() => events);
     const head = (() => { try { return execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(); } catch { return null; } })();
     const dirty = (() => { try { return !!execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim(); } catch { return null; } })();
@@ -167,8 +200,10 @@ test("@real-model browser task", async () => {
       counts[name] = (counts[name] ?? 0) + 1;
       return counts;
     }, {});
-    const report = { scenario, seed, provider: providerName, model, gitHead: head, gitDirty: dirty, browser: browserProduct ?? browser?.product ?? null,
-      outcome, ...result, taskTimeoutMs, networkSettled, ledgerDrained, logComplete, serverActivity, elapsedMs: Date.now() - started, providerUsageByStep: usageEvidence(events),
+    const report = { scenario, seed, provider: providerName, model, suiteIdentity, gitHead: head, gitDirty: dirty, browser: browserProduct ?? browser?.product ?? null,
+      extensionBuild, extensionBuildStable, lockfileSha256,
+      outcome, ...result, taskTimeoutMs, taskStartedAt, taskDeadlineAt, terminalTimestamp, deadlineState,
+      networkSettled, ledgerDrained, logComplete, serverActivity, elapsedMs: Date.now() - started, providerUsageByStep: usageEvidence(events),
       requests: proxy.requests, requestBytes: proxy.requests.reduce((sum, request) => sum + request.bytes, 0),
       toolCalls: starts.length, toolNames, completedProgramOperations: completedProgramOperations(events), toolTerminalResults: terminals.length,
       toolsWithExactlyOneTerminal: result.lifecycleVerified, toolLifecycle };
