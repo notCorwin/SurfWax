@@ -147,3 +147,38 @@ for (const kind of ["next", "iterator"] as const) test(`evaluate rejects a modif
     await expect(target.locator("body")).not.toHaveAttribute("data-callback-ran", "yes");
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
+
+for (const variant of [
+  { label: "Array iterator", patch: "Array.prototype[Symbol.iterator] = function*(){};", expected: "Array.prototype[Symbol.iterator]" },
+  { label: "Array iterator next", patch: "Object.getPrototypeOf([][Symbol.iterator]()).next = function(){ return {done:true}; };", expected: "Array Iterator.prototype.next" },
+  { label: "Map iterator next", patch: "Object.getPrototypeOf(new Map().entries()).next = function(){ return {done:true}; };", expected: "Map Iterator.prototype.next" },
+  { label: "Map iterator identity", patch: "Object.getPrototypeOf(new Map().entries())[Symbol.iterator] = function*(){};", expected: "Map Iterator.prototype[Symbol.iterator]" },
+  { label: "Set iterator next", patch: "Object.getPrototypeOf(new Set().values()).next = function(){ return {done:true}; };", expected: "Set Iterator.prototype.next" },
+  { label: "Set iterator identity", patch: "Object.getPrototypeOf(new Set().values())[Symbol.iterator] = function*(){};", expected: "Set Iterator.prototype[Symbol.iterator]" },
+]) test(`evaluate rejects a modified ${variant.label} before running page code`, async () => {
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  try {
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/automation`);
+    responses.push(
+      commandResponse("execute_program", { code: `return await page.evaluate(() => { ${variant.patch} return true; });` }, "patch-iterator"),
+      (request) => {
+        expect(lastTool(request)).toMatchObject({ ok: true, result: true });
+        return commandResponse("execute_program", { code: "return await page.evaluate(() => { document.body.dataset.callbackRan = 'yes'; return {map:new Map([['account',42]]), set:new Set([42])}; });" }, "blocked-iterator");
+      },
+      (request) => {
+        expect(lastTool(request)).toMatchObject({ ok: false, error: { effectUnknown: true, message: expect.stringContaining(`${variant.expected} is modified`) } });
+        return textResponse("ITERATOR_CHECK_OK");
+      },
+      textResponse("Iterator check"),
+    );
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("Evaluate with modified iterator methods");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("ITERATOR_CHECK_OK", { timeout: 60_000 });
+    await expect(target.locator("body")).not.toHaveAttribute("data-callback-ran", "yes");
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});

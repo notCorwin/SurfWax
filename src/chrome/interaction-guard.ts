@@ -1,4 +1,34 @@
 /** These functions are self-contained because Chrome serializes them into each frame. */
+export function targetEditor(target?: Element, text = "", replace = false): { ok: boolean; reason?: string } | undefined {
+  if (!target) { (globalThis as any).__surfWaxTargetEditor = targetEditor; return; }
+  if (!target.isConnected || target.ownerDocument !== document) return { ok: false, reason: "target-detached" };
+  const element = target as HTMLElement & { type?: string; disabled?: boolean; readOnly?: boolean; assignedSlot?: HTMLSlotElement | null };
+  const kind = element.localName === "input" ? ["text", "search", "email", "tel", "url", "password", "number"].includes(element.type ?? "")
+    : element.localName === "textarea" ? true : !["select", "button", "option"].includes(element.localName) && element.isContentEditable;
+  if (!kind || element.disabled || element.matches(":disabled") || element.readOnly || element.getAttribute("aria-readonly") === "true")
+    return { ok: false, reason: "not-editable" };
+  let ancestor: Element | null = element;
+  while (ancestor) {
+    const disabled = ancestor.getAttribute("aria-disabled")?.toLowerCase();
+    if (disabled === "true") return { ok: false, reason: "not-editable" };
+    if (disabled === "false") break;
+    const root = ancestor.getRootNode();
+    ancestor = (ancestor as HTMLElement).assignedSlot || ancestor.parentElement || (root.nodeType === Node.DOCUMENT_FRAGMENT_NODE ? (root as ShadowRoot).host : null);
+  }
+  let node: Element = target, root: Node = node.getRootNode();
+  while (root.nodeType === Node.DOCUMENT_FRAGMENT_NODE && (root as ShadowRoot).host) {
+    const shadow = root as ShadowRoot;
+    if (shadow.activeElement !== node) return { ok: false, reason: "focus-changed" };
+    node = shadow.host; root = node.getRootNode();
+  }
+  if (root !== document) return { ok: false, reason: "wrong-root" };
+  if (document.activeElement !== node) return { ok: false, reason: "wrong-active-element" };
+  if (!document.hasFocus()) return { ok: false, reason: "document-not-focused" };
+  if (!document.queryCommandEnabled("insertText")) return { ok: false, reason: "insert-disabled" };
+  if (replace && (!document.queryCommandEnabled("selectAll") || !document.execCommand("selectAll"))) return { ok: false, reason: "select-failed" };
+  return document.execCommand("insertText", false, text) ? { ok: true } : { ok: false, reason: "edit-rejected" };
+}
+
 export function primePageGuard(): void {
   const scope = globalThis as any;
   if (scope.__surfWaxEarlyGuard) return;
@@ -62,14 +92,12 @@ export function installPageGuard(runId: string, css = "", passThrough = false): 
       derived = undefined;
     },
     revoke() { ticket = undefined; derived = undefined; },
-    insert(text: string) {
-      const active = document.activeElement;
-      if (!active || !document.hasFocus() || !(active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement
-        || active instanceof HTMLElement && active.isContentEditable)) return false;
-      // The atomic DOM edit keeps the listeners installed. Hardware events cannot
-      // interleave this JS task; beforeinput/input still reach the site's handlers.
+    insertTarget(target: Element, text: string, replace = false) {
+      if (typeof scope.__surfWaxTargetEditor !== "function") return { ok: false, reason: "editor-unavailable" };
+      // No hardware events can interleave this synchronous editing task.
       atomic = true;
-      try { return document.execCommand("insertText", false, text); } finally { atomic = false; }
+      try { return scope.__surfWaxTargetEditor(target, text, replace); }
+      finally { atomic = false; }
     },
   };
   document.documentElement.appendChild(overlay);
@@ -85,9 +113,4 @@ export function authorizeGuardInput(runId: string, timestamp?: number, text?: st
   const blocker = (globalThis as any).__surfWaxBlocker;
   if (blocker?.runId !== runId) return;
   if (timestamp == null) blocker.revoke(); else blocker.authorize(timestamp, text);
-}
-
-export function insertGuardedText(runId: string, text: string): boolean {
-  const blocker = (globalThis as any).__surfWaxBlocker;
-  return blocker?.runId === runId ? blocker.insert(text) : false;
 }

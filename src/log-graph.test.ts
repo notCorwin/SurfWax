@@ -4,6 +4,39 @@ import { EventLogger, fromLogValue, toLogValue, type LogEvent } from "./logging"
 import { testEventStore } from "./test-event-store";
 
 describe("canonical native object graphs", () => {
+  it.each([
+    ["Array.prototype[Symbol.iterator]", () => Array.prototype, Symbol.iterator],
+    ["Array Iterator.prototype.next", () => Object.getPrototypeOf([][Symbol.iterator]()), "next"],
+    ["Map Iterator.prototype.next", () => Object.getPrototypeOf(new Map().entries()), "next"],
+    ["Map Iterator.prototype[Symbol.iterator]", () => Object.getPrototypeOf(new Map().entries()), Symbol.iterator],
+    ["Set Iterator.prototype.next", () => Object.getPrototypeOf(new Set().values()), "next"],
+    ["Set Iterator.prototype[Symbol.iterator]", () => Object.getPrototypeOf(new Set().values()), Symbol.iterator],
+  ] as const)("rejects a modified %s before serializing page data", (name, findPrototype, key) => {
+    const prototype = findPrototype();
+    const original = Object.getOwnPropertyDescriptor(prototype, key);
+    let error: unknown;
+    try {
+      Object.defineProperty(prototype, key, { configurable: true, writable: true, value: () => ({ done: true }) });
+      createLogGraphCodec({ verifyIntrinsics: true }).encodeLogGraph({ map: new Map([["account", 42]]), set: new Set([42]) });
+    } catch (caught) { error = caught; }
+    finally {
+      if (original) Object.defineProperty(prototype, key, original);
+      else delete prototype[key];
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(`${name} is modified`);
+  });
+  it("rejects a different native Array iterator before it corrupts Map entries", () => {
+    const original = Array.prototype[Symbol.iterator];
+    let error: unknown;
+    try {
+      Array.prototype[Symbol.iterator] = Array.prototype.keys as typeof original;
+      createLogGraphCodec({ verifyIntrinsics: true });
+    } catch (caught) { error = caught; }
+    finally { Array.prototype[Symbol.iterator] = original; }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("Array.prototype[Symbol.iterator] is modified");
+  });
   it("rejects an altered generator next method before page graph encoding", () => {
     const generator = (function* () { yield 1; })();
     const prototype = Object.getPrototypeOf(Object.getPrototypeOf(generator));

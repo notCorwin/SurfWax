@@ -25,6 +25,8 @@ function event<T extends (...args: any[]) => void>() {
   };
 }
 
+const sessionIdOf = (source: chrome.debugger.Debuggee) => (source as chrome.debugger.Debuggee & { sessionId?: string }).sessionId;
+
 function harness(
   metadata: object[] | undefined = [{ role: "button", name: "Sign in", tag: "button", text: "Sign in" }],
   states: object[] = [{ connected: true, x: 10, y: 12, visible: true, stable: true, enabled: true, editable: true, receivesEvents: true, checked: false }],
@@ -75,6 +77,7 @@ function harness(
       if (params.functionDeclaration.includes("this.slice(0,10)")) return { result: { value: metadata.slice(0, 10) } };
     }
     if (method === "Runtime.callFunctionOn" && params.functionDeclaration === "function(){ return this.isConnected; }") return { result: { value: (states[0] as any)?.connected ?? false } };
+    if (method === "Runtime.callFunctionOn" && params.functionDeclaration.startsWith("function() { /* surf-wax:text-input-kind */")) return { result: { value: "text" } };
     if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("identityRole")) {
       const item = metadata[0] as any;
       return { result: { value: { connected: true, identityRole: item?.role ?? "", identityName: item?.name ?? "", role: item?.role ?? "", name: item?.name ?? "" } } };
@@ -103,6 +106,217 @@ function harness(
 }
 
 describe("AutomationRuntime", () => {
+  it("preserves a new OOPIF attachment when its old renderer later reports a swap", async () => {
+    const { runtime, command } = harness();
+    await runtime.createPage(3);
+    let requested!: () => void, release!: () => void;
+    const waiting = new Promise<void>((resolve) => { requested = resolve; });
+    const response = new Promise<void>((resolve) => { release = resolve; });
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (sessionIdOf(source) === "new" && method === "Page.enable") { requested(); await response; return {}; }
+      if (sessionIdOf(source) === "new" && method === "Page.getFrameTree") return { frameTree: { frame: { id: "frame" } } };
+      return original(source, method, params);
+    });
+    const session = (runtime as any).sessions.get(3);
+    session.frames.set("frame", { tabId: 3 });
+    session.frameParents.set("frame", "root");
+    runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "new", targetInfo: { type: "iframe", targetId: "frame" } });
+    const ready = session.frameReady.get("new") as Promise<void>;
+    await waiting;
+    runtime.handleEvent({ tabId: 3 }, "Page.frameDetached", { frameId: "frame", reason: "swap" });
+    expect(session.frames.get("frame").sessionId).toBe("new");
+    expect(session.frameParents.get("frame")).toBe("root");
+    release();
+    await ready;
+    expect(session.frames.get("frame").sessionId).toBe("new");
+    expect(session.frameParents.get("frame")).toBe("root");
+    await runtime.abortSessions();
+  });
+
+  it("retains ancestry when a swap precedes attachment, but removes a genuinely detached frame", async () => {
+    const { runtime, command } = harness();
+    await runtime.createPage(3);
+    const session = (runtime as any).sessions.get(3);
+    session.frames.set("frame", { tabId: 3 });
+    session.frameParents.set("frame", "root");
+    runtime.handleEvent({ tabId: 3 }, "Page.frameDetached", { frameId: "frame", reason: "swap" });
+    expect(session.frames.has("frame")).toBe(false);
+    expect(session.frameParents.get("frame")).toBe("root");
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (sessionIdOf(source) === "new" && method === "Page.getFrameTree") return { frameTree: { frame: { id: "frame" } } };
+      return original(source, method, params);
+    });
+    runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "new", targetInfo: { type: "iframe", targetId: "frame" } });
+    await session.frameReady.get("new");
+    expect(session.frames.get("frame").sessionId).toBe("new");
+    expect(session.frameParents.get("frame")).toBe("root");
+    runtime.handleEvent({ tabId: 3 }, "Page.frameDetached", { frameId: "frame", reason: "remove" });
+    expect(session.frames.has("frame")).toBe(false);
+    expect(session.frameParents.has("frame")).toBe(false);
+    await runtime.abortSessions();
+  });
+
+  it("does not let a stale child target's swap or detach remove its replacement", async () => {
+    const { runtime } = harness();
+    await runtime.createPage(3);
+    const session = (runtime as any).sessions.get(3);
+    session.frames.set("frame", { tabId: 3, sessionId: "new" });
+    session.frameParents.set("frame", "root");
+    runtime.handleEvent({ tabId: 3, sessionId: "old" }, "Page.frameDetached", { frameId: "frame", reason: "swap" });
+    runtime.handleEvent({ tabId: 3 }, "Target.detachedFromTarget", { sessionId: "old" });
+    expect(session.frames.get("frame").sessionId).toBe("new");
+    expect(session.frameParents.get("frame")).toBe("root");
+    await runtime.abortSessions();
+  });
+
+  it("uses an isolated frame document when a same-process frame is not script-accessible", async () => {
+    const { runtime, command } = harness();
+    await runtime.createPage(3);
+    const session = (runtime as any).sessions.get(3);
+    session.frames.set("frame", { tabId: 3 });
+    vi.spyOn(runtime as any, "resolveDirect").mockResolvedValue("owner");
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.describeNode" && params.objectId === "owner") return { node: { frameId: "frame" } };
+      if (method === "Runtime.callFunctionOn" && params.objectId === "owner" && params.functionDeclaration.includes("contentDocument")) return { result: { value: false } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 42 };
+      if (method === "Runtime.evaluate" && params.contextId === 42) return { result: { objectId: "frame-document" } };
+      return original(source, method, params);
+    });
+    try {
+      const scoped = await (runtime as any).locatorScope(session, { queries: [{ kind: "frame", value: "#frame" }, { kind: "css", value: "#button" }] });
+      expect(scoped.rootObjectId).toBe("frame-document");
+      expect(scoped.spec.queries).toEqual([{ kind: "css", value: "#button" }]);
+    } finally { await runtime.abortSessions(); }
+  });
+
+  it("rechecks the target when a frame is still attaching to its own process", async () => {
+    const { runtime, command } = harness();
+    await runtime.createPage(3);
+    const session = (runtime as any).sessions.get(3);
+    session.frames.set("frame", { tabId: 3 });
+    vi.spyOn(runtime as any, "resolveDirect").mockResolvedValue("owner");
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.describeNode" && params.objectId === "owner") return { node: { frameId: "frame" } };
+      if (method === "Runtime.callFunctionOn" && params.objectId === "owner" && params.functionDeclaration.includes("contentDocument")) return { result: { value: false } };
+      if (method === "Page.createIsolatedWorld") {
+        session.frames.set("frame", { tabId: 3, sessionId: "child" });
+        session.frameReady.set("child", Promise.resolve());
+        throw new Error("No frame with given id found");
+      }
+      return original(source, method, params);
+    });
+    try {
+      const scoped = await (runtime as any).locatorScope(session, { queries: [{ kind: "frame", value: "#frame" }, { kind: "css", value: "#button" }] });
+      expect(scoped.debuggee.sessionId).toBe("child");
+      expect(scoped.spec.queries).toEqual([{ kind: "css", value: "#button" }]);
+    } finally { await runtime.abortSessions(); }
+  });
+
+  it("does not restore a detached frame from an in-flight frame-tree request", async () => {
+    const { runtime, command } = harness();
+    await runtime.createPage(3);
+    let requested!: () => void, release!: (tree: object) => void;
+    const waiting = new Promise<void>((resolve) => { requested = resolve; });
+    const response = new Promise<object>((resolve) => { release = resolve; });
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (sessionIdOf(source) === "old" && method === "Page.getFrameTree") { requested(); return response; }
+      return original(source, method, params);
+    });
+    const session = (runtime as any).sessions.get(3);
+    runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "old", targetInfo: { type: "iframe", targetId: "frame" } });
+    const ready = session.frameReady.get("old") as Promise<void>;
+    await waiting;
+    runtime.handleEvent({ tabId: 3 }, "Target.detachedFromTarget", { sessionId: "old" });
+    release({ frameTree: { frame: { id: "frame", parentId: "root" }, childFrames: [{ frame: { id: "child", parentId: "frame" } }] } });
+    await expect(ready).rejects.toMatchObject({ code: "frame-detached" });
+    expect(session.frames.has("frame")).toBe(false);
+    expect(session.frames.has("child")).toBe(false);
+    expect(command).not.toHaveBeenCalledWith(expect.objectContaining({ sessionId: "old" }), "Target.setAutoAttach", expect.anything());
+    await runtime.abortSessions();
+  });
+
+  it("does not let a previous attachment overwrite a newer target session", async () => {
+    const { runtime, command } = harness();
+    await runtime.createPage(3);
+    let requested!: () => void, release!: (tree: object) => void;
+    const waiting = new Promise<void>((resolve) => { requested = resolve; });
+    const response = new Promise<object>((resolve) => { release = resolve; });
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Page.getFrameTree" && sessionIdOf(source) === "old") { requested(); return response; }
+      if (method === "Page.getFrameTree" && sessionIdOf(source) === "new") return { frameTree: { frame: { id: "frame", parentId: "root" } } };
+      return original(source, method, params);
+    });
+    const session = (runtime as any).sessions.get(3);
+    const attach = (sessionId: string) => runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId, targetInfo: { type: "iframe", targetId: "frame" } });
+    attach("old");
+    const oldReady = session.frameReady.get("old") as Promise<void>;
+    await waiting;
+    attach("new");
+    await session.frameReady.get("new");
+    release({ frameTree: { frame: { id: "frame", parentId: "old-parent" }, childFrames: [{ frame: { id: "old-child", parentId: "frame" } }] } });
+    await expect(oldReady).rejects.toMatchObject({ code: "frame-detached" });
+    expect(session.frames.get("frame").sessionId).toBe("new");
+    expect(session.frameParents.get("frame")).toBe("root");
+    expect(session.frames.has("old-child")).toBe(false);
+    await runtime.abortSessions();
+  });
+
+  it.each(["abort", "detach"] as const)("ignores pending attachment work after %s", async (method) => {
+    const { runtime, command } = harness();
+    await runtime.createPage(3);
+    let requested!: () => void, release!: () => void;
+    const waiting = new Promise<void>((resolve) => { requested = resolve; });
+    const response = new Promise<void>((resolve) => { release = resolve; });
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (sessionIdOf(source) === "old" && method === "Page.enable") { requested(); await response; return {}; }
+      return original(source, method, params);
+    });
+    const session = (runtime as any).sessions.get(3);
+    runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "old", targetInfo: { type: "iframe", targetId: "frame" } });
+    const ready = session.frameReady.get("old") as Promise<void>;
+    await waiting;
+    if (method === "abort") await runtime.abortSessions(); else runtime.handleDetach({ tabId: 3 });
+    release();
+    await expect(ready).rejects.toMatchObject({ code: "frame-detached" });
+    expect(command).not.toHaveBeenCalledWith(expect.objectContaining({ sessionId: "old" }), "Runtime.enable", expect.anything());
+    expect((runtime as any).sessions.has(3)).toBe(false);
+  });
+
+  it("retries a frame-tree snapshot invalidated while it was being fetched", async () => {
+    const { runtime, command } = harness();
+    await runtime.createPage(3);
+    let requested!: () => void, release!: (tree: object) => void;
+    const waiting = new Promise<void>((resolve) => { requested = resolve; });
+    const response = new Promise<object>((resolve) => { release = resolve; });
+    let reads = 0;
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (sessionIdOf(source) === "child" && method === "Page.getFrameTree") {
+        if (++reads === 1) { requested(); return response; }
+        return { frameTree: { frame: { id: "frame", parentId: "root" }, childFrames: [{ frame: { id: "new", parentId: "frame" } }] } };
+      }
+      return original(source, method, params);
+    });
+    const session = (runtime as any).sessions.get(3);
+    runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "child", targetInfo: { type: "iframe", targetId: "frame" } });
+    const ready = session.frameReady.get("child") as Promise<void>;
+    await waiting;
+    runtime.handleEvent({ tabId: 3, sessionId: "child" }, "Page.frameAttached", { frameId: "new", parentFrameId: "frame" });
+    release({ frameTree: { frame: { id: "frame", parentId: "root" }, childFrames: [{ frame: { id: "old", parentId: "frame" } }] } });
+    await ready;
+    expect(reads).toBe(2);
+    expect(session.frames.has("old")).toBe(false);
+    expect(session.frames.get("new").sessionId).toBe("child");
+    await runtime.abortSessions();
+  });
+
   it("keeps same-process frame prefixes inside an OOPIF and finds later target boundaries", async () => {
     const { runtime, command } = harness();
     await runtime.createPage(3);
@@ -206,7 +420,7 @@ describe("AutomationRuntime", () => {
     command.mockImplementation(async (source, method, params) => {
       if (method === "DOM.describeNode") return { node: { backendNodeId: 7 } };
       if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("document.hasFocus()"))
-        return { result: { value: { connected: true, focused } } };
+        return { result: { value: { connected: true, focused, editable: true } } };
       if (method === "Input.insertText") { focused = false; return {}; }
       return original(source, method, params);
     });
@@ -216,23 +430,37 @@ describe("AutomationRuntime", () => {
     await runtime.abortSessions();
   });
 
-  it("releases a dispatched key and stops fill if a keydown moves focus", async () => {
+  it("stops fill when focus makes the input non-editable", async () => {
     const { runtime, command } = harness();
     const page = await runtime.createPage(3);
     const original = command.getMockImplementation()!;
-    let focused = true;
+    let editable = true;
     command.mockImplementation(async (source, method, params) => {
-      if (method === "DOM.describeNode") return { node: { backendNodeId: 7 } };
       if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("document.hasFocus()"))
-        return { result: { value: { connected: true, focused } } };
-      if (method === "Input.dispatchKeyEvent" && params.type === "rawKeyDown") focused = false;
+        return { result: { value: { connected: true, focused: true, editable } } };
+      if (method === "DOM.focus") editable = false;
       return original(source, method, params);
     });
     await expect(page.getByRole("button", { name: "Sign in" }).fill("replacement"))
-      .rejects.toMatchObject({ code: "focus-lost", effectUnknown: true });
-    expect(command.mock.calls.filter(([, method]) => method === "Input.dispatchKeyEvent").map(([, , params]) => [params.type, params.key]))
-      .toEqual([["rawKeyDown", "a"], ["keyUp", "a"]]);
+      .rejects.toMatchObject({ code: "not-editable", effectUnknown: true });
     expect(command.mock.calls.some(([, method]) => method === "Input.insertText")).toBe(false);
+    await runtime.abortSessions();
+  });
+
+  it("stops sequential insertion when the input becomes readonly after the first character", async () => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    const original = command.getMockImplementation()!;
+    let editable = true;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("document.hasFocus()"))
+        return { result: { value: { connected: true, focused: true, editable } } };
+      if (method === "Input.insertText") editable = false;
+      return original(source, method, params);
+    });
+    await expect(page.getByRole("button", { name: "Sign in" }).pressSequentially("abc"))
+      .rejects.toMatchObject({ code: "not-editable", effectUnknown: true });
+    expect(command.mock.calls.filter(([, method]) => method === "Input.insertText").map(([, , params]) => params.text)).toEqual(["a"]);
     await runtime.abortSessions();
   });
 
@@ -243,7 +471,7 @@ describe("AutomationRuntime", () => {
     command.mockImplementation(async (source, method, params) => {
       if (method === "DOM.describeNode") return { node: { backendNodeId: 7 } };
       if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("document.hasFocus()"))
-        return { result: { value: { connected: true, focused: true } } };
+        return { result: { value: { connected: true, focused: true, editable: true } } };
       if (method === "Input.dispatchKeyEvent" && params.type === "keyDown") throw new Error("uncertain keydown");
       return original(source, method, params);
     });
@@ -251,27 +479,6 @@ describe("AutomationRuntime", () => {
       .rejects.toMatchObject({ message: "uncertain keydown", effectUnknown: true });
     expect(command.mock.calls.filter(([, method]) => method === "Input.dispatchKeyEvent").map(([, , params]) => [params.type, params.key]))
       .toEqual([["keyDown", "x"], ["keyUp", "x"]]);
-    await runtime.abortSessions();
-  });
-
-  it("releases a held key and sends no later fill input after cancellation", async () => {
-    const { runtime, command } = harness();
-    const controller = new AbortController();
-    runtime.setContext({ signal: controller.signal });
-    const page = await runtime.createPage(3);
-    const original = command.getMockImplementation()!;
-    command.mockImplementation(async (source, method, params) => {
-      if (method === "DOM.describeNode") return { node: { backendNodeId: 7 } };
-      if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("document.hasFocus()"))
-        return { result: { value: { connected: true, focused: true } } };
-      if (method === "Input.dispatchKeyEvent" && params.type === "rawKeyDown") controller.abort();
-      return original(source, method, params);
-    });
-    await expect(page.getByRole("button", { name: "Sign in" }).fill("replacement"))
-      .rejects.toMatchObject({ name: "AbortError", effectUnknown: true });
-    expect(command.mock.calls.filter(([, method]) => method === "Input.dispatchKeyEvent").map(([, , params]) => [params.type, params.key]))
-      .toEqual([["rawKeyDown", "a"], ["keyUp", "a"]]);
-    expect(command.mock.calls.some(([, method]) => method === "Input.insertText")).toBe(false);
     await runtime.abortSessions();
   });
 

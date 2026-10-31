@@ -3,7 +3,8 @@ import { BackgroundRunCoordinator } from "./agent/background-coordinator";
 import type { RunIdentity } from "./agent/coordinator";
 import { recoverBrowserInput } from "./chrome/input-recovery";
 import { createHeldInputState, debuggeeKey, shouldPersistInputState, updateHeldInputState, type HeldInputState } from "./chrome/input-state";
-import { installPageGuard, removePageGuard, authorizeGuardInput, insertGuardedText } from "./chrome/interaction-guard";
+import { installPageGuard, removePageGuard, authorizeGuardInput, targetEditor } from "./chrome/interaction-guard";
+import { GuardedInputContexts } from "./chrome/guarded-input";
 import guardCss from "./design-tokens/interaction.css?raw";
 import { requireDebuggee } from "./chrome/debuggee";
 import { callUserScripts, restoreUserScripts, serializeUserScripts, USER_SCRIPTS_ERROR_KEY } from "./userscripts/persistence";
@@ -153,6 +154,7 @@ async function updatePageGuard(tabId: number, consumeLoading = false): Promise<v
     try {
       if (enabled) {
         const runId = runs.identity()?.runId ?? "";
+        await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: targetEditor });
         await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, func: installPageGuard, args: [runId, guardCss, bypassedTabs.has(tabId)] });
         if (guardedTabs.has(tabId) && runs.identity()?.runId === runId) confirmedGuards.set(tabId, runId);
       }
@@ -256,6 +258,17 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "surf-wax-debugger") return;
   const sessions = new Map<string, chrome.debugger.Debuggee>();
   const runtimeEvaluations = new Map<string, {debuggee:chrome.debugger.Debuggee;count:number}>();
+  const guardedInput = new GuardedInputContexts(`chrome-extension://${chrome.runtime.id}`,
+    async (source, method, params) => {
+      const key = JSON.stringify(source);
+      const evaluation = method === "Runtime.callFunctionOn";
+      if (evaluation) runtimeEvaluations.set(key, {debuggee:source,count:(runtimeEvaluations.get(key)?.count ?? 0)+1});
+      try { return await chrome.debugger.sendCommand(source, method, params); }
+      finally { if (evaluation) {
+        const entry = runtimeEvaluations.get(key);
+        if (entry && entry.count > 1) entry.count--; else runtimeEvaluations.delete(key);
+      } }
+    });
   const pointerGestures = new Set<number>();
   const heldInput = new Map<string, HeldInputState>();
   let validatedRunId: string | undefined;
@@ -311,10 +324,14 @@ chrome.runtime.onConnect.addListener((port) => {
     return task;
   }
   const onEvent = (source: chrome.debugger.Debuggee, method: string, params?: object) => {
-    if (!closed && sessions.has(debuggeeKey(source))) port.postMessage({ event: "onEvent", args: [source, method, params] });
+    if (!closed && sessions.has(debuggeeKey(source))) {
+      guardedInput.event(source, method, params);
+      port.postMessage({ event: "onEvent", args: [source, method, params] });
+    }
   };
   const onDetach = (source: chrome.debugger.Debuggee, reason: string) => {
     if (!sessions.delete(debuggeeKey(source))) return;
+    guardedInput.detach(source);
     if (!closed) port.postMessage({ event: "onDetach", args: [source, reason] });
   };
   chrome.debugger.onEvent.addListener(onEvent);
@@ -349,6 +366,7 @@ chrome.runtime.onConnect.addListener((port) => {
         requireDebuggee(args[0], method);
         await Promise.all([...heldInput].filter(([, state]) => debuggeeKey(state.debuggee) === debuggeeKey(args[0])).map(([inputKey]) => releaseHeldInput(inputKey)));
         await chrome.debugger.detach(args[0]);
+        guardedInput.detach(args[0]);
         sessions.delete(debuggeeKey(args[0]));
       } else if (method === "endPointerGestures") {
         await Promise.all([...pointerGestures].map((tabId) => endGesture(tabId)));
@@ -409,17 +427,30 @@ chrome.runtime.onConnect.addListener((port) => {
           }
           if (input && command === "Input.insertText" && guardedTabs.has(tabId!)) {
             const inputRunId = message.runId ?? validatedRunId!;
-            const inserted = await chrome.scripting.executeScript({ target: { tabId: tabId!, allFrames: true }, func: insertGuardedText,
-              args: [inputRunId, args[2]?.text ?? ""] }).catch(() => []);
-            if (!inserted.some((frame) => frame.result)) {
-              for (const character of String(args[2]?.text ?? "")) {
+            const text = String(args[2]?.text ?? "");
+            const backendNodeId = args[2]?.surfWaxTargetBackendNodeId;
+            if (backendNodeId !== undefined) {
+              await guardedInput.insert(debuggee, backendNodeId, inputRunId, text, () => {
+                if (closed || !sessions.has(debuggeeKey(debuggee)) || !guardedTabs.has(tabId!)) throw new Error("AutomationError[guard-context-unavailable]: Guard or debugger session expired");
+                runs.validate(message as RunIdentity);
+              }, args[2]?.surfWaxReplaceSelection === true);
+            } else {
+              if (!text) throw new Error("AutomationError[not-editable]: Empty insertion requires an exact focused target");
+              for (const character of text) {
                 if (!cleanup) runs.validate(message as RunIdentity);
                 await authorizedNativeInput(debuggee, tabId!, inputRunId, "Input.dispatchKeyEvent", { type: "char", text: character });
               }
             }
             result = {};
           } else if (input) {
-            result = await authorizedNativeInput(debuggee, tabId!, message.runId ?? validatedRunId!, command, args[2] ?? {});
+            const { surfWaxTargetBackendNodeId: _target, surfWaxReplaceSelection: _replace, ...nativeParams } = args[2] ?? {};
+            if (command === "Input.insertText" && _target !== undefined) {
+              await guardedInput.insertUnguarded(debuggee, _target, String(nativeParams.text ?? ""), _replace === true, () => {
+                if (closed || !sessions.has(debuggeeKey(debuggee)) || guardedTabs.has(tabId!)) throw new Error("AutomationError[guard-context-unavailable]: Guard or debugger session changed");
+                runs.validate(message as RunIdentity);
+              });
+              result = {};
+            } else result = await authorizedNativeInput(debuggee, tabId!, message.runId ?? validatedRunId!, command, nativeParams);
           } else {
             const evaluationKey = JSON.stringify(debuggee);
             const evaluation = method === "sendCommand" && ["Runtime.evaluate","Runtime.callFunctionOn"].includes(command);
@@ -450,6 +481,7 @@ chrome.runtime.onConnect.addListener((port) => {
     closed = true;
     chrome.debugger.onEvent.removeListener(onEvent);
     chrome.debugger.onDetach.removeListener(onDetach);
+    guardedInput.clear();
     const debuggees = [...sessions.values()];
     sessions.clear();
     cleanupTask = track((async () => {

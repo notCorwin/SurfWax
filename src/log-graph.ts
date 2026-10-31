@@ -7,8 +7,8 @@ if (options.verifyIntrinsics) {
   // Function.prototype.toString. There is no trusted main-world realm here.
   const g = globalThis as any;
   const fail = (name: string): never => { throw new Error(`Page evaluation cannot start: JavaScript intrinsic ${name} is modified`); };
-  for (const name of ["Object", "Array", "ArrayBuffer", "DataView", "Date", "RegExp", "Map", "Set", "Function", "Number", "Uint8Array"])
-    if (typeof g[name] !== "function") fail(name);
+  const required = ["Object", "Array", "ArrayBuffer", "DataView", "Date", "RegExp", "Map", "Set", "Function", "Number", "Symbol", "Uint8Array"];
+  for (let i = 0; i < required.length; i++) if (typeof g[required[i]!] !== "function") fail(required[i]!);
   const inspect = g.Function.prototype?.toString;
   const check = (name: string, value: unknown) => {
     let source = "";
@@ -16,6 +16,45 @@ if (options.verifyIntrinsics) {
     if (!/\{\s*\[native code\]\s*\}/.test(source)) fail(name);
   };
   check("Function.prototype.toString", inspect);
+  check("Array.isArray", g.Array.isArray);
+  // Check iteration before using for-of or destructuring in this guard. Both
+  // the graph walker and decoder consume Map entry arrays through these APIs.
+  const iteratorSymbol = g.Symbol.iterator;
+  check("Array.prototype[Symbol.iterator]", g.Array.prototype?.[iteratorSymbol]);
+  const arrayIterator = g.Array.prototype[iteratorSymbol].call(["first", "second"]);
+  check("Array Iterator.prototype.next", arrayIterator?.next);
+  const checkIteratorIdentity = (name: string, iterator: any) => {
+    check(name, iterator?.[iteratorSymbol]);
+    try { if (iterator[iteratorSymbol]() !== iterator) fail(name); } catch { fail(name); }
+  };
+  checkIteratorIdentity("Array Iterator.prototype[Symbol.iterator]", arrayIterator);
+  try {
+    if (arrayIterator.next().value !== "first" || arrayIterator.next().value !== "second"
+      || arrayIterator.next().done !== true) fail("Array.prototype[Symbol.iterator]");
+  } catch { fail("Array.prototype[Symbol.iterator]"); }
+  check("Map", g.Map);
+  check("Set", g.Set);
+  check("Map.prototype.entries", g.Map.prototype?.entries);
+  check("Map.prototype.set", g.Map.prototype?.set);
+  check("Set.prototype.values", g.Set.prototype?.values);
+  check("Set.prototype.add", g.Set.prototype?.add);
+  const map = new g.Map(); g.Map.prototype.set.call(map, "key", "value");
+  const mapIterator = g.Map.prototype.entries.call(map);
+  check("Map Iterator.prototype.next", mapIterator?.next);
+  checkIteratorIdentity("Map Iterator.prototype[Symbol.iterator]", mapIterator);
+  try {
+    const entry = mapIterator.next();
+    if (entry.done || !g.Array.isArray(entry.value) || entry.value[0] !== "key" || entry.value[1] !== "value"
+      || mapIterator.next().done !== true) fail("Map Iterator.prototype.next");
+  } catch { fail("Map Iterator.prototype.next"); }
+  const set = new g.Set(); g.Set.prototype.add.call(set, "member");
+  const setIterator = g.Set.prototype.values.call(set);
+  check("Set Iterator.prototype.next", setIterator?.next);
+  checkIteratorIdentity("Set Iterator.prototype[Symbol.iterator]", setIterator);
+  try {
+    const entry = setIterator.next();
+    if (entry.done || entry.value !== "member" || setIterator.next().done !== true) fail("Set Iterator.prototype.next");
+  } catch { fail("Set Iterator.prototype.next"); }
   // The graph walker uses generators to stream entries. A page can otherwise
   // replace their methods and make a successful evaluation silently omit data.
   const generator: any = (function* () {})();
@@ -24,11 +63,9 @@ if (options.verifyIntrinsics) {
   for (const [name, owner, member] of [
     ["Object.getOwnPropertyDescriptor", g.Object, "getOwnPropertyDescriptor"], ["Object.getPrototypeOf", g.Object, "getPrototypeOf"],
     ["Object.getOwnPropertySymbols", g.Object, "getOwnPropertySymbols"], ["Object.hasOwn", g.Object, "hasOwn"],
-    ["Array.isArray", g.Array, "isArray"], ["Array.from", g.Array, "from"], ["ArrayBuffer.isView", g.ArrayBuffer, "isView"],
+    ["Array.from", g.Array, "from"], ["ArrayBuffer.isView", g.ArrayBuffer, "isView"],
     ["Array.prototype.map", g.Array.prototype, "map"], ["Array.prototype.filter", g.Array.prototype, "filter"],
     ["Array.prototype.includes", g.Array.prototype, "includes"], ["Array.prototype.find", g.Array.prototype, "find"], ["Array.prototype.push", g.Array.prototype, "push"],
-    ["Map.prototype.entries", g.Map.prototype, "entries"], ["Map.prototype.set", g.Map.prototype, "set"],
-    ["Set.prototype.values", g.Set.prototype, "values"], ["Set.prototype.add", g.Set.prototype, "add"],
     ["Date.prototype.getTime", g.Date.prototype, "getTime"], ["Date.prototype.toISOString", g.Date.prototype, "toISOString"],
     ["Uint8Array.prototype.subarray", g.Uint8Array.prototype, "subarray"],
   ] as const) check(name, owner?.[member]);

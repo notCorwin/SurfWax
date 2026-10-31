@@ -92,6 +92,7 @@ type ElementState = {
   stable: boolean;
   enabled: boolean;
   editable: boolean;
+  editKind?: string;
   receivesEvents: boolean;
   checked: boolean | null;
   connected: boolean;
@@ -194,6 +195,44 @@ const DISABLED_STATE_SOURCE = `function() {
     element = element.assignedSlot || element.parentElement || root.host || null;
   }
   return false;
+}`;
+
+// Native non-text controls can report isContentEditable through an ancestor;
+// they still cannot receive the text insertion performed by fill/type_text.
+const TEXT_INPUT_KIND_SOURCE = `function() { /* surf-wax:text-input-kind */
+  if (!this.isConnected) return 'detached';
+  if (this.localName === 'input') {
+    const type = this.type;
+    if (['date', 'time', 'datetime-local', 'month', 'week'].includes(type)) return type;
+    return ['text', 'search', 'email', 'tel', 'url', 'password', 'number'].includes(type) ? 'text' : 'unsupported';
+  }
+  if (this.localName === 'textarea') return 'text';
+  if (['select', 'button', 'option'].includes(this.localName)) return 'unsupported';
+  return this.isContentEditable ? 'text' : 'unsupported';
+}`;
+
+const STRUCTURED_INPUT_TYPES = new Set(["date", "time", "datetime-local", "month", "week"]);
+
+// Validate before focusing, then recheck in the page task that applies the
+// value. The prototype setter keeps controlled inputs (e.g. React) observable.
+const STRUCTURED_FILL_SOURCE = `function(type, value, apply) {
+  if (!this.isConnected) return { error: 'detached' };
+  if (this.localName !== 'input' || this.type !== type) return { error: 'target-changed' };
+  if ((${DISABLED_STATE_SOURCE}).call(this) || this.readOnly || this.getAttribute('aria-readonly') === 'true') return { error: 'not-editable' };
+  const view = this.ownerDocument?.defaultView;
+  const setter = view && Object.getOwnPropertyDescriptor(view.HTMLInputElement.prototype, 'value')?.set;
+  if (!view || !setter) return { error: 'value-setter-unavailable' };
+  const probe = this.ownerDocument.createElement('input');
+  probe.type = type;
+  setter.call(probe, value);
+  const normalized = probe.value;
+  if (value !== '' && normalized === '') return { error: 'invalid-value' };
+  if (!apply) return { value: normalized };
+  setter.call(this, normalized);
+  if (this.value !== normalized) return { error: 'value-not-applied' };
+  this.dispatchEvent(new view.Event('input', { bubbles: true, composed: true }));
+  this.dispatchEvent(new view.Event('change', { bubbles: true }));
+  return { value: this.value };
 }`;
 
 // Shared by reads and mutations so ARIA controls and native inputs use the
@@ -451,20 +490,41 @@ export class AutomationRuntime {
     const preserveChooser = !chooser || !this.chooserAffected(source, method, params, { frameId: chooser.frameId, source: chooser.debuggee });
     if (method === "Target.attachedToTarget" && params?.targetInfo?.type === "iframe" && session) {
       const debuggee = { tabId, sessionId: params.sessionId } as Debuggee;
-      session.frames.set(params.targetInfo.targetId, debuggee);
-      session.targetParents.set(params.sessionId, source.sessionId);
+      const targetId = params.targetInfo.targetId as string;
+      const sessionId = params.sessionId as string;
+      session.frames.set(targetId, debuggee);
+      session.targetParents.set(sessionId, source.sessionId);
       this.invalidateFrames(session);
-      const ready = (async () => {
-        for (const domain of ["Page", "Runtime", "DOM", "Accessibility"]) await this.options.command(debuggee, `${domain}.enable`, {});
+      let ready!: Promise<void>;
+      const guard = () => {
+        if (this.sessions.get(tabId!) !== session || session.lifetime.signal.aborted
+          || session.frameReady.get(sessionId) !== ready || session.frames.get(targetId)?.sessionId !== sessionId)
+          throw automationError("frame-detached", { reason: "target-session-changed" });
+      };
+      ready = (async () => {
+        for (const domain of ["Page", "Runtime", "DOM", "Accessibility"]) {
+          await this.options.command(debuggee, `${domain}.enable`, {});
+          guard();
+        }
         await this.options.command(debuggee, "Page.setLifecycleEventsEnabled", { enabled: true });
-        const tree = await this.options.command(debuggee, "Page.getFrameTree", {});
-        this.recordFrameTree(session, debuggee, tree?.frameTree);
+        guard();
+        // Frame events can arrive while the tree request is in flight. Retry
+        // only the stale snapshot instead of restoring an already detached child.
+        while (true) {
+          const revision = session.frameRevision;
+          const tree = await this.options.command(debuggee, "Page.getFrameTree", {});
+          guard();
+          if (revision !== session.frameRevision) continue;
+          this.recordFrameTree(session, debuggee, tree?.frameTree);
+          break;
+        }
         // Each out-of-process iframe is its own target. Recursively attach its
         // iframe targets so deeper cross-process descendants can be discovered.
         await this.options.command(debuggee, "Target.setAutoAttach", { autoAttach: true, flatten: true, waitForDebuggerOnStart: false, filter: [{ type: "iframe", exclude: false }] });
+        guard();
       })();
       void ready.catch(() => undefined);
-      session.frameReady.set(params.sessionId, ready);
+      session.frameReady.set(sessionId, ready);
     }
     if (method === "Page.frameAttached" && params?.frameId && session) {
       if (!session.frames.get(params.frameId)?.sessionId || source.sessionId === session.frames.get(params.frameId)?.sessionId) session.frames.set(params.frameId, source);
@@ -488,8 +548,15 @@ export class AutomationRuntime {
     }
     if (method === "Runtime.executionContextDestroyed" && session) this.clearFrameDocuments(tabId!, source);
     if (method === "Page.frameDetached" && params?.frameId && session) {
-      session.frames.delete(params.frameId);
-      session.frameParents.delete(params.frameId);
+      const current = session.frames.get(params.frameId);
+      // A swap detaches the old renderer's view of the frame, not the frame
+      // itself. An attachment from the new target can arrive first; do not
+      // remove its mapping when the old target reports its delayed swap.
+      const transferred = params.reason === "swap" && current?.sessionId && current.sessionId !== source.sessionId;
+      if (!transferred) session.frames.delete(params.frameId);
+      // Keep ancestry across a process swap, including when attach arrives
+      // after detach and the new target's frame-tree root has no parentId.
+      if (params.reason !== "swap") session.frameParents.delete(params.frameId);
       this.invalidate(session, preserveChooser);
     }
     if (method === "Target.detachedFromTarget" && params?.sessionId && session) {
@@ -1038,20 +1105,50 @@ export class AutomationRuntime {
       if (operation === "fill" || operation === "clear") {
         const { objectId, targetSession } = await this.waitActionableLocator(session, spec, true, false);
         const value = operation === "clear" ? "" : String(args[0] ?? "");
-        await this.withFocusedTarget(targetSession, objectId, operationSignal, async (assertFocus) => {
-          await this.focusedKey(targetSession, { key: "a", code: "KeyA", commands: ["selectAll"] }, assertFocus);
-          await this.focusedKey(targetSession, { key: "Backspace", code: "Backspace" }, assertFocus);
-          if (value) { await assertFocus(); await this.options.command(targetSession.debuggee, "Input.insertText", { text: value }); }
-        });
+        const kind = await this.callOn(targetSession, objectId, TEXT_INPUT_KIND_SOURCE);
+        if (kind === "detached") throw automationError("detached", { reason: "editable-target-removed" });
+        if (kind === "unsupported" || typeof kind !== "string") throw automationError("invalid-editable-target", { reason: "not-a-text-input" });
+        if (STRUCTURED_INPUT_TYPES.has(kind)) {
+          const fill = async (apply: boolean): Promise<string> => {
+            const result = await this.callOn(targetSession, objectId, STRUCTURED_FILL_SOURCE, [kind, value, apply]);
+            if (!result || result.error) throw automationError("invalid-input-value", { reason: result?.error ?? "missing-result", type: kind });
+            if (typeof result.value !== "string") throw automationError("state-unavailable", { reason: "missing-input-value" });
+            return result.value;
+          };
+          await fill(false);
+          let actual = "";
+          await this.withFocusedTarget(targetSession, objectId, operationSignal, async (assertFocus) => {
+            await assertFocus();
+            actual = await fill(true);
+          });
+          return { ...(await this.afterAction(session)), value: actual };
+        }
+        await this.withFocusedTarget(targetSession, objectId, operationSignal, async (assertFocus, backendNodeId) => {
+          await assertFocus();
+          await this.options.command(targetSession.debuggee, "Input.insertText", { text: value, surfWaxTargetBackendNodeId: backendNodeId, surfWaxReplaceSelection: true });
+          if (value === "") {
+            const result = await this.callOn(targetSession, objectId, `function(){
+              if (!this.isConnected) return { connected: false };
+              return { connected: true, value: this.localName === 'input' || this.localName === 'textarea' ? this.value : this.textContent };
+            }`);
+            if (!result?.connected) throw automationError("detached", { reason: "editable-target-removed" });
+            if (result.value !== "") throw automationError("value-not-applied", { reason: "input-not-cleared" });
+          }
+        }, true);
         return this.afterAction(session);
       }
       if (operation === "press" || operation === "pressSequentially") {
         const { objectId, targetSession } = await this.waitActionableLocator(session, spec, operation === "pressSequentially", false, false, operation === "pressSequentially");
-        await this.withFocusedTarget(targetSession, objectId, operationSignal, async (assertFocus) => {
+        if (operation === "pressSequentially") {
+          const kind = await this.callOn(targetSession, objectId, TEXT_INPUT_KIND_SOURCE);
+          if (kind === "detached") throw automationError("detached", { reason: "editable-target-removed" });
+          if (kind !== "text") throw automationError("invalid-editable-target", { reason: STRUCTURED_INPUT_TYPES.has(kind) ? "use-fill-for-structured-input" : "not-a-text-input" });
+        }
+        await this.withFocusedTarget(targetSession, objectId, operationSignal, async (assertFocus, backendNodeId) => {
           if (operation === "pressSequentially") {
-            for (const character of String(args[0] ?? "")) { await assertFocus(); await this.options.command(targetSession.debuggee, "Input.insertText", { text: character }); }
+            for (const character of String(args[0] ?? "")) { await assertFocus(); await this.options.command(targetSession.debuggee, "Input.insertText", { text: character, surfWaxTargetBackendNodeId: backendNodeId }); }
           } else { await assertFocus(); await this.press(targetSession, String(args[0] ?? ""), operationSignal); }
-        });
+        }, operation === "pressSequentially");
         return this.afterAction(session);
       }
       if (operation === "selectOption") {
@@ -1930,6 +2027,37 @@ export class AutomationRuntime {
       if (!ownerId) throw automationError("frame-not-found", { locator: ownerSpec });
       const owner = (await this.options.command(debuggee, "DOM.describeNode", { objectId: ownerId })).node;
       const child = owner?.frameId ? session.frames.get(owner.frameId) : undefined;
+      if (owner?.frameId && (!child?.sessionId || child.sessionId === debuggee.sessionId)) {
+        const accessible = await this.callOn({ ...session, debuggee }, ownerId,
+          "function(){ try { return this.contentDocument !== null; } catch { return false; } }");
+        if (accessible === false) {
+          const revision = session.frameRevision, generation = session.generation;
+          const frame: FrameRefRecord = { frameId: owner.frameId, debuggee, generation, revision,
+            conversationId: this.context.conversationId, runId: this.context.logIdentity?.runId };
+          const guard = () => {
+            throwIfAborted(this.context.signal);
+            if (this.sessions.get(session.tabId) !== session || session.generation !== generation || session.frameRevision !== revision)
+              throw automationError("stale-frame", { reason: "frame-tree-changed" });
+          };
+          try {
+            // An isolated world can reach a same-process sandboxed or
+            // cross-origin document even when contentDocument is unavailable.
+            rootObjectId = await this.frameDocument(session, frame, guard);
+          } catch (error) {
+            throwIfAborted(this.context.signal);
+            const changed = this.sessions.get(session.tabId) === session && (session.generation !== generation || session.frameRevision !== revision);
+            const message = error instanceof Error ? error.message : String(error);
+            const awaitingTarget = /(?:no frame (?:with|for) (?:the )?given id|frame with the given id does not belong|cannot find (?:default )?(?:execution )?context)/i.test(message);
+            if (!immediate && (changed || awaitingTarget)) { await delay(50, this.context.signal); continue; }
+            if (awaitingTarget) throw automationError("frame-unavailable", { reason: "frame-target-not-attached" });
+            throw error;
+          }
+          rootIsElement = false;
+          scoped = { ...scoped, queries: scoped.queries.slice(frameIndex + 1) };
+          scanFrom = 0;
+          continue;
+        }
+      }
       // A same-process child inherits its parent's debugger session, including
       // when that parent is itself an OOPIF. Keep that frame in the locator
       // prefix and keep looking for any later cross-process boundary.
@@ -2039,8 +2167,9 @@ export class AutomationRuntime {
         if (guard) guard.style.setProperty("pointer-events", pointerEvents || "auto", pointerPriority || "important");
       }
       const disabled = (${DISABLED_STATE_SOURCE}).call(this);
-      const editable = !disabled && !this.readOnly && this.getAttribute("aria-readonly") !== "true" && (this.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(this.tagName));
-      return { connected: true, x, y, width: rect.width, height: rect.height, visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none", stable: true, enabled: !disabled, editable, receivesEvents: Boolean(hit && (hit === this || this.contains(hit))), checked: (${CHECKED_STATE_SOURCE}).call(this).value };
+      const editKind = (${TEXT_INPUT_KIND_SOURCE}).call(this);
+      const editable = !disabled && !this.readOnly && this.getAttribute("aria-readonly") !== "true" && editKind !== "unsupported" && editKind !== "detached";
+      return { connected: true, x, y, width: rect.width, height: rect.height, visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none", stable: true, enabled: !disabled, editable, editKind, receivesEvents: Boolean(hit && (hit === this || this.contains(hit))), checked: (${CHECKED_STATE_SOURCE}).call(this).value };
     }`, [scroll, pointer], pointer);
       if (!pointer || !value.connected || !value.visible) return value as ElementState;
       // CDP quads are relative to this debugger target's viewport and already
@@ -2111,6 +2240,7 @@ export class AutomationRuntime {
       const reason = !state?.connected ? "detached" : !state.visible ? "not-visible" : stable && !state.stable ? "not-stable" : enabled && !state.enabled ? "disabled" : editable && !state.editable ? "not-editable" : pointer && !state.receivesEvents ? "intercepted" : "actionable";
       this.recordAttempt(session, spec, attempt, reason, candidates, state);
       if (spec.ref && !state?.connected) throw automationError("detached", { ref: spec.ref, reason: "node-removed" });
+      if (editable && state?.connected && state.editKind === "unsupported") throw automationError("invalid-editable-target", { reason: "not-a-text-input" });
       if (state?.connected && state.visible && (!stable || state.stable) && (!enabled || state.enabled) && (!editable || state.editable) && (!pointer || state.receivesEvents)) return { objectId, targetSession, state };
       await delay(50, this.context.signal);
     }
@@ -2238,9 +2368,9 @@ export class AutomationRuntime {
   }
 
   /** Check the bound node, its shadow hosts and the containing frame before input. */
-  private async assertFocused(session: Session, objectId: string, signal?: AbortSignal): Promise<void> {
+  private async assertFocused(session: Session, objectId: string, signal?: AbortSignal, requireText = false): Promise<void> {
     throwIfAborted(signal);
-    const value = await this.callOn(session, objectId, `function(){
+    const value = await this.callOn(session, objectId, `function(requireText){
       if (!this.isConnected) return { connected: false, focused: false };
       const document = this.ownerDocument;
       let node = this, root = node.getRootNode();
@@ -2250,16 +2380,20 @@ export class AutomationRuntime {
         node = root.host;
         root = node.getRootNode();
       }
-      return { connected: this.isConnected, focused: root === document && document.hasFocus() };
-    }`);
+      const editable = !requireText || ((${TEXT_INPUT_KIND_SOURCE}).call(this) === 'text' && !(${DISABLED_STATE_SOURCE}).call(this)
+        && !this.readOnly && this.getAttribute('aria-readonly') !== 'true');
+      return { connected: this.isConnected, focused: root === document && document.hasFocus(), editable };
+    }`, [requireText]);
     throwIfAborted(signal);
     if (!value || typeof value.connected !== "boolean" || typeof value.focused !== "boolean")
       throw automationError("focus-unavailable", { reason: "missing-focus-state" });
     if (!value.connected) throw automationError("detached", { reason: "focused-target-removed" });
     if (!value.focused) throw automationError("focus-lost", { reason: "focused-target-changed" });
+    if (requireText && typeof value.editable !== "boolean") throw automationError("state-unavailable", { reason: "missing-editable-state" });
+    if (requireText && !value.editable) throw automationError("not-editable", { reason: "focused-target-changed" });
   }
 
-  private async withFocusedTarget(session: Session, objectId: string, signal: AbortSignal | undefined, run: (assertFocus: () => Promise<void>) => Promise<void>): Promise<void> {
+  private async withFocusedTarget(session: Session, objectId: string, signal: AbortSignal | undefined, run: (assertFocus: () => Promise<void>, backendNodeId: number) => Promise<void>, requireText = false): Promise<void> {
     const node = await this.describe(session, objectId);
     if (!node?.backendNodeId) throw automationError("focus-unavailable", { reason: "missing-backend-node-id" });
     let focusAttempted = false;
@@ -2268,21 +2402,13 @@ export class AutomationRuntime {
       // Focusing can itself run page handlers, so later failures cannot claim no effect.
       focusAttempted = true;
       await this.options.command(session.debuggee, "DOM.focus", { backendNodeId: node.backendNodeId });
-      const assertFocus = () => this.assertFocused(session, objectId, signal);
+      const assertFocus = () => this.assertFocused(session, objectId, signal, requireText);
       await assertFocus();
-      await run(assertFocus);
+      await run(assertFocus, node.backendNodeId);
     } catch (error) {
       if (focusAttempted && error && typeof error === "object") Object.assign(error, { effectUnknown: true });
       throw error;
     }
-  }
-
-  private async focusedKey(session: Session, input: { key: string; code: string; commands?: string[] }, assertFocus: () => Promise<void>): Promise<void> {
-    await assertFocus();
-    const release = () => this.options.command(session.debuggee, "Input.dispatchKeyEvent", { type: "keyUp", key: input.key, code: input.code });
-    try { await this.options.command(session.debuggee, "Input.dispatchKeyEvent", { type: "rawKeyDown", ...input }); }
-    catch (error) { await release().catch(() => undefined); throw error; }
-    await release();
   }
 
   private async press(session: Session, chord: string, signal = this.context.signal): Promise<void> {
