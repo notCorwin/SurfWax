@@ -1,6 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, closeServer, type MockResponse } from "./fixtures";
-import { sequenceFixture, sequenceScore } from "./evaluation/sequence-fixture";
+import { sequenceFixture, sequenceInteractionScore, sequenceScore } from "./evaluation/sequence-fixture";
 import { dispatchFixture, dispatchScore } from "./evaluation/dispatch-fixture";
 
 // A scripted tool execution contract, not a measurement of model performance.
@@ -55,19 +55,23 @@ test("extension tools can complete the dispatch capability level", async () => {
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("DISPATCH_TOOL_PATH_DONE", { timeout: 100_000 });
     await expect.poll(() => sequenceScore(fixture.evidence())).toBe(true);
+    expect(sequenceInteractionScore(fixture.evidence())).toBe(true);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
     await closeServer(fixture.server);
   }
 });
 
-test.fixme("extension tools can complete the popup and dialog capability level", async () => {
+test("extension tools can complete the popup and dialog capability level", async () => {
   test.setTimeout(120_000);
   const fixture = await dispatchFixture(17);
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
   try {
+    // Prevent Playwright from automatically dismissing dialogs on new pages;
+    // the extension owns the actual response.
+    opened.context.on("page", (popup) => popup.on("dialog", () => {}));
     const target = await opened.context.newPage();
     await target.goto(fixture.origin);
     let jobId = "", polls = 0, code = "";

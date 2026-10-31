@@ -6,8 +6,10 @@ import { test, openExtension, dispose, configure, readEvents, closeServer } from
 import { modelProxy, usageEvidence } from "./evaluation/model-proxy";
 import { businessScore, orderFixture } from "./evaluation/order-fixture";
 import { claimsFixture, claimsScore } from "./evaluation/claims-fixture";
-import { sequenceFixture, sequenceScore } from "./evaluation/sequence-fixture";
+import { sequenceFixture, sequenceInteractionScore, sequenceScore } from "./evaluation/sequence-fixture";
 import { dispatchFixture, dispatchScore } from "./evaluation/dispatch-fixture";
+import { uploadFixture, uploadScore } from "./evaluation/upload-fixture";
+import { trackFixtureRequests } from "./evaluation/network-quiescence";
 
 test.use({ trace: "off", screenshot: "off", video: "off" });
 
@@ -23,21 +25,28 @@ test("@real-model browser task", async () => {
   const seed = Number(process.env.SURFWAX_EVAL_SEED ?? 17);
   if (!Number.isSafeInteger(seed) || seed < 0 || seed > 999999) throw new Error("Invalid seed");
   const scenario = process.env.SURFWAX_EVAL_SCENARIO ?? "cross-frame-order";
-  if (!["cross-frame-order", "claims-queue", "sequence-editor", "dispatch-review"].includes(scenario)) throw new Error("Invalid scenario");
+  if (!["cross-frame-order", "claims-queue", "sequence-editor", "dispatch-review", "dossier-upload"].includes(scenario)) throw new Error("Invalid scenario");
   const service = seed % 2 ? "express" : "economy";
   const order = `ORDER-${seed}`;
   const started = Date.now();
   const proxy = await modelProxy(upstream, key);
-  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | undefined;
+  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | Awaited<ReturnType<typeof uploadFixture>> | undefined;
   let opened: Awaited<ReturnType<typeof openExtension>> | undefined;
-  let events: any[] = [], outcome = "setup_failed", businessVerified = false;
+  let events: any[] = [], outcome = "setup_failed", businessVerified = false, interactionVerified: boolean | null = null;
+  let networkSettled: boolean | null = null;
+  let tracker: ReturnType<typeof trackFixtureRequests> | undefined;
   let browserProduct: string | null = null;
   try {
     let prompt: string;
     let grade: () => boolean;
-    if (scenario === "sequence-editor") {
+    let gradeInteraction: (() => boolean) | undefined;
+    if (scenario === "dossier-upload") {
+      const upload = await uploadFixture(seed); fixture = upload; prompt = upload.prompt;
+      grade = () => uploadScore(upload.evidence());
+    } else if (scenario === "sequence-editor") {
       const sequence = await sequenceFixture(seed); fixture = sequence; prompt = sequence.prompt;
       grade = () => sequenceScore(sequence.evidence());
+      gradeInteraction = () => sequenceInteractionScore(sequence.evidence());
     } else if (scenario === "dispatch-review") {
       const dispatch = await dispatchFixture(seed); fixture = dispatch; prompt = dispatch.prompt;
       grade = () => dispatchScore(dispatch.evidence());
@@ -50,6 +59,11 @@ test("@real-model browser task", async () => {
       grade = () => businessScore(checkout.evidence(), order, service);
     }
     opened = await openExtension();
+    // The extension handles dialogs; Playwright must not auto-dismiss them.
+    opened.context.on("page", (page) => page.on("dialog", () => {}));
+    const alternateOrigin = new URL(fixture.origin);
+    alternateOrigin.hostname = "localhost";
+    tracker = trackFixtureRequests(opened.context, [fixture.origin, alternateOrigin.origin]);
     const target = await opened.context.newPage();
     await target.goto(fixture.origin);
     const frame = target.frames().find((item) => item.url().includes("localhost"));
@@ -77,7 +91,7 @@ test("@real-model browser task", async () => {
       await new Promise((resolveWait) => setTimeout(resolveWait, 1000));
     }
     // An unsettled network may still contain a submission or decoy request.
-    const networkSettled = await target.waitForLoadState("networkidle", { timeout: 5000 }).then(() => true, () => false);
+    networkSettled = await tracker.wait({ quietMs: 500, timeoutMs: 5000 });
     events = await readEvents(opened.page);
     browserProduct = await opened.context.newCDPSession(opened.page).then((session) => session.send("Browser.getVersion")).then((version) => version.product).catch(() => null);
     // Stop page timers and drain all server requests before reading the ledger.
@@ -85,7 +99,9 @@ test("@real-model browser task", async () => {
     await opened.context.close();
     await closeServer(fixture.server);
     businessVerified = networkSettled && grade();
+    interactionVerified = networkSettled && gradeInteraction ? gradeInteraction() : null;
   } finally {
+    tracker?.dispose();
     if (opened) events = await readEvents(opened.page).catch(() => events);
     const head = (() => { try { return execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(); } catch { return null; } })();
     const dirty = (() => { try { return !!execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim(); } catch { return null; } })();
@@ -98,7 +114,7 @@ test("@real-model browser task", async () => {
       return counts;
     }, {});
     const report = { scenario, seed, provider: providerName, model, gitHead: head, gitDirty: dirty, browser: browserProduct ?? browser?.product ?? null,
-      outcome, businessVerified, elapsedMs: Date.now() - started, providerUsageByStep: usageEvidence(events),
+      outcome, businessVerified, interactionVerified, networkSettled, elapsedMs: Date.now() - started, providerUsageByStep: usageEvidence(events),
       requests: proxy.requests, requestBytes: proxy.requests.reduce((sum, request) => sum + request.bytes, 0),
       toolCalls: starts.length, toolNames, toolTerminalResults: terminals.length,
       toolsWithExactlyOneTerminal: starts.length > 0 && starts.every((start) => terminals.filter((end) => end.runId === start.runId && end.toolCallId === start.toolCallId).length === 1) };
@@ -109,5 +125,5 @@ test("@real-model browser task", async () => {
     if (fixture) await closeServer(fixture.server);
     await closeServer(proxy.server);
   }
-  if (outcome !== "conversation.finished" || !businessVerified) throw new Error("Evaluation did not complete with a correct business result; see the report");
+  if (outcome !== "conversation.finished" || !businessVerified || interactionVerified === false) throw new Error("Evaluation did not complete with the required results; see the report");
 });

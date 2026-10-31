@@ -1,13 +1,34 @@
 import { createServer, type Server } from "node:http";
 
 type Submission = { sequence: string[]; reference: string; confirmed: boolean };
-type Attempt = { body: unknown; accepted: boolean };
+type Attempt = { body: unknown; accepted: boolean; witness?: unknown };
 
 export interface SequenceFixture {
   origin: string;
   server: Server;
   prompt: string;
-  evidence(): { attempts: Attempt[]; decoyClicks: number; expected: Submission };
+  evidence(): { attempts: Attempt[]; decoyClicks: number; expected: Submission; initial: string[] };
+}
+
+/** Replay the page's trusted keyboard evidence separately from the business result.
+ * The page sends this evidence, so it detects ordinary bypasses, not adversarial forgery. */
+export function sequenceInteractionScore(evidence: ReturnType<SequenceFixture["evidence"]>): boolean {
+  if (!sequenceScore(evidence)) return false;
+  const witness = evidence.attempts[0]!.witness;
+  if (!witness || typeof witness !== "object" || Array.isArray(witness)) return false;
+  const { moves, trustedSubmit } = witness as Record<string, unknown>;
+  if (trustedSubmit !== true || !Array.isArray(moves) || moves.length === 0) return false;
+  const sequence = [...evidence.initial];
+  for (const move of moves) {
+    if (!move || typeof move !== "object" || Array.isArray(move)) return false;
+    const { name, key, trusted } = move as Record<string, unknown>;
+    if (typeof name !== "string" || (key !== "ArrowUp" && key !== "ArrowDown") || trusted !== true) return false;
+    const index = sequence.indexOf(name);
+    const next = index + (key === "ArrowUp" ? -1 : 1);
+    if (index < 0 || next < 0 || next >= sequence.length) return false;
+    [sequence[index], sequence[next]] = [sequence[next]!, sequence[index]!];
+  }
+  return JSON.stringify(sequence) === JSON.stringify(evidence.expected.sequence);
 }
 
 /** The judge checks the complete external ledger, including rejected and duplicate attempts. */
@@ -36,7 +57,8 @@ export async function sequenceFixture(seed: number): Promise<SequenceFixture> {
   };
   const expected: Submission = { sequence: shuffle(names), reference: `DSP-${seed}-A/7`, confirmed: true };
   let initial = shuffle(names);
-  if (JSON.stringify(initial) === JSON.stringify(expected.sequence)) initial = [...initial.slice(1), initial[0]!];
+  const distance = (values: string[]) => values.reduce((total, name, index) => total + values.slice(index + 1).filter((other) => expected.sequence.indexOf(name) > expected.sequence.indexOf(other)).length, 0);
+  if (distance(initial) < 7) initial = [...expected.sequence].reverse();
   const attempts: Attempt[] = [];
   let decoyClicks = 0;
   const server = createServer(async (request, response) => {
@@ -59,7 +81,7 @@ export async function sequenceFixture(seed: number): Promise<SequenceFixture> {
           connectedCallback() {
             const root = this.attachShadow({mode:'open'});
             root.innerHTML = '<main><h1>Sequence editor</h1><p>Focus a shipment and use Arrow Up or Arrow Down to change its position.</p><ol aria-label="Shipment order"></ol><label>Dispatch reference <input></label><label><input type="checkbox"> Confirm dispatch</label><button type="button">Send dispatch</button><output aria-live="polite">Not sent</output></main>';
-            let sequence = ${JSON.stringify(initial)};
+            let sequence = ${JSON.stringify(initial)}, moves = [];
             const list = root.querySelector('ol'), output = root.querySelector('output');
             const render = (focusName) => {
               list.replaceChildren(...sequence.map((name) => {
@@ -69,6 +91,7 @@ export async function sequenceFixture(seed: number): Promise<SequenceFixture> {
                   if (!['ArrowUp','ArrowDown'].includes(event.key)) return;
                   event.preventDefault(); const index = sequence.indexOf(name), next = index + (event.key === 'ArrowUp' ? -1 : 1);
                   if (next < 0 || next >= sequence.length) return;
+                  moves.push({name, key:event.key, trusted:event.isTrusted});
                   [sequence[index],sequence[next]] = [sequence[next],sequence[index]]; render(name);
                 });
                 li.append(button); return li;
@@ -76,8 +99,8 @@ export async function sequenceFixture(seed: number): Promise<SequenceFixture> {
               if (focusName) [...list.querySelectorAll('button')].find((button) => button.textContent === focusName)?.focus();
             };
             render();
-            root.querySelector('main > button').onclick = async () => {
-              const body = {sequence, reference:root.querySelector('input:not([type=checkbox])').value, confirmed:root.querySelector('input[type=checkbox]').checked};
+            root.querySelector('main > button').onclick = async (event) => {
+              const body = {sequence, reference:root.querySelector('input:not([type=checkbox])').value, confirmed:root.querySelector('input[type=checkbox]').checked, witness:{moves, trustedSubmit:event.isTrusted}};
               try { const response = await fetch('/dispatch', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}); output.textContent = response.ok ? 'Dispatch sent' : 'Dispatch rejected'; }
               catch { output.textContent = 'Dispatch failed'; }
             };
@@ -92,9 +115,10 @@ export async function sequenceFixture(seed: number): Promise<SequenceFixture> {
       try {
         const chunks: Buffer[] = [];
         for await (const chunk of request) chunks.push(Buffer.from(chunk));
-        const body: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-        const valid = sequenceScore({ attempts: [{ body, accepted: true }], decoyClicks: 0, expected });
-        attempts.push({ body, accepted: valid });
+        const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        const { witness, ...body } = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : { invalid: parsed };
+        const valid = sequenceScore({ attempts: [{ body, accepted: true }], decoyClicks: 0, expected, initial });
+        attempts.push({ body, accepted: valid, witness });
         response.writeHead(valid ? 201 : 400, { "content-type": "application/json" }).end(JSON.stringify({ status: valid ? "sent" : "rejected" }));
       } catch {
         attempts.push({ body: null, accepted: false });
@@ -110,6 +134,6 @@ export async function sequenceFixture(seed: number): Promise<SequenceFixture> {
   return {
     origin: `http://127.0.0.1:${address.port}`, server,
     prompt: `In the dispatch workspace, arrange the shipments in this exact order: ${expected.sequence.join(", ")}. Enter dispatch reference ${expected.reference}, confirm the dispatch, and send it once.`,
-    evidence: () => ({ attempts: structuredClone(attempts), decoyClicks, expected: structuredClone(expected) }),
+    evidence: () => ({ attempts: structuredClone(attempts), decoyClicks, expected: structuredClone(expected), initial: [...initial] }),
   };
 }

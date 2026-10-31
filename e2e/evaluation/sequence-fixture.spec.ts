@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { sequenceFixture, sequenceScore } from "./sequence-fixture";
+import { sequenceFixture, sequenceInteractionScore, sequenceScore } from "./sequence-fixture";
 
 for (const seed of [17, 73]) test(`keyboard reorders replaced shadow nodes across nested origins (seed ${seed})`, async ({ page }) => {
   const fixture = await sequenceFixture(seed);
@@ -8,6 +8,9 @@ for (const seed of [17, 73]) test(`keyboard reorders replaced shadow nodes acros
     const editor = page.frameLocator('iframe[title="Dispatch workspace"]').frameLocator('iframe[title="Sequence editor"]');
     const list = editor.getByRole("list", { name: "Shipment order" });
     const desired = fixture.evidence().expected;
+    const initial = fixture.evidence().initial;
+    const distance = initial.reduce((total, name, index) => total + initial.slice(index + 1).filter((other) => desired.sequence.indexOf(name) > desired.sequence.indexOf(other)).length, 0);
+    expect(distance).toBeGreaterThanOrEqual(7);
     expect(sequenceScore(fixture.evidence())).toBe(false);
     await list.getByRole("button").first().evaluate((element) => { (window as any).__original = element; });
     let moves = 0;
@@ -28,6 +31,7 @@ for (const seed of [17, 73]) test(`keyboard reorders replaced shadow nodes acros
     await editor.getByRole("button", { name: "Send dispatch" }).click();
     await expect(editor.locator("output")).toHaveText("Dispatch sent");
     expect(sequenceScore(fixture.evidence())).toBe(true);
+    expect(sequenceInteractionScore(fixture.evidence())).toBe(true);
     // Visible state and a fabricated receipt are not evidence of business effects.
     await editor.locator("output").evaluate((element) => { element.textContent = "Not sent"; });
     expect(sequenceScore(fixture.evidence())).toBe(true);
@@ -38,6 +42,38 @@ for (const seed of [17, 73]) test(`keyboard reorders replaced shadow nodes acros
     expect(sequenceScore(fixture.evidence())).toBe(false);
   } finally {
     await new Promise<void>((resolve, reject) => fixture.server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("business success alone and synthetic keyboard events do not count as observed keyboard interaction", async ({ page }) => {
+  const direct = await sequenceFixture(17);
+  const synthetic = await sequenceFixture(73);
+  try {
+    expect((await page.request.post(`${direct.origin}/dispatch`, { data: direct.evidence().expected })).status()).toBe(201);
+    expect(sequenceScore(direct.evidence())).toBe(true);
+    expect(sequenceInteractionScore(direct.evidence())).toBe(false);
+
+    await page.goto(synthetic.origin);
+    const editor = page.frameLocator('iframe[title="Dispatch workspace"]').frameLocator('iframe[title="Sequence editor"]');
+    const list = editor.getByRole("list", { name: "Shipment order" });
+    const expected = synthetic.evidence().expected;
+    for (let index = 0; index < expected.sequence.length; index++) {
+      let current = await list.getByRole("button").allTextContents();
+      while (current.indexOf(expected.sequence[index]!) > index) {
+        await list.getByRole("button", { name: expected.sequence[index], exact: true }).evaluate((button) => {
+          button.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+        });
+        current = await list.getByRole("button").allTextContents();
+      }
+    }
+    await editor.getByLabel("Dispatch reference").fill(expected.reference);
+    await editor.getByLabel("Confirm dispatch").check();
+    await editor.getByRole("button", { name: "Send dispatch" }).click();
+    await expect(editor.locator("output")).toHaveText("Dispatch sent");
+    expect(sequenceScore(synthetic.evidence())).toBe(true);
+    expect(sequenceInteractionScore(synthetic.evidence())).toBe(false);
+  } finally {
+    await Promise.all([direct, synthetic].map((fixture) => new Promise<void>((resolve, reject) => fixture.server.close((error) => error ? reject(error) : resolve()))));
   }
 });
 
