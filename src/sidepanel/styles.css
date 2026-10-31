@@ -55,13 +55,6 @@ p {
   justify-content: flex-start;
 }
 
-.conversation-action svg,
-.conversation-delete svg {
-  width: calc(var(--spacing) * 3.75);
-  height: calc(var(--spacing) * 3.75);
-  flex: 0 0 auto;
-}
-
 .conversation-trigger span {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -71,8 +64,12 @@ p {
 .conversation-dropdown {
   width: calc(100vw - var(--spacing) * 6);
   max-height: min(calc(var(--spacing) * 128), var(--radix-popover-content-available-height));
-  border-radius: var(--radius-panel);
+  border-radius: var(--radius-xl);
   overscroll-behavior: contain;
+}
+
+.conversation-dropdown [data-slot="input-group"] {
+  border-radius: var(--radius-sm);
 }
 
 .conversation-select,
@@ -130,7 +127,7 @@ p {
   display: flex;
   align-items: center;
   gap: calc(var(--spacing) * 1);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
 }
 
 .conversation-select {
@@ -139,7 +136,7 @@ p {
   flex: 1;
   align-items: center;
   gap: calc(var(--spacing) * 2);
-  padding: calc(var(--spacing) * 2.25) calc(var(--spacing) * 2.5);
+  padding: calc(var(--spacing) * 2) calc(var(--spacing) * 3);
   text-align: left;
 }
 
@@ -154,7 +151,7 @@ p {
 .conversation-select small {
   flex: 0 0 auto;
   color: var(--muted-foreground);
-  font-size: var(--type-tiny);
+  font-size: var(--type-xs);
 }
 
 .conversation-select small[data-status="interrupted"] {
