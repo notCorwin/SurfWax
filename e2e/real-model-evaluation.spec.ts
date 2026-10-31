@@ -14,17 +14,23 @@ import { pointerFixture, pointerInteractionScore, pointerScore } from "./evaluat
 import { recoveryFixture, recoveryScore } from "./evaluation/recovery-fixture";
 import { multitabFixture, multitabScore } from "./evaluation/multitab-fixture";
 import { manifestFixture, manifestScore } from "./evaluation/manifest-fixture";
+import { rollingFixture, rollingInteractionScore, rollingScore } from "./evaluation/rolling-fixture";
+import { chooserPromptFixture, chooserPromptScore } from "./evaluation/chooser-prompt-fixture";
 import { trackFixtureRequests } from "./evaluation/network-quiescence";
 import { trackServerResponses, type ServerActivity } from "./evaluation/server-quiescence";
 import { waitForEvaluationQuiescence } from "./evaluation/quiescence";
 import { completedProgramOperations, toolLifecycleEvidence } from "./evaluation/tool-lifecycle";
+import { evaluateResultEvidence } from "./evaluation/result-evidence";
 
 test.use({ trace: "off", screenshot: "off", video: "off" });
 
 // An explicit opt-in is required: this test may incur provider charges.
 test("@real-model browser task", async () => {
   test.skip(process.env.SURFWAX_REAL_MODEL_EVAL !== "1", "Explicit real-model opt-in required");
-  test.setTimeout(Number(process.env.SURFWAX_EVAL_TIMEOUT_MS ?? 600_000));
+  const taskTimeoutMs = Number(process.env.SURFWAX_EVAL_TIMEOUT_MS ?? 600_000);
+  if (!Number.isSafeInteger(taskTimeoutMs) || taskTimeoutMs <= 0 || taskTimeoutMs > 2_147_423_647) throw new Error("Invalid evaluation timeout");
+  // Keep setup, evidence collection and teardown outside the task's time budget.
+  test.setTimeout(taskTimeoutMs + 60_000);
   const upstream = process.env.SURFWAX_EVAL_BASE_URL;
   const key = process.env.SURFWAX_EVAL_API_KEY;
   const model = process.env.SURFWAX_EVAL_MODEL;
@@ -33,15 +39,16 @@ test("@real-model browser task", async () => {
   const seed = Number(process.env.SURFWAX_EVAL_SEED ?? 17);
   if (!Number.isSafeInteger(seed) || seed < 0 || seed > 999999) throw new Error("Invalid seed");
   const scenario = process.env.SURFWAX_EVAL_SCENARIO ?? "cross-frame-order";
-  if (!["cross-frame-order", "claims-queue", "sequence-editor", "dispatch-review", "dossier-upload", "pointer-drag", "uncertain-write", "window-transfer", "long-manifest"].includes(scenario)) throw new Error("Invalid scenario");
+  if (!["cross-frame-order", "claims-queue", "sequence-editor", "dispatch-review", "dossier-upload", "pointer-drag", "uncertain-write", "window-transfer", "long-manifest", "rolling-queue", "chooser-prompt"].includes(scenario)) throw new Error("Invalid scenario");
   const service = seed % 2 ? "express" : "economy";
   const order = `ORDER-${seed}`;
   const started = Date.now();
   const proxy = await modelProxy(upstream, key);
-  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | Awaited<ReturnType<typeof uploadFixture>> | Awaited<ReturnType<typeof pointerFixture>> | Awaited<ReturnType<typeof recoveryFixture>> | Awaited<ReturnType<typeof multitabFixture>> | Awaited<ReturnType<typeof manifestFixture>> | undefined;
+  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | Awaited<ReturnType<typeof uploadFixture>> | Awaited<ReturnType<typeof pointerFixture>> | Awaited<ReturnType<typeof recoveryFixture>> | Awaited<ReturnType<typeof multitabFixture>> | Awaited<ReturnType<typeof manifestFixture>> | Awaited<ReturnType<typeof rollingFixture>> | Awaited<ReturnType<typeof chooserPromptFixture>> | undefined;
   let opened: Awaited<ReturnType<typeof openExtension>> | undefined;
-  let events: any[] = [], outcome = "setup_failed", businessVerified = false, interactionVerified: boolean | null = null;
-  let lifecycleVerified = false;
+  let events: any[] = [], outcome = "setup_failed", business: boolean | null = null, interaction: boolean | null = null;
+  const interactionApplicable = scenario === "sequence-editor" || scenario === "pointer-drag" || scenario === "rolling-queue";
+  let passed = false, ledgerDrained = false, logComplete = false;
   let networkSettled: boolean | null = null;
   let tracker: ReturnType<typeof trackFixtureRequests> | undefined;
   let serverTracker: ReturnType<typeof trackServerResponses> | undefined;
@@ -51,7 +58,14 @@ test("@real-model browser task", async () => {
     let prompt: string;
     let grade: () => boolean;
     let gradeInteraction: (() => boolean) | undefined;
-    if (scenario === "long-manifest") {
+    if (scenario === "chooser-prompt") {
+      const chooser = await chooserPromptFixture(seed); fixture = chooser; prompt = chooser.prompt;
+      grade = () => chooserPromptScore(chooser.evidence());
+    } else if (scenario === "rolling-queue") {
+      const queue = await rollingFixture(seed); fixture = queue; prompt = queue.prompt;
+      grade = () => rollingScore(queue.evidence());
+      gradeInteraction = () => rollingInteractionScore(queue.evidence());
+    } else if (scenario === "long-manifest") {
       const manifest = await manifestFixture(seed); fixture = manifest; prompt = manifest.prompt;
       grade = () => manifestScore(manifest.evidence());
     } else if (scenario === "window-transfer") {
@@ -108,27 +122,32 @@ test("@real-model browser task", async () => {
     await opened.page.getByTestId("composer-input").fill(prompt);
     await opened.page.getByTestId("composer-input").press("Enter");
     outcome = "running";
-    const deadline = Date.now() + Number(process.env.SURFWAX_EVAL_TIMEOUT_MS ?? 600_000) - 30_000;
+    const deadline = Date.now() + taskTimeoutMs;
     while (Date.now() < deadline) {
       events = await readEvents(opened.page);
       const terminal = events.find((event) => ["conversation.finished", "conversation.failed", "conversation.aborted"].includes(event.type));
       if (terminal) { outcome = terminal.type; break; }
-      await new Promise((resolveWait) => setTimeout(resolveWait, 1000));
+      await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(1000, Math.max(0, deadline - Date.now()))));
     }
+    if (outcome === "running") outcome = "timed_out";
     // An unsettled network may still contain a submission or decoy request.
     const quiet = await waitForEvaluationQuiescence(tracker, serverTracker, 500, 5000);
     networkSettled = quiet.settled;
     events = await readEvents(opened.page);
+    logComplete = ["conversation.finished", "conversation.failed", "conversation.aborted"].includes(outcome);
     browserProduct = await opened.context.newCDPSession(opened.page).then((session) => session.send("Browser.getVersion")).then((version) => version.product).catch(() => null);
     // Stop page timers and drain all server requests before reading the ledger.
     // Otherwise a delayed effect can arrive after the score has been decided.
     await opened.context.close();
     await closeServer(fixture.server);
+    ledgerDrained = true;
     serverActivity = serverTracker.snapshot();
     // Requests observed after the quiet check invalidate that observation.
     if (serverActivity.active !== quiet.server.active || serverActivity.finished !== quiet.server.finished || serverActivity.interrupted !== quiet.server.interrupted) networkSettled = false;
-    businessVerified = networkSettled && grade();
-    interactionVerified = networkSettled && gradeInteraction ? gradeInteraction() : null;
+    if (networkSettled) {
+      business = grade();
+      if (gradeInteraction) interaction = gradeInteraction();
+    }
   } finally {
     tracker?.dispose();
     serverActivity ??= serverTracker?.snapshot() ?? null;
@@ -139,18 +158,20 @@ test("@real-model browser task", async () => {
     const browser = !browserProduct && opened ? await opened.context.newCDPSession(opened.page).then((session) => session.send("Browser.getVersion")).catch(() => null) : null;
     const terminals = events.filter((event) => ["tool.finished", "tool.failed"].includes(event.type));
     const starts = events.filter((event) => event.type === "tool.started");
-    const toolLifecycle = toolLifecycleEvidence(events);
-    lifecycleVerified = toolLifecycle.complete;
+    const toolLifecycle = logComplete ? toolLifecycleEvidence(events) : null;
+    const result = evaluateResultEvidence({ outcome, networkSettled, ledgerDrained, logComplete, business,
+      interaction: interactionApplicable ? { applicable: true, verified: interaction } : { applicable: false }, lifecycle: toolLifecycle?.complete ?? null });
+    passed = result.passed;
     const toolNames = starts.reduce<Record<string, number>>((counts, event) => {
       const name = typeof event.content?.toolName === "string" ? event.content.toolName : "unknown";
       counts[name] = (counts[name] ?? 0) + 1;
       return counts;
     }, {});
     const report = { scenario, seed, provider: providerName, model, gitHead: head, gitDirty: dirty, browser: browserProduct ?? browser?.product ?? null,
-      outcome, businessVerified, interactionVerified, networkSettled, serverActivity, elapsedMs: Date.now() - started, providerUsageByStep: usageEvidence(events),
+      outcome, ...result, taskTimeoutMs, networkSettled, ledgerDrained, logComplete, serverActivity, elapsedMs: Date.now() - started, providerUsageByStep: usageEvidence(events),
       requests: proxy.requests, requestBytes: proxy.requests.reduce((sum, request) => sum + request.bytes, 0),
       toolCalls: starts.length, toolNames, completedProgramOperations: completedProgramOperations(events), toolTerminalResults: terminals.length,
-      toolsWithExactlyOneTerminal: lifecycleVerified, toolLifecycle };
+      toolsWithExactlyOneTerminal: result.lifecycleVerified, toolLifecycle };
     const directory = resolve(process.env.SURFWAX_EVAL_REPORT_DIR ?? ".dev/verification/model-evals");
     await mkdir(directory, { recursive: true });
     await writeFile(resolve(directory, `${Date.now()}-${seed}-${randomUUID()}.json`), JSON.stringify(report, null, 2), { flag: "wx" });
@@ -158,5 +179,5 @@ test("@real-model browser task", async () => {
     if (fixture) await closeServer(fixture.server);
     await closeServer(proxy.server);
   }
-  if (outcome !== "conversation.finished" || !businessVerified || interactionVerified === false || !lifecycleVerified) throw new Error("Evaluation did not complete with the required results; see the report");
+  if (!passed) throw new Error("Evaluation did not complete with the required results; see the report");
 });
