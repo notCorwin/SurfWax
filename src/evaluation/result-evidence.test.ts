@@ -3,13 +3,13 @@ import { evaluateResultEvidence, lastAgentResponse, type ResultEvidenceInput } f
 
 const complete = (): ResultEvidenceInput => ({
   outcome: "conversation.finished", networkSettled: true, ledgerDrained: true, logComplete: true,
-  business: true, interaction: { applicable: true, verified: true }, lifecycle: true,
+  jobsSettled: true, business: true, interaction: { applicable: true, verified: true }, lifecycle: true,
 });
 
 describe("evaluation result evidence", () => {
   it("passes only with a finished conversation and all applicable evidence", () => {
     expect(evaluateResultEvidence(complete())).toEqual({ classification: "passed", passed: true, businessVerified: true,
-      interactionApplicable: true, interactionVerified: true, lifecycleVerified: true, reasons: [] });
+      interactionApplicable: true, interactionVerified: true, lifecycleVerified: true, jobsSettled: true, reasons: [] });
     expect(evaluateResultEvidence({ ...complete(), interaction: { applicable: false } })).toMatchObject({
       classification: "passed", interactionApplicable: false, interactionVerified: null,
     });
@@ -51,7 +51,7 @@ describe("evaluation result evidence", () => {
 
   it("keeps lifecycle unknown if the canonical log is incomplete", () => {
     expect(evaluateResultEvidence({ ...complete(), logComplete: false, lifecycle: false })).toMatchObject({
-      classification: "unknown", lifecycleVerified: null, reasons: ["lifecycle_unknown"],
+      classification: "unknown", lifecycleVerified: null, jobsSettled: null, reasons: ["lifecycle_unknown", "jobs_unknown"],
     });
     expect(evaluateResultEvidence({ ...complete(), lifecycle: null })).toMatchObject({
       classification: "unknown", lifecycleVerified: null, reasons: ["lifecycle_unknown"],
@@ -73,14 +73,20 @@ describe("evaluation result evidence", () => {
     expect(evaluateResultEvidence({ ...complete(), outcome: "setup_failed", networkSettled: null, ledgerDrained: false,
       logComplete: false, business: false, interaction: { applicable: true, verified: false }, lifecycle: false })).toMatchObject({
       classification: "unknown", passed: false, businessVerified: null, interactionVerified: null, lifecycleVerified: null,
-      reasons: ["conversation_outcome_unknown", "network_unknown", "ledger_unavailable", "business_unknown", "interaction_unknown", "lifecycle_unknown"],
+      reasons: ["conversation_outcome_unknown", "network_unknown", "ledger_unavailable", "business_unknown", "interaction_unknown", "lifecycle_unknown", "jobs_unknown"],
     });
   });
 
-  it("retains a definitive failure even when a different evidence source is unavailable", () => {
+  it("keeps unfinished or unknown jobs unknown while retaining observed errors", () => {
+    expect(evaluateResultEvidence({ ...complete(), jobsSettled: false, business: false })).toMatchObject({
+      classification: "unknown", businessVerified: false, jobsSettled: false, reasons: ["business_incorrect", "jobs_unsettled"],
+    });
+    expect(evaluateResultEvidence({ ...complete(), jobsSettled: null })).toMatchObject({
+      classification: "unknown", jobsSettled: null, reasons: ["jobs_unknown"],
+    });
     expect(evaluateResultEvidence({ ...complete(), business: false, logComplete: false })).toMatchObject({
-      classification: "failed", businessVerified: false, lifecycleVerified: null,
-      reasons: ["business_incorrect", "lifecycle_unknown"],
+      classification: "unknown", businessVerified: false, lifecycleVerified: null, jobsSettled: null,
+      reasons: ["business_incorrect", "lifecycle_unknown", "jobs_unknown"],
     });
   });
 

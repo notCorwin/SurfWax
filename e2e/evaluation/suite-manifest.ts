@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { evaluateResultEvidence, lastAgentResponse } from "./result-evidence.ts";
+import { evaluateResultEvidence, lastAgentResponse, requiresInteraction } from "./result-evidence.ts";
 import { SCENARIOS } from "./scenarios.ts";
 
 export interface SuitePlan {
@@ -121,19 +121,20 @@ function validatedReport(value: unknown, sample: SuiteSample, plan: SuitePlan, p
   if (!isRecord(suite) || Object.keys(suite).sort().join(",") !== "planHash,repeat,sampleId"
     || suite.sampleId !== sample.id || suite.planHash !== planHash || suite.repeat !== sample.repeat) throw new Error("Suite report identity mismatch");
   if (typeof value.outcome !== "string" || !identity(value.outcome) || !triState(value.networkSettled)
-    || typeof value.ledgerDrained !== "boolean" || typeof value.logComplete !== "boolean" || !triState(value.businessVerified)
+    || typeof value.ledgerDrained !== "boolean" || typeof value.logComplete !== "boolean" || !triState(value.businessVerified) || !triState(value.jobsSettled)
     || typeof value.interactionApplicable !== "boolean" || !triState(value.interactionVerified) || !triState(value.lifecycleVerified)
     || !Array.isArray(value.reasons)) throw new Error("Invalid result evidence");
+  if (value.interactionApplicable !== requiresInteraction(sample.scenario)) throw new Error("Scenario interaction evidence mismatch");
   const expected = evaluateResultEvidence({ outcome: value.outcome, networkSettled: value.networkSettled, ledgerDrained: value.ledgerDrained,
-    logComplete: value.logComplete, business: value.businessVerified,
+    logComplete: value.logComplete, jobsSettled: value.jobsSettled, business: value.businessVerified,
     interaction: value.interactionApplicable ? { applicable: true, verified: value.interactionVerified } : { applicable: false },
     lifecycle: value.lifecycleVerified });
   if (value.classification !== expected.classification || value.passed !== expected.passed || value.businessVerified !== expected.businessVerified
-    || value.interactionVerified !== expected.interactionVerified || value.lifecycleVerified !== expected.lifecycleVerified
+    || value.interactionVerified !== expected.interactionVerified || value.lifecycleVerified !== expected.lifecycleVerified || value.jobsSettled !== expected.jobsSettled
     || JSON.stringify(value.reasons) !== JSON.stringify(expected.reasons)) throw new Error("Inconsistent result evidence");
   if (sample.scenario === "userscript-repair") {
-    if (!triState(value.scriptLedgerVerified) || !triState(value.scriptExecutionVerified) || !triState(value.scriptJobsSettled)
-      || value.scriptExecutionVerified !== null && (value.scriptJobsSettled !== true || value.outcome !== "conversation.finished")) {
+    if (!triState(value.scriptLedgerVerified) || !triState(value.scriptExecutionVerified)
+      || value.scriptExecutionVerified !== null && (value.jobsSettled !== true || value.outcome !== "conversation.finished")) {
       throw new Error("Invalid user script execution evidence");
     }
     const business = value.networkSettled === true && value.ledgerDrained

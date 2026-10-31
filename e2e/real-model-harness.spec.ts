@@ -217,7 +217,7 @@ for (const scenario of [
     if (scenario.name === "rolling-queue") expect(report).toMatchObject({ interactionApplicable: true, interactionVerified: true, classification: "passed" });
     if (scenario.name === "frame-replacement") expect(report).toMatchObject({ interactionApplicable: true, interactionVerified: true, classification: "passed" });
     if (scenario.name === "userscript-repair") {
-      expect(report).toMatchObject({ scriptExecutionVerified: true, scriptJobsSettled: true });
+      expect(report).toMatchObject({ scriptExecutionVerified: true, jobsSettled: true });
       expect(report.completedProgramOperations["scripts.edit"]).toBeGreaterThan(0);
       expect(report.completedProgramOperations["scripts.setEnabled"]).toBeGreaterThan(0);
       expect(aggregateSuiteReports(manifest!, [{ sampleId: sample!.id, planHash: manifest!.planHash, report }]).counts.passed).toBe(1);
@@ -277,7 +277,73 @@ test("a no-op registered script cannot pass by writing stamps directly into the 
     expect(failure).toMatchObject({ code: 1 });
     const report = await readReport(directory);
     expect(report).toMatchObject({ outcome: "conversation.finished", classification: "failed", businessVerified: false,
-      scriptLedgerVerified: true, scriptJobsSettled: true, scriptExecutionVerified: false, lifecycleVerified: true });
+      scriptLedgerVerified: true, jobsSettled: true, scriptExecutionVerified: false, lifecycleVerified: true });
+  } finally {
+    await closeServer(provider.server);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the closed event evaluator rejects a task with no recorded source activity", async () => {
+  test.setTimeout(120_000);
+  const provider = await startProvider([textResponse("Done"), textResponse("Audit")]);
+  const directory = await mkdtemp(resolve(tmpdir(), "surfwax-eval-harness-"));
+  try {
+    const failure = await runHarness(provider.baseURL, directory, "closed-event-ledger").then(() => null, (error: unknown) => error);
+    expect(failure).toMatchObject({ code: 1 });
+    expect(await readReport(directory)).toMatchObject({ scenario: "closed-event-ledger", outcome: "conversation.finished",
+      classification: "failed", businessVerified: false });
+    expect(JSON.stringify(provider.requests)).toContain("180 AUDIT codes");
+  } finally {
+    await closeServer(provider.server);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a completed order with an unfinished background job remains unknown", async () => {
+  test.setTimeout(120_000);
+  const responses: MockResponse[] = [];
+  let accepted: any, firstJobId = "", firstPolls = 0;
+  const afterBackground: MockResponse = (request) => {
+    const message = request.messages.findLast((entry: any) => entry.role === "tool");
+    if (!message) { responses.unshift(afterBackground); return textResponse("Order"); }
+    accepted = JSON.parse(message.content);
+    return textResponse("Done");
+  };
+  const afterOrder: MockResponse = (request) => {
+    const message = request.messages.findLast((entry: any) => entry.role === "tool");
+    if (!message) { responses.unshift(afterOrder); return textResponse("Order"); }
+    const result = JSON.parse(message.content);
+    if (result.accepted && result.complete === false || result.terminal === false) {
+      firstJobId = result.jobId ?? firstJobId;
+      responses.unshift(afterOrder);
+      return commandResponse("get_job", { jobId: firstJobId, after: result.nextCursor, waitMs: 10_000 }, `order-poll-${++firstPolls}`);
+    }
+    if (!result.ok || result.state !== "succeeded") throw new Error(`Order tool failed: ${JSON.stringify(result)}`);
+    responses.unshift(afterBackground);
+    return commandResponse("execute_program", { background: true, timeoutMs: 60_000, code: `
+      await sleep(30000);
+      await page.frameLocator('iframe[title="Checkout"]').getByRole('button', {name:'Submit order'}).click();
+      return 'done';` }, "delayed-order");
+  };
+  responses.push(commandResponse("execute_program", { timeoutMs: 30_000, code: `
+    const desk = page.frameLocator('iframe[title="Checkout"]');
+    await desk.locator('body').evaluate(body => {
+      body.querySelector('#order').value = 'ORDER-17';
+      body.querySelector('#service').value = 'express';
+      body.querySelector('#confirmed').checked = true;
+    });
+    await desk.getByRole('button', {name:'Submit order'}).click();
+    await desk.locator('#status').filter({hasText:'Submitted ORDER-17'}).waitFor();
+    return 'done';` }, "first-order"), afterOrder, textResponse("Order"));
+  const provider = await startProvider(responses);
+  const directory = await mkdtemp(resolve(tmpdir(), "surfwax-eval-harness-"));
+  try {
+    const failure = await runHarness(provider.baseURL, directory).then(() => null, (error: unknown) => error);
+    expect(failure).toMatchObject({ code: 1 });
+    expect(accepted).toMatchObject({ accepted: true, complete: false });
+    expect(await readReport(directory)).toMatchObject({ outcome: "conversation.finished", classification: "unknown", passed: false,
+      businessVerified: true, lifecycleVerified: true, jobsSettled: null, reasons: expect.arrayContaining(["jobs_unknown"]) });
   } finally {
     await closeServer(provider.server);
     await rm(directory, { recursive: true, force: true });

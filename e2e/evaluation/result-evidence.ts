@@ -12,6 +12,8 @@ export interface ResultEvidenceInput {
   ledgerDrained: boolean;
   /** Whether the complete canonical log needed for lifecycle checking was read. */
   logComplete: boolean;
+  /** Whether every observed browser job reached a terminal state before shutdown. */
+  jobsSettled: boolean | null;
   /** The independent judge's answer, or null if it was not evaluated. */
   business: boolean | null;
   interaction: InteractionEvidence;
@@ -30,7 +32,14 @@ export type ResultReason =
   | "interaction_incorrect"
   | "interaction_unknown"
   | "lifecycle_invalid"
-  | "lifecycle_unknown";
+  | "lifecycle_unknown"
+  | "jobs_unsettled"
+  | "jobs_unknown";
+
+/** Scenarios that require independently observed trusted user input. */
+export function requiresInteraction(scenario: string): boolean {
+  return ["sequence-editor", "pointer-drag", "rolling-queue", "frame-replacement"].includes(scenario);
+}
 
 /** Last agent request observed by the proxy, independent of the task result.
  * An incomplete response can also be caused by downstream cancellation. */
@@ -61,6 +70,7 @@ export function evaluateResultEvidence(input: ResultEvidenceInput) {
   const interactionApplicable = input.interaction.applicable;
   const interactionVerified = canGrade && input.interaction.applicable ? input.interaction.verified : null;
   const lifecycleVerified = input.logComplete ? input.lifecycle : null;
+  const jobsSettled = input.logComplete ? input.jobsSettled : null;
   const reasons: ResultReason[] = [];
   const terminalFailure = input.outcome === "conversation.failed" || input.outcome === "conversation.aborted";
   const finished = input.outcome === "conversation.finished";
@@ -75,6 +85,8 @@ export function evaluateResultEvidence(input: ResultEvidenceInput) {
   else if (interactionApplicable && interactionVerified === null) reasons.push("interaction_unknown");
   if (lifecycleVerified === false) reasons.push("lifecycle_invalid");
   else if (lifecycleVerified === null) reasons.push("lifecycle_unknown");
+  if (jobsSettled === false) reasons.push("jobs_unsettled");
+  else if (jobsSettled === null) reasons.push("jobs_unknown");
 
   const incorrect = businessVerified === false || interactionApplicable && interactionVerified === false || lifecycleVerified === false;
   const missing = !finished || input.networkSettled !== true || !input.ledgerDrained || businessVerified === null
@@ -83,6 +95,6 @@ export function evaluateResultEvidence(input: ResultEvidenceInput) {
   // transport error, including before any tool was called. The ledger and
   // lifecycle remain observable facts, but cannot establish task failure in
   // a run that did not finish normally.
-  const classification: "passed" | "failed" | "unknown" = !finished ? "unknown" : incorrect ? "failed" : missing ? "unknown" : "passed";
-  return { classification, passed: classification === "passed", businessVerified, interactionApplicable, interactionVerified, lifecycleVerified, reasons };
+  const classification: "passed" | "failed" | "unknown" = !finished || jobsSettled !== true ? "unknown" : incorrect ? "failed" : missing ? "unknown" : "passed";
+  return { classification, passed: classification === "passed", businessVerified, interactionApplicable, interactionVerified, lifecycleVerified, jobsSettled, reasons };
 }

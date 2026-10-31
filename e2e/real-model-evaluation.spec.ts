@@ -18,14 +18,16 @@ import { rollingFixture, rollingInteractionScore, rollingScore } from "./evaluat
 import { chooserPromptFixture, chooserPromptScore } from "./evaluation/chooser-prompt-fixture";
 import { networkFixture, networkScore } from "./evaluation/network-level-fixture";
 import { userscriptFixture, userscriptScore, type UserscriptFixture, type RegistryEvidence } from "./evaluation/userscript-level-fixture";
-import { browserJobsSettled, verifyUserScript } from "./evaluation/userscript-verification";
+import { browserJobsSettled } from "./evaluation/job-evidence";
+import { verifyUserScript } from "./evaluation/userscript-verification";
 import { frameReplacementFixture, frameReplacementScore, frameReplacementInteractionScore, type FrameReplacementFixture } from "./evaluation/frame-replacement-fixture";
 import { binaryTransferFixture, binaryTransferScore, type BinaryTransferFixture } from "./evaluation/binary-transfer-fixture";
+import { closedEventFixture, closedEventScore, type ClosedEventFixture } from "./evaluation/closed-event-fixture";
 import { trackFixtureRequests } from "./evaluation/network-quiescence";
 import { trackServerResponses, type ServerActivity } from "./evaluation/server-quiescence";
 import { waitForEvaluationQuiescence } from "./evaluation/quiescence";
 import { completedProgramOperations, toolLifecycleEvidence } from "./evaluation/tool-lifecycle";
-import { evaluateResultEvidence, lastAgentResponse } from "./evaluation/result-evidence";
+import { evaluateResultEvidence, lastAgentResponse, requiresInteraction } from "./evaluation/result-evidence";
 import { deadlineEvidence } from "./evaluation/deadline-evidence";
 import { SCENARIOS } from "./evaluation/scenarios";
 import { buildFingerprint, evaluationFingerprint, fileFingerprint, type BuildFingerprint } from "./evaluation/build-fingerprint";
@@ -64,13 +66,14 @@ test("@real-model browser task", async () => {
   const order = `ORDER-${seed}`;
   const started = Date.now();
   const proxy = await modelProxy(upstream, key);
-  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | Awaited<ReturnType<typeof uploadFixture>> | Awaited<ReturnType<typeof pointerFixture>> | Awaited<ReturnType<typeof recoveryFixture>> | Awaited<ReturnType<typeof multitabFixture>> | Awaited<ReturnType<typeof manifestFixture>> | Awaited<ReturnType<typeof rollingFixture>> | Awaited<ReturnType<typeof chooserPromptFixture>> | Awaited<ReturnType<typeof networkFixture>> | UserscriptFixture | FrameReplacementFixture | BinaryTransferFixture | undefined;
-  let scriptLevel: UserscriptFixture | undefined, scriptRegistry: RegistryEvidence | null = null, scriptExecutionVerified: boolean | null = null, scriptJobsSettled: boolean | null = null, scriptLedgerVerified: boolean | null = null;
+  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | Awaited<ReturnType<typeof uploadFixture>> | Awaited<ReturnType<typeof pointerFixture>> | Awaited<ReturnType<typeof recoveryFixture>> | Awaited<ReturnType<typeof multitabFixture>> | Awaited<ReturnType<typeof manifestFixture>> | Awaited<ReturnType<typeof rollingFixture>> | Awaited<ReturnType<typeof chooserPromptFixture>> | Awaited<ReturnType<typeof networkFixture>> | UserscriptFixture | FrameReplacementFixture | BinaryTransferFixture | ClosedEventFixture | undefined;
+  let scriptLevel: UserscriptFixture | undefined, scriptRegistry: RegistryEvidence | null = null, scriptExecutionVerified: boolean | null = null, scriptLedgerVerified: boolean | null = null;
   let opened: Awaited<ReturnType<typeof openExtension>> | undefined;
   let events: any[] = [], outcome = "setup_failed", business: boolean | null = null, interaction: boolean | null = null;
-  const interactionApplicable = scenario === "sequence-editor" || scenario === "pointer-drag" || scenario === "rolling-queue" || scenario === "frame-replacement";
+  const interactionApplicable = requiresInteraction(scenario);
   let passed = false, ledgerDrained = false, logComplete = false;
   let networkSettled: boolean | null = null;
+  let jobsSettled: boolean | null = null;
   let taskStartedAt: number | null = null, taskDeadlineAt: number | null = null, terminalTimestamp: string | null = null;
   let deadlineState: "pending" | "on_time" | "late" | "unknown" | null = null;
   let tracker: ReturnType<typeof trackFixtureRequests> | undefined;
@@ -85,7 +88,10 @@ test("@real-model browser task", async () => {
     let prompt: string;
     let grade: () => boolean | null;
     let gradeInteraction: (() => boolean) | undefined;
-    if (scenario === "binary-transfer") {
+    if (scenario === "closed-event-ledger") {
+      const closed = await closedEventFixture(seed); fixture = closed; prompt = closed.prompt;
+      grade = () => closedEventScore(closed.evidence());
+    } else if (scenario === "binary-transfer") {
       const transfer = await binaryTransferFixture(seed); fixture = transfer; prompt = transfer.prompt;
       grade = () => binaryTransferScore(transfer.evidence());
     } else if (scenario === "frame-replacement") {
@@ -193,8 +199,8 @@ test("@real-model browser task", async () => {
     terminalTimestamp = observed.terminalTimestamp;
     logComplete = observed.logTerminalPresent;
     outcome = observed.state === "on_time" ? observed.terminal! : observed.state === "unknown" ? "terminal_time_unknown" : "timed_out";
-    if (scriptLevel) scriptJobsSettled = browserJobsSettled(events);
-    if (scriptLevel && outcome === "conversation.finished" && initialNetworkSettled && scriptJobsSettled === true) {
+    jobsSettled = logComplete ? browserJobsSettled(events) : null;
+    if (scriptLevel && outcome === "conversation.finished" && initialNetworkSettled && jobsSettled === true) {
       scriptExecutionVerified = await verifyUserScript(opened.context, scriptLevel.createVerification());
       // The independent verification itself uses the fixture network.
       quiet = await waitForEvaluationQuiescence(tracker, serverTracker, 500, 5000);
@@ -208,6 +214,11 @@ test("@real-model browser task", async () => {
       if (!Array.isArray(active) || !Array.isArray(disabled)) throw new Error("Script state unavailable");
       return { registered, active, disabled };
     }).catch(() => null);
+    // Capture job state before closing the extension: shutdown can cancel a
+    // still-running job and make its terminal state misleading for this run.
+    try { events = await readEvents(opened.page); jobsSettled = logComplete ? browserJobsSettled(events) : null; }
+    catch { jobsSettled = null; }
+    if (scriptLevel && jobsSettled !== true) scriptExecutionVerified = null;
     // Stop page timers and drain all server requests before reading the ledger.
     // Otherwise a delayed effect can arrive after the score has been decided.
     await opened.context.close();
@@ -235,7 +246,7 @@ test("@real-model browser task", async () => {
     const terminals = events.filter((event) => ["tool.finished", "tool.failed"].includes(event.type));
     const starts = events.filter((event) => event.type === "tool.started");
     const toolLifecycle = logComplete ? toolLifecycleEvidence(events) : null;
-    const result = evaluateResultEvidence({ outcome, networkSettled, ledgerDrained, logComplete, business,
+    const result = evaluateResultEvidence({ outcome, networkSettled, ledgerDrained, logComplete, jobsSettled, business,
       interaction: interactionApplicable ? { applicable: true, verified: interaction } : { applicable: false }, lifecycle: toolLifecycle?.complete ?? null });
     passed = result.passed;
     const toolNames = starts.reduce<Record<string, number>>((counts, event) => {
@@ -249,7 +260,7 @@ test("@real-model browser task", async () => {
     const report = { scenario, seed, provider: providerName, model, suiteIdentity, gitHead: head, gitDirty: dirty, browser: browserProduct ?? browser?.product ?? null,
       extensionBuild, extensionBuildStable, evaluationSource, evaluationSourceStable, lockfileSha256,
       outcome, ...result, taskTimeoutMs, taskStartedAt, taskDeadlineAt, terminalTimestamp, deadlineState,
-      networkSettled, ledgerDrained, logComplete, scriptExecutionVerified, scriptJobsSettled, scriptLedgerVerified, serverActivity, elapsedMs: Date.now() - started, providerUsageByStep: usageEvidence(events),
+      networkSettled, ledgerDrained, logComplete, scriptExecutionVerified, scriptLedgerVerified, serverActivity, elapsedMs: Date.now() - started, providerUsageByStep: usageEvidence(events),
       requests, lastAgentResponse: lastAgentResponse(requests), requestBytes: requests.reduce((sum, request) => sum + request.bytes, 0),
       toolCalls: starts.length, toolNames, completedProgramOperations: completedProgramOperations(events), toolTerminalResults: terminals.length,
       toolsWithExactlyOneTerminal: result.lifecycleVerified, toolLifecycle };

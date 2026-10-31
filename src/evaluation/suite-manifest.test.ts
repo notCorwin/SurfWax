@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import { aggregateSuiteReports, createSuiteManifest, type SuitePlan, type SuiteReport } from "../../e2e/evaluation/suite-manifest";
-import { evaluateResultEvidence } from "../../e2e/evaluation/result-evidence";
+import { evaluateResultEvidence, requiresInteraction } from "../../e2e/evaluation/result-evidence";
 
 const plan = (): SuitePlan => ({ version: 1, provider: "local-mock", model: "test/model", scenarios: ["rolling-queue", "long-manifest"], seeds: [73, 17], repeats: 2, timeoutMs: 30000 });
 const usage = (input: number | null, output: number | null) => [{ inputTokens: input, outputTokens: output, totalTokens: input === null || output === null ? null : input + output, cachedInputTokens: null, reasoningTokens: null }];
@@ -12,8 +12,9 @@ function report(manifest: ReturnType<typeof createSuiteManifest>, index: number,
   const outcome = typeof changes.outcome === "string" ? changes.outcome : "conversation.finished";
   const business = changes.businessVerified === null ? null : typeof changes.businessVerified === "boolean" ? changes.businessVerified : true;
   const lifecycle = typeof changes.lifecycleVerified === "boolean" ? changes.lifecycleVerified : true;
-  const result = evaluateResultEvidence({ outcome, networkSettled: true, ledgerDrained: true, logComplete: true, business,
-    interaction: { applicable: false }, lifecycle });
+  const jobsSettled = changes.jobsSettled === null ? null : typeof changes.jobsSettled === "boolean" ? changes.jobsSettled : true;
+  const interaction = requiresInteraction(sample.scenario) ? { applicable: true as const, verified: true } : { applicable: false as const };
+  const result = evaluateResultEvidence({ outcome, networkSettled: true, ledgerDrained: true, logComplete: true, jobsSettled, business, interaction, lifecycle });
   return { sampleId: sample.id, planHash: manifest.planHash, report: { scenario: sample.scenario, seed: sample.seed,
     provider: manifest.plan.provider, model: manifest.plan.model, taskTimeoutMs: manifest.plan.timeoutMs,
     suiteIdentity: { sampleId: sample.id, planHash: manifest.planHash, repeat: sample.repeat },
@@ -25,17 +26,30 @@ function report(manifest: ReturnType<typeof createSuiteManifest>, index: number,
 describe("offline benchmark suite manifest", () => {
   it("rejects a user script pass without matching independent execution evidence", () => {
     const manifest = createSuiteManifest({ ...plan(), scenarios: ["userscript-repair"], seeds: [17], repeats: 1 });
-    const evidence = { scriptLedgerVerified: true, scriptExecutionVerified: true, scriptJobsSettled: true };
+    const evidence = { scriptLedgerVerified: true, scriptExecutionVerified: true };
     const valid = report(manifest, 0, evidence);
     expect(aggregateSuiteReports(manifest, [valid]).counts.passed).toBe(1);
     for (const changes of [
-      { scriptExecutionVerified: false }, { scriptExecutionVerified: null }, { scriptJobsSettled: false },
-      { scriptJobsSettled: null }, { scriptLedgerVerified: null }, { scriptExecutionVerified: undefined },
+      { scriptExecutionVerified: false }, { scriptExecutionVerified: null },
+      { scriptLedgerVerified: null }, { scriptExecutionVerified: undefined },
     ]) expect(() => aggregateSuiteReports(manifest, [report(manifest, 0, { ...evidence, ...changes })])).toThrow(/user script/i);
+    for (const jobsSettled of [false, null]) expect(() => aggregateSuiteReports(manifest, [report(manifest, 0, { ...evidence, jobsSettled })])).toThrow();
     const failed = report(manifest, 0, { ...evidence, businessVerified: false, scriptExecutionVerified: false });
     expect(aggregateSuiteReports(manifest, [failed]).counts.failed).toBe(1);
-    const unknown = report(manifest, 0, { ...evidence, businessVerified: null, scriptExecutionVerified: null, scriptJobsSettled: false });
+    const unknown = report(manifest, 0, { ...evidence, businessVerified: null, scriptExecutionVerified: null, jobsSettled: false });
     expect(aggregateSuiteReports(manifest, [unknown]).counts.unknown).toBe(1);
+  });
+
+  it("requires scenario-specific interaction and settled job evidence", () => {
+    for (const scenario of ["sequence-editor", "pointer-drag", "rolling-queue", "frame-replacement"]) {
+      const manifest = createSuiteManifest({ ...plan(), scenarios: [scenario], seeds: [17], repeats: 1 });
+      expect(() => aggregateSuiteReports(manifest, [report(manifest, 0, { interactionApplicable: false, interactionVerified: null })])).toThrow(/interaction evidence mismatch/i);
+    }
+    const manifest = createSuiteManifest({ ...plan(), scenarios: ["cross-frame-order"], seeds: [17], repeats: 1 });
+    expect(aggregateSuiteReports(manifest, [report(manifest, 0, { jobsSettled: false })]).counts.unknown).toBe(1);
+    expect(aggregateSuiteReports(manifest, [report(manifest, 0, { jobsSettled: null })]).counts.unknown).toBe(1);
+    expect(() => aggregateSuiteReports(manifest, [report(manifest, 0, { jobsSettled: undefined })])).toThrow(/result evidence/i);
+    expect(() => aggregateSuiteReports(manifest, [report(manifest, 0, { interactionApplicable: true, interactionVerified: true })])).toThrow(/interaction evidence mismatch/i);
   });
 
   it("canonicalizes the plan and fixes each scenario, seed and repetition once", () => {
