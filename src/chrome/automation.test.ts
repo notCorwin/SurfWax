@@ -4,6 +4,9 @@ import { encodeLogGraph } from "../log-graph";
 import { EventSubscriptions } from "./event-subscriptions";
 import { ProgramScope } from "./program";
 import type { EventLogger } from "../logging";
+import { ChromeExecutor } from "./executor";
+import { createProgramTools, PROGRAM_TOOL_REGISTRY } from "./tool";
+import { ToolScheduler } from "./tool-scheduler";
 
 const inspectText = (value: any) => value.items.map((item: any) => item.line).join("\n");
 
@@ -105,6 +108,60 @@ function harness(
 }
 
 describe("AutomationRuntime", () => {
+  it.each([true, false])("bounds an automatic snapshot after a click with ok=%s and releases the executor queue", async (ok) => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    const original = command.getMockImplementation()!;
+    let ready = false, observed!: () => void;
+    const inspecting = new Promise<void>((resolve) => { observed = resolve; });
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.evaluate" && params.expression === "document.readyState === 'complete'") {
+        observed(); return { result: { value: ready } };
+      }
+      return original(source, method, params);
+    });
+    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never });
+    (executor as any).automation = runtime;
+    (executor as any).currentBrowserState = vi.fn(async () => ({ windowId: 1, tabId: 3 }));
+    (executor as any).boundPage = vi.fn(async () => page);
+    executor.runProgram = vi.fn().mockResolvedValueOnce(ok ? { ok: true, result: { performed: true } } : { ok: false, error: { code: "click-failed" } })
+      .mockImplementationOnce(async () => { ready = true; return { ok: true, result: "next" }; });
+    const scheduler = new ToolScheduler(PROGRAM_TOOL_REGISTRY.map(({ name }) => name));
+    const tools = createProgramTools(executor, { scheduler }) as Record<string, any>;
+    const calls = [3, 4].map((tabId) => ({ type: "tool-call", toolCallId: String(tabId), toolName: "click", input: { target: { ref: "one" }, tabId } }));
+    scheduler.prepare(calls, 3);
+    vi.useFakeTimers();
+    try {
+      const first = tools.click.execute(calls[0]!.input, { toolCallId: "3" });
+      const second = tools.click.execute(calls[1]!.input, { toolCallId: "4" });
+      await inspecting;
+      await vi.advanceTimersByTimeAsync(15_000);
+      const result = await first;
+      expect(result).toMatchObject({ ok, pageSnapshotStatus: { state: "unavailable", error: { code: "timeout" } } });
+      if (ok) expect(result.result).toEqual({ performed: true });
+      else expect(result.error.code).toBe("click-failed");
+      expect(result).not.toHaveProperty("pageSnapshot");
+      expect(await second).toMatchObject({ ok: true, result: "next", pageSnapshot: { mode: "full" } });
+    } finally { vi.useRealTimers(); executor.dispose(); }
+  });
+
+  it("bounds explicit inspect_page while it is queued and never starts a timed-out inspection", async () => {
+    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never });
+    let release!: () => void;
+    (executor as any).tail = new Promise<void>((resolve) => { release = resolve; });
+    const currentBrowserState = vi.fn();
+    (executor as any).currentBrowserState = currentBrowserState;
+    const tools = createProgramTools(executor) as Record<string, any>;
+    vi.useFakeTimers();
+    try {
+      const pending = tools.inspect_page.execute({ timeoutMs: 100 }, { toolCallId: "inspect" });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(await pending).toMatchObject({ ok: false, error: { code: "timeout" } });
+      release(); await (executor as any).tail;
+      expect(currentBrowserState).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); executor.dispose(); }
+  });
+
   it("waits for document load before collecting a semantic snapshot", async () => {
     const { runtime, command } = harness();
     const page = await runtime.createPage(3);

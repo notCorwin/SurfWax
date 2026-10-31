@@ -30,6 +30,7 @@ type ExecutorChrome = typeof chrome & { debugger: DebuggerApi };
 
 const BRIDGE_KEY = "__surfWaxDebugger";
 const RESULTS_KEY = "__surfWaxResults";
+const DEFAULT_INSPECT_TIMEOUT_MS = 15_000;
 type ExecutionContext = { runSignal?: AbortSignal; conversationId?: string; toolCallId?: string; visualEnabled?: boolean; logIdentity?: { runId?: string; toolCallId: string; toolCallIdCanonical: true } };
 type ArtifactRef = { id: number; filename: string; mimeType: string; byteLength: number; saved: boolean; downloadId?: number };
 type BrowserState = { windowId: number; tabId?: number };
@@ -363,21 +364,32 @@ export class ChromeExecutor {
     (globalThis as Record<string, unknown>)[BRIDGE_KEY] = this.bridge;
   }
 
-  inspect(input: InspectOptions & { tabId?: number; region?: unknown; image?: boolean; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
-    return this.enqueueAbortable(async (combined) => {
-      this.activeSignal = combined; this.activeContext = context;
-      this.automation.setContext({ ...context, signal: combined });
-      try {
-        const state = await this.currentBrowserState();
-        const page = input.tabId === undefined ? await this.pageFor(state) : await this.boundPage(input.tabId, state);
-        if (input.image) {
-          if (!context.visualEnabled) throw new Error("AutomationError[visual-unavailable]: Image input is disabled or unsupported by the selected model");
-          return await this.captureScreenshot(page, { target: input.region });
-        }
-        const region = input.region === undefined ? undefined : this.locatorFor(page, input.region);
-        return await page.inspect(input, region);
-      } finally { this.activeSignal = undefined; this.activeContext = {}; await this.automation.clearContext(); }
-    }, signal, input.timeoutMs, false);
+  async inspect(input: InspectOptions & { tabId?: number; region?: unknown; image?: boolean; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+    // Start the deadline before entering the queue: the default covers both
+    // explicit inspections and the snapshot captured after each operation.
+    const timeoutMs = input.timeoutMs ?? DEFAULT_INSPECT_TIMEOUT_MS;
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(new DOMException(`Page inspection timed out after ${timeoutMs}ms`, "TimeoutError")), timeoutMs);
+    const signals = [signal, context.runSignal, deadline.signal].filter((value): value is AbortSignal => value !== undefined);
+    const effectiveSignal = AbortSignal.any(signals);
+    try {
+      return await this.enqueueAbortable(async (combined) => {
+        this.activeSignal = combined; this.activeContext = context;
+        this.automation.setContext({ ...context, signal: combined });
+        try {
+          const state = await this.currentBrowserState();
+          throwIfAborted(combined);
+          const page = input.tabId === undefined ? await this.pageFor(state) : await this.boundPage(input.tabId, state);
+          throwIfAborted(combined);
+          if (input.image) {
+            if (!context.visualEnabled) throw new Error("AutomationError[visual-unavailable]: Image input is disabled or unsupported by the selected model");
+            return await this.captureScreenshot(page, { target: input.region });
+          }
+          const region = input.region === undefined ? undefined : this.locatorFor(page, input.region);
+          return await page.inspect(input, region);
+        } finally { this.activeSignal = undefined; this.activeContext = {}; await this.automation.clearContext(); }
+      }, effectiveSignal, undefined, false);
+    } finally { clearTimeout(timer); }
   }
 
   listFrames(input: { tabId?: number; cursor?: string; limit?: number; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
