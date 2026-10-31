@@ -108,6 +108,24 @@ function harness(
 }
 
 describe("AutomationRuntime", () => {
+  it("waits for document load before collecting a semantic snapshot", async () => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    const original = command.getMockImplementation()!;
+    let ready = false;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.evaluate" && params.expression === "document.readyState === 'complete'") return { result: { value: ready } };
+      return original(source, method, params);
+    });
+    command.mockClear();
+    const pending = page.inspect();
+    await vi.waitFor(() => expect(command).toHaveBeenCalledWith(expect.anything(), "Runtime.evaluate", expect.objectContaining({ expression: "document.readyState === 'complete'" })));
+    expect(command).not.toHaveBeenCalledWith(expect.anything(), "Accessibility.getFullAXTree", expect.anything());
+    ready = true;
+    await expect(pending).resolves.toMatchObject({ mode: "full" });
+    expect(command).toHaveBeenCalledWith(expect.anything(), "Accessibility.getFullAXTree", expect.anything());
+    await runtime.abortSessions();
+  });
   it("rejects a chord for single-key down and up operations", async () => {
     const { runtime, command } = harness();
     await runtime.createPage(3);
@@ -1131,6 +1149,20 @@ describe("AutomationRuntime", () => {
     expect(session.refsByNode.size).toBe(session.refUsage.size);
     await expect(page.ref(retainedRef).count()).resolves.toBe(1);
     await expect(page.inspect({ cursor: second.nextCursor })).rejects.toMatchObject({ code: "stale-observation" });
+    await runtime.abortSessions();
+  });
+
+  it("reclaims old refs during automatic capture while preserving the operation's refs", async () => {
+    const { runtime } = harness([{ role: "button", name: "First" }, { role: "button", name: "Second" }]);
+    const page = await runtime.createPage(3);
+    const first = await page.inspect({ limit: 1 }) as any;
+    const session = fillReferencePool(runtime, 32_769);
+    const oldRef = first.items.find((item: any) => item.ref)?.ref ?? (await page.inspect({ cursor: first.nextCursor, limit: 1 }) as any).items[0].ref;
+    const captured = await page.inspect({ recentRefs: [oldRef], limit: 1 }) as any;
+    expect(session.refUsage.size).toBeLessThanOrEqual(24_578);
+    await expect(page.ref(oldRef).count()).resolves.toBe(1);
+    const next = await page.inspect({ cursor: captured.nextCursor, limit: 1 }) as any;
+    await expect(page.ref(next.items[0].ref).count()).resolves.toBe(1);
     await runtime.abortSessions();
   });
 

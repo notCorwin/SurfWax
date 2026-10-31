@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { callUserScripts, restoreUserScripts, snapshotUserScripts, USER_SCRIPTS_DATA_KEY, USER_SCRIPTS_DISABLED_KEY, USER_SCRIPTS_LEGACY_KEY, USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_WORLDS_KEY } from "./persistence";
+import { callUserScripts, restoreUserScripts, snapshotUserScripts, USER_SCRIPTS_DATA_KEY, USER_SCRIPTS_DISABLED_KEY, USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_WORLDS_KEY } from "./persistence";
 
 function fakeChrome(options: { available?: boolean; stored?: Record<string, unknown>; registered?: chrome.userScripts.RegisteredUserScript[] } = {}) {
   const stored = { ...(options.stored ?? {}) };
   let registered = [...(options.registered ?? [])];
   let worlds: chrome.userScripts.WorldProperties[] = [];
   const api = {
-    getScripts: vi.fn(async () => [...registered]),
+    getScripts: vi.fn(async (filter?: { ids?: string[] }) => registered.filter((script) => !filter?.ids || filter.ids.includes(script.id))),
     register: vi.fn(async (scripts: chrome.userScripts.RegisteredUserScript[]) => { registered.push(...scripts); }),
     update: vi.fn(async (scripts: chrome.userScripts.RegisteredUserScript[]) => {
       for (const script of scripts) registered = registered.map((item) => item.id === script.id ? { ...item, ...script } : item);
@@ -43,8 +43,47 @@ describe("user script persistence", () => {
     await expect(restoreUserScripts({ chromeApi: fake.chromeApi as never })).rejects.toThrow("原始数据已保留");
     expect(fake.stored[USER_SCRIPTS_STORAGE_KEY]).toEqual([{ id: "legacy" }]);
     expect(fake.api.unregister).not.toHaveBeenCalled();
-    await callUserScripts("register", [[{ id: "new", matches: ["<all_urls>"], js: [{ code: "1" }] }]], { chromeApi: fake.chromeApi as never });
-    expect(fake.stored[USER_SCRIPTS_LEGACY_KEY]).toEqual([{ id: "legacy" }]);
+    await expect(callUserScripts("register", [[{ id: "new", matches: ["<all_urls>"], js: [{ code: "1" }] }]], { chromeApi: fake.chromeApi as never })).rejects.toThrow("原始数据已保留");
+    expect(fake.stored[USER_SCRIPTS_STORAGE_KEY]).toEqual([{ id: "legacy" }]);
+    expect(fake.api.register).not.toHaveBeenCalled();
+  });
+
+  it("restores saved scripts before creating a script after the native registry was cleared", async () => {
+    const saved = { id: "saved", matches: ["<all_urls>"], js: [{ code: "1" }] };
+    const created = { id: "created", matches: ["<all_urls>"], js: [{ code: "2" }] };
+    const fake = fakeChrome({ stored: { [USER_SCRIPTS_STORAGE_KEY]: [saved] } });
+    await callUserScripts("create", [created], { chromeApi: fake.chromeApi as never });
+    expect(await fake.api.getScripts()).toEqual([saved, created]);
+    expect(fake.stored[USER_SCRIPTS_STORAGE_KEY]).toEqual([saved, created]);
+  });
+
+  it("preserves the full declaration when recovery fails partway and retries before the next write", async () => {
+    const first = { id: "first", matches: ["<all_urls>"], js: [{ code: "1" }] };
+    const second = { id: "second", matches: ["<all_urls>"], js: [{ code: "2" }] };
+    const created = { id: "created", matches: ["<all_urls>"], js: [{ code: "3" }] };
+    const fake = fakeChrome({ stored: { [USER_SCRIPTS_STORAGE_KEY]: [first, second] } });
+    fake.api.register.mockImplementationOnce(fake.api.register.getMockImplementation()!).mockRejectedValueOnce(new Error("restore failed"));
+    const options = { chromeApi: fake.chromeApi as never };
+    await expect(callUserScripts("create", [created], options)).rejects.toThrow("restore failed");
+    expect(fake.stored[USER_SCRIPTS_STORAGE_KEY]).toEqual([first, second]);
+    expect(fake.api.register).not.toHaveBeenCalledWith([created]);
+    await callUserScripts("create", [created], options);
+    expect(await fake.api.getScripts()).toEqual([first, second, created]);
+    expect(fake.stored[USER_SCRIPTS_STORAGE_KEY]).toEqual([first, second, created]);
+  });
+
+  it("allows a script that cannot be restored to be disabled without losing other saved scripts", async () => {
+    const bad = { id: "bad", matches: ["<all_urls>"], js: [{ code: "1" }] };
+    const other = { id: "other", matches: ["<all_urls>"], js: [{ code: "2" }] };
+    const fake = fakeChrome({ stored: { [USER_SCRIPTS_STORAGE_KEY]: [bad, other] } });
+    fake.api.register.mockRejectedValueOnce(new Error("unsupported script"));
+    const options = { chromeApi: fake.chromeApi as never };
+    await expect(callUserScripts("create", [{ id: "new", matches: ["<all_urls>"], js: [{ code: "3" }] }], options)).rejects.toThrow("unsupported script");
+    await callUserScripts("setEnabled", [{ id: "bad", enabled: false }], options);
+    expect(fake.stored[USER_SCRIPTS_STORAGE_KEY]).toEqual([other]);
+    expect(fake.stored[USER_SCRIPTS_DISABLED_KEY]).toEqual([bad]);
+    await restoreUserScripts(options);
+    expect(await fake.api.getScripts()).toEqual([other]);
   });
 
   it("restores missing and changed definitions without unregistering other scripts", async () => {
@@ -128,7 +167,8 @@ describe("user script persistence", () => {
     fake.api.unregister.mockRejectedValueOnce(new Error("Chrome refused"));
     await expect(callUserScripts("setEnabled", [{ id: script.id, enabled: false }], { chromeApi: fake.chromeApi as never })).rejects.toThrow("Chrome refused");
     expect(await fake.api.getScripts()).toEqual([script]);
-    expect(fake.stored[USER_SCRIPTS_DISABLED_KEY]).toEqual([]);
+    expect(fake.stored[USER_SCRIPTS_DISABLED_KEY] ?? []).toEqual([]);
+    expect(fake.stored[USER_SCRIPTS_STORAGE_KEY]).toEqual([script]);
   });
 
   it("runs the agent's create, list, read, edit and enable flow without changing script identity", async () => {

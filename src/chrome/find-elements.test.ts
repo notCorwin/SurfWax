@@ -18,6 +18,7 @@ function harness() {
     return id;
   };
   const command = vi.fn(async (_source: chrome.debugger.Debuggee, method: string, params: any = {}) => {
+    if (method === "Runtime.evaluate" && params.expression === "document.readyState === 'complete'") return { result: { value: true } };
     if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root" } } };
     if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
     if (method === "Accessibility.getFullAXTree") return { nodes: [

@@ -86,8 +86,10 @@ test("inspects the page and fills and clicks with atomic tools", async () => {
     await expect(opened.page.locator(".markdown-body").last()).toContainText("PAGE_AUTOMATION_OK");
     const events = await readEvents(opened.page);
     const observation = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-snapshot")?.output;
+    const clicked = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-click")?.output;
     const verified = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-verify")?.output;
     expect(observation.items).toEqual(expect.arrayContaining([expect.objectContaining({ ref: expect.stringMatching(/^t\d+s[a-f0-9]+d\d+e\d+$/) })]));
+    expect(clicked.pageSnapshot.items).toEqual(expect.arrayContaining([expect.objectContaining({ line: expect.stringContaining("Welcome me@example.com") })]));
     expect(verified.items).toEqual(expect.arrayContaining([expect.objectContaining({ line: expect.stringContaining("Welcome me@example.com") })]));
     await expect.poll(() => target.locator("output").textContent()).toBe("Welcome me@example.com");
     expect(events.some((event) => event.type === "automation.action.finished" && event.toolCallId === "call-click")).toBe(true);

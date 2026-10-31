@@ -13,7 +13,7 @@ const elementTargetObject = z.union([
   z.object({ ref: z.string().min(1) }).strict(),
   z.object({ by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testId", "css"]), value: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional(), index: z.number().int().optional(), frame: z.union([z.object({ by: z.literal("css"), value: z.string().min(1) }).strict(), z.object({ ref: z.string().min(1) }).strict()]).optional() }).strict(),
 ]);
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v21";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v22";
 export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetObject]).optional(),
   fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional(), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
@@ -37,6 +37,9 @@ const handleDialogInputSchema = z.object({ dialogId: z.string().min(1), accept: 
   .refine((input) => input.accept || input.prompt === undefined, "prompt requires accept=true");
 
 type ToolDefinition = { name: string; inputSchema: z.ZodType<any>; summary: string; description: string; program?: (input: any) => { code: string; timeoutMs?: number; background?: boolean } };
+// These calls manage stored data or coordinate work, rather than operate a page.
+// In particular they must remain usable while a background job holds the queue.
+const NO_PAGE_CAPTURE = new Set(["inspect_page", "read_api_reference", "read_artifact", "list_jobs", "subscribe_event", "wait_event", "unsubscribe_event", "list_downloads"]);
 export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
   { name: "inspect_page", inputSchema: inspectInputSchema, summary: "Read the semantic page and element refs", description: "Inspect semantic items with id, line and optional ref. For since, remove removed ids and upsert added, updated or moved items immediately after their after id (null means first). Reassemble split items using their UTF-16 fragment offsets before applying changes. Ref use checks visible role/name, but a DOM node may be reused for different business data with the same name; verify relevant row and page state before acting. Older refs may expire after later independent observations or searches; an affected continuation returns stale-observation. region and fields narrow results. budget limits UTF-8 JSON items bytes. Continue a frozen snapshot with nextCursor using cursor, tabId, budget and limit only. Use take_screenshot for visual input." },
   { name: "find_elements", inputSchema: findElementsInputSchema, summary: "Find candidates and return element refs", description: "Find matching elements with refs for actions. Ref use checks visible role/name but cannot prove business identity for reused nodes; verify relevant row and page state before acting. Older refs may expire after later independent observations or searches. limit defaults to 25, max 100; repeat target and tab with nextCursor to page a fixed node list. Candidates may report detached, changed or identity-unknown without a ref. Details may change between pages; cursors expire on run or document changes or eviction." },
@@ -61,7 +64,7 @@ browser.runIn({kind:'page',tabId,world:'MAIN'|'ISOLATED'|'USER_SCRIPT',frameId?,
 net.fetch({context:'page'|'extension',url,tabId?,init?}) returns {url,status,ok,headers,body}; no page-to-extension fallback. Page fetch obeys page origin/cookies/CORS; extension fetch uses extension host permissions. net.requests(options?,tabId?) returns {requests,integrity,hasMore,nextOffset?} for captured history (not all traffic); net.console(options?,tabId?) returns the same metadata with messages instead of requests. hasMore can be null when unknown and offsets refer to a live list. net.request(requestRef,tabId?) and net.responseBody(requestRef,tabId?) read captured requests.
 protocol.sessions(tabId?) lists root/child CDP handles; protocol.send({tabId,sessionId?},method,params?) sends Chrome CDP methods. Input timestamps are replaced; guarded Input.insertText becomes character key events. Arbitrary JS/CDP/fetch are effectful; there is no readonly override. inspect.documentId is the local navigation generation; USER_SCRIPT documentId uses Chrome's native scripting document ID. File URL sources are fetched in extension context.
 artifacts.read(id,{path?,offset?,limit?}) pages arrays/strings, Map/Set entries, ArrayBuffer/DataView bytes and TypedArray elements; offset and limit must be non-negative safe integers. A numeric path segment selects a Map's [key,value] pair or a Set's item. Native artifacts and page/locator evaluate preserve supported cycles, shared references and binary backing buffers. Own enumerable string properties are preserved, except TypedArray named properties; put such metadata in a containing object. Enumerable symbol properties, custom prototypes and Error subclasses, shared/resizable buffers, DOM nodes, URL and Blob are unsupported; convert them to supported data. Error values from another realm are unsupported. evaluate requires intact page built-ins. text(filename,text,mimeType?,save=false); save(id,filename?). Files and images stay internal unless the user requested download/export. emit(value) persists incremental output; check(condition,message?) records a verified assertion; sleep(ms) and signal support cancellation. Functions cannot be serialized as data; evaluate accepts a function as its first argument. Completed operations only confirm dispatch/return; verify application outcomes. Queued operations are not dispatched, uncertain effects must be inspected before continuing. Program computation uses a disposable opaque-origin sandbox Worker; browser capabilities are mediated by the Side Panel. Closing the panel cancels jobs and revokes capabilities; arbitrary program finally blocks are not guaranteed to run. Only records survive restart, never arbitrary JS stacks.`;
-export const PROGRAM_TOOL_CONTEXT = `Available tools:\n${PROGRAM_TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n")}\nresultType=undefined marks an undefined result. undefinedPaths, holePaths, numberPaths and bigintPaths are relative to result; numberPaths entries hold {path,value} for NaN, Infinity, -Infinity or -0, and bigintPaths hold decimal strings. These replace values with null. typePaths marks non-JSON types: date is ISO or null for invalid; array-buffer and typed-array are base64 bytes (typed-array name identifies the view); regexp is {source,flags,lastIndex}; map is key/value pairs; set is an array. Apply the other sidecars first, then typePaths from deepest path to shallowest. Large results provide paged sidecar access. If envelopeWrapped=true, reconstruct the original tool envelope from result and its sidecars; outer fields summarize status.`;
+export const PROGRAM_TOOL_CONTEXT = `Available tools:\n${PROGRAM_TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n")}\nEach completed operation includes pageSnapshot when available; use inspect_page with its nextCursor and tabId to continue a truncated snapshot. pageSnapshotStatus explains when it could not be captured. Background work has no completed snapshot until its terminal get_job result. resultType=undefined marks an undefined result. undefinedPaths, holePaths, numberPaths and bigintPaths are relative to result; numberPaths entries hold {path,value} for NaN, Infinity, -Infinity or -0, and bigintPaths hold decimal strings. These replace values with null. typePaths marks non-JSON types: date is ISO or null for invalid; array-buffer and typed-array are base64 bytes (typed-array name identifies the view); regexp is {source,flags,lastIndex}; map is key/value pairs; set is an array. Apply the other sidecars first, then typePaths from deepest path to shallowest. Large results provide paged sidecar access. If envelopeWrapped=true, reconstruct the original tool envelope from result and its sidecars; outer fields summarize status.`;
 
 export function createProgramTools(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string; callId?: () => string | undefined; visualEnabled?: () => Promise<boolean>; scheduler?: ToolScheduler; runSignal?: AbortSignal } = {}): Record<string, ReturnType<typeof dynamicTool>> {
   return Object.fromEntries(PROGRAM_TOOL_REGISTRY.map((definition) => [definition.name, dynamicTool({
@@ -111,6 +114,9 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
         let output: unknown;
         let executing = false;
         let observedTerminalJob: string | undefined;
+        let resultPending = false;
+        let openedTabId: number | undefined;
+        let recentRefs: string[] = [];
         try {
           abortSignal?.throwIfAborted();
           const context = { conversationId: options.conversationId, toolCallId, logIdentity: identity, runSignal: options.runSignal, visualEnabled: await options.visualEnabled?.() ?? false };
@@ -135,6 +141,10 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
             : definition.name === "get_job" ? await executor.queryJobs({ action: value.waitMs ? "wait" : "status", id: value.jobId, after: value.after, limit: value.limit, waitMs: value.waitMs }, abortSignal, context)
             : definition.name === "cancel_job" ? await executor.queryJobs({ action: "cancel", id: value.jobId }, abortSignal, context)
             : await executor.runProgram(definition.program!(value), abortSignal, context);
+          resultPending = (result as any)?.complete === false || ((definition.name === "get_job" || definition.name === "cancel_job") && (result as any)?.terminal !== true);
+          if (definition.name === "open_tab" && Number.isSafeInteger((result as any)?.result?.tabId)) openedTabId = (result as any).result.tabId;
+          if (definition.name === "find_elements" && Array.isArray((result as any)?.elements))
+            recentRefs = (result as any).elements.flatMap((element: any) => typeof element?.ref === "string" ? [element.ref] : []);
           const jobRef = jobResultReferenceInfo((result as any)?.result);
           const failure = (result as any)?.ok === false ? (result as any).error ?? (result as any).failed?.error ?? jobRef?.info.error ?? (result as any).result?.error : undefined;
           const artifact = (result as any)?.result?.artifact;
@@ -170,6 +180,29 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
           if ((definition.name === "get_job" || definition.name === "cancel_job") && (result as any)?.terminal === true && typeof (result as any).id === "string") observedTerminalJob = (result as any).id;
         } catch (error) {
           output = await failureFor(error, executing);
+        }
+        // Capture before releasing the scheduler slot, so a later action in the
+        // same model response cannot change the page first. Management calls
+        // must never wait behind a still-running job occupying the browser queue.
+        if (executing && !NO_PAGE_CAPTURE.has(definition.name) && typeof executor.inspect === "function" && !abortSignal?.aborted) {
+          const pending = executor.pendingBackgroundJobs?.() ?? [];
+          const otherPending = pending.some((id) => id !== observedTerminalJob);
+          let pageEvidence: Record<string, unknown>;
+          if (resultPending || otherPending) {
+            pageEvidence = { pageSnapshotStatus: { state: "pending", reason: "browser-job-running" } };
+          } else {
+            try {
+              const value = input && typeof input === "object" ? input as Record<string, unknown> : {};
+              // close_tab invalidates its argument; switch_tab changes the binding.
+              const tabId = openedTabId ?? (definition.name !== "close_tab" && typeof value.tabId === "number" ? value.tabId : undefined);
+              const context = { conversationId: options.conversationId, toolCallId, logIdentity: identity, runSignal: options.runSignal, visualEnabled: false };
+              pageEvidence = { pageSnapshot: await executor.inspect({ ...(recentRefs.length ? { recentRefs } : {}), ...(tabId === undefined ? {} : { tabId }) }, abortSignal, context) };
+            } catch (error) {
+              pageEvidence = { pageSnapshotStatus: { state: "unavailable", error: toolFailure(error).error } };
+            }
+          }
+          output = output && typeof output === "object" && !Array.isArray(output)
+            ? { ...output, ...pageEvidence } : { result: output, ...pageEvidence };
         }
         const saved = await finish(output);
         if (observedTerminalJob && options.logger && options.conversationId) executor.acknowledgeBackgroundJob(observedTerminalJob, options.conversationId);

@@ -8,6 +8,58 @@ import { callUserScript } from "./script-client";
 import { ToolScheduler } from "./tool-scheduler";
 
 describe("browser tools", () => {
+  it("attaches each action's snapshot before the next scheduled action, including failures", async () => {
+    const order: string[] = [];
+    const executor = {
+      runProgram: vi.fn(async () => { order.push("action"); return { ok: order.length !== 1, error: { code: "failed" } }; }),
+      inspect: vi.fn(async () => { order.push("snapshot"); return { tabId: 4, items: [{ line: order.join(",") }], nextCursor: "next" }; }),
+      pendingBackgroundJobs: () => [],
+    } as unknown as ChromeExecutor;
+    const scheduler = new ToolScheduler(PROGRAM_TOOL_REGISTRY.map(({ name }) => name));
+    const tools = createProgramTools(executor, { scheduler }) as Record<string, any>;
+    const calls = ["first", "second"].map((toolCallId, index) => ({ type: "tool-call", toolCallId, toolName: "click", input: { target: { ref: "one" }, tabId: 4 + index } }));
+    scheduler.prepare(calls, 4);
+    const [first, second] = await Promise.all(calls.map(({ toolCallId }) => tools.click.execute({ target: { ref: "one" }, tabId: toolCallId === "first" ? 4 : 5 }, { toolCallId })));
+    expect(first).toMatchObject({ ok: false, pageSnapshot: { tabId: 4, items: [{ line: "action,snapshot" }], nextCursor: "next" } });
+    expect(second).toMatchObject({ ok: true, pageSnapshot: { items: [{ line: "action,snapshot,action,snapshot" }] } });
+    expect(order).toEqual(["action", "snapshot", "action", "snapshot"]);
+  });
+
+  it("reports unavailable snapshots without changing the action result and waits for terminal jobs", async () => {
+    let pending = ["job"];
+    const executor = {
+      runProgram: vi.fn(async () => ({ jobId: "job", accepted: true, complete: false })),
+      inspect: vi.fn(async () => { throw new Error("no page"); }),
+      queryJobs: vi.fn(async () => ({ id: "job", terminal: true, state: "finished" })),
+      pendingBackgroundJobs: () => pending,
+      acknowledgeBackgroundJob: () => { pending = []; return true; },
+    } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor) as Record<string, any>;
+    expect(await tools.click.execute({ target: { ref: "one" }, background: true }, { toolCallId: "first" })).toMatchObject({ accepted: true, pageSnapshotStatus: { state: "pending" } });
+    expect(executor.inspect).not.toHaveBeenCalled();
+    expect(await tools.get_job.execute({ jobId: "job" }, { toolCallId: "status" })).toMatchObject({ terminal: true, pageSnapshotStatus: { state: "unavailable", error: { message: "no page" } } });
+    expect(executor.inspect).toHaveBeenCalledOnce();
+  });
+
+  it("retains a screenshot and a large paginated snapshot for the selected tab", async () => {
+    const screenshot = { mediaType: "image/png", data: "aW1hZ2U=" };
+    const inspect = vi.fn(async () => ({ tabId: 8, items: [{ line: "x".repeat(9000) }], nextCursor: "cursor" }));
+    const executor = { runProgram: vi.fn(async () => ({ ok: true, result: { screenshot } })), inspect, pendingBackgroundJobs: () => [] } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor, { visualEnabled: async () => true }) as Record<string, any>;
+    const output = await tools.take_screenshot.execute({ tabId: 8 }, { toolCallId: "screen" });
+    expect(output).toMatchObject({ result: { screenshot }, pageSnapshot: { tabId: 8, nextCursor: "cursor", items: [{ line: "x".repeat(9000) }] } });
+    expect(inspect).toHaveBeenCalledWith({ tabId: 8 }, undefined, expect.any(Object));
+    const prepared = await prepareToolMessages([{ role: "tool", content: [{ type: "tool-result", output: { type: "json", value: output } }] }], 1);
+    expect(prepared.at(-1).content).toContainEqual(expect.objectContaining({ type: "file", mediaType: "image/png" }));
+  });
+
+  it("keeps returned search refs alive when capturing the following snapshot", async () => {
+    const inspect = vi.fn(async () => ({ tabId: 8, items: [] }));
+    const executor = { findElements: vi.fn(async () => ({ tabId: 8, elements: [{ ref: "t8s1d0e1" }, { status: "changed" }] })), inspect, pendingBackgroundJobs: () => [] } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor) as Record<string, any>;
+    await tools.find_elements.execute({ tabId: 8, target: { by: "role", value: "button" } }, { toolCallId: "find" });
+    expect(inspect).toHaveBeenCalledWith({ tabId: 8, recentRefs: ["t8s1d0e1"] }, undefined, expect.any(Object));
+  });
   it.each(["screenshot", "pdf", "save"])("retains a %s artifact when the abort race settles before its underlying work", async (operation) => {
     const events: LogEvent[] = [];
     const logger = new EventLogger({ store: testEventStore(events) });

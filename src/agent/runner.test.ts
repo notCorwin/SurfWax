@@ -65,7 +65,8 @@ describe("createAgent", () => {
     } : text() });
     await createAgent({ model: config, languageModel: model, executor, logger, conversationId: "conversation" }).generate({ prompt: "act" });
     expect(runProgram).toHaveBeenCalledOnce();
-    expect(inspect).toHaveBeenCalledOnce();
+    // The failed click captures the page before the explicit inspection.
+    expect(inspect).toHaveBeenCalledTimes(2);
     const terminal = events.filter((event) => ["tool.finished", "tool.failed"].includes(event.type));
     expect(terminal).toHaveLength(3);
     expect(terminal.find((event) => event.toolCallId === "second")).toMatchObject({ type: "tool.failed", output: { ok: false, error: { code: "prior-action-failed" } } });

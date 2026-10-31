@@ -45,7 +45,7 @@ type SearchSnapshot = {
   conversationId?: string; runId?: string; debuggee: Debuggee; total: number;
   candidates?: Candidate[]; arrayId?: string; group?: string;
 };
-export type InspectOptions = { cursor?: string; since?: string; fields?: Array<"text" | "state" | "ref" | "actions">; budget?: number; offset?: number; limit?: number; depth?: number };
+export type InspectOptions = { cursor?: string; since?: string; fields?: Array<"text" | "state" | "ref" | "actions">; budget?: number; offset?: number; limit?: number; depth?: number; recentRefs?: readonly string[] };
 type ObservationRecord = {
   observationId: string;
   tabId: number;
@@ -774,7 +774,10 @@ export class AutomationRuntime {
     return this.action(tabId, "inspect", region ?? null, async () => {
       if (region) validateLocator(region);
       const session = await this.session(tabId);
-      if (options.cursor === undefined) this.pruneRefs(session, region);
+      if (options.cursor === undefined) {
+        for (const ref of options.recentRefs ?? []) this.touchRef(session, ref);
+        this.pruneRefs(session, region);
+      }
       const generation = session.generation;
       const signal = this.context.signal;
       const conversationId = this.context.conversationId, runId = this.context.logIdentity?.runId;
@@ -2670,6 +2673,18 @@ export class AutomationRuntime {
     };
     while (true) {
       guard();
+      // A debugger can attach after the load event, so lifecycle events alone
+      // cannot establish readiness. Never return an observation of a document
+      // while its load event is still pending.
+      try {
+        if (!await waitForCapture(this.pageValue(session.tabId, "document.readyState === 'complete'"))) {
+          await delay(50, signal); continue;
+        }
+      } catch (error) {
+        guard();
+        if (!isTransientNavigationError(error)) throw error;
+        await delay(50, signal); continue;
+      }
       const generation = session.generation, frameRevision = session.frameRevision;
       const changed = () => generation !== session.generation || frameRevision !== session.frameRevision;
       const regionTask = region ? this.resolveOnce(session, region) : undefined;
@@ -2713,6 +2728,14 @@ export class AutomationRuntime {
         await delay(0, signal); continue;
       }
       guard();
+      if (changed()) { await delay(0, signal); continue; }
+      try {
+        if (!await waitForCapture(this.pageValue(session.tabId, "document.readyState === 'complete'"))) { await delay(50, signal); continue; }
+      } catch (error) {
+        guard();
+        if (!changed() && !isTransientNavigationError(error)) throw error;
+        await delay(0, signal); continue;
+      }
       if (changed()) { await delay(0, signal); continue; }
       const lines: SnapshotLine[] = [];
       const render = (nodes: any[], debuggee: Debuggee, frameLabel?: string, frameDepth = 0) => {

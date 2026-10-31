@@ -3,6 +3,7 @@ import { AutomationRuntime } from "./automation";
 
 function harness() {
   const command = vi.fn(async (source: chrome.debugger.Debuggee & { sessionId?: string }, method: string, params: any = {}): Promise<any> => {
+    if (method === "Runtime.evaluate" && params.expression === "document.readyState === 'complete'") return { result: { value: true } };
     if (method === "Page.getFrameTree") return source.sessionId === "nested-child" || source.sessionId === "new-child"
       ? { frameTree: { frame: { id: "nested", url: "https://cross.test/nested", parentId: "cross" } } }
       : source.sessionId ? { frameTree: { frame: { id: "cross", url: "https://cross.test/", parentId: "root" }, childFrames: [{ frame: { id: "nested", parentId: "cross", url: "https://cross.test/nested" } }] } }

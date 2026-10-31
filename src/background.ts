@@ -678,6 +678,9 @@ chrome.runtime.onStartup.addListener(() => {
   void restoreSavedUserScripts().catch(() => undefined);
   discardJevConfig();
 });
+// Reconcile when the worker is reloaded too: enabling Allow User Scripts may
+// make the API available only after an existing extension context is reloaded.
+void restoreSavedUserScripts().catch(() => undefined);
 void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 
 // Chrome 138 relies on pagehide/owner-port disconnect; Chrome 142+ adds this signal.
