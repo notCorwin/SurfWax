@@ -1,26 +1,10 @@
 import { z } from "zod";
+import { scriptChanges, scriptDefinition } from "../userscripts/schema";
+import { elementTargetSchema as target } from "./element-target";
 
-// The public schemas are kept separate from the program API. Arguments are encoded
-// as JSON data, never interpolated as JavaScript source.
-const target = z.union([
-  z.object({ ref: z.string().min(1) }).strict(),
-  z.object({ by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testId", "css"]), value: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional(), index: z.number().int().optional(), frame: z.union([z.object({ by: z.literal("css"), value: z.string().min(1) }).strict(), z.object({ ref: z.string().min(1) }).strict()]).optional() }).strict(),
-]);
+// Arguments are encoded as JSON data, never interpolated as JavaScript source.
 const tabId = z.number().int().nonnegative().optional();
 const timeoutMs = z.number().int().positive().optional();
-const scriptSource = z.union([z.object({ code: z.string().min(1) }).strict(), z.object({ file: z.string().min(1) }).strict()]);
-const scriptFields = {
-  matches: z.array(z.string().min(1)).min(1), js: z.array(scriptSource).min(1),
-  allFrames: z.boolean(), excludeGlobs: z.array(z.string()), excludeMatches: z.array(z.string()),
-  includeGlobs: z.array(z.string()), runAt: z.enum(["document_start", "document_end", "document_idle"]),
-  world: z.enum(["USER_SCRIPT", "MAIN"]), worldId: z.string().min(1),
-};
-const scriptDefinition = z.object({ id: z.string().min(1).refine((id) => !id.startsWith("_")), matches: scriptFields.matches, js: scriptFields.js,
-  allFrames: scriptFields.allFrames.optional(), excludeGlobs: scriptFields.excludeGlobs.optional(), excludeMatches: scriptFields.excludeMatches.optional(),
-  includeGlobs: scriptFields.includeGlobs.optional(), runAt: scriptFields.runAt.optional(), world: scriptFields.world.optional(), worldId: scriptFields.worldId.optional() }).strict();
-const scriptChanges = z.object({ matches: scriptFields.matches.optional(), js: scriptFields.js.optional(), allFrames: scriptFields.allFrames.nullable().optional(),
-  excludeGlobs: scriptFields.excludeGlobs.nullable().optional(), excludeMatches: scriptFields.excludeMatches.nullable().optional(), includeGlobs: scriptFields.includeGlobs.nullable().optional(),
-  runAt: scriptFields.runAt.nullable().optional(), world: scriptFields.world.nullable().optional(), worldId: scriptFields.worldId.nullable().optional() }).strict().refine((value) => Object.keys(value).length > 0);
 const pageFields = { tabId, timeoutMs };
 const targetFields = { ...pageFields, target };
 const selector = `function locate(page, target) {

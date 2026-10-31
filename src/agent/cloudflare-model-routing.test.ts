@@ -21,7 +21,7 @@ const routes = [
 ] as const;
 
 function configFor(model: string): ModelConfig {
-  return applyModelPreset({ providerId: preset.id, sdk: preset.sdk, baseURL: preset.baseURL, model, apiKey: "legacy-token",
+  return applyModelPreset({ providerId: preset.id, sdk: preset.sdk, baseURL: preset.baseURL, model,
     providerSettings: { apiKey: "saved-token", accountId: "saved-account", gatewayId: "saved-gateway" },
   }, preset);
 }

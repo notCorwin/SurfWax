@@ -39,8 +39,8 @@ function deferred<T>() {
 
 describe("model config persistence", () => {
   it("recognizes complete configuration without trimming the API key", () => {
-    expect(isCompleteModelConfig({ baseURL: " https://provider.test/v1 ", model: " model ", apiKey: " key " })).toBe(true);
-    expect(isCompleteModelConfig({ baseURL: "", model: "model", apiKey: "key" })).toBe(false);
+    expect(isCompleteModelConfig({ baseURL: " https://provider.test/v1 ", model: " model ", providerSettings: { apiKey: " key " } })).toBe(true);
+    expect(isCompleteModelConfig({ baseURL: "", model: "model", providerSettings: { apiKey: "key" } })).toBe(false);
   });
 
   it("saves the three fields and loads them back", async () => {
@@ -63,15 +63,6 @@ describe("model config persistence", () => {
     } } };
     await saveModelConfig(config, storage);
     await expect(loadModelConfig(undefined, storage)).resolves.toEqual({ selectedProviderId: "vercel", profiles: { vercel: { ...config.profiles.vercel, imageInput: "auto" } } });
-  });
-
-  it("migrates the previous single provider config to custom", async () => {
-    const storage = memoryStorage(MODEL_CONFIG_STORAGE_KEY);
-    storage.value = { baseURL: "https://provider.test/v1", model: "old", apiKey: "secret" };
-    await expect(loadModelConfig(undefined, storage)).resolves.toMatchObject({
-      selectedProviderId: "custom",
-      profiles: { custom: { providerId: "custom", sdk: "@ai-sdk/openai-compatible", model: "old", providerSettings: { apiKey: "secret" } } },
-    });
   });
 
   it("keeps credentials and model choices isolated by provider", async () => {

@@ -221,7 +221,7 @@ describe("models.dev limit matching", () => {
     const imageCatalog = { openai: { api: "https://api.openai.com/v1", models: { "gpt-5": { limit: { context: 1000 }, modalities: { input: ["text", "image"], output: ["text"] } } } } };
     const storage = { async get() { return {}; }, async set() {} };
     const fetch = vi.fn(async () => new Response(JSON.stringify(imageCatalog)));
-    const config = { baseURL: "https://api.openai.com/v1", apiKey: "secret", model: "gpt-5" };
+    const config = { baseURL: "https://api.openai.com/v1", providerSettings: { apiKey: "secret" }, model: "gpt-5" };
     await expect(modelSupportsImages(config, { storage, fetch })).resolves.toBe(true);
     await expect(modelSupportsImages({ ...config, imageInput: "disabled" }, { storage, fetch })).resolves.toBe(false);
     await expect(modelSupportsImages({ ...config, imageInput: "enabled" }, { storage, fetch })).resolves.toBe(true);
@@ -234,7 +234,7 @@ describe("models.dev limit matching", () => {
       async get(key: string) { return { [key]: values[key] }; },
       async set(items: Record<string, unknown>) { Object.assign(values, items); },
     };
-    const config = { baseURL: "https://api.openai.com/v1", apiKey: "secret", model: "gpt-5" };
+    const config = { baseURL: "https://api.openai.com/v1", providerSettings: { apiKey: "secret" }, model: "gpt-5" };
     const fetch = vi.fn(async () => new Response(JSON.stringify(catalog)));
     await expect(resolveModelLimit(config, { storage, fetch, now: () => 100 })).resolves.toMatchObject({ context: 400_000 });
     await expect(resolveModelLimit(config, { storage, fetch: vi.fn(async () => { throw new Error("offline"); }), now: () => 100 + 86_400_001 }))

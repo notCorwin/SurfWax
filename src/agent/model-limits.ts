@@ -56,7 +56,6 @@ export type ModelProviderPreset = {
   doc?: string;
   fields: ProviderSettingField[];
   /** Legacy display/tests; request dispatch uses sdk. */
-  transport: "gateway" | "openai-compatible";
   models: Array<{ id: string; name: string; family?: string; canonicalModelId?: string }>;
   /** Includes unselectable models so a typed/restored unsupported route fails explicitly. */
   modelProviders?: Record<string, ModelProviderOverride>;
@@ -237,7 +236,7 @@ export function modelProviderPresets(catalog: ModelCatalog): ModelProviderPreset
     const descriptor = { id, npm: sdk, api: provider.api, env: provider.env };
     return [{ id, name: provider.name ?? id, baseURL: gateway ? VERCEL_GATEWAY_URL : provider.api ?? defaultBaseURL(sdk),
       sdk, env: provider.env ?? [], doc: provider.doc, fields: providerSettingFields(descriptor),
-      transport: gateway ? "gateway" as const : "openai-compatible" as const, models, modelProviders,
+      models, modelProviders,
       ...(defaultProvider ? { defaultProvider } : {}),
     }];
   }).sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));

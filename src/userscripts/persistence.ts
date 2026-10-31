@@ -1,4 +1,5 @@
 import type { EventLogger } from "../logging";
+import { scriptChanges, scriptDefinition, scriptId } from "./schema";
 
 export const USER_SCRIPTS_STORAGE_KEY = "side-agent:user-scripts";
 export const USER_SCRIPTS_DATA_KEY = "side-agent:user-scripts-data";
@@ -115,8 +116,14 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
       if (!script) throw new Error("找不到该脚本。");
       return { script, enabled: !disabled.some((item) => item.id === id) };
     }
-    const api = chromeApi.userScripts as unknown as Record<string, (...params: unknown[]) => Promise<unknown>> | undefined;
-    if (!api || !["replace", "setEnabled", "delete", "create", "edit"].includes(method) && typeof api[method] !== "function") throw new Error("Allow User Scripts 未开启，或 Chrome 不支持该操作。");
+    if (!chromeApi.userScripts) throw new Error("Allow User Scripts 未开启，或 Chrome 不支持该操作。");
+    if (!["replace", "setEnabled", "delete", "create", "edit"].includes(method)) throw new Error("不支持的脚本操作。");
+    if (method === "create" || method === "replace") scriptDefinition.parse(args[0]);
+    if (method === "edit") {
+      const input = args[0] as { id?: unknown; changes?: unknown } | undefined;
+      scriptId.parse(input?.id);
+      scriptChanges.parse(input?.changes);
+    }
     // Removing a problematic declaration must remain possible even when its
     // registration is the reason reconciliation cannot complete.
     if (method === "delete" || method === "setEnabled" && (args[0] as { enabled?: unknown })?.enabled === false) {
@@ -140,10 +147,8 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
     // stopped halfway, so never snapshot a mutation until the entire saved
     // declaration is present in the native registry. If reconciliation fails,
     // leave storage intact and let the next operation retry it.
-    if (!["getScripts", "getWorldConfigurations"].includes(method)) {
-      await restoreUserScripts(options);
-      options.beforeExecute?.();
-    }
+    await restoreUserScripts(options);
+    options.beforeExecute?.();
     if (method === "create") {
       const script = args[0] as chrome.userScripts.RegisteredUserScript;
       const stored = await chromeApi.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY]);
@@ -182,6 +187,7 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
       if (method === "edit") for (const [key, value] of Object.entries((args[0] as { changes: Record<string, unknown> }).changes)) {
         if (value === null) delete (script as unknown as Record<string, unknown>)[key];
       }
+      scriptDefinition.parse(script);
       if (!previous && disabled.some((item) => item.id === id)) {
         await chromeApi.storage.local.set({ [USER_SCRIPTS_DISABLED_KEY]: disabled.map((item) => item.id === id ? script : item) });
         return { id, enabled: false };
@@ -195,8 +201,6 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
       await snapshotUserScripts(options);
       return { id, enabled: true };
     }
-    const result = await api[method](...args);
-    if (["register", "update", "unregister", "configureWorld", "resetWorldConfiguration"].includes(method)) await snapshotUserScripts(options);
-    return result;
+    throw new Error("不支持的脚本操作。");
   });
 }

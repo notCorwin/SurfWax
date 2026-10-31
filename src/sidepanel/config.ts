@@ -52,11 +52,10 @@ export async function loadModelConfig(
       // An unavailable persisted SDK is an error, not permission to use another protocol.
       const modelProvider = typeof profile.sdk === "string" && !isModelSdk(profile.sdk) && restoredProvider?.npm === undefined
         ? { ...restoredProvider, npm: profile.sdk } : restoredProvider;
-      const sdk = isModelSdk(profile.sdk) ? profile.sdk : profile.transport === "gateway" ? "@ai-sdk/gateway" : "@ai-sdk/openai-compatible";
+      const sdk = isModelSdk(profile.sdk) ? profile.sdk : "@ai-sdk/openai-compatible";
       const rawSettings = profile.providerSettings && typeof profile.providerSettings === "object" && !Array.isArray(profile.providerSettings)
         ? profile.providerSettings as Record<string, unknown> : {};
       const providerSettings = Object.fromEntries(Object.entries(rawSettings).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
-      if (!providerSettings.apiKey && typeof profile.apiKey === "string") providerSettings.apiKey = profile.apiKey;
       return [[providerId, {
         providerId,
         sdk,
@@ -131,20 +130,7 @@ export async function loadModelConfig(
     return result;
   }
 
-  const legacy = candidate as Partial<Record<keyof ModelConfig, unknown>>;
-  if (typeof legacy.baseURL !== "string" && typeof legacy.apiKey !== "string" && typeof legacy.model !== "string") return fallback;
-  return { selectedProviderId: "custom", profiles: { custom: {
-    providerId: "custom",
-    sdk: "@ai-sdk/openai-compatible",
-    providerSettings: { apiKey: typeof legacy.apiKey === "string" ? legacy.apiKey : "" },
-    baseURL: typeof legacy.baseURL === "string" ? legacy.baseURL : "",
-    model: typeof legacy.model === "string" ? legacy.model : "",
-    imageInput: legacy.imageInput === "enabled" || legacy.imageInput === "disabled" ? legacy.imageInput : "auto",
-    ...(Number.isSafeInteger(legacy.contextWindowOverride) && Number(legacy.contextWindowOverride) > 0
-      ? { contextWindowOverride: Number(legacy.contextWindowOverride) } : {}),
-    ...(Number.isSafeInteger(legacy.maxTokensOverride) && Number(legacy.maxTokensOverride) > 0
-      ? { maxTokensOverride: Number(legacy.maxTokensOverride) } : {}),
-  } } };
+  return fallback;
 }
 
 export async function saveModelConfig(

@@ -22,21 +22,21 @@ const responsesFinal = { id: "two", created_at: 2, model: "test", output: [{ typ
 const contracts: Contract[] = [
   {
     name: "OpenAI-compatible chat",
-    config: { sdk: "@ai-sdk/openai-compatible", baseURL: "https://provider.test/v1", apiKey: "key", model: "test" },
+    config: { sdk: "@ai-sdk/openai-compatible", baseURL: "https://provider.test/v1", providerSettings: { apiKey: "key" }, model: "test" },
     first: openAIFirst,
     final: openAIFinal,
     hasToolResult: (body) => body.messages.some((message: any) => message.role === "tool" && message.tool_call_id === "call"),
   },
   {
     name: "Anthropic Messages",
-    config: { sdk: "@ai-sdk/anthropic", baseURL: "https://provider.test", apiKey: "key", model: "test" },
+    config: { sdk: "@ai-sdk/anthropic", baseURL: "https://provider.test", providerSettings: { apiKey: "key" }, model: "test" },
     first: { type: "message", id: "one", model: "test", content: [{ type: "tool_use", id: "call", name: "echo", input: { value: "ok" } }], stop_reason: "tool_use", stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } },
     final: { type: "message", id: "two", model: "test", content: [{ type: "text", text: "done" }], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } },
     hasToolResult: (body) => body.messages.some((message: any) => message.content?.some((part: any) => part.type === "tool_result" && part.tool_use_id === "call")),
   },
   {
     name: "Google Gemini",
-    config: { sdk: "@ai-sdk/google", baseURL: "https://provider.test/v1beta", apiKey: "key", model: "test" },
+    config: { sdk: "@ai-sdk/google", baseURL: "https://provider.test/v1beta", providerSettings: { apiKey: "key" }, model: "test" },
     first: { candidates: [{ content: { role: "model", parts: [{ functionCall: { id: "call", name: "echo", args: { value: "ok" } } }] }, finishReason: "STOP" }],
       usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1, totalTokenCount: 2 } },
     final: { candidates: [{ content: { role: "model", parts: [{ text: "done" }] }, finishReason: "STOP" }],
@@ -79,7 +79,7 @@ it("keeps DeepSeek V4 reasoning_content on assistant messages across tool calls"
       ? { id: "one", object: "chat.completion", created: 1, model: "deepseek-flash", choices: [{ index: 0, message: { role: "assistant", reasoning_content: "plan", tool_calls: [{ id: "call", type: "function", function: { name: "echo", arguments: '{"value":"ok"}' } }] }, finish_reason: "tool_calls" }] }
       : { id: "two", object: "chat.completion", created: 2, model: "deepseek-flash", choices: [{ index: 0, message: { role: "assistant", content: "done" }, finish_reason: "stop" }] });
   });
-  const model = await createModel({ providerId: "deepseek", sdk: "@ai-sdk/openai-compatible", baseURL: "https://api.deepseek.com", apiKey: "key", model: "deepseek-flash" }, undefined, undefined, { fetch });
+  const model = await createModel({ providerId: "deepseek", sdk: "@ai-sdk/openai-compatible", baseURL: "https://api.deepseek.com", providerSettings: { apiKey: "key" }, model: "deepseek-flash" }, undefined, undefined, { fetch });
   const agent = new ToolLoopAgent({ model, tools: { echo: tool({ description: "Echo a value.", inputSchema: z.object({ value: z.string() }), execute: async ({ value }) => ({ value }) }) } });
   const result = await agent.generate({ prompt: "echo ok" });
   expect(result.text).toBe("done");
@@ -102,7 +102,7 @@ it.each([
       ? { ...openAIFirst, model: modelId, choices: [{ ...openAIFirst.choices[0], message: { ...openAIFirst.choices[0].message, reasoning_content: "plan" } }] }
       : { ...openAIFinal, model: modelId }), { headers: { "Content-Type": "application/json" } });
   });
-  const model = await createModel({ providerId, sdk: "@ai-sdk/openai-compatible", baseURL, apiKey: "key", model: modelId }, undefined, undefined, { fetch });
+  const model = await createModel({ providerId, sdk: "@ai-sdk/openai-compatible", baseURL, providerSettings: { apiKey: "key" }, model: modelId }, undefined, undefined, { fetch });
   const agent = new ToolLoopAgent({ model, tools: { echo: tool({ description: "Echo a value.", inputSchema: z.object({ value: z.string() }), execute: async ({ value }) => ({ value }) }) } });
   await expect(agent.generate({ prompt: "echo ok" })).resolves.toMatchObject({ text: "done" });
   expect(bodies[1].messages).toContainEqual(expect.objectContaining({ role: "assistant", reasoning_content: "plan" }));
@@ -122,7 +122,7 @@ it("preserves MiniMax Anthropic thinking blocks through tool calls", async () =>
       stop_reason: bodies.length === 1 ? "tool_use" : "end_turn", stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } }),
     { headers: { "Content-Type": "application/json" } });
   });
-  const model = await createModel({ providerId: "minimax", sdk: "@ai-sdk/anthropic", baseURL: "https://api.minimax.io/anthropic/v1", apiKey: "key", model: "MiniMax-M3" }, undefined, undefined, { fetch });
+  const model = await createModel({ providerId: "minimax", sdk: "@ai-sdk/anthropic", baseURL: "https://api.minimax.io/anthropic/v1", providerSettings: { apiKey: "key" }, model: "MiniMax-M3" }, undefined, undefined, { fetch });
   const agent = new ToolLoopAgent({ model, tools: { echo: tool({ description: "Echo a value.", inputSchema: z.object({ value: z.string() }), execute: async ({ value }) => ({ value }) }) } });
   await expect(agent.generate({ prompt: "echo ok" })).resolves.toMatchObject({ text: "done" });
   expect(bodies[1].messages).toContainEqual(expect.objectContaining({ role: "assistant", content: expect.arrayContaining([expect.objectContaining({ type: "thinking", thinking: "plan", signature: "signature" })]) }));

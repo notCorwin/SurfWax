@@ -124,11 +124,9 @@ body {
   width: min(32rem, calc(100vw - calc(var(--spacing) * 8)));
   max-height: min(calc(var(--spacing) * 90), var(--radix-popover-content-available-height));
   overflow-y: auto;
-  border: 1px solid var(--border);
+  border-width: 1px;
+  border-style: solid;
   border-radius: var(--radius-md);
-  background: var(--popover);
-  color: var(--popover-foreground);
-  box-shadow: var(--shadow-md);
 }
 
 .search-combobox-option {
@@ -144,11 +142,6 @@ body {
   color: inherit;
   text-align: left;
   cursor: pointer;
-}
-
-.search-combobox-option:is(:hover, :focus-visible) {
-  background: var(--accent);
-  color: var(--accent-foreground);
 }
 
 .search-combobox-option > svg {

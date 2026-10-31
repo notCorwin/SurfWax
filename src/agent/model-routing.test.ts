@@ -37,7 +37,7 @@ describe("model-specific SDK routes", () => {
     expect(resolvedBaseURL(config)).toBe("https://proxy.test/v1");
   });
   it("uses native Mantle Responses at the model endpoint with saved provider credentials", async () => {
-    const config: ModelConfig = { providerId: "amazon-bedrock", sdk: "@ai-sdk/amazon-bedrock", baseURL: "https://bedrock-runtime.us-east-1.amazonaws.com", model: "openai.gpt-6.1-sol", apiKey: "legacy-key",
+    const config: ModelConfig = { providerId: "amazon-bedrock", sdk: "@ai-sdk/amazon-bedrock", baseURL: "https://bedrock-runtime.us-east-1.amazonaws.com", model: "openai.gpt-6.1-sol",
       providerSettings: { apiKey: "user-key", region: "eu-west-1" }, modelProvider: { npm: "@ai-sdk/amazon-bedrock/mantle", api: "https://bedrock-mantle.${AWS_REGION}.api.aws/openai/v1", shape: "responses", headers: { "x-catalog": "model", Authorization: "catalog-key" }, body: { service_tier: "priority", model: "wrong", input: "wrong", stream: true, stream_options: { include_usage: true }, extra_body: { streaming: true, stream_mode: "enabled", vendor_setting: "kept" } } } };
     const requests: Request[] = [];
     const model = await createModel(config, undefined, undefined, { fetch: async (input, init) => { requests.push(new Request(input, init)); return responses(); } });
@@ -59,7 +59,7 @@ describe("model-specific SDK routes", () => {
 
   it("selects native OpenAI Chat Completions instead of its default Responses interface", async () => {
     const requests: Request[] = [];
-    const model = await createModel({ sdk: "@ai-sdk/openai", baseURL: "https://default.test/v1", model: "test", apiKey: "key", modelProvider: { api: "https://model.test/v1", shape: "completions" } }, undefined, undefined, {
+    const model = await createModel({ sdk: "@ai-sdk/openai", baseURL: "https://default.test/v1", model: "test", providerSettings: { apiKey: "key" }, modelProvider: { api: "https://model.test/v1", shape: "completions" } }, undefined, undefined, {
       fetch: async (input, init) => { requests.push(new Request(input, init)); return chat(); },
     });
     expect((await generateText({ model, prompt: "hello" })).text).toBe("done");
@@ -68,7 +68,7 @@ describe("model-specific SDK routes", () => {
 
   it("uses native OpenAI Responses for a compatible provider with a Responses-shaped model", async () => {
     const requests: Request[] = [];
-    const model = await createModel({ providerId: "sakana", sdk: "@ai-sdk/openai-compatible", baseURL: "https://provider.test/v1", model: "fugu", apiKey: "key", modelProvider: { shape: "responses" } }, undefined, undefined, {
+    const model = await createModel({ providerId: "sakana", sdk: "@ai-sdk/openai-compatible", baseURL: "https://provider.test/v1", model: "fugu", providerSettings: { apiKey: "key" }, modelProvider: { shape: "responses" } }, undefined, undefined, {
       fetch: async (input, init) => { requests.push(new Request(input, init)); return responses(); },
     });
     expect((await generateText({ model, prompt: "hello" })).text).toBe("done");
@@ -87,7 +87,7 @@ describe("model-specific SDK routes", () => {
 
   it("rejects unknown model SDKs and unsupported shapes before sending requests", async () => {
     const fetch = vi.fn();
-    const config: ModelConfig = { sdk: "@ai-sdk/openai", apiKey: "key", baseURL: "https://provider.test/v1", model: "test" };
+    const config: ModelConfig = { sdk: "@ai-sdk/openai", providerSettings: { apiKey: "key" }, baseURL: "https://provider.test/v1", model: "test" };
     await expect(createModel({ ...config, modelProvider: { npm: "future-sdk" } }, undefined, undefined, { fetch })).rejects.toThrow("Unsupported model SDK");
     await expect(createModel({ ...config, modelProvider: { shape: "future-shape" } }, undefined, undefined, { fetch })).rejects.toThrow("Unsupported model API shape");
     await expect(createModel({ ...config, sdk: "@ai-sdk/anthropic", modelProvider: { shape: "responses" } }, undefined, undefined, { fetch })).rejects.toThrow("does not support model API shape");

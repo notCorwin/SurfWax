@@ -22,9 +22,9 @@ describe("createRetryingFetch", () => {
     expect(isContextOverflowError({ statusCode: 400, message: "Unsupported context parameter" })).toBe(false);
   });
   it("creates gateway and OpenAI-compatible models through their native providers", async () => {
-    expect(((await createModel({ providerId: "vercel", transport: "gateway", baseURL: "", apiKey: "key", model: "openai/gpt-5" })) as unknown as { provider: string }).provider)
+    expect(((await createModel({ providerId: "vercel", sdk: "@ai-sdk/gateway", baseURL: "", providerSettings: { apiKey: "key" }, model: "openai/gpt-5" })) as unknown as { provider: string }).provider)
       .toContain("gateway");
-    expect(((await createModel({ providerId: "custom", transport: "openai-compatible", baseURL: "https://provider.test/v1", apiKey: "key", model: "test" })) as unknown as { provider: string }).provider)
+    expect(((await createModel({ providerId: "custom", sdk: "@ai-sdk/openai-compatible", baseURL: "https://provider.test/v1", providerSettings: { apiKey: "key" }, model: "test" })) as unknown as { provider: string }).provider)
       .toContain("custom");
   });
 
@@ -262,7 +262,7 @@ describe("createRetryingFetch", () => {
 
   it("uses the provider default when reasoning capability is unknown", async () => {
     const attempts: Array<unknown> = [];
-    const settings = new ReasoningSettings({ baseURL: "https://provider.test/v1", model: "test-model", apiKey: "key" }, {
+    const settings = new ReasoningSettings({ baseURL: "https://provider.test/v1", model: "test-model", providerSettings: { apiKey: "key" } }, {
       fetch: vi.fn(async () => new Response("missing", { status: 404 })),
       modelLimit: async () => undefined,
     });

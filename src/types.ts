@@ -68,12 +68,9 @@ export type ModelConfig = {
   providerSettings?: Record<string, string>;
   /** Models.dev per-model transport defaults, kept separate from user credentials. */
   modelProvider?: ModelProviderOverride;
-  /** Legacy fields are read during migration and kept optional for restored tests/conversations. */
-  transport?: ModelTransport;
   baseURL: string;
   /** Optional user override for a Models.dev provider endpoint. */
   baseURLOverride?: string;
-  apiKey?: string;
   model: string;
   contextWindowOverride?: number;
   maxTokensOverride?: number;
@@ -100,5 +97,3 @@ export type ModelProviderOverride = {
   body?: Record<string, JsonValue>;
   headers?: Record<string, string>;
 };
-
-export type ModelTransport = "gateway" | "openai-compatible";

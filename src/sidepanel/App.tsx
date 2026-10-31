@@ -8,7 +8,7 @@ import { Button } from "../components/ui/button";
 import { ErrorNotice } from "../components/ui/error-notice";
 import { generateConversationTitle } from "../conversations";
 import { activeContext, ensureAutomaticContextSummary } from "../agent/context-choice";
-import { contextPressure, pendingContextChoice } from "../agent/compaction";
+import { contextPressure } from "../agent/compaction";
 import { activeRunIdentity, claimConversationRun, registerBackgroundRequest, withIdleConversation } from "../agent/coordinator";
 import { EventLogger, fromLogValue, rebuildConversationList, stringifyLogSafe } from "../logging";
 import type { ModelConfig } from "../types";
@@ -245,8 +245,7 @@ function ConversationView({ config, logger, threadId, drafts }: { config: ModelC
           && (!before.checkpoint || before.checkpoint.eventId < lastRun.id);
         const pressure = await contextPressure({ raw: before.raw, branchIds: before.branchIds, events: before.events, model: config, signal: controller.signal });
         if (!active) return;
-        if (!force && !overflow && !pendingContextChoice(before.events, before.branchIds)
-          && (!pressure || pressure.estimated <= pressure.threshold)) {
+        if (!force && !overflow && (!pressure || pressure.estimated <= pressure.threshold)) {
           setContextStatus(before.checkpoint ? { message: "历史上下文已被压缩成摘要", error: false } : undefined);
           return;
         }

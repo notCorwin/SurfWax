@@ -13,6 +13,7 @@ import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { CodeEditor } from "./CodeEditor";
 import { formatUserScriptCode } from "./format-code";
+import { scriptDefinition } from "./schema";
 import { USER_SCRIPTS_DISABLED_KEY, USER_SCRIPTS_ERROR_KEY, USER_SCRIPTS_LEGACY_KEY, USER_SCRIPTS_STORAGE_KEY } from "./persistence";
 import "../styles.css";
 import "../options/styles.css";
@@ -21,17 +22,8 @@ import "./styles.css";
 type Script = chrome.userScripts.RegisteredUserScript;
 type Field = "id" | "matches" | "code";
 const TEMPLATE: Script = { id: "", matches: [], js: [{ code: "" }], world: "USER_SCRIPT" };
-const SCRIPT_FIELDS = new Set(["allFrames", "excludeGlobs", "excludeMatches", "id", "includeGlobs", "js", "matches", "runAt", "world", "worldId"]);
-
 function isScript(value: unknown): value is Script {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const script = value as Partial<Script>;
-  return Object.keys(script).every((key) => SCRIPT_FIELDS.has(key))
-    && typeof script.id === "string" && !!script.id && !script.id.startsWith("_")
-    && Array.isArray(script.matches) && script.matches.length > 0 && script.matches.every((match) => typeof match === "string")
-    && Array.isArray(script.js) && script.js.length > 0 && script.js.every((source) => source && typeof source === "object"
-      && Object.keys(source).every((key) => key === "code" || key === "file")
-      && (typeof source.code === "string") !== (typeof source.file === "string"));
+  return scriptDefinition.safeParse(value).success;
 }
 
 function parseImport(text: string): Script[] {
@@ -243,7 +235,7 @@ export function ScriptsApp() {
         catch (cause) { formatWarning = errorDetails(cause); }
       }
       if (selected) await call("replace", script);
-      else await call("register", [script]);
+      else await call("create", script);
       choose(script, true);
       await refresh();
       setMessage(formatWarning ? "脚本已保存，但代码未格式化。" : "脚本已保存");
@@ -376,7 +368,7 @@ export function ScriptsApp() {
         const existing = scripts.some((item) => item.id === script.id);
         if (existing && !overwriteIds.includes(script.id)) continue;
         try {
-          await call(existing ? "replace" : "register", existing ? script : [script]);
+          await call(existing ? "replace" : "create", script);
           imported++;
         } catch (cause) { failed.push(`${script.id}：${errorDetails(cause)}`); }
       }

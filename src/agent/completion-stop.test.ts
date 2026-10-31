@@ -4,7 +4,7 @@ import type { ModelConfig } from "../types";
 import { createModel } from "./model";
 
 const config: ModelConfig = { providerId: "custom", sdk: "@ai-sdk/openai", endpointType: "openai-completions",
-  model: "test", baseURL: "https://provider.test/v1", apiKey: "test-key" };
+  model: "test", baseURL: "https://provider.test/v1", providerSettings: { apiKey: "test-key" } };
 const intended = "log starts\nuser: account=42\nlog ends";
 
 function reply(text: string) {

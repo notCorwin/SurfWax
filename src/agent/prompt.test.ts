@@ -36,7 +36,7 @@ describe("canonical prompt versions", () => {
     await ensureConversationPrompt(logger, "one", "Custom", ["other-branch"]);
     expect(events).toHaveLength(3);
     const raw = [{ role: "user" as const, content: "Original task" }];
-    const model = { baseURL: "https://test/v1", apiKey: "key", model: "test", contextWindowOverride: 262144 };
+    const model = { baseURL: "https://test/v1", providerSettings: { apiKey: "key" }, model: "test", contextWindowOverride: 262144 };
     const signal = new AbortController().signal;
     const failed = new MockLanguageModelV4({ doGenerate: async () => { throw new Error("permanent failure"); } });
     await expect(summarizeContext({ raw, branchIds: ["u"], uiCount: 1, model, languageModel: failed, logger, conversationId: "one", signal, prompt: current })).rejects.toThrow("permanent");
@@ -54,7 +54,7 @@ describe("canonical prompt versions", () => {
     const tools = [{ name: "tool", description: "large schema".repeat(100) }];
     const estimated = estimatePromptInput({ instructions, messages: raw, tools });
     const limit = { context: estimated * 5, input: estimated * 5, output: 0, source: "manual" as const, provider: "test", model: "unknown" };
-    const model = { baseURL: "", apiKey: "key", model: "unknown" };
+    const model = { baseURL: "", providerSettings: { apiKey: "key" }, model: "unknown" };
     const result = await contextPressure({ raw, branchIds: ["u"], events: [], model, instructions, tools, limit: { ...limit, input: estimated * 1.25 } });
     expect(result?.estimated).toBe(estimated); expect(result?.threshold).toBe(estimated);
     const over = await contextPressure({ raw: [...raw, { role: "user", content: "one more token" }], branchIds: ["u"], events: [], model, instructions, tools, limit: { ...limit, input: estimated * 1.25 } });

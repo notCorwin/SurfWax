@@ -24,7 +24,7 @@ const ENDPOINT_ALIASES: Record<string, string> = {
   CLOUDFLARE_ACCOUNT_ID: "accountId", CLOUDFLARE_GATEWAY_ID: "gatewayId", WATSONX_AI_PROJECT_ID: "projectId",
 };
 
-export function sdkFor(config: Pick<ModelConfig, "providerId" | "sdk" | "transport" | "baseURL" | "modelProvider" | "endpointType">): ModelSdk {
+export function sdkFor(config: Pick<ModelConfig, "providerId" | "sdk" | "baseURL" | "modelProvider" | "endpointType">): ModelSdk {
   const endpointType = config.endpointType;
   if (config.providerId === "custom" && endpointType) {
     if (endpointType === "anthropic-messages") return "@ai-sdk/anthropic";
@@ -38,7 +38,7 @@ export function sdkFor(config: Pick<ModelConfig, "providerId" | "sdk" | "transpo
   }
   if (config.providerId === "deepseek" && (!config.sdk || config.sdk === "@ai-sdk/openai-compatible") || config.sdk === "@ai-sdk/openai-compatible" && URL.canParse(config.baseURL)
     && new URL(config.baseURL).hostname === "api.deepseek.com") return "@ai-sdk/deepseek";
-  return config.sdk ?? (config.transport === "gateway" ? "@ai-sdk/gateway" : "@ai-sdk/openai-compatible");
+  return config.sdk ?? "@ai-sdk/openai-compatible";
 }
 
 /** A model's SDK override changes its protocol, not its saved gateway identity. */
@@ -46,8 +46,8 @@ export function isCloudflareGateway(config: Pick<ModelConfig, "providerId" | "sd
   return config.providerId === "cloudflare-ai-gateway" || config.sdk === "ai-gateway-provider" || config.modelProvider?.npm === "ai-gateway-provider";
 }
 
-export function settingsFor(config: Pick<ModelConfig, "providerSettings" | "apiKey">): Record<string, string> {
-  return { ...(config.providerSettings ?? {}), ...(config.providerSettings?.apiKey || !config.apiKey ? {} : { apiKey: config.apiKey }) };
+export function settingsFor(config: Pick<ModelConfig, "providerSettings">): Record<string, string> {
+  return config.providerSettings ?? {};
 }
 
 export function defaultBaseURL(sdk: ModelSdk): string {

@@ -128,32 +128,6 @@ test("anchors context usage to provider-reported input tokens", async () => {
 });
 
 
-test('resolves a persisted legacy context gate automatically when the conversation reopens', async () => {
-  const provider = await startProvider([textResponse('LEGACY_CONTEXT_HISTORY'), textResponse('旧对话标题'), textResponse('LATE_COMPACTION_REPLY')], 0, summary);
-  const opened = await openExtension();
-  try {
-    await (await configure(opened.context, opened.page, provider.baseURL, 100_000)).close();
-    await opened.page.getByTestId('composer-input').fill('preserve this old request'); await opened.page.getByTestId('composer-input').press('Enter');
-    await expect(opened.page.getByTestId('conversation-menu')).toContainText('旧对话标题');
-    const events = await readEvents(opened.page);
-    const conversationId = events.find(event => event.type === 'conversation.created').conversationId;
-    const branchIds = events.filter(event => event.type === 'conversation.message' && event.conversationId === conversationId).map(event => event.content.id);
-    await opened.page.evaluate(async ({ conversationId, branchIds }) => {
-      const db = await new Promise<IDBDatabase>((resolve, reject) => { const request = indexedDB.open('side-agent-runtime'); request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error); });
-      const transaction = db.transaction('events', 'readwrite');
-      transaction.objectStore('events').add({ type: 'context.choice.required', timestamp: new Date().toISOString(), conversationId, content: { branchIds, reason: 'pressure' } });
-      await new Promise<void>((resolve, reject) => { transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error); }); db.close();
-    }, { conversationId, branchIds });
-    await opened.page.reload(); await opened.page.getByTestId('conversation-menu').click();
-    await opened.page.locator('.conversation-item', { hasText: '旧对话标题' }).locator('.conversation-select').click();
-    await expect(opened.page.getByTestId('context-status')).toContainText('历史上下文已被压缩成摘要');
-    await expect(opened.page.getByTestId('context-choice')).toHaveCount(0);
-    expect((await readEvents(opened.page)).some(event => event.type === 'context.choice.resolved' && event.content?.automatic === true)).toBe(true);
-    await opened.page.getByTestId('composer-input').fill('continue'); await opened.page.getByTestId('composer-input').press('Enter');
-    await expect(opened.page.locator('.markdown-body').last()).toContainText('LATE_COMPACTION_REPLY');
-  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
-});
-
 test('a summary failure keeps original history and exposes a retry that creates a verified checkpoint', async () => {
   const provider = await startProvider([textResponse(largeReply), textResponse('摘要重试')], 0, summary, ['minimal'], 0, 1);
   const opened = await openExtension();

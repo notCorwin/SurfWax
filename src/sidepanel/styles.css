@@ -223,8 +223,9 @@ p {
 .thinking-body {
   display: flex;
   flex-direction: column;
-  gap: var(--transcript-block-gap);
 }
+
+.thinking-body { gap: var(--transcript-block-gap); }
 
 .conversation-turn {
   padding-bottom: var(--transcript-turn-gap);
@@ -332,8 +333,10 @@ p {
   color: var(--muted-foreground);
   padding: 0;
   line-height: var(--transcript-line-height);
-  font-size: var(--type-body);
-  font-weight: 600;
+  gap: calc(var(--spacing) * 2);
+  font-size: var(--type-xs);
+  font-weight: 450;
+  min-height: calc(var(--spacing) * 6);
 }
 
 .thinking-item summary::-webkit-details-marker,
@@ -394,7 +397,6 @@ p {
 .reasoning-select { font-size: var(--type-xs); color: var(--muted-foreground); border-color: transparent; box-shadow: none; }
 .user-message [data-slot="bubble-content"] { border-radius: var(--radius-xl); padding: calc(var(--spacing) * 2) calc(var(--spacing) * 3); }
 .assistant-message { padding-inline: 0; }
-:is(.thinking-item, .activity) > summary { gap: calc(var(--spacing) * 2); font-weight: 450; font-size: var(--type-xs); min-height: calc(var(--spacing) * 6); }
 :is(.thinking-item, .activity) > summary::after {
   content: ""; width: calc(var(--spacing) * 1.25); height: calc(var(--spacing) * 1.25); flex-shrink: 0;
   border-right: 1px solid currentColor; border-top: 1px solid currentColor; transform: rotate(45deg);

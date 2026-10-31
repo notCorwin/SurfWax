@@ -80,7 +80,7 @@ export function SearchCombobox({ id, name, value, options, onValueChange, allowC
       </div>
     </PopoverPrimitive.Anchor>
     <PopoverPrimitive.Portal>
-      <PopoverPrimitive.Content className="search-combobox-content" align="start" sideOffset={4}
+      <PopoverPrimitive.Content data-slot="popover-content" className="search-combobox-content" align="start" sideOffset={4}
         onOpenAutoFocus={(event) => event.preventDefault()}>
         <div id={listId} role="listbox" aria-label={name === "providerId" ? "Provider 候选" : "模型候选"}>
           {visibleOptions.map((option, index) => <button key={option.value} type="button" role="option"

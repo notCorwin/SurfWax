@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { endpointEfforts, ReasoningSettings } from "./reasoning";
 
-const config = { baseURL: "https://provider.test/v1", model: "test-model", apiKey: "secret" };
+const config = { baseURL: "https://provider.test/v1", model: "test-model", providerSettings: { apiKey: "secret" } };
 
 function storage() {
   let saved: Record<string, unknown> = {};

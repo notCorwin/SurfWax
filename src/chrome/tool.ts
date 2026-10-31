@@ -7,20 +7,17 @@ import type { ChromeExecutor } from "./executor";
 import { ATOMIC_TOOL_REGISTRY } from "./atomic-tools";
 import type { ToolScheduler } from "./tool-scheduler";
 import { jobResultReferenceInfo } from "./job-result";
+import { elementTargetSchema } from "./element-target";
 
 const timeoutMs = z.number().int().positive().optional();
-const elementTargetObject = z.union([
-  z.object({ ref: z.string().min(1) }).strict(),
-  z.object({ by: z.enum(["role", "text", "label", "placeholder", "alt", "title", "testId", "css"]), value: z.string().min(1), name: z.string().optional(), exact: z.boolean().optional(), index: z.number().int().optional(), frame: z.union([z.object({ by: z.literal("css"), value: z.string().min(1) }).strict(), z.object({ ref: z.string().min(1) }).strict()]).optional() }).strict(),
-]);
 export const PROGRAM_CATALOG_VERSION = "atomic-tools-v22";
-export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetObject]).optional(),
+export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetSchema]).optional(),
   fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional(), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
   since: z.string().min(1).optional(), cursor: z.string().min(1).max(256).optional() }).strict()
   .refine((input) => input.cursor === undefined || [input.region, input.fields, input.depth, input.since, input.offset].every((value) => value === undefined),
     "cursor cannot be combined with region, fields, depth, since, or offset");
-const findElementsInputSchema = z.object({ target: elementTargetObject, tabId: z.number().int().nonnegative().optional(), timeoutMs,
+const findElementsInputSchema = z.object({ target: elementTargetSchema, tabId: z.number().int().nonnegative().optional(), timeoutMs,
   limit: z.number().int().min(1).max(100).optional(), cursor: z.string().min(1).max(256).optional() }).strict();
 const listFramesInputSchema = z.object({ tabId: z.number().int().nonnegative().optional(), timeoutMs,
   limit: z.number().int().min(1).max(100).optional(), cursor: z.string().min(1).max(256).optional() }).strict();

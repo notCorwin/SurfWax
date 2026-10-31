@@ -102,16 +102,6 @@ export async function effectiveContext(events: readonly LogEvent[], branchIds: r
   return { checkpoint, messages: checkpoint ? [summaryMessage(checkpoint.summary), ...raw.slice(checkpoint.sourceCount)] : raw };
 }
 
-export function pendingContextChoice(events: readonly LogEvent[], branchIds: readonly string[]): boolean {
-  let pending = false;
-  for (const event of events) {
-    if (event.type !== "context.choice.required" && event.type !== "context.choice.resolved") continue;
-    const content = fromLogValue(event.content, event.valueEncoding) as { branchIds?: string[] };
-    if (Array.isArray(content?.branchIds) && isBranchPrefix(content.branchIds, branchIds)) pending = event.type === "context.choice.required";
-  }
-  return pending;
-}
-
 export async function contextPressure(options: {
   raw: ModelMessage[]; branchIds: string[]; events: LogEvent[]; model: ModelConfig;
   limit?: ModelLimit; signal?: AbortSignal;

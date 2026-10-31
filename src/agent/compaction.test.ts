@@ -3,7 +3,7 @@ import { MockLanguageModelV4 } from "ai/test";
 import type { ModelMessage } from "ai";
 import type { EventLogger, LogEvent } from "../logging";
 import { createPromptSnapshot, PROMPT_TOOLS } from "./prompt";
-import { ContextCompactor, contextPressure, effectiveContext, estimatePromptInput, estimateInput, pendingContextChoice, summarizeContext } from "./compaction";
+import { ContextCompactor, contextPressure, effectiveContext, estimatePromptInput, estimateInput, summarizeContext } from "./compaction";
 
 function fixture() {
   const events: LogEvent[] = [];
@@ -23,7 +23,7 @@ function fixture() {
     warnings: [],
   }));
   const languageModel = new MockLanguageModelV4({ doGenerate: generate as any });
-  const model = { baseURL: "https://provider.test/v1", apiKey: "key", model: "test", contextWindowOverride: 8_000 };
+  const model = { baseURL: "https://provider.test/v1", providerSettings: { apiKey: "key" }, model: "test", contextWindowOverride: 8_000 };
   const raw: ModelMessage[] = [
     { role: "user", content: "Old user details " + "a".repeat(7_000) },
     { role: "assistant", content: "Old findings " + "b".repeat(7_000) },
@@ -220,12 +220,4 @@ describe("context choices and summary", () => {
     expect(events.some((event) => event.type === "context.compacted")).toBe(false);
   });
 
-  it("restores a pending choice and clears it only for its branch", () => {
-    const { events } = fixture();
-    events.push({ id: 1, type: "context.choice.required", timestamp: "2026-01-01", content: { branchIds: ["u", "a"] } });
-    expect(pendingContextChoice(events, ["u", "a", "next"])).toBe(true);
-    expect(pendingContextChoice(events, ["other"])).toBe(false);
-    events.push({ id: 2, type: "context.choice.resolved", timestamp: "2026-01-01", content: { branchIds: ["u", "a"] } });
-    expect(pendingContextChoice(events, ["u", "a", "next"])).toBe(false);
-  });
 });

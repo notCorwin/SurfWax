@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
-import { EventLogger, fromLogValue, type LogEvent } from "../logging";
+import { EventLogger, type LogEvent } from "../logging";
 import { activeContext, ensureAutomaticContextSummary } from "./context-choice";
 
 async function fixture(text = "Original goal") {
@@ -15,7 +15,7 @@ async function fixture(text = "Original goal") {
     finishReason: { unified: "stop" as const, raw: "stop" },
     usage: { inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 10, text: 10, reasoning: 0 } }, warnings: [] }));
   const languageModel = new MockLanguageModelV4({ doGenerate: generate });
-  const model = { baseURL: "https://provider.test/v1", apiKey: "test-key", model: "test", contextWindowOverride: 32_000 };
+  const model = { baseURL: "https://provider.test/v1", providerSettings: { apiKey: "test-key" }, model: "test", contextWindowOverride: 32_000 };
   return { events, logger, model, languageModel, generate };
 }
 
@@ -35,14 +35,6 @@ describe("automatic context upkeep", () => {
     expect((await activeContext(logger, "one")).checkpoint).toMatchObject({ sourceUiCount: 1, branchIds: ["u"] });
     expect(await ensureAutomaticContextSummary(logger, "one", model, new AbortController().signal, { languageModel })).toBe(false);
     expect(events.filter((event) => event.type === "context.compacted")).toHaveLength(1);
-  });
-
-  it("resolves a restored legacy manual gate automatically", async () => {
-    const { events, logger, model, languageModel } = await fixture();
-    await logger.append({ type: "context.choice.required", conversationId: "one", content: { branchIds: ["u"] } });
-    expect(await ensureAutomaticContextSummary(logger, "one", model, new AbortController().signal, { languageModel })).toBe(true);
-    const resolved = events.find((event) => event.type === "context.choice.resolved");
-    expect(fromLogValue(resolved?.content)).toMatchObject({ branchIds: ["u"], action: "summary", automatic: true });
   });
 
   it("handles a provider overflow below the estimated threshold without changing original messages", async () => {

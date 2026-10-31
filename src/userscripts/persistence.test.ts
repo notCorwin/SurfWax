@@ -43,7 +43,7 @@ describe("user script persistence", () => {
     await expect(restoreUserScripts({ chromeApi: fake.chromeApi as never })).rejects.toThrow("原始数据已保留");
     expect(fake.stored[USER_SCRIPTS_STORAGE_KEY]).toEqual([{ id: "legacy" }]);
     expect(fake.api.unregister).not.toHaveBeenCalled();
-    await expect(callUserScripts("register", [[{ id: "new", matches: ["<all_urls>"], js: [{ code: "1" }] }]], { chromeApi: fake.chromeApi as never })).rejects.toThrow("原始数据已保留");
+    await expect(callUserScripts("create", [{ id: "new", matches: ["<all_urls>"], js: [{ code: "1" }] }], { chromeApi: fake.chromeApi as never })).rejects.toThrow("原始数据已保留");
     expect(fake.stored[USER_SCRIPTS_STORAGE_KEY]).toEqual([{ id: "legacy" }]);
     expect(fake.api.register).not.toHaveBeenCalled();
   });
@@ -119,8 +119,8 @@ describe("user script persistence", () => {
     const first = { id: "first", matches: ["<all_urls>"], js: [{ code: "1" }] };
     const second = { id: "second", matches: ["<all_urls>"], js: [{ code: "2" }] };
     await Promise.all([
-      callUserScripts("register", [[first]], { chromeApi: fake.chromeApi as never }),
-      callUserScripts("register", [[second]], { chromeApi: fake.chromeApi as never }),
+      callUserScripts("create", [first], { chromeApi: fake.chromeApi as never }),
+      callUserScripts("create", [second], { chromeApi: fake.chromeApi as never }),
     ]);
     expect(fake.stored[USER_SCRIPTS_STORAGE_KEY]).toEqual([first, second]);
   });
@@ -171,6 +171,19 @@ describe("user script persistence", () => {
     expect(fake.stored[USER_SCRIPTS_STORAGE_KEY]).toEqual([script]);
   });
 
+  it("rejects invalid definitions before mutating the registry or saved scripts", async () => {
+    const script = { id: "saved", matches: ["<all_urls>"], js: [{ code: "1" }] };
+    const fake = fakeChrome({ registered: [script], stored: { [USER_SCRIPTS_STORAGE_KEY]: [script] } });
+    const options = { chromeApi: fake.chromeApi as never };
+    for (const invalid of [{ ...script, matches: [""] }, { ...script, js: [{ code: "" }] }, { ...script, allFrames: "yes" }]) {
+      await expect(callUserScripts("replace", [invalid], options)).rejects.toThrow();
+    }
+    await expect(callUserScripts("register", [[script]], options)).rejects.toThrow("不支持的脚本操作");
+    expect(await fake.api.getScripts()).toEqual([script]);
+    expect(fake.stored[USER_SCRIPTS_STORAGE_KEY]).toEqual([script]);
+    expect(fake.api.unregister).not.toHaveBeenCalled();
+  });
+
   it("runs the agent's create, list, read, edit and enable flow without changing script identity", async () => {
     const fake = fakeChrome({ stored: { [USER_SCRIPTS_STORAGE_KEY]: [] } });
     const options = { chromeApi: fake.chromeApi as never };
@@ -180,6 +193,9 @@ describe("user script persistence", () => {
     await expect(callUserScripts("list", [], options)).resolves.toEqual([{ id: script.id, matches: script.matches, enabled: true }]);
     await expect(callUserScripts("read", [script.id], options)).resolves.toEqual({ script, enabled: true });
     await callUserScripts("setEnabled", [{ id: script.id, enabled: false }], options);
+    await expect(callUserScripts("create", [{ ...script, js: [{ code: "replacement" }] }], options)).rejects.toThrow("脚本 ID 已存在");
+    expect(await fake.api.getScripts()).toEqual([]);
+    expect(fake.stored[USER_SCRIPTS_DISABLED_KEY]).toEqual([script]);
     await callUserScripts("setEnabled", [{ id: script.id, enabled: false }], options);
     expect(fake.stored[USER_SCRIPTS_DISABLED_KEY]).toHaveLength(1);
     await expect(callUserScripts("edit", [{ id: script.id, changes: { js: [{ code: "2" }], runAt: null } }], options)).resolves.toEqual({ id: script.id, enabled: false });

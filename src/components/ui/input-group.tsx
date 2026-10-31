@@ -13,7 +13,7 @@ function InputGroup({ className, ...props }: React.ComponentProps<"div">) {
       data-focus-group=""
       role="group"
       className={cn(
-        "group/input-group relative flex w-full items-center rounded-md border border-input shadow-xs transition-[color,box-shadow] dark:bg-input/30",
+        "group/input-group relative flex w-full items-center rounded-md border border-input shadow-xs transition-[color,box-shadow]",
         "h-9 min-w-0 has-[>textarea]:h-auto",
 
         // Variants based on alignment.
@@ -133,7 +133,7 @@ function InputGroupInput({
       data-slot="input-group-control"
       data-focus-delegate=""
       className={cn(
-        "flex-1 rounded-none border-0 bg-transparent shadow-none dark:bg-transparent",
+        "flex-1 rounded-none border-0 shadow-none",
         className
       )}
       {...props}
@@ -150,7 +150,7 @@ function InputGroupTextarea({
       data-slot="input-group-control"
       data-focus-delegate=""
       className={cn(
-        "flex-1 resize-none rounded-none border-0 bg-transparent py-3 shadow-none dark:bg-transparent",
+        "flex-1 resize-none rounded-none border-0 py-3 shadow-none",
         className
       )}
       {...props}
