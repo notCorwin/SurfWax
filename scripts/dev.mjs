@@ -74,6 +74,7 @@ async function main() {
     colorScheme: null,
     viewport: null,
     args: [
+      "--start-maximized",
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
       "--hide-crash-restore-bubble",
