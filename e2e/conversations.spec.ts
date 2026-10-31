@@ -35,13 +35,16 @@ test("opens a bounded conversation dropdown below its trigger and keeps outside 
     const trigger = opened.page.getByTestId("conversation-menu");
     const dropdown = opened.page.getByRole("dialog", { name: "对话列表" });
     const search = dropdown.getByRole("searchbox", { name: "搜索会话" });
+    const openSearch = dropdown.getByRole("button", { name: "搜索会话" });
     const composer = opened.page.getByTestId("composer-input");
     for (const viewport of [{ width: 360, height: 700 }, { width: 320, height: 400 }, { width: 430, height: 850 }]) {
       await opened.page.setViewportSize(viewport);
       await trigger.click();
-      await expect(search).toBeFocused();
+      await expect(search).toHaveCount(0);
       await expect(dropdown.locator(".conversation-item")).toHaveCount(18);
       if (viewport.width === 360) {
+        await openSearch.click();
+        await expect(search).toBeFocused();
         const row = dropdown.locator(".conversation-item").first();
         const actions = row.getByRole("group", { name: "会话操作" });
         const rename = row.getByRole("button", { name: /^重命名 / });
@@ -91,6 +94,7 @@ test("opens a bounded conversation dropdown below its trigger and keeps outside 
       await expect(trigger).toBeFocused();
     }
     await trigger.press("Enter");
+    await openSearch.click();
     await expect(search).toBeFocused();
     await search.fill("不存在的会话");
     await expect(dropdown).toContainText("没有找到匹配的会话");
@@ -99,6 +103,8 @@ test("opens a bounded conversation dropdown below its trigger and keeps outside 
     await expect(composer).toBeFocused();
     await composer.fill("保留草稿");
     await trigger.click();
+    await expect(search).toHaveCount(0);
+    await openSearch.click();
     await expect(search).toHaveValue("");
     await trigger.click();
     await expect(dropdown).toBeHidden();
@@ -339,6 +345,7 @@ test("creates, titles, switches, starts fresh on reload and supports undoable co
     await opened.page.getByTestId("conversation-menu").click();
     const dialogs: string[] = [];
     opened.page.on("dialog", (dialog) => { dialogs.push(dialog.type()); void dialog.dismiss(); });
+    await opened.page.getByRole("dialog", { name: "对话列表" }).getByRole("button", { name: "搜索会话" }).click();
     const search = opened.page.getByRole("searchbox", { name: "搜索会话" });
     await search.fill("second conversation");
     await expect(opened.page.locator(".conversation-item", { hasText: "第二标题" })).toBeVisible();
@@ -387,6 +394,7 @@ test("searches saved messages, renames and lists historical archived conversatio
     await composer.press("Enter");
     await expect(opened.page.getByTestId("conversation-menu")).toContainText("第一标题");
     await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.getByRole("dialog", { name: "对话列表" }).getByRole("button", { name: "搜索会话" }).click();
     const search = opened.page.getByRole("searchbox", { name: "搜索会话" });
     await search.fill("unique saved message");
     expect(await search.evaluate((input) => ({
@@ -430,6 +438,7 @@ test("searches saved messages, renames and lists historical archived conversatio
     await opened.page.getByTestId("conversation-menu").click();
     await expect(opened.page.getByText("已归档", { exact: true })).toHaveCount(0);
     await expect(opened.page.getByRole("button", { name: /^(归档|恢复) /, includeHidden: true })).toHaveCount(0);
+    await opened.page.getByRole("dialog", { name: "对话列表" }).getByRole("button", { name: "搜索会话" }).click();
     await opened.page.getByRole("searchbox", { name: "搜索会话" }).fill("unique saved message");
     await expect(opened.page.locator(".conversation-item")).toContainText("手动命名");
     await opened.page.locator(".conversation-item", { hasText: "手动命名" }).locator(".conversation-select").click();
@@ -736,6 +745,12 @@ test("contains a long conversation search error inside the menu", async () => {
     await opened.page.getByTestId("conversation-menu").click();
     const dialog = opened.page.locator(".conversation-dropdown");
     const notice = dialog.locator(".app-error-notice");
+    await expect(notice).toHaveCount(0);
+    await dialog.getByRole("button", { name: "搜索会话" }).click();
+    const search = dialog.getByRole("searchbox", { name: "搜索会话" });
+    await expect(search).toBeFocused();
+    await expect(notice).toHaveCount(0);
+    await search.fill("查询");
     await expect(notice).toContainText("搜索记录读取失败");
     await notice.getByText("错误详情").click();
     await expect(notice.locator(".app-error-detail")).toContainText("SEARCH_ERROR_");

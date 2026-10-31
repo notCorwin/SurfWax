@@ -37,7 +37,7 @@ test("offers editable task suggestions and keeps the redesigned panel usable in 
     }
     await opened.page.getByTestId("conversation-menu").click();
     const dialog = opened.page.getByRole("dialog");
-    await expect(dialog.getByRole("searchbox", { name: "搜索会话" })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "搜索会话" })).toBeVisible();
     await opened.page.screenshot({ animations: "disabled", path: test.info().outputPath("conversations-drawer.png") });
     await opened.page.keyboard.press("Escape");
     await expect(opened.page.getByTestId("conversation-menu")).toBeFocused();
@@ -47,7 +47,8 @@ test("offers editable task suggestions and keeps the redesigned panel usable in 
     const header = opened.page.locator(".app-header");
     const title = header.getByTestId("conversation-menu");
     await expect(header.getByRole("heading", { name: longTitle })).toBeVisible();
-    await expect(title).toHaveAttribute("title", longTitle);
+    await expect(title).toHaveAccessibleName(longTitle);
+    await expect(title).not.toHaveAttribute("title");
     await expect(header.getByText("就绪")).toHaveCount(0);
     for (const width of [320, 430]) {
       await opened.page.setViewportSize({ width, height: 820 });

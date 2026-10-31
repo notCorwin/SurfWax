@@ -48,6 +48,7 @@ test("shows one shared focus indicator across search, composer, settings and scr
 
       await opened.page.bringToFront();
       await opened.page.getByTestId("conversation-menu").click();
+      await opened.page.getByRole("dialog", { name: "对话列表" }).getByRole("button", { name: "搜索会话" }).click();
       const search = opened.page.getByRole("searchbox", { name: "搜索会话" });
       const searchGroup = opened.page.getByRole("dialog", { name: "对话列表" }).locator('[data-slot="input-group"]');
       await expectFocus(opened.page, search, searchGroup, color);

@@ -46,6 +46,8 @@ p {
   justify-content: flex-start;
 }
 
+.conversation-trigger[data-state="open"] { background: var(--surface-hover); }
+
 .conversation-trigger span {
   min-width: 0;
   overflow: hidden;
@@ -54,10 +56,19 @@ p {
 }
 
 .conversation-dropdown {
-  width: calc(100vw - var(--spacing) * 6);
+  width: min(calc(var(--spacing) * 80), calc(100vw - var(--spacing) * 6));
   max-height: min(calc(var(--spacing) * 96), var(--radix-popover-content-available-height));
-  border-radius: var(--radius-xl);
+  border-radius: var(--radius-md);
   overscroll-behavior: contain;
+}
+
+.conversation-dropdown-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-left: calc(var(--spacing) * 3);
+  color: var(--muted-foreground);
+  font-size: var(--type-xs);
 }
 
 .conversation-dropdown [data-slot="input-group"] {
@@ -357,7 +368,7 @@ p {
 }
 
 /* Panel layouts consume the shared material and typography tokens. */
-.conversation-trigger { height: calc(var(--spacing) * 9); padding: 0; gap: calc(var(--spacing) * 2); font-size: var(--type-body); font-weight: inherit; color: var(--foreground); }
+.conversation-trigger { height: calc(var(--spacing) * 9); padding-inline: calc(var(--spacing) * 2); gap: calc(var(--spacing) * 2); font-size: var(--type-body); font-weight: inherit; color: var(--foreground); }
 .conversation-trigger > span { max-width: 100%; }
 .conversation-item { min-height: calc(var(--spacing) * 10); }
 .conversation-select { height: auto; min-height: calc(var(--spacing) * 10); }
