@@ -12,6 +12,8 @@ import { dispatchFixture, dispatchScore } from "./evaluation/dispatch-fixture";
 import { uploadFixture, uploadScore } from "./evaluation/upload-fixture";
 import { pointerFixture, pointerInteractionScore, pointerScore } from "./evaluation/pointer-fixture";
 import { recoveryFixture, recoveryScore } from "./evaluation/recovery-fixture";
+import { multitabFixture, multitabScore } from "./evaluation/multitab-fixture";
+import { manifestFixture, manifestScore } from "./evaluation/manifest-fixture";
 import { trackFixtureRequests } from "./evaluation/network-quiescence";
 import { trackServerResponses, type ServerActivity } from "./evaluation/server-quiescence";
 import { waitForEvaluationQuiescence } from "./evaluation/quiescence";
@@ -31,12 +33,12 @@ test("@real-model browser task", async () => {
   const seed = Number(process.env.SURFWAX_EVAL_SEED ?? 17);
   if (!Number.isSafeInteger(seed) || seed < 0 || seed > 999999) throw new Error("Invalid seed");
   const scenario = process.env.SURFWAX_EVAL_SCENARIO ?? "cross-frame-order";
-  if (!["cross-frame-order", "claims-queue", "sequence-editor", "dispatch-review", "dossier-upload", "pointer-drag", "uncertain-write"].includes(scenario)) throw new Error("Invalid scenario");
+  if (!["cross-frame-order", "claims-queue", "sequence-editor", "dispatch-review", "dossier-upload", "pointer-drag", "uncertain-write", "window-transfer", "long-manifest"].includes(scenario)) throw new Error("Invalid scenario");
   const service = seed % 2 ? "express" : "economy";
   const order = `ORDER-${seed}`;
   const started = Date.now();
   const proxy = await modelProxy(upstream, key);
-  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | Awaited<ReturnType<typeof uploadFixture>> | Awaited<ReturnType<typeof pointerFixture>> | Awaited<ReturnType<typeof recoveryFixture>> | undefined;
+  let fixture: Awaited<ReturnType<typeof orderFixture>> | Awaited<ReturnType<typeof claimsFixture>> | Awaited<ReturnType<typeof sequenceFixture>> | Awaited<ReturnType<typeof dispatchFixture>> | Awaited<ReturnType<typeof uploadFixture>> | Awaited<ReturnType<typeof pointerFixture>> | Awaited<ReturnType<typeof recoveryFixture>> | Awaited<ReturnType<typeof multitabFixture>> | Awaited<ReturnType<typeof manifestFixture>> | undefined;
   let opened: Awaited<ReturnType<typeof openExtension>> | undefined;
   let events: any[] = [], outcome = "setup_failed", businessVerified = false, interactionVerified: boolean | null = null;
   let lifecycleVerified = false;
@@ -49,7 +51,13 @@ test("@real-model browser task", async () => {
     let prompt: string;
     let grade: () => boolean;
     let gradeInteraction: (() => boolean) | undefined;
-    if (scenario === "uncertain-write") {
+    if (scenario === "long-manifest") {
+      const manifest = await manifestFixture(seed); fixture = manifest; prompt = manifest.prompt;
+      grade = () => manifestScore(manifest.evidence());
+    } else if (scenario === "window-transfer") {
+      const transfer = await multitabFixture(seed); fixture = transfer; prompt = transfer.prompt;
+      grade = () => multitabScore(transfer.evidence());
+    } else if (scenario === "uncertain-write") {
       const recovery = await recoveryFixture(seed); fixture = recovery; prompt = recovery.prompt;
       grade = () => recoveryScore(recovery.evidence());
     } else if (scenario === "pointer-drag") {

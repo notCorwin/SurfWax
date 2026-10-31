@@ -78,6 +78,41 @@ test("real-model entry accepts recovery after the intentional response interrupt
   }
 });
 
+for (const scenario of [
+  { name: "window-transfer", code: `
+    const launcher = page.frameLocator('iframe[title="Window launcher"]');
+    const waiting = page.waitForEvent('popup');
+    await launcher.getByRole('button', {name:'Open source window'}).click();
+    const source = await waiting;
+    await launcher.getByRole('button', {name:'Open destination window'}).click();
+    let tab; for (let i = 0; i < 100; i++) { tab = (await browser.tabs.list()).find(item => item.url && item.url.includes('/window/destination')); if (tab) break; await sleep(50); }
+    if (!tab) throw new Error('Destination window missing');
+    const destination = await browser.page(tab.id);
+    await destination.getByLabel('Transfer code').fill(await source.locator('strong').textContent());
+    await destination.getByRole('button', {name:'Submit transfer'}).click(); return 'done';` },
+  { name: "long-manifest", code: `
+    const desk = page.frameLocator('iframe[title="Manifest desk"]'), current = desk.locator('#page'), pages = [];
+    await current.filter({hasText:'Page 1 of 20'}).waitFor();
+    for (let index = 1; index <= 20; index++) {
+      pages.push(await desk.getByRole('list', {name:'Tracking codes'}).innerText());
+      if (index < 20) { await desk.getByRole('button', {name:'Next page'}).click(); await current.filter({hasText:'Page ' + (index + 1) + ' of 20'}).waitFor(); }
+    }
+    await desk.getByLabel('Complete manifest').fill(pages.join('\\n'));
+    await desk.getByRole('button', {name:'Submit manifest'}).click(); return 'done';` },
+]) test(`real-model entry grades the local scripted ${scenario.name} level`, async () => {
+  test.setTimeout(120_000);
+  const provider = await startProvider([commandResponse("execute_program", { code: scenario.code, timeoutMs: 60_000 }, "local-level"), textResponse("Done"), textResponse("Title")]);
+  const directory = await mkdtemp(resolve(tmpdir(), "surfwax-eval-harness-"));
+  try {
+    await runHarness(provider.baseURL, directory, scenario.name);
+    expect(await readReport(directory)).toMatchObject({ scenario: scenario.name, outcome: "conversation.finished", businessVerified: true,
+      networkSettled: true, toolsWithExactlyOneTerminal: true });
+  } finally {
+    await closeServer(provider.server);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("real-model entry retains a failed scripted run without tool calls", async () => {
   test.setTimeout(120_000);
   const provider = await startProvider([textResponse("Done"), textResponse("Order")]);

@@ -57,6 +57,11 @@ export async function modelProxy(upstreamBase: string, key: string): Promise<{ b
     if (req.method === "GET" && req.url === "/v1/models") { res.writeHead(200, { "content-type": "application/json" }).end('{"data":[]}'); return; }
     if (req.method !== "POST" || req.url !== "/v1/chat/completions") { res.writeHead(404).end(); return; }
     if (req.headers.authorization !== `Bearer ${token}`) { res.writeHead(401).end(); return; }
+    const upstreamAbort = new AbortController();
+    // Downstream cancellation can happen while reading the request body,
+    // waiting for upstream headers, or forwarding the upstream stream.
+    req.once("aborted", () => upstreamAbort.abort());
+    res.once("close", () => { if (!res.writableFinished) upstreamAbort.abort(); });
     try {
       const chunks: Buffer[] = [];
       for await (const chunk of req) chunks.push(Buffer.from(chunk));
@@ -67,8 +72,11 @@ export async function modelProxy(upstreamBase: string, key: string): Promise<{ b
       const destination = new URL(`${upstream.pathname.replace(/\/$/, "")}/chat/completions`, upstream.origin);
       const response = await fetch(destination, { method: "POST", redirect: "manual", headers: {
         authorization: `Bearer ${key}`, "content-type": "application/json",
-      }, body });
+      }, body, signal: upstreamAbort.signal });
       measured.evidence.responseStatus = response.status;
+      if (upstreamAbort.signal.aborted || res.destroyed) return;
+      let upstreamComplete = false;
+      res.once("finish", () => { measured.evidence.responseComplete = upstreamComplete && !upstreamAbort.signal.aborted; });
       res.writeHead(response.status, { "content-type": response.headers.get("content-type") ?? "application/json" });
       if (response.body) {
         const stream = Readable.fromWeb(response.body as any);
@@ -83,11 +91,11 @@ export async function modelProxy(upstreamBase: string, key: string): Promise<{ b
             if (buffer.length > 2_000_000) buffer = "";
           } else if (buffer.length > 2_000_000) buffer = "";
         });
-        stream.on("end", () => { if (!sse) inspect(buffer); else if (buffer.startsWith("data:")) inspect(buffer.slice(5).trim()); measured.evidence.responseComplete = true; });
-        stream.on("error", () => res.destroy());
+        stream.on("end", () => { if (!sse) inspect(buffer); else if (buffer.startsWith("data:")) inspect(buffer.slice(5).trim()); upstreamComplete = true; });
+        stream.on("error", () => { if (!res.destroyed) res.destroy(); });
         stream.pipe(res);
-      } else { measured.evidence.responseComplete = true; res.end(); }
-    } catch { if (!res.headersSent) res.writeHead(502); res.end(); }
+      } else { upstreamComplete = true; res.end(); }
+    } catch { if (!res.destroyed) { if (!res.headersSent) res.writeHead(502); res.end(); } }
   });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
   const address = server.address();
