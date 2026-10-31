@@ -38,8 +38,6 @@ test("offers editable task suggestions and keeps the redesigned panel usable in 
     await opened.page.getByTestId("conversation-menu").click();
     const dialog = opened.page.getByRole("dialog");
     await expect(dialog.getByRole("searchbox", { name: "搜索会话" })).toBeVisible();
-    expect(await dialog.evaluate((element) => ({ background: getComputedStyle(element).backgroundColor, blur: getComputedStyle(element).backdropFilter })))
-      .toEqual({ background: "rgb(32, 32, 32)", blur: "blur(32px) saturate(0.8)" });
     await opened.page.screenshot({ animations: "disabled", path: test.info().outputPath("conversations-drawer.png") });
     await opened.page.keyboard.press("Escape");
     await expect(opened.page.getByTestId("conversation-menu")).toBeFocused();

@@ -257,14 +257,10 @@ summary,
   --surface-opacity: 0.045;
   --surface-hover-opacity: 0.075;
   --surface-selected-opacity: 0.11;
-  --surface-blur: 16px;
-  --overlay-blur: 32px;
   --surface-soft: color-mix(in srgb, var(--foreground) calc(var(--surface-opacity) * 100%), transparent);
   --surface-hover: color-mix(in srgb, var(--foreground) calc(var(--surface-hover-opacity) * 100%), transparent);
   --surface-selected: color-mix(in srgb, var(--brand) calc(var(--surface-selected-opacity) * 100%), transparent);
   --surface-stroke: color-mix(in srgb, var(--foreground) 10%, transparent);
-  --surface-shadow: 0 2px 8px color-mix(in srgb, var(--foreground) 3%, transparent), 0 12px 32px color-mix(in srgb, var(--foreground) 3%, transparent);
-  --material-overlay: var(--popover);
   --radius-panel: 1.25rem;
 }
 @media (prefers-color-scheme: dark) {
@@ -302,16 +298,18 @@ summary,
   background: var(--surface-soft);
   color: var(--foreground);
   border-color: var(--surface-stroke);
-  backdrop-filter: blur(var(--surface-blur));
 }
-[data-slot="bubble"][data-variant="ghost"] [data-slot="bubble-content"] { background: transparent; backdrop-filter: none; }
+[data-slot="bubble"][data-variant="ghost"] [data-slot="bubble-content"] { background: transparent; }
 [data-slot="dialog-content"], [data-slot="alert-dialog-content"], [data-slot="popover-content"],
 [data-slot="select-content"], [data-slot="tooltip-content"],
 .search-combobox-content, [data-streamdown="table-fullscreen"] {
-  background: var(--material-overlay);
+  background: var(--popover);
   color: var(--popover-foreground);
-  backdrop-filter: blur(var(--overlay-blur)) saturate(0.8);
   border-color: var(--surface-stroke);
-  box-shadow: var(--surface-shadow);
+  box-shadow: var(--shadow-md);
 }
-[data-slot="dialog-overlay"], [data-slot="alert-dialog-overlay"] { backdrop-filter: blur(var(--surface-blur)); }
+@media (prefers-color-scheme: dark) {
+  [data-slot="dialog-content"], [data-slot="alert-dialog-content"], [data-slot="popover-content"],
+  [data-slot="select-content"], [data-slot="tooltip-content"],
+  .search-combobox-content, [data-streamdown="table-fullscreen"] { box-shadow: none; }
+}

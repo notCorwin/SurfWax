@@ -1,17 +1,10 @@
 /* Shared interaction motion tokens, used by the extension and injected shadow roots. */
 :root, :host {
-  --guard-color-start: #6366f1;
-  --guard-color-mid: #22d3ee;
-  --guard-color-end: #a855f7;
+  --guard-color: #696969;
   --guard-breath-cycle: 2.4s;
   --guard-opacity-min: 0.04;
   --guard-opacity-max: 0.22;
   --guard-opacity-rest: 0.12;
-  --guard-glow-size: 36px;
-  --guard-glow-color: rgb(99 102 241 / 0.45);
-  --guard-glow-opacity-min: 0.35;
-  --guard-glow-opacity-max: 1;
-  --guard-glow-opacity-rest: 0.65;
 }
 .guard-visual {
   position: fixed;
@@ -22,26 +15,13 @@
   content: "";
   position: fixed;
   inset: 0;
-  background: linear-gradient(135deg, var(--guard-color-start), var(--guard-color-mid), var(--guard-color-end));
+  background: var(--guard-color);
   opacity: var(--guard-opacity-rest);
   pointer-events: none;
   animation: surf-wax-guard-breathe var(--guard-breath-cycle) ease-in-out infinite;
-}
-.guard-visual::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  box-shadow: inset 0 0 var(--guard-glow-size) var(--guard-glow-color);
-  opacity: var(--guard-glow-opacity-rest);
-  pointer-events: none;
-  animation: surf-wax-guard-glow-breathe var(--guard-breath-cycle) ease-in-out infinite;
 }
 @keyframes surf-wax-guard-breathe {
   0%, 100% { opacity: var(--guard-opacity-min); }
   50% { opacity: var(--guard-opacity-max); }
 }
-@keyframes surf-wax-guard-glow-breathe {
-  0%, 100% { opacity: var(--guard-glow-opacity-min); }
-  50% { opacity: var(--guard-glow-opacity-max); }
-}
-@media (prefers-reduced-motion: reduce) { .guard-visual::before, .guard-visual::after { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .guard-visual::before { animation: none; } }

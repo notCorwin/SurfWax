@@ -1,5 +1,5 @@
 import { usePanelRuntime, usePanelState } from "@/sidepanel/runtime-view";
-import { CodeXmlIcon, MessageSquarePlusIcon, SettingsIcon, WavesIcon, SlidersHorizontalIcon, LoaderCircleIcon } from "lucide-react";
+import { CodeXmlIcon, MessageSquarePlusIcon, SettingsIcon, SlidersHorizontalIcon, LoaderCircleIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ConversationMenu } from "../components/chat/thread-list";
 import { Thread } from "../components/chat/thread";
@@ -58,7 +58,7 @@ function Header({ conversation = false, logger }: { conversation?: boolean; logg
   return <><a className="skip-link" href="#chat-content">跳转到内容</a>
     <header className="app-header">
       <div className="flex min-w-0 items-center gap-2.5">
-        <WavesIcon className="brand-mark size-6 shrink-0" aria-hidden="true" />
+        <img src="/icons/icon-32.png" className="size-6 shrink-0" alt="" />
         <h1 translate="no">Surf Wax</h1>
       </div>
       <nav aria-label="侧栏工具" className="flex shrink-0 items-center gap-0.5">
@@ -109,8 +109,8 @@ export function App() {
         <Empty data-testid="config-required-state" className="welcome">
           <EmptyHeader>
             <EmptyMedia className="welcome-symbol">{session.configReady ? <SlidersHorizontalIcon aria-hidden="true" /> : <LoaderCircleIcon className="animate-spin" aria-hidden="true" />}</EmptyMedia>
-            <EmptyTitle><h2>{session.configReady ? "让浏览器成为你的助手" : "正在准备对话…"}</h2></EmptyTitle>
-            <EmptyDescription>{session.configReady ? "连接你常用的模型，就可以开始阅读页面、整理信息和执行任务。" : "正在读取模型配置…"}</EmptyDescription>
+            <EmptyTitle><h2>{session.configReady ? "配置模型" : "正在准备对话…"}</h2></EmptyTitle>
+            <EmptyDescription>{session.configReady ? "连接模型后即可阅读页面、整理信息和执行任务" : "正在读取模型配置…"}</EmptyDescription>
           </EmptyHeader>
           <EmptyContent>
             {session.configReady && <Button onClick={() => void chrome.runtime.openOptionsPage()}><SlidersHorizontalIcon data-icon="inline-start" />配置模型</Button>}
