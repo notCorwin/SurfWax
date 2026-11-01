@@ -5,6 +5,7 @@ import { abortError, axValue, delay, imageSize, isTransientNavigationError, keyb
 import { diffSnapshot, paginateSnapshot, type SnapshotItem, type SnapshotPosition } from "./snapshot-pagination";
 import { renderSnapshotNode, type SnapshotNode, type SnapshotStateName } from "./snapshot-render";
 import { snapshotDomSupplement, type SnapshotDomEvidence } from "./snapshot-dom";
+import { createSnapshotDomIndex } from "./snapshot-dom-index";
 import { sameDOMSnapshot } from "./snapshot-consistency";
 import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
 import { projectTextPaint, sameTextPaintCandidates, TEXT_PAINT_CACHE_LOOKUP_SOURCE, TEXT_PAINT_CACHE_REGISTER_SOURCE, type TextPaintEvidence } from "./snapshot-text-paint";
@@ -41,7 +42,7 @@ type FrameDocument = { session: Session; frame: FrameRefRecord; promise: Promise
 type FrameListSnapshot = { id: string; session: Session; generation: number; revision: number; conversationId?: string; runId?: string; frames: Array<Record<string, unknown>> };
 type SnapshotLine = { id: string; line: string; ref?: string; node?: SnapshotNode };
 type InspectSnapshot = {
-  id: string; session: Session; generation: number; conversationId?: string; runId?: string;
+  id: string; session: Session; generation: number; frameRevision: number; conversationId?: string; runId?: string;
   record: ObservationRecord; source: SnapshotItem[]; mode: "full" | "delta"; reset?: string;
   expected?: SnapshotPosition; eligibleForBaseline: boolean;
 };
@@ -63,6 +64,7 @@ type ObservationRecord = {
   viewport: { x: number; y: number; width: number; height: number; scale: number };
   image?: { width: number; height: number; scale: number; origin?: { x: number; y: number } };
   scopeKey?: string;
+  regionIdentity?: string;
   incomplete?: boolean;
 };
 type Session = {
@@ -872,7 +874,7 @@ export class AutomationRuntime {
         const match = /^([a-f0-9-]+):(\d+):(\d+)$/.exec(options.cursor);
         if (!match || !Number.isSafeInteger(Number(match[2])) || !Number.isSafeInteger(Number(match[3]))) throw automationError("stale-observation", { reason: "invalid-cursor" });
         const snapshot = this.inspectionSnapshots.get(match[1]!);
-        if (!snapshot || snapshot.session !== session || snapshot.generation !== generation || snapshot.conversationId !== conversationId || snapshot.runId !== runId
+        if (!snapshot || snapshot.session !== session || snapshot.generation !== generation || snapshot.frameRevision !== session.frameRevision || snapshot.conversationId !== conversationId || snapshot.runId !== runId
           || this.observations.get(snapshot.id) !== snapshot.record)
           throw automationError("stale-observation", { reason: "expired-or-mismatched-cursor" });
         saved = snapshot;
@@ -886,7 +888,9 @@ export class AutomationRuntime {
           throw automationError("stale-observation", { observationId: options.since, reason: "document-or-scope-changed" });
         const captured = await this.captureSnapshot(session, region);
         guard();
+        if (captured.frameRevision !== session.frameRevision) throw automationError("stale-observation", { reason: "frame-tree-changed-during-inspection" });
         if (previous && previous.documentId !== session.generation) throw automationError("stale-observation", { observationId: options.since, reason: "document-changed-during-inspection" });
+        if (previous && previous.regionIdentity !== captured.regionIdentity) throw automationError("stale-observation", { observationId: options.since, reason: "region-identity-changed" });
         const fields = options.fields ?? ["text", "state", "ref", "actions"];
         const lines: SnapshotLine[] = captured.lines.filter(({ node, line }) => options.depth === undefined || (node?.depth ?? (line.match(/^ */)?.[0].length ?? 0) / 2) <= options.depth)
           .map(({ id, line, node }) => {
@@ -899,6 +903,7 @@ export class AutomationRuntime {
           });
         const viewport = await this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})") as ObservationRecord["viewport"];
         guard();
+        if (captured.frameRevision !== session.frameRevision) throw automationError("stale-observation", { reason: "frame-tree-changed-during-inspection" });
         const observationId = crypto.randomUUID();
         const baseline = previous && !previous.incomplete ? previous : undefined;
         const changes = baseline ? diffSnapshot(baseline.lines, lines) : undefined;
@@ -908,7 +913,7 @@ export class AutomationRuntime {
         position = { index, charOffset: 0 };
         const record: ObservationRecord = { session, observationId, tabId, documentId: generation, ...captured, lines, viewport, scopeKey, incomplete: true };
         this.rememberObservation(record);
-        saved = { id: observationId, session, generation, conversationId, runId, record, source, mode: changes ? "delta" : "full",
+        saved = { id: observationId, session, generation, frameRevision: captured.frameRevision, conversationId, runId, record, source, mode: changes ? "delta" : "full",
           ...(previous?.incomplete ? { reset: "previous-output-truncated" } : {}), expected: position, eligibleForBaseline: index === 0 };
         this.inspectionSnapshots.set(saved.id, saved);
         while (this.inspectionSnapshots.size > 32) this.inspectionSnapshots.delete(this.inspectionSnapshots.keys().next().value!);
@@ -1667,6 +1672,7 @@ export class AutomationRuntime {
               candidates: [{ backendNodeId: item.backendNodeId, role: item.role, name: item.name, debuggee, ref: locator.spec.ref }], group };
           } else {
             const scoped = await this.locatorScope(session, locator.spec);
+            try {
             guard(); debuggee = scoped.debuggee;
             if ((!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) || this.hasSemanticQueries(scoped.spec)) {
               const matches: Candidate[] = !scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)
@@ -1699,6 +1705,7 @@ export class AutomationRuntime {
               if (!Number.isSafeInteger(total) || total < 0) throw automationError("search-unavailable", { reason: "invalid-result-count" });
               snapshot = { id, tabId, generation, session, key, conversationId, runId, debuggee, total, arrayId, group };
             }
+            } finally { scoped.dispose(); }
           }
           this.searches.set(id, snapshot);
           while (this.searches.size > 32) this.releaseSearch(this.searches.values().next().value!);
@@ -1882,10 +1889,21 @@ export class AutomationRuntime {
     const ref = session.refs.get(refId);
     if (!ref || ref.generation !== session.generation) throw automationError("stale-ref", { ref: refId, reason: "expired-document" });
     this.touchRef(session, refId);
+    const signal = this.context.signal;
+    let objectId: string | undefined, retained = false, released = false;
+    const release = () => {
+      if (!objectId || released) return;
+      released = true; this.objectDebuggees.delete(objectId);
+      void this.options.command(ref.debuggee, "Runtime.releaseObject", { objectId }).catch(() => undefined);
+    };
+    signal?.addEventListener("abort", release, { once: true });
+    session.lifetime.signal.addEventListener("abort", release, { once: true });
     try {
       const response = await this.options.command(ref.debuggee, "DOM.resolveNode", { backendNodeId: ref.backendNodeId, objectGroup: "surf-wax-automation" });
-      const objectId = response.object?.objectId;
+      objectId = response.object?.objectId;
       if (typeof objectId !== "string" || !objectId) throw automationError("ref-unavailable", { ref: refId, reason: "missing-object-id" });
+      throwIfAborted(signal);
+      if (session.lifetime.signal.aborted) throw abortError();
       const connected = await this.options.command(ref.debuggee, "Runtime.callFunctionOn", { objectId, functionDeclaration: "function(){ return this.isConnected; }", returnByValue: true });
       if (connected.exceptionDetails) throw new Error(connected.exceptionDetails.exception?.description || connected.exceptionDetails.text || "Could not inspect node connection");
       if (connected.result?.value === false) throw automationError("detached", { ref: refId, reason: "node-removed" });
@@ -1903,14 +1921,22 @@ export class AutomationRuntime {
       }
       if (!identity) throw automationError("ref-unavailable", { ref: refId, reason: "identity-unavailable" });
       if (identity.role !== ref.role || identity.name !== ref.name) throw automationError("stale-ref", { ref: refId, reason: "visible-identity-changed" });
+      throwIfAborted(signal);
+      if (session.lifetime.signal.aborted) throw abortError();
       if (this.sessions.get(session.tabId) !== session || session.generation !== ref.generation || session.refs.get(refId) !== ref)
         throw automationError("stale-ref", { ref: refId, reason: "document-or-reference-changed" });
       this.objectDebuggees.set(objectId, ref.debuggee);
+      retained = true;
       return { ref, objectId };
     } catch (error) {
+      throwIfAborted(signal);
       if (error && typeof error === "object" && "name" in error && error.name === "AbortError") throw error;
       if (isDetachedNodeError(error) && !(error instanceof AutomationError)) throw automationError("detached", { ref: refId, reason: "node-removed" });
       throw error;
+    } finally {
+      signal?.removeEventListener("abort", release);
+      session.lifetime.signal.removeEventListener("abort", release);
+      if (!retained) release();
     }
   }
 
@@ -1941,10 +1967,20 @@ export class AutomationRuntime {
       return { objectId, backendNodeId, ...(executionContextId === undefined ? {} : { executionContextId }) };
     };
     const executionContextId = rootObjectId ? [...this.frameDocuments.values()].find((frame) => frame.objectId === rootObjectId)?.executionContextId : undefined;
-    const initial = await describe(documentId, executionContextId);
     const unique = (nodes: LocatedNode[]) => {
       const seen = new Set<number>();
       return nodes.filter((node) => !seen.has(node.backendNodeId) && Boolean(seen.add(node.backendNodeId)));
+    };
+    // Every concurrently requested handle must settle before the ownership
+    // set is released, including when an earlier request fails.
+    const settleOwned = async <T>(requests: Array<Promise<T>>): Promise<T[]> => {
+      let failure: unknown, failed = false;
+      const results = await Promise.allSettled(requests.map((request) => request.catch((error) => {
+        if (!failed) { failed = true; failure = error; }
+        throw error;
+      })));
+      if (failed) throw failure;
+      return results.map((result) => (result as PromiseFulfilledResult<T>).value);
     };
     const domStep = async (root: LocatedNode, query: Query): Promise<LocatedNode[]> => {
       const result = await this.resolveLocator(debuggee, { queries: [query] }, "nodes", root.objectId, undefined, session);
@@ -1954,7 +1990,7 @@ export class AutomationRuntime {
         const properties = await this.options.command(debuggee, "Runtime.getProperties", { objectId: arrayId, ownProperties: true });
         const entries = (properties.result ?? []).filter((property: any) => /^(0|[1-9]\d*)$/.test(property.name))
           .sort((a: any, b: any) => Number(a.name) - Number(b.name));
-        return await Promise.all(entries.map((property: any) => {
+        return await settleOwned(entries.map((property: any) => {
           if (!property.value?.objectId) throw automationError("state-unavailable", { reason: "missing-node-object" });
           owned.add(property.value.objectId);
           return describe(property.value.objectId, root.executionContextId);
@@ -1965,7 +2001,7 @@ export class AutomationRuntime {
     };
     const semanticStep = async (root: LocatedNode, query: Query): Promise<LocatedNode[]> => {
       const matches = await this.resolveAccessibility(debuggee, { queries: [query] }, root.objectId);
-      return (await Promise.all(matches.filter((candidate) => candidate.backendNodeId && candidate.backendNodeId !== root.backendNodeId).map(async (candidate) => {
+      return (await settleOwned(matches.filter((candidate) => candidate.backendNodeId && candidate.backendNodeId !== root.backendNodeId).map(async (candidate) => {
         const response = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: candidate.backendNodeId, objectGroup: "surf-wax-automation",
           ...(root.executionContextId === undefined ? {} : { executionContextId: root.executionContextId }) });
         const objectId = response.object?.objectId;
@@ -2047,7 +2083,7 @@ export class AutomationRuntime {
           continue;
         }
         if (query.kind === "frame" || query.kind === "frameRef") throw automationError("unsupported-target", { reason: "frame-inside-filter" });
-        const groups = await Promise.all(current.map((node) => query.kind === "role" ? semanticStep(node, query) : domStep(node, query)));
+        const groups = await settleOwned(current.map((node) => query.kind === "role" ? semanticStep(node, query) : domStep(node, query)));
         current = unique(groups.flat());
       }
       await guardScope();
@@ -2061,6 +2097,7 @@ export class AutomationRuntime {
     };
     let results: LocatedNode[] = [];
     try {
+      const initial = await describe(documentId, executionContextId);
       results = await walk(initial, spec);
       return results;
     } finally {
@@ -2074,14 +2111,20 @@ export class AutomationRuntime {
 
   private async resolveMetadata(session: Session, spec: LocatorSpec): Promise<Candidate[]> {
     if (spec.ref && standaloneRef(spec)) {
-      const { ref } = await this.resolveRef(session, spec.ref);
-      return [{ role: ref.role, name: ref.name, ref: spec.ref }];
+      const { ref, objectId } = await this.resolveRef(session, spec.ref);
+      try { return [{ role: ref.role, name: ref.name, ref: spec.ref }]; }
+      finally {
+        this.objectDebuggees.delete(objectId);
+        void this.options.command(ref.debuggee, "Runtime.releaseObject", { objectId }).catch(() => undefined);
+      }
     }
     const scoped = await this.locatorScope(session, spec);
-    if (!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) return this.resolveAccessibility(scoped.debuggee, scoped.spec, scoped.rootObjectId);
-    if (this.hasSemanticQueries(scoped.spec)) return (await this.resolveSemantic(session, scoped.debuggee, scoped.spec, scoped.rootObjectId, false))
-      .map((node) => ({ role: node.role ?? "", name: node.name ?? "", backendNodeId: node.backendNodeId, debuggee: scoped.debuggee }));
-    return (await this.resolveLocator(scoped.debuggee, scoped.spec, true, scoped.rootObjectId, undefined, session))?.value as Candidate[];
+    try {
+      if (!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) return await this.resolveAccessibility(scoped.debuggee, scoped.spec, scoped.rootObjectId);
+      if (this.hasSemanticQueries(scoped.spec)) return (await this.resolveSemantic(session, scoped.debuggee, scoped.spec, scoped.rootObjectId, false))
+        .map((node) => ({ role: node.role ?? "", name: node.name ?? "", backendNodeId: node.backendNodeId, debuggee: scoped.debuggee }));
+      return (await this.resolveLocator(scoped.debuggee, scoped.spec, true, scoped.rootObjectId, undefined, session))?.value as Candidate[];
+    } finally { scoped.dispose(); }
   }
 
   private async resolveOne(session: Session, spec: LocatorSpec): Promise<string> {
@@ -2106,6 +2149,9 @@ export class AutomationRuntime {
       if (error instanceof AutomationError && error.code === "frame-not-found") return undefined;
       throw error;
     }
+    let resolvedObject: string | undefined;
+    try {
+    const resolve = async (): Promise<string | undefined> => {
     if (!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) {
       const matches = await this.resolveAccessibility(scoped.debuggee, scoped.spec, scoped.rootObjectId);
       this.assertStrict(spec, matches);
@@ -2124,16 +2170,27 @@ export class AutomationRuntime {
     }
     if (this.hasSemanticQueries(scoped.spec)) {
       const matches = await this.resolveSemantic(session, scoped.debuggee, scoped.spec, scoped.rootObjectId);
-      this.assertStrict(spec, matches.map((node) => ({ role: node.role ?? "", name: node.name ?? "" })));
+      try { this.assertStrict(spec, matches.map((node) => ({ role: node.role ?? "", name: node.name ?? "" }))); }
+      catch (error) {
+        for (const { objectId } of matches) {
+          this.objectDebuggees.delete(objectId);
+          void this.options.command(scoped.debuggee, "Runtime.releaseObject", { objectId }).catch(() => undefined);
+        }
+        throw error;
+      }
       return matches[0]?.objectId;
     }
     return this.resolveDomOnce(session, scoped.debuggee, scoped.spec, scoped.rootObjectId);
+    };
+    resolvedObject = await resolve(); return resolvedObject;
+    } finally { scoped.dispose(resolvedObject); }
   }
 
   private async resolveDomOnce(session: Session, debuggee: Debuggee, spec: LocatorSpec, rootObjectId?: string, observe?: (matches: Candidate[]) => void): Promise<string | undefined> {
     const result = await this.resolveLocator(debuggee, spec, "nodes", rootObjectId, undefined, session);
     const arrayId = result?.objectId;
     if (!arrayId) throw automationError("state-unavailable", { reason: "missing-result-array" });
+    let objectId: string | undefined, retained = false;
     try {
       throwIfAborted(this.context.signal);
       const length = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: arrayId,
@@ -2153,9 +2210,9 @@ export class AutomationRuntime {
       if (!count) { observe?.([]); return undefined; }
       const first = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: arrayId,
         functionDeclaration: "function(){return this[0]}", returnByValue: false, objectGroup: "surf-wax-automation" });
+      objectId = first.result?.objectId;
       if (first.exceptionDetails) throw new Error(first.exceptionDetails.exception?.description || first.exceptionDetails.text);
       throwIfAborted(this.context.signal);
-      const objectId = first.result?.objectId;
       if (!objectId) throw automationError("state-unavailable", { reason: "missing-node-object" });
       this.objectDebuggees.set(objectId, debuggee);
       if (observe) {
@@ -2168,8 +2225,12 @@ export class AutomationRuntime {
           throw automationError("state-unavailable", { reason: "missing-node-metadata" });
         observe([value]);
       }
-      return objectId;
+      retained = true; return objectId;
     } finally {
+      if (objectId && !retained) {
+        this.objectDebuggees.delete(objectId);
+        void this.options.command(debuggee, "Runtime.releaseObject", { objectId }).catch(() => undefined);
+      }
       void this.options.command(debuggee, "Runtime.releaseObject", { objectId: arrayId }).catch(() => undefined);
     }
   }
@@ -2181,6 +2242,9 @@ export class AutomationRuntime {
       return objectId;
     }
     const scoped = await this.locatorScope(session, spec, immediate);
+    let resolvedObject: string | undefined;
+    try {
+    const resolve = async (): Promise<string | undefined> => {
     if (!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) {
       const matches = await this.resolveAccessibility(scoped.debuggee, scoped.spec, scoped.rootObjectId);
       observe?.(matches);
@@ -2201,11 +2265,20 @@ export class AutomationRuntime {
     if (this.hasSemanticQueries(scoped.spec)) {
       const matches = await this.resolveSemantic(session, scoped.debuggee, scoped.spec, scoped.rootObjectId);
       const candidates = matches.map((node) => ({ role: node.role ?? "", name: node.name ?? "", backendNodeId: node.backendNodeId, debuggee: scoped.debuggee }));
-      observe?.(candidates);
-      this.assertStrict(spec, candidates);
+      try { observe?.(candidates); this.assertStrict(spec, candidates); }
+      catch (error) {
+        for (const { objectId } of matches) {
+          this.objectDebuggees.delete(objectId);
+          void this.options.command(scoped.debuggee, "Runtime.releaseObject", { objectId }).catch(() => undefined);
+        }
+        throw error;
+      }
       return matches[0]?.objectId;
     }
     return this.resolveDomOnce(session, scoped.debuggee, scoped.spec, scoped.rootObjectId, observe);
+    };
+    resolvedObject = await resolve(); return resolvedObject;
+    } finally { scoped.dispose(resolvedObject); }
   }
 
   private assertStrict(spec: LocatorSpec, matches: Candidate[]): void {
@@ -2305,15 +2378,36 @@ export class AutomationRuntime {
     return objectId;
   }
 
-  private async locatorScope(session: Session, spec: LocatorSpec, immediate = false): Promise<{ debuggee: Debuggee; spec: LocatorSpec; rootObjectId?: string; rootIsElement?: boolean }> {
+  private async locatorScope(session: Session, spec: LocatorSpec, immediate = false): Promise<{ debuggee: Debuggee; spec: LocatorSpec; rootObjectId?: string; rootIsElement?: boolean; dispose: (transferObjectId?: string) => void }> {
     let debuggee = session.debuggee;
     let scoped = spec;
     let rootObjectId: string | undefined;
     let rootIsElement = false;
+    const signal = this.context.signal;
+    let ownedRoot: { objectId: string; debuggee: Debuggee } | undefined;
+    let transferred = false;
+    const releaseRoot = () => {
+      if (!ownedRoot) return;
+      const { objectId, debuggee: owner } = ownedRoot; ownedRoot = undefined;
+      this.objectDebuggees.delete(objectId);
+      void this.options.command(owner, "Runtime.releaseObject", { objectId }).catch(() => undefined);
+    };
+    signal?.addEventListener("abort", releaseRoot, { once: true });
+    session.lifetime.signal.addEventListener("abort", releaseRoot, { once: true });
+    const dispose = (transferObjectId?: string) => {
+      signal?.removeEventListener("abort", releaseRoot);
+      session.lifetime.signal.removeEventListener("abort", releaseRoot);
+      if (ownedRoot?.objectId === transferObjectId) ownedRoot = undefined;
+      releaseRoot();
+    };
+    try {
     if (spec.ref) {
       const resolved = await this.resolveRef(session, spec.ref);
       debuggee = resolved.ref.debuggee;
       rootObjectId = resolved.objectId;
+      ownedRoot = { objectId: rootObjectId, debuggee };
+      throwIfAborted(signal);
+      if (session.lifetime.signal.aborted) throw abortError();
       rootIsElement = true;
       scoped = { ...scoped, ref: undefined };
     }
@@ -2342,20 +2436,53 @@ export class AutomationRuntime {
     let scanFrom = 0;
     while (true) {
       const frameIndex = scoped.queries.findIndex((query, index) => index >= scanFrom && query.kind === "frame");
-      if (frameIndex < 0) return { debuggee, spec: scoped, ...(rootObjectId ? { rootObjectId } : {}), ...(rootIsElement ? { rootIsElement } : {}) };
+      if (frameIndex < 0) {
+        transferred = true;
+        return { debuggee, spec: scoped, ...(rootObjectId ? { rootObjectId } : {}), ...(rootIsElement ? { rootIsElement } : {}), dispose };
+      }
       const frame = scoped.queries[frameIndex]!;
       const ownerSpec: LocatorSpec = { queries: [...scoped.queries.slice(0, frameIndex), { ...frame, kind: "css" }] };
       let ownerId: string | undefined;
       if (this.hasSemanticQueries(ownerSpec)) {
         do {
           const matches = await this.resolveSemantic(session, debuggee, ownerSpec, rootObjectId);
-          this.assertStrict(ownerSpec, matches.map((node) => ({ role: node.role ?? "", name: node.name ?? "" })));
+          try {
+            throwIfAborted(signal);
+            if (session.lifetime.signal.aborted) throw abortError();
+            this.assertStrict(ownerSpec, matches.map((node) => ({ role: node.role ?? "", name: node.name ?? "" })));
+          } catch (error) {
+            for (const { objectId } of matches) {
+              this.objectDebuggees.delete(objectId);
+              void this.options.command(debuggee, "Runtime.releaseObject", { objectId }).catch(() => undefined);
+            }
+            throw error;
+          }
           ownerId = matches[0]?.objectId;
           if (!ownerId && !immediate) await delay(50, this.context.signal);
         } while (!ownerId && !immediate);
       } else ownerId = immediate ? await this.resolveDomOnce(session, debuggee, ownerSpec, rootObjectId) : await this.resolveDirect(debuggee, ownerSpec, rootObjectId, session);
       if (!ownerId) throw automationError("frame-not-found", { locator: ownerSpec });
-      const owner = (await this.options.command(debuggee, "DOM.describeNode", { objectId: ownerId })).node;
+      const ownerDebuggee = debuggee;
+      let ownerReleased = false;
+      const releaseOwner = () => {
+        if (ownerReleased) return;
+        ownerReleased = true; this.objectDebuggees.delete(ownerId!);
+        void this.options.command(ownerDebuggee, "Runtime.releaseObject", { objectId: ownerId }).catch(() => undefined);
+      };
+      signal?.addEventListener("abort", releaseOwner, { once: true });
+      session.lifetime.signal.addEventListener("abort", releaseOwner, { once: true });
+      let owner: any;
+      try {
+        throwIfAborted(signal);
+        if (session.lifetime.signal.aborted) throw abortError();
+        owner = (await this.options.command(ownerDebuggee, "DOM.describeNode", { objectId: ownerId })).node;
+        throwIfAborted(signal);
+        if (session.lifetime.signal.aborted) throw abortError();
+      } finally {
+        signal?.removeEventListener("abort", releaseOwner);
+        session.lifetime.signal.removeEventListener("abort", releaseOwner);
+        releaseOwner();
+      }
       const child = owner?.frameId ? session.frames.get(owner.frameId) : undefined;
       if (owner?.frameId && (!child?.sessionId || child.sessionId === debuggee.sessionId)) {
           const revision = session.frameRevision, generation = session.generation;
@@ -2392,6 +2519,7 @@ export class AutomationRuntime {
       scoped = { ...scoped, queries: scoped.queries.slice(frameIndex + 1) };
       scanFrom = 0;
     }
+    } finally { if (!transferred) dispose(); }
   }
 
   private async resolveLocator(debuggee: Debuggee, spec: LocatorSpec, metadata: boolean | "nodes", rootObjectId?: string, objectGroup = "surf-wax-automation", session?: Session): Promise<any> {
@@ -2890,7 +3018,7 @@ export class AutomationRuntime {
     }
   }
 
-  private async captureSnapshot(session: Session, region?: LocatorSpec): Promise<{ url: string; title: string; lines: SnapshotLine[] }> {
+  private async captureSnapshot(session: Session, region?: LocatorSpec): Promise<{ url: string; title: string; lines: SnapshotLine[]; frameRevision: number; regionIdentity?: string }> {
     const signal = this.context.signal;
     const frameContext = { conversationId: this.context.conversationId, runId: this.context.logIdentity?.runId ?? this.context.runId };
     const guard = () => {
@@ -2946,7 +3074,15 @@ export class AutomationRuntime {
       }).catch(() => undefined);
       const regionObject = regionTask ? await waitForCapture(regionTask) : undefined;
       const regionDebuggee = regionObject ? this.objectDebuggees.get(regionObject) ?? session.debuggee : undefined;
-      const regionNode = regionObject ? await waitForCapture(this.options.command(regionDebuggee!, "DOM.describeNode", { objectId: regionObject })) : undefined;
+      let regionNode: any;
+      if (regionObject) {
+        try { regionNode = await waitForCapture(this.options.command(regionDebuggee!, "DOM.describeNode", { objectId: regionObject })); }
+        finally {
+          this.objectDebuggees.delete(regionObject);
+          // Cleanup must not delay cancellation if CDP never settles.
+          void this.options.command(regionDebuggee!, "Runtime.releaseObject", { objectId: regionObject }).catch(() => undefined);
+        }
+      }
       guard();
       if (changed()) { await delay(0, signal); continue; }
       if (region && !regionNode?.node?.backendNodeId) throw automationError("not-found", { locator: region });
@@ -2958,22 +3094,25 @@ export class AutomationRuntime {
         .sort((left, right) => left.depth - right.depth);
       const sameDebuggee = (left: Debuggee, right: Debuggee) => left.tabId === right.tabId && left.sessionId === right.sessionId;
       const allDebuggees = [{ debuggee: session.debuggee, frameId: undefined as string | undefined, depth: 0 }, ...childFrames];
-      const debuggees = allDebuggees
-        .filter(({ debuggee }) => !regionDebuggee || sameDebuggee(debuggee, regionDebuggee));
-      if (regionDebuggee && !debuggees.length) throw automationError("frame-unavailable", { reason: "region-session-detached" });
+      if (regionDebuggee && !allDebuggees.some(({ debuggee }) => sameDebuggee(debuggee, regionDebuggee))) throw automationError("frame-unavailable", { reason: "region-session-detached" });
       // A target's default AX request covers only its root document, even for
       // same-process child frames. Capture each additional frame explicitly.
       const frames = [...allDebuggees, ...[...session.frames]
         .filter(([frameId]) => frameId !== session.rootFrameId && !childFrames.some((item) => item.frameId === frameId))
         .map(([frameId, debuggee]) => ({ debuggee, frameId, depth: depthOf(frameId) }))]
         .sort((left, right) => left.depth - right.depth);
-      const capturedFrames = frames.filter(({ debuggee }) => !regionDebuggee || sameDebuggee(debuggee, regionDebuggee));
+      const framesById = new Map(frames.map((item) => [item.frameId ?? session.rootFrameId, item]));
+      let capturedFrames = frames;
+      let relevantFrames = frames;
+      let relevantDebuggees = allDebuggees;
+      let regionFrameId: string | undefined;
       const frameGuard = () => {
         guard();
         if (changed()) throw automationError("stale-frame", { reason: "frame-tree-changed-during-capture" });
       };
-      const framesAreReady = async () => {
-        const states = await Promise.all(capturedFrames.map(async ({ frameId, debuggee }) => {
+      const frameIsReady = async ({ frameId, debuggee }: (typeof frames)[number]) => {
+          if (debuggee.sessionId) await session.frameReady.get(debuggee.sessionId);
+          frameGuard();
           if (!frameId) return this.pageValue(session.tabId, "document.readyState === 'complete'");
           const frame: FrameRefRecord = { frameId, debuggee, generation, revision: frameRevision,
             conversationId: this.context.conversationId, runId: this.context.logIdentity?.runId };
@@ -2983,7 +3122,9 @@ export class AutomationRuntime {
           });
           if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
           return response.result?.value;
-        }));
+      };
+      const framesAreReady = async () => {
+        const states = await Promise.all(capturedFrames.map(frameIsReady));
         if (states.some((state) => typeof state !== "boolean")) throw automationError("snapshot-unavailable", { reason: "missing-frame-readiness" });
         return states.every(Boolean);
       };
@@ -2991,19 +3132,148 @@ export class AutomationRuntime {
       let trees: Array<{ debuggee: Debuggee; frameId: string | undefined; depth: number; tree: any; visibility: Map<number, boolean>; textProjections: Map<number, TextProjection>; candidates: SnapshotTextPaintCandidate[]; snapshot: any }>;
       let info: { url: string; title: string };
       try {
-        // A newly attached iframe must finish enabling its domains before AX
-        // capture. Scoped requests wait only on the selected target.
-        await waitForCapture(Promise.all(allDebuggees.map(({ debuggee }) => debuggee.sessionId ? session.frameReady.get(debuggee.sessionId) : undefined)));
-        guard();
-        if (changed()) { await delay(0, signal); continue; }
+        // A scoped request discovers its frame membership from a preliminary
+        // DOM capture before waiting for document loads. The subsequent D0
+        // capture must prove the same membership after those waits.
+        type Layout = { debuggee: Debuggee; snapshot: any };
+        const captureLayout = async (debuggee: Debuggee): Promise<Layout> => {
+          if (debuggee.sessionId) await session.frameReady.get(debuggee.sessionId);
+          frameGuard();
+          return { debuggee, snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true }) };
+        };
+        const selectRegionFrames = async (layouts: Layout[], allowCapture: boolean) => {
+          if (!regionNode || !regionDebuggee) return { frameId: undefined, selected: frames };
+          const getLayout = async (debuggee: Debuggee) => {
+            let layout = layouts.find((item) => sameDebuggee(item.debuggee, debuggee));
+            if (!layout && allowCapture) { layout = await captureLayout(debuggee); layouts.push(layout); }
+            return layout;
+          };
+          const layout = await getLayout(regionDebuggee);
+          const matches = (layout?.snapshot.documents ?? []).filter((doc: any) => doc.nodes?.backendNodeId?.includes(regionNode.node.backendNodeId));
+          if (matches.length !== 1) throw automationError("snapshot-region-unavailable", { locator: region });
+          const doc = matches[0], frameId = layout!.snapshot.strings?.[doc.frameId];
+          if (typeof frameId !== "string" || !frames.some((item) => (item.frameId ?? session.rootFrameId) === frameId && sameDebuggee(item.debuggee, regionDebuggee)))
+            throw automationError("snapshot-region-unavailable", { locator: region });
+          let index: ReturnType<typeof createSnapshotDomIndex>;
+          try { index = createSnapshotDomIndex(doc.nodes); }
+          catch { throw automationError("snapshot-unavailable", { reason: "invalid-dom-snapshot" }); }
+          const visibility = new Map<string, Map<number, boolean>>();
+          const indexes = new Map<string, ReturnType<typeof createSnapshotDomIndex>>([[frameId, index]]);
+          const parentEvidence = async (id: string) => {
+            const parent = session.frames.get(id);
+            if (!parent) throw automationError("snapshot-unavailable", { reason: "missing-frame-parent", frameId: id });
+            const parentLayout = await getLayout(parent);
+            if (!parentLayout) return undefined;
+            let parentIndex = indexes.get(id);
+            if (!parentIndex) {
+              const parentDoc = parentLayout.snapshot.documents?.find((candidate: any) => parentLayout.snapshot.strings?.[candidate.frameId] === id);
+              if (!parentDoc) throw automationError("snapshot-unavailable", { reason: "missing-dom-frame", frameId: id });
+              try { parentIndex = createSnapshotDomIndex(parentDoc.nodes); }
+              catch { throw automationError("snapshot-unavailable", { reason: "invalid-dom-snapshot" }); }
+              indexes.set(id, parentIndex);
+            }
+            let state = visibility.get(parent.sessionId ?? "");
+            if (!state) { state = snapshotVisibility(parentLayout.snapshot); visibility.set(parent.sessionId ?? "", state); }
+            return { parent, parentIndex, state };
+          };
+          // Establish visibility of the entire region frame chain before
+          // touching descendants of a hidden region.
+          for (let current: string | undefined = frameId; current && current !== session.rootFrameId;) {
+            const parentId = session.frameParents.get(current);
+            if (!parentId) throw automationError("snapshot-unavailable", { reason: "unknown-frame-ancestry", frameId: current });
+            const evidence = await parentEvidence(parentId);
+            if (!evidence) return { frameId, selected: [] };
+            const owner = await this.options.command(evidence.parent, "DOM.getFrameOwner", { frameId: current });
+            frameGuard();
+            if (evidence.parentIndex.indexOf(owner?.backendNodeId) === undefined)
+              throw automationError("snapshot-unavailable", { reason: "missing-frame-owner", frameId: current });
+            const visible = evidence.state.get(owner.backendNodeId);
+            if (visible === undefined) throw automationError("snapshot-unavailable", { reason: "missing-frame-owner-visibility", frameId: current });
+            if (!visible) throw automationError("snapshot-region-unavailable", { locator: region });
+            current = parentId;
+          }
+          const selected = new Set([frameId]);
+          const readyFrames = new Set<string>();
+          const ready = async (id: string) => {
+            if (readyFrames.has(id)) return true;
+            const item = framesById.get(id)!;
+            if (!await frameIsReady(item)) return false;
+            readyFrames.add(id); return true;
+          };
+          const knownOwners = new Map<string, Set<number>>();
+          for (const child of frames) {
+            const id = child.frameId;
+            if (!id || id === frameId) continue;
+            const parentId = session.frameParents.get(id);
+            if (!parentId || !selected.has(parentId)) continue;
+            if (allowCapture && !await ready(parentId)) return { frameId, selected: [], pending: true };
+            const evidence = await parentEvidence(parentId);
+            if (!evidence) return { frameId, selected: [] };
+            const owner = await this.options.command(evidence.parent, "DOM.getFrameOwner", { frameId: id });
+            frameGuard();
+            if (evidence.parentIndex.indexOf(owner?.backendNodeId) === undefined)
+              throw automationError("snapshot-unavailable", { reason: "missing-frame-owner", frameId: id });
+            const ownerIds = knownOwners.get(parentId) ?? new Set<number>();
+            ownerIds.add(owner?.backendNodeId); knownOwners.set(parentId, ownerIds);
+            if (parentId === frameId && index.contains(regionNode.node.backendNodeId, owner?.backendNodeId) !== true) continue;
+            const visible = evidence.state.get(owner?.backendNodeId);
+            if (visible === undefined) throw automationError("snapshot-unavailable", { reason: "missing-frame-owner-visibility", frameId: id });
+            if (visible) selected.add(id);
+          }
+          // A visible iframe owner without a known frame cannot be treated as
+          // an empty frame: attachment may still be in flight.
+          for (const id of selected) {
+            const item = framesById.get(id)!;
+            if (allowCapture && !await ready(id)) return { frameId, selected: [], pending: true };
+            const parentLayout = await getLayout(item.debuggee);
+            if (!parentLayout) return { frameId, selected: [] };
+            const parentDoc = parentLayout.snapshot.documents?.find((candidate: any) => parentLayout.snapshot.strings?.[candidate.frameId] === id);
+            if (!parentDoc) throw automationError("snapshot-unavailable", { reason: "missing-dom-frame", frameId: id });
+            let state = visibility.get(item.debuggee.sessionId ?? "");
+            if (!state) { state = snapshotVisibility(parentLayout.snapshot); visibility.set(item.debuggee.sessionId ?? "", state); }
+            const names = parentDoc.nodes?.nodeName ?? [], ids = parentDoc.nodes?.backendNodeId ?? [];
+            for (let node = 0; node < ids.length; node++) {
+              const tag = parentLayout.snapshot.strings?.[names[node]]?.toLowerCase();
+              if (tag !== "iframe" && tag !== "frame") continue;
+              const owner = ids[node];
+              if (id === frameId && index.contains(regionNode.node.backendNodeId, owner) !== true) continue;
+              if (state.get(owner) === true && !knownOwners.get(id)?.has(owner))
+                throw automationError("snapshot-unavailable", { reason: "frame-owner-not-attached", frameId: id });
+            }
+          }
+          return { frameId, selected: frames.filter((item) => selected.has(item.frameId ?? session.rootFrameId ?? "")) };
+        };
+        const captureLayouts = () => Promise.all(relevantDebuggees.map(({ debuggee }) => captureLayout(debuggee)));
+        const preliminary: Layout[] | undefined = regionNode ? [] : undefined;
+        if (preliminary) {
+          const selection = await waitForCapture(selectRegionFrames(preliminary, true));
+          if (selection.pending) { await delay(50, signal); continue; }
+          regionFrameId = selection.frameId; capturedFrames = selection.selected;
+          const required = new Set(capturedFrames.map((item) => item.frameId ?? session.rootFrameId));
+          for (const id of [...required]) {
+            let current = id;
+            while (current && current !== session.rootFrameId) {
+              current = session.frameParents.get(current);
+              if (!current) throw automationError("snapshot-unavailable", { reason: "unknown-frame-ancestry", frameId: id });
+              required.add(current);
+            }
+          }
+          relevantFrames = frames.filter((item) => required.has(item.frameId ?? session.rootFrameId));
+          relevantDebuggees = allDebuggees.filter(({ debuggee }) => relevantFrames.some((item) => sameDebuggee(item.debuggee, debuggee)));
+        }
+        await waitForCapture(Promise.all(relevantDebuggees.map(({ debuggee }) => debuggee.sessionId ? session.frameReady.get(debuggee.sessionId) : undefined)));
+        frameGuard();
         if (!await waitForCapture(framesAreReady())) { await delay(50, signal); continue; }
         if (changed()) { await delay(0, signal); continue; }
         // Bracket AX and live DOM reads with bulk DOM captures. This detects
         // ordinary page changes that do not advance the document generation.
-        const initialLayouts = await waitForCapture(Promise.all(allDebuggees.map(async ({ debuggee }) => ({ debuggee,
-          snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true }) }))));
+        const initialLayouts = await waitForCapture(captureLayouts());
+        if (regionNode) {
+          const verified = await waitForCapture(selectRegionFrames(initialLayouts, false));
+          if (verified.frameId !== regionFrameId || verified.selected.length !== capturedFrames.length || verified.selected.some((item, index) => item !== capturedFrames[index])) continue;
+        }
         const [captured, layouts, pageInfo] = await waitForCapture(Promise.all([
-          Promise.all(frames.map(async (item) => ({ ...item, tree: !regionDebuggee || sameDebuggee(item.debuggee, regionDebuggee)
+          Promise.all(relevantFrames.map(async (item) => ({ ...item, tree: capturedFrames.includes(item)
             ? await this.options.command(item.debuggee, "Accessibility.getFullAXTree", allDebuggees.includes(item) ? {} : { frameId: item.frameId })
             : undefined }))),
           Promise.all(initialLayouts.map(async ({ debuggee, snapshot }) => {
@@ -3018,7 +3288,7 @@ export class AutomationRuntime {
             await Promise.all([...byFrame].map(async ([frameId, list]) => {
               const source = capturedFrames.find((frame) => (frame.frameId ?? session.rootFrameId) === frameId && sameDebuggee(frame.debuggee, debuggee));
               if (!source) {
-                if (!capturedFrames.some((frame) => sameDebuggee(frame.debuggee, debuggee))) return;
+                if (regionNode || !capturedFrames.some((frame) => sameDebuggee(frame.debuggee, debuggee))) return;
                 throw automationError("snapshot-unavailable", { reason: "missing-text-paint-frame", frameId });
               }
               const frame: FrameRefRecord = { frameId, debuggee, generation, revision: frameRevision,
@@ -3081,7 +3351,7 @@ export class AutomationRuntime {
                       else applyEvidence(cacheable[index]!, evidence[index]!);
                     }
                   }
-                } else missing.push(...list);
+                } else for (const candidate of list) missing.push(candidate);
                 for (let offset = 0; offset < missing.length; offset += 32) {
                   paintGuard();
                   const batch = missing.slice(offset, offset + 32);
@@ -3146,11 +3416,11 @@ export class AutomationRuntime {
       const visibilityBySession = new Map(trees.map(({ debuggee, visibility }) => [debuggee.sessionId ?? "", visibility]));
       const owners = new Map<string, boolean>();
       const childFramesByOwner = new Map<string, string>();
-      if (frames.some((item) => item.frameId)) {
+      if (relevantFrames.some((item) => item.frameId)) {
         const rootFrameId = session.rootFrameId;
         if (!rootFrameId) throw automationError("snapshot-unavailable", { reason: "missing-root-frame" });
         const ancestry = new Set<string>();
-        for (const { frameId } of frames) {
+        for (const { frameId } of relevantFrames) {
           if (!frameId) continue;
           let current: string | undefined = frameId;
           const seen = new Set<string>();
@@ -3193,12 +3463,17 @@ export class AutomationRuntime {
       }
       const lines: SnapshotLine[] = [];
       const render = async (nodes: any[], visibility: Map<number, boolean>, textProjections: Map<number, TextProjection>, snapshot: any, debuggee: Debuggee, frameLabel?: string, frameDepth = 0) => {
-        if (regionDebuggee && !sameDebuggee(regionDebuggee, debuggee)) return;
         const byId = new Map(nodes.map((node) => [node.nodeId, node]));
         const frameId = frameLabel ?? session.rootFrameId;
         if (!frameId) throw automationError("snapshot-unavailable", { reason: "missing-root-frame" });
+        const scopedRoot = Boolean(regionNode && regionFrameId === frameId && regionDebuggee && sameDebuggee(regionDebuggee, debuggee));
         const doc = snapshot.documents?.find((document: any) => snapshot.strings?.[document.frameId] === frameId);
         if (!doc) throw automationError("snapshot-unavailable", { reason: "missing-dom-frame", frameId });
+        let evidence: ReturnType<typeof snapshotDomSupplement>;
+        try { evidence = snapshotDomSupplement(snapshot, { frameId, visibility, textProjections, covered: new Set() }); }
+        catch (error) { throw automationError("snapshot-unavailable", { reason: "invalid-dom-snapshot", detail: error instanceof Error ? error.message : String(error) }); }
+        const domIndex = evidence.indexes.get(frameId);
+        if (!domIndex) throw automationError("snapshot-unavailable", { reason: "missing-dom-frame", frameId });
         const securityByBackend = new Map<number, string>();
         for (let row = 0; row < (doc.layout?.nodeIndex?.length ?? 0); row++) {
           const index = doc.layout.nodeIndex[row], backend = doc.nodes?.backendNodeId?.[index];
@@ -3221,26 +3496,39 @@ export class AutomationRuntime {
         if (frameLabel) lines.push({ id: `${snapshotScope}:doc`, line: `${"  ".repeat(frameDepth)}- frame-document [frameRef=${capturedFrameRefs.get(frameLabel)}]` });
         // The region may be omitted entirely by AX (for example aria-hidden).
         // Its DOM frame/identity is independently resolved and validated below.
-        const root = regionNode ? nodes.find((node) => node.backendDOMNodeId === regionNode.node.backendNodeId) : nodes.find((node) => !node.parentId) ?? nodes[0];
+        const root = scopedRoot ? nodes.find((node) => node.backendDOMNodeId === regionNode!.node.backendNodeId) : nodes.find((node) => !node.parentId) ?? nodes[0];
+        const scopeIndex = scopedRoot ? domIndex : undefined;
+        const otherFrameBackends = scopedRoot ? new Set<number>() : undefined;
+        if (otherFrameBackends) for (const document of snapshot.documents ?? []) if (document !== doc)
+          for (const id of document.nodes?.backendNodeId ?? []) if (typeof id === "number") otherFrameBackends.add(id);
         // Internal AX descendants (notably input value text) may have no DOM
         // snapshot entry. Inherit their nearest known ancestor's state, while
         // still allowing a known visible descendant to override it.
         const effectiveHidden = new Map<string, boolean>();
+        const scoped = new Map<string, boolean>();
         // AX names derived from contents can include transparent or clipped
         // descendants. Explicit labels remain authoritative; only rebuild a
         // contents-derived name when a descendant was actually filtered.
         const hiddenSubtree = new Map<string, boolean>();
         const treeRoot = nodes.find((node) => !node.parentId) ?? nodes[0];
-        const order: any[] = [], scan: Array<{ node: any; inherited: boolean }> = treeRoot ? [{ node: treeRoot, inherited: false }] : [];
+        const order: any[] = [], scan: Array<{ node: any; inherited: boolean; within: boolean }> = treeRoot ? [{ node: treeRoot, inherited: false, within: false }] : [];
         while (scan.length) {
-          const { node, inherited } = scan.pop()!;
+          const { node, inherited, within } = scan.pop()!;
           const known = typeof node.backendDOMNodeId === "number" ? visibility.get(node.backendDOMNodeId) : undefined;
+          if (scopeIndex && typeof node.backendDOMNodeId === "number" && scopeIndex.indexOf(node.backendDOMNodeId) === undefined
+            && !otherFrameBackends?.has(node.backendDOMNodeId) && known !== false && !node.ignored
+            && !["", "none", "generic", "InlineTextBox"].includes(axValue(node.role)))
+            throw automationError("snapshot-unavailable", { reason: "unknown-region-membership" });
           const isHidden = known === undefined ? inherited : !known;
+          const isScoped = !scopeIndex || (typeof node.backendDOMNodeId === "number"
+            ? scopeIndex.contains(regionNode!.node.backendNodeId, node.backendDOMNodeId) === true : within);
           effectiveHidden.set(node.nodeId, isHidden);
+          scoped.set(node.nodeId, isScoped);
           order.push(node);
-          for (const id of node.childIds ?? []) { const child = byId.get(id); if (child) scan.push({ node: child, inherited: isHidden }); }
+          for (const id of node.childIds ?? []) { const child = byId.get(id); if (child) scan.push({ node: child, inherited: isHidden, within: isScoped }); }
         }
         const hidden = (node: any) => effectiveHidden.get(node.nodeId) === true;
+        const inScope = (node: any) => scoped.get(node.nodeId) === true;
         const projected = (node: any): string | undefined => {
           if (axValue(node.role) !== "StaticText" || typeof node.backendDOMNodeId !== "number") return undefined;
           const projection = textProjections.get(node.backendDOMNodeId);
@@ -3248,13 +3536,14 @@ export class AutomationRuntime {
         };
         for (let index = order.length - 1; index >= 0; index--) {
           const node = order[index]!;
-          hiddenSubtree.set(node.nodeId, hidden(node) || maskedControl(node) || projected(node) !== undefined || (node.childIds ?? []).some((id: string) => hiddenSubtree.get(id)));
+          hiddenSubtree.set(node.nodeId, hidden(node) || !inScope(node) || maskedControl(node) || projected(node) !== undefined || (node.childIds ?? []).some((id: string) => hiddenSubtree.get(id)));
         }
         const visibleName = (node: any, original: string) => {
           const ownProjection = projected(node);
           if (ownProjection !== undefined) return ownProjection;
           const source = node.name?.sources?.find((item: any) => !item.superseded && item.value?.value !== undefined);
-          if (source?.type !== "contents" || !(node.childIds ?? []).some((id: string) => hiddenSubtree.get(id))) return original;
+          if (!(node.childIds ?? []).some((id: string) => hiddenSubtree.get(id))) return original;
+          if (source?.type !== "contents") return source || !scopedRoot ? original : "";
           const parts: string[] = [];
           const pendingNames: Array<string | null> = [...(node.childIds ?? [])].reverse();
           while (pendingNames.length) {
@@ -3262,6 +3551,7 @@ export class AutomationRuntime {
             if (next === null) { parts.push(" "); continue; }
             const child: any = byId.get(next);
             if (!child) continue;
+            if (!inScope(child)) continue;
             const childRole = child.ignored ? "" : axValue(child.role);
             if (!hidden(child)) {
               if (childRole === "StaticText") {
@@ -3309,22 +3599,34 @@ export class AutomationRuntime {
         };
         const start = lines.length;
         const lineBackends = new Map<string, number>();
+        const axLines = new Map<string, string>();
         const covered = new Set<number>();
-        const pending: Array<{ node: any; depth: number }> = root ? [{ node: root, depth: frameLabel ? frameDepth + 1 : 0 }] : [];
+        const traversalRoot = scopedRoot ? treeRoot : root;
+        const pending: Array<{ node: any; depth: number }> = traversalRoot ? [{ node: traversalRoot, depth: frameLabel ? frameDepth + 1 : 0 }] : [];
         while (pending.length) {
           const { node, depth } = pending.pop()!;
           let childDepth = depth;
-          const role = node.ignored || hidden(node) ? "" : axValue(node.role); const originalName = axValue(node.name); const name = visibleName(node, originalName); const value = maskedControl(node) ? "" : axValue(node.value);
+          const role = node.ignored || hidden(node) || !inScope(node) ? "" : axValue(node.role); const originalName = axValue(node.name); const name = role ? visibleName(node, originalName) : ""; const value = maskedControl(node) ? "" : axValue(node.value);
           const parent = byId.get(node.parentId);
-          const parentRole = parent && !parent.ignored && !hidden(parent) ? axValue(parent.role) : "";
+          const parentRole = parent && !parent.ignored && !hidden(parent) && inScope(parent) ? axValue(parent.role) : "";
           // A single static text leaf that exactly repeats its named semantic
           // parent carries no additional content or action. Do not collapse
           // siblings, independently named controls, or a selected region root.
-          const duplicateText = node !== root && role === "StaticText" && parent && parent.childIds?.length === 1
+          const singleTextLeaf = node !== root && role === "StaticText" && parent && parent.childIds?.length === 1
+            && (node.childIds ?? []).every((id: string) => axValue(byId.get(id)?.role) === "InlineTextBox");
+          const duplicateNamedText = singleTextLeaf
             && ["button", "link", "heading", "checkbox", "radio", "tab", "option", "menuitem"].includes(parentRole)
             && !node.properties?.some((property: any) => property.name === "focusable" && property.value?.value)
-            && (node.childIds ?? []).every((id: string) => axValue(byId.get(id)?.role) === "InlineTextBox")
             && Boolean(name) && name === visibleName(parent, axValue(parent.name));
+          // An editable control's value is already emitted on its row. Only
+          // suppress an entirely plain, unique leaf; retain masked values,
+          // independent semantics and a leaf selected as the region root.
+          const duplicateValueText = singleTextLeaf && ["textbox", "searchbox"].includes(parentRole)
+            && !maskedControl(parent)
+            && (node.properties === undefined || Array.isArray(node.properties) && node.properties.length === 0)
+            && (node.actions === undefined || Array.isArray(node.actions) && node.actions.length === 0)
+            && Boolean(name) && name === axValue(parent.value);
+          const duplicateText = duplicateNamedText || duplicateValueText;
           if (role && role !== "none" && role !== "generic" && role !== "InlineTextBox" && typeof node.backendDOMNodeId === "number") covered.add(node.backendDOMNodeId);
           if (role && role !== "none" && role !== "generic" && role !== "InlineTextBox" && !duplicateText) {
             let ref = "";
@@ -3347,6 +3649,7 @@ export class AutomationRuntime {
             const snapshotNode: SnapshotNode = { id: snapshotId, depth, role, name, value, ...(ref ? { ref, actions } : {}), ...(childFrameRef ? { childFrameRef } : {}), state };
             const rendered = renderSnapshotNode(snapshotNode);
             lines.push({ id: snapshotId, line: rendered.line, ...(rendered.ref ? { ref: rendered.ref } : {}), node: snapshotNode });
+            axLines.set(node.nodeId, snapshotId);
             if (typeof node.backendDOMNodeId === "number") lineBackends.set(snapshotId, node.backendDOMNodeId);
             childDepth += 1;
           }
@@ -3356,21 +3659,56 @@ export class AutomationRuntime {
             if (child) pending.push({ node: child, depth: childDepth });
           }
         }
-        let evidence: ReturnType<typeof snapshotDomSupplement>;
-        try { evidence = snapshotDomSupplement(snapshot, { frameId, visibility, textProjections, covered: new Set() }); }
-        catch (error) { throw automationError("snapshot-unavailable", { reason: "invalid-dom-snapshot", detail: error instanceof Error ? error.message : String(error) }); }
-        const domIndex = evidence.indexes.get(frameId);
-        if (!domIndex) throw automationError("snapshot-unavailable", { reason: "missing-dom-frame", frameId });
         const positions = new Map<number, number>();
         for (let position = 0; position < domIndex.preorder.length; position++) {
           const id = domIndex.backendAt(domIndex.preorder[position]!);
           if (id !== undefined) positions.set(id, position);
         }
+        if (scopedRoot) {
+          // aria-owns can reorder AX nodes across DOM boundaries. Restore DOM
+          // order and parent depths for the selected document while retaining
+          // AX-only children immediately after their nearest semantic owner.
+          const nearestAx = new Map<string, string | undefined>();
+          const anchorByAx = new Map<string, number | undefined>();
+          for (const node of order) {
+            const parent = node.parentId, parentNode = parent && byId.get(parent);
+            nearestAx.set(node.nodeId, parentNode && inScope(parentNode) ? axLines.get(parent) ?? nearestAx.get(parent) : undefined);
+            anchorByAx.set(node.nodeId, typeof node.backendDOMNodeId === "number" && inScope(node) ? node.backendDOMNodeId
+              : parentNode && inScope(parentNode) ? anchorByAx.get(parent) : undefined);
+          }
+          const nodeByLine = new Map([...axLines].map(([nodeId, lineId]) => [lineId, nodeId]));
+          const markedBackends = new Set(lineBackends.values());
+          const nearestDom = domIndex.nearestMarkedAncestors(markedBackends);
+          const original = lines.splice(start);
+          const anchor = (line: SnapshotLine) => {
+            return positions.get(anchorByAx.get(nodeByLine.get(line.id) ?? "") ?? -1) ?? Number.MAX_SAFE_INTEGER;
+          };
+          original.sort((left, right) => anchor(left) - anchor(right));
+          const byLine = new Map(original.map((line) => [line.id, line]));
+          const depthByBackend = new Map<number, number>();
+          const base = frameLabel ? frameDepth + 1 : 0;
+          for (const line of original) {
+            const node = line.node!;
+            const backend = lineBackends.get(line.id), owner = nearestAx.get(nodeByLine.get(line.id) ?? "");
+            const parentIndex = backend === undefined ? -1 : nearestDom[domIndex.indexOf(backend) ?? -1] ?? -1;
+            const parentBackend = parentIndex < 0 ? undefined : domIndex.backendAt(parentIndex);
+            const sameBackendOwner = owner && lineBackends.get(owner) === backend ? byLine.get(owner)?.node?.depth : undefined;
+            const ownerDepth = backend === undefined && owner ? byLine.get(owner)?.node?.depth : sameBackendOwner;
+            const parentDepth = ownerDepth ?? (parentBackend === undefined ? undefined : depthByBackend.get(parentBackend));
+            const updated = { ...node, depth: parentDepth === undefined ? base : parentDepth + 1 };
+            line.node = updated;
+            if (backend !== undefined && !depthByBackend.has(backend)) depthByBackend.set(backend, updated.depth);
+            const rendered = renderSnapshotNode(updated);
+            line.line = rendered.line;
+            if (rendered.ref) line.ref = rendered.ref;
+          }
+          for (const line of original) lines.push(line);
+        }
         // Scoped output remains inside the region, but an input can have a
         // visible associated label elsewhere in the same document or shadow
         // tree. Retain whole-frame text solely for verified label names.
         const frameEvidence = evidence.items.sort((a, b) => positions.get(a.backendNodeId)! - positions.get(b.backendNodeId)!);
-        const allEvidence = regionNode ? frameEvidence.filter((item) => domIndex.contains(regionNode.node.backendNodeId, item.backendNodeId) === true) : frameEvidence;
+        const allEvidence = scopedRoot ? frameEvidence.filter((item) => domIndex.contains(regionNode!.node.backendNodeId, item.backendNodeId) === true) : frameEvidence;
         const extra = allEvidence.filter((item) => !covered.has(item.backendNodeId));
         const depths = new Map<number, number>();
         for (const line of lines.slice(start)) {
@@ -3580,8 +3918,8 @@ export class AutomationRuntime {
       if (regionNode && regionMatches.length !== 1) throw automationError("snapshot-region-unavailable", { locator: region });
       for (const item of trees) {
         const { debuggee, frameId, depth, tree, visibility, textProjections, snapshot } = item;
-        if (tree && (!regionNode || regionMatches[0] === item))
-          await waitForCapture(render(tree.nodes ?? [], visibility, textProjections, snapshot, debuggee, frameId, depth));
+        if (tree)
+          await waitForCapture(render(tree.nodes ?? [], visibility, textProjections, snapshot, debuggee, frameId, regionFrameId ? Math.max(0, depth - depthOf(regionFrameId)) : depth));
       }
       const ids = new Set<string>();
       for (const { id } of lines) {
@@ -3591,7 +3929,7 @@ export class AutomationRuntime {
       if (!changed()) {
         let confirmations: Array<{ debuggee: Debuggee; snapshot: any }>;
         try {
-          confirmations = await waitForCapture(Promise.all(allDebuggees.map(async ({ debuggee }) => ({ debuggee,
+          confirmations = await waitForCapture(Promise.all(relevantDebuggees.map(async ({ debuggee }) => ({ debuggee,
             snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true }) }))));
           if (changed()) continue;
           if (!await waitForCapture(framesAreReady())) { await delay(50, signal); continue; }
@@ -3604,20 +3942,33 @@ export class AutomationRuntime {
         let unstable = false, unstablePaint = false;
         for (const confirmation of confirmations) {
           const initial = trees.find(({ debuggee }) => sameDebuggee(debuggee, confirmation.debuggee));
-          if (initial && sameDOMSnapshot(initial.snapshot, confirmation.snapshot,
-            { visibility: initial.visibility, textPaintCandidates: initial.candidates, paintAdjusted: true })) continue;
+          // Ignore unrelated same-target child documents. Keep original CDP
+          // contentDocumentIndex values, so document reordering remains a
+          // conservative mismatch rather than inventing an association.
+          const relevantIds = regionNode ? new Set(relevantFrames.filter((item) => sameDebuggee(item.debuggee, confirmation.debuggee))
+            .map((item) => item.frameId ?? session.rootFrameId)) : undefined;
+          const relevantDocuments = (snapshot: any) => !relevantIds ? snapshot : { ...snapshot,
+            documents: snapshot.documents.filter((document: any) => relevantIds.has(snapshot.strings?.[document.frameId])) };
+          const candidates = relevantIds ? initial?.candidates.filter((candidate) => relevantIds.has(candidate.frameId)) : initial?.candidates;
+          const visibility = initial && relevantIds ? snapshotVisibility(relevantDocuments(initial.snapshot)) : initial?.visibility;
+          if (visibility && initial && relevantIds) for (const id of visibility.keys()) {
+            const value = initial.visibility.get(id);
+            if (value !== undefined) visibility.set(id, value);
+          }
+          if (initial && visibility && sameDOMSnapshot(relevantDocuments(initial.snapshot), relevantDocuments(confirmation.snapshot),
+            { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true })) continue;
           unstable = true;
           const after: SnapshotTextPaintCandidate[] = [];
           try { snapshotVisibility(confirmation.snapshot, { textPaintCandidates: after }); }
           catch { throw automationError("snapshot-unavailable", { reason: "invalid-dom-confirmation" }); }
-          if (initial && !sameTextPaintCandidates(initial.candidates, after)) unstablePaint = true;
+          if (initial && !sameTextPaintCandidates(candidates ?? [], relevantIds ? after.filter((candidate) => relevantIds.has(candidate.frameId)) : after)) unstablePaint = true;
         }
         if (unstable) {
           if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: unstablePaint ? "text-paint-unstable" : "dom-unstable" });
           retriedUnstableCapture = true;
           continue;
         }
-        return { ...info, lines };
+        return { ...info, lines, frameRevision, ...(regionNode ? { regionIdentity: JSON.stringify([regionDebuggee?.sessionId ?? "", regionFrameId, regionNode.node.backendNodeId]) } : {}) };
       }
     }
   }

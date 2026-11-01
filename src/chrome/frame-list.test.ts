@@ -710,6 +710,7 @@ describe("frame tree discovery", () => {
   it("captures only the target session for a cross-process region", async () => {
     const { runtime, command } = harness();
     const original = command.getMockImplementation()!;
+    let unrelatedChanges = 0;
     command.mockImplementation(async (source, method, params = {}) => {
       if (method === "Accessibility.getFullAXTree") return { nodes: [{ nodeId: "target-ax", backendDOMNodeId: 8, role: { value: "button" }, name: { value: "Regional target" }, childIds: [] }] };
       if (method === "DOM.describeNode") return { node: { backendNodeId: 8 } };
@@ -718,6 +719,12 @@ describe("frame tree discovery", () => {
         const doc = snapshot.documents[0]; snapshot.strings.push("BUTTON");
         doc.nodes.backendNodeId.push(8); doc.nodes.parentIndex.push(-1); doc.nodes.nodeType.push(1); doc.nodes.nodeName.push(snapshot.strings.length - 1);
         doc.layout.nodeIndex.push(doc.nodes.backendNodeId.length - 1); doc.layout.bounds.push([0, 0, 100, 20]); doc.layout.styles.push([0, 1, 1, 1, 2]);
+        // This same-target document is outside the selected button region.
+        // Its continuous changes must not invalidate that observation.
+        const unrelated = snapshot.documents[1];
+        snapshot.strings.push("#text", `outside-${++unrelatedChanges}`);
+        unrelated.nodes.backendNodeId.push(77); unrelated.nodes.parentIndex.push(-1); unrelated.nodes.nodeType.push(3);
+        unrelated.nodes.nodeName.push(snapshot.strings.length - 2); unrelated.nodes.nodeValue = [snapshot.strings.length - 1];
         return snapshot;
       }
       if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
@@ -730,10 +737,84 @@ describe("frame tree discovery", () => {
     const cross = frames.frames.find((frame: any) => frame.url === "https://cross.test/");
     const result: any = await page.inspect({}, page.frameRef(cross.frameRef).getByRole("button"));
     expect(result.items.map((item: any) => item.line).join("\n")).toContain('button "Regional target"');
+    expect(unrelatedChanges).toBeGreaterThanOrEqual(3);
     expect(command.mock.calls.filter(([, method]) => method === "Accessibility.getFullAXTree")).toEqual([
       [{ tabId: 3, sessionId: "child" }, "Accessibility.getFullAXTree", {}],
-      [{ tabId: 3, sessionId: "child" }, "Accessibility.getFullAXTree", { frameId: "nested" }],
     ]);
+    await runtime.abortSessions();
+  });
+
+  it("does not report a complete region while a visible iframe owner has no attached frame", async () => {
+    const { runtime, command } = harness(), original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOM.describeNode") return { node: { backendNodeId: 8 } };
+      if (method === "DOMSnapshot.captureSnapshot" && source.sessionId === "child") {
+        const snapshot = await original(source, method, params), doc = snapshot.documents[0];
+        snapshot.strings.push("SECTION");
+        const root = doc.nodes.backendNodeId.length;
+        doc.nodes.backendNodeId.push(8, 104); doc.nodes.parentIndex.push(-1, root); doc.nodes.nodeType.push(1, 1);
+        doc.nodes.nodeName.push(snapshot.strings.length - 1, 3);
+        doc.layout.nodeIndex.push(root, root + 1); doc.layout.bounds.push([0, 0, 100, 20], [0, 0, 100, 20]);
+        doc.layout.styles.push([0, 1, 1, 1, 2], [0, 1, 1, 1, 2]);
+        return snapshot;
+      }
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "child", targetInfo: { type: "iframe", targetId: "cross" } });
+    const frames: any = await runtime.listFrames(3);
+    const cross = frames.frames.find((frame: any) => frame.url === "https://cross.test/");
+    await expect(page.inspect({}, page.frameRef(cross.frameRef).getByRole("button")))
+      .rejects.toMatchObject({ code: "snapshot-unavailable", detail: { reason: "frame-owner-not-attached" } });
+    await runtime.abortSessions();
+  });
+
+  it("fails closed when a child frame owner is missing from the parent document", async () => {
+    const { runtime, command } = harness(), original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOM.describeNode") return { node: { backendNodeId: 8 } };
+      if (method === "DOM.getFrameOwner" && params.frameId === "nested") return { backendNodeId: 404 };
+      if (method === "DOMSnapshot.captureSnapshot" && source.sessionId === "child") {
+        const snapshot = await original(source, method, params), doc = snapshot.documents[0];
+        snapshot.strings.push("BUTTON");
+        doc.nodes.backendNodeId.push(8); doc.nodes.parentIndex.push(-1); doc.nodes.nodeType.push(1); doc.nodes.nodeName.push(snapshot.strings.length - 1);
+        doc.layout.nodeIndex.push(doc.nodes.backendNodeId.length - 1); doc.layout.bounds.push([0, 0, 100, 20]); doc.layout.styles.push([0, 1, 1, 1, 2]);
+        return snapshot;
+      }
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "child", targetInfo: { type: "iframe", targetId: "cross" } });
+    const frames: any = await runtime.listFrames(3), cross = frames.frames.find((frame: any) => frame.url === "https://cross.test/");
+    await expect(page.inspect({}, page.frameRef(cross.frameRef).getByRole("button")))
+      .rejects.toMatchObject({ code: "snapshot-unavailable", detail: { reason: "missing-frame-owner" } });
+    await runtime.abortSessions();
+  });
+
+  it("rejects a region inside a hidden frame before inspecting descendant readiness", async () => {
+    const { runtime, command } = harness(), original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOM.describeNode") return { node: { backendNodeId: 8 } };
+      if (method === "DOMSnapshot.captureSnapshot") {
+        const snapshot = await original(source, method, params);
+        if (source.sessionId === "child") {
+          const doc = snapshot.documents[0]; snapshot.strings.push("BUTTON");
+          doc.nodes.backendNodeId.push(8); doc.nodes.parentIndex.push(-1); doc.nodes.nodeType.push(1); doc.nodes.nodeName.push(snapshot.strings.length - 1);
+          doc.layout.nodeIndex.push(doc.nodes.backendNodeId.length - 1); doc.layout.bounds.push([0, 0, 100, 20]); doc.layout.styles.push([0, 1, 1, 1, 2]);
+        } else {
+          snapshot.strings.push("0");
+          snapshot.documents[0].layout.styles[1][0] = snapshot.strings.length - 1;
+        }
+        return snapshot;
+      }
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "child", targetInfo: { type: "iframe", targetId: "cross" } });
+    const frames: any = await runtime.listFrames(3), cross = frames.frames.find((frame: any) => frame.url === "https://cross.test/");
+    command.mockClear();
+    await expect(page.inspect({}, page.frameRef(cross.frameRef).getByRole("button"))).rejects.toMatchObject({ code: "snapshot-region-unavailable" });
+    expect(command.mock.calls.some(([, method, params]) => method === "Runtime.callFunctionOn" && params?.objectId === "doc-33" && params.functionDeclaration.includes("readyState"))).toBe(false);
     await runtime.abortSessions();
   });
 

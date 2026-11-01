@@ -109,6 +109,28 @@ function harness(
   return { runtime, calls, command, pressChord, detach, tabsCreated, onDispatch };
 }
 
+function textboxSnapshot(options: { value?: string; text?: string; role?: string; masked?: boolean; properties?: any[]; actions?: string[]; sibling?: boolean } = {}) {
+  const { runtime, command } = harness();
+  const original = command.getMockImplementation()!;
+  const value = options.value ?? "DSP-17-A/7", text = options.text ?? value;
+  const strings = ["root", "#document", "INPUT", "SPAN", "1", "visible", "static", "none", "auto", "ltr", "horizontal-tb", "block", "16px", "rgb(0, 0, 0)", "0px", "border-box", "clip", "disc"];
+  const style = [4, 5, 5, 5, 5, 6, 7, 7, 7, 7, 8, 7, 7, 7, 7, 7, 8, 9, 10, 11, 12, 13, 7, 14, 15, 7, options.masked ? 17 : 7, 16, 7, 7, 7];
+  const snapshot = { strings, documents: [{ frameId: 0, nodes: { backendNodeId: [1, 7, 8], parentIndex: [-1, 0, 1], nodeType: [9, 1, 1], nodeName: [1, 2, 3], nodeValue: [-1, -1, -1] }, layout: { nodeIndex: [0, 1, 2], bounds: [[0, 0, 100, 100], [0, 0, 100, 20], [0, 0, 100, 20]], styles: [[], style, style], text: [-1, -1, -1] } }] };
+  const nodes = [
+    { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["box"] },
+    { nodeId: "box", parentId: "root", backendDOMNodeId: 7, role: { value: options.role ?? "textbox" }, name: { value: "Recipient" }, value: { value }, childIds: options.sibling ? ["text", "extra"] : ["text"] },
+    { nodeId: "text", parentId: "box", backendDOMNodeId: 8, role: { value: "StaticText" }, name: { value: text }, childIds: [], ...(options.properties ? { properties: options.properties } : {}), ...(options.actions ? { actions: options.actions } : {}) },
+    ...(options.sibling ? [{ nodeId: "extra", parentId: "box", role: { value: "StaticText" }, name: { value: "extra" }, childIds: [] }] : []),
+  ];
+  command.mockImplementation(async (source, method, params) => {
+    if (method === "DOMSnapshot.captureSnapshot") return snapshot;
+    if (method === "Accessibility.getFullAXTree") return { nodes };
+    if (method === "DOM.describeNode") return { node: { backendNodeId: 8 } };
+    return original(source, method, params);
+  });
+  return { runtime, command, value, text };
+}
+
 describe("AutomationRuntime", () => {
   it.each([true, false])("bounds an automatic snapshot after a click with ok=%s and releases the executor queue", async (ok) => {
     const { runtime, command } = harness();
@@ -274,7 +296,115 @@ describe("AutomationRuntime", () => {
       const scoped = await (runtime as any).locatorScope(session, { queries: [{ kind: "frame", value: "#frame" }, { kind: "css", value: "#button" }] });
       expect(scoped.rootObjectId).toBe("frame-document");
       expect(scoped.spec.queries).toEqual([{ kind: "css", value: "#button" }]);
+      scoped.dispose();
+      expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === "owner")).toBe(true);
+      expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === "frame-document")).toBe(false);
     } finally { await runtime.abortSessions(); }
+  });
+
+  it("releases a frame owner when its description is aborted", async () => {
+    const { runtime, command } = harness();
+    const controller = new AbortController(); runtime.setContext({ signal: controller.signal });
+    const page = await runtime.createPage(3), session = (runtime as any).sessions.get(3);
+    vi.spyOn(runtime as any, "resolveDirect").mockImplementation(async () => {
+      (runtime as any).objectDebuggees.set("owner", session.debuggee); return "owner";
+    });
+    const original = command.getMockImplementation()!;
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => { entered = resolve; });
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.describeNode" && params?.objectId === "owner") { entered(); return new Promise(() => {}); }
+      return original(source, method, params);
+    });
+    const pending = page.inspect({}, page.frameLocator("#frame").locator("#region"));
+    await waiting; controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === "owner")).toBe(true);
+    expect((runtime as any).objectDebuggees.has("owner")).toBe(false);
+    await runtime.abortSessions();
+  });
+
+  it("releases frame owner handles after a failed description or ambiguous semantic match", async () => {
+    const { runtime, command } = harness(); await runtime.createPage(3);
+    const session = (runtime as any).sessions.get(3), original = command.getMockImplementation()!;
+    vi.spyOn(runtime as any, "resolveDirect").mockResolvedValue("owner");
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.describeNode" && params?.objectId === "owner") throw new Error("owner failed");
+      return original(source, method, params);
+    });
+    await expect((runtime as any).locatorScope(session, { queries: [{ kind: "frame", value: "#frame" }] })).rejects.toThrow("owner failed");
+    expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === "owner")).toBe(true);
+    vi.spyOn(runtime as any, "resolveSemantic").mockResolvedValue([{ objectId: "one", backendNodeId: 1 }, { objectId: "two", backendNodeId: 2 }]);
+    await expect((runtime as any).locatorScope(session, { queries: [{ kind: "role", value: "group" }, { kind: "frame", value: "iframe" }] }))
+      .rejects.toMatchObject({ code: "strict-mode" });
+    for (const id of ["one", "two"]) expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === id)).toBe(true);
+    await runtime.abortSessions();
+  });
+
+  it("releases a scoped reference root only after its consumer finishes, or transfers it as the result", async () => {
+    const { runtime, command } = harness(); await runtime.createPage(3);
+    const session = (runtime as any).sessions.get(3), ref = { debuggee: session.debuggee };
+    vi.spyOn(runtime as any, "resolveRef").mockImplementation(async () => {
+      (runtime as any).objectDebuggees.set("ref-root", session.debuggee); return { ref, objectId: "ref-root" };
+    });
+    const resolveDom = vi.spyOn(runtime as any, "resolveDomOnce").mockImplementation(async (_session, _debuggee, _spec, root) => {
+      expect(root).toBe("ref-root");
+      expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === "ref-root")).toBe(false);
+      return "child";
+    });
+    const spec = { ref: "e1", queries: [{ kind: "css", value: "span" }] };
+    await expect((runtime as any).resolveOnce(session, spec)).resolves.toBe("child");
+    expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === "ref-root")).toBe(true);
+    expect((runtime as any).objectDebuggees.has("ref-root")).toBe(false);
+    command.mockClear(); resolveDom.mockResolvedValue("ref-root");
+    await expect((runtime as any).resolveOnce(session, spec)).resolves.toBe("ref-root");
+    expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === "ref-root")).toBe(false);
+    expect((runtime as any).objectDebuggees.has("ref-root")).toBe(true);
+    await runtime.abortSessions();
+  });
+
+  it("releases an owned reference root immediately if its consumer is aborted", async () => {
+    const { runtime, command } = harness(), controller = new AbortController();
+    runtime.setContext({ signal: controller.signal }); await runtime.createPage(3);
+    const session = (runtime as any).sessions.get(3);
+    vi.spyOn(runtime as any, "resolveRef").mockImplementation(async () => {
+      (runtime as any).objectDebuggees.set("ref-root", session.debuggee);
+      return { ref: { debuggee: session.debuggee }, objectId: "ref-root" };
+    });
+    let entered!: () => void, finish!: (value: string) => void;
+    const waiting = new Promise<void>((resolve) => { entered = resolve; });
+    const result = new Promise<string>((resolve) => { finish = resolve; });
+    vi.spyOn(runtime as any, "resolveDomOnce").mockImplementation(async () => { entered(); return result; });
+    const pending = (runtime as any).resolveOnce(session, { ref: "e1", queries: [{ kind: "css", value: "span" }] });
+    await waiting; controller.abort();
+    expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === "ref-root")).toBe(true);
+    expect((runtime as any).objectDebuggees.has("ref-root")).toBe(false);
+    finish("child"); await pending;
+    await runtime.abortSessions();
+  });
+
+  it("releases a reference object when its live identity is stale or arrives after cancellation", async () => {
+    const { runtime, command } = harness();
+    const controller = new AbortController(); runtime.setContext({ signal: controller.signal });
+    await runtime.createPage(3);
+    const session = (runtime as any).sessions.get(3);
+    const ref = (runtime as any).rememberRef(session, "test", { backendNodeId: 7, debuggee: session.debuggee, role: "button", name: "Different", generation: session.generation, identitySource: "ax" });
+    await expect((runtime as any).resolveRef(session, ref)).rejects.toMatchObject({ code: "stale-ref" });
+    expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === "node-1")).toBe(true);
+    const original = command.getMockImplementation()!;
+    let entered!: () => void, deliver!: (value: any) => void;
+    const waiting = new Promise<void>((resolve) => { entered = resolve; });
+    const late = new Promise<any>((resolve) => { deliver = resolve; });
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.resolveNode") { entered(); return late; }
+      return original(source, method, params);
+    });
+    const pending = (runtime as any).resolveRef(session, ref);
+    await waiting; controller.abort(); deliver({ object: { objectId: "late-ref" } });
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === "late-ref")).toBe(true);
+    expect((runtime as any).objectDebuggees.has("late-ref")).toBe(false);
+    await runtime.abortSessions();
   });
 
   it("rechecks the target when a frame is still attaching to its own process", async () => {
@@ -1146,6 +1276,247 @@ describe("AutomationRuntime", () => {
     expect(inspectText(result)).not.toContain("textbox");
     expect(inspectText(result)).toContain('button "Label restored"');
     expect(inspectText(result)).toContain('StaticText "restored"');
+    await runtime.abortSessions();
+  });
+
+  it.each(["textbox", "searchbox"])("emits a %s value only once without losing its name or ref", async (role) => {
+    const { runtime, value } = textboxSnapshot({ role });
+    const result = await (await runtime.createPage(3)).inspect();
+    expect(inspectText(result)).toContain(`${role} "Recipient"`);
+    expect(inspectText(result).split(value)).toHaveLength(2);
+    expect(inspectText(result)).not.toContain("StaticText");
+    expect((result.items as any[]).find((item) => item.line.includes(role))?.ref).toBeTruthy();
+    await runtime.abortSessions();
+  });
+
+  it.each([
+    { text: "Different" },
+    { properties: [{ name: "live", value: { value: "polite" } }] },
+    { actions: ["doDefault"] },
+    { sibling: true },
+    { value: "••••", text: "••••", masked: true },
+  ])("preserves input text with independent content or semantics: %o", async (options) => {
+    const { runtime, text } = textboxSnapshot(options);
+    const result = await (await runtime.createPage(3)).inspect();
+    expect(inspectText(result)).toContain(`StaticText "${text}"`);
+    if (options.masked) expect(inspectText(result)).toContain("masked=true");
+    await runtime.abortSessions();
+  });
+
+  it("retains a selected static text region and fragments long input values correctly", async () => {
+    const value = `Start ${"long😀".repeat(100)} end`;
+    const { runtime } = textboxSnapshot({ value });
+    const page = await runtime.createPage(3);
+    const region = await page.inspect({}, page.locator("#leaf"));
+    expect(inspectText(region)).toContain(`StaticText "${value}"`);
+    const first: any = await page.inspect({ budget: 240, limit: 1 });
+    const items = [...first.items];
+    let cursor = first.nextCursor, pages = 1;
+    while (cursor) {
+      const next: any = await page.inspect({ cursor, budget: 240, limit: 1 });
+      items.push(...next.items);
+      cursor = next.nextCursor;
+      expect(++pages).toBeLessThan(100);
+      if (!cursor) expect(next.truncation.baselineComplete).toBe(true);
+    }
+    expect(pages).toBeGreaterThan(2);
+    const reconstructed = items.map((item: any) => item.line).join("");
+    expect(reconstructed).toContain(value);
+    expect(reconstructed).not.toContain("StaticText");
+    expect(reconstructed.split(value)).toHaveLength(2);
+    await runtime.abortSessions();
+  });
+
+  it("rejects a scoped baseline if the same locator resolves to a different node", async () => {
+    const { runtime, command } = textboxSnapshot();
+    const original = command.getMockImplementation()!;
+    let backendNodeId = 8;
+    command.mockImplementation(async (source, method, params) => method === "DOM.describeNode"
+      ? { node: { backendNodeId } } : original(source, method, params));
+    const page = await runtime.createPage(3), region = page.locator("#leaf");
+    const first = await page.inspect({}, region);
+    backendNodeId = 7;
+    await expect(page.inspect({ since: first.observationId as string }, region)).rejects.toMatchObject({ code: "stale-observation", detail: { reason: "region-identity-changed" } });
+    await runtime.abortSessions();
+  });
+
+  it("invalidates frozen snapshot cursors when frame handles become stale", async () => {
+    const { runtime } = textboxSnapshot({ value: "long".repeat(200) });
+    const page = await runtime.createPage(3);
+    const first = await page.inspect({ budget: 240, limit: 1 });
+    expect(first.nextCursor).toEqual(expect.any(String));
+    runtime.handleEvent({ tabId: 3 }, "Page.frameAttached", { frameId: "new-frame", parentFrameId: "root" });
+    await expect(page.inspect({ cursor: first.nextCursor as string })).rejects.toMatchObject({ code: "stale-observation" });
+    await runtime.abortSessions();
+  });
+
+  it("uses DOM region membership and order when aria-owns reparents AX nodes in both directions", async () => {
+    const { runtime, command } = harness(), original = command.getMockImplementation()!;
+    const strings = ["root", "#document", "SECTION", "H2", "BUTTON", "DIV", "1", "visible", "auto"];
+    const snapshot = { strings, documents: [{ frameId: 0,
+      nodes: { backendNodeId: [1, 7, 8, 9, 10, 11], parentIndex: [-1, 0, 1, 1, 0, 0], nodeType: [9, 1, 1, 1, 1, 1], nodeName: [1, 2, 3, 4, 3, 5], nodeValue: [-1, -1, -1, -1, -1, -1] },
+      layout: { nodeIndex: [0, 1, 2, 3, 4, 5], bounds: Array.from({ length: 6 }, () => [0, 0, 100, 20]), styles: [[], ...Array.from({ length: 5 }, () => [6, 7, 7, 7, 8])], text: [-1, -1, -1, -1, -1, -1] },
+    }] };
+    const nodes = [
+      { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["region", "owner"] },
+      { nodeId: "region", parentId: "root", backendDOMNodeId: 7, role: { value: "region" }, name: { value: "Outside Action", sources: [{ type: "contents", value: { value: "Outside Action" } }] }, childIds: ["outside", "button"] },
+      { nodeId: "outside", parentId: "region", backendDOMNodeId: 10, role: { value: "heading" }, name: { value: "Outside" }, childIds: [] },
+      { nodeId: "button", parentId: "region", backendDOMNodeId: 9, role: { value: "button" }, name: { value: "Action", sources: [{ type: "attribute", value: { value: "Action" } }] }, childIds: [] },
+      { nodeId: "owner", parentId: "root", backendDOMNodeId: 11, role: { value: "group" }, childIds: ["inside"] },
+      { nodeId: "inside", parentId: "owner", backendDOMNodeId: 8, role: { value: "heading" }, name: { value: "Inside" }, childIds: [] },
+    ];
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOMSnapshot.captureSnapshot") return snapshot;
+      if (method === "Accessibility.getFullAXTree") return { nodes };
+      if (method === "DOM.describeNode") return { node: { backendNodeId: 7 } };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    const result = await page.inspect({}, page.locator("#region"));
+    const text = inspectText(result);
+    expect(text).not.toContain("Outside");
+    expect(text).toContain('heading "Inside"');
+    expect(text).toContain('button "Action"');
+    expect(text.indexOf('heading "Inside"')).toBeLessThan(text.indexOf('button "Action"'));
+    expect((result.items as any[]).find((item) => item.line.includes('button "Action"'))?.ref).toBeTruthy();
+    const paged: any = await page.inspect({ budget: 240, limit: 1 }, page.locator("#region"));
+    const parts = [...paged.items];
+    let cursor = paged.nextCursor;
+    while (cursor) {
+      const next: any = await page.inspect({ cursor, budget: 240, limit: 1 });
+      parts.push(...next.items); cursor = next.nextCursor;
+    }
+    const reconstructed = new Map<string, string>();
+    for (const item of parts) reconstructed.set(item.id, (reconstructed.get(item.id) ?? "") + item.line);
+    expect([...reconstructed.values()]).toEqual((result.items as any[]).map((item) => item.line));
+    expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === "node-1")).toBe(true);
+    await runtime.abortSessions();
+  });
+
+  it("does not claim a complete region when an AX semantic node has unknown DOM membership", async () => {
+    const { runtime, command } = textboxSnapshot(), original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method !== "Accessibility.getFullAXTree") return original(source, method, params);
+      const response = await original(source, method, params);
+      response.nodes[0].childIds.push("unknown");
+      response.nodes.push({ nodeId: "unknown", parentId: "root", backendDOMNodeId: 999, role: { value: "heading" }, name: { value: "unknown" }, childIds: [] });
+      return response;
+    });
+    const page = await runtime.createPage(3);
+    await expect(page.inspect({}, page.locator("#leaf"))).rejects.toMatchObject({ code: "snapshot-unavailable", detail: { reason: "unknown-region-membership" } });
+    await runtime.abortSessions();
+  });
+
+  it("paginates a large scoped accessibility tree without expanding a large argument list", async () => {
+    const { runtime, command } = harness(), original = command.getMockImplementation()!;
+    const count = 12_000, strings = ["root", "#document", "SECTION", "SPAN", "1", "visible", "auto"];
+    const ids = Array.from({ length: count }, (_, index) => index + 10);
+    const snapshot = { strings, documents: [{ frameId: 0,
+      nodes: { backendNodeId: [1, 7, ...ids], parentIndex: [-1, 0, ...ids.map(() => 1)], nodeType: [9, 1, ...ids.map(() => 1)], nodeName: [1, 2, ...ids.map(() => 3)] },
+      layout: { nodeIndex: Array.from({ length: count + 2 }, (_, index) => index), bounds: Array.from({ length: count + 2 }, () => [0, 0, 10, 10]), styles: [[], ...Array.from({ length: count + 1 }, () => [4, 5, 5, 5, 6])] },
+    }] };
+    const nodes = [
+      { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["region"] },
+      { nodeId: "region", parentId: "root", backendDOMNodeId: 7, role: { value: "region" }, name: { value: "Large" }, childIds: ids.map(String) },
+      ...ids.map((id) => ({ nodeId: String(id), parentId: "region", backendDOMNodeId: id, role: { value: "heading" }, name: { value: `Heading ${id}` }, childIds: [] })),
+    ];
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOMSnapshot.captureSnapshot") return snapshot;
+      if (method === "Accessibility.getFullAXTree") return { nodes };
+      if (method === "DOM.describeNode") return { node: { backendNodeId: 7 } };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    const result = await page.inspect({ budget: 240 }, page.locator("#large"));
+    expect(result).toMatchObject({ mode: "full", truncation: { truncated: true, total: count + 1 } });
+    expect(result.nextCursor).toEqual(expect.any(String));
+    await runtime.abortSessions();
+  });
+
+  it("releases a resolved region object when describing it is aborted", async () => {
+    const { runtime, command } = harness(), original = command.getMockImplementation()!;
+    const controller = new AbortController();
+    runtime.setContext({ signal: controller.signal });
+    let entered!: () => void;
+    const describing = new Promise<void>((resolve) => { entered = resolve; });
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.describeNode") { entered(); return new Promise(() => {}); }
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3), pending = page.inspect({}, page.locator("#region"));
+    await describing; controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === "node-1")).toBe(true);
+    await runtime.abortSessions();
+  });
+
+  it("releases a late DOM locator result after the region capture is aborted", async () => {
+    const { runtime, command } = harness(), original = command.getMockImplementation()!;
+    const controller = new AbortController(); runtime.setContext({ signal: controller.signal });
+    let entered!: () => void, deliver!: (value: any) => void;
+    const waiting = new Promise<void>((resolve) => { entered = resolve; });
+    const response = new Promise<any>((resolve) => { deliver = resolve; });
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.callFunctionOn" && params?.objectId === "node-array" && params.functionDeclaration === "function(){return this[0]}") { entered(); return response; }
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3), pending = page.inspect({}, page.locator("#region"));
+    await waiting; controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    deliver({ result: { objectId: "late-node" } });
+    await vi.waitFor(() => expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === "late-node")).toBe(true));
+    expect((runtime as any).objectDebuggees.has("late-node")).toBe(false);
+    await runtime.abortSessions();
+  });
+
+  it("releases semantic locator document when its initial description fails", async () => {
+    const { runtime, command } = harness(), original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.evaluate" && params?.expression === "document") return { result: { objectId: "semantic-document" } };
+      if (method === "DOM.describeNode" && params?.objectId === "semantic-document") throw new Error("describe failed");
+      return original(source, method, params);
+    });
+    await runtime.createPage(3);
+    const session = (runtime as any).sessions.get(3);
+    await expect((runtime as any).resolveSemantic(session, session.debuggee, { queries: [] })).rejects.toThrow("describe failed");
+    expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === "semantic-document")).toBe(true);
+    await runtime.abortSessions();
+  });
+
+  it("releases all retained semantic matches when uniqueness fails", async () => {
+    const { runtime, command } = harness(); await runtime.createPage(3);
+    const session = (runtime as any).sessions.get(3), spec = { queries: [{ kind: "role", value: "button" }] };
+    vi.spyOn(runtime as any, "locatorScope").mockResolvedValue({ debuggee: session.debuggee, spec, rootIsElement: true, dispose: () => {} });
+    vi.spyOn(runtime as any, "resolveSemantic").mockResolvedValue([{ objectId: "semantic-one", backendNodeId: 7 }, { objectId: "semantic-two", backendNodeId: 8 }]);
+    for (const id of ["semantic-one", "semantic-two"]) (runtime as any).objectDebuggees.set(id, session.debuggee);
+    await expect((runtime as any).resolveOnce(session, spec)).rejects.toMatchObject({ code: "strict-mode" });
+    for (const id of ["semantic-one", "semantic-two"]) {
+      expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === id)).toBe(true);
+      expect((runtime as any).objectDebuggees.has(id)).toBe(false);
+    }
+    await runtime.abortSessions();
+  });
+
+  it("releases semantic handles that arrive after a concurrent resolution fails", async () => {
+    const { runtime, command } = harness(), original = command.getMockImplementation()!;
+    let deliver!: (value: any) => void;
+    const late = new Promise<any>((resolve) => { deliver = resolve; });
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.evaluate" && params?.expression === "document") return { result: { objectId: "semantic-document" } };
+      if (method === "DOM.describeNode" && params?.objectId === "semantic-document") return { node: { backendNodeId: 1 } };
+      if (method === "DOM.resolveNode" && params?.backendNodeId === 7) throw new Error("first failed");
+      if (method === "DOM.resolveNode" && params?.backendNodeId === 8) return late;
+      return original(source, method, params);
+    });
+    await runtime.createPage(3);
+    const session = (runtime as any).sessions.get(3);
+    vi.spyOn(runtime as any, "resolveAccessibility").mockResolvedValue([{ backendNodeId: 7 }, { backendNodeId: 8 }]);
+    const pending = (runtime as any).resolveSemantic(session, session.debuggee, { queries: [{ kind: "role", value: "button" }] });
+    const rejected = expect(pending).rejects.toThrow("first failed");
+    deliver({ object: { objectId: "late-semantic" } });
+    await rejected;
+    expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObject" && params?.objectId === "late-semantic")).toBe(true);
+    expect((runtime as any).objectDebuggees.has("late-semantic")).toBe(false);
     await runtime.abortSessions();
   });
 

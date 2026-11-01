@@ -148,7 +148,7 @@ export const TEXT_PAINT_EVIDENCE_SOURCE = String.raw`function(...rest) {
             || ['margin-left', 'margin-right', 'padding-left', 'padding-right', 'border-left-width', 'border-right-width'].some((name) => parseFloat(style.getPropertyValue(name)) !== 0)
             || !['none', 'normal'].includes(view.getComputedStyle(node, '::before').content)
             || !['none', 'normal'].includes(view.getComputedStyle(node, '::after').content)) return fail();
-          stack.push(...[...node.childNodes].reverse());
+          for (let index = node.childNodes.length - 1; index >= 0; index--) stack.push(node.childNodes[index]);
         } else if (node.nodeType === 3) {
           const source = node.data;
           // Restrict the proof to scripts with left-to-right text ordering;
@@ -330,7 +330,7 @@ export function projectTextPaint(candidate: SnapshotTextPaintCandidate, evidence
   if (typeof source !== "string" || typeof layout !== "string" || evidence.sourceText !== source) return undefined;
   const firstLetter = candidate.firstLetter ?? "";
   const ranges: Array<[number, number]> = candidate.zeroFont ? [] : evidence.ranges.map((range) => [...range]);
-  ranges.push(...(evidence.firstLineRanges ?? []));
+  for (const range of evidence.firstLineRanges ?? []) ranges.push(range);
   const selection = candidate.zeroFont ? undefined : evidence.selection;
   if (selection) ranges.push([selection.start, selection.end]);
   if (firstLetter) ranges.push([0, firstLetter.length]);

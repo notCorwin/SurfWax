@@ -18,6 +18,12 @@ describe("painted text projection", () => {
     expect(projectTextPaint(candidate, { ...evidence, ranges: [[1, 3], [2, 4], [5, 6]] })).toEqual({ hidden: false, text: "BCD … F" });
   });
 
+  it("projects a large number of first-line ranges without exceeding the call stack", () => {
+    const firstLineRanges: Array<[number, number]> = Array.from({ length: 160_000 }, () => [1, 2]);
+    expect(projectTextPaint({ ...candidate, documentFloatRisk: false }, { ...evidence, firstLineRanges }))
+      .toEqual({ hidden: false, text: "B" });
+  });
+
   it("retains an identified first-letter prefix without exposing its invisible suffix", () => {
     expect(projectTextPaint({ ...candidate, layoutText: "BCDEF", firstLetter: "A" }, { ...evidence, firstLetterRisk: true }))
       .toEqual({ hidden: false, text: "A" });
