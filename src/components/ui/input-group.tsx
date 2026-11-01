@@ -10,7 +10,6 @@ function InputGroup({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="input-group"
-      data-focus-group=""
       role="group"
       className={cn(
         "group/input-group relative flex w-full items-center rounded-md border border-input shadow-xs transition-[color,box-shadow]",
@@ -131,7 +130,6 @@ function InputGroupInput({
   return (
     <Input
       data-slot="input-group-control"
-      data-focus-delegate=""
       className={cn(
         "flex-1 rounded-none border-0 shadow-none",
         className
@@ -148,7 +146,6 @@ function InputGroupTextarea({
   return (
     <Textarea
       data-slot="input-group-control"
-      data-focus-delegate=""
       className={cn(
         "flex-1 resize-none rounded-none border-0 py-3 shadow-none",
         className

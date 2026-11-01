@@ -387,7 +387,7 @@ test("renders a complete Markdown response without blocking draft input", async 
     await rendered.locator('[data-streamdown="table-wrapper"] button').last().focus();
     await opened.page.keyboard.press("Tab");
     await expect(tableScroll).toBeFocused();
-    expect(await tableScroll.evaluate((scroll) => getComputedStyle(scroll).outlineWidth)).toBe("2px");
+    expect(await tableScroll.evaluate((scroll) => getComputedStyle(scroll).outlineStyle)).toBe("none");
     await tableScroll.evaluate((scroll) => { scroll.scrollLeft = 0; });
     await opened.page.keyboard.press("ArrowRight");
     await expect.poll(() => tableScroll.evaluate((scroll) => scroll.scrollLeft)).toBeGreaterThan(0);

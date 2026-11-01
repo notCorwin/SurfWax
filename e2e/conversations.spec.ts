@@ -399,8 +399,8 @@ test("searches saved messages, renames and lists historical archived conversatio
     await search.fill("unique saved message");
     expect(await search.evaluate((input) => ({
       input: getComputedStyle(input).outlineStyle,
-      group: getComputedStyle(input.closest('[data-slot="input-group"]')!).outlineWidth,
-    }))).toEqual({ input: "none", group: "2px" });
+      group: getComputedStyle(input.closest('[data-slot="input-group"]')!).outlineStyle,
+    }))).toEqual({ input: "none", group: "none" });
     await expect(opened.page.locator(".conversation-item")).toHaveCount(1);
     await search.fill("not found");
     await expect(opened.page.getByText("没有找到匹配的会话")).toBeVisible();
@@ -612,7 +612,7 @@ test("edits user messages, regenerates replies and restores the selected branch"
     await opened.page.getByTestId("edit-message-input").fill("long-edit-text-".repeat(40));
     for (const colorScheme of ["light", "dark"] as const) {
       await opened.page.emulateMedia({ colorScheme });
-      await expect(opened.page.getByTestId("user-message-bubble")).toHaveCSS("outline-width", "2px");
+      await expect(opened.page.getByTestId("user-message-bubble")).toHaveCSS("outline-style", "none");
       expect(await opened.page.getByTestId("edit-message-input").evaluate((input) => {
         const editor = input.closest("form")!;
         return {

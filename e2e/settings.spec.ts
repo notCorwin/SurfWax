@@ -315,7 +315,7 @@ test("shows inline settings errors and returns keyboard focus after closing conv
     await expect(options.locator("#base-url-error")).toHaveText("请输入 Base URL");
     await expect(disclosure).not.toHaveAttribute("open", "");
     await expect(options.locator("#base-url")).toBeFocused();
-    expect(await options.locator("#base-url").evaluate((input) => getComputedStyle(input).outlineStyle)).toBe("solid");
+    expect(await options.locator("#base-url").evaluate((input) => getComputedStyle(input).outlineStyle)).toBe("none");
     await expect(options.locator("#base-url")).toHaveAttribute("aria-invalid", "true");
     await options.setViewportSize({ width: 320, height: 720 });
     expect(await options.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
