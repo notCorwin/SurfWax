@@ -1322,6 +1322,30 @@ describe("AutomationRuntime", () => {
   });
 
   it.each([
+    { label: "plain UA value", expected: 1 },
+    { label: "semantic text", property: "live", expected: 2 },
+    { label: "actionable text", action: true, expected: 2 },
+    { label: "independent sibling", sibling: true, expected: 3 },
+    { label: "named wrapper", wrapperName: "Independent", expected: 2 },
+  ])("deduplicates only a sole plain native shadow value: $label", async ({ property, action, sibling, wrapperName, expected }) => {
+    const { runtime, command, value } = textboxSnapshot();
+    const original = command.getMockImplementation()!;
+    const editable = { name: "editable", value: { value: "plaintext" } };
+    command.mockImplementation(async (source, method, params) => method !== "Accessibility.getFullAXTree" ? original(source, method, params) : { nodes: [
+      { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["box"] },
+      { nodeId: "box", parentId: "root", backendDOMNodeId: 7, role: { value: "textbox" }, name: { value: "Recipient" }, value: { value }, childIds: ["wrapper"] },
+      { nodeId: "wrapper", parentId: "box", backendDOMNodeId: 9, role: { value: "generic" }, name: { value: wrapperName ?? "" }, properties: [editable], childIds: sibling ? ["text", "extra"] : ["text"] },
+      { nodeId: "text", parentId: "wrapper", backendDOMNodeId: 10, role: { value: "StaticText" }, name: { value }, childIds: [],
+        properties: property ? [editable, { name: property, value: { value: "polite" } }] : [editable], ...(action ? { actions: ["doDefault"] } : {}) },
+      ...(sibling ? [{ nodeId: "extra", parentId: "wrapper", backendDOMNodeId: 11, role: { value: "StaticText" }, name: { value }, childIds: [], properties: [editable] }] : []),
+    ] });
+    const result = await (await runtime.createPage(3)).inspect();
+    expect(inspectText(result).split(value)).toHaveLength(expected + 1);
+    expect((result.items as any[]).find((item) => item.line.includes('textbox "Recipient"'))?.ref).toBeTruthy();
+    await runtime.abortSessions();
+  });
+
+  it.each([
     { text: "Different" },
     { properties: [{ name: "live", value: { value: "polite" } }] },
     { actions: ["doDefault"] },

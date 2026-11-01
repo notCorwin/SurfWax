@@ -41,11 +41,27 @@ export const PLACEHOLDER_EVIDENCE_SOURCE = String.raw`function(text, expected) {
       && prop(s, 'clip-path') === 'none' && prop(s, 'clip') === 'auto'
       && prop(s, 'mask-image') === 'none' && prop(s, '-webkit-mask-box-image-source') === 'none'
       && prop(s, 'perspective') === 'none';
+    const family = prop(style, 'font-family');
+    const genericFamilies = ['monospace', 'sans-serif', 'serif', 'system-ui'];
+    const families = family.split(',').map((item) => item.trim());
+    // Native Chrome controls default to Arial. A web font can deliberately
+    // use that same name, so only accept it in the document tree when the
+    // live FontFaceSet proves no author-provided face can override it.
+    // Shadow-tree font-face scoping differs between browser versions.
+    let nativeArial = false;
+    if (families[0] === 'arial' && families.slice(1).every((item) => genericFamilies.includes(item))
+        && host.getRootNode() === doc && doc.fonts && doc.fonts.status === 'loaded'
+        && typeof doc.fonts[Symbol.iterator] === 'function') {
+      nativeArial = true;
+      for (const face of doc.fonts) {
+        if (typeof face.family !== 'string' || face.family.trim().toLowerCase() === 'arial') { nativeArial = false; break; }
+      }
+    }
     if (!noEffect(style) || prop(style, 'text-transform') !== 'none'
         || prop(style, '-webkit-text-security') !== 'none' || prop(style, 'text-shadow') !== 'none'
         || prop(style, '-webkit-text-stroke-width') !== '0px' || prop(style, 'background-clip') !== 'border-box'
         || prop(style, 'text-overflow') !== 'clip' || prop(style, '-webkit-line-clamp') !== 'none'
-        || !['monospace', 'sans-serif', 'serif', 'system-ui'].includes(prop(style, 'font-family'))
+        || !genericFamilies.includes(family) && !nativeArial
         || !Number.isFinite(parseFloat(style.fontSize)) || parseFloat(style.fontSize) <= 0
         || /[\r\n]/.test(expected) || doc.fonts && doc.fonts.status !== 'loaded') return unknown();
     const fill = prop(style, '-webkit-text-fill-color');
@@ -62,6 +78,13 @@ export const PLACEHOLDER_EVIDENCE_SOURCE = String.raw`function(text, expected) {
     if (![box.left, box.right, box.top, box.bottom, view.innerWidth, view.innerHeight].every(Number.isFinite)
         || box.right <= box.left || box.bottom <= box.top || box.left < 0 || box.top < 0
         || box.right > view.innerWidth || box.bottom > view.innerHeight) return unknown();
+    // Pinch zoom can leave layout coordinates inside innerWidth/innerHeight
+    // while the actual visual viewport shows only a smaller, offset region.
+    const visual = view.visualViewport;
+    if (!visual || ![visual.offsetLeft, visual.offsetTop, visual.width, visual.height, visual.scale].every(Number.isFinite)
+        || visual.width <= 0 || visual.height <= 0 || visual.scale <= 0
+        || box.left < visual.offsetLeft || box.top < visual.offsetTop
+        || box.right > visual.offsetLeft + visual.width || box.bottom > visual.offsetTop + visual.height) return unknown();
     // Each clipped ancestor contributes a client box. A clipped rounded corner
     // or complex transform cannot be proven by axis-aligned rectangles.
     const visited = new Set();

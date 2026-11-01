@@ -15,12 +15,14 @@ function fixture() {
   const makeStyle = () => ({ display: "block", visibility: "visible", opacity: "1", fontSize: "16px", properties: { ...defaults },
     getPropertyValue(name: string) { return this.properties[name] ?? ""; } });
   const geometry = { left: 10, right: 90, top: 10, bottom: 30 };
-  const view: any = { innerWidth: 400, innerHeight: 300, CSS: { highlights: new Map() }, getComputedStyle: (element: any) => element.style };
-  const doc: any = { defaultView: view, fonts: { status: "loaded" }, getSelection: () => ({ isCollapsed: true }),
+  const view: any = { innerWidth: 400, innerHeight: 300, visualViewport: { offsetLeft: 0, offsetTop: 0, width: 400, height: 300, scale: 1 }, CSS: { highlights: new Map() }, getComputedStyle: (element: any) => element.style };
+  const fonts = Object.assign(new Set<{ family: unknown }>(), { status: "loaded" });
+  const doc: any = { defaultView: view, fonts, getSelection: () => ({ isCollapsed: true }),
     createRange: () => ({ selectNodeContents() {}, getClientRects: () => [geometry] }) };
   const element = () => ({ style: makeStyle(), clientLeft: 0, clientTop: 0, clientWidth: 200, clientHeight: 40,
     getBoundingClientRect: () => ({ left: 5, top: 5 }), getRootNode: () => ({ host: undefined }), parentElement: null as any });
   const host: any = { ...element(), ownerDocument: doc, isConnected: true, nodeName: "INPUT", value: "", placeholder: "Placeholder" };
+  host.getRootNode = () => doc;
   const parent: any = { ...element(), getRootNode: () => ({ host }), getAttribute: (name: string) => name === "pseudo" ? "-webkit-input-placeholder" : null };
   const text: any = { nodeType: 3, isConnected: true, ownerDocument: doc, parentElement: parent, data: "Placeholder", getRootNode: () => ({ host }) };
   parent.childNodes = [text]; parent.firstChild = text;
@@ -88,6 +90,35 @@ describe("placeholder paint evidence", () => {
     const f = fixture(); f.doc.getSelection = () => ({ isCollapsed: false });
     expect(f.run()).toEqual({ status: "unknown" });
     f.doc.getSelection = () => ({ isCollapsed: true }); f.doc.fonts.status = "loading";
+    expect(f.run()).toEqual({ status: "unknown" });
+  });
+
+  it("accepts document-root Arial only when the live FontFaceSet excludes an author face", () => {
+    const f = fixture(); f.parent.style.properties["font-family"] = "Arial";
+    expect(f.run()).toEqual({ status: "visible", text: "Placeholder" });
+    f.parent.style.properties["font-family"] = "Arial, sans-serif";
+    expect(f.run()).toEqual({ status: "visible", text: "Placeholder" });
+    f.parent.style.properties["font-family"] = "Arial, Helvetica, sans-serif";
+    expect(f.run()).toEqual({ status: "unknown" });
+    f.parent.style.properties["font-family"] = "Arial, sans-serif";
+    f.doc.fonts.add({ family: "Other" });
+    expect(f.run()).toEqual({ status: "visible", text: "Placeholder" });
+    f.doc.fonts.add({ family: "ARIAL" });
+    expect(f.run()).toEqual({ status: "unknown" });
+    f.doc.fonts = { status: "loaded" };
+    expect(f.run()).toEqual({ status: "unknown" });
+    f.doc.fonts = Object.assign(new Set(), { status: "loaded" }); f.host.getRootNode = () => ({});
+    expect(f.run()).toEqual({ status: "unknown" });
+  });
+
+  it("rejects text outside the visual viewport under pinch zoom", () => {
+    const f = fixture(); f.view.visualViewport.width = 80;
+    expect(f.run()).toEqual({ status: "unknown" });
+    f.view.visualViewport.offsetLeft = 10;
+    expect(f.run()).toEqual({ status: "visible", text: "Placeholder" });
+    f.view.visualViewport.offsetLeft = 20;
+    expect(f.run()).toEqual({ status: "unknown" });
+    f.view.visualViewport = null;
     expect(f.run()).toEqual({ status: "unknown" });
   });
 

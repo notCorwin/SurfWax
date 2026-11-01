@@ -13,6 +13,7 @@ import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility, type SnapshotTextPaintCan
 import { projectTextPaint, sameTextPaintCandidates, TEXT_PAINT_CACHE_LOOKUP_SOURCE, TEXT_PAINT_CACHE_REGISTER_SOURCE, type TextPaintEvidence } from "./snapshot-text-paint";
 import { PLACEHOLDER_EVIDENCE_SOURCE, samePlaceholderEvidence, type PlaceholderEvidence } from "./snapshot-placeholder";
 import { FRAME_OWNER_FULLY_VISIBLE_SOURCE } from "./snapshot-frame-containment";
+import { createFrameHandle } from "./snapshot-frame-handle";
 import { createFrameVisibility } from "./frame-visibility";
 import { PROGRAM_EVENT_INVOKE } from "./program-handles";
 
@@ -1546,7 +1547,7 @@ export class AutomationRuntime {
     if (record && record.generation === session.generation && record.revision === session.frameRevision
       && record.debuggee.tabId === debuggee.tabId && record.debuggee.sessionId === debuggee.sessionId) return previous!;
     if (previous) session.frameRefs.delete(previous);
-    const ref = `f${crypto.randomUUID()}`;
+    const ref = createFrameHandle();
     session.frameRefs.set(ref, { frameId, debuggee, generation: session.generation, revision: session.frameRevision, conversationId, runId });
     session.frameRefsById.set(key, ref);
     return ref;
@@ -3730,6 +3731,27 @@ export class AutomationRuntime {
         // glyphs. Unknown security is not proof that raw characters are visible.
         const maskedControl = (node: any) => ["textbox", "searchbox", "combobox", "spinbutton"].includes(axValue(node.role))
           && securityByBackend.get(node.backendDOMNodeId) !== "none";
+        const plainEditable = (entry: any) => (entry.actions === undefined || Array.isArray(entry.actions) && entry.actions.length === 0)
+          && (entry.properties === undefined || Array.isArray(entry.properties) && entry.properties.length <= 1
+            && entry.properties.every((property: any) => property.name === "editable" && property.value?.value === "plaintext"));
+        // Chrome normally represents a native control's value as a single
+        // UA-shadow generic → StaticText path absent from DOMSnapshot. Only
+        // this exact, semantically plain path is equivalent to the value row.
+        const nativeValueOwner = (leaf: any): any | undefined => {
+          if (!leaf || leaf.ignored || axValue(leaf.role) !== "StaticText" || !axValue(leaf.name)
+            || !Array.isArray(leaf.childIds) || !leaf.childIds.every((id: string) => axValue(byId.get(id)?.role) === "InlineTextBox")
+            || typeof leaf.backendDOMNodeId !== "number" || domIndex.indexOf(leaf.backendDOMNodeId) !== undefined || !plainEditable(leaf)) return undefined;
+          const wrapper = byId.get(leaf.parentId), owner = wrapper && byId.get(wrapper.parentId);
+          if (!wrapper || wrapper.ignored || axValue(wrapper.role) !== "generic" || axValue(wrapper.name) || axValue(wrapper.value)
+            || typeof wrapper.backendDOMNodeId !== "number" || domIndex.indexOf(wrapper.backendDOMNodeId) !== undefined
+            || !Array.isArray(wrapper.childIds) || wrapper.childIds.length !== 1 || wrapper.childIds[0] !== leaf.nodeId || !plainEditable(wrapper)
+            || !owner || owner.ignored || !["textbox", "searchbox"].includes(axValue(owner.role)) || maskedControl(owner)
+            || !Array.isArray(owner.childIds) || owner.childIds.length !== 1 || owner.childIds[0] !== wrapper.nodeId
+            || axValue(owner.value) !== axValue(leaf.name)) return undefined;
+          const index = typeof owner.backendDOMNodeId === "number" ? domIndex.indexOf(owner.backendDOMNodeId) : undefined;
+          const tag = index === undefined ? "" : snapshot.strings?.[doc.nodes.nodeName?.[index]]?.toUpperCase();
+          return tag === "INPUT" || tag === "TEXTAREA" ? owner : undefined;
+        };
         const scope = frameLabel ?? session.rootFrameId ?? "root";
         // Frame ID alone is insufficient: an OOPIF can be replaced by a new
         // debugger target without changing the frame ID or document generation.
@@ -3761,13 +3783,17 @@ export class AutomationRuntime {
         while (scan.length) {
           const { node, inherited, within, placeholderOwner } = scan.pop()!;
           const known = typeof node.backendDOMNodeId === "number" ? visibility.get(node.backendDOMNodeId) : undefined;
+          const nativeOwner = nativeValueOwner(node) ?? (axValue(node.role) === "generic" && node.childIds?.length === 1
+            ? nativeValueOwner(byId.get(node.childIds[0])) : undefined);
           if (scopeIndex && typeof node.backendDOMNodeId === "number" && !placeholderTextNodes.has(node.backendDOMNodeId) && scopeIndex.indexOf(node.backendDOMNodeId) === undefined
-            && !otherFrameBackends?.has(node.backendDOMNodeId) && known !== false && !node.ignored
+            && !otherFrameBackends?.has(node.backendDOMNodeId) && !nativeOwner && known !== false && !node.ignored
             && !["", "none", "generic", "InlineTextBox"].includes(axValue(node.role)))
             throw automationError("snapshot-unavailable", { reason: "unknown-region-membership" });
           const isHidden = known === undefined ? inherited : !known;
           const isScoped = !scopeIndex || (typeof node.backendDOMNodeId === "number"
-            ? scopeIndex.contains(regionNode!.node.backendNodeId, node.backendDOMNodeId) === true : within);
+            ? scopeIndex.contains(regionNode!.node.backendNodeId, node.backendDOMNodeId) === true
+              || Boolean(nativeOwner && scopeIndex.contains(regionNode!.node.backendNodeId, nativeOwner.backendDOMNodeId) === true)
+            : within);
           const owner = placeholder(node) ? node : placeholderOwner;
           if (owner && owner !== node && axValue(node.role) === "StaticText" && placeholder(owner)?.status !== "visible"
             && (typeof node.backendDOMNodeId !== "number" || known !== true)) {
@@ -3888,7 +3914,10 @@ export class AutomationRuntime {
             && (node.properties === undefined || Array.isArray(node.properties) && node.properties.length === 0)
             && (node.actions === undefined || Array.isArray(node.actions) && node.actions.length === 0)
             && Boolean(name) && name === axValue(parent.value);
-          const duplicateText = duplicateNamedText || duplicateValueText;
+          const owner = nativeValueOwner(node);
+          const duplicateNativeValueText = singleTextLeaf && parentRole === "generic" && owner && !hidden(owner) && inScope(owner)
+            && Boolean(name) && name === axValue(owner.value);
+          const duplicateText = duplicateNamedText || duplicateValueText || duplicateNativeValueText;
           if (role && role !== "none" && role !== "generic" && role !== "InlineTextBox" && typeof node.backendDOMNodeId === "number") covered.add(node.backendDOMNodeId);
           if (role && role !== "none" && role !== "generic" && role !== "InlineTextBox" && !duplicateText) {
             let ref = "";
