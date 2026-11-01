@@ -22,6 +22,17 @@ describe("canonical prompt versions", () => {
     expect(events).toHaveLength(2); expect(fromLogValue(events[0]!.content)).toEqual({ prompt: first });
     expect(readPromptSnapshot(events)?.source).toBe("Next instructions");
   });
+  it("updates a persisted default prompt when its instructions change", async () => {
+    const { logger, events } = fixture();
+    const old = { ...createPromptSnapshot(), instructions: "Old default instructions" };
+    await logger.append({ type: "context.prompt.updated", conversationId: "one", content: { prompt: old } });
+    const updated = await ensureConversationPrompt(logger, "one");
+    expect(updated).toEqual(createPromptSnapshot());
+    expect(events).toHaveLength(2);
+    expect(fromLogValue(events[0]!.content)).toEqual({ prompt: old });
+    expect(await ensureConversationPrompt(logger, "one")).toEqual(updated);
+    expect(events).toHaveLength(2);
+  });
   it("migrates every old branch on its next turn without changing history, even if compaction fails", async () => {
     const { logger, events } = fixture();
     const legacy = { version: 1 as const, format: "legacy-user-tools" as const, catalogVersion: "formal-49-v2", source: "Custom", instructions: "Custom" };

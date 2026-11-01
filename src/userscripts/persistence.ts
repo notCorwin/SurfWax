@@ -2,14 +2,12 @@ import type { EventLogger } from "../logging";
 import { scriptChanges, scriptDefinition, scriptId } from "./schema";
 
 export const USER_SCRIPTS_STORAGE_KEY = "side-agent:user-scripts";
-export const USER_SCRIPTS_DATA_KEY = "side-agent:user-scripts-data";
 export const USER_SCRIPTS_ERROR_KEY = "side-agent:user-scripts-error";
 export const USER_SCRIPTS_WORLDS_KEY = "side-agent:user-script-worlds";
 export const USER_SCRIPTS_LEGACY_KEY = "side-agent:user-scripts-unparsed";
 export const USER_SCRIPTS_DISABLED_KEY = "side-agent:user-scripts-disabled";
-const DATA_VERSION = 3;
 
-type UserScriptsApi = Pick<typeof chrome.userScripts, "getScripts" | "register" | "unregister" | "update">
+type UserScriptsApi = Pick<typeof chrome.userScripts, "getScripts" | "register" | "unregister">
   & Partial<Pick<typeof chrome.userScripts, "getWorldConfigurations" | "configureWorld">>;
 type UserScriptsChrome = {
   storage: { local: Pick<chrome.storage.StorageArea, "get" | "set"> };
@@ -29,10 +27,10 @@ export async function restoreUserScripts(options: { chromeApi?: UserScriptsChrom
   const chromeApi = options.chromeApi ?? globalThis.chrome;
   const api = chromeApi.userScripts;
   if (!api) {
-    options.logger?.record({ type: "userscript.unavailable", content: null });
+    options.logger?.telemetry({ type: "userscript.unavailable", content: null });
     return false;
   }
-  const stored = await chromeApi.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY, USER_SCRIPTS_DATA_KEY, USER_SCRIPTS_WORLDS_KEY]);
+  const stored = await chromeApi.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY, USER_SCRIPTS_WORLDS_KEY]);
   const desired = scriptsFromStorage(stored[USER_SCRIPTS_STORAGE_KEY]);
   const disabledIds = new Set(scriptsFromStorage(stored[USER_SCRIPTS_DISABLED_KEY]).map((script) => script.id));
   const registered = await api.getScripts();
@@ -47,7 +45,7 @@ export async function restoreUserScripts(options: { chromeApi?: UserScriptsChrom
     if (disabledIds.has(script.id)) await api.unregister({ ids: [script.id] });
   }
   const active = registered.filter((script) => !disabledIds.has(script.id));
-  if (stored[USER_SCRIPTS_STORAGE_KEY] === undefined && active.length) {
+  if (stored[USER_SCRIPTS_STORAGE_KEY] === undefined) {
     await snapshotUserScripts(options);
     return true;
   }
@@ -60,14 +58,24 @@ export async function restoreUserScripts(options: { chromeApi?: UserScriptsChrom
     if (disabledIds.has(script.id)) continue;
     const current = byId.get(script.id);
     if (!current) await api.register([script]);
-    else if (JSON.stringify(current) !== JSON.stringify(script)) await api.update([script]);
+    else if (JSON.stringify(current) !== JSON.stringify(script)) {
+      // update() merges properties, so omitted optional fields would survive.
+      // Re-register the declaration exactly, restoring the prior projection if
+      // registration fails; storage remains authoritative for a later retry.
+      await api.unregister({ ids: [script.id] });
+      try { await api.register([script]); }
+      catch (error) {
+        await api.register([current]).catch(() => undefined);
+        throw error;
+      }
+    }
   }
   // Storage is the declaration; the native registry is only its executable
   // projection. Normalize a legacy active/disabled conflict without taking a
   // reverse snapshot that could make unrelated native drift canonical.
   const normalized = desired.filter((script) => !disabledIds.has(script.id));
   if (normalized.length !== desired.length) await chromeApi.storage.local.set({ [USER_SCRIPTS_STORAGE_KEY]: normalized });
-  options.logger?.record({ type: "userscript.restored", content: { count: desired.length } });
+  options.logger?.telemetry({ type: "userscript.restored", content: { count: desired.length } });
   return true;
 }
 
@@ -85,10 +93,9 @@ export async function snapshotUserScripts(options: { chromeApi?: UserScriptsChro
   await chromeApi.storage.local.set({
     ...legacy,
     [USER_SCRIPTS_STORAGE_KEY]: scripts,
-    [USER_SCRIPTS_DATA_KEY]: { version: DATA_VERSION },
     ...(worlds ? { [USER_SCRIPTS_WORLDS_KEY]: worlds } : {}),
   });
-  options.logger?.record({ type: "userscript.snapshot", content: { count: scripts.length } });
+  options.logger?.telemetry({ type: "userscript.snapshot", content: { count: scripts.length } });
   return true;
 }
 
@@ -124,83 +131,81 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
       scriptId.parse(input?.id);
       scriptChanges.parse(input?.changes);
     }
-    // Removing a problematic declaration must remain possible even when its
-    // registration is the reason reconciliation cannot complete.
-    if (method === "delete" || method === "setEnabled" && (args[0] as { enabled?: unknown })?.enabled === false) {
-      const { id } = args[0] as { id: string };
-      if (typeof id !== "string" || !id) throw new Error("无效的脚本操作。");
-      const stored = await chromeApi.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY]);
-      const saved = scriptsFromStorage(stored[USER_SCRIPTS_STORAGE_KEY]);
-      const disabled = scriptsFromStorage(stored[USER_SCRIPTS_DISABLED_KEY]);
-      const active = (await chromeApi.userScripts!.getScripts({ ids: [id] }))[0];
-      const script = disabled.find((item) => item.id === id) ?? saved.find((item) => item.id === id) ?? active;
-      if (!script) throw new Error("找不到该脚本，请刷新状态。");
-      options.beforeExecute?.();
-      if (active) await chromeApi.userScripts!.unregister({ ids: [id] });
-      await chromeApi.storage.local.set({
-        [USER_SCRIPTS_STORAGE_KEY]: saved.filter((item) => item.id !== id),
-        [USER_SCRIPTS_DISABLED_KEY]: method === "delete" ? disabled.filter((item) => item.id !== id) : [...disabled.filter((item) => item.id !== id), script],
-      });
-      return { id, enabled: false };
+    let stored = await chromeApi.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY]);
+    // A pre-existing native registry is the initial declaration until the
+    // first snapshot succeeds. Never overwrite it with a single new script.
+    if (stored[USER_SCRIPTS_STORAGE_KEY] === undefined) {
+      await restoreUserScripts(options);
+      stored = await chromeApi.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY]);
     }
-    // Storage is authoritative. A previous restore may have been skipped or
-    // stopped halfway, so never snapshot a mutation until the entire saved
-    // declaration is present in the native registry. If reconciliation fails,
-    // leave storage intact and let the next operation retry it.
-    await restoreUserScripts(options);
-    options.beforeExecute?.();
+    const saved = scriptsFromStorage(stored[USER_SCRIPTS_STORAGE_KEY]);
+    const disabled = scriptsFromStorage(stored[USER_SCRIPTS_DISABLED_KEY]);
+    const id = method === "create" || method === "replace"
+      ? (args[0] as chrome.userScripts.RegisteredUserScript).id
+      : (args[0] as { id?: unknown })?.id;
+    scriptId.parse(id);
+    const scriptIdValue = id as string;
+    const savedScript = saved.find((item) => item.id === scriptIdValue);
+    const disabledScript = disabled.find((item) => item.id === scriptIdValue);
+    const previous = (await chromeApi.userScripts.getScripts({ ids: [scriptIdValue] }))[0];
+    const declared = disabledScript ?? savedScript;
+    let next: chrome.userScripts.RegisteredUserScript | undefined;
+    let enabled = false;
+
     if (method === "create") {
-      const script = args[0] as chrome.userScripts.RegisteredUserScript;
-      const stored = await chromeApi.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY]);
-      if ([...scriptsFromStorage(stored[USER_SCRIPTS_STORAGE_KEY]), ...scriptsFromStorage(stored[USER_SCRIPTS_DISABLED_KEY])].some((item) => item.id === script.id)
-        || (await chromeApi.userScripts!.getScripts({ ids: [script.id] })).length) throw new Error("脚本 ID 已存在。");
-      await chromeApi.userScripts!.register([script]);
-      await snapshotUserScripts(options);
-      return { id: script.id, enabled: true };
-    }
-    if (method === "setEnabled") {
-      const { id, enabled } = args[0] as { id: string; enabled?: boolean };
-      if (typeof id !== "string" || !id || enabled !== true) throw new Error("无效的脚本操作。");
-      const stored = await chromeApi.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY]);
-      const saved = scriptsFromStorage(stored[USER_SCRIPTS_STORAGE_KEY]);
-      const disabled = scriptsFromStorage(stored[USER_SCRIPTS_DISABLED_KEY]);
-      const active = (await chromeApi.userScripts!.getScripts({ ids: [id] }))[0];
-      const script = active ?? disabled.find((item) => item.id === id) ?? saved.find((item) => item.id === id);
-      if (!script) throw new Error("找不到该脚本，请刷新状态。");
-      if (!active) await chromeApi.userScripts!.register([script]);
-      await chromeApi.storage.local.set({
-        [USER_SCRIPTS_STORAGE_KEY]: [...saved.filter((item) => item.id !== id), script],
-        [USER_SCRIPTS_DISABLED_KEY]: disabled.filter((item) => item.id !== id),
-      });
-      return { id, enabled: true };
-    }
-    if (method === "replace" || method === "edit") {
-      const id = method === "edit" ? (args[0] as { id: string }).id : (args[0] as chrome.userScripts.RegisteredUserScript).id;
-      const stored = await chromeApi.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY]);
-      const disabled = scriptsFromStorage(stored[USER_SCRIPTS_DISABLED_KEY]);
-      const previous = (await chromeApi.userScripts!.getScripts({ ids: [id] }))[0];
-      const current = previous ?? disabled.find((item) => item.id === id) ?? scriptsFromStorage(stored[USER_SCRIPTS_STORAGE_KEY]).find((item) => item.id === id);
-      if (method === "edit" && !current) throw new Error("找不到该脚本。");
-      const script = method === "edit"
-        ? { ...current!, ...(args[0] as { changes: Record<string, unknown> }).changes } as chrome.userScripts.RegisteredUserScript
+      if (declared) throw new Error("脚本 ID 已存在。");
+      next = args[0] as chrome.userScripts.RegisteredUserScript;
+      enabled = true;
+    } else if (method === "edit" || method === "replace") {
+      if (method === "edit" && !declared) throw new Error("找不到该脚本。");
+      next = method === "edit"
+        ? { ...declared!, ...(args[0] as { changes: Record<string, unknown> }).changes } as chrome.userScripts.RegisteredUserScript
         : args[0] as chrome.userScripts.RegisteredUserScript;
       if (method === "edit") for (const [key, value] of Object.entries((args[0] as { changes: Record<string, unknown> }).changes)) {
-        if (value === null) delete (script as unknown as Record<string, unknown>)[key];
+        if (value === null) delete (next as unknown as Record<string, unknown>)[key];
       }
-      scriptDefinition.parse(script);
-      if (!previous && disabled.some((item) => item.id === id)) {
-        await chromeApi.storage.local.set({ [USER_SCRIPTS_DISABLED_KEY]: disabled.map((item) => item.id === id ? script : item) });
-        return { id, enabled: false };
-      }
-      if (previous) await chromeApi.userScripts!.unregister({ ids: [id] });
-      try { await chromeApi.userScripts!.register([script]); }
-      catch (error) {
-        if (previous) await chromeApi.userScripts!.register([previous]);
-        throw error;
-      }
-      await snapshotUserScripts(options);
-      return { id, enabled: true };
+      scriptDefinition.parse(next);
+      enabled = !disabledScript;
+    } else if (method === "setEnabled") {
+      const requested = (args[0] as { enabled?: unknown }).enabled;
+      if (typeof requested !== "boolean") throw new Error("无效的脚本操作。");
+      next = declared;
+      if (!next) throw new Error("找不到该脚本，请刷新状态。");
+      enabled = requested;
+    } else if (method === "delete") {
+      if (!declared) throw new Error("找不到该脚本，请刷新状态。");
     }
-    throw new Error("不支持的脚本操作。");
+
+    // Only reconcile this declaration. Unrelated saved scripts may still be
+    // awaiting startup recovery; never replace them with a registry snapshot.
+    const nativeMatches = enabled && previous && JSON.stringify(previous) === JSON.stringify(next);
+    const replaceNative = Boolean(previous && !nativeMatches);
+    const registerNative = Boolean(enabled && next && !nativeMatches);
+    options.beforeExecute?.();
+    let removed = false;
+    let registered = false;
+    try {
+      if (replaceNative) { await chromeApi.userScripts.unregister({ ids: [scriptIdValue] }); removed = true; }
+      if (registerNative) { await chromeApi.userScripts.register([next!]); registered = true; }
+      const update = (scripts: chrome.userScripts.RegisteredUserScript[], replacement?: chrome.userScripts.RegisteredUserScript) => {
+        const index = scripts.findIndex((item) => item.id === scriptIdValue);
+        if (index < 0) return replacement ? [...scripts, replacement] : scripts;
+        if (!replacement) return scripts.filter((item) => item.id !== scriptIdValue);
+        return scripts.map((item, itemIndex) => itemIndex === index ? replacement : item);
+      };
+      const activeNext = update(saved, enabled ? next : undefined);
+      const disabledNext = update(disabled, !enabled ? next : undefined);
+      const changes: Record<string, unknown> = {};
+      if (JSON.stringify(saved) !== JSON.stringify(activeNext)) changes[USER_SCRIPTS_STORAGE_KEY] = activeNext;
+      if (JSON.stringify(disabled) !== JSON.stringify(disabledNext)) changes[USER_SCRIPTS_DISABLED_KEY] = disabledNext;
+      if (Object.keys(changes).length) await chromeApi.storage.local.set(changes);
+    } catch (error) {
+      // Storage is still authoritative. Restore the previous projection when
+      // possible; startup reconciliation repairs an interrupted rollback.
+      if (registered) await chromeApi.userScripts.unregister({ ids: [scriptIdValue] }).catch(() => undefined);
+      if (removed && previous) await chromeApi.userScripts.register([previous]).catch(() => undefined);
+      throw error;
+    }
+    return { id: scriptIdValue, enabled };
   });
 }

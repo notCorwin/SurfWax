@@ -65,10 +65,10 @@ describe("DSML model middleware", () => {
     ["duplicate parameter", v41.replace('</｜DSML｜ invoke>', '<｜DSML｜ parameter name="url" string="true">return 2;</｜DSML｜ parameter></｜DSML｜ invoke>')],
     ["removed legacy tool", v41.replace('name="navigate"', 'name="run-code"')],
   ])("preserves %s without executing it", async (_label, text) => {
-    const record = vi.fn();
-    const result = await generated([{ type: "text", text }], { record } as unknown as EventLogger);
+    const telemetry = vi.fn();
+    const result = await generated([{ type: "text", text }], { telemetry } as unknown as EventLogger);
     expect(result.content).toEqual([{ type: "text", text }]);
-    expect(record).toHaveBeenCalledWith(expect.objectContaining({ type: "model.dsml.recovery", content: expect.objectContaining({ recovered: false }) }));
+    expect(telemetry).toHaveBeenCalledWith(expect.objectContaining({ type: "model.dsml.recovery", content: expect.objectContaining({ recovered: false }) }));
   });
 
   it("does not recover calls excluded by tool choice or without active function tools", async () => {

@@ -12,8 +12,7 @@ describe("human-facing tool activity", () => {
   });
 
   it("has a human-facing label for every registered tool", () => {
-    const missing = PROGRAM_TOOL_REGISTRY.filter(({ name }) => name !== "execute_program"
-      && toolAction({ toolName: name, args: {} }) === "执行浏览器操作");
+    const missing = PROGRAM_TOOL_REGISTRY.filter(({ name }) => toolAction({ toolName: name, args: {} }) === "执行浏览器操作");
     expect(missing.map(({ name }) => name)).toEqual([]);
   });
 

@@ -1094,22 +1094,11 @@ export class EventLogger {
     this.bufferTimer ??= setTimeout(() => this.flushBuffer(), 16);
   }
 
-  /** @deprecated Use append for canonical facts or telemetry for diagnostics. */
-  record(record: LogRecord): void { this.telemetry(record); }
-
-  async appendMessage(conversationId: string, message: ConversationMessage, options?: { runId?: string; parentId?: string | null }): Promise<void>;
-  async appendMessage(message: ConversationMessage, runId?: string): Promise<void>;
-  async appendMessage(
-    conversationOrMessage: string | ConversationMessage,
-    messageOrRunId: ConversationMessage | string | undefined,
-    options: { runId?: string; parentId?: string | null } = {},
-  ): Promise<void> {
-    const legacy = typeof conversationOrMessage !== "string";
-    const message = (legacy ? conversationOrMessage : messageOrRunId) as ConversationMessage;
+  async appendMessage(conversationId: string, message: ConversationMessage, options: { runId?: string; parentId?: string | null } = {}): Promise<void> {
     const saved = await this.append({
       type: "conversation.message",
-      ...(legacy ? {} : { conversationId: conversationOrMessage }),
-      runId: legacy && typeof messageOrRunId === "string" ? messageOrRunId : options.runId,
+      conversationId,
+      runId: options.runId,
       parentId: options.parentId,
       content: message,
     });

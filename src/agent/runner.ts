@@ -60,32 +60,6 @@ function usesClaudePromptCache(config: ModelConfig): boolean {
   } catch { return false; }
 }
 
-const READ_ONLY_TOOLS = new Set([
-  "inspect_page", "find_elements", "list_frames", "read_text", "read_value", "read_attribute", "read_checked",
-  "count_elements", "read_elements", "get_page_info",
-  "list_tabs", "list_downloads", "read_artifact", "list_requests", "read_response", "read_console",
-  "list_scripts", "read_script", "list_jobs", "get_job",
-]);
-
-function signature(value: unknown): string {
-  try { return JSON.stringify(value); } catch { return String(value); }
-}
-
-export function stagnationReason(steps: readonly any[]): string | undefined {
-  const calls = steps.flatMap((step) => (step.toolResults ?? []).map((result: any) => ({
-    toolName: result.toolName, signature: signature([result.toolName, result.input, result.output]),
-    failed: result.output?.ok === false || result.output?.type === "tool-error",
-  })));
-  const last = calls.at(-1);
-  if (!last) return undefined;
-  if (last.failed && calls.at(-2)?.signature === last.signature) return "repeated-failure";
-  if (READ_ONLY_TOOLS.has(last.toolName) && calls.slice(-3).length === 3 && calls.slice(-3).every((call) => call.signature === last.signature)) return "repeated-read";
-  const cycle = calls.slice(-6);
-  if (cycle.length === 6 && cycle.every((call, index) => call.signature === cycle[index % 2]!.signature)
-    && cycle.every((call) => READ_ONLY_TOOLS.has(call.toolName))) return "two-call-cycle";
-  return undefined;
-}
-
 export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, BrowserAgentTools> {
   const logger = options.logger;
   let callId: string | undefined;
@@ -114,7 +88,6 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
   const activeTools = () => currentTools().map(({ name }) => name);
   const canonicalContext = logger && options.conversationId ? new IncrementalActiveContext(logger, options.conversationId) : undefined;
   let browserDigest: string | undefined;
-  let loggedGuard: string | undefined;
   const completion = options.model.endpointType === "openai-completions"
     || !options.model.endpointType && options.model.modelProvider?.shape === "completion";
   return new ToolLoopAgent<never, BrowserAgentTools>({
@@ -129,20 +102,20 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     activeTools: activeTools(),
     repairToolCall: repairProgramToolCall as any,
     onLanguageModelCallEnd: async (event) => {
-      logger?.record({ type: "model.response.received", conversationId: options.conversationId, content: { callId: event.callId } });
+      logger?.telemetry({ type: "model.response.received", conversationId: options.conversationId, content: { callId: event.callId } });
       const failure = scheduler.prepare(event.content, boundTabId, options.signal);
-      if (failure) logger?.record({ type: "agent.tool-schedule.invalid", conversationId: options.conversationId, error: failure });
+      if (failure) logger?.telemetry({ type: "agent.tool-schedule.invalid", conversationId: options.conversationId, error: failure });
       await options.onResponse?.(event);
     },
-    prepareStep: async ({ messages, initialMessages, responseMessages, stepNumber, steps }) => {
-      logger?.record({ type: "model.context.preparing", conversationId: options.conversationId, content: { stepNumber } });
+    prepareStep: async ({ messages, initialMessages, responseMessages, stepNumber }) => {
+      logger?.telemetry({ type: "model.context.preparing", conversationId: options.conversationId, content: { stepNumber } });
       let prepared = await options.compactor?.prepare(messages, stepNumber) ?? messages;
       const browserContext = await options.executor.browserContext();
       boundTabId = browserContext.tabs.find((tab) => tab.current)?.tabId;
       const nextBrowserDigest = JSON.stringify(browserContext.tabs);
       const browserChanged = stepNumber === 0 || nextBrowserDigest !== browserDigest;
       browserDigest = nextBrowserDigest;
-      if (browserChanged) logger?.record({ type: "browser.context.prepared", conversationId: options.conversationId, content: { stepNumber, ...browserContext } });
+      if (browserChanged) logger?.telemetry({ type: "browser.context.prepared", conversationId: options.conversationId, content: { stepNumber, ...browserContext } });
       const modelLimit = await (limit ??= resolveModelLimit(options.model, { signal: options.signal }));
       const prepareMessages = async (source: typeof prepared) => prepareToolMessages(
         source,
@@ -156,11 +129,6 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       const estimatedInput = options.compactor?.estimate(outgoing, prompt) ?? estimatePromptInput({ ...prompt, messages: outgoing });
       const pressure = modelLimit && estimatedInput > inputBudget(modelLimit) * 0.8
         && (!options.compactor || options.compactor.canCompact(prepared, modelLimit));
-      const guard = pressure ? "context-budget" : stagnationReason(steps);
-      if (guard && guard !== loggedGuard) {
-        loggedGuard = guard;
-        logger?.record({ type: "agent.loop-guard.triggered", conversationId: options.conversationId, content: { stepNumber, reason: guard } });
-      }
       if (pressure) {
         if (!options.compactor) throw new Error("上下文容量不足，无法在当前运行中压缩历史消息。");
         prepared = await options.compactor.compact([...initialMessages, ...responseMessages], prepared, stepNumber, options.languageModel, modelLimit);
@@ -187,23 +155,23 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       };
     },
     ...(logger ? {
-      onStart: (event) => { callId = event.callId; logger.record({
+      onStart: (event) => { callId = event.callId; logger.telemetry({
         type: "model.started",
         conversationId: options.conversationId,
         content: { callId: event.callId, operationId: event.operationId, provider: event.provider, modelId: event.modelId, activeTools: activeTools(), toolCount: activeTools().length },
       }); },
-      onStepStart: (event) => logger.record({
+      onStepStart: (event) => logger.telemetry({
         type: "model.step.started",
         conversationId: options.conversationId,
         content: { callId: event.callId, stepNumber: event.stepNumber, provider: event.provider, modelId: event.modelId },
       }),
       onLanguageModelCallStart: (event) => {
-        logger.record({ type: "model.request.started", conversationId: options.conversationId, content: { callId: event.callId } });
+        logger.telemetry({ type: "model.request.started", conversationId: options.conversationId, content: { callId: event.callId } });
         options.compactor?.recordPrompt(event);
       },
       onStepEnd: async (event) => {
         options.compactor?.recordUsage(event.usage.inputTokens, event.stepNumber);
-        logger.record({
+        logger.telemetry({
           type: "model.step.finished",
           conversationId: options.conversationId,
           content: { callId: event.callId, stepNumber: event.stepNumber, text: event.text, reasoning: event.reasoning,
@@ -215,7 +183,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
           latencyMs: event.performance?.stepTimeMs,
         });
       },
-      onEnd: (event) => logger.record({
+      onEnd: (event) => logger.telemetry({
         type: "model.finished",
         conversationId: options.conversationId,
         content: { callId: event.callId, stepNumber: event.stepNumber, text: event.text, reasoning: event.reasoning,

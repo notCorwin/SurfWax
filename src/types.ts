@@ -1,14 +1,6 @@
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
-export type PageExecutionTarget = {
-  kind: "page";
-  tabId: number;
-  world: "MAIN" | "ISOLATED" | "USER_SCRIPT";
-  frameId?: number;
-  documentId?: string;
-};
-
 export type BrowserSelector = {
   by: "role" | "text" | "label" | "placeholder" | "alt" | "title" | "testId" | "css";
   value: string;

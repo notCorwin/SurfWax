@@ -6,7 +6,7 @@ import { PROGRAM_TOOL_CONTEXT, PROGRAM_TOOL_REGISTRY } from "../chrome/tool";
 import { EventLogger, fromLogValue, type LogEvent } from "../logging";
 import { ContextCompactor, estimatePromptInput } from "./compaction";
 import { createPromptSnapshot, PROMPT_TOOLS } from "./prompt";
-import { createAgent, DEFAULT_INSTRUCTIONS, stagnationReason } from "./runner";
+import { createAgent, DEFAULT_INSTRUCTIONS } from "./runner";
 import type { ModelConfig } from "../types";
 
 const usage = { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } };
@@ -162,16 +162,6 @@ describe("createAgent", () => {
     expect(events.some((event) => event.type === "context.compacted" && (event.content as any).stepNumber === 0)).toBe(true);
   });
 
-  it("detects repeated failures and read loops without limiting repeatable input", () => {
-    const step = (toolName: string, output: unknown) => ({ toolResults: [{ toolName, input: {}, output }] });
-    expect(stagnationReason([step("click", { ok: false }), step("click", { ok: false })])).toBe("repeated-failure");
-    expect(stagnationReason([step("inspect_page", { text: "same" }), step("inspect_page", { text: "same" }), step("inspect_page", { text: "same" })])).toBe("repeated-read");
-    for (const name of ["find_elements", "list_frames", "list_downloads", "count_elements", "read_elements", "get_page_info"]) expect(stagnationReason([step(name, { value: "same" }), step(name, { value: "same" }), step(name, { value: "same" })])).toBe("repeated-read");
-    expect(stagnationReason([step("click", { ok: true }), step("click", { ok: true }), step("click", { ok: true })])).toBeUndefined();
-    expect(stagnationReason(Array.from({ length: 6 }, (_, index) => step(index % 2 ? "fill" : "click", { ok: true })))).toBeUndefined();
-    expect(stagnationReason(Array.from({ length: 6 }, (_, index) => step(index % 2 ? "read_text" : "inspect_page", { text: "same" })))).toBe("two-call-cycle");
-  });
-
   it("executes navigation with stable instructions and complete-response callbacks", async () => {
     const { events, logger } = memoryLog();
     let step = 0;
@@ -314,8 +304,8 @@ describe("createAgent", () => {
     expect(events).toEqual(expect.arrayContaining([expect.objectContaining({ type: "model.dsml.recovery", content: { recovered: true, toolNames: ["navigate"] } })]));
   });
 
-  it("continues beyond one hundred calls and records repeated reads without disabling tools", async () => {
-    const { events, logger } = memoryLog();
+  it("continues beyond one hundred repeated reads without disabling tools", async () => {
+    const { logger } = memoryLog();
     let step = 0;
     const executor = browserExecutor({ inspect: vi.fn(async () => ({ text: "same" })) });
     const model = new MockLanguageModelV4({ doGenerate: async (options) => {
@@ -328,7 +318,5 @@ describe("createAgent", () => {
     expect(executor.inspect).toHaveBeenCalledTimes(121);
     expect(result.steps.flatMap((step) => step.toolResults)).toHaveLength(121);
     expect(result.finishReason).toBe("stop");
-    await logger.flush();
-    expect(events).toEqual(expect.arrayContaining([expect.objectContaining({ type: "agent.loop-guard.triggered", content: { stepNumber: 3, reason: "repeated-read" } })]));
   }, 90_000);
 });

@@ -61,7 +61,7 @@ function parseDsml(text: string, activeTools: Set<string>): Parsed | undefined {
 }
 
 export function dsmlMiddleware(logger?: EventLogger, conversationId?: string): LanguageModelMiddleware {
-  const log = (result: Parsed) => logger?.record({
+  const log = (result: Parsed) => logger?.telemetry({
     type: "model.dsml.recovery",
     conversationId,
     content: "calls" in result ? { recovered: true, toolNames: result.calls.map(({ toolName }) => toolName) } : { recovered: false, reason: result.error },

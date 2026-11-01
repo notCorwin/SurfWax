@@ -117,7 +117,7 @@ export class BrowserDiagnostics {
         || (method === "Page.frameDetached" && params?.frameId === record.frameId)
         || (method === "Target.detachedFromTarget" && params?.sessionId === record.debuggee.sessionId)) state.historical.delete(ref);
     }
-    this.logger?.record({ type: "browser.diagnostic", ...this.context, ...this.context.logIdentity, content: { tabId, source, method, epoch: state.epoch, revision: state.revision, index, consoleGeneration: state.consoleGeneration }, output: params });
+    this.logger?.telemetry({ type: "browser.diagnostic", ...this.context, ...this.context.logIdentity, content: { tabId, source, method, epoch: state.epoch, revision: state.revision, index, consoleGeneration: state.consoleGeneration }, output: params });
     this.apply(state, source, method, params, index);
     if (state.network.length > CACHE_LIMIT) {
       for (const record of state.network.splice(0, state.network.length - CACHE_LIMIT)) {
@@ -296,7 +296,7 @@ export class BrowserDiagnostics {
   }
   async console(tabId: number, input: { clear?: boolean; minLevel?: string; offset?: number; limit?: number }, signal?: AbortSignal): Promise<unknown> {
     signal?.throwIfAborted();
-    if (input.clear) { const state = this.state(tabId); state.console = []; state.nextConsole = 0; state.consoleGeneration += 1; state.revision += 1; state.pages.clear(); this.logger?.record({ type: "browser.diagnostic", ...this.context, ...this.context.logIdentity, content: { tabId, source: { tabId }, method: "console.clear", epoch: state.epoch, revision: state.revision, consoleGeneration: state.consoleGeneration }, output: null }); return { cleared: true }; }
+    if (input.clear) { const state = this.state(tabId); state.console = []; state.nextConsole = 0; state.consoleGeneration += 1; state.revision += 1; state.pages.clear(); this.logger?.telemetry({ type: "browser.diagnostic", ...this.context, ...this.context.logIdentity, content: { tabId, source: { tabId }, method: "console.clear", epoch: state.epoch, revision: state.revision, consoleGeneration: state.consoleGeneration }, output: null }); return { cleared: true }; }
     const offset = input.offset ?? 0, limit = input.limit ?? 100;
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Console list offset must be nonnegative and limit must be between 1 and 100");
     const rank: Record<string, number> = { debug: 0, info: 1, log: 1, warning: 2, warn: 2, error: 3, assert: 3 };

@@ -75,8 +75,7 @@ test("restores independent credentials and models when switching Providers", asy
     await options.getByLabel("API Key", { exact: true }).fill("vercel-key");
     await options.getByRole("button", { name: "保存配置" }).click();
 
-    await expect.poll(() => options.evaluate(async () =>
-      ((await chrome.storage.local.get("side-agent:model-limit"))["side-agent:model-limit"] as any)?.match?.source)).toBe("models.dev");
+    await expect(options.getByRole("status").filter({ hasText: "配置已保存" })).toBeVisible();
     await expect(options.getByTestId("model-limit-match")).toHaveCount(0);
 
     await options.getByText("高级设置", { exact: true }).click();

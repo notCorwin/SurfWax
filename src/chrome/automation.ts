@@ -468,7 +468,7 @@ export class AutomationRuntime {
     const now = performance.now();
     if (attempt !== 1 && this.lastAttemptLog?.reason === reason && now - this.lastAttemptLog.at < 1_000) return;
     this.lastAttemptLog = { reason, at: now };
-    this.options.logger?.record({
+    this.options.logger?.telemetry({
       type: "automation.action.attempt",
       conversationId: this.context.conversationId,
       toolCallId: this.context.toolCallId,
@@ -3215,18 +3215,18 @@ export class AutomationRuntime {
     this.lastWait = undefined;
     this.lastAttemptLog = undefined;
     const context = this.context;
-    this.options.logger?.record({ type: "automation.action.started", conversationId: context.conversationId, toolCallId: context.toolCallId, ...context.logIdentity, content: { tabId, operation, locator } });
+    this.options.logger?.telemetry({ type: "automation.action.started", conversationId: context.conversationId, toolCallId: context.toolCallId, ...context.logIdentity, content: { tabId, operation, locator } });
     this.activeActions.set(tabId, (this.activeActions.get(tabId) ?? 0) + 1);
     try {
       const result = await run();
-      this.options.logger?.record({ type: "automation.action.finished", conversationId: context.conversationId, toolCallId: context.toolCallId, ...context.logIdentity, content: { tabId, operation, locator }, output: result, latencyMs: performance.now() - startedAt });
+      this.options.logger?.telemetry({ type: "automation.action.finished", conversationId: context.conversationId, toolCallId: context.toolCallId, ...context.logIdentity, content: { tabId, operation, locator }, output: result, latencyMs: performance.now() - startedAt });
       return result;
     } catch (error) {
       const lastWait = this.waitDiagnostic();
       const failure = error && typeof error === "object" && (error as { name?: string }).name === "TimeoutError"
         ? automationError(lastWait?.state?.receivesEvents === false ? "intercepted" : "timeout", { operation, locator, lastObservation: lastWait ?? null })
         : error;
-      this.options.logger?.record({
+      this.options.logger?.telemetry({
         type: "automation.action.failed",
         conversationId: context.conversationId,
         toolCallId: context.toolCallId,

@@ -256,8 +256,8 @@ describe("ChromeExecutor programs", () => {
   });
 
   it("awaits foreground completion without rescanning the job log for every progress receipt", async () => {
-    const h = programHarness(async ({ emit }) => {
-      for (let index = 0; index < 50; index++) await emit(index);
+    const h = programHarness(async ({ page }) => {
+      for (let index = 0; index < 50; index++) await page.title();
       return "finished";
     });
     const reads = vi.spyOn(h.logger, "jobEvents");
@@ -420,37 +420,11 @@ describe("ChromeExecutor programs", () => {
     expect(await h.run()).toMatchObject({ ok: true, result: { snapshot: "Current [ref=t41d1e1]" } });
     expect(h.events.map(event => fromLogValue(event.content))).toContainEqual(expect.objectContaining({ operation: "page.goto", state: "completed" })); h.executor.dispose();
   });
-  it("runs explicit MAIN code through the existing page session without a fallback host", async () => {
-    const h = programHarness(async ({ browser }) => browser.runIn({ kind: "page", tabId: 41, world: "MAIN" }, "return document.title"));
-    const pageValue = vi.fn(async () => ({ kind: "value", value: "Automation Target" })); (h.executor as any).automation.pageValue = pageValue;
-    expect(await h.run()).toMatchObject({ ok: true, result: "Automation Target" });
-    expect(pageValue).toHaveBeenCalledWith(41, expect.stringContaining("return document.title")); expect(h.fake.debuggerApi.getTargets).not.toHaveBeenCalled(); h.executor.dispose();
-  });
-  it("returns a page timeout with unknown effects and cleans the pending evaluation", async () => {
-    const h = programHarness(async ({ browser }) => browser.runIn({ kind: "page", tabId: 41, world: "MAIN" }, "await new Promise(() => {})"));
-    (h.executor as any).automation.pageValue = () => new Promise(() => undefined);
-    expect(await h.run(undefined, { timeoutMs: 5 })).toMatchObject({ ok: false, result: { error: { code: "timeout", effectUnknown: true } } }); h.executor.dispose();
-  });
   it("serializes whole programs through one queue", async () => {
     let finish!: () => void; const order: string[] = []; let index = 0;
     const h = programHarness(async () => { const n = ++index; order.push(`start${n}`); if (n === 1) await new Promise<void>(resolve => { finish = resolve; }); order.push(`end${n}`); return n; });
     const first = h.run(); const second = h.run(); await vi.waitFor(() => expect(finish).toBeTypeOf("function")); expect(order).toEqual(["start1"]);
     finish(); expect(await first).toMatchObject({ ok: true, result: 1 }); expect(await second).toMatchObject({ ok: true, result: 2 }); expect(order).toEqual(["start1", "end1", "start2", "end2"]); h.executor.dispose();
-  });
-  it("propagates native page exceptions and keeps document-scoped object references", async () => {
-    const h = programHarness(async ({ browser }) => browser.runIn({ kind: "page", tabId: 41, world: "MAIN" }, "return 1n"));
-    const pageValue = vi.fn().mockRejectedValueOnce(new Error("boom")).mockResolvedValueOnce({ kind: "reference", id: "ref-1", type: "bigint", preview: "1" }); (h.executor as any).automation.pageValue = pageValue;
-    expect(await h.run()).toMatchObject({ ok: false, result: { error: { message: "boom" } } });
-    expect(await h.run()).toMatchObject({ ok: true, result: { $ref: "ref-1", access: 'globalThis.__surfWaxObject("ref-1")', scope: "page", host: "page" } });
-    expect(pageValue).toHaveBeenCalledTimes(2); h.executor.dispose();
-  });
-  it("keeps MAIN and USER_SCRIPT execution explicit, including native frame/document ownership", async () => {
-    let world = "MAIN";
-    const h = programHarness(async ({ browser }) => browser.runIn({ kind: "page", tabId: 41, world, ...(world === "USER_SCRIPT" ? { documentId: "doc" } : {}) }, "return document.title"));
-    (h.executor as any).automation.pageValue = vi.fn(async () => ({ kind: "value", value: "CDP" }));
-    const execute = vi.fn(async () => [{ documentId: "doc", frameId: 0, result: { kind: "value", value: "USER" } }]); (h.fake.chromeApi.userScripts as any).execute = execute;
-    expect(await h.run()).toMatchObject({ ok: true, result: "CDP" }); world = "USER_SCRIPT"; expect(await h.run()).toMatchObject({ ok: true, result: "USER" });
-    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ target: { tabId: 41, documentIds: ["doc"] }, world: "USER_SCRIPT", injectImmediately: true })); h.executor.dispose();
   });
   it("reads historical canonical result slices without an execution context and rejects other conversations", async () => {
     let foreign = false; let id = 0;
@@ -507,7 +481,7 @@ describe("ChromeExecutor programs", () => {
       for (const name of ["chrome", "__surfWaxBrowser", "__surfWaxDebugger", "__surfWaxResult"]) expect(caps).not.toHaveProperty(name);
       expect(caps.browser).not.toHaveProperty("cdp"); return Object.keys(caps).sort();
     });
-    expect(await h.run()).toMatchObject({ ok: true, result: ["artifacts", "browser", "check", "emit", "net", "page", "protocol", "sleep"] }); h.executor.dispose();
+    expect(await h.run()).toMatchObject({ ok: true, result: ["artifacts", "browser", "net", "page", "sleep"] }); h.executor.dispose();
   });
   it("applies a default program deadline and honors an explicit deadline", async () => {
     const h = programHarness(async () => 1); const timer = vi.spyOn(globalThis, "setTimeout");
@@ -548,14 +522,6 @@ describe("ChromeExecutor programs", () => {
     expect(await h.run()).toMatchObject({ ok: true, result: "done" });
     expect(host).toHaveBeenCalledOnce();
     h.executor.dispose();
-  });
-  it("never retries a failed world or silently substitutes an available MAIN host for USER_SCRIPT", async () => {
-    let world = "USER_SCRIPT";
-    const h = programHarness(async ({ browser }) => browser.runIn({ kind: "page", tabId: 41, world }, "return document.title"));
-    const pageValue = vi.fn().mockRejectedValue(new Error("page failed")); (h.executor as any).automation.pageValue = pageValue;
-    expect(await h.run()).toMatchObject({ ok: false, result: { error: { message: expect.stringContaining("Allow User Scripts") } } });
-    expect(pageValue).not.toHaveBeenCalled(); world = "MAIN";
-    expect(await h.run()).toMatchObject({ ok: false, result: { error: { message: "page failed" } } }); expect(pageValue).toHaveBeenCalledTimes(1); h.executor.dispose();
   });
   it.each([
     ["queued", "tool", false], ["running", "tool", false],

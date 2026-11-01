@@ -2,7 +2,6 @@ import { isModelSdk, type JsonValue, type ModelConfig, type ModelProviderOverrid
 import { defaultBaseURL, isCloudflareGateway, providerSettingFields, resolvedBaseURL, sdkFor, type ProviderSettingField } from "./model-sdks";
 import bundledCatalogGzip, { metadata as bundledCatalogMetadata } from "../data/models-dev-api";
 
-const CACHE_KEY = "side-agent:model-limit";
 export const CATALOG_CACHE_KEY = "side-agent:model-catalog";
 // Older normalized catalogs discarded per-model routes and cannot be reused safely.
 const CATALOG_CACHE_VERSION = 2;
@@ -43,7 +42,6 @@ export type ModelCatalog = Record<string, {
   }>;
 }>;
 
-type CachedLimit = { key: string; fetchedAt: number; catalogRevision: string; match: ModelLimit };
 type CachedCatalog = { version: number; fetchedAt: number; revision?: string; catalog: ModelCatalog };
 type Storage = { get(key: string): Promise<Record<string, unknown>>; set(items: Record<string, unknown>): Promise<void> };
 
@@ -273,10 +271,6 @@ function cachedCatalogRevision(cached?: CachedCatalog): string {
   return cached?.revision ?? (cached ? `legacy:${cached.fetchedAt}` : `bundle:${bundledCatalogMetadata.sha256}`);
 }
 
-function currentCatalogCache(value?: CachedCatalog): CachedCatalog | undefined {
-  return value?.version === CATALOG_CACHE_VERSION && value.fetchedAt >= Date.parse(bundledCatalogMetadata.fetchedAt) ? value : undefined;
-}
-
 export function loadModelCatalog(
   options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; refresh?: boolean; onStale?: (error: unknown) => void; bundledFallback?: boolean; staleFallback?: boolean; validateCompleteness?: boolean } = {},
 ): Promise<ModelCatalog> {
@@ -288,7 +282,7 @@ export function loadModelCatalog(
     let cached = stored?.version === CATALOG_CACHE_VERSION ? stored : undefined;
     try { if (cached?.catalog && validateCompleteness) validateCatalog(cached.catalog); } catch { cached = undefined; }
     if (cached?.catalog && validateCompleteness && cached.fetchedAt < Date.parse(bundledCatalogMetadata.fetchedAt)) cached = undefined;
-    if (cached?.catalog) catalogRevisions.set(cached.catalog, cachedCatalogRevision(cached));
+    if (cached?.catalog) catalogRevisions.set(cached.catalog, cached.revision ?? await sha256(JSON.stringify(cached.catalog)));
     if (!options.refresh && cached?.catalog && (options.now ?? Date.now)() - cached.fetchedAt < REFRESH_MS) return cached.catalog;
     const fetchCatalog = async () => {
       const timeout = AbortSignal.timeout(10_000);
@@ -304,7 +298,6 @@ export function loadModelCatalog(
       catalogRevisions.set(catalog, revision);
       if (storage) await storage.set({
         [CATALOG_CACHE_KEY]: { version: CATALOG_CACHE_VERSION, fetchedAt, revision, catalog } satisfies CachedCatalog,
-        [CACHE_KEY]: null,
       }).catch(() => undefined);
       return catalog;
     };
@@ -357,37 +350,42 @@ export function loadModelCatalog(
 }
 
 const limitRequests = new WeakMap<typeof globalThis.fetch, Map<string, Promise<ModelLimit | undefined>>>();
+// Derived matches need not be persisted separately from the authoritative catalog.
+// Keep a few revisions so an in-flight lookup against an older snapshot cannot
+// invalidate results from a newer one.
+const limitMatches = new Map<string, Map<string, ModelLimit>>();
+
+export function modelLimitKey(config: ModelConfig): string {
+  return JSON.stringify([sdkFor(config), config.providerId ?? "", resolvedBaseURL(config), config.model.trim(), config.contextWindowOverride ?? null]);
+}
 
 export function resolveModelLimit(
   config: ModelConfig,
   options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal } = {},
 ): Promise<ModelLimit | undefined> {
-  const key = `${sdkFor(config)}\u0000${config.providerId ?? ""}\u0000${resolvedBaseURL(config)}\u0000${config.model.trim()}\u0000${config.contextWindowOverride ?? ""}`;
-  const storage = options.storage ?? (typeof chrome !== "undefined" ? chrome.storage?.local : undefined);
-  const task = async () => {
+  const key = modelLimitKey(config);
+  const task = async (): Promise<ModelLimit | undefined> => {
     if (validLimit(config.contextWindowOverride)) {
       return { provider: "manual", model: config.model, context: config.contextWindowOverride, source: "manual" } as ModelLimit;
     }
-    const cached = storage ? (await storage.get(CACHE_KEY).catch(() => ({ [CACHE_KEY]: undefined })))[CACHE_KEY] as CachedLimit | undefined : undefined;
-    const currentCatalog = storage ? (await storage.get(CATALOG_CACHE_KEY).catch(() => ({ [CATALOG_CACHE_KEY]: undefined })))[CATALOG_CACHE_KEY] as CachedCatalog | undefined : undefined;
-    const validCache = cached?.key === key && validLimit(cached.match?.context)
-      && cached.catalogRevision === cachedCatalogRevision(currentCatalogCache(currentCatalog)) ? cached : undefined;
-    if (validCache && (options.now ?? Date.now)() - validCache.fetchedAt < REFRESH_MS) return validCache.match;
     try {
       const catalog = await loadModelCatalog(options);
       const catalogRevision = catalogRevisions.get(catalog) ?? cachedCatalogRevision();
-      const match = matchModel(catalog, resolvedBaseURL(config), config.model, config.providerId);
-      if (match && storage) {
-        await storage.set({ [CACHE_KEY]: { key, fetchedAt: (options.now ?? Date.now)(), catalogRevision, match } satisfies CachedLimit }).catch(() => undefined);
-        const latest = (await storage.get(CATALOG_CACHE_KEY).catch(() => ({ [CATALOG_CACHE_KEY]: undefined })))[CATALOG_CACHE_KEY] as CachedCatalog | undefined;
-        if (cachedCatalogRevision(currentCatalogCache(latest)) !== catalogRevision) {
-          await storage.set({ [CACHE_KEY]: null }).catch(() => undefined);
-        }
+      let matches = limitMatches.get(catalogRevision);
+      if (!matches) {
+        matches = new Map();
+        limitMatches.set(catalogRevision, matches);
+        if (limitMatches.size > 4) limitMatches.delete(limitMatches.keys().next().value!);
       }
-      return match ?? validCache?.match ?? { provider: "unknown", model: config.model, context: 256_000, source: "estimated" };
+      const cached = matches.get(key);
+      if (cached) return cached;
+      const match = matchModel(catalog, resolvedBaseURL(config), config.model, config.providerId)
+        ?? { provider: "unknown", model: config.model, context: 256_000, source: "estimated" } as ModelLimit;
+      matches.set(key, match);
+      return match;
     } catch (error) {
       if (options.signal?.aborted) throw error;
-      return validCache?.match ?? { provider: "unknown", model: config.model, context: 256_000, source: "estimated" };
+      return { provider: "unknown", model: config.model, context: 256_000, source: "estimated" };
     }
   };
   if (options.signal || options.fetch || options.storage || options.now) return task();

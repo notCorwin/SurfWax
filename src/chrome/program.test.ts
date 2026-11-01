@@ -882,7 +882,7 @@ describe("canonical browser jobs", () => {
         await started();
         const scope = new ProgramScope(signal, id, context, logger);
         await scope.call("first", () => ({ performed: true }), false);
-        await scope.check(false, "outcome did not match");
+        await scope.call("check", () => { throw new Error("outcome did not match"); }, false, true);
       },
     );
     const result: any = await jobs.completion(id, context.conversationId);
@@ -966,7 +966,7 @@ describe("revocable program capabilities", () => {
       order.push("click");
     });
     await Promise.all([waiting, first, second]);
-    await scope.check(order.join() === "subscribe,fill,click");
+    await scope.call("readCondition", () => { expect(order.join()).toBe("subscribe,fill,click"); }, false, true);
     await scope.finish();
     expect(scope.effectUnknown).toBe(false);
     expect(
@@ -978,7 +978,7 @@ describe("revocable program capabilities", () => {
       }),
     ).toHaveLength(1);
     expect(events.map((event) => fromLogValue(event.content))).toContainEqual(
-      expect.objectContaining({ operation: "check", state: "verified" }),
+      expect.objectContaining({ operation: "readCondition", state: "verified" }),
     );
     expect(events.map((event) => fromLogValue(event.content))).toContainEqual(
       expect.objectContaining({

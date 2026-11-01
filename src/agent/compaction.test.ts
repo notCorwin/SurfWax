@@ -13,7 +13,7 @@ function fixture() {
       events.push(event);
       return event;
     },
-    record(record: Partial<LogEvent>) { events.push({ id: events.length + 1, timestamp: new Date().toISOString(), content: null, ...record } as LogEvent); },
+    telemetry(record: Partial<LogEvent>) { events.push({ id: events.length + 1, timestamp: new Date().toISOString(), content: null, ...record } as LogEvent); },
     async conversation() { return [...events]; },
   } as unknown as EventLogger;
   const generate = vi.fn(async (_options?: unknown) => ({

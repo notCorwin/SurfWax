@@ -211,7 +211,7 @@ export function createRetryingFetch(options: {
             : rejection.fieldUnsupported ? null : rejection.supported?.find((candidate) => candidate !== previousEffort)
               ?? REASONING_EFFORTS[REASONING_EFFORTS.indexOf(previousEffort) + 1] ?? null;
           reasoningEffort = fallback;
-          options.logger?.record({
+          options.logger?.telemetry({
             type: "request.retry",
             conversationId: options.conversationId,
             content: { url, method, status: response.status, rejectedReasoningEffort: previousEffort, reasoningEffort: fallback ?? "provider-default" },
@@ -225,7 +225,7 @@ export function createRetryingFetch(options: {
         if (!isRecoverableHttpStatus(response.status)) {
           if (response.ok && requestedReasoningEffort !== undefined && !options.reasoningSettings) supportedReasoningEffort = reasoningEffort;
           const details = response.ok ? {} : await responseDetails(response);
-          options.logger?.record({
+          options.logger?.telemetry({
             type: "request.completed",
             conversationId: options.conversationId,
             content: { url, method, status: response.status, retries, reasoningEffort: reasoningEffort ?? "provider-default", ...details },
@@ -237,7 +237,7 @@ export function createRetryingFetch(options: {
         retries += 1;
         const delayMs = retryAfter(response, now) ?? retryBackoffDelay(retries, random);
         const details = await responseDetails(response);
-        options.logger?.record({
+        options.logger?.telemetry({
           type: "request.retry",
           conversationId: options.conversationId,
           content: { url, method, status: response.status, ...details },
@@ -248,7 +248,7 @@ export function createRetryingFetch(options: {
         await waitForModelRetry(delayMs, signal, options.sleep);
       } catch (error) {
         if (isAbortError(error, signal)) {
-          options.logger?.record({
+          options.logger?.telemetry({
             type: "request.aborted",
             conversationId: options.conversationId,
             content: { url, method },
@@ -259,7 +259,7 @@ export function createRetryingFetch(options: {
         }
 
         if (!isRecoverableModelError(error, signal)) {
-          options.logger?.record({
+          options.logger?.telemetry({
             type: "request.failed",
             conversationId: options.conversationId,
             content: { url, method, error },
@@ -271,7 +271,7 @@ export function createRetryingFetch(options: {
 
         retries += 1;
         const delayMs = retryBackoffDelay(retries, random);
-        options.logger?.record({
+        options.logger?.telemetry({
           type: "request.retry",
           conversationId: options.conversationId,
           content: { url, method, error, reason: "network", diagnosis: "Check endpoint connectivity, CORS, and provider configuration while retrying." },

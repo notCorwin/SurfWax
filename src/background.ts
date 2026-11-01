@@ -388,7 +388,7 @@ async function restoreSavedUserScripts(): Promise<boolean> {
     return restored;
   } catch (error) {
     await chrome.storage.local.set({ [USER_SCRIPTS_ERROR_KEY]: error instanceof Error ? error.message : String(error) });
-    eventLogger.record({ type: "userscript.restore-failed", content: null, error });
+    eventLogger.telemetry({ type: "userscript.restore-failed", content: null, error });
     throw error;
   }
 }
@@ -410,7 +410,7 @@ chrome.runtime.onMessage.addListener((message: { type?: string; method?: string;
 
 function discardJevConfig(): void {
   void chrome.storage.local.remove("side-agent:jev-config").catch((error) => {
-    eventLogger.record({ type: "legacy-config.clear-failed", content: null, error });
+    eventLogger.telemetry({ type: "legacy-config.clear-failed", content: null, error });
   });
 }
 

@@ -275,23 +275,6 @@ export class ProgramScope {
       : value;
   }
 
-  async emit(value: unknown): Promise<void> {
-    this.guard();
-    await this.event("emit", ++this.sequence, "completed", value);
-  }
-  async check(
-    condition: unknown,
-    message = "Program assertion failed",
-  ): Promise<void> {
-    await this.call(
-      "check",
-      () => {
-        if (!condition) throw new Error(message);
-      },
-      false,
-      true,
-    );
-  }
   async sleep(ms: number): Promise<void> {
     this.guard();
     if (!Number.isFinite(ms) || ms < 0)

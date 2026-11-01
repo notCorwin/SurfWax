@@ -33,7 +33,7 @@ const sessionIdOf = (source: chrome.debugger.Debuggee) => (source as chrome.debu
 function harness(
   metadata: object[] | undefined = [{ role: "button", name: "Sign in", tag: "button", text: "Sign in" }],
   states: object[] = [{ connected: true, x: 10, y: 12, visible: true, stable: true, enabled: true, editable: true, receivesEvents: true, checked: false }],
-  logger?: { record: ReturnType<typeof vi.fn> },
+  logger?: { telemetry: ReturnType<typeof vi.fn> },
   onDispatch = vi.fn(async (): Promise<void> => undefined),
   claimChooser?: (chooser: any) => { assert: () => void; finish: (outcome: "handled" | "not-dispatched" | "uncertain") => void },
 ) {
@@ -1435,7 +1435,7 @@ describe("AutomationRuntime", () => {
   });
 
   it("keeps the starting action identity when the surrounding request phase changes while it waits", async () => {
-    const logger = { record: vi.fn() };
+    const logger = { telemetry: vi.fn() };
     const { runtime } = harness([], undefined, logger);
     let finish!: () => void;
     const identity = { runId: "run", toolCallId: "1:call", toolCallIdCanonical: true as const };
@@ -1443,7 +1443,7 @@ describe("AutomationRuntime", () => {
     const pending = (runtime as any).action(3, "waiting", null, () => new Promise<void>((resolve) => { finish = resolve; }));
     runtime.setContext({ conversationId: "other", toolCallId: "later" });
     finish(); await pending;
-    expect(logger.record.mock.calls.map(([event]) => ({ conversationId: event.conversationId, runId: event.runId, toolCallId: event.toolCallId, toolCallIdCanonical: event.toolCallIdCanonical }))).toEqual([
+    expect(logger.telemetry.mock.calls.map(([event]) => ({ conversationId: event.conversationId, runId: event.runId, toolCallId: event.toolCallId, toolCallIdCanonical: event.toolCallIdCanonical }))).toEqual([
       { conversationId: "conversation", ...identity }, { conversationId: "conversation", ...identity },
     ]);
   });
@@ -1639,7 +1639,7 @@ describe("AutomationRuntime", () => {
   it("returns timeout diagnostics while throttling repeated locator attempts", async () => {
     vi.useFakeTimers();
     try {
-      const logger = { record: vi.fn() };
+      const logger = { telemetry: vi.fn() };
       const { runtime } = harness([], undefined, logger);
       const controller = new AbortController();
       runtime.setContext({ signal: controller.signal });
@@ -1650,10 +1650,10 @@ describe("AutomationRuntime", () => {
       await vi.advanceTimersByTimeAsync(2_200);
 
       await rejected;
-      const attempts = logger.record.mock.calls.map(([event]) => event).filter((event) => event.type === "automation.action.attempt");
+      const attempts = logger.telemetry.mock.calls.map(([event]) => event).filter((event) => event.type === "automation.action.attempt");
       expect(attempts).toHaveLength(3);
       expect(attempts.map((event) => event.content.attempt)).toEqual([1, 21, 41]);
-      expect(logger.record.mock.calls.map(([event]) => event).find((event) => event.type === "automation.action.failed")?.content.diagnostic)
+      expect(logger.telemetry.mock.calls.map(([event]) => event).find((event) => event.type === "automation.action.failed")?.content.diagnostic)
         .toMatchObject({ code: "timeout", lastObservation: { reason: "no-candidate", attempt: 44 } });
     } finally {
       vi.useRealTimers();

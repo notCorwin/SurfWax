@@ -11,12 +11,12 @@ import { ErrorNotice } from "../components/ui/error-notice";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "../components/ui/alert-dialog";
 import { SearchCombobox, type SearchComboboxOption } from "./SearchCombobox";
 import { EventLogger } from "../logging";
-import { applyModelPreset, loadModelCatalog, modelPresetFields, modelProviderPresets, resolveModelLimit, type ModelLimit, type ModelProviderPreset } from "../agent/model-limits";
+import { applyModelPreset, loadModelCatalog, modelPresetFields, modelProviderPresets, type ModelProviderPreset } from "../agent/model-limits";
+import { useModelLimit } from "./useModelLimit";
 import { modelConfigErrors, resolvedBaseURL, type ProviderSettingField } from "../agent/model-sdks";
 import type { ModelProfile } from "../sidepanel/config";
 import {
   EMPTY_MODEL_CONFIG,
-  isCompleteModelConfig,
   loadModelConfig,
   saveModelConfig,
   selectedModelConfig,
@@ -37,7 +37,6 @@ export function OptionsApp() {
   const [status, setStatus] = useState<Status>("idle");
   const [message, setMessage] = useState("");
   const [errorDetail, setErrorDetail] = useState<unknown>();
-  const [matchedLimit, setMatchedLimit] = useState<ModelLimit>();
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<ModelField, string>>>({});
   const [clearConfirmationOpen, setClearConfirmationOpen] = useState(false);
   const [activeTab, setActiveTab] = useState("model");
@@ -45,7 +44,6 @@ export function OptionsApp() {
   const [clearMessage, setClearMessage] = useState("");
   const [clearError, setClearError] = useState<unknown>();
   const savedConfig = useRef(JSON.stringify({ modelSettings: EMPTY_MODEL_CONFIG, providerInput: "" }));
-  const matchingKey = useRef("");
   const dirty = ready && JSON.stringify({ modelSettings, providerInput }) !== savedConfig.current;
   const storedProfile = selectedModelConfig(modelSettings);
   const selectedProvider = providers.find((provider) => provider.id === modelSettings.selectedProviderId);
@@ -57,6 +55,7 @@ export function OptionsApp() {
   const config = storedProfile && selectedProvider
     ? applyModelPreset(storedProfile, selectedProvider)
     : storedProfile;
+  const matchedLimit = useModelLimit(config, ready);
   const settingFields: ProviderSettingField[] = config ? modelPresetFields(config, selectedProvider) : [];
   const routingErrors = config ? modelConfigErrors(config, settingFields) : {};
   const routingError = routingErrors.sdk ?? routingErrors.shape ?? routingErrors.body ?? routingErrors.headers;
@@ -80,15 +79,6 @@ export function OptionsApp() {
       setProviderInput(stored.selectedProviderId);
       setProviders(catalogProviders);
       savedConfig.current = JSON.stringify({ modelSettings: stored, providerInput: stored.selectedProviderId });
-      const selected = selectedModelConfig(stored);
-      const preset = catalogProviders.find((provider) => provider.id === stored.selectedProviderId);
-      const effective = selected && preset ? applyModelPreset(selected, preset) : selected;
-      matchingKey.current = effective ? `${effective.baseURL}\u0000${effective.model}` : "";
-      if (effective && isCompleteModelConfig(effective)) {
-        void resolveModelLimit({ ...effective, contextWindowOverride: undefined }).then((limit) => {
-          if (active && matchingKey.current === `${effective.baseURL}\u0000${effective.model}`) setMatchedLimit(limit);
-        }).catch(() => undefined);
-      }
     }).catch((error) => {
       if (!active) return;
       fail("配置读取失败。", error);
@@ -131,10 +121,6 @@ export function OptionsApp() {
       } : {}),
     } } }));
     setFieldErrors((current) => field === "model" ? {} : { ...current, [field]: undefined });
-    if (field === "baseURL" || field === "baseURLOverride" || field === "model" || field === "endpointType") {
-      matchingKey.current = "";
-      setMatchedLimit(undefined);
-    }
     setStatus("idle");
     setMessage("");
     setErrorDetail(undefined);
@@ -176,7 +162,6 @@ export function OptionsApp() {
       } satisfies ModelProfile },
     }));
     setFieldErrors({});
-    setMatchedLimit(undefined);
     setStatus("idle");
     setMessage("");
     setErrorDetail(undefined);
@@ -215,12 +200,6 @@ export function OptionsApp() {
       savedConfig.current = JSON.stringify({ modelSettings: savedModelSettings, providerInput });
       setStatus("saved");
       setMessage("配置已保存，Side Panel 会立即使用新配置");
-      if (config) {
-        matchingKey.current = `${config.baseURL}\u0000${config.model}`;
-        void resolveModelLimit({ ...config, contextWindowOverride: undefined }).then((limit) => {
-          if (matchingKey.current === `${config.baseURL}\u0000${config.model}`) setMatchedLimit(limit);
-        }).catch(() => undefined);
-      }
     } catch (error) {
       fail("配置保存失败。", error);
     }

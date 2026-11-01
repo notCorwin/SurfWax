@@ -859,9 +859,9 @@ describe("canonical event log", () => {
   it("rebuilds messages only from the append-only conversation events and clears them", async () => {
     const store = memoryStore();
     const logger = new EventLogger({ store });
-    await logger.appendMessage({ id: "u1", role: "user", parts: [{ type: "text", text: "one" }] });
+    await logger.appendMessage("one", { id: "u1", role: "user", parts: [{ type: "text", text: "one" }] });
     await logger.append({ type: "request.completed", content: { status: 200 } });
-    await logger.appendMessage({ id: "a1", role: "assistant", parts: [{ type: "text", text: "two" }], metadata: undefined });
+    await logger.appendMessage("one", { id: "a1", role: "assistant", parts: [{ type: "text", text: "two" }], metadata: undefined });
 
     expect(rebuildConversation(await store.all())).toEqual([
       { id: "u1", role: "user", parts: [{ type: "text", text: "one" }] },
@@ -889,9 +889,9 @@ describe("canonical event log", () => {
   it("does not accept late events after a session is stopped for clearing", async () => {
     const store = memoryStore();
     const logger = new EventLogger({ store });
-    logger.record({ type: "sidepanel.closed", content: null });
+    logger.telemetry({ type: "sidepanel.closed", content: null });
     logger.stop();
-    logger.record({ type: "userscript.snapshot", content: { count: 1 } });
+    logger.telemetry({ type: "userscript.snapshot", content: { count: 1 } });
     await logger.flush();
     await logger.clear();
     expect((await store.all()).map(({ type }) => type)).toEqual(["sidepanel.closed", "log.cleared"]);

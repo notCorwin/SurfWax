@@ -914,7 +914,7 @@ test("shows a bounded diagnostic when the canonical event log fails", async () =
     await opened.page.evaluate(() => {
       const original = IDBDatabase.prototype.transaction;
       IDBDatabase.prototype.transaction = function (names, mode, options) {
-        if (names === "events" && mode === "readwrite") throw new Error("LOG_ERROR_".repeat(2000));
+        if ((names === "events" || Array.isArray(names) && names.includes("events")) && mode === "readwrite") throw new Error("LOG_ERROR_".repeat(2000));
         return original.call(this, names, mode, options);
       };
     });

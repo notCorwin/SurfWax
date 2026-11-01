@@ -103,7 +103,6 @@ describe("models.dev limit matching", () => {
     const now = Date.parse(bundledMetadata.fetchedAt) + 1;
     const original = vi.fn(async () => new Response(JSON.stringify(catalog)));
     await expect(resolveModelLimit(config, { storage, fetch: original, now: () => now })).resolves.toMatchObject({ context: 400_000 });
-    expect(values["side-agent:model-limit"]).toBeTruthy();
 
     const updated = vi.fn(async () => new Response(JSON.stringify({
       openai: { ...catalog.openai, models: { "gpt-5": { limit: { context: 500_000 } } } },
@@ -111,7 +110,6 @@ describe("models.dev limit matching", () => {
     await expect(loadModelCatalog({ storage, fetch: updated, now: () => now + 1, refresh: true }))
       .resolves.toHaveProperty("openai.models.gpt-5.limit.context", 500_000);
     expect(updated).toHaveBeenCalledWith("https://models.dev/api.json", expect.objectContaining({ cache: "no-cache" }));
-    expect(values["side-agent:model-limit"]).toBeNull();
     await expect(resolveModelLimit(config, { storage, fetch: original, now: () => now + 2 })).resolves.toMatchObject({ context: 500_000 });
     expect(original).toHaveBeenCalledTimes(1);
   });
@@ -165,38 +163,26 @@ describe("models.dev limit matching", () => {
     } finally { vi.unstubAllGlobals(); }
   });
 
-  it("clears a bundled limit write that races with a successful background refresh", async () => {
-    const snapshot = await loadModelCatalog({ storage: { async get() { return {}; }, async set() {} },
-      fetch: vi.fn(async () => { throw new Error("offline"); }), bundledFallback: true });
-    const modelEntry = Object.entries(snapshot).flatMap(([providerId, provider]) => Object.entries(provider.models ?? {})
-      .filter(([, model]) => Boolean(model.limit?.context)).map(([modelId, model]) => ({ providerId, provider, modelId, model })))[0]!;
-    let finishFetch!: (response: Response) => void;
-    const fetchPending = new Promise<Response>((resolve) => { finishFetch = resolve; });
-    vi.stubGlobal("fetch", vi.fn(() => fetchPending));
-    let releaseLimitWrite!: () => void;
-    const limitWriteBlocked = new Promise<void>((resolve) => { releaseLimitWrite = resolve; });
-    let limitWriteStarted!: () => void;
-    const limitWriteStarting = new Promise<void>((resolve) => { limitWriteStarted = resolve; });
+  it("reuses results for different models and invalidates them on catalog revision", async () => {
     const values: Record<string, unknown> = {};
-    const storage = {
-      async get(key: string) { return { [key]: values[key] }; },
-      async set(items: Record<string, unknown>) {
-        if (items["side-agent:model-limit"] && items["side-agent:model-limit"] !== null) {
-          limitWriteStarted();
-          await limitWriteBlocked;
-        }
-        Object.assign(values, items);
-      },
-    };
-    try {
-      const result = resolveModelLimit({ providerId: modelEntry.providerId, baseURL: modelEntry.model.provider?.api ?? modelEntry.provider.api ?? "", model: modelEntry.model.id ?? modelEntry.modelId }, { storage });
-      await limitWriteStarting;
-      finishFetch(Response.json(snapshot));
-      await vi.waitFor(() => expect(values["side-agent:model-catalog"]).toBeTruthy());
-      releaseLimitWrite();
-      await expect(result).resolves.toHaveProperty("context");
-      expect(values["side-agent:model-limit"]).toBeNull();
-    } finally { vi.unstubAllGlobals(); }
+    const storage = { async get(key: string) { return { [key]: values[key] }; }, async set(items: Record<string, unknown>) { Object.assign(values, items); } };
+    const now = Date.parse(bundledMetadata.fetchedAt) + 1;
+    const fetch = vi.fn(async () => Response.json(catalog));
+    const first = { providerId: "openai", baseURL: "https://api.openai.com/v1", model: "gpt-5" };
+    const second = { ...first, model: "gpt-5-mini" };
+    const firstMatch = await resolveModelLimit(first, { storage, fetch, now: () => now });
+    const secondMatch = await resolveModelLimit(second, { storage, fetch, now: () => now });
+    expect(firstMatch?.context).toBe(400_000);
+    expect(secondMatch?.context).toBe(128_000);
+    expect(await resolveModelLimit(first, { storage, fetch, now: () => now })).toBe(firstMatch);
+    expect(await resolveModelLimit(second, { storage, fetch, now: () => now })).toBe(secondMatch);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(values).not.toHaveProperty("side-agent:model-limit");
+
+    await loadModelCatalog({ storage, now: () => now + 1, refresh: true, fetch: vi.fn(async () => Response.json({
+      openai: { ...catalog.openai, models: { "gpt-5": { limit: { context: 500_000 } } } },
+    })) });
+    expect(await resolveModelLimit(first, { storage, fetch, now: () => now + 2 })).toMatchObject({ context: 500_000 });
   });
 
   it("uses only exact provider/model matches and honors input limits", () => {

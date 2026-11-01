@@ -22,7 +22,7 @@ export function createSidePanelCloser(runtime: CloseableRuntime, logger?: EventL
     closed = true;
     abortAllConversationWork();
     runtime.thread.cancelRun();
-    logger?.record({ type: "sidepanel.closed", content: null });
+    logger?.telemetry({ type: "sidepanel.closed", content: null });
     void logger?.flush();
   };
 }
