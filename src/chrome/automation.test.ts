@@ -8,6 +8,7 @@ import { ChromeExecutor } from "./executor";
 import { createProgramTools, PROGRAM_TOOL_REGISTRY } from "./tool";
 import { ToolScheduler } from "./tool-scheduler";
 import { PLACEHOLDER_EVIDENCE_SOURCE } from "./snapshot-placeholder";
+import { SNAPSHOT_NATIVE_VALUE_SOURCE } from "./snapshot-native-value";
 import { SNAPSHOT_DELIVERY_COMMIT } from "./snapshot-wire";
 
 const inspectText = (value: any) => value.items.map((item: any) => item.line).join("\n");
@@ -144,11 +145,11 @@ function textboxSnapshot(options: { value?: string; text?: string; role?: string
   const original = command.getMockImplementation()!;
   const value = options.value ?? "DSP-17-A/7", text = options.text ?? value;
   const strings = ["root", "#document", "INPUT", "SPAN", "1", "visible", "static", "none", "auto", "ltr", "horizontal-tb", "block", "16px", "rgb(0, 0, 0)", "0px", "border-box", "clip", "disc"];
-  const textTag = strings.push("#text") - 1, textValue = strings.push(text) - 1;
+  const textTag = strings.push("#text") - 1, textValue = strings.push(text) - 1, inputValue = strings.push(value) - 1;
   const style = [4, 5, 5, 5, 5, 6, 7, 7, 7, 7, 8, 7, 7, 7, 7, 7, 8, 9, 10, 11, 12, 13, 7, 14, 15, 7, options.masked ? 17 : 7, 16, 7, 7, 7];
   // Native input value text belongs to UA shadow DOM absent from DOMSnapshot.
   // A separately painted document text node, when requested, is an AX sibling.
-  const snapshot = { strings, documents: [{ frameId: 0, nodes: { backendNodeId: [1, 7, 8], parentIndex: [-1, 0, 0], nodeType: [9, 1, options.independent ? 3 : 1], nodeName: [1, 2, options.independent ? textTag : 3], nodeValue: [-1, -1, options.independent ? textValue : -1] }, layout: { nodeIndex: [0, 1, 2], bounds: [[0, 0, 100, 100], [0, 0, 100, 20], [0, 0, 100, 20]], styles: [[], style, style], text: [-1, -1, options.independent ? textValue : -1] } }] };
+  const snapshot = { strings, documents: [{ frameId: 0, nodes: { backendNodeId: [1, 7, 8], parentIndex: [-1, 0, 0], nodeType: [9, 1, options.independent ? 3 : 1], nodeName: [1, 2, options.independent ? textTag : 3], nodeValue: [-1, -1, options.independent ? textValue : -1], inputValue: { index: [1], value: [inputValue] }, shadowRootType: { index: [], value: [] } }, layout: { nodeIndex: [0, 1, 2], bounds: [[0, 0, 100, 100], [0, 0, 100, 20], [0, 25, 100, 20]], styles: [[], style, style], text: [-1, -1, options.independent ? textValue : -1] } }] };
   const editable = { name: "editable", value: { value: "plaintext" } };
   const nodes = [
     { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["box", ...(options.independent ? ["text"] : []), ...(options.sibling ? ["extra"] : [])] },
@@ -161,6 +162,18 @@ function textboxSnapshot(options: { value?: string; text?: string; role?: string
   command.mockImplementation(async (source, method, params) => {
     if (method === "DOMSnapshot.captureSnapshot") return snapshot;
     if (method === "Accessibility.getFullAXTree") return { nodes };
+    if (method === "Page.createIsolatedWorld") return { executionContextId: 31 };
+    if (method === "Runtime.evaluate" && params?.expression === "document") return { result: { objectId: "native-document" } };
+    if (method === "DOM.describeNode" && params?.backendNodeId === 7) return { node: { backendNodeId: 7, nodeName: "INPUT",
+      shadowRoots: [{ shadowRootType: "user-agent", children: [{ children: [{ nodeType: 3, backendNodeId: 10, nodeValue: value }] }] }] } };
+    if (method === "DOM.resolveNode" && params?.backendNodeId === 10 && params?.objectGroup?.startsWith("surf-wax-native-value:"))
+      return { object: { objectId: "native-value-text" } };
+    if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === SNAPSHOT_NATIVE_VALUE_SOURCE) {
+      expect(params.objectId).toBe("native-document");
+      expect(params.arguments).toEqual([{ value: [{ expected: value }] }, { value: true }, { value: true }, { objectId: "native-value-text" }]);
+      const proven = /^[\x20-\x7e]{1,10}$/.test(value);
+      return { result: { value: { scene: ["visible isolated document"], values: [proven ? { text: value, box: { x: 0, y: 0, width: 100, height: 20 } } : null] } } };
+    }
     if (method === "DOM.describeNode") return { node: { backendNodeId: 8 } };
     return original(source, method, params);
   });
@@ -171,8 +184,8 @@ function placeholderSnapshot(options: { status?: string[]; label?: boolean; depe
   const { runtime, command } = harness(), original = command.getMockImplementation()!;
   const strings = ["root", "#document", "INPUT", "placeholder", "PRIVATE_HINT", "1", "visible", "static", "none", "auto", "ltr", "horizontal-tb", "block", "16px", "rgb(0, 0, 0)", "0px", "border-box", "clip", "BUTTON", options.value ?? "", "DIV"];
   const style = [5, 6, 6, 6, 6, 7, 8, 8, 8, 8, 9, 8, 8, 8, 8, 8, 9, 10, 11, 12, 13, 14, 8, 15, 16, 8, 8, 17, 8, 8, 8];
-  const snapshot = { strings, documents: [{ frameId: 0, nodes: { backendNodeId: [1, 7, 9, 10], parentIndex: [-1, 0, 0, 0], nodeType: [9, 1, 1, 1], nodeName: [1, 2, options.dependency ? 18 : 20, options.transitive ? 18 : 20], nodeValue: [-1, -1, -1, -1], attributes: [[], [3, 4], [], []], inputValue: { index: [1], value: [19] } },
-    layout: { nodeIndex: [0, 1, 2, 3], bounds: Array.from({ length: 4 }, () => [0, 0, 100, 20]), styles: [[], style, style, style], text: [-1, -1, -1, -1] } }] };
+  const snapshot = { strings, documents: [{ frameId: 0, nodes: { backendNodeId: [1, 7, 9, 10], parentIndex: [-1, 0, 0, 0], nodeType: [9, 1, 1, 1], nodeName: [1, 2, options.dependency ? 18 : 20, options.transitive ? 18 : 20], nodeValue: [-1, -1, -1, -1], attributes: [[], [3, 4], [], []], inputValue: { index: [1], value: [19] }, shadowRootType: { index: [], value: [] } },
+    layout: { nodeIndex: [0, 1, 2, 3], bounds: [[0, 0, 100, 100], [0, 0, 100, 20], [0, 25, 100, 20], [0, 50, 100, 20]], styles: [[], style, style, style], text: [-1, -1, -1, -1] } }] };
   const source = options.label ? { type: "attribute", value: { value: "Label" }, attribute: "aria-label" } : { type: "placeholder", value: { value: "PRIVATE_HINT" }, attribute: "placeholder" };
   const related = (id: number) => ({ type: "relatedElement", attribute: "aria-labelledby", value: { value: "PRIVATE_HINT" }, attributeValue: { relatedNodes: [{ backendDOMNodeId: id }] } });
   const nodes: any[] = [
@@ -187,8 +200,16 @@ function placeholderSnapshot(options: { status?: string[]; label?: boolean; depe
     if (method === "Accessibility.getFullAXTree") return { nodes };
     if (method === "Page.createIsolatedWorld") return { executionContextId: 31 };
     if (method === "Runtime.evaluate" && params?.expression === "document") return { result: { objectId: "placeholder-document" } };
-    if (method === "DOM.describeNode" && params?.backendNodeId === 7) return { node: { backendNodeId: 7, shadowRoots: [{ children: [{ attributes: ["pseudo", "-webkit-input-placeholder"], children: [{ nodeType: 3, backendNodeId: 8 }] }] }] } };
+    if (method === "DOM.describeNode" && params?.backendNodeId === 7) return { node: { backendNodeId: 7, nodeName: "INPUT", shadowRoots: [{ shadowRootType: "user-agent", children: [
+      { attributes: ["pseudo", "-webkit-input-placeholder"], children: [{ nodeType: 3, backendNodeId: 8 }] },
+      ...(options.value ? [{ children: [{ nodeType: 3, backendNodeId: 12, nodeValue: options.value }] }] : []),
+    ] }] } };
     if (method === "DOM.resolveNode" && params?.objectGroup?.startsWith("surf-wax-placeholder:")) return { object: { objectId: params.backendNodeId === 7 ? "placeholder-host" : "placeholder-text" } };
+    if (method === "DOM.resolveNode" && params?.backendNodeId === 12 && params?.objectGroup?.startsWith("surf-wax-native-value:")) return { object: { objectId: "native-value-text" } };
+    if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === SNAPSHOT_NATIVE_VALUE_SOURCE) {
+      expect(params.arguments).toEqual([{ value: [{ expected: options.value }] }, { value: true }, { value: true }, { objectId: "native-value-text" }]);
+      return { result: { value: { scene: ["visible isolated document"], values: [{ text: options.value, box: { x: 0, y: 0, width: 100, height: 20 } }] } } };
+    }
     if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === PLACEHOLDER_EVIDENCE_SOURCE) {
       const status = (options.status ?? ["visible"])[Math.min(reads++, (options.status ?? ["visible"]).length - 1)];
       return { result: { value: status === "visible" ? { status, text: "PRIVATE_HINT" } : { status } } };
@@ -249,6 +270,7 @@ describe("AutomationRuntime", () => {
         const type = snapshot.strings.push("type") - 1, checkbox = snapshot.strings.push("checkbox") - 1;
         const label = snapshot.strings.push("aria-label") - 1, name = snapshot.strings.push("Confirm") - 1;
         nodes.attributes = [[], [type, checkbox, label, name]]; nodes.inputChecked = { index: [] };
+        nodes.inputValue = { index: [1], value: [snapshot.strings.push("on") - 1] };
         layout.nodeIndex = layout.nodeIndex.slice(0, 2); layout.bounds = layout.bounds.slice(0, 2);
         layout.styles = layout.styles.slice(0, 2); layout.text = layout.text.slice(0, 2);
         return snapshot;
@@ -260,7 +282,7 @@ describe("AutomationRuntime", () => {
         if (params.functionDeclaration.includes("const labels=this.labels")) return { result: { value: {
           meta: { connected: true, tag: "input", identityRole: "checkbox", identityName: "Confirm" },
           fillability: { fillable: false, disabled: false, readonly: false, mode: null }, isContentEditable: false,
-          attributes: { type: "checkbox", "aria-label": "Confirm" }, checked: false, checkedState, labelCount: 0,
+          attributes: { type: "checkbox", "aria-label": "Confirm" }, value: "on", checked: false, checkedState, labelCount: 0,
         } } };
         return { result: { value: checkedState } };
       }
@@ -284,6 +306,7 @@ describe("AutomationRuntime", () => {
         const snapshot = structuredClone(await original(source, method, params));
         const nodes = snapshot.documents[0].nodes, layout = snapshot.documents[0].layout, add = (value: string) => snapshot.strings.push(value) - 1;
         snapshot.strings[2] = "DIV";
+        nodes.inputValue = { index: [], value: [] };
         nodes.backendNodeId.push(9); nodes.parentIndex.push(0); nodes.nodeType.push(1); nodes.nodeName.push(3); nodes.nodeValue.push(-1);
         nodes.attributes = [[], [add("role"), add("switch"), add("aria-labelledby"), add("x")], [add("id"), add("x")], [add("id"), add("y")]];
         layout.nodeIndex.push(3); layout.bounds.push([0, 0, 100, 20]); layout.styles.push([...layout.styles[2]]); layout.text.push(-1);
@@ -1470,6 +1493,55 @@ describe("AutomationRuntime", () => {
     await runtime.abortSessions();
   });
 
+  it("does not expose an unproven native value via its AX owner or UA-shadow text", async () => {
+    const { runtime, command, value } = textboxSnapshot();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === SNAPSHOT_NATIVE_VALUE_SOURCE)
+        return { result: { value: { scene: null, values: [null] } } };
+      return original(source, method, params);
+    });
+    const result = await (await runtime.createPage(3)).inspect();
+    expect(inspectText(result)).not.toContain(value);
+    expect(inspectText(result)).toContain("[value=unknown]");
+    expect(inspectText(result)).not.toContain("StaticText");
+    expect((result.items as any[]).find((item) => item.line.includes("textbox"))?.ref).toBeTruthy();
+    await runtime.abortSessions();
+  });
+
+  it("retains uncertainty for an independent unproven UA text value", async () => {
+    const { runtime, command } = textboxSnapshot();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === SNAPSHOT_NATIVE_VALUE_SOURCE)
+        return { result: { value: { scene: null, values: [null] } } };
+      const result = await original(source, method, params);
+      if (method !== "Accessibility.getFullAXTree") return result;
+      const tree = structuredClone(result);
+      tree.nodes.find((node: any) => node.nodeId === "native-value").value = { value: "independent" };
+      return tree;
+    });
+    const result = await (await runtime.createPage(3)).inspect();
+    expect(inspectText(result)).toContain("StaticText [name=unknown] [value=unknown]");
+    expect(inspectText(result)).not.toContain("independent");
+    await runtime.abortSessions();
+  });
+
+  it("keeps an unknown leaf when its UA owner cannot be verified", async () => {
+    const { runtime, command, value } = textboxSnapshot();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.describeNode" && params?.backendNodeId === 7)
+        return { node: { backendNodeId: 7, nodeName: "INPUT", shadowRoots: [] } };
+      return original(source, method, params);
+    });
+    const result = await (await runtime.createPage(3)).inspect();
+    expect(inspectText(result)).not.toContain(value);
+    expect(inspectText(result)).toContain("textbox [name=unknown] [value=unknown]");
+    expect(inspectText(result)).toContain("StaticText [name=unknown]");
+    await runtime.abortSessions();
+  });
+
   it.each([true, false])("uses only a painted native label association for a textbox (visible=%s)", async (visible) => {
     const { runtime, command } = textboxSnapshot();
     const original = command.getMockImplementation()!;
@@ -1579,8 +1651,10 @@ describe("AutomationRuntime", () => {
     const reconstructed = items.map((item: any) => item.line).join("");
     expect(reconstructed).toContain(value);
     expect(reconstructed).toContain("StaticText");
-    // One native input value and one physically separate, identical text node.
-    expect(reconstructed.split(value)).toHaveLength(3);
+    // The independently painted text remains fully pageable. The long native
+    // input has no full-paint proof in this fixture and must not be duplicated.
+    expect(reconstructed.split(value)).toHaveLength(2);
+    expect(reconstructed).toContain("[value=unknown]");
     await runtime.abortSessions();
   });
 

@@ -13,6 +13,8 @@ export type SnapshotNode = Readonly<{
   preserveTextWhitespace?: boolean;
   nameUnknown?: boolean;
   value?: string;
+  /** A control has a value whose complete painted text was not established. */
+  valueUnknown?: boolean;
   selectedLabels?: readonly string[];
   placeholder?: Readonly<{ status: "visible"; text: string } | { status: "unknown" }>;
   /** A reference created by the browser runtime, not parsed from page text. */
@@ -61,6 +63,7 @@ export function renderSnapshotNode(
     if (state) line += ` [${state}]`;
   }
   if (fields.has("text") && value && value !== name) line += `: ${value}`;
+  if (fields.has("text") && node.valueUnknown) line += " [value=unknown]";
   if (fields.has("text") && node.placeholder?.status === "unknown") line += " [placeholder=unknown]";
   else if (fields.has("text") && node.placeholder?.status === "visible" && node.placeholder.text !== name)
     line += ` [placeholder=${quote(node.placeholder.text)}]`;

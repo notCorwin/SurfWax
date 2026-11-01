@@ -65,6 +65,12 @@ describe("structured semantic snapshot rendering", () => {
     expect(renderSnapshotNode(input, { fields: ["state"] }).line).toBe("- textbox");
   });
 
+  it("marks unverified control values only when text is requested", () => {
+    const input: SnapshotNode = { id: "one", depth: 0, role: "textbox", valueUnknown: true };
+    expect(renderSnapshotNode(input).line).toBe("- textbox [value=unknown]");
+    expect(renderSnapshotNode(input, { fields: ["ref"] }).line).toBe("- textbox");
+  });
+
   it("keeps the owner-to-child-frame association in every field projection", () => {
     const owner: SnapshotNode = { id: "owner", depth: 1, role: "Iframe", name: "Work item", childFrameRef: "f-handle" };
     expect(renderSnapshotNode(owner).line).toBe('  - Iframe "Work item" [frameRef=f-handle]');
