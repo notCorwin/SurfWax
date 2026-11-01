@@ -200,6 +200,82 @@ describe("AutomationRuntime", () => {
     expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.releaseObjectGroup" && params?.objectGroup?.startsWith("surf-wax-editability:"))).toHaveLength(4);
     await runtime.abortSessions();
   });
+  it.each([
+    { readings: [null, false, false, false], fails: false },
+    { readings: [null, false, null, false], fails: true },
+  ])("retries or rejects changing native indeterminate state during DOM fallback capture", async ({ readings, fails }) => {
+    const { runtime, command } = textboxSnapshot(), original = command.getMockImplementation()!;
+    let reads = 0;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOMSnapshot.captureSnapshot") {
+        const snapshot = structuredClone(await original(source, method, params));
+        const document = snapshot.documents[0], nodes = document.nodes, layout = document.layout;
+        nodes.backendNodeId = [1, 7]; nodes.parentIndex = [-1, 0]; nodes.nodeType = [9, 1]; nodes.nodeName = [1, 2]; nodes.nodeValue = [-1, -1];
+        const type = snapshot.strings.push("type") - 1, checkbox = snapshot.strings.push("checkbox") - 1;
+        const label = snapshot.strings.push("aria-label") - 1, name = snapshot.strings.push("Confirm") - 1;
+        nodes.attributes = [[], [type, checkbox, label, name]]; nodes.inputChecked = { index: [] };
+        layout.nodeIndex = layout.nodeIndex.slice(0, 2); layout.bounds = layout.bounds.slice(0, 2);
+        layout.styles = layout.styles.slice(0, 2); layout.text = layout.text.slice(0, 2);
+        return snapshot;
+      }
+      if (method === "Accessibility.getFullAXTree") return { nodes: [{ nodeId: "root", role: { value: "RootWebArea" }, childIds: [] }] };
+      if (method === "DOM.resolveNode" && params?.objectGroup?.startsWith("surf-wax-dom-snapshot:")) return { object: { objectId: "dom-checkbox" } };
+      if (method === "Runtime.callFunctionOn" && params?.objectId === "dom-checkbox") {
+        const checkedState = { supported: true, radio: false, value: readings[Math.min(reads++, readings.length - 1)] };
+        if (params.functionDeclaration.includes("const labels=this.labels")) return { result: { value: {
+          meta: { connected: true, tag: "input", identityRole: "checkbox", identityName: "Confirm" },
+          fillability: { fillable: false, disabled: false, readonly: false, mode: null }, isContentEditable: false,
+          attributes: { type: "checkbox", "aria-label": "Confirm" }, checked: false, checkedState, labelCount: 0,
+        } } };
+        return { result: { value: checkedState } };
+      }
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    if (fails) await expect(page.inspect()).rejects.toMatchObject({ code: "snapshot-unavailable", detail: { reason: "dom-checked-unstable" } });
+    else expect(inspectText(await page.inspect())).toContain("[checked=false]");
+    expect(reads).toBe(4);
+    expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.releaseObjectGroup" && params?.objectGroup?.startsWith("surf-wax-dom-snapshot:"))).toHaveLength(2);
+    await runtime.abortSessions();
+  });
+  it.each([
+    { readings: [8, 9, 9, 9], fails: false },
+    { readings: [8, 9, 8, 9], fails: true },
+  ])("retries or rejects changing live aria-labelledby associations", async ({ readings, fails }) => {
+    const { runtime, command } = textboxSnapshot(), original = command.getMockImplementation()!;
+    let reads = 0;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOMSnapshot.captureSnapshot") {
+        const snapshot = structuredClone(await original(source, method, params));
+        const nodes = snapshot.documents[0].nodes, layout = snapshot.documents[0].layout, add = (value: string) => snapshot.strings.push(value) - 1;
+        snapshot.strings[2] = "DIV";
+        nodes.backendNodeId.push(9); nodes.parentIndex.push(0); nodes.nodeType.push(1); nodes.nodeName.push(3); nodes.nodeValue.push(-1);
+        nodes.attributes = [[], [add("role"), add("switch"), add("aria-labelledby"), add("x")], [add("id"), add("x")], [add("id"), add("y")]];
+        layout.nodeIndex.push(3); layout.bounds.push([0, 0, 100, 20]); layout.styles.push([...layout.styles[2]]); layout.text.push(-1);
+        return snapshot;
+      }
+      if (method === "Accessibility.getFullAXTree") return { nodes: [{ nodeId: "root", role: { value: "RootWebArea" }, childIds: [] }] };
+      if (method === "DOM.resolveNode" && params?.objectGroup?.startsWith("surf-wax-dom-snapshot:")) return { object: { objectId: "dom-switch" } };
+      if (method === "Runtime.callFunctionOn" && params?.objectId === "dom-switch" && params.functionDeclaration.includes("const labels=this.labels")) return { result: { value: {
+        meta: { connected: true, tag: "div", identityRole: "switch", identityName: "" },
+        fillability: { fillable: false, disabled: false, readonly: false, mode: null }, isContentEditable: false,
+        attributes: { role: "switch", "aria-labelledby": "x" }, checkedState: { supported: false }, labelCount: 0,
+      } } };
+      if (method === "Runtime.callFunctionOn" && params?.objectId === "dom-switch" && params.functionDeclaration.includes("ariaLabelledByElements"))
+        return { result: { objectId: `aria-list-${readings[Math.min(reads++, readings.length - 1)]}` } };
+      if (method === "Runtime.getProperties" && params?.objectId?.startsWith("aria-list-")) return { result: [
+        { name: "0", value: { objectId: `aria-node-${params.objectId.slice(-1)}` } }, { name: "length", value: { value: 1 } },
+      ] };
+      if (method === "DOM.describeNode" && params?.objectId?.startsWith("aria-node-")) return { node: { nodeType: 1, backendNodeId: Number(params.objectId.slice(-1)) } };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    if (fails) await expect(page.inspect()).rejects.toMatchObject({ code: "snapshot-unavailable", detail: { reason: "dom-aria-label-unstable" } });
+    else await expect(page.inspect()).resolves.toMatchObject({ mode: "full" });
+    expect(reads).toBe(4);
+    expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.releaseObjectGroup" && params?.objectGroup?.startsWith("surf-wax-dom-snapshot:"))).toHaveLength(2);
+    await runtime.abortSessions();
+  });
   it.each([true, false])("bounds an automatic snapshot after a click with ok=%s and releases the executor queue", async (ok) => {
     const { runtime, command } = harness();
     const page = await runtime.createPage(3);
@@ -1862,7 +1938,7 @@ describe("AutomationRuntime", () => {
     const page = await runtime.createPage(3);
     const first = await page.inspect() as any;
     const second = await page.inspect({ since: first.observationId }) as any;
-    expect(first.items.map((item: any) => item.id)).toEqual(["f1:a:root", "f1:a:node-0"]);
+    expect(first.items.map((item: any) => item.id)).toEqual(["1.aroot", "1.anode-0"]);
     expect(second).toMatchObject({ mode: "delta", items: [] });
     const ref = first.items.find((item: any) => item.ref)?.ref;
     expect(ref).toMatch(/^t3s[a-f0-9]+d0e1$/);
@@ -1882,7 +1958,7 @@ describe("AutomationRuntime", () => {
     const one = await page.inspect({ since: baseline.observationId, limit: 1 }) as any;
     expect(one).toMatchObject({ mode: "delta", items: [{ id: second.id, change: "updated", after: first.id }], nextCursor: expect.any(String) });
     const two = await page.inspect({ cursor: one.nextCursor, limit: 1 }) as any;
-    expect(two).toMatchObject({ mode: "delta", items: [{ id: "f1:a:node-2", change: "added", after: second.id }] });
+    expect(two).toMatchObject({ mode: "delta", items: [{ id: "1.anode-2", change: "added", after: second.id }] });
     expect(two.nextCursor).toBeUndefined();
     await runtime.abortSessions();
   });

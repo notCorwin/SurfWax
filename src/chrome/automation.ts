@@ -7,7 +7,6 @@ import { renderSnapshotNode, type SnapshotNode, type SnapshotStateName } from ".
 import { stitchSnapshotFrames, type SnapshotLine } from "./snapshot-frame-tree";
 import { snapshotDomSupplement, type SnapshotDomEvidence } from "./snapshot-dom";
 import { createSnapshotDomIndex } from "./snapshot-dom-index";
-import { snapshotPreformattedText } from "./snapshot-preformatted";
 import { snapshotSlottedNodes } from "./snapshot-slot-index";
 import { sameDOMSnapshot } from "./snapshot-consistency";
 import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
@@ -3149,6 +3148,7 @@ export class AutomationRuntime {
       type Fillability = { fillable: boolean; disabled: boolean; readonly: boolean; mode: "richtext" | "plaintext" | null };
       type FillabilityBatch = { debuggee: Debuggee; frameId: string; values: Map<number, Fillability> };
       const fillabilityBatches: FillabilityBatch[] = [];
+      let unstableDOMChecked = false, unstableDOMAria = false;
       const readFillability = async (debuggee: Debuggee, frameId: string, ids: readonly number[]): Promise<Map<number, Fillability>> => {
         const values = new Map<number, Fillability>();
         if (!ids.length) return values;
@@ -3722,12 +3722,12 @@ export class AutomationRuntime {
         const scopedRoot = Boolean(regionNode && regionFrameId === frameId && regionDebuggee && sameDebuggee(regionDebuggee, debuggee));
         const doc = snapshot.documents?.find((document: any) => snapshot.strings?.[document.frameId] === frameId);
         if (!doc) throw automationError("snapshot-unavailable", { reason: "missing-dom-frame", frameId });
-        let evidence: ReturnType<typeof snapshotDomSupplement>, preformatted: Map<number, string>;
+        let evidence: ReturnType<typeof snapshotDomSupplement>;
         try {
           evidence = snapshotDomSupplement(snapshot, { frameId, visibility, textProjections, covered: new Set() });
-          preformatted = snapshotPreformattedText(snapshot, frameId);
         }
         catch (error) { throw automationError("snapshot-unavailable", { reason: "invalid-dom-snapshot", detail: error instanceof Error ? error.message : String(error) }); }
+        const preformatted = evidence.preformatted.get(frameId)!;
         const domIndex = evidence.indexes.get(frameId);
         if (!domIndex) throw automationError("snapshot-unavailable", { reason: "missing-dom-frame", frameId });
         const placeholders = new Map<number, PlaceholderProof>();
@@ -3832,10 +3832,10 @@ export class AutomationRuntime {
         const scopeKey = JSON.stringify([scope, debuggee.sessionId ?? null]);
         let snapshotScope = session.snapshotScopes.get(scopeKey);
         if (!snapshotScope) {
-          snapshotScope = `f${(session.nextSnapshotScope++).toString(36)}`;
+          snapshotScope = (session.nextSnapshotScope++).toString(36);
           session.snapshotScopes.set(scopeKey, snapshotScope);
         }
-        if (frameLabel) lines.push({ id: `${snapshotScope}:doc`, line: `${"  ".repeat(frameDepth)}- frame-document [frameRef=${capturedFrameRefs.get(frameLabel)}]` });
+        if (frameLabel) lines.push({ id: `${snapshotScope}.m`, line: `${"  ".repeat(frameDepth)}- frame-document [frameRef=${capturedFrameRefs.get(frameLabel)}]` });
         // The region may be omitted entirely by AX (for example aria-hidden).
         // Its DOM frame/identity is independently resolved and validated below.
         const root = scopedRoot ? nodes.find((node) => node.backendDOMNodeId === regionNode!.node.backendNodeId) : nodes.find((node) => !node.parentId) ?? nodes[0];
@@ -4037,13 +4037,13 @@ export class AutomationRuntime {
               : ["combobox", "listbox"].includes(role) ? ["click", "select"] : ["click", "doubleClick", "hover"];
             // AX node IDs identify semantic rows; multiple AX rows can refer
             // to the same backend DOM node and therefore share an action ref.
-            const snapshotId = `${snapshotScope}:a:${node.nodeId}`;
+            const snapshotId = `${snapshotScope}.a${node.nodeId}`;
             const childFrameId = typeof node.backendDOMNodeId === "number"
               ? childFramesByOwner.get(JSON.stringify([debuggee.sessionId ?? "", node.backendDOMNodeId])) : undefined;
             const childFrameRef = childFrameId ? capturedFrameRefs.get(childFrameId) : undefined;
             const ownPlaceholder = placeholder(node);
             const preserveTextWhitespace = role === "StaticText" && typeof node.backendDOMNodeId === "number" && Boolean(name)
-              && !textProjections.has(node.backendDOMNodeId) && preformatted.get(node.backendDOMNodeId) === name;
+              && !textProjections.has(node.backendDOMNodeId) && preformatted.get(node.backendDOMNodeId)?.text === name;
             const snapshotNode: SnapshotNode = { id: snapshotId, depth, role, name, value, ...(preserveTextWhitespace ? { preserveTextWhitespace: true } : {}), ...(namesUnknown.has(node.nodeId) ? { nameUnknown: true } : {}),
               ...(ownPlaceholder && ownPlaceholder.status !== "hidden" ? { placeholder: ownPlaceholder } : {}),
               ...(ref ? { ref, actions } : {}), ...(childFrameRef ? { childFrameRef } : {}), state };
@@ -4143,9 +4143,8 @@ export class AutomationRuntime {
         const visibleLabel = (ids: readonly number[]): string => ids
           .map((id) => labels.get(id)!.parts.join("").replace(/\s+/g, " ").trim()).filter(Boolean).join(" ");
         const omitText = new Set<number>();
-        for (const [id, parts] of controlParts) if (parts.length === 1 && parts[0]!.text?.replace(/\s+/g, " ").trim() === controlText.get(id)) omitText.add(parts[0]!.backendNodeId);
         const marked = new Set(depths.keys());
-        for (const item of extra) if (item.kind === "control" || item.kind === "text" && !!item.text?.trim() && !omitText.has(item.backendNodeId)) marked.add(item.backendNodeId);
+        for (const item of extra) if (item.kind === "control" || item.kind === "text" && !!item.text?.trim()) marked.add(item.backendNodeId);
         const nearestEmitted = domIndex.nearestMarkedAncestors(marked);
         const group = controls.size ? `surf-wax-dom-snapshot:${crypto.randomUUID()}` : undefined;
         const additions: Array<{ position: number; line: SnapshotLine }> = [];
@@ -4163,7 +4162,7 @@ export class AutomationRuntime {
               if (!resolved.object?.objectId) throw automationError("snapshot-unavailable", { reason: "missing-dom-control" });
               const objectId = resolved.object.objectId as string;
               const response = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId, returnByValue: true,
-                functionDeclaration: `function(){const labels=this.labels, fillability=(${SNAPSHOT_FILLABILITY_SOURCE}).call(this);return {meta:(${SEARCH_META_SOURCE}).call(this,true), fillability, isContentEditable:!!this.isContentEditable, editable:fillability.fillable ? (${SNAPSHOT_EDITABLE_HOST_SOURCE}).call(this) : null, attributes:Object.fromEntries([...this.attributes].map(a=>[a.name.toLowerCase(),a.value])), value: typeof this.value === "string" ? this.value : undefined, checked: typeof this.checked === "boolean" ? this.checked : undefined, labelCount: labels == null ? 0 : labels.length}}` });
+                functionDeclaration: `function(){const labels=this.labels, fillability=(${SNAPSHOT_FILLABILITY_SOURCE}).call(this);return {meta:(${SEARCH_META_SOURCE}).call(this,true), fillability, isContentEditable:!!this.isContentEditable, editable:fillability.fillable ? (${SNAPSHOT_EDITABLE_HOST_SOURCE}).call(this) : null, attributes:Object.fromEntries([...this.attributes].map(a=>[a.name.toLowerCase(),a.value])), value: typeof this.value === "string" ? this.value : undefined, checked: typeof this.checked === "boolean" ? this.checked : undefined, checkedState: (${CHECKED_STATE_SOURCE}).call(this), labelCount: labels == null ? 0 : labels.length}}` });
               frameGuard();
               if (response.exceptionDetails) throw automationError("snapshot-unavailable", { reason: "dom-control-read-failed" });
               return { objectId, value: response.result?.value };
@@ -4249,15 +4248,132 @@ export class AutomationRuntime {
               currentControls.get(batch[index]!.controlId).labels.push(id);
             });
           }
+          // Resolve actual browser label associations, including shadow-root
+          // scoping and duplicate IDs. Only painted text from the captured
+          // document is used as output; the live nodes supply identity alone.
+          const ariaControls = controlItems.filter((item) => Object.hasOwn(item.attributes ?? {}, "aria-labelledby"));
+          const ariaControlIds = new Set(ariaControls.map((item) => item.backendNodeId));
+          const readAriaReferences = async () => {
+            const ariaReferences = new Map<number, number[]>();
+            for (let offset = 0; offset < ariaControls.length; offset += 4) {
+            const batch = ariaControls.slice(offset, offset + 4);
+            const results = await Promise.allSettled(batch.map(async (item) => {
+              frameGuard();
+              const response = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: controlObjects.get(item.backendNodeId), objectGroup: group,
+                functionDeclaration: "function(){return Array.from(this.ariaLabelledByElements || [])}" });
+              frameGuard();
+              if (response.exceptionDetails || typeof response.result?.objectId !== "string")
+                throw automationError("snapshot-unavailable", { reason: "dom-aria-label-list-unavailable" });
+              const properties = await this.options.command(debuggee, "Runtime.getProperties", { objectId: response.result.objectId, ownProperties: true });
+              frameGuard();
+              const count = properties.result?.find((property: any) => property.name === "length")?.value?.value;
+              // IDREF lists may repeat the same element arbitrarily many
+              // times, so their length is not bounded by document node count.
+              // The returned JavaScript array still has a 32-bit length.
+              if (properties.exceptionDetails || !Array.isArray(properties.result) || !Number.isSafeInteger(count) || count < 0 || count > 0xffffffff)
+                throw automationError("snapshot-unavailable", { reason: "dom-aria-label-list-unavailable" });
+              const handles: string[] = new Array(count);
+              for (const property of properties.result) {
+                if (typeof property.name !== "string" || !/^(?:0|[1-9]\d*)$/.test(property.name)) continue;
+                const index = Number(property.name), objectId = property.value?.objectId;
+                if (!Number.isSafeInteger(index) || index >= count || handles[index] !== undefined || typeof objectId !== "string")
+                  throw automationError("snapshot-unavailable", { reason: "dom-aria-label-identity-unavailable" });
+                handles[index] = objectId;
+              }
+              if (Object.keys(handles).length !== count) throw automationError("snapshot-unavailable", { reason: "dom-aria-label-identity-unavailable" });
+              const ids: number[] = [];
+              for (let offset = 0; offset < handles.length; offset += 8) {
+                const described = await Promise.allSettled(handles.slice(offset, offset + 8).map((objectId) => this.options.command(debuggee, "DOM.describeNode", { objectId, depth: 0 })));
+                frameGuard();
+                const failed = described.find((entry): entry is PromiseRejectedResult => entry.status === "rejected");
+                if (failed) throw failed.reason;
+                for (const entry of described as PromiseFulfilledResult<any>[]) {
+                  const node = entry.value?.node, id = node?.backendNodeId;
+                  if (node?.nodeType !== 1 || !Number.isSafeInteger(id) || id <= 0 || domIndex.indexOf(id) === undefined)
+                    throw automationError("snapshot-unavailable", { reason: "dom-aria-label-identity-unavailable" });
+                  ids.push(id);
+                }
+              }
+              return ids;
+            }));
+            const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+            if (failed) throw failed.reason;
+              results.forEach((result, index) => ariaReferences.set(batch[index]!.backendNodeId, (result as PromiseFulfilledResult<number[]>).value));
+            }
+            return ariaReferences;
+          };
+          const ariaReferences = await readAriaReferences();
+          const visibleText = frameEvidence.filter((item) => item.kind === "text" && item.text);
+          const lowerTextPosition = (position: number) => {
+            let low = 0, high = visibleText.length;
+            while (low < high) {
+              const middle = (low + high) >>> 1;
+              if ((positions.get(visibleText[middle]!.backendNodeId) ?? Infinity) < position) low = middle + 1;
+              else high = middle;
+            }
+            return low;
+          };
+          const ariaTextCache = new Map<number, string>();
+          const ariaText = (id: number) => {
+            const cached = ariaTextCache.get(id);
+            if (cached !== undefined) return cached;
+            const index = domIndex.indexOf(id), range = index === undefined ? undefined : domIndex.subtreeRange(index);
+            const value = range ? semanticName(visibleText.slice(lowerTextPosition(range.start), lowerTextPosition(range.end)).map((item) => item.text).join("")) : "";
+            ariaTextCache.set(id, value);
+            return value;
+          };
+          // Suppress a text leaf only when the actual emitted name contains
+          // exactly that visible text. An aria-label can differ from painted
+          // content; replacing the latter would discard information.
+          const controlName = (item: SnapshotDomEvidence) => {
+            const current = currentControls.get(item.backendNodeId), tag = item.tag!;
+            const type = (item.attributes?.type ?? "text").toLowerCase();
+            const matchedLabels: number[] = (current?.labels ?? []).filter((id: number) => labels.has(id))
+              .sort((left: number, right: number) => (positions.get(left) ?? 0) - (positions.get(right) ?? 0));
+            const references = ariaReferences.get(item.backendNodeId) ?? [];
+            const referencedLabel = references.map(ariaText).filter(Boolean).join(" ");
+            const directLabel = references.length === 0 ? semanticName(item.attributes?.["aria-label"] ?? "") : "";
+            return referencedLabel || directLabel || visibleLabel(matchedLabels) || controlText.get(item.backendNodeId) || (tag === "input" && ["button", "submit", "reset"].includes(type) ? item.value ?? "" : "");
+          };
+          for (const item of controlItems) {
+            const parts = controlParts.get(item.backendNodeId);
+            if (parts?.length !== 1) continue;
+            const part = parts[0]!, formatted = preformatted.get(part.backendNodeId);
+            if (part.text && !formatted && semanticName(part.text) === controlName(item)) omitText.add(part.backendNodeId);
+          }
+          // Native indeterminate is a live property absent from DOMSnapshot.
+          // Compare it and checked against a second live sample before release;
+          // attribute states are separately checked by both DOM captures.
+          const checkedItems = controlItems.filter((item) => item.checked !== undefined);
+          for (let offset = 0; offset < checkedItems.length; offset += 32) {
+            const batch = checkedItems.slice(offset, offset + 32);
+            const results = await Promise.allSettled(batch.map((item) => this.options.command(debuggee, "Runtime.callFunctionOn", {
+              objectId: controlObjects.get(item.backendNodeId), functionDeclaration: CHECKED_STATE_SOURCE, returnByValue: true,
+            })));
+            frameGuard();
+            const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+            if (failed) throw failed.reason;
+            results.forEach((result, index) => {
+              const response = (result as PromiseFulfilledResult<any>).value, next = response.result?.value;
+              const before = currentControls.get(batch[index]!.backendNodeId)?.checkedState;
+              if (response.exceptionDetails || !next || next.supported !== true || ![true, false, null].includes(next.value))
+                throw automationError("snapshot-unavailable", { reason: "missing-dom-checked-evidence" });
+              if (!before || before.supported !== next.supported || before.radio !== next.radio || before.value !== next.value) unstableDOMChecked = true;
+            });
+          }
           for (const item of extra) {
             if (item.kind === "text" && (omitText.has(item.backendNodeId) || !item.text?.trim())) continue;
             const parentIndex = nearestEmitted[item.nodeIndex]!;
             const parent = parentIndex < 0 ? undefined : domIndex.backendAt(parentIndex);
             const depth = parent === undefined || !depths.has(parent) ? (frameLabel ? frameDepth + 1 : 0) : depths.get(parent)! + 1;
-            const id = `${snapshotScope}:d:${item.backendNodeId}`;
+            const id = `${snapshotScope}.d${item.backendNodeId}`;
             let node: SnapshotNode;
-            if (item.kind === "text") node = { id, depth, role: "StaticText", name: item.text,
-              ...(item.text && !textProjections.has(item.backendNodeId) && preformatted.get(item.backendNodeId) === item.text ? { preserveTextWhitespace: true } : {}) };
+            if (item.kind === "text") {
+              const formatted = preformatted.get(item.backendNodeId);
+              const preserve = Boolean(item.text && !textProjections.has(item.backendNodeId) && formatted?.source === item.text);
+              node = { id, depth, role: "StaticText", name: preserve ? formatted!.text : item.text,
+                ...(preserve ? { preserveTextWhitespace: true } : {}) };
+            }
             else {
               const tag = item.tag!;
               const type = (item.attributes?.type ?? "text").toLowerCase();
@@ -4270,17 +4386,20 @@ export class AutomationRuntime {
                 : tag === "iframe" || tag === "frame" ? "iframe" : tag === "button" ? "button" : tag === "a" ? "link" : tag === "select" ? "combobox" : tag === "textarea" ? "textbox"
                 : tag === "input" ? ({ checkbox: "checkbox", radio: "radio", range: "slider", number: "spinbutton", search: "searchbox", button: "button", submit: "button", reset: "button" } as Record<string, string>)[type] ?? "textbox"
                   : item.attributes?.role?.trim() === "button" ? "button" : "generic";
-              const matchedLabels: number[] = (current?.labels ?? []).filter((id: number) => labels.has(id))
-                .sort((left: number, right: number) => (positions.get(left) ?? 0) - (positions.get(right) ?? 0));
-              const directLabel = !item.attributes?.["aria-labelledby"] ? semanticName(item.attributes?.["aria-label"] ?? "") : "";
-              const name = directLabel || visibleLabel(matchedLabels) || controlText.get(item.backendNodeId) || (tag === "input" && ["button", "submit", "reset"].includes(type) ? item.value ?? "" : "");
+              const name = controlName(item);
               const state: Partial<Record<SnapshotStateName, unknown>> = {};
               if (editableControl) state.editable = current.fillability.mode;
               if (current?.fillability?.disabled) state.disabled = true;
               if (current?.fillability?.readonly) state.readonly = true;
-              if (item.checked !== undefined) state.checked = item.checked;
+              if (current?.checkedState?.supported === true)
+                state.checked = current.checkedState.value === null ? "mixed" : current.checkedState.value;
               if (item.masked) state.masked = true;
               for (const key of ["disabled", "required", "readonly"] as const) if (Object.hasOwn(item.attributes ?? {}, key)) state[key] = true;
+              for (const key of ["expanded", "pressed", "selected", "required", "readonly"] as const) {
+                const value = item.attributes?.[`aria-${key}`]?.trim().toLowerCase();
+                if ((value === "true" || value === "false") && !(state[key] === true && value === "false")) state[key] = value === "true";
+                else if (key === "pressed" && value === "mixed") state[key] = "mixed";
+              }
               let ref = "";
               if (tag !== "iframe" && tag !== "frame") {
                 if (current?.meta?.connected !== true || current.meta.tag !== tag
@@ -4300,18 +4419,31 @@ export class AutomationRuntime {
                 }
               }
               const nonNativeTextRole = ["textbox", "searchbox", "spinbutton"].includes(role) && !["input", "textarea"].includes(tag);
+              const nativeControl = ["input", "textarea", "select", "button", "a"].includes(tag);
+              const explicitTabIndex = item.attributes?.tabindex?.trim();
+              const focusHint = explicitTabIndex !== undefined && /^[+-]?\d+$/.test(explicitTabIndex);
+              // A role establishes semantics, not a pointer or editing handler.
+              // Only advertise pointer actions for CDP-proven clickable custom
+              // controls; tabindex independently permits keyboard targeting.
               const actions = !ref ? [] : editableControl || !nonNativeTextRole && ["textbox", "searchbox", "spinbutton"].includes(role) ? ["click", "fill", "clear", "press", "insertText"]
+                : !nativeControl ? [...(item.clickable ? ["click", "doubleClick", "hover"] : []), ...(focusHint ? ["press"] : []),
+                  ...(item.clickable && current?.checkedState?.supported === true ? ["check"] : [])]
                 : ["checkbox", "radio", "switch"].includes(role) ? ["click", "check"] : ["combobox", "listbox"].includes(role) ? ["click", "select"] : ["click", "doubleClick", "hover"];
               const childFrameId = childFramesByOwner.get(JSON.stringify([debuggee.sessionId ?? "", item.backendNodeId]));
               const childFrameRef = childFrameId ? capturedFrameRefs.get(childFrameId) : undefined;
               const ownPlaceholder = placeholders.get(item.backendNodeId)?.evidence;
-              node = { id, depth, role, ...(name ? { name } : {}), ...(ownPlaceholder && ownPlaceholder.status !== "hidden" ? { placeholder: ownPlaceholder } : {}), ...(item.value && item.valueVisible && tag !== "select" && !["button", "submit", "reset"].includes(type) ? { value: item.value } : {}),
+              const nameUnknown = ariaControlIds.has(item.backendNodeId) && (current?.meta?.identityTooLarge || current?.meta?.identityName !== name);
+              node = { id, depth, role, ...(name ? { name } : {}), ...(nameUnknown ? { nameUnknown: true } : {}), ...(ownPlaceholder && ownPlaceholder.status !== "hidden" ? { placeholder: ownPlaceholder } : {}), ...(item.value && item.valueVisible && tag !== "select" && !["button", "submit", "reset"].includes(type) ? { value: item.value } : {}),
                 ...(item.valueVisible && item.selectedOptions?.length ? { selectedLabels: item.selectedOptions.map(({ label }) => label) } : {}),
                 ...(ref ? { ref, actions } : {}), ...(childFrameRef ? { childFrameRef } : {}), state };
             }
             depths.set(item.backendNodeId, depth);
             const rendered = renderSnapshotNode(node);
             additions.push({ position: positions.get(item.backendNodeId) ?? Number.MAX_SAFE_INTEGER, line: { id, line: rendered.line, ...(rendered.ref ? { ref: rendered.ref } : {}), node } });
+          }
+          if (ariaControls.length) {
+            const afterReferences = await readAriaReferences();
+            unstableDOMAria ||= ariaControls.some((item) => JSON.stringify(ariaReferences.get(item.backendNodeId)) !== JSON.stringify(afterReferences.get(item.backendNodeId)));
           }
         } finally { if (group) await this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined); }
         frameGuard();
@@ -4346,6 +4478,14 @@ export class AutomationRuntime {
         const frameRef = capturedFrameRefs.get(frameId ?? session.rootFrameId!);
         if (!frameRef) throw automationError("snapshot-unavailable", { reason: "missing-frame-ref" });
         frameSnapshots.push({ frameRef, lines: lines.splice(0) });
+      }
+      if (unstableDOMChecked) {
+        if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "dom-checked-unstable" });
+        retriedUnstableCapture = true; continue;
+      }
+      if (unstableDOMAria) {
+        if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "dom-aria-label-unstable" });
+        retriedUnstableCapture = true; continue;
       }
       for (const line of stitchSnapshotFrames(frameSnapshots, capturedFrameRefs.get(regionFrameId ?? session.rootFrameId!))) lines.push(line);
       const ids = new Set<string>();

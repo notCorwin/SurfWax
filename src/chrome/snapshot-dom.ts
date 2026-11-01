@@ -1,4 +1,5 @@
 import { createSnapshotDomIndex, type SnapshotDomIndex } from "./snapshot-dom-index";
+import { createPreformattedTextCollector, type PreformattedText } from "./snapshot-preformatted";
 
 /** Visible DOM evidence from a single CDP DOMSnapshot capture. IDs are scoped
  * to the frame and debugger target that produced the capture. */
@@ -21,6 +22,14 @@ export type SnapshotDomEvidence = Readonly<{
   selectedOptions?: readonly Readonly<{ label: string; value: string }>[];
 }>;
 
+// These explicit roles carry control semantics even when their author has
+// omitted a tab stop or uses tabindex=-1. Visibility is proven separately;
+// this only requests DOM evidence and does not establish action capability.
+const DOM_INTERACTIVE_ROLES = new Set([
+  "button", "checkbox", "combobox", "link", "listbox", "menuitem", "menuitemcheckbox", "menuitemradio",
+  "option", "radio", "searchbox", "slider", "spinbutton", "switch", "tab", "textbox", "treeitem",
+]);
+
 export type SnapshotDomOptions = Readonly<{
   visibility: ReadonlyMap<number, boolean>;
   textProjections?: ReadonlyMap<number, Readonly<{ full: string; text: string }>>;
@@ -37,12 +46,13 @@ export type SnapshotDomOptions = Readonly<{
  * alone does not imply its descendant text is covered: only pass identities
  * whose equivalent information was actually emitted.
  */
-export function snapshotDomSupplement(snapshot: any, options: SnapshotDomOptions): { items: SnapshotDomEvidence[]; indexes: Map<string, SnapshotDomIndex> } {
+export function snapshotDomSupplement(snapshot: any, options: SnapshotDomOptions): { items: SnapshotDomEvidence[]; indexes: Map<string, SnapshotDomIndex>; preformatted: Map<string, Map<number, PreformattedText>> } {
   if (!Array.isArray(snapshot?.documents) || !Array.isArray(snapshot?.strings)) throw new Error("Invalid DOM snapshot");
   const strings: string[] = snapshot.strings;
   const stringAt = (index: unknown): string | undefined => Number.isSafeInteger(index) && Number(index) >= 0 ? strings[Number(index)] : undefined;
   const result: SnapshotDomEvidence[] = [];
   const indexes = new Map<string, SnapshotDomIndex>();
+  const preformatted = new Map<string, Map<number, PreformattedText>>();
   for (const document of snapshot.documents) {
     const frameId = stringAt(document.frameId);
     if (!frameId) throw new Error("DOM snapshot missing frame identity");
@@ -54,11 +64,15 @@ export function snapshotDomSupplement(snapshot: any, options: SnapshotDomOptions
     const domIndex = createSnapshotDomIndex(nodes);
     indexes.set(frameId, domIndex);
     const layouts = new Map<number, number[]>();
+    const collector = createPreformattedTextCollector(strings, nodes, layout);
     for (let i = 0; i < layout.nodeIndex.length; i++) {
       const index = layout.nodeIndex[i];
       if (!Number.isSafeInteger(index) || index < 0 || index >= nodes.backendNodeId.length) throw new Error("Invalid DOM snapshot layout index");
-      const rows = layouts.get(index) ?? []; rows.push(i); layouts.set(index, rows);
+      const existing = layouts.get(index);
+      collector.observe(i, existing !== undefined);
+      const rows = existing ?? []; rows.push(i); layouts.set(index, rows);
     }
+    preformatted.set(frameId, collector.result);
     // Propagate painted descendants upward once, without walking a deep
     // ancestor chain separately for every layout node.
     const hasVisibleLayoutDescendant = new Uint8Array(nodes.backendNodeId.length);
@@ -201,7 +215,7 @@ export function snapshotDomSupplement(snapshot: any, options: SnapshotDomOptions
       if (!tag) continue;
       const attributes = attributesFor(index);
       const isControl = tag === "button" || tag === "select" || tag === "textarea" || tag === "iframe" || tag === "frame" || tag === "input" && (attributes.type ?? "text").toLowerCase() !== "hidden"
-        || tag === "a" && Object.hasOwn(attributes, "href") || attributes.role?.trim() === "button" || clickable.has(index)
+        || tag === "a" && Object.hasOwn(attributes, "href") || DOM_INTERACTIVE_ROLES.has(attributes.role?.trim() ?? "") || clickable.has(index)
         || Object.hasOwn(attributes, "contenteditable") && ["", "true", "plaintext-only"].includes(attributes.contenteditable!.trim().toLowerCase());
       if (!isControl) continue;
       const selectedOptions = tag === "select" && nodes.optionSelected !== undefined ? selections.get(index) ?? [] : undefined;
@@ -220,5 +234,5 @@ export function snapshotDomSupplement(snapshot: any, options: SnapshotDomOptions
       });
     }
   }
-  return { items: result, indexes };
+  return { items: result, indexes, preformatted };
 }

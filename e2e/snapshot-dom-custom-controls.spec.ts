@@ -48,7 +48,7 @@ test("supplements visible custom controls omitted from AX without inventing clic
     await expect(target.locator("#role-button")).toBeVisible();
     await expect(target.locator("#generic-click")).toBeVisible();
     responses.push(
-      commandResponse("inspect_page", { budget: 12000 }, "custom-controls-inspect"),
+      commandResponse("inspect_page", { fields: ["text", "state", "ref", "actions"], budget: 12000 }, "custom-controls-inspect"),
       (request) => {
         snapshot = lastTool(request);
         const items: Item[] = Array.isArray(snapshot.items) ? snapshot.items : [];

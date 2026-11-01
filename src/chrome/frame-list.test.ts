@@ -619,14 +619,14 @@ describe("frame tree discovery", () => {
     const page = await runtime.createPage(3);
     const initial: any = await page.inspect();
     const root = initial.items.find((item: any) => item.line.includes('button "Root control"'));
-    expect(root.id).toMatch(/^f[0-9a-z]+:a:shared-ax$/);
+    expect(root.id).toMatch(/^[0-9a-z]+\.ashared-ax$/);
     runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "old-child", targetInfo: { type: "iframe", targetId: "cross" } });
     const attached: any = await page.inspect({ since: initial.observationId });
     expect(attached.mode).toBe("delta");
     expect(attached.items.some((item: any) => item.id === root.id)).toBe(false);
     const old = attached.items.find((item: any) => item.line.includes('button "Cross control"'));
     expect(old).toMatchObject({ change: "added", ref: expect.any(String) });
-    expect(old.id).toMatch(/^f[0-9a-z]+:a:shared-ax$/);
+    expect(old.id).toMatch(/^[0-9a-z]+\.ashared-ax$/);
     expect(old.id).not.toBe(root.id);
     runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "replacement-child", targetInfo: { type: "iframe", targetId: "cross" } });
     const changed: any = await page.inspect({ since: attached.observationId });
@@ -646,8 +646,8 @@ describe("frame tree discovery", () => {
     command.mockImplementation(async (source, method, params = {}) => {
       if (method === "Accessibility.getFullAXTree") {
         if (!source.sessionId && !params.frameId) return { nodes: [
-          { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["owner"] },
-          { nodeId: "owner", parentId: "root", backendDOMNodeId: 102, ignored, role: { value: "Iframe" }, name: { value: "Work item" }, childIds: [] },
+          { nodeId: "102", role: { value: "RootWebArea" }, childIds: ["owner"] },
+          { nodeId: "owner", parentId: "102", backendDOMNodeId: 102, ignored, role: { value: "Iframe" }, name: { value: "Work item" }, childIds: [] },
         ] };
         return { nodes: [{ nodeId: "child", role: { value: "heading" }, name: { value: "Child document" }, childIds: [] }] };
       }
@@ -659,13 +659,17 @@ describe("frame tree discovery", () => {
     const page = await runtime.createPage(3);
     runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "child", targetInfo: { type: "iframe", targetId: "cross" } });
     const capture: any = await page.inspect();
-    const owner = capture.items.find((item: any) => ignored ? item.id.endsWith(":d:102") : item.line.includes('Iframe "Work item"'));
+    const owner = capture.items.find((item: any) => ignored ? item.id.endsWith(".d102") : item.line.includes('Iframe "Work item"'));
     expect(owner).toEqual(expect.any(Object));
+    const root = capture.items.find((item: any) => item.id.endsWith(".a102"));
+    expect(root).toEqual(expect.any(Object));
+    expect(owner.id).not.toBe(root.id);
     const ref = /\[frameRef=(f[^\]]+)\]/.exec(owner.line)?.[1];
     expect(ref).toEqual(expect.any(String));
     expect(owner.line).not.toContain("[frame=");
     const marker = capture.items.find((item: any) => item.line.includes(`- frame-document [frameRef=${ref}]`));
-    expect(marker.id).toMatch(/^f[0-9a-z]+:doc$/);
+    expect(marker.id).toMatch(/^[0-9a-z]+\.m$/);
+    expect(new Set([root.id, owner.id, marker.id]).size).toBe(3);
     const listed: any = await runtime.listFrames(3);
     expect(listed.frames.find((frame: any) => frame.url === "https://cross.test/").frameRef).toBe(ref);
     // Different runs cannot reuse the handle; a refresh capture using
@@ -701,7 +705,7 @@ describe("frame tree discovery", () => {
     runtime.setContext({ conversationId: "c", runId: "other-run" });
     release();
     const capture: any = await pending;
-    const marker = capture.items.find((item: any) => item.id.endsWith(":doc"));
+    const marker = capture.items.find((item: any) => item.id.endsWith(".m"));
     const ref = /\[frameRef=(f[^\]]+)\]/.exec(marker.line)?.[1];
     expect(ref).toEqual(expect.any(String));
     await expect(page.frameRef(ref!).getByRole("button").count()).rejects.toMatchObject({ code: "stale-frame" });

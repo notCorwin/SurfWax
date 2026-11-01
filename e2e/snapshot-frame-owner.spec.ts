@@ -94,11 +94,11 @@ test("ties same-name iframe owners to their child snapshots across frame replace
     const ids = (snapshot: any) => (snapshot.items as Item[]).map((item) => item.id);
     expect(new Set(ids(first)).size).toBe(first.items.length);
     expect(ids(repeated)).toEqual(ids(first));
-    expect(ids(first).every((id) => /^f[0-9a-z]+:(?:a|d):.+$|^f[0-9a-z]+:doc$/.test(id))).toBe(true);
+    expect(ids(first).every((id) => /^[0-9a-z]+\.(?:[ad].+|m)$/.test(id))).toBe(true);
     const root = first.items.find((item: Item) => /- heading "Work queue"/.test(item.line));
     expect(root?.id).toEqual(expect.any(String));
-    const rootScope = root.id.split(":")[0];
-    const childScopes = first.items.filter((item: Item) => /^\s*- frame-document \[frameRef=/.test(item.line)).map((item: Item) => item.id.split(":")[0]);
+    const rootScope = root.id.split(".")[0];
+    const childScopes = first.items.filter((item: Item) => /^\s*- frame-document \[frameRef=/.test(item.line)).map((item: Item) => item.id.split(".")[0]);
     expect(childScopes).toHaveLength(2);
     expect(new Set([rootScope, ...childScopes]).size).toBe(3);
     const firstFrames = snapshotFrames(first);
@@ -117,7 +117,7 @@ test("ties same-name iframe owners to their child snapshots across frame replace
     expect(second).toMatchObject({ mode: "full", truncation: { baselineComplete: true } });
     expect(new Set(ids(second)).size).toBe(second.items.length);
     expect(second.items.find((item: Item) => /- heading "Work queue"/.test(item.line))?.id).toBe(root.id);
-    const replacedScopes = second.items.filter((item: Item) => /^\s*- frame-document \[frameRef=/.test(item.line)).map((item: Item) => item.id.split(":")[0]);
+    const replacedScopes = second.items.filter((item: Item) => /^\s*- frame-document \[frameRef=/.test(item.line)).map((item: Item) => item.id.split(".")[0]);
     expect(replacedScopes).toHaveLength(2);
     expect(replacedScopes.every((scope: string) => scope !== rootScope && !childScopes.includes(scope))).toBe(true);
     const after = await frameOwners(cdp);
