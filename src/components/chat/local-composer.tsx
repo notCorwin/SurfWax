@@ -464,18 +464,12 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
                 /^(gpt|glm|api)$/i.test(part) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1),
               ).join(" ")}
             </span>
-            <Select value={goalMode ? "goal" : "normal"} disabled={locked || isRunning || blocked}
-              onValueChange={(value) => onGoalModeChange(value === "goal")}>
-              <SelectTrigger data-testid="work-mode" data-mode={goalMode ? "goal" : "normal"} size="sm" aria-label="工作模式" title="目标模式要求模型调用完成工具才能结束工作" className="composer-select shrink-0 gap-1 px-2">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent position="popper" align="start">
-                <SelectGroup>
-                  <SelectItem value="normal">普通模式</SelectItem>
-                  <SelectItem value="goal">目标模式</SelectItem>
-                </SelectGroup>
-              </SelectContent>
-            </Select>
+            <Button type="button" variant="ghost" size="sm" role="switch" aria-label="目标模式" aria-checked={goalMode}
+              data-testid="work-mode" disabled={locked || isRunning || blocked}
+              title="目标模式要求模型调用完成工具才能结束工作" className="composer-select px-2"
+              onClick={() => onGoalModeChange(!goalMode)}>
+              {goalMode ? "目标模式" : "普通模式"}
+            </Button>
             <Select value={reasoning.selected ?? undefined} disabled={!reasoning.ready || isRunning || !reasoning.choices.length}
               onValueChange={(value) => settings.select(value as ReasoningEffort)}>
               <SelectTrigger data-testid="reasoning-effort" size="sm" aria-label="思考强度"

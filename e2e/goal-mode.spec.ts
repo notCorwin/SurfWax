@@ -17,11 +17,12 @@ test("goal mode keeps working until its completion tool is called", async () => 
     const model = opened.page.getByTestId("composer-model");
     await expect(model).toHaveAttribute("title", longModel);
     await options.close();
-    const mode = opened.page.getByRole("combobox", { name: "工作模式" });
+    const mode = opened.page.getByRole("switch", { name: "目标模式" });
     const reasoning = opened.page.getByRole("combobox", { name: "思考强度" });
     const context = opened.page.getByTestId("context-indicator");
     const send = opened.page.getByRole("button", { name: "发送消息" });
     await expect(mode).toContainText("普通模式");
+    await expect(mode).not.toBeChecked();
     // The name yields space to interactive controls at side-panel widths, in both themes.
     for (const colorScheme of ["light", "dark"] as const) {
       await opened.page.emulateMedia({ colorScheme });
@@ -34,10 +35,17 @@ test("goal mode keeps working until its completion tool is called", async () => 
         expect(await opened.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       }
     }
+    await mode.click();
+    await expect(mode).toBeChecked();
+    await expect(mode).toContainText("目标模式");
+    await opened.page.mouse.move(0, 0);
+    await expect(mode).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+    await mode.click();
+    await expect(mode).not.toBeChecked();
     await mode.focus();
     await expect(mode).toBeFocused();
-    await mode.press("Enter");
-    await opened.page.getByRole("option", { name: "目标模式" }).click();
+    await mode.press("Space");
+    await expect(mode).toBeChecked();
     await expect(mode).toContainText("目标模式");
     await opened.page.getByTestId("composer-input").fill("Complete the goal");
     await opened.page.getByTestId("composer-input").press("Enter");
@@ -47,6 +55,7 @@ test("goal mode keeps working until its completion tool is called", async () => 
 
     releaseReply();
     await expect(mode).toBeEnabled();
+    await expect(mode).toBeChecked();
     expect(provider.requests.length).toBeGreaterThanOrEqual(2);
     const events = await readEvents(opened.page);
     expect(events.some((event) => event.type === "conversation.finished")).toBe(true);

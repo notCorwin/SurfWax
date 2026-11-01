@@ -394,8 +394,7 @@ p {
 .composer-surface [data-slot="input-group-addon"] { cursor: default; }
 .composer-model { max-width: min(40vw, 16rem); }
 .composer-select { font-size: var(--type-xs); color: var(--muted-foreground); border-color: transparent; box-shadow: none; }
-.composer-select:not([data-mode="goal"]):not(:disabled):hover { background: var(--surface-hover); color: var(--foreground); }
-.composer-select[data-mode="goal"] { background: var(--surface-selected); color: var(--brand); }
+.composer-select:not(:disabled):hover { background: var(--surface-hover); color: var(--foreground); }
 .user-message [data-slot="bubble-content"] { border-radius: var(--radius-xl); padding: calc(var(--spacing) * 2) calc(var(--spacing) * 3); }
 .assistant-message { padding-inline: 0; }
 :is(.thinking-item, .activity) > summary::after {
