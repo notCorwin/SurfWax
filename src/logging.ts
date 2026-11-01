@@ -882,7 +882,9 @@ export class EventLogger {
       this.generation = undefined;
       let ready!: () => void;
       this.ready = new Promise<void>((resolve) => { ready = resolve; });
+      let maintenance = 0;
       port.onDisconnect.addListener(() => {
+        maintenance += 1;
         if (this.generation === undefined) this.handshakePaused = true;
         this.stop();
         ready();
@@ -902,16 +904,18 @@ export class EventLogger {
           ready();
         }
         if (message.type === "prepare-clear") {
+          const request = ++maintenance;
           void import("./agent/coordinator").then(({ settleAllConversationWork }) => settleAllConversationWork("log-cleared"))
-            .then(() => { this.stop(); return this.flush(); })
-            .then(() => { this.generation = message.generation ?? (this.generation ?? 0) + 1; })
+            .then(() => { if (request === maintenance) { this.stop(); return this.flush(); } })
+            .then(() => { if (request === maintenance) this.generation = message.generation ?? (this.generation ?? 0) + 1; })
             .then(() => port.postMessage({ id: message.id, ok: true }), (error) => port.postMessage({ id: message.id, ok: false, error: String(error) }));
         }
         if (message.type === "clear-complete") {
+          maintenance += 1;
           if (/\/(sidepanel|userscripts)\.html$/.test(location.pathname)) location.reload();
           else this.resume();
         }
-        if (message.type === "clear-failed") this.resume();
+        if (message.type === "clear-failed") { maintenance += 1; this.resume(); }
       });
     }
   }
@@ -975,7 +979,7 @@ export class EventLogger {
       artifactPart: { key: graph.key, owner: event.conversationId, node: part.node, section: part.section, part: part.part }, output: part.value })) };
   }
 
-  private enqueue(events: readonly Omit<LogEvent, "id">[], expectedEpoch?: string, expectedJobStateId?: number, artifactLink?: "resultArtifactId", artifactParts: readonly Omit<LogEvent, "id">[] = []): Promise<LogEvent[]> {
+  private enqueue(events: readonly Omit<LogEvent, "id">[], expectedEpoch?: string, expectedJobStateId?: number, artifactLink?: "resultArtifactId", artifactParts: readonly Omit<LogEvent, "id">[] = [], requireAtomic = false): Promise<LogEvent[]> {
     const generation = this.generation;
     const task = this.pending.then(async () => {
       await this.ready;
@@ -984,6 +988,17 @@ export class EventLogger {
         // Recheck after the cross-page lock: maintenance may have advanced while
         // this writer was waiting for another page's terminal transaction.
         if (generation === undefined ? this.handshakePaused : generation !== this.generation) return [];
+        if (requireAtomic) {
+          const dispatch = events.find((event) => event.type === "conversation.followup.dispatched");
+          const followup = fromLogValue(dispatch?.content, dispatch?.valueEncoding) as { id?: unknown } | null;
+          if (!dispatch?.conversationId || typeof followup?.id !== "string") throw new Error("Invalid follow-up submission");
+          const floor = await this.latestClearIdFresh(store);
+          const history = store.byTypes ? await store.byTypes([...FOLLOWUP_EVENT_TYPES], dispatch.conversationId, floor)
+            : (await store.all()).filter((event) => event.id > floor && event.conversationId === dispatch.conversationId && FOLLOWUP_EVENT_TYPES.includes(event.type as typeof FOLLOWUP_EVENT_TYPES[number]));
+          const current = history.filter((event) => (fromLogValue(event.content, event.valueEncoding) as { id?: unknown } | null)?.id === followup.id)
+            .sort((left, right) => left.id - right.id).at(-1);
+          if (current?.type !== "conversation.followup.queued") return [];
+        }
         const floor = expectedEpoch === undefined && expectedJobStateId === undefined ? undefined : await this.latestClearIdFresh(store);
         if (expectedEpoch !== undefined && JSON.stringify([this.generation ?? null, floor]) !== expectedEpoch) return [];
         if (expectedJobStateId !== undefined) {
@@ -1026,7 +1041,8 @@ export class EventLogger {
         } else if (artifactParts.length && accepted.length) {
           if (accepted.length !== 1 || !store.appendPartitioned) throw new Error("Event store does not support atomic partitioned artifact writes");
           stored.push(await store.appendPartitioned(accepted[0]!, artifactParts));
-        } else if (accepted.length && store.appendMany) stored.push(...await store.appendMany(accepted));
+        } else if (requireAtomic && accepted.length && !store.appendMany) throw new Error("Event store does not support atomic conversation submission");
+        else if (accepted.length && store.appendMany) stored.push(...await store.appendMany(accepted));
         else for (const event of accepted) stored.push(await store.append(event));
         for (const event of stored) {
           for (const listener of this.listeners) listener(event);
@@ -1038,7 +1054,7 @@ export class EventLogger {
         return events.map((event) => terminalKey(event) ? existing.get(terminalKey(event)!)! : appended.get(event)!)
           .filter((event): event is LogEvent => Boolean(event));
       };
-      const terminalWrite = () => events.some((event) => terminalKey(event)) ? withTerminalWriteLock(write) : write();
+      const terminalWrite = () => events.some((event) => terminalKey(event) || FOLLOWUP_EVENT_TYPES.includes(event.type as typeof FOLLOWUP_EVENT_TYPES[number])) ? withTerminalWriteLock(write) : write();
       return expectedEpoch !== undefined || events.some((event) => event.type === "browser.job.state" || event.type === "log.cleared")
         ? withJobStateWriteLock(terminalWrite, Boolean(this.options.store)) : terminalWrite();
     });
@@ -1103,6 +1119,20 @@ export class EventLogger {
       content: message,
     });
     if (!saved) throw new DOMException("日志维护已阻止消息保存。", "AbortError");
+  }
+
+  /** A follow-up leaves its queue only when its message and run are durable. */
+  async appendFollowupSubmission(input: { conversationId: string; runId: string; chatId: string; message: ConversationMessage;
+    parentId: string | null; followup: { id: string; mode: "followup" | "immediate" } }): Promise<void> {
+    if (!this.accepting) throw new DOMException("日志维护已阻止后续消息发送。", "AbortError");
+    this.flushBuffer();
+    const { conversationId, runId, message, parentId, followup } = input;
+    const saved = await this.enqueue([
+      this.event({ type: "conversation.message", conversationId, runId, parentId, content: message }),
+      this.event({ type: "conversation.followup.dispatched", conversationId, runId, content: followup }),
+      this.event({ type: "conversation.submitted", conversationId, runId, content: { chatId: input.chatId, messageId: message.id } }),
+    ], undefined, undefined, undefined, [], true);
+    if (saved.length !== 3) throw new Error("后续消息已发送、移除或日志正在维护。");
   }
 
   async repository(conversationId: string): Promise<ConversationRepository> {

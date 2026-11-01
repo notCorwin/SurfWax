@@ -73,6 +73,7 @@ export function ScriptsApp() {
   const [draft, setDraft] = useState(JSON.stringify(TEMPLATE, null, 2));
   const savedDraft = useRef(JSON.stringify(TEMPLATE, null, 2));
   const draftRevision = useRef(0);
+  const refreshRevision = useRef(0);
   const [action, setAction] = useState<"saving" | "deleting" | "refreshing" | "toggling" | "formatting" | "importing" | null>(null);
   const busy = action !== null;
   const parsed = parseScript(draft);
@@ -111,7 +112,10 @@ export function ScriptsApp() {
   }, [dirty, view]);
 
   const refresh = async (reconcile = true) => {
+    const revision = ++refreshRevision.current;
+    const current = () => revision === refreshRevision.current;
     const stored = await chrome.storage.local.get([USER_SCRIPTS_STORAGE_KEY, USER_SCRIPTS_DISABLED_KEY, USER_SCRIPTS_ERROR_KEY, USER_SCRIPTS_LEGACY_KEY]);
+    if (!current()) return;
     setRestoreError(String(stored[USER_SCRIPTS_ERROR_KEY] ?? ""));
     setLegacy(stored[USER_SCRIPTS_LEGACY_KEY]);
     const saved = stored[USER_SCRIPTS_STORAGE_KEY];
@@ -123,8 +127,10 @@ export function ScriptsApp() {
     try {
       if (!chrome.userScripts) throw new Error("Allow User Scripts 尚未开启");
       await chrome.userScripts.getScripts();
+      if (!current()) return;
       setAvailable(true);
     } catch (cause) {
+      if (!current()) return;
       setAvailable(false);
       setRegistered([]);
       setError(errorDetails(cause));
@@ -132,9 +138,11 @@ export function ScriptsApp() {
     }
     try {
       if (reconcile) await call("restore");
-      setRegistered((await chrome.userScripts.getScripts()).map((script) => script.id));
+      const registeredScripts = await chrome.userScripts.getScripts();
+      if (!current()) return;
+      setRegistered(registeredScripts.map((script) => script.id));
       setError("");
-    } catch (cause) { setError(errorDetails(cause)); }
+    } catch (cause) { if (current()) setError(errorDetails(cause)); }
   };
 
   useEffect(() => {
@@ -143,7 +151,7 @@ export function ScriptsApp() {
       if (area === "local" && (changes[USER_SCRIPTS_STORAGE_KEY] || changes[USER_SCRIPTS_DISABLED_KEY] || changes[USER_SCRIPTS_ERROR_KEY] || changes[USER_SCRIPTS_LEGACY_KEY])) void refresh(false);
     };
     chrome.storage.onChanged.addListener(onChanged);
-    return () => chrome.storage.onChanged.removeListener(onChanged);
+    return () => { refreshRevision.current += 1; chrome.storage.onChanged.removeListener(onChanged); };
   }, []);
 
   const changeView = (next: "manager" | "editor") => {

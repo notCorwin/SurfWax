@@ -71,6 +71,70 @@ describe("scoped atomic program calls", () => {
 });
 
 describe("canonical browser jobs", () => {
+  it("does not start browser work after recovery wins a delayed running receipt", async () => {
+    const { logger, events } = indexedLog();
+    const jobs = new BrowserJobs(logger);
+    const append = logger.appendIfEpoch.bind(logger);
+    let release!: () => void;
+    let reached!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const waiting = new Promise<void>((resolve) => { reached = resolve; });
+    vi.spyOn(logger, "appendIfEpoch").mockImplementation(async (record, epoch, expected) => {
+      if (record.type === "browser.job.state" && (record.content as any)?.state === "running") { reached(); await gate; }
+      return append(record, epoch, expected);
+    });
+    const executeEffect = vi.fn();
+    const id = await jobs.start(context, undefined, async (_signal, _id, started) => {
+      await started();
+      executeEffect();
+    });
+    await waiting;
+    const recovered = await new BrowserJobs(logger).query({ action: "status", id }, context.conversationId);
+    expect(recovered).toMatchObject({ state: "interrupted", terminal: true });
+    release();
+    await jobs.waitForOwner(id, context.conversationId);
+    expect(executeEffect).not.toHaveBeenCalled();
+    expect(events.filter((event) => event.type === "browser.job.state").map((event) => (fromLogValue(event.content, event.valueEncoding) as any).state)).toEqual(["queued", "interrupted"]);
+    expect(await jobs.query({ action: "status", id }, context.conversationId)).toMatchObject({ state: "interrupted", terminal: true });
+  });
+
+  it("rejects a second or late attempt to start the same job", async () => {
+    const { logger, events } = indexedLog();
+    const jobs = new BrowserJobs(logger);
+    let late!: () => Promise<void>;
+    const id = await jobs.start(context, undefined, async (_signal, _id, started) => {
+      late = started;
+      await started();
+      await expect(started()).rejects.toThrow("only start once");
+    });
+    await jobs.waitForOwner(id, context.conversationId);
+    await expect(late()).rejects.toThrow("only start once");
+    expect(events.filter((event) => event.type === "browser.job.state").map((event) => (fromLogValue(event.content, event.valueEncoding) as any).state)).toEqual(["queued", "running", "succeeded"]);
+  });
+
+  it("finishes an outstanding start receipt before writing the terminal state", async () => {
+    const { logger, events } = indexedLog();
+    const jobs = new BrowserJobs(logger);
+    const append = logger.appendIfEpoch.bind(logger);
+    let release!: () => void;
+    let reached!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const waiting = new Promise<void>((resolve) => { reached = resolve; });
+    vi.spyOn(logger, "appendIfEpoch").mockImplementation(async (record, epoch, expected) => {
+      if (record.type === "browser.job.state" && (record.content as any)?.state === "running") { reached(); await gate; }
+      return append(record, epoch, expected);
+    });
+    const id = await jobs.start(context, undefined, async (_signal, _id, started) => {
+      void started();
+      return "done";
+    });
+    await waiting;
+    expect(events.filter((event) => event.type === "browser.job.state").map((event) => (fromLogValue(event.content, event.valueEncoding) as any).state)).toEqual(["queued"]);
+    release();
+    await jobs.waitForOwner(id, context.conversationId);
+    expect(events.filter((event) => event.type === "browser.job.state").map((event) => (fromLogValue(event.content, event.valueEncoding) as any).state)).toEqual(["queued", "running", "succeeded"]);
+  });
+
   it("reuses one large terminal artifact across paginated job reads and enforces conversation isolation", async () => {
     const { logger, events } = indexedLog();
     const jobs = new BrowserJobs(logger);

@@ -85,3 +85,53 @@ it("queues a run started by an idle edit until its command lease is released", a
     await Promise.resolve();
   } finally { vi.unstubAllGlobals(); }
 });
+
+it("releases a pending ownership claim and its lock when cancelled before the worker replies", async () => {
+  let held = false;
+  const request = vi.fn(async (_name: string, _options: unknown, callback: (lock: object | null) => Promise<void>) => {
+    if (held) return callback(null);
+    held = true;
+    try { return await callback({}); } finally { held = false; }
+  });
+  const ports: Array<{ postMessage: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn>; reply: (message: unknown) => void }> = [];
+  const connect = vi.fn(() => {
+    const messages = new Set<(message: any) => void>();
+    const disconnects = new Set<() => void>();
+    const port = {
+      onMessage: { addListener: (listener: (message: any) => void) => messages.add(listener), removeListener: (listener: (message: any) => void) => messages.delete(listener) },
+      onDisconnect: { addListener: (listener: () => void) => disconnects.add(listener), removeListener: (listener: () => void) => disconnects.delete(listener) },
+      postMessage: vi.fn(),
+      disconnect: vi.fn(() => { for (const listener of disconnects) listener(); }),
+      reply: (message: unknown) => { for (const listener of messages) listener(message); },
+    };
+    ports.push(port);
+    return port;
+  });
+  vi.stubGlobal("navigator", { locks: { request } });
+  vi.stubGlobal("chrome", { runtime: { connect } });
+  try {
+    const controller = new AbortController();
+    const pending = claimConversationRun("first", controller.signal);
+    await vi.waitFor(() => expect(ports[0]?.postMessage).toHaveBeenCalledOnce());
+    const reason = new DOMException("stopped", "AbortError");
+    controller.abort(reason);
+    await expect(pending).rejects.toBe(reason);
+    await vi.waitFor(() => expect(held).toBe(false));
+    expect(ports[0]!.disconnect).toHaveBeenCalledOnce();
+
+    const next = claimConversationRun("second");
+    await vi.waitFor(() => expect(ports[1]?.postMessage).toHaveBeenCalledOnce());
+    ports[1]!.reply({ type: "claimed", generation: 2 });
+    const run = await next;
+    expect(run.signal.aborted).toBe(false);
+    run.finish();
+    await vi.waitFor(() => expect(held).toBe(false));
+
+    const invalid = claimConversationRun("invalid");
+    await vi.waitFor(() => expect(ports[2]?.postMessage).toHaveBeenCalledOnce());
+    ports[2]!.reply({ type: "claimed" });
+    await expect(invalid).rejects.toThrow("无效的所有权");
+    await vi.waitFor(() => expect(held).toBe(false));
+    expect(ports[2]!.disconnect).toHaveBeenCalledOnce();
+  } finally { vi.unstubAllGlobals(); }
+});

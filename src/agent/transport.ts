@@ -128,16 +128,21 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
         let initial = await withSavedMetadata(options.messages);
         const userMessage = [...initial].reverse().find((message) => message.role === "user");
         parentId = userMessage?.id ?? null;
-        if (userMessage && !existing.messages.some(({ message }) => message.id === userMessage.id)) {
+        const dispatched = options.trigger === "submit-message" ? followupDispatch(userMessage) : undefined;
+        if (userMessage && dispatched) {
           const index = initial.findIndex((message) => message.id === userMessage.id);
-          await logger.appendMessage(conversationId, userMessage as ConversationMessage, {
-            runId: currentRunId, parentId: index > 0 ? initial[index - 1]!.id : null,
-          });
+          await logger.appendFollowupSubmission({ conversationId, runId: currentRunId, chatId: options.chatId,
+            message: userMessage as ConversationMessage, parentId: index > 0 ? initial[index - 1]!.id : null, followup: dispatched });
+        } else {
+          if (userMessage && !existing.messages.some(({ message }) => message.id === userMessage.id)) {
+            const index = initial.findIndex((message) => message.id === userMessage.id);
+            await logger.appendMessage(conversationId, userMessage as ConversationMessage, {
+              runId: currentRunId, parentId: index > 0 ? initial[index - 1]!.id : null,
+            });
+          }
+          await logger.append({ type: "conversation.submitted", conversationId, runId: currentRunId,
+            content: { chatId: options.chatId, messageId: userMessage?.id ?? null } });
         }
-        const dispatched = followupDispatch(userMessage);
-        if (dispatched) await logger.append({ type: "conversation.followup.dispatched", conversationId, runId: currentRunId, content: dispatched });
-        await logger.append({ type: "conversation.submitted", conversationId, runId: currentRunId,
-          content: { chatId: options.chatId, messageId: userMessage?.id ?? null } });
         let attempt = 0;
         let phase = 0;
         let resumed = false;

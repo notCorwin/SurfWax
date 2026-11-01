@@ -284,6 +284,7 @@ test("keeps paused follow-ups after stop and panel reload until the user resumes
     await composer.fill("saved request");
     await composer.press("Enter");
     await expect(opened.page.getByTestId("followup-queue")).toContainText("saved request");
+    await expect.poll(() => provider.requests.filter((request) => request.tools).length).toBe(1);
 
     await opened.page.getByRole("button", { name: "停止生成" }).click();
     await expect(opened.page.getByRole("button", { name: "停止生成" })).toHaveCount(0);

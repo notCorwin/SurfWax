@@ -579,12 +579,17 @@ describe("ChromeExecutor programs", () => {
     const h = programHarness(host);
     if (background) await h.executor.beginRun();
     const append = h.logger.append.bind(h.logger);
+    const appendIfEpoch = h.logger.appendIfEpoch.bind(h.logger);
     let resume!: () => void; let notify!: () => void;
     const held = new Promise<void>((resolve) => { resume = resolve; });
     const entered = new Promise<void>((resolve) => { notify = resolve; });
     vi.spyOn(h.logger, "append").mockImplementation(async (record) => {
       if (record.type === "browser.job.state" && (record.content as any)?.state === state) { notify(); await held; }
       return append(record);
+    });
+    vi.spyOn(h.logger, "appendIfEpoch").mockImplementation(async (record, epoch, expected) => {
+      if (record.type === "browser.job.state" && (record.content as any)?.state === state) { notify(); await held; }
+      return appendIfEpoch(record, epoch, expected);
     });
     const tool = new AbortController(); const run = new AbortController();
     const pending = h.executor.runProgram({ code: "test", background }, tool.signal, {
@@ -1889,12 +1894,17 @@ describe("foreground dialog handoff", () => {
     await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.fileChooserOpened", { backendNodeId: 77, mode: "selectSingle" });
     const observed: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, context);
     const append = h.logger.append.bind(h.logger);
+    const appendIfEpoch = h.logger.appendIfEpoch.bind(h.logger);
     let resume!: () => void; let entered!: () => void;
     const hold = new Promise<void>(resolve => { resume = resolve; });
     const writing = new Promise<void>(resolve => { entered = resolve; });
     vi.spyOn(h.logger, "append").mockImplementation(async (record) => {
       if (record.type === "browser.job.state" && (record.content as any)?.state === state) { entered(); await hold; }
       return append(record);
+    });
+    vi.spyOn(h.logger, "appendIfEpoch").mockImplementation(async (record, epoch, expected) => {
+      if (record.type === "browser.job.state" && (record.content as any)?.state === state) { entered(); await hold; }
+      return appendIfEpoch(record, epoch, expected);
     });
     const tool = new AbortController();
     const pending = h.executor.uploadChooser({ chooserId: observed.events[0].payload.chooserId, artifactId: artifact!.id }, tool.signal, context);
@@ -1915,13 +1925,13 @@ describe("foreground dialog handoff", () => {
     const artifact = await h.logger.append({ type: "tool.result.data", conversationId: "conversation", output: { filename: "file.txt", mimeType: "text/plain", base64: "YQ==" } });
     await (h.executor as any).handleCommandEvent({ tabId: 41 }, "Page.fileChooserOpened", { backendNodeId: 77, mode: "selectSingle" });
     const observed: any = await h.executor.waitEvent({ subscriptionId: subscription.subscriptionId }, undefined, context);
-    const append = h.logger.append.bind(h.logger);
+    const appendIfEpoch = h.logger.appendIfEpoch.bind(h.logger);
     let resume!: () => void; let entered!: () => void;
     const hold = new Promise<void>(resolve => { resume = resolve; });
     const writing = new Promise<void>(resolve => { entered = resolve; });
-    vi.spyOn(h.logger, "append").mockImplementation(async (record) => {
+    vi.spyOn(h.logger, "appendIfEpoch").mockImplementation(async (record, epoch, expected) => {
       if (record.type === "browser.job.state" && (record.content as any)?.state === "running") { entered(); await hold; }
-      return append(record);
+      return appendIfEpoch(record, epoch, expected);
     });
     const run = new AbortController();
     const pending = h.executor.uploadChooser({ chooserId: observed.events[0].payload.chooserId, artifactId: artifact!.id }, undefined, { ...context, runSignal: run.signal });

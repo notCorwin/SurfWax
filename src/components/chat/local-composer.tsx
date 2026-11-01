@@ -7,6 +7,7 @@ import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, t
 import { InputGroup, InputGroupTextarea, InputGroupAddon } from "@/components/ui/input-group";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ErrorNotice } from "@/components/ui/error-notice";
 import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -302,10 +303,16 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const composing = useRef(false);
   const dispatching = useRef<string | undefined>(undefined);
+  const savingFollowup = useRef(false);
+  const mounted = useRef(false);
+  const [saving, setSaving] = useState(false);
+  const [queueError, setQueueError] = useState<{ summary: string; error: unknown }>();
   const [immediateId, setImmediateId] = useState<string>();
   const [resumeQueue, setResumeQueue] = useState(false);
   const [hasText, setHasText] = useState(() => Boolean((draft ?? externalText).trim()));
   const previousExternalText = useRef(externalText);
+
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
   useEffect(() => {
     if (previousExternalText.current === externalText) return;
@@ -328,12 +335,16 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
   const dispatchFollowup = useCallback((message: FollowupMessage, mode: "followup" | "immediate") => {
     if (dispatching.current || blocked) return;
     dispatching.current = message.id;
+    setQueueError(undefined);
     void waitForConversationRun(conversationId).then(() => runtimeCommands.thread.append({
       role: "user",
       content: [{ type: "text", text: message.text }],
       createdAt: new Date(),
       metadata: { custom: { followupId: message.id, followupMode: mode } },
-    })).catch(() => { dispatching.current = undefined; });
+    })).catch((error) => {
+      dispatching.current = undefined;
+      if (mounted.current) setQueueError({ summary: "排队消息未能发送，请重试。", error });
+    });
   }, [runtimeCommands, blocked, conversationId]);
 
   useEffect(() => {
@@ -358,7 +369,8 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
   const submit = useCallback(() => {
     const input = inputRef.current;
     const value = input?.value ?? "";
-    if (!input || !value.trim() || isDisabled || blocked) return;
+    if (!input || !value.trim() || isDisabled || blocked || savingFollowup.current) return;
+    setQueueError(undefined);
     if (followups.ready && !isRunning && followups.messages.length === 0) {
       runtimeCommands.composer.setText(value);
       runtimeCommands.composer.send();
@@ -370,14 +382,24 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
       text: value,
       createdAt: new Date().toISOString(),
     };
-    clearInput();
+    savingFollowup.current = true;
+    setSaving(true);
     void logger.append({
       type: "conversation.followup.queued",
       conversationId,
       content: queued,
-    }).then(() => {
+    }).then((saved) => {
+      if (!saved) throw new Error("日志当前不可写，请重试。");
+      if (!mounted.current) return;
+      // Retain edits made while the durable write was pending.
+      if (inputRef.current?.value === value) clearInput();
       if (!followups.ready || !isRunning) setResumeQueue(true);
-    }).catch(() => undefined);
+    }).catch((error) => {
+      if (mounted.current) setQueueError({ summary: "消息未能加入队列，请重试。", error });
+    }).finally(() => {
+      savingFollowup.current = false;
+      if (mounted.current) setSaving(false);
+    });
   }, [runtimeCommands, blocked, clearInput, conversationId, followups.messages.length, followups.ready, isDisabled, isRunning, logger]);
 
   const sendImmediately = useCallback((message: FollowupMessage) => {
@@ -391,7 +413,12 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
   }, [runtimeCommands, blocked, dispatchFollowup, isRunning]);
 
   const removeFollowup = useCallback((id: string) => {
-    void logger.append({ type: "conversation.followup.removed", conversationId, content: { id } }).catch(() => undefined);
+    setQueueError(undefined);
+    void logger.append({ type: "conversation.followup.removed", conversationId, content: { id } }).then((saved) => {
+      if (!saved) throw new Error("日志当前不可写，请重试。");
+    }).catch((error) => {
+      if (mounted.current) setQueueError({ summary: "排队消息未能移除，请重试。", error });
+    });
   }, [conversationId, logger]);
 
   const keyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -410,10 +437,11 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
   }, [onDraftChange, submit]);
 
   return (
-    <form className="relative flex w-full flex-col" onSubmit={(event: FormEvent<HTMLFormElement>) => {
+    <form className="relative flex w-full flex-col" aria-busy={saving} onSubmit={(event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
       submit();
     }}>
+      {queueError && <ErrorNotice summary={queueError.summary} error={queueError.error} onDismiss={() => setQueueError(undefined)} />}
       {followups.messages.length > 0 && <div className="mb-2 flex flex-col gap-1" role="list" aria-label="等待发送的消息" data-testid="followup-queue">
         {followups.messages.map((message, index) => <div key={message.id} role="listitem" data-testid="followup-item"
           className="flex min-w-0 items-center gap-2 rounded-lg border border-border/70 bg-muted/50 px-2 py-1.5 text-xs">
@@ -478,7 +506,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
           </div>
           <div className="flex shrink-0 items-center gap-1">
             {isRunning && <Button type="button" size="icon-sm" className="rounded-full" aria-label="停止生成" title="停止生成" onClick={() => runtimeCommands.thread.cancelRun()}><SquareIcon aria-hidden="true" /></Button>}
-            {(!isRunning || hasText) && <Button type="button" size="icon-sm" className="rounded-full" disabled={!hasText || isDisabled || blocked}
+            {(!isRunning || hasText) && <Button type="button" size="icon-sm" className="rounded-full" disabled={!hasText || isDisabled || blocked || saving}
               aria-label={isRunning || followups.messages.length > 0 ? "排队消息" : "发送消息"}
               title={isRunning || followups.messages.length > 0 ? "加入 Follow-up 队列" : "发送消息"} onClick={submit}><ArrowUpIcon aria-hidden="true" /></Button>}
           </div>

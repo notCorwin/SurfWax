@@ -17,6 +17,7 @@ const STORAGE_KEY = "side-agent:reasoning-selections";
 const LEARNED_TTL_MS = 24 * 60 * 60 * 1000;
 type Storage = { get(key: string): Promise<Record<string, unknown>>; set(items: Record<string, unknown>): Promise<void> };
 type SavedSettings = { manual?: ReasoningEffort; rejected?: ReasoningEffort[]; fieldUnsupported?: boolean; learnedAt?: number };
+let persistenceTail: Promise<void> = Promise.resolve();
 
 function efforts(value: unknown): ReasoningEffort[] | undefined {
   if (!Array.isArray(value)) return undefined;
@@ -77,15 +78,23 @@ export class ReasoningSettings {
   private async persist(): Promise<void> {
     const storage = this.storage();
     if (!storage) return;
-    const values = (await storage.get(STORAGE_KEY).catch(() => ({} as Record<string, unknown>)))[STORAGE_KEY];
-    const saved = values && typeof values === "object" && !Array.isArray(values) ? values as Record<string, unknown> : {};
-    const value: SavedSettings = {
-      ...(this.manual && this.state.selected ? { manual: this.state.selected } : {}),
-      ...(this.rejected.size || this.fieldUnsupported ? {
-        rejected: [...this.rejected], fieldUnsupported: this.fieldUnsupported, learnedAt: Date.now(),
-      } : {}),
+    const write = async () => {
+      const values = (await storage.get(STORAGE_KEY))[STORAGE_KEY];
+      const saved = values && typeof values === "object" && !Array.isArray(values) ? values as Record<string, unknown> : {};
+      const value: SavedSettings = {
+        ...(this.manual && this.state.selected ? { manual: this.state.selected } : {}),
+        ...(this.rejected.size || this.fieldUnsupported ? {
+          rejected: [...this.rejected], fieldUnsupported: this.fieldUnsupported, learnedAt: Date.now(),
+        } : {}),
+      };
+      await storage.set({ [STORAGE_KEY]: { ...saved, [this.key()]: value } });
     };
-    await storage.set({ [STORAGE_KEY]: { ...saved, [this.key()]: value } });
+    // The storage value contains settings for every model. Serialize the whole
+    // read-modify-write, including across extension pages, to avoid lost updates.
+    const task = persistenceTail.then(() => typeof navigator !== "undefined" && navigator.locks
+      ? navigator.locks.request("surf-wax:reasoning-settings", write) : write());
+    persistenceTail = task.catch(() => undefined);
+    await task;
   }
 
   select(effort: ReasoningEffort): void {
@@ -122,7 +131,7 @@ export class ReasoningSettings {
       this.rejected = new Set(efforts(stored.rejected) ?? []);
     }
     const initialChoices = this.fieldUnsupported ? [] : REASONING_EFFORTS.filter((effort) => !this.rejected.has(effort));
-    this.publish({ selected: this.fieldUnsupported ? null : manual ?? null, choices: initialChoices, source: "unknown", ready: true });
+    this.publish({ selected: manual && initialChoices.includes(manual) ? manual : null, choices: initialChoices, source: "unknown", ready: true });
     const unregister = registerBackgroundRequest(this.controller);
     void this.discover().catch(() => undefined).finally(unregister);
   }

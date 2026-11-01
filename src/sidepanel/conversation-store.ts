@@ -1,6 +1,6 @@
 import { isSyntheticTerminalMessage, restoreConversationRepository } from "../conversations";
 import { abortConversationWork, withIdleConversation } from "../agent/coordinator";
-import type { ConversationTransport, SidePanelMessage } from "../agent/transport";
+import { followupDispatch, type ConversationTransport, type SidePanelMessage } from "../agent/transport";
 import { ConversationListProjection, fromLogValue, type ConversationRepository, type ConversationSummary, type EventLogger, type LogEvent } from "../logging";
 
 export type PartStatus = { type: "running" | "complete" | "incomplete" | "requires-action"; reason?: string; error?: unknown };
@@ -265,7 +265,7 @@ export class ConversationStore {
       this.publish({ threadListItem: { id, ...(exists ? { remoteId: id } : {}) }, composer: { text: "" }, threads: { ...this.state.threads, mainThreadId: id } });
       this.display(branchMessages(repository));
       if (exists) this.logger.telemetry({ type: "conversation.selected", conversationId: id, content: null });
-    } catch (error) { this.updateThread({ error }); throw error; }
+    } catch (error) { if (revision === this.loadVersion) this.updateThread({ error }); throw error; }
     finally { if (revision === this.loadVersion) this.updateThread({ isLoading: false }); }
   }
   private async run(messages: SidePanelMessage[], trigger: "submit-message" | "regenerate-message") {
@@ -282,7 +282,7 @@ export class ConversationStore {
         this.publish({ threadListItem: { id, remoteId: id } });
       }
       const user = messages.at(-1);
-      if (user?.role === "user" && !this.repository.messages.some((item) => item.message.id === user.id)) {
+      if (user?.role === "user" && !followupDispatch(user) && !this.repository.messages.some((item) => item.message.id === user.id)) {
         await this.logger.appendMessage(id, { ...user }, { parentId: messages.at(-2)?.id ?? null });
       }
       priorFailureEventId = Math.max(0, ...(await this.logger.restorationEvents(id))

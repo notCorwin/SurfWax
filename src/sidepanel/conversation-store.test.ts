@@ -4,6 +4,43 @@ import { EventLogger, type ConversationMessage, type LogEvent } from "../logging
 import { ConversationStore, createMessageProjection } from "./conversation-store";
 import type { SidePanelMessage } from "../agent/transport";
 
+it("keeps a queued follow-up out of the message log until transport claims it, while preserving normal prewrites", async () => {
+  const events: LogEvent[] = [];
+  const logger = new EventLogger({ store: {
+    async append(event) { const saved = { ...event, id: events.length + 1 }; events.push(saved); return saved; },
+    async all() { return [...events]; }, async clear() { events.length = 0; },
+  } });
+  const seen: string[][] = [];
+  const runtime = new ConversationStore(logger, () => ({ async sendMessages() {
+    seen.push((await logger.all()).filter((event) => event.type === "conversation.message").map((event) => event.type));
+    throw new Error("stopped before submission");
+  } }));
+  await runtime.thread.append({ role: "user", content: [{ type: "text", text: "queued" }],
+    metadata: { custom: { followupId: "f", followupMode: "followup" } } });
+  expect(seen[0]).toEqual([]);
+  await runtime.thread.append("normal message");
+  expect(seen[1]).toEqual(["conversation.message"]);
+});
+
+it("does not expose an outdated conversation load failure after a later switch", async () => {
+  const logger = new EventLogger({ store: {
+    async append(event) { return { ...event, id: 1 }; },
+    async all() { return []; },
+    async clear() {},
+  } });
+  let rejectOld!: (error: Error) => void;
+  const pending = new Promise<LogEvent[]>((_resolve, reject) => { rejectOld = reject; });
+  vi.spyOn(logger, "restorationEvents").mockImplementation((id) => id === "old" ? pending : Promise.resolve([]));
+  const runtime = new ConversationStore(logger, () => { throw new Error("Unexpected model request"); });
+  const old = runtime.threads.switchToThread("old");
+  await runtime.threads.switchToThread("new");
+  rejectOld(new Error("old load failed"));
+  await expect(old).rejects.toThrow("old load failed");
+  expect(runtime.getState().threadListItem.id).toBe("new");
+  expect(runtime.getState().thread.error).toBeUndefined();
+  expect(runtime.getState().thread.isLoading).toBe(false);
+});
+
 it("lists historical archived conversations normally and preserves their messages", async () => {
   const events: LogEvent[] = [];
   const logger = new EventLogger({ store: {

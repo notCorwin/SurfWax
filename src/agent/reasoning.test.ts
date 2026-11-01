@@ -64,4 +64,54 @@ describe("reasoning settings", () => {
     expect(settings.reject("minimal", undefined, true)).toBeNull();
     expect(settings.snapshot()).toMatchObject({ selected: null, choices: [] });
   });
+
+  it("never restores a selected effort that is also rejected", async () => {
+    const key = "@ai-sdk/openai-compatible\u0000\u0000https://provider.test/v1\u0000test-model";
+    const local = {
+      get: async () => ({ "side-agent:reasoning-selections": { [key]: { manual: "high", rejected: ["high"], learnedAt: Date.now() } } }),
+      set: async () => {},
+    };
+    const settings = new ReasoningSettings(config, { storage: local, fetch: async () => new Response("", { status: 404 }), modelLimit: async () => undefined });
+    await settings.ready;
+    expect(settings.snapshot().selected).toBeNull();
+    expect(settings.snapshot().choices).not.toContain("high");
+  });
+
+  it("preserves updates to different models when writes overlap", async () => {
+    let saved: Record<string, unknown> = {};
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const local = {
+      get: vi.fn(async (key: string) => ({ [key]: structuredClone(saved[key]) })),
+      set: vi.fn(async (items: Record<string, unknown>) => {
+        if (local.set.mock.calls.length === 1) await gate;
+        saved = { ...saved, ...structuredClone(items) };
+      }),
+    };
+    const options = { storage: local, fetch: async () => new Response("", { status: 404 }), modelLimit: async () => undefined };
+    const first = new ReasoningSettings(config, options);
+    const second = new ReasoningSettings({ ...config, model: "other-model" }, options);
+    await Promise.all([first.ready, second.ready]);
+    first.select("low");
+    await vi.waitFor(() => expect(local.set).toHaveBeenCalledTimes(1));
+    second.select("high");
+    release();
+    await vi.waitFor(() => expect(local.set).toHaveBeenCalledTimes(2));
+    const entries = saved["side-agent:reasoning-selections"] as Record<string, { manual?: string }>;
+    expect(Object.values(entries).map((entry) => entry.manual).sort()).toEqual(["high", "low"]);
+  });
+
+  it("does not overwrite other model settings when reading storage fails", async () => {
+    let fail = false;
+    const local = {
+      get: vi.fn(async () => { if (fail) throw new Error("storage unavailable"); return {}; }),
+      set: vi.fn(async () => {}),
+    };
+    const settings = new ReasoningSettings(config, { storage: local, fetch: async () => new Response("", { status: 404 }), modelLimit: async () => undefined });
+    await settings.ready;
+    fail = true;
+    settings.select("high");
+    await vi.waitFor(() => expect(local.get).toHaveBeenCalledTimes(2));
+    expect(local.set).not.toHaveBeenCalled();
+  });
 });

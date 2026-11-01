@@ -64,19 +64,31 @@ export async function claimConversationRun(conversationId: string, signal?: Abor
       port = chrome.runtime.connect({ name: "surf-wax-run-owner" });
       const connected = port;
       generation = await new Promise<number>((accept, reject) => {
-        const disconnect = () => reject(new Error("后台运行协调器已断开，请重新打开侧栏。"));
-        connected.onDisconnect.addListener(disconnect);
-        connected.onMessage.addListener((message) => {
-          if (message.type !== "claimed") return;
+        const cleanup = () => {
           connected.onDisconnect.removeListener(disconnect);
-          if (message.error) reject(new Error(message.error)); else accept(message.generation);
-        });
+          connected.onMessage.removeListener(message);
+          signal?.removeEventListener("abort", abort);
+        };
+        const disconnect = () => { cleanup(); reject(new Error("后台运行协调器已断开，请重新打开侧栏。")); };
+        const abort = () => { cleanup(); reject(signal!.reason); };
+        const message = (reply: { type?: string; error?: string; generation?: number }) => {
+          if (reply.type !== "claimed") return;
+          cleanup();
+          if (reply.error) reject(new Error(reply.error));
+          else if (!Number.isSafeInteger(reply.generation) || reply.generation! < 1) reject(new Error("后台运行协调器返回了无效的所有权。"));
+          else accept(reply.generation!);
+        };
+        connected.onDisconnect.addListener(disconnect);
+        connected.onMessage.addListener(message);
+        signal?.addEventListener("abort", abort, { once: true });
+        if (signal?.aborted) { abort(); return; }
         void (async () => {
           const windowId = typeof chrome.windows?.getCurrent === "function" ? (await chrome.windows.getCurrent()).id : undefined;
           signal?.throwIfAborted();
           connected.postMessage({ type: "claim", runId, ownerId, conversationId, windowId });
-        })().catch(reject);
+        })().catch((error) => { cleanup(); reject(error); });
       });
+      signal?.throwIfAborted();
       connected.onDisconnect.addListener(() => controller.abort("worker-disconnected"));
       connected.onMessage.addListener((message) => { if (message.type === "abort") controller.abort(message.reason); });
     }

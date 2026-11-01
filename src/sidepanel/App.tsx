@@ -198,7 +198,7 @@ function RunOwnershipNotice() {
     : null;
 }
 
-function ConversationView({ config, logger, threadId, drafts, goalMode, onGoalModeChange }: { config: ModelConfig; logger: EventLogger; threadId: string; drafts: Map<string, string>; goalMode: boolean; onGoalModeChange: (value: boolean) => void }) {
+export function ConversationView({ config, logger, threadId, drafts, goalMode, onGoalModeChange }: { config: ModelConfig; logger: EventLogger; threadId: string; drafts: Map<string, string>; goalMode: boolean; onGoalModeChange: (value: boolean) => void }) {
   const conversationId = usePanelState((state) => state.threadListItem.remoteId ?? state.threadListItem.id);
   const isRunning = usePanelState((state) => state.thread.isRunning);
   const [contextStatus, setContextStatus] = useState<{ message: string; error: boolean }>();
@@ -206,6 +206,7 @@ function ConversationView({ config, logger, threadId, drafts, goalMode, onGoalMo
   const [compactionError, setCompactionError] = useState("");
   const [retry, setRetry] = useState<{ attempt: number; delayMs: number; reason: string }>();
   const refreshing = useRef(false);
+  const pendingRefresh = useRef<{ refresh: (force?: boolean) => Promise<void>; force: boolean } | undefined>(undefined);
   const compactionController = useRef<AbortController | undefined>(undefined);
   const refreshContext = useRef<(forced?: boolean) => Promise<void>>(async () => undefined);
   useEffect(() => logger.subscribe((event) => {
@@ -234,7 +235,12 @@ function ConversationView({ config, logger, threadId, drafts, goalMode, onGoalMo
   useEffect(() => {
     let active = true;
     const refresh = async (force = false) => {
-      if (refreshing.current || isRunning) return;
+      if (isRunning) return;
+      if (refreshing.current) {
+        const pending = pendingRefresh.current;
+        pendingRefresh.current = { refresh, force: force || (pending?.refresh === refresh && pending.force) };
+        return;
+      }
       refreshing.current = true;
       const controller = new AbortController();
       compactionController.current = controller;
@@ -273,6 +279,9 @@ function ConversationView({ config, logger, threadId, drafts, goalMode, onGoalMo
         if (compactionController.current === controller) compactionController.current = undefined;
         refreshing.current = false;
         if (active) setCompactionBusy(false);
+        const pending = pendingRefresh.current;
+        pendingRefresh.current = undefined;
+        if (pending) void pending.refresh(pending.force);
       }
     };
     refreshContext.current = refresh;
@@ -282,7 +291,7 @@ function ConversationView({ config, logger, threadId, drafts, goalMode, onGoalMo
       if (event.type === "conversation.failed" && /context.{0,30}(length|window|token)|maximum.{0,30}token/i.test(JSON.stringify(event.error))) void refresh(true);
     });
     void refresh();
-    return () => { active = false; unsubscribe(); compactionController.current?.abort("sidepanel-closed"); };
+    return () => { active = false; unsubscribe(); if (pendingRefresh.current?.refresh === refresh) pendingRefresh.current = undefined; compactionController.current?.abort("sidepanel-closed"); };
   }, [config, conversationId, isRunning, logger]);
   return (
     <>

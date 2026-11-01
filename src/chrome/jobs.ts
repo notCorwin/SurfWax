@@ -23,6 +23,7 @@ type LiveJob = {
   conversationId: string;
   stateId?: number;
 };
+type JobState = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "interrupted";
 const terminal = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
 type JobListCursor = { v: 1; conversationId: string; epoch: string; upper: number; after: number };
 const LIST_LIMIT = 25;
@@ -131,14 +132,26 @@ export class BrowserJobs {
       throw error;
     }
     void (async () => {
+      let acceptingStart = true;
+      let startPromise: Promise<void> | undefined;
+      const started = () => {
+        if (!acceptingStart || startPromise) return Promise.reject(new Error("Browser job may only start once while executing"));
+        startPromise = this.write(context, id, "running");
+        void startPromise.catch(() => undefined);
+        return startPromise;
+      };
       try {
         combined.throwIfAborted();
-        const result = await execute(combined, id, () =>
-          this.write(context, id, "running"),
-        );
+        const result = await execute(combined, id, started);
+        acceptingStart = false;
+        // A caller may start the receipt without awaiting it. Do not let the
+        // terminal write race the queued-to-running transition.
+        if (startPromise) await startPromise;
         combined.throwIfAborted();
         await this.write(context, id, "succeeded", result);
       } catch (error) {
+        acceptingStart = false;
+        if (startPromise) await startPromise.catch(() => undefined);
         const timedOut =
           (combined.reason ?? error) instanceof DOMException &&
           (combined.reason ?? error).name === "TimeoutError";
@@ -181,7 +194,7 @@ export class BrowserJobs {
   private async write(
     context: JobContext,
     id: string,
-    state: string,
+    state: JobState,
     output?: unknown,
   ): Promise<void> {
     const record = {
@@ -207,7 +220,10 @@ export class BrowserJobs {
       if (saved) this.live.get(id)!.stateId = saved.id;
       return;
     }
-    const saved = await this.logger?.append(record);
+    const previous = this.live.get(id)?.stateId;
+    const saved = state === "running" && previous !== undefined
+      ? await this.logger!.appendIfEpoch(record, await this.logger!.canonicalEpoch(), previous)
+      : state === "queued" ? await this.logger?.append(record) : undefined;
     if (!saved) throw new Error("Could not persist browser job state");
     const owner = this.live.get(id);
     if (owner) owner.stateId = saved.id;

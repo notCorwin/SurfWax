@@ -62,7 +62,7 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
       </MessageScroller>
     </MessageScrollerProvider>
     <div className="composer-dock shrink-0 px-3 pt-2 pb-3">
-      <LocalComposer config={config} logger={logger} conversationId={conversationId} blocked={contextBlocked} draft={draft} onDraftChange={onDraftChange} goalMode={goalMode} onGoalModeChange={onGoalModeChange} />
+      <LocalComposer key={conversationId} config={config} logger={logger} conversationId={conversationId} blocked={contextBlocked} draft={draft} onDraftChange={onDraftChange} goalMode={goalMode} onGoalModeChange={onGoalModeChange} />
     </div>
   </div>;
 }

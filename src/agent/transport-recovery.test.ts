@@ -8,6 +8,8 @@ import { PROGRAM_CATALOG_VERSION } from "../chrome/tool";
 import { restoreConversationRepository } from "../conversations";
 import { browserJobsSettled } from "../../e2e/evaluation/job-evidence";
 import { toolLifecycleEvidence } from "../../e2e/evaluation/tool-lifecycle";
+import { testEventStore } from "../test-event-store";
+import { canAutoDispatchFollowup, rebuildFollowups } from "./followups";
 
 vi.mock("./coordinator", () => ({ claimConversationRun: async (_id: string, signal?: AbortSignal) => ({ signal: signal ?? new AbortController().signal, finish: vi.fn() }) }));
 function logger() {
@@ -33,6 +35,87 @@ function setup(model: MockLanguageModelV4, log = logger(), executor = { browserC
 const options = () => ({ trigger: "submit-message" as const, chatId: "thread", messages: [user], abortSignal: new AbortController().signal });
 
 describe("complete-response transport", () => {
+  it("leaves a follow-up queued when its atomic submission fails, then dispatches it once on retry", async () => {
+    const store = testEventStore();
+    const batch = store.appendMany.bind(store);
+    let rejectSubmission = true;
+    const guardedStore = { ...store, async appendMany(events: readonly Omit<LogEvent, "id">[]) {
+      if (rejectSubmission && events.some((event) => event.type === "conversation.followup.dispatched")) {
+        rejectSubmission = false;
+        throw new Error("transaction aborted");
+      }
+      return batch(events);
+    } };
+    const first = new EventLogger({ store: guardedStore });
+    const queued = { id: "followup", text: "Next step", createdAt: "2026-01-01T00:00:00Z" };
+    await first.append({ type: "conversation.followup.queued", conversationId: "thread", content: queued });
+    const followup: SidePanelMessage = { id: "followup-message", role: "user", parts: [{ type: "text", text: queued.text }],
+      metadata: { custom: { followupId: queued.id, followupMode: "followup" } } };
+    const model = new MockLanguageModelV4({ doGenerate: async () => reply() });
+    const firstRun = setup(model, first);
+    await expect(createChatTransport(firstRun.factory, first, "thread").sendMessages({ ...options(), messages: [followup] })).rejects.toThrow("transaction aborted");
+    expect(firstRun.factory).not.toHaveBeenCalled();
+    const interrupted = await store.all();
+    expect(interrupted.filter((event) => ["conversation.message", "conversation.followup.dispatched", "conversation.submitted"].includes(event.type))).toEqual([]);
+    expect(rebuildFollowups(interrupted)).toEqual([queued]);
+
+    const recovered = new EventLogger({ store: guardedStore });
+    const retry = setup(model, recovered);
+    await createChatTransport(retry.factory, recovered, "thread").sendMessages({ ...options(), messages: [followup] });
+    const events = await store.all();
+    expect(events.filter((event) => event.type === "conversation.followup.dispatched")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "conversation.submitted")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "conversation.message" && (fromLogValue(event.content, event.valueEncoding) as { id?: string }).id === followup.id)).toHaveLength(1);
+    expect(rebuildFollowups(events)).toEqual([]);
+  });
+
+  it("recovers an interrupted run after the follow-up transaction without redispatching the message", async () => {
+    const store = testEventStore();
+    const log = new EventLogger({ store });
+    const queued = { id: "followup", text: "Next step", createdAt: "2026-01-01T00:00:00Z" };
+    await log.append({ type: "conversation.followup.queued", conversationId: "thread", content: queued });
+    await log.appendFollowupSubmission({ conversationId: "thread", runId: "interrupted-run", chatId: "thread", parentId: null,
+      message: { id: "followup-message", role: "user", parts: [{ type: "text", text: queued.text }] }, followup: { id: queued.id, mode: "followup" } });
+    const types = (await store.all()).slice(-3).map((event) => event.type);
+    expect(types).toEqual(["conversation.message", "conversation.followup.dispatched", "conversation.submitted"]);
+    const recovered = new EventLogger({ store });
+    await recovered.recoverDanglingRuns([], "worker-restarted");
+    const events = await recovered.conversation("thread");
+    expect(rebuildFollowups(events)).toEqual([]);
+    expect(canAutoDispatchFollowup(events)).toBe(false);
+    const repository = await restoreConversationRepository(events);
+    expect(repository.messages.some(({ message }) => message.id === "followup-message")).toBe(true);
+    expect(repository.messages.some(({ parentId, message }) => parentId === "followup-message"
+      && (message.metadata as { custom?: { syntheticTerminal?: boolean } } | undefined)?.custom?.syntheticTerminal === true)).toBe(true);
+    expect(events.filter((event) => event.type === "conversation.aborted")).toHaveLength(1);
+  });
+
+  it("refuses a follow-up submission when the store cannot commit it atomically", async () => {
+    const store = testEventStore();
+    const { appendMany: _batch, ...nonAtomicStore } = store;
+    const log = new EventLogger({ store: nonAtomicStore });
+    await log.append({ type: "conversation.followup.queued", conversationId: "thread", content: { id: "f", text: "next", createdAt: "2026-01-01T00:00:00Z" } });
+    await expect(log.appendFollowupSubmission({ conversationId: "thread", runId: "run", chatId: "thread", parentId: null,
+      message: { id: "message", role: "user", parts: [] }, followup: { id: "f", mode: "followup" } })).rejects.toThrow("atomic conversation submission");
+    expect((await store.all()).map((event) => event.type)).toEqual(["conversation.followup.queued"]);
+  });
+
+  it("prevents two loggers from dispatching the same queued message", async () => {
+    const store = testEventStore();
+    const first = new EventLogger({ store });
+    const second = new EventLogger({ store });
+    await first.append({ type: "conversation.followup.queued", conversationId: "thread", content: { id: "f", text: "next", createdAt: "2026-01-01T00:00:00Z" } });
+    const submission = (runId: string) => ({ conversationId: "thread", runId, chatId: "thread", parentId: null,
+      message: { id: `message-${runId}`, role: "user" as const, parts: [] }, followup: { id: "f", mode: "followup" as const } });
+    const results = await Promise.allSettled([first.appendFollowupSubmission(submission("one")), second.appendFollowupSubmission(submission("two"))]);
+    expect(results.map((result) => result.status).sort()).toEqual(["fulfilled", "rejected"]);
+    const events = await store.all();
+    expect(events.filter((event) => event.type === "conversation.followup.dispatched")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "conversation.message")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "conversation.submitted")).toHaveLength(1);
+    const rejected = results[0]!.status === "rejected" ? first : second;
+    await expect(rejected.append({ type: "test.after-stale-dispatch" })).resolves.toBeDefined();
+  });
   it("returns rejected model calls as repair feedback and continues without dispatching them", async () => {
     const prompts: string[] = [];
     const { factory, executor, log } = setup(new MockLanguageModelV4({ doGenerate: async ({ prompt }) => {

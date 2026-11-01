@@ -425,6 +425,26 @@ describe("canonical event log", () => {
     expect(await logger.append({ type: "late.callback" })).toBeUndefined();
   });
 
+  it("does not pause a writer after an abandoned clear finishes settling", async () => {
+    const { registerBackgroundRequest } = await import("./agent/coordinator");
+    const controller = new AbortController();
+    const finishRequest = registerBackgroundRequest(controller);
+    const store = memoryStore();
+    let receive!: (message: any) => void;
+    const port = { onMessage: { addListener(listener: (message: any) => void) { receive = listener; } },
+      onDisconnect: { addListener: vi.fn() }, postMessage: vi.fn() } as unknown as chrome.runtime.Port;
+    const logger = new EventLogger({ store, writerPort: port });
+    receive({ type: "writer-ready", paused: false, generation: 0 });
+    receive({ type: "prepare-clear", id: "slow", generation: 1 });
+    try {
+      await vi.waitFor(() => expect(controller.signal.aborted).toBe(true));
+      // A different writer failed, or this writer timed out, before it settled.
+      receive({ type: "clear-failed" });
+    } finally { finishRequest(); }
+    await vi.waitFor(() => expect(port.postMessage).toHaveBeenCalledWith({ id: "slow", ok: true }));
+    expect((await logger.append({ type: "conversation.created", conversationId: "after-failed-clear" }))?.type).toBe("conversation.created");
+  });
+
   it("closes pending tools with their original phase IDs and remains idempotent after recovery", async () => {
     const store = memoryStore();
     const logger = new EventLogger({ store });
