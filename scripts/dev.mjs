@@ -101,8 +101,27 @@ async function main() {
   }
 
   const page = context.pages()[0] ?? (await context.newPage());
-  await page.goto(targetUrl);
   const browserSession = await context.browser().newBrowserCDPSession();
+  const pageSession = await context.newCDPSession(page);
+  const { windowId } = await pageSession.send("Browser.getWindowForTarget");
+  await browserSession.send("Browser.setWindowBounds", {
+    windowId,
+    bounds: { windowState: "normal" },
+  });
+  const screenBounds = await page.evaluate(() => ({
+    left: screen.availLeft,
+    top: screen.availTop,
+    width: screen.availWidth,
+    height: screen.availHeight,
+  }));
+  await browserSession.send("Browser.setWindowBounds", { windowId, bounds: screenBounds });
+  const { bounds } = await browserSession.send("Browser.getWindowBounds", { windowId });
+  await pageSession.detach();
+  if (Object.entries(screenBounds).some(([key, value]) => bounds[key] !== value)) {
+    throw new Error("无法将开发浏览器窗口铺满屏幕的可用区域。");
+  }
+
+  await page.goto(targetUrl);
   const { targetInfos } = await browserSession.send("Target.getTargets", {
     filter: [{ type: "tab", exclude: false }, { exclude: true }],
   });
@@ -130,23 +149,6 @@ async function main() {
   };
 
   await ensurePanel();
-  const { windowId, bounds } = await browserSession.send("Browser.getWindowForTarget", {
-    targetId: tab.targetId,
-  });
-  if (bounds.windowState === "minimized" || bounds.windowState === "fullscreen") {
-    await browserSession.send("Browser.setWindowBounds", {
-      windowId,
-      bounds: { windowState: "normal" },
-    });
-  }
-  await browserSession.send("Browser.setWindowBounds", {
-    windowId,
-    bounds: { windowState: "maximized" },
-  });
-  const { bounds: maximizedBounds } = await browserSession.send("Browser.getWindowBounds", { windowId });
-  if (maximizedBounds.windowState !== "maximized") {
-    throw new Error("无法最大化开发浏览器窗口。");
-  }
   context.on("serviceworker", (nextWorker) => {
     if (new URL(nextWorker.url()).hostname === extensionId) {
       setTimeout(() => void ensurePanel().catch(console.error), 300);
