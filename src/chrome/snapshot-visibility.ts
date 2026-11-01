@@ -1,11 +1,44 @@
 /** Style order must match the DOMSnapshot.captureSnapshot request. */
-export const SNAPSHOT_COMPUTED_STYLES = ["opacity", "overflow-x", "overflow-y", "visibility", "content-visibility", "position", "transform", "filter", "perspective", "contain", "will-change", "backdrop-filter", "translate", "rotate", "scale"] as const;
+export const SNAPSHOT_COMPUTED_STYLES = ["opacity", "overflow-x", "overflow-y", "visibility", "content-visibility", "position", "transform", "filter", "perspective", "contain", "will-change", "backdrop-filter", "translate", "rotate", "scale", "clip-path", "clip"] as const;
 
 type Interval = readonly [number, number];
 type Clip = { x: Interval; y: Interval };
 const infinite: Interval = [-Infinity, Infinity];
 const intersection = (a: Interval, b: Interval): Interval => [Math.max(a[0], b[0]), Math.min(a[1], b[1])];
 const intersects = (a: Interval, b: Interval) => a[1] > b[0] && a[0] < b[1] && b[1] > b[0];
+
+/** Recognize only clips that are empty regardless of the element's size. */
+function emptyInset(value: string): boolean {
+  const match = /^inset\((.*)\)(?:\s+(?:border-box|padding-box|content-box|margin-box|fill-box|stroke-box|view-box))?$/.exec(value.trim());
+  if (!match) return false;
+  const offsets = match[1]!.split(/\s+round\s+/)[0]!.trim().split(/\s+/);
+  if (offsets.length < 1 || offsets.length > 4) return false;
+  const percent = (part: string): number | undefined => {
+    if (/^[+-]?(?:0+(?:\.0*)?|\.0+)(?:px)?$/.test(part)) return 0;
+    const percentage = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+))%$/.exec(part);
+    return percentage ? Number(percentage[1]) : undefined;
+  };
+  const values = offsets.map(percent);
+  const [top, right = top, bottom = top, left = right] = values;
+  return top !== undefined && bottom !== undefined && top + bottom >= 100
+    || right !== undefined && left !== undefined && right + left >= 100;
+}
+
+/** The legacy clip property affects only absolutely or fixed positioned boxes. */
+function emptyLegacyClip(value: string, position: string): boolean {
+  if (position !== "absolute" && position !== "fixed") return false;
+  const match = /^rect\((.*)\)$/.exec(value.trim());
+  if (!match) return false;
+  const parts = match[1]!.split(/\s*,\s*/);
+  if (parts.length !== 4) return false;
+  const pixels = (part: string): number | undefined => {
+    const pixel = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+))px$/.exec(part.trim());
+    return pixel ? Number(pixel[1]) : undefined;
+  };
+  const [top, right, bottom, left] = parts.map(pixels);
+  return top !== undefined && bottom !== undefined && bottom <= top
+    || left !== undefined && right !== undefined && right <= left;
+}
 
 /**
  * Index the visual state of DOM nodes from one target's bulk layout capture.
@@ -23,11 +56,12 @@ export function snapshotVisibility(snapshot: any): Map<number, boolean> {
       || !Array.isArray(layout?.nodeIndex) || !Array.isArray(layout?.bounds) || !Array.isArray(layout?.styles)) throw new Error("Invalid DOM snapshot document");
     const layoutByNode = new Map<number, number>();
     layout.nodeIndex.forEach((nodeIndex: number, index: number) => layoutByNode.set(nodeIndex, index));
-    const contexts: Array<{ transparent: boolean; contentHidden: boolean; clip: Clip; absoluteClip: Clip; fixedClip: Clip; axisAligned: boolean }> = [];
+    const contexts: Array<{ transparent: boolean; contentHidden: boolean; emptyClip: boolean; clip: Clip; absoluteClip: Clip; fixedClip: Clip; axisAligned: boolean }> = [];
     for (let index = 0; index < nodes.backendNodeId.length; index++) {
       const parent = contexts[nodes.parentIndex[index]];
       let transparent = parent?.transparent ?? false;
       let contentHidden = parent?.contentHidden ?? false;
+      let emptyClip = parent?.emptyClip ?? false;
       const unbounded: Clip = { x: infinite, y: infinite };
       let clip: Clip = parent?.clip ?? unbounded;
       let absoluteClip: Clip = parent?.absoluteClip ?? unbounded;
@@ -38,11 +72,14 @@ export function snapshotVisibility(snapshot: any): Map<number, boolean> {
       // layout box cannot display its document. General layoutless nodes are
       // retained because their descendants may still be rendered.
       const nodeName = strings[nodes.nodeName?.[index]]?.toUpperCase();
-      let visible = !transparent && !contentHidden && !(layoutIndex === undefined && (nodeName === "IFRAME" || nodeName === "FRAME"));
+      let visible = !transparent && !contentHidden && !emptyClip && !(layoutIndex === undefined && (nodeName === "IFRAME" || nodeName === "FRAME"));
       if (layoutIndex !== undefined) {
         const styles: number[] = layout.styles[layoutIndex] ?? [];
         const style = (position: number) => strings[styles[position]!] ?? "";
         const position = style(5);
+        // Unlike overflow, these clips apply to the complete rendered subtree,
+        // including fixed and absolute descendants that escape overflow clips.
+        emptyClip ||= emptyInset(style(15)) || emptyLegacyClip(style(16), position);
         const transform = style(6);
         if (transform && transform !== "none") {
           const match = /^matrix\(([^)]+)\)$/.exec(transform);
@@ -77,7 +114,7 @@ export function snapshotVisibility(snapshot: any): Map<number, boolean> {
         // They have no visual box of their own, but must not hide descendants.
         const outsideClip = hasBounds && ((bounds[2]! > 0 && !intersects(x, clip.x)) || (bounds[3]! > 0 && !intersects(y, clip.y)));
         const emptyFrame = (nodeName === "IFRAME" || nodeName === "FRAME") && hasBounds && (bounds[2]! <= 0 || bounds[3]! <= 0);
-        visible = !transparent && !contentHidden && visibility !== "hidden" && visibility !== "collapse" && !outsideClip && !emptyFrame;
+        visible = !transparent && !contentHidden && !emptyClip && visibility !== "hidden" && visibility !== "collapse" && !outsideClip && !emptyFrame;
         const overflowX = style(1), overflowY = style(2);
         const clipAxis = (overflow: string, parentClip: Interval, boundsAxis: Interval): Interval => {
           if (overflow === "hidden" || overflow === "clip") return intersection(parentClip, boundsAxis);
@@ -97,7 +134,7 @@ export function snapshotVisibility(snapshot: any): Map<number, boolean> {
       }
       const backendId = nodes.backendNodeId[index];
       if (typeof backendId === "number") result.set(backendId, visible);
-      contexts[index] = { transparent, contentHidden, clip, absoluteClip, fixedClip, axisAligned };
+      contexts[index] = { transparent, contentHidden, emptyClip, clip, absoluteClip, fixedClip, axisAligned };
     }
   }
   return result;

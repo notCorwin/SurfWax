@@ -2,14 +2,14 @@ import { describe, expect, it } from "vitest";
 import { snapshotVisibility } from "./snapshot-visibility";
 
 // Indexes are deliberately independent of layout indexes, as in CDP snapshots.
-function capture(nodes: Array<{ parent: number; bounds?: number[]; client?: number[]; offset?: number[]; opacity?: string; x?: string; y?: string; visibility?: string; content?: string; name?: string; position?: string; transform?: string }>) {
+function capture(nodes: Array<{ parent: number; bounds?: number[]; client?: number[]; offset?: number[]; opacity?: string; x?: string; y?: string; visibility?: string; content?: string; name?: string; position?: string; transform?: string; clipPath?: string; clip?: string }>) {
   const strings = ["1", "0", "visible", "hidden", "auto", "clip", "scroll", "IFRAME", "static", "fixed", "absolute", "relative", "none", "matrix(1, 0, 0, 1, 0, 0)", "matrix(0, 1, -1, 0, 0, 0)"];
-  const stringId = (value: string) => strings.indexOf(value);
+  const stringId = (value: string) => { const index = strings.indexOf(value); if (index >= 0) return index; return strings.push(value) - 1; };
   const withLayout = nodes.map((node, index) => ({ node, index })).filter(({ node }) => node.bounds);
   return { strings, documents: [{ nodes: { backendNodeId: nodes.map((_, i) => i + 1), parentIndex: nodes.map((node) => node.parent), nodeName: nodes.map((node) => stringId(node.name ?? "")) }, layout: {
     nodeIndex: withLayout.map(({ index }) => index), bounds: withLayout.map(({ node }) => node.bounds),
     clientRects: withLayout.map(({ node }) => node.client ?? []), offsetRects: withLayout.map(({ node }) => node.offset ?? []),
-    styles: withLayout.map(({ node }) => [node.opacity ?? "1", node.x ?? "visible", node.y ?? "visible", node.visibility ?? "visible", node.content ?? "visible", node.position ?? "static", node.transform ?? "none", "none", "none", "none", "auto", "none", "none", "none", "none"].map(stringId)),
+    styles: withLayout.map(({ node }) => [node.opacity ?? "1", node.x ?? "visible", node.y ?? "visible", node.visibility ?? "visible", node.content ?? "visible", node.position ?? "static", node.transform ?? "none", "none", "none", "none", "auto", "none", "none", "none", "none", node.clipPath ?? "none", node.clip ?? "auto"].map(stringId)),
   } }] };
 }
 
@@ -86,6 +86,26 @@ describe("snapshot visual visibility", () => {
       { parent: 2, bounds: [40, 40, 5, 5] },
     ]));
     expect(state.get(4)).toBe(true);
+  });
+
+  it("removes only definitively empty CSS clips, including positioned descendants", () => {
+    const state = snapshotVisibility(capture([
+      { parent: -1, bounds: [0, 0, 500, 500] },
+      { parent: 0, bounds: [0, 0, 100, 100], clipPath: "inset(50%)" },
+      { parent: 1, bounds: [0, 0, 20, 20] },
+      { parent: 1, bounds: [200, 0, 20, 20], position: "fixed" },
+      { parent: 1, bounds: [0, 0, 20, 20], position: "absolute" },
+      { parent: 0, bounds: [0, 0, 100, 100], clipPath: "inset(0px 25% 0px 75% round 4px)" },
+      { parent: 0, bounds: [0, 0, 100, 100], clipPath: "inset(49%)" },
+      { parent: 0, bounds: [0, 0, 100, 100], clipPath: "inset(calc(50% + 1px))" },
+      { parent: 0, bounds: [0, 0, 100, 100], clipPath: "circle(0%)" },
+      { parent: 0, bounds: [0, 0, 100, 100], clip: "rect(0px, 0px, 0px, 0px)", position: "absolute" },
+      { parent: 9, bounds: [200, 0, 20, 20], position: "fixed" },
+      { parent: 0, bounds: [0, 0, 100, 100], clip: "rect(0px, 0px, 0px, 0px)" },
+      { parent: 0, bounds: [0, 0, 100, 100], clip: "rect(auto, 0px, auto, 0px)", position: "fixed" },
+      { parent: 0, bounds: [0, 0, 100, 100], clip: "rect(0px, 20px, 20px, 0px)", position: "absolute" },
+    ]));
+    expect([...state.values()]).toEqual([true, false, false, false, false, false, true, true, true, false, false, true, false, true]);
   });
 
   it("does not silently accept a failed or incomplete layout capture", () => {

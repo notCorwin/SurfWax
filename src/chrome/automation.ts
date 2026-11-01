@@ -2913,14 +2913,51 @@ export class AutomationRuntime {
           const source = node.name?.sources?.find((item: any) => !item.superseded && item.value?.value !== undefined);
           if (source?.type !== "contents" || !(node.childIds ?? []).some((id: string) => hiddenSubtree.get(id))) return original;
           const parts: string[] = [];
-          const pendingNames = [...(node.childIds ?? [])].reverse();
+          const pendingNames: Array<string | null> = [...(node.childIds ?? [])].reverse();
           while (pendingNames.length) {
-            const child: any = byId.get(pendingNames.pop());
+            const next = pendingNames.pop();
+            if (next === null) { parts.push(" "); continue; }
+            const child: any = byId.get(next);
             if (!child) continue;
             const childRole = child.ignored ? "" : axValue(child.role);
-            if (!hidden(child) && (childRole === "StaticText" || childRole === "image" || childRole === "img")) {
-              parts.push(axValue(child.name));
-              continue;
+            if (!hidden(child)) {
+              if (childRole === "StaticText") {
+                parts.push(axValue(child.name));
+                continue;
+              }
+              // Embedded form controls contribute their value, not their own
+              // accessible label or every option in their subtree.
+              if (["textbox", "searchbox", "combobox", "listbox", "slider", "spinbutton", "scrollbar"].includes(childRole)) {
+                const valueText = child.properties?.find((property: any) => property.name === "valuetext");
+                const value = axValue(valueText?.value) || axValue(child.value);
+                if (value) parts.push(` ${value} `);
+                else if (childRole === "listbox" || childRole === "combobox") {
+                  // Listboxes can expose their selection as AX option nodes
+                  // without an aggregate value. Ignore unselected options.
+                  const selected: string[] = [], scanOptions = [...(child.childIds ?? [])].reverse();
+                  while (scanOptions.length) {
+                    const option: any = byId.get(scanOptions.pop());
+                    if (!option) continue;
+                    if (axValue(option.role) === "option") {
+                      if (!hidden(option) && option.properties?.some((property: any) => property.name === "selected" && property.value?.value === true)) selected.push(option.nodeId);
+                    } else for (const id of [...(option.childIds ?? [])].reverse()) scanOptions.push(id);
+                  }
+                  if (selected.length) {
+                    pendingNames.push(null);
+                    for (let index = selected.length - 1; index >= 0; index--) pendingNames.push(selected[index]!, null);
+                  }
+                }
+                continue;
+              }
+              const childSource = child.name?.sources?.find((item: any) => !item.superseded && item.value?.value !== undefined);
+              // An explicit name replaces descendant contents, including for
+              // generic elements. Chrome separates such semantic objects from
+              // surrounding text even when the markup has no whitespace.
+              if (childRole && (childRole === "image" || childRole === "img" || childSource && childSource.type !== "contents")) {
+                const name = axValue(child.name);
+                if (name) parts.push(` ${name} `);
+                continue;
+              }
             }
             const children: string[] = child.childIds ?? [];
             for (let index = children.length - 1; index >= 0; index--) pendingNames.push(children[index]);

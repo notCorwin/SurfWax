@@ -1116,6 +1116,48 @@ describe("AutomationRuntime", () => {
     await runtime.abortSessions();
   });
 
+  it("preserves explicit descendant labels, embedded control values and semantic spacing when filtering a name", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    const named = (value: string, type = "contents") => ({ value, sources: [{ type, value: { value } }] });
+    const originalName = "Begin HIDDEN Known alias 35 Selected choice Selected end";
+    const nodes = [
+      { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["button"] },
+      { nodeId: "button", parentId: "root", backendDOMNodeId: 7, role: { value: "button" }, name: named(originalName), childIds: ["start", "secret", "alias", "range", "select", "list", "end"] },
+      { nodeId: "start", parentId: "button", role: { value: "StaticText" }, name: named("Begin") },
+      { nodeId: "secret", parentId: "button", backendDOMNodeId: 8, role: { value: "StaticText" }, name: named("HIDDEN") },
+      { nodeId: "alias", parentId: "button", role: { value: "generic" }, name: named("Known alias", "attribute"), childIds: ["alias-text"] },
+      { nodeId: "alias-text", parentId: "alias", role: { value: "StaticText" }, name: named("Original text") },
+      { nodeId: "range", parentId: "button", role: { value: "slider" }, name: named("Size", "attribute"), value: { value: 35 } },
+      { nodeId: "select", parentId: "button", role: { value: "combobox" }, value: { value: "Selected choice" }, childIds: ["unselected"] },
+      { nodeId: "unselected", parentId: "select", role: { value: "StaticText" }, name: named("Unselected choice") },
+      { nodeId: "list", parentId: "button", role: { value: "listbox" }, childIds: ["selected", "other"] },
+      { nodeId: "selected", parentId: "list", role: { value: "option" }, properties: [{ name: "selected", value: { value: true } }], childIds: ["selected-text"] },
+      { nodeId: "selected-text", parentId: "selected", role: { value: "StaticText" }, name: named("Selected") },
+      { nodeId: "other", parentId: "list", role: { value: "option" }, properties: [{ name: "selected", value: { value: false } }], childIds: ["other-text"] },
+      { nodeId: "other-text", parentId: "other", role: { value: "StaticText" }, name: named("Other") },
+      { nodeId: "end", parentId: "button", role: { value: "StaticText" }, name: named("end") },
+    ];
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Accessibility.getFullAXTree") return { nodes };
+      if (method === "DOMSnapshot.captureSnapshot") return { strings: ["1", "0", "visible", "auto"], documents: [{
+        nodes: { backendNodeId: [7, 8], parentIndex: [-1, -1] },
+        layout: { nodeIndex: [0, 1], bounds: [[0, 0, 100, 20], [0, 0, 100, 20]], styles: [[0, 2, 2, 2, 3], [1, 2, 2, 2, 3]] },
+      }] };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    const result = await page.inspect() as any;
+    const button = result.items.find((item: any) => item.line.includes("- button "));
+    expect(button.line).toContain('button "Begin Known alias 35 Selected choice Selected end"');
+    expect(button.line).not.toContain("HIDDEN");
+    expect(button.line).not.toContain("Original text");
+    expect(button.line).not.toContain("Unselected choice");
+    expect(button.line).not.toContain("Other");
+    expect((runtime as any).sessions.get(3).refs.get(button.ref).name).toBe(originalName);
+    await runtime.abortSessions();
+  });
+
   it("inspects text by default, qualifies references, and returns changes without repeating the full snapshot", async () => {
     const metadata = [{ role: "button", name: "Save", tag: "button", text: "Save" }];
     const { runtime, calls } = harness(metadata); const page = await runtime.createPage(3);
