@@ -45,6 +45,7 @@ function harness(
   const command = vi.fn(async (_debuggee: chrome.debugger.Debuggee, method: string, params?: any): Promise<any> => {
     calls.push({ method, params });
     if (method === "Performance.getMetrics") return { metrics: [{ name: "Timestamp", value: 0 }] };
+    if (method === "DOMSnapshot.captureSnapshot") return { strings: [], documents: [{ nodes: { backendNodeId: [], parentIndex: [] }, layout: { nodeIndex: [], bounds: [], styles: [] } }] };
     if (method === "Accessibility.getFullAXTree") return { nodes: [
       { nodeId: "root", role: { value: "RootWebArea" }, name: { value: "Test" }, childIds: metadata.map((_, index) => `node-${index}`) },
       ...metadata.map((item: any, index) => ({
@@ -1082,6 +1083,36 @@ describe("AutomationRuntime", () => {
     command.mockImplementation(async (source, method, params) => method === "Accessibility.getFullAXTree" ? { nodes } : original(source, method, params));
     const result = await (await runtime.createPage(3)).inspect();
     expect(inspectText(result)).toContain('button "Deep target"');
+    await runtime.abortSessions();
+  });
+
+  it("inherits visibility for AX-only descendants while preserving a known visible descendant", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    const nodes = [
+      { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["button"] },
+      { nodeId: "button", parentId: "root", backendDOMNodeId: 7, role: { value: "button" },
+        name: { value: "Label SECRET restored", sources: [{ type: "contents", value: { value: "Label SECRET restored" } }] }, childIds: ["label", "input"] },
+      { nodeId: "label", parentId: "button", role: { value: "StaticText" }, name: { value: "Label " }, childIds: [] },
+      { nodeId: "input", parentId: "button", backendDOMNodeId: 8, role: { value: "textbox" }, value: { value: "SECRET" }, childIds: ["internal"] },
+      { nodeId: "internal", parentId: "input", role: { value: "generic" }, childIds: ["secret", "restored"] },
+      { nodeId: "secret", parentId: "internal", backendDOMNodeId: 1000, role: { value: "StaticText" }, name: { value: "SECRET" }, childIds: [] },
+      { nodeId: "restored", parentId: "internal", backendDOMNodeId: 9, role: { value: "StaticText" }, name: { value: "restored" }, childIds: [] },
+    ];
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Accessibility.getFullAXTree") return { nodes };
+      if (method === "DOMSnapshot.captureSnapshot") return { strings: ["1", "0", "visible", "auto"], documents: [{
+        nodes: { backendNodeId: [7, 8, 9], parentIndex: [-1, -1, -1] },
+        layout: { nodeIndex: [0, 1, 2], bounds: [[0, 0, 100, 20], [0, 0, 100, 20], [0, 0, 100, 20]], styles: [[0, 2, 2, 2, 3], [1, 2, 2, 2, 3], [0, 2, 2, 2, 3]] },
+      }] };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    const result = await page.inspect();
+    expect(inspectText(result)).not.toContain("SECRET");
+    expect(inspectText(result)).not.toContain("textbox");
+    expect(inspectText(result)).toContain('button "Label restored"');
+    expect(inspectText(result)).toContain('StaticText "restored"');
     await runtime.abortSessions();
   });
 

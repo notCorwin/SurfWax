@@ -21,6 +21,7 @@ function harness() {
     if (method === "Runtime.evaluate" && params.expression === "document.readyState === 'complete'") return { result: { value: true } };
     if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root" } } };
     if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
+    if (method === "DOMSnapshot.captureSnapshot") return { strings: [], documents: [{ nodes: { backendNodeId: [], parentIndex: [] }, layout: { nodeIndex: [], bounds: [], styles: [] } }] };
     if (method === "Accessibility.getFullAXTree") return { nodes: [
       { nodeId: "root-node", role: { value: "RootWebArea" }, name: { value: "Test" }, childIds: order.map(id => `ax:${id}`) },
       ...order.map(id => nodes.get(id)!).filter(node => node.connected).map(node => ({ nodeId: `ax:${node.id}`, parentId: "root-node", backendDOMNodeId: node.id,

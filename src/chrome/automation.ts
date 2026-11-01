@@ -4,6 +4,8 @@ import { waitForDocumentFrame } from "./dom-frame";
 import { abortError, axValue, delay, imageSize, isTransientNavigationError, keyboardParams, modifierMask, parseKeyboardChord, throwIfAborted } from "./automation-utils";
 import { diffSnapshot, paginateSnapshot, type SnapshotItem, type SnapshotPosition } from "./snapshot-pagination";
 import { renderSnapshotNode, type SnapshotNode, type SnapshotStateName } from "./snapshot-render";
+import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility } from "./snapshot-visibility";
+import { createFrameVisibility } from "./frame-visibility";
 import { PROGRAM_EVENT_INVOKE } from "./program-handles";
 
 const EVALUATION_CODEC_FACTORY = `(${createLogGraphCodec.toString()})({ verifyIntrinsics: true })`;
@@ -2791,21 +2793,34 @@ export class AutomationRuntime {
         .filter((item, index, all) => all.findIndex((other) => other.debuggee.sessionId === item.debuggee.sessionId) === index)
         .sort((left, right) => left.depth - right.depth);
       const sameDebuggee = (left: Debuggee, right: Debuggee) => left.tabId === right.tabId && left.sessionId === right.sessionId;
-      const debuggees = [{ debuggee: session.debuggee, frameId: undefined as string | undefined, depth: 0 }, ...childFrames]
+      const allDebuggees = [{ debuggee: session.debuggee, frameId: undefined as string | undefined, depth: 0 }, ...childFrames];
+      const debuggees = allDebuggees
         .filter(({ debuggee }) => !regionDebuggee || sameDebuggee(debuggee, regionDebuggee));
       if (regionDebuggee && !debuggees.length) throw automationError("frame-unavailable", { reason: "region-session-detached" });
-      let trees: Array<{ debuggee: Debuggee; frameId: string | undefined; depth: number; tree: any }>;
+      // A target's default AX request covers only its root document, even for
+      // same-process child frames. Capture each additional frame explicitly.
+      const frames = [...allDebuggees, ...[...session.frames]
+        .filter(([frameId]) => frameId !== session.rootFrameId && !childFrames.some((item) => item.frameId === frameId))
+        .map(([frameId, debuggee]) => ({ debuggee, frameId, depth: depthOf(frameId) }))]
+        .sort((left, right) => left.depth - right.depth);
+      let trees: Array<{ debuggee: Debuggee; frameId: string | undefined; depth: number; tree: any; visibility: Map<number, boolean> }>;
       let info: { url: string; title: string };
       try {
         // A newly attached iframe must finish enabling its domains before AX
         // capture. Scoped requests wait only on the selected target.
-        await waitForCapture(Promise.all(debuggees.map(({ debuggee }) => debuggee.sessionId ? session.frameReady.get(debuggee.sessionId) : undefined)));
+        await waitForCapture(Promise.all(allDebuggees.map(({ debuggee }) => debuggee.sessionId ? session.frameReady.get(debuggee.sessionId) : undefined)));
         guard();
         if (changed()) { await delay(0, signal); continue; }
-        [trees, info] = await waitForCapture(Promise.all([
-          Promise.all(debuggees.map(async (item) => ({ ...item, tree: await this.options.command(item.debuggee, "Accessibility.getFullAXTree", {}) }))),
+        const [captured, layouts, pageInfo] = await waitForCapture(Promise.all([
+          Promise.all(frames.map(async (item) => ({ ...item, tree: !regionDebuggee || sameDebuggee(item.debuggee, regionDebuggee)
+            ? await this.options.command(item.debuggee, "Accessibility.getFullAXTree", allDebuggees.includes(item) ? {} : { frameId: item.frameId })
+            : undefined }))),
+          Promise.all(allDebuggees.map(async ({ debuggee }) => ({ debuggee, visibility: snapshotVisibility(await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true })) }))),
           this.pageValue(session.tabId, "({url:location.href,title:document.title})") as Promise<{ url: string; title: string }>,
         ]));
+        const visibilityByTarget = new Map(layouts.map(({ debuggee, visibility }) => [debuggee.sessionId ?? "", visibility]));
+        trees = captured.map((item) => ({ ...item, visibility: visibilityByTarget.get(item.debuggee.sessionId ?? "")! }));
+        info = pageInfo;
       } catch (error) {
         guard();
         if (!changed()) throw error;
@@ -2821,24 +2836,107 @@ export class AutomationRuntime {
         await delay(0, signal); continue;
       }
       if (changed()) { await delay(0, signal); continue; }
+      // An OOPIF is captured independently of its embedding document, so its
+      // AX tree alone cannot tell us whether any host in the frame chain is
+      // hidden. Reuse the per-target layout indexes for all host elements.
+      const visibilityBySession = new Map(trees.map(({ debuggee, visibility }) => [debuggee.sessionId ?? "", visibility]));
+      const owners = new Map<string, boolean>();
+      if (frames.some((item) => item.frameId)) {
+        const rootFrameId = session.rootFrameId;
+        if (!rootFrameId) throw automationError("snapshot-unavailable", { reason: "missing-root-frame" });
+        const ancestry = new Set<string>();
+        for (const { frameId } of frames) {
+          if (!frameId) continue;
+          let current: string | undefined = frameId;
+          const seen = new Set<string>();
+          while (current && current !== rootFrameId && !ancestry.has(current)) {
+            if (seen.has(current) || !session.frameParents.has(current)) throw automationError("snapshot-unavailable", { reason: "unknown-frame-ancestry", frameId });
+            seen.add(current); ancestry.add(current);
+            current = session.frameParents.get(current);
+          }
+          if (!current) throw automationError("snapshot-unavailable", { reason: "unknown-frame-ancestry", frameId });
+        }
+        try {
+          await waitForCapture(Promise.all([...ancestry].map(async (frameId) => {
+            const parentId = session.frameParents.get(frameId);
+            const parent = parentId && session.frames.get(parentId);
+            if (!parent) throw automationError("snapshot-unavailable", { reason: "missing-frame-parent", frameId });
+            const owner = await this.options.command(parent, "DOM.getFrameOwner", { frameId });
+            const visible = visibilityBySession.get(parent.sessionId ?? "")?.get(owner?.backendNodeId);
+            if (visible === undefined) throw automationError("snapshot-unavailable", { reason: "missing-frame-owner-visibility", frameId });
+            owners.set(frameId, visible);
+          })));
+        } catch (error) {
+          guard();
+          if (!changed()) throw error;
+          await delay(0, signal); continue;
+        }
+        const frameVisibility = createFrameVisibility(rootFrameId, session.frameParents, owners);
+        for (const item of trees) if (item.frameId) {
+          const visible = frameVisibility(item.frameId);
+          if (visible === "unknown") throw automationError("snapshot-unavailable", { reason: "unknown-frame-visibility", frameId: item.frameId });
+          if (visible === "hidden") item.tree = undefined;
+        }
+      }
       const lines: SnapshotLine[] = [];
-      const render = (nodes: any[], debuggee: Debuggee, frameLabel?: string, frameDepth = 0) => {
+      const render = (nodes: any[], visibility: Map<number, boolean>, debuggee: Debuggee, frameLabel?: string, frameDepth = 0) => {
         if (regionDebuggee && !sameDebuggee(regionDebuggee, debuggee)) return;
         const byId = new Map(nodes.map((node) => [node.nodeId, node]));
-        const scope = debuggee.sessionId ?? session.rootFrameId ?? "root";
+        const scope = frameLabel ?? session.rootFrameId ?? "root";
         if (frameLabel) lines.push({ id: `${scope}:frame`, line: `${"  ".repeat(frameDepth)}- iframe [frame=${frameLabel}]` });
         const root = regionNode ? nodes.find((node) => node.backendDOMNodeId === regionNode.node.backendNodeId) : nodes.find((node) => !node.parentId) ?? nodes[0];
         if (regionNode && !root) throw automationError("snapshot-region-unavailable", { locator: region });
+        // Internal AX descendants (notably input value text) may have no DOM
+        // snapshot entry. Inherit their nearest known ancestor's state, while
+        // still allowing a known visible descendant to override it.
+        const effectiveHidden = new Map<string, boolean>();
+        // AX names derived from contents can include transparent or clipped
+        // descendants. Explicit labels remain authoritative; only rebuild a
+        // contents-derived name when a descendant was actually filtered.
+        const hiddenSubtree = new Map<string, boolean>();
+        const treeRoot = nodes.find((node) => !node.parentId) ?? nodes[0];
+        const order: any[] = [], scan: Array<{ node: any; inherited: boolean }> = treeRoot ? [{ node: treeRoot, inherited: false }] : [];
+        while (scan.length) {
+          const { node, inherited } = scan.pop()!;
+          const known = typeof node.backendDOMNodeId === "number" ? visibility.get(node.backendDOMNodeId) : undefined;
+          const isHidden = known === undefined ? inherited : !known;
+          effectiveHidden.set(node.nodeId, isHidden);
+          order.push(node);
+          for (const id of node.childIds ?? []) { const child = byId.get(id); if (child) scan.push({ node: child, inherited: isHidden }); }
+        }
+        const hidden = (node: any) => effectiveHidden.get(node.nodeId) === true;
+        for (let index = order.length - 1; index >= 0; index--) {
+          const node = order[index]!;
+          hiddenSubtree.set(node.nodeId, hidden(node) || (node.childIds ?? []).some((id: string) => hiddenSubtree.get(id)));
+        }
+        const visibleName = (node: any, original: string) => {
+          const source = node.name?.sources?.find((item: any) => !item.superseded && item.value?.value !== undefined);
+          if (source?.type !== "contents" || !(node.childIds ?? []).some((id: string) => hiddenSubtree.get(id))) return original;
+          const parts: string[] = [];
+          const pendingNames = [...(node.childIds ?? [])].reverse();
+          while (pendingNames.length) {
+            const child: any = byId.get(pendingNames.pop());
+            if (!child) continue;
+            const childRole = child.ignored ? "" : axValue(child.role);
+            if (!hidden(child) && (childRole === "StaticText" || childRole === "image" || childRole === "img")) {
+              parts.push(axValue(child.name));
+              continue;
+            }
+            const children: string[] = child.childIds ?? [];
+            for (let index = children.length - 1; index >= 0; index--) pendingNames.push(children[index]);
+          }
+          return parts.join("").replace(/\s+/g, " ").trim();
+        };
         const pending: Array<{ node: any; depth: number }> = root ? [{ node: root, depth: frameLabel ? frameDepth + 1 : 0 }] : [];
         while (pending.length) {
           const { node, depth } = pending.pop()!;
           let childDepth = depth;
-          const role = node.ignored ? "" : axValue(node.role); const name = axValue(node.name); const value = axValue(node.value);
+          const role = node.ignored || hidden(node) ? "" : axValue(node.role); const originalName = axValue(node.name); const name = visibleName(node, originalName); const value = axValue(node.value);
           if (role && role !== "none" && role !== "generic" && role !== "InlineTextBox") {
             let ref = "";
             const identity = `${scope}:${node.backendDOMNodeId ?? node.nodeId}`;
             if (node.backendDOMNodeId && (INTERACTIVE_ROLES.has(role) || node.properties?.some((property: any) => property.name === "focusable" && property.value?.value))) {
-              ref = this.rememberRef(session, identity, { backendNodeId: node.backendDOMNodeId, frameId: node.frameId, debuggee, role, name: semanticName(name), generation, identitySource: "ax" });
+              ref = this.rememberRef(session, identity, { backendNodeId: node.backendDOMNodeId, frameId: node.frameId, debuggee, role, name: semanticName(originalName), generation, identitySource: "ax" });
             }
             const properties = Object.fromEntries((node.properties ?? []).map((property: any) => [property.name, property.value?.value]));
             const state: Partial<Record<SnapshotStateName, unknown>> = Object.fromEntries(["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly"].filter((key) => properties[key] !== undefined).map((key) => [key, properties[key]]));
@@ -2860,7 +2958,10 @@ export class AutomationRuntime {
           }
         }
       };
-      for (const { debuggee, frameId, depth, tree } of trees) render(tree.nodes ?? [], debuggee, frameId, depth);
+      if (regionNode && !trees.some(({ tree }) => tree?.nodes?.some((node: any) => node.backendDOMNodeId === regionNode.node.backendNodeId)))
+        throw automationError("snapshot-region-unavailable", { locator: region });
+      for (const { debuggee, frameId, depth, tree, visibility } of trees) if (tree && (!regionNode || tree.nodes?.some((node: any) => node.backendDOMNodeId === regionNode.node.backendNodeId)))
+        render(tree.nodes ?? [], visibility, debuggee, frameId, depth);
       const ids = new Set<string>();
       for (const { id } of lines) {
         if (ids.has(id)) throw automationError("snapshot-unavailable", { reason: "duplicate-semantic-id", id });

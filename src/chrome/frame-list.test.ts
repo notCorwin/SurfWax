@@ -15,6 +15,11 @@ function harness() {
     if (method === "Runtime.evaluate" && params.expression === "document") return { result: { objectId: `doc-${params.contextId}` } };
     if (method === "Accessibility.queryAXTree") return { nodes: [{ nodeId: "node", backendDOMNodeId: 8, role: { value: "button" }, name: { value: params.objectId ?? "wrong-root" } }] };
     if (method === "Accessibility.getPartialAXTree") return { nodes: [{ backendDOMNodeId: 8, role: { value: "button" }, name: { value: "doc-31" } }] };
+    if (method === "DOM.getFrameOwner") return { backendNodeId: { same: 101, cross: 102, nested: 103 }[params.frameId as "same" | "cross" | "nested"] };
+    if (method === "DOMSnapshot.captureSnapshot") return { strings: ["1", "visible", "auto"], documents: [{
+      nodes: { backendNodeId: [101, 102, 103], parentIndex: [-1, -1, -1] },
+      layout: { nodeIndex: [0, 1, 2], bounds: [[0, 0, 100, 100], [0, 0, 100, 100], [0, 0, 100, 100]], styles: [[0, 1, 1, 1, 2], [0, 1, 1, 1, 2], [0, 1, 1, 1, 2]] },
+    }] };
     if (method === "DOM.resolveNode") return { object: { objectId: "node-object" } };
     if (method === "Runtime.callFunctionOn") return { result: { value: { connected: true, role: "button", name: "Open", tag: "button", text: "Open" } } };
     return {};
@@ -26,6 +31,38 @@ function harness() {
 }
 
 describe("frame tree discovery", () => {
+  it("captures same-process frame AX trees separately and skips hidden frame owners", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let hideSame = true;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "Accessibility.getFullAXTree") {
+        const name = params.frameId === "same" ? "Same frame" : params.frameId === "cross" ? "Other frame" : "Root frame";
+        return { nodes: [{ nodeId: "shared-id", backendDOMNodeId: params.frameId === "same" ? 8 : params.frameId === "cross" ? 9 : 7,
+          role: { value: "button" }, name: { value: name }, childIds: [] }] };
+      }
+      if (method === "DOMSnapshot.captureSnapshot") return { strings: ["1", "0", "visible", "auto"], documents: [{
+        nodes: { backendNodeId: [101, 102], parentIndex: [-1, -1] },
+        layout: { nodeIndex: [0, 1], bounds: [[0, 0, 100, 100], [0, 0, 100, 100]], styles: [[hideSame ? 1 : 0, 2, 2, 2, 3], [0, 2, 2, 2, 3]] },
+      }] };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({x:scrollX")) return { result: { value: { x: 0, y: 0, width: 100, height: 100, scale: 1 } } };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    const before: any = await page.inspect();
+    expect(before.items.map((item: any) => item.line).join("\n")).not.toContain('button "Same frame"');
+    hideSame = false;
+    const after: any = await page.inspect();
+    const lines = after.items.map((item: any) => item.line).join("\n");
+    expect(lines).toContain('button "Root frame"');
+    expect(lines).toContain('button "Same frame"');
+    expect(lines).toContain('button "Other frame"');
+    expect(new Set(after.items.map((item: any) => item.id)).size).toBe(after.items.length);
+    expect(command).toHaveBeenCalledWith({ tabId: 3 }, "Accessibility.getFullAXTree", { frameId: "same" });
+    await runtime.abortSessions();
+  });
+
   it.each([false, true])("restarts AX capture when a child attaches in flight (first request fails: %s)", async (failFirst) => {
     const { runtime, command } = harness();
     const original = command.getMockImplementation()!;
@@ -35,7 +72,7 @@ describe("frame tree discovery", () => {
     let rootCaptures = 0;
     command.mockImplementation(async (source, method, params = {}) => {
       if (method === "Accessibility.getFullAXTree") {
-        if (!source.sessionId && ++rootCaptures === 1) {
+        if (!source.sessionId && !params.frameId && ++rootCaptures === 1) {
           notify(); await hold;
           if (failFirst) throw new Error("target changed during capture");
         }
@@ -54,7 +91,7 @@ describe("frame tree discovery", () => {
     const result: any = await pending;
     expect(result.items.map((item: any) => item.line).join("\n")).toContain('button "Child target"');
     expect(rootCaptures).toBe(2);
-    expect(command.mock.calls.filter(([source, method]) => source.sessionId === "child" && method === "Accessibility.getFullAXTree")).toHaveLength(1);
+    expect(command.mock.calls.filter(([source, method, params]) => source.sessionId === "child" && method === "Accessibility.getFullAXTree" && !params.frameId)).toHaveLength(1);
     await runtime.abortSessions();
   });
 
@@ -74,7 +111,10 @@ describe("frame tree discovery", () => {
     const cross = frames.frames.find((frame: any) => frame.url === "https://cross.test/");
     const result: any = await page.inspect({}, page.frameRef(cross.frameRef).getByRole("button"));
     expect(result.items.map((item: any) => item.line).join("\n")).toContain('button "Regional target"');
-    expect(command.mock.calls.filter(([, method]) => method === "Accessibility.getFullAXTree")).toEqual([[{ tabId: 3, sessionId: "child" }, "Accessibility.getFullAXTree", {}]]);
+    expect(command.mock.calls.filter(([, method]) => method === "Accessibility.getFullAXTree")).toEqual([
+      [{ tabId: 3, sessionId: "child" }, "Accessibility.getFullAXTree", {}],
+      [{ tabId: 3, sessionId: "child" }, "Accessibility.getFullAXTree", { frameId: "nested" }],
+    ]);
     await runtime.abortSessions();
   });
 
@@ -189,7 +229,7 @@ describe("frame tree discovery", () => {
     await runtime.createPage(3);
     await rejected;
     release();
-    expect(command.mock.calls.filter(([, method]) => method === "Accessibility.getFullAXTree")).toHaveLength(1);
+    expect(command.mock.calls.filter(([, method, params]) => method === "Accessibility.getFullAXTree" && !params.frameId)).toHaveLength(1);
     await runtime.abortSessions();
   });
 
