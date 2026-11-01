@@ -58,7 +58,7 @@ type SearchSnapshot = {
   conversationId?: string; runId?: string; debuggee: Debuggee; total: number;
   candidates?: Candidate[]; arrayId?: string; group?: string;
 };
-export type InspectOptions = { cursor?: string; since?: string; fields?: Array<"text" | "state" | "ref" | "actions">; budget?: number; offset?: number; limit?: number; depth?: number; recentRefs?: readonly string[]; wire?: { maxBytes: number; evidenceId: string } };
+export type InspectOptions = { cursor?: string; since?: string; fields?: Array<"text" | "state" | "ref" | "actions">; budget?: number; offset?: number; limit?: number; depth?: number; recentRefs?: readonly string[]; wire?: { maxBytes: number; evidenceId: string }; deferDelivery?: boolean };
 type ObservationRecord = {
   session: Session;
   observationId: string;
@@ -963,7 +963,8 @@ export class AutomationRuntime {
         const truncated = position.index > 0 || position.charOffset > 0 || page.hasMore;
         const reason = page.reason === "budget" ? "budget" : "slice";
         const baselineComplete = !saved.record.incomplete || advances && !page.hasMore && saved.eligibleForBaseline;
-        return { observationId: saved.id, tabId, documentId: generation, url: saved.record.url, title: saved.record.title, viewport: saved.record.viewport,
+        return { observationId: saved.id, tabId, documentId: generation,
+          ...(options.cursor === undefined ? { url: saved.record.url, title: saved.record.title } : { continuation: true }), viewport: saved.record.viewport,
           mode: saved.mode, ...(saved.reset ? { reset: saved.reset } : {}),
           items: page.fragments, ...(candidate.lookahead ? { lookahead: candidate.lookahead } : {}),
           ...(page.next ? { nextCursor: `${saved.id}:${page.next.index}:${page.next.charOffset}` } : {}),
@@ -996,7 +997,7 @@ export class AutomationRuntime {
         && !page.fragments.some((item) => item.ref && !session.refs.has(item.ref));
       const atPosition = () => Boolean(saved.expected && saved.expected.index === position.index && saved.expected.charOffset === position.charOffset);
       const advance = () => { saved.expected = page.next; if (!page.hasMore && saved.eligibleForBaseline) record.incomplete = false; };
-      if (options.wire) {
+      if (options.wire || options.deferDelivery) {
         const token = Symbol("inspection-delivery"), shouldAdvance = advances;
         let state: "prepared" | "pending" | "finished" | "canceled" = "prepared";
         const lease: SnapshotDeliveryLease = {

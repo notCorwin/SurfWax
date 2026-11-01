@@ -2,8 +2,8 @@ import { expect } from "@playwright/test";
 import { test, commandResponse, configure, delayedResponse, dispose, openExtension, readEvents, startProvider, textResponse, type MockResponse } from "./fixtures";
 import { SemanticPages } from "./evaluation/semantic-state";
 
-/** A scripted provider consumes the actual refresh and its real inspect_page continuations. */
-test("continues a bounded refresh snapshot in the same run", async () => {
+/** A scripted provider consumes the actual refresh, metadata artifact, and frozen snapshot. */
+test("restores long refresh metadata and continues a bounded snapshot in the same run", async () => {
   test.setTimeout(120_000);
   let releaseModel!: () => void, releaseLoad!: () => void;
   const modelMayFinish = new Promise<void>((resolve) => { releaseModel = resolve; });
@@ -11,7 +11,10 @@ test("continues a bounded refresh snapshot in the same run", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
+  const completeTitle = `TITLE_BEGIN_${"海🌊".repeat(3500)}_TITLE_END`;
+  expect(Buffer.byteLength(completeTitle, "utf8")).toBeGreaterThan(16 * 1024);
   let problem: unknown, firstText = "", tabId = 0, currentCursor: string | undefined, pagesRead = 0;
+  let titleAccess: any, titleLength = 0, title = "", titleReads = 0, pendingTitleId = "";
   const pages = new SemanticPages();
   const done = () => textResponse("REFRESH_PAGINATION_DONE");
   const consume: MockResponse = (request) => {
@@ -23,6 +26,9 @@ test("continues a bounded refresh snapshot in the same run", async () => {
       const page = JSON.parse(content);
       expect(page).toMatchObject({ tabId, mode: "full", items: expect.any(Array), truncation: expect.any(Object) });
       expect(page).not.toHaveProperty("error");
+      expect(page).toMatchObject({ continuation: true });
+      expect(page).not.toHaveProperty("url");
+      expect(page).not.toHaveProperty("title");
       currentCursor = pages.append(page, currentCursor);
       pagesRead++;
       expect(pagesRead).toBeLessThan(30);
@@ -34,6 +40,30 @@ test("continues a bounded refresh snapshot in the same run", async () => {
       expect(pages.result().items.some((item) => item.line.includes("REFRESH_PAGE_LOADED_MARKER"))).toBe(true);
       return done();
     } catch (error) { problem = error; return done(); }
+  };
+  const consumeTitle: MockResponse = (request) => {
+    if (!Array.isArray(request.tools) || !request.messages.some((entry: any) => entry.role === "tool" && entry.tool_call_id === pendingTitleId)) {
+      responses.unshift(consumeTitle); return textResponse("Read the complete page title");
+    }
+    try {
+      const message = request.messages.findLast((entry: any) => entry.role === "tool" && entry.tool_call_id === pendingTitleId);
+      const content = Array.isArray(message.content) ? message.content.find((part: any) => part.type === "text")?.text : message.content;
+      const result = JSON.parse(content);
+      expect(result).toMatchObject({ ok: true, result: expect.any(String) });
+      expect(result.result.length).toBeGreaterThan(0);
+      title += result.result;
+      expect(title.length).toBeLessThanOrEqual(titleLength);
+      if (title.length < titleLength) return readTitle();
+      expect(title).toBe(completeTitle);
+      responses.unshift(consume);
+      return commandResponse("inspect_page", { tabId, cursor: currentCursor, budget: 3000 }, "refresh-page-0");
+    } catch (error) { problem = error; return done(); }
+  };
+  const readTitle = (): ReturnType<typeof commandResponse> | ReturnType<typeof textResponse> => {
+    pendingTitleId = `refresh-title-${++titleReads}`;
+    expect(titleReads).toBeLessThan(30);
+    responses.unshift(consumeTitle);
+    return commandResponse("read_artifact", { ...titleAccess, offset: title.length }, pendingTitleId);
   };
   const afterRefresh: MockResponse = (request) => {
     if (!Array.isArray(request.tools)) { responses.unshift(afterRefresh); return textResponse("Refresh pagination"); }
@@ -51,11 +81,15 @@ test("continues a bounded refresh snapshot in the same run", async () => {
         nextCursor: expect.any(String), truncation: { truncated: true, budget: 12_000 } });
       expect(observation.truncation.used).toBeLessThanOrEqual(12_000);
       expect(firstText).not.toContain("REFRESH_PAGE_LAST_ITEM");
+      expect(observation).toMatchObject({ metadataTruncated: expect.arrayContaining(["title"]), metadataOffsetUnit: "UTF-16",
+        metadataLengths: { title: completeTitle.length }, metadataAccess: { title: { artifactId: expect.any(Number), path: ["title"], offset: 0, limit: 1000 } } });
+      expect(observation.title.length).toBeLessThan(completeTitle.length);
+      expect(completeTitle.startsWith(observation.title)).toBe(true);
       tabId = observation.tabId;
       currentCursor = pages.append(observation);
       expect(currentCursor).toBeTruthy();
-      responses.unshift(consume);
-      return commandResponse("inspect_page", { tabId, cursor: currentCursor, budget: 3000 }, "refresh-page-0");
+      titleAccess = observation.metadataAccess.title; titleLength = observation.metadataLengths.title;
+      return readTitle();
     } catch (error) { problem = error; return done(); }
   };
   responses.push(delayedResponse(textResponse("REFRESH_MODEL_BEFORE"), 0, modelMayFinish), afterRefresh, textResponse("Refresh pagination"));
@@ -66,8 +100,8 @@ test("continues a bounded refresh snapshot in the same run", async () => {
       documents++;
       const rows = Array.from({ length: 160 }, (_, index) => `<p>Record ${index}: ${"content ".repeat(14)}</p>`).join("");
       const body = documents === 1 ? "<!doctype html><title>Before</title><main>Initial</main>"
-        : `<!doctype html><title>After</title><main>${rows}<p>REFRESH_PAGE_LAST_ITEM</p><p id="loaded">not loaded</p></main><img src="/refresh-pagination-held"><script>window.addEventListener('load', () => {document.querySelector('#loaded').textContent = 'REFRESH_PAGE_LOADED_MARKER'})</script>`;
-      await route.fulfill({ contentType: "text/html", body });
+        : `<!doctype html><title>${completeTitle}</title><main>${rows}<p>REFRESH_PAGE_LAST_ITEM</p><p id="loaded">not loaded</p></main><img src="/refresh-pagination-held"><script>window.addEventListener('load', () => {document.querySelector('#loaded').textContent = 'REFRESH_PAGE_LOADED_MARKER'})</script>`;
+      await route.fulfill({ contentType: "text/html; charset=utf-8", body });
     });
     await target.route("**/refresh-pagination-held", async (route) => { await loadMayFinish; await route.fulfill({ status: 204, body: "" }); });
     await target.goto(`${provider.origin}/refresh-pagination`);
@@ -87,6 +121,8 @@ test("continues a bounded refresh snapshot in the same run", async () => {
     await expect(opened.page.locator(".markdown-body").last()).toContainText("REFRESH_PAGINATION_DONE", { timeout: 90_000 });
     if (problem) throw problem;
     expect(pagesRead).toBeGreaterThan(1);
+    expect(titleReads).toBeGreaterThan(1);
+    expect(title).toBe(completeTitle);
     const events = await readEvents(opened.page);
     const refreshEvents = events.filter((event) => event.type === "conversation.message" && JSON.stringify(event).includes("<page-refresh>"));
     expect(refreshEvents).toHaveLength(1);

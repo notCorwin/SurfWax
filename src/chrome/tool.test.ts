@@ -6,7 +6,18 @@ import { parseLocatorTarget, ChromeExecutor } from "./executor";
 import { compactToolResult, createProgramTools, prepareToolMessages, repairProgramToolCall, PROGRAM_TOOL_REGISTRY, PROGRAM_TOOL_CONTEXT } from "./tool";
 import { callUserScript } from "./script-client";
 import { ToolScheduler } from "./tool-scheduler";
-import { SNAPSHOT_DELIVERY_COMMIT } from "./snapshot-wire";
+import { SNAPSHOT_DELIVERY_COMMIT, type SnapshotDeliveryLease } from "./snapshot-wire";
+
+function mockSnapshot(tabId: number, lines: string[] = [], cursor?: string, delivery: SnapshotDeliveryLease = { begin: vi.fn(() => true), finish: vi.fn(), cancel: vi.fn() }) {
+  const items = lines.map((line, index) => ({ id: `node-${index}`, line }));
+  const page = { observationId: "observation", tabId, documentId: 1, url: "https://example.test/", title: "Page",
+    viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "full", items, ...(cursor ? { nextCursor: cursor } : {}),
+    truncation: { truncated: Boolean(cursor), total: items.length + (cursor ? 1 : 0), returned: items.length, offset: 0, charOffset: 0,
+      nextOffset: items.length, nextCharOffset: 0, budget: 12000, used: new TextEncoder().encode(JSON.stringify(items)).byteLength,
+      ...(cursor ? { reason: "budget" } : {}), baselineComplete: !cursor } };
+  Object.defineProperty(page, SNAPSHOT_DELIVERY_COMMIT, { value: delivery });
+  return page;
+}
 
 describe("browser tools", () => {
   it("returns a budgeted inspection page inline with its continuation and fragments intact", async () => {
@@ -64,11 +75,36 @@ describe("browser tools", () => {
     expect(delivery.finish).not.toHaveBeenCalled();
   });
 
+  it("accepts metadata-free cursor pages, including empty retries, only for cursor calls", async () => {
+    const delivery = { begin: vi.fn(() => true), finish: vi.fn(), cancel: vi.fn() };
+    const { url: _url, title: _title, ...base } = mockSnapshot(4);
+    const page = { ...base, continuation: true, items: [], nextCursor: "observation:0:0",
+      truncation: { truncated: true, total: 1, returned: 0, offset: 0, charOffset: 0, nextOffset: 0, nextCharOffset: 0,
+        budget: 100, used: 2, requiredBudget: 150, reason: "budget", baselineComplete: false } };
+    Object.defineProperty(page, SNAPSHOT_DELIVERY_COMMIT, { value: delivery });
+    const executor = { inspect: vi.fn(async () => page) } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor) as Record<string, any>;
+    expect(await tools.inspect_page.execute({ cursor: "observation:0:0", budget: 100 }, { toolCallId: "cursor" }))
+      .toMatchObject({ continuation: true, items: [], nextCursor: "observation:0:0", truncation: { requiredBudget: 150 } });
+    expect(await tools.inspect_page.execute({}, { toolCallId: "first" }))
+      .toMatchObject({ ok: false, error: { code: "snapshot-delivery-invalid" } });
+    expect(delivery.begin).toHaveBeenCalledOnce();
+    expect(delivery.finish).toHaveBeenCalledOnce();
+  });
+
+  it("requires both title and URL on a first inspection page", async () => {
+    const { title: _title, ...page } = mockSnapshot(4);
+    const executor = { inspect: vi.fn(async () => page) } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor) as Record<string, any>;
+    expect(await tools.inspect_page.execute({}, { toolCallId: "first" }))
+      .toMatchObject({ ok: false, error: { code: "snapshot-delivery-invalid" } });
+  });
+
   it("attaches each action's snapshot before the next scheduled action, including failures", async () => {
     const order: string[] = [];
     const executor = {
       runProgram: vi.fn(async () => { order.push("action"); return { ok: order.length !== 1, error: { code: "failed" } }; }),
-      inspect: vi.fn(async () => { order.push("snapshot"); return { tabId: 4, items: [{ line: order.join(",") }], nextCursor: "next" }; }),
+      inspect: vi.fn(async () => { order.push("snapshot"); return mockSnapshot(4, [order.join(",")], "next"); }),
       pendingBackgroundJobs: () => [],
     } as unknown as ChromeExecutor;
     const scheduler = new ToolScheduler(PROGRAM_TOOL_REGISTRY.map(({ name }) => name));
@@ -79,6 +115,55 @@ describe("browser tools", () => {
     expect(first).toMatchObject({ ok: false, pageSnapshot: { tabId: 4, items: [{ line: "action,snapshot" }], nextCursor: "next" } });
     expect(second).toMatchObject({ ok: true, pageSnapshot: { items: [{ line: "action,snapshot,action,snapshot" }] } });
     expect(order).toEqual(["action", "snapshot", "action", "snapshot"]);
+  });
+
+  it("commits an automatic snapshot only after saving the completed action", async () => {
+    const order: string[] = [];
+    const delivery = { begin: vi.fn(() => { order.push("begin"); return true; }), finish: vi.fn(() => { order.push("finish"); }), cancel: vi.fn() };
+    const page = mockSnapshot(4, ["- button Save"], "next", delivery);
+    const executor = { runProgram: vi.fn(async () => ({ ok: true, result: "saved" })), inspect: vi.fn(async () => page), pendingBackgroundJobs: () => [] } as unknown as ChromeExecutor;
+    const logger = { append: vi.fn(async (event: any) => { if (event.type === "tool.finished") { order.push("logged"); expect(event.output.pageSnapshot).toMatchObject({ observationId: "observation" }); } return { id: 1 }; }) } as unknown as EventLogger;
+    const tools = createProgramTools(executor, { logger }) as Record<string, any>;
+    expect(await tools.click.execute({ target: { ref: "one" }, tabId: 4 }, { toolCallId: "click" })).toMatchObject({ ok: true, result: "saved", pageSnapshot: { observationId: "observation", nextCursor: "next" } });
+    expect(order).toEqual(["begin", "logged", "finish"]);
+    expect(delivery.cancel).not.toHaveBeenCalled();
+  });
+
+  it("keeps the action result when the automatic snapshot becomes stale before delivery", async () => {
+    const delivery = { begin: vi.fn(() => false), finish: vi.fn(), cancel: vi.fn() };
+    const page = mockSnapshot(4, ["- button Save"], "next", delivery);
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: testEventStore(events) });
+    const executor = { runProgram: vi.fn(async () => ({ ok: true, result: "saved" })), inspect: vi.fn(async () => page), pendingBackgroundJobs: () => [] } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor, { logger, conversationId: "thread" }) as Record<string, any>;
+    const result = await tools.click.execute({ target: { ref: "one" }, tabId: 4 }, { toolCallId: "click" });
+    expect(result).toMatchObject({ ok: true, result: "saved", pageSnapshotStatus: { state: "unavailable", error: { code: "stale-observation" } } });
+    expect(result).not.toHaveProperty("pageSnapshot");
+    expect(events.some((event) => event.type === "tool.finished")).toBe(true);
+    expect(events.some((event) => event.type === "tool.failed")).toBe(false);
+    expect(delivery.finish).not.toHaveBeenCalled();
+    expect(delivery.cancel).toHaveBeenCalledOnce();
+  });
+
+  it("cancels an automatic snapshot lease when the action's terminal log cannot be saved", async () => {
+    const delivery = { begin: vi.fn(() => true), finish: vi.fn(), cancel: vi.fn() };
+    const page = mockSnapshot(4, ["- button Save"], "next", delivery);
+    const executor = { runProgram: vi.fn(async () => ({ ok: true, result: "saved" })), inspect: vi.fn(async () => page), pendingBackgroundJobs: () => [] } as unknown as ChromeExecutor;
+    const logger = { append: vi.fn(async (event: any) => event.type === "tool.finished" ? undefined : { id: 1 }) } as unknown as EventLogger;
+    const tools = createProgramTools(executor, { logger }) as Record<string, any>;
+    await expect(tools.click.execute({ target: { ref: "one" }, tabId: 4 }, { toolCallId: "click" })).rejects.toThrow();
+    expect(executor.runProgram).toHaveBeenCalledOnce();
+    expect(delivery.begin).toHaveBeenCalledOnce();
+    expect(delivery.finish).not.toHaveBeenCalled();
+    expect(delivery.cancel).toHaveBeenCalledOnce();
+  });
+
+  it.each([{ items: [] }, { ...mockSnapshot(4) }])("reports an invalid automatic snapshot without changing a successful action", async (snapshot) => {
+    const executor = { runProgram: vi.fn(async () => ({ ok: true, result: "saved" })), inspect: vi.fn(async () => snapshot), pendingBackgroundJobs: () => [] } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor) as Record<string, any>;
+    const result = await tools.click.execute({ target: { ref: "one" } }, { toolCallId: "click" });
+    expect(result).toMatchObject({ ok: true, result: "saved", pageSnapshotStatus: { state: "unavailable", error: { code: "snapshot-delivery-invalid" } } });
+    expect(result).not.toHaveProperty("pageSnapshot");
   });
 
   it("reports unavailable snapshots without changing the action result and waits for terminal jobs", async () => {
@@ -99,22 +184,22 @@ describe("browser tools", () => {
 
   it("retains a screenshot and a large paginated snapshot for the selected tab", async () => {
     const screenshot = { mediaType: "image/png", data: "aW1hZ2U=" };
-    const inspect = vi.fn(async () => ({ tabId: 8, items: [{ line: "x".repeat(9000) }], nextCursor: "cursor" }));
+    const inspect = vi.fn(async () => mockSnapshot(8, ["x".repeat(9000)], "cursor"));
     const executor = { runProgram: vi.fn(async () => ({ ok: true, result: { screenshot } })), inspect, pendingBackgroundJobs: () => [] } as unknown as ChromeExecutor;
     const tools = createProgramTools(executor, { visualEnabled: async () => true }) as Record<string, any>;
     const output = await tools.take_screenshot.execute({ tabId: 8 }, { toolCallId: "screen" });
     expect(output).toMatchObject({ result: { screenshot }, pageSnapshot: { tabId: 8, nextCursor: "cursor", items: [{ line: "x".repeat(9000) }] } });
-    expect(inspect).toHaveBeenCalledWith({ tabId: 8 }, undefined, expect.any(Object));
+    expect(inspect).toHaveBeenCalledWith({ tabId: 8, wire: { maxBytes: 16384, evidenceId: "screen" } }, undefined, expect.any(Object));
     const prepared = await prepareToolMessages([{ role: "tool", content: [{ type: "tool-result", output: { type: "json", value: output } }] }], 1);
     expect(prepared.at(-1).content).toContainEqual(expect.objectContaining({ type: "file", mediaType: "image/png" }));
   });
 
   it("keeps returned search refs alive when capturing the following snapshot", async () => {
-    const inspect = vi.fn(async () => ({ tabId: 8, items: [] }));
+    const inspect = vi.fn(async () => mockSnapshot(8));
     const executor = { findElements: vi.fn(async () => ({ tabId: 8, elements: [{ ref: "t8s1d0e1" }, { status: "changed" }] })), inspect, pendingBackgroundJobs: () => [] } as unknown as ChromeExecutor;
     const tools = createProgramTools(executor) as Record<string, any>;
     await tools.find_elements.execute({ tabId: 8, target: { by: "role", value: "button" } }, { toolCallId: "find" });
-    expect(inspect).toHaveBeenCalledWith({ tabId: 8, recentRefs: ["t8s1d0e1"] }, undefined, expect.any(Object));
+    expect(inspect).toHaveBeenCalledWith({ tabId: 8, recentRefs: ["t8s1d0e1"], wire: { maxBytes: 16384, evidenceId: "find" } }, undefined, expect.any(Object));
   });
   it.each(["screenshot", "pdf", "save"])("retains a %s artifact when the abort race settles before its underlying work", async (operation) => {
     const events: LogEvent[] = [];

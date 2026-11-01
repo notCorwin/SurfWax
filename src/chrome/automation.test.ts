@@ -2075,6 +2075,47 @@ describe("AutomationRuntime", () => {
     await runtime.abortSessions();
   });
 
+  it("continues a frozen refresh with oversized metadata without repeating or losing it", async () => {
+    const metadata = Array.from({ length: 8 }, (_, index) => ({ role: "button", name: `row-${index}-${"海😀".repeat(90)}`, tag: "button" }));
+    const { runtime, command, calls } = harness(metadata);
+    const original = command.getMockImplementation()!;
+    const title = "标题🌊".repeat(5000), url = `https://example.test/${"x".repeat(20_000)}`;
+    command.mockImplementation(async (debuggee, method, params) => {
+      if (method === "Runtime.evaluate" && params?.expression?.includes("({url:")) return { result: { value: { url, title } } };
+      return original(debuggee, method, params);
+    });
+    const page = await runtime.createPage(3);
+    const first = await page.inspect({ budget: 700, deferDelivery: true }) as any;
+    expect(first).toMatchObject({ url, title, nextCursor: expect.any(String) });
+    deliver(first);
+    const wire = { maxBytes: 16_384, evidenceId: "call" };
+    const retry = await page.inspect({ cursor: `${first.observationId}:0:0`, budget: 700, wire }) as any;
+    expect(retry).toMatchObject({ continuation: true, observationId: first.observationId });
+    expect(retry).not.toHaveProperty("url");
+    expect(retry).not.toHaveProperty("title");
+    deliver(retry);
+    const reconstructed = new Map<string, string>();
+    for (const item of first.items) reconstructed.set(item.id, item.line);
+    let cursor = first.nextCursor, last: any, pages = 0;
+    do {
+      last = await page.inspect({ cursor, budget: 700, wire }) as any;
+      expect(last).toMatchObject({ continuation: true, observationId: first.observationId });
+      expect(last).not.toHaveProperty("url");
+      expect(last).not.toHaveProperty("title");
+      expect(new TextEncoder().encode(JSON.stringify({ ...last, evidenceId: wire.evidenceId })).byteLength).toBeLessThanOrEqual(wire.maxBytes);
+      for (const item of last.items) reconstructed.set(item.id, (reconstructed.get(item.id) ?? "") + item.line);
+      deliver(last);
+      cursor = last.nextCursor;
+      expect(++pages).toBeLessThan(50);
+    } while (cursor);
+    expect(last.truncation.baselineComplete).toBe(true);
+    expect([...reconstructed.values()].join("\n")).toContain("row-7-");
+    expect(calls.filter(({ method }) => method === "Accessibility.getFullAXTree")).toHaveLength(1);
+    await expect(page.inspect({ since: first.observationId, wire })).rejects.toMatchObject({ code: "snapshot-unavailable", detail: { reason: "wire-budget-insufficient" } });
+    expect(await page.inspect({ since: first.observationId })).toMatchObject({ mode: "delta", url, title, items: [] });
+    await runtime.abortSessions();
+  });
+
   it("commits a wire baseline only after delivery, with an idempotent non-serialized callback", async () => {
     const { runtime } = harness([{ role: "button", name: "One", tag: "button" }]);
     const page = await runtime.createPage(3);

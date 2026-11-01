@@ -8,10 +8,10 @@ import { ATOMIC_TOOL_REGISTRY } from "./atomic-tools";
 import type { ToolScheduler } from "./tool-scheduler";
 import { jobResultReferenceInfo } from "./job-result";
 import { elementTargetSchema } from "./element-target";
-import { SNAPSHOT_DELIVERY_COMMIT } from "./snapshot-wire";
+import { SNAPSHOT_DELIVERY_COMMIT, type SnapshotDeliveryLease } from "./snapshot-wire";
 
 const timeoutMs = z.number().int().positive().optional();
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v30";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v31";
 export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetSchema]).optional().describe("Restrict inspection to one matching element. Prefer a structured target. A plain string is a CSS selector, except recognized element refs and supported locator expressions such as getByRole('button', {name:'Save'})."),
   fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional().describe("Fields to include; defaults to text, state, and ref. Include actions explicitly for role-based action hints."), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
@@ -37,7 +37,7 @@ type ToolDefinition = { name: string; inputSchema: z.ZodType<any>; summary: stri
 // In particular they must remain usable while a background job holds the queue.
 const NO_PAGE_CAPTURE = new Set(["inspect_page", "read_artifact", "list_jobs", "subscribe_event", "wait_event", "unsubscribe_event", "list_downloads"]);
 export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
-  { name: "inspect_page", inputSchema: inspectInputSchema, summary: "Read the semantic page and element refs", description: "Inspect semantic items with id, line and optional ref. Item ids identify snapshot rows, not frame handles. An iframe's frameRef in its line is the handle to pass as target.frame.ref; a frame-document marker with that same handle introduces the child document's items. Frame handles expire when the frame tree changes. Waits for a fully loaded page for up to 15 seconds by default; set timeoutMs to allow more time. For since, first reconstruct all primary pages; baselineComplete means the server generated the pages, not that you read them. Remove removed ids and upsert added, updated or moved items immediately after their after id (null means first). Reassemble split items using their UTF-16 fragment offsets before applying changes. Ref use checks visible role/name, but a DOM node may be reused for different business data with the same name; verify relevant row and page state before acting. Older refs may expire after later independent observations or searches; an affected continuation returns stale-observation. Default fields are text, state and ref; include actions explicitly for per-row hints. These hints are derived from role, not proof an action will succeed: textbox/searchbox/spinbutton use click, fill, press_key, type_text; checkbox/radio/switch use click, set_checked; combobox/listbox use click, select_option; rows marked editable use click, fill, press_key, type_text; other rows with a ref use click, double_click, hover. region and fields narrow results. budget limits UTF-8 JSON items bytes; when lookahead is present it also bounds JSON {items,lookahead}, measured by truncation.withLookahead. limit also bounds the source row window eligible for lookahead. lookahead contains sparse, non-authoritative later rows from the same frozen snapshot, not part of items or a complete baseline; ancestor context may be absent and no element refs are provided. Use a locator or continue the snapshot. The complete response is capped at 16 KiB and may use less than the requested budget. Continue a frozen snapshot by passing nextCursor as cursor, with only tabId, budget, limit or timeoutMs if needed. Use take_screenshot for visual input." },
+  { name: "inspect_page", inputSchema: inspectInputSchema, summary: "Read the semantic page and element refs", description: "Inspect semantic items with id, line and optional ref. Item ids identify snapshot rows, not frame handles. An iframe's frameRef in its line is the handle to pass as target.frame.ref; a frame-document marker with that same handle introduces the child document's items. Frame handles expire when the frame tree changes. Waits for a fully loaded page for up to 15 seconds by default; set timeoutMs to allow more time. For since, first reconstruct all primary pages; baselineComplete means the server generated the pages, not that you read them. Remove removed ids and upsert added, updated or moved items immediately after their after id (null means first). Reassemble split items using their UTF-16 fragment offsets before applying changes. Ref use checks visible role/name, but a DOM node may be reused for different business data with the same name; verify relevant row and page state before acting. Older refs may expire after later independent observations or searches; an affected continuation returns stale-observation. Default fields are text, state and ref; include actions explicitly for per-row hints. These hints are derived from role, not proof an action will succeed: textbox/searchbox/spinbutton use click, fill, press_key, type_text; checkbox/radio/switch use click, set_checked; combobox/listbox use click, select_option; rows marked editable use click, fill, press_key, type_text; other rows with a ref use click, double_click, hover. region and fields narrow results. budget limits UTF-8 JSON items bytes; when lookahead is present it also bounds JSON {items,lookahead}, measured by truncation.withLookahead. limit also bounds the source row window eligible for lookahead. lookahead contains sparse, non-authoritative later rows from the same frozen snapshot, not part of items or a complete baseline; ancestor context may be absent and no element refs are provided. Use a locator or continue the snapshot. The complete response is capped at 16 KiB and may use less than the requested budget. Continue a frozen snapshot by passing nextCursor as cursor, with only tabId, budget, limit or timeoutMs if needed. Continuation pages omit url and title; use the first page or refresh metadataAccess. Use take_screenshot for visual input." },
   { name: "find_elements", inputSchema: findElementsInputSchema, summary: "Find candidates and return element refs", description: "Find matching elements with refs for actions. Ref use checks visible role/name but cannot prove business identity for reused nodes; verify relevant row and page state before acting. Older refs may expire after later independent observations or searches. limit defaults to 25, max 100; repeat target and tab with nextCursor as cursor to page a fixed node list. Candidates may report detached, changed or identity-unknown without a ref. Details may change between pages; cursors expire on run or document changes or eviction." },
   { name: "list_frames", inputSchema: listFramesInputSchema, summary: "List frames and their document-bound refs", description: "List the selected tab's frame tree with refs usable as target.frame.ref. limit defaults to 25, max 100; pass nextCursor as cursor to continue a fixed snapshot. References and cursors expire on document or frame changes." },
   ...ATOMIC_TOOL_REGISTRY,
@@ -105,7 +105,7 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
         let executing = false;
         let observedTerminalJob: string | undefined;
         let resultPending = false;
-        let inspectionDelivery: { begin(): boolean; finish(): void; cancel(): void } | undefined;
+        let inspectionDelivery: SnapshotDeliveryLease | undefined;
         let openedTabId: number | undefined;
         let recentRefs: string[] = [];
         try {
@@ -140,17 +140,8 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
           const envelope = failure ? { ...result as object, ...(artifact ? { artifact } : {}), error: recoveryError(failure, definition.name) } : result;
           if (definition.name === "inspect_page" && envelope && typeof envelope === "object"
             && Object.hasOwn(envelope, "observationId") && Object.hasOwn(envelope, "items")) {
-            if (!inspectionPageSchema.safeParse(envelope).success)
-              throw new Error("AutomationError[snapshot-delivery-invalid]: Invalid snapshot page cannot be delivered safely");
-            const serialized = JSON.stringify({ ...envelope as Record<string, unknown>, evidenceId: identity?.toolCallId ?? toolCallId });
-            if (new TextEncoder().encode(serialized).byteLength > INSPECTION_RESULT_BYTES)
-              throw new Error("AutomationError[snapshot-envelope-too-large]: Snapshot page cannot be delivered inline within the response limit");
+            inspectionDelivery = inspectionPageDelivery(result, identity?.toolCallId ?? toolCallId, value.cursor !== undefined);
             output = envelope;
-            const delivery = (result as { [SNAPSHOT_DELIVERY_COMMIT]?: unknown })[SNAPSHOT_DELIVERY_COMMIT];
-            if (!delivery || typeof delivery !== "object" || !("begin" in delivery) || typeof delivery.begin !== "function"
-              || !("finish" in delivery) || typeof delivery.finish !== "function" || !("cancel" in delivery) || typeof delivery.cancel !== "function")
-              throw new Error("AutomationError[snapshot-delivery-invalid]: Snapshot delivery lease is missing");
-            inspectionDelivery = delivery as typeof inspectionDelivery;
           } else if (jobRef) {
             const { result: _result, ...rest } = envelope as Record<string, unknown>;
             const compact = normalizationExceedsBudget(rest)
@@ -198,7 +189,10 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
               // close_tab invalidates its argument; switch_tab changes the binding.
               const tabId = openedTabId ?? (definition.name !== "close_tab" && typeof value.tabId === "number" ? value.tabId : undefined);
               const context = { conversationId: options.conversationId, toolCallId, logIdentity: identity, runSignal: options.runSignal, visualEnabled: false };
-              pageEvidence = { pageSnapshot: await executor.inspect({ ...(recentRefs.length ? { recentRefs } : {}), ...(tabId === undefined ? {} : { tabId }) }, abortSignal, context) };
+              const pageSnapshot = await executor.inspect({ ...(recentRefs.length ? { recentRefs } : {}), ...(tabId === undefined ? {} : { tabId }),
+                wire: { maxBytes: INSPECTION_RESULT_BYTES, evidenceId: identity?.toolCallId ?? toolCallId } }, abortSignal, context);
+              inspectionDelivery = inspectionPageDelivery(pageSnapshot, identity?.toolCallId ?? toolCallId, false);
+              pageEvidence = { pageSnapshot };
             } catch (error) {
               pageEvidence = { pageSnapshotStatus: { state: "unavailable", error: toolFailure(error).error } };
             }
@@ -206,9 +200,18 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
           output = output && typeof output === "object" && !Array.isArray(output)
             ? { ...output, ...pageEvidence } : { result: output, ...pageEvidence };
         }
-        if (inspectionDelivery && !inspectionDelivery.begin()) {
-          inspectionDelivery = undefined;
-          output = await failureFor(new Error("AutomationError[stale-observation]: Snapshot changed before delivery"), true);
+        if (inspectionDelivery) {
+          try {
+            if (!inspectionDelivery.begin()) throw new Error("AutomationError[stale-observation]: Snapshot changed before delivery");
+          } catch (error) {
+            inspectionDelivery.cancel();
+            inspectionDelivery = undefined;
+            if (definition.name === "inspect_page") output = await failureFor(error, true);
+            else {
+              const { pageSnapshot: _pageSnapshot, ...rest } = output as Record<string, unknown>;
+              output = { ...rest, pageSnapshotStatus: { state: "unavailable", error: toolFailure(error).error } };
+            }
+          }
         }
         let saved: unknown;
         try {
@@ -238,7 +241,7 @@ const INSPECTION_RESULT_BYTES = 16 * 1024;
 const inspectionInteger = z.number().int().nonnegative();
 const inspectionPageSchema = z.object({
   observationId: z.string(), tabId: inspectionInteger, documentId: inspectionInteger,
-  url: z.string(), title: z.string(),
+  url: z.string().optional(), title: z.string().optional(), continuation: z.literal(true).optional(),
   viewport: z.object({ x: z.number(), y: z.number(), width: z.number(), height: z.number(), scale: z.number() }).strict(),
   mode: z.enum(["full", "delta"]), reset: z.literal("previous-output-truncated").optional(),
   items: z.array(z.object({ id: z.string(), line: z.string(), ref: z.string().optional(),
@@ -254,7 +257,9 @@ const inspectionPageSchema = z.object({
     budget: inspectionInteger, used: inspectionInteger, withLookahead: inspectionInteger.optional(), reason: z.enum(["budget", "slice"]).optional(),
     baselineComplete: z.boolean(), requiredBudget: inspectionInteger.optional(),
   }).strict(),
-}).strict().refine((page) => page.truncation.returned === page.items.length).refine((page) => {
+}).strict().refine((page) => page.continuation === true
+  ? page.url === undefined && page.title === undefined : typeof page.url === "string" && typeof page.title === "string")
+  .refine((page) => page.truncation.returned === page.items.length).refine((page) => {
   if (!page.lookahead) return page.truncation.withLookahead === undefined;
   const size = new TextEncoder().encode(JSON.stringify({ items: page.items, lookahead: page.lookahead })).byteLength;
   return page.mode === "full" && page.truncation.truncated && Boolean(page.nextCursor)
@@ -262,6 +267,21 @@ const inspectionPageSchema = z.object({
     && page.lookahead.items.every((item, index, all) => item.index > page.truncation.nextOffset
       && (index === 0 || item.index > all[index - 1]!.index) && item.line.length <= 512);
 });
+
+/** Validate the complete inline snapshot and retain its internal delivery lease. */
+function inspectionPageDelivery(value: unknown, evidenceId: string, continuation: boolean): SnapshotDeliveryLease {
+  const parsed = inspectionPageSchema.safeParse(value);
+  if (!parsed.success || (parsed.data.continuation === true) !== continuation)
+    throw new Error("AutomationError[snapshot-delivery-invalid]: Invalid snapshot page cannot be delivered safely");
+  const serialized = JSON.stringify({ ...value as Record<string, unknown>, evidenceId });
+  if (new TextEncoder().encode(serialized).byteLength > INSPECTION_RESULT_BYTES)
+    throw new Error("AutomationError[snapshot-envelope-too-large]: Snapshot page cannot be delivered inline within the response limit");
+  const delivery = (value as { [SNAPSHOT_DELIVERY_COMMIT]?: unknown })[SNAPSHOT_DELIVERY_COMMIT];
+  if (!delivery || typeof delivery !== "object" || !("begin" in delivery) || typeof delivery.begin !== "function"
+    || !("finish" in delivery) || typeof delivery.finish !== "function" || !("cancel" in delivery) || typeof delivery.cancel !== "function")
+    throw new Error("AutomationError[snapshot-delivery-invalid]: Snapshot delivery lease is missing");
+  return delivery as SnapshotDeliveryLease;
+}
 
 type VisualEvidence = { screenshot: Record<string, unknown>; context: Record<string, unknown>; path: Array<string | number> };
 

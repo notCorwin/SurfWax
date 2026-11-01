@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { EventLogger, type ConversationMessage } from "../logging";
+import { testEventStore } from "../test-event-store";
 import { observePageRefreshes } from "./refresh-observer";
+import { SNAPSHOT_DELIVERY_COMMIT } from "./snapshot-wire";
+import { ChromeExecutor } from "./executor";
+import { createProgramTools } from "./tool";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -7,7 +12,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function harness(inspect = vi.fn<() => Promise<unknown>>(async () => ({ snapshot: "loaded page" }))) {
+function harness(inspect = vi.fn<() => Promise<unknown>>(async () => ({ snapshot: "loaded page" })), logger = new EventLogger({ store: testEventStore() })) {
   let updated: ((tabId: number, change: chrome.tabs.OnUpdatedInfo, tab: chrome.tabs.Tab) => void) | undefined;
   let removed: ((tabId: number, info: chrome.tabs.OnRemovedInfo) => void) | undefined;
   const onUpdated = {
@@ -20,11 +25,17 @@ function harness(inspect = vi.fn<() => Promise<unknown>>(async () => ({ snapshot
   };
   vi.stubGlobal("chrome", { tabs: { onUpdated, onRemoved } });
   const unsubscribe = vi.fn();
-  const executor = { boundTabId: 1, inspect, onBoundTabChanged: vi.fn(() => unsubscribe) };
+  const inspected = vi.fn(async (...args: any[]) => {
+    const value = await (inspect as (...args: any[]) => Promise<unknown>)(...args);
+    if (value && typeof value === "object" && !Object.hasOwn(value, SNAPSHOT_DELIVERY_COMMIT))
+      Object.defineProperty(value, SNAPSHOT_DELIVERY_COMMIT, { value: { begin: () => true, finish: () => {}, cancel: () => {} } });
+    return value;
+  });
+  const executor = { boundTabId: 1, inspect: inspected, onBoundTabChanged: vi.fn(() => unsubscribe) };
   const controller = new AbortController();
-  const observer = observePageRefreshes(executor as never, "conversation", controller.signal, "run");
+  const observer = observePageRefreshes(executor as never, "conversation", controller.signal, "run", logger);
   return {
-    observer, controller, inspect, onUpdated, onRemoved, unsubscribe,
+    observer, controller, inspect: inspected, logger, onUpdated, onRemoved, unsubscribe,
     update: (status: "loading" | "complete", tabId = 1) => updated?.(tabId, { status }, {} as chrome.tabs.Tab),
   };
 }
@@ -37,7 +48,7 @@ describe("observePageRefreshes", () => {
     h.update("loading");
     expect(h.inspect).not.toHaveBeenCalled();
     h.update("complete");
-    expect(h.inspect).toHaveBeenCalledWith({ tabId: 1, budget: 12_000 }, h.controller.signal,
+    expect(h.inspect).toHaveBeenCalledWith({ tabId: 1, budget: 12_000, deferDelivery: true }, h.controller.signal,
       { conversationId: "conversation", runId: "run", runSignal: h.controller.signal });
     const [message] = await h.observer.drain();
     expect(message).toMatchObject({ role: "user", metadata: { custom: { pageRefresh: true } }, parts: [
@@ -46,9 +57,10 @@ describe("observePageRefreshes", () => {
     h.observer.dispose();
   });
 
-  it("preserves the frozen snapshot cursor and explicitly bounds oversized metadata", async () => {
-    const h = harness(vi.fn(async () => ({ tabId: 1, observationId: "observation", url: `https://example.com/${"海".repeat(2000)}`,
-      title: "😀".repeat(1000), mode: "full", items: [{ id: "a", line: "visible" }], nextCursor: "cursor:1:0",
+  it("preserves the cursor and makes bounded Unicode metadata exactly recoverable", async () => {
+    const url = `https://example.com/${"海😀".repeat(2000)}`, title = "😀海".repeat(1000);
+    const h = harness(vi.fn(async () => ({ tabId: 1, observationId: "observation", url,
+      title, mode: "full", items: [{ id: "a", line: "visible" }], nextCursor: "cursor:1:0",
       lookahead: { nonAuthoritative: true, items: [{ index: 2, id: "c", line: "later", ref: "ref-c" }] },
       truncation: { truncated: true, budget: 12_000, used: 100 } })));
     h.update("loading");
@@ -66,6 +78,122 @@ describe("observePageRefreshes", () => {
     expect(new TextEncoder().encode(observation.url).length).toBeLessThanOrEqual(2048);
     expect(new TextEncoder().encode(observation.title).length).toBeLessThanOrEqual(2048);
     expect(observation.title).not.toMatch(/[\uD800-\uDBFF]$/);
+    expect(observation.metadataLengths).toEqual({ url: url.length, title: title.length });
+    expect(observation.metadataOffsetUnit).toBe("UTF-16");
+    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger: h.logger });
+    const tools = createProgramTools(executor, { logger: h.logger, conversationId: "conversation" }) as Record<string, any>;
+    let readId = 0;
+    for (const [field, original] of Object.entries({ url, title })) {
+      const access = observation.metadataAccess[field];
+      expect(access).toMatchObject({ artifactId: expect.any(Number), path: [field], offset: 0, limit: 1000 });
+      let restored = "";
+      for (let offset = 0; offset < original.length; offset += access.limit) {
+        const output = await tools.read_artifact.execute({ ...access, offset }, { toolCallId: `read-${++readId}` });
+        const roundtrip = JSON.parse(JSON.stringify(output));
+        expect(roundtrip).toMatchObject({ ok: true, result: expect.any(String) });
+        restored += roundtrip.result;
+      }
+      expect(restored).toBe(original);
+      await expect(h.logger.result(access.artifactId, { path: access.path }, "different-conversation")).rejects.toThrow();
+    }
+    executor.dispose();
+    h.observer.dispose();
+  });
+
+  it("commits only after the matching refresh is durably written in the same conversation and run", async () => {
+    const lease = { begin: vi.fn(() => true), finish: vi.fn(), cancel: vi.fn() };
+    const page = { tabId: 1, observationId: "obs", items: [], truncation: { baselineComplete: true } };
+    Object.defineProperty(page, SNAPSHOT_DELIVERY_COMMIT, { value: lease });
+    const h = harness(vi.fn(async () => page));
+    h.update("loading"); h.update("complete");
+    const [message] = await h.observer.drain();
+    expect(lease.begin).toHaveBeenCalledOnce();
+    expect(lease.finish).not.toHaveBeenCalled();
+    await h.logger.appendMessage("other", message as ConversationMessage, { runId: "run" });
+    await h.logger.appendMessage("conversation", message as ConversationMessage, { runId: "other" });
+    const forged = { ...message!, parts: [{ type: "text", text: "different" }] };
+    await h.logger.appendMessage("conversation", forged as ConversationMessage, { runId: "run" });
+    expect(lease.finish).not.toHaveBeenCalled();
+    await h.logger.appendMessage("conversation", message as ConversationMessage, { runId: "run" });
+    expect(lease.finish).toHaveBeenCalledOnce();
+    h.observer.dispose();
+    expect(lease.cancel).not.toHaveBeenCalled();
+  });
+
+  it.each(["dispose", "abort"] as const)("cancels an unpersisted refresh on %s", async (action) => {
+    const lease = { begin: vi.fn(() => true), finish: vi.fn(), cancel: vi.fn() };
+    const page = { tabId: 1, observationId: "obs", items: [] };
+    Object.defineProperty(page, SNAPSHOT_DELIVERY_COMMIT, { value: lease });
+    const h = harness(vi.fn(async () => page));
+    h.update("loading"); h.update("complete");
+    const [message] = await h.observer.drain();
+    if (action === "abort") h.controller.abort(); else h.observer.dispose();
+    expect(lease.cancel).toHaveBeenCalledOnce();
+    await h.logger.appendMessage("conversation", message as ConversationMessage, { runId: "run" });
+    expect(lease.finish).not.toHaveBeenCalled();
+    h.observer.dispose();
+  });
+
+  it("does not commit a refresh to the baseline when navigation precedes persistence", async () => {
+    const lease = { begin: vi.fn(() => true), finish: vi.fn(), cancel: vi.fn() };
+    const page = { tabId: 1, observationId: "obs", items: [] };
+    Object.defineProperty(page, SNAPSHOT_DELIVERY_COMMIT, { value: lease });
+    const h = harness(vi.fn(async () => page));
+    h.update("loading"); h.update("complete");
+    const [message] = await h.observer.drain();
+    h.update("loading");
+    await h.logger.appendMessage("conversation", message as ConversationMessage, { runId: "run" });
+    // The transport already owns this message after drain(): its historical
+    // content can still be persisted even though it no longer describes the
+    // current document. The lease must not certify it as a usable baseline.
+    expect(await h.logger.messages("conversation")).toContainEqual(message);
+    expect(lease.finish).not.toHaveBeenCalled();
+    expect(lease.cancel).toHaveBeenCalledOnce();
+    h.observer.dispose();
+  });
+
+  it("does not deliver a snapshot if its complete metadata could not be stored", async () => {
+    const logger = new EventLogger({ store: testEventStore() });
+    vi.spyOn(logger, "append").mockResolvedValueOnce(undefined);
+    const lease = { begin: vi.fn(() => true), finish: vi.fn(), cancel: vi.fn() };
+    const page = { tabId: 1, title: "海".repeat(2000), items: [{ id: "x", line: "secret-free page" }] };
+    Object.defineProperty(page, SNAPSHOT_DELIVERY_COMMIT, { value: lease });
+    const h = harness(vi.fn(async () => page), logger);
+    h.update("loading"); h.update("complete");
+    const [message] = await h.observer.drain();
+    expect(JSON.stringify(message)).toContain("Could not save the complete page metadata");
+    expect(JSON.stringify(message)).not.toContain("secret-free page");
+    expect(lease.begin).not.toHaveBeenCalled();
+    expect(lease.cancel).toHaveBeenCalledOnce();
+    h.observer.dispose();
+  });
+
+  it("keeps a long unavailable diagnostic recoverable without an unbounded refresh message", async () => {
+    const diagnostic = "ERROR_" + "海😀".repeat(1600);
+    const h = harness(vi.fn(async () => { throw new Error(diagnostic); }));
+    h.update("loading"); h.update("complete");
+    const [message] = await h.observer.drain();
+    const text = message!.parts[0]!.type === "text" ? message!.parts[0]!.text : "";
+    const observation = JSON.parse(text.split("\n")[2]!);
+    expect(new TextEncoder().encode(observation.unavailable).length).toBeLessThanOrEqual(2048);
+    expect(observation.metadataLengths.unavailable).toBe(diagnostic.length);
+    const access = observation.metadataAccess.unavailable;
+    let restored = "";
+    for (let offset = 0; offset < diagnostic.length; offset += access.limit)
+      restored += await h.logger.result(access.artifactId, { path: access.path, offset, limit: access.limit }, "conversation");
+    expect(restored).toBe(diagnostic);
+    h.observer.dispose();
+  });
+
+  it("does not let a refresh listener throw after a durable message write", async () => {
+    const lease = { begin: vi.fn(() => true), finish: vi.fn(() => { throw new Error("unexpected"); }), cancel: vi.fn() };
+    const page = { tabId: 1, observationId: "obs", items: [] };
+    Object.defineProperty(page, SNAPSHOT_DELIVERY_COMMIT, { value: lease });
+    const h = harness(vi.fn(async () => page));
+    h.update("loading"); h.update("complete");
+    const [message] = await h.observer.drain();
+    await expect(h.logger.appendMessage("conversation", message as ConversationMessage, { runId: "run" })).resolves.toBeUndefined();
+    expect(lease.cancel).toHaveBeenCalledOnce();
     h.observer.dispose();
   });
 
