@@ -6,9 +6,9 @@
 
 | 工具 | 功能 |
 | --- | --- |
-| `inspect_page` | Inspect semantic items with id, line and optional ref. Waits for a fully loaded page for up to 15 seconds by default; set timeoutMs to allow more time. For since, remove removed ids and upsert added, updated or moved items immediately after their after id (null means first). Reassemble split items using their UTF-16 fragment offsets before applying changes. Ref use checks visible role/name, but a DOM node may be reused for different business data with the same name; verify relevant row and page state before acting. Older refs may expire after later independent observations or searches; an affected continuation returns stale-observation. region and fields narrow results. budget limits UTF-8 JSON items bytes. Continue a frozen snapshot with nextCursor using cursor, tabId, budget and limit only. Use take_screenshot for visual input. |
-| `find_elements` | Find matching elements with refs for actions. Ref use checks visible role/name but cannot prove business identity for reused nodes; verify relevant row and page state before acting. Older refs may expire after later independent observations or searches. limit defaults to 25, max 100; repeat target and tab with nextCursor to page a fixed node list. Candidates may report detached, changed or identity-unknown without a ref. Details may change between pages; cursors expire on run or document changes or eviction. |
-| `list_frames` | List the selected tab's frame tree with refs usable as target.frame.ref. limit defaults to 25, max 100; pass nextCursor to continue a fixed snapshot. References and cursors expire on document or frame changes. |
+| `inspect_page` | Inspect semantic items with id, line and optional ref. Waits for a fully loaded page for up to 15 seconds by default; set timeoutMs to allow more time. For since, remove removed ids and upsert added, updated or moved items immediately after their after id (null means first). Reassemble split items using their UTF-16 fragment offsets before applying changes. Ref use checks visible role/name, but a DOM node may be reused for different business data with the same name; verify relevant row and page state before acting. Older refs may expire after later independent observations or searches; an affected continuation returns stale-observation. region and fields narrow results. budget limits UTF-8 JSON items bytes. Continue a frozen snapshot by passing nextCursor as cursor, with only tabId, budget, limit or timeoutMs if needed. Use take_screenshot for visual input. |
+| `find_elements` | Find matching elements with refs for actions. Ref use checks visible role/name but cannot prove business identity for reused nodes; verify relevant row and page state before acting. Older refs may expire after later independent observations or searches. limit defaults to 25, max 100; repeat target and tab with nextCursor as cursor to page a fixed node list. Candidates may report detached, changed or identity-unknown without a ref. Details may change between pages; cursors expire on run or document changes or eviction. |
+| `list_frames` | List the selected tab's frame tree with refs usable as target.frame.ref. limit defaults to 25, max 100; pass nextCursor as cursor to continue a fixed snapshot. References and cursors expire on document or frame changes. |
 | `click` | Click exactly one matching element. Fails immediately if it is missing, blocked or otherwise not actionable. Defaults to a 5 second execution timeout. |
 | `double_click` | Double-click exactly one matching element. Fails immediately if it is missing, blocked or otherwise not actionable. Defaults to a 5 second execution timeout. |
 | `hover` | Move the pointer over exactly one matching element. |
@@ -25,7 +25,7 @@
 | `select_option` | Select option values or labels on a select element. An empty array clears selection; missing, disabled or ambiguous options fail without changing selection. |
 | `drag` | Drag one element to another using pointer events. |
 | `scroll` | Scroll the page by a horizontal and vertical delta at the current pointer. |
-| `move_pointer` | Move the pointer to coordinates bound to a current observation. |
+| `move_pointer` | Move the pointer using observationId from take_screenshot on the same tab. x and y are pixel coordinates relative to that screenshot's top-left, including for an element screenshot; the tool accounts for its scale and origin. A navigation or change in scroll position, viewport size or scale invalidates the observation; take a new screenshot. |
 | `press_pointer` | Press a pointer button at its current position. |
 | `release_pointer` | Release a pointer button at its current position. |
 | `read_text` | Read an element's visible text. |
@@ -34,7 +34,7 @@
 | `read_attribute` | Read an element's named attribute. |
 | `count_elements` | Count elements matching a target. |
 | `read_elements` | Read visible text and selected attributes from a page of matching elements. The list is live: elements can change between reads or pages. offset defaults to 0 and limit defaults to 25, maximum 100. |
-| `verify_state` | Verify one element condition immediately or wait for it to become true. textEquals compares the complete visible text exactly; textIncludes checks a substring. A timed-out wait returns verified=false and timedOut=true. |
+| `verify_state` | Specify exactly one of textIncludes, textEquals, valueEquals, or state. Checks immediately by default (timeoutMs=0); a positive timeoutMs waits for the condition. textEquals compares the complete visible text exactly; textIncludes checks a substring. A timed-out wait returns verified=false and timedOut=true. |
 | `wait_for_url` | Wait until the page URL contains the given text. |
 | `get_page_info` | Read the selected page's URL and title. |
 | `navigate` | Navigate the selected page to a URL. |
@@ -55,8 +55,8 @@
 | `save_artifact` | Export an internal artifact to a file. |
 | `list_scripts` | List persisted user scripts and their state. |
 | `read_script` | Read a persisted user script by ID. |
-| `create_script` | Create a persisted user script. |
-| `update_script` | Update a persisted user script. |
+| `create_script` | Create a persisted user script and immediately enable and register it. It will run on matching page loads according to its injection settings. |
+| `update_script` | Update one or more fields of a persisted user script while preserving its enabled state. Supplied fields, including arrays, replace their old values; omitted fields remain unchanged. For nullable optional settings, null removes the setting and restores Chrome's default. |
 | `set_script_enabled` | Enable or disable a persisted user script. |
 | `delete_script` | Delete a persisted user script. |
 | `list_requests` | List captured network requests and requestRef identifiers. limit defaults to 100, max 100. integrity describes captured history, not all network traffic; hasMore may be null when unknown. nextOffset paginates a live, possibly changing list. |
@@ -65,11 +65,11 @@
 | `send_request` | Send one HTTP request in the explicit page or extension context; contexts have different permissions and credentials. |
 | `list_downloads` | List download metadata across the Chrome profile. limit defaults to 100; 0 requests all records. hasMore reports truncation. The list is live and Chrome's exists field may be stale; metadata does not provide file bytes. |
 | `subscribe_event` | Subscribe to a tab's dialog, popup, download, filechooser, request, response or console events. Returns a run-scoped subscription and cursor. Filechooser events include a chooserId for upload_file. |
-| `wait_event` | Read events after a subscription cursor, or wait up to waitMs. Use nextCursor and hasMore. Overflow, truncation and closure are explicit; a closed tab's bounded unread events remain available until unsubscribe or run end. |
+| `wait_event` | Read events after a subscription cursor, or wait up to waitMs. Pass the returned nextCursor as after on the next call; hasMore indicates unread events. Overflow, truncation and closure are explicit; a closed tab's bounded unread events remain available until unsubscribe or run end. |
 | `unsubscribe_event` | Stop a subscription and release its resources. |
 | `handle_dialog` | Respond to a captured dialog by ID. prompt is allowed only when accepting a prompt dialog. An uncertain response must not be blindly retried. |
-| `list_jobs` | List jobs in creation order in a fixed snapshot. limit defaults to 25, max 100. If hasMore, pass nextCursor to continue; cursor expires on log maintenance. Job state is as of the first page; get_job reads current state. |
-| `get_job` | Read status and paginated receipts for a job. waitMs waits for receipts after the supplied canonical event cursor or for completion; unread receipts return immediately. A terminal event with outputAt:'result' or 'resultAccess' refers to that top-level field. A running job is not complete. |
+| `list_jobs` | List jobs in creation order in a fixed snapshot. limit defaults to 25, max 100. If hasMore, pass nextCursor as cursor to continue; cursor expires on log maintenance. Job state is as of the first page; get_job reads current state. |
+| `get_job` | Read status and paginated receipts for a job. Pass the previous response's nextCursor as after to read subsequent receipts. waitMs waits for receipts after the supplied canonical event cursor or for completion; unread receipts return immediately. A terminal event with outputAt:'result' or 'resultAccess' refers to that top-level field. A running job is not complete. |
 | `cancel_job` | Cancel a job in the current conversation. Cancellation does not roll back dispatched effects. |
 
 ## 多步工作

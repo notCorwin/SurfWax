@@ -119,6 +119,22 @@ describe("atomic browser tool programs", () => {
     expect(definition("verify_state").program({ target: { ref: "e1" }, state: "visible", timeoutMs: Number.MAX_SAFE_INTEGER }).timeoutMs).toBe(Number.MAX_SAFE_INTEGER);
   });
 
+  it("exposes the same exclusive verification conditions to the model", () => {
+    const schema = z.toJSONSchema(definition("verify_state").inputSchema, { target: "draft-7" }) as {
+      type: string; properties: Record<string, unknown>; required: string[]; oneOf: Array<{ required: string[] }>;
+    };
+    expect(schema.type).toBe("object");
+    expect(schema.properties).toHaveProperty("background");
+    expect(schema.required).toContain("target");
+    expect(schema.oneOf).toEqual(["textIncludes", "textEquals", "valueEquals", "state"].map((name) => ({ required: [name] })));
+    const inputSchema = definition("verify_state").inputSchema;
+    for (const input of [{ textIncludes: "" }, { textEquals: "" }, { valueEquals: "" }, { state: "visible" }]) {
+      expect(inputSchema.safeParse({ target: { ref: "e1" }, background: true, ...input }).success).toBe(true);
+    }
+    expect(inputSchema.safeParse({ target: { ref: "e1" } }).success).toBe(false);
+    expect(inputSchema.safeParse({ target: { ref: "e1" }, textEquals: "x", state: "visible" }).success).toBe(false);
+  });
+
   it("uploads only the bytes of the requested artifact and rejects unavailable content before dispatch", async () => {
     const setInputFiles = vi.fn(async () => "uploaded");
     const page = { ref: () => ({ setInputFiles }) };
