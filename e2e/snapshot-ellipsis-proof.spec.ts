@@ -15,7 +15,7 @@ test("exposes a proven painted ellipsis prefix and keeps its action reference", 
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/target`);
     await target.evaluate(() => {
-      document.body.innerHTML = '<button id="queue" aria-label="UNPAINTED_ACCESSIBLE_NAME" style="display:block;width:110px;height:25px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font:13.3333px Arial">Next TASK-746F9DB6E6FB</button>';
+      document.body.innerHTML = '<ul style="list-style:none"><li><button id="queue" aria-label="UNPAINTED_ACCESSIBLE_NAME" style="display:block;width:110px;height:25px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font:13.3333px Arial">Next TASK-746F9DB6E6FB</button></li></ul>';
       document.querySelector("button")!.addEventListener("click", () => { document.body.dataset.clicked = "yes"; });
     });
     const button = target.locator("#queue"), before = await button.screenshot();

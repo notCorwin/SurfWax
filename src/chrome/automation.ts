@@ -16,6 +16,7 @@ import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility, type SnapshotTextPaintCan
 import { projectTextPaint, sameTextPaintCandidates, TEXT_PAINT_CACHE_LOOKUP_SOURCE, TEXT_PAINT_CACHE_REGISTER_SOURCE, type TextPaintEvidence } from "./snapshot-text-paint";
 import { axEllipsisCandidate, confirmAxEllipsis, type AxEllipsisCandidate } from "./snapshot-ax-ellipsis";
 import { AX_ELLIPSIS_GEOMETRY_SOURCE } from "./snapshot-ellipsis-geometry";
+import { SNAPSHOT_FRAME_PAINT_SOURCE } from "./snapshot-frame-paint";
 import { PLACEHOLDER_EVIDENCE_SOURCE, samePlaceholderEvidence, type PlaceholderEvidence } from "./snapshot-placeholder";
 import { FRAME_OWNER_FULLY_VISIBLE_SOURCE } from "./snapshot-frame-containment";
 import { createFrameHandle } from "./snapshot-frame-handle";
@@ -3789,6 +3790,58 @@ export class AutomationRuntime {
         const frameId = item.frameId ?? session.rootFrameId;
         if (item.tree && frameId) capturedFrameRefs.set(frameId, this.rememberFrameRef(session, frameId, item.debuggee, frameContext));
       }
+      type FramePaintProof = { frameId: string; parentId: string; backendNodeId: number; value: unknown };
+      const framePaintBatches: FramePaintProof[][] = [];
+      const framePaintCache = new Map<string, Promise<FramePaintProof[] | null>>();
+      // Prove the entire owner is free of competing paint at each level. This
+      // intentionally needs no coordinate mapping between frame viewports.
+      const readFramePaint = async (frameId: string): Promise<FramePaintProof[] | null> => {
+        const proof: FramePaintProof[] = [], visited = new Set<string>();
+        let current = frameId;
+        while (current !== session.rootFrameId) {
+          if (visited.has(current)) return null;
+          visited.add(current);
+          const parentId = session.frameParents.get(current), parent = parentId && session.frames.get(parentId);
+          const parentTree = trees.find(item => (item.frameId ?? session.rootFrameId) === parentId && parent && sameDebuggee(item.debuggee, parent));
+          const doc = parentTree?.snapshot?.documents?.find((entry: any) => parentTree.snapshot.strings?.[entry.frameId] === parentId);
+          const shadowRoots = doc?.nodes?.shadowRootType?.index;
+          if (!parentId || !parent || !Array.isArray(shadowRoots) || shadowRoots.length) return null;
+          const frame: FrameRefRecord = { frameId: parentId, debuggee: parent, generation, revision: frameRevision,
+            conversationId: frameContext.conversationId, runId: frameContext.runId };
+          const group = `surf-wax-frame-paint:${crypto.randomUUID()}`;
+          try {
+            await this.frameDocument(session, frame, frameGuard);
+            const key = JSON.stringify([session.tabId, parentId, parent.sessionId ?? null]);
+            const document = this.frameDocuments.get(key), contextId = document?.executionContextId;
+            if (!Number.isSafeInteger(contextId)) return null;
+            const check = () => {
+              frameGuard();
+              if (this.frameDocuments.get(key) !== document) throw automationError("stale-frame", { reason: "frame-paint-context-expired" });
+            };
+            const owner = await this.options.command(parent, "DOM.getFrameOwner", { frameId: current });
+            check();
+            if (!Number.isSafeInteger(owner?.backendNodeId) || owner.backendNodeId <= 0) return null;
+            const node = await this.options.command(parent, "DOM.resolveNode", { backendNodeId: owner.backendNodeId, executionContextId: contextId, objectGroup: group });
+            check();
+            if (typeof node.object?.objectId !== "string") return null;
+            const response = await this.options.command(parent, "Runtime.callFunctionOn", { objectId: node.object.objectId,
+              arguments: [{ value: true }], functionDeclaration: SNAPSHOT_FRAME_PAINT_SOURCE, returnByValue: true });
+            check();
+            if (response.exceptionDetails || !response.result?.value) return null;
+            proof.push({ frameId: current, parentId, backendNodeId: owner.backendNodeId, value: response.result.value });
+          } catch {
+            frameGuard();
+            return null;
+          } finally { void this.options.command(parent, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined); }
+          current = parentId;
+        }
+        return proof;
+      };
+      const framePaint = (frameId: string) => {
+        let promise = framePaintCache.get(frameId);
+        if (!promise) { promise = readFramePaint(frameId); framePaintCache.set(frameId, promise); }
+        return promise;
+      };
       const lines: SnapshotLine[] = [];
       const render = async (nodes: any[], visibility: Map<number, boolean>, textProjections: Map<number, TextProjection>, unknownText: Set<number>,
         paintEvidence: ReadonlyMap<number, TextPaintEvidence>, candidates: readonly SnapshotTextPaintCandidate[], snapshot: any, debuggee: Debuggee, frameLabel?: string, frameDepth = 0) => {
@@ -3803,7 +3856,8 @@ export class AutomationRuntime {
           const group = byBackend.get(node.backendDOMNodeId) ?? []; group.push(node); byBackend.set(node.backendDOMNodeId, group);
         }
         const noShadowRoots = Array.isArray(doc.nodes?.shadowRootType?.index) && doc.nodes.shadowRootType.index.length === 0;
-        const frameUnobscured = frameId === session.rootFrameId && sameDebuggee(debuggee, session.debuggee);
+        const rootFrame = frameId === session.rootFrameId && sameDebuggee(debuggee, session.debuggee);
+        let frameUnobscured = rootFrame;
         const pendingEllipsis: Array<{ candidate: SnapshotTextPaintCandidate; match: AxEllipsisCandidate; request: EllipsisRequest }> = [];
         for (const candidate of candidates) {
           if (candidate.frameId !== frameId || !candidate.ellipsis || !candidate.basePainted || !unknownText.has(candidate.backendNodeId)
@@ -3817,6 +3871,12 @@ export class AutomationRuntime {
           if (match) pendingEllipsis.push({ candidate, match, request: { backendNodeId: candidate.backendNodeId, prefix: match.prefix,
             sourceText: candidate.sourceText, frameUnobscured, noShadowRoots, basePainted: true } });
         }
+        let frameProof: FramePaintProof[] | null = null;
+        if (pendingEllipsis.length && noShadowRoots && !rootFrame && frameId !== session.rootFrameId) {
+          frameProof = await waitForCapture(framePaint(frameId));
+          frameUnobscured = Boolean(frameProof);
+          for (const item of pendingEllipsis) item.request.frameUnobscured = frameUnobscured;
+        }
         if (pendingEllipsis.length && frameUnobscured && noShadowRoots) {
           const proofs = await waitForCapture(readEllipsisGeometry(debuggee, frameId, pendingEllipsis.map(({ request }) => request)));
           const accepted: EllipsisBatch = { debuggee, frameId, requests: [], proofs: [] };
@@ -3828,7 +3888,10 @@ export class AutomationRuntime {
             unknownText.delete(candidate.backendNodeId);
             accepted.requests.push(request); accepted.proofs.push(proof);
           });
-          if (accepted.requests.length) ellipsisBatches.push(accepted);
+          if (accepted.requests.length) {
+            ellipsisBatches.push(accepted);
+            if (frameProof) framePaintBatches.push(frameProof);
+          }
         }
         let evidence: ReturnType<typeof snapshotDomSupplement>;
         try {
@@ -4608,6 +4671,11 @@ export class AutomationRuntime {
           const afterEllipsis = await waitForCapture(Promise.all(ellipsisBatches.map((batch) => readEllipsisGeometry(batch.debuggee, batch.frameId, batch.requests))));
           if (ellipsisBatches.some((batch, index) => JSON.stringify(batch.proofs) !== JSON.stringify(afterEllipsis[index]))) {
             if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "text-paint-unstable" });
+            retriedUnstableCapture = true; continue;
+          }
+          const afterFramePaint = await waitForCapture(Promise.all(framePaintBatches.map((batch) => readFramePaint(batch[0]!.frameId))));
+          if (framePaintBatches.some((batch, index) => JSON.stringify(batch) !== JSON.stringify(afterFramePaint[index]))) {
+            if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "frame-paint-unstable" });
             retriedUnstableCapture = true; continue;
           }
           const afterFillability = await waitForCapture(Promise.all(fillabilityBatches.map((batch) => readFillability(batch.debuggee, batch.frameId, [...batch.values.keys()]))));

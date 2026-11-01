@@ -45,6 +45,11 @@ export const AX_ELLIPSIS_GEOMETRY_SOURCE = `function(token, requests) {
   const pseudoSafe = el => ['::before','::after'].every(p => {
     const s = view.getComputedStyle(el, p); return s.content === 'none' || s.content === 'normal';
   });
+  // list-style:none alone is insufficient: an authored ::marker content
+  // still paints outside the list item's box. Only admit an absent default
+  // marker, and fail closed if computed pseudo-element evidence is missing.
+  const markerSafe = (el, s) => !s.display.includes('list-item') ||
+    (s.listStyleType === 'none' && s.listStyleImage === 'none' && view.getComputedStyle(el, '::marker').content === 'normal');
   const elements = [...doc.querySelectorAll('*')];
   const scene = new Map();
   const visual = el => {
@@ -53,8 +58,7 @@ export const AX_ELLIPSIS_GEOMETRY_SOURCE = `function(token, requests) {
     const hidden = s.display === 'none' || s.visibility === 'hidden' || Number(s.opacity) === 0;
     const unsafe = !hidden && (!safeCommon(s) || !pseudoSafe(el) || !noEffect(s.boxShadow)
       || !noEffect(s.textShadow) || (s.outlineStyle && s.outlineStyle !== 'none')
-      // ::marker content can paint beyond the element even when list-style is none.
-      || s.display.includes('list-item')
+      || !markerSafe(el, s)
       || !zero(s.webkitTextStrokeWidth) || (s.textDecorationLine && s.textDecorationLine !== 'none')
       || el.shadowRoot || el.localName.includes('-') || el.hasAttribute('is') || el.namespaceURI !== 'http://www.w3.org/1999/xhtml');
     const value = {hidden,unsafe,rect}; scene.set(el,value); return value;

@@ -21,7 +21,7 @@ function fixture() {
     getRootNode: () => doc };
   host.childNodes.push(text); host.firstChild = text;
   const elements: unknown[] = [host], texts: unknown[] = [text], overflowPosition = { x: 500, y: 500 };
-  const state = { topLayer: false, animations: [] as Array<{ playState: string }> };
+  const state = { topLayer: false, markerContent: "normal", animations: [] as Array<{ playState: string }> };
   const doc = { defaultView: null as unknown, fonts: { status: "loaded", check: () => true }, fullscreenElement: null,
     querySelector: () => state.topLayer ? {} : null, getAnimations: () => state.animations,
     querySelectorAll: () => elements, createTreeWalker: () => { let index = 0; return { nextNode: () => texts[index++] ?? null }; }, createElement: () => ({ getContext: () => ({ font: "", fontKerning: "auto",
@@ -29,7 +29,7 @@ function fixture() {
     createRange: () => { let end = 0, selected: unknown = text; return { selectNodeContents: (node: unknown) => { selected = node; end = text.data.length; }, setStart: () => {}, setEnd: (_: unknown, value: number) => { end = value; },
       getClientRects: () => selected !== text ? [rect(overflowPosition.x, overflowPosition.y, 10, 14)] : end === 4 ? [rect(0, 1, 40, 15), rect(0, 1, 40, 15)] : [rect(0, 1, 150, 15), rect(0, 1, 40, 15)] }; } };
   const view = { document: doc, innerWidth: 1000, innerHeight: 1000, getSelection: () => ({ isCollapsed: true }),
-    getComputedStyle: (el: typeof host, pseudo?: string) => pseudo ? { content: "none" } : el.style };
+    getComputedStyle: (el: typeof host, pseudo?: string) => pseudo ? { content: pseudo === "::marker" ? state.markerContent : "none" } : el.style };
   doc.defaultView = view; text.ownerDocument = doc;
   Reflect.set(globalThis, key, { token: "session", nodes: new Map([[1, { deref: () => text }]]) });
   const call = new Function(`return (${AX_ELLIPSIS_GEOMETRY_SOURCE})`)() as (this: typeof doc, token: string, requests: unknown[]) => unknown[];
@@ -84,6 +84,8 @@ describe("AX ellipsis geometry", () => {
   it("rejects custom markers even when list-style is none", () => {
     const f = fixture();
     f.elements.push({ ...f.host, style: { ...f.normal, display: "list-item", listStyleType: "none", listStyleImage: "none" }, getBoundingClientRect: () => f.rect(500, 500, 10, 10) });
+    expect(f.call.call(f.doc, "session", [f.request])[0]).not.toBeNull();
+    f.state.markerContent = '"CUSTOM"';
     expect(f.call.call(f.doc, "session", [f.request])).toEqual([null]);
   });
   it("fails closed on a tiny clip or a possible out-of-box effect", () => {
