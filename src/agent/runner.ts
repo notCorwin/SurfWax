@@ -1,4 +1,5 @@
-import { simulateStreamingMiddleware, ToolLoopAgent, wrapLanguageModel } from "ai";
+import { dynamicTool, simulateStreamingMiddleware, ToolLoopAgent, wrapLanguageModel } from "ai";
+import { z } from "zod";
 import type { LanguageModel, LanguageModelCallEndEvent } from "ai";
 import { createProgramTools, prepareToolMessages, repairProgramToolCall, PROGRAM_TOOL_REGISTRY } from "../chrome/tool";
 import { ToolScheduler } from "../chrome/tool-scheduler";
@@ -30,7 +31,13 @@ export type CreateAgentOptions = {
   signal?: AbortSignal;
   onResponse?: (event: LanguageModelCallEndEvent<any>) => void | Promise<void>;
   shouldYield?: () => boolean;
+  goalMode?: boolean;
 };
+
+const GOAL_SCHEMA = z.object({ status: z.enum(["completed", "blocked"]), summary: z.string().min(1).describe("Explain the outcome or the information needed to continue.") }).strict();
+const GOAL_DESCRIPTION = "Finish the current goal with a concise outcome, or explain a blocker that requires the user. Call this tool alone after all work and background jobs have finished.";
+export const GOAL_INSTRUCTIONS = "\n\nGoal mode: continue working until the outcome is achieved or user input is required. To end the work, call complete_goal alone with the outcome or blocker; plain text does not end the work.\n- complete_goal: Finish the goal or report a blocker to the user.";
+export const GOAL_TOOLS = [...PROMPT_TOOLS, { type: "function", name: "complete_goal", description: GOAL_DESCRIPTION, inputSchema: z.toJSONSchema(GOAL_SCHEMA, { target: "draft-7", unrepresentable: "any" }) }];
 
 type BrowserAgentTools = ReturnType<typeof createProgramTools>;
 function browserContextMessage(context: BrowserContext): string {
@@ -75,6 +82,26 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     })(),
   };
   const tools = createProgramTools(options.executor, toolOptions);
+  let goalCallAlone = false;
+  if (options.goalMode) tools.complete_goal = dynamicTool({
+    description: GOAL_DESCRIPTION, inputSchema: GOAL_SCHEMA, needsApproval: false,
+    execute: async (input, { abortSignal, toolCallId }) => {
+      abortSignal?.throwIfAborted();
+      const identity = options.conversationId ? logger?.toolIdentity(options.conversationId, toolCallId) : undefined;
+      const start = performance.now();
+      if (logger && !await logger.append({ type: "tool.started", conversationId: options.conversationId, content: { callId, toolName: "complete_goal" }, input, toolCallId, ...identity }))
+        throw new DOMException("日志维护已阻止工具启动。", "AbortError");
+      abortSignal?.throwIfAborted();
+      const pending = options.executor.pendingBackgroundJobs?.() ?? [];
+      const output = !goalCallAlone ? { ok: false, error: { code: "goal-call-not-alone", message: "Call complete_goal alone after observing all other tool results." } }
+        : pending.length ? { ok: false, error: { code: "background-jobs-pending", message: "Wait for all background jobs to finish before completing the goal." } }
+        : { ok: true, ...(input as z.infer<typeof GOAL_SCHEMA>) };
+      if (logger && !await logger.append({ type: output.ok ? "tool.finished" : "tool.failed", conversationId: options.conversationId,
+        content: { callId, toolName: "complete_goal" }, input, output, toolCallId, ...identity, ...(!output.ok ? { error: output.error } : {}), latencyMs: Math.max(0, performance.now() - start) }))
+        throw new DOMException("日志维护已阻止工具结果保存。", "AbortError");
+      return output;
+    },
+  });
   const toolOrder = Object.keys(tools);
   const cacheClaude = usesClaudePromptCache(options.model);
   if (cacheClaude && toolOrder.length) {
@@ -82,9 +109,9 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     tools[last] = { ...tools[last]!, providerOptions: { ...tools[last]!.providerOptions, anthropic: { ...tools[last]!.providerOptions?.anthropic, cacheControl: { type: "ephemeral" } } } };
   }
   let limit: ReturnType<typeof resolveModelLimit> | undefined;
-  const currentInstructions = () => createPromptSnapshot(options.compactor?.prompt?.source ?? initialPrompt.source).instructions;
+  const currentInstructions = () => createPromptSnapshot(options.compactor?.prompt?.source ?? initialPrompt.source).instructions + (options.goalMode ? GOAL_INSTRUCTIONS : "");
   const wireInstructions = () => cacheClaude ? { role: "system" as const, content: currentInstructions(), providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } } } : currentInstructions();
-  const currentTools = () => PROMPT_TOOLS;
+  const currentTools = () => options.goalMode ? GOAL_TOOLS : PROMPT_TOOLS;
   const activeTools = () => currentTools().map(({ name }) => name);
   const canonicalContext = logger && options.conversationId ? new IncrementalActiveContext(logger, options.conversationId) : undefined;
   let browserDigest: string | undefined;
@@ -103,6 +130,8 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     repairToolCall: repairProgramToolCall as any,
     onLanguageModelCallEnd: async (event) => {
       logger?.telemetry({ type: "model.response.received", conversationId: options.conversationId, content: { callId: event.callId } });
+      const calls = event.content.filter((part) => part.type === "tool-call");
+      goalCallAlone = calls.length === 1 && calls[0]?.toolName === "complete_goal";
       const failure = scheduler.prepare(event.content, boundTabId, options.signal);
       if (failure) logger?.telemetry({ type: "agent.tool-schedule.invalid", conversationId: options.conversationId, error: failure });
       await options.onResponse?.(event);
@@ -194,7 +223,8 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         providerMetadata: event.providerMetadata,
       }),
     } : {}),
-    stopWhen: () => options.shouldYield?.() ?? false,
+    stopWhen: ({ steps }) => (options.shouldYield?.() ?? false) || (options.goalMode === true && steps.at(-1)?.toolResults.some((result) =>
+      result.toolName === "complete_goal" && typeof result.output === "object" && result.output !== null && "ok" in result.output && result.output.ok === true) === true),
     // The provider fetch owns the unbounded retry policy; disable the SDK's finite retry loop.
     maxRetries: 0,
   });

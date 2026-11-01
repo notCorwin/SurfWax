@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import { abortAllConversationWork } from "../agent/coordinator";
 import { ensureConversationPrompt, PROMPT_TOOLS } from "../agent/prompt";
-import { createAgent } from "../agent/runner";
+import { createAgent, GOAL_INSTRUCTIONS, GOAL_TOOLS } from "../agent/runner";
 import { ContextCompactor } from "../agent/compaction";
 import { createModel } from "../agent/model";
 import { ensureAutomaticContextSummary } from "../agent/context-choice";
@@ -27,15 +27,15 @@ export function createSidePanelCloser(runtime: CloseableRuntime, logger?: EventL
   };
 }
 
-export function useSidePanelRuntime(config: ModelConfig, systemPrompt: string | undefined, logger: EventLogger, initialThreadId?: string) {
+export function useSidePanelRuntime(config: ModelConfig, systemPrompt: string | undefined, logger: EventLogger, initialThreadId?: string, goalMode = false) {
   const executor = useMemo(() => new ChromeExecutor({ logger }), [logger]);
   // Configuration changes are deliberately hot-swapped for the next run.
   // An active run keeps the snapshot it started with; the conversation and
   // browser executor are not remounted underneath it.
-  const latest = useRef({ config, systemPrompt });
-  latest.current = { config, systemPrompt };
+  const latest = useRef({ config, systemPrompt, goalMode });
+  latest.current = { config, systemPrompt, goalMode };
   const runtime = useMemo(() => new ConversationStore(logger, (conversationId) => {
-    const { config, systemPrompt } = latest.current;
+    const { config, systemPrompt, goalMode } = latest.current;
     return createChatTransport(async (signal, branchIds, _resumed, onResponse, shouldYield) => {
       signal.throwIfAborted();
       const reasoning = reasoningSettingsFor(config);
@@ -44,11 +44,11 @@ export function useSidePanelRuntime(config: ModelConfig, systemPrompt: string | 
       signal.throwIfAborted();
       const prompt = await ensureConversationPrompt(logger, conversationId, systemPrompt, branchIds);
       return createAgent({ model: config, languageModel, reasoning: reasoning.snapshot().selected ?? undefined, executor, logger, conversationId,
-        instructions: systemPrompt, prompt, signal, onResponse, shouldYield,
+        instructions: systemPrompt, prompt, signal, onResponse, shouldYield, goalMode,
         compactor: new ContextCompactor({ model: config, logger, conversationId, branchIds, signal, prompt }) });
     }, logger, conversationId, () => executor.endRun(), async (signal) => {
       const prompt = await ensureConversationPrompt(logger, conversationId, systemPrompt);
-      await ensureAutomaticContextSummary(logger, conversationId, config, signal, { forced: true, instructions: prompt.instructions, tools: PROMPT_TOOLS });
+      await ensureAutomaticContextSummary(logger, conversationId, config, signal, { forced: true, instructions: prompt.instructions + (goalMode ? GOAL_INSTRUCTIONS : ""), tools: goalMode ? GOAL_TOOLS : PROMPT_TOOLS });
     }, systemPrompt, async (signal) => {
       const observer = observePageRefreshes(executor, conversationId, signal);
       try {
@@ -56,7 +56,7 @@ export function useSidePanelRuntime(config: ModelConfig, systemPrompt: string | 
         signal.throwIfAborted();
         return observer;
       } catch (error) { observer.dispose(); throw error; }
-    });
+    }, goalMode);
   }, initialThreadId), [executor, logger, initialThreadId]);
 
   useEffect(() => runtime.connect(), [runtime]);

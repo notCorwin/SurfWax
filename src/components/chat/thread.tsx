@@ -14,8 +14,9 @@ import { WaitingStatus } from "./waiting-status";
 import type { ModelConfig } from "@/types";
 import type { EventLogger } from "@/logging";
 
-export function Thread({ config, logger, conversationId, contextBlocked, draft, onDraftChange }: {
+export function Thread({ config, logger, conversationId, contextBlocked, draft, onDraftChange, goalMode, onGoalModeChange }: {
   config: ModelConfig; logger: EventLogger; conversationId: string; contextBlocked?: boolean; draft?: string; onDraftChange: (value: string) => void;
+  goalMode: boolean; onGoalModeChange: (value: boolean) => void;
 }) {
   const state = useThreadState();
   const { locked } = useRunState();
@@ -61,7 +62,7 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
       </MessageScroller>
     </MessageScrollerProvider>
     <div className="composer-dock shrink-0 px-3 pt-2 pb-3">
-      <LocalComposer config={config} logger={logger} conversationId={conversationId} blocked={contextBlocked} draft={draft} onDraftChange={onDraftChange} />
+      <LocalComposer config={config} logger={logger} conversationId={conversationId} blocked={contextBlocked} draft={draft} onDraftChange={onDraftChange} goalMode={goalMode} onGoalModeChange={onGoalModeChange} />
     </div>
   </div>;
 }

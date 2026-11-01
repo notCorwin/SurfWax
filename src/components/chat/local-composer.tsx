@@ -19,6 +19,7 @@ import { reasoningSettingsFor, type ReasoningEffort } from "@/agent/reasoning";
 import { fromLogValue, type ConversationMessage, type EventLogger, type LogEvent } from "@/logging";
 import type { ModelConfig } from "@/types";
 import { useRuntimeView } from "@/sidepanel/runtime-view";
+import { useRunState } from "@/sidepanel/useRunState";
 
 const composerText = (state: PanelState) => state.composer.text;
 const threadRunning = (state: PanelState) => state.thread.isRunning;
@@ -287,13 +288,15 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
   );
 });
 
-export const LocalComposer = memo(function LocalComposer({ config, logger, conversationId, blocked, draft, onDraftChange }: {
+export const LocalComposer = memo(function LocalComposer({ config, logger, conversationId, blocked, draft, onDraftChange, goalMode, onGoalModeChange }: {
   config: ModelConfig;
   logger: EventLogger;
   conversationId: string;
   blocked?: boolean;
   draft?: string;
   onDraftChange: (value: string) => void;
+  goalMode: boolean;
+  onGoalModeChange: (value: boolean) => void;
 }) {
   const settings = reasoningSettingsFor(config);
   const reasoning = useSyncExternalStore(settings.subscribe, settings.snapshot);
@@ -301,6 +304,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
   const runtimeCommands = usePanelRuntime();
   const externalText = usePanelState(composerText);
   const isRunning = usePanelState(threadRunning);
+  const { locked } = useRunState();
   const isDisabled = usePanelState(composerDisabled);
   const followups = useFollowups(logger, conversationId);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -460,6 +464,18 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
                 /^(gpt|glm|api)$/i.test(part) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1),
               ).join(" ")}
             </span>
+            <Select value={goalMode ? "goal" : "normal"} disabled={locked || isRunning || blocked}
+              onValueChange={(value) => onGoalModeChange(value === "goal")}>
+              <SelectTrigger data-testid="work-mode" size="sm" aria-label="工作模式" title="目标模式要求模型调用完成工具才能结束工作" className="h-7 gap-1 px-1.5">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper" align="start">
+                <SelectGroup>
+                  <SelectItem value="normal">普通模式</SelectItem>
+                  <SelectItem value="goal">目标模式</SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
             <Select value={reasoning.selected ?? undefined} disabled={!reasoning.ready || isRunning || !reasoning.choices.length}
               onValueChange={(value) => settings.select(value as ReasoningEffort)}>
               <SelectTrigger data-testid="reasoning-effort" size="sm" aria-label="思考强度"

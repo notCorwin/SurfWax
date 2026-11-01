@@ -156,14 +156,15 @@ function RecoverConversationTitles({ logger, config }: { logger: EventLogger; co
 }
 
 function ConfiguredRuntime({ config, systemPrompt, logger, initialThreadId }: { config: ModelConfig; systemPrompt?: string; logger: EventLogger; initialThreadId?: string }) {
-  const runtime = useSidePanelRuntime(config, systemPrompt, logger, initialThreadId);
+  const [goalMode, setGoalMode] = useState(false);
+  const runtime = useSidePanelRuntime(config, systemPrompt, logger, initialThreadId, goalMode);
   const view = useMemo(() => ({ getState: runtime.thread.getState, thread: runtime.thread, runtime }), [runtime]);
   return <RuntimeViewContext.Provider value={view}>
-    <ConfiguredConversation config={config} logger={logger} />
+    <ConfiguredConversation config={config} logger={logger} goalMode={goalMode} onGoalModeChange={setGoalMode} />
   </RuntimeViewContext.Provider>;
 }
 
-function ConfiguredConversation({ config, logger }: { config: ModelConfig; logger: EventLogger }) {
+function ConfiguredConversation({ config, logger, goalMode, onGoalModeChange }: { config: ModelConfig; logger: EventLogger; goalMode: boolean; onGoalModeChange: (value: boolean) => void }) {
   const threadId = usePanelState((state) => state.threads.mainThreadId);
   const drafts = useRef(new Map<string, string>());
   return (
@@ -171,7 +172,7 @@ function ConfiguredConversation({ config, logger }: { config: ModelConfig; logge
       <RecoverConversationTitles logger={logger} config={config} />
       <Header conversation logger={logger} />
       <RunOwnershipNotice />
-      <ConversationView key={threadId} config={config} logger={logger} threadId={threadId} drafts={drafts.current} />
+      <ConversationView key={threadId} config={config} logger={logger} threadId={threadId} drafts={drafts.current} goalMode={goalMode} onGoalModeChange={onGoalModeChange} />
     </main>
   );
 }
@@ -183,7 +184,7 @@ function RunOwnershipNotice() {
     : null;
 }
 
-function ConversationView({ config, logger, threadId, drafts }: { config: ModelConfig; logger: EventLogger; threadId: string; drafts: Map<string, string> }) {
+function ConversationView({ config, logger, threadId, drafts, goalMode, onGoalModeChange }: { config: ModelConfig; logger: EventLogger; threadId: string; drafts: Map<string, string>; goalMode: boolean; onGoalModeChange: (value: boolean) => void }) {
   const conversationId = usePanelState((state) => state.threadListItem.remoteId ?? state.threadListItem.id);
   const isRunning = usePanelState((state) => state.thread.isRunning);
   const [contextStatus, setContextStatus] = useState<{ message: string; error: boolean }>();
@@ -286,7 +287,7 @@ function ConversationView({ config, logger, threadId, drafts }: { config: ModelC
         {compactionError && <ErrorNotice testId="context-maintenance-error" summary="上下文处理失败；可以重试压缩。" error={compactionError} />}
       </section>}
       <section id="chat-content" tabIndex={-1} className="chat-scroll" data-testid="chat-scroll">
-        <Thread config={config} logger={logger} conversationId={conversationId} contextBlocked={compactionBusy} draft={drafts.get(threadId)} onDraftChange={(value) => {
+        <Thread config={config} logger={logger} conversationId={conversationId} contextBlocked={compactionBusy} goalMode={goalMode} onGoalModeChange={onGoalModeChange} draft={drafts.get(threadId)} onDraftChange={(value) => {
           if (value) drafts.set(threadId, value);
           else drafts.delete(threadId);
         }} />

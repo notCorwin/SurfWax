@@ -6,16 +6,17 @@ import { contextPressure, effectiveContext, summarizeContext } from "./compactio
 import { createModel } from "./model";
 import type { ModelLimit } from "./model-limits";
 import { materializeToolCatalog } from "./tool-catalog";
+import { replayGoalContinuations } from "./goal-context";
 
-export async function modelMessages(messages: ConversationMessage[]): Promise<ModelMessage[]> {
-  return convertToModelMessages(messages.map(materializeToolCatalog) as UIMessage[], { ignoreIncompleteToolCalls: true });
+export async function modelMessages(messages: ConversationMessage[], events: readonly LogEvent[] = []): Promise<ModelMessage[]> {
+  return convertToModelMessages(replayGoalContinuations(messages as UIMessage[], events).map(materializeToolCatalog) as UIMessage[], { ignoreIncompleteToolCalls: true });
 }
 
 export async function activeContext(logger: EventLogger, conversationId: string) {
   const ui = await activeConversationMessages(logger, conversationId);
   const branchIds = ui.map((message) => message.id);
-  const raw = await modelMessages(ui);
   const events = await logger.conversation(conversationId);
+  const raw = await modelMessages(ui, events);
   const { checkpoint, messages } = await effectiveContext(events, branchIds, raw);
   return { ui, branchIds, raw, events, checkpoint, messages };
 }
@@ -67,7 +68,7 @@ export class IncrementalActiveContext {
       if (!isSyntheticTerminalMessage(item.message)) ui.unshift(item.message);
       id = item.parentId;
     }
-    const raw = await modelMessages(ui);
+    const raw = await modelMessages(ui, projected);
     const { messages } = await effectiveContext(projected, ui.map((message) => message.id), raw);
     return { messages };
   }

@@ -4,6 +4,7 @@ import { normalizeRecoveredToolOutput } from "../tool-result-values";
 import { claimConversationRun } from "./coordinator";
 import { ensureConversationPrompt } from "./prompt";
 import { materializeToolCatalog } from "./tool-catalog";
+import { replayGoalContinuations } from "./goal-context";
 import { isContextOverflowError, isRecoverableModelError, retryBackoffDelay, waitForModelRetry } from "./model";
 
 export type SidePanelMessage = UIMessage<any, never, any>;
@@ -35,7 +36,7 @@ export function followupDispatch(message: SidePanelMessage | undefined): { id: s
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
 /** Each publication contains complete model content or a completed tool result. */
-export function createChatTransport(agent: AgentFactory, logger: EventLogger, conversationId: string, cleanup?: () => Promise<void>, onContextOverflow?: (signal: AbortSignal) => Promise<void>, systemPrompt?: string, observeRefreshes?: (signal: AbortSignal) => Promise<RefreshObserver>): ConversationTransport {
+export function createChatTransport(agent: AgentFactory, logger: EventLogger, conversationId: string, cleanup?: () => Promise<void>, onContextOverflow?: (signal: AbortSignal) => Promise<void>, systemPrompt?: string, observeRefreshes?: (signal: AbortSignal) => Promise<RefreshObserver>, goalMode = false): ConversationTransport {
   return {
     async sendMessages(options) {
       const currentRunId = crypto.randomUUID();
@@ -136,15 +137,22 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
         await logger.append({ type: "conversation.submitted", conversationId, runId: currentRunId,
           content: { chatId: options.chatId, messageId: userMessage?.id ?? null } });
         let attempt = 0;
+        let phase = 0;
         let resumed = false;
+        let historyEvents = await logger.conversation(conversationId);
+        let goalSegments: SidePanelMessage[] = [];
+        let goalOffset = 0;
         const summarizedSources = new Set<string>();
         while (true) {
           lease.signal.throwIfAborted();
-          const messages = await withSavedMetadata(response.parts.length ? [...initial, response] : initial);
-          logger.setRunPhase(currentRunId, attempt);
+          const tail = { ...response, parts: response.parts.slice(goalOffset) };
+          const canonicalMessages = await withSavedMetadata(response.parts.length ? [...initial, response] : initial);
+          const initialMessages = replayGoalContinuations(initial, historyEvents);
+          const messages = await withSavedMetadata([...initialMessages, ...goalSegments, ...(tail.parts.length ? [tail] : [])] as SidePanelMessage[]);
+          logger.setRunPhase(currentRunId, phase++);
           let captured = false;
           try {
-            const runAgent = await agent(signal, messages.map((message) => message.id), resumed, async (event) => {
+            const runAgent = await agent(signal, canonicalMessages.map((message) => message.id), resumed, async (event) => {
               signal.throwIfAborted();
               captured = true;
               acceptContent(event.content);
@@ -171,6 +179,10 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
                   return failPublication(output.error);
                 }
                 updateTool(toolId(event.toolCall.toolCallId), { state: "output-available", output: output.output });
+                if (event.toolCall.toolName === "complete_goal" && output.output && typeof output.output === "object"
+                  && "ok" in output.output && output.output.ok === true && "summary" in output.output && typeof output.output.summary === "string") {
+                  response = { ...response, parts: [...response.parts, { type: "text", text: output.output.summary, state: "done" }] };
+                }
                 await publishFromModel();
               },
               onStepEnd: async (event) => {
@@ -197,7 +209,24 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
               priorMessages = initial.slice(options.messages.length);
               parentId = parent;
               response = { id: crypto.randomUUID(), role: "assistant", parts: [] };
+              goalSegments = [];
+              goalOffset = 0;
               published = undefined;
+              continue;
+            }
+            const goalCompleted = response.parts.some((part) => "toolCallId" in part && "toolName" in part && part.toolName === "complete_goal"
+              && part.state === "output-available" && part.output && typeof part.output === "object" && "ok" in part.output && part.output.ok === true);
+            if (goalMode && !goalCompleted) {
+              const segment = response.parts.slice(goalOffset);
+              const assistantSegment: SidePanelMessage = { id: crypto.randomUUID(), role: "assistant", parts: segment.some((part) => part.type !== "step-start") ? segment : [{ type: "text", text: "(No response.)" }] };
+              goalSegments.push(assistantSegment);
+              const reminder = "Goal mode is still active. Continue the work, or call complete_goal alone to report the outcome or a blocker requiring user input.";
+              const reminderMessage: SidePanelMessage = { id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text: reminder }] };
+              goalSegments.push(reminderMessage);
+              goalOffset = response.parts.length;
+              const saved = await logger.append({ type: "agent.goal.continued", conversationId, runId: currentRunId, content: { messageId: response.id, offset: goalOffset, assistantSegment, reminderMessage } });
+              if (!saved) throw new DOMException("日志维护已阻止目标模式继续。", "AbortError");
+              historyEvents.push(saved);
               continue;
             }
             refreshObserver?.dispose();
