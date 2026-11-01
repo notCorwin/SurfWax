@@ -42,6 +42,27 @@ test("executes an atomic browser action without crashing the live development ex
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("DEV_SANDBOX_OK");
     await expect.poll(() => opened!.context.serviceWorkers().length).toBe(1);
+    const gatewayError = await opened.page.evaluate(async () => {
+      const aiUrl = "http://localhost:5273/node_modules/.vite/deps/ai.js";
+      const gatewayUrl = "http://localhost:5273/node_modules/.vite/deps/@ai-sdk_gateway.js";
+      const { generateText } = await import(/* @vite-ignore */ aiUrl);
+      const { GatewayAuthenticationError } = await import(/* @vite-ignore */ gatewayUrl);
+      try {
+        await generateText({
+          model: {
+            specificationVersion: "v4", provider: "test", modelId: "test", supportedUrls: {},
+            doGenerate: async () => { throw new GatewayAuthenticationError(); },
+          },
+          prompt: "test",
+          maxRetries: 0,
+        });
+        return { name: "", message: "No error was raised" };
+      } catch (error) {
+        return { name: (error as Error).name, message: (error as Error).message };
+      }
+    });
+    expect(gatewayError.name).toBe("GatewayAuthenticationError");
+    expect(gatewayError.message).toContain("Unauthenticated request to AI Gateway");
   } finally {
     await opened?.context.close().catch(() => undefined);
     if (opened) await rm(opened.userDataDirectory, { recursive: true, force: true });

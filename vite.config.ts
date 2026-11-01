@@ -20,6 +20,9 @@ const devManifest = {
 export default defineConfig({
   define: {
     __SURF_WAX_DEV_SERVER__: JSON.stringify(`http://localhost:${devPort}`),
+    // AI SDK's gateway error handler probes process without a typeof guard.
+    // Preserve browser runtime detection while making that probe safe.
+    process: "globalThis.process",
   },
   plugins: [
     {
