@@ -464,6 +464,12 @@ test("follows the bottom through layout changes while respecting manual scrollin
     await viewport.press("ArrowDown");
     await opened.page.setViewportSize({ width: 430, height: 550 });
     await expect.poll(remaining).toBeLessThanOrEqual(1);
+    // Reflow and virtual-item measurements can move offsets independently of
+    // user intent. Following must survive each new layout, not just one resize.
+    for (const size of [{ width: 600, height: 700 }, { width: 380, height: 500 }, { width: 430, height: 550 }]) {
+      await opened.page.setViewportSize(size);
+      await expect.poll(remaining).toBeLessThanOrEqual(1);
+    }
     const growLastTurn = async () => {
       const height = await viewport.evaluate((element) => element.scrollHeight);
       await viewport.locator(".conversation-turn").last().evaluate((turn) => {
@@ -478,6 +484,8 @@ test("follows the bottom through layout changes while respecting manual scrollin
     await opened.page.mouse.wheel(0, -1_200);
     await expect.poll(remaining).toBeGreaterThan(500);
     const position = await viewport.evaluate((element) => element.scrollTop);
+    await opened.page.setViewportSize({ width: 430, height: 650 });
+    await expect.poll(() => viewport.evaluate((element) => element.scrollTop)).toBe(position);
     await growLastTurn();
     await expect.poll(remaining).toBeGreaterThan(500);
     await expect.poll(() => viewport.evaluate((element) => element.scrollTop)).toBe(position);

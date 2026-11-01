@@ -3,6 +3,7 @@ import { MockLanguageModelV4 } from "ai/test";
 import type { ModelMessage } from "ai";
 import { goalReviewContext, reviewGoal } from "./goal-review";
 import type { Goal } from "./goal-completion";
+import { EventLogger, type LogEvent } from "../logging";
 
 const goal: Goal = { taskType: "browser", status: "completed", summary: "Submitted once; destination says Rejected.", evidence: [{ toolCallId: "submit", observation: "Rejected" }] };
 const context = goalReviewContext([{ role: "user", content: "Transfer the original file and confirm it was accepted." },
@@ -10,6 +11,30 @@ const context = goalReviewContext([{ role: "user", content: "Transfer the origin
 const usage = { inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 20, text: 20, reasoning: 0 } };
 
 describe("independent goal review", () => {
+  it.each([false, true])("retains one review terminal and observed usage on malformed output or cancellation (%s)", async (abort) => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: { async append(record) { const event = { ...record, id: events.length + 1 }; events.push(event); return event; }, async all() { return events; }, async clear() {} } });
+    const controller = new AbortController();
+    const model = new MockLanguageModelV4({ doGenerate: async () => {
+      if (abort) controller.abort(new DOMException("Stopped", "AbortError"));
+      return { content: [{ type: "text", text: "not JSON" }], finishReason: { unified: "stop", raw: "stop" }, usage, warnings: [] };
+    } });
+    await expect(reviewGoal({ goal, context, model, logger, signal: controller.signal })).rejects.toThrow();
+    expect(events.map((event) => event.type)).toEqual(["agent.goal.review.started", "agent.goal.review.failed"]);
+    expect(events[1]!.content).toMatchObject({ reviewId: (events[0]!.content as { reviewId: string }).reviewId, aborted: abort });
+    if (!abort) expect(events[1]!.usage).toBeDefined();
+  });
+
+  it("uses original requirements after compaction and refuses truncated requirements before sending", async () => {
+    const original: ModelMessage[] = [{ role: "user", content: "Return the exact date and three source URLs" }];
+    const projected: ModelMessage[] = [{ role: "assistant", content: "Earlier summary omitted the requested links" }];
+    expect(goalReviewContext(projected, 1000, original)).toContain("three source URLs");
+    let requested = false;
+    const model = new MockLanguageModelV4({ doGenerate: async () => { requested = true; throw new Error("must not send"); } });
+    await expect(reviewGoal({ goal, context: goalReviewContext(projected, 10, original), model })).rejects.toThrow("truncated original requirements");
+    expect(requested).toBe(false);
+  });
+
   it("supplies original requirements and actual result, returning actionable unmet work", async () => {
     const model = new MockLanguageModelV4({ doGenerate: async ({ prompt, tools }) => {
       expect(tools?.length ?? 0).toBe(0);
