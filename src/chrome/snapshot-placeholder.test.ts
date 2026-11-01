@@ -63,6 +63,18 @@ describe("placeholder paint evidence", () => {
     expect(f.run()).toEqual({ status: "unknown" });
   });
 
+  it("follows an input's assigned slot to a clipping shadow ancestor", () => {
+    const f = fixture();
+    const clip: any = { ...f.host, style: { ...f.host.style, properties: { ...f.host.style.properties, "overflow-x": "hidden" } }, clientWidth: 20 };
+    const slot: any = { ...f.host, parentElement: clip };
+    f.host.assignedSlot = slot;
+    expect(f.run()).toEqual({ status: "unknown" });
+    clip.clientWidth = 200;
+    expect(f.run()).toEqual({ status: "visible", text: "Placeholder" });
+    slot.assignedSlot = slot;
+    expect(f.run()).toEqual({ status: "unknown" });
+  });
+
   it.each([
     ["text-transform", "uppercase"], ["-webkit-text-security", "disc"], ["text-shadow", "red 1px 1px"],
     ["mask-image", "linear-gradient(black, transparent)"], ["filter", "blur(1px)"],

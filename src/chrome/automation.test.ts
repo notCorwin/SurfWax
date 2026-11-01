@@ -1843,6 +1843,20 @@ describe("AutomationRuntime", () => {
     await expect(page.inspect({ since: reset.observationId as string, fields: ["ref"] })).rejects.toThrow("stale-observation");
   });
 
+  it("omits role-derived action hints by default but allows explicit hints and compatible deltas", async () => {
+    const { runtime } = harness([{ role: "button", name: "Save", tag: "button" }]);
+    const page = await runtime.createPage(3);
+    const first = await page.inspect() as any;
+    expect(first.items.find((item: any) => item.line.includes('button "Save"'))).toMatchObject({ ref: expect.any(String) });
+    expect(inspectText(first)).not.toContain("[actions=");
+    const delta = await page.inspect({ since: first.observationId, fields: ["text", "state", "ref"] }) as any;
+    expect(delta).toMatchObject({ mode: "delta", items: [] });
+    await expect(page.inspect({ since: first.observationId, fields: ["text", "state", "ref", "actions"] })).rejects.toMatchObject({ code: "stale-observation" });
+    const explicit = await page.inspect({ fields: ["text", "state", "ref", "actions"] }) as any;
+    expect(inspectText(explicit)).toContain("[actions=click,double_click,hover]");
+    await runtime.abortSessions();
+  });
+
   it("pages an immutable snapshot through a long node, then uses the completed baseline", async () => {
     const name = `Start ${"long😀\n".repeat(400)} end`;
     const metadata = [{ role: "button", name, tag: "button" }];

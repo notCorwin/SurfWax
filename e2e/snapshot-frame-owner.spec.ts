@@ -1,6 +1,7 @@
 import { expect, type CDPSession } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, closeServer, type MockResponse } from "./fixtures";
 import { frameReplacementFixture } from "./evaluation/frame-replacement-fixture";
+import { sequenceFixture } from "./evaluation/sequence-fixture";
 
 type Item = { id: string; line: string; ref?: string };
 
@@ -131,6 +132,59 @@ test("ties same-name iframe owners to their child snapshots across frame replace
     }
     expect(stale).toMatchObject({ ok: false, error: { code: "stale-frame" } });
     await cdp.detach();
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+    await closeServer(fixture.server);
+  }
+});
+
+test("nests cross-origin frame documents at their owners ahead of same-name outer controls", async () => {
+  test.setTimeout(90_000);
+  const fixture = await sequenceFixture(17), responses: MockResponse[] = [];
+  const provider = await startProvider(responses), opened = await openExtension();
+  let full: any, scoped: any, workspaceRef = "";
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(fixture.origin);
+    responses.push(
+      commandResponse("inspect_page", { budget: 12000 }, "nested-full"),
+      (request) => {
+        full = lastTool(request);
+        const owner = full.items?.find((item: Item) => item.line.includes('- Iframe "Dispatch workspace"'));
+        workspaceRef = /\[frameRef=([^\]]+)\]/.exec(owner?.line ?? "")?.[1] ?? "";
+        return workspaceRef ? commandResponse("inspect_page", { budget: 12000,
+          region: { by: "role", value: "main", frame: { ref: workspaceRef } } }, "nested-region") : textResponse("NESTED_DONE");
+      },
+      (request) => { scoped = lastTool(request); return textResponse("NESTED_DONE"); },
+      textResponse("Inspect nested frames"),
+    );
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("Inspect the dispatch workspace");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("NESTED_DONE", { timeout: 60_000 });
+
+    expect(full).toMatchObject({ mode: "full", truncation: { baselineComplete: true } });
+    const rows: Item[] = full.items;
+    const workspace = rows.findIndex((item) => item.line.includes('- Iframe "Dispatch workspace"'));
+    const editor = rows.findIndex((item) => item.line.includes('- Iframe "Sequence editor"'));
+    const editorRef = /\[frameRef=([^\]]+)\]/.exec(rows[editor]?.line ?? "")?.[1];
+    const depth = (line: string) => /^ */.exec(line)![0].length;
+    expect(workspace).toBeGreaterThanOrEqual(0);
+    expect(editor).toBeGreaterThan(workspace);
+    expect(editorRef).toEqual(expect.any(String));
+    expect(rows[workspace + 1]?.line).toContain(`- frame-document [frameRef=${workspaceRef}]`);
+    expect(depth(rows[workspace + 1]!.line)).toBe(depth(rows[workspace]!.line) + 2);
+    expect(rows[editor + 1]?.line).toContain(`- frame-document [frameRef=${editorRef}]`);
+    expect(depth(rows[editor + 1]!.line)).toBe(depth(rows[editor]!.line) + 2);
+    const sends = rows.filter((item) => item.line.includes('- button "Send dispatch"'));
+    expect(sends).toHaveLength(2);
+    expect(rows.indexOf(sends[0]!)).toBeGreaterThan(editor);
+    expect(depth(sends[0]!.line)).toBeGreaterThan(depth(rows[editor]!.line));
+    expect(depth(sends[1]!.line)).toBe(depth(rows[workspace]!.line));
+    expect(sends[0]!.ref).not.toBe(sends[1]!.ref);
+    expect(scoped).toMatchObject({ mode: "full", truncation: { baselineComplete: true } });
+    expect((scoped.items as Item[]).filter((item) => item.line.includes('- button "Send dispatch"')).map((item) => item.ref)).toEqual([sends[0]!.ref]);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
     await closeServer(fixture.server);

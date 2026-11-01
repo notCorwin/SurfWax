@@ -149,22 +149,47 @@ test("updates the snapshot when a placeholder becomes transparent and visible ag
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
-test("marks a child frame placeholder unknown until its full frame clipping can be proven", async () => {
+test("proves child frame placeholders only through fully contained frame owners", async () => {
   test.setTimeout(90_000);
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses), opened = await openExtension();
   let snapshot: any;
   try {
     const target = await opened.context.newPage();
+    await target.route("http://cross-frame.test/**", (route) => route.fulfill({ contentType: "text/html", body:
+      '<style>input{width:300px;height:30px;font:16px monospace}</style><input placeholder="CROSS_ORIGIN_VISIBLE_HINT">' }));
     await target.goto(`${provider.origin}/target`);
     await target.evaluate(() => {
-      const frame = document.createElement("iframe");
-      frame.title = "Child workspace";
-      frame.style.cssText = "width:450px;height:100px";
-      frame.srcdoc = `<style>input{width:300px;height:30px;font:16px monospace}</style><input placeholder="FRAME_UNPROVEN_HINT">`;
-      document.body.replaceChildren(frame);
+      const makeFrame = (title: string, html: string) => {
+        const frame = document.createElement("iframe"); frame.title = title;
+        frame.style.cssText = "display:block;width:450px;height:100px"; frame.srcdoc = html;
+        return frame;
+      };
+      const visible = makeFrame("Visible workspace", '<style>input{width:300px;height:30px;font:16px monospace}</style><input placeholder="FRAME_VISIBLE_HINT">');
+      const clipped = makeFrame("Clipped workspace", '<style>input{width:300px;height:30px;font:16px monospace}</style><input aria-label="Clipped frame input" placeholder="FRAME_CLIPPED_HINT">');
+      const clip = document.createElement("div"); clip.style.cssText = "width:100px;overflow:hidden"; clip.append(clipped);
+      const cross = document.createElement("iframe"); cross.title = "Cross origin workspace";
+      cross.style.cssText = "display:block;width:450px;height:100px"; cross.src = "http://cross-frame.test/child";
+      const inner = '<style>input{width:300px;height:30px;font:16px monospace}</style><input placeholder="NESTED_VISIBLE_HINT">';
+      const nested = makeFrame("Nested workspace", `<iframe title="Inner workspace" style="width:400px;height:70px" srcdoc="${inner.replaceAll("&", "&amp;").replaceAll('"', "&quot;")}"></iframe>`);
+      const host = document.createElement("div");
+      host.attachShadow({ mode: "open" }).innerHTML = '<div style="width:80px;overflow:hidden"><slot></slot></div>';
+      const slotted = makeFrame("Slotted workspace", '<style>input{width:300px;height:30px;font:16px monospace}</style><input aria-label="Slotted frame input" placeholder="SLOTTED_FRAME_CLIPPED_HINT">');
+      host.append(slotted);
+      const inputHost = document.createElement("div");
+      inputHost.attachShadow({ mode: "open" }).innerHTML = '<div style="width:20px;overflow:hidden"><slot></slot></div>';
+      const slottedInput = document.createElement("input"); slottedInput.style.cssText = "width:300px;font:16px monospace";
+      slottedInput.placeholder = "SLOTTED_INPUT_CLIPPED_HINT"; inputHost.append(slottedInput);
+      const closedHost = document.createElement("div");
+      closedHost.attachShadow({ mode: "closed" }).innerHTML = '<div style="width:80px;overflow:hidden"><slot></slot></div>';
+      const closedFrame = makeFrame("Closed slotted workspace", '<style>input{width:300px;height:30px;font:16px monospace}</style><input aria-label="Closed slotted frame input" placeholder="CLOSED_FRAME_CLIPPED_HINT">');
+      const closedInput = document.createElement("input"); closedInput.style.cssText = "width:300px;font:16px monospace";
+      closedInput.placeholder = "CLOSED_INPUT_CLIPPED_HINT"; closedHost.append(closedFrame, closedInput);
+      document.body.replaceChildren(visible, clip, cross, nested, host, inputHost, closedHost);
     });
-    await expect(target.frameLocator('iframe[title="Child workspace"]').locator("input")).toBeVisible();
+    await expect(target.frameLocator('iframe[title="Visible workspace"]').locator("input")).toBeVisible();
+    await expect(target.frameLocator('iframe[title="Cross origin workspace"]').locator("input")).toBeVisible();
+    await expect(target.frameLocator('iframe[title="Nested workspace"]').frameLocator('iframe[title="Inner workspace"]').locator("input")).toBeVisible();
     responses.push(commandResponse("inspect_page", { budget: 12000 }, "placeholder-child-frame"),
       (request) => { snapshot = lastTool(request); return textResponse("PLACEHOLDER_FRAME_DONE"); },
       textResponse("Inspect the child frame"));
@@ -176,7 +201,14 @@ test("marks a child frame placeholder unknown until its full frame clipping can 
 
     expect(snapshot).toMatchObject({ mode: "full", items: expect.any(Array) });
     const items: Item[] = snapshot.items;
-    expect(JSON.stringify(items)).not.toContain("FRAME_UNPROVEN_HINT");
-    expect(items.find((item) => item.line.includes("textbox") && item.line.includes("[placeholder=unknown]"))).toBeTruthy();
+    expect(JSON.stringify(items)).toContain("FRAME_VISIBLE_HINT");
+    expect(JSON.stringify(items)).toContain("CROSS_ORIGIN_VISIBLE_HINT");
+    expect(JSON.stringify(items)).toContain("NESTED_VISIBLE_HINT");
+    expect(JSON.stringify(items)).not.toContain("FRAME_CLIPPED_HINT");
+    expect(JSON.stringify(items)).not.toContain("SLOTTED_FRAME_CLIPPED_HINT");
+    expect(JSON.stringify(items)).not.toContain("SLOTTED_INPUT_CLIPPED_HINT");
+    expect(JSON.stringify(items)).not.toContain("CLOSED_FRAME_CLIPPED_HINT");
+    expect(JSON.stringify(items)).not.toContain("CLOSED_INPUT_CLIPPED_HINT");
+    expect(items.find((item) => item.line.includes("Clipped frame input") && item.line.includes("[placeholder=unknown]"))).toBeTruthy();
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

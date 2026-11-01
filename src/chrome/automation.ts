@@ -4,12 +4,15 @@ import { waitForDocumentFrame } from "./dom-frame";
 import { abortError, axValue, delay, imageSize, isTransientNavigationError, keyboardParams, modifierMask, parseKeyboardChord, throwIfAborted } from "./automation-utils";
 import { diffSnapshot, paginateSnapshot, type SnapshotItem, type SnapshotPosition } from "./snapshot-pagination";
 import { renderSnapshotNode, type SnapshotNode, type SnapshotStateName } from "./snapshot-render";
+import { stitchSnapshotFrames, type SnapshotLine } from "./snapshot-frame-tree";
 import { snapshotDomSupplement, type SnapshotDomEvidence } from "./snapshot-dom";
 import { createSnapshotDomIndex } from "./snapshot-dom-index";
+import { snapshotSlottedNodes } from "./snapshot-slot-index";
 import { sameDOMSnapshot } from "./snapshot-consistency";
 import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
 import { projectTextPaint, sameTextPaintCandidates, TEXT_PAINT_CACHE_LOOKUP_SOURCE, TEXT_PAINT_CACHE_REGISTER_SOURCE, type TextPaintEvidence } from "./snapshot-text-paint";
 import { PLACEHOLDER_EVIDENCE_SOURCE, samePlaceholderEvidence, type PlaceholderEvidence } from "./snapshot-placeholder";
+import { FRAME_OWNER_FULLY_VISIBLE_SOURCE } from "./snapshot-frame-containment";
 import { createFrameVisibility } from "./frame-visibility";
 import { PROGRAM_EVENT_INVOKE } from "./program-handles";
 
@@ -41,7 +44,6 @@ type FrameRefRecord = { frameId: string; debuggee: Debuggee; generation: number;
 type FrameDocument = { session: Session; frame: FrameRefRecord; promise: Promise<string>; objectId?: string; executionContextId?: number;
   paintCacheToken: string; paintCacheWarm?: boolean; paintCacheTail?: Promise<void>; backendNodeId?: number };
 type FrameListSnapshot = { id: string; session: Session; generation: number; revision: number; conversationId?: string; runId?: string; frames: Array<Record<string, unknown>> };
-type SnapshotLine = { id: string; line: string; ref?: string; node?: SnapshotNode };
 type InspectSnapshot = {
   id: string; session: Session; generation: number; frameRevision: number; conversationId?: string; runId?: string;
   record: ObservationRecord; source: SnapshotItem[]; mode: "full" | "delta"; reset?: string;
@@ -883,7 +885,8 @@ export class AutomationRuntime {
         position = { index: Number(match[2]), charOffset: Number(match[3]) };
         this.inspectionSnapshots.delete(saved.id); this.inspectionSnapshots.set(saved.id, saved);
       } else {
-        const scopeKey = JSON.stringify([region ?? null, options.fields ?? ["text", "state", "ref", "actions"], options.depth ?? null]);
+        const fields = options.fields ?? ["text", "state", "ref"];
+        const scopeKey = JSON.stringify([region ?? null, fields, options.depth ?? null]);
         const previous = options.since ? this.observations.get(options.since) : undefined;
         if (options.since && (!previous || previous.session !== session || previous.tabId !== tabId || previous.documentId !== generation || previous.scopeKey !== scopeKey))
           throw automationError("stale-observation", { observationId: options.since, reason: "document-or-scope-changed" });
@@ -892,7 +895,6 @@ export class AutomationRuntime {
         if (captured.frameRevision !== session.frameRevision) throw automationError("stale-observation", { reason: "frame-tree-changed-during-inspection" });
         if (previous && previous.documentId !== session.generation) throw automationError("stale-observation", { observationId: options.since, reason: "document-changed-during-inspection" });
         if (previous && previous.regionIdentity !== captured.regionIdentity) throw automationError("stale-observation", { observationId: options.since, reason: "region-identity-changed" });
-        const fields = options.fields ?? ["text", "state", "ref", "actions"];
         const lines: SnapshotLine[] = captured.lines.filter(({ node, line }) => options.depth === undefined || (node?.depth ?? (line.match(/^ */)?.[0].length ?? 0) / 2) <= options.depth)
           .map(({ id, line, node }) => {
             if (!node) return { id, line };
@@ -3132,9 +3134,66 @@ export class AutomationRuntime {
       type PlaceholderCandidate = { frameId: string; debuggee: Debuggee; backendNodeId: number; expected: string; hostHidden: boolean };
       type PlaceholderProof = { evidence: PlaceholderEvidence; textBackendNodeId?: number };
       const placeholderKey = (item: PlaceholderCandidate) => JSON.stringify([item.debuggee.sessionId ?? "", item.frameId, item.backendNodeId]);
+      let slottedByDebuggee = new Map<string, Set<number>>();
       const collectPlaceholders = async (items: PlaceholderCandidate[]): Promise<Map<string, PlaceholderProof>> => {
         const result = new Map<string, PlaceholderProof>();
         const groups = new Map<string, PlaceholderCandidate[]>();
+        // Share each owner proof across placeholders in the same capture. The
+        // second capture obtains fresh proofs before accepting any evidence.
+        const ownerProofs = new Map<string, Promise<boolean>>();
+        const ownerFullyContained = (frameId: string): Promise<boolean> => {
+          let pending = ownerProofs.get(frameId);
+          if (pending) return pending;
+          pending = (async () => {
+            const parentId = session.frameParents.get(frameId), parent = parentId && session.frames.get(parentId);
+            if (!parentId || !parent) throw automationError("snapshot-unavailable", { reason: "missing-frame-parent", frameId });
+            const frame: FrameRefRecord = { frameId: parentId, debuggee: parent, generation, revision: frameRevision,
+              conversationId: frameContext.conversationId, runId: frameContext.runId };
+            await this.frameDocument(session, frame, frameGuard);
+            const key = JSON.stringify([session.tabId, parentId, parent.sessionId ?? null]);
+            const document = this.frameDocuments.get(key), contextId = document?.executionContextId;
+            if (!Number.isSafeInteger(contextId)) throw automationError("snapshot-unavailable", { reason: "missing-placeholder-context" });
+            const check = () => {
+              frameGuard();
+              if (this.frameDocuments.get(key) !== document) throw automationError("stale-frame", { reason: "placeholder-context-expired" });
+            };
+            const group = `surf-wax-placeholder-owner:${crypto.randomUUID()}`;
+            try {
+              const owner = await this.options.command(parent, "DOM.getFrameOwner", { frameId });
+              check();
+              if (!Number.isSafeInteger(owner?.backendNodeId) || owner.backendNodeId <= 0)
+                throw automationError("snapshot-unavailable", { reason: "missing-frame-owner", frameId });
+              // assignedSlot is deliberately null through a closed shadow
+              // root. CDP's flattened ancestry detects that case; until its
+              // complete paint path is proven, do not expose the text.
+              const slotted = slottedByDebuggee.get(parent.sessionId ?? "");
+              if (!slotted || slotted.has(owner.backendNodeId)) return false;
+              const node = await this.options.command(parent, "DOM.resolveNode", { backendNodeId: owner.backendNodeId, executionContextId: contextId, objectGroup: group });
+              check();
+              if (typeof node.object?.objectId !== "string") throw automationError("snapshot-unavailable", { reason: "missing-frame-owner-object", frameId });
+              const response = await this.options.command(parent, "Runtime.callFunctionOn", { objectId: node.object.objectId, functionDeclaration: FRAME_OWNER_FULLY_VISIBLE_SOURCE, returnByValue: true });
+              check();
+              const status = response.result?.value?.status;
+              if (response.exceptionDetails || !["visible", "unknown"].includes(status))
+                throw automationError("snapshot-unavailable", { reason: "frame-containment-unavailable", frameId });
+              return status === "visible";
+            } finally { void this.options.command(parent, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined); }
+          })();
+          ownerProofs.set(frameId, pending);
+          return pending;
+        };
+        const frameFullyContained = async (frameId: string): Promise<boolean> => {
+          const visited = new Set<string>();
+          while (frameId !== session.rootFrameId) {
+            if (visited.has(frameId)) throw automationError("snapshot-unavailable", { reason: "cyclic-frame-ancestry" });
+            visited.add(frameId);
+            if (!await ownerFullyContained(frameId)) return false;
+            const parentId = session.frameParents.get(frameId);
+            if (!parentId) throw automationError("snapshot-unavailable", { reason: "missing-frame-parent", frameId });
+            frameId = parentId;
+          }
+          return true;
+        };
         for (const item of items) {
           if (item.hostHidden) { result.set(placeholderKey(item), { evidence: { status: "hidden" } }); continue; }
           const key = JSON.stringify([item.debuggee.sessionId ?? "", item.frameId]);
@@ -3190,8 +3249,10 @@ export class AutomationRuntime {
                 if (response.exceptionDetails || !value || !["visible", "hidden", "unknown"].includes(value.status)
                   || value.status === "visible" && (typeof value.text !== "string" || value.text !== item.expected))
                   throw automationError("snapshot-unavailable", { reason: "placeholder-evidence-unavailable" });
-                const evidence: PlaceholderEvidence = value.status === "visible" && item.frameId !== session.rootFrameId
-                  ? { status: "unknown" } : value.status === "visible" ? { status: "visible", text: value.text } : { status: value.status };
+                const slots = slottedByDebuggee.get(debuggee.sessionId ?? "");
+                const evidence: PlaceholderEvidence = value.status === "visible"
+                  ? slots && !slots.has(item.backendNodeId) && await frameFullyContained(item.frameId) ? { status: "visible", text: value.text } : { status: "unknown" }
+                  : { status: value.status };
                 return { evidence, ...(textBackendNodeId === undefined ? {} : { textBackendNodeId }) };
               }));
               const failed = settled.find((entry): entry is PromiseRejectedResult => entry.status === "rejected");
@@ -3385,6 +3446,9 @@ export class AutomationRuntime {
             }
           }
         }
+        try { slottedByDebuggee = placeholderItems.length
+          ? new Map(initialLayouts.map(({ debuggee, snapshot }) => [debuggee.sessionId ?? "", snapshotSlottedNodes(snapshot)])) : new Map(); }
+        catch { throw automationError("snapshot-unavailable", { reason: "invalid-dom-snapshot" }); }
         placeholderBefore = await waitForCapture(collectPlaceholders(placeholderItems));
         const [captured, layouts, pageInfo] = await waitForCapture(Promise.all([
           Promise.all(relevantFrames.map(async (item) => ({ ...item, tree: capturedFrames.includes(item)
@@ -4119,11 +4183,18 @@ export class AutomationRuntime {
           && doc.nodes?.backendNodeId?.includes(regionNode.node.backendNodeId));
       }) : [];
       if (regionNode && regionMatches.length !== 1) throw automationError("snapshot-region-unavailable", { locator: region });
+      const frameSnapshots: Array<{ frameRef: string; lines: SnapshotLine[] }> = [];
       for (const item of trees) {
-        const { debuggee, frameId, depth, tree, visibility, textProjections, snapshot } = item;
-        if (tree)
-          await waitForCapture(render(tree.nodes ?? [], visibility, textProjections, snapshot, debuggee, frameId, regionFrameId ? Math.max(0, depth - depthOf(regionFrameId)) : depth));
+        const { debuggee, frameId, tree, visibility, textProjections, snapshot } = item;
+        if (!tree) continue;
+        // Render each document at its own origin, then insert it at the
+        // represented iframe owner. Frame depth alone is not semantic depth.
+        await waitForCapture(render(tree.nodes ?? [], visibility, textProjections, snapshot, debuggee, frameId, 0));
+        const frameRef = capturedFrameRefs.get(frameId ?? session.rootFrameId!);
+        if (!frameRef) throw automationError("snapshot-unavailable", { reason: "missing-frame-ref" });
+        frameSnapshots.push({ frameRef, lines: lines.splice(0) });
       }
+      for (const line of stitchSnapshotFrames(frameSnapshots, capturedFrameRefs.get(regionFrameId ?? session.rootFrameId!))) lines.push(line);
       const ids = new Set<string>();
       for (const { id } of lines) {
         if (ids.has(id)) throw automationError("snapshot-unavailable", { reason: "duplicate-semantic-id", id });

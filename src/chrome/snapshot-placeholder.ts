@@ -64,7 +64,10 @@ export const PLACEHOLDER_EVIDENCE_SOURCE = String.raw`function(text, expected) {
         || box.right > view.innerWidth || box.bottom > view.innerHeight) return unknown();
     // Each clipped ancestor contributes a client box. A clipped rounded corner
     // or complex transform cannot be proven by axis-aligned rectangles.
+    const visited = new Set();
     for (let element = parent; element; ) {
+      if (visited.has(element)) return unknown();
+      visited.add(element);
       const s = view.getComputedStyle(element);
       if (s.display === 'none' || Number(s.opacity) === 0) return hidden();
       if (!noEffect(s) || !Number.isFinite(Number(s.opacity))) return unknown();
@@ -80,7 +83,7 @@ export const PLACEHOLDER_EVIDENCE_SOURCE = String.raw`function(text, expected) {
             || y !== 'visible' && (box.top < top || box.bottom > top + element.clientHeight)) return unknown();
       }
       const root = element.getRootNode();
-      element = element.parentElement || (root && root.host) || null;
+      element = element.assignedSlot || element.parentElement || (root && root.host) || null;
     }
     // The UA placeholder box itself clips overflow even when CSS reports
     // overflow:visible; require complete containment independently.
