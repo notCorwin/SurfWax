@@ -25,6 +25,58 @@ function scrollRange(size: number, viewport: number, direction: "positive" | "ne
   return [direction === "positive" ? 0 : -distance, direction === "negative" ? 0 : distance];
 }
 
+const zeroLength = /^[+-]?(?:0+(?:\.0*)?|\.0+)(?:px|%)?$/;
+const transparencyPreservingFilters = new Set(["blur", "brightness", "contrast", "drop-shadow", "grayscale", "hue-rotate", "invert", "opacity", "saturate", "sepia"]);
+
+/** SVG filters can create new pixels even from a transparent input. */
+function transparentFilter(value: string): boolean {
+  let index = 0, transparent = false;
+  while (index < value.length) {
+    while (/\s/.test(value[index] ?? "")) index++;
+    if (index >= value.length) break;
+    const match = /^([a-z-]+)\(/i.exec(value.slice(index));
+    if (!match) return false;
+    const name = match[1]!.toLowerCase();
+    index += match[0].length;
+    const start = index;
+    let depth = 1, quote = "";
+    while (index < value.length && depth) {
+      const char = value[index++]!;
+      if (char === "\\") { index++; continue; }
+      if (quote) { if (char === quote) quote = ""; continue; }
+      if (char === '"' || char === "'") { quote = char; continue; }
+      if (char === "(") depth++;
+      else if (char === ")") depth--;
+    }
+    if (depth || quote) return false;
+    const argument = value.slice(start, index - 1).trim();
+    if (name === "opacity" && zeroLength.test(argument)) transparent = true;
+    else if (!transparencyPreservingFilters.has(name)) transparent = false;
+  }
+  return transparent;
+}
+
+/** A zero-radius circle/ellipse or coincident polygon has no painted area. */
+function emptyShape(value: string): boolean {
+  const match = /^(circle|ellipse|polygon)\((.*)\)(?:\s+(?:border-box|padding-box|content-box|margin-box|fill-box|stroke-box|view-box))?$/.exec(value.trim());
+  if (!match) return false;
+  const kind = match[1]!, argument = match[2]!;
+  if (kind === "circle" || kind === "ellipse") {
+    const radii = argument.split(/\s+at\s+/)[0]!.trim().split(/\s+/);
+    return radii.length === (kind === "circle" ? 1 : 2) && radii.some((radius) => zeroLength.test(radius));
+  }
+  const points = argument.split(",").map((part) => part.trim());
+  if (points[0] === "evenodd" || points[0] === "nonzero") points.shift();
+  if (points.length < 3) return false;
+  const coordinates = (point: string): string | undefined => {
+    const values = point.split(/\s+/);
+    if (values.length !== 2 || values.some((part) => !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:px|%)$/.test(part))) return undefined;
+    return values.map((part) => { const number = Number.parseFloat(part); return number === 0 ? "0" : `${number}${part.endsWith("%") ? "%" : "px"}`; }).join(" ");
+  };
+  const first = coordinates(points[0]!);
+  return first !== undefined && points.every((point) => coordinates(point) === first);
+}
+
 /** Recognize only clips that are empty regardless of the element's size. */
 function emptyInset(value: string): boolean {
   const match = /^inset\((.*)\)(?:\s+(?:border-box|padding-box|content-box|margin-box|fill-box|stroke-box|view-box))?$/.exec(value.trim());
@@ -126,7 +178,7 @@ export function snapshotVisibility(snapshot: any): Map<number, boolean> {
         const position = style(5);
         // Unlike overflow, these clips apply to the complete rendered subtree,
         // including fixed and absolute descendants that escape overflow clips.
-        emptyClip ||= emptyInset(style(15)) || emptyLegacyClip(style(16), position);
+        emptyClip ||= emptyInset(style(15)) || emptyShape(style(15)) || emptyLegacyClip(style(16), position);
         const transform = style(6);
         if (transform && transform !== "none") {
           const match = /^matrix\(([^)]+)\)$/.exec(transform);
@@ -139,7 +191,7 @@ export function snapshotVisibility(snapshot: any): Map<number, boolean> {
         // property establishes a containing block for fixed descendants.
         if (position === "absolute") clip = absoluteClip;
         else if (position === "fixed") clip = fixedClip;
-        transparent ||= Number.parseFloat(style(0)) === 0;
+        transparent ||= Number.parseFloat(style(0)) === 0 || transparentFilter(style(7));
         const visibility = style(3);
         const bounds: number[] = layout.bounds[layoutIndex] ?? [];
         const hasBounds = bounds.length >= 4 && bounds.every(Number.isFinite);

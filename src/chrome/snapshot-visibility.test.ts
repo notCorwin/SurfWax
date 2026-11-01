@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { snapshotVisibility } from "./snapshot-visibility";
 
 // Indexes are deliberately independent of layout indexes, as in CDP snapshots.
-function capture(nodes: Array<{ parent: number; bounds?: number[]; client?: number[]; offset?: number[]; scroll?: number[]; opacity?: string; x?: string; y?: string; visibility?: string; content?: string; name?: string; type?: number; position?: string; transform?: string; clipPath?: string; clip?: string; direction?: string; writing?: string; display?: string }>, document: { contentWidth?: number; contentHeight?: number; scrollOffsetX?: number; scrollOffsetY?: number } = {}) {
+function capture(nodes: Array<{ parent: number; bounds?: number[]; client?: number[]; offset?: number[]; scroll?: number[]; opacity?: string; filter?: string; x?: string; y?: string; visibility?: string; content?: string; name?: string; type?: number; position?: string; transform?: string; clipPath?: string; clip?: string; direction?: string; writing?: string; display?: string }>, document: { contentWidth?: number; contentHeight?: number; scrollOffsetX?: number; scrollOffsetY?: number } = {}) {
   const strings = ["1", "0", "visible", "hidden", "auto", "clip", "scroll", "IFRAME", "static", "fixed", "absolute", "relative", "none", "matrix(1, 0, 0, 1, 0, 0)", "matrix(0, 1, -1, 0, 0, 0)"];
   const stringId = (value: string) => { const index = strings.indexOf(value); if (index >= 0) return index; return strings.push(value) - 1; };
   const withLayout = nodes.map((node, index) => ({ node, index })).filter(({ node }) => node.bounds);
@@ -10,7 +10,7 @@ function capture(nodes: Array<{ parent: number; bounds?: number[]; client?: numb
     nodeIndex: withLayout.map(({ index }) => index), bounds: withLayout.map(({ node }) => node.bounds),
     clientRects: withLayout.map(({ node }) => node.client ?? []), offsetRects: withLayout.map(({ node }) => node.offset ?? []),
     scrollRects: withLayout.map(({ node }) => node.scroll ?? []),
-    styles: withLayout.map(({ node }) => [node.opacity ?? "1", node.x ?? "visible", node.y ?? "visible", node.visibility ?? "visible", node.content ?? "visible", node.position ?? "static", node.transform ?? "none", "none", "none", "none", "auto", "none", "none", "none", "none", node.clipPath ?? "none", node.clip ?? "auto", node.direction ?? "ltr", node.writing ?? "horizontal-tb", node.display ?? "block"].map(stringId)),
+    styles: withLayout.map(({ node }) => [node.opacity ?? "1", node.x ?? "visible", node.y ?? "visible", node.visibility ?? "visible", node.content ?? "visible", node.position ?? "static", node.transform ?? "none", node.filter ?? "none", "none", "none", "auto", "none", "none", "none", "none", node.clipPath ?? "none", node.clip ?? "auto", node.direction ?? "ltr", node.writing ?? "horizontal-tb", node.display ?? "block"].map(stringId)),
   } }] };
 }
 
@@ -24,6 +24,37 @@ describe("snapshot visual visibility", () => {
       { parent: 0, bounds: [0, 0, 20, 20] },
     ]));
     expect([...state.values()]).toEqual([true, false, false, false, true]);
+  });
+
+  it("filters fully transparent filter output while preserving unknown SVG effects", () => {
+    const state = snapshotVisibility(capture([
+      { parent: -1, bounds: [0, 0, 500, 500] },
+      { parent: 0, bounds: [0, 0, 100, 100], filter: "opacity(0%) blur(2px)" },
+      { parent: 1, bounds: [0, 0, 20, 20], position: "fixed" },
+      { parent: 0, bounds: [0, 0, 100, 100], filter: "opacity(0) url(#flood)" },
+      { parent: 0, bounds: [0, 0, 100, 100], filter: "url(#flood) opacity(0)" },
+      { parent: 0, bounds: [0, 0, 100, 100], filter: 'url("file opacity(0) value") blur(2px)' },
+      { parent: 0, bounds: [0, 0, 100, 100], filter: "opacity(0.01)" },
+      { parent: 0, bounds: [0, 0, 100, 100], filter: "opacity(calc(0))" },
+      { parent: 0, bounds: [0, 0, 100, 100], filter: "opacity(0) url(#flood) opacity(0) drop-shadow(0px 0px 2px red)" },
+    ]));
+    expect([...state.values()]).toEqual([true, false, false, true, false, true, true, true, false]);
+  });
+
+  it("filters only clip shapes with provably zero area", () => {
+    const state = snapshotVisibility(capture([
+      { parent: -1, bounds: [0, 0, 500, 500] },
+      { parent: 0, bounds: [0, 0, 100, 100], clipPath: "circle(0% at 30% 20%)" },
+      { parent: 1, bounds: [0, 0, 20, 20], position: "fixed" },
+      { parent: 0, bounds: [0, 0, 100, 100], clipPath: "ellipse(10px 0px at center)" },
+      { parent: 0, bounds: [0, 0, 100, 100], clipPath: "polygon(evenodd, 0px 0%, 0% 0px, 0px 0px)" },
+      { parent: 0, bounds: [0, 0, 100, 100], clipPath: "polygon(20px 30%, 20.0px 30%, 20px 30%)" },
+      { parent: 0, bounds: [0, 0, 100, 100], clipPath: "circle(1px)" },
+      { parent: 0, bounds: [0, 0, 100, 100], clipPath: "ellipse(1px 2px)" },
+      { parent: 0, bounds: [0, 0, 100, 100], clipPath: "polygon(0px 0px, 100% 0px, 0px 100%)" },
+      { parent: 0, bounds: [0, 0, 100, 100], clipPath: "polygon(calc(0px) 0px, 0px 0px, 0px 0px)" },
+    ]));
+    expect([...state.values()]).toEqual([true, false, false, false, false, false, true, true, true, true]);
   });
 
   it("filters non-scrollable clipping while preserving offscreen scrollable content", () => {
@@ -106,7 +137,7 @@ describe("snapshot visual visibility", () => {
       { parent: 0, bounds: [0, 0, 100, 100], clip: "rect(auto, 0px, auto, 0px)", position: "fixed" },
       { parent: 0, bounds: [0, 0, 100, 100], clip: "rect(0px, 20px, 20px, 0px)", position: "absolute" },
     ]));
-    expect([...state.values()]).toEqual([true, false, false, false, false, false, true, true, true, false, false, true, false, true]);
+    expect([...state.values()]).toEqual([true, false, false, false, false, false, true, true, false, false, false, true, false, true]);
   });
 
   it("uses the document's scroll reachability and retains viewport-fixed and transformed fixed content appropriately", () => {
