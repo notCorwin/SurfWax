@@ -27,7 +27,7 @@ export function createSidePanelCloser(runtime: CloseableRuntime, logger?: EventL
   };
 }
 
-export function useSidePanelRuntime(config: ModelConfig, systemPrompt: string | undefined, logger: EventLogger, initialThreadId?: string, goalMode = false) {
+export function useSidePanelRuntime(config: ModelConfig, systemPrompt: string | undefined, logger: EventLogger, initialThreadId?: string, goalMode = true) {
   const executor = useMemo(() => new ChromeExecutor({ logger }), [logger]);
   // Configuration changes are deliberately hot-swapped for the next run.
   // An active run keeps the snapshot it started with; the conversation and

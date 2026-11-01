@@ -1,5 +1,5 @@
 import { arrayBufferLength, arrayViewName, assertPlainGraphObject, dateISOString, dateValue, graphProperties, isArrayBuffer, isDate, isMap, isRegExp, isSet, mapEntries, regexpFlagString, regexpSource, setValues, viewLayout } from "./log-graph";
-const RESULT_SIDECAR_FIELDS = new Set(["resultType", "undefinedPaths", "holePaths", "numberPaths", "bigintPaths", "typePaths", "undefinedCount", "holeCount", "numberCount", "bigintCount", "typeCount", "undefinedPathsAccess", "holePathsAccess", "numberPathsAccess", "bigintPathsAccess", "typePathsAccess", "undefinedPathsOversizedItem", "holePathsOversizedItem", "numberPathsOversizedItem", "bigintPathsOversizedItem", "typePathsOversizedItem", "pathsNote", "envelopeWrapped"]);
+const RESULT_SIDECAR_FIELDS = new Set(["evidenceId", "resultType", "undefinedPaths", "holePaths", "numberPaths", "bigintPaths", "typePaths", "undefinedCount", "holeCount", "numberCount", "bigintCount", "typeCount", "undefinedPathsAccess", "holePathsAccess", "numberPathsAccess", "bigintPathsAccess", "typePathsAccess", "undefinedPathsOversizedItem", "holePathsOversizedItem", "numberPathsOversizedItem", "bigintPathsOversizedItem", "typePathsOversizedItem", "pathsNote", "envelopeWrapped"]);
 
 function bytesBase64(bytes: Uint8Array): string {
   let binary = "";

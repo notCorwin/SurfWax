@@ -171,7 +171,7 @@ test("@real-model browser task", async () => {
     await target.goto(fixture.origin);
     const frame = target.frames().find((item) => item.url().includes("localhost"));
     if (!frame && !scriptLevel) throw new Error("Fixture frame missing");
-    const options = await configure(opened.context, opened.page, proxy.baseURL);
+    const options = await configure(opened.context, opened.page, proxy.baseURL, undefined, { goalMode: true });
     await options.getByLabel("Model ID", { exact: true }).fill(model);
     await options.getByLabel("API Key", { exact: true }).fill(proxy.token);
     await options.getByRole("button", { name: "保存配置" }).click();

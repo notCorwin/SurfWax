@@ -2,7 +2,7 @@ import { convertToModelMessages, type LanguageModel, type ModelMessage, type UIM
 import { activeConversationMessages, isSyntheticTerminalMessage, restoreConversationRepository } from "../conversations";
 import { fromLogValue, isConversationMessage, type ConversationMessage, type EventLogger, type LogEvent } from "../logging";
 import type { ModelConfig } from "../types";
-import { contextPressure, effectiveContext, summarizeContext } from "./compaction";
+import { contextPressure, effectiveContext, hasSummarizableHistory, summarizeContext } from "./compaction";
 import { createModel } from "./model";
 import type { ModelLimit } from "./model-limits";
 import { materializeToolCatalog } from "./tool-catalog";
@@ -85,6 +85,7 @@ export async function ensureAutomaticContextSummary(
   const pressure = await contextPressure({ raw: source.raw, branchIds: source.branchIds, events: source.events,
     model, signal, limit: options.limit, instructions: options.instructions, tools: options.tools });
   if (!options.forced && (!pressure || pressure.estimated <= pressure.threshold)) return false;
+  if (!options.forced && pressure && !hasSummarizableHistory(pressure.messages, pressure.limit)) return false;
   if (!source.raw.length) return false;
   // Fixed instructions/schema overhead cannot be reduced by re-summarizing an unchanged prefix.
   if (!options.forced && source.checkpoint?.sourceCount === source.raw.length) return false;

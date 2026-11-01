@@ -2,8 +2,10 @@ import type { LanguageModelMiddleware } from "ai";
 import type { LanguageModelV4ToolCall } from "@ai-sdk/provider";
 import { PROGRAM_TOOL_REGISTRY } from "../chrome/tool";
 import type { EventLogger } from "../logging";
+import { repairableToolProtocolError } from "./tool-protocol-error";
 
 type Parsed = { calls: LanguageModelV4ToolCall[] } | { error: string };
+type ToolSchema = { parse(input: unknown): unknown };
 
 const DIALECTS = [
   { calls: "<｜DSML｜ calls>", endCalls: "</｜DSML｜ calls>", invoke: "<｜DSML｜ invoke name=\"", endInvoke: "</｜DSML｜ invoke>", parameter: "<｜DSML｜ parameter name=\"", endParameter: "</｜DSML｜ parameter>" },
@@ -12,7 +14,7 @@ const DIALECTS = [
 const END_SENTENCE = "<｜end▁of▁sentence｜>";
 const DSML_MARKER = "<｜DSML｜";
 
-function parseDsml(text: string, activeTools: Set<string>): Parsed | undefined {
+function parseDsml(text: string, activeTools: Set<string>, additionalSchemas: Readonly<Record<string, ToolSchema>>): Parsed | undefined {
   let source = text.trim();
   if (source.endsWith(END_SENTENCE)) source = source.slice(0, -END_SENTENCE.length).trimEnd();
   const dialect = DIALECTS.find(({ calls }) => source.startsWith(calls));
@@ -53,14 +55,15 @@ function parseDsml(text: string, activeTools: Set<string>): Parsed | undefined {
     }
     let validated: unknown;
     try {
-      validated = PROGRAM_TOOL_REGISTRY.find(({ name }) => name === toolName)?.inputSchema.parse(input);
+      const schema = additionalSchemas[toolName] ?? PROGRAM_TOOL_REGISTRY.find(({ name }) => name === toolName)?.inputSchema;
+      validated = schema?.parse(input);
     } catch { return fail("invalid-tool-arguments"); }
     if (validated === undefined) return fail("unknown-tool");
     calls.push({ type: "tool-call", toolCallId: crypto.randomUUID(), toolName, input: JSON.stringify(validated), dynamic: true });
   }
 }
 
-export function dsmlMiddleware(logger?: EventLogger, conversationId?: string): LanguageModelMiddleware {
+export function dsmlMiddleware(logger?: EventLogger, conversationId?: string, additionalSchemas: Readonly<Record<string, ToolSchema>> = {}): LanguageModelMiddleware {
   const log = (result: Parsed) => logger?.telemetry({
     type: "model.dsml.recovery",
     conversationId,
@@ -75,7 +78,7 @@ export function dsmlMiddleware(logger?: EventLogger, conversationId?: string): L
       const ids = new Set<string>();
       for (const part of result.content) if (part.type === "tool-call") {
         if (typeof part.toolCallId !== "string" || !part.toolCallId.trim() || ids.has(part.toolCallId)) {
-          throw Object.assign(new Error("Missing or duplicate tool call ID in model response"), { code: "invalid-tool-call-id" });
+          throw repairableToolProtocolError(Object.assign(new Error("Missing or duplicate tool call ID in model response"), { code: "invalid-tool-call-id" }), JSON.stringify(result.content));
         }
         ids.add(part.toolCallId);
       }
@@ -83,11 +86,17 @@ export function dsmlMiddleware(logger?: EventLogger, conversationId?: string): L
       const textParts = result.content.filter((part) => part.type === "text");
       if (!textParts.length) return result;
       const activeTools = params.tools.filter((tool) => tool.type === "function" && (params.toolChoice?.type !== "tool" || tool.name === params.toolChoice.toolName)).map((tool) => tool.name);
-      const parsed = parseDsml(textParts.map((part) => part.text).join(""), new Set(activeTools));
+      const text = textParts.map((part) => part.text).join("");
+      const parsed = parseDsml(text, new Set(activeTools), additionalSchemas);
       if (!parsed) return result;
       const nativeCall = result.content.some((part) => part.type === "tool-call");
       if (!nativeCall) log(parsed);
-      if (!("calls" in parsed)) return result;
+      if (!("calls" in parsed)) {
+        if (nativeCall) return result;
+        throw repairableToolProtocolError(Object.assign(new Error(`Invalid DSML tool response (${parsed.error}); no tool was executed.`), { code: "dsml-tool-protocol" }), text);
+      }
+      if (!nativeCall && result.finishReason.unified !== "stop")
+        throw repairableToolProtocolError(Object.assign(new Error("The DSML response did not finish normally; no tool was executed."), { code: "dsml-tool-protocol" }), text);
       const firstText = result.content.findIndex((part) => part.type === "text");
       return { ...result,
         content: result.content.flatMap((part, index) => part.type !== "text" ? [part] : !nativeCall && index === firstText ? parsed.calls : []),

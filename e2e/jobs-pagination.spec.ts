@@ -30,7 +30,7 @@ test("paginates a fixed job snapshot across model calls in Chrome", async () => 
         return commandResponse("list_jobs", { limit: 1, cursor: page.nextCursor }, "page-three");
       },
       (request) => {
-        expect(lastTool(request)).toEqual({ jobs: [{ id: ids[2], state: "succeeded" }], hasMore: false });
+        expect(lastTool(request)).toEqual({ evidenceId: expect.any(String), jobs: [{ id: ids[2], state: "succeeded" }], hasMore: false });
         return textResponse("JOB_PAGINATION_OK");
       },
       textResponse("任务分页"),

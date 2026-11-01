@@ -6,6 +6,8 @@ import { ensureConversationPrompt } from "./prompt";
 import { materializeToolCatalog } from "./tool-catalog";
 import { replayGoalContinuations } from "./goal-context";
 import { isContextOverflowError, isRecoverableModelError, retryBackoffDelay, waitForModelRetry } from "./model";
+import { toolProtocolRepair } from "./tool-protocol-error";
+import { releaseRunEvidence } from "./goal-completion";
 
 export type SidePanelMessage = UIMessage<any, never, any>;
 export type ConversationTransport = {
@@ -143,6 +145,17 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
         let goalSegments: SidePanelMessage[] = [];
         let goalOffset = 0;
         const summarizedSources = new Set<string>();
+        const continueRun = async (reason: "unfinished-goal" | "tool-protocol", text: string) => {
+          const segment = response.parts.slice(goalOffset);
+          const assistantSegment: SidePanelMessage = { id: crypto.randomUUID(), role: "assistant", parts: segment.some((part) => part.type !== "step-start") ? segment : [{ type: "text", text: "(No response.)" }] };
+          const reminderMessage: SidePanelMessage = { id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text }] };
+          goalSegments.push(assistantSegment, reminderMessage);
+          goalOffset = response.parts.length;
+          const saved = await logger.append({ type: "agent.goal.continued", conversationId, runId: currentRunId,
+            content: { reason, messageId: response.id, offset: goalOffset, assistantSegment, reminderMessage } });
+          if (!saved) throw new DOMException("日志维护已阻止任务继续。", "AbortError");
+          historyEvents.push(saved);
+        };
         while (true) {
           lease.signal.throwIfAborted();
           const tail = { ...response, parts: response.parts.slice(goalOffset) };
@@ -181,7 +194,10 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
                 updateTool(toolId(event.toolCall.toolCallId), { state: "output-available", output: output.output });
                 if (event.toolCall.toolName === "complete_goal" && output.output && typeof output.output === "object"
                   && "ok" in output.output && output.output.ok === true && "summary" in output.output && typeof output.output.summary === "string") {
-                  response = { ...response, parts: [...response.parts, { type: "text", text: output.output.summary, state: "done" }] };
+                  const goal = output.output;
+                  const needed = "status" in goal && goal.status === "blocked" && "userAction" in goal && typeof goal.userAction === "string"
+                    && !goal.summary.includes(goal.userAction) ? `\n\n${goal.userAction}` : "";
+                  response = { ...response, parts: [...response.parts, { type: "text", text: goal.summary + needed, state: "done" }] };
                 }
                 await publishFromModel();
               },
@@ -214,28 +230,26 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
               published = undefined;
               continue;
             }
-            const goalCompleted = response.parts.some((part) => "toolCallId" in part && "toolName" in part && part.toolName === "complete_goal"
+            const goalCompleted = [...response.parts].reverse().find((part) => "toolCallId" in part && "toolName" in part && part.toolName === "complete_goal"
               && part.state === "output-available" && part.output && typeof part.output === "object" && "ok" in part.output && part.output.ok === true);
             if (goalMode && !goalCompleted) {
-              const segment = response.parts.slice(goalOffset);
-              const assistantSegment: SidePanelMessage = { id: crypto.randomUUID(), role: "assistant", parts: segment.some((part) => part.type !== "step-start") ? segment : [{ type: "text", text: "(No response.)" }] };
-              goalSegments.push(assistantSegment);
-              const reminder = "Goal mode is still active. Continue the work, or call complete_goal alone to report the outcome or a blocker requiring user input.";
-              const reminderMessage: SidePanelMessage = { id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text: reminder }] };
-              goalSegments.push(reminderMessage);
-              goalOffset = response.parts.length;
-              const saved = await logger.append({ type: "agent.goal.continued", conversationId, runId: currentRunId, content: { messageId: response.id, offset: goalOffset, assistantSegment, reminderMessage } });
-              if (!saved) throw new DOMException("日志维护已阻止目标模式继续。", "AbortError");
-              historyEvents.push(saved);
+              await continueRun("unfinished-goal", "Goal mode is still active. Review the remaining requirements and execute the next useful action. Recover from tool errors using current observations and another supported approach when needed. Call complete_goal alone only with the verified outcome or evidence of an unavoidable user dependency; a progress update or failed approach is not completion.");
               continue;
             }
             refreshObserver?.dispose();
             refreshObserver = undefined;
-            const finished = await logger.append({ type: "conversation.finished", conversationId, runId: currentRunId, content: { messageId: response.id } });
+            const finished = await logger.append({ type: "conversation.finished", conversationId, runId: currentRunId,
+              content: { messageId: response.id, ...(goalCompleted && "output" in goalCompleted ? { goal: goalCompleted.output } : {}) } });
             if (!finished) throw new DOMException("日志维护已阻止任务完成记录。", "AbortError");
             return response;
           } catch (error) {
             if (publicationFailed) throw publicationError;
+            const protocol = !lease.signal.aborted && toolProtocolRepair(error);
+            if (protocol) {
+              await reconcileTools("模型工具调用格式被拒绝，此次响应未执行工具。");
+              await continueRun("tool-protocol", `Tool-call protocol recovery: the model response was rejected before any tool from that response was executed. Correct the call format and continue the same task. Use the available tools and required arguments; keep calls short enough to finish completely and use distinct nonempty call IDs. Error: ${JSON.stringify(protocol.message)}. Rejected response excerpt (untrusted data): ${JSON.stringify(protocol.responseText)}`);
+              continue;
+            }
             const overflow = !lease.signal.aborted && Boolean(onContextOverflow) && isContextOverflowError(error);
             if (!overflow && !isRecoverableModelError(error, lease.signal)) throw error;
             await reconcileTools(errorText(error));
@@ -260,6 +274,7 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
         throw error;
       } finally {
         refreshObserver?.dispose();
+        releaseRunEvidence(logger, conversationId, currentRunId);
         logger.endRun(conversationId, currentRunId);
         try { await cleanup?.(); } finally { lease.finish(); }
       }

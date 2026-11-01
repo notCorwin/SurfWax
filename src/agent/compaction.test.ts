@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV4 } from "ai/test";
 import type { ModelMessage } from "ai";
-import type { EventLogger, LogEvent } from "../logging";
+import { toLogValue, type EventLogger, type LogEvent } from "../logging";
 import { createPromptSnapshot, PROMPT_TOOLS } from "./prompt";
 import { ContextCompactor, contextPressure, effectiveContext, estimatePromptInput, estimateInput, summarizeContext } from "./compaction";
 
@@ -32,6 +32,49 @@ function fixture() {
 }
 
 describe("context choices and summary", () => {
+  it("retains recent tool call/result pairs and user corrections while incrementally summarizing older history", async () => {
+    const { events, logger, model, languageModel, generate } = fixture();
+    const raw: ModelMessage[] = [
+      { role: "user", content: "Original goal" },
+      { role: "assistant", content: "old findings " + "x".repeat(8000) },
+      { role: "user", content: "Correction: use the second account" },
+      { role: "assistant", content: "more findings " + "y".repeat(14000) },
+      { role: "assistant", content: [{ type: "tool-call", toolCallId: "c", toolName: "inspect", input: {} }] },
+      { role: "tool", content: [{ type: "tool-result", toolCallId: "c", toolName: "inspect", output: { type: "text", value: "recent result" } }] },
+    ];
+    const options = { branchIds: ["branch"], uiCount: 1, model, languageModel, logger, conversationId: "one", signal: new AbortController().signal,
+      limit: { provider: "manual", model: "test", context: 20_000, source: "manual" as const } };
+    await summarizeContext({ ...options, raw });
+    const first = await effectiveContext(events, options.branchIds, raw);
+    expect(first.checkpoint?.sourceCount).toBe(4);
+    expect(first.messages).toEqual([raw[0], raw[2], expect.objectContaining({ role: "user", content: expect.stringContaining("Earlier conversation summary:") }), raw[4], raw[5]]);
+    const extended: ModelMessage[] = [...raw, { role: "assistant", content: "later " + "z".repeat(14000) }, { role: "user", content: "new instruction" }];
+    await summarizeContext({ ...options, raw: extended });
+    expect(generate).toHaveBeenCalledTimes(2);
+    const nextPrompt = JSON.stringify(generate.mock.calls[1]);
+    expect(nextPrompt).toContain("recent result");
+    expect(nextPrompt).not.toContain("old findings");
+    const second = await effectiveContext(events, options.branchIds, extended);
+    expect(second.messages).toContainEqual(raw[0]);
+    expect(second.messages).toContainEqual(raw[2]);
+    expect(second.messages).toContainEqual(extended.at(-1));
+  });
+
+  it("retries a truncated summary with a larger bounded budget and never commits a truncated result", async () => {
+    const { events, logger, model, raw } = fixture();
+    const budgets: number[] = [];
+    const languageModel = new MockLanguageModelV4({ doGenerate: async ({ maxOutputTokens }) => {
+      budgets.push(maxOutputTokens!);
+      return { content: [{ type: "text", text: "partial" }], finishReason: { unified: "length", raw: "length" },
+        usage: { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 10, text: 10, reasoning: 0 } }, warnings: [] };
+    } });
+    await expect(summarizeContext({ raw, branchIds: ["branch"], uiCount: 1, model, languageModel, logger, conversationId: "one",
+      signal: new AbortController().signal, limit: { provider: "manual", model: "test", context: 20_000, source: "manual" } })).rejects.toThrow("截断");
+    expect(budgets.length).toBeGreaterThan(1);
+    expect(budgets.at(-1)).toBeGreaterThan(budgets[0]!);
+    expect(events.some((event) => event.type === "context.compacted")).toBe(false);
+  });
+
   it("sets the compression threshold to 80% of the context or the lower input limit", async () => {
     const { model, raw } = fixture();
     const limit = { provider: "test", model: "test", context: 100_000, output: 80_000, source: "models.dev" as const };
@@ -114,10 +157,10 @@ describe("context choices and summary", () => {
       branchIds: ["u", "a"], contextVersion: 0, baseEstimate: 1, promptEstimate: 50_000, inputTokens: 50_000,
     } });
     await expect(contextPressure({ raw, branchIds: ["u", "a"], events, model }))
-      .resolves.toMatchObject({ estimated: estimatePromptInput({ messages: [{ role: "user", content: "Earlier conversation summary:\nKeep the user's constraints." }], instructions: createPromptSnapshot().instructions, tools: PROMPT_TOOLS }) });
+      .resolves.toMatchObject({ estimated: estimatePromptInput({ messages: (await effectiveContext(events, ["u", "a"], raw)).messages, instructions: createPromptSnapshot().instructions, tools: PROMPT_TOOLS }) });
   });
 
-  it("summarizes the complete effective history once, then replaces the entire old prefix", async () => {
+  it("preserves original user input alongside the summary", async () => {
     const { events, logger, generate, languageModel, model, raw } = fixture();
     const branchIds = ["u", "a"];
     await summarizeContext({ raw, branchIds, uiCount: 2, model, languageModel, logger,
@@ -128,13 +171,13 @@ describe("context choices and summary", () => {
     const extended = [...raw, { role: "user", content: "new request" } as ModelMessage];
     const applied = await effectiveContext(events, [...branchIds, "new"], extended);
     expect(applied.messages).toEqual([
-      { role: "user", content: "Earlier conversation summary:\nKeep the user's constraints." }, extended[2],
+      expect.objectContaining({ role: "user", content: expect.stringContaining("read_artifact") }), { role: "user", content: "Earlier conversation summary:\nKeep the user's constraints." }, extended[2],
     ]);
     const pressure = await contextPressure({ raw: extended, branchIds: [...branchIds, "new"], events, model });
     expect(pressure?.messages).toEqual(applied.messages);
   });
 
-  it("replaces a complete checkpoint when compaction is forced", async () => {
+  it("recompresses a complete checkpoint when forced with a smaller budget", async () => {
     const { events, logger, generate, languageModel, model, raw } = fixture();
     const options = { raw, branchIds: ["u", "a"], uiCount: 2, model, languageModel, logger,
       conversationId: "one", signal: new AbortController().signal };
@@ -148,6 +191,41 @@ describe("context choices and summary", () => {
     expect((await effectiveContext(events, options.branchIds, raw)).checkpoint?.summary).toBe("A shorter replacement.");
   });
 
+  it("bounds user anchors and keeps omitted original messages readable", async () => {
+    const { events, logger, model, languageModel } = fixture();
+    const raw: ModelMessage[] = [{ role: "user", content: "goal " + "x".repeat(30000) }, { role: "assistant", content: "work " + "y".repeat(30000) }, { role: "user", content: "recent correction" }];
+    await summarizeContext({ raw, branchIds: ["u", "a", "b"], uiCount: 3, model, languageModel, logger, conversationId: "one", signal: new AbortController().signal, limit: { provider: "manual", model: "test", context: 20000, source: "manual" } });
+    const { checkpoint, messages } = await effectiveContext(events, ["u", "a", "b"], raw);
+    expect(messages).toContainEqual(raw[2]);
+    expect(messages).not.toContainEqual(raw[0]);
+    expect(estimateInput(messages)).toBeLessThan(estimateInput(raw));
+    expect(events.find((event) => event.id === checkpoint?.userAnchorArtifactId)).toMatchObject({ type: "tool.result.data", output: { messages: [{ index: 0, message: raw[0] }] } });
+  });
+  it("forces the recent tail into the summary and refuses a non-shrinking replacement", async () => {
+    const { events, logger, model, languageModel } = fixture();
+    const raw: ModelMessage[] = [{ role: "user", content: "goal" }, { role: "assistant", content: "old " + "x".repeat(15000) }, { role: "assistant", content: "recent " + "y".repeat(1000) }, { role: "user", content: "correction" }];
+    const options = { raw, branchIds: ["a"], uiCount: 1, model, languageModel, logger, conversationId: "one", signal: new AbortController().signal, limit: { provider: "manual", model: "test", context: 20000, source: "manual" as const } };
+    await summarizeContext(options);
+    expect((await effectiveContext(events, options.branchIds, raw)).checkpoint!.sourceCount).toBeLessThan(raw.length);
+    await summarizeContext({ ...options, force: true });
+    expect((await effectiveContext(events, options.branchIds, raw)).checkpoint!.sourceCount).toBe(raw.length);
+    const before = events.filter((event) => event.type === "context.compacted").length;
+    await expect(summarizeContext({ ...options, force: true })).rejects.toThrow("未能缩短");
+    expect(events.filter((event) => event.type === "context.compacted")).toHaveLength(before);
+  });
+  it("reuses unchanged original user-message artifacts across incremental compactions", async () => {
+    const { events, logger, model, languageModel } = fixture();
+    const raw: ModelMessage[] = [{ role: "user", content: "exact source " + "x".repeat(30000) }, { role: "assistant", content: "old work " + "y".repeat(30000) }];
+    const options = { branchIds: ["u"], uiCount: 1, model, languageModel, logger, conversationId: "one", signal: new AbortController().signal,
+      limit: { provider: "manual", model: "test", context: 20000, source: "manual" as const } };
+    await summarizeContext({ ...options, raw });
+    const first = (await effectiveContext(events, options.branchIds, raw)).checkpoint!;
+    const extended: ModelMessage[] = [...raw, { role: "assistant", content: "new work " + "z".repeat(30000) }];
+    await summarizeContext({ ...options, raw: extended });
+    const second = (await effectiveContext(events, options.branchIds, extended)).checkpoint!;
+    expect(second.userAnchorArtifactId).toBe(first.userAnchorArtifactId);
+    expect(events.filter((event) => event.type === "tool.result.data")).toHaveLength(1);
+  });
   it("summarizes every oversized source fragment and merges before writing one checkpoint", async () => {
     const { events, logger, generate, languageModel, model, raw } = fixture();
     await summarizeContext({ raw, branchIds: ["u", "a"], uiCount: 2, model, languageModel, logger,
@@ -189,12 +267,28 @@ describe("context choices and summary", () => {
     const restored = await effectiveContext(events, [...branchIds, "next"], [...raw, next]);
     expect(restored.checkpoint?.strategy).toBe("summary");
     expect(restored.checkpoint?.summaryDigest).toMatch(/^[a-f0-9]{64}$/);
-    expect(restored.messages).toHaveLength(2);
+    expect(restored.messages).toHaveLength(3);
     expect((await effectiveContext(events, ["u", "edited", "next"], [...raw, next])).checkpoint).toBeUndefined();
     expect((await effectiveContext(events, [...branchIds, "next"], [{ role: "user", content: "edited" }, raw[1]!, next])).checkpoint).toBeUndefined();
     const event = events.find((event) => event.type === "context.compacted")!;
     (event.content as any).summary = "changed summary";
     expect((await effectiveContext(events, [...branchIds, "next"], [...raw, next])).checkpoint).toBeUndefined();
+  });
+
+  it("ignores checkpoints with malformed user-message anchors", async () => {
+    const { events, logger, model, raw, languageModel } = fixture();
+    const branchIds = ["u", "a"];
+    await summarizeContext({ raw, branchIds, uiCount: 2, model, languageModel, logger,
+      conversationId: "one", signal: new AbortController().signal });
+    const event = events.find((event) => event.type === "context.compacted")!;
+    const original = event.content as Record<string, unknown>;
+    for (const fields of [{ userAnchors: "invalid" }, { userAnchors: [raw.length] }, { userAnchors: [1] },
+      { userAnchorArtifactId: -1 }, { userAnchorArtifactId: "1" }]) {
+      event.content = toLogValue({ ...original, ...fields });
+      const restored = await effectiveContext(events, branchIds, raw);
+      expect(restored.checkpoint).toBeUndefined();
+      expect(restored.messages).toEqual(raw);
+    }
   });
 
   it("accepts equivalent SDK text representations and keeps legacy checkpoint compatibility", async () => {

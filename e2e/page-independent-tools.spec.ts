@@ -32,7 +32,7 @@ test("runs page-independent tools after closing the bound tab, including opening
         const output = lastTool(request); expect(output).toMatchObject({ ok: true, result: { tabId: expect.any(Number) } });
         return commandResponse("switch_tab", { tabId: output.result.tabId }, "switch-web");
       },
-      (request) => { expect(lastTool(request)).toEqual(expect.arrayContaining([expect.objectContaining({ current: true })])); return commandResponse("click", { target: { by: "css", value: "button" } }, "click-new"); },
+      (request) => { expect(lastTool(request)).toEqual({ evidenceId: expect.any(String), pageSnapshot: expect.any(Object), result: expect.arrayContaining([expect.objectContaining({ current: true })]) }); return commandResponse("click", { target: { by: "css", value: "button" } }, "click-new"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return textResponse("PAGE_INDEPENDENT_TOOLS_OK"); },
       textResponse("Page-independent tools"),
     );

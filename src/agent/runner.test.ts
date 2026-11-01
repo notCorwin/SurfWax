@@ -121,14 +121,14 @@ describe("createAgent", () => {
     expect(terminal).toHaveLength(1);
     expect(terminal[0]!.type).toBe("tool.failed");
     const output = fromLogValue(terminal[0]!.output) as any;
-    expect(output).toMatchObject({ ok: false, error: { ...failed.failed.error, retryable: false }, $ref: expect.any(Number),
+    expect(output).toMatchObject({ ok: false, error: { ...failed.failed.error }, $ref: expect.any(Number),
       access: { artifactId: expect.any(Number), path: ["completed"] } });
     expect(output.access.artifactId).toBe(output.$ref);
     expect(JSON.stringify(output).length).toBeLessThan(8192);
     const stored = events.filter((event) => event.type === "tool.result.data" && event.id === output.$ref);
     expect(stored).toHaveLength(1);
     expect(stored[0]).toMatchObject({ conversationId: "conversation", toolCallId: "large-act" });
-    await expect(logger.result(output.$ref, {}, "conversation")).resolves.toEqual({ ...failed, error: { ...failed.failed.error, retryable: false } });
+    await expect(logger.result(output.$ref, {}, "conversation")).resolves.toEqual({ ...failed, error: { ...failed.failed.error, retryable: false, recovery: "Inspect the current state before repeating this action. Use the observed outcome to choose a safe recovery path." } });
     await expect(logger.result(output.$ref, { path: output.access.path }, "conversation")).resolves.toEqual(failed.completed);
   });
 
@@ -149,17 +149,35 @@ describe("createAgent", () => {
 
   it("counts frozen tool schemas and instructions before the first provider usage", async () => {
     const { events, logger } = memoryLog();
-    const config = { baseURL: "https://test/v1", model: "test", contextWindowOverride: Math.ceil(estimatePromptInput({ instructions: createPromptSnapshot().instructions, tools: PROMPT_TOOLS, messages: [{ role: "user", content: "inspect" }] }) / 0.85) };
+    const task = "inspect " + "x".repeat(5000);
+    const config = { baseURL: "https://test/v1", model: "test", contextWindowOverride: Math.ceil(estimatePromptInput({ instructions: createPromptSnapshot().instructions, tools: PROMPT_TOOLS, messages: [{ role: "user", content: task }] }) / 0.85) };
     const summaryRequests: string[] = [];
     const model = new MockLanguageModelV4({ doGenerate: async (options) => {
       if (options.reasoning === "minimal") { summaryRequests.push(JSON.stringify(options.prompt)); return text("The user asks to inspect the page."); }
       return text();
     } });
     const compactor = new ContextCompactor({ model: config, logger, conversationId: "conversation", branchIds: ["u"], signal: new AbortController().signal });
-    const result = await createAgent({ model: config, languageModel: model, executor: browserExecutor(), logger, conversationId: "conversation", compactor }).generate({ prompt: "inspect" });
+    const result = await createAgent({ model: config, languageModel: model, executor: browserExecutor(), logger, conversationId: "conversation", compactor }).generate({ prompt: task });
     expect(result.text).toBe("done");
-    expect(summaryRequests).toHaveLength(1);
+    expect(summaryRequests).toHaveLength(2);
+    expect(summaryRequests[0]).toContain(task);
     expect(events.some((event) => event.type === "context.compacted" && (event.content as any).stepNumber === 0)).toBe(true);
+  });
+
+  it("starts a short task when fixed schemas alone exceed the automatic compaction threshold", async () => {
+    const { events, logger } = memoryLog();
+    const task = "inspect the current page";
+    const estimated = estimatePromptInput({ instructions: createPromptSnapshot().instructions, tools: PROMPT_TOOLS,
+      messages: [{ role: "user", content: task }] });
+    const modelConfig = { ...config, contextWindowOverride: Math.ceil(estimated / 0.85) };
+    const generate = vi.fn(async () => text());
+    const model = new MockLanguageModelV4({ doGenerate: generate });
+    const compactor = new ContextCompactor({ model: modelConfig, logger, conversationId: "conversation", branchIds: ["u"], signal: new AbortController().signal });
+    const result = await createAgent({ model: modelConfig, languageModel: model, executor: browserExecutor(), logger,
+      conversationId: "conversation", compactor }).generate({ prompt: task });
+    expect(result.text).toBe("done");
+    expect(generate).toHaveBeenCalledOnce();
+    expect(events.some((event) => event.type === "context.compaction.started")).toBe(false);
   });
 
   it("executes navigation with stable instructions and complete-response callbacks", async () => {
@@ -256,11 +274,12 @@ describe("createAgent", () => {
       }), { status: 200, headers: { "content-type": "application/json" } });
     });
     const instructions = createPromptSnapshot("Custom guidance.");
-    const estimated = estimatePromptInput({ instructions: instructions.instructions, tools: PROMPT_TOOLS, messages: [{ role: "user", content: "inspect" }] });
+    const task = "inspect " + "x".repeat(5000);
+    const estimated = estimatePromptInput({ instructions: instructions.instructions, tools: PROMPT_TOOLS, messages: [{ role: "user", content: task }] });
     const model = { providerId: "anthropic", sdk: "@ai-sdk/anthropic", baseURL: "https://api.anthropic.com/v1", model: "claude-sonnet-4-5", contextWindowOverride: Math.ceil(estimated / 0.85), maxTokensOverride: 4096 } as ModelConfig;
     const languageModel = createAnthropic({ apiKey: "test-key", fetch })("claude-sonnet-4-5");
     const compactor = new ContextCompactor({ model, logger, conversationId: "conversation", branchIds: ["u"], signal: new AbortController().signal, prompt: instructions });
-    const result = await createAgent({ model, languageModel, executor: browserExecutor({ inspect: vi.fn(async () => ({ snapshot: "current" })) }), instructions: "Custom guidance.", logger, conversationId: "conversation", compactor }).generate({ prompt: "inspect" });
+    const result = await createAgent({ model, languageModel, executor: browserExecutor({ inspect: vi.fn(async () => ({ snapshot: "current" })) }), instructions: "Custom guidance.", logger, conversationId: "conversation", compactor }).generate({ prompt: task });
     expect(result.text).toBe("done");
     expect(events.some((event) => event.type === "context.compacted")).toBe(true);
     const agentRequests = requests.filter((request) => Array.isArray(request.tools));

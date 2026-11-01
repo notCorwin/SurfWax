@@ -31,6 +31,28 @@ function setup(model: MockLanguageModelV4, log = logger(), executor = { browserC
 const options = () => ({ trigger: "submit-message" as const, chatId: "thread", messages: [user], abortSignal: new AbortController().signal });
 
 describe("complete-response transport", () => {
+  it("returns rejected model calls as repair feedback and continues without dispatching them", async () => {
+    const prompts: string[] = [];
+    const { factory, executor, log } = setup(new MockLanguageModelV4({ doGenerate: async ({ prompt }) => {
+      prompts.push(JSON.stringify(prompt));
+      if (prompts.length === 1) {
+        const invalid = call("duplicate", "https://example.com/");
+        return { ...invalid, content: [...invalid.content, invalid.content[1]!] };
+      }
+      return prompts.length === 2 ? call("repaired", "https://example.com/") : reply("Recovered task");
+    } }));
+    const result = await createChatTransport(factory, log, "thread").sendMessages(options());
+    expect(prompts).toHaveLength(3);
+    expect(prompts[1]).toContain("Tool-call protocol recovery:");
+    expect(prompts[1]).toContain("before any tool");
+    expect(executor.runProgram).toHaveBeenCalledOnce();
+    const events = await log.all();
+    expect(events.filter((event) => event.type === "tool.started").map((event) => event.toolCallId)).toEqual(["1:repaired"]);
+    expect(events.some((event) => event.type === "model.request.retrying")).toBe(false);
+    expect(events.at(-1)?.type).toBe("conversation.finished");
+    expect(result.parts).toEqual(expect.arrayContaining([expect.objectContaining({ text: "Recovered task" })]));
+  });
+
   it("sends recovered V2 BigInt tool results in the next model request", async () => {
     const log = logger();
     await log.appendMessage("thread", user as ConversationMessage, { runId: "old" });
@@ -106,7 +128,7 @@ describe("complete-response transport", () => {
     const snapshots: SidePanelMessage[] = [];
     const result = await createChatTransport(factory, log, "thread").sendMessages({ ...options(), onMessage: (message) => { snapshots.push(message); } });
     expect(result.parts).toEqual(expect.arrayContaining([expect.objectContaining({ text: "Recovered", state: "done" }),
-      expect.objectContaining({ toolCallId: "effect", state: "output-available", output: { ok: true } })]));
+      expect.objectContaining({ toolCallId: "effect", state: "output-available", output: { ok: true, evidenceId: "effect" } })]));
     expect(snapshots[0]!.parts.some((part) => "toolCallId" in part && part.state === "input-available")).toBe(true);
     expect(snapshots.every((message) => message.parts.every((part) => !("state" in part) || part.state !== "streaming"))).toBe(true);
     expect((await log.all()).some((event) => event.type === "conversation.stream.chunk")).toBe(false);

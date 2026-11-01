@@ -20,6 +20,12 @@ async function fixture(text = "Original goal") {
 }
 
 describe("automatic context upkeep", () => {
+  it("does not summarize a tiny task when fixed instructions cause context pressure", async () => {
+    const { logger, model, languageModel, generate } = await fixture();
+    expect(await ensureAutomaticContextSummary(logger, "one", model, new AbortController().signal,
+      { languageModel, instructions: "fixed schema overhead ".repeat(5000) })).toBe(false);
+    expect(generate).not.toHaveBeenCalled();
+  });
   it("does nothing below pressure and creates no manual choice event", async () => {
     const { events, logger, model, languageModel, generate } = await fixture();
     model.contextWindowOverride = 256_000;
@@ -39,11 +45,13 @@ describe("automatic context upkeep", () => {
   });
 
   it("handles a provider overflow below the estimated threshold without changing original messages", async () => {
-    const { events, logger, model, languageModel } = await fixture();
+    const { events, logger, model, languageModel } = await fixture("Original goal " + "x".repeat(20_000));
     const original = events[0]!.content;
     expect(await ensureAutomaticContextSummary(logger, "one", model, new AbortController().signal, { languageModel, forced: true })).toBe(true);
     expect(events[0]!.content).toEqual(original);
-    expect((await activeContext(logger, "one")).messages).toHaveLength(1);
+    const context = await activeContext(logger, "one");
+    expect(context.checkpoint).toBeDefined();
+    expect(JSON.stringify(context.messages).length).toBeLessThan(JSON.stringify(context.raw).length);
   });
 
   it("keeps the branch intact and checkpoint absent after a failed or cancelled summary", async () => {
@@ -69,7 +77,7 @@ describe("incremental canonical context", () => {
     await compare();
     await logger.appendMessage("one", message("a", "First"), { parentId: "u" });
     await compare();
-    await logger.appendMessage("one", message("a", "Updated"), { parentId: "u" });
+    await logger.appendMessage("one", message("a", "Updated " + "x".repeat(5000)), { parentId: "u" });
     await compare();
     await logger.appendMessage("one", message("b", "Alternative"), { parentId: "u" });
     await logger.append({ type: "conversation.branch.selected", conversationId: "one", content: { headId: "a" } });

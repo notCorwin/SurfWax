@@ -1,5 +1,6 @@
 import type { LanguageModelMiddleware } from "ai";
 import type { LanguageModelV4CallOptions, LanguageModelV4GenerateResult, LanguageModelV4Message, LanguageModelV4ToolCall } from "@ai-sdk/provider";
+import { repairableToolProtocolError } from "./tool-protocol-error";
 
 /** The legacy completions endpoint accepts text only. Tool calls use a reserved
  * response prefix so ordinary answers, including ordinary JSON, remain text. */
@@ -116,7 +117,9 @@ export function completionToolsMiddleware(): LanguageModelMiddleware {
     wrapGenerate: async ({ doGenerate, params }) => {
       const context = calls.get(params);
       if (!context) return unsupported("Completion tool context is unavailable.");
-      return decodeCalls(await doGenerate(), context.names, context.choice);
+      const result = await doGenerate();
+      try { return decodeCalls(result, context.names, context.choice); }
+      catch (error) { throw repairableToolProtocolError(error, result.content.filter((part) => part.type === "text").map((part) => part.text).join("")); }
     },
   };
 }
@@ -131,7 +134,8 @@ export function completionToolChoiceMiddleware(): LanguageModelMiddleware {
       if (choice?.type !== "required" && choice?.type !== "tool") return result;
       const calls = result.content.filter((part) => part.type === "tool-call");
       if (!calls.length || choice.type === "tool" && calls.some((call) => call.toolName !== choice.toolName))
-        return unsupported("The completion did not satisfy the required tool choice; no tool was executed.");
+        throw repairableToolProtocolError(Object.assign(new Error("The completion did not satisfy the required tool choice; no tool was executed."), { code: "completion-tool-protocol" }),
+          result.content.filter((part) => part.type === "text").map((part) => part.text).join(""));
       return result;
     },
   };

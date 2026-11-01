@@ -10,7 +10,7 @@ import { jobResultReferenceInfo } from "./job-result";
 import { elementTargetSchema } from "./element-target";
 
 const timeoutMs = z.number().int().positive().optional();
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v24";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v25";
 export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetSchema]).optional().describe("Restrict inspection to one matching element. Prefer a structured target. A plain string is a CSS selector, except recognized element refs and supported locator expressions such as getByRole('button', {name:'Save'})."),
   fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional(), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
@@ -49,7 +49,7 @@ export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
   { name: "get_job", inputSchema: getJobInputSchema, summary: "Read a job's status and receipts", description: "Read status and paginated receipts for a job. Pass the previous response's nextCursor as after to read subsequent receipts. waitMs waits for receipts after the supplied canonical event cursor or for completion; unread receipts return immediately. A terminal event with outputAt:'result' or 'resultAccess' refers to that top-level field. A running job is not complete." },
   { name: "cancel_job", inputSchema: cancelJobInputSchema, summary: "Request cancellation of a job", description: "Cancel a job in the current conversation. Cancellation does not roll back dispatched effects." },
 ]);
-export const PROGRAM_TOOL_CONTEXT = `Available tools:\n${PROGRAM_TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n")}\nUse background=true for long operations or actions that may block on a browser event. Use get_job with after set to the previous nextCursor for incremental receipts and bounded waits, or cancel_job to cancel. Continue until terminal; cancellation never rolls back completed effects. Restart preserves job records, not running work. For a native dialog, subscribe_event before the trigger, start the action with background=true, wait_event for its dialogId, then handle_dialog and inspect the job to completion. A foreground action blocked by a dialog may instead return state=blocked with jobId and blockedBy.dialogId. Use handle_dialog if needed, and continue checking the job until terminal. For a file chooser, subscribe before the trigger, use background=true, wait for its chooserId, and use upload_file with the chooserId and existing artifact IDs before inspecting the job. Event subscriptions belong to this run. Each completed operation includes pageSnapshot when available; use inspect_page with its nextCursor as cursor and the same tabId to continue a truncated snapshot. pageSnapshotStatus explains when it could not be captured. Background work has no completed snapshot until its terminal get_job result. resultType=undefined marks an undefined result. undefinedPaths, holePaths, numberPaths and bigintPaths are relative to result; numberPaths entries hold {path,value} for NaN, Infinity, -Infinity or -0, and bigintPaths hold decimal strings. These replace values with null. typePaths marks non-JSON types: date is ISO or null for invalid; array-buffer and typed-array are base64 bytes (typed-array name identifies the view); regexp is {source,flags,lastIndex}; map is key/value pairs; set is an array. Apply the other sidecars first, then typePaths from deepest path to shallowest. Large results provide paged sidecar access. If envelopeWrapped=true, reconstruct the original tool envelope from result and its sidecars; outer fields summarize status.`;
+export const PROGRAM_TOOL_CONTEXT = `Available tools:\n${PROGRAM_TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n")}\nUse background=true for long operations or actions that may block on a browser event. Use get_job with after set to the previous nextCursor for incremental receipts and bounded waits, or cancel_job to cancel. Continue until terminal; cancellation never rolls back completed effects. Restart preserves job records, not running work. For a native dialog, subscribe_event before the trigger, start the action with background=true, wait_event for its dialogId, then handle_dialog and inspect the job to completion. A foreground action blocked by a dialog may instead return state=blocked with jobId and blockedBy.dialogId. Use handle_dialog if needed, and continue checking the job until terminal. For a file chooser, subscribe before the trigger, use background=true, wait for its chooserId, and use upload_file with the chooserId and existing artifact IDs before inspecting the job. Event subscriptions belong to this run. Every tool result includes evidenceId for citing that actual result in complete_goal. Each completed operation includes pageSnapshot when available; use inspect_page with its nextCursor as cursor and the same tabId to continue a truncated snapshot. pageSnapshotStatus explains when it could not be captured. Background work has no completed snapshot until its terminal get_job result. resultType=undefined marks an undefined result. undefinedPaths, holePaths, numberPaths and bigintPaths are relative to result; numberPaths entries hold {path,value} for NaN, Infinity, -Infinity or -0, and bigintPaths hold decimal strings. These replace values with null. typePaths marks non-JSON types: date is ISO or null for invalid; array-buffer and typed-array are base64 bytes (typed-array name identifies the view); regexp is {source,flags,lastIndex}; map is key/value pairs; set is an array. Apply the other sidecars first, then typePaths from deepest path to shallowest. Large results provide paged sidecar access. If envelopeWrapped=true, reconstruct the original tool envelope from result and its sidecars; outer fields summarize status.`;
 
 export function createProgramTools(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string; callId?: () => string | undefined; visualEnabled?: () => Promise<boolean>; scheduler?: ToolScheduler; runSignal?: AbortSignal } = {}): Record<string, ReturnType<typeof dynamicTool>> {
   return Object.fromEntries(PROGRAM_TOOL_REGISTRY.map((definition) => [definition.name, dynamicTool({
@@ -65,6 +65,9 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
         if (!started) throw new DOMException("日志维护已阻止工具启动。", "AbortError");
       }
       const finish = async (output: unknown) => {
+        output = output && typeof output === "object" && !Array.isArray(output)
+          ? { ...output, evidenceId: identity?.toolCallId ?? toolCallId }
+          : { result: output, evidenceId: identity?.toolCallId ?? toolCallId };
         if (options.logger) {
           const failed = Boolean(output && typeof output === "object" && "ok" in output && output.ok === false);
           const interrupted = failed && abortSignal?.aborted;
@@ -84,9 +87,10 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
         const cause = abortSignal?.aborted && !(error instanceof Error)
           ? new DOMException(abortSignal.reason instanceof Error ? abortSignal.reason.message : String(abortSignal.reason ?? error ?? "Operation aborted"), "AbortError")
           : error;
-        const failure = toolFailure(cause); failure.error.retryable = false;
+        const failure = toolFailure(cause);
         const chooserUpload = definition.name === "upload_file" && input && typeof input === "object" && "chooserId" in input && typeof input.chooserId === "string";
-        if (executing && !chooserUpload && definition.name !== "read_artifact" && abortSignal?.aborted && definition.program && !failure.error.effectUnknown) failure.error.effectUnknown = true;
+        if (executing && !chooserUpload && definition.name !== "read_artifact" && abortSignal?.aborted && definition.program && !READ_ONLY_TOOLS.has(definition.name) && !failure.error.effectUnknown) failure.error.effectUnknown = true;
+        failure.error = recoveryError(failure.error, definition.name);
         if (!failure.artifact && options.logger && identity?.runId) {
           const artifact = await options.logger.toolArtifact(options.conversationId!, identity).catch(() => undefined);
           if (artifact) failure.artifact = artifact;
@@ -131,7 +135,7 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
           const jobRef = jobResultReferenceInfo((result as any)?.result);
           const failure = (result as any)?.ok === false ? (result as any).error ?? (result as any).failed?.error ?? jobRef?.info.error ?? (result as any).result?.error : undefined;
           const artifact = (result as any)?.result?.artifact;
-          const envelope = failure ? { ...result as object, ...(artifact ? { artifact } : {}), error: { ...failure, retryable: false } } : result;
+          const envelope = failure ? { ...result as object, ...(artifact ? { artifact } : {}), error: recoveryError(failure, definition.name) } : result;
           if (jobRef) {
             const { result: _result, ...rest } = envelope as Record<string, unknown>;
             const compact = normalizationExceedsBudget(rest)
@@ -142,7 +146,7 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
             output = { ...visible, ...(visible.$ref ? { receiptsArtifactId: visible.$ref } : {}), $ref: jobRef.id,
               resultAccess: access, ...(!visible.$ref ? { access } : {}), sidecarsDeferred: true,
               pathsNote: "Read a bounded slice with read_artifact; shared or cyclic object identity is not exposed.",
-              ...(jobRef.info.error ? { error: jobRef.info.error, errorAccess: { artifactId: jobRef.id, path: ["result", "error"] } } : {}),
+              ...(jobRef.info.error ? { error: recoveryError(jobRef.info.error, definition.name), errorAccess: { artifactId: jobRef.id, path: ["result", "error"] } } : {}),
               ...(jobRef.info.artifact ? { artifact: jobRef.info.artifact, artifactAccess: { artifactId: jobRef.id, path: ["result", "artifact"] } } : {}),
               ...(jobRef.info.screenshot ? { ...jobRef.info.visualContext, screenshot: { ...jobRef.info.screenshot, ...(jobRef.info.inlineScreenshot ? { artifactId: jobRef.id, artifactPath: ["result", "screenshot"] } : {}) }, visualAccess: { artifactId: jobRef.id, path: ["result"] } } : {}) };
           } else
@@ -367,6 +371,7 @@ function boundedError(error: unknown): unknown {
     if (message.truncated) result.messageTruncated = true;
   }
   for (const field of ["retryable", "effectUnknown"]) if (typeof record[field] === "boolean") result[field] = record[field];
+  if (typeof record.recovery === "string") result.recovery = excerpt(record.recovery, 512).value;
   return result;
 }
 
@@ -592,14 +597,29 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
       ...(typeof verification.present === "boolean" ? { present: verification.present } : {}) } } : {}) };
 }
 
-function toolFailure(error: unknown): { ok: false; error: { code: string; message: string; retryable: boolean; effectUnknown?: boolean }; artifact?: unknown } {
+const READ_ONLY_TOOLS = new Set([
+  "inspect_page", "find_elements", "list_frames", "read_text", "read_value", "read_attribute", "read_checked", "read_elements", "count_elements", "get_page_info", "verify_state", "wait_for_url", "list_tabs", "list_downloads", "read_artifact", "list_requests", "read_response", "read_console", "list_scripts", "read_script", "list_jobs", "wait_event",
+]);
+
+function recoveryError<T extends Record<string, any>>(error: T, toolName: string): T & { recovery?: string } {
+  if (error.effectUnknown === true) return { ...error, retryable: false, recovery: "Effect unknown. Inspect the current state and verify the outcome before deciding whether to act again." };
+  if (typeof error.code === "string" && /stale|expired|detached|identity-unknown/.test(error.code))
+    return { ...error, retryable: false, recovery: "Observe the current state and locate the target again before continuing." };
+  if (error.code === "timeout" && READ_ONLY_TOOLS.has(toolName))
+    return { ...error, retryable: true, recovery: "This read can be retried with the same parameters; adjust the timeout if needed." };
+  if (!READ_ONLY_TOOLS.has(toolName)) return { ...error, retryable: false,
+    recovery: "Inspect the current state before repeating this action. Use the observed outcome to choose a safe recovery path." };
+  return error;
+}
+
+function toolFailure(error: unknown): { ok: false; error: { code: string; message: string; retryable?: boolean; effectUnknown?: boolean; recovery?: string }; artifact?: unknown } {
   const message = error instanceof Error || error instanceof DOMException ? error.message : String(error);
   const code = error instanceof DOMException && error.name === "AbortError" ? "aborted"
     : error instanceof DOMException && error.name === "TimeoutError" ? "timeout"
     : error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code
     : /(?:Command|Automation)Error\[([^\]]+)\]/.exec(message)?.[1] ?? "tool-error";
   const effectUnknown = Boolean(error && typeof error === "object" && "effectUnknown" in error && error.effectUnknown);
-  return { ok: false, error: { code, message, retryable: code === "timeout" && !effectUnknown, ...(effectUnknown ? { effectUnknown: true } : {}) }, ...(error && typeof error === "object" && "artifact" in error ? { artifact: error.artifact } : {}) };
+  return { ok: false, error: { code, message, ...(effectUnknown ? { effectUnknown: true } : {}) }, ...(error && typeof error === "object" && "artifact" in error ? { artifact: error.artifact } : {}) };
 }
 
 export const repairProgramToolCall: ToolCallRepairFunction<Record<string, ReturnType<typeof dynamicTool>>> = async ({ toolCall, tools }) => {

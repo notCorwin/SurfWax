@@ -51,7 +51,7 @@ test("persists indexed artifact parts and reads a bounded page after reload", as
       state.__restoreArtifactReads = () => { IDBObjectStore.prototype.get = originalGet; };
     });
     responses.push(commandResponse("read_artifact", { artifactId, path: ["base64"], offset: 100001, limit: 5 }, "page"),
-      (request) => { expect(lastTool(request)).toEqual({ ok: true, result: encoded.slice(100001, 100006) }); return textResponse("RESTORED"); });
+      (request) => { expect(lastTool(request)).toEqual({ evidenceId: expect.any(String), ok: true, result: encoded.slice(100001, 100006) }); return textResponse("RESTORED"); });
     await opened.page.getByTestId("composer-input").fill("Read a data page"); await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("RESTORED", { timeout: 60_000 });
     const readParts = await opened.page.evaluate(async () => {

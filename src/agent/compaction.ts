@@ -6,7 +6,7 @@ import { inputBudget, resolveModelLimit, type ModelLimit } from "./model-limits"
 import { retryModelOperation } from "./model";
 
 export const SUMMARY_PREFIX = "Earlier conversation summary:\n";
-const SUMMARY_INSTRUCTIONS = "Summarize the entire supplied conversation faithfully for continuing the browser task. Preserve the user's goal, constraints, decisions, page and tab identities, browser side effects, tool results, errors, unresolved work, and exact values needed later. Do not invent facts. Return only the concise summary.";
+const SUMMARY_INSTRUCTIONS = "Summarize the entire supplied conversation faithfully so another agent can continue the browser task. Record the original goal and constraints; unfinished steps and blockers; verified facts and their sources; page and tab identities; completed or uncertain side effects and errors; recovery instructions; and exact data, identifiers, URLs and artifact references needed later. Distinguish verified outcomes from assumptions and dispatched actions. Do not invent facts. Return only the continuation summary.";
 
 export type SummaryCheckpoint = {
   strategy: "summary";
@@ -17,6 +17,8 @@ export type SummaryCheckpoint = {
   /** Older checkpoints remain readable; new checkpoints verify the summary as well as its source. */
   summaryDigest?: string;
   summary: string;
+  userAnchors?: number[];
+  userAnchorArtifactId?: number;
   prompt?: PromptSnapshot;
 };
 
@@ -40,6 +42,11 @@ function estimateValue(value: unknown): number {
 
 export function estimateInput(messages: readonly ModelMessage[]): number {
   return estimateValue(messages);
+}
+
+/** Fixed instructions and schemas cannot be reduced by summarizing a tiny task. */
+export function hasSummarizableHistory(messages: readonly ModelMessage[], limit: ModelLimit): boolean {
+  return estimateInput(messages) - estimateInput([]) >= Math.min(1024, inputBudget(limit) * 0.1);
 }
 
 export function estimatePromptInput(prompt: {
@@ -89,6 +96,9 @@ export async function currentSummary(events: readonly LogEvent[], branchIds: rea
       || !value.branchIds.every((id) => typeof id === "string") || !isBranchPrefix(value.branchIds, branchIds)
       || !Number.isSafeInteger(value.sourceCount) || value.sourceCount! < 0 || value.sourceCount! > messages.length
       || typeof value.sourceDigest !== "string" || typeof value.summary !== "string" || !value.summary.trim()
+      || value.userAnchors !== undefined && (!Array.isArray(value.userAnchors)
+        || !value.userAnchors.every((index) => Number.isSafeInteger(index) && index >= 0 && index < value.sourceCount! && messages[index]?.role === "user"))
+      || value.userAnchorArtifactId !== undefined && (!Number.isSafeInteger(value.userAnchorArtifactId) || value.userAnchorArtifactId <= 0)
       || value.summaryDigest !== undefined && value.summaryDigest !== await digestValue(value.summary)) continue;
     const source = messages.slice(0, value.sourceCount);
     if (value.sourceDigest === await digest(source)
@@ -107,7 +117,39 @@ export function summaryMessage(summary: string): ModelMessage {
 
 export async function effectiveContext(events: readonly LogEvent[], branchIds: readonly string[], raw: ModelMessage[]) {
   const checkpoint = await currentSummary(events, branchIds, raw);
-  return { checkpoint, messages: checkpoint ? [summaryMessage(checkpoint.summary), ...raw.slice(checkpoint.sourceCount)] : raw };
+  return { checkpoint, messages: checkpoint ? checkpointMessages(checkpoint, raw) : raw };
+}
+
+function checkpointMessages(checkpoint: SummaryCheckpoint, raw: ModelMessage[]): ModelMessage[] {
+  return [...(checkpoint.userAnchors ?? []).map((index) => raw[index]!),
+    ...(checkpoint.userAnchorArtifactId ? [{ role: "user" as const, content: `Earlier user messages are available in full via read_artifact with artifactId ${checkpoint.userAnchorArtifactId}, path ["messages"]. Page the array as needed; each entry contains its original message index and content.` }] : []),
+    summaryMessage(checkpoint.summary), ...raw.slice(checkpoint.sourceCount)];
+}
+
+function isUserAnchor(message: ModelMessage): boolean {
+  if (message.role !== "user") return false;
+  const text = typeof message.content === "string" ? message.content : message.content.filter((part) => part.type === "text").map((part) => part.text).join("");
+  return !text.startsWith("<browser-context>\nSupplemental state only.") && !text.startsWith("Goal mode is still active.") && !text.startsWith("Tool-call protocol recovery:");
+}
+
+/** Keep recent complete turns. A tool result cannot be separated from its call. */
+function summarySourceCount(raw: readonly ModelMessage[], limit: ModelLimit): number {
+  if (raw.length < 4) return raw.length;
+  const tailBytes = Math.max(0, (Math.floor(inputBudget(limit) * 0.25) - 1024) * 3);
+  const encoder = new TextEncoder();
+  let bytes = 2;
+  let cut = raw.length;
+  while (cut > 1) {
+    let start = cut - 1;
+    while (start > 0 && raw[start]?.role === "tool") start--;
+    if (start === 0) break;
+    let groupBytes = 0;
+    for (let index = start; index < cut; index++) groupBytes += encoder.encode(stringifyLogSafe(raw[index])).length + 1;
+    if (bytes + groupBytes > tailBytes) break;
+    bytes += groupBytes;
+    cut = start;
+  }
+  return cut;
 }
 
 export async function contextPressure(options: {
@@ -165,19 +207,55 @@ export async function summarizeContext(options: {
   const { raw, branchIds, logger, conversationId, signal } = options;
   const events = await logger.conversation(conversationId);
   signal.throwIfAborted();
-  const { checkpoint: priorCheckpoint, messages } = await effectiveContext(events, branchIds, raw);
+  const { checkpoint: priorCheckpoint, messages: previousMessages } = await effectiveContext(events, branchIds, raw);
   // Every trigger (in-run pressure, overflow recovery, and post-turn upkeep)
   // converges here. Reuse an already committed checkpoint for the exact same
   // branch instead of allowing sequential triggers to summarize it twice.
-  if (!options.force && priorCheckpoint?.sourceCount === raw.length && priorCheckpoint.sourceDigest === await digest(raw)) return priorCheckpoint.summary;
   const limit = options.limit ?? await resolveModelLimit(options.model, { signal });
   if (!limit) throw new Error("无法取得模型上下文窗口；请手动设置窗口大小。");
-  const summary = await generateSummary(options.prepared ?? messages, options.languageModel, logger, conversationId, signal, limit);
+  const sourceCount = options.force ? raw.length : summarySourceCount(raw, limit);
+  if (!options.force && priorCheckpoint && sourceCount <= priorCheckpoint.sourceCount) return priorCheckpoint.summary;
+  const source = priorCheckpoint
+    ? [summaryMessage(priorCheckpoint.summary), ...raw.slice(priorCheckpoint.sourceCount, sourceCount)]
+    : raw.slice(0, sourceCount);
+  const summary = await generateSummary(source, options.languageModel, logger, conversationId, signal, limit);
   signal.throwIfAborted();
-  const checkpoint: SummaryCheckpoint = { strategy: "summary", branchIds, sourceCount: raw.length,
-    sourceUiCount: options.uiCount, sourceDigest: await digest(raw), summaryDigest: await digestValue(summary), summary,
+  const userIndices = raw.slice(0, sourceCount).flatMap((message, index) => isUserAnchor(message) ? [index] : []);
+  const anchorBudgetBytes = Math.max(0, Math.min(Math.floor(inputBudget(limit) * 0.1) * 3,
+    options.force ? Math.floor((estimateInput(previousMessages) - 1024) * 0.3) : Number.POSITIVE_INFINITY));
+  const encoder = new TextEncoder();
+  const chosen = new Set<number>();
+  let anchorBytes = 0;
+  // Preserve the original goal first, then the latest corrections within the budget.
+  for (const index of [userIndices[0], ...userIndices.slice(1).reverse()]) {
+    if (index === undefined) continue;
+    const bytes = encoder.encode(stringifyLogSafe(raw[index])).length + 1;
+    if (anchorBytes + bytes <= anchorBudgetBytes) { chosen.add(index); anchorBytes += bytes; }
+  }
+  const userAnchors = userIndices.filter((index) => chosen.has(index));
+  const omitted = userIndices.filter((index) => !chosen.has(index));
+  let userAnchorArtifactId: number | undefined;
+  const previousAnchors = new Set(priorCheckpoint?.userAnchors);
+  const previousOmitted = priorCheckpoint?.userAnchorArtifactId
+    ? raw.slice(0, priorCheckpoint.sourceCount).flatMap((message, index) => isUserAnchor(message) && !previousAnchors.has(index) ? [index] : []) : [];
+  if (omitted.length && previousOmitted.length === omitted.length && omitted.every((index, offset) => index === previousOmitted[offset])) {
+    userAnchorArtifactId = priorCheckpoint!.userAnchorArtifactId;
+  } else if (omitted.length) {
+    const artifact = await logger.append({ type: "tool.result.data", conversationId, content: { purpose: "compacted-user-messages" },
+      output: { messages: omitted.map((index) => ({ index, message: raw[index] })) } });
+    if (!artifact) throw new Error("用户原文未能保存；原始历史已保留。");
+    userAnchorArtifactId = artifact.id;
+  }
+  const checkpoint: SummaryCheckpoint = { strategy: "summary", branchIds, sourceCount,
+    sourceUiCount: options.uiCount, sourceDigest: await digest(raw.slice(0, sourceCount)), summaryDigest: await digestValue(summary), summary,
+    userAnchors, ...(userAnchorArtifactId ? { userAnchorArtifactId } : {}),
     prompt: createPromptSnapshot((options.prompt ?? readPromptSnapshot(events, branchIds))?.source) };
   signal.throwIfAborted();
+  const projected = checkpointMessages(checkpoint, raw);
+  if (estimateInput(projected) >= estimateInput(previousMessages)) {
+    if (!options.force) return summarizeContext({ ...options, force: true });
+    throw new Error("上下文压缩未能缩短历史；原始历史已保留。请调整上下文窗口或减少固定提示与工具开销。");
+  }
   const stored = await logger.append({ type: "context.compacted", conversationId, content: { ...checkpoint, limit, stepNumber: options.stepNumber } });
   if (!stored) throw new Error("上下文摘要未能保存；请重试。");
   return summary;
@@ -187,16 +265,24 @@ async function generateSummary(messages: ModelMessage[], languageModel: Language
   conversationId: string, signal: AbortSignal, limit: ModelLimit): Promise<string> {
   await logger.append({ type: "context.compaction.started", conversationId, content: { strategy: "summary", messageCount: messages.length, limit } });
   try {
-    const maxOutputTokens = Math.max(1, Math.min(limit.output ?? 2048, 2048, Math.max(128, Math.floor(inputBudget(limit) / 10))));
-    const promptBudget = Math.min(limit.input ?? Number.POSITIVE_INFINITY, limit.context - maxOutputTokens);
+    const outputCap = Math.max(1, Math.min(limit.output ?? limit.context, Math.floor(inputBudget(limit) / 4)));
+    const maxOutputTokens = Math.min(outputCap, Math.max(256, Math.ceil(estimateInput(messages) / 3)));
+    const promptBudget = Math.min(limit.input ?? Number.POSITIVE_INFINITY, limit.context - outputCap);
     const fits = (prompt: string) => estimateInput([{ role: "system", content: SUMMARY_INSTRUCTIONS }, { role: "user", content: prompt }]) <= promptBudget;
     const generate = async (prompt: string, phase: "complete" | "chunk" | "merge", chunk?: number): Promise<string> => {
       signal.throwIfAborted();
       if (!fits(prompt)) throw new Error("摘要模型窗口过小，无法容纳摘要指令；请增大上下文窗口。");
-      const result = await retryModelOperation(() => generateText({ model: languageModel, maxRetries: 0, maxOutputTokens,
-        reasoning: "minimal", abortSignal: signal, system: SUMMARY_INSTRUCTIONS, prompt }),
-      { signal, logger, conversationId, purpose: "summary" });
+      let budget = maxOutputTokens;
+      let result;
+      while (true) {
+        result = await retryModelOperation(() => generateText({ model: languageModel, maxRetries: 0, maxOutputTokens: budget,
+          reasoning: "minimal", abortSignal: signal, system: SUMMARY_INSTRUCTIONS, prompt }),
+        { signal, logger, conversationId, purpose: "summary" });
+        if (result.finishReason !== "length" || budget >= outputCap) break;
+        budget = Math.min(outputCap, budget * 2);
+      }
       signal.throwIfAborted();
+      if (result.finishReason === "length") throw new Error("摘要因输出长度限制被截断；原始历史已保留。");
       const summary = result.text.trim();
       if (!summary) throw new Error("Model returned an empty context summary");
       await logger.append({ type: "model.compaction.finished", conversationId,
@@ -305,6 +391,7 @@ export class ContextCompactor {
   }
 
   canCompact(messages: readonly ModelMessage[], limit: ModelLimit): boolean {
+    if (!hasSummarizableHistory(messages, limit)) return false;
     // Summarizing an unchanged tiny tail cannot reduce fixed tool-schema overhead.
     return this.compactedBaseEstimate === undefined
       || estimateInput(messages) - this.compactedBaseEstimate >= inputBudget(limit) * 0.1;
@@ -314,11 +401,16 @@ export class ContextCompactor {
     languageModel: LanguageModel, limit: ModelLimit): Promise<ModelMessage[]> {
     const { model, logger, conversationId, signal, branchIds } = this.options;
     signal.throwIfAborted();
-    const summary = await summarizeContext({ raw, prepared, stepNumber, branchIds, uiCount: branchIds.length,
-      model, languageModel, logger, conversationId, signal, limit, prompt: this.prompt, force: true });
-    const messages = [summaryMessage(summary)];
+    await summarizeContext({ raw, prepared, stepNumber, branchIds, uiCount: branchIds.length,
+      model, languageModel, logger, conversationId, signal, limit, prompt: this.prompt });
     this.events = await logger.conversation(conversationId);
-    const checkpoint = await currentSummary(this.events, branchIds, raw);
+    let { checkpoint, messages } = await effectiveContext(this.events, branchIds, raw);
+    if (estimateInput(messages) >= estimateInput(prepared)) {
+      await summarizeContext({ raw, prepared, stepNumber, branchIds, uiCount: branchIds.length,
+        model, languageModel, logger, conversationId, signal, limit, prompt: this.prompt, force: true });
+      this.events = await logger.conversation(conversationId);
+      ({ checkpoint, messages } = await effectiveContext(this.events, branchIds, raw));
+    }
     this.prompt = checkpoint?.prompt ?? this.prompt;
     this.contextVersion = checkpoint?.eventId ?? 0;
     this.calibration = undefined;

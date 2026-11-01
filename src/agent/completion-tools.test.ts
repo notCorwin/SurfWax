@@ -156,7 +156,7 @@ describe("text completion browser tool protocol", () => {
   it("checks a specific tool choice after DSML recovery before any tool executes", async () => {
     const wrong = choiceHarness(dsmlCall("get_page_info"));
     await expect(generateText({ model: wrong.model, prompt: "act", tools: wrong.tools,
-      toolChoice: { type: "tool", toolName: "navigate" } })).rejects.toMatchObject({ code: "completion-tool-protocol" });
+      toolChoice: { type: "tool", toolName: "navigate" } })).rejects.toMatchObject({ code: "dsml-tool-protocol" });
     expect(wrong.execute).not.toHaveBeenCalled();
     const right = choiceHarness(dsmlCall("navigate", '<｜DSML｜ parameter name="url" string="true">https://example.com/2</｜DSML｜ parameter>'));
     await generateText({ model: right.model, prompt: "act", tools: right.tools,

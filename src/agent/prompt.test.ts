@@ -46,7 +46,7 @@ describe("canonical prompt versions", () => {
     expect(fromLogValue(events[2]!.content)).toMatchObject({ migratedFrom: "formal-49-v2" });
     await ensureConversationPrompt(logger, "one", "Custom", ["other-branch"]);
     expect(events).toHaveLength(3);
-    const raw = [{ role: "user" as const, content: "Original task" }];
+    const raw = [{ role: "user" as const, content: "Original task" }, { role: "assistant" as const, content: "Prior work " + "x".repeat(5000) }];
     const model = { baseURL: "https://test/v1", providerSettings: { apiKey: "key" }, model: "test", contextWindowOverride: 262144 };
     const signal = new AbortController().signal;
     const failed = new MockLanguageModelV4({ doGenerate: async () => { throw new Error("permanent failure"); } });

@@ -233,7 +233,7 @@ test('automatically summarizes and retries the same request after provider conte
   const opened = await openExtension();
   try {
     await (await configure(opened.context, opened.page, provider.baseURL, 100_000)).close();
-    await opened.page.getByTestId('composer-input').fill('overflow request'); await opened.page.getByTestId('composer-input').press('Enter');
+    await opened.page.getByTestId('composer-input').fill('overflow request ' + 'prior page observation '.repeat(1_000)); await opened.page.getByTestId('composer-input').press('Enter');
     await expect(opened.page.locator('.markdown-body').last()).toContainText('OVERFLOW_RECOVERED');
     await expect(opened.page.getByTestId('context-choice')).toHaveCount(0);
     const events = await readEvents(opened.page);

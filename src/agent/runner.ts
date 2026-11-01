@@ -14,6 +14,8 @@ import { IncrementalActiveContext } from "./context-choice";
 import type { ReasoningEffort } from "./reasoning";
 import { dsmlMiddleware } from "./dsml";
 import { completionToolChoiceMiddleware, completionToolsMiddleware } from "./completion-tools";
+import { GOAL_SCHEMA, GOAL_DESCRIPTION, GOAL_INSTRUCTIONS, localEvidence, runEvidence, validateGoal } from "./goal-completion";
+export { GOAL_INSTRUCTIONS } from "./goal-completion";
 
 export { DEFAULT_INSTRUCTIONS } from "./prompt";
 import { createPromptSnapshot, PROMPT_TOOLS, type PromptSnapshot } from "./prompt";
@@ -34,9 +36,6 @@ export type CreateAgentOptions = {
   goalMode?: boolean;
 };
 
-const GOAL_SCHEMA = z.object({ status: z.enum(["completed", "blocked"]), summary: z.string().min(1).describe("Explain the outcome or the information needed to continue.") }).strict();
-const GOAL_DESCRIPTION = "Finish the current goal with a concise outcome, or explain a blocker that requires the user. Call this tool alone after all work and background jobs have finished.";
-export const GOAL_INSTRUCTIONS = "\n\nGoal mode: continue working until the outcome is achieved or user input is required. To end the work, call complete_goal alone with the outcome or blocker; plain text does not end the work.\n- complete_goal: Finish the goal or report a blocker to the user.";
 export const GOAL_TOOLS = [...PROMPT_TOOLS, { type: "function", name: "complete_goal", description: GOAL_DESCRIPTION, inputSchema: z.toJSONSchema(GOAL_SCHEMA, { target: "draft-7", unrepresentable: "any" }) }];
 
 type BrowserAgentTools = ReturnType<typeof createProgramTools>;
@@ -82,6 +81,17 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     })(),
   };
   const tools = createProgramTools(options.executor, toolOptions);
+  const localResults: ReturnType<typeof localEvidence>[] = [];
+  if (options.goalMode) for (const [name, definition] of Object.entries(tools)) {
+    const execute = definition.execute;
+    if (!execute) continue;
+    definition.execute = (async (input: any, context: any) => {
+      const output = await execute(input, context);
+      const identity = options.conversationId ? logger?.toolIdentity(options.conversationId, context.toolCallId) : undefined;
+      localResults.push(localEvidence(identity?.toolCallId ?? context.toolCallId, name, output, localResults.length));
+      return output;
+    }) as typeof execute;
+  }
   let goalCallAlone = false;
   if (options.goalMode) tools.complete_goal = dynamicTool({
     description: GOAL_DESCRIPTION, inputSchema: GOAL_SCHEMA, needsApproval: false,
@@ -93,8 +103,12 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         throw new DOMException("日志维护已阻止工具启动。", "AbortError");
       abortSignal?.throwIfAborted();
       const pending = options.executor.pendingBackgroundJobs?.() ?? [];
+      const evidence = logger && options.conversationId && identity?.runId
+        ? await runEvidence(logger, options.conversationId, identity.runId) : localResults;
+      const invalid = validateGoal(input as z.infer<typeof GOAL_SCHEMA>, evidence);
       const output = !goalCallAlone ? { ok: false, error: { code: "goal-call-not-alone", message: "Call complete_goal alone after observing all other tool results." } }
         : pending.length ? { ok: false, error: { code: "background-jobs-pending", message: "Wait for all background jobs to finish before completing the goal." } }
+        : invalid ? { ok: false, error: { code: "goal-evidence-invalid", message: invalid } }
         : { ok: true, ...(input as z.infer<typeof GOAL_SCHEMA>) };
       if (logger && !await logger.append({ type: output.ok ? "tool.finished" : "tool.failed", conversationId: options.conversationId,
         content: { callId, toolName: "complete_goal" }, input, output, toolCallId, ...identity, ...(!output.ok ? { error: output.error } : {}), latencyMs: Math.max(0, performance.now() - start) }))
@@ -120,8 +134,8 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
   return new ToolLoopAgent<never, BrowserAgentTools>({
     model: typeof options.languageModel === "string" ? options.languageModel
       : wrapLanguageModel({ model: options.languageModel, middleware: completion
-        ? [simulateStreamingMiddleware(), completionToolChoiceMiddleware(), dsmlMiddleware(logger, options.conversationId), completionToolsMiddleware()]
-        : dsmlMiddleware(logger, options.conversationId) }),
+        ? [simulateStreamingMiddleware(), completionToolChoiceMiddleware(), dsmlMiddleware(logger, options.conversationId, options.goalMode ? { complete_goal: GOAL_SCHEMA } : undefined), completionToolsMiddleware()]
+        : dsmlMiddleware(logger, options.conversationId, options.goalMode ? { complete_goal: GOAL_SCHEMA } : undefined) }),
     ...(options.reasoning ? { reasoning: options.reasoning === "max" ? "xhigh" : options.reasoning } : {}),
     instructions: wireInstructions(),
     tools,

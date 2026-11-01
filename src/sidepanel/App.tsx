@@ -110,6 +110,21 @@ export function App() {
 
 function ConfiguredChat({ config, systemPrompt, logger, onError }: { config: ModelConfig; systemPrompt?: string; logger: EventLogger; onError: (error: unknown) => void }) {
   const [initialThreadId, setInitialThreadId] = useState<string | null>();
+  const [goalMode, setGoalMode] = useState<boolean>();
+  const modeWrites = useRef(Promise.resolve());
+
+  useEffect(() => {
+    let active = true;
+    void chrome.storage.local.get("side-agent:goal-mode").then((stored) => {
+      if (active) setGoalMode(typeof stored["side-agent:goal-mode"] === "boolean" ? stored["side-agent:goal-mode"] : true);
+    }).catch((error) => { if (active) onError(error); });
+    return () => { active = false; };
+  }, [onError]);
+
+  const changeGoalMode = (value: boolean) => {
+    setGoalMode(value);
+    modeWrites.current = modeWrites.current.then(() => chrome.storage.local.set({ "side-agent:goal-mode": value })).catch(onError);
+  };
 
   useEffect(() => {
     let active = true;
@@ -124,7 +139,7 @@ function ConfiguredChat({ config, systemPrompt, logger, onError }: { config: Mod
     return () => { active = false; };
   }, [logger, onError]);
 
-  if (initialThreadId === undefined) {
+  if (initialThreadId === undefined || goalMode === undefined) {
     return (
       <main className="app-shell" data-testid="sidepanel-shell">
         <Header />
@@ -132,7 +147,7 @@ function ConfiguredChat({ config, systemPrompt, logger, onError }: { config: Mod
       </main>
     );
   }
-  return <ConfiguredRuntime config={config} systemPrompt={systemPrompt} logger={logger} initialThreadId={initialThreadId ?? undefined} />;
+  return <ConfiguredRuntime config={config} systemPrompt={systemPrompt} logger={logger} initialThreadId={initialThreadId ?? undefined} goalMode={goalMode} onGoalModeChange={changeGoalMode} />;
 }
 
 function RecoverConversationTitles({ logger, config }: { logger: EventLogger; config: ModelConfig }) {
@@ -155,12 +170,11 @@ function RecoverConversationTitles({ logger, config }: { logger: EventLogger; co
   return null;
 }
 
-function ConfiguredRuntime({ config, systemPrompt, logger, initialThreadId }: { config: ModelConfig; systemPrompt?: string; logger: EventLogger; initialThreadId?: string }) {
-  const [goalMode, setGoalMode] = useState(false);
+function ConfiguredRuntime({ config, systemPrompt, logger, initialThreadId, goalMode, onGoalModeChange }: { config: ModelConfig; systemPrompt?: string; logger: EventLogger; initialThreadId?: string; goalMode: boolean; onGoalModeChange: (value: boolean) => void }) {
   const runtime = useSidePanelRuntime(config, systemPrompt, logger, initialThreadId, goalMode);
   const view = useMemo(() => ({ getState: runtime.thread.getState, thread: runtime.thread, runtime }), [runtime]);
   return <RuntimeViewContext.Provider value={view}>
-    <ConfiguredConversation config={config} logger={logger} goalMode={goalMode} onGoalModeChange={setGoalMode} />
+    <ConfiguredConversation config={config} logger={logger} goalMode={goalMode} onGoalModeChange={onGoalModeChange} />
   </RuntimeViewContext.Provider>;
 }
 

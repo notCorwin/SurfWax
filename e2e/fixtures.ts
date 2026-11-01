@@ -182,7 +182,7 @@ export async function startProvider(responses: MockResponse[], delayMs = 0, summ
     request.on("end", () => {
       const requestBody = JSON.parse(Buffer.concat(body).toString("utf8"));
       requests.push(requestBody);
-      const isSummary = summaryText && JSON.stringify(requestBody).includes("Summarize the entire supplied conversation faithfully for continuing the browser task");
+      const isSummary = summaryText && JSON.stringify(requestBody).includes("Summarize the entire supplied conversation faithfully");
       if (isSummary) {
         stats.summaryCalls += 1;
         if (stats.summaryFailures > 0) {
@@ -329,7 +329,8 @@ export async function selectProvider(options: Page, query: string, optionName: s
   await options.getByRole("option", { name: optionName }).click();
 }
 
-export async function configure(context: BrowserContext, page: Page, baseURL: string, contextWindow = 1_000_000): Promise<Page> {
+export async function configure(context: BrowserContext, page: Page, baseURL: string, contextWindow = 1_000_000, settings: { goalMode?: boolean } = { goalMode: false }): Promise<Page> {
+  if (settings.goalMode !== undefined) await page.evaluate((goalMode) => chrome.storage.local.set({ "side-agent:goal-mode": goalMode }), settings.goalMode);
   const [options] = await Promise.all([context.waitForEvent("page"), page.getByTestId("open-settings").click()]);
   await options.waitForLoadState("domcontentloaded");
   await selectProvider(options, "custom", /自定义 Endpoint.*custom/);

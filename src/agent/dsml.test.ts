@@ -64,11 +64,26 @@ describe("DSML model middleware", () => {
     ["invalid opener", v41.replace('<｜DSML｜ calls>', '<｜DSML｜ unknown>')],
     ["duplicate parameter", v41.replace('</｜DSML｜ invoke>', '<｜DSML｜ parameter name="url" string="true">return 2;</｜DSML｜ parameter></｜DSML｜ invoke>')],
     ["removed legacy tool", v41.replace('name="navigate"', 'name="run-code"')],
-  ])("preserves %s without executing it", async (_label, text) => {
+  ])("rejects %s before execution and makes the response repairable", async (_label, text) => {
     const telemetry = vi.fn();
-    const result = await generated([{ type: "text", text }], { telemetry } as unknown as EventLogger);
-    expect(result.content).toEqual([{ type: "text", text }]);
+    await expect(generated([{ type: "text", text }], { telemetry } as unknown as EventLogger)).rejects.toMatchObject({
+      code: "dsml-tool-protocol", toolProtocolRepair: { responseText: text },
+    });
     expect(telemetry).toHaveBeenCalledWith(expect.objectContaining({ type: "model.dsml.recovery", content: expect.objectContaining({ recovered: false }) }));
+  });
+
+  it("recovers registered completion tools and rejects truncated DSML before dispatch", async () => {
+    const content = '<｜DSML｜ calls><｜DSML｜ invoke name="complete_goal"><｜DSML｜ parameter name="summary" string="true">Done</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
+    const schema = { parse: (input: unknown) => input };
+    for (const reason of ["stop", "length"] as const) {
+      const model = wrapLanguageModel({
+        model: new MockLanguageModelV4({ doGenerate: async () => ({ content: [{ type: "text", text: content }], finishReason: { unified: reason, raw: reason }, usage, warnings: [] }) }),
+        middleware: dsmlMiddleware(undefined, undefined, { complete_goal: schema }),
+      });
+      const request = model.doGenerate({ prompt: [], tools: [{ type: "function", name: "complete_goal", inputSchema: { type: "object" } }] });
+      if (reason === "stop") expect((await request).content).toMatchObject([{ type: "tool-call", toolName: "complete_goal", input: '{"summary":"Done"}' }]);
+      else await expect(request).rejects.toMatchObject({ code: "dsml-tool-protocol" });
+    }
   });
 
   it("does not recover calls excluded by tool choice or without active function tools", async () => {

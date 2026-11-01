@@ -14,8 +14,8 @@ test("reads stored artifact paths without treating missing or inherited values a
     responses.push(
       commandResponse("create_text_artifact", { filename: "sample.txt", text: "example" }, "produce-artifact"),
       (request) => { artifactId = lastTool(request).result.id; expect(artifactId).toEqual(expect.any(Number)); return commandResponse("read_artifact", { artifactId, path: ["filename"] }, "read-name"); },
-      (request) => { expect(lastTool(request)).toEqual({ ok: true, result: "sample.txt" }); return commandResponse("read_artifact", { artifactId, path: ["base64"], offset: 0, limit: 4 }, "read-slice"); },
-      (request) => { expect(lastTool(request)).toEqual({ ok: true, result: "ZXhh" }); return commandResponse("read_artifact", { artifactId, path: ["missing"] }, "read-missing"); },
+      (request) => { expect(lastTool(request)).toEqual({ evidenceId: expect.any(String), ok: true, result: "sample.txt" }); return commandResponse("read_artifact", { artifactId, path: ["base64"], offset: 0, limit: 4 }, "read-slice"); },
+      (request) => { expect(lastTool(request)).toEqual({ evidenceId: expect.any(String), ok: true, result: "ZXhh" }); return commandResponse("read_artifact", { artifactId, path: ["missing"] }, "read-missing"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "result-path-not-found" } }); return commandResponse("read_artifact", { artifactId, path: ["constructor"] }, "read-inherited"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "result-path-not-found" } }); return textResponse("ARTIFACT_PATHS_OK"); },
       textResponse("产物路径"),
