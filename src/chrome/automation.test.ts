@@ -1294,7 +1294,7 @@ describe("AutomationRuntime", () => {
     expect(await page.inspect({ since: retained.observationId })).toMatchObject({ mode: "delta", items: [] });
     await runtime.abortSessions();
   });
-  it("waits for equal geometry across samples before dispatching native input", async () => {
+  it("rejects unstable geometry and clicks once it is stable on retry", async () => {
     const base = { connected: true, y: 12, height: 20, visible: true, stable: true, enabled: true,
       editable: true, receivesEvents: true, checked: false };
     const { runtime, calls } = harness(undefined, [
@@ -1302,6 +1302,8 @@ describe("AutomationRuntime", () => {
       { ...base, x: 30, width: 40 }, { ...base, x: 30, width: 40 },
     ]);
     const page = await runtime.createPage(3);
+    await expect(page.getByRole("button", { name: "Sign in" }).click()).rejects.toMatchObject({ code: "not-stable" });
+    expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent")).toHaveLength(0);
     await page.getByRole("button", { name: "Sign in" }).click();
     const pressed = calls.findIndex(({ method, params }) => method === "Input.dispatchMouseEvent" && params.type === "mousePressed");
     expect(calls.slice(0, pressed).filter(({ method }) => method === "Runtime.callFunctionOn")).toHaveLength(4);
@@ -1388,16 +1390,42 @@ describe("AutomationRuntime", () => {
     await runtime.abortSessions();
   });
 
-  it("re-resolves a locator when a framework replaces the node during actionability", async () => {
+  it("re-resolves a locator when a framework replaces the node during hover actionability", async () => {
     const blocked = { connected: false, x: 0, y: 0, visible: false, stable: false, enabled: false, editable: false, receivesEvents: false, checked: false };
     const ready = { connected: true, x: 10, y: 12, visible: true, stable: true, enabled: true, editable: true, receivesEvents: true, checked: false };
     const { runtime, calls } = harness(undefined, [blocked, ready]);
     const page = await runtime.createPage(3);
 
-    await page.getByRole("button", { name: "Sign in" }).click();
+    await page.getByRole("button", { name: "Sign in" }).hover();
 
     expect(calls.filter(({ method }) => method === "DOM.resolveNode").length).toBeGreaterThanOrEqual(2);
-    expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent").map(({ params }) => params.type)).toEqual(["mouseMoved", "mousePressed", "mouseReleased"]);
+    expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent").map(({ params }) => params.type)).toEqual(["mouseMoved"]);
+  });
+
+  it.each(["click", "dblclick"] as const)("reports an intercepted %s without dispatching input", async (operation) => {
+    const blocked = { connected: true, x: 10, y: 12, visible: true, stable: true, enabled: true, editable: true, receivesEvents: false, checked: false };
+    const { runtime, calls } = harness(undefined, [blocked]);
+    const page = await runtime.createPage(3);
+    await expect(page.getByRole("button", { name: "Sign in" })[operation]()).rejects.toMatchObject({ code: "intercepted" });
+    expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent")).toHaveLength(0);
+  });
+
+  it("fails immediately when a click target is missing", async () => {
+    const { runtime, calls } = harness([]);
+    const page = await runtime.createPage(3);
+    await expect(page.getByText("missing").click()).rejects.toMatchObject({ code: "not-found" });
+    expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent")).toHaveLength(0);
+  });
+
+  it.each([
+    ["not-visible", { visible: false }],
+    ["disabled", { enabled: false }],
+  ])("reports a %s click target without dispatching input", async (code, override) => {
+    const state = { connected: true, x: 10, y: 12, visible: true, stable: true, enabled: true, editable: true, receivesEvents: true, checked: false, ...override };
+    const { runtime, calls } = harness(undefined, [state]);
+    const page = await runtime.createPage(3);
+    await expect(page.getByRole("button", { name: "Sign in" }).click()).rejects.toMatchObject({ code });
+    expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent")).toHaveLength(0);
   });
 
   it("waits for explicit locator states", async () => {
@@ -1460,7 +1488,7 @@ describe("AutomationRuntime", () => {
       const controller = new AbortController();
       runtime.setContext({ signal: controller.signal });
       const page = await runtime.createPage(3);
-      const pending = page.getByText("missing").click();
+      const pending = page.getByText("missing").hover();
       const rejected = expect(pending).rejects.toThrow(/AutomationError\[timeout\].*lastObservation/);
       setTimeout(() => controller.abort(new DOMException("timed out", "TimeoutError")), 2_200);
       await vi.advanceTimersByTimeAsync(2_200);

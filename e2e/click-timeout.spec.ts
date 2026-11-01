@@ -24,8 +24,8 @@ test("a covered click returns promptly with the page and can be retried after di
       () => { elapsed = Date.now(); return commandResponse("click", { target: { by: "css", value: "#target" } }, "covered"); },
       (request) => {
         elapsed = Date.now() - elapsed;
-        expect(elapsed).toBeLessThan(15_000);
-        expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "timeout" }, timeoutMs: 5_000, timeoutSource: "default", pageSnapshot: expect.any(Object) });
+        expect(elapsed).toBeLessThan(4_000);
+        expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "intercepted" }, timeoutMs: 5_000, timeoutSource: "default", pageSnapshot: expect.any(Object) });
         expect(JSON.stringify(lastTool(request).pageSnapshot)).toContain("Dismiss overlay");
         return commandResponse("click", { target: { by: "css", value: "#dismiss" } }, "dismiss");
       },
@@ -41,7 +41,7 @@ test("a covered click returns promptly with the page and can be retried after di
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
-test("an explicit longer timeout waits for the overlay to clear", async () => {
+test("an explicit longer timeout does not make a covered click wait", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -54,17 +54,14 @@ test("an explicit longer timeout waits for the overlay to clear", async () => {
       document.querySelector("#target")!.addEventListener("click", () => { document.body.dataset.clicked = "yes"; });
     });
     responses.push(
-      () => {
-        void target.evaluate(() => { setTimeout(() => document.querySelector("#overlay")!.remove(), 5_500); });
-        return commandResponse("click", { target: { by: "css", value: "#target" }, timeoutMs: 10_000 }, "wait-for-overlay");
-      },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, timeoutMs: 10_000, timeoutSource: "explicit" }); return textResponse("LONG_WAIT_OK"); },
+      commandResponse("click", { target: { by: "css", value: "#target" }, timeoutMs: 10_000 }, "covered-explicit"),
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "intercepted" }, timeoutMs: 10_000, timeoutSource: "explicit" }); return textResponse("LONG_WAIT_OK"); },
       textResponse("点击等待"),
     );
     await target.bringToFront();
     await opened.page.getByTestId("composer-input").fill("Open the lesson after the overlay closes");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("LONG_WAIT_OK", { timeout: 30_000 });
-    await expect(target.locator("body")).toHaveAttribute("data-clicked", "yes");
+    await expect(target.locator("body")).not.toHaveAttribute("data-clicked");
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

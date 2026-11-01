@@ -59,8 +59,8 @@ const targetAction = (name: string, summary: string, method: string) => define(n
 
 /** Only capabilities supported by the existing program host are registered here. */
 export const ATOMIC_TOOL_REGISTRY: readonly AtomicToolDefinition[] = Object.freeze([
-  targetAction("click", "Click exactly one matching element. Defaults to a 5 second execution timeout; set timeoutMs to wait longer.", "click"),
-  targetAction("double_click", "Double-click exactly one matching element. Defaults to a 5 second execution timeout; set timeoutMs to wait longer.", "dblclick"),
+  targetAction("click", "Click exactly one matching element. Fails immediately if it is missing, blocked or otherwise not actionable. Defaults to a 5 second execution timeout.", "click"),
+  targetAction("double_click", "Double-click exactly one matching element. Fails immediately if it is missing, blocked or otherwise not actionable. Defaults to a 5 second execution timeout.", "dblclick"),
   targetAction("hover", "Move the pointer over exactly one matching element.", "hover"),
   targetAction("focus_element", "Focus exactly one matching element.", "focus"),
   targetAction("blur_element", "Blur exactly one matching element.", "blur"),

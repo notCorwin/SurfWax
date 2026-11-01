@@ -2419,14 +2419,18 @@ export class AutomationRuntime {
     }
   }
 
-  private async waitActionableLocator(session: Session, spec: LocatorSpec, editable: boolean, pointer: boolean, stable = pointer, enabled = true): Promise<{ objectId: string; targetSession: Session; state: ElementState }> {
+  private async waitActionableLocator(session: Session, spec: LocatorSpec, editable: boolean, pointer: boolean, stable = pointer, enabled = true, failFast = false): Promise<{ objectId: string; targetSession: Session; state: ElementState }> {
     let attempt = 0;
     while (true) {
       throwIfAborted(this.context.signal);
       let candidates: Candidate[] = [];
       const objectId = await this.resolveOnce(session, spec, (matches) => { candidates = matches; });
       attempt += 1;
-      if (!objectId) { this.recordAttempt(session, spec, attempt, "no-candidate", candidates); await delay(50, this.context.signal); continue; }
+      if (!objectId) {
+        this.recordAttempt(session, spec, attempt, "no-candidate", candidates);
+        if (failFast) throw automationError("not-found", { locator: spec, lastObservation: this.waitDiagnostic() });
+        await delay(50, this.context.signal); continue;
+      }
       const targetSession = this.objectSession(session, objectId);
       const state = await this.elementState(targetSession, objectId, pointer, true).catch((error) => {
         if (error && typeof error === "object" && "name" in error && error.name === "AbortError") throw error;
@@ -2441,6 +2445,7 @@ export class AutomationRuntime {
       if (spec.ref && !state?.connected) throw automationError("detached", { ref: spec.ref, reason: "node-removed" });
       if (editable && state?.connected && state.editKind === "unsupported") throw automationError("invalid-editable-target", { reason: "not-a-text-input" });
       if (state?.connected && state.visible && (!stable || state.stable) && (!enabled || state.enabled) && (!editable || state.editable) && (!pointer || state.receivesEvents)) return { objectId, targetSession, state };
+      if (failFast) throw automationError(reason, { locator: spec, lastObservation: this.waitDiagnostic() });
       await delay(50, this.context.signal);
     }
   }
@@ -2559,7 +2564,7 @@ export class AutomationRuntime {
   }
 
   private async pointer(session: Session, spec: LocatorSpec, operation: string, options: { button?: "left" | "right" | "middle"; modifiers?: string[] } = {}, bound?: { objectId: string; targetSession: Session; state: ElementState }): Promise<void> {
-    const target = bound ? await this.waitBoundActionable(session, bound, operation !== "hover") : await this.waitActionableLocator(session, spec, false, true, true, operation !== "hover");
+    const target = bound ? await this.waitBoundActionable(session, bound, operation !== "hover") : await this.waitActionableLocator(session, spec, false, true, true, operation !== "hover", operation === "click" || operation === "dblclick");
     const state = await this.toRootPoint(session, target.targetSession, target.state);
     if (operation === "hover") {
       await this.options.command(session.debuggee, "Input.dispatchMouseEvent", { type: "mouseMoved", x: state.x, y: state.y });
