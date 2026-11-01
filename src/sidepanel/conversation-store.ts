@@ -13,6 +13,7 @@ export type MessageView = {
   id: string; runId?: string; role: SidePanelMessage["role"]; parts: readonly MessagePart[]; content: readonly MessagePart[];
   metadata: { custom?: Record<string, unknown> }; status: PartStatus;
   branchNumber: number; branchCount: number; source: SidePanelMessage;
+  userBranch?: { id: string; number: number; count: number };
 };
 export type ThreadState = { messages: readonly MessageView[]; isRunning: boolean; isStopping: boolean; stoppingAt?: number; isLoading: boolean; isDisabled: boolean; error?: unknown };
 export type ThreadItem = ConversationSummary & { remoteId: string; custom: { runStatus: string } };
@@ -107,6 +108,7 @@ export class ConversationStore {
     messages = messages.filter((message) => message.metadata?.custom?.pageRefresh !== true);
     const siblings = new Map<string | null, string[]>();
     const parents = new Map<string, string | null>();
+    const entries = new Map(this.repository.messages.map((entry) => [entry.message.id, entry]));
     for (const { parentId, message } of this.repository.messages) {
       parents.set(message.id, parentId);
       const group = siblings.get(parentId) ?? [];
@@ -115,7 +117,12 @@ export class ConversationStore {
     this.updateThread({ messages: messages.map((message, index) => {
       const parent = parents.get(message.id) ?? messages[index - 1]?.id ?? null;
       const group = siblings.get(parent) ?? [];
-      return this.projection.message(message, message.id === liveId, group.includes(message.id) ? group : [...group, message.id], this.messageRuns.get(message.id), this.toolTimings);
+      const view = this.projection.message(message, message.id === liveId, group.includes(message.id) ? group : [...group, message.id], this.messageRuns.get(message.id), this.toolTimings);
+      const parentMessage = parent ? entries.get(parent) : undefined;
+      if (message.role !== "assistant" || parentMessage?.message.role !== "user") return view;
+      const userSiblings = siblings.get(parentMessage.parentId) ?? [];
+      if (userSiblings.length < 2) return view;
+      return { ...view, userBranch: { id: parentMessage.message.id, number: userSiblings.indexOf(parentMessage.message.id) + 1, count: userSiblings.length } };
     }) });
   }
   private remember(headId: string | null) {
@@ -289,8 +296,16 @@ export class ConversationStore {
       let restoredEvents: LogEvent[] = [];
       try { restoredEvents = await this.restore(id); } catch (error) { failure ??= error; }
       if (failure !== undefined) {
-        const recorded = restoredEvents.some((event) => event.type === "conversation.failed" && event.id > priorFailureEventId);
-        if (!recorded) this.updateThread({ error: failure });
+        const terminal = [...restoredEvents].reverse().find((event) => event.type === "conversation.failed" && event.id > priorFailureEventId);
+        const submitted = terminal && [...restoredEvents].reverse().find((event) => event.type === "conversation.submitted" && event.runId === terminal.runId);
+        const parentId = submitted && (fromLogValue(submitted.content, submitted.valueEncoding) as { messageId?: string } | null)?.messageId;
+        const visible = this.state.thread.messages.some((message) => message.status.reason === "error" && (
+          message.runId === terminal?.runId || isSyntheticTerminalMessage(message.source)
+            && this.repository.messages.some((entry) => entry.message.id === message.id && entry.parentId === parentId)
+        ));
+        // A failed regeneration with no partial reply leaves the previous reply
+        // selected. In that case the terminal event has no visible message.
+        if (!visible) this.updateThread({ error: failure });
       }
       this.controller = undefined;
       this.updateThread({ isRunning: false, isStopping: false, stoppingAt: undefined });

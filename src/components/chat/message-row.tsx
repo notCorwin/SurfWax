@@ -15,7 +15,7 @@ import { useRuntimeView, type MessageView } from "@/sidepanel/runtime-view";
 export type { MessageView } from "@/sidepanel/runtime-view";
 export const CONTINUE_INTERRUPTED_TEXT = "继续上一次被中断的工作。不要重复已经完成的操作；先根据上面的工具结果确认当前状态。";
 type RowProps = { message: MessageView; messages: readonly MessageView[]; running: boolean; locked: boolean;
-  command: (action: () => void) => void; latest: boolean; timeline: ToolTimeline };
+  command: (action: () => void | Promise<unknown>) => void; latest: boolean; timeline: ToolTimeline };
 export const MessageRow = memo(function MessageRow({ message, messages, running, locked, command, latest, timeline }: RowProps) {
   const runtimeCommands = usePanelRuntime();
   const runtime = useRuntimeView();
@@ -47,7 +47,7 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
         output.push(<ActivityPhaseContext.Provider key={index} value={activityPhaseAt(boundary, index, phase, part.status.type)}><Reasoning {...part} /></ActivityPhaseContext.Provider>);
       } else {
         const group = toolGroupAt(timeline, message.id, index);
-        if (group) output.push(<ActivityPhaseContext.Provider key={index} value={activityPhaseAt(boundary, index, phase, part.status.type)}><ToolGroupView group={group} /></ActivityPhaseContext.Provider>);
+        if (group) output.push(<ActivityPhaseContext.Provider key={index} value={!group.live && phase !== "pending" ? phase : activityPhaseAt(boundary, index, phase, part.status.type)}><ToolGroupView group={group} /></ActivityPhaseContext.Provider>);
       }
     }
     return output;
@@ -56,16 +56,19 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
     <Button type="button" variant="ghost" size="icon-xs" aria-label={copied ? "已复制" : "复制消息"} title="复制消息" onClick={() => void copy()}><CopyIcon aria-hidden="true" /></Button>
     {user && !editing && <Button type="button" variant="ghost" size="icon-xs" disabled={locked} data-testid="edit-message-button" aria-label="编辑消息" title="编辑消息"
       onClick={() => command(() => { const rect = bubble.current!.getBoundingClientRect(); setEditSize({ width: rect.width, height: rect.height }); setDraft(client().getCopyText()); setEditing(true); })}><PencilIcon aria-hidden="true" /></Button>}
-    <Button type="button" variant="ghost" size="icon-xs" disabled={locked || editing} data-testid={user ? "retry-user-message-button" : "replay-message-button"}
-      aria-label={user ? "重试消息" : "重新生成回复"} title={user ? "重试消息" : "重新生成回复"} onClick={() => command(() => {
-        if (user) runtimeCommands.thread.startRun({ parentId: message.id }); else client().reload();
-      })}><RotateCcwIcon aria-hidden="true" /></Button>
-    {message.branchCount > 1 && <div className="flex items-center gap-0.5 tabular-nums" aria-label="消息分支">
+    {!user && <Button type="button" variant="ghost" size="icon-xs" disabled={locked} data-testid="replay-message-button"
+      aria-label="重新生成回复" title="重新生成回复" onClick={() => command(() => client().reload())}><RotateCcwIcon aria-hidden="true" /></Button>}
+    {!user && message.branchCount > 1 && <div className="flex items-center gap-0.5 tabular-nums" aria-label="回复分支">
       <Button type="button" variant="ghost" size="icon-xs" disabled={locked || message.branchNumber <= 1} aria-label="上一个分支" title="上一个分支" onClick={() => command(() => client().switchToBranch({ position: "previous" }))}><ChevronLeftIcon aria-hidden="true" /></Button>
       <span className="min-w-8 text-center">{message.branchNumber} / {message.branchCount}</span>
       <Button type="button" variant="ghost" size="icon-xs" disabled={locked || message.branchNumber >= message.branchCount} aria-label="下一个分支" title="下一个分支" onClick={() => command(() => client().switchToBranch({ position: "next" }))}><ChevronRightIcon aria-hidden="true" /></Button>
     </div>}
-  </MessageFooter>, [runtimeCommands, runtime, user, message.id, message.branchCount, message.branchNumber, copied, editing, running, locked, command]);
+    {!user && message.userBranch && <div className="flex items-center gap-0.5 tabular-nums" aria-label="用户消息版本">
+      <Button type="button" variant="ghost" size="icon-xs" disabled={message.userBranch.number <= 1} aria-label="上一个消息版本" title="上一个消息版本" onClick={() => command(() => runtime.thread.getMessageById(message.userBranch!.id).switchToBranch({ position: "previous" }))}><ChevronLeftIcon aria-hidden="true" /></Button>
+      <span className="min-w-8 text-center">{message.userBranch.number} / {message.userBranch.count}</span>
+      <Button type="button" variant="ghost" size="icon-xs" disabled={message.userBranch.number >= message.userBranch.count} aria-label="下一个消息版本" title="下一个消息版本" onClick={() => command(() => runtime.thread.getMessageById(message.userBranch!.id).switchToBranch({ position: "next" }))}><ChevronRightIcon aria-hidden="true" /></Button>
+    </div>}
+  </MessageFooter>, [runtime, user, message.id, message.branchCount, message.branchNumber, message.userBranch, copied, editing, running, locked, command]);
   const hasVisiblePart = parts.some((part, index) => part.type === "tool-call" ? Boolean(toolGroupAt(timeline, message.id, index))
     : part.type === "reasoning" ? Boolean(part.text.trim()) || part.status.type === "running" : Boolean(part.text.trim()));
   if (!user && !hasVisiblePart && message.metadata.custom?.interrupted !== true
@@ -82,7 +85,7 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
         {editing && <div className="flex justify-end gap-1">
           <Button type="button" size="sm" variant="ghost" onClick={() => setEditing(false)}>取消</Button>
           <Button type="button" size="sm" disabled={locked || !draft.trim()} onClick={() => command(() => {
-            void runtime.thread.edit(message.id, draft); setEditing(false);
+            const result = runtime.thread.edit(message.id, draft); setEditing(false); return result;
           })}>保存并重新生成</Button>
         </div>}
       </form> : renderParts()}

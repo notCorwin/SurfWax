@@ -648,20 +648,21 @@ test("edits user messages, regenerates replies and restores the selected branch"
     expect(promptTexts).toEqual(expect.arrayContaining(["edited question", "follow up"]));
     expect(JSON.stringify(provider.requests.at(-1).messages)).not.toContain(originalQuestion);
 
-    await opened.page.getByRole("button", { name: "上一个分支" }).first().click();
+    await opened.page.getByRole("button", { name: "上一个消息版本" }).first().click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("ORIGINAL_REPLY");
     await expect.poll(async () => (await readEvents(opened.page)).filter((event) => event.type === "conversation.branch.selected").at(-1)?.content?.headId).toBe(originalReply);
     await opened.page.reload();
     await opened.page.getByTestId("conversation-menu").click();
     await opened.page.locator(".conversation-item", { hasText: "分支测试" }).locator(".conversation-select").click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("ORIGINAL_REPLY");
-    await expect(opened.page.getByLabel("消息分支").first()).toBeVisible();
+    await expect(opened.page.getByLabel("回复分支").first()).toBeVisible();
     await composer.fill("check branch visibility");
     await composer.press("Enter");
     await expect(opened.page.getByRole("button", { name: "停止生成" })).toBeVisible();
-    for (const branch of await opened.page.getByLabel("消息分支").getByRole("button").all()) await expect(branch).toBeDisabled();
+    await expect(opened.page.getByLabel("回复分支")).toHaveCount(0);
+    await expect(opened.page.getByLabel("用户消息版本")).toHaveCount(0);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("BRANCH_DONE");
-    await expect(opened.page.getByLabel("消息分支").first()).toBeVisible();
+    await expect(opened.page.getByLabel("回复分支").first()).toBeVisible();
   } catch (error) {
     await test.info().attach("branch-events-final.json", { body: JSON.stringify(await readEvents(opened.page), null, 2), contentType: "application/json" });
     throw error;

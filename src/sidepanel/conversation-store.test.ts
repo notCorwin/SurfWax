@@ -63,8 +63,10 @@ it("restores the selected reply inside an inactive branch when reopening a conve
   const runtime = new ConversationStore(logger, () => { throw new Error("Branch navigation must not request a model"); });
   await runtime.threads.switchToThread(conversationId);
   expect(runtime.getState().thread.messages.map(({ id }) => id)).toEqual(["edited", "edited-reply"]);
+  expect(runtime.getState().thread.messages[1]?.userBranch).toEqual({ id: "edited", number: 2, count: 2 });
   await runtime.thread.getMessageById("edited").switchToBranch({ position: "previous" });
   expect(runtime.getState().thread.messages.map(({ id }) => id)).toEqual(["question", "original"]);
+  expect(runtime.getState().thread.messages[1]?.userBranch).toEqual({ id: "question", number: 1, count: 2 });
   await runtime.thread.getMessageById("question").switchToBranch({ position: "next" });
   expect(runtime.getState().thread.messages.map(({ id }) => id)).toEqual(["edited", "edited-reply"]);
 });
@@ -179,6 +181,30 @@ it("does not duplicate a refreshed canonical failure when its synthetic message 
   await runtime.thread.startRun({ parentId: "question" });
   expect(runtime.getState().thread.error).toBeUndefined();
   expect(runtime.getState().thread.messages.at(-1)?.status).toMatchObject({ reason: "error", error: "new" });
+});
+
+it("reports a failed regeneration that produced no reply while preserving the original reply", async () => {
+  const events: LogEvent[] = [];
+  const logger = new EventLogger({ store: {
+    async append(event) { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
+    async all() { return [...events]; },
+    async clear() { events.length = 0; },
+  } });
+  const conversationId = "failed-regeneration";
+  await logger.appendMessage(conversationId, { id: "question", role: "user", parts: [{ type: "text", text: "hello" }] });
+  await logger.appendMessage(conversationId, { id: "reply", role: "assistant", parts: [{ type: "text", text: "original" }] }, { parentId: "question" });
+  const failure = new Error("provider rejected regeneration");
+  const runtime = new ConversationStore(logger, () => ({
+    async sendMessages() {
+      await logger.append({ type: "conversation.submitted", conversationId, runId: "retry", content: { messageId: "question" } });
+      await logger.append({ type: "conversation.failed", conversationId, runId: "retry", content: null, error: failure });
+      throw failure;
+    },
+  }));
+  await runtime.threads.switchToThread(conversationId);
+  await runtime.thread.getMessageById("reply").reload();
+  expect(runtime.getState().thread.messages.map(({ id }) => id)).toEqual(["question", "reply"]);
+  expect(runtime.getState().thread.error).toBe(failure);
 });
 
 it("publishes complete transport snapshots while running and restores its returned message", async () => {

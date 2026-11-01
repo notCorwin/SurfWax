@@ -1166,7 +1166,7 @@ for (const format of ["legacy-user-tools", "system-tools"] as const) test(`conti
     for (const request of requests) expect(request.tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "send_request", "list_jobs", "get_job", "cancel_job"]));
     expect(requests[0].messages[0].content).toMatch(/^PERSISTED_CUSTOM_GUIDANCE\n\nAvailable tools:/);
     expect(JSON.stringify(requests[0].messages)).toContain("HISTORICAL_RECEIPT");
-    await opened.page.getByTestId("retry-user-message-button").last().click();
+    await opened.page.getByTestId("replay-message-button").last().click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("RETRY_CURRENT_TOOLS");
     expect(provider.requests.filter(request => request.tools).at(-1).tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "send_request", "list_jobs", "get_job", "cancel_job"]));
     await expect(target.locator("body")).toHaveAttribute("data-migrated-effects", "1");

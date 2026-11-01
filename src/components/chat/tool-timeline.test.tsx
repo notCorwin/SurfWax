@@ -47,6 +47,30 @@ describe("tool timeline", () => {
     expect(toolGroupAt(projectToolTimeline([message("a", [tool("done"), text("later text")])], true), "a", 0)?.live).toBe(false);
   });
 
+  it("retains failed and interrupted calls after later calls and after the group settles", () => {
+    const failed: Tool = { ...tool("failed"), isError: true, result: { error: "failure" }, status: { type: "incomplete" } };
+    const interrupted: Tool = { ...tool("interrupted"), interrupted: true, status: { type: "incomplete" } };
+    const messages = [message("a", [failed, interrupted, tool("1"), tool("2"), tool("3")])];
+    for (const running of [true, false]) {
+      const group = toolGroupAt(projectToolTimeline(messages, running), "a", 0)!;
+      const html = renderToStaticMarkup(createElement(ToolGroupView, { group }));
+      expect(html).toContain("未完成");
+      expect(html).toContain("已中断");
+      expect(html.match(/data-status="error"/g)).toHaveLength(2);
+    }
+  });
+
+  it("reports a pending call as interrupted when its turn was cancelled after an earlier call", () => {
+    const pending: Tool = { ...tool("pending"), status: { type: "running" }, finishedAtMs: undefined };
+    const item = { ...message("a", [tool("done"), pending]), metadata: { custom: { interrupted: true } } };
+    const messages = [item];
+    const runtime = { thread: { getMessageById: () => ({ getCopyText: () => "" }) } } as unknown as RuntimeView["runtime"];
+    const html = renderToStaticMarkup(createElement(RuntimeViewContext.Provider, { value: { runtime, thread: runtime.thread, getState: runtime.thread.getState } },
+      createElement(MessageRow, { message: item, messages, running: false, locked: false, latest: true, timeline: projectToolTimeline(messages, false), command: () => {} })));
+    expect(html).toContain("已中断");
+    expect(html).toContain('data-status="error"');
+  });
+
   it("renders text and tool groups in chronological order across assistant messages", () => {
     const messages = [message("a", [text("BEFORE"), tool("1")]), message("b", [tool("2"), text("AFTER")])];
     const timeline = projectToolTimeline(messages, false);

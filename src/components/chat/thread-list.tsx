@@ -81,11 +81,18 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
         if (active && current === revision) setSearchError(error);
       });
     };
-    requestSearchIndex.current = () => { if (!requested) refresh(); };
+    requestSearchIndex.current = () => { if (!requested || !indexed.current) refresh(); };
     return () => { active = false; requestSearchIndex.current = () => undefined; };
   }, [logger, open, searchOpen]);
 
   useEffect(() => logger.subscribe((event) => {
+    if (event.type === "log.cleared") {
+      cachedMessages.current.clear();
+      indexed.current = false;
+      setIndex(new Map());
+      requestSearchIndex.current();
+      return;
+    }
     if (event.type === "conversation.message") {
       ingest(event);
       if (indexed.current && event.conversationId) {
@@ -117,6 +124,7 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
       onEscapeKeyDown={(event) => { if (document.activeElement?.getAttribute("aria-label") === "会话名称") event.preventDefault(); }}>
       <div className="conversation-dropdown-header"><span>会话</span><Button type="button" variant="ghost" size="icon-sm" aria-label={searchOpen ? "关闭搜索" : "搜索会话"} aria-expanded={searchOpen} onClick={() => { setSearchOpen(!searchOpen); if (searchOpen) { setQuery(""); setSearchError(undefined); } }}><SearchIcon aria-hidden="true" /></Button></div>
       {searchOpen && <InputGroup className="shrink-0"><InputGroupAddon><SearchIcon aria-hidden="true" /></InputGroupAddon><InputGroupInput autoFocus type="search" aria-label="搜索会话" placeholder="搜索会话" value={query} onChange={(event) => setQuery(event.target.value)} /></InputGroup>}
+      {locked && !warning && <p role="status" className="conversation-notice">任务正在运行，请先停止运行再切换或修改会话。</p>}
       {warning && <p role="status" className="conversation-notice">{warning}</p>}
       {deleted && <div role="status" className="conversation-notice flex items-center justify-between gap-2"><span>已删除“{deleted.title}”</span>
         <Button type="button" variant="ghost" size="sm" disabled={locked} onClick={() => void runtimeCommands.threads.restore(deleted.id).then(async () => {

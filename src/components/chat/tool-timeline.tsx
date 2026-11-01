@@ -1,6 +1,8 @@
 import type { MessagePart, MessageView } from "@/sidepanel/conversation-store";
 import { summarizeToolActions } from "./tool-labels";
 import { ToolFallback } from "./tool-fallback";
+import { useContext } from "react";
+import { ActivityPhaseContext, toolActivity } from "./process-group";
 
 type ToolPart = Extract<MessagePart, { type: "tool-call" }>;
 export type ToolGroup = { key: string; tools: ToolPart[]; live: boolean };
@@ -60,12 +62,14 @@ export function toolGroupDuration(tools: readonly ToolPart[]): number | undefine
 }
 
 export function ToolGroupView({ group }: { group: ToolGroup }) {
+  const phase = useContext(ActivityPhaseContext);
+  const failures = group.tools.filter((part) => toolActivity(part, phase).status === "error");
   if (group.live) return <div data-testid="live-tool-calls" className="transcript-activity-list flex flex-col">
-    {group.tools.slice(-3).map((part) => <ToolFallback key={part.toolCallId} {...part} autoExpandError={false} />)}
+    {group.tools.filter((part, index) => index >= group.tools.length - 3 || failures.includes(part)).map((part) => <ToolFallback key={part.toolCallId} {...part} />)}
   </div>;
   const duration = toolGroupDuration(group.tools);
   const summary = summarizeToolActions(group.tools);
-  return <div data-testid="tool-group-summary" className="transcript-activity">
+  return <><div data-testid="tool-group-summary" className="transcript-activity">
     <span className="truncate" title={summary}>{summary}</span>{duration === undefined ? null : <span className="shrink-0">{` · ${(duration / 1000).toFixed(2)} 秒`}</span>}
-  </div>;
+  </div>{failures.map((part) => <ToolFallback key={part.toolCallId} {...part} />)}</>;
 }

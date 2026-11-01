@@ -50,7 +50,7 @@ test("allows user interaction while the agent is working", async () => {
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
-test("applies explicit model and prompt changes next turn and retries user messages as logged branches", async () => {
+test("applies explicit model and prompt changes next turn and retries replies as logged branches", async () => {
   const provider = await startProvider([
     delayedResponse(textResponse("CONFIG_DONE"), 250),
     textResponse("NEXT_TURN"), textResponse("USER_RETRY_BRANCH"),
@@ -69,7 +69,7 @@ test("applies explicit model and prompt changes next turn and retries user messa
     await expect(options.getByRole("status")).toContainText("配置已保存"); await options.close();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("CONFIG_DONE");
     expect(provider.requests[0].model).toBe("test-model"); expect(provider.stats.abortedResponses).toBe(0);
-    await expect(opened.page.getByTestId("retry-user-message-button")).toBeEnabled();
+    await expect(opened.page.getByTestId("retry-user-message-button")).toHaveCount(0);
     await opened.page.getByTestId("composer-input").fill("next turn"); await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("NEXT_TURN");
     expect(provider.requests[1].model).toBe("next-model");
@@ -81,7 +81,7 @@ test("applies explicit model and prompt changes next turn and retries user messa
       nextMessage = (await readEvents(opened.page)).find((event) => event.type === "conversation.message" && event.content?.role === "assistant" && event.content.parts?.some((part: any) => part.type === "text" && part.text === "NEXT_TURN"))?.content.id;
       return nextMessage;
     }).toBeTruthy();
-    await opened.page.getByTestId("retry-user-message-button").last().click();
+    await opened.page.getByTestId("replay-message-button").last().click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("USER_RETRY_BRANCH");
     await opened.page.getByRole("button", { name: "上一个分支" }).last().click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("NEXT_TURN");

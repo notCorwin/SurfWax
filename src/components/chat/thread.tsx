@@ -23,7 +23,7 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
   const projectTurns = useMemo(createTurnProjection, []);
   const turns = useMemo(() => projectTurns(state.messages), [projectTurns, state.messages]);
   const [warning, setWarning] = useState("");
-  const command = useCallback((action: () => void) => {
+  const command = useCallback((action: () => void | Promise<unknown>) => {
     if (locked) { setWarning("当前会话尚未结束，请等待完成或先停止运行。"); return; }
     void Promise.resolve().then(action).catch((error) => setWarning(error instanceof Error ? error.message : String(error)));
   }, [locked]);

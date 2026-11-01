@@ -23,19 +23,23 @@ function visibleText(message: ConversationMessage | undefined): string {
 }
 
 async function waitForCompletedRun(logger: EventLogger, conversationId: string, signal: AbortSignal): Promise<void> {
-  if ((await logger.conversation(conversationId)).some((event) => event.type === "conversation.finished")) return;
   await new Promise<void>((resolve, reject) => {
+    const cleanup = () => { unsubscribe(); signal.removeEventListener("abort", onAbort); };
     const onAbort = () => {
-      unsubscribe();
+      cleanup();
       reject(new DOMException("Operation aborted", "AbortError"));
     };
     const unsubscribe = logger.subscribe((event) => {
       if (event.conversationId !== conversationId || event.type !== "conversation.finished") return;
-      signal.removeEventListener("abort", onAbort);
-      unsubscribe();
+      cleanup();
       resolve();
     });
     signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) { onAbort(); return; }
+    // Subscribe before reading so completion during the read cannot be missed.
+    void logger.conversation(conversationId).then((events) => {
+      if (events.some((event) => event.type === "conversation.finished")) { cleanup(); resolve(); }
+    }, (error) => { cleanup(); reject(error); });
   });
 }
 
