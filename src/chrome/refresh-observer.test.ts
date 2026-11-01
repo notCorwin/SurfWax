@@ -49,6 +49,7 @@ describe("observePageRefreshes", () => {
   it("preserves the frozen snapshot cursor and explicitly bounds oversized metadata", async () => {
     const h = harness(vi.fn(async () => ({ tabId: 1, observationId: "observation", url: `https://example.com/${"海".repeat(2000)}`,
       title: "😀".repeat(1000), mode: "full", items: [{ id: "a", line: "visible" }], nextCursor: "cursor:1:0",
+      lookahead: { nonAuthoritative: true, items: [{ index: 2, id: "c", line: "later", ref: "ref-c" }] },
       truncation: { truncated: true, budget: 12_000, used: 100 } })));
     h.update("loading");
     h.update("complete");
@@ -57,9 +58,11 @@ describe("observePageRefreshes", () => {
     expect(h.inspect).toHaveBeenCalledOnce();
     const text = message!.parts[0]!.type === "text" ? message!.parts[0]!.text : "";
     expect(text).toContain("inspect_page using the same tabId and cursor");
+    expect(text).toContain("Lookahead is a sparse, non-authoritative preview");
     const observation = JSON.parse(text.split("\n")[2]!);
     expect(observation).toMatchObject({ tabId: 1, observationId: "observation", nextCursor: "cursor:1:0",
-      items: [{ id: "a", line: "visible" }], metadataTruncated: ["url", "title"], truncation: { truncated: true } });
+      items: [{ id: "a", line: "visible" }], lookahead: { nonAuthoritative: true, items: [{ index: 2, id: "c", line: "later", ref: "ref-c" }] },
+      metadataTruncated: ["url", "title"], truncation: { truncated: true } });
     expect(new TextEncoder().encode(observation.url).length).toBeLessThanOrEqual(2048);
     expect(new TextEncoder().encode(observation.title).length).toBeLessThanOrEqual(2048);
     expect(observation.title).not.toMatch(/[\uD800-\uDBFF]$/);

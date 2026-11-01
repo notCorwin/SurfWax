@@ -899,11 +899,42 @@ describe("browser tools", () => {
         budget: 12000, used: 10000, reason: "budget", baselineComplete: false } });
     const page = makePage("x".repeat(9000));
     expect(await compactToolResult(page, { logger, preserveInspectionStatus: true, toolCallId: "call" })).toEqual(page);
+    const lookahead = { nonAuthoritative: true as const, items: Array.from({ length: 30 }, (_, index) => ({ index: index + 2, id: `later-${index}`, line: "x".repeat(300) })) };
+    const previewBase = { ...makePage("prefix"), mode: "full", lookahead };
+    const withPreview = { ...previewBase, truncation: { ...previewBase.truncation,
+      withLookahead: new TextEncoder().encode(JSON.stringify({ items: previewBase.items, lookahead })).byteLength } };
+    expect(await compactToolResult(withPreview, { logger, preserveInspectionStatus: true, toolCallId: "call" })).toEqual(withPreview);
+    expect(await compactToolResult({ ...withPreview, truncation: { ...withPreview.truncation, withLookahead: 1 } }, { logger, preserveInspectionStatus: true, toolCallId: "call" })).toMatchObject({ $ref: 18 });
+    const largePreview = await compactToolResult({ ...withPreview, url: "y".repeat(17000) }, { logger, preserveInspectionStatus: true, toolCallId: "call" });
+    expect(largePreview).toMatchObject({ $ref: 18, lookaheadNonAuthoritative: true, lookaheadCount: 30,
+      lookaheadAccess: { artifactId: 18, path: ["lookahead", "items"], offset: 0, limit: expect.any(Number) },
+      truncation: { withLookahead: withPreview.truncation.withLookahead } });
     for (const value of [makePage("x".repeat(17000)), { ...page, url: "y".repeat(17000) }, { ...page, unexpected: true }, { result: page }]) {
       expect(await compactToolResult(value, { logger, preserveInspectionStatus: true, toolCallId: "call" })).toMatchObject({ $ref: 18 });
     }
     expect(await compactToolResult(page, { logger, preserveInspectionStatus: true, toolCallId: "x".repeat(17000) })).toMatchObject({ $ref: 18 });
     expect(await compactToolResult(page, { logger })).toMatchObject({ $ref: 18 });
+  });
+
+  it("exposes lookahead artifact access even when normalization is deferred", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: testEventStore(events) });
+    const lookahead = { nonAuthoritative: true, items: [{ index: 2, id: "later", line: '  - button "Later"' }] };
+    const items = [{ id: "first", line: "x".repeat(600), fragment: { index: 0, start: 0, end: 600, total: 1000 } }];
+    const withLookahead = new TextEncoder().encode(JSON.stringify({ items, lookahead })).byteLength;
+    const page = { observationId: "obs", tabId: 4, documentId: 1, url: "x".repeat(70_000), title: "Page",
+      viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "full", items, lookahead, nextCursor: "obs:0:600",
+      truncation: { truncated: true, total: 3, returned: 1, offset: 0, charOffset: 0, nextOffset: 0, nextCharOffset: 600,
+        budget: 12000, used: 650, withLookahead, reason: "budget", baselineComplete: false } };
+    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
+    vi.spyOn(executor, "inspect").mockResolvedValue(page);
+    const tools = createProgramTools(executor, { logger, conversationId: "thread" }) as Record<string, any>;
+    const output = await tools.inspect_page.execute({}, { toolCallId: "inspect" });
+    expect(output).toMatchObject({ sidecarsDeferred: true, lookaheadNonAuthoritative: true, lookaheadCount: 1,
+      lookaheadAccess: { path: ["lookahead", "items"], offset: 0, limit: expect.any(Number) }, truncation: { withLookahead } });
+    const read = await tools.read_artifact.execute(output.lookaheadAccess, { toolCallId: "read" });
+    expect(read).toMatchObject({ ok: true, result: lookahead.items });
+    executor.dispose();
   });
 
   it("keeps request history integrity and access visible after compaction", async () => {

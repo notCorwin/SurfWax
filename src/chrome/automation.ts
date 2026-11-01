@@ -3,6 +3,7 @@ import { createLogGraphCodec, decodeLogGraph, encodeLogGraph } from "../log-grap
 import { waitForDocumentFrame } from "./dom-frame";
 import { abortError, axValue, delay, imageSize, isTransientNavigationError, keyboardParams, modifierMask, parseKeyboardChord, throwIfAborted } from "./automation-utils";
 import { diffSnapshot, paginateSnapshot, type SnapshotItem, type SnapshotPosition } from "./snapshot-pagination";
+import { snapshotLookahead } from "./snapshot-lookahead";
 import { renderSnapshotNode, type SnapshotNode, type SnapshotStateName } from "./snapshot-render";
 import { stitchSnapshotFrames, type SnapshotLine } from "./snapshot-frame-tree";
 import { snapshotDomSupplement, type SnapshotDomEvidence } from "./snapshot-dom";
@@ -955,9 +956,11 @@ export class AutomationRuntime {
       }
       guard();
       const budget = options.budget ?? 12000;
-      let page;
-      try { page = paginateSnapshot(saved.source, { budget, limit: options.limit, position }); }
+      let ordinaryPage;
+      try { ordinaryPage = paginateSnapshot(saved.source, { budget, limit: options.limit, position }); }
       catch (error) { throw automationError("stale-observation", { reason: error instanceof Error ? error.message : String(error) }); }
+      const preview = snapshotLookahead(saved.source, ordinaryPage, { budget, limit: options.limit, position, mode: saved.mode });
+      const page = preview.page;
       if (page.fragments.some((item) => item.ref && !session.refs.has(item.ref)))
         throw automationError("stale-observation", { observationId: saved.id, reason: "reference-identity-changed" });
       for (const item of page.fragments) if (item.ref) this.touchRef(session, item.ref);
@@ -969,10 +972,11 @@ export class AutomationRuntime {
       const reason = page.reason === "budget" ? "budget" : "slice";
       return { observationId: saved.id, tabId, documentId: generation, url: saved.record.url, title: saved.record.title, viewport: saved.record.viewport,
         mode: saved.mode, ...(saved.reset ? { reset: saved.reset } : {}),
-        items: page.fragments,
+        items: page.fragments, ...(preview.lookahead ? { lookahead: preview.lookahead } : {}),
         ...(page.next ? { nextCursor: `${saved.id}:${page.next.index}:${page.next.charOffset}` } : {}),
         truncation: { truncated, total: saved.source.length, returned: page.fragments.length, offset: position.index, charOffset: position.charOffset,
           nextOffset: page.next?.index ?? saved.source.length, nextCharOffset: page.next?.charOffset ?? 0, budget, used: page.usedBytes,
+          ...(preview.combinedBytes === undefined ? {} : { withLookahead: preview.combinedBytes }),
           ...(truncated ? { reason, baselineComplete: !saved.record.incomplete, ...(page.requiredBudget === undefined ? {} : { requiredBudget: page.requiredBudget }) }
             : { baselineComplete: !saved.record.incomplete }) } };
     });

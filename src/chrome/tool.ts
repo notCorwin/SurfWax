@@ -10,7 +10,7 @@ import { jobResultReferenceInfo } from "./job-result";
 import { elementTargetSchema } from "./element-target";
 
 const timeoutMs = z.number().int().positive().optional();
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v27";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v28";
 export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetSchema]).optional().describe("Restrict inspection to one matching element. Prefer a structured target. A plain string is a CSS selector, except recognized element refs and supported locator expressions such as getByRole('button', {name:'Save'})."),
   fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional().describe("Fields to include; defaults to text, state, and ref. Include actions explicitly for role-based action hints."), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
@@ -36,7 +36,7 @@ type ToolDefinition = { name: string; inputSchema: z.ZodType<any>; summary: stri
 // In particular they must remain usable while a background job holds the queue.
 const NO_PAGE_CAPTURE = new Set(["inspect_page", "read_artifact", "list_jobs", "subscribe_event", "wait_event", "unsubscribe_event", "list_downloads"]);
 export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
-  { name: "inspect_page", inputSchema: inspectInputSchema, summary: "Read the semantic page and element refs", description: "Inspect semantic items with id, line and optional ref. Item ids identify snapshot rows, not frame handles. An iframe's frameRef in its line is the handle to pass as target.frame.ref; a frame-document marker with that same handle introduces the child document's items. Frame handles expire when the frame tree changes. Waits for a fully loaded page for up to 15 seconds by default; set timeoutMs to allow more time. For since, remove removed ids and upsert added, updated or moved items immediately after their after id (null means first). Reassemble split items using their UTF-16 fragment offsets before applying changes. Ref use checks visible role/name, but a DOM node may be reused for different business data with the same name; verify relevant row and page state before acting. Older refs may expire after later independent observations or searches; an affected continuation returns stale-observation. Default fields are text, state and ref; include actions explicitly for per-row hints. These hints are derived from role, not proof an action will succeed: textbox/searchbox/spinbutton use click, fill, press_key, type_text; checkbox/radio/switch use click, set_checked; combobox/listbox use click, select_option; rows marked editable use click, fill, press_key, type_text; other rows with a ref use click, double_click, hover. region and fields narrow results. budget limits UTF-8 JSON items bytes. Continue a frozen snapshot by passing nextCursor as cursor, with only tabId, budget, limit or timeoutMs if needed. Use take_screenshot for visual input." },
+  { name: "inspect_page", inputSchema: inspectInputSchema, summary: "Read the semantic page and element refs", description: "Inspect semantic items with id, line and optional ref. Item ids identify snapshot rows, not frame handles. An iframe's frameRef in its line is the handle to pass as target.frame.ref; a frame-document marker with that same handle introduces the child document's items. Frame handles expire when the frame tree changes. Waits for a fully loaded page for up to 15 seconds by default; set timeoutMs to allow more time. For since, remove removed ids and upsert added, updated or moved items immediately after their after id (null means first). Reassemble split items using their UTF-16 fragment offsets before applying changes. Ref use checks visible role/name, but a DOM node may be reused for different business data with the same name; verify relevant row and page state before acting. Older refs may expire after later independent observations or searches; an affected continuation returns stale-observation. Default fields are text, state and ref; include actions explicitly for per-row hints. These hints are derived from role, not proof an action will succeed: textbox/searchbox/spinbutton use click, fill, press_key, type_text; checkbox/radio/switch use click, set_checked; combobox/listbox use click, select_option; rows marked editable use click, fill, press_key, type_text; other rows with a ref use click, double_click, hover. region and fields narrow results. budget limits UTF-8 JSON items bytes; when lookahead is present it also bounds JSON {items,lookahead}, measured by truncation.withLookahead. lookahead contains sparse, non-authoritative later rows from the same frozen snapshot, not part of items or a complete baseline; ancestor context may be absent and no element refs are provided. Use a locator or continue the snapshot. If the result is an artifact, lookaheadAccess reads its preview. Continue a frozen snapshot by passing nextCursor as cursor, with only tabId, budget, limit or timeoutMs if needed. Use take_screenshot for visual input." },
   { name: "find_elements", inputSchema: findElementsInputSchema, summary: "Find candidates and return element refs", description: "Find matching elements with refs for actions. Ref use checks visible role/name but cannot prove business identity for reused nodes; verify relevant row and page state before acting. Older refs may expire after later independent observations or searches. limit defaults to 25, max 100; repeat target and tab with nextCursor as cursor to page a fixed node list. Candidates may report detached, changed or identity-unknown without a ref. Details may change between pages; cursors expire on run or document changes or eviction." },
   { name: "list_frames", inputSchema: listFramesInputSchema, summary: "List frames and their document-bound refs", description: "List the selected tab's frame tree with refs usable as target.frame.ref. limit defaults to 25, max 100; pass nextCursor as cursor to continue a fixed snapshot. References and cursors expire on document or frame changes." },
   ...ATOMIC_TOOL_REGISTRY,
@@ -49,7 +49,7 @@ export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
   { name: "get_job", inputSchema: getJobInputSchema, summary: "Read a job's status and receipts", description: "Read status and paginated receipts for a job. Pass the previous response's nextCursor as after to read subsequent receipts. waitMs waits for receipts after the supplied canonical event cursor or for completion; unread receipts return immediately. A terminal event with outputAt:'result' or 'resultAccess' refers to that top-level field. A running job is not complete." },
   { name: "cancel_job", inputSchema: cancelJobInputSchema, summary: "Request cancellation of a job", description: "Cancel a job in the current conversation. Cancellation does not roll back dispatched effects." },
 ]);
-export const PROGRAM_TOOL_CONTEXT = `Available tools:\n${PROGRAM_TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n")}\nAn element target {ref} already identifies its frame; do not combine it with frame. To use a frameRef, supply a locator target with by, value and frame:{ref}. Use background=true for long operations or actions that may block on a browser event. Use get_job with after set to the previous nextCursor for incremental receipts and bounded waits, or cancel_job to cancel. Continue until terminal; cancellation never rolls back completed effects. Restart preserves job records, not running work. For a native dialog, subscribe_event before the trigger, start the action with background=true, wait_event for its dialogId, then handle_dialog and inspect the job to completion. A foreground action blocked by a dialog may instead return state=blocked with jobId and blockedBy.dialogId. Use handle_dialog if needed, and continue checking the job until terminal. For a file chooser, subscribe before the trigger, use background=true, wait for its chooserId, and use upload_file with the chooserId and existing artifact IDs before inspecting the job. Event subscriptions belong to this run. Every tool result includes evidenceId for citing that actual result in complete_goal. Each completed operation includes pageSnapshot when available; use inspect_page with its nextCursor as cursor and the same tabId to continue a truncated snapshot. pageSnapshotStatus explains when it could not be captured. Background work has no completed snapshot until its terminal get_job result. resultType=undefined marks an undefined result. undefinedPaths, holePaths, numberPaths and bigintPaths are relative to result; numberPaths entries hold {path,value} for NaN, Infinity, -Infinity or -0, and bigintPaths hold decimal strings. These replace values with null. typePaths marks non-JSON types: date is ISO or null for invalid; array-buffer and typed-array are base64 bytes (typed-array name identifies the view); regexp is {source,flags,lastIndex}; map is key/value pairs; set is an array. Apply the other sidecars first, then typePaths from deepest path to shallowest. Large results provide paged sidecar access. If envelopeWrapped=true, reconstruct the original tool envelope from result and its sidecars; outer fields summarize status.`;
+export const PROGRAM_TOOL_CONTEXT = `Available tools:\n${PROGRAM_TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n")}\nAn element target {ref} already identifies its frame; do not combine it with frame. To use a frameRef, supply a locator target with by, value and frame:{ref}. Snapshot lookahead is a sparse, non-authoritative preview without element refs; use a locator or continue nextCursor to reconstruct items. Use background=true for long operations or actions that may block on a browser event. Use get_job with after set to the previous nextCursor for incremental receipts and bounded waits, or cancel_job to cancel. Continue until terminal; cancellation never rolls back completed effects. Restart preserves job records, not running work. For a native dialog, subscribe_event before the trigger, start the action with background=true, wait_event for its dialogId, then handle_dialog and inspect the job to completion. A foreground action blocked by a dialog may instead return state=blocked with jobId and blockedBy.dialogId. Use handle_dialog if needed, and continue checking the job until terminal. For a file chooser, subscribe before the trigger, use background=true, wait for its chooserId, and use upload_file with the chooserId and existing artifact IDs before inspecting the job. Event subscriptions belong to this run. Every tool result includes evidenceId for citing that actual result in complete_goal. Each completed operation includes pageSnapshot when available; use inspect_page with its nextCursor as cursor and the same tabId to continue a truncated snapshot. pageSnapshotStatus explains when it could not be captured. Background work has no completed snapshot until its terminal get_job result. resultType=undefined marks an undefined result. undefinedPaths, holePaths, numberPaths and bigintPaths are relative to result; numberPaths entries hold {path,value} for NaN, Infinity, -Infinity or -0, and bigintPaths hold decimal strings. These replace values with null. typePaths marks non-JSON types: date is ISO or null for invalid; array-buffer and typed-array are base64 bytes (typed-array name identifies the view); regexp is {source,flags,lastIndex}; map is key/value pairs; set is an array. Apply the other sidecars first, then typePaths from deepest path to shallowest. Large results provide paged sidecar access. If envelopeWrapped=true, reconstruct the original tool envelope from result and its sidecars; outer fields summarize status.`;
 
 export function createProgramTools(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string; callId?: () => string | undefined; visualEnabled?: () => Promise<boolean>; scheduler?: ToolScheduler; runSignal?: AbortSignal } = {}): Record<string, ReturnType<typeof dynamicTool>> {
   return Object.fromEntries(PROGRAM_TOOL_REGISTRY.map((definition) => [definition.name, dynamicTool({
@@ -219,13 +219,23 @@ const inspectionPageSchema = z.object({
     change: z.enum(["added", "updated", "removed", "moved"]).optional(), after: z.string().nullable().optional(),
     fragment: z.object({ index: inspectionInteger, start: inspectionInteger, end: inspectionInteger, total: inspectionInteger }).strict().optional(),
   }).strict()),
+  lookahead: z.object({ nonAuthoritative: z.literal(true), items: z.array(z.object({
+    index: inspectionInteger, id: z.string(), line: z.string(),
+  }).strict()) }).strict().optional(),
   nextCursor: z.string().optional(),
   truncation: z.object({ truncated: z.boolean(), total: inspectionInteger, returned: inspectionInteger,
     offset: inspectionInteger, charOffset: inspectionInteger, nextOffset: inspectionInteger, nextCharOffset: inspectionInteger,
-    budget: inspectionInteger, used: inspectionInteger, reason: z.enum(["budget", "slice"]).optional(),
+    budget: inspectionInteger, used: inspectionInteger, withLookahead: inspectionInteger.optional(), reason: z.enum(["budget", "slice"]).optional(),
     baselineComplete: z.boolean(), requiredBudget: inspectionInteger.optional(),
   }).strict(),
-}).strict().refine((page) => page.truncation.returned === page.items.length);
+}).strict().refine((page) => page.truncation.returned === page.items.length).refine((page) => {
+  if (!page.lookahead) return page.truncation.withLookahead === undefined;
+  const size = new TextEncoder().encode(JSON.stringify({ items: page.items, lookahead: page.lookahead })).byteLength;
+  return page.mode === "full" && page.truncation.truncated && !page.truncation.baselineComplete && Boolean(page.nextCursor)
+    && page.lookahead.items.length > 0 && page.truncation.withLookahead === size && size <= page.truncation.budget
+    && page.lookahead.items.every((item, index, all) => item.index > page.truncation.nextOffset
+      && (index === 0 || item.index > all[index - 1]!.index) && item.line.length <= 512);
+});
 
 type VisualEvidence = { screenshot: Record<string, unknown>; context: Record<string, unknown>; path: Array<string | number> };
 
@@ -336,16 +346,27 @@ function eventMetadata(record: Record<string, unknown>): Record<string, unknown>
   }
   return result;
 }
-function inspectionMetadata(record: Record<string, unknown>): Record<string, unknown> {
+function inspectionMetadata(record: Record<string, unknown>, artifactId: number): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   for (const field of ["observationId", "mode", "nextCursor", "reset"]) { const value = exactText(record[field], 512); if (value !== undefined) result[field] = value; }
   for (const field of ["tabId", "documentId"]) if (Number.isSafeInteger(record[field]) && Number(record[field]) >= 0) result[field] = record[field];
   if (record.truncation && typeof record.truncation === "object" && !Array.isArray(record.truncation)) {
     const source = record.truncation as Record<string, unknown>; const truncation: Record<string, unknown> = {};
     for (const field of ["truncated", "baselineComplete"]) if (typeof source[field] === "boolean") truncation[field] = source[field];
-    for (const field of ["total", "returned", "offset", "charOffset", "nextOffset", "nextCharOffset", "budget", "used", "requiredBudget"]) if (Number.isSafeInteger(source[field]) && Number(source[field]) >= 0) truncation[field] = source[field];
+    for (const field of ["total", "returned", "offset", "charOffset", "nextOffset", "nextCharOffset", "budget", "used", "withLookahead", "requiredBudget"]) if (Number.isSafeInteger(source[field]) && Number(source[field]) >= 0) truncation[field] = source[field];
     const reason = exactText(source.reason, 128); if (reason !== undefined) truncation.reason = reason;
     result.truncation = truncation;
+  }
+  const lookahead = record.lookahead;
+  if (lookahead && typeof lookahead === "object" && !Array.isArray(lookahead)) {
+    const preview = lookahead as Record<string, unknown>;
+    if (preview.nonAuthoritative === true && Array.isArray(preview.items)) {
+      const read = artifactAccess(artifactId, ["lookahead", "items"], preview.items);
+      result.lookaheadNonAuthoritative = true;
+      result.lookaheadCount = preview.items.length;
+      result.lookaheadAccess = read.access;
+      if (read.oversizedItem) result.lookaheadOversizedItem = read.oversizedItem;
+    }
   }
   return result;
 }
@@ -464,7 +485,7 @@ async function storeUnnormalizedResult(value: unknown, options: { logger?: Event
     pathsNote: "Read a bounded slice with read_artifact; its type sidecars are relative to that slice. For oversized items, select a nested path. Shared or cyclic object identity is not exposed.",
     ...(root && Object.hasOwn(root, "result") ? { resultAccess: access(["result"], root.result) } : {}),
     ...(job ? jobMetadata(job) : {}), ...(search ? searchMetadata(search) : {}),
-    ...(inspection ? inspectionMetadata(inspection) : {}), ...(browserEvents ? eventMetadata(browserEvents) : {}),
+    ...(inspection ? inspectionMetadata(inspection, event.id) : {}), ...(browserEvents ? eventMetadata(browserEvents) : {}),
     ...(diagnostic ? { ...(diagnostic.integrity === "complete" || diagnostic.integrity === "incomplete" ? { integrity: diagnostic.integrity } : {}),
       ...(typeof diagnostic.hasMore === "boolean" || diagnostic.hasMore === null ? { hasMore: diagnostic.hasMore } : {}),
       ...(Number.isSafeInteger(diagnostic.nextOffset) && Number(diagnostic.nextOffset) >= 0 ? { nextOffset: diagnostic.nextOffset } : {}),
@@ -587,7 +608,7 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
     ...(root?.envelopeWrapped === true ? { envelopeWrapped: true } : {}),
     ...(job ? jobMetadata(job) : {}),
     ...(search ? searchMetadata(search) : {}),
-    ...(inspection ? inspectionMetadata(inspection) : {}),
+    ...(inspection ? inspectionMetadata(inspection, event.id) : {}),
     ...(browserEvents ? eventMetadata(browserEvents) : {}),
     ...(diagnostic ? { ...(diagnostic.integrity === "complete" || diagnostic.integrity === "incomplete" ? { integrity: diagnostic.integrity } : {}),
       ...(typeof diagnostic.hasMore === "boolean" || diagnostic.hasMore === null ? { hasMore: diagnostic.hasMore } : {}),
