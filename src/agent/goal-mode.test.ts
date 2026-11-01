@@ -6,7 +6,7 @@ import { EventLogger, type LogEvent } from "../logging";
 import { createAgent } from "./runner";
 import { activeContext, IncrementalActiveContext } from "./context-choice";
 import { createChatTransport, type SidePanelMessage } from "./transport";
-import { GOAL_SCHEMA, localEvidence, releaseRunEvidence, runEvidence, validateGoal, type Goal } from "./goal-completion";
+import { GOAL_SCHEMA, actionHistory, localEvidence, releaseRunEvidence, runEvidence, validateGoal, type Goal } from "./goal-completion";
 import { reviewGoal } from "./goal-review";
 
 // These tests exercise the execution/evidence protocol. Semantic verdicts have
@@ -88,6 +88,58 @@ describe("goal mode", () => {
     expect(await runEvidence(logger, "thread", "run")).toHaveLength(2);
     releaseRunEvidence(logger, "thread", "run");
     expect(await runEvidence(logger, "thread", "run")).toEqual(expect.arrayContaining(first));
+  });
+
+  it("retains repeated submissions with their target label and full-run counts", async () => {
+    const { logger } = fixture(new MockLanguageModelV4({ doGenerate: async () => reply("done") }));
+    const input = { tabId: 12, target: { ref: "submit" }, value: "unneeded large body".repeat(100_000) };
+    const output = { ok: true, state: "succeeded", result: { performed: true }, pageSnapshot: {
+      observationId: "o", tabId: 12, documentId: "d", mode: "full", items: [{ ref: "submit", line: "button Submit file" }],
+    } };
+    for (const id of ["first-submit", "second-submit"]) await logger.append({ type: "tool.finished", conversationId: "thread", runId: "run",
+      toolCallId: id, content: { toolName: "click" }, input, output });
+    const entries = await runEvidence(logger, "thread", "run");
+    expect(actionHistory(entries)).toEqual([{ name: "click", receipt: { input: { tabId: 12, target: { ref: "submit" } },
+      result: { state: "succeeded", performed: true }, labels: { target: "button Submit file" } }, success: true, effectUnknown: false,
+      count: 2, firstOrder: entries[0]!.order, lastOrder: entries[1]!.order }]);
+    expect(JSON.stringify(entries)).not.toContain("unneeded large body");
+    expect(actionHistory(await runEvidence(logger, "thread", "run"))).toEqual(actionHistory(entries));
+  });
+
+  it("preserves HTML and binary file identities without reading or caching payload bytes", () => {
+    const file = (id: number, filename: string, mimeType: string, byteLength: number) => ({ id, filename, mimeType, byteLength,
+      get base64(): never { throw new Error("Receipt projection must not read file bytes"); } });
+    const input = { tabId: 12, target: { ref: "download" }, get body(): never { throw new Error("Must not read unrelated large input"); } };
+    const entries = [
+      localEvidence("html", "import_file_from_link", { ok: true, result: file(11, "error.html", "text/html", 700) }, 1, input),
+      localEvidence("upload-html", "upload_file", { ok: true, result: { performed: true } }, 2, { artifactId: 11, target: { ref: "file-input" } }),
+      localEvidence("binary", "import_file_from_link", { ok: true, artifact: file(22, "sample.bin", "application/octet-stream", 65_539) }, 4, input),
+      localEvidence("upload-binary", "upload_file", { ok: true, result: { performed: true } }, 5, { artifactId: 22, target: { ref: "file-input" } }),
+    ];
+    const history = actionHistory(entries);
+    expect(history).toHaveLength(4);
+    expect(history[0]!.receipt.result?.artifact).toEqual({ id: 11, filename: "error.html", mimeType: "text/html", byteLength: 700 });
+    expect(history[1]!.receipt.input?.artifactId).toBe(11);
+    expect(history[2]!.receipt.result?.artifact).toEqual({ id: 22, filename: "sample.bin", mimeType: "application/octet-stream", byteLength: 65_539 });
+    expect(history[3]!.receipt.input?.artifactId).toBe(22);
+  });
+
+  it("bounds each receipt while retaining every distinct action and unknown-effect group", () => {
+    const input = { url: "https://example.test/" + "x".repeat(10_000), target: { by: "css", scope: { a: { b: { c: "deep" } } },
+      values: Array.from({ length: 20 }, (_, index) => index) } };
+    const bounded = localEvidence("bounded", "navigate", { ok: true, jobId: "job", state: "succeeded" }, 0, input);
+    expect(bounded.receipt?.truncated).toBe(true);
+    expect(String(bounded.receipt?.input?.url).length).toBeLessThanOrEqual(256);
+    expect(JSON.stringify(bounded.receipt)).not.toContain("deep");
+    const entries = Array.from({ length: 200 }, (_, order) => localEvidence(`call-${order}`, "click", { ok: true }, order,
+      { target: { ref: `target-${order}` } }));
+    entries.push(localEvidence("unknown", "click", { ok: false, error: { effectUnknown: true } }, 201, { target: { ref: "target-0" } }));
+    const history = actionHistory(entries);
+    expect(history).toHaveLength(201);
+    expect(history.reduce((sum, group) => sum + group.count, 0)).toBe(201);
+    expect(history.at(-1)).toMatchObject({ success: false, effectUnknown: true, firstOrder: 201, lastOrder: 201 });
+    expect(localEvidence("job", "get_job", { terminal: true, jobId: "j", state: "succeeded", result: { performed: true } }, 202).receipt)
+      .toEqual({ result: { jobId: "j", state: "succeeded", performed: true } });
   });
 
   it("validates browser evidence, blockers, unknown effects, and the pure answer exception", () => {

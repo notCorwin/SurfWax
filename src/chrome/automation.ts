@@ -1260,7 +1260,7 @@ export class AutomationRuntime {
         return this.afterAction(session);
       }
       if (operation === "press" || operation === "pressSequentially") {
-        const { objectId, targetSession } = await this.waitActionableLocator(session, spec, operation === "pressSequentially", false, false, operation === "pressSequentially");
+        const { objectId, targetSession } = await this.waitActionableLocator(session, spec, operation === "pressSequentially", false, false, operation === "pressSequentially", operation === "press");
         if (operation === "pressSequentially") {
           const kind = await this.callOn(targetSession, objectId, TEXT_INPUT_KIND_SOURCE);
           if (kind === "detached") throw automationError("detached", { reason: "editable-target-removed" });
@@ -2144,13 +2144,13 @@ export class AutomationRuntime {
     }
   }
 
-  private async resolveOnce(session: Session, spec: LocatorSpec, observe?: (matches: Candidate[]) => void): Promise<string | undefined> {
+  private async resolveOnce(session: Session, spec: LocatorSpec, observe?: (matches: Candidate[]) => void, immediate = false): Promise<string | undefined> {
     if (spec.ref && standaloneRef(spec)) {
       const { ref, objectId } = await this.resolveRef(session, spec.ref);
       observe?.([{ role: ref.role, name: ref.name, ref: spec.ref }]);
       return objectId;
     }
-    const scoped = await this.locatorScope(session, spec);
+    const scoped = await this.locatorScope(session, spec, immediate);
     if (!scoped.rootIsElement && this.usesNativeAccessibility(scoped.spec)) {
       const matches = await this.resolveAccessibility(scoped.debuggee, scoped.spec, scoped.rootObjectId);
       observe?.(matches);
@@ -2526,7 +2526,7 @@ export class AutomationRuntime {
     while (true) {
       throwIfAborted(this.context.signal);
       let candidates: Candidate[] = [];
-      const objectId = await this.resolveOnce(session, spec, (matches) => { candidates = matches; });
+      const objectId = await this.resolveOnce(session, spec, (matches) => { candidates = matches; }, singleResolution);
       attempt += 1;
       if (!objectId) {
         this.recordAttempt(session, spec, attempt, "no-candidate", candidates);

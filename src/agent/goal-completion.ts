@@ -32,7 +32,9 @@ export const GOAL_SCHEMA = z.object({ taskType: z.enum(["answer", "browser"]), s
 export const GOAL_DESCRIPTION = "Finish only after all work and background jobs have finished. The summary must deliver every requested output, including requested facts and links; an independent review checks requirements against observations. For a browser task cite evidenceId values from actual tool results, including successful post-action page snapshots; for a blocker identify the observed user dependency, needed action and actual recovery attempts. A rejected action or invalid search is not proof of an external blocker or absence. Use answer only for a pure question with no browser work. Call this tool alone.";
 export const GOAL_INSTRUCTIONS = "\n\nContinue until the user's outcome is achieved or a genuine user dependency prevents further progress. Plain text does not end work. Call complete_goal alone with a structured outcome and evidence from this run. A dispatched action is not proof of the outcome; cite at least one successful observation. For each effectUnknown, inspect or otherwise observe the relevant state after that action, explain what was established, and include its evidenceId in that observation's resolves array. A verified absence may permit a safe recovery action; continue to the requested outcome before reporting completion. verify_state evidence must report verified=true. Do not report a recoverable error as a user blocker.\n- complete_goal: Report a completed answer, a browser outcome supported by tool evidence, or a genuine user-dependent blocker.";
 
-type Evidence = { id: string; name: string; success: boolean; effectUnknown: boolean; order: number; pageObserved?: true };
+type ReceiptValue = string | number | boolean | null | ReceiptValue[] | { [key: string]: ReceiptValue };
+type ActionReceipt = { input?: { [key: string]: ReceiptValue }; result?: { [key: string]: ReceiptValue }; labels?: { [key: string]: string }; truncated?: true };
+type Evidence = { id: string; name: string; success: boolean; effectUnknown: boolean; order: number; pageObserved?: true; receipt?: ActionReceipt };
 type Cache = { runId: string; cursor: number; epoch?: string; entries: Map<string, Evidence> };
 const caches = new WeakMap<EventLogger, Map<string, Cache>>();
 
@@ -44,7 +46,75 @@ function verification(output: unknown): unknown {
   const result = object(value.result);
   return object(value.verification).verified ?? result.verified ?? (value.envelopeWrapped === true ? object(result.result).verified : undefined) ?? value.verified;
 }
-function projectEvidence(id: string, name: string, output: unknown, failed: boolean, order: number): Evidence {
+/** Retain effect identities, never raw page bodies, file bytes or large inputs. */
+function actionReceipt(input: unknown, output: unknown): ActionReceipt {
+  const receipt: ActionReceipt = {};
+  let remaining = 4096;
+  const short = (value: unknown, depth = 0): ReceiptValue | undefined => {
+    if (value === null || typeof value === "boolean") return value;
+    if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+    if (typeof value === "string") {
+      const length = Math.min(256, remaining);
+      remaining -= Math.min(value.length, length);
+      if (value.length > length) { receipt.truncated = true; return length ? value.slice(0, length - 1) + "…" : ""; }
+      return value;
+    }
+    if (!value || typeof value !== "object") return undefined;
+    if (depth >= 3 || remaining <= 0) { receipt.truncated = true; return "[receipt limit]"; }
+    if (Array.isArray(value)) {
+      if (value.length > 8) receipt.truncated = true;
+      return value.slice(0, 8).map((entry) => short(entry, depth + 1) ?? null);
+    }
+    const fields: Array<[string, ReceiptValue]> = [];
+    let visited = 0;
+    for (const key in value) {
+      if (!Object.hasOwn(value, key)) continue;
+      if (visited++ === 8) { receipt.truncated = true; break; }
+      const projected = short((value as Record<string, unknown>)[key], depth + 1);
+      if (projected !== undefined) fields.push([key.slice(0, 256), projected]);
+      if (key.length > 256) receipt.truncated = true;
+    }
+    return Object.fromEntries(fields.sort(([left], [right]) => left.localeCompare(right)));
+  };
+  const parameters = object(input);
+  const keptInput: { [key: string]: ReceiptValue } = {};
+  for (const key of ["tabId", "target", "source", "destination", "artifactId", "url", "key"]) {
+    const value = short(parameters[key]);
+    if (value !== undefined) keptInput[key] = value;
+  }
+  if (Object.keys(keptInput).length) receipt.input = keptInput;
+  const outer = object(output);
+  const candidates = [outer, object(outer.result), object(object(outer.result).result)];
+  const result: { [key: string]: ReceiptValue } = {};
+  for (const key of ["jobId", "state", "performed"]) for (const candidate of candidates) {
+    const value = short(candidate[key]);
+    if (value !== undefined) { result[key] = value; break; }
+  }
+  for (const candidate of candidates) {
+    const artifact = candidate.artifact && typeof candidate.artifact === "object" && !Array.isArray(candidate.artifact) ? object(candidate.artifact)
+      : ["filename", "mimeType", "byteLength"].some((key) => candidate[key] !== undefined) ? candidate : undefined;
+    if (!artifact) continue;
+    const metadata: { [key: string]: ReceiptValue } = {};
+    for (const key of ["id", "artifactId", "filename", "mimeType", "byteLength"]) {
+      const value = short(artifact[key]);
+      if (value !== undefined) metadata[key] = value;
+    }
+    if (Object.keys(metadata).length) { result.artifact = metadata; break; }
+  }
+  if (Object.keys(result).length) receipt.result = result;
+  const items = object(outer.pageSnapshot).items;
+  if (Array.isArray(items)) for (const key of ["target", "source", "destination"]) {
+    const ref = object(parameters[key]).ref;
+    if (typeof ref !== "string") continue;
+    const item = items.find((item) => object(item).ref === ref);
+    if (typeof object(item).line === "string") {
+      receipt.labels ??= {};
+      receipt.labels[key] = short(object(item).line) as string;
+    }
+  }
+  return receipt;
+}
+function projectEvidence(id: string, name: string, output: unknown, failed: boolean, order: number, input?: unknown): Evidence {
   const value = object(output);
   const snapshot = object(value.pageSnapshot);
   const pageObserved = typeof snapshot.observationId === "string" && snapshot.observationId.length > 0
@@ -52,6 +122,7 @@ function projectEvidence(id: string, name: string, output: unknown, failed: bool
     && ["full", "delta"].includes(String(snapshot.mode)) && Array.isArray(snapshot.items)
     && snapshot.pending !== true && snapshot.unavailable !== true;
   return { id, name, order, effectUnknown: object(value.error).effectUnknown === true,
+    ...(!OBSERVATION_TOOLS.has(name) || name === "get_job" ? { receipt: actionReceipt(input, output) } : {}),
     ...(pageObserved ? { pageObserved: true as const } : {}),
     success: !failed && value.ok !== false && !["running", "blocked", "failed", "cancelled", "interrupted"].includes(String(value.state))
       && !(value.accepted === true && value.complete === false)
@@ -89,13 +160,31 @@ export async function runEvidence(logger: EventLogger, conversationId: string, r
     const content = object(fromLogValue(event.content, event.valueEncoding));
     if (typeof content.toolName !== "string" || content.toolName === "complete_goal") continue;
     cache.entries.set(event.toolCallId, projectEvidence(event.toolCallId, content.toolName,
-      fromLogValue(event.output, event.valueEncoding), event.type === "tool.failed", event.id));
+      fromLogValue(event.output, event.valueEncoding), event.type === "tool.failed", event.id,
+      fromLogValue(event.input, event.valueEncoding)));
   }
   return [...cache.entries.values()];
 }
 
-export function localEvidence(id: string, name: string, output: unknown, order: number): Evidence {
-  return projectEvidence(id, name, output, object(output).ok === false, order);
+export function localEvidence(id: string, name: string, output: unknown, order: number, input?: unknown): Evidence {
+  return projectEvidence(id, name, output, object(output).ok === false, order, input);
+}
+
+/** All effects participate; repeated matching receipts retain counts and order ranges. */
+export function actionHistory(entries: readonly Evidence[]) {
+  const groups = new Map<string, { name: string; receipt: ActionReceipt; success: boolean; effectUnknown: boolean; count: number; firstOrder: number; lastOrder: number }>();
+  for (const entry of entries) {
+    if (entry.receipt === undefined) continue;
+    const key = JSON.stringify([entry.name, entry.receipt, entry.success, entry.effectUnknown]);
+    const previous = groups.get(key);
+    if (previous) {
+      previous.count++;
+      previous.firstOrder = Math.min(previous.firstOrder, entry.order);
+      previous.lastOrder = Math.max(previous.lastOrder, entry.order);
+    } else groups.set(key, { name: entry.name, receipt: entry.receipt, success: entry.success, effectUnknown: entry.effectUnknown,
+      count: 1, firstOrder: entry.order, lastOrder: entry.order });
+  }
+  return [...groups.values()].sort((left, right) => left.firstOrder - right.firstOrder);
 }
 
 export function validateGoal(goal: Goal, entries: Evidence[]): string | undefined {

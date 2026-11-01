@@ -1590,6 +1590,30 @@ describe("AutomationRuntime", () => {
     expect(calls.filter(({ method }) => method === "DOM.focus")).toHaveLength(0);
   });
 
+  it.each([false, true])("fails a targeted press immediately without input when its %s frame/target is missing", async (missingFrame) => {
+    const { runtime, calls, pressChord, onDispatch } = harness([]);
+    const page = await runtime.createPage(3);
+    const root = missingFrame ? page.frameLocator("#missing-frame") : page;
+    await expect(root.getByText("missing").press("ArrowUp")).rejects.toMatchObject({ code: missingFrame ? "frame-not-found" : "not-found" });
+    expect(pressChord).not.toHaveBeenCalled();
+    expect(onDispatch).not.toHaveBeenCalled();
+    expect(calls.filter(({ method }) => method === "DOM.focus" || method.startsWith("Input."))).toHaveLength(0);
+  });
+
+  it("still focuses an observed target and dispatches its valid key once", async () => {
+    const { runtime, command, pressChord } = harness();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("document.hasFocus()"))
+        return { result: { value: { connected: true, focused: true } } };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    await expect(page.getByRole("button", { name: "Sign in" }).press("ArrowUp")).resolves.toMatchObject({ performed: true });
+    expect(pressChord).toHaveBeenCalledOnce();
+    expect(pressChord).toHaveBeenCalledWith(expect.any(Object), "ArrowUp", undefined, expect.any(Function));
+  });
+
   it.each(["keydown", "keyup"] as const)("normalizes named %s keys and rejects unsupported names before dispatch", async (operation) => {
     const { runtime, calls } = harness();
     await runtime.keyState(3, operation, "ARROWUP");

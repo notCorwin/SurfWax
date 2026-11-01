@@ -471,11 +471,24 @@ test("follows the bottom through layout changes while respecting manual scrollin
       await expect.poll(remaining).toBeLessThanOrEqual(1);
     }
     const growLastTurn = async () => {
-      const height = await viewport.evaluate((element) => element.scrollHeight);
-      await viewport.locator(".conversation-turn").last().evaluate((turn) => {
+      const turn = viewport.locator(".conversation-turn");
+      await expect(turn).toHaveCount(1);
+      // Following the current bottom can finish before the virtualizer's next
+      // measurement catches up with a width reflow. Establish the growth
+      // baseline only after its single-turn spacer matches the actual layout.
+      await expect.poll(() => turn.evaluate((element) => {
+        const spacer = element.parentElement;
+        if (!spacer) throw new Error("virtual turn has no spacer");
+        return Math.abs(spacer.getBoundingClientRect().height - element.getBoundingClientRect().height);
+      })).toBeLessThanOrEqual(1);
+      const height = await viewport.evaluate((element) => {
+        const turn = element.querySelector(".conversation-turn");
+        if (!turn) throw new Error("virtual turn is missing");
+        const height = element.scrollHeight;
         const extra = document.createElement("div");
         extra.style.height = "400px";
         turn.append(extra);
+        return height;
       });
       await expect.poll(() => viewport.evaluate((element) => element.scrollHeight)).toBeGreaterThan(height + 350);
     };

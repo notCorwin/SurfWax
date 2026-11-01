@@ -1008,8 +1008,7 @@ export class ChromeExecutor {
       read: (id: number, selection = {}) => call("artifacts.read", false, () => this.logger!.result(id, selection, this.activeContext.conversationId)),
       save: (id: number, filename?: string) => call("artifacts.save", true, () => this.saveArtifact(id, filename)),
       text: (filename: string, text: string, mimeType = "text/plain", save = false) => call("artifacts.text", save, () => this.storeText(filename, text, mimeType, save)),
-      importUrl: (url: string, filename: string) => call("artifacts.importUrl", true, async () => {
-        await scope.dispatched();
+      importUrl: (url: string, filename: string) => call("artifacts.importUrl", false, async () => {
         const response = await fetch(url, { signal: scope.signal });
         if (!response.ok) throw new Error(`Could not import file: HTTP ${response.status}`);
         const bytes = new Uint8Array(await response.arrayBuffer());
@@ -1018,10 +1017,9 @@ export class ChromeExecutor {
         for (const byte of bytes) binary += String.fromCharCode(byte);
         return this.storeArtifact(filename, btoa(binary), response.headers.get("content-type") || "application/octet-stream");
       }),
-      importLink: (tabId: number, target: unknown) => call("artifacts.importLink", true, async () => {
+      importLink: (tabId: number, target: unknown) => call("artifacts.importLink", false, async () => {
         const raw = await this.boundPage(tabId, state);
         const locator = await this.locatorFor(raw, target);
-        await scope.dispatched();
         const file = await locator.evaluate(`async element => {
           if (!(element instanceof HTMLAnchorElement) || !element.hasAttribute('href')) throw new Error('Target must be a link with an href');
           const response = await fetch(element.href);

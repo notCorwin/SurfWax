@@ -14,7 +14,7 @@ import { IncrementalActiveContext } from "./context-choice";
 import type { ReasoningEffort } from "./reasoning";
 import { dsmlMiddleware } from "./dsml";
 import { completionToolChoiceMiddleware, completionToolsMiddleware } from "./completion-tools";
-import { GOAL_SCHEMA, GOAL_DESCRIPTION, GOAL_INSTRUCTIONS, localEvidence, runEvidence, validateGoal } from "./goal-completion";
+import { GOAL_SCHEMA, GOAL_DESCRIPTION, GOAL_INSTRUCTIONS, actionHistory, localEvidence, runEvidence, validateGoal } from "./goal-completion";
 import { goalRequirements, goalReviewContext, reviewGoal, type GoalVerdict } from "./goal-review";
 export { GOAL_INSTRUCTIONS } from "./goal-completion";
 
@@ -89,7 +89,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     definition.execute = (async (input: any, context: any) => {
       const output = await execute(input, context);
       const identity = options.conversationId ? logger?.toolIdentity(options.conversationId, context.toolCallId) : undefined;
-      localResults.push(localEvidence(identity?.toolCallId ?? context.toolCallId, name, output, localResults.length));
+      localResults.push(localEvidence(identity?.toolCallId ?? context.toolCallId, name, output, localResults.length, input));
       return output;
     }) as typeof execute;
   }
@@ -121,11 +121,13 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
           const proposed = input as z.infer<typeof GOAL_SCHEMA>;
           const context = goalReviewContext(reviewContext, budget ? Math.floor(budget.input * 0.75) : undefined, reviewRequirements,
             proposed.taskType === "browser" ? proposed.evidence.map((item) => item.toolCallId) : []);
-          const key = JSON.stringify([input, context]);
+          const history = actionHistory(evidence);
+          const key = JSON.stringify([input, context, history]);
           const verdict = lastReview?.key === key ? lastReview.verdict : await reviewGoal({
             goal: input as z.infer<typeof GOAL_SCHEMA>, context, model: options.languageModel,
             signal: abortSignal ?? options.signal, logger, conversationId: options.conversationId,
             budget,
+            history,
           });
           lastReview = { key, verdict };
           if (!verdict.accept) output = { ok: false, error: { code: "goal-incomplete", message: [verdict.reason, ...verdict.remaining].join("\n") } };

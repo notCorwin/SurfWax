@@ -4,6 +4,8 @@ import { ChromeExecutor } from "./executor";
 import { LocatorFacade } from "./automation";
 import { ProgramScope } from "./program";
 import { DeferredProgramPage, PROGRAM_EVENT_INVOKE, ProgramHandles } from "./program-handles";
+import { createProgramTools } from "./tool";
+import { browserJobsSettled } from "../../e2e/evaluation/job-evidence";
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 function fakeChrome(responses: Array<object | (() => Promise<object>)> = []) {
@@ -459,6 +461,45 @@ describe("ChromeExecutor programs", () => {
     expect(fetchFile).toHaveBeenCalledWith("https://example.com/file", expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(await h.run()).toMatchObject({ ok: false, result: { error: { message: "Could not import file: HTTP 404" } } });
     expect(h.events.filter(event => event.type === "tool.result.data")).toHaveLength(1);
+    h.executor.dispose();
+  });
+
+  it.each(["url", "link"] as const)("records a rejected %s file GET as a settled failure without unknown external effects", async (kind) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("missing", { status: 404 })));
+    const target = { by: "css", value: "#file" };
+    const h = programHarness(async ({ artifacts }) => kind === "url"
+      ? artifacts.importUrl("https://example.test/missing.bin", "sample.bin") : artifacts.importLink(41, target));
+    const link = document.createElement("a");
+    link.href = "https://example.test/missing.bin";
+    link.download = "sample.bin";
+    h.raw.locator = () => ({ evaluate: async (source: string) => new Function(`return (${source})`)()(link) });
+    h.logger.beginRun("conversation", "run");
+    const tools = createProgramTools(h.executor, { logger: h.logger, conversationId: "conversation" });
+    const definition = kind === "url" ? tools.import_file_from_url : tools.import_file_from_link;
+    const input = kind === "url" ? { url: link.href, filename: "sample.bin" } : { target };
+    const result: any = await (definition!.execute as any)(input, { toolCallId: "import", messages: [] });
+    expect(result).toMatchObject({ ok: false, state: "failed", error: { code: "execution-failed", message: kind === "url" ? "Could not import file: HTTP 404" : "Could not import linked file: HTTP 404" } });
+    expect(result.error.effectUnknown).toBeUndefined();
+    expect(browserJobsSettled(h.events)).toBe(true);
+    expect(h.events.some((event) => event.type === "tool.result.data")).toBe(false);
+    h.executor.dispose();
+  });
+
+  it("does not report a successful import if artifact persistence fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(new Uint8Array([0, 255]))));
+    const h = programHarness(async ({ artifacts }) => artifacts.importUrl("https://example.test/file", "sample.bin"));
+    const append = h.logger.append.bind(h.logger);
+    vi.spyOn(h.logger, "append").mockImplementation((record) => record.type === "tool.result.data" ? Promise.resolve(undefined) : append(record));
+    expect(await h.run()).toMatchObject({ ok: false, state: "failed", result: { error: { code: "artifact-log-unavailable" } } });
+    h.executor.dispose();
+  });
+
+  it("preserves unknown effects when a dispatched POST loses its response", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("Response connection lost"); }));
+    const h = programHarness(async ({ net }) => net.fetch({ context: "extension", url: "https://example.test/write", init: { method: "POST" } }));
+    const result: any = await h.run();
+    expect(result).toMatchObject({ ok: false, state: "failed", result: { error: { effectUnknown: true } } });
+    expect(browserJobsSettled(h.events)).toBeNull();
     h.executor.dispose();
   });
   it("imports a link through its selected frame and persists its binary result", async () => {
