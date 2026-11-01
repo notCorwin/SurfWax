@@ -23,6 +23,25 @@ function intern(snapshot: ReturnType<typeof fixture>, value: string) {
 }
 
 describe("DOM snapshot consistency", () => {
+  it("detects changes to user-modify even when node attributes and geometry remain unchanged", () => {
+    const before = fixture(), after = fixture(true);
+    for (const snapshot of [before, after]) {
+      const layout = snapshot.documents[0]!.layout;
+      layout.styles = layout.styles.map((style) => [...style, intern(snapshot, "normal"), intern(snapshot, "read-write")]);
+    }
+    expect(sameDOMSnapshot(before, after)).toBe(true);
+    after.documents[0]!.layout.styles[2]![33] = intern(after, "read-only");
+    expect(sameDOMSnapshot(before, after)).toBe(false);
+  });
+  it("detects changed white-space styles even when text and geometry are unchanged", () => {
+    const before = fixture(), after = fixture(true);
+    before.documents[0]!.layout.styles[2] = [...before.documents[0]!.layout.styles[2]!, intern(before, "pre")];
+    after.documents[0]!.layout.styles[2] = [...after.documents[0]!.layout.styles[2]!, intern(after, "pre")];
+    expect(sameDOMSnapshot(before, after)).toBe(true);
+    after.documents[0]!.layout.styles[2]![32] = intern(after, "normal");
+    expect(sameDOMSnapshot(before, after)).toBe(false);
+  });
+
   it("compares string values rather than string-table indexes", () => {
     expect(sameDOMSnapshot(fixture(), fixture(true))).toBe(true);
   });

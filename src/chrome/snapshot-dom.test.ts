@@ -23,6 +23,15 @@ function fixture() {
 }
 
 describe("DOM snapshot visible supplementary evidence", () => {
+  it.each([["", true], ["true", true], ["plaintext-only", true], ["false", false], ["invalid", false]])
+  ("retains only a valid explicit contenteditable fallback (%s)", (value, expected) => {
+    const snapshot = fixture(), doc = snapshot.documents[0]!;
+    const add = (text: string) => snapshot.strings.push(text) - 1;
+    doc.nodes.nodeName[6] = add("DIV");
+    doc.nodes.attributes[6] = [add("contenteditable"), add(value as string)];
+    const items = snapshotDomSupplement(snapshot, { frameId: "outer", visibility: new Map([[16, true]]), covered: new Set() });
+    expect(items.some((item) => item.backendNodeId === 16 && item.kind === "control")).toBe(expected);
+  });
   it("preserves distinct matching text, clips projected text and exposes omitted native controls", () => {
     const snapshot = fixture();
     const visibility = new Map<number, boolean>(Array.from({ length: 11 }, (_, i) => [10 + i, true]));

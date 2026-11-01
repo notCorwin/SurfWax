@@ -7,6 +7,7 @@ import { renderSnapshotNode, type SnapshotNode, type SnapshotStateName } from ".
 import { stitchSnapshotFrames, type SnapshotLine } from "./snapshot-frame-tree";
 import { snapshotDomSupplement, type SnapshotDomEvidence } from "./snapshot-dom";
 import { createSnapshotDomIndex } from "./snapshot-dom-index";
+import { snapshotPreformattedText } from "./snapshot-preformatted";
 import { snapshotSlottedNodes } from "./snapshot-slot-index";
 import { sameDOMSnapshot } from "./snapshot-consistency";
 import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
@@ -232,6 +233,20 @@ const TEXT_INPUT_KIND_SOURCE = `function() { /* surf-wax:text-input-kind */
   return this.isContentEditable ? 'text' : 'unsupported';
 }`;
 
+// The DOM fallback is used when AX omits a visible element (for example
+// aria-hidden). Inherited descendants need their own tab stop. The effective
+// editing mode comes from the independently sampled computed style.
+const SNAPSHOT_EDITABLE_HOST_SOURCE = `function() {
+  if (!this.isConnected || !this.isContentEditable || ['input', 'textarea', 'select', 'button', 'option'].includes(this.localName)) return null;
+  const root = this.getRootNode(), parent = this.parentElement || (root && root.host) || null;
+  if (parent && parent.isContentEditable && this.tabIndex < 0) return null;
+  const mode = this.contentEditable;
+  const inherited = mode === 'inherit';
+  if (inherited && this.tabIndex < 0) return null;
+  if (!['true', 'plaintext-only', 'inherit'].includes(mode)) return null;
+  return { inherited };
+}`;
+
 const STRUCTURED_INPUT_TYPES = new Set(["date", "time", "datetime-local", "month", "week"]);
 
 // Validate before focusing, then recheck in the page task that applies the
@@ -258,6 +273,23 @@ const STRUCTURED_FILL_SOURCE = `function(type, value, apply) {
 
 const EDITABLE_STATE_SOURCE = `function(kind, disabled) {
   return !disabled && !this.readOnly && this.getAttribute("aria-readonly") !== "true" && kind !== "unsupported" && kind !== "detached";
+}`;
+
+// Snapshot action hints use the same live capability test as fill/type_text.
+const SNAPSHOT_FILLABILITY_SOURCE = `function() {
+  const kind = (${TEXT_INPUT_KIND_SOURCE}).call(this);
+  const disabled = (${DISABLED_STATE_SOURCE}).call(this);
+  let readonly = !!this.readOnly || this.getAttribute('aria-readonly') === 'true';
+  let mode = null;
+  if (this.isContentEditable && !['input', 'textarea', 'select', 'button', 'option'].includes(this.localName)) {
+    const style = this.ownerDocument?.defaultView?.getComputedStyle(this).getPropertyValue('-webkit-user-modify').trim().toLowerCase();
+    if (style === 'read-write') mode = 'richtext';
+    else if (style === 'read-write-plaintext-only') mode = 'plaintext';
+    else if (style === 'read-only') readonly = true;
+  }
+  const fillable = (${EDITABLE_STATE_SOURCE}).call(this, kind, disabled)
+    && (!this.isContentEditable || ['input', 'textarea'].includes(this.localName) || mode !== null);
+  return { fillable: fillable && !readonly, disabled, readonly, mode };
 }`;
 
 // Shared by reads and mutations so ARIA controls and native inputs use the
@@ -3114,6 +3146,45 @@ export class AutomationRuntime {
         guard();
         if (changed()) throw automationError("stale-frame", { reason: "frame-tree-changed-during-capture" });
       };
+      type Fillability = { fillable: boolean; disabled: boolean; readonly: boolean; mode: "richtext" | "plaintext" | null };
+      type FillabilityBatch = { debuggee: Debuggee; frameId: string; values: Map<number, Fillability> };
+      const fillabilityBatches: FillabilityBatch[] = [];
+      const readFillability = async (debuggee: Debuggee, frameId: string, ids: readonly number[]): Promise<Map<number, Fillability>> => {
+        const values = new Map<number, Fillability>();
+        if (!ids.length) return values;
+        const frame: FrameRefRecord = { frameId, debuggee, generation, revision: frameRevision,
+          conversationId: frameContext.conversationId, runId: frameContext.runId };
+        await this.frameDocument(session, frame, frameGuard);
+        const key = JSON.stringify([session.tabId, frameId, debuggee.sessionId ?? null]);
+        const document = this.frameDocuments.get(key), contextId = document?.executionContextId;
+        if (!Number.isSafeInteger(contextId)) throw automationError("snapshot-unavailable", { reason: "missing-editability-context" });
+        const check = () => {
+          frameGuard();
+          if (this.frameDocuments.get(key) !== document) throw automationError("stale-frame", { reason: "frame-context-expired" });
+        };
+        const group = `surf-wax-editability:${crypto.randomUUID()}`;
+        try {
+          for (let offset = 0; offset < ids.length; offset += 32) {
+            const batch = ids.slice(offset, offset + 32);
+            const settled = await Promise.allSettled(batch.map(async (backendNodeId) => {
+              const node = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId, executionContextId: contextId, objectGroup: group });
+              check();
+              if (typeof node.object?.objectId !== "string") throw automationError("snapshot-unavailable", { reason: "missing-editability-node" });
+              const response = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: node.object.objectId, functionDeclaration: SNAPSHOT_FILLABILITY_SOURCE, returnByValue: true });
+              check();
+              const value = response.result?.value;
+              if (response.exceptionDetails || !value || [value.fillable, value.disabled, value.readonly].some((item) => typeof item !== "boolean")
+                || ![null, "richtext", "plaintext"].includes(value.mode))
+                throw automationError("snapshot-unavailable", { reason: "missing-editability-evidence" });
+              return value as Fillability;
+            }));
+            const failed = settled.find((item): item is PromiseRejectedResult => item.status === "rejected");
+            if (failed) throw failed.reason;
+            for (let index = 0; index < batch.length; index++) values.set(batch[index]!, (settled[index] as PromiseFulfilledResult<Fillability>).value);
+          }
+        } finally { void this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined); }
+        return values;
+      };
       const frameIsReady = async ({ frameId, debuggee }: (typeof frames)[number]) => {
           if (debuggee.sessionId) await session.frameReady.get(debuggee.sessionId);
           frameGuard();
@@ -3651,8 +3722,11 @@ export class AutomationRuntime {
         const scopedRoot = Boolean(regionNode && regionFrameId === frameId && regionDebuggee && sameDebuggee(regionDebuggee, debuggee));
         const doc = snapshot.documents?.find((document: any) => snapshot.strings?.[document.frameId] === frameId);
         if (!doc) throw automationError("snapshot-unavailable", { reason: "missing-dom-frame", frameId });
-        let evidence: ReturnType<typeof snapshotDomSupplement>;
-        try { evidence = snapshotDomSupplement(snapshot, { frameId, visibility, textProjections, covered: new Set() }); }
+        let evidence: ReturnType<typeof snapshotDomSupplement>, preformatted: Map<number, string>;
+        try {
+          evidence = snapshotDomSupplement(snapshot, { frameId, visibility, textProjections, covered: new Set() });
+          preformatted = snapshotPreformattedText(snapshot, frameId);
+        }
         catch (error) { throw automationError("snapshot-unavailable", { reason: "invalid-dom-snapshot", detail: error instanceof Error ? error.message : String(error) }); }
         const domIndex = evidence.indexes.get(frameId);
         if (!domIndex) throw automationError("snapshot-unavailable", { reason: "missing-dom-frame", frameId });
@@ -3810,6 +3884,20 @@ export class AutomationRuntime {
         }
         const hidden = (node: any) => effectiveHidden.get(node.nodeId) === true;
         const inScope = (node: any) => scoped.get(node.nodeId) === true;
+        const axEditableCandidates = [...new Set<number>(order.flatMap((node) => {
+          if (node.ignored || hidden(node) || !inScope(node) || typeof node.backendDOMNodeId !== "number") return [];
+          const properties = Object.fromEntries((node.properties ?? []).map((property: any) => [property.name, property.value?.value]));
+          const index = domIndex.indexOf(node.backendDOMNodeId);
+          const tag = index === undefined ? "" : snapshot.strings?.[doc.nodes.nodeName?.[index]]?.toLowerCase();
+          if (index === undefined || doc.nodes.nodeType?.[index] !== 1 || properties.focusable !== true) return [];
+          const attributes = doc.nodes.attributes?.[index] ?? [];
+          const hasContentEditable = Array.isArray(attributes) && attributes.some((value: number, offset: number) => offset % 2 === 0
+            && snapshot.strings?.[value]?.toLowerCase() === "contenteditable");
+          if (!["richtext", "plaintext"].includes(properties.editable) && !hasContentEditable) return [];
+          return index !== undefined && doc.nodes.nodeType?.[index] === 1 && tag && !["input", "textarea", "select", "button", "option"].includes(tag) ? [node.backendDOMNodeId] : [];
+        }))];
+        const axFillability = await waitForCapture(readFillability(debuggee, frameId, axEditableCandidates));
+        if (axFillability.size) fillabilityBatches.push({ debuggee, frameId, values: axFillability });
         const projected = (node: any): string | undefined => {
           if (axValue(node.role) !== "StaticText" || typeof node.backendDOMNodeId !== "number") return undefined;
           const projection = textProjections.get(node.backendDOMNodeId);
@@ -3894,7 +3982,19 @@ export class AutomationRuntime {
         while (pending.length) {
           const { node, depth } = pending.pop()!;
           let childDepth = depth;
-          const role = node.ignored || hidden(node) || !inScope(node) || axValue(node.role) === "StaticText" && placeholderTextNodes.has(node.backendDOMNodeId) ? "" : axValue(node.role); const originalName = axValue(node.name); const name = role ? visibleName(node, originalName) : ""; const value = maskedControl(node) ? "" : axValue(node.value);
+          const role = node.ignored || hidden(node) || !inScope(node) || axValue(node.role) === "StaticText" && placeholderTextNodes.has(node.backendDOMNodeId) ? "" : axValue(node.role);
+          const properties = Object.fromEntries((node.properties ?? []).map((property: any) => [property.name, property.value?.value]));
+          // AX can mark native buttons editable through an ancestor even
+          // though text insertion cannot target them. Require a known DOM
+          // element whose tag supports the runtime's editing operations.
+          const editableIndex = typeof node.backendDOMNodeId === "number" ? domIndex.indexOf(node.backendDOMNodeId) : undefined;
+          const editableTag = editableIndex === undefined ? "" : snapshot.strings?.[doc.nodes.nodeName?.[editableIndex]]?.toLowerCase();
+          const editableEvidence = typeof node.backendDOMNodeId === "number" ? axFillability.get(node.backendDOMNodeId) : undefined;
+          const editableControl = editableEvidence?.fillable === true && editableEvidence.mode !== null;
+          const originalName = axValue(node.name), name = role ? visibleName(node, originalName) : "";
+          // The rich editing host's AX value aggregates descendant text that
+          // is emitted in document order below; do not duplicate it here.
+          const value = maskedControl(node) || editableControl && !["textbox", "searchbox", "spinbutton"].includes(role) ? "" : axValue(node.value);
           const parent = byId.get(node.parentId);
           const parentRole = parent && !parent.ignored && !hidden(parent) && inScope(parent) ? axValue(parent.role) : "";
           // A single static text leaf that exactly repeats its named semantic
@@ -3918,27 +4018,33 @@ export class AutomationRuntime {
           const duplicateNativeValueText = singleTextLeaf && parentRole === "generic" && owner && !hidden(owner) && inScope(owner)
             && Boolean(name) && name === axValue(owner.value);
           const duplicateText = duplicateNamedText || duplicateValueText || duplicateNativeValueText;
-          if (role && role !== "none" && role !== "generic" && role !== "InlineTextBox" && typeof node.backendDOMNodeId === "number") covered.add(node.backendDOMNodeId);
-          if (role && role !== "none" && role !== "generic" && role !== "InlineTextBox" && !duplicateText) {
+          const emittedRole = role && role !== "none" && role !== "InlineTextBox" && (role !== "generic" || editableControl || editableEvidence?.readonly && properties.focusable === true);
+          if (emittedRole && typeof node.backendDOMNodeId === "number") covered.add(node.backendDOMNodeId);
+          if (emittedRole && !duplicateText) {
             let ref = "";
             const identity = `${scope}:${node.backendDOMNodeId ?? node.nodeId}`;
             if (node.backendDOMNodeId && (INTERACTIVE_ROLES.has(role) || node.properties?.some((property: any) => property.name === "focusable" && property.value?.value))) {
               ref = this.rememberRef(session, identity, { backendNodeId: node.backendDOMNodeId, frameId: frameLabel ?? session.rootFrameId, debuggee, role, name: semanticName(originalName), generation, identitySource: "ax" });
             }
-            const properties = Object.fromEntries((node.properties ?? []).map((property: any) => [property.name, property.value?.value]));
             const state: Partial<Record<SnapshotStateName, unknown>> = Object.fromEntries(["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly"].filter((key) => properties[key] !== undefined).map((key) => [key, properties[key]]));
+            if (editableControl) state.editable = editableEvidence.mode;
+            if (editableEvidence?.disabled) state.disabled = true;
+            if (editableEvidence?.readonly) state.readonly = true;
             if (maskedControl(node)) state.masked = true;
-            const actions = !ref ? [] : ["textbox", "searchbox", "spinbutton"].includes(role) ? ["click", "fill", "clear", "press", "insertText"]
+            const nonNativeTextRole = ["textbox", "searchbox", "spinbutton"].includes(role) && !!editableTag && !["input", "textarea"].includes(editableTag);
+            const actions = !ref ? [] : editableControl || !nonNativeTextRole && ["textbox", "searchbox", "spinbutton"].includes(role) ? ["click", "fill", "clear", "press", "insertText"]
               : ["checkbox", "radio", "switch"].includes(role) ? ["click", "check"]
               : ["combobox", "listbox"].includes(role) ? ["click", "select"] : ["click", "doubleClick", "hover"];
             // AX node IDs identify semantic rows; multiple AX rows can refer
             // to the same backend DOM node and therefore share an action ref.
-            const snapshotId = `${snapshotScope}:ax:${node.nodeId}`;
+            const snapshotId = `${snapshotScope}:a:${node.nodeId}`;
             const childFrameId = typeof node.backendDOMNodeId === "number"
               ? childFramesByOwner.get(JSON.stringify([debuggee.sessionId ?? "", node.backendDOMNodeId])) : undefined;
             const childFrameRef = childFrameId ? capturedFrameRefs.get(childFrameId) : undefined;
             const ownPlaceholder = placeholder(node);
-            const snapshotNode: SnapshotNode = { id: snapshotId, depth, role, name, value, ...(namesUnknown.has(node.nodeId) ? { nameUnknown: true } : {}),
+            const preserveTextWhitespace = role === "StaticText" && typeof node.backendDOMNodeId === "number" && Boolean(name)
+              && !textProjections.has(node.backendDOMNodeId) && preformatted.get(node.backendDOMNodeId) === name;
+            const snapshotNode: SnapshotNode = { id: snapshotId, depth, role, name, value, ...(preserveTextWhitespace ? { preserveTextWhitespace: true } : {}), ...(namesUnknown.has(node.nodeId) ? { nameUnknown: true } : {}),
               ...(ownPlaceholder && ownPlaceholder.status !== "hidden" ? { placeholder: ownPlaceholder } : {}),
               ...(ref ? { ref, actions } : {}), ...(childFrameRef ? { childFrameRef } : {}), state };
             const rendered = renderSnapshotNode(snapshotNode);
@@ -4057,7 +4163,7 @@ export class AutomationRuntime {
               if (!resolved.object?.objectId) throw automationError("snapshot-unavailable", { reason: "missing-dom-control" });
               const objectId = resolved.object.objectId as string;
               const response = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId, returnByValue: true,
-                functionDeclaration: `function(){const labels=this.labels;return {meta:(${SEARCH_META_SOURCE}).call(this,true), attributes:Object.fromEntries([...this.attributes].map(a=>[a.name.toLowerCase(),a.value])), value: typeof this.value === "string" ? this.value : undefined, checked: typeof this.checked === "boolean" ? this.checked : undefined, labelCount: labels == null ? 0 : labels.length}}` });
+                functionDeclaration: `function(){const labels=this.labels, fillability=(${SNAPSHOT_FILLABILITY_SOURCE}).call(this);return {meta:(${SEARCH_META_SOURCE}).call(this,true), fillability, isContentEditable:!!this.isContentEditable, editable:fillability.fillable ? (${SNAPSHOT_EDITABLE_HOST_SOURCE}).call(this) : null, attributes:Object.fromEntries([...this.attributes].map(a=>[a.name.toLowerCase(),a.value])), value: typeof this.value === "string" ? this.value : undefined, checked: typeof this.checked === "boolean" ? this.checked : undefined, labelCount: labels == null ? 0 : labels.length}}` });
               frameGuard();
               if (response.exceptionDetails) throw automationError("snapshot-unavailable", { reason: "dom-control-read-failed" });
               return { objectId, value: response.result?.value };
@@ -4075,6 +4181,14 @@ export class AutomationRuntime {
               currentControls.set(batch[index]!.backendNodeId, { ...value, labels: [] });
             });
           }
+          const domFillability = new Map<number, Fillability>();
+          for (const item of controlItems) {
+            const current = currentControls.get(item.backendNodeId), value = current?.fillability;
+            if ((current?.isContentEditable || Object.hasOwn(item.attributes ?? {}, "contenteditable"))
+              && value && [value.fillable, value.disabled, value.readonly].every((part) => typeof part === "boolean"))
+              domFillability.set(item.backendNodeId, value);
+          }
+          if (domFillability.size) fillabilityBatches.push({ debuggee, frameId, values: domFillability });
           // Read only actual live associations, rather than resolving every
           // label sharing a potentially duplicated HTML id for every control.
           // The sum is bounded by document labels because a label has at most
@@ -4140,21 +4254,30 @@ export class AutomationRuntime {
             const parentIndex = nearestEmitted[item.nodeIndex]!;
             const parent = parentIndex < 0 ? undefined : domIndex.backendAt(parentIndex);
             const depth = parent === undefined || !depths.has(parent) ? (frameLabel ? frameDepth + 1 : 0) : depths.get(parent)! + 1;
-            const id = `${snapshotScope}:dom:${item.backendNodeId}`;
+            const id = `${snapshotScope}:d:${item.backendNodeId}`;
             let node: SnapshotNode;
-            if (item.kind === "text") node = { id, depth, role: "StaticText", name: item.text };
+            if (item.kind === "text") node = { id, depth, role: "StaticText", name: item.text,
+              ...(item.text && !textProjections.has(item.backendNodeId) && preformatted.get(item.backendNodeId) === item.text ? { preserveTextWhitespace: true } : {}) };
             else {
               const tag = item.tag!;
               const type = (item.attributes?.type ?? "text").toLowerCase();
-              const role = tag === "iframe" || tag === "frame" ? "iframe" : tag === "button" ? "button" : tag === "a" ? "link" : tag === "select" ? "combobox" : tag === "textarea" ? "textbox"
+              const current = currentControls.get(item.backendNodeId);
+              const editable = current?.editable;
+              const editableControl = !!editable && current?.fillability?.fillable === true
+                && ["richtext", "plaintext"].includes(current.fillability.mode);
+              const explicitRole = item.attributes?.role?.trim();
+              const role = explicitRole && /^[a-z][a-z0-9]*$/.test(explicitRole) && !["input", "textarea", "select", "button", "option"].includes(tag) ? explicitRole
+                : tag === "iframe" || tag === "frame" ? "iframe" : tag === "button" ? "button" : tag === "a" ? "link" : tag === "select" ? "combobox" : tag === "textarea" ? "textbox"
                 : tag === "input" ? ({ checkbox: "checkbox", radio: "radio", range: "slider", number: "spinbutton", search: "searchbox", button: "button", submit: "button", reset: "button" } as Record<string, string>)[type] ?? "textbox"
                   : item.attributes?.role?.trim() === "button" ? "button" : "generic";
-              const current = currentControls.get(item.backendNodeId);
               const matchedLabels: number[] = (current?.labels ?? []).filter((id: number) => labels.has(id))
                 .sort((left: number, right: number) => (positions.get(left) ?? 0) - (positions.get(right) ?? 0));
               const directLabel = !item.attributes?.["aria-labelledby"] ? semanticName(item.attributes?.["aria-label"] ?? "") : "";
               const name = directLabel || visibleLabel(matchedLabels) || controlText.get(item.backendNodeId) || (tag === "input" && ["button", "submit", "reset"].includes(type) ? item.value ?? "" : "");
               const state: Partial<Record<SnapshotStateName, unknown>> = {};
+              if (editableControl) state.editable = current.fillability.mode;
+              if (current?.fillability?.disabled) state.disabled = true;
+              if (current?.fillability?.readonly) state.readonly = true;
               if (item.checked !== undefined) state.checked = item.checked;
               if (item.masked) state.masked = true;
               for (const key of ["disabled", "required", "readonly"] as const) if (Object.hasOwn(item.attributes ?? {}, key)) state[key] = true;
@@ -4176,7 +4299,8 @@ export class AutomationRuntime {
                   ref = this.rememberRef(session, `${scope}:${item.backendNodeId}`, { backendNodeId: item.backendNodeId, frameId, debuggee, role, name: current.meta.identityName, generation, identitySource: "dom" });
                 }
               }
-              const actions = !ref ? [] : ["textbox", "searchbox", "spinbutton"].includes(role) ? ["click", "fill", "clear", "press", "insertText"]
+              const nonNativeTextRole = ["textbox", "searchbox", "spinbutton"].includes(role) && !["input", "textarea"].includes(tag);
+              const actions = !ref ? [] : editableControl || !nonNativeTextRole && ["textbox", "searchbox", "spinbutton"].includes(role) ? ["click", "fill", "clear", "press", "insertText"]
                 : ["checkbox", "radio", "switch"].includes(role) ? ["click", "check"] : ["combobox", "listbox"].includes(role) ? ["click", "select"] : ["click", "doubleClick", "hover"];
               const childFrameId = childFramesByOwner.get(JSON.stringify([debuggee.sessionId ?? "", item.backendNodeId]));
               const childFrameRef = childFrameId ? capturedFrameRefs.get(childFrameId) : undefined;
@@ -4232,6 +4356,18 @@ export class AutomationRuntime {
       if (!changed()) {
         let confirmations: Array<{ debuggee: Debuggee; snapshot: any }>;
         try {
+          const afterFillability = await waitForCapture(Promise.all(fillabilityBatches.map((batch) => readFillability(batch.debuggee, batch.frameId, [...batch.values.keys()]))));
+          const changedFillability = fillabilityBatches.some((batch, index) => {
+            const next = afterFillability[index]!;
+            return next.size !== batch.values.size || [...batch.values].some(([id, before]) => {
+              const value = next.get(id);
+              return !value || value.fillable !== before.fillable || value.disabled !== before.disabled || value.readonly !== before.readonly || value.mode !== before.mode;
+            });
+          });
+          if (changedFillability) {
+            if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "editability-unstable" });
+            retriedUnstableCapture = true; continue;
+          }
           const after = await waitForCapture(collectPlaceholders(placeholderItems));
           const changedPlaceholder = after.size !== placeholderBefore.size || [...placeholderBefore].some(([key, before]) => {
             const next = after.get(key);

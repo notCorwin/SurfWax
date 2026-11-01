@@ -1,5 +1,5 @@
 /** Style order must match the DOMSnapshot.captureSnapshot request. */
-export const SNAPSHOT_COMPUTED_STYLES = ["opacity", "overflow-x", "overflow-y", "visibility", "content-visibility", "position", "transform", "filter", "perspective", "contain", "will-change", "backdrop-filter", "translate", "rotate", "scale", "clip-path", "clip", "direction", "writing-mode", "display", "font-size", "-webkit-text-fill-color", "text-shadow", "-webkit-text-stroke-width", "background-clip", "text-transform", "-webkit-text-security", "text-overflow", "-webkit-line-clamp", "mask-image", "-webkit-mask-box-image-source", "float"] as const;
+export const SNAPSHOT_COMPUTED_STYLES = ["opacity", "overflow-x", "overflow-y", "visibility", "content-visibility", "position", "transform", "filter", "perspective", "contain", "will-change", "backdrop-filter", "translate", "rotate", "scale", "clip-path", "clip", "direction", "writing-mode", "display", "font-size", "-webkit-text-fill-color", "text-shadow", "-webkit-text-stroke-width", "background-clip", "text-transform", "-webkit-text-security", "text-overflow", "-webkit-line-clamp", "mask-image", "-webkit-mask-box-image-source", "float", "white-space", "-webkit-user-modify"] as const;
 
 type Interval = readonly [number, number];
 type Clip = { x: Interval; y: Interval };

@@ -619,12 +619,15 @@ describe("frame tree discovery", () => {
     const page = await runtime.createPage(3);
     const initial: any = await page.inspect();
     const root = initial.items.find((item: any) => item.line.includes('button "Root control"'));
+    expect(root.id).toMatch(/^f[0-9a-z]+:a:shared-ax$/);
     runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "old-child", targetInfo: { type: "iframe", targetId: "cross" } });
     const attached: any = await page.inspect({ since: initial.observationId });
     expect(attached.mode).toBe("delta");
     expect(attached.items.some((item: any) => item.id === root.id)).toBe(false);
     const old = attached.items.find((item: any) => item.line.includes('button "Cross control"'));
     expect(old).toMatchObject({ change: "added", ref: expect.any(String) });
+    expect(old.id).toMatch(/^f[0-9a-z]+:a:shared-ax$/);
+    expect(old.id).not.toBe(root.id);
     runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "replacement-child", targetInfo: { type: "iframe", targetId: "cross" } });
     const changed: any = await page.inspect({ since: attached.observationId });
     expect(changed.documentId).toBe(initial.documentId);
@@ -656,7 +659,7 @@ describe("frame tree discovery", () => {
     const page = await runtime.createPage(3);
     runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "child", targetInfo: { type: "iframe", targetId: "cross" } });
     const capture: any = await page.inspect();
-    const owner = capture.items.find((item: any) => ignored ? item.id.endsWith(":dom:102") : item.line.includes('Iframe "Work item"'));
+    const owner = capture.items.find((item: any) => ignored ? item.id.endsWith(":d:102") : item.line.includes('Iframe "Work item"'));
     expect(owner).toEqual(expect.any(Object));
     const ref = /\[frameRef=(f[^\]]+)\]/.exec(owner.line)?.[1];
     expect(ref).toEqual(expect.any(String));

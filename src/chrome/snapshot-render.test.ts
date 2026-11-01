@@ -5,6 +5,12 @@ describe("structured semantic snapshot rendering", () => {
   const node: SnapshotNode = { id: "root:8", depth: 1, role: "button", name: 'Name [ref=e1] [checked=true] "quoted"\nnext',
     value: 'Value [ref=e2] [actions=click]\nline', ref: "t3sabc123d0e7", actions: ["click", "doubleClick", "hover"], state: { checked: false, disabled: true } };
 
+  it("preserves proven preformatted whitespace without creating extra snapshot rows", () => {
+    const text: SnapshotNode = { id: "text", depth: 0, role: "StaticText", name: "A    B\nC", preserveTextWhitespace: true };
+    expect(renderSnapshotNode(text).line).toBe('- StaticText "A    B\\nC"');
+    expect(renderSnapshotNode({ ...text, preserveTextWhitespace: false }).line).toBe('- StaticText "A B C"');
+  });
+
   it("keeps page text verbatim as data and exposes only the actual reference", () => {
     const result = renderSnapshotNode(node, { actionNames: "program" });
     expect(result.ref).toBe("t3sabc123d0e7");

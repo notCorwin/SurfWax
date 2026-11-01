@@ -79,12 +79,12 @@ export function sameDOMSnapshot(left: any, right: any, before?: SnapshotConsiste
       && nodeRareFlags.every((key) => optional(a[key], b[key], (x, y) => sparse(x, y, "none")))
       && optional(a.contentDocumentIndex, b.contentDocumentIndex, (x, y) => sparse(x, y, "numbers"));
   };
-  // Text transform and security can change visible text independently of the
+  // Text transform, security and whitespace can change visible text independently of the
   // raw node value. Other styles and geometry are reflected in the visibility
   // map and candidate evidence computed by snapshotVisibility.
   const textStyles = (a: any, b: any) => array(a, b, (x, y) => Array.isArray(x) && Array.isArray(y)
     && x.every((index: unknown) => validString(leftStrings, index)) && y.every((index: unknown) => validString(rightStrings, index))
-    && [25, 26].every((index) => optional(x[index], y[index], string)));
+    && [25, 26, 32, 33].every((index) => optional(x[index], y[index], string)));
   const layout = (a: any, b: any) => {
     if (!known(a, layoutKeys) || !known(b, layoutKeys) || !Array.isArray(a.nodeIndex) || !Array.isArray(b.nodeIndex)
       || !Array.isArray(a.styles) || !Array.isArray(b.styles) || !Array.isArray(a.bounds) || !Array.isArray(b.bounds)

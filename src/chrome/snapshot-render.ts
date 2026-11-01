@@ -1,7 +1,7 @@
 import { quote } from "./automation-utils";
 
 export type SnapshotField = "text" | "state" | "ref" | "actions";
-export type SnapshotStateName = "checked" | "disabled" | "expanded" | "pressed" | "selected" | "required" | "readonly" | "masked";
+export type SnapshotStateName = "checked" | "disabled" | "expanded" | "pressed" | "selected" | "required" | "readonly" | "editable" | "masked";
 
 /** Data received from one AX node, before it is rendered into page text. */
 export type SnapshotNode = Readonly<{
@@ -9,6 +9,8 @@ export type SnapshotNode = Readonly<{
   depth: number;
   role: string;
   name?: string;
+  /** Preserve proven preformatted whitespace in already-visible text rows. */
+  preserveTextWhitespace?: boolean;
   nameUnknown?: boolean;
   value?: string;
   selectedLabels?: readonly string[];
@@ -29,7 +31,7 @@ export type RenderedSnapshotNode = Readonly<{
 }>;
 
 const allFields: readonly SnapshotField[] = ["text", "state", "ref", "actions"];
-const stateNames: readonly SnapshotStateName[] = ["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly", "masked"];
+const stateNames: readonly SnapshotStateName[] = ["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly", "editable", "masked"];
 const toolActions: Readonly<Record<string, string>> = { doubleClick: "double_click", insertText: "type_text", select: "select_option", clear: "fill", press: "press_key", check: "set_checked" };
 
 /**
@@ -46,7 +48,7 @@ export function renderSnapshotNode(
   const fields = new Set(options.fields ?? allFields);
   const name = node.name ?? "";
   const value = node.value ?? "";
-  let line = `${"  ".repeat(node.depth)}- ${node.role}${fields.has("text") && name ? ` ${quote(name)}` : ""}`;
+  let line = `${"  ".repeat(node.depth)}- ${node.role}${fields.has("text") && name ? ` ${node.preserveTextWhitespace ? JSON.stringify(name) : quote(name)}` : ""}`;
   if (fields.has("text") && node.nameUnknown) line += " [name=unknown]";
   if (node.childFrameRef) line += ` [frameRef=${node.childFrameRef}]`;
   if (fields.has("ref") && node.ref && options.inlineRef !== false) line += ` [ref=${node.ref}]`;

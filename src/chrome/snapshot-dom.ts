@@ -201,7 +201,8 @@ export function snapshotDomSupplement(snapshot: any, options: SnapshotDomOptions
       if (!tag) continue;
       const attributes = attributesFor(index);
       const isControl = tag === "button" || tag === "select" || tag === "textarea" || tag === "iframe" || tag === "frame" || tag === "input" && (attributes.type ?? "text").toLowerCase() !== "hidden"
-        || tag === "a" && Object.hasOwn(attributes, "href") || attributes.role?.trim() === "button" || clickable.has(index);
+        || tag === "a" && Object.hasOwn(attributes, "href") || attributes.role?.trim() === "button" || clickable.has(index)
+        || Object.hasOwn(attributes, "contenteditable") && ["", "true", "plaintext-only"].includes(attributes.contenteditable!.trim().toLowerCase());
       if (!isControl) continue;
       const selectedOptions = tag === "select" && nodes.optionSelected !== undefined ? selections.get(index) ?? [] : undefined;
       const value = tag === "textarea" ? textValues.get(index) ?? ""

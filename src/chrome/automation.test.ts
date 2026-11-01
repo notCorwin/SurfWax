@@ -164,6 +164,42 @@ function placeholderSnapshot(options: { status?: string[]; label?: boolean; depe
 }
 
 describe("AutomationRuntime", () => {
+  it.each([
+    { readings: [true, false, false, false], fails: false },
+    { readings: [true, false, true, false], fails: true },
+    { readings: [true, true, true, true], modes: ["richtext", "plaintext", "plaintext", "plaintext"], fails: false },
+  ])("retries or rejects when live editability changes during capture", async ({ readings, fails, modes }) => {
+    const { runtime, command } = textboxSnapshot(), original = command.getMockImplementation()!;
+    let reads = 0;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOMSnapshot.captureSnapshot") {
+        const snapshot = structuredClone(await original(source, method, params));
+        snapshot.strings[2] = "DIV";
+        return snapshot;
+      }
+      if (method === "Accessibility.getFullAXTree") {
+        const tree = structuredClone(await original(source, method, params));
+        tree.nodes[1].role.value = "generic";
+        tree.nodes[1].properties = [{ name: "focusable", value: { value: true } }, { name: "editable", value: { value: "richtext" } }];
+        return tree;
+      }
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Runtime.evaluate" && params?.expression === "document") return { result: { objectId: "editable-document" } };
+      if (method === "DOM.resolveNode" && params?.objectGroup?.startsWith("surf-wax-editability:")) return { object: { objectId: "editable-host" } };
+      if (method === "Runtime.callFunctionOn" && params?.objectId === "editable-host") {
+        const index = Math.min(reads++, readings.length - 1), fillable = readings[index];
+        return { result: { value: { fillable, disabled: false, readonly: false, mode: modes?.[index] ?? (fillable ? "richtext" : null) } } };
+      }
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    if (fails) await expect(page.inspect()).rejects.toMatchObject({ code: "snapshot-unavailable", detail: { reason: "editability-unstable" } });
+    else if (modes) expect(inspectText(await page.inspect())).toContain("[editable=plaintext]");
+    else expect(inspectText(await page.inspect())).not.toContain("[editable=");
+    expect(reads).toBe(4);
+    expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.releaseObjectGroup" && params?.objectGroup?.startsWith("surf-wax-editability:"))).toHaveLength(4);
+    await runtime.abortSessions();
+  });
   it.each([true, false])("bounds an automatic snapshot after a click with ok=%s and releases the executor queue", async (ok) => {
     const { runtime, command } = harness();
     const page = await runtime.createPage(3);
@@ -1826,11 +1862,28 @@ describe("AutomationRuntime", () => {
     const page = await runtime.createPage(3);
     const first = await page.inspect() as any;
     const second = await page.inspect({ since: first.observationId }) as any;
-    expect(first.items.map((item: any) => item.id)).toEqual(["f1:ax:root", "f1:ax:node-0"]);
+    expect(first.items.map((item: any) => item.id)).toEqual(["f1:a:root", "f1:a:node-0"]);
     expect(second).toMatchObject({ mode: "delta", items: [] });
     const ref = first.items.find((item: any) => item.ref)?.ref;
     expect(ref).toMatch(/^t3s[a-f0-9]+d0e1$/);
     await expect(page.ref(ref).count()).resolves.toBe(1);
+    await runtime.abortSessions();
+  });
+
+  it("preserves compact item IDs and predecessor links across delta pages", async () => {
+    const metadata = [{ role: "button", name: "First" }, { role: "button", name: "Second" }];
+    const { runtime } = harness(metadata);
+    const page = await runtime.createPage(3);
+    const baseline = await page.inspect() as any;
+    const first = baseline.items.find((item: any) => item.line.includes('button "First"'));
+    const second = baseline.items.find((item: any) => item.line.includes('button "Second"'));
+    metadata[1]!.name = "Second updated";
+    metadata.push({ role: "button", name: "Third" });
+    const one = await page.inspect({ since: baseline.observationId, limit: 1 }) as any;
+    expect(one).toMatchObject({ mode: "delta", items: [{ id: second.id, change: "updated", after: first.id }], nextCursor: expect.any(String) });
+    const two = await page.inspect({ cursor: one.nextCursor, limit: 1 }) as any;
+    expect(two).toMatchObject({ mode: "delta", items: [{ id: "f1:a:node-2", change: "added", after: second.id }] });
+    expect(two.nextCursor).toBeUndefined();
     await runtime.abortSessions();
   });
 

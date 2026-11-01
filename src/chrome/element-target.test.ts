@@ -12,6 +12,12 @@ describe("element target contract", () => {
     expect(elementTargetSchema.safeParse({ by: "testId", value: "save", exact: false }).success).toBe(false);
   });
 
+  it("uses either an element ref or a locator scoped by a frame ref", () => {
+    expect(elementTargetSchema.safeParse({ ref: "element", frame: { ref: "frame" } }).success).toBe(false);
+    expect(elementTargetSchema.safeParse({ ref: "element" }).success).toBe(true);
+    expect(elementTargetSchema.safeParse({ by: "role", value: "button", frame: { ref: "frame" } }).success).toBe(true);
+  });
+
   it("exposes locator-specific restrictions and semantics in JSON Schema", () => {
     const schema = z.toJSONSchema(elementTargetSchema, { target: "draft-7" });
     const serialized = JSON.stringify(schema);
