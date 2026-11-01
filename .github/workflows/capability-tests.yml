@@ -58,7 +58,18 @@ jobs:
       - run: npm ci
       - run: npx tsc --noEmit
       - run: node --test scripts/tests/browser-tests.test.mjs
-      - run: mkdir -p test-results && npm test -- src/evaluation src/components/chat/markdown-text.test.tsx src/components/chat/markdown-text.loading.test.tsx --reporter=default --reporter=junit --outputFile.junit=test-results/evaluation.xml
+      - run: >-
+          mkdir -p test-results && npm test --
+          src/evaluation
+          src/components/chat/markdown-text.test.tsx
+          src/components/chat/markdown-text.loading.test.tsx
+          src/chrome/snapshot-pagination.test.ts
+          src/chrome/snapshot-render.test.ts
+          src/chrome/snapshot-visibility.test.ts
+          src/chrome/frame-visibility.test.ts
+          src/chrome/frame-list.test.ts
+          src/chrome/automation.test.ts
+          --reporter=default --reporter=junit --outputFile.junit=test-results/evaluation.xml
       - name: Save evaluation results on failure
         if: failure()
         uses: actions/upload-artifact@v7
@@ -126,9 +137,16 @@ jobs:
           e2e/closed-event-tools.spec.ts
           e2e/semantic-delta-tools.spec.ts
           e2e/semantic-alternative-path.spec.ts
+          e2e/snapshot-css-effects.spec.ts
+          e2e/snapshot-frame-readiness.spec.ts
+          e2e/snapshot-offscreen.spec.ts
+          e2e/snapshot-visibility.spec.ts
+          e2e/refresh-snapshot.spec.ts
+          e2e/semantic-delta-identity.spec.ts
+          e2e/locator-accessibility-semantics.spec.ts
           e2e/real-model-harness.spec.ts
           e2e/rendering.spec.ts
-          --grep 'purpose-specific tools|artifact-handoff|cancel-recovery|chooser-prompt-tools|dispatch-tools|failed-job-evidence|manifest-tools|multitab-tools|network-context|network-level-tools|recovery-tools|rolling-tools|upload-tools|upload-job-evidence|claims-fixture|procurement-fixture|procurement-tools|closed-event-fixture|semantic-delta-fixture|claims-queue-tools|closed-event-tools|semantic-delta-tools|semantic-alternative-path|local scripted semantic-delta|local scripted userscript-repair|local scripted binary-transfer|local scripted frame-replacement|local scripted window-transfer|a completed order with an unfinished background job|renders a complete Markdown response'
+          --grep 'purpose-specific tools|artifact-handoff|cancel-recovery|chooser-prompt-tools|dispatch-tools|failed-job-evidence|manifest-tools|multitab-tools|network-context|network-level-tools|recovery-tools|rolling-tools|upload-tools|upload-job-evidence|claims-fixture|procurement-fixture|procurement-tools|closed-event-fixture|semantic-delta-fixture|claims-queue-tools|closed-event-tools|semantic-delta-tools|semantic-alternative-path|local scripted semantic-delta|local scripted userscript-repair|local scripted binary-transfer|local scripted frame-replacement|local scripted window-transfer|a completed order with an unfinished background job|renders a complete Markdown response|snapshot-|refresh-snapshot|semantic-delta-identity|locator-accessibility-semantics'
           --project=current --shard=${{ matrix.shard }}/2 --workers=1 --retries=0 --reporter=list,html
       - name: Save browser reports on failure
         if: failure()
