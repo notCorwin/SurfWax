@@ -13,10 +13,11 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { registerBackgroundRequest, waitForConversationRun } from "@/agent/coordinator";
 import { modelMessages } from "@/agent/context-choice";
 import { contextPressure } from "@/agent/compaction";
+import { summarizeTokenUsage, type TokenUsageField, type TokenUsageSummary } from "@/agent/token-usage";
 import { canAutoDispatchFollowup, FOLLOWUP_EVENT_TYPES, rebuildFollowups, type FollowupMessage } from "@/agent/followups";
 import { contextUsedPercent, inputBudget, resolveModelLimit, type ModelLimit } from "@/agent/model-limits";
 import { reasoningSettingsFor, type ReasoningEffort } from "@/agent/reasoning";
-import { fromLogValue, type ConversationMessage, type EventLogger, type LogEvent } from "@/logging";
+import { type ConversationMessage, type EventLogger } from "@/logging";
 import type { ModelConfig } from "@/types";
 import { useRuntimeView } from "@/sidepanel/runtime-view";
 import { useRunState } from "@/sidepanel/useRunState";
@@ -42,26 +43,14 @@ type ContextUsage = { state: "loading" | "unavailable" } | {
   limit: ModelLimit;
   usedPercent: number;
 };
-type TokenUsage = { input: number; output: number; cacheRead: number };
 const limitSourceLabel = (limit: ModelLimit) => limit.source === "manual" ? "手动设置" : limit.source === "models.dev" ? "Models.dev" : "默认值";
 const usageLabel = (usage: ContextUsage) => usage.state === "ready"
-  ? `上下文已使用约 ${usage.usedPercent}% · ${usage.estimated.toLocaleString("zh-CN")} / ${usage.budget.toLocaleString("zh-CN")} tokens · ${limitSourceLabel(usage.limit)}`
+  ? `估算输入占用约 ${usage.usedPercent}% · ${usage.estimated.toLocaleString("zh-CN")} / ${usage.budget.toLocaleString("zh-CN")} tokens · 上限来源：${limitSourceLabel(usage.limit)}`
   : usage.state === "loading" ? "正在估算上下文…" : "无法取得上下文窗口；可在设置中手动指定";
 
-function sumTokenUsage(events: readonly LogEvent[]): TokenUsage {
-  const total: TokenUsage = { input: 0, output: 0, cacheRead: 0 };
-  for (const event of events) {
-    const usage = fromLogValue(event.usage, event.valueEncoding) as {
-      inputTokens?: unknown;
-      outputTokens?: unknown;
-      inputTokenDetails?: { cacheReadTokens?: unknown };
-    } | undefined;
-    if (typeof usage?.inputTokens === "number") total.input += usage.inputTokens;
-    if (typeof usage?.outputTokens === "number") total.output += usage.outputTokens;
-    if (typeof usage?.inputTokenDetails?.cacheReadTokens === "number") total.cacheRead += usage.inputTokenDetails.cacheReadTokens;
-  }
-  return total;
-}
+const formatTokenUsage = (field: TokenUsageField) => field.reported === 0
+  ? field.missing ? "未提供" : "暂无调用"
+  : `${field.missing ? "至少 " : ""}${field.total.toLocaleString("zh-CN")} tokens`;
 
 const FOLLOWUP_LIFECYCLE_EVENTS = new Set<string>([
   ...FOLLOWUP_EVENT_TYPES,
@@ -111,16 +100,16 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
     setUsage((previous) => !detailsOpen.current && previous.state === "ready" && next.state === "ready"
       && previous.usedPercent === next.usedPercent && previous.budget === next.budget && previous.limit === next.limit ? previous : next);
   }, []);
-  const [tokens, setTokens] = useState<TokenUsage>({ input: 0, output: 0, cacheRead: 0 });
+  const [tokens, setTokens] = useState<TokenUsageSummary>();
 
   useEffect(() => {
     let active = true;
     let version = 0;
-    setTokens({ input: 0, output: 0, cacheRead: 0 });
+    setTokens(undefined);
     const refresh = async () => {
       const current = ++version;
       const events = await logger.modelUsageEvents(conversationId);
-      if (active && current === version) setTokens(sumTokenUsage(events));
+      if (active && current === version) setTokens(summarizeTokenUsage(events));
     };
     const unsubscribe = logger.subscribe((event) => {
       if ((event.conversationId === conversationId && event.type === "model.step.finished") || event.type === "log.cleared") void refresh();
@@ -262,22 +251,25 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
         <div data-testid="context-detail" className="flex flex-col gap-3">
           <div className="flex items-start justify-between gap-3">
             <div className="flex flex-col gap-1">
-              <p className="text-muted-foreground">上下文用量</p>
+              <p className="text-muted-foreground">估算输入占用</p>
               <p className={cn("text-xl font-semibold tracking-tight", (usage.state === "unavailable" || usage.state === "ready" && usage.usedPercent >= 80) && "text-destructive")}>
                 {usage.state === "ready" ? `约 ${usage.usedPercent}%` : usage.state === "loading" ? "估算中" : "不可用"}
               </p>
             </div>
-            {source && <Badge variant={usage.state === "ready" && usage.usedPercent >= 80 ? "destructive" : "secondary"}>{source}</Badge>}
+            {source && <Badge variant={usage.state === "ready" && usage.usedPercent >= 80 ? "destructive" : "secondary"}>上限：{source}</Badge>}
           </div>
           {usage.state === "ready" ? <>
             <Progress data-testid="context-detail-progress" aria-label="上下文用量详情" value={usage.usedPercent} className="h-1.5" />
+            <p data-testid="context-estimate" className="tabular-nums">约 {usage.estimated.toLocaleString("zh-CN")} / {usage.budget.toLocaleString("zh-CN")} tokens</p>
+            <p className="leading-relaxed text-muted-foreground">包含系统提示词、工具定义和当前对话；实际用量由模型返回。</p>
+            <p className="text-muted-foreground">本会话模型步骤累计</p>
             <dl data-testid="context-token-usage" className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5">
-              <dt className="text-muted-foreground">累计输入</dt>
-              <dd data-testid="context-input" className="text-right font-medium tabular-nums">{tokens.input.toLocaleString("zh-CN")} tokens</dd>
-              <dt className="text-muted-foreground">累计输出</dt>
-              <dd data-testid="context-output" className="text-right font-medium tabular-nums">{tokens.output.toLocaleString("zh-CN")} tokens</dd>
-              <dt className="text-muted-foreground">累计缓存命中</dt>
-              <dd data-testid="context-cache-read" className="text-right font-medium tabular-nums">{tokens.cacheRead.toLocaleString("zh-CN")} tokens</dd>
+              <dt className="text-muted-foreground">输入</dt>
+              <dd data-testid="context-input" className="text-right font-medium tabular-nums">{tokens ? formatTokenUsage(tokens.input) : "读取中"}</dd>
+              <dt className="text-muted-foreground">输出</dt>
+              <dd data-testid="context-output" className="text-right font-medium tabular-nums">{tokens ? formatTokenUsage(tokens.output) : "读取中"}</dd>
+              <dt className="text-muted-foreground">缓存命中</dt>
+              <dd data-testid="context-cache-read" className="text-right font-medium tabular-nums">{tokens ? formatTokenUsage(tokens.cacheRead) : "读取中"}</dd>
             </dl>
           </> : <p className="leading-relaxed text-muted-foreground">
             {usage.state === "loading" ? "正在根据当前对话估算…" : "无法取得上下文窗口，可在设置中手动指定。"}

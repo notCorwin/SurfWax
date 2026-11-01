@@ -47,7 +47,10 @@ test("updates context usage from a completed reply and shows structured details"
     await opened.page.emulateMedia({ colorScheme: "dark" });
     await focusPageControl(opened.page, indicator);
     const tooltip = opened.page.getByRole("tooltip");
-    await expect(tooltip).toContainText("上下文用量");
+    await expect(tooltip).toContainText("估算输入占用");
+    await expect(tooltip).toContainText("系统提示词、工具定义和当前对话");
+    await expect(opened.page.getByTestId("context-estimate")).toContainText("/ 100,000 tokens");
+    await expect(opened.page.getByTestId("context-input")).toHaveText("暂无调用");
     await expect(tooltip).toContainText("输入");
     await expect(tooltip).toContainText("输出");
     await expect(tooltip).toContainText("缓存命中");
@@ -69,6 +72,36 @@ test("updates context usage from a completed reply and shows structured details"
     await expect(opened.page.getByTestId("context-output")).toHaveText("800 tokens");
     await expect(opened.page.getByTestId("context-cache-read")).toHaveText("500 tokens");
     await options.close();
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("distinguishes unreported usage from zero and partial totals", async () => {
+  const provider = await startProvider([
+    textResponse("NO_USAGE_REPLY"),
+    textResponse("用量测试"),
+    textResponse("REPORTED_USAGE_REPLY", { promptTokens: 2000, completionTokens: 0, cachedTokens: 0 }),
+  ]);
+  const opened = await openExtension();
+  try {
+    await (await configure(opened.context, opened.page, provider.baseURL, 100_000)).close();
+    const composer = opened.page.getByTestId("composer-input");
+    const indicator = opened.page.getByTestId("context-indicator");
+    await composer.fill("first");
+    await composer.press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("NO_USAGE_REPLY");
+    await expect(opened.page.getByRole("button", { name: "发送消息" })).toBeVisible();
+    await focusPageControl(opened.page, indicator);
+    await expect(opened.page.getByTestId("context-input")).toHaveText("未提供");
+    await expect(opened.page.getByTestId("context-output")).toHaveText("未提供");
+    await composer.fill("second");
+    await composer.press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("REPORTED_USAGE_REPLY");
+    await expect(opened.page.getByRole("button", { name: "发送消息" })).toBeVisible();
+    await focusPageControl(opened.page, indicator);
+    await expect(opened.page.getByTestId("context-input")).toHaveText("至少 2,000 tokens");
+    await expect(opened.page.getByTestId("context-output")).toHaveText("至少 0 tokens");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -163,7 +196,7 @@ test('a summary failure keeps original history and exposes a retry that creates 
   const provider = await startProvider([textResponse(largeReply), textResponse('摘要重试')], 0, summary, ['minimal'], 0, 1);
   const opened = await openExtension();
   try {
-    await (await configure(opened.context, opened.page, provider.baseURL, 50_000)).close();
+    await (await configure(opened.context, opened.page, provider.baseURL, 75_000)).close();
     await opened.page.getByTestId('composer-input').fill('retain original history on failure'); await opened.page.getByTestId('composer-input').press('Enter');
     await expect(opened.page.getByTestId('context-maintenance-error')).toBeVisible();
     let events = await readEvents(opened.page);
@@ -183,7 +216,7 @@ test('stopping background summarization leaves the source log intact and no part
   const provider = await startProvider([textResponse(largeReply), textResponse('停止摘要')], 0, summary, ['minimal'], 2_000);
   const opened = await openExtension();
   try {
-    await (await configure(opened.context, opened.page, provider.baseURL, 50_000)).close();
+    await (await configure(opened.context, opened.page, provider.baseURL, 75_000)).close();
     await opened.page.getByTestId('composer-input').fill('test summary cancellation'); await opened.page.getByTestId('composer-input').press('Enter');
     await opened.page.getByRole('button', { name: '停止压缩' }).click();
     await expect(opened.page.getByTestId('context-status')).toContainText('上下文压缩已停止');

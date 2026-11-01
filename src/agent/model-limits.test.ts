@@ -193,6 +193,15 @@ describe("models.dev limit matching", () => {
     expect(contextUsedPercent(999_999, matchModel(catalog, "https://api.openai.com/v1", "gpt-5")!)).toBe(100);
   });
 
+  it("measures the input against the available context without reserving output tokens", () => {
+    const contextOnly = { provider: "test", model: "test", context: 100_000, output: 80_000, source: "models.dev" as const };
+    expect(inputBudget(contextOnly)).toBe(100_000);
+    expect(contextUsedPercent(80_000, contextOnly)).toBe(80);
+    expect(inputBudget({ ...contextOnly, input: 60_000 })).toBe(60_000);
+    expect(contextUsedPercent(48_000, { ...contextOnly, input: 60_000 })).toBe(80);
+    expect(inputBudget({ ...contextOnly, input: 120_000 })).toBe(100_000);
+  });
+
   it("uses effort metadata only from an exact endpoint and model", () => {
     const models = {
       openai: { api: "https://api.openai.com/v1", models: { "gpt-5": { limit: { context: 1000 }, reasoning_options: [{ type: "effort", values: ["none", "low"] }] } } },

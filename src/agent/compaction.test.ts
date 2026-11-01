@@ -32,6 +32,14 @@ function fixture() {
 }
 
 describe("context choices and summary", () => {
+  it("sets the compression threshold to 80% of the context or the lower input limit", async () => {
+    const { model, raw } = fixture();
+    const limit = { provider: "test", model: "test", context: 100_000, output: 80_000, source: "models.dev" as const };
+    const options = { raw, branchIds: ["u", "a"], events: [], model, instructions: "system", tools: [] };
+    await expect(contextPressure({ ...options, limit })).resolves.toMatchObject({ threshold: 80_000 });
+    await expect(contextPressure({ ...options, limit: { ...limit, input: 60_000 } })).resolves.toMatchObject({ threshold: 48_000 });
+  });
+
   it("anchors estimates to the complete prompt and provider usage", async () => {
     const { events, logger, model, raw } = fixture();
     const compactor = new ContextCompactor({ model, logger, conversationId: "one", branchIds: ["u", "a"], signal: new AbortController().signal });

@@ -400,7 +400,7 @@ export function resolveModelLimit(
 }
 
 export function inputBudget(limit: ModelLimit): number {
-  return Math.min(limit.input ?? Number.POSITIVE_INFINITY, limit.context - Math.min(limit.output ?? 4096, Math.floor(limit.context / 5)));
+  return Math.min(limit.input ?? Number.POSITIVE_INFINITY, limit.context);
 }
 
 export async function modelSupportsImages(config: ModelConfig, options: Parameters<typeof resolveModelLimit>[1] = {}): Promise<boolean> {
