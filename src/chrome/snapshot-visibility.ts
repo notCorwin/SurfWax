@@ -1,11 +1,43 @@
 /** Style order must match the DOMSnapshot.captureSnapshot request. */
-export const SNAPSHOT_COMPUTED_STYLES = ["opacity", "overflow-x", "overflow-y", "visibility", "content-visibility", "position", "transform", "filter", "perspective", "contain", "will-change", "backdrop-filter", "translate", "rotate", "scale", "clip-path", "clip", "direction", "writing-mode", "display"] as const;
+export const SNAPSHOT_COMPUTED_STYLES = ["opacity", "overflow-x", "overflow-y", "visibility", "content-visibility", "position", "transform", "filter", "perspective", "contain", "will-change", "backdrop-filter", "translate", "rotate", "scale", "clip-path", "clip", "direction", "writing-mode", "display", "font-size", "-webkit-text-fill-color", "text-shadow", "-webkit-text-stroke-width", "background-clip", "text-transform", "-webkit-text-security", "text-overflow", "-webkit-line-clamp", "mask-image", "-webkit-mask-box-image-source", "float"] as const;
 
 type Interval = readonly [number, number];
 type Clip = { x: Interval; y: Interval };
 const infinite: Interval = [-Infinity, Infinity];
 const intersection = (a: Interval, b: Interval): Interval => [Math.max(a[0], b[0]), Math.min(a[1], b[1])];
 const intersects = (a: Interval, b: Interval) => a[1] > b[0] && a[0] < b[1] && b[1] > b[0];
+
+export type SnapshotTextPaintCandidate = {
+  backendNodeId: number;
+  frameId: string;
+  /** CSS-generated text is represented by its pseudo-element backend node. */
+  kind?: "pseudo";
+  pseudoType?: "before" | "after";
+  sourceText?: string;
+  layoutText?: string;
+  textTransform?: string;
+  textSecurity?: string;
+  /** Browser text-box offsets need not match transformed text offsets. */
+  textBoxes?: Array<{ start: number; length: number; bounds: readonly number[] }>;
+  /** True only if all source text boxes are inside a known, uncomplicated clip. */
+  fullyWithinClip?: boolean;
+  /** False only when all laid out elements in this document are non-floating. */
+  documentFloatRisk?: boolean;
+  /** Glyphs have zero font size and zero layout extent. */
+  zeroFont?: boolean;
+  /** A positively identified, rendered ::first-letter prefix. */
+  firstLetter?: string;
+  /** A ::first-letter may apply but cannot be associated with certainty. */
+  firstLetterUnknown?: boolean;
+};
+
+/** Recognize only computed colors whose alpha is explicitly zero. */
+function transparentColor(value: string): boolean {
+  const color = value.trim().toLowerCase();
+  if (color === "transparent") return true;
+  return /^rgba\([^()]*,\s*(?:0+(?:\.0*)?|\.0+)%?\s*\)$/.test(color)
+    || /^(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\([^()]*\/\s*(?:0+(?:\.0*)?|\.0+)%?\s*\)$/.test(color);
+}
 
 type ScrollDirections = { x: "positive" | "negative" | "unknown"; y: "positive" | "unknown" };
 const unknownDirections: ScrollDirections = { x: "unknown", y: "unknown" };
@@ -116,16 +148,35 @@ function emptyLegacyClip(value: string, position: string): boolean {
  * viewport or a scrollable container can still be reached by scrolling.
  * Missing layout does not imply a hidden subtree (e.g. display:contents).
  */
-export function snapshotVisibility(snapshot: any): Map<number, boolean> {
+export function snapshotVisibility(snapshot: any, options: { textPaintCandidates?: SnapshotTextPaintCandidate[] } = {}): Map<number, boolean> {
   if (!Array.isArray(snapshot?.documents) || !Array.isArray(snapshot?.strings)) throw new Error("Invalid DOM snapshot");
   const result = new Map<number, boolean>();
   const strings: string[] = snapshot.strings;
+  const segmenter = options.textPaintCandidates ? new Intl.Segmenter(undefined, { granularity: "grapheme" }) : undefined;
   for (const document of snapshot.documents) {
     const nodes = document.nodes, layout = document.layout;
     if (!Array.isArray(nodes?.backendNodeId) || !Array.isArray(nodes?.parentIndex)
       || !Array.isArray(layout?.nodeIndex) || !Array.isArray(layout?.bounds) || !Array.isArray(layout?.styles)) throw new Error("Invalid DOM snapshot document");
     const layoutByNode = new Map<number, number>();
-    layout.nodeIndex.forEach((nodeIndex: number, index: number) => layoutByNode.set(nodeIndex, index));
+    const multiLayoutText = new Set<number>();
+    layout.nodeIndex.forEach((nodeIndex: number, index: number) => {
+      if (layoutByNode.has(nodeIndex) && nodes.nodeType?.[nodeIndex] === 3) multiLayoutText.add(nodeIndex);
+      layoutByNode.set(nodeIndex, index);
+    });
+    const documentFloatRisk = layout.nodeIndex.some((index: number, layoutIndex: number) => nodes.nodeType?.[index] === 1
+      && (strings[layout.styles[layoutIndex]?.[31]] ?? "") !== "none");
+    const boxesByLayout = new Map<number, Array<{ start: number; length: number; bounds: readonly number[] }>>();
+    const textBoxes = document.textBoxes;
+    if (options.textPaintCandidates && Array.isArray(textBoxes?.layoutIndex)) {
+      textBoxes.layoutIndex.forEach((layoutIndex: number, index: number) => {
+        const start = textBoxes.start?.[index], length = textBoxes.length?.[index], bounds = textBoxes.bounds?.[index];
+        if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(length) || length < 0
+          || !Array.isArray(bounds) || bounds.length !== 4 || !bounds.every(Number.isFinite)) return;
+        const boxes = boxesByLayout.get(layoutIndex) ?? [];
+        boxes.push({ start, length, bounds });
+        boxesByLayout.set(layoutIndex, boxes);
+      });
+    }
     const nodeName = (index: number) => strings[nodes.nodeName?.[index]]?.toUpperCase();
     const styleFor = (nodeIndex: number, position: number) => {
       const layoutIndex = layoutByNode.get(nodeIndex);
@@ -143,19 +194,44 @@ export function snapshotVisibility(snapshot: any): Map<number, boolean> {
     const htmlDirections = scrollDirections((position) => styleFor(html, position));
     const bodyDirections = scrollDirections((position) => styleFor(body, position));
     const rootDirections = htmlDirections.x === bodyDirections.x && htmlDirections.y === bodyDirections.y ? htmlDirections : unknownDirections;
-    const viewportAxis = (axis: 0 | 1): { reachable: Interval; fixed: Interval } => {
+    const viewportAxis = (axis: 0 | 1): { reachable: Interval; fixed: Interval; known: boolean } => {
       const extent = viewport[axis + 2], content = axis === 0 ? document.contentWidth : document.contentHeight;
       const offset = axis === 0 ? document.scrollOffsetX : document.scrollOffsetY;
       if (!(typeof extent === "number" && Number.isFinite(extent) && extent > 0
         && typeof content === "number" && Number.isFinite(content) && content >= 0
-        && typeof offset === "number" && Number.isFinite(offset))) return { reachable: infinite, fixed: infinite };
+        && typeof offset === "number" && Number.isFinite(offset))) return { reachable: infinite, fixed: infinite, known: false };
       const [minimum, maximum] = scrollRange(content, extent, axis === 0 ? rootDirections.x : rootDirections.y);
-      return { reachable: [minimum - 1, maximum + extent + 1], fixed: [offset - 1, offset + extent + 1] };
+      return { reachable: [minimum - 1, maximum + extent + 1], fixed: [offset - 1, offset + extent + 1], known: true };
     };
     const horizontalViewport = viewportAxis(0), verticalViewport = viewportAxis(1);
     const documentClip: Clip = { x: horizontalViewport.reachable, y: verticalViewport.reachable };
     const viewportClip: Clip = { x: horizontalViewport.fixed, y: verticalViewport.fixed };
-    const contexts: Array<{ transparent: boolean; contentHidden: boolean; emptyClip: boolean; clip: Clip; absoluteClip: Clip; fixedClip: Clip; axisAligned: boolean }> = [];
+    // Pseudo highlights may recolor or resize text without changing the text
+    // layout's computed styles. Candidates stay visible until the caller has
+    // checked their actual selection and pseudo-element state.
+    const frameId = strings[document.frameId];
+    // A visible ::first-letter has its own layout node, while the AX text row
+    // still refers to the original #text node, potentially deep in the block.
+    type FirstLetter = { text?: string; backendNodeId?: number; visibleFill: boolean; matched: boolean; fullyWithinClip: boolean };
+    const firstLetterParents = new Map<number, FirstLetter>();
+    layout.nodeIndex.forEach((index: number, layoutIndex: number) => {
+      if (nodeName(index) !== "::FIRST-LETTER") return;
+      const pseudoStyles = layout.styles[layoutIndex] ?? [];
+      const fill = strings[pseudoStyles[21]] ?? "";
+      const font = strings[pseudoStyles[20]] ?? "";
+      const text = strings[layout.text?.[layoutIndex]];
+      const bounds: number[] = layout.bounds[layoutIndex] ?? [];
+      // Chrome commonly emits a separate geometry row with no text for the
+      // same pseudo node before its text-bearing layout row.
+      if (!text) return;
+      const parent = nodes.parentIndex[index];
+      // Multiple pseudo layouts are ambiguous; retain rather than guess.
+      if (firstLetterParents.has(parent)) { firstLetterParents.get(parent)!.text = undefined; return; }
+      firstLetterParents.set(parent, { text, backendNodeId: nodes.backendNodeId[index],
+        visibleFill: /^rgb\(/.test(fill) && font !== "0px" && font !== "" && bounds.length >= 4
+          && bounds.every(Number.isFinite) && bounds[2]! > 0 && bounds[3]! > 0, matched: false, fullyWithinClip: false });
+    });
+    const contexts: Array<{ transparent: boolean; contentHidden: boolean; emptyClip: boolean; clip: Clip; absoluteClip: Clip; fixedClip: Clip; axisAligned: boolean; paintedTextRisk: boolean; textClipRisk: boolean; svg: boolean; firstLetter?: FirstLetter }> = [];
     for (let index = 0; index < nodes.backendNodeId.length; index++) {
       const parent = contexts[nodes.parentIndex[index]];
       let transparent = parent?.transparent ?? false;
@@ -166,15 +242,32 @@ export function snapshotVisibility(snapshot: any): Map<number, boolean> {
       let absoluteClip: Clip = parent?.absoluteClip ?? (index === documentNode ? documentClip : unbounded);
       let fixedClip: Clip = parent?.fixedClip ?? (index === documentNode ? viewportClip : unbounded);
       let axisAligned = parent?.axisAligned ?? true;
+      let paintedTextRisk = parent?.paintedTextRisk ?? false;
+      let textClipRisk = parent?.textClipRisk ?? false;
+      let svg = parent?.svg ?? false;
+      const firstLetter = firstLetterParents.get(index) ?? parent?.firstLetter;
       const layoutIndex = layoutByNode.get(index);
       // Frame elements do not use display:contents, and a frame with no
       // layout box cannot display its document. General layoutless nodes are
       // retained because their descendants may still be rendered.
       const tagName = nodeName(index);
+      svg ||= tagName === "SVG";
       let visible = !transparent && !contentHidden && !emptyClip && !(layoutIndex === undefined && (tagName === "IFRAME" || tagName === "FRAME"));
       if (layoutIndex !== undefined) {
         const styles: number[] = layout.styles[layoutIndex] ?? [];
         const style = (position: number) => strings[styles[position]!] ?? "";
+        // A filter may synthesize pixels and a background clipped to glyphs
+        // can paint descendant text even when its fill is transparent.
+        const filter = style(7), backgroundClip = style(24);
+        if (nodes.nodeType?.[index] === 1) {
+          paintedTextRisk ||= !filter || filter !== "none" || !backgroundClip || /(?:^|,)\s*text\s*(?:,|$)/.test(backgroundClip);
+          // These effects may hide characters even when their text boxes lie
+          // inside the ancestor's ordinary overflow clip.
+          const overflowText = style(27), lineClamp = style(28), mask = style(29), webkitMaskBorder = style(30);
+          textClipRisk ||= !overflowText || overflowText !== "clip" || !lineClamp || lineClamp !== "none" || !mask || mask !== "none"
+            || !webkitMaskBorder || webkitMaskBorder !== "none"
+            || !style(15) || style(15) !== "none" || !style(16) || style(16) !== "auto";
+        }
         const position = style(5);
         // Unlike overflow, these clips apply to the complete rendered subtree,
         // including fixed and absolute descendants that escape overflow clips.
@@ -213,7 +306,68 @@ export function snapshotVisibility(snapshot: any): Map<number, boolean> {
         // They have no visual box of their own, but must not hide descendants.
         const outsideClip = hasBounds && ((bounds[2]! > 0 && !intersects(x, clip.x)) || (bounds[3]! > 0 && !intersects(y, clip.y)));
         const emptyFrame = (tagName === "IFRAME" || tagName === "FRAME") && hasBounds && (bounds[2]! <= 0 || bounds[3]! <= 0);
+        const isText = nodes.nodeType?.[index] === 3;
+        const pseudoType = tagName === "::BEFORE" ? "before" : tagName === "::AFTER" ? "after" : undefined;
+        const pseudoText = pseudoType ? strings[layout.text?.[layoutIndex]] : undefined;
+        const isPaintedText = isText || !!pseudoText;
+        const fontSize = style(20), fill = style(21), shadow = style(22), stroke = style(23);
+        const zeroText = isPaintedText && fontSize === "0px" && hasBounds && bounds[2] === 0 && bounds[3] === 0 && !paintedTextRisk && !svg;
+        const transparentText = isPaintedText && transparentColor(fill) && shadow === "none" && stroke === "0px" && !paintedTextRisk && !svg;
         visible = !transparent && !contentHidden && !emptyClip && visibility !== "hidden" && visibility !== "collapse" && !outsideClip && !emptyFrame;
+        if (tagName === "::FIRST-LETTER" && firstLetter && firstLetter.backendNodeId === nodes.backendNodeId[index]) {
+          firstLetter.fullyWithinClip = visible && !textClipRisk && axisAligned && hasBounds && bounds[2]! > 0 && bounds[3]! > 0
+            && bounds[0]! >= clip.x[0] && bounds[1]! >= clip.y[0]
+            && bounds[0]! + bounds[2]! <= clip.x[1] && bounds[1]! + bounds[3]! <= clip.y[1];
+        }
+        if ((isText || pseudoText) && typeof frameId === "string") {
+          const sourceText = isText ? strings[nodes.nodeValue?.[index]] : pseudoText, layoutText = strings[layout.text?.[layoutIndex]];
+          let firstLetterText: string | undefined;
+          let firstLetterUnknown = !!firstLetter && !firstLetter.matched;
+          if (firstLetter && !firstLetter.matched && firstLetter.text && typeof sourceText === "string" && typeof layoutText === "string"
+            && sourceText.startsWith(firstLetter.text) && layoutText === sourceText.slice(firstLetter.text.length)) {
+            firstLetter.matched = true;
+            if (firstLetter.visibleFill && firstLetter.backendNodeId !== undefined && result.get(firstLetter.backendNodeId) === true)
+              firstLetterText = firstLetter.text;
+            else firstLetterUnknown = true;
+          }
+          if (visible && (zeroText || transparentText) && !multiLayoutText.has(index) && typeof nodes.backendNodeId[index] === "number") {
+            const boxes = boxesByLayout.get(layoutIndex);
+            // CDP text-box starts use source UTF-16 offsets, but lengths can
+            // use rendered glyph counts (e.g. case expansion or masking).
+            // Require coverage of every source grapheme start; do not interpret
+            // box lengths as offsets into the transformed layout string.
+            const prefixLength = firstLetterText?.length ?? 0;
+            let graphemesCovered = typeof sourceText === "string" && !!boxes?.length && !!segmenter;
+            if (graphemesCovered && sourceText && boxes && segmenter) {
+              const ordered = [...boxes].sort((a, b) => a.start - b.start);
+              let nextBox = 0, coveredEnd = 0;
+              for (const { index } of segmenter.segment(sourceText)) {
+                if (index < prefixLength) continue;
+                const offset = index - prefixLength;
+                while (nextBox < ordered.length && ordered[nextBox]!.start <= offset) {
+                  const box = ordered[nextBox++]!;
+                  coveredEnd = Math.max(coveredEnd, box.start + box.length);
+                }
+                if (offset >= coveredEnd) { graphemesCovered = false; break; }
+              }
+            }
+            const fullyWithinClip = horizontalViewport.known && verticalViewport.known && !textClipRisk && axisAligned
+              && (!firstLetterUnknown || !!firstLetterText) && (!firstLetterText || firstLetter?.fullyWithinClip)
+              && typeof sourceText === "string" && !!sourceText.length && graphemesCovered && !!boxes?.length
+              && boxes.every(({ start, length, bounds }) => (bounds[2] === 0 || bounds[3] === 0)
+                ? /^[\r\n]+$/.test(sourceText.slice(start + prefixLength, start + prefixLength + length))
+                : bounds[2]! > 0 && bounds[3]! > 0 && bounds[0]! >= clip.x[0] && bounds[1]! >= clip.y[0]
+                  && bounds[0]! + bounds[2]! <= clip.x[1] && bounds[1]! + bounds[3]! <= clip.y[1]);
+            options.textPaintCandidates?.push({ backendNodeId: nodes.backendNodeId[index], frameId,
+              documentFloatRisk,
+              ...(pseudoType ? { kind: "pseudo" as const, pseudoType } : {}),
+              ...(typeof sourceText === "string" ? { sourceText } : {}), ...(typeof layoutText === "string" ? { layoutText } : {}),
+              ...(style(25) ? { textTransform: style(25) } : {}), ...(style(26) ? { textSecurity: style(26) } : {}),
+              ...(boxes ? { textBoxes: boxes } : {}), ...(fullyWithinClip ? { fullyWithinClip: true } : {}),
+              ...(zeroText ? { zeroFont: true } : {}),
+              ...(firstLetterText ? { firstLetter: firstLetterText } : {}), ...(firstLetterUnknown && !firstLetterText ? { firstLetterUnknown: true } : {}) });
+          }
+        }
         const overflowX = style(1), overflowY = style(2);
         const scroll: number[] = layout.scrollRects?.[layoutIndex] ?? [];
         const directions = scrollDirections(style);
@@ -245,7 +399,7 @@ export function snapshotVisibility(snapshot: any): Map<number, boolean> {
       }
       const backendId = nodes.backendNodeId[index];
       if (typeof backendId === "number") result.set(backendId, visible);
-      contexts[index] = { transparent, contentHidden, emptyClip, clip, absoluteClip, fixedClip, axisAligned };
+      contexts[index] = { transparent, contentHidden, emptyClip, clip, absoluteClip, fixedClip, axisAligned, paintedTextRisk, textClipRisk, svg, firstLetter };
     }
   }
   return result;

@@ -66,6 +66,7 @@ jobs:
           src/chrome/snapshot-pagination.test.ts
           src/chrome/snapshot-render.test.ts
           src/chrome/snapshot-visibility.test.ts
+          src/chrome/snapshot-text-paint.test.ts
           src/chrome/frame-visibility.test.ts
           src/chrome/frame-list.test.ts
           src/chrome/automation.test.ts
@@ -138,6 +139,8 @@ jobs:
           e2e/semantic-delta-tools.spec.ts
           e2e/semantic-alternative-path.spec.ts
           e2e/snapshot-css-effects.spec.ts
+          e2e/snapshot-text-paint.spec.ts
+          e2e/snapshot-firstline-proof.spec.ts
           e2e/snapshot-frame-readiness.spec.ts
           e2e/snapshot-offscreen.spec.ts
           e2e/snapshot-visibility.spec.ts

@@ -1,5 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 import { AutomationRuntime } from "./automation";
+import { TEXT_PAINT_CACHE_LOOKUP_SOURCE, TEXT_PAINT_CACHE_REGISTER_SOURCE } from "./snapshot-text-paint";
+
+function textPaintSnapshot() {
+  const strings: string[] = [];
+  const id = (value: string) => { const found = strings.indexOf(value); return found < 0 ? strings.push(value) - 1 : found; };
+  const names = ["#document", "IFRAME", "IFRAME", "#text", "#text"];
+  const text = ["", "", "", "Hidden item", "XX Paint YY"];
+  const style = ["1", "visible", "visible", "visible", "visible", "static", "none", "none", "none", "none", "auto", "none", "none", "none", "none", "none", "auto", "ltr", "horizontal-tb", "block", "16px", "rgba(0, 0, 0, 0)", "none", "0px", "border-box", "none", "none", "clip", "none", "none", "none"].map(id);
+  return { strings, documents: [{ frameId: id("root"), contentWidth: 500, contentHeight: 500, scrollOffsetX: 0, scrollOffsetY: 0,
+    nodes: { backendNodeId: [1, 101, 102, 7, 8], parentIndex: [-1, 0, 0, 0, 0], nodeType: [9, 1, 1, 3, 3], nodeName: names.map(id), nodeValue: text.map(id) },
+    layout: { nodeIndex: [0, 1, 2, 3, 4], bounds: [[0, 0, 500, 500], [0, 0, 100, 100], [0, 0, 100, 100], [0, 0, 100, 20], [0, 30, 100, 20]],
+      styles: [[], style, style, style, style], text: text.map(id) },
+    textBoxes: { layoutIndex: [3, 4], start: [0, 0], length: [11, 11], bounds: [[0, 0, 100, 20], [0, 30, 100, 20]] },
+  }] };
+}
 
 function harness() {
   const command = vi.fn(async (source: chrome.debugger.Debuggee & { sessionId?: string }, method: string, params: any = {}): Promise<any> => {
@@ -32,6 +47,311 @@ function harness() {
 }
 
 describe("frame tree discovery", () => {
+  it.each(["during-confirmation", "between-attempts"] as const)("resets text-paint retry budget after navigation %s", async (when) => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let layouts = 0, navigateAtReady = false;
+    const navigate = () => runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "root" } });
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "Runtime.evaluate" && params.expression === "document.readyState === 'complete'" && navigateAtReady) {
+        navigateAtReady = false; navigate();
+      }
+      if (method === "DOMSnapshot.captureSnapshot") {
+        const snapshot = textPaintSnapshot();
+        const opaque = ++layouts === 2 || layouts >= 4;
+        if (opaque) {
+          snapshot.strings.push("rgb(0, 0, 0)");
+          for (const style of snapshot.documents[0]!.layout.styles) if (style.length) style[21] = snapshot.strings.length - 1;
+        }
+        if (layouts === 2) { if (when === "during-confirmation") navigate(); else navigateAtReady = true; }
+        return snapshot;
+      }
+      if (method === "Accessibility.getFullAXTree") return { nodes: params.frameId ? [] : [
+        { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["text"] },
+        { nodeId: "text", parentId: "root", backendDOMNodeId: 7, role: { value: "StaticText" }, name: { value: "Hidden item" } },
+      ] };
+      if (method === "DOM.resolveNode") return { object: { objectId: `paint-${params.backendNodeId}` } };
+      if (method === "Runtime.callFunctionOn" && [TEXT_PAINT_CACHE_REGISTER_SOURCE, TEXT_PAINT_CACHE_LOOKUP_SOURCE].includes(params.functionDeclaration))
+        return { result: { value: params.arguments[1].value.map((id: number) => ({ sourceText: id === 7 ? "Hidden item" : "XX Paint YY", ranges: [], firstLineRisk: false, firstLetterRisk: false, unknown: false })) } };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      return original(source, method, params);
+    });
+    expect((await (await runtime.createPage(3)).snapshot()).snapshot).toContain('StaticText "Hidden item"');
+    expect(layouts).toBe(5);
+    await runtime.abortSessions();
+  });
+  it.each([false, true])("rechecks text paint inputs and bounds retries when changing continuously: %s", async (unstable) => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let layouts = 0, axCaptures = 0;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOMSnapshot.captureSnapshot") {
+        const snapshot = textPaintSnapshot();
+        const opaque = unstable ? ++layouts % 2 === 0 : ++layouts >= 2;
+        if (opaque) {
+          snapshot.strings.push("rgb(0, 0, 0)");
+          for (const style of snapshot.documents[0]!.layout.styles) if (style.length) style[21] = snapshot.strings.length - 1;
+        }
+        return snapshot;
+      }
+      if (method === "Accessibility.getFullAXTree") {
+        if (params.frameId) return { nodes: [] };
+        axCaptures++;
+        return { nodes: [{ nodeId: "root", role: { value: "RootWebArea" }, childIds: ["text"] },
+          { nodeId: "text", parentId: "root", backendDOMNodeId: 7, role: { value: "StaticText" }, name: { value: "Hidden item" } }] };
+      }
+      if (method === "DOM.resolveNode") return { object: { objectId: `paint-${params.backendNodeId}` } };
+      if (method === "Runtime.callFunctionOn" && [TEXT_PAINT_CACHE_REGISTER_SOURCE, TEXT_PAINT_CACHE_LOOKUP_SOURCE].includes(params.functionDeclaration))
+        return { result: { value: params.arguments[1].value.map((id: number) => ({ sourceText: id === 7 ? "Hidden item" : "XX Paint YY", ranges: [], firstLineRisk: false, firstLetterRisk: false, unknown: false })) } };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    if (unstable) {
+      await expect(page.snapshot()).rejects.toMatchObject({ code: "snapshot-unavailable", detail: { reason: "text-paint-unstable" } });
+      expect(layouts).toBe(4);
+    } else {
+      expect((await page.snapshot()).snapshot).toContain('StaticText "Hidden item"');
+      expect(layouts).toBe(3);
+    }
+    expect(axCaptures).toBe(2);
+    await runtime.abortSessions();
+  });
+  it("batches text paint evidence in the owning frame and projects only painted fragments", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOMSnapshot.captureSnapshot") return textPaintSnapshot();
+      if (method === "Accessibility.getFullAXTree") return { nodes: params.frameId ? [] : [
+        { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["hidden", "painted"] },
+        { nodeId: "hidden", parentId: "root", backendDOMNodeId: 7, role: { value: "StaticText" }, name: { value: "Hidden item" } },
+        { nodeId: "painted", parentId: "root", backendDOMNodeId: 8, role: { value: "StaticText" }, name: { value: "XX Paint YY" } },
+      ] };
+      if (method === "DOM.resolveNode") return { object: { objectId: `paint-${params.backendNodeId}` } };
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration === TEXT_PAINT_CACHE_REGISTER_SOURCE) return { result: { value: [
+        { sourceText: "Hidden item", ranges: [], firstLineRisk: false, firstLetterRisk: false, unknown: false },
+        { sourceText: "XX Paint YY", ranges: [], selection: { start: 3, end: 8, text: "Paint" }, firstLineRisk: false, firstLetterRisk: false, unknown: false },
+      ] } };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      return original(source, method, params);
+    });
+    const result = await (await runtime.createPage(3)).snapshot();
+    expect(result.snapshot).not.toContain("Hidden item");
+    expect(result.snapshot).toContain('StaticText "Paint"');
+    expect(result.snapshot).not.toContain("XX Paint YY");
+    const calls = command.mock.calls.filter(([, method, params]) => method === "DOM.resolveNode" && params.objectGroup?.startsWith("surf-wax-text-paint:"));
+    expect(calls).toHaveLength(2);
+    expect(calls.every(([, , params]) => params.executionContextId === 33)).toBe(true);
+    expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.callFunctionOn" && params.functionDeclaration === TEXT_PAINT_CACHE_REGISTER_SOURCE)).toHaveLength(1);
+    expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.releaseObjectGroup" && params.objectGroup?.startsWith("surf-wax-text-paint:"))).toHaveLength(1);
+    await runtime.abortSessions();
+  });
+
+  it("reuses weak text handles but recomputes evidence, resolves misses, and invalidates on context destruction", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let selected = false, missFirst = false;
+    const value = (id: number) => id === 7
+      ? { sourceText: "Hidden item", ranges: [], firstLineRisk: false, firstLetterRisk: false, unknown: false }
+      : { sourceText: "XX Paint YY", ranges: [], ...(selected ? { selection: { start: 3, end: 8, text: "Paint" } } : {}), firstLineRisk: false, firstLetterRisk: false, unknown: false };
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOMSnapshot.captureSnapshot") return textPaintSnapshot();
+      if (method === "Accessibility.getFullAXTree") return { nodes: params.frameId ? [] : [
+        { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["hidden", "painted"] },
+        { nodeId: "hidden", parentId: "root", backendDOMNodeId: 7, role: { value: "StaticText" }, name: { value: "Hidden item" } },
+        { nodeId: "painted", parentId: "root", backendDOMNodeId: 8, role: { value: "StaticText" }, name: { value: "XX Paint YY" } },
+      ] };
+      if (method === "DOM.resolveNode") return { object: { objectId: `paint-${params.backendNodeId}` } };
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration === TEXT_PAINT_CACHE_REGISTER_SOURCE)
+        return { result: { value: params.arguments[1].value.map(value) } };
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration === TEXT_PAINT_CACHE_LOOKUP_SOURCE)
+        return { result: { value: params.arguments[1].value.map((id: number) => missFirst && id === 7 ? null : value(id)) } };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    expect((await page.snapshot()).snapshot).not.toContain("Paint");
+    selected = true;
+    expect((await page.snapshot()).snapshot).toContain('StaticText "Paint"');
+    expect(command.mock.calls.filter(([, method, params]) => method === "DOM.resolveNode" && params.objectGroup?.startsWith("surf-wax-text-paint:"))).toHaveLength(2);
+    missFirst = true;
+    await page.snapshot();
+    expect(command.mock.calls.filter(([, method, params]) => method === "DOM.resolveNode" && params.objectGroup?.startsWith("surf-wax-text-paint:"))).toHaveLength(3);
+    const tokensBefore = command.mock.calls.filter(([, method, params]) => method === "Runtime.callFunctionOn" && params.functionDeclaration === TEXT_PAINT_CACHE_REGISTER_SOURCE).map(([, , params]) => params.arguments[0].value);
+    expect(new Set(tokensBefore).size).toBe(1);
+    runtime.handleEvent({ tabId: 3 }, "Runtime.executionContextDestroyed", { executionContextId: 33 });
+    await page.snapshot();
+    const resolves = command.mock.calls.filter(([, method, params]) => method === "DOM.resolveNode" && params.objectGroup?.startsWith("surf-wax-text-paint:"));
+    expect(resolves).toHaveLength(5);
+    const tokensAfter = command.mock.calls.filter(([, method, params]) => method === "Runtime.callFunctionOn" && params.functionDeclaration === TEXT_PAINT_CACHE_REGISTER_SOURCE).map(([, , params]) => params.arguments[0].value);
+    expect(new Set(tokensAfter).size).toBe(2);
+    await runtime.abortSessions();
+  });
+
+  it("coalesces concurrent captures before reusing a frame's text handles", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let release!: () => void, notify!: () => void, notified = false;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { notify = resolve; });
+    const value = (id: number) => ({ sourceText: id === 7 ? "Hidden item" : "XX Paint YY", ranges: [], firstLineRisk: false, firstLetterRisk: false, unknown: false });
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOMSnapshot.captureSnapshot") return textPaintSnapshot();
+      if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+      if (method === "DOM.resolveNode" && params.objectGroup?.startsWith("surf-wax-text-paint:")) {
+        if (!notified) { notified = true; notify(); }
+        await hold;
+        return { object: { objectId: `paint-${params.backendNodeId}` } };
+      }
+      if (method === "Runtime.callFunctionOn" && [TEXT_PAINT_CACHE_REGISTER_SOURCE, TEXT_PAINT_CACHE_LOOKUP_SOURCE].includes(params.functionDeclaration))
+        return { result: { value: params.arguments[1].value.map(value) } };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    const first = page.snapshot(), second = page.snapshot();
+    await entered;
+    expect(command.mock.calls.filter(([, method, params]) => method === "DOM.resolveNode" && params.objectGroup?.startsWith("surf-wax-text-paint:"))).toHaveLength(2);
+    release();
+    await Promise.all([first, second]);
+    expect(command.mock.calls.filter(([, method, params]) => method === "DOM.resolveNode" && params.objectGroup?.startsWith("surf-wax-text-paint:"))).toHaveLength(2);
+    expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.callFunctionOn" && params.functionDeclaration === TEXT_PAINT_CACHE_LOOKUP_SOURCE)).toHaveLength(1);
+    await runtime.abortSessions();
+  });
+
+  it("cancels a queued capture without dispatching redundant text resolutions", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let release!: () => void, notify!: () => void, notified = false;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { notify = resolve; });
+    const value = (id: number) => ({ sourceText: id === 7 ? "Hidden item" : "XX Paint YY", ranges: [], firstLineRisk: false, firstLetterRisk: false, unknown: false });
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOMSnapshot.captureSnapshot") return textPaintSnapshot();
+      if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+      if (method === "DOM.resolveNode" && params.objectGroup?.startsWith("surf-wax-text-paint:")) {
+        if (!notified) { notified = true; notify(); }
+        await hold; return { object: { objectId: `paint-${params.backendNodeId}` } };
+      }
+      if (method === "Runtime.callFunctionOn" && [TEXT_PAINT_CACHE_REGISTER_SOURCE, TEXT_PAINT_CACHE_LOOKUP_SOURCE].includes(params.functionDeclaration))
+        return { result: { value: params.arguments[1].value.map(value) } };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    const first = page.snapshot();
+    await entered;
+    const frame = (runtime as any).frameDocuments.get(JSON.stringify([3, "root", null]));
+    const firstTail = frame.paintCacheTail;
+    const controller = new AbortController();
+    runtime.setContext({ signal: controller.signal });
+    const second = page.snapshot();
+    await vi.waitFor(() => expect(frame.paintCacheTail).not.toBe(firstTail));
+    controller.abort();
+    await expect(second).rejects.toMatchObject({ name: "AbortError" });
+    release();
+    await first;
+    await vi.waitFor(() => expect(frame.paintCacheTail).toBeUndefined());
+    expect(command.mock.calls.filter(([, method, params]) => method === "DOM.resolveNode" && params.objectGroup?.startsWith("surf-wax-text-paint:"))).toHaveLength(2);
+    await runtime.abortSessions();
+  });
+
+  it("discards in-flight paint evidence and rebuilds the cache after its frame context expires", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let release!: () => void, notify!: () => void, firstBatch = true;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { notify = resolve; });
+    const value = (id: number) => ({ sourceText: id === 7 ? "Hidden item" : "XX Paint YY", ranges: [], firstLineRisk: false, firstLetterRisk: false, unknown: false });
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOMSnapshot.captureSnapshot") return textPaintSnapshot();
+      if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+      if (method === "DOM.resolveNode" && params.objectGroup?.startsWith("surf-wax-text-paint:")) {
+        if (firstBatch) { notify(); await hold; }
+        return { object: { objectId: `paint-${params.backendNodeId}` } };
+      }
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration === TEXT_PAINT_CACHE_REGISTER_SOURCE)
+        return { result: { value: params.arguments[1].value.map(value) } };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      return original(source, method, params);
+    });
+    const pending = (await runtime.createPage(3)).snapshot();
+    await entered;
+    runtime.handleEvent({ tabId: 3 }, "Runtime.executionContextDestroyed", { executionContextId: 33 });
+    firstBatch = false;
+    release();
+    await pending;
+    expect(command.mock.calls.filter(([, method, params]) => method === "DOM.resolveNode" && params.objectGroup?.startsWith("surf-wax-text-paint:"))).toHaveLength(4);
+    expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.callFunctionOn" && params.functionDeclaration === TEXT_PAINT_CACHE_REGISTER_SOURCE)).toHaveLength(1);
+    await runtime.abortSessions();
+  });
+
+  it("waits for all text-node resolutions to settle before releasing their group on failure", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let release!: () => void, notify!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { notify = resolve; });
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOMSnapshot.captureSnapshot") return textPaintSnapshot();
+      if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+      if (method === "DOM.resolveNode" && params.objectGroup?.startsWith("surf-wax-text-paint:")) {
+        if (params.backendNodeId === 7) throw new Error("CDP disconnected");
+        notify(); await hold; return { object: { objectId: "late-node" } };
+      }
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      return original(source, method, params);
+    });
+    const pending = (await runtime.createPage(3)).snapshot();
+    const rejected = expect(pending).rejects.toThrow("CDP disconnected");
+    await entered;
+    expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObjectGroup" && params.objectGroup?.startsWith("surf-wax-text-paint:"))).toBe(false);
+    release();
+    await rejected;
+    expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.releaseObjectGroup" && params.objectGroup?.startsWith("surf-wax-text-paint:"))).toHaveLength(1);
+    await runtime.abortSessions();
+  });
+
+  it("responds to cancellation immediately and releases late text-node handles afterward", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let release!: () => void, notify!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { notify = resolve; });
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOMSnapshot.captureSnapshot") return textPaintSnapshot();
+      if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+      if (method === "DOM.resolveNode" && params.objectGroup?.startsWith("surf-wax-text-paint:")) { notify(); await hold; return { object: { objectId: `late-${params.backendNodeId}` } }; }
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      return original(source, method, params);
+    });
+    const controller = new AbortController();
+    runtime.setContext({ signal: controller.signal });
+    const pending = (await runtime.createPage(3)).snapshot();
+    await entered;
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    release();
+    await vi.waitFor(() => expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.releaseObjectGroup" && params.objectGroup?.startsWith("surf-wax-text-paint:"))).toHaveLength(1));
+    await runtime.abortSessions();
+  });
+
+  it("does not silently accept a failed text paint analysis command", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOMSnapshot.captureSnapshot") return textPaintSnapshot();
+      if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+      if (method === "DOM.resolveNode" && params.objectGroup?.startsWith("surf-wax-text-paint:")) return { object: { objectId: `paint-${params.backendNodeId}` } };
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration === TEXT_PAINT_CACHE_REGISTER_SOURCE) throw new Error("paint analysis failed");
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      return original(source, method, params);
+    });
+    await expect((await runtime.createPage(3)).snapshot()).rejects.toThrow("paint analysis failed");
+    expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.releaseObjectGroup" && params.objectGroup?.startsWith("surf-wax-text-paint:"))).toHaveLength(1);
+    await runtime.abortSessions();
+  });
+
   it("waits for each frame before capture and repeats capture if a frame starts loading afterward", async () => {
     const { runtime, command } = harness();
     const original = command.getMockImplementation()!;

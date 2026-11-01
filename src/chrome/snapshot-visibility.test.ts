@@ -1,20 +1,155 @@
 import { describe, expect, it } from "vitest";
-import { snapshotVisibility } from "./snapshot-visibility";
+import { snapshotVisibility, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
 
 // Indexes are deliberately independent of layout indexes, as in CDP snapshots.
-function capture(nodes: Array<{ parent: number; bounds?: number[]; client?: number[]; offset?: number[]; scroll?: number[]; opacity?: string; filter?: string; x?: string; y?: string; visibility?: string; content?: string; name?: string; type?: number; position?: string; transform?: string; clipPath?: string; clip?: string; direction?: string; writing?: string; display?: string }>, document: { contentWidth?: number; contentHeight?: number; scrollOffsetX?: number; scrollOffsetY?: number } = {}) {
+function capture(nodes: Array<{ parent: number; bounds?: number[]; client?: number[]; offset?: number[]; scroll?: number[]; opacity?: string; filter?: string; x?: string; y?: string; visibility?: string; content?: string; name?: string; type?: number; position?: string; transform?: string; clipPath?: string; clip?: string; direction?: string; writing?: string; display?: string; font?: string; fill?: string; shadow?: string; stroke?: string; backgroundClip?: string; textTransform?: string; textSecurity?: string; textOverflow?: string; lineClamp?: string; mask?: string; value?: string; text?: string }>, document: { contentWidth?: number; contentHeight?: number; scrollOffsetX?: number; scrollOffsetY?: number } = {}) {
   const strings = ["1", "0", "visible", "hidden", "auto", "clip", "scroll", "IFRAME", "static", "fixed", "absolute", "relative", "none", "matrix(1, 0, 0, 1, 0, 0)", "matrix(0, 1, -1, 0, 0, 0)"];
   const stringId = (value: string) => { const index = strings.indexOf(value); if (index >= 0) return index; return strings.push(value) - 1; };
   const withLayout = nodes.map((node, index) => ({ node, index })).filter(({ node }) => node.bounds);
-  return { strings, documents: [{ ...document, nodes: { backendNodeId: nodes.map((_, i) => i + 1), parentIndex: nodes.map((node) => node.parent), nodeName: nodes.map((node) => stringId(node.name ?? "")), nodeType: nodes.map((node) => node.type ?? 1) }, layout: {
+  return { strings, documents: [{ ...document, frameId: stringId("test-frame"), nodes: { backendNodeId: nodes.map((_, i) => i + 1), parentIndex: nodes.map((node) => node.parent), nodeName: nodes.map((node) => stringId(node.name ?? "")), nodeValue: nodes.map((node) => stringId(node.value ?? "")), nodeType: nodes.map((node) => node.type ?? 1) }, layout: {
     nodeIndex: withLayout.map(({ index }) => index), bounds: withLayout.map(({ node }) => node.bounds),
+    text: withLayout.map(({ node }) => stringId(node.text ?? node.value ?? "")),
     clientRects: withLayout.map(({ node }) => node.client ?? []), offsetRects: withLayout.map(({ node }) => node.offset ?? []),
     scrollRects: withLayout.map(({ node }) => node.scroll ?? []),
-    styles: withLayout.map(({ node }) => [node.opacity ?? "1", node.x ?? "visible", node.y ?? "visible", node.visibility ?? "visible", node.content ?? "visible", node.position ?? "static", node.transform ?? "none", node.filter ?? "none", "none", "none", "auto", "none", "none", "none", "none", node.clipPath ?? "none", node.clip ?? "auto", node.direction ?? "ltr", node.writing ?? "horizontal-tb", node.display ?? "block"].map(stringId)),
+    styles: withLayout.map(({ node }) => [node.opacity ?? "1", node.x ?? "visible", node.y ?? "visible", node.visibility ?? "visible", node.content ?? "visible", node.position ?? "static", node.transform ?? "none", node.filter ?? "none", "none", "none", "auto", "none", "none", "none", "none", node.clipPath ?? "none", node.clip ?? "auto", node.direction ?? "ltr", node.writing ?? "horizontal-tb", node.display ?? "block", node.font ?? "16px", node.fill ?? "rgb(0, 0, 0)", node.shadow ?? "none", node.stroke ?? "0px", node.backgroundClip ?? "border-box", node.textTransform ?? "none", node.textSecurity ?? "none", node.textOverflow ?? "clip", node.lineClamp ?? "none", node.mask ?? "none", "none"].map(stringId)),
   } }] };
 }
 
 describe("snapshot visual visibility", () => {
+  it("collects only text with potentially invisible glyphs and leaves visibility unchanged until browser evidence arrives", () => {
+    const candidates: SnapshotTextPaintCandidate[] = [];
+    const state = snapshotVisibility(capture([
+      { parent: -1, bounds: [0, 0, 500, 500] },
+      { parent: 0, type: 3, bounds: [0, 0, 0, 0], font: "0px", value: "Zero" },
+      { parent: 0, type: 3, bounds: [0, 0, 100, 20], fill: "rgba(0, 0, 0, 0)", value: "Transparent" },
+      { parent: 0, type: 3, bounds: [0, 0, 100, 20], fill: "color(display-p3 1 0 0 / 0)", value: "Transparent wide gamut" },
+      { parent: 0, type: 3, bounds: [0, 0, 100, 20], fill: "rgba(0, 0, 0, 0.2)", value: "Translucent" },
+      { parent: 0, type: 3, bounds: [0, 0, 100, 20], fill: "rgba(0, 0, 0, 0)", shadow: "rgb(0, 0, 0) 1px 1px 1px", value: "Shadow" },
+      { parent: 0, type: 3, bounds: [0, 0, 100, 20], fill: "transparent", stroke: "1px", value: "Stroke" },
+      { parent: 0, bounds: [0, 0, 100, 20], backgroundClip: "text" },
+      { parent: 7, type: 3, bounds: [0, 0, 100, 20], fill: "transparent", value: "Gradient" },
+      { parent: 0, bounds: [0, 0, 100, 20], filter: "url(#paint)" },
+      { parent: 9, type: 3, bounds: [0, 0, 100, 20], fill: "transparent", value: "Filtered" },
+      { parent: 0, name: "SVG", bounds: [0, 0, 100, 20] },
+      { parent: 11, type: 3, bounds: [0, 0, 100, 20], fill: "transparent", value: "SVG" },
+      { parent: 0, bounds: [0, 0, 100, 20], opacity: "0" },
+      { parent: 13, type: 3, bounds: [0, 0, 100, 20], fill: "transparent", value: "Already hidden" },
+      { parent: 9, type: 3, bounds: [0, 0, 0, 0], font: "0px", value: "Filtered zero" },
+      { parent: 11, type: 3, bounds: [0, 0, 0, 0], font: "0px", value: "SVG zero" },
+    ]), { textPaintCandidates: candidates });
+    expect(candidates.map(({ backendNodeId, frameId }) => [backendNodeId, frameId])).toEqual([[2, "test-frame"], [3, "test-frame"], [4, "test-frame"]]);
+    expect(candidates[0]).toMatchObject({ zeroFont: true });
+    expect([state.get(2), state.get(3), state.get(4), state.get(15)]).toEqual([true, true, true, false]);
+  });
+
+  it("does not mistake a document layout without element styles for an unknown ancestor paint effect", () => {
+    const snapshot = capture([
+      { parent: -1, name: "#document", type: 9, bounds: [0, 0, 500, 500] },
+      { parent: 0, name: "HTML", bounds: [0, 0, 500, 500] },
+      { parent: 1, type: 3, bounds: [0, 0, 30, 20], fill: "rgba(0, 0, 0, 0)", value: "Hidden" },
+    ]);
+    snapshot.documents[0]!.layout.styles[0] = [];
+    const candidates: SnapshotTextPaintCandidate[] = [];
+    snapshotVisibility(snapshot, { textPaintCandidates: candidates });
+    expect(candidates.map(({ backendNodeId }) => backendNodeId)).toEqual([3]);
+  });
+
+  it("retains source, rendered text and raw text-box metadata for later range validation", () => {
+    const snapshot: any = capture([
+      { parent: -1, name: "#document", type: 9, bounds: [0, 0, 500, 500] },
+      { parent: 0, type: 3, bounds: [0, 0, 100, 20], fill: "transparent", textTransform: "uppercase", textSecurity: "none", value: "maß", text: "MASS" },
+    ], { contentWidth: 500, contentHeight: 500, scrollOffsetX: 0, scrollOffsetY: 0 });
+    snapshot.documents[0].textBoxes = { layoutIndex: [1, 1], start: [0, 2], length: [2, 2], bounds: [[0, 0, 20, 20], [20, 0, 20, 20]] };
+    const candidates: SnapshotTextPaintCandidate[] = [];
+    snapshotVisibility(snapshot, { textPaintCandidates: candidates });
+    expect(candidates).toEqual([expect.objectContaining({ sourceText: "maß", layoutText: "MASS", textTransform: "uppercase", textSecurity: "none",
+      fullyWithinClip: true, textBoxes: [{ start: 0, length: 2, bounds: [0, 0, 20, 20] }, { start: 2, length: 2, bounds: [20, 0, 20, 20] }] })]);
+  });
+
+  it("only proves text is fully within a simple clip when all text-box geometry is accounted for", () => {
+    const check = (parent: Parameters<typeof capture>[0][number], bounds = [10, 0, 30, 20], start = 0, length = 4) => {
+      const snapshot: any = capture([
+        { parent: -1, name: "#document", type: 9, bounds: [0, 0, 500, 500] },
+        { ...parent, parent: 0, bounds: [0, 0, 40, 40], x: "hidden", y: "hidden" },
+        { parent: 1, type: 3, bounds, fill: "transparent", value: "Text" },
+      ], { contentWidth: 500, contentHeight: 500, scrollOffsetX: 0, scrollOffsetY: 0 });
+      snapshot.documents[0].textBoxes = { layoutIndex: [2], start: [start], length: [length], bounds: [bounds] };
+      const candidates: SnapshotTextPaintCandidate[] = [];
+      snapshotVisibility(snapshot, { textPaintCandidates: candidates });
+      return candidates[0]?.fullyWithinClip;
+    };
+    expect(check({ parent: 0 })).toBe(true);
+    expect(check({ parent: 0 }, [30, 0, 30, 20])).toBeUndefined();
+    expect(check({ parent: 0, textOverflow: "ellipsis" })).toBeUndefined();
+    expect(check({ parent: 0, lineClamp: "1" })).toBeUndefined();
+    expect(check({ parent: 0, clipPath: "circle(40%)" })).toBeUndefined();
+    expect(check({ parent: 0, mask: "linear-gradient(black, transparent)" })).toBeUndefined();
+    expect(check({ parent: 0, transform: "matrix(0, 1, -1, 0, 0, 0)" })).toBeUndefined();
+    expect(check({ parent: 0 }, [10, 0, 30, 20], 1, 2)).toBeUndefined();
+  });
+
+  it("does not infer hidden glyphs from only one of multiple layouts for the same text node", () => {
+    const snapshot = capture([
+      { parent: -1, bounds: [0, 0, 500, 500] },
+      { parent: 0, type: 3, bounds: [0, 0, 100, 20], fill: "transparent", value: "Possibly painted" },
+    ]);
+    const layout = snapshot.documents[0]!.layout;
+    layout.nodeIndex.push(1);
+    layout.bounds.push([0, 20, 100, 20]);
+    layout.styles.push([...layout.styles[1]!]);
+    layout.text.push(layout.text[1]!);
+    const candidates: SnapshotTextPaintCandidate[] = [];
+    snapshotVisibility(snapshot, { textPaintCandidates: candidates });
+    expect(candidates).toEqual([]);
+  });
+
+  it("collects text-bearing transparent pseudo elements without confusing geometry-only rows", () => {
+    const snapshot = capture([
+      { parent: -1, bounds: [0, 0, 500, 500] },
+      { parent: 0, bounds: [0, 0, 200, 20] },
+      { parent: 1, name: "::before", bounds: [0, 0, 80, 20], fill: "transparent", text: "Hidden generated" },
+      { parent: 1, name: "::after", bounds: [100, 0, 80, 20], text: "Visible generated" },
+      { parent: 1, name: "::after", bounds: [100, 0, 80, 20], fill: "transparent", shadow: "black 1px 1px 1px", text: "Visible shadow" },
+    ]);
+    const layout = snapshot.documents[0]!.layout;
+    const pseudo = layout.nodeIndex.indexOf(2);
+    layout.nodeIndex.splice(pseudo, 0, 2);
+    layout.bounds.splice(pseudo, 0, [...layout.bounds[pseudo]!]);
+    layout.styles.splice(pseudo, 0, [...layout.styles[pseudo]!]);
+    layout.text.splice(pseudo, 0, snapshot.strings.indexOf(""));
+    const candidates: SnapshotTextPaintCandidate[] = [];
+    const state = snapshotVisibility(snapshot, { textPaintCandidates: candidates });
+    expect(candidates).toEqual([expect.objectContaining({ backendNodeId: 3, frameId: "test-frame", kind: "pseudo", pseudoType: "before",
+      sourceText: "Hidden generated", layoutText: "Hidden generated" })]);
+    expect(state.get(3)).toBe(true);
+  });
+
+  it("identifies a provably painted first-letter prefix and preserves ambiguous cases", () => {
+    const candidates: SnapshotTextPaintCandidate[] = [];
+    const snapshot = capture([
+      { parent: -1, bounds: [0, 0, 500, 500] },
+      { parent: 0, bounds: [0, 0, 200, 40] },
+      { parent: 1, name: "::first-letter", bounds: [0, 0, 10, 20], text: "X" },
+      { parent: 1, type: 3, bounds: [10, 0, 120, 20], value: "Xunpainted suffix", text: "unpainted suffix", fill: "transparent" },
+      { parent: 0, bounds: [0, 40, 200, 40] },
+      { parent: 4, name: "::first-letter", bounds: [0, 40, 10, 20], text: "A" },
+      { parent: 4, type: 3, bounds: [10, 40, 120, 20], value: "ambiguous", text: "mbiguous", fill: "transparent" },
+    ]);
+    // CDP commonly exposes a no-text geometry row and a text row for the
+    // same ::first-letter pseudo node.
+    const layout = snapshot.documents[0]!.layout;
+    const pseudo = layout.nodeIndex.indexOf(2);
+    layout.nodeIndex.splice(pseudo, 0, 2);
+    layout.bounds.splice(pseudo, 0, [...layout.bounds[pseudo]!]);
+    layout.styles.splice(pseudo, 0, [...layout.styles[pseudo]!]);
+    layout.text.splice(pseudo, 0, snapshot.strings.indexOf(""));
+    snapshotVisibility(snapshot, { textPaintCandidates: candidates });
+    expect(candidates).toEqual([
+      expect.objectContaining({ backendNodeId: 4, sourceText: "Xunpainted suffix", layoutText: "unpainted suffix", firstLetter: "X" }),
+      expect.objectContaining({ backendNodeId: 7, firstLetterUnknown: true }),
+    ]);
+  });
+
   it("filters transparent ancestors including descendants with and without layout", () => {
     const state = snapshotVisibility(capture([
       { parent: -1, bounds: [0, 0, 500, 500] },
