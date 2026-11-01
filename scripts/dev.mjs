@@ -81,26 +81,7 @@ async function main() {
     ],
   });
 
-  const worker = await reloadDevelopmentExtension(context, await waitForWorker());
-  const extensionId = new URL(worker.url()).hostname;
-  console.log("Surf Wax 开发扩展已重新加载，当前源码已生效。");
-
-  const settings = await context.newPage();
-  try {
-    await settings.goto(`chrome://extensions/?id=${extensionId}`);
-    const toggle = settings.locator(
-      "extensions-toggle-row#allow-user-scripts cr-toggle#crToggle",
-    );
-    await toggle.waitFor({ state: "visible" });
-    if (await toggle.getAttribute("aria-pressed") !== "true") await toggle.click();
-    await settings.locator(
-      "extensions-toggle-row#allow-user-scripts cr-toggle#crToggle[aria-pressed='true']",
-    ).waitFor({ state: "visible" });
-  } finally {
-    await settings.close();
-  }
-
-  const page = context.pages()[0] ?? (await context.newPage());
+  const page = context.pages().find((candidate) => candidate.url() === "about:blank") ?? await context.newPage();
   const browserSession = await context.browser().newBrowserCDPSession();
   const pageSession = await context.newCDPSession(page);
   const { windowId } = await pageSession.send("Browser.getWindowForTarget");
@@ -119,6 +100,25 @@ async function main() {
   await pageSession.detach();
   if (Object.entries(screenBounds).some(([key, value]) => bounds[key] !== value)) {
     throw new Error("无法将开发浏览器窗口铺满屏幕的可用区域。");
+  }
+
+  const worker = await reloadDevelopmentExtension(context, await waitForWorker());
+  const extensionId = new URL(worker.url()).hostname;
+  console.log("Surf Wax 开发扩展已重新加载，当前源码已生效。");
+
+  const settings = await context.newPage();
+  try {
+    await settings.goto(`chrome://extensions/?id=${extensionId}`);
+    const toggle = settings.locator(
+      "extensions-toggle-row#allow-user-scripts cr-toggle#crToggle",
+    );
+    await toggle.waitFor({ state: "visible" });
+    if (await toggle.getAttribute("aria-pressed") !== "true") await toggle.click();
+    await settings.locator(
+      "extensions-toggle-row#allow-user-scripts cr-toggle#crToggle[aria-pressed='true']",
+    ).waitFor({ state: "visible" });
+  } finally {
+    await settings.close();
   }
 
   await page.goto(targetUrl);
