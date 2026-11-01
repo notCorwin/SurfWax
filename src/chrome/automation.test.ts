@@ -8,7 +8,7 @@ import { ChromeExecutor } from "./executor";
 import { createProgramTools, PROGRAM_TOOL_REGISTRY } from "./tool";
 import { ToolScheduler } from "./tool-scheduler";
 import { PLACEHOLDER_EVIDENCE_SOURCE } from "./snapshot-placeholder";
-import { SNAPSHOT_NATIVE_VALUE_SOURCE } from "./snapshot-native-value";
+import { SNAPSHOT_CONTROL_PAINT_SOURCE } from "./snapshot-control-paint";
 import { SNAPSHOT_DELIVERY_COMMIT } from "./snapshot-wire";
 
 const inspectText = (value: any) => value.items.map((item: any) => item.line).join("\n");
@@ -168,11 +168,11 @@ function textboxSnapshot(options: { value?: string; text?: string; role?: string
       shadowRoots: [{ shadowRootType: "user-agent", children: [{ children: [{ nodeType: 3, backendNodeId: 10, nodeValue: value }] }] }] } };
     if (method === "DOM.resolveNode" && params?.backendNodeId === 10 && params?.objectGroup?.startsWith("surf-wax-native-value:"))
       return { object: { objectId: "native-value-text" } };
-    if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === SNAPSHOT_NATIVE_VALUE_SOURCE) {
+    if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === SNAPSHOT_CONTROL_PAINT_SOURCE) {
       expect(params.objectId).toBe("native-document");
-      expect(params.arguments).toEqual([{ value: [{ expected: value }] }, { value: true }, { value: true }, { objectId: "native-value-text" }]);
+      expect(params.arguments).toEqual([{ value: { native: [{ expected: value }], selects: [], selectHosts: [] } }, { value: true }, { value: true }, { objectId: "native-value-text" }]);
       const proven = /^[\x20-\x7e]{1,10}$/.test(value);
-      return { result: { value: { scene: ["visible isolated document"], values: [proven ? { text: value, box: { x: 0, y: 0, width: 100, height: 20 } } : null] } } };
+      return { result: { value: { scene: ["visible isolated document"], selectValues: [], selectStates: [], nativeValues: [proven ? { text: value, box: { x: 0, y: 0, width: 100, height: 20 } } : null] } } };
     }
     if (method === "DOM.describeNode") return { node: { backendNodeId: 8 } };
     return original(source, method, params);
@@ -206,9 +206,9 @@ function placeholderSnapshot(options: { status?: string[]; label?: boolean; depe
     ] }] } };
     if (method === "DOM.resolveNode" && params?.objectGroup?.startsWith("surf-wax-placeholder:")) return { object: { objectId: params.backendNodeId === 7 ? "placeholder-host" : "placeholder-text" } };
     if (method === "DOM.resolveNode" && params?.backendNodeId === 12 && params?.objectGroup?.startsWith("surf-wax-native-value:")) return { object: { objectId: "native-value-text" } };
-    if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === SNAPSHOT_NATIVE_VALUE_SOURCE) {
-      expect(params.arguments).toEqual([{ value: [{ expected: options.value }] }, { value: true }, { value: true }, { objectId: "native-value-text" }]);
-      return { result: { value: { scene: ["visible isolated document"], values: [{ text: options.value, box: { x: 0, y: 0, width: 100, height: 20 } }] } } };
+    if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === SNAPSHOT_CONTROL_PAINT_SOURCE) {
+      expect(params.arguments).toEqual([{ value: { native: [{ expected: options.value }], selects: [], selectHosts: [] } }, { value: true }, { value: true }, { objectId: "native-value-text" }]);
+      return { result: { value: { scene: ["visible isolated document"], selectValues: [], selectStates: [], nativeValues: [{ text: options.value, box: { x: 0, y: 0, width: 100, height: 20 } }] } } };
     }
     if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === PLACEHOLDER_EVIDENCE_SOURCE) {
       const status = (options.status ?? ["visible"])[Math.min(reads++, (options.status ?? ["visible"]).length - 1)];
@@ -220,6 +220,61 @@ function placeholderSnapshot(options: { status?: string[]; label?: boolean; depe
 }
 
 describe("AutomationRuntime", () => {
+  it.each([null, { multiple: false, size: 0, open: true }])("refuses a native popup with unproven visibility: %j", async (selectState) => {
+    const { runtime, command } = harness([{ role: "combobox", name: "", tag: "select" }]);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Accessibility.getFullAXTree") return { nodes: [
+        { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["select"] },
+        { nodeId: "select", parentId: "root", backendDOMNodeId: 7, role: { value: "combobox" }, childIds: ["popup"] },
+        { nodeId: "popup", parentId: "select", role: { value: "MenuListPopup" }, childIds: ["option"] },
+        { nodeId: "option", parentId: "popup", role: { value: "option" }, name: { value: "UNPROVEN_OPTION" }, childIds: [] },
+      ] };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 31 };
+      if (method === "Runtime.evaluate" && params?.expression === "document") return { result: { objectId: "select-document" } };
+      if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === SNAPSHOT_CONTROL_PAINT_SOURCE)
+        return { result: { value: { scene: null, nativeValues: [], selectValues: [], selectStates: [selectState] } } };
+      return original(source, method, params);
+    });
+    await expect((await runtime.createPage(3)).inspect()).rejects.toMatchObject({ code: "snapshot-unavailable", detail: { reason: "select-popup-unproven" } });
+    await runtime.abortSessions();
+  });
+  it.each(["hidden", "outside-region"] as const)("ignores an unproven popup when its select is %s", async (placement) => {
+    const outside = placement === "outside-region";
+    const { runtime, command } = harness(outside
+      ? [{ role: "region", name: "", tag: "section" }, { role: "combobox", name: "", tag: "select" }]
+      : [{ role: "combobox", name: "", tag: "select" }]);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOMSnapshot.captureSnapshot") {
+        const snapshot = structuredClone(await original(source, method, params));
+        if (!outside) {
+          const hidden = snapshot.strings.push("hidden") - 1;
+          snapshot.documents[0].layout.styles[1] = [...snapshot.documents[0].layout.styles[1]];
+          snapshot.documents[0].layout.styles[1][3] = hidden;
+        }
+        return snapshot;
+      }
+      if (method === "Accessibility.getFullAXTree") return { nodes: [
+        { nodeId: "root", role: { value: "RootWebArea" }, childIds: outside ? ["region", "select"] : ["select"] },
+        ...(outside ? [{ nodeId: "region", parentId: "root", backendDOMNodeId: 7, role: { value: "region" }, childIds: [] }] : []),
+        { nodeId: "select", parentId: "root", backendDOMNodeId: outside ? 8 : 7, role: { value: "combobox" }, childIds: ["popup"] },
+        { nodeId: "popup", parentId: "select", role: { value: "MenuListPopup" }, childIds: ["option"] },
+        { nodeId: "option", parentId: "popup", role: { value: "option" }, name: { value: "UNPROVEN_OPTION" }, childIds: [] },
+      ] };
+      if (outside && method === "Runtime.callFunctionOn" && params?.objectId === "node-array" && params.functionDeclaration === "function(){return this.length}")
+        return { result: { value: 1 } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 31 };
+      if (method === "Runtime.evaluate" && params?.expression === "document") return { result: { objectId: "select-document" } };
+      if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === SNAPSHOT_CONTROL_PAINT_SOURCE)
+        return { result: { value: { scene: null, nativeValues: [], selectValues: [], selectStates: [null] } } };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    const snapshot = outside ? await page.inspect({}, page.locator("#region")) : await page.inspect();
+    expect(inspectText(snapshot)).not.toContain("UNPROVEN_OPTION");
+    await runtime.abortSessions();
+  });
   it.each([
     { readings: [true, false, false, false], fails: false },
     { readings: [true, false, true, false], fails: true },
@@ -1497,8 +1552,8 @@ describe("AutomationRuntime", () => {
     const { runtime, command, value } = textboxSnapshot();
     const original = command.getMockImplementation()!;
     command.mockImplementation(async (source, method, params) => {
-      if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === SNAPSHOT_NATIVE_VALUE_SOURCE)
-        return { result: { value: { scene: null, values: [null] } } };
+      if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === SNAPSHOT_CONTROL_PAINT_SOURCE)
+        return { result: { value: { scene: null, nativeValues: [null], selectValues: [], selectStates: [] } } };
       return original(source, method, params);
     });
     const result = await (await runtime.createPage(3)).inspect();
@@ -1513,8 +1568,8 @@ describe("AutomationRuntime", () => {
     const { runtime, command } = textboxSnapshot();
     const original = command.getMockImplementation()!;
     command.mockImplementation(async (source, method, params) => {
-      if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === SNAPSHOT_NATIVE_VALUE_SOURCE)
-        return { result: { value: { scene: null, values: [null] } } };
+      if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === SNAPSHOT_CONTROL_PAINT_SOURCE)
+        return { result: { value: { scene: null, nativeValues: [null], selectValues: [], selectStates: [] } } };
       const result = await original(source, method, params);
       if (method !== "Accessibility.getFullAXTree") return result;
       const tree = structuredClone(result);

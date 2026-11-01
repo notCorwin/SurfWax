@@ -17,7 +17,7 @@ import { projectTextPaint, sameTextPaintCandidates, TEXT_PAINT_CACHE_LOOKUP_SOUR
 import { axEllipsisCandidate, confirmAxEllipsis, type AxEllipsisCandidate } from "./snapshot-ax-ellipsis";
 import { AX_ELLIPSIS_GEOMETRY_SOURCE } from "./snapshot-ellipsis-geometry";
 import { SNAPSHOT_FRAME_PAINT_SOURCE } from "./snapshot-frame-paint";
-import { SNAPSHOT_NATIVE_VALUE_SOURCE } from "./snapshot-native-value";
+import { SNAPSHOT_CONTROL_PAINT_SOURCE } from "./snapshot-control-paint";
 import { PLACEHOLDER_EVIDENCE_SOURCE, samePlaceholderEvidence, type PlaceholderEvidence } from "./snapshot-placeholder";
 import { FRAME_OWNER_FULLY_VISIBLE_SOURCE } from "./snapshot-frame-containment";
 import { createFrameHandle } from "./snapshot-frame-handle";
@@ -3844,13 +3844,16 @@ export class AutomationRuntime {
         return promise;
       };
       type NativeValueRequest = { backendNodeId: number; expected: string; tag: "input" | "textarea" };
-      type NativeValueBatch = { frameId: string; debuggee: Debuggee; requests: NativeValueRequest[]; frameSafe: boolean; shadowSafe: boolean; result: NativeValueResult };
+      type SelectRequest = { backendNodeId: number; optionId: number; expected: string };
+      type SelectHost = { backendNodeId: number };
+      type NativeValueBatch = { frameId: string; debuggee: Debuggee; requests: NativeValueRequest[]; selects: SelectRequest[]; hosts: SelectHost[]; frameSafe: boolean; shadowSafe: boolean; result: NativeValueResult };
       type NativeValueProof = { text: string; segments?: Array<{ kind: "text" | "break"; value: string }> };
-      type NativeValueResult = { identities: Array<number[] | null>; scene: unknown; values: Array<NativeValueProof | null> };
+      type SelectState = { multiple: boolean; size: number; open: boolean };
+      type NativeValueResult = { identities: Array<number[] | null>; selectIdentities: Array<number[] | null>; scene: unknown; values: Array<NativeValueProof | null>; selectValues: Array<NativeValueProof | null>; selectStates: Array<SelectState | null> };
       const nativeValueBatches: NativeValueBatch[] = [];
-      const readNativeValues = async (debuggee: Debuggee, frameId: string, requests: NativeValueRequest[], frameSafe: boolean, shadowSafe: boolean): Promise<NativeValueResult> => {
-        const empty = (): NativeValueResult => ({ identities: requests.map(() => null), scene: null, values: requests.map(() => null) });
-        if (!requests.length) return empty();
+      const readNativeValues = async (debuggee: Debuggee, frameId: string, requests: NativeValueRequest[], selects: SelectRequest[], hosts: SelectHost[], frameSafe: boolean, shadowSafe: boolean): Promise<NativeValueResult> => {
+        const empty = (): NativeValueResult => ({ identities: requests.map(() => null), selectIdentities: selects.map(() => null), scene: null, values: requests.map(() => null), selectValues: selects.map(() => null), selectStates: hosts.map(() => null) });
+        if (!requests.length && !hosts.length) return empty();
         const frame: FrameRefRecord = { frameId, debuggee, generation, revision: frameRevision,
           conversationId: frameContext.conversationId, runId: frameContext.runId };
         const group = `surf-wax-native-value:${crypto.randomUUID()}`;
@@ -3910,20 +3913,66 @@ export class AutomationRuntime {
             resolved.push(...values);
           }
           const active = requests.flatMap((request, index) => resolved[index] ? [{ request, text: resolved[index]!, index }] : []);
-          if (!active.length) return empty();
+          const resolveInBatches = async <T, R>(items: T[], resolve: (item: T) => Promise<R>): Promise<R[]> => {
+            const results: R[] = [];
+            for (let offset = 0; offset < items.length; offset += 32)
+              results.push(...await Promise.all(items.slice(offset, offset + 32).map(resolve)));
+            return results;
+          };
+          const resolvedSelects = await resolveInBatches(selects, async (request) => {
+            try {
+              const host = (await this.options.command(debuggee, "DOM.describeNode", { backendNodeId: request.backendNodeId, depth: 0, pierce: true })).node;
+              check();
+              if (host?.backendNodeId !== request.backendNodeId || host.nodeName !== "SELECT") return null;
+              const roots = (host.shadowRoots ?? []).filter((root: any) => root.shadowRootType === "user-agent");
+              if (roots.length !== 1 || !Number.isSafeInteger(roots[0].backendNodeId)) return null;
+              const root = (await this.options.command(debuggee, "DOM.describeNode", { backendNodeId: roots[0].backendNodeId, depth: 1, pierce: true })).node;
+              check();
+              const inners = (root?.children ?? []).filter((child: any) => child.nodeName === "DIV" && Array.isArray(child.attributes)
+                && child.attributes.some((value: string, index: number) => index % 2 === 0 && value === "pseudo" && child.attributes[index + 1] === "-internal-select-inner-element"));
+              if (inners.length !== 1 || !Number.isSafeInteger(inners[0].backendNodeId)) return null;
+              const inner = (await this.options.command(debuggee, "DOM.describeNode", { backendNodeId: inners[0].backendNodeId, depth: 1, pierce: true })).node;
+              check();
+              const parts = inner?.children;
+              if (!Array.isArray(parts) || parts.length !== 1 || parts[0].nodeType !== 3 || !Number.isSafeInteger(parts[0].backendNodeId)) return null;
+              const [text, option] = await Promise.all([parts[0].backendNodeId, request.optionId].map((backendNodeId) =>
+                this.options.command(debuggee, "DOM.resolveNode", { backendNodeId, executionContextId: contextId, objectGroup: group })));
+              check();
+              if (typeof text.object?.objectId !== "string" || typeof option.object?.objectId !== "string") return null;
+              return { identities: [request.backendNodeId, roots[0].backendNodeId, inners[0].backendNodeId, parts[0].backendNodeId, request.optionId], text: text.object.objectId, option: option.object.objectId };
+            } catch { check(); return null; }
+          });
+          const resolvedHosts = await resolveInBatches(hosts, async (host) => {
+            try {
+              const result = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: host.backendNodeId, executionContextId: contextId, objectGroup: group });
+              check();
+              return typeof result.object?.objectId === "string" ? result.object.objectId as string : null;
+            } catch { check(); return null; }
+          });
+          const activeSelects = selects.flatMap((request, index) => resolvedSelects[index] ? [{ request, resolved: resolvedSelects[index]!, index }] : []);
+          const activeHosts = hosts.flatMap((host, index) => resolvedHosts[index] ? [{ host, objectId: resolvedHosts[index]!, index }] : []);
+          if (!active.length && !activeSelects.length && !activeHosts.length) return empty();
           const response = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: documentId,
-            functionDeclaration: SNAPSHOT_NATIVE_VALUE_SOURCE, returnByValue: true,
-            arguments: [{ value: active.map(({ request }) => ({ expected: request.expected })) }, { value: frameSafe }, { value: shadowSafe },
-              ...active.map(({ text }) => ({ objectId: text.objectId }))] });
+            functionDeclaration: SNAPSHOT_CONTROL_PAINT_SOURCE, returnByValue: true,
+            arguments: [{ value: { native: active.map(({ request }) => ({ expected: request.expected })), selects: activeSelects.map(({ request }) => ({ expected: request.expected })), selectHosts: activeHosts.map(() => ({})) } }, { value: frameSafe }, { value: shadowSafe },
+              ...active.map(({ text }) => ({ objectId: text.objectId })), ...activeSelects.flatMap(({ resolved }) => [{ objectId: resolved.text }, { objectId: resolved.option }]), ...activeHosts.map(({ objectId }) => ({ objectId }))] });
           check();
           const data = response.result?.value;
-          if (response.exceptionDetails || !data || !Array.isArray(data.values) || data.values.length !== active.length) return empty();
+          if (response.exceptionDetails || !data || !Array.isArray(data.nativeValues) || data.nativeValues.length !== active.length
+            || !Array.isArray(data.selectValues) || data.selectValues.length !== activeSelects.length
+            || !Array.isArray(data.selectStates) || data.selectStates.length !== activeHosts.length) return empty();
           const result = empty(); result.scene = data.scene;
           active.forEach(({ text, request, index }, position) => {
-            const proof = data.values[position];
+            const proof = data.nativeValues[position];
             result.identities[index] = text.identities;
             if (proof && proof.text === request.expected) result.values[index] = proof;
           });
+          activeSelects.forEach(({ resolved, request, index }, position) => {
+            result.selectIdentities[index] = resolved.identities;
+            const proof = data.selectValues[position];
+            if (proof && proof.text === request.expected) result.selectValues[index] = proof;
+          });
+          activeHosts.forEach(({ index }, position) => { result.selectStates[index] = data.selectStates[position]; });
           return result;
         } catch { frameGuard(); return empty(); }
         finally { void this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined); }
@@ -3990,21 +4039,27 @@ export class AutomationRuntime {
             || item.tag === "input" && ["text", "search", "email", "tel", "url"].includes(type))
             ? [{ backendNodeId: item.backendNodeId, expected: item.value, tag: item.tag as "input" | "textarea" }] : [];
         });
+        const selectHosts: SelectHost[] = evidence.items.flatMap((item) => item.kind === "control" && item.tag === "select" ? [{ backendNodeId: item.backendNodeId }] : []);
+        const selectRequests: SelectRequest[] = evidence.items.flatMap((item) => item.kind === "control" && item.tag === "select"
+          && item.selectedOptions?.length === 1 && item.selectedOptionIds?.length === 1 && item.selectedOptions[0]!.label.trim()
+          ? [{ backendNodeId: item.backendNodeId, optionId: item.selectedOptionIds[0]!, expected: item.selectedOptions[0]!.label.trim() }] : []);
         const nativeValues = new Map<number, string>();
         const nativeProofs = new Map<number, NativeValueProof>();
         const nativeIdentities = new Map<number, number[]>();
-        if (nativeRequests.length) {
+        const selectValues = new Map<number, string>();
+        const selectStates = new Map<number, SelectState>();
+        if (nativeRequests.length || selectHosts.length) {
           const parentProof = rootFrame ? [] : noShadowRoots && frameId !== session.rootFrameId ? await waitForCapture(framePaint(frameId)) : null;
           const frameSafe = Boolean(parentProof);
-          // Without a paint path, resolve UA identities only when a scoped
-          // observation needs them to establish region membership.
-          if (frameSafe && noShadowRoots || scopedRoot) {
-            const result = await waitForCapture(readNativeValues(debuggee, frameId, nativeRequests, frameSafe, noShadowRoots));
+          if (frameSafe && noShadowRoots || scopedRoot || selectHosts.length) {
+            const result = await waitForCapture(readNativeValues(debuggee, frameId, nativeRequests, selectRequests, selectHosts, frameSafe, noShadowRoots));
             result.values.forEach((value, index) => { if (value) { nativeValues.set(nativeRequests[index]!.backendNodeId, value.text); nativeProofs.set(nativeRequests[index]!.backendNodeId, value); } });
             result.identities.forEach((id, index) => { if (id !== null) nativeIdentities.set(nativeRequests[index]!.backendNodeId, id); });
-            if (nativeIdentities.size) {
-              nativeValueBatches.push({ frameId, debuggee, requests: nativeRequests, frameSafe, shadowSafe: noShadowRoots, result });
-              if (nativeValues.size && parentProof?.length) framePaintBatches.push(parentProof);
+            result.selectValues.forEach((value, index) => { if (value) selectValues.set(selectRequests[index]!.backendNodeId, value.text); });
+            result.selectStates.forEach((value, index) => { if (value) selectStates.set(selectHosts[index]!.backendNodeId, value); });
+            if (nativeIdentities.size || selectHosts.length) {
+              nativeValueBatches.push({ frameId, debuggee, requests: nativeRequests, selects: selectRequests, hosts: selectHosts, frameSafe, shadowSafe: noShadowRoots, result });
+              if ((nativeValues.size || selectValues.size) && parentProof?.length) framePaintBatches.push(parentProof);
             }
           }
         }
@@ -4182,9 +4237,9 @@ export class AutomationRuntime {
         const effectiveHidden = new Map<string, boolean>();
         const scoped = new Map<string, boolean>();
         const treeRoot = nodes.find((node) => !node.parentId) ?? nodes[0];
-        const order: any[] = [], scan: Array<{ node: any; inherited: boolean; within: boolean; placeholderOwner?: any }> = treeRoot ? [{ node: treeRoot, inherited: false, within: false }] : [];
+        const order: any[] = [], scan: Array<{ node: any; inherited: boolean; within: boolean; closedPopup?: boolean; placeholderOwner?: any }> = treeRoot ? [{ node: treeRoot, inherited: false, within: false }] : [];
         while (scan.length) {
-          const { node, inherited, within, placeholderOwner } = scan.pop()!;
+          const { node, inherited, within, closedPopup, placeholderOwner } = scan.pop()!;
           const known = typeof node.backendDOMNodeId === "number" ? visibility.get(node.backendDOMNodeId) : undefined;
           const nativeOwner = nativeValueOwner(node) ?? nativeTextareaOwner(node) ?? (axValue(node.role) === "generic" && node.childIds?.length === 1
             ? nativeValueOwner(byId.get(node.childIds[0])) : undefined);
@@ -4192,7 +4247,16 @@ export class AutomationRuntime {
             && !otherFrameBackends?.has(node.backendDOMNodeId) && !nativeOwner && known !== false && !node.ignored
             && !["", "none", "generic", "InlineTextBox"].includes(axValue(node.role)))
             throw automationError("snapshot-unavailable", { reason: "unknown-region-membership" });
-          const isHidden = known === undefined ? inherited : !known;
+          const parentNode = byId.get(node.parentId);
+          const parentIndex = typeof parentNode?.backendDOMNodeId === "number" ? domIndex.indexOf(parentNode.backendDOMNodeId) : undefined;
+          const parentIsSelect = parentIndex !== undefined && snapshot.strings?.[doc.nodes.nodeName?.[parentIndex]]?.toUpperCase() === "SELECT";
+          const parentSelectState = parentNode && selectStates.get(parentNode.backendDOMNodeId);
+          if ((known === undefined ? !inherited : known) && (!scopeIndex || within)
+            && axValue(node.role) === "MenuListPopup" && parentIsSelect && (!parentSelectState || parentSelectState.open))
+            throw automationError("snapshot-unavailable", { reason: "select-popup-unproven" });
+          const closedSelectPopup = Boolean(closedPopup || axValue(node.role) === "MenuListPopup" && parentIsSelect
+            && parentSelectState && !parentSelectState.multiple && parentSelectState.size <= 1);
+          const isHidden = closedSelectPopup || (known === undefined ? inherited : !known);
           const isScoped = !scopeIndex || (typeof node.backendDOMNodeId === "number"
             ? scopeIndex.contains(regionNode!.node.backendNodeId, node.backendDOMNodeId) === true
               || Boolean(nativeOwner && scopeIndex.contains(regionNode!.node.backendNodeId, nativeOwner.backendDOMNodeId) === true)
@@ -4209,7 +4273,7 @@ export class AutomationRuntime {
           effectiveHidden.set(node.nodeId, isHidden);
           scoped.set(node.nodeId, isScoped);
           order.push(node);
-          for (const id of node.childIds ?? []) { const child = byId.get(id); if (child) scan.push({ node: child, inherited: isHidden, within: isScoped, placeholderOwner: owner }); }
+          for (const id of node.childIds ?? []) { const child = byId.get(id); if (child) scan.push({ node: child, inherited: isHidden, within: isScoped, closedPopup: closedSelectPopup, placeholderOwner: owner }); }
         }
         const hidden = (node: any) => effectiveHidden.get(node.nodeId) === true;
         const inScope = (node: any) => scoped.get(node.nodeId) === true;
@@ -4326,7 +4390,7 @@ export class AutomationRuntime {
           const nativeValue = ["input", "textarea"].includes(editableTag ?? "") && !["checkbox", "radio", "switch"].includes(role);
           const nativeLeafOwner = nativeValueOwner(node) ?? nativeTextareaOwner(node);
           const valueUnknown = Boolean(rawValue) && (nativeValue && !maskedControl(node)
-            && nativeValues.get(node.backendDOMNodeId) !== rawValue || nativeLeafOwner && nativeValues.get(nativeLeafOwner.backendDOMNodeId) !== rawValue);
+            && nativeValues.get(node.backendDOMNodeId) !== rawValue || editableTag === "select" && selectValues.get(node.backendDOMNodeId) !== rawValue || nativeLeafOwner && nativeValues.get(nativeLeafOwner.backendDOMNodeId) !== rawValue);
           const value = maskedControl(node) || ["checkbox", "radio", "switch"].includes(role)
             || editableControl && !["textbox", "searchbox", "spinbutton"].includes(role) || valueUnknown ? "" : rawValue;
           const parent = byId.get(node.parentId);
@@ -4761,10 +4825,12 @@ export class AutomationRuntime {
               const ownPlaceholder = placeholders.get(item.backendNodeId)?.evidence;
               const nameUnknown = hasUnknownSubtree(item.backendNodeId) || (!name && Boolean(current?.meta?.identityName)) || Boolean(current?.meta?.identityTooLarge);
               const valueCandidate = item.value && item.valueVisible && tag !== "select" && !["button", "submit", "reset", "checkbox", "radio"].includes(type);
-              const valueUnknown = Boolean(valueCandidate && ["input", "textarea"].includes(tag) && nativeValues.get(item.backendNodeId) !== item.value);
+              const selectLabel = tag === "select" ? selectValues.get(item.backendNodeId) : undefined;
+              const valueUnknown = Boolean(valueCandidate && ["input", "textarea"].includes(tag) && nativeValues.get(item.backendNodeId) !== item.value
+                || tag === "select" && item.selectedOptions?.length && !selectLabel);
               node = { id, depth, role, ...(name ? { name } : {}), ...(nameUnknown ? { nameUnknown: true } : {}), ...(ownPlaceholder && ownPlaceholder.status !== "hidden" ? { placeholder: ownPlaceholder } : {}),
                 ...(valueUnknown ? { valueUnknown: true } : valueCandidate ? { value: item.value } : {}),
-                ...(item.valueVisible && item.selectedOptions?.length ? { selectedLabels: item.selectedOptions.map(({ label }) => label) } : {}),
+                ...(item.valueVisible && selectLabel ? { selectedLabels: [selectLabel] } : {}),
                 ...(ref ? { ref, actions } : {}), ...(childFrameRef ? { childFrameRef } : {}), state };
             }
             depths.set(item.backendNodeId, depth);
@@ -4836,7 +4902,7 @@ export class AutomationRuntime {
             if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "frame-paint-unstable" });
             retriedUnstableCapture = true; continue;
           }
-          const afterNativeValues = await waitForCapture(Promise.all(nativeValueBatches.map((batch) => readNativeValues(batch.debuggee, batch.frameId, batch.requests, batch.frameSafe, batch.shadowSafe))));
+          const afterNativeValues = await waitForCapture(Promise.all(nativeValueBatches.map((batch) => readNativeValues(batch.debuggee, batch.frameId, batch.requests, batch.selects, batch.hosts, batch.frameSafe, batch.shadowSafe))));
           if (nativeValueBatches.some((batch, index) => JSON.stringify(batch.result) !== JSON.stringify(afterNativeValues[index]))) {
             if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "native-value-unstable" });
             retriedUnstableCapture = true; continue;

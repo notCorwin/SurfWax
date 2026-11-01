@@ -111,12 +111,12 @@ describe("DOM snapshot visible supplementary evidence", () => {
     }, layout: { nodeIndex: [0, 1, 3], text: [-1, -1, -1], styles: [[], [], []] } }] };
     const result = snapshotDomSupplement(snapshot, { frameId: "outer", visibility: new Map([[2, true], [4, true]]), covered: new Set() });
     expect(result.find((item) => item.backendNodeId === 2)).toMatchObject({ tag: "textarea", value: "Live notes" });
-    expect(result.find((item) => item.backendNodeId === 4)).toMatchObject({ tag: "select", value: "blue", selectedOptions: [{ label: "Blue label", value: "blue" }] });
+    expect(result.find((item) => item.backendNodeId === 4)).toMatchObject({ tag: "select", value: "blue", selectedOptions: [{ label: "Blue label", value: "blue" }], selectedOptionIds: [7] });
     expect(JSON.stringify(result)).not.toContain("Default notes");
     expect(JSON.stringify(result)).not.toContain("First raw");
     snapshot.documents[0]!.nodes.optionSelected.index = [4];
     const changed = snapshotDomSupplement(snapshot, { frameId: "outer", visibility: new Map([[4, true]]), covered: new Set() });
-    expect(changed[0]).toMatchObject({ value: "first", selectedOptions: [{ label: "First label", value: "first" }] });
+    expect(changed[0]).toMatchObject({ value: "first", selectedOptions: [{ label: "First label", value: "first" }], selectedOptionIds: [5] });
   });
 
   it("never merges identical adjacent layout fragments", () => {

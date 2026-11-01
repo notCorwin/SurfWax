@@ -20,6 +20,8 @@ export type SnapshotDomEvidence = Readonly<{
   clickable?: boolean;
   checked?: boolean;
   selectedOptions?: readonly Readonly<{ label: string; value: string }>[];
+  /** Backend identities from the same DOMSnapshot, never model-visible. */
+  selectedOptionIds?: readonly number[];
 }>;
 
 // These explicit roles carry control semantics even when their author has
@@ -136,7 +138,7 @@ export function snapshotDomSupplement(snapshot: any, options: SnapshotDomOptions
         const parts = optionText.get(parent) ?? []; parts.push(stringAt(nodes.nodeValue?.[index]) ?? ""); optionText.set(parent, parts);
       }
     }
-    const selections = new Map<number, Array<{ label: string; value: string }>>();
+    const selections = new Map<number, Array<{ label: string; value: string; backendNodeId?: number }>>();
     for (const index of selected) {
       if (!Number.isSafeInteger(index) || index < 0 || index >= nodes.backendNodeId.length || !optionIndexes.has(index))
         throw new Error("Invalid selected option identity");
@@ -144,7 +146,9 @@ export function snapshotDomSupplement(snapshot: any, options: SnapshotDomOptions
       if (parent === -1) continue;
       const attrs = attributesFor(index), text = (optionText.get(index) ?? []).join("").replace(/\s+/g, " ").trim();
       const list = selections.get(parent) ?? [];
-      list.push({ label: Object.hasOwn(attrs, "label") ? attrs.label! : text, value: Object.hasOwn(attrs, "value") ? attrs.value! : text });
+      const optionId = nodes.backendNodeId[index];
+      list.push({ label: Object.hasOwn(attrs, "label") ? attrs.label! : text, value: Object.hasOwn(attrs, "value") ? attrs.value! : text,
+        ...(Number.isSafeInteger(optionId) && optionId > 0 ? { backendNodeId: optionId } : {}) });
       selections.set(parent, list);
     }
     // Compute visible first-letter ancestry with a sweep of subtree ranges.
@@ -218,7 +222,10 @@ export function snapshotDomSupplement(snapshot: any, options: SnapshotDomOptions
         || tag === "a" && Object.hasOwn(attributes, "href") || DOM_INTERACTIVE_ROLES.has(attributes.role?.trim() ?? "") || clickable.has(index)
         || Object.hasOwn(attributes, "contenteditable") && ["", "true", "plaintext-only"].includes(attributes.contenteditable!.trim().toLowerCase());
       if (!isControl) continue;
-      const selectedOptions = tag === "select" && nodes.optionSelected !== undefined ? selections.get(index) ?? [] : undefined;
+      const selected = tag === "select" && nodes.optionSelected !== undefined ? selections.get(index) ?? [] : undefined;
+      const selectedOptions = selected?.map(({ label, value }) => ({ label, value }));
+      const selectedOptionIds = selected && selected.every(({ backendNodeId }) => backendNodeId !== undefined)
+        ? selected.map(({ backendNodeId }) => backendNodeId!) : undefined;
       const value = tag === "textarea" ? textValues.get(index) ?? ""
         : tag === "select" && selectedOptions !== undefined ? selectedOptions[0]?.value ?? "" : values.get(index);
       const layoutRow = rows?.[0];
@@ -230,6 +237,7 @@ export function snapshotDomSupplement(snapshot: any, options: SnapshotDomOptions
         ...(masked ? { masked: true } : {}),
         ...(clickable.has(index) ? { clickable: true } : {}),
         ...(selectedOptions === undefined ? {} : { selectedOptions }),
+        ...(selectedOptionIds === undefined ? {} : { selectedOptionIds }),
         ...(tag === "input" && ["checkbox", "radio"].includes((attributes.type ?? "").toLowerCase()) ? { checked: checked.has(index) } : {}),
       });
     }
