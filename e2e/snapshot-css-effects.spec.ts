@@ -22,9 +22,9 @@ test("filters transparent effects and empty clip shapes while retaining visible 
         <div data-effect style="clip-path:ellipse(0% 50%)"><button>Ellipse hidden</button></div>
         <div data-effect style="clip-path:polygon(0 0,0 0,0 0)"><button>Polygon hidden</button></div>
         <button style="filter:opacity(0.2)">Translucent visible</button>
-        <button style="clip-path:circle(40%)">Circle partial visible</button>
+        <button id="circle-partial" style="clip-path:circle(40%)">Circle partial visible</button>
         <button style="backdrop-filter:opacity(0)">Backdrop visible</button>
-        <span id="filter-label" style="filter:opacity(0)">Filter accessible name</span><button aria-labelledby="filter-label"></button>
+        <span id="filter-label" style="filter:opacity(0)">Filter accessible name</span><button id="filter-label-button" aria-labelledby="filter-label"></button>
         <button>Visible text<span style="filter:opacity(0)">Hidden effect text</span></button>
       </main>`;
       document.getElementById("reveal")!.addEventListener("click", () => document.querySelectorAll<HTMLElement>("[data-effect]").forEach((element) => {
@@ -32,9 +32,28 @@ test("filters transparent effects and empty clip shapes while retaining visible 
         element.style.clipPath = "none";
       }));
     });
+    const circleRuns = await target.locator("#circle-partial").evaluate((element) => {
+      const text = element.firstChild!, box = element.getBoundingClientRect();
+      const cx = box.left + box.width / 2, cy = box.top + box.height / 2;
+      const radius = .4 * Math.hypot(box.width, box.height) / Math.SQRT2;
+      const range = document.createRange(), runs: string[] = [];
+      let run = "";
+      for (let index = 0; index < text.textContent!.length; index++) {
+        range.setStart(text, index); range.setEnd(text, index + 1);
+        const rect = range.getBoundingClientRect();
+        const inside = rect.width > 0 && rect.height > 0 && [[rect.left, rect.top], [rect.right, rect.top], [rect.left, rect.bottom], [rect.right, rect.bottom]]
+          .every(([x, y]) => Math.hypot(x! - cx, y! - cy) < radius - 1);
+        if (inside) run += text.textContent![index];
+        else if (run) { runs.push(run.replace(/\s+/g, " ").trim()); run = ""; }
+      }
+      if (run) runs.push(run.replace(/\s+/g, " ").trim());
+      return runs.filter(Boolean);
+    });
     let baseline: any;
     responses.push(commandResponse("inspect_page", { budget: 12000 }, "effects-before"),
-      (request) => { baseline = lastTool(request); return commandResponse("click", { target: { ref: button(baseline.items, "Reveal effects")?.ref } }, "effects-reveal"); },
+      (request) => { baseline = lastTool(request); return commandResponse("inspect_page", { region: { by: "css", value: "#filter-label-button" }, budget: 12000 }, "effects-hidden-label"); },
+      () => commandResponse("inspect_page", { region: { by: "css", value: "#circle-partial" }, budget: 12000 }, "effects-partial-circle"),
+      () => commandResponse("click", { target: { ref: button(baseline.items, "Reveal effects")?.ref } }, "effects-reveal"),
       () => commandResponse("inspect_page", { since: baseline.observationId, budget: 12000 }, "effects-delta"),
       textResponse("EFFECTS_OK"), textResponse("效果测试"));
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
@@ -47,9 +66,17 @@ test("filters transparent effects and empty clip shapes while retaining visible 
     const before = output("effects-before"), changed = output("effects-reveal"), delta = output("effects-delta");
     const hidden = ["Filter hidden", "Filter fixed hidden", "Final filter hidden", "Circle hidden", "Ellipse hidden", "Polygon hidden"];
     for (const name of hidden) expect(JSON.stringify(before.items)).not.toContain(name);
-    for (const name of ["SVG filter visible", "Translucent visible", "Circle partial visible", "Backdrop visible", "Filter accessible name", "Visible text"]) expect(button(before.items, name)?.ref).toBeTruthy();
+    for (const name of ["SVG filter visible", "Translucent visible", "Backdrop visible", "Visible text"]) expect(button(before.items, name)?.ref, name).toBeTruthy();
+    const partial = output("effects-partial-circle")?.items?.find((item: any) => /\bbutton(?:\s|$)/.test(item.line) && item.ref);
+    expect(partial?.ref).toEqual(expect.any(String));
+    const name = /\bbutton\s+("(?:\\.|[^"\\])*")/.exec(partial.line)?.[1];
+    if (name) expect(circleRuns.some((run) => run.includes(JSON.parse(name)))).toBe(true);
+    else expect(partial.line).toContain("[name=unknown]");
     expect(JSON.stringify(before.items)).not.toContain("Hidden effect text");
-    expect(before.items.filter((item: any) => item.line.includes("Filter accessible name"))).toHaveLength(1);
+    expect(JSON.stringify(before.items)).not.toContain("Filter accessible name");
+    const anonymous = output("effects-hidden-label");
+    expect(anonymous?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(item.line) && typeof item.ref === "string")).toBe(true);
+    expect(JSON.stringify(anonymous.items)).not.toContain("Filter accessible name");
     expect(changed).toMatchObject({ ok: true });
     for (const name of hidden) {
       expect(button(changed.pageSnapshot.items, name)?.ref).toBeTruthy();

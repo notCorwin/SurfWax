@@ -23,7 +23,7 @@ test("keeps each native input value once without collapsing independent frame an
     await expect(target.frameLocator('iframe[title="Child field"]').locator("input")).toBeVisible();
     responses.push(commandResponse("inspect_page", { budget: 12000 }, "native-initial"), (request) => {
       initial = lastTool(request);
-      const ref = initial.items?.find((item: any) => item.line.includes('textbox "Native field"'))?.ref;
+      const ref = initial.items?.find((item: any) => item.line.includes("textbox") && item.line.includes(value))?.ref;
       if (!ref) return textResponse("NATIVE_INPUT_DONE");
       responses.unshift(
         (next) => { region = lastTool(next); return commandResponse("fill", { target: { ref }, value: "CHANGED_NATIVE_VALUE" }, "native-fill"); },
@@ -38,6 +38,7 @@ test("keeps each native input value once without collapsing independent frame an
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("NATIVE_INPUT_DONE", { timeout: 60_000 });
     expect(initial).toMatchObject({ mode: "full", truncation: { baselineComplete: true } });
+    expect(JSON.stringify(initial.items)).not.toContain("Native field");
     expect(occurrences(initial, value)).toBe(3);
     expect(region).toMatchObject({ mode: "full" });
     expect(occurrences(region, value)).toBe(1);

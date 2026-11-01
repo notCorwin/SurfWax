@@ -17,6 +17,10 @@ export type SnapshotTextPaintCandidate = {
   layoutText?: string;
   textTransform?: string;
   textSecurity?: string;
+  direction?: string;
+  writingMode?: string;
+  /** Simple text-overflow ellipsis, subject to separate live geometry proof. */
+  ellipsis?: boolean;
   /** Browser text-box offsets need not match transformed text offsets. */
   textBoxes?: Array<{ start: number; length: number; bounds: readonly number[] }>;
   /** True only if all source text boxes are inside a known, uncomplicated clip. */
@@ -25,6 +29,8 @@ export type SnapshotTextPaintCandidate = {
   documentFloatRisk?: boolean;
   /** Glyphs have zero font size and zero layout extent. */
   zeroFont?: boolean;
+  /** The ordinary text fill paints; selection-only evidence is not its text. */
+  basePainted?: boolean;
   /** A positively identified, rendered ::first-letter prefix. */
   firstLetter?: string;
   /** A ::first-letter may apply but cannot be associated with certainty. */
@@ -231,7 +237,7 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
         visibleFill: /^rgb\(/.test(fill) && font !== "0px" && font !== "" && bounds.length >= 4
           && bounds.every(Number.isFinite) && bounds[2]! > 0 && bounds[3]! > 0, matched: false, fullyWithinClip: false });
     });
-    const contexts: Array<{ transparent: boolean; contentHidden: boolean; emptyClip: boolean; clip: Clip; absoluteClip: Clip; fixedClip: Clip; axisAligned: boolean; paintedTextRisk: boolean; textClipRisk: boolean; svg: boolean; firstLetter?: FirstLetter }> = [];
+    const contexts: Array<{ transparent: boolean; contentHidden: boolean; emptyClip: boolean; clip: Clip; absoluteClip: Clip; fixedClip: Clip; axisAligned: boolean; paintedTextRisk: boolean; textClipRisk: boolean; hardTextClipRisk: boolean; ellipsis: boolean; svg: boolean; firstLetter?: FirstLetter }> = [];
     for (let index = 0; index < nodes.backendNodeId.length; index++) {
       const parent = contexts[nodes.parentIndex[index]];
       let transparent = parent?.transparent ?? false;
@@ -244,6 +250,8 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
       let axisAligned = parent?.axisAligned ?? true;
       let paintedTextRisk = parent?.paintedTextRisk ?? false;
       let textClipRisk = parent?.textClipRisk ?? false;
+      let hardTextClipRisk = parent?.hardTextClipRisk ?? false;
+      let ellipsis = parent?.ellipsis ?? false;
       let svg = parent?.svg ?? false;
       const firstLetter = firstLetterParents.get(index) ?? parent?.firstLetter;
       const layoutIndex = layoutByNode.get(index);
@@ -264,6 +272,9 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
           // These effects may hide characters even when their text boxes lie
           // inside the ancestor's ordinary overflow clip.
           const overflowText = style(27), lineClamp = style(28), mask = style(29), webkitMaskBorder = style(30);
+          ellipsis ||= overflowText === "ellipsis";
+          hardTextClipRisk ||= !overflowText || !["clip", "ellipsis"].includes(overflowText) || !lineClamp || lineClamp !== "none" || !mask || mask !== "none"
+            || !webkitMaskBorder || webkitMaskBorder !== "none" || !style(15) || style(15) !== "none" || !style(16) || style(16) !== "auto";
           textClipRisk ||= !overflowText || overflowText !== "clip" || !lineClamp || lineClamp !== "none" || !mask || mask !== "none"
             || !webkitMaskBorder || webkitMaskBorder !== "none"
             || !style(15) || style(15) !== "none" || !style(16) || style(16) !== "auto";
@@ -330,7 +341,9 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
               firstLetterText = firstLetter.text;
             else firstLetterUnknown = true;
           }
-          if (visible && (zeroText || transparentText) && !multiLayoutText.has(index) && typeof nodes.backendNodeId[index] === "number") {
+          const partialClip = hasBounds && (bounds[0]! < clip.x[0] || bounds[1]! < clip.y[0]
+            || bounds[0]! + bounds[2]! > clip.x[1] || bounds[1]! + bounds[3]! > clip.y[1]);
+          if (visible && (zeroText || transparentText || textClipRisk || partialClip) && typeof nodes.backendNodeId[index] === "number") {
             const boxes = boxesByLayout.get(layoutIndex);
             // CDP text-box starts use source UTF-16 offsets, but lengths can
             // use rendered glyph counts (e.g. case expansion or masking).
@@ -351,7 +364,7 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
                 if (offset >= coveredEnd) { graphemesCovered = false; break; }
               }
             }
-            const fullyWithinClip = horizontalViewport.known && verticalViewport.known && !textClipRisk && axisAligned
+            const fullyWithinClip = horizontalViewport.known && verticalViewport.known && !hardTextClipRisk && axisAligned && !multiLayoutText.has(index)
               && (!firstLetterUnknown || !!firstLetterText) && (!firstLetterText || firstLetter?.fullyWithinClip)
               && typeof sourceText === "string" && !!sourceText.length && graphemesCovered && !!boxes?.length
               && boxes.every(({ start, length, bounds }) => (bounds[2] === 0 || bounds[3] === 0)
@@ -363,8 +376,11 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
               ...(pseudoType ? { kind: "pseudo" as const, pseudoType } : {}),
               ...(typeof sourceText === "string" ? { sourceText } : {}), ...(typeof layoutText === "string" ? { layoutText } : {}),
               ...(style(25) ? { textTransform: style(25) } : {}), ...(style(26) ? { textSecurity: style(26) } : {}),
+              ...(style(17) ? { direction: style(17) } : {}), ...(style(18) ? { writingMode: style(18) } : {}),
+              ...(ellipsis && !hardTextClipRisk && axisAligned && !multiLayoutText.has(index) ? { ellipsis: true } : {}),
               ...(boxes ? { textBoxes: boxes } : {}), ...(fullyWithinClip ? { fullyWithinClip: true } : {}),
               ...(zeroText ? { zeroFont: true } : {}),
+              ...(!zeroText && !transparentText && isText && fill && !transparentColor(fill) ? { basePainted: true } : {}),
               ...(firstLetterText ? { firstLetter: firstLetterText } : {}), ...(firstLetterUnknown && !firstLetterText ? { firstLetterUnknown: true } : {}) });
           }
         }
@@ -399,7 +415,7 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
       }
       const backendId = nodes.backendNodeId[index];
       if (typeof backendId === "number") result.set(backendId, visible);
-      contexts[index] = { transparent, contentHidden, emptyClip, clip, absoluteClip, fixedClip, axisAligned, paintedTextRisk, textClipRisk, svg, firstLetter };
+      contexts[index] = { transparent, contentHidden, emptyClip, clip, absoluteClip, fixedClip, axisAligned, paintedTextRisk, textClipRisk, hardTextClipRisk, ellipsis, svg, firstLetter };
     }
   }
   return result;

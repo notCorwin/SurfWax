@@ -9,13 +9,19 @@ describe("painted text projection", () => {
   it("compares the semantic inputs that validate text paint decisions", () => {
     expect(sameTextPaintCandidates([candidate], [{ ...candidate }])).toBe(true);
     expect(sameTextPaintCandidates([candidate], [])).toBe(false);
-    for (const change of [{ sourceText: "changed" }, { frameId: "other" }, { fullyWithinClip: false }, { firstLetter: "A" }, { zeroFont: true }])
+    for (const change of [{ sourceText: "changed" }, { frameId: "other" }, { fullyWithinClip: false }, { firstLetter: "A" }, { zeroFont: true }, { basePainted: true }])
       expect(sameTextPaintCandidates([candidate], [{ ...candidate, ...change }])).toBe(false);
   });
 
   it("removes invisible text and preserves only selected or highlighted intervals", () => {
     expect(projectTextPaint(candidate, evidence)).toEqual({ hidden: true });
     expect(projectTextPaint(candidate, { ...evidence, ranges: [[1, 3], [2, 4], [5, 6]] })).toEqual({ hidden: false, text: "BCD … F" });
+  });
+
+  it("does not mistake ordinary opaque text for unpainted selection-only text", () => {
+    expect(projectTextPaint({ ...candidate, basePainted: true }, evidence)).toEqual({ hidden: false, text: "ABCDEF" });
+    expect(projectTextPaint({ ...candidate, basePainted: true, fullyWithinClip: false }, evidence)).toBeUndefined();
+    expect(projectTextPaint({ ...candidate, basePainted: true }, { ...evidence, sourceText: "changed" })).toBeUndefined();
   });
 
   it("projects a large number of first-line ranges without exceeding the call stack", () => {

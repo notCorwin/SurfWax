@@ -45,11 +45,32 @@ function harness(
   let latestState: any = states[0];
   const tabsCreated = event<(tab: chrome.tabs.Tab) => void>();
   const downloadsCreated = event<(item: chrome.downloads.DownloadItem) => void>();
+  // The mock AX tree is backed by matching DOM text/layout evidence. AX name
+  // alone does not prove that a label is painted.
+  const visibleSnapshot = () => {
+    const strings = ["root", "#document", "#text", "1", "visible", "static", "none", "auto", "ltr", "horizontal-tb", "block", "16px", "rgb(0, 0, 0)", "0px", "border-box", "clip"];
+    const add = (value: string) => { const index = strings.indexOf(value); return index < 0 ? strings.push(value) - 1 : index; };
+    const style = [3, 4, 4, 4, 4, 5, 6, 6, 6, 6, 7, 6, 6, 6, 6, 6, 7, 8, 9, 10, 11, 12, 6, 13, 14, 6, 6, 15, 6, 6, 6];
+    const nodes = { backendNodeId: [1], parentIndex: [-1], nodeType: [9], nodeName: [1], nodeValue: [-1], attributes: [[]] as number[][] };
+    const layout = { nodeIndex: [0], bounds: [[0, 0, 1000, 1000]], styles: [[]] as number[][], text: [-1] };
+    metadata.forEach((item: any, index) => {
+      const element = nodes.backendNodeId.length;
+      const tag = (item.tag ?? (item.role === "button" ? "button" : "div")).toUpperCase();
+      nodes.backendNodeId.push(item.backendId ?? 7 + index); nodes.parentIndex.push(0); nodes.nodeType.push(1); nodes.nodeName.push(add(tag)); nodes.nodeValue.push(-1); nodes.attributes.push([]);
+      layout.nodeIndex.push(element); layout.bounds.push([0, 0, 500, 20]); layout.styles.push(style); layout.text.push(-1);
+      const value = typeof item.text === "string" ? item.text : item.name;
+      if (typeof value !== "string" || !value) return;
+      const text = nodes.backendNodeId.length, string = add(value);
+      nodes.backendNodeId.push(1_000_000 + index); nodes.parentIndex.push(element); nodes.nodeType.push(3); nodes.nodeName.push(2); nodes.nodeValue.push(string); nodes.attributes.push([]);
+      layout.nodeIndex.push(text); layout.bounds.push([0, 0, 500, 20]); layout.styles.push(style); layout.text.push(string);
+    });
+    return { strings, documents: [{ frameId: 0, nodes, layout }] };
+  };
   const command = vi.fn(async (_debuggee: chrome.debugger.Debuggee, method: string, params?: any): Promise<any> => {
     calls.push({ method, params });
     if (method === "Performance.getMetrics") return { metrics: [{ name: "Timestamp", value: 0 }] };
     if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root", url: "https://example.test/" } } };
-    if (method === "DOMSnapshot.captureSnapshot") return { strings: ["root"], documents: [{ frameId: 0, nodes: { backendNodeId: [], parentIndex: [], nodeType: [], nodeName: [] }, layout: { nodeIndex: [], bounds: [], styles: [] } }] };
+    if (method === "DOMSnapshot.captureSnapshot") return visibleSnapshot();
     if (method === "Accessibility.getFullAXTree") return { nodes: [
       { nodeId: "root", role: { value: "RootWebArea" }, name: { value: "Test" }, childIds: metadata.map((_, index) => `node-${index}`) },
       ...metadata.map((item: any, index) => ({
@@ -58,8 +79,14 @@ function harness(
         backendDOMNodeId: 7 + index,
         role: { value: item.role },
         name: { value: item.name },
+        childIds: (item.text ?? item.name) ? [`text-${index}`] : [],
         properties: [{ name: "focusable", value: { value: true } }],
       })),
+      ...metadata.flatMap((item: any, index) => {
+        const text = item.text ?? item.name;
+        return typeof text === "string" && text ? [{ nodeId: `text-${index}`, parentId: `node-${index}`, backendDOMNodeId: 1_000_000 + index,
+          role: { value: "StaticText" }, name: { value: text }, childIds: [] }] : [];
+      }),
     ] };
     if (method === "Accessibility.queryAXTree") return { nodes: metadata.map((item: any, index) => ({
       nodeId: `node-${index}`, backendDOMNodeId: 7 + index, role: { value: item.role }, name: { value: item.name },
@@ -112,18 +139,24 @@ function harness(
   return { runtime, calls, command, pressChord, detach, tabsCreated, onDispatch };
 }
 
-function textboxSnapshot(options: { value?: string; text?: string; role?: string; masked?: boolean; properties?: any[]; actions?: string[]; sibling?: boolean } = {}) {
+function textboxSnapshot(options: { value?: string; text?: string; role?: string; masked?: boolean; properties?: any[]; actions?: string[]; sibling?: boolean; independent?: boolean } = {}) {
   const { runtime, command } = harness();
   const original = command.getMockImplementation()!;
   const value = options.value ?? "DSP-17-A/7", text = options.text ?? value;
   const strings = ["root", "#document", "INPUT", "SPAN", "1", "visible", "static", "none", "auto", "ltr", "horizontal-tb", "block", "16px", "rgb(0, 0, 0)", "0px", "border-box", "clip", "disc"];
+  const textTag = strings.push("#text") - 1, textValue = strings.push(text) - 1;
   const style = [4, 5, 5, 5, 5, 6, 7, 7, 7, 7, 8, 7, 7, 7, 7, 7, 8, 9, 10, 11, 12, 13, 7, 14, 15, 7, options.masked ? 17 : 7, 16, 7, 7, 7];
-  const snapshot = { strings, documents: [{ frameId: 0, nodes: { backendNodeId: [1, 7, 8], parentIndex: [-1, 0, 1], nodeType: [9, 1, 1], nodeName: [1, 2, 3], nodeValue: [-1, -1, -1] }, layout: { nodeIndex: [0, 1, 2], bounds: [[0, 0, 100, 100], [0, 0, 100, 20], [0, 0, 100, 20]], styles: [[], style, style], text: [-1, -1, -1] } }] };
+  // Native input value text belongs to UA shadow DOM absent from DOMSnapshot.
+  // A separately painted document text node, when requested, is an AX sibling.
+  const snapshot = { strings, documents: [{ frameId: 0, nodes: { backendNodeId: [1, 7, 8], parentIndex: [-1, 0, 0], nodeType: [9, 1, options.independent ? 3 : 1], nodeName: [1, 2, options.independent ? textTag : 3], nodeValue: [-1, -1, options.independent ? textValue : -1] }, layout: { nodeIndex: [0, 1, 2], bounds: [[0, 0, 100, 100], [0, 0, 100, 20], [0, 0, 100, 20]], styles: [[], style, style], text: [-1, -1, options.independent ? textValue : -1] } }] };
+  const editable = { name: "editable", value: { value: "plaintext" } };
   const nodes = [
-    { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["box"] },
-    { nodeId: "box", parentId: "root", backendDOMNodeId: 7, role: { value: options.role ?? "textbox" }, name: { value: "Recipient" }, value: { value }, childIds: options.sibling ? ["text", "extra"] : ["text"] },
-    { nodeId: "text", parentId: "box", backendDOMNodeId: 8, role: { value: "StaticText" }, name: { value: text }, childIds: [], ...(options.properties ? { properties: options.properties } : {}), ...(options.actions ? { actions: options.actions } : {}) },
-    ...(options.sibling ? [{ nodeId: "extra", parentId: "box", role: { value: "StaticText" }, name: { value: "extra" }, childIds: [] }] : []),
+    { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["box", ...(options.independent ? ["text"] : []), ...(options.sibling ? ["extra"] : [])] },
+    { nodeId: "box", parentId: "root", backendDOMNodeId: 7, role: { value: options.role ?? "textbox" }, name: { value: "Recipient" }, value: { value }, childIds: ["wrapper"] },
+    { nodeId: "wrapper", parentId: "box", backendDOMNodeId: 9, role: { value: "generic" }, name: { value: "" }, properties: [editable], childIds: ["native-value"] },
+    { nodeId: "native-value", parentId: "wrapper", backendDOMNodeId: 10, role: { value: "StaticText" }, name: { value }, childIds: [], properties: [editable] },
+    ...(options.independent ? [{ nodeId: "text", parentId: "root", backendDOMNodeId: 8, role: { value: "StaticText" }, name: { value: text }, childIds: [], ...(options.properties ? { properties: options.properties } : {}), ...(options.actions ? { actions: options.actions } : {}) }] : []),
+    ...(options.sibling ? [{ nodeId: "extra", parentId: "root", role: { value: "StaticText" }, name: { value: "extra" }, childIds: [] }] : []),
   ];
   command.mockImplementation(async (source, method, params) => {
     if (method === "DOMSnapshot.captureSnapshot") return snapshot;
@@ -1380,7 +1413,7 @@ describe("AutomationRuntime", () => {
     await page.inspect(); expect(onDispatch).toHaveBeenCalledTimes(1);
   });
   it("inspects a deeply nested accessibility tree without exhausting the call stack", async () => {
-    const { runtime, command } = harness();
+    const { runtime, command } = harness([{ role: "button", name: "Deep target", backendId: 20_000 }]);
     const original = command.getMockImplementation()!;
     const depth = 20_000;
     const nodes = Array.from({ length: depth }, (_, index) => ({
@@ -1420,42 +1453,95 @@ describe("AutomationRuntime", () => {
     const result = await page.inspect();
     expect(inspectText(result)).not.toContain("SECRET");
     expect(inspectText(result)).not.toContain("textbox");
-    expect(inspectText(result)).toContain('button "Label restored"');
+    expect(inspectText(result)).toContain("button [name=unknown]");
+    expect(inspectText(result)).not.toContain("Label");
     expect(inspectText(result)).toContain('StaticText "restored"');
     await runtime.abortSessions();
   });
 
-  it.each(["textbox", "searchbox"])("emits a %s value only once without losing its name or ref", async (role) => {
+  it.each(["textbox", "searchbox"])("emits a %s value once without exposing an unpainted name or losing its ref", async (role) => {
     const { runtime, value } = textboxSnapshot({ role });
     const result = await (await runtime.createPage(3)).inspect();
-    expect(inspectText(result)).toContain(`${role} "Recipient"`);
+    expect(inspectText(result)).toContain(`${role} [name=unknown]`);
+    expect(inspectText(result)).not.toContain("Recipient");
     expect(inspectText(result).split(value)).toHaveLength(2);
     expect(inspectText(result)).not.toContain("StaticText");
     expect((result.items as any[]).find((item) => item.line.includes(role))?.ref).toBeTruthy();
     await runtime.abortSessions();
   });
 
+  it.each([true, false])("uses only a painted native label association for a textbox (visible=%s)", async (visible) => {
+    const { runtime, command } = textboxSnapshot();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOMSnapshot.captureSnapshot") {
+        const snapshot = structuredClone(await original(source, method, params));
+        const { nodes, layout } = snapshot.documents[0], add = (value: string) => snapshot.strings.push(value) - 1;
+        const label = add("LABEL"), textTag = add("#text"), labelText = add("Recipient"), zero = add("0");
+        nodes.backendNodeId.push(5, 6); nodes.parentIndex.push(0, 3); nodes.nodeType.push(1, 3);
+        nodes.nodeName.push(label, textTag); nodes.nodeValue.push(-1, labelText);
+        const labelStyle = [...layout.styles[1]];
+        if (!visible) labelStyle[0] = zero;
+        layout.nodeIndex.push(3, 4); layout.bounds.push([0, 25, 100, 20], [0, 25, 100, 20]);
+        layout.styles.push(labelStyle, [...layout.styles[1]]); layout.text.push(-1, labelText);
+        return snapshot;
+      }
+      if (method === "Accessibility.getFullAXTree") {
+        const tree = structuredClone(await original(source, method, params));
+        tree.nodes[0].childIds.unshift("label");
+        tree.nodes[1].name = { value: "Recipient", sources: [{ type: "relatedElement", value: { value: "Recipient" },
+          nativeSource: "labelfor", nativeSourceValue: { relatedNodes: [{ backendDOMNodeId: 5, text: "Recipient" }] } }] };
+        tree.nodes.push({ nodeId: "label", parentId: "root", backendDOMNodeId: 5, role: { value: "LabelText" }, childIds: ["label-text"] },
+          { nodeId: "label-text", parentId: "label", backendDOMNodeId: 6, role: { value: "StaticText" }, name: { value: "Recipient" }, childIds: [] });
+        return tree;
+      }
+      if (method === "Accessibility.getPartialAXTree" && params?.backendNodeId === 7)
+        return { nodes: [{ backendDOMNodeId: 7, role: { value: "textbox" }, name: { value: "Recipient" } }] };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3), result = await page.inspect() as any;
+    const textbox = result.items.find((item: any) => item.line.includes("textbox"));
+    expect(textbox.ref).toBeTruthy();
+    if (visible) expect(textbox.line).toContain('textbox "Recipient"');
+    else expect(inspectText(result)).not.toContain("Recipient");
+    await expect(page.ref(textbox.ref).count()).resolves.toBe(1);
+    await runtime.abortSessions();
+  });
+
   it.each([
-    { label: "plain UA value", expected: 1 },
-    { label: "semantic text", property: "live", expected: 2 },
-    { label: "actionable text", action: true, expected: 2 },
-    { label: "independent sibling", sibling: true, expected: 3 },
-    { label: "named wrapper", wrapperName: "Independent", expected: 2 },
-  ])("deduplicates only a sole plain native shadow value: $label", async ({ property, action, sibling, wrapperName, expected }) => {
+    { label: "plain UA value" },
+    { label: "semantic text", property: "live" },
+    { label: "actionable text", action: true },
+    { label: "independent sibling", sibling: true },
+    { label: "named wrapper", wrapperName: "Independent" },
+  ])("keeps unproven native shadow text out of the visible value: $label", async ({ property, action, sibling, wrapperName }) => {
     const { runtime, command, value } = textboxSnapshot();
     const original = command.getMockImplementation()!;
     const editable = { name: "editable", value: { value: "plaintext" } };
-    command.mockImplementation(async (source, method, params) => method !== "Accessibility.getFullAXTree" ? original(source, method, params) : { nodes: [
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOMSnapshot.captureSnapshot") {
+        const snapshot = structuredClone(await original(source, method, params));
+        const { nodes, layout } = snapshot.documents[0];
+        for (const key of ["backendNodeId", "parentIndex", "nodeType", "nodeName", "nodeValue"]) nodes[key].pop();
+        for (const key of ["nodeIndex", "bounds", "styles", "text"]) layout[key].pop();
+        return snapshot;
+      }
+      return method !== "Accessibility.getFullAXTree" ? original(source, method, params) : { nodes: [
       { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["box"] },
       { nodeId: "box", parentId: "root", backendDOMNodeId: 7, role: { value: "textbox" }, name: { value: "Recipient" }, value: { value }, childIds: ["wrapper"] },
       { nodeId: "wrapper", parentId: "box", backendDOMNodeId: 9, role: { value: "generic" }, name: { value: wrapperName ?? "" }, properties: [editable], childIds: sibling ? ["text", "extra"] : ["text"] },
       { nodeId: "text", parentId: "wrapper", backendDOMNodeId: 10, role: { value: "StaticText" }, name: { value }, childIds: [],
         properties: property ? [editable, { name: property, value: { value: "polite" } }] : [editable], ...(action ? { actions: ["doDefault"] } : {}) },
       ...(sibling ? [{ nodeId: "extra", parentId: "wrapper", backendDOMNodeId: 11, role: { value: "StaticText" }, name: { value }, childIds: [], properties: [editable] }] : []),
-    ] });
+      ] };
+    });
     const result = await (await runtime.createPage(3)).inspect();
-    expect(inspectText(result).split(value)).toHaveLength(expected + 1);
-    expect((result.items as any[]).find((item) => item.line.includes('textbox "Recipient"'))?.ref).toBeTruthy();
+    expect(inspectText(result).split(value)).toHaveLength(2);
+    expect(inspectText(result)).not.toContain("Recipient");
+    expect((result.items as any[]).find((item) => item.line.includes("textbox"))?.ref).toBeTruthy();
+    const unknownText = (result.items as any[]).filter((item) => item.line.includes("StaticText [name=unknown]"));
+    if (property || action || sibling || wrapperName) expect(unknownText.length).toBeGreaterThan(0);
+    else expect(unknownText).toHaveLength(0);
     await runtime.abortSessions();
   });
 
@@ -1466,7 +1552,7 @@ describe("AutomationRuntime", () => {
     { sibling: true },
     { value: "••••", text: "••••", masked: true },
   ])("preserves input text with independent content or semantics: %o", async (options) => {
-    const { runtime, text } = textboxSnapshot(options);
+    const { runtime, text } = textboxSnapshot({ ...options, independent: true });
     const result = await (await runtime.createPage(3)).inspect();
     expect(inspectText(result)).toContain(`StaticText "${text}"`);
     if (options.masked) expect(inspectText(result)).toContain("masked=true");
@@ -1475,7 +1561,7 @@ describe("AutomationRuntime", () => {
 
   it("retains a selected static text region and fragments long input values correctly", async () => {
     const value = `Start ${"long😀".repeat(100)} end`;
-    const { runtime } = textboxSnapshot({ value });
+    const { runtime } = textboxSnapshot({ value, independent: true });
     const page = await runtime.createPage(3);
     const region = await page.inspect({}, page.locator("#leaf"));
     expect(inspectText(region)).toContain(`StaticText "${value}"`);
@@ -1492,8 +1578,9 @@ describe("AutomationRuntime", () => {
     expect(pages).toBeGreaterThan(2);
     const reconstructed = items.map((item: any) => item.line).join("");
     expect(reconstructed).toContain(value);
-    expect(reconstructed).not.toContain("StaticText");
-    expect(reconstructed.split(value)).toHaveLength(2);
+    expect(reconstructed).toContain("StaticText");
+    // One native input value and one physically separate, identical text node.
+    expect(reconstructed.split(value)).toHaveLength(3);
     await runtime.abortSessions();
   });
 
@@ -1522,10 +1609,11 @@ describe("AutomationRuntime", () => {
 
   it("uses DOM region membership and order when aria-owns reparents AX nodes in both directions", async () => {
     const { runtime, command } = harness(), original = command.getMockImplementation()!;
-    const strings = ["root", "#document", "SECTION", "H2", "BUTTON", "DIV", "1", "visible", "auto"];
+    const strings = ["root", "#document", "SECTION", "H2", "BUTTON", "DIV", "1", "visible", "auto", "#text", "Inside", "Action", "Outside", "static", "none", "ltr", "horizontal-tb", "block", "16px", "rgb(0, 0, 0)", "0px", "border-box", "clip", "normal"];
+    const style = [6, 7, 7, 7, 7, 13, 14, 14, 14, 14, 8, 14, 14, 14, 14, 14, 8, 15, 16, 17, 18, 19, 14, 20, 21, 14, 14, 22, 14, 14, 14, 14, 23, 14];
     const snapshot = { strings, documents: [{ frameId: 0,
-      nodes: { backendNodeId: [1, 7, 8, 9, 10, 11], parentIndex: [-1, 0, 1, 1, 0, 0], nodeType: [9, 1, 1, 1, 1, 1], nodeName: [1, 2, 3, 4, 3, 5], nodeValue: [-1, -1, -1, -1, -1, -1] },
-      layout: { nodeIndex: [0, 1, 2, 3, 4, 5], bounds: Array.from({ length: 6 }, () => [0, 0, 100, 20]), styles: [[], ...Array.from({ length: 5 }, () => [6, 7, 7, 7, 8])], text: [-1, -1, -1, -1, -1, -1] },
+      nodes: { backendNodeId: [1, 7, 8, 9, 10, 11, 101, 102, 103], parentIndex: [-1, 0, 1, 1, 0, 0, 2, 3, 4], nodeType: [9, 1, 1, 1, 1, 1, 3, 3, 3], nodeName: [1, 2, 3, 4, 3, 5, 9, 9, 9], nodeValue: [-1, -1, -1, -1, -1, -1, 10, 11, 12] },
+      layout: { nodeIndex: [0, 1, 2, 3, 4, 5, 6, 7, 8], bounds: Array.from({ length: 9 }, () => [0, 0, 100, 20]), styles: [[], ...Array.from({ length: 8 }, () => style)], text: [-1, -1, -1, -1, -1, -1, 10, 11, 12] },
     }] };
     const nodes = [
       { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["region", "owner"] },
@@ -1593,20 +1681,21 @@ describe("AutomationRuntime", () => {
     await runtime.abortSessions();
   });
 
-  it("retains an independent ARIA name and a visible placeholder", async () => {
+  it("keeps a visible placeholder without exposing an unpainted ARIA name", async () => {
     const { runtime } = placeholderSnapshot({ label: true });
     const result = await (await runtime.createPage(3)).inspect();
-    expect(inspectText(result)).toContain('textbox "Label"');
+    expect(inspectText(result)).toContain("textbox [name=unknown]");
+    expect(inspectText(result)).not.toContain("Label");
     expect(inspectText(result)).toContain('[placeholder="PRIVATE_HINT"]');
     await runtime.abortSessions();
   });
 
-  it("keeps an independent ARIA name when its placeholder is hidden", async () => {
+  it("does not expose an unpainted ARIA name when its placeholder is hidden", async () => {
     const { runtime } = placeholderSnapshot({ label: true, status: ["hidden"] });
     const result = await (await runtime.createPage(3)).inspect();
-    expect(inspectText(result)).toContain('textbox "Label"');
+    expect(inspectText(result)).toContain("textbox [name=unknown]");
+    expect(inspectText(result)).not.toContain("Label");
     expect(inspectText(result)).not.toContain("PRIVATE_HINT");
-    expect(inspectText(result)).not.toContain("name=unknown");
     await runtime.abortSessions();
   });
 
@@ -1645,8 +1734,8 @@ describe("AutomationRuntime", () => {
       const result = await (await runtime.createPage(3)).inspect();
       const text = inspectText(result);
       expect(text).not.toContain("PRIVATE_HINT");
-      if (value) { expect(text).toContain(": typed"); expect(text).not.toContain("StaticText"); }
-      else expect(text).toContain("StaticText [name=unknown]");
+      if (value) expect(text).toContain(": typed");
+      expect(text).toContain("StaticText [name=unknown]");
       await runtime.abortSessions();
     }
   });
@@ -1818,7 +1907,7 @@ describe("AutomationRuntime", () => {
     await runtime.abortSessions();
   });
 
-  it("preserves explicit descendant labels, embedded control values and semantic spacing when filtering a name", async () => {
+  it("uses painted descendants instead of explicit descendant aliases when filtering a name", async () => {
     const { runtime, command } = harness();
     const original = command.getMockImplementation()!;
     const named = (value: string, type = "contents") => ({ value, sources: [{ type, value: { value } }] });
@@ -1826,10 +1915,10 @@ describe("AutomationRuntime", () => {
     const nodes = [
       { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["button"] },
       { nodeId: "button", parentId: "root", backendDOMNodeId: 7, role: { value: "button" }, name: named(originalName), childIds: ["start", "secret", "alias", "range", "select", "list", "end"] },
-      { nodeId: "start", parentId: "button", role: { value: "StaticText" }, name: named("Begin") },
+      { nodeId: "start", parentId: "button", backendDOMNodeId: 10, role: { value: "StaticText" }, name: named("Begin ") },
       { nodeId: "secret", parentId: "button", backendDOMNodeId: 8, role: { value: "StaticText" }, name: named("HIDDEN") },
       { nodeId: "alias", parentId: "button", role: { value: "generic" }, name: named("Known alias", "attribute"), childIds: ["alias-text"] },
-      { nodeId: "alias-text", parentId: "alias", role: { value: "StaticText" }, name: named("Original text") },
+      { nodeId: "alias-text", parentId: "alias", backendDOMNodeId: 11, role: { value: "StaticText" }, name: named("Original text") },
       { nodeId: "range", parentId: "button", role: { value: "slider" }, name: named("Size", "attribute"), value: { value: 35 } },
       { nodeId: "select", parentId: "button", backendDOMNodeId: 9, role: { value: "combobox" }, value: { value: "Selected choice" }, childIds: ["unselected"] },
       { nodeId: "unselected", parentId: "select", role: { value: "StaticText" }, name: named("Unselected choice") },
@@ -1838,22 +1927,24 @@ describe("AutomationRuntime", () => {
       { nodeId: "selected-text", parentId: "selected", role: { value: "StaticText" }, name: named("Selected") },
       { nodeId: "other", parentId: "list", role: { value: "option" }, properties: [{ name: "selected", value: { value: false } }], childIds: ["other-text"] },
       { nodeId: "other-text", parentId: "other", role: { value: "StaticText" }, name: named("Other") },
-      { nodeId: "end", parentId: "button", role: { value: "StaticText" }, name: named("end") },
+      { nodeId: "end", parentId: "button", backendDOMNodeId: 12, role: { value: "StaticText" }, name: named(" end") },
     ];
+    const strings = ["1", "0", "visible", "auto", "root", "BUTTON", "#text", "HIDDEN", "SELECT", "none", "Begin ", "Original text", " end", "static", "ltr", "horizontal-tb", "block", "16px", "rgb(0, 0, 0)", "0px", "border-box", "clip", "normal"];
+    const style = [0, 2, 2, 2, 2, 13, 9, 9, 9, 9, 3, 9, 9, 9, 9, 9, 3, 14, 15, 16, 17, 18, 9, 19, 20, 9, 9, 21, 9, 9, 9, 9, 22, 9];
     command.mockImplementation(async (source, method, params) => {
       if (method === "Accessibility.getFullAXTree") return { nodes };
-      if (method === "DOMSnapshot.captureSnapshot") return { strings: ["1", "0", "visible", "auto", "root", "BUTTON", "#text", "HIDDEN", "SELECT", "none"], documents: [{
-        frameId: 4, nodes: { backendNodeId: [7, 8, 9], parentIndex: [-1, -1, -1], nodeType: [1, 3, 1], nodeName: [5, 6, 8], nodeValue: [-1, 7, -1] },
-        layout: { nodeIndex: [0, 1, 2], text: [-1, 7, -1], bounds: [[0, 0, 100, 20], [0, 0, 100, 20], [0, 0, 100, 20]], styles: [[0, 2, 2, 2, 3], [1, 2, 2, 2, 3], [0, 2, 2, 2, 3, ...Array(21).fill(0), 9]] },
+      if (method === "DOMSnapshot.captureSnapshot") return { strings, documents: [{
+        frameId: 4, nodes: { backendNodeId: [7, 8, 9, 10, 11, 12], parentIndex: [-1, 0, 0, 0, 0, 0], nodeType: [1, 3, 1, 3, 3, 3], nodeName: [5, 6, 8, 6, 6, 6], nodeValue: [-1, 7, -1, 10, 11, 12] },
+        layout: { nodeIndex: [0, 1, 2, 3, 4, 5], text: [-1, 7, -1, 10, 11, 12], bounds: Array.from({ length: 6 }, () => [0, 0, 100, 20]), styles: [style, [1, ...style.slice(1)], style, style, style, style] },
       }] };
       return original(source, method, params);
     });
     const page = await runtime.createPage(3);
     const result = await page.inspect() as any;
     const button = result.items.find((item: any) => item.line.includes("- button "));
-    expect(button.line).toContain('button "Begin Known alias 35 Selected choice Selected end"');
+    expect(button.line).toContain('button "Begin Original text end"');
     expect(button.line).not.toContain("HIDDEN");
-    expect(button.line).not.toContain("Original text");
+    expect(button.line).not.toContain("Known alias");
     expect(button.line).not.toContain("Unselected choice");
     expect(button.line).not.toContain("Other");
     expect((runtime as any).sessions.get(3).refs.get(button.ref).name).toBe(originalName);
@@ -1895,7 +1986,7 @@ describe("AutomationRuntime", () => {
     expect(first).toMatchObject({ mode: "full", tabId: 3, documentId: 0, truncation: { baselineComplete: true } });
     const ref = (first.items as any[]).find((item) => item.line.includes('button "Save"'))?.ref;
     expect(ref).toMatch(/^t3s[a-f0-9]+d0e1$/); expect(first).not.toHaveProperty("screenshot");
-    metadata[0]!.name = "Continue";
+    metadata[0]!.name = "Continue"; metadata[0]!.text = "Continue";
     const second = await page.inspect({ since: first.observationId as string });
     expect(second).toMatchObject({ mode: "delta", items: [expect.objectContaining({ change: "updated", line: expect.stringContaining("Continue") })] });
     expect(second).not.toHaveProperty("snapshot");
@@ -1934,7 +2025,11 @@ describe("AutomationRuntime", () => {
     const frameId = "FRAME-12345678901234567890123456789012";
     command.mockImplementation(async (source, method, params) => {
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: frameId } } };
-      if (method === "DOMSnapshot.captureSnapshot") return { strings: [frameId], documents: [{ frameId: 0, nodes: { backendNodeId: [], parentIndex: [], nodeType: [], nodeName: [] }, layout: { nodeIndex: [], bounds: [], styles: [] } }] };
+      if (method === "DOMSnapshot.captureSnapshot") {
+        const snapshot = await original(source, method, params);
+        snapshot.strings[0] = frameId;
+        return snapshot;
+      }
       return original(source, method, params);
     });
     const page = await runtime.createPage(3);
@@ -1966,7 +2061,7 @@ describe("AutomationRuntime", () => {
   });
 
   it("keeps AX row identities distinct when two semantic nodes share a backend node", async () => {
-    const { runtime, command } = harness();
+    const { runtime, command } = harness([{ role: "button", name: "Same", text: "Same" }]);
     const original = command.getMockImplementation()!;
     let includeSecond = true;
     command.mockImplementation(async (source, method, params) => method === "Accessibility.getFullAXTree" ? { nodes: [
@@ -2043,7 +2138,8 @@ describe("AutomationRuntime", () => {
     expect(ownedRef).toMatch(/^t3s[a-f0-9]+d0e1$/);
     expect(calls.filter(({ method }) => method === "Accessibility.getFullAXTree")).toHaveLength(1);
     const delta = await page.inspect({ since: first.observationId as string }) as any;
-    expect(delta).toMatchObject({ mode: "delta", items: [expect.objectContaining({ change: "updated", line: expect.stringContaining("Changed after the initial snapshot") })] });
+    expect(delta).toMatchObject({ mode: "delta", items: expect.arrayContaining([expect.objectContaining({ change: "updated", line: expect.stringContaining("Changed after the initial snapshot") })]) });
+    expect(delta.items.every((item: any) => item.change === "updated" || item.change === "removed")).toBe(true);
     await runtime.abortSessions();
   });
 

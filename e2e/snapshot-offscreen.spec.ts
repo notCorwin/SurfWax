@@ -23,7 +23,7 @@ test("snapshot excludes unreachable offscreen content but keeps scroll-reachable
         <button id="fixed-negative" style="position:fixed;left:-9999px;top:65px">Fixed negative hidden</button>
         <button id="fixed-right" style="position:fixed;left:1800px;top:65px">Fixed right hidden</button>
         <button id="fixed-partial" style="position:fixed;left:-25px;top:100px;width:100px">Fixed partially visible</button>
-        <span id="hidden-label" style="position:absolute;left:-9999px;top:140px">Offscreen accessible name</span><button style="position:absolute;left:10px;top:140px" aria-labelledby="hidden-label"></button>
+        <span id="hidden-label" style="position:absolute;left:-9999px;top:140px">Offscreen accessible name</span><button id="offscreen-label-button" style="position:absolute;left:10px;top:140px" aria-labelledby="hidden-label"></button>
         <div id="ltr" style="position:absolute;left:10px;top:220px;width:200px;height:100px;overflow:auto;border:1px solid">
           <div style="position:relative;width:1000px;height:80px">
             <button id="ltr-negative" style="position:absolute;left:-9999px;top:10px">LTR scroller hidden</button>
@@ -97,11 +97,35 @@ test("snapshot excludes unreachable offscreen content but keeps scroll-reachable
       return { fixedBefore, fixedAfter, partial, reachable };
     });
     expect(frameActual).toEqual({ fixedBefore: -9999, fixedAfter: -9999, partial: true, reachable: true });
+    // Independently identify characters whose boxes lie wholly inside both
+    // the button and its own viewport. Partially visible glyphs are unproven.
+    const visibleRuns = (element: Element) => {
+      const text = element.firstChild!, box = element.getBoundingClientRect(), view = element.ownerDocument.defaultView!;
+      const range = element.ownerDocument.createRange(), runs: string[] = [];
+      let run = "";
+      for (let index = 0; index < text.textContent!.length; index++) {
+        range.setStart(text, index); range.setEnd(text, index + 1);
+        const rect = range.getBoundingClientRect();
+        const inside = rect.width > 0 && rect.height > 0 && rect.left >= Math.max(0, box.left) && rect.top >= Math.max(0, box.top)
+          && rect.right <= Math.min(view.innerWidth, box.right) && rect.bottom <= Math.min(view.innerHeight, box.bottom);
+        if (inside) run += text.textContent![index];
+        else if (run) { runs.push(run.replace(/\s+/g, " ").trim()); run = ""; }
+      }
+      if (run) runs.push(run.replace(/\s+/g, " ").trim());
+      return runs.filter(Boolean);
+    };
+    const fixedRuns = await target.locator("#fixed-partial").evaluate(visibleRuns);
+    const frameRuns = await frame.locator("#frame-partial").evaluate(visibleRuns);
     let baseline: any;
     responses.push(
       commandResponse("inspect_page", { budget: 12000 }, "offscreen-before"),
       (request) => {
         baseline = lastTool(request);
+        return commandResponse("inspect_page", { region: { by: "css", value: "#offscreen-label-button" }, budget: 12000 }, "offscreen-label");
+      },
+      () => commandResponse("inspect_page", { region: { by: "css", value: "#fixed-partial" }, budget: 12000 }, "offscreen-partial"),
+      () => commandResponse("inspect_page", { region: { by: "css", value: "#frame-partial", frame: { by: "css", value: "#child-frame" } }, budget: 12000 }, "offscreen-frame-partial"),
+      () => {
         return commandResponse("click", { target: { ref: button(baseline.items, "Reveal offscreen")?.ref } }, "offscreen-reveal");
       },
       () => commandResponse("inspect_page", { since: baseline.observationId, budget: 12000 }, "offscreen-delta"),
@@ -120,10 +144,20 @@ test("snapshot excludes unreachable offscreen content but keeps scroll-reachable
       expect(button(before.items, name)).toBeUndefined();
       expect(JSON.stringify(before.items)).not.toContain(name);
     }
-    for (const name of ["Root right reachable", "Root below reachable", "Fixed partially visible", "LTR scroller reachable", "RTL scroller reachable", "Vertical scroller reachable", "Transformed fixed reachable", "Frame partially visible", "Frame below reachable", "Offscreen accessible name"]) {
-      expect(button(before.items, name)?.ref).toBeTruthy();
+    for (const name of ["Root right reachable", "Root below reachable", "LTR scroller reachable", "RTL scroller reachable", "Vertical scroller reachable", "Transformed fixed reachable", "Frame below reachable"]) {
+      expect(button(before.items, name)?.ref, name).toBeTruthy();
     }
-    expect(before.items.filter((item: any) => item.line.includes("Offscreen accessible name"))).toHaveLength(1);
+    for (const [id, runs] of [["offscreen-partial", fixedRuns], ["offscreen-frame-partial", frameRuns]] as const) {
+      const partial = output(id)?.items?.find((item: any) => /\bbutton(?:\s|$)/.test(item.line) && item.ref);
+      expect(partial?.ref, id).toEqual(expect.any(String));
+      const name = /\bbutton\s+("(?:\\.|[^"\\])*")/.exec(partial.line)?.[1];
+      if (name) expect(runs.some((run) => run.includes(JSON.parse(name))) || runs.join(" ").includes(JSON.parse(name)), id).toBe(true);
+      else expect(partial.line, id).toContain("[name=unknown]");
+    }
+    expect(JSON.stringify(before.items)).not.toContain("Offscreen accessible name");
+    const anonymous = output("offscreen-label");
+    expect(anonymous?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(item.line) && typeof item.ref === "string")).toBe(true);
+    expect(JSON.stringify(anonymous.items)).not.toContain("Offscreen accessible name");
     expect(changed).toMatchObject({ ok: true });
     for (const name of ["Root negative hidden", "Fixed negative hidden", "LTR scroller hidden", "Frame fixed hidden"]) {
       expect(button(changed.pageSnapshot.items, name)?.ref).toBeTruthy();

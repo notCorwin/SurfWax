@@ -80,7 +80,10 @@ describe("snapshot visual visibility", () => {
     };
     expect(check({ parent: 0 })).toBe(true);
     expect(check({ parent: 0 }, [30, 0, 30, 20])).toBeUndefined();
-    expect(check({ parent: 0, textOverflow: "ellipsis" })).toBeUndefined();
+    // The declaration alone does not truncate a short label: all source
+    // graphemes have boxes inside its clip. An overflowing one is uncertain.
+    expect(check({ parent: 0, textOverflow: "ellipsis" })).toBe(true);
+    expect(check({ parent: 0, textOverflow: "ellipsis" }, [30, 0, 30, 20])).toBeUndefined();
     expect(check({ parent: 0, lineClamp: "1" })).toBeUndefined();
     expect(check({ parent: 0, clipPath: "circle(40%)" })).toBeUndefined();
     expect(check({ parent: 0, mask: "linear-gradient(black, transparent)" })).toBeUndefined();
@@ -100,7 +103,8 @@ describe("snapshot visual visibility", () => {
     layout.text.push(layout.text[1]!);
     const candidates: SnapshotTextPaintCandidate[] = [];
     snapshotVisibility(snapshot, { textPaintCandidates: candidates });
-    expect(candidates).toEqual([]);
+    expect(candidates).toEqual([expect.objectContaining({ backendNodeId: 2 })]);
+    expect(candidates[0]!.fullyWithinClip).toBeUndefined();
   });
 
   it("collects text-bearing transparent pseudo elements without confusing geometry-only rows", () => {

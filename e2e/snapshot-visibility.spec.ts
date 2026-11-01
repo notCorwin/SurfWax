@@ -26,14 +26,14 @@ test("snapshots reflect rendered visibility and update when content is shown or 
         <div data-reveal-clip style="position:absolute;left:900px;top:100px;width:140px;height:60px;clip-path:inset(50%)"><button id="modern-fixed" style="position:fixed;left:10px;top:10px">Modern fixed clipped action</button></div>
         <button id="legacy-partial" style="position:absolute;left:900px;top:250px;width:140px;height:40px;clip:rect(0,70px,40px,0)">Legacy partially clipped action</button>
         <button id="modern-partial" style="position:absolute;left:900px;top:300px;width:140px;height:40px;clip-path:inset(0 50% 0 0)">Modern partially clipped action</button>
-        <span id="clipped-label" style="position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap">Clipped accessible name</span><button aria-labelledby="clipped-label"></button>
+        <span id="clipped-label" style="position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap">Clipped accessible name</span><button id="clipped-name-button" aria-labelledby="clipped-label"></button>
         <div style="position:relative"><div style="width:0;height:0;overflow:hidden"><button style="position:absolute;left:400px;top:0">Escaped absolute action</button></div></div>
         <div style="width:0;height:0;overflow:hidden"><button style="position:fixed;left:400px;top:80px">Escaped fixed action</button></div>
         <div style="height:1800px"></div><button>Scrollable action</button>
-        <span id="label" style="display:none">Accessible name</span><button aria-labelledby="label"></button>
+        <span id="label" style="display:none">Accessible name</span><button id="hidden-name-button" aria-labelledby="label"></button>
         <button id="aggregate"><span>Visible label</span><span style="opacity:0">Hidden label</span></button>
         <button>Start <span aria-label="Known alias">Original text</span><span style="opacity:0">Nested hidden secret</span> end</button>
-        <button aria-label="Explicit label"><span style="opacity:0">Hidden child</span></button>
+        <button id="explicit-name-button" aria-label="Explicit label"><span style="opacity:0">Hidden child</span></button>
         <div style="display:contents"><button>Contents action</button></div>
       </main>`;
       const host = document.createElement("div");
@@ -65,6 +65,13 @@ test("snapshots reflect rendered visibility and update when content is shown or 
       commandResponse("inspect_page", { budget: 12000 }, "visibility-before"),
       (request) => {
         baseline = lastTool(request);
+        return commandResponse("inspect_page", { budget: 12000, region: { by: "css", value: "#clipped-name-button" } }, "visibility-clipped-name");
+      },
+      commandResponse("inspect_page", { budget: 12000, region: { by: "css", value: "#hidden-name-button" } }, "visibility-hidden-name"),
+      commandResponse("inspect_page", { budget: 12000, region: { by: "css", value: "#explicit-name-button" } }, "visibility-explicit-name"),
+      commandResponse("inspect_page", { budget: 12000, region: { by: "css", value: "#legacy-partial" } }, "visibility-legacy-partial"),
+      commandResponse("inspect_page", { budget: 12000, region: { by: "css", value: "#modern-partial" } }, "visibility-modern-partial"),
+      () => {
         const aggregateRef = baseline.items.find((item: any) => item.line.includes("Visible label"))?.ref;
         return commandResponse("click", { target: { ref: aggregateRef } }, "visibility-change");
       },
@@ -93,21 +100,30 @@ test("snapshots reflect rendered visibility and update when content is shown or 
     for (const text of ["Legacy clipped action", "Legacy clipped standalone text", "Modern clipped action", "Modern clipped standalone text", "Legacy fixed clipped action", "Modern fixed clipped action"]) {
       expect(JSON.stringify(before.items)).not.toContain(text);
     }
-    for (const name of ["Legacy partially clipped action", "Modern partially clipped action"]) expect(button(before.items, name)?.ref).toBeTruthy();
-    expect(button(before.items, "Clipped accessible name")?.ref).toBeTruthy();
-    expect(before.items.filter((item: any) => item.line.includes("Clipped accessible name"))).toHaveLength(1);
+    for (const [id, prefix] of [["visibility-legacy-partial", "Legacy"], ["visibility-modern-partial", "Modern"]]) {
+      const page = output(id), row = page?.items?.find((item: any) => /\bbutton(?:\s|$)/.test(item.line) && item.ref);
+      expect(row?.ref).toEqual(expect.any(String));
+      expect(row.line.includes(prefix) || row.line.includes("[name=unknown]")).toBe(true);
+      expect(row.line).not.toContain("partially clipped action");
+    }
+    for (const [id, hidden] of [["visibility-clipped-name", "Clipped accessible name"], ["visibility-hidden-name", "Accessible name"], ["visibility-explicit-name", "Explicit label"]]) {
+      const page = output(id);
+      expect(page?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(item.line) && typeof item.ref === "string")).toBe(true);
+      expect(JSON.stringify(page.items)).not.toContain(hidden);
+    }
+    expect(JSON.stringify(before.items)).not.toContain("Clipped accessible name");
     expect(button(before.items, "Escaped absolute action")?.ref).toBeTruthy();
     expect(button(before.items, "Escaped fixed action")?.ref).toBeTruthy();
     expect(button(before.items, "Scrollable action")?.ref).toBeTruthy();
     expect(button(before.items, "Contents action")?.ref).toBeTruthy();
     expect(button(before.items, "Shadow hidden action")).toBeUndefined();
-    expect(button(before.items, "Accessible name")?.ref).toBeTruthy();
+    expect(JSON.stringify(before.items)).not.toContain("Accessible name");
     expect(button(before.items, "Visible label")?.ref).toBeTruthy();
     expect(JSON.stringify(before.items)).not.toContain("Hidden label");
-    expect(button(before.items, "Start Known alias end")?.ref).toBeTruthy();
-    expect(button(before.items, "Start Original text end")).toBeUndefined();
+    expect(button(before.items, "Start Original text end")?.ref).toBeTruthy();
+    expect(JSON.stringify(before.items)).not.toContain("Known alias");
     expect(JSON.stringify(before.items)).not.toContain("Nested hidden secret");
-    expect(button(before.items, "Explicit label")?.ref).toBeTruthy();
+    expect(JSON.stringify(before.items)).not.toContain("Explicit label");
     expect(changed).toMatchObject({ ok: true });
     expect(await target.locator("body").getAttribute("data-aggregated")).toBe("yes");
     expect(button(changed.pageSnapshot.items, "Visible action")).toBeUndefined();
@@ -121,7 +137,9 @@ test("snapshots reflect rendered visibility and update when content is shown or 
       expect(delta.items.some((item: any) => item.change === "added" && item.line.includes(text))).toBe(true);
     }
     expect(delta?.mode).toBe("delta");
-    expect(button(delta.items, "Visible action")?.change).toBe("removed");
+    const previouslyVisible = button(before.items, "Visible action");
+    expect(previouslyVisible?.id).toEqual(expect.any(String));
+    expect(delta.items.find((item: any) => item.id === previouslyVisible.id)).toMatchObject({ id: previouslyVisible.id, line: "", change: "removed" });
     expect(button(delta.items, "Transparent action")?.change).toBe("added");
     expect(button(after.items, "Visible action")).toBeUndefined();
     expect(button(after.items, "Transparent action")?.ref).toBeTruthy();

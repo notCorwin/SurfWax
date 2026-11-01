@@ -6,6 +6,63 @@ function lastTool(request: any): any {
   return JSON.parse(Array.isArray(content) ? content.find((part: any) => part.type === "text").text : content);
 }
 
+// Some editable hosts have no visible name of their own. Locate the host by
+// its rendered descendant text and snapshot nesting, never by its hidden ARIA
+// identity. The role keeps a child with its own ref from being mistaken for
+// the editable owner.
+const visibleEditors: Record<string, { text: string; role: string; state?: string }> = {
+  "Rich editor": { text: "Initial", role: "generic", state: "editable=richtext" },
+  "Plain editor": { text: "Initial plain", role: "generic", state: "editable=plaintext" },
+  "Outer editor": { text: "Outer", role: "generic", state: "editable=richtext" },
+  "Frame editor": { text: "Frame initial", role: "generic", state: "editable=richtext" },
+  "AX hidden editor": { text: "Visible editor", role: "generic", state: "editable=richtext" },
+  "AX hidden plain": { text: "Fixed text", role: "generic", state: "editable=plaintext" },
+  "AX hidden inherited": { text: "Inherited and focusable", role: "generic", state: "editable=plaintext" },
+  "Article editor": { text: "Article text", role: "article", state: "editable=richtext" },
+  "Button editor": { text: "Button text", role: "button", state: "editable=richtext" },
+  "Heading editor": { text: "Heading text", role: "heading", state: "editable=plaintext" },
+  "ARIA textbox editor": { text: "Textbox text", role: "textbox", state: "editable=plaintext" },
+  "ARIA search editor": { text: "Search text", role: "searchbox", state: "editable=richtext" },
+  "ARIA spin editor": { text: "Spin text", role: "spinbutton", state: "editable=richtext" },
+  "CSS plaintext editor": { text: "CSS plaintext visible", role: "article", state: "editable=plaintext" },
+  "CSS rich editor": { text: "CSS rich visible", role: "article", state: "editable=richtext" },
+  "AX hidden CSS plaintext": { text: "AX hidden CSS plaintext visible", role: "article", state: "editable=plaintext" },
+  "AX hidden CSS rich": { text: "AX hidden CSS rich visible", role: "article", state: "editable=richtext" },
+  "open slot editor": { text: "open slot text", role: "generic", state: "editable=plaintext" },
+  "closed slot editor": { text: "closed slot text", role: "generic", state: "editable=plaintext" },
+  "AX hidden role editor": { text: "AX hidden role text", role: "button", state: "editable=richtext" },
+  "Native button": { text: "Native button text", role: "button" },
+  "Inherited child": { text: "inherited text", role: "generic" },
+  "Native textbox": { text: "Native value", role: "textbox" },
+  "Read-only editor": { text: "Read-only visible text", role: "article", state: "readonly=true" },
+  "AX hidden read-only": { text: "AX hidden readonly visible", role: "textbox", state: "readonly=true" },
+  "CSS read-only editor": { text: "CSS readonly visible", role: "article", state: "readonly=true" },
+  "AX hidden CSS read-only": { text: "AX hidden CSS readonly visible", role: "article", state: "readonly=true" },
+  "Disabled editor": { text: "Disabled visible text", role: "article", state: "disabled=true" },
+  "AX hidden disabled": { text: "AX hidden disabled visible", role: "article", state: "disabled=true" },
+  "CSS-only editor": { text: "CSS-only text", role: "article" },
+};
+
+function visibleOwner(snapshot: any, label: string): any {
+  const spec = visibleEditors[label], items = snapshot?.items as any[] | undefined;
+  if (!spec || !items) return undefined;
+  const matches = (item: any) => typeof item.ref === "string" && new RegExp(`^\\s*- ${spec.role}(?:\\s|$)`).test(item.line)
+    && (!spec.state || item.line.includes(spec.state));
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index]!;
+    if (!item.line.includes(JSON.stringify(spec.text)) && !item.line.endsWith(`: ${spec.text}`)) continue;
+    if (matches(item)) return item;
+    let depth = item.line.match(/^ */)![0].length;
+    for (let parent = index - 1; parent >= 0; parent--) {
+      const candidate = items[parent]!, candidateDepth = candidate.line.match(/^ */)![0].length;
+      if (candidateDepth >= depth) continue;
+      if (matches(candidate)) return candidate;
+      depth = candidateDepth;
+    }
+  }
+  return undefined;
+}
+
 test("exposes editable hosts and preserves their usable refs across regions and frames", async () => {
   test.setTimeout(120_000);
   const responses: MockResponse[] = [];
@@ -29,21 +86,21 @@ test("exposes editable hosts and preserves their usable refs across regions and 
         <div role="textbox" contenteditable="plaintext-only" aria-label="ARIA textbox editor">Textbox text</div>
         <div role="searchbox" contenteditable="true" aria-label="ARIA search editor">Search text</div>
         <div role="spinbutton" contenteditable="true" aria-label="ARIA spin editor">Spin text</div>
-        <div role="article" contenteditable="true" aria-readonly="true" aria-label="Read-only editor">Read-only text</div>
-        <div role="article" contenteditable="true" aria-disabled="true" aria-label="Disabled editor">Disabled text</div>
+        <div role="article" contenteditable="true" aria-readonly="true" aria-label="Read-only editor">Read-only visible text</div>
+        <div role="article" contenteditable="true" aria-disabled="true" aria-label="Disabled editor">Disabled visible text</div>
         <div role="article" tabindex="0" style="-webkit-user-modify:read-write" aria-label="CSS-only editor">CSS-only text</div>
-        <div role="article" contenteditable="true" style="-webkit-user-modify:read-write-plaintext-only" aria-label="CSS plaintext editor">Plain text</div>
-        <div role="article" contenteditable="plaintext-only" style="-webkit-user-modify:read-write" aria-label="CSS rich editor">Rich text</div>
-        <div role="article" tabindex="0" contenteditable="true" style="-webkit-user-modify:read-only" aria-label="CSS read-only editor">Read-only text</div>
+        <div role="article" contenteditable="true" style="-webkit-user-modify:read-write-plaintext-only" aria-label="CSS plaintext editor">CSS plaintext visible</div>
+        <div role="article" contenteditable="plaintext-only" style="-webkit-user-modify:read-write" aria-label="CSS rich editor">CSS rich visible</div>
+        <div role="article" tabindex="0" contenteditable="true" style="-webkit-user-modify:read-only" aria-label="CSS read-only editor">CSS readonly visible</div>
         <button contenteditable="true" aria-label="Native button">Native button text</button>
         <section aria-hidden="true">
           <div id="ax-hidden" contenteditable="true" aria-label="AX hidden editor" style="border:1px solid">Visible editor</div>
           <div role="button" id="ax-hidden-role" contenteditable="true" aria-label="AX hidden role editor">AX hidden role text</div>
-          <div role="textbox" contenteditable="true" aria-readonly="true" aria-label="AX hidden read-only">Read-only text</div>
-          <div role="article" contenteditable="true" aria-disabled="true" aria-label="AX hidden disabled">Disabled text</div>
-          <div role="article" contenteditable="true" style="-webkit-user-modify:read-write-plaintext-only" aria-label="AX hidden CSS plaintext">Plain text</div>
-          <div role="article" contenteditable="plaintext-only" style="-webkit-user-modify:read-write" aria-label="AX hidden CSS rich">Rich text</div>
-          <div role="article" contenteditable="true" style="-webkit-user-modify:read-only" aria-label="AX hidden CSS read-only">Read-only text</div>
+          <div role="textbox" contenteditable="true" aria-readonly="true" aria-label="AX hidden read-only">AX hidden readonly visible</div>
+          <div role="article" contenteditable="true" aria-disabled="true" aria-label="AX hidden disabled">AX hidden disabled visible</div>
+          <div role="article" contenteditable="true" style="-webkit-user-modify:read-write-plaintext-only" aria-label="AX hidden CSS plaintext">AX hidden CSS plaintext visible</div>
+          <div role="article" contenteditable="plaintext-only" style="-webkit-user-modify:read-write" aria-label="AX hidden CSS rich">AX hidden CSS rich visible</div>
+          <div role="article" contenteditable="true" style="-webkit-user-modify:read-only" aria-label="AX hidden CSS read-only">AX hidden CSS readonly visible</div>
           <div contenteditable="plaintext-only" aria-label="AX hidden plain" style="border:1px solid">
             <span tabindex="0" aria-label="AX hidden inherited">Inherited and focusable</span>
             <span contenteditable="false" aria-label="AX hidden fixed">Fixed text</span>
@@ -62,7 +119,7 @@ test("exposes editable hosts and preserves their usable refs across regions and 
     await expect(target.frameLocator('iframe[title="Child editor"]').locator('[contenteditable]')).toBeVisible();
     responses.push(commandResponse("inspect_page", { budget: 12000 }, "editable-initial"), (request) => {
       initial = lastTool(request);
-      const byName = (name: string) => initial.items?.find((item: any) => item.line.includes(`"${name}"`));
+      const byName = (name: string) => visibleOwner(initial, name);
       const rich = byName("Rich editor")?.ref, plain = byName("Plain editor")?.ref, child = byName("Frame editor")?.ref, hidden = byName("AX hidden editor")?.ref;
       const article = byName("Article editor")?.ref, hiddenRole = byName("AX hidden role editor")?.ref;
       if (!rich || !plain || !child || !hidden || !article || !hiddenRole) return textResponse("EDITABLE_TEST_DONE");
@@ -85,7 +142,7 @@ test("exposes editable hosts and preserves their usable refs across regions and 
     await expect(opened.page.locator(".markdown-body").last()).toContainText("EDITABLE_TEST_DONE", { timeout: 90_000 });
 
     expect(initial).toMatchObject({ mode: "full", truncation: { baselineComplete: true } });
-    const line = (name: string) => initial.items.find((item: any) => item.line.includes(`"${name}"`))?.line as string | undefined;
+    const line = (name: string) => visibleOwner(initial, name)?.line as string | undefined;
     expect(line("Rich editor")).toContain("[editable=richtext]");
     expect(line("Plain editor")).toContain("[editable=plaintext]");
     expect(line("Outer editor")).toContain("[editable=richtext]");
@@ -93,9 +150,9 @@ test("exposes editable hosts and preserves their usable refs across regions and 
     expect(line("AX hidden editor")).toContain("[editable=richtext]");
     expect(line("AX hidden plain")).toContain("[editable=plaintext]");
     expect(line("AX hidden inherited")).toContain("[editable=plaintext]");
-    expect(line("Article editor")).toContain('article "Article editor" [editable=richtext]');
-    expect(line("Button editor")).toContain('button "Button editor" [editable=richtext]');
-    expect(line("Heading editor")).toContain('heading "Heading editor" [editable=plaintext]');
+    expect(line("Article editor")).toContain("[editable=richtext]");
+    expect(line("Button editor")).toContain('button "Button text" [editable=richtext]');
+    expect(line("Heading editor")).toContain('heading "Heading text" [editable=plaintext]');
     expect(line("ARIA textbox editor")).toContain("editable=plaintext");
     expect(line("ARIA search editor")).toContain("editable=richtext");
     expect(line("ARIA spin editor")).toContain("editable=richtext");
@@ -105,12 +162,14 @@ test("exposes editable hosts and preserves their usable refs across regions and 
     expect(line("AX hidden CSS rich")).toContain("editable=richtext");
     expect(line("open slot editor")).toContain("editable=plaintext");
     expect(line("closed slot editor")).toContain("editable=plaintext");
-    expect(line("AX hidden role editor")).toContain('button "AX hidden role editor" [editable=richtext]');
+    expect(line("AX hidden role editor")).toContain('button "AX hidden role text" [editable=richtext]');
     expect(line("Native button")).not.toContain("[editable=");
-    expect(line("AX hidden fixed") ?? "").not.toContain("[editable=");
-    expect(line("Inherited child") ?? "").not.toContain("[editable=");
-    expect(line("Fixed child") ?? "").not.toContain("[editable=");
-    expect(line("Locked area") ?? "").not.toContain("[editable=");
+    expect(line("Inherited child")).not.toContain("[editable=");
+    for (const text of ["Fixed text", "fixed text", "Locked text"]) {
+      const staticText = initial.items.find((item: any) => item.line.includes(`- StaticText ${JSON.stringify(text)}`));
+      expect(staticText?.line, text).toEqual(expect.any(String));
+      expect(staticText.line).not.toContain("[editable=");
+    }
     expect(line("Native textbox")).toContain("textbox");
     for (const name of ["Read-only editor", "AX hidden read-only", "CSS read-only editor", "AX hidden CSS read-only"]) {
       expect(line(name)).toContain("readonly=true");
@@ -122,18 +181,20 @@ test("exposes editable hosts and preserves their usable refs across regions and 
     }
     expect(line("CSS-only editor")).not.toContain("editable=");
     for (const name of ["Rich editor", "Plain editor", "Frame editor", "AX hidden editor", "AX hidden inherited", "Article editor", "Button editor", "Heading editor", "AX hidden role editor", "ARIA textbox editor", "ARIA search editor", "ARIA spin editor", "CSS plaintext editor", "CSS rich editor", "AX hidden CSS plaintext", "AX hidden CSS rich", "open slot editor", "closed slot editor"]) {
-      const item = withActions?.items?.find((entry: any) => entry.line.includes(`"${name}"`));
+      const item = visibleOwner(withActions, name);
       expect(item?.line).toContain("[actions=click,fill,press_key,type_text]");
     }
     for (const name of ["Read-only editor", "AX hidden read-only", "Disabled editor", "AX hidden disabled", "CSS-only editor", "CSS read-only editor", "AX hidden CSS read-only"]) {
-      const item = withActions?.items?.find((entry: any) => entry.line.includes(`"${name}"`));
+      const item = visibleOwner(withActions, name);
       expect(item?.line).not.toContain("fill");
       expect(item?.line).not.toContain("type_text");
     }
-    expect(withActions?.items?.find((entry: any) => entry.line.includes('"Native button"'))?.line).not.toContain("type_text");
+    expect(visibleOwner(withActions, "Native button")?.line).not.toContain("type_text");
     expect(region).toMatchObject({ mode: "full" });
     expect(JSON.stringify(region.items)).toContain("[editable=richtext]");
-    expect(JSON.stringify(region.items)).not.toContain("Plain editor");
+    expect(JSON.stringify(region.items)).not.toContain("Initial plain");
+    for (const hiddenName of ["Rich editor", "Plain editor", "Frame editor", "AX hidden editor", "Article editor", "AX hidden role editor"])
+      expect(JSON.stringify(initial.items)).not.toContain(JSON.stringify(hiddenName));
     expect(richFill).toMatchObject({ ok: true });
     expect(plainType).toMatchObject({ ok: true });
     expect(childFill).toMatchObject({ ok: true });

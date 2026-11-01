@@ -9,7 +9,7 @@ for (const seed of [17, 72]) test(`reassembles semantic continuations and acts o
   test.setTimeout(300_000);
   const fixture = await semanticDeltaFixture(seed), responses: MockResponse[] = [];
   const provider = await startProvider(responses), opened = await openExtension();
-  let problem: unknown, observationId = "", rounds = 0, pageCount = 0, fragmentCount = 0, deltaChanges = 0, freshChecks = 0;
+  let problem: unknown, observationId = "", rounds = 0, pageCount = 0, fullPages = 0, deltaPages = 0, freshPages = 0, deltaChanges = 0, freshChecks = 0;
   let state: SemanticItem[] = [], pages = new SemanticPages(), cursor: string | undefined, kind: "full" | "delta" | "fresh" = "full";
   const frame = { by: "css", value: 'iframe[title="Semantic queue"]' };
   const done = () => textResponse("SEMANTIC_DELTA_TOOLS_DONE");
@@ -48,14 +48,18 @@ for (const seed of [17, 72]) test(`reassembles semantic continuations and acts o
     return commandResponse("find_elements", { target: { by: "role", value: "button", name: "Next TASK-", frame } }, `semantic-find-${rounds}`);
   };
   const readPage: MockResponse = after((result) => {
+    // The long aria-label suffix is never painted in this fixture. It must not
+    // leak through any full, delta, continuation or lookahead page.
+    expect(JSON.stringify(result)).not.toContain("海");
+    expect(JSON.stringify(result)).not.toContain("🌊");
     cursor = pages.append(result, cursor); pageCount++;
+    if (kind === "full") fullPages++; else if (kind === "delta") deltaPages++; else freshPages++;
     expect(pageCount).toBeLessThan(500);
     if (cursor) { responses.unshift(readPage); return commandResponse("inspect_page", { cursor, budget: 6000 }, `semantic-page-${pageCount}`); }
-    fragmentCount += pages.fragments;
     const observation = pages.result();
     if (kind === "full") {
       expect(observation.mode).toBe("full"); state = observation.items;
-      expect(state.some((item) => item.line.includes("海🌊".repeat(2500)))).toBe(true);
+      expect(state.length).toBeGreaterThanOrEqual(120);
     } else if (kind === "delta") {
       expect(observation.mode).toBe("delta"); deltaChanges += observation.items.length;
       state = applySemanticDelta(state, observation.items);
@@ -64,9 +68,9 @@ for (const seed of [17, 72]) test(`reassembles semantic continuations and acts o
     }
     observationId = observation.observationId;
     if (kind === "delta") return capture("fresh");
-    const next = state.filter((item) => item.ref && item.line.includes('- button "Next TASK-'));
-    expect(next).toHaveLength(1);
-    return act(next[0].ref!);
+    // The narrow cross-frame buttons may have an unproven ellipsized name.
+    // Resolve the current Next control explicitly and act on the fresh ref.
+    return findNext();
   });
   try {
     const target = await opened.context.newPage(); await target.goto(fixture.origin);
@@ -82,8 +86,9 @@ for (const seed of [17, 72]) test(`reassembles semantic continuations and acts o
     await expect(opened.page.locator(".markdown-body").last()).toContainText("SEMANTIC_DELTA_TOOLS_DONE", { timeout: 280_000 });
     if (problem) throw problem;
     expect(rounds).toBe(12);
-    expect(pageCount).toBeGreaterThan(12);
-    expect(fragmentCount).toBeGreaterThan(1);
+    expect(fullPages).toBeGreaterThan(1);
+    expect(deltaPages).toBeGreaterThan(0);
+    expect(freshPages).toBeGreaterThan(1);
     expect(deltaChanges).toBeGreaterThan(11);
     expect(freshChecks).toBe(1);
     await expect.poll(() => semanticDeltaScore(fixture.evidence())).toBe(true);

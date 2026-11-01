@@ -7,6 +7,23 @@ function emptyFrameDocument(frameId: number) {
     layout: { nodeIndex: [], bounds: [], styles: [] } };
 }
 
+/** Model a rendered control and its painted text in its owning DOM document. */
+function addVisibleControl(snapshot: any, documentIndex: number, backend: number, name: string, tag = "BUTTON") {
+  const doc = snapshot.documents[documentIndex], strings: string[] = snapshot.strings;
+  const intern = (value: string) => { const i = strings.indexOf(value); return i < 0 ? strings.push(value) - 1 : i; };
+  const style = ["1", "visible", "visible", "visible", "visible", "static", "none", "none", "none", "none", "auto", "none", "none", "none", "none", "none", "auto", "ltr", "horizontal-tb", "block", "16px", "rgb(0, 0, 0)", "none", "0px", "border-box", "none", "none", "clip", "none", "none", "none"].map(intern);
+  const nodes = doc.nodes, layout = doc.layout;
+  nodes.nodeValue ??= nodes.backendNodeId.map(() => -1);
+  layout.text ??= layout.nodeIndex.map(() => -1);
+  const parent = nodes.backendNodeId.length;
+  nodes.backendNodeId.push(backend); nodes.parentIndex.push(-1); nodes.nodeType.push(1); nodes.nodeName.push(intern(tag)); nodes.nodeValue.push(-1);
+  layout.nodeIndex.push(parent); layout.bounds.push([0, 0, 100, 20]); layout.styles.push(style); layout.text.push(-1);
+  const text = nodes.backendNodeId.length;
+  nodes.backendNodeId.push(1_000_000 + backend); nodes.parentIndex.push(parent); nodes.nodeType.push(3); nodes.nodeName.push(intern("#text")); nodes.nodeValue.push(intern(name));
+  layout.nodeIndex.push(text); layout.bounds.push([0, 0, 100, 20]); layout.styles.push(style); layout.text.push(intern(name));
+  return snapshot;
+}
+
 function textPaintSnapshot() {
   const strings: string[] = [];
   const id = (value: string) => { const found = strings.indexOf(value); return found < 0 ? strings.push(value) - 1 : found; };
@@ -549,10 +566,15 @@ describe("frame tree discovery", () => {
         return { nodes: [{ nodeId: "shared-id", backendDOMNodeId: params.frameId === "same" ? 8 : params.frameId === "cross" ? 9 : 7,
           role: { value: "button" }, name: { value: name }, childIds: [] }] };
       }
-      if (method === "DOMSnapshot.captureSnapshot") return { strings: ["1", "0", "visible", "auto", "IFRAME", "root", "same", "cross"], documents: [{
-        frameId: 5, nodes: { backendNodeId: [101, 102], parentIndex: [-1, -1], nodeType: [1, 1], nodeName: [4, 4] },
-        layout: { nodeIndex: [0, 1], bounds: [[0, 0, 100, 100], [0, 0, 100, 100]], styles: [[hideSame ? 1 : 0, 2, 2, 2, 3], [0, 2, 2, 2, 3]] },
-      }, emptyFrameDocument(6), emptyFrameDocument(7)] };
+      if (method === "DOMSnapshot.captureSnapshot") {
+        const snapshot = { strings: ["1", "0", "visible", "auto", "IFRAME", "root", "same", "cross"], documents: [{
+          frameId: 5, nodes: { backendNodeId: [101, 102], parentIndex: [-1, -1], nodeType: [1, 1], nodeName: [4, 4] },
+          layout: { nodeIndex: [0, 1], bounds: [[0, 0, 100, 100], [0, 0, 100, 100]], styles: [[hideSame ? 1 : 0, 2, 2, 2, 3], [0, 2, 2, 2, 3]] },
+        }, emptyFrameDocument(6), emptyFrameDocument(7)] };
+        addVisibleControl(snapshot, 0, 7, "Root frame");
+        addVisibleControl(snapshot, 1, 8, "Same frame");
+        return addVisibleControl(snapshot, 2, 9, "Other frame");
+      }
       if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
       if (method === "Runtime.evaluate" && params.expression?.includes("({x:scrollX")) return { result: { value: { x: 0, y: 0, width: 100, height: 100, scale: 1 } } };
       return original(source, method, params);
@@ -585,7 +607,13 @@ describe("frame tree discovery", () => {
           if (failFirst) throw new Error("target changed during capture");
         }
         const child = Boolean(source.sessionId);
-        return { nodes: [{ nodeId: child ? "child-ax" : "root-ax", role: { value: "button" }, name: { value: child ? "Child target" : "Root target" }, childIds: [] }] };
+        return { nodes: [{ nodeId: child ? "child-ax" : "root-ax", backendDOMNodeId: 8, role: { value: "button" }, name: { value: child ? "Child target" : "Root target" }, childIds: [] }] };
+      }
+      if (method === "DOMSnapshot.captureSnapshot") {
+        const snapshot = await original(source, method, params);
+        addVisibleControl(snapshot, 0, 8, source.sessionId ? "Child target" : "Root target");
+        if (!source.sessionId) { addVisibleControl(snapshot, 1, 8, "Root target"); addVisibleControl(snapshot, 2, 8, "Root target"); }
+        return snapshot;
       }
       if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
       if (method === "Runtime.evaluate" && params.expression?.includes("({x:scrollX")) return { result: { value: { x: 0, y: 0, width: 100, height: 100, scale: 1 } } };
@@ -612,6 +640,15 @@ describe("frame tree discovery", () => {
         return { nodes: [{ nodeId: "shared-ax", backendDOMNodeId: 8, ...(child ? { frameId: "cross" } : {}),
           role: { value: "button" }, name: { value: child ? "Cross control" : params.frameId ? "Other control" : "Root control" }, childIds: [] }] };
       }
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration === "function(){ return this.isConnected; }") return { result: { value: true } };
+      if (method === "Accessibility.getPartialAXTree") return { nodes: [{ backendDOMNodeId: 8, role: { value: "button" },
+        name: { value: source.sessionId ? "Cross control" : "Root control" } }] };
+      if (method === "DOMSnapshot.captureSnapshot") {
+        const snapshot = await original(source, method, params);
+        addVisibleControl(snapshot, 0, 8, source.sessionId ? "Cross control" : "Root control");
+        if (!source.sessionId) { addVisibleControl(snapshot, 1, 8, "Other control"); addVisibleControl(snapshot, 2, 8, "Other control"); }
+        return snapshot;
+      }
       if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
       if (method === "Runtime.evaluate" && params.expression?.includes("({x:scrollX")) return { result: { value: { x: 0, y: 0, width: 100, height: 100, scale: 1 } } };
       return original(source, method, params);
@@ -636,6 +673,7 @@ describe("frame tree discovery", () => {
     expect(replacement).toMatchObject({ ref: expect.any(String) });
     expect(replacement.id).not.toBe(old.id);
     expect(replacement.ref).not.toBe(old.ref);
+    await expect(page.ref(replacement.ref).count()).resolves.toBe(1);
     await expect(page.ref(old.ref).count()).rejects.toMatchObject({ code: "stale-ref" });
     await runtime.abortSessions();
   });
@@ -659,8 +697,10 @@ describe("frame tree discovery", () => {
     const page = await runtime.createPage(3);
     runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "child", targetInfo: { type: "iframe", targetId: "cross" } });
     const capture: any = await page.inspect();
-    const owner = capture.items.find((item: any) => ignored ? item.id.endsWith(".d102") : item.line.includes('Iframe "Work item"'));
+    const owner = capture.items.find((item: any) => ignored ? item.id.endsWith(".d102") : item.id.endsWith(".aowner"));
     expect(owner).toEqual(expect.any(Object));
+    // The iframe's accessible title is private metadata, not painted text.
+    if (!ignored) { expect(owner.line).toContain("[name=unknown]"); expect(owner.line).not.toContain("Work item"); }
     const root = capture.items.find((item: any) => item.id.endsWith(".a102"));
     expect(root).toEqual(expect.any(Object));
     expect(owner.id).not.toBe(root.id);
@@ -723,9 +763,7 @@ describe("frame tree discovery", () => {
       if (method === "DOM.describeNode") return { node: { backendNodeId: 8 } };
       if (method === "DOMSnapshot.captureSnapshot" && source.sessionId === "child") {
         const snapshot = await original(source, method, params);
-        const doc = snapshot.documents[0]; snapshot.strings.push("BUTTON");
-        doc.nodes.backendNodeId.push(8); doc.nodes.parentIndex.push(-1); doc.nodes.nodeType.push(1); doc.nodes.nodeName.push(snapshot.strings.length - 1);
-        doc.layout.nodeIndex.push(doc.nodes.backendNodeId.length - 1); doc.layout.bounds.push([0, 0, 100, 20]); doc.layout.styles.push([0, 1, 1, 1, 2]);
+        addVisibleControl(snapshot, 0, 8, "Regional target");
         // This same-target document is outside the selected button region.
         // Its continuous changes must not invalidate that observation.
         const unrelated = snapshot.documents[1];
@@ -835,13 +873,14 @@ describe("frame tree discovery", () => {
     const entered = new Promise<void>((resolve) => { notify = resolve; });
     let rootLayouts = 0, rootAX = 0, changed = false;
     command.mockImplementation(async (source, method, params = {}) => {
-      if (method === "DOMSnapshot.captureSnapshot" && !source.sessionId && ++rootLayouts === 2) {
-        notify(); await hold;
+      if (method === "DOMSnapshot.captureSnapshot" && !source.sessionId) {
+        if (++rootLayouts === 2) { notify(); await hold; }
+        return addVisibleControl(await original(source, method, params), 0, 7, changed ? "New document" : "Old document", "H1");
       }
       if (method === "Accessibility.getFullAXTree") {
         if (source.sessionId || params.frameId) return { nodes: [] };
         rootAX++;
-        return { nodes: [{ nodeId: "root-ax", role: { value: "heading" }, name: { value: changed ? "New document" : "Old document" }, childIds: [] }] };
+        return { nodes: [{ nodeId: "root-ax", backendDOMNodeId: 7, role: { value: "heading" }, name: { value: changed ? "New document" : "Old document" }, childIds: [] }] };
       }
       if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
       if (method === "Runtime.evaluate" && params.expression?.includes("({x:scrollX")) return { result: { value: { x: 0, y: 0, width: 100, height: 100, scale: 1 } } };

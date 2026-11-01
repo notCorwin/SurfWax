@@ -23,7 +23,7 @@ test("snapshot follows rendered text visibility and updates when the text is rev
         <p style="color:transparent;text-shadow:1px 1px 0 black">Shadow painted text</p>
         <p style="color:transparent;-webkit-text-stroke:1px black">Stroke painted text</p>
         <p id="gradient" style="background:linear-gradient(red,blue);background-clip:text;-webkit-background-clip:text;color:transparent"><span id="gradient-text">Gradient painted text</span></p>
-        <span id="label" style="color:transparent">Accessible hidden label</span><button aria-labelledby="label"></button>
+        <span id="label" style="color:transparent">Accessible hidden label</span><button id="transparent-label-button" aria-labelledby="label"></button>
         <button aria-label="Explicit label">Visible button<span style="color:transparent"> hidden explicit child</span></button>
       </main>`;
       document.querySelector("#reveal")!.addEventListener("click", () => {
@@ -41,7 +41,8 @@ test("snapshot follows rendered text visibility and updates when the text is rev
     let baseline: any;
     responses.push(
       commandResponse("inspect_page", { budget: 12000 }, "text-before"),
-      (request) => { baseline = lastTool(request); return commandResponse("click", { target: { ref: button(baseline.items, "Reveal painted text")?.ref } }, "text-reveal"); },
+      (request) => { baseline = lastTool(request); return commandResponse("inspect_page", { region: { by: "css", value: "#transparent-label-button" }, budget: 12000 }, "text-transparent-label"); },
+      () => commandResponse("click", { target: { ref: button(baseline.items, "Reveal painted text")?.ref } }, "text-reveal"),
       () => commandResponse("inspect_page", { since: baseline.observationId, budget: 12000 }, "text-delta"),
       textResponse("TEXT_PAINT_OK"), textResponse("文字检查"),
     );
@@ -59,8 +60,12 @@ test("snapshot follows rendered text visibility and updates when the text is rev
     for (const hidden of ["hidden transparent child", "hidden zero-size child", "Standalone transparent text", "Standalone zero-size text", "hidden explicit child"]) {
       expect(JSON.stringify(before.items)).not.toContain(hidden);
     }
-    expect(button(before.items, "Accessible hidden label")?.ref).toBeTruthy();
-    expect(button(before.items, "Explicit label")?.ref).toBeTruthy();
+    expect(JSON.stringify(before.items)).not.toContain("Accessible hidden label");
+    expect(JSON.stringify(before.items)).not.toContain("Explicit label");
+    expect(button(before.items, "Visible button")?.ref).toBeTruthy();
+    const transparentLabel = output("text-transparent-label");
+    expect(transparentLabel?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(item.line) && typeof item.ref === "string")).toBe(true);
+    expect(JSON.stringify(transparentLabel.items)).not.toContain("Accessible hidden label");
     for (const visible of ["MIXED CASE SAMPLE", "Translucent text", "Shadow painted text", "Stroke painted text", "Gradient painted text"]) {
       expect(JSON.stringify(before.items)).toContain(visible);
     }

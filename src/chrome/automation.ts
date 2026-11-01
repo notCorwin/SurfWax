@@ -9,10 +9,13 @@ import { renderSnapshotNode, type SnapshotNode, type SnapshotStateName } from ".
 import { stitchSnapshotFrames, type SnapshotLine } from "./snapshot-frame-tree";
 import { snapshotDomSupplement, type SnapshotDomEvidence } from "./snapshot-dom";
 import { createSnapshotDomIndex } from "./snapshot-dom-index";
+import { snapshotRenderOrder } from "./snapshot-render-order";
 import { snapshotSlottedNodes } from "./snapshot-slot-index";
 import { sameDOMSnapshot } from "./snapshot-consistency";
 import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
 import { projectTextPaint, sameTextPaintCandidates, TEXT_PAINT_CACHE_LOOKUP_SOURCE, TEXT_PAINT_CACHE_REGISTER_SOURCE, type TextPaintEvidence } from "./snapshot-text-paint";
+import { axEllipsisCandidate, confirmAxEllipsis, type AxEllipsisCandidate } from "./snapshot-ax-ellipsis";
+import { AX_ELLIPSIS_GEOMETRY_SOURCE } from "./snapshot-ellipsis-geometry";
 import { PLACEHOLDER_EVIDENCE_SOURCE, samePlaceholderEvidence, type PlaceholderEvidence } from "./snapshot-placeholder";
 import { FRAME_OWNER_FULLY_VISIBLE_SOURCE } from "./snapshot-frame-containment";
 import { createFrameHandle } from "./snapshot-frame-handle";
@@ -3197,6 +3200,25 @@ export class AutomationRuntime {
       type Fillability = { fillable: boolean; disabled: boolean; readonly: boolean; mode: "richtext" | "plaintext" | null };
       type FillabilityBatch = { debuggee: Debuggee; frameId: string; values: Map<number, Fillability> };
       const fillabilityBatches: FillabilityBatch[] = [];
+      type EllipsisRequest = { backendNodeId: number; prefix: string; sourceText: string; frameUnobscured: boolean; noShadowRoots: boolean; basePainted: boolean };
+      type EllipsisProof = Parameters<typeof confirmAxEllipsis>[1] & { fingerprint: unknown; fullBounds: unknown };
+      type EllipsisBatch = { debuggee: Debuggee; frameId: string; requests: EllipsisRequest[]; proofs: EllipsisProof[] };
+      const ellipsisBatches: EllipsisBatch[] = [];
+      const readEllipsisGeometry = async (debuggee: Debuggee, frameId: string, requests: readonly EllipsisRequest[]): Promise<Array<EllipsisProof | null>> => {
+        if (!requests.length) return [];
+        const frame: FrameRefRecord = { frameId, debuggee, generation, revision: frameRevision,
+          conversationId: frameContext.conversationId, runId: frameContext.runId };
+        const objectId = await this.frameDocument(session, frame, frameGuard);
+        const key = JSON.stringify([session.tabId, frameId, debuggee.sessionId ?? null]);
+        const document = this.frameDocuments.get(key);
+        if (!document) throw automationError("stale-frame", { reason: "text-paint-context-expired" });
+        const result = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId,
+          arguments: [{ value: document.paintCacheToken }, { value: requests }], functionDeclaration: AX_ELLIPSIS_GEOMETRY_SOURCE, returnByValue: true });
+        frameGuard();
+        if (this.frameDocuments.get(key) !== document) throw automationError("stale-frame", { reason: "text-paint-context-expired" });
+        const values = result?.result?.value;
+        return !result?.exceptionDetails && Array.isArray(values) && values.length === requests.length ? values : requests.map(() => null);
+      };
       let unstableDOMChecked = false, unstableDOMAria = false;
       const readFillability = async (debuggee: Debuggee, frameId: string, ids: readonly number[]): Promise<Map<number, Fillability>> => {
         const values = new Map<number, Fillability>();
@@ -3396,7 +3418,7 @@ export class AutomationRuntime {
       };
       let placeholderItems: PlaceholderCandidate[] = [], placeholderBefore = new Map<string, PlaceholderProof>();
       type TextProjection = { full: string; text: string };
-      let trees: Array<{ debuggee: Debuggee; frameId: string | undefined; depth: number; tree: any; visibility: Map<number, boolean>; textProjections: Map<number, TextProjection>; candidates: SnapshotTextPaintCandidate[]; snapshot: any }>;
+      let trees: Array<{ debuggee: Debuggee; frameId: string | undefined; depth: number; tree: any; visibility: Map<number, boolean>; textProjections: Map<number, TextProjection>; unknownText: Set<number>; paintEvidence: Map<number, TextPaintEvidence>; candidates: SnapshotTextPaintCandidate[]; snapshot: any }>;
       let info: { url: string; title: string };
       try {
         // A scoped request discovers its frame membership from a preliminary
@@ -3578,6 +3600,8 @@ export class AutomationRuntime {
           Promise.all(initialLayouts.map(async ({ debuggee, snapshot }) => {
             const { candidates, visibility } = initialPaint.get(debuggee.sessionId ?? "")!;
             const textProjections = new Map<number, TextProjection>();
+            const unknownText = new Set<number>();
+            const paintEvidence = new Map<number, TextPaintEvidence>();
             const byFrame = new Map<string, SnapshotTextPaintCandidate[]>();
             for (const candidate of candidates) {
               const list = byFrame.get(candidate.frameId) ?? [];
@@ -3615,10 +3639,12 @@ export class AutomationRuntime {
                 await previous;
                 paintGuard();
                 const applyEvidence = (candidate: SnapshotTextPaintCandidate, evidence: TextPaintEvidence) => {
+                  paintEvidence.set(candidate.backendNodeId, evidence);
                   const projection = projectTextPaint(candidate, evidence);
                   if (projection?.hidden) visibility.set(candidate.backendNodeId, false);
                   else if (projection?.text !== undefined && typeof candidate.layoutText === "string")
                     textProjections.set(candidate.backendNodeId, { full: (candidate.firstLetter ?? "") + candidate.layoutText, text: projection.text });
+                  else if (!projection) unknownText.add(candidate.backendNodeId);
                 };
                 const validate = (response: any, count: number): Array<TextPaintEvidence | null> => {
                   const values = response?.result?.value;
@@ -3684,7 +3710,7 @@ export class AutomationRuntime {
                 if (dispatched) await this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup }).catch(() => undefined);
               }
             }));
-            return { debuggee, visibility, textProjections, candidates, snapshot };
+            return { debuggee, visibility, textProjections, unknownText, paintEvidence, candidates, snapshot };
           })),
           this.pageValue(session.tabId, "({url:location.href,title:document.title})") as Promise<{ url: string; title: string }>,
         ]));
@@ -3764,13 +3790,46 @@ export class AutomationRuntime {
         if (item.tree && frameId) capturedFrameRefs.set(frameId, this.rememberFrameRef(session, frameId, item.debuggee, frameContext));
       }
       const lines: SnapshotLine[] = [];
-      const render = async (nodes: any[], visibility: Map<number, boolean>, textProjections: Map<number, TextProjection>, snapshot: any, debuggee: Debuggee, frameLabel?: string, frameDepth = 0) => {
+      const render = async (nodes: any[], visibility: Map<number, boolean>, textProjections: Map<number, TextProjection>, unknownText: Set<number>,
+        paintEvidence: ReadonlyMap<number, TextPaintEvidence>, candidates: readonly SnapshotTextPaintCandidate[], snapshot: any, debuggee: Debuggee, frameLabel?: string, frameDepth = 0) => {
         const byId = new Map(nodes.map((node) => [node.nodeId, node]));
         const frameId = frameLabel ?? session.rootFrameId;
         if (!frameId) throw automationError("snapshot-unavailable", { reason: "missing-root-frame" });
         const scopedRoot = Boolean(regionNode && regionFrameId === frameId && regionDebuggee && sameDebuggee(regionDebuggee, debuggee));
         const doc = snapshot.documents?.find((document: any) => snapshot.strings?.[document.frameId] === frameId);
         if (!doc) throw automationError("snapshot-unavailable", { reason: "missing-dom-frame", frameId });
+        const byBackend = new Map<number, any[]>();
+        for (const node of nodes) if (axValue(node.role) === "StaticText" && Number.isSafeInteger(node.backendDOMNodeId)) {
+          const group = byBackend.get(node.backendDOMNodeId) ?? []; group.push(node); byBackend.set(node.backendDOMNodeId, group);
+        }
+        const noShadowRoots = Array.isArray(doc.nodes?.shadowRootType?.index) && doc.nodes.shadowRootType.index.length === 0;
+        const frameUnobscured = frameId === session.rootFrameId && sameDebuggee(debuggee, session.debuggee);
+        const pendingEllipsis: Array<{ candidate: SnapshotTextPaintCandidate; match: AxEllipsisCandidate; request: EllipsisRequest }> = [];
+        for (const candidate of candidates) {
+          if (candidate.frameId !== frameId || !candidate.ellipsis || !candidate.basePainted || !unknownText.has(candidate.backendNodeId)
+            || candidate.firstLetter || candidate.firstLetterUnknown || typeof candidate.sourceText !== "string" || typeof candidate.layoutText !== "string") continue;
+          const paint = paintEvidence.get(candidate.backendNodeId), matches = byBackend.get(candidate.backendNodeId);
+          if (!paint || paint.unknown || paint.firstLineRisk || paint.firstLetterRisk || paint.sourceText !== candidate.sourceText || matches?.length !== 1) continue;
+          const match = axEllipsisCandidate({ node: matches[0], nodesById: byId, frameId: candidate.frameId, expectedFrameId: frameId,
+            backendNodeId: candidate.backendNodeId, sourceText: candidate.sourceText, layoutText: candidate.layoutText,
+            textBoxes: candidate.textBoxes ?? [], direction: candidate.direction ?? "", writingMode: candidate.writingMode ?? "",
+            textTransform: candidate.textTransform ?? "", textSecurity: candidate.textSecurity ?? "" });
+          if (match) pendingEllipsis.push({ candidate, match, request: { backendNodeId: candidate.backendNodeId, prefix: match.prefix,
+            sourceText: candidate.sourceText, frameUnobscured, noShadowRoots, basePainted: true } });
+        }
+        if (pendingEllipsis.length && frameUnobscured && noShadowRoots) {
+          const proofs = await waitForCapture(readEllipsisGeometry(debuggee, frameId, pendingEllipsis.map(({ request }) => request)));
+          const accepted: EllipsisBatch = { debuggee, frameId, requests: [], proofs: [] };
+          pendingEllipsis.forEach(({ candidate, match, request }, index) => {
+            const proof = proofs[index];
+            const text = proof && confirmAxEllipsis(match, proof);
+            if (!proof || typeof text !== "string") return;
+            textProjections.set(candidate.backendNodeId, { full: candidate.layoutText!, text });
+            unknownText.delete(candidate.backendNodeId);
+            accepted.requests.push(request); accepted.proofs.push(proof);
+          });
+          if (accepted.requests.length) ellipsisBatches.push(accepted);
+        }
         let evidence: ReturnType<typeof snapshotDomSupplement>;
         try {
           evidence = snapshotDomSupplement(snapshot, { frameId, visibility, textProjections, covered: new Set() });
@@ -3779,6 +3838,7 @@ export class AutomationRuntime {
         const preformatted = evidence.preformatted.get(frameId)!;
         const domIndex = evidence.indexes.get(frameId);
         if (!domIndex) throw automationError("snapshot-unavailable", { reason: "missing-dom-frame", frameId });
+        const { positions, subtreeRange: visibleRange } = snapshotRenderOrder(domIndex, doc.nodes.nodeName, snapshot.strings);
         const placeholders = new Map<number, PlaceholderProof>();
         const placeholderTextNodes = new Set<number>();
         const placeholderTextEvidence = new Map<number, PlaceholderEvidence>();
@@ -3788,6 +3848,39 @@ export class AutomationRuntime {
           placeholders.set(item.backendNodeId, proof);
           if (proof.textBackendNodeId !== undefined) { placeholderTextNodes.add(proof.textBackendNodeId); placeholderTextEvidence.set(proof.textBackendNodeId, proof.evidence); }
         }
+        // Keep one document-order text index for all semantic nodes. The AX
+        // name is an identity, not proof that the text was painted.
+        const frameEvidence = evidence.items.map((item) => item.kind === "text" && (unknownText.has(item.backendNodeId) || placeholderTextEvidence.has(item.backendNodeId) && placeholderTextEvidence.get(item.backendNodeId)?.status !== "visible") ? { ...item, text: "" } : item);
+        const evidenceIds = new Set(frameEvidence.map((item) => item.backendNodeId));
+        for (const backendNodeId of unknownText) {
+          const nodeIndex = domIndex.indexOf(backendNodeId);
+          if (nodeIndex === undefined || evidenceIds.has(backendNodeId) || visibility.get(backendNodeId) !== true) continue;
+          const parent = domIndex.parentAt(nodeIndex), parentBackendNodeId = parent === undefined ? undefined : domIndex.backendAt(parent);
+          frameEvidence.push({ frameId, backendNodeId, nodeIndex, kind: "text", ...(parentBackendNodeId === undefined ? {} : { parentBackendNodeId }) });
+        }
+        frameEvidence.sort((a, b) => positions.get(a.backendNodeId)! - positions.get(b.backendNodeId)!);
+        const evidenceText = frameEvidence.filter((item) => item.kind === "text");
+        const evidenceTextById = new Map(evidenceText.map((item) => [item.backendNodeId, item.text ?? ""]));
+        const textOffsets: number[] = [], textPositions: number[] = [];
+        let textJoined = "";
+        for (const item of evidenceText) {
+          textPositions.push(positions.get(item.backendNodeId)!); textOffsets.push(textJoined.length); textJoined += item.text ?? "";
+        }
+        textOffsets.push(textJoined.length);
+        const lowerText = (position: number) => { let low = 0, high = textPositions.length; while (low < high) { const middle = (low + high) >>> 1; if (textPositions[middle]! < position) low = middle + 1; else high = middle; } return low; };
+        const unknownPositions = [...unknownText].flatMap((id) => positions.has(id) ? [positions.get(id)!] : []).sort((a, b) => a - b);
+        const hasUnknownSubtree = (backend: number): boolean => {
+          const index = domIndex.indexOf(backend), range = index === undefined ? undefined : visibleRange(index);
+          if (!range) return false;
+          let low = 0, high = unknownPositions.length;
+          while (low < high) { const middle = (low + high) >>> 1; if (unknownPositions[middle]! < range.start) low = middle + 1; else high = middle; }
+          return low < unknownPositions.length && unknownPositions[low]! < range.end;
+        };
+        const visibleSubtree = (backend: number): string => {
+          const index = domIndex.indexOf(backend), range = index === undefined ? undefined : visibleRange(index);
+          if (!range) return "";
+          return semanticName(textJoined.slice(textOffsets[lowerText(range.start)]!, textOffsets[lowerText(range.end)]!));
+        };
         const tainted = new Uint8Array(doc.nodes.backendNodeId.length);
         for (const [id, proof] of placeholders) if (proof.evidence.status !== "visible") {
           const index = domIndex.indexOf(id);
@@ -3897,10 +3990,6 @@ export class AutomationRuntime {
         // still allowing a known visible descendant to override it.
         const effectiveHidden = new Map<string, boolean>();
         const scoped = new Map<string, boolean>();
-        // AX names derived from contents can include transparent or clipped
-        // descendants. Explicit labels remain authoritative; only rebuild a
-        // contents-derived name when a descendant was actually filtered.
-        const hiddenSubtree = new Map<string, boolean>();
         const treeRoot = nodes.find((node) => !node.parentId) ?? nodes[0];
         const order: any[] = [], scan: Array<{ node: any; inherited: boolean; within: boolean; placeholderOwner?: any }> = treeRoot ? [{ node: treeRoot, inherited: false, within: false }] : [];
         while (scan.length) {
@@ -3947,80 +4036,59 @@ export class AutomationRuntime {
         }))];
         const axFillability = await waitForCapture(readFillability(debuggee, frameId, axEditableCandidates));
         if (axFillability.size) fillabilityBatches.push({ debuggee, frameId, values: axFillability });
-        const projected = (node: any): string | undefined => {
-          if (axValue(node.role) !== "StaticText" || typeof node.backendDOMNodeId !== "number") return undefined;
-          const projection = textProjections.get(node.backendDOMNodeId);
-          return projection && semanticName(axValue(node.name)) === semanticName(projection.full) ? projection.text : undefined;
+        const namedTextRoles = new Set(["button", "link", "heading", "checkbox", "radio", "tab", "option", "menuitem", "menuitemcheckbox", "menuitemradio", "treeitem"]);
+        const pseudoTextOwner = (node: any): number | undefined => {
+          if (axValue(node.role) !== "StaticText" || typeof node.backendDOMNodeId === "number") return undefined;
+          const parent = byId.get(node.parentId), backend = parent?.backendDOMNodeId;
+          const index = typeof backend === "number" ? domIndex.indexOf(backend) : undefined;
+          const name = index === undefined ? "" : snapshot.strings?.[doc.nodes.nodeName?.[index]] ?? "";
+          return /^::(?:before|after|marker|first-letter)$/i.test(name) ? backend : undefined;
         };
-        for (let index = order.length - 1; index >= 0; index--) {
-          const node = order[index]!;
-          const textEvidence = placeholderTextEvidence.get(node.backendDOMNodeId);
-          hiddenSubtree.set(node.nodeId, hidden(node) || !inScope(node) || maskedControl(node) || unknownPlaceholderText.has(node.nodeId) || taintedNames.has(node.nodeId) || uncertainNames.has(node.nodeId) || placeholder(node)?.status === "hidden" || placeholder(node)?.status === "unknown" || textEvidence !== undefined && textEvidence.status !== "visible" || projected(node) !== undefined || (node.childIds ?? []).some((id: string) => hiddenSubtree.get(id)));
-        }
-        const visibleName = (node: any, original: string) => {
-          const ownProjection = projected(node);
-          if (ownProjection !== undefined) return ownProjection;
-          original = safeName(node, original);
-          if (activeSource(node)?.type === "placeholder") return original;
-          const source = node.name?.sources?.find((item: any) => !item.superseded && item.value?.value !== undefined);
-          if (!(node.childIds ?? []).some((id: string) => hiddenSubtree.get(id))) return original;
-          if (source?.type !== "contents") return source || !scopedRoot ? original : "";
-          const parts: string[] = [];
-          const pendingNames: Array<string | null> = [...(node.childIds ?? [])].reverse();
-          while (pendingNames.length) {
-            const next = pendingNames.pop();
-            if (next === null) { parts.push(" "); continue; }
-            const child: any = byId.get(next);
-            if (!child) continue;
-            if (!inScope(child)) continue;
-            const childRole = child.ignored ? "" : axValue(child.role);
-            if (!hidden(child)) {
-              if (childRole === "StaticText") {
-                const textEvidence = placeholderTextEvidence.get(child.backendDOMNodeId);
-                if (!textEvidence) parts.push(projected(child) ?? safeName(child, axValue(child.name)));
-                else if (textEvidence.status === "visible") parts.push(textEvidence.text);
-                continue;
-              }
-              // Embedded form controls contribute their value, not their own
-              // accessible label or every option in their subtree.
-              if (["textbox", "searchbox", "combobox", "listbox", "slider", "spinbutton", "scrollbar"].includes(childRole)) {
-                const valueText = child.properties?.find((property: any) => property.name === "valuetext");
-                const ownPlaceholder = placeholder(child);
-                const value = maskedControl(child) ? "" : ownPlaceholder && ownPlaceholder.status !== "visible"
-                  ? axValue(child.value) : axValue(valueText?.value) || axValue(child.value);
-                if (value) parts.push(` ${value} `);
-                else if (childRole === "listbox" || childRole === "combobox") {
-                  // Listboxes can expose their selection as AX option nodes
-                  // without an aggregate value. Ignore unselected options.
-                  const selected: string[] = [], scanOptions = [...(child.childIds ?? [])].reverse();
-                  while (scanOptions.length) {
-                    const option: any = byId.get(scanOptions.pop());
-                    if (!option) continue;
-                    if (axValue(option.role) === "option") {
-                      if (!hidden(option) && option.properties?.some((property: any) => property.name === "selected" && property.value?.value === true)) selected.push(option.nodeId);
-                    } else for (const id of [...(option.childIds ?? [])].reverse()) scanOptions.push(id);
-                  }
-                  if (selected.length) {
-                    pendingNames.push(null);
-                    for (let index = selected.length - 1; index >= 0; index--) pendingNames.push(selected[index]!, null);
-                  }
-                }
-                continue;
-              }
-              const childSource = child.name?.sources?.find((item: any) => !item.superseded && item.value?.value !== undefined);
-              // An explicit name replaces descendant contents, including for
-              // generic elements. Chrome separates such semantic objects from
-              // surrounding text even when the markup has no whitespace.
-              if (childRole && (childRole === "image" || childRole === "img" || childSource && childSource.type !== "contents")) {
-                const name = safeName(child, axValue(child.name));
-                if (name) parts.push(` ${name} `);
-                continue;
-              }
+        const visibleName = (node: any, original: string): string => {
+          const role = axValue(node.role), backend = node.backendDOMNodeId;
+          const ownPlaceholder = placeholder(node);
+          const source = activeSource(node);
+          if (role === "RootWebArea") return "";
+          if (source?.type === "placeholder") return safeName(node, original);
+          if (role === "StaticText") {
+            const pseudo = pseudoTextOwner(node);
+            if (pseudo !== undefined) {
+              if (unknownText.has(pseudo)) { namesUnknown.add(node.nodeId); return ""; }
+              const text = evidenceTextById.get(pseudo);
+              if (text !== undefined) return text;
+              if (original) namesUnknown.add(node.nodeId);
+              return "";
             }
-            const children: string[] = child.childIds ?? [];
-            for (let index = children.length - 1; index >= 0; index--) pendingNames.push(children[index]);
+            if (typeof backend === "number" && unknownText.has(backend)) { namesUnknown.add(node.nodeId); return ""; }
+            if (typeof backend === "number" && domIndex.indexOf(backend) !== undefined) {
+              const observed = evidenceTextById.get(backend);
+              const formatted = preformatted.get(backend);
+              const text = observed === undefined ? visibleSubtree(backend)
+                : formatted && !textProjections.has(backend) && formatted.source === observed ? formatted.text : observed;
+              if (!text && original && visibility.get(backend) !== false) namesUnknown.add(node.nodeId);
+              return text;
+            }
+            // An input's internal value is handled on the control row.
+            if (nativeValueOwner(node) && !maskedControl(nativeValueOwner(node))) return safeName(node, original);
+            if (original) namesUnknown.add(node.nodeId);
+            return "";
           }
-          return parts.join("").replace(/\s+/g, " ").trim();
+          if (ownPlaceholder?.status === "visible" && original === ownPlaceholder.text) return ownPlaceholder.text;
+          if (namedTextRoles.has(role) && typeof backend === "number") {
+            const text = visibleSubtree(backend);
+            if (hasUnknownSubtree(backend)) namesUnknown.add(node.nodeId);
+            if (text) return text;
+          }
+          if (source?.type === "relatedElement") {
+            const related = [source.relatedNodes, source.attributeValue?.relatedNodes, source.value?.relatedNodes, source.nativeSourceValue?.relatedNodes].filter(Array.isArray).flat();
+            const ids = [...new Set<number>(related.flatMap((entry: any) => Number.isSafeInteger(entry?.backendDOMNodeId) ? [entry.backendDOMNodeId] : []))]
+              .filter((id) => !scopedRoot || ["label", "labelfor"].includes(source.nativeSource) || domIndex.contains(regionNode!.node.backendNodeId, id) === true);
+            const visible = ids.map((id) => visibleSubtree(id)).filter(Boolean);
+            if (ids.some((id) => hasUnknownSubtree(id))) namesUnknown.add(node.nodeId);
+            if (visible.length) return visible.join(" ");
+          }
+          if (original) namesUnknown.add(node.nodeId);
+          return "";
         };
         const start = lines.length;
         const lineBackends = new Map<string, number>();
@@ -4043,7 +4111,8 @@ export class AutomationRuntime {
           const originalName = axValue(node.name), name = role ? visibleName(node, originalName) : "";
           // The rich editing host's AX value aggregates descendant text that
           // is emitted in document order below; do not duplicate it here.
-          const value = maskedControl(node) || editableControl && !["textbox", "searchbox", "spinbutton"].includes(role) ? "" : axValue(node.value);
+          const value = maskedControl(node) || ["checkbox", "radio", "switch"].includes(role)
+            || editableControl && !["textbox", "searchbox", "spinbutton"].includes(role) ? "" : axValue(node.value);
           const parent = byId.get(node.parentId);
           const parentRole = parent && !parent.ignored && !hidden(parent) && inScope(parent) ? axValue(parent.role) : "";
           // A single static text leaf that exactly repeats its named semantic
@@ -4069,6 +4138,7 @@ export class AutomationRuntime {
           const duplicateText = duplicateNamedText || duplicateValueText || duplicateNativeValueText;
           const emittedRole = role && role !== "none" && role !== "InlineTextBox" && (role !== "generic" || editableControl || editableEvidence?.readonly && properties.focusable === true);
           if (emittedRole && typeof node.backendDOMNodeId === "number") covered.add(node.backendDOMNodeId);
+          else if (emittedRole && pseudoTextOwner(node) !== undefined) covered.add(pseudoTextOwner(node)!);
           if (emittedRole && !duplicateText) {
             let ref = "";
             const identity = `${scope}:${node.backendDOMNodeId ?? node.nodeId}`;
@@ -4107,11 +4177,6 @@ export class AutomationRuntime {
             const child = byId.get(children[index]);
             if (child) pending.push({ node: child, depth: childDepth });
           }
-        }
-        const positions = new Map<number, number>();
-        for (let position = 0; position < domIndex.preorder.length; position++) {
-          const id = domIndex.backendAt(domIndex.preorder[position]!);
-          if (id !== undefined) positions.set(id, position);
         }
         if (scopedRoot) {
           // aria-owns can reorder AX nodes across DOM boundaries. Restore DOM
@@ -4156,7 +4221,6 @@ export class AutomationRuntime {
         // Scoped output remains inside the region, but an input can have a
         // visible associated label elsewhere in the same document or shadow
         // tree. Retain whole-frame text solely for verified label names.
-        const frameEvidence = evidence.items.sort((a, b) => positions.get(a.backendNodeId)! - positions.get(b.backendNodeId)!);
         const allEvidence = scopedRoot ? frameEvidence.filter((item) => domIndex.contains(regionNode!.node.backendNodeId, item.backendNodeId) === true) : frameEvidence;
         const extra = allEvidence.filter((item) => !covered.has(item.backendNodeId));
         const depths = new Map<number, number>();
@@ -4193,7 +4257,7 @@ export class AutomationRuntime {
           .map((id) => labels.get(id)!.parts.join("").replace(/\s+/g, " ").trim()).filter(Boolean).join(" ");
         const omitText = new Set<number>();
         const marked = new Set(depths.keys());
-        for (const item of extra) if (item.kind === "control" || item.kind === "text" && !!item.text?.trim()) marked.add(item.backendNodeId);
+        for (const item of extra) if (item.kind === "control" || item.kind === "text" && (!!item.text?.trim() || unknownText.has(item.backendNodeId))) marked.add(item.backendNodeId);
         const nearestEmitted = domIndex.nearestMarkedAncestors(marked);
         const group = controls.size ? `surf-wax-dom-snapshot:${crypto.randomUUID()}` : undefined;
         const additions: Array<{ position: number; line: SnapshotLine }> = [];
@@ -4301,7 +4365,6 @@ export class AutomationRuntime {
           // scoping and duplicate IDs. Only painted text from the captured
           // document is used as output; the live nodes supply identity alone.
           const ariaControls = controlItems.filter((item) => Object.hasOwn(item.attributes ?? {}, "aria-labelledby"));
-          const ariaControlIds = new Set(ariaControls.map((item) => item.backendNodeId));
           const readAriaReferences = async () => {
             const ariaReferences = new Map<number, number[]>();
             for (let offset = 0; offset < ariaControls.length; offset += 4) {
@@ -4366,7 +4429,7 @@ export class AutomationRuntime {
           const ariaText = (id: number) => {
             const cached = ariaTextCache.get(id);
             if (cached !== undefined) return cached;
-            const index = domIndex.indexOf(id), range = index === undefined ? undefined : domIndex.subtreeRange(index);
+            const index = domIndex.indexOf(id), range = index === undefined ? undefined : visibleRange(index);
             const value = range ? semanticName(visibleText.slice(lowerTextPosition(range.start), lowerTextPosition(range.end)).map((item) => item.text).join("")) : "";
             ariaTextCache.set(id, value);
             return value;
@@ -4375,14 +4438,13 @@ export class AutomationRuntime {
           // exactly that visible text. An aria-label can differ from painted
           // content; replacing the latter would discard information.
           const controlName = (item: SnapshotDomEvidence) => {
-            const current = currentControls.get(item.backendNodeId), tag = item.tag!;
-            const type = (item.attributes?.type ?? "text").toLowerCase();
+            const current = currentControls.get(item.backendNodeId);
             const matchedLabels: number[] = (current?.labels ?? []).filter((id: number) => labels.has(id))
               .sort((left: number, right: number) => (positions.get(left) ?? 0) - (positions.get(right) ?? 0));
-            const references = ariaReferences.get(item.backendNodeId) ?? [];
+            const references = [...new Set<number>(ariaReferences.get(item.backendNodeId) ?? [])]
+              .filter((id) => !scopedRoot || domIndex.contains(regionNode!.node.backendNodeId, id) === true);
             const referencedLabel = references.map(ariaText).filter(Boolean).join(" ");
-            const directLabel = references.length === 0 ? semanticName(item.attributes?.["aria-label"] ?? "") : "";
-            return referencedLabel || directLabel || visibleLabel(matchedLabels) || controlText.get(item.backendNodeId) || (tag === "input" && ["button", "submit", "reset"].includes(type) ? item.value ?? "" : "");
+            return controlText.get(item.backendNodeId) || referencedLabel || visibleLabel(matchedLabels) || "";
           };
           for (const item of controlItems) {
             const parts = controlParts.get(item.backendNodeId);
@@ -4411,7 +4473,7 @@ export class AutomationRuntime {
             });
           }
           for (const item of extra) {
-            if (item.kind === "text" && (omitText.has(item.backendNodeId) || !item.text?.trim())) continue;
+            if (item.kind === "text" && (omitText.has(item.backendNodeId) || !item.text?.trim() && !unknownText.has(item.backendNodeId))) continue;
             const parentIndex = nearestEmitted[item.nodeIndex]!;
             const parent = parentIndex < 0 ? undefined : domIndex.backendAt(parentIndex);
             const depth = parent === undefined || !depths.has(parent) ? (frameLabel ? frameDepth + 1 : 0) : depths.get(parent)! + 1;
@@ -4420,7 +4482,7 @@ export class AutomationRuntime {
             if (item.kind === "text") {
               const formatted = preformatted.get(item.backendNodeId);
               const preserve = Boolean(item.text && !textProjections.has(item.backendNodeId) && formatted?.source === item.text);
-              node = { id, depth, role: "StaticText", name: preserve ? formatted!.text : item.text,
+              node = { id, depth, role: "StaticText", name: preserve ? formatted!.text : item.text, ...(unknownText.has(item.backendNodeId) ? { nameUnknown: true } : {}),
                 ...(preserve ? { preserveTextWhitespace: true } : {}) };
             }
             else {
@@ -4459,9 +4521,7 @@ export class AutomationRuntime {
                   throw automationError("snapshot-unavailable", { reason: "dom-control-changed-during-capture" });
                 // Never bind a DOM ref unless its live identity matches the
                 // visible name and native role actually exposed in this snapshot.
-                const privateValueIdentity = !name && item.value !== undefined && (item.masked || item.valueVisible)
-                  && current.meta.identityName === semanticName(item.value);
-                if (!current.meta.identityTooLarge && current.meta.identityRole === role && (current.meta.identityName === name || privateValueIdentity)) {
+                if (!current.meta.identityTooLarge && current.meta.identityRole === role && typeof current.meta.identityName === "string") {
                   // DOM identity may be derived from the current input value.
                   // Keep it only in the private ref record, never in its label.
                   ref = this.rememberRef(session, `${scope}:${item.backendNodeId}`, { backendNodeId: item.backendNodeId, frameId, debuggee, role, name: current.meta.identityName, generation, identitySource: "dom" });
@@ -4481,7 +4541,7 @@ export class AutomationRuntime {
               const childFrameId = childFramesByOwner.get(JSON.stringify([debuggee.sessionId ?? "", item.backendNodeId]));
               const childFrameRef = childFrameId ? capturedFrameRefs.get(childFrameId) : undefined;
               const ownPlaceholder = placeholders.get(item.backendNodeId)?.evidence;
-              const nameUnknown = ariaControlIds.has(item.backendNodeId) && (current?.meta?.identityTooLarge || current?.meta?.identityName !== name);
+              const nameUnknown = hasUnknownSubtree(item.backendNodeId) || (!name && Boolean(current?.meta?.identityName)) || Boolean(current?.meta?.identityTooLarge);
               node = { id, depth, role, ...(name ? { name } : {}), ...(nameUnknown ? { nameUnknown: true } : {}), ...(ownPlaceholder && ownPlaceholder.status !== "hidden" ? { placeholder: ownPlaceholder } : {}), ...(item.value && item.valueVisible && tag !== "select" && !["button", "submit", "reset"].includes(type) ? { value: item.value } : {}),
                 ...(item.valueVisible && item.selectedOptions?.length ? { selectedLabels: item.selectedOptions.map(({ label }) => label) } : {}),
                 ...(ref ? { ref, actions } : {}), ...(childFrameRef ? { childFrameRef } : {}), state };
@@ -4519,11 +4579,11 @@ export class AutomationRuntime {
       if (regionNode && regionMatches.length !== 1) throw automationError("snapshot-region-unavailable", { locator: region });
       const frameSnapshots: Array<{ frameRef: string; lines: SnapshotLine[] }> = [];
       for (const item of trees) {
-        const { debuggee, frameId, tree, visibility, textProjections, snapshot } = item;
+        const { debuggee, frameId, tree, visibility, textProjections, unknownText, paintEvidence, candidates, snapshot } = item;
         if (!tree) continue;
         // Render each document at its own origin, then insert it at the
         // represented iframe owner. Frame depth alone is not semantic depth.
-        await waitForCapture(render(tree.nodes ?? [], visibility, textProjections, snapshot, debuggee, frameId, 0));
+        await waitForCapture(render(tree.nodes ?? [], visibility, textProjections, unknownText, paintEvidence, candidates, snapshot, debuggee, frameId, 0));
         const frameRef = capturedFrameRefs.get(frameId ?? session.rootFrameId!);
         if (!frameRef) throw automationError("snapshot-unavailable", { reason: "missing-frame-ref" });
         frameSnapshots.push({ frameRef, lines: lines.splice(0) });
@@ -4545,6 +4605,11 @@ export class AutomationRuntime {
       if (!changed()) {
         let confirmations: Array<{ debuggee: Debuggee; snapshot: any }>;
         try {
+          const afterEllipsis = await waitForCapture(Promise.all(ellipsisBatches.map((batch) => readEllipsisGeometry(batch.debuggee, batch.frameId, batch.requests))));
+          if (ellipsisBatches.some((batch, index) => JSON.stringify(batch.proofs) !== JSON.stringify(afterEllipsis[index]))) {
+            if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "text-paint-unstable" });
+            retriedUnstableCapture = true; continue;
+          }
           const afterFillability = await waitForCapture(Promise.all(fillabilityBatches.map((batch) => readFillability(batch.debuggee, batch.frameId, [...batch.values.keys()]))));
           const changedFillability = fillabilityBatches.some((batch, index) => {
             const next = afterFillability[index]!;

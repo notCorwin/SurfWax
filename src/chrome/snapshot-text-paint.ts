@@ -21,7 +21,8 @@ export function sameTextPaintCandidates(left: readonly SnapshotTextPaintCandidat
     return a.backendNodeId === b.backendNodeId && a.frameId === b.frameId && a.kind === b.kind
       && a.pseudoType === b.pseudoType && a.sourceText === b.sourceText && a.layoutText === b.layoutText
       && a.textTransform === b.textTransform && a.textSecurity === b.textSecurity
-      && a.fullyWithinClip === b.fullyWithinClip && a.zeroFont === b.zeroFont
+      && a.direction === b.direction && a.writingMode === b.writingMode && a.ellipsis === b.ellipsis
+      && a.fullyWithinClip === b.fullyWithinClip && a.zeroFont === b.zeroFont && a.basePainted === b.basePainted
       && a.documentFloatRisk === b.documentFloatRisk
       && a.firstLetter === b.firstLetter && a.firstLetterUnknown === b.firstLetterUnknown;
   });
@@ -326,6 +327,11 @@ export function projectTextPaint(candidate: SnapshotTextPaintCandidate, evidence
     return undefined;
   if (evidence.firstLineRanges && candidate.documentFloatRisk !== false) return undefined;
   if (candidate.kind === "pseudo") return evidence.pseudoUnpainted ? { hidden: true } : undefined;
+  if (candidate.basePainted) {
+    if (!candidate.fullyWithinClip || typeof candidate.layoutText !== "string" || typeof candidate.sourceText !== "string"
+      || evidence.sourceText !== candidate.sourceText) return undefined;
+    return { hidden: false, text: (candidate.firstLetter ?? "") + candidate.layoutText };
+  }
   const source = candidate.sourceText, layout = candidate.layoutText;
   if (typeof source !== "string" || typeof layout !== "string" || evidence.sourceText !== source) return undefined;
   const firstLetter = candidate.firstLetter ?? "";
