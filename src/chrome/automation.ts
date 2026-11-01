@@ -2803,6 +2803,26 @@ export class AutomationRuntime {
         .filter(([frameId]) => frameId !== session.rootFrameId && !childFrames.some((item) => item.frameId === frameId))
         .map(([frameId, debuggee]) => ({ debuggee, frameId, depth: depthOf(frameId) }))]
         .sort((left, right) => left.depth - right.depth);
+      const capturedFrames = frames.filter(({ debuggee }) => !regionDebuggee || sameDebuggee(debuggee, regionDebuggee));
+      const frameGuard = () => {
+        guard();
+        if (changed()) throw automationError("stale-frame", { reason: "frame-tree-changed-during-capture" });
+      };
+      const framesAreReady = async () => {
+        const states = await Promise.all(capturedFrames.map(async ({ frameId, debuggee }) => {
+          if (!frameId) return this.pageValue(session.tabId, "document.readyState === 'complete'");
+          const frame: FrameRefRecord = { frameId, debuggee, generation, revision: frameRevision,
+            conversationId: this.context.conversationId, runId: this.context.logIdentity?.runId };
+          const objectId = await this.frameDocument(session, frame, frameGuard);
+          const response = await this.options.command(debuggee, "Runtime.callFunctionOn", {
+            objectId, functionDeclaration: "function(){return this.readyState === 'complete'}", returnByValue: true,
+          });
+          if (response.exceptionDetails) throw new Error(response.exceptionDetails.exception?.description || response.exceptionDetails.text);
+          return response.result?.value;
+        }));
+        if (states.some((state) => typeof state !== "boolean")) throw automationError("snapshot-unavailable", { reason: "missing-frame-readiness" });
+        return states.every(Boolean);
+      };
       let trees: Array<{ debuggee: Debuggee; frameId: string | undefined; depth: number; tree: any; visibility: Map<number, boolean> }>;
       let info: { url: string; title: string };
       try {
@@ -2810,6 +2830,8 @@ export class AutomationRuntime {
         // capture. Scoped requests wait only on the selected target.
         await waitForCapture(Promise.all(allDebuggees.map(({ debuggee }) => debuggee.sessionId ? session.frameReady.get(debuggee.sessionId) : undefined)));
         guard();
+        if (changed()) { await delay(0, signal); continue; }
+        if (!await waitForCapture(framesAreReady())) { await delay(50, signal); continue; }
         if (changed()) { await delay(0, signal); continue; }
         const [captured, layouts, pageInfo] = await waitForCapture(Promise.all([
           Promise.all(frames.map(async (item) => ({ ...item, tree: !regionDebuggee || sameDebuggee(item.debuggee, regionDebuggee)
@@ -2823,13 +2845,13 @@ export class AutomationRuntime {
         info = pageInfo;
       } catch (error) {
         guard();
-        if (!changed()) throw error;
-        await delay(0, signal); continue;
+        if (!changed() && !isTransientNavigationError(error)) throw error;
+        await delay(changed() ? 0 : 50, signal); continue;
       }
       guard();
       if (changed()) { await delay(0, signal); continue; }
       try {
-        if (!await waitForCapture(this.pageValue(session.tabId, "document.readyState === 'complete'"))) { await delay(50, signal); continue; }
+        if (!await waitForCapture(framesAreReady())) { await delay(50, signal); continue; }
       } catch (error) {
         guard();
         if (!changed() && !isTransientNavigationError(error)) throw error;

@@ -13,6 +13,7 @@ function harness() {
       ] } };
     if (method === "Page.createIsolatedWorld") return { executionContextId: params.frameId === "same" ? 31 : params.frameId === "cross" ? 32 : 33 };
     if (method === "Runtime.evaluate" && params.expression === "document") return { result: { objectId: `doc-${params.contextId}` } };
+    if (method === "Runtime.callFunctionOn" && params.functionDeclaration === "function(){return this.readyState === 'complete'}") return { result: { value: true } };
     if (method === "Accessibility.queryAXTree") return { nodes: [{ nodeId: "node", backendDOMNodeId: 8, role: { value: "button" }, name: { value: params.objectId ?? "wrong-root" } }] };
     if (method === "Accessibility.getPartialAXTree") return { nodes: [{ backendDOMNodeId: 8, role: { value: "button" }, name: { value: "doc-31" } }] };
     if (method === "DOM.getFrameOwner") return { backendNodeId: { same: 101, cross: 102, nested: 103 }[params.frameId as "same" | "cross" | "nested"] };
@@ -31,6 +32,85 @@ function harness() {
 }
 
 describe("frame tree discovery", () => {
+  it("waits for each frame before capture and repeats capture if a frame starts loading afterward", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let ready = false, startedCapture = false, afterCaptureReady = false;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration === "function(){return this.readyState === 'complete'}" && params.objectId === "doc-31")
+        return { result: { value: startedCapture ? afterCaptureReady : ready } };
+      if (method === "Accessibility.getFullAXTree") {
+        startedCapture = true;
+        return { nodes: [] };
+      }
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({x:scrollX")) return { result: { value: { x: 0, y: 0, width: 100, height: 100, scale: 1 } } };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    const pending = page.inspect();
+    await vi.waitFor(() => expect(command).toHaveBeenCalledWith({ tabId: 3 }, "Runtime.callFunctionOn", expect.objectContaining({ objectId: "doc-31" })));
+    expect(command.mock.calls.some(([, method]) => method === "Accessibility.getFullAXTree")).toBe(false);
+    ready = true;
+    await vi.waitFor(() => expect(command.mock.calls.some(([, method]) => method === "Accessibility.getFullAXTree")).toBe(true));
+    // The first capture is discarded when a frame becomes incomplete before
+    // the post-capture check. No result may be returned until it completes.
+    let settled = false;
+    void pending.then(() => { settled = true; }, () => { settled = true; });
+    await vi.waitFor(() => expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.callFunctionOn" && params.objectId === "doc-31").length).toBeGreaterThanOrEqual(3));
+    expect(settled).toBe(false);
+    afterCaptureReady = true;
+    await pending;
+    expect(command.mock.calls.filter(([, method, params]) => method === "Accessibility.getFullAXTree" && !params.frameId)).toHaveLength(2);
+    await runtime.abortSessions();
+  });
+
+  it("retries frame readiness after navigation replaces a document", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let release!: () => void, notify!: () => void, first = true;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { notify = resolve; });
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration === "function(){return this.readyState === 'complete'}" && params.objectId === "doc-31" && first) {
+        first = false; notify(); await hold; return { result: { value: true } };
+      }
+      if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({x:scrollX")) return { result: { value: { x: 0, y: 0, width: 100, height: 100, scale: 1 } } };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    const pending = page.snapshot();
+    await entered;
+    runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "same", parentId: "root" } });
+    release();
+    await pending;
+    expect(command.mock.calls.filter(([, method, params]) => method === "Page.createIsolatedWorld" && params.frameId === "same")).toHaveLength(2);
+    await runtime.abortSessions();
+  });
+
+  it("cancels while a frame readiness check is in flight", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let release!: () => void, notify!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { notify = resolve; });
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration === "function(){return this.readyState === 'complete'}") { notify(); await hold; return { result: { value: true } }; }
+      return original(source, method, params);
+    });
+    const controller = new AbortController();
+    runtime.setContext({ signal: controller.signal });
+    const page = await runtime.createPage(3);
+    const pending = page.snapshot();
+    await entered;
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    release();
+    await runtime.abortSessions();
+  });
+
   it("captures same-process frame AX trees separately and skips hidden frame owners", async () => {
     const { runtime, command } = harness();
     const original = command.getMockImplementation()!;

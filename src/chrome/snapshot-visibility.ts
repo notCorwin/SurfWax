@@ -1,11 +1,29 @@
 /** Style order must match the DOMSnapshot.captureSnapshot request. */
-export const SNAPSHOT_COMPUTED_STYLES = ["opacity", "overflow-x", "overflow-y", "visibility", "content-visibility", "position", "transform", "filter", "perspective", "contain", "will-change", "backdrop-filter", "translate", "rotate", "scale", "clip-path", "clip"] as const;
+export const SNAPSHOT_COMPUTED_STYLES = ["opacity", "overflow-x", "overflow-y", "visibility", "content-visibility", "position", "transform", "filter", "perspective", "contain", "will-change", "backdrop-filter", "translate", "rotate", "scale", "clip-path", "clip", "direction", "writing-mode", "display"] as const;
 
 type Interval = readonly [number, number];
 type Clip = { x: Interval; y: Interval };
 const infinite: Interval = [-Infinity, Infinity];
 const intersection = (a: Interval, b: Interval): Interval => [Math.max(a[0], b[0]), Math.min(a[1], b[1])];
 const intersects = (a: Interval, b: Interval) => a[1] > b[0] && a[0] < b[1] && b[1] > b[0];
+
+type ScrollDirections = { x: "positive" | "negative" | "unknown"; y: "positive" | "unknown" };
+const unknownDirections: ScrollDirections = { x: "unknown", y: "unknown" };
+
+/** Reverse flex/grid and non-horizontal writing can move the scroll origin. */
+function scrollDirections(style: (index: number) => string): ScrollDirections {
+  const direction = style(17), writing = style(18), display = style(19);
+  if (writing !== "horizontal-tb" || !["block", "inline-block", "flow-root"].includes(display)
+    || (direction !== "ltr" && direction !== "rtl")) return unknownDirections;
+  return { x: direction === "rtl" ? "negative" : "positive", y: "positive" };
+}
+
+/** Overestimate reachable positions whenever scroll direction is uncertain. */
+function scrollRange(size: number, viewport: number, direction: "positive" | "negative" | "unknown"): Interval {
+  // CDP dimensions can be rounded to integral CSS pixels.
+  const distance = Math.max(0, size - viewport) + 1;
+  return [direction === "positive" ? 0 : -distance, direction === "negative" ? 0 : distance];
+}
 
 /** Recognize only clips that are empty regardless of the element's size. */
 function emptyInset(value: string): boolean {
@@ -56,6 +74,35 @@ export function snapshotVisibility(snapshot: any): Map<number, boolean> {
       || !Array.isArray(layout?.nodeIndex) || !Array.isArray(layout?.bounds) || !Array.isArray(layout?.styles)) throw new Error("Invalid DOM snapshot document");
     const layoutByNode = new Map<number, number>();
     layout.nodeIndex.forEach((nodeIndex: number, index: number) => layoutByNode.set(nodeIndex, index));
+    const nodeName = (index: number) => strings[nodes.nodeName?.[index]]?.toUpperCase();
+    const styleFor = (nodeIndex: number, position: number) => {
+      const layoutIndex = layoutByNode.get(nodeIndex);
+      return layoutIndex === undefined ? "" : strings[layout.styles[layoutIndex]?.[position]] ?? "";
+    };
+    const documentNode = nodes.backendNodeId.findIndex((_: unknown, index: number) => nodeName(index) === "#DOCUMENT");
+    const documentLayout = layoutByNode.get(documentNode);
+    const viewport: number[] = documentLayout === undefined ? [] : layout.bounds[documentLayout] ?? [];
+    // BODY direction and writing-mode can propagate to the viewport, even in
+    // standards mode. Only infer a directional range when both agree.
+    // A document type node is also named "html"; it has no computed style.
+    const isElement = (index: number) => nodes.nodeType?.[index] === undefined || nodes.nodeType[index] === 1;
+    const html = nodes.backendNodeId.findIndex((_: unknown, index: number) => isElement(index) && nodeName(index) === "HTML");
+    const body = nodes.backendNodeId.findIndex((_: unknown, index: number) => isElement(index) && nodeName(index) === "BODY");
+    const htmlDirections = scrollDirections((position) => styleFor(html, position));
+    const bodyDirections = scrollDirections((position) => styleFor(body, position));
+    const rootDirections = htmlDirections.x === bodyDirections.x && htmlDirections.y === bodyDirections.y ? htmlDirections : unknownDirections;
+    const viewportAxis = (axis: 0 | 1): { reachable: Interval; fixed: Interval } => {
+      const extent = viewport[axis + 2], content = axis === 0 ? document.contentWidth : document.contentHeight;
+      const offset = axis === 0 ? document.scrollOffsetX : document.scrollOffsetY;
+      if (!(typeof extent === "number" && Number.isFinite(extent) && extent > 0
+        && typeof content === "number" && Number.isFinite(content) && content >= 0
+        && typeof offset === "number" && Number.isFinite(offset))) return { reachable: infinite, fixed: infinite };
+      const [minimum, maximum] = scrollRange(content, extent, axis === 0 ? rootDirections.x : rootDirections.y);
+      return { reachable: [minimum - 1, maximum + extent + 1], fixed: [offset - 1, offset + extent + 1] };
+    };
+    const horizontalViewport = viewportAxis(0), verticalViewport = viewportAxis(1);
+    const documentClip: Clip = { x: horizontalViewport.reachable, y: verticalViewport.reachable };
+    const viewportClip: Clip = { x: horizontalViewport.fixed, y: verticalViewport.fixed };
     const contexts: Array<{ transparent: boolean; contentHidden: boolean; emptyClip: boolean; clip: Clip; absoluteClip: Clip; fixedClip: Clip; axisAligned: boolean }> = [];
     for (let index = 0; index < nodes.backendNodeId.length; index++) {
       const parent = contexts[nodes.parentIndex[index]];
@@ -63,16 +110,16 @@ export function snapshotVisibility(snapshot: any): Map<number, boolean> {
       let contentHidden = parent?.contentHidden ?? false;
       let emptyClip = parent?.emptyClip ?? false;
       const unbounded: Clip = { x: infinite, y: infinite };
-      let clip: Clip = parent?.clip ?? unbounded;
-      let absoluteClip: Clip = parent?.absoluteClip ?? unbounded;
-      let fixedClip: Clip = parent?.fixedClip ?? unbounded;
+      let clip: Clip = parent?.clip ?? (index === documentNode ? documentClip : unbounded);
+      let absoluteClip: Clip = parent?.absoluteClip ?? (index === documentNode ? documentClip : unbounded);
+      let fixedClip: Clip = parent?.fixedClip ?? (index === documentNode ? viewportClip : unbounded);
       let axisAligned = parent?.axisAligned ?? true;
       const layoutIndex = layoutByNode.get(index);
       // Frame elements do not use display:contents, and a frame with no
       // layout box cannot display its document. General layoutless nodes are
       // retained because their descendants may still be rendered.
-      const nodeName = strings[nodes.nodeName?.[index]]?.toUpperCase();
-      let visible = !transparent && !contentHidden && !emptyClip && !(layoutIndex === undefined && (nodeName === "IFRAME" || nodeName === "FRAME"));
+      const tagName = nodeName(index);
+      let visible = !transparent && !contentHidden && !emptyClip && !(layoutIndex === undefined && (tagName === "IFRAME" || tagName === "FRAME"));
       if (layoutIndex !== undefined) {
         const styles: number[] = layout.styles[layoutIndex] ?? [];
         const style = (position: number) => strings[styles[position]!] ?? "";
@@ -113,18 +160,30 @@ export function snapshotVisibility(snapshot: any): Map<number, boolean> {
         // Zero-size structural containers may still contain visible overflow.
         // They have no visual box of their own, but must not hide descendants.
         const outsideClip = hasBounds && ((bounds[2]! > 0 && !intersects(x, clip.x)) || (bounds[3]! > 0 && !intersects(y, clip.y)));
-        const emptyFrame = (nodeName === "IFRAME" || nodeName === "FRAME") && hasBounds && (bounds[2]! <= 0 || bounds[3]! <= 0);
+        const emptyFrame = (tagName === "IFRAME" || tagName === "FRAME") && hasBounds && (bounds[2]! <= 0 || bounds[3]! <= 0);
         visible = !transparent && !contentHidden && !emptyClip && visibility !== "hidden" && visibility !== "collapse" && !outsideClip && !emptyFrame;
         const overflowX = style(1), overflowY = style(2);
-        const clipAxis = (overflow: string, parentClip: Interval, boundsAxis: Interval): Interval => {
+        const scroll: number[] = layout.scrollRects?.[layoutIndex] ?? [];
+        const directions = scrollDirections(style);
+        const clipAxis = (axis: 0 | 1, overflow: string, parentClip: Interval, boundsAxis: Interval): Interval => {
           if (overflow === "hidden" || overflow === "clip") return intersection(parentClip, boundsAxis);
-          // A scroll container can move its descendants through the clip.
-          // If the container itself is outside a non-scrollable clip, it
-          // cannot expose them; otherwise its scrollable axis is unbounded.
-          if (overflow === "auto" || overflow === "scroll") return intersects(boundsAxis, parentClip) ? infinite : [0, 0];
+          if (overflow === "auto" || overflow === "scroll") {
+            const exposed = intersection(parentClip, boundsAxis);
+            if (!intersects(boundsAxis, parentClip)) return [0, 0];
+            // Rectangles are unavailable or unreliable under rotated and
+            // perspective transforms: retain the existing conservative view.
+            if (!axisAligned || client.length < 4 || offset.length < 4 || scroll.length < 4
+              || !client.every(Number.isFinite) || !offset.every(Number.isFinite) || !scroll.every(Number.isFinite)
+              || offset[axis + 2]! <= 0 || client[axis + 2]! < 0 || scroll[axis + 2]! < 0) return infinite;
+            const scale = bounds[axis + 2]! / offset[axis + 2]!;
+            if (!(scale > 0 && Number.isFinite(scale))) return infinite;
+            const [minimum, maximum] = scrollRange(scroll[axis + 2]!, client[axis + 2]!, axis === 0 ? directions.x : directions.y);
+            const current = scroll[axis]!;
+            return [exposed[0] + (minimum - current) * scale - 1, exposed[1] + (maximum - current) * scale + 1];
+          }
           return parentClip;
         };
-        if (hasBounds) clip = { x: clipAxis(overflowX, clip.x, clientX), y: clipAxis(overflowY, clip.y, clientY) };
+        if (hasBounds) clip = { x: clipAxis(0, overflowX, clip.x, clientX), y: clipAxis(1, overflowY, clip.y, clientY) };
         const establishesFixed = [style(6), style(7), style(8), style(11), style(12), style(13), style(14)].some((value) => value !== "" && value !== "none")
           || /\b(layout|paint|strict|content)\b/.test(style(9))
           || /\b(transform|translate|rotate|scale|filter|perspective|contain|backdrop-filter)\b/.test(style(10));
