@@ -10,10 +10,33 @@ test("goal mode keeps working until its completion tool is called", async () => 
   ]);
   const opened = await openExtension();
   try {
-    await (await configure(opened.context, opened.page, provider.baseURL)).close();
-    const mode = opened.page.getByTestId("work-mode");
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    const longModel = "provider/extraordinarily-long-browser-automation-model-name";
+    await options.getByLabel("Model ID", { exact: true }).fill(longModel);
+    await options.getByRole("button", { name: "保存配置" }).click();
+    const model = opened.page.getByTestId("composer-model");
+    await expect(model).toHaveAttribute("title", longModel);
+    await options.close();
+    const mode = opened.page.getByRole("combobox", { name: "工作模式" });
+    const reasoning = opened.page.getByRole("combobox", { name: "思考强度" });
+    const context = opened.page.getByTestId("context-indicator");
+    const send = opened.page.getByRole("button", { name: "发送消息" });
     await expect(mode).toContainText("普通模式");
-    await mode.click();
+    // The name yields space to interactive controls at side-panel widths, in both themes.
+    for (const colorScheme of ["light", "dark"] as const) {
+      await opened.page.emulateMedia({ colorScheme });
+      for (const width of [320, 400]) {
+        await opened.page.setViewportSize({ width, height: 720 });
+        for (const control of [model, mode, reasoning, context, send]) await expect(control).toBeInViewport();
+        const boxes = await Promise.all([model, mode, reasoning, context, send].map((control) => control.boundingBox()));
+        expect(boxes.every((box) => box && box.width > 0 && box.x >= 0 && box.x + box.width <= width)).toBe(true);
+        for (let i = 1; i < boxes.length; i++) expect(boxes[i - 1]!.x + boxes[i - 1]!.width).toBeLessThanOrEqual(boxes[i]!.x + 0.5);
+        expect(await opened.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      }
+    }
+    await mode.focus();
+    await expect(mode).toBeFocused();
+    await mode.press("Enter");
     await opened.page.getByRole("option", { name: "目标模式" }).click();
     await expect(mode).toContainText("目标模式");
     await opened.page.getByTestId("composer-input").fill("Complete the goal");

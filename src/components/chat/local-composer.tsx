@@ -458,7 +458,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
           onCompositionEnd={() => { composing.current = false; }}
         />
         <InputGroupAddon align="block-end" className="min-w-0 justify-between gap-1 px-2 pb-2">
-          <div className="flex min-w-0 items-center gap-1">
+          <div className="flex min-w-0 flex-1 items-center gap-1">
             <span data-testid="composer-model" className="composer-model min-w-0 truncate px-2 text-xs text-muted-foreground" title={model}>
               {(model.split("/").at(-1) ?? model).split(/[-_\s]+/).filter(Boolean).map((part) =>
                 /^(gpt|glm|api)$/i.test(part) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1),
@@ -466,7 +466,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
             </span>
             <Select value={goalMode ? "goal" : "normal"} disabled={locked || isRunning || blocked}
               onValueChange={(value) => onGoalModeChange(value === "goal")}>
-              <SelectTrigger data-testid="work-mode" size="sm" aria-label="工作模式" title="目标模式要求模型调用完成工具才能结束工作" className="h-7 gap-1 px-1.5">
+              <SelectTrigger data-testid="work-mode" data-mode={goalMode ? "goal" : "normal"} size="sm" aria-label="工作模式" title="目标模式要求模型调用完成工具才能结束工作" className="composer-select shrink-0 gap-1 px-2">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent position="popper" align="start">
@@ -479,7 +479,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
             <Select value={reasoning.selected ?? undefined} disabled={!reasoning.ready || isRunning || !reasoning.choices.length}
               onValueChange={(value) => settings.select(value as ReasoningEffort)}>
               <SelectTrigger data-testid="reasoning-effort" size="sm" aria-label="思考强度"
-                className="reasoning-select h-7 max-w-20 gap-1 px-1.5">
+                className="composer-select shrink-0 gap-1 px-2">
                 <SelectValue placeholder="默认" />
               </SelectTrigger>
               <SelectContent position="popper" align="start">
@@ -490,7 +490,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
             </Select>
             <ContextIndicator config={config} logger={logger} conversationId={conversationId} />
           </div>
-          <div className="flex items-center gap-1">
+          <div className="flex shrink-0 items-center gap-1">
             {isRunning && <Button type="button" size="icon-sm" className="rounded-full" aria-label="停止生成" title="停止生成" onClick={() => runtimeCommands.thread.cancelRun()}><SquareIcon aria-hidden="true" /></Button>}
             {(!isRunning || hasText) && <Button type="button" size="icon-sm" className="rounded-full" disabled={!hasText || isDisabled || blocked}
               aria-label={isRunning || followups.messages.length > 0 ? "排队消息" : "发送消息"}
