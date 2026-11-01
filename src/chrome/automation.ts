@@ -4,6 +4,7 @@ import { waitForDocumentFrame } from "./dom-frame";
 import { abortError, axValue, delay, imageSize, isTransientNavigationError, keyboardParams, modifierMask, parseKeyboardChord, throwIfAborted } from "./automation-utils";
 import { diffSnapshot, paginateSnapshot, type SnapshotItem, type SnapshotPosition } from "./snapshot-pagination";
 import { snapshotLookahead } from "./snapshot-lookahead";
+import { selectSnapshotWirePage, SnapshotWireError, SNAPSHOT_DELIVERY_COMMIT, type SnapshotDeliveryLease, type SnapshotWirePage } from "./snapshot-wire";
 import { renderSnapshotNode, type SnapshotNode, type SnapshotStateName } from "./snapshot-render";
 import { stitchSnapshotFrames, type SnapshotLine } from "./snapshot-frame-tree";
 import { snapshotDomSupplement, type SnapshotDomEvidence } from "./snapshot-dom";
@@ -49,7 +50,7 @@ type FrameListSnapshot = { id: string; session: Session; generation: number; rev
 type InspectSnapshot = {
   id: string; session: Session; generation: number; frameRevision: number; conversationId?: string; runId?: string;
   record: ObservationRecord; source: SnapshotItem[]; mode: "full" | "delta"; reset?: string;
-  expected?: SnapshotPosition; eligibleForBaseline: boolean;
+  expected?: SnapshotPosition; eligibleForBaseline: boolean; delivery?: symbol;
 };
 export type FindOptions = { cursor?: string; limit?: number };
 type SearchSnapshot = {
@@ -57,7 +58,7 @@ type SearchSnapshot = {
   conversationId?: string; runId?: string; debuggee: Debuggee; total: number;
   candidates?: Candidate[]; arrayId?: string; group?: string;
 };
-export type InspectOptions = { cursor?: string; since?: string; fields?: Array<"text" | "state" | "ref" | "actions">; budget?: number; offset?: number; limit?: number; depth?: number; recentRefs?: readonly string[] };
+export type InspectOptions = { cursor?: string; since?: string; fields?: Array<"text" | "state" | "ref" | "actions">; budget?: number; offset?: number; limit?: number; depth?: number; recentRefs?: readonly string[]; wire?: { maxBytes: number; evidenceId: string } };
 type ObservationRecord = {
   session: Session;
   observationId: string;
@@ -956,29 +957,72 @@ export class AutomationRuntime {
       }
       guard();
       const budget = options.budget ?? 12000;
-      let ordinaryPage;
-      try { ordinaryPage = paginateSnapshot(saved.source, { budget, limit: options.limit, position }); }
-      catch (error) { throw automationError("stale-observation", { reason: error instanceof Error ? error.message : String(error) }); }
-      const preview = snapshotLookahead(saved.source, ordinaryPage, { budget, limit: options.limit, position, mode: saved.mode });
-      const page = preview.page;
+      const advances = Boolean(saved.expected && saved.expected.index === position.index && saved.expected.charOffset === position.charOffset);
+      const envelope = (candidate: SnapshotWirePage): Record<string, unknown> => {
+        const { page } = candidate;
+        const truncated = position.index > 0 || position.charOffset > 0 || page.hasMore;
+        const reason = page.reason === "budget" ? "budget" : "slice";
+        const baselineComplete = !saved.record.incomplete || advances && !page.hasMore && saved.eligibleForBaseline;
+        return { observationId: saved.id, tabId, documentId: generation, url: saved.record.url, title: saved.record.title, viewport: saved.record.viewport,
+          mode: saved.mode, ...(saved.reset ? { reset: saved.reset } : {}),
+          items: page.fragments, ...(candidate.lookahead ? { lookahead: candidate.lookahead } : {}),
+          ...(page.next ? { nextCursor: `${saved.id}:${page.next.index}:${page.next.charOffset}` } : {}),
+          truncation: { truncated, total: saved.source.length, returned: page.fragments.length, offset: position.index, charOffset: position.charOffset,
+            nextOffset: page.next?.index ?? saved.source.length, nextCharOffset: page.next?.charOffset ?? 0, budget: candidate.budget, used: page.usedBytes,
+            ...(candidate.combinedBytes === undefined ? {} : { withLookahead: candidate.combinedBytes }),
+            ...(truncated ? { reason, baselineComplete, ...(page.requiredBudget === undefined ? {} : { requiredBudget: page.requiredBudget }) }
+              : { baselineComplete }) } };
+      };
+      let candidate: SnapshotWirePage;
+      try {
+        if (options.wire) candidate = selectSnapshotWirePage(saved.source, { budget, limit: options.limit, position, mode: saved.mode, ...options.wire }, envelope);
+        else {
+          const ordinary = paginateSnapshot(saved.source, { budget, limit: options.limit, position });
+          candidate = { ...snapshotLookahead(saved.source, ordinary, { budget, limit: options.limit, position, mode: saved.mode }), budget };
+        }
+      } catch (error) {
+        throw automationError(error instanceof SnapshotWireError ? "snapshot-unavailable" : "stale-observation", { reason: error instanceof SnapshotWireError ? "wire-budget-insufficient" : error instanceof Error ? error.message : String(error) });
+      }
+      const page = candidate.page;
       if (page.fragments.some((item) => item.ref && !session.refs.has(item.ref)))
         throw automationError("stale-observation", { observationId: saved.id, reason: "reference-identity-changed" });
       for (const item of page.fragments) if (item.ref) this.touchRef(session, item.ref);
-      if (saved.expected && saved.expected.index === position.index && saved.expected.charOffset === position.charOffset) {
-        saved.expected = page.next;
-        if (!page.hasMore && saved.eligibleForBaseline) saved.record.incomplete = false;
+      const result = envelope(candidate);
+      const source = saved.source, record = saved.record;
+      const valid = () => this.sessions.get(tabId) === session && session.generation === generation
+        && session.frameRevision === saved.frameRevision && this.inspectionSnapshots.get(saved.id) === saved
+        && this.observations.get(saved.id) === record && saved.source === source && saved.record === record
+        && saved.conversationId === conversationId && saved.runId === runId
+        && !page.fragments.some((item) => item.ref && !session.refs.has(item.ref));
+      const atPosition = () => Boolean(saved.expected && saved.expected.index === position.index && saved.expected.charOffset === position.charOffset);
+      const advance = () => { saved.expected = page.next; if (!page.hasMore && saved.eligibleForBaseline) record.incomplete = false; };
+      if (options.wire) {
+        const token = Symbol("inspection-delivery"), shouldAdvance = advances;
+        let state: "prepared" | "pending" | "finished" | "canceled" = "prepared";
+        const lease: SnapshotDeliveryLease = {
+          begin: () => {
+            if (state === "pending" || state === "finished") return true;
+            if (state !== "prepared" || signal?.aborted || !valid() || saved.delivery || shouldAdvance && !atPosition()) return false;
+            saved.delivery = token; state = "pending"; return true;
+          },
+          finish: () => {
+            if (state !== "pending" || saved.delivery !== token) return;
+            saved.delivery = undefined; state = "finished";
+            if (!valid() || shouldAdvance && !atPosition()) {
+              if (this.inspectionSnapshots.get(saved.id) === saved) this.inspectionSnapshots.delete(saved.id);
+              if (this.observations.get(saved.id) === record) this.observations.delete(saved.id);
+              return;
+            }
+            if (shouldAdvance) advance();
+          },
+          cancel: () => { if (state === "pending" && saved.delivery === token) saved.delivery = undefined; if (state !== "finished") state = "canceled"; },
+        };
+        Object.defineProperty(result, SNAPSHOT_DELIVERY_COMMIT, { value: lease });
+      } else if (advances && valid()) {
+        if (saved.delivery) throw automationError("stale-observation", { reason: "snapshot-delivery-pending" });
+        advance();
       }
-      const truncated = position.index > 0 || position.charOffset > 0 || page.hasMore;
-      const reason = page.reason === "budget" ? "budget" : "slice";
-      return { observationId: saved.id, tabId, documentId: generation, url: saved.record.url, title: saved.record.title, viewport: saved.record.viewport,
-        mode: saved.mode, ...(saved.reset ? { reset: saved.reset } : {}),
-        items: page.fragments, ...(preview.lookahead ? { lookahead: preview.lookahead } : {}),
-        ...(page.next ? { nextCursor: `${saved.id}:${page.next.index}:${page.next.charOffset}` } : {}),
-        truncation: { truncated, total: saved.source.length, returned: page.fragments.length, offset: position.index, charOffset: position.charOffset,
-          nextOffset: page.next?.index ?? saved.source.length, nextCharOffset: page.next?.charOffset ?? 0, budget, used: page.usedBytes,
-          ...(preview.combinedBytes === undefined ? {} : { withLookahead: preview.combinedBytes }),
-          ...(truncated ? { reason, baselineComplete: !saved.record.incomplete, ...(page.requiredBudget === undefined ? {} : { requiredBudget: page.requiredBudget }) }
-            : { baselineComplete: !saved.record.incomplete }) } };
+      return result;
     });
   }
 

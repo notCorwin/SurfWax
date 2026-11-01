@@ -8,8 +8,10 @@ import { ChromeExecutor } from "./executor";
 import { createProgramTools, PROGRAM_TOOL_REGISTRY } from "./tool";
 import { ToolScheduler } from "./tool-scheduler";
 import { PLACEHOLDER_EVIDENCE_SOURCE } from "./snapshot-placeholder";
+import { SNAPSHOT_DELIVERY_COMMIT } from "./snapshot-wire";
 
 const inspectText = (value: any) => value.items.map((item: any) => item.line).join("\n");
+const deliver = (value: any) => { const lease = value[SNAPSHOT_DELIVERY_COMMIT]; expect(lease.begin()).toBe(true); lease.finish(); };
 
 function fillReferencePool(runtime: AutomationRuntime, count: number) {
   const session = (runtime as any).sessions.get(3);
@@ -2042,6 +2044,101 @@ describe("AutomationRuntime", () => {
     expect(calls.filter(({ method }) => method === "Accessibility.getFullAXTree")).toHaveLength(1);
     const delta = await page.inspect({ since: first.observationId as string }) as any;
     expect(delta).toMatchObject({ mode: "delta", items: [expect.objectContaining({ change: "updated", line: expect.stringContaining("Changed after the initial snapshot") })] });
+    await runtime.abortSessions();
+  });
+
+  it("fits each frozen inspection page into the model envelope before advancing the cursor", async () => {
+    const metadata = Array.from({ length: 24 }, (_, index) => ({ role: "button", name: `row-${index}-${'海😀"'.repeat(120)}`, tag: "button" }));
+    const { runtime } = harness(metadata);
+    const page = await runtime.createPage(3);
+    const expected = await page.inspect({ budget: 100_000 }) as any;
+    const wire = { maxBytes: 1700, evidenceId: 'call-"🌊' };
+    let current = await page.inspect({ budget: 30_000, wire }) as any;
+    const observationId = current.observationId, rebuilt = new Map<string, string>();
+    let pages = 0;
+    for (;;) {
+      expect(new TextEncoder().encode(JSON.stringify({ ...current, evidenceId: wire.evidenceId })).byteLength).toBeLessThanOrEqual(wire.maxBytes);
+      expect(current.truncation.budget).toBeLessThanOrEqual(30_000);
+      for (const item of current.items) rebuilt.set(item.id, (rebuilt.get(item.id) ?? "") + item.line);
+      deliver(current);
+      pages++;
+      if (!current.nextCursor) break;
+      if (pages === 1) await expect(page.inspect({ cursor: current.nextCursor, budget: 30_000, wire: { ...wire, evidenceId: "x".repeat(3000) } })).rejects.toMatchObject({ code: "snapshot-unavailable", detail: { reason: "wire-budget-insufficient" } });
+      current = await page.inspect({ cursor: current.nextCursor, budget: 30_000, wire }) as any;
+      expect(current.observationId).toBe(observationId);
+      expect(pages).toBeLessThan(100);
+    }
+    expect(pages).toBeGreaterThan(1);
+    expect([...rebuilt]).toEqual(expected.items.map((item: any) => [item.id, item.line]));
+    expect(current.truncation.baselineComplete).toBe(true);
+    expect(await page.inspect({ since: observationId })).toMatchObject({ mode: "delta", items: [] });
+    await runtime.abortSessions();
+  });
+
+  it("commits a wire baseline only after delivery, with an idempotent non-serialized callback", async () => {
+    const { runtime } = harness([{ role: "button", name: "One", tag: "button" }]);
+    const page = await runtime.createPage(3);
+    const prepared = await page.inspect({ wire: { maxBytes: 5000, evidenceId: "call" } }) as any;
+    expect(prepared.truncation.baselineComplete).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(prepared, SNAPSHOT_DELIVERY_COMMIT)?.enumerable).toBe(false);
+    expect(JSON.stringify(prepared)).not.toContain("snapshot-delivery-commit");
+    expect(await page.inspect({ since: prepared.observationId })).toMatchObject({ mode: "full", reset: "previous-output-truncated" });
+    const lease = prepared[SNAPSHOT_DELIVERY_COMMIT];
+    expect(lease.begin()).toBe(true);
+    expect(lease.begin()).toBe(true);
+    lease.finish(); lease.finish();
+    expect(await page.inspect({ since: prepared.observationId })).toMatchObject({ mode: "delta", items: [] });
+    await runtime.abortSessions();
+  });
+
+  it("rejects out-of-order or stale prepared pages without advancing the frozen baseline", async () => {
+    const { runtime } = harness(Array.from({ length: 6 }, (_, index) => ({ role: "button", name: `Row ${index}`, tag: "button" })));
+    const page = await runtime.createPage(3), wire = { maxBytes: 5000, evidenceId: "call" };
+    const first = await page.inspect({ limit: 1, wire }) as any;
+    const tooEarly = await page.inspect({ cursor: first.nextCursor, limit: 1, wire }) as any;
+    deliver(tooEarly);
+    expect(await page.inspect({ since: first.observationId })).toMatchObject({ mode: "full", reset: "previous-output-truncated" });
+    deliver(first);
+    const retry = await page.inspect({ cursor: first.nextCursor, limit: 1, wire }) as any;
+    deliver(retry);
+    const stale = await page.inspect({ cursor: retry.nextCursor, limit: 1, wire }) as any;
+    const session = (runtime as any).sessions.get(3);
+    session.frameRevision++;
+    expect(stale[SNAPSHOT_DELIVERY_COMMIT].begin()).toBe(false);
+    expect(stale[SNAPSHOT_DELIVERY_COMMIT].begin()).toBe(false);
+    expect(await page.inspect({ since: first.observationId })).toMatchObject({ mode: "full", reset: "previous-output-truncated" });
+    await runtime.abortSessions();
+  });
+
+  it("reserves a delivery across logging and cancels safely without advancing", async () => {
+    const { runtime } = harness([{ role: "button", name: "One", tag: "button" }]);
+    const page = await runtime.createPage(3), wire = { maxBytes: 5000, evidenceId: "call" };
+    const first = await page.inspect({ limit: 1, wire }) as any;
+    const second = await page.inspect({ cursor: first.nextCursor, limit: 1, wire }) as any;
+    const lease = first[SNAPSHOT_DELIVERY_COMMIT], competitor = second[SNAPSHOT_DELIVERY_COMMIT];
+    expect(lease.begin()).toBe(true);
+    expect(competitor.begin()).toBe(false);
+    lease.cancel(); lease.cancel();
+    expect(lease.begin()).toBe(false);
+    expect(await page.inspect({ since: first.observationId })).toMatchObject({ mode: "full", reset: "previous-output-truncated" });
+    const retry = await page.inspect({ cursor: `${first.observationId}:0:0`, limit: 1, wire }) as any;
+    deliver(retry);
+    const next = await page.inspect({ cursor: first.nextCursor, limit: 1, wire }) as any;
+    deliver(next);
+    expect(await page.inspect({ since: first.observationId })).toMatchObject({ mode: "delta", items: [] });
+    await runtime.abortSessions();
+  });
+
+  it("invalidates the observation if its frame changes after delivery begins", async () => {
+    const { runtime } = harness([{ role: "button", name: "One", tag: "button" }]);
+    const page = await runtime.createPage(3);
+    const first = await page.inspect({ limit: 1, wire: { maxBytes: 5000, evidenceId: "call" } }) as any;
+    const lease = first[SNAPSHOT_DELIVERY_COMMIT];
+    expect(lease.begin()).toBe(true);
+    (runtime as any).sessions.get(3).frameRevision++;
+    lease.finish(); lease.finish();
+    await expect(page.inspect({ cursor: first.nextCursor })).rejects.toMatchObject({ code: "stale-observation" });
+    await expect(page.inspect({ since: first.observationId })).rejects.toMatchObject({ code: "stale-observation" });
     await runtime.abortSessions();
   });
 

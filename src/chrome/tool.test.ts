@@ -6,6 +6,7 @@ import { parseLocatorTarget, ChromeExecutor } from "./executor";
 import { compactToolResult, createProgramTools, prepareToolMessages, repairProgramToolCall, PROGRAM_TOOL_REGISTRY, PROGRAM_TOOL_CONTEXT } from "./tool";
 import { callUserScript } from "./script-client";
 import { ToolScheduler } from "./tool-scheduler";
+import { SNAPSHOT_DELIVERY_COMMIT } from "./snapshot-wire";
 
 describe("browser tools", () => {
   it("returns a budgeted inspection page inline with its continuation and fragments intact", async () => {
@@ -16,12 +17,51 @@ describe("browser tools", () => {
       viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "full", items, nextCursor: "obs:0:3100",
       truncation: { truncated: true, total: 2, returned: 1, offset: 0, charOffset: 0, nextOffset: 0, nextCharOffset: 3100,
         budget: 12000, used: new TextEncoder().encode(JSON.stringify(items)).byteLength, reason: "budget", baselineComplete: false } };
+    const delivery = { begin: vi.fn(() => true), finish: vi.fn(), cancel: vi.fn() };
+    Object.defineProperty(page, SNAPSHOT_DELIVERY_COMMIT, { value: delivery });
     const executor = { inspect: vi.fn(async () => page), pendingBackgroundJobs: () => [] } as unknown as ChromeExecutor;
     const tools = createProgramTools(executor, { logger, conversationId: "thread" }) as Record<string, any>;
     const result = await tools.inspect_page.execute({}, { toolCallId: "inspect" });
     expect(new TextEncoder().encode(JSON.stringify(result)).byteLength).toBeGreaterThan(8192);
     expect(result).toEqual({ ...page, evidenceId: "inspect" });
+    expect(delivery.begin).toHaveBeenCalledOnce();
+    expect(delivery.finish).toHaveBeenCalledOnce();
+    expect(delivery.cancel).not.toHaveBeenCalled();
     expect(events.filter((event) => event.type === "tool.result.data")).toHaveLength(0);
+  });
+
+  it("does not commit a snapshot page when the terminal event cannot be saved", async () => {
+    const delivery = { begin: vi.fn(() => true), finish: vi.fn(), cancel: vi.fn() };
+    const page = { observationId: "obs", tabId: 4, documentId: 1, url: "https://example.test/", title: "Page",
+      viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "full", items: [{ id: "node", line: "- main" }],
+      truncation: { truncated: false, total: 1, returned: 1, offset: 0, charOffset: 0, nextOffset: 1, nextCharOffset: 0,
+        budget: 12000, used: 31, baselineComplete: true } };
+    Object.defineProperty(page, SNAPSHOT_DELIVERY_COMMIT, { value: delivery });
+    const logger = { append: vi.fn(async (event: any) => event.type === "tool.finished" ? undefined : { id: 1 }) } as unknown as EventLogger;
+    const executor = { inspect: vi.fn(async () => page) } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor, { logger }) as Record<string, any>;
+    await expect(tools.inspect_page.execute({}, { toolCallId: "inspect" })).rejects.toThrow();
+    expect(delivery.begin).toHaveBeenCalledOnce();
+    expect(delivery.finish).not.toHaveBeenCalled();
+    expect(delivery.cancel).toHaveBeenCalledOnce();
+  });
+
+  it("reports a stale page as a failed tool result if its delivery lease cannot begin", async () => {
+    const delivery = { begin: vi.fn(() => false), finish: vi.fn(), cancel: vi.fn() };
+    const page = { observationId: "obs", tabId: 4, documentId: 1, url: "https://example.test/", title: "Page",
+      viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "full", items: [{ id: "node", line: "- main" }],
+      truncation: { truncated: false, total: 1, returned: 1, offset: 0, charOffset: 0, nextOffset: 1, nextCharOffset: 0,
+        budget: 12000, used: 31, baselineComplete: true } };
+    Object.defineProperty(page, SNAPSHOT_DELIVERY_COMMIT, { value: delivery });
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: testEventStore(events) });
+    const executor = { inspect: vi.fn(async () => page) } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor, { logger, conversationId: "thread" }) as Record<string, any>;
+    const result = await tools.inspect_page.execute({}, { toolCallId: "inspect" });
+    expect(result).toMatchObject({ ok: false, error: { code: "stale-observation" } });
+    expect(events.some((event) => event.type === "tool.failed")).toBe(true);
+    expect(events.some((event) => event.type === "tool.finished")).toBe(false);
+    expect(delivery.finish).not.toHaveBeenCalled();
   });
 
   it("attaches each action's snapshot before the next scheduled action, including failures", async () => {
@@ -904,6 +944,8 @@ describe("browser tools", () => {
     const withPreview = { ...previewBase, truncation: { ...previewBase.truncation,
       withLookahead: new TextEncoder().encode(JSON.stringify({ items: previewBase.items, lookahead })).byteLength } };
     expect(await compactToolResult(withPreview, { logger, preserveInspectionStatus: true, toolCallId: "call" })).toEqual(withPreview);
+    const repeated = { ...withPreview, truncation: { ...withPreview.truncation, baselineComplete: true } };
+    expect(await compactToolResult(repeated, { logger, preserveInspectionStatus: true, toolCallId: "call" })).toEqual(repeated);
     expect(await compactToolResult({ ...withPreview, truncation: { ...withPreview.truncation, withLookahead: 1 } }, { logger, preserveInspectionStatus: true, toolCallId: "call" })).toMatchObject({ $ref: 18 });
     const largePreview = await compactToolResult({ ...withPreview, url: "y".repeat(17000) }, { logger, preserveInspectionStatus: true, toolCallId: "call" });
     expect(largePreview).toMatchObject({ $ref: 18, lookaheadNonAuthoritative: true, lookaheadCount: 30,
@@ -916,7 +958,7 @@ describe("browser tools", () => {
     expect(await compactToolResult(page, { logger })).toMatchObject({ $ref: 18 });
   });
 
-  it("exposes lookahead artifact access even when normalization is deferred", async () => {
+  it("fails explicitly instead of hiding an oversized inspection page in an artifact", async () => {
     const events: LogEvent[] = [];
     const logger = new EventLogger({ store: testEventStore(events) });
     const lookahead = { nonAuthoritative: true, items: [{ index: 2, id: "later", line: '  - button "Later"' }] };
@@ -930,10 +972,8 @@ describe("browser tools", () => {
     vi.spyOn(executor, "inspect").mockResolvedValue(page);
     const tools = createProgramTools(executor, { logger, conversationId: "thread" }) as Record<string, any>;
     const output = await tools.inspect_page.execute({}, { toolCallId: "inspect" });
-    expect(output).toMatchObject({ sidecarsDeferred: true, cursorNote: expect.stringContaining("Read all items"), lookaheadNonAuthoritative: true, lookaheadCount: 1,
-      lookaheadAccess: { path: ["lookahead", "items"], offset: 0, limit: expect.any(Number) }, truncation: { withLookahead } });
-    const read = await tools.read_artifact.execute(output.lookaheadAccess, { toolCallId: "read" });
-    expect(read).toMatchObject({ ok: true, result: lookahead.items });
+    expect(output).toMatchObject({ ok: false, error: { code: "snapshot-envelope-too-large" } });
+    expect(output.$ref).toBeUndefined();
     executor.dispose();
   });
 

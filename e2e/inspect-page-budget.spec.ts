@@ -10,14 +10,13 @@ function toolResult(request: any, id: string): any {
   return JSON.parse(content);
 }
 
-test("serves normal snapshot pages inline and preserves artifact access for oversized requests", async () => {
+test("delivers snapshot pages inline even when the requested budget is oversized", async () => {
   test.setTimeout(120_000);
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses), opened = await openExtension();
-  const pages = new SemanticPages();
-  const artifacts: any[] = [];
+  const pages = new SemanticPages(), oversizedPages = new SemanticPages();
   let cursor: string | undefined, pending = "budget-page-0", pageCount = 0, largestPageBytes = 0, problem: unknown;
-  let oversized: any, offset = 0, returned = 0, artifactReads = 0;
+  let oversizedCursor: string | undefined, oversizedPageCount = 0;
   const done = () => textResponse("INSPECT_BUDGET_DONE");
   const after = (fn: (result: any) => ReturnType<typeof commandResponse> | ReturnType<typeof textResponse>): MockResponse => {
     const callback: MockResponse = (request) => {
@@ -29,30 +28,17 @@ test("serves normal snapshot pages inline and preserves artifact access for over
     };
     return callback;
   };
-  const readArtifact = () => {
-    pending = `budget-artifact-${offset}`;
-    responses.unshift(after((result) => {
-      expect(result).toMatchObject({ ok: true, result: expect.any(Array) });
-      expect(result.result.length).toBeGreaterThan(0);
-      artifacts.push(...result.result); offset += result.result.length; artifactReads++;
-      expect(offset).toBeLessThanOrEqual(returned);
-      return offset < returned ? readArtifact() : done();
-    }));
-    return commandResponse("read_artifact", { ...oversized.access, offset, limit: 10 }, pending);
-  };
   const readOversized = () => {
-    pending = "budget-oversized";
+    pending = `budget-oversized-${oversizedPageCount}`;
     responses.unshift(after((result) => {
-      oversized = result;
-      expect(result.$ref).toEqual(expect.any(Number));
-      expect(result.access).toMatchObject({ artifactId: result.$ref, path: ["items"] });
-      expect(result.cursorNote).toContain("Read all items");
-      expect(result.nextCursor).toBeUndefined();
-      returned = result.truncation.returned;
-      expect(returned).toBeGreaterThan(80);
-      return readArtifact();
+      expect(result.$ref).toBeUndefined();
+      expect(result.mode).toBe("full");
+      expect(result.items).toEqual(expect.any(Array));
+      oversizedCursor = oversizedPages.append(result, oversizedCursor);
+      expect(++oversizedPageCount).toBeLessThan(50);
+      return oversizedCursor ? readOversized() : done();
     }));
-    return commandResponse("inspect_page", { budget: 100000 }, pending);
+    return commandResponse("inspect_page", { budget: 100000, ...(oversizedCursor ? { cursor: oversizedCursor } : {}) }, pending);
   };
   const readPage = () => {
     pending = `budget-page-${pageCount}`;
@@ -99,9 +85,9 @@ test("serves normal snapshot pages inline and preserves artifact access for over
     expect(pageCount).toBeGreaterThan(1);
     expect(largestPageBytes).toBeGreaterThan(8192);
     expect(normal.items.some((item) => item.line.includes("PAGE_ROW_079_") && item.line.includes("_FINAL_ROW"))).toBe(true);
-    expect(artifactReads).toBeGreaterThan(0);
-    expect(artifacts).toHaveLength(returned);
-    expect(artifacts.some((item) => item.line.includes("PAGE_ROW_079_") && item.line.includes("_FINAL_ROW"))).toBe(true);
-    expect(artifacts.map((item) => item.id)).toEqual(normal.items.map((item) => item.id));
+    expect(oversizedPageCount).toBeGreaterThan(1);
+    const oversized = oversizedPages.result();
+    expect(oversized.items.some((item) => item.line.includes("PAGE_ROW_079_") && item.line.includes("_FINAL_ROW"))).toBe(true);
+    expect(oversized.items).toEqual(normal.items);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
