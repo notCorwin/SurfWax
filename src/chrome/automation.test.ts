@@ -1573,6 +1573,34 @@ describe("AutomationRuntime", () => {
     expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent")).toHaveLength(0);
   });
 
+  it.each(["focus", "blur"] as const)("fails immediately when a %s target is missing", async (operation) => {
+    const { runtime, calls, onDispatch } = harness([]);
+    const page = await runtime.createPage(3);
+    await expect(page.getByText("missing")[operation]()).rejects.toMatchObject({ code: "not-found" });
+    expect(onDispatch).not.toHaveBeenCalled();
+    expect(calls.filter(({ method }) => method === "DOM.focus")).toHaveLength(0);
+  });
+
+  it("rejects an invalid key before resolving or focusing its target", async () => {
+    const { runtime, calls, pressChord, onDispatch } = harness([]);
+    const page = await runtime.createPage(3);
+    await expect(page.getByText("missing").press("Control+ARROWWUP")).rejects.toThrow("AutomationError[invalid-key]");
+    expect(onDispatch).not.toHaveBeenCalled();
+    expect(pressChord).not.toHaveBeenCalled();
+    expect(calls.filter(({ method }) => method === "DOM.focus")).toHaveLength(0);
+  });
+
+  it.each(["keydown", "keyup"] as const)("normalizes named %s keys and rejects unsupported names before dispatch", async (operation) => {
+    const { runtime, calls } = harness();
+    await runtime.keyState(3, operation, "ARROWUP");
+    expect(calls.filter(({ method }) => method === "Input.dispatchKeyEvent").map(({ params }) => params)).toMatchObject([
+      { key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38, type: operation === "keydown" ? "rawKeyDown" : "keyUp" },
+    ]);
+    calls.length = 0;
+    await expect(runtime.keyState(3, operation, "ARROWWUP")).rejects.toThrow("AutomationError[invalid-key]");
+    expect(calls.filter(({ method }) => method === "Input.dispatchKeyEvent")).toHaveLength(0);
+  });
+
   it.each([
     ["not-visible", { visible: false }],
     ["disabled", { enabled: false }],

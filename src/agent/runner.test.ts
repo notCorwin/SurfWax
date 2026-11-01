@@ -4,10 +4,11 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import type { ChromeExecutor } from "../chrome/executor";
 import { PROGRAM_TOOL_CONTEXT, PROGRAM_TOOL_REGISTRY } from "../chrome/tool";
 import { EventLogger, fromLogValue, type LogEvent } from "../logging";
-import { ContextCompactor, estimatePromptInput } from "./compaction";
+import { ContextCompactor, estimatePromptInput, summarizeContext } from "./compaction";
 import { createPromptSnapshot, PROMPT_TOOLS } from "./prompt";
 import { createAgent, DEFAULT_INSTRUCTIONS } from "./runner";
 import type { ModelConfig } from "../types";
+import { testEventStore } from "../test-event-store";
 
 const usage = { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } };
 const text = (text = "done") => ({ content: [{ type: "text" as const, text }], finishReason: { unified: "stop" as const, raw: "stop" }, usage, warnings: [] });
@@ -178,6 +179,78 @@ describe("createAgent", () => {
     expect(result.text).toBe("done");
     expect(generate).toHaveBeenCalledOnce();
     expect(events.some((event) => event.type === "context.compaction.started")).toBe(false);
+  });
+
+  it("never sends a request when fixed schemas exceed the input window", async () => {
+    const { events, logger } = memoryLog();
+    const modelConfig = { ...config, contextWindowOverride: 2_000 };
+    const generate = vi.fn(async () => text());
+    const model = new MockLanguageModelV4({ doGenerate: generate });
+    const compactor = new ContextCompactor({ model: modelConfig, logger, conversationId: "conversation", branchIds: ["u"], signal: new AbortController().signal });
+    await expect(createAgent({ model: modelConfig, languageModel: model, executor: browserExecutor(), logger,
+      conversationId: "conversation", compactor }).generate({ prompt: "inspect" })).rejects.toThrow("系统提示与工具定义");
+    expect(generate).not.toHaveBeenCalled();
+    expect(events.some((event) => event.type === "context.compaction.started")).toBe(false);
+  });
+
+  it("compacts newly appended browser state after restoring a committed checkpoint before sending it", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: testEventStore(events) });
+    logger.beginRun("conversation", "run");
+    const modelConfig = { ...config, contextWindowOverride: 100_000 };
+    const branchIds = ["u", "a"];
+    const raw = [{ role: "user" as const, content: "Preserve the task and verify its result" },
+      { role: "assistant" as const, content: "old findings " + "o".repeat(300_000) }];
+    const agentRequests: string[] = [];
+    const model = new MockLanguageModelV4({ doGenerate: async (options) => {
+      if (options.reasoning === "minimal") return text("The task remains active. Keep exact data available from the recorded artifacts.");
+      agentRequests.push(JSON.stringify(options.prompt));
+      return text();
+    } });
+    await summarizeContext({ raw, branchIds, uiCount: 2, model: modelConfig, languageModel: model, logger,
+      conversationId: "conversation", signal: new AbortController().signal });
+    const before = events.filter((event) => event.type === "context.compacted").length;
+    const compactor = new ContextCompactor({ model: modelConfig, logger, conversationId: "conversation", branchIds, signal: new AbortController().signal });
+    const result = await createAgent({ model: modelConfig, languageModel: model, executor: browserExecutor(), logger,
+      conversationId: "conversation", compactor }).generate({ messages: [...raw,
+        { role: "user", content: "<page-refresh>\n" + "n".repeat(210_000) }] });
+    expect(result.text).toBe("done");
+    expect(events.filter((event) => event.type === "context.compacted").length).toBeGreaterThan(before);
+    expect(agentRequests).toHaveLength(1);
+    expect(agentRequests[0]).not.toContain("n".repeat(10_000));
+    expect(agentRequests[0]).toContain("Preserve the task");
+    expect(agentRequests[0]).toContain("read_artifact");
+  });
+
+  it("forces a full-tail summary before dispatch when the normal growth guard declines an oversized prompt", async () => {
+    const { events, logger } = memoryLog();
+    const modelConfig = { ...config, contextWindowOverride: 100_000 };
+    const generate = vi.fn(async () => text());
+    const model = new MockLanguageModelV4({ doGenerate: generate });
+    const compactor = new ContextCompactor({ model: modelConfig, logger, conversationId: "conversation", branchIds: ["u"], signal: new AbortController().signal });
+    const canCompact = vi.spyOn(compactor, "canCompact").mockReturnValue(false);
+    const compact = vi.spyOn(compactor, "compact").mockResolvedValue([{ role: "user", content: "Preserved task and source artifact references." }]);
+    const result = await createAgent({ model: modelConfig, languageModel: model, executor: browserExecutor(), logger,
+      conversationId: "conversation", compactor }).generate({ prompt: "task " + "x".repeat(400_000) });
+    expect(result.text).toBe("done");
+    expect(canCompact).toHaveBeenCalledOnce();
+    expect(compact).toHaveBeenCalledOnce();
+    expect(compact.mock.calls[0]!.at(-1)).toBe(true);
+    expect(generate).toHaveBeenCalledOnce();
+    expect(JSON.stringify(generate.mock.calls[0])).not.toContain("x".repeat(10_000));
+  });
+
+  it("rejects a still-oversized outgoing request after bounded compaction attempts", async () => {
+    const { logger } = memoryLog();
+    const modelConfig = { ...config, contextWindowOverride: 100_000 };
+    const generate = vi.fn(async () => text());
+    const model = new MockLanguageModelV4({ doGenerate: generate });
+    const compactor = new ContextCompactor({ model: modelConfig, logger, conversationId: "conversation", branchIds: ["u"], signal: new AbortController().signal });
+    const compact = vi.spyOn(compactor, "compact").mockImplementation(async (_raw, prepared) => prepared);
+    await expect(createAgent({ model: modelConfig, languageModel: model, executor: browserExecutor(), logger,
+      conversationId: "conversation", compactor }).generate({ prompt: "task " + "x".repeat(400_000) })).rejects.toThrow("压缩后请求仍超出");
+    expect(compact).toHaveBeenCalledTimes(2);
+    expect(generate).not.toHaveBeenCalled();
   });
 
   it("executes navigation with stable instructions and complete-response callbacks", async () => {

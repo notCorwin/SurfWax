@@ -84,7 +84,16 @@ export function macEditingCommands(code: string, modifiers: number, platform = g
   return command === undefined ? undefined : Array.isArray(command) ? [...command] : [command];
 }
 
-const KEY_ALIASES: Record<string, string> = { alt: "Alt", option: "Alt", control: "Control", ctrl: "Control", meta: "Meta", cmd: "Meta", command: "Meta", shift: "Shift", controlormeta: "ControlOrMeta" };
+const KEY_ALIASES: Record<string, string> = Object.assign(Object.create(null), { alt: "Alt", option: "Alt", control: "Control", ctrl: "Control", meta: "Meta", cmd: "Meta", command: "Meta", shift: "Shift", controlormeta: "ControlOrMeta" });
+const NAMED_KEYS: Record<string, number> = {
+  Enter: 13, Tab: 9, Escape: 27, Backspace: 8, Delete: 46, Insert: 45, Clear: 12,
+  ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39, Home: 36, End: 35, PageUp: 33, PageDown: 34,
+  Alt: 18, Control: 17, Shift: 16, Meta: 91, CapsLock: 20, NumLock: 144, ScrollLock: 145,
+  Pause: 19, PrintScreen: 44, ContextMenu: 93,
+};
+for (let index = 1; index <= 24; index++) NAMED_KEYS[`F${index}`] = 111 + index;
+const KEY_NAMES: Record<string, string> = Object.assign(Object.create(null), Object.fromEntries(Object.keys(NAMED_KEYS).map((name) => [name.toLowerCase(), name])));
+Object.assign(KEY_NAMES, { space: " ", spacebar: " ", esc: "Escape", del: "Delete", return: "Enter" });
 const PUNCTUATION_KEYS: Record<string, [string, number]> = {
   "-": ["Minus", 189], "_": ["Minus", 189], "=": ["Equal", 187], "+": ["Equal", 187],
   "[": ["BracketLeft", 219], "{": ["BracketLeft", 219], "]": ["BracketRight", 221], "}": ["BracketRight", 221],
@@ -106,8 +115,10 @@ export function parseKeyboardChord(chord: string): { key: string; modifiers: Arr
   });
   if (new Set(modifiers).size !== modifiers.length) throw new Error("AutomationError[invalid-key]: Duplicate chord modifier");
   if (!requested) throw new Error("AutomationError[invalid-key]: A chord must include a key");
-  const named = KEY_ALIASES[requested.toLowerCase()] ?? requested;
-  const key = named === "Space" ? " " : named === "ControlOrMeta" ? (modifierMask([named]) === 4 ? "Meta" : "Control") : named;
+  const named = KEY_ALIASES[requested.toLowerCase()] ?? KEY_NAMES[requested.toLowerCase()] ?? requested;
+  const key = named === "ControlOrMeta" ? (modifierMask([named]) === 4 ? "Meta" : "Control") : named;
+  if (!Object.hasOwn(NAMED_KEYS, key) && ([...key].length !== 1 || /[\p{Cc}\p{Cs}]/u.test(key)))
+    throw new Error(`AutomationError[invalid-key]: Unknown key ${JSON.stringify(requested)}; use a character or a named key such as ArrowUp, Enter or F1`);
   if (modifiers.some((modifier) => modifier === key)) throw new Error("AutomationError[invalid-key]: Duplicate chord modifier");
   return { key, modifiers };
 }
@@ -117,6 +128,5 @@ export function keyboardParams(chord: string): Record<string, unknown> {
   const modifierKeys: Record<string, number> = { Alt: 1, Control: 2, Meta: 4, Shift: 8 };
   const modifiers = modifierMask(modifiersList) | (modifierKeys[key] ?? 0);
   const code = key === " " ? "Space" : ["Alt", "Control", "Shift", "Meta"].includes(key) ? `${key}Left` : PUNCTUATION_KEYS[key]?.[0] ?? (key.length === 1 && /[a-z]/i.test(key) ? `Key${key.toUpperCase()}` : key.length === 1 && /\d/.test(key) ? `Digit${key}` : key);
-  const virtualKeys: Record<string, number> = { Enter: 13, Tab: 9, Escape: 27, Backspace: 8, Delete: 46, ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39, Home: 36, End: 35, PageUp: 33, PageDown: 34, Alt: 18, Control: 17, Shift: 16, Meta: 91, " ": 32 };
-  return { key, code, modifiers, windowsVirtualKeyCode: virtualKeys[key] ?? PUNCTUATION_KEYS[key]?.[1] ?? (key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0), ...(key.length === 1 && !(modifiers & 7) ? { text: key } : key === "Enter" ? { text: "\r" } : {}) };
+  return { key, code, modifiers, windowsVirtualKeyCode: NAMED_KEYS[key] ?? (key === " " ? 32 : undefined) ?? PUNCTUATION_KEYS[key]?.[1] ?? (/^[a-z0-9]$/i.test(key) ? key.toUpperCase().charCodeAt(0) : 0), ...([...key].length === 1 && !(modifiers & 7) ? { text: key } : key === "Enter" ? { text: "\r" } : {}) };
 }

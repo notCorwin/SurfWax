@@ -460,6 +460,10 @@ test("follows the bottom through layout changes while respecting manual scrollin
     await opened.page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
     await opened.page.setViewportSize({ width: 430, height: 650 });
     await expect.poll(remaining).toBeLessThanOrEqual(1);
+    await viewport.focus();
+    await viewport.press("ArrowDown");
+    await opened.page.setViewportSize({ width: 430, height: 550 });
+    await expect.poll(remaining).toBeLessThanOrEqual(1);
     const growLastTurn = async () => {
       const height = await viewport.evaluate((element) => element.scrollHeight);
       await viewport.locator(".conversation-turn").last().evaluate((turn) => {

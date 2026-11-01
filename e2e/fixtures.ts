@@ -182,6 +182,14 @@ export async function startProvider(responses: MockResponse[], delayMs = 0, summ
     request.on("end", () => {
       const requestBody = JSON.parse(Buffer.concat(body).toString("utf8"));
       requests.push(requestBody);
+      // Scripted-provider tests exercise browser/evidence plumbing, not an LLM
+      // judge. Keep the independent review request out of their action queue.
+      // Real-model evaluation forwards this request to the configured model.
+      if (requestBody.messages?.some((message: any) => message.role === "system" && String(message.content).startsWith("SURFWAX_GOAL_REVIEW"))) {
+        response.writeHead(200, JSON_HEADERS);
+        response.end(JSON.stringify(textResponse(JSON.stringify({ accept: true, reason: "Scripted provider acknowledges the supplied goal", remaining: [] }))));
+        return;
+      }
       const isSummary = summaryText && JSON.stringify(requestBody).includes("Summarize the entire supplied conversation faithfully");
       if (isSummary) {
         stats.summaryCalls += 1;

@@ -462,7 +462,13 @@ describe("ChromeExecutor programs", () => {
     h.executor.dispose();
   });
   it("imports a link through its selected frame and persists its binary result", async () => {
-    const evaluate = vi.fn(async () => ({ filename: "sample.bin", mimeType: "application/octet-stream", base64: "AP+ACkE=" }));
+    const link = document.createElement("a");
+    link.href = "blob:https://example.test/generated-id";
+    link.download = "sample.bin";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(new Uint8Array([0, 255, 128, 10, 65]), {
+      headers: { "content-type": "application/octet-stream", "content-disposition": 'attachment; filename="different.bin"' },
+    })));
+    const evaluate = vi.fn(async (source: string) => new Function(`return (${source})`)()(link));
     const locator = vi.fn(() => ({ evaluate }));
     const frameLocator = vi.fn(() => ({ locator }));
     const target = { by: "css", value: "#file", frame: { by: "css", value: "#source" } };
@@ -472,7 +478,7 @@ describe("ChromeExecutor programs", () => {
     expect(result).toMatchObject({ ok: true, result: { filename: "sample.bin", mimeType: "application/octet-stream", byteLength: 5, saved: false } });
     expect(frameLocator).toHaveBeenCalledWith("#source");
     expect(locator).toHaveBeenCalledWith("#file");
-    expect(evaluate).toHaveBeenCalledWith(expect.stringContaining("fetch(element.href)"), undefined);
+    expect(evaluate).toHaveBeenCalledWith(expect.stringContaining("fetch(element.href)"));
     expect(await h.logger.result(result.result.id, {}, "conversation")).toEqual({ filename: "sample.bin", mimeType: "application/octet-stream", base64: "AP+ACkE=" });
     h.executor.dispose();
   });
@@ -866,6 +872,21 @@ describe("ChromeExecutor programs", () => {
     expect(events()).toEqual([["rawKeyDown", "Control", 2], ["keyDown", "a", 2], ["keyUp", "a", 2]]);
     expect([...((executor as any).heldInput.get(41).keys.values())]).toContainEqual(expect.objectContaining({ key: "Control", code: "ControlLeft" }));
     await executor.endRun(); executor.dispose();
+  });
+
+  it("dispatches normalized named keys and rejects unknown keys before any chord modifier is held", async () => {
+    const fake = fakeChrome(), executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never });
+    const press = (chord: string) => (executor as any).pressChord({ tabId: 41 }, chord);
+    await press("ARROWUP");
+    const keys = fake.debuggerApi.sendCommand.mock.calls.filter(([, method]) => method === "Input.dispatchKeyEvent").map(([, , params]: any[]) => params);
+    expect(keys).toMatchObject([
+      { type: "rawKeyDown", key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38 },
+      { type: "keyUp", key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38 },
+    ]);
+    fake.debuggerApi.sendCommand.mockClear();
+    await expect(press("Control+ARROWWUP")).rejects.toThrow("AutomationError[invalid-key]");
+    expect(fake.debuggerApi.sendCommand.mock.calls.filter(([, method]) => method === "Input.dispatchKeyEvent")).toHaveLength(0);
+    executor.dispose();
   });
 
   it("applies Mac native editing commands after resolving held modifiers", async () => {

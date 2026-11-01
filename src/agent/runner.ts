@@ -1,6 +1,6 @@
 import { dynamicTool, simulateStreamingMiddleware, ToolLoopAgent, wrapLanguageModel } from "ai";
 import { z } from "zod";
-import type { LanguageModel, LanguageModelCallEndEvent } from "ai";
+import type { LanguageModel, LanguageModelCallEndEvent, ModelMessage } from "ai";
 import { createProgramTools, prepareToolMessages, repairProgramToolCall, PROGRAM_TOOL_REGISTRY } from "../chrome/tool";
 import { ToolScheduler } from "../chrome/tool-scheduler";
 import { ChromeExecutor } from "../chrome/executor";
@@ -9,12 +9,13 @@ import type { EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
 import { inputBudget, modelSupportsImages, resolveModelLimit } from "./model-limits";
 import { resolvedBaseURL, sdkFor } from "./model-sdks";
-import { estimatePromptInput, type ContextCompactor } from "./compaction";
+import { estimatePromptInput, hasSummarizableHistory, type ContextCompactor } from "./compaction";
 import { IncrementalActiveContext } from "./context-choice";
 import type { ReasoningEffort } from "./reasoning";
 import { dsmlMiddleware } from "./dsml";
 import { completionToolChoiceMiddleware, completionToolsMiddleware } from "./completion-tools";
 import { GOAL_SCHEMA, GOAL_DESCRIPTION, GOAL_INSTRUCTIONS, localEvidence, runEvidence, validateGoal } from "./goal-completion";
+import { goalRequirements, goalReviewContext, reviewGoal, type GoalVerdict } from "./goal-review";
 export { GOAL_INSTRUCTIONS } from "./goal-completion";
 
 export { DEFAULT_INSTRUCTIONS } from "./prompt";
@@ -93,6 +94,9 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     }) as typeof execute;
   }
   let goalCallAlone = false;
+  let reviewContext: ModelMessage[] = [];
+  let reviewRequirements: ModelMessage[] = [];
+  let lastReview: { key: string; verdict: GoalVerdict } | undefined;
   if (options.goalMode) tools.complete_goal = dynamicTool({
     description: GOAL_DESCRIPTION, inputSchema: GOAL_SCHEMA, needsApproval: false,
     execute: async (input, { abortSignal, toolCallId }) => {
@@ -106,10 +110,31 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       const evidence = logger && options.conversationId && identity?.runId
         ? await runEvidence(logger, options.conversationId, identity.runId) : localResults;
       const invalid = validateGoal(input as z.infer<typeof GOAL_SCHEMA>, evidence);
-      const output = !goalCallAlone ? { ok: false, error: { code: "goal-call-not-alone", message: "Call complete_goal alone after observing all other tool results." } }
+      let output = !goalCallAlone ? { ok: false, error: { code: "goal-call-not-alone", message: "Call complete_goal alone after observing all other tool results." } }
         : pending.length ? { ok: false, error: { code: "background-jobs-pending", message: "Wait for all background jobs to finish before completing the goal." } }
         : invalid ? { ok: false, error: { code: "goal-evidence-invalid", message: invalid } }
         : { ok: true, ...(input as z.infer<typeof GOAL_SCHEMA>) };
+      if (output.ok) {
+        try {
+          const reviewLimit = await (limit ??= resolveModelLimit(options.model, { signal: options.signal }));
+          const budget = reviewLimit ? { input: inputBudget(reviewLimit), output: Math.min(reviewLimit.output ?? 2048, Math.max(1, Math.floor(reviewLimit.context / 4))) } : undefined;
+          const proposed = input as z.infer<typeof GOAL_SCHEMA>;
+          const context = goalReviewContext(reviewContext, budget ? Math.floor(budget.input * 0.75) : undefined, reviewRequirements,
+            proposed.taskType === "browser" ? proposed.evidence.map((item) => item.toolCallId) : []);
+          const key = JSON.stringify([input, context]);
+          const verdict = lastReview?.key === key ? lastReview.verdict : await reviewGoal({
+            goal: input as z.infer<typeof GOAL_SCHEMA>, context, model: options.languageModel,
+            signal: abortSignal ?? options.signal, logger, conversationId: options.conversationId,
+            budget,
+          });
+          lastReview = { key, verdict };
+          if (!verdict.accept) output = { ok: false, error: { code: "goal-incomplete", message: [verdict.reason, ...verdict.remaining].join("\n") } };
+        } catch (error) {
+          (abortSignal ?? options.signal)?.throwIfAborted();
+          output = { ok: false, error: { code: "goal-review-unavailable", message: error instanceof Error ? error.message : String(error) } };
+        }
+      }
+      (abortSignal ?? options.signal)?.throwIfAborted();
       if (logger && !await logger.append({ type: output.ok ? "tool.finished" : "tool.failed", conversationId: options.conversationId,
         content: { callId, toolName: "complete_goal" }, input, output, toolCallId, ...identity, ...(!output.ok ? { error: output.error } : {}), latencyMs: Math.max(0, performance.now() - start) }))
         throw new DOMException("日志维护已阻止工具结果保存。", "AbortError");
@@ -151,6 +176,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       await options.onResponse?.(event);
     },
     prepareStep: async ({ messages, initialMessages, responseMessages, stepNumber }) => {
+      if (stepNumber === 0) reviewRequirements = goalRequirements(messages);
       logger?.telemetry({ type: "model.context.preparing", conversationId: options.conversationId, content: { stepNumber } });
       let prepared = await options.compactor?.prepare(messages, stepNumber) ?? messages;
       const browserContext = await options.executor.browserContext();
@@ -169,13 +195,34 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       );
       let outgoing = await prepareMessages(prepared);
       const prompt = { instructions: currentInstructions(), tools: currentTools() };
-      const estimatedInput = options.compactor?.estimate(outgoing, prompt) ?? estimatePromptInput({ ...prompt, messages: outgoing });
+      let estimatedInput = options.compactor?.estimate(outgoing, prompt) ?? estimatePromptInput({ ...prompt, messages: outgoing });
+      // Fixed instructions and schemas cannot be made smaller by repeatedly
+      // summarizing history. Check them before spending requests on summaries.
+      const capacity = modelLimit && inputBudget(modelLimit);
+      if (capacity && estimatePromptInput({ ...prompt, messages: [] }) >= capacity) {
+        throw new Error("模型输入窗口无法容纳系统提示与工具定义；请增大上下文窗口或减少固定提示与工具开销。");
+      }
       const pressure = modelLimit && estimatedInput > inputBudget(modelLimit) * 0.8
         && (!options.compactor || options.compactor.canCompact(prepared, modelLimit));
       if (pressure) {
         if (!options.compactor) throw new Error("上下文容量不足，无法在当前运行中压缩历史消息。");
         prepared = await options.compactor.compact([...initialMessages, ...responseMessages], prepared, stepNumber, options.languageModel, modelLimit);
         outgoing = await prepareMessages(prepared);
+        estimatedInput = options.compactor.estimate(outgoing, prompt);
+      }
+      // The automatic threshold is a compaction policy, not permission to send
+      // an oversized prompt. Include late browser state, attachments and schemas
+      // in this final check even when the growth guard skipped a normal summary.
+      if (modelLimit && estimatedInput > inputBudget(modelLimit)) {
+        if (!options.compactor || !hasSummarizableHistory(prepared, modelLimit)) {
+          throw new Error("模型输入窗口无法容纳当前请求；原始历史已保留，请增大上下文窗口或减少固定提示与工具开销。");
+        }
+        prepared = await options.compactor.compact([...initialMessages, ...responseMessages], prepared, stepNumber, options.languageModel, modelLimit, true);
+        outgoing = await prepareMessages(prepared);
+        estimatedInput = options.compactor.estimate(outgoing, prompt);
+        if (estimatedInput > inputBudget(modelLimit)) {
+          throw new Error("压缩后请求仍超出模型输入窗口；原始历史已保留，请增大上下文窗口或减少固定提示与工具开销。");
+        }
       }
       if (options.compactor) {
         // The persisted UI projection can represent completed tool calls
@@ -189,6 +236,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
           && canonical.every((message, index) => message.role === persisted[index]?.role) ? canonical : prepared;
         await options.compactor.recordBase(base);
       }
+      reviewContext = outgoing;
       return {
         instructions: wireInstructions(),
         activeTools: activeTools(),

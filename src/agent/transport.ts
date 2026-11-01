@@ -38,7 +38,7 @@ export function followupDispatch(message: SidePanelMessage | undefined): { id: s
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
 /** Each publication contains complete model content or a completed tool result. */
-export function createChatTransport(agent: AgentFactory, logger: EventLogger, conversationId: string, cleanup?: () => Promise<void>, onContextOverflow?: (signal: AbortSignal) => Promise<void>, systemPrompt?: string, observeRefreshes?: (signal: AbortSignal) => Promise<RefreshObserver>, goalMode = false): ConversationTransport {
+export function createChatTransport(agent: AgentFactory, logger: EventLogger, conversationId: string, cleanup?: () => Promise<void>, onContextOverflow?: (signal: AbortSignal) => Promise<void>, systemPrompt?: string, observeRefreshes?: (signal: AbortSignal, runId: string) => Promise<RefreshObserver>, goalMode = false): ConversationTransport {
   return {
     async sendMessages(options) {
       const currentRunId = crypto.randomUUID();
@@ -118,7 +118,7 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
       try {
         logger.beginRun(conversationId, currentRunId);
         lease.signal.throwIfAborted();
-        refreshObserver = await observeRefreshes?.(signal);
+        refreshObserver = await observeRefreshes?.(signal, currentRunId);
         await ensureConversationPrompt(logger, conversationId, systemPrompt, options.messages.map((message) => message.id));
         const existing = await logger.repository(conversationId);
         const withSavedMetadata = async (messages: SidePanelMessage[]) => {
@@ -171,10 +171,11 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
               acceptContent(event.content);
               try {
                 for (const part of event.content) if (part.type === "tool-call" && part.invalid) {
+                  const error = { code: "invalid-tool-input", message: errorText(part.error), effectUnknown: false, cause: part.error };
                   const saved = await logger.append({ type: "tool.failed", conversationId, runId: currentRunId,
-                    content: { callId: event.callId, toolName: part.toolName },
+                    content: { callId: event.callId, toolName: part.toolName, dispatched: false },
                     toolCallId: toolId(part.toolCallId), toolCallIdCanonical: true,
-                    input: part.input, error: part.error, output: { ok: false, error: part.error }, latencyMs: 0 });
+                    input: part.input, error, output: { ok: false, error }, latencyMs: 0 });
                   if (!saved) throw new DOMException("日志维护已阻止工具结果保存。", "AbortError");
                 }
                 await publish();

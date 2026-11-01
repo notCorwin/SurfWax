@@ -255,8 +255,9 @@ describe("atomic browser tool programs", () => {
   it("imports a file from the specified page link and frame", async () => {
     const importLink = vi.fn(async () => ({ id: 8 }));
     const target = { by: "css", value: "a", frame: { by: "css", value: "iframe" } };
-    expect(await execute("import_file_from_link", { target, filename: "a.bin" }, { page: { tabId: 7 }, artifacts: { importLink } })).toEqual({ id: 8 });
-    expect(importLink).toHaveBeenCalledWith(7, target, "a.bin");
+    expect(await execute("import_file_from_link", { target }, { page: { tabId: 7 }, artifacts: { importLink } })).toEqual({ id: 8 });
+    expect(importLink).toHaveBeenCalledWith(7, target);
+    expect(definition("import_file_from_link").inputSchema.safeParse({ target, filename: "renamed.bin" }).success).toBe(false);
   });
 
   it("reads bounded pages of element text and requested attributes", async () => {

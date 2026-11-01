@@ -12,15 +12,15 @@
 | `click` | Click exactly one matching element. Fails immediately if it is missing, blocked or otherwise not actionable. Defaults to a 5 second execution timeout. |
 | `double_click` | Double-click exactly one matching element. Fails immediately if it is missing, blocked or otherwise not actionable. Defaults to a 5 second execution timeout. |
 | `hover` | Move the pointer over exactly one matching element. |
-| `focus_element` | Focus exactly one matching element. |
-| `blur_element` | Blur exactly one matching element. |
+| `focus_element` | Focus exactly one matching element. Fails immediately if the target or frame is missing; use verify_state to wait explicitly. |
+| `blur_element` | Blur exactly one matching element. Fails immediately if the target or frame is missing. |
 | `scroll_to_element` | Scroll exactly one matching element into view. |
 | `fill` | Replace an editable element's value; an empty value clears it. Does not emit beforeinput or keyboard events. Date, time, datetime-local, month and week require valid browser-format values and dispatch untrusted input/change events; the result includes the actual normalized value. |
 | `fill_from_artifact` | Replace an editable element's value with a stored string or UTF-8 file artifact. Use path to select a string within a stored result. Applies the same fill semantics as fill. |
 | `type_text` | Insert text character by character into a text, number or contenteditable element; this does not emit beforeinput, keydown or keyup. Use fill for date/time/month/week controls. |
-| `press_key` | Press a key or chord, optionally focusing an element first. |
-| `key_down` | Hold a key until key_up or run cleanup. |
-| `key_up` | Release a held key. |
+| `press_key` | Press a character or chord such as Control+ArrowUp, optionally focusing an element first. Named keys (ArrowUp, Enter, F1–F24) are case-insensitive; unknown key names fail before input or focus is dispatched. |
+| `key_down` | Hold one character or named key until key_up or run cleanup. Named keys are case-insensitive; chords and unknown key names are rejected. |
+| `key_up` | Release one held character or named key. Named keys are case-insensitive; chords and unknown key names are rejected. |
 | `set_checked` | Set a checkbox or radio button to the requested checked state. |
 | `select_option` | Select option values or labels on a select element. An empty array clears selection; missing, disabled or ambiguous options fail without changing selection. |
 | `drag` | Drag one element to another using pointer events. |
@@ -51,7 +51,7 @@
 | `read_artifact` | Read a stored artifact or large tool result by ID, including during a background job. Missing paths fail. offset/limit page arrays, strings, Map/Set entries, binary bytes for ArrayBuffer/DataView, or elements for TypedArray. In path, a numeric Map index selects a [key,value] pair and a numeric Set index selects an item. Undefined is null with resultType=undefined; nested undefined and array holes are null with undefinedPaths and holePaths; non-finite numbers, negative zero and bigints use numberPaths and bigintPaths. Paths are relative to the returned slice; large results expose paged sidecar access. |
 | `create_text_artifact` | Store text as an internal artifact. |
 | `import_file_from_url` | Fetch a file in the extension context and store its original bytes as an internal artifact. Uses extension permissions and credentials, not the page's context. Fails on non-success HTTP responses. |
-| `import_file_from_link` | Fetch a link's file in the link's page and frame context and store its original bytes as an internal artifact. Uses page origin, credentials and CORS; supports page-created blob URLs. Uses the link's download filename unless filename is provided; fails if neither is available or the response is unsuccessful. |
+| `import_file_from_link` | Import a linked file with its original bytes and filename in the link's page and frame context. Uses page origin, credentials and CORS; supports page-created blob URLs. Preserves the download attribute, otherwise uses Content-Disposition or the response URL filename. Returns filename and byteLength; fails if no filename is available or the response is unsuccessful. Use save_artifact for an explicitly renamed export. |
 | `save_artifact` | Export an internal artifact to a file. |
 | `list_scripts` | List persisted user scripts and their state. |
 | `read_script` | Read a persisted user script by ID. |

@@ -326,6 +326,29 @@ describe("context choices and summary", () => {
     expect(withTools!.estimated - plain!.estimated).toBeGreaterThan(3_900);
   });
 
+  it("restores the committed compression baseline without absorbing a newly appended large tail", async () => {
+    const { events, logger, model, languageModel } = fixture();
+    model.contextWindowOverride = 20_000;
+    const limit = { provider: "manual", model: "test", context: 20_000, source: "manual" as const };
+    const branchIds = ["u", "a", "b", "c"];
+    const raw: ModelMessage[] = [{ role: "user", content: "Keep the exact goal" },
+      { role: "assistant", content: "old findings " + "a".repeat(40_000) },
+      { role: "assistant", content: "retained tail " + "b".repeat(8_000) }, { role: "user", content: "recent correction" }];
+    await summarizeContext({ raw, branchIds, uiCount: 4, model, languageModel, logger, conversationId: "one",
+      signal: new AbortController().signal, limit });
+    const applied = await effectiveContext(events, branchIds, raw);
+    expect(applied.checkpoint!.sourceCount).toBeLessThan(raw.length);
+    expect(applied.checkpoint!.compactedInputEstimate).toBe(estimateInput(applied.messages));
+
+    const resumed = new ContextCompactor({ model, logger, conversationId: "one", branchIds, signal: new AbortController().signal });
+    const unchanged = await resumed.prepare(raw, 0);
+    expect(resumed.canCompact(unchanged!, limit)).toBe(false);
+    const extended: ModelMessage[] = [...raw, { role: "user", content: "<page-refresh>" + "x".repeat(60_000) }];
+    const withTail = new ContextCompactor({ model, logger, conversationId: "one", branchIds, signal: new AbortController().signal });
+    const prepared = await withTail.prepare(extended, 0);
+    expect(withTail.canCompact(prepared!, limit)).toBe(true);
+  });
+
   it("reports a failed in-run summary without replacing the history", async () => {
     const { events, logger, model, raw } = fixture();
     const languageModel = new MockLanguageModelV4({ doGenerate: async () => { throw new Error("summary unavailable"); } });

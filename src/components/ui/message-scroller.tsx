@@ -36,8 +36,29 @@ function MessageScroller({
 
 function MessageScrollerViewport({
   className,
+  onKeyDown,
+  onWheel,
   ...props
 }: React.ComponentProps<typeof MessageScrollerPrimitive.Viewport>) {
+  const { scrollToEnd } = useMessageScroller()
+  const followIfAtEnd = (viewport: HTMLDivElement) => {
+    // The primitive releases auto-follow on scroll input, even when downward
+    // input at the bottom cannot move it. Restore following in that case:
+    // there will be no scroll event before the next resize or content update.
+    if (viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 1) {
+      scrollToEnd({ behavior: "auto" })
+    }
+  }
+  const handleWheel: React.WheelEventHandler<HTMLDivElement> = (event) => {
+    onWheel?.(event)
+    if (!event.defaultPrevented && event.deltaY >= 0) followIfAtEnd(event.currentTarget)
+  }
+  const handleKeyDown: React.KeyboardEventHandler<HTMLDivElement> = (event) => {
+    onKeyDown?.(event)
+    if (!event.defaultPrevented && !event.shiftKey && ["ArrowDown", "PageDown", "End", " "].includes(event.key)) {
+      followIfAtEnd(event.currentTarget)
+    }
+  }
   return (
     <MessageScrollerPrimitive.Viewport
       data-slot="message-scroller-viewport"
@@ -45,6 +66,8 @@ function MessageScrollerViewport({
         "size-full min-h-0 min-w-0 scroll-fade-b scrollbar-thin scrollbar-gutter-stable overflow-y-auto overscroll-contain contain-content data-autoscrolling:scrollbar-none data-pending-scroll:invisible",
         className
       )}
+      onKeyDown={handleKeyDown}
+      onWheel={handleWheel}
       {...props}
     />
   )

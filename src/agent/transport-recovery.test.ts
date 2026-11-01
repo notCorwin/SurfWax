@@ -6,6 +6,8 @@ import { createAgent } from "./runner";
 import type { ChromeExecutor } from "../chrome/executor";
 import { PROGRAM_CATALOG_VERSION } from "../chrome/tool";
 import { restoreConversationRepository } from "../conversations";
+import { browserJobsSettled } from "../../e2e/evaluation/job-evidence";
+import { toolLifecycleEvidence } from "../../e2e/evaluation/tool-lifecycle";
 
 vi.mock("./coordinator", () => ({ claimConversationRun: async (_id: string, signal?: AbortSignal) => ({ signal: signal ?? new AbortController().signal, finish: vi.fn() }) }));
 function logger() {
@@ -144,6 +146,43 @@ describe("complete-response transport", () => {
     expect((await log.all()).filter((event) => event.toolCallId === "invalid" && ["tool.failed", "tool.finished"].includes(event.type)))
       .toMatchObject([{ type: "tool.failed", latencyMs: 0 }]);
     expect(result.parts).toEqual(expect.arrayContaining([expect.objectContaining({ toolCallId: "invalid", state: "output-error" })]));
+  });
+
+  it.each([false, true])("distinguishes an SDK-rejected argument from a later unknown browser effect (%s)", async (effectUnknown) => {
+    let step = 0;
+    const executor = {
+      browserContext: async () => ({ tabs: [] }),
+      inspect: vi.fn(async () => ({ observationId: "observed", items: [], truncation: { truncated: false } })),
+      runProgram: vi.fn(async () => ({ ok: false, error: { code: "response-lost", message: "Response lost after dispatch", effectUnknown: true } })),
+    };
+    const { factory, log } = setup(new MockLanguageModelV4({ doGenerate: async () => {
+      if (++step === 1) return {
+        content: [{ type: "tool-call" as const, toolCallId: "bad-arguments", toolName: "click", input: JSON.stringify({
+          target: { by: "role", value: "button", name: "Approve" }, frame: { by: "css", value: "iframe" },
+        }) }], finishReason: { unified: "tool-calls" as const, raw: "tool_calls" }, usage, warnings: [],
+      };
+      if (step === 2) return effectUnknown ? call("later-action", "https://example.com/") : {
+        content: [{ type: "tool-call" as const, toolCallId: "later-observation", toolName: "inspect_page", input: "{}" }],
+        finishReason: { unified: "tool-calls" as const, raw: "tool_calls" }, usage, warnings: [],
+      };
+      return reply("Checked the result");
+    } }), undefined, executor);
+    await createChatTransport(factory, log, "thread").sendMessages(options());
+    const events = await log.all();
+    const rejected = events.filter((event) => event.toolCallId === "bad-arguments" && ["tool.failed", "tool.finished"].includes(event.type));
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.type).toBe("tool.failed");
+    expect(fromLogValue(rejected[0]!.content, rejected[0]!.valueEncoding)).toMatchObject({ toolName: "click", dispatched: false });
+    const error = fromLogValue(rejected[0]!.error, rejected[0]!.valueEncoding) as { code: string; message: string; effectUnknown: boolean; cause: { name: string; message: string } };
+    expect(error).toMatchObject({ code: "invalid-tool-input", effectUnknown: false });
+    expect(error.message).toContain("frame");
+    expect(error.cause.name).toContain("InvalidToolInputError");
+    expect(error.cause.message).toContain("frame");
+    expect(events.some((event) => event.type === "tool.started" && event.toolCallId === "bad-arguments")).toBe(false);
+    expect(executor.runProgram).toHaveBeenCalledTimes(effectUnknown ? 1 : 0);
+    expect(browserJobsSettled(events)).toBe(effectUnknown ? null : true);
+    expect(toolLifecycleEvidence(events)).toMatchObject({ complete: true, started: 1, declaredCalls: 2,
+      unstartedFailures: 1, missingDeclaredTerminals: 0, missingTerminals: 0, duplicateTerminals: 0 });
   });
 
   it("recovers a missing invalid-call result after a one-time terminal write failure", async () => {

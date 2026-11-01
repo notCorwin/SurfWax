@@ -13,6 +13,18 @@ describe("automation utilities", () => {
     expect(keyboardParams("Shift+A")).toMatchObject({ key: "A", code: "KeyA", modifiers: 8 });
   });
 
+  it("normalizes named keys and rejects unknown names rather than dispatching keyCode zero", () => {
+    expect(keyboardParams("ARROWUP")).toMatchObject({ key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38 });
+    expect(keyboardParams("ctrl+arrowdown")).toMatchObject({ key: "ArrowDown", modifiers: 2, windowsVirtualKeyCode: 40 });
+    expect(keyboardParams("space")).toMatchObject({ key: " ", code: "Space", windowsVirtualKeyCode: 32, text: " " });
+    expect(keyboardParams("f12")).toMatchObject({ key: "F12", code: "F12", windowsVirtualKeyCode: 123 });
+    expect(keyboardParams("F24")).toMatchObject({ key: "F24", windowsVirtualKeyCode: 135 });
+    expect(keyboardParams("é")).toMatchObject({ key: "é", text: "é" });
+    expect(keyboardParams("😀")).toMatchObject({ key: "😀", text: "😀" });
+    for (const key of ["ARROWWUP", "F25", "constructor", "__proto__", "Enterr", "\n"])
+      expect(() => keyboardParams(key)).toThrow("AutomationError[invalid-key]");
+  });
+
   it("maps Mac native editor shortcuts across selection, navigation, deletion, clipboard and history", () => {
     for (const [code, mask, commands] of [
       ["KeyA", 4, ["selectAll"]], ["ArrowLeft", 12, ["moveToLeftEndOfLineAndModifySelection"]],

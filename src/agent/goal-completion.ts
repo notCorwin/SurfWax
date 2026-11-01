@@ -29,10 +29,10 @@ export const GOAL_SCHEMA = z.object({ taskType: z.enum(["answer", "browser"]), s
   } else if (value.dependency !== undefined || value.userAction !== undefined || value.attemptedRecovery !== undefined)
     reject("A completed goal cannot include blocker fields.");
 }) as z.ZodType<Goal>;
-export const GOAL_DESCRIPTION = "Finish only after all work and background jobs have finished. For a browser task cite evidenceId values from actual tool results; for a blocker identify the user dependency, needed action, attempted recovery, and successful observations. Use answer only for a pure question with no browser work. Call this tool alone.";
+export const GOAL_DESCRIPTION = "Finish only after all work and background jobs have finished. The summary must deliver every requested output, including requested facts and links; an independent review checks requirements against observations. For a browser task cite evidenceId values from actual tool results, including successful post-action page snapshots; for a blocker identify the observed user dependency, needed action and actual recovery attempts. A rejected action or invalid search is not proof of an external blocker or absence. Use answer only for a pure question with no browser work. Call this tool alone.";
 export const GOAL_INSTRUCTIONS = "\n\nContinue until the user's outcome is achieved or a genuine user dependency prevents further progress. Plain text does not end work. Call complete_goal alone with a structured outcome and evidence from this run. A dispatched action is not proof of the outcome; cite at least one successful observation. For each effectUnknown, inspect or otherwise observe the relevant state after that action, explain what was established, and include its evidenceId in that observation's resolves array. A verified absence may permit a safe recovery action; continue to the requested outcome before reporting completion. verify_state evidence must report verified=true. Do not report a recoverable error as a user blocker.\n- complete_goal: Report a completed answer, a browser outcome supported by tool evidence, or a genuine user-dependent blocker.";
 
-type Evidence = { id: string; name: string; success: boolean; effectUnknown: boolean; order: number };
+type Evidence = { id: string; name: string; success: boolean; effectUnknown: boolean; order: number; pageObserved?: true };
 type Cache = { runId: string; cursor: number; epoch?: string; entries: Map<string, Evidence> };
 const caches = new WeakMap<EventLogger, Map<string, Cache>>();
 
@@ -46,7 +46,13 @@ function verification(output: unknown): unknown {
 }
 function projectEvidence(id: string, name: string, output: unknown, failed: boolean, order: number): Evidence {
   const value = object(output);
+  const snapshot = object(value.pageSnapshot);
+  const pageObserved = typeof snapshot.observationId === "string" && snapshot.observationId.length > 0
+    && Number.isSafeInteger(snapshot.tabId) && snapshot.documentId !== undefined
+    && ["full", "delta"].includes(String(snapshot.mode)) && Array.isArray(snapshot.items)
+    && snapshot.pending !== true && snapshot.unavailable !== true;
   return { id, name, order, effectUnknown: object(value.error).effectUnknown === true,
+    ...(pageObserved ? { pageObserved: true as const } : {}),
     success: !failed && value.ok !== false && !["running", "blocked", "failed", "cancelled", "interrupted"].includes(String(value.state))
       && !(value.accepted === true && value.complete === false)
       && !(name === "get_job" && value.terminal !== true)
@@ -54,7 +60,7 @@ function projectEvidence(id: string, name: string, output: unknown, failed: bool
 }
 function successful(entry: Evidence): boolean { return entry.success; }
 const OBSERVATION_TOOLS = new Set(["inspect_page", "find_elements", "list_frames", "read_text", "read_value", "read_attribute", "read_checked", "read_elements", "count_elements", "get_page_info", "verify_state", "wait_for_url", "take_screenshot", "list_tabs", "list_downloads", "read_artifact", "list_requests", "read_response", "read_console", "list_scripts", "read_script", "list_jobs", "get_job", "wait_event"]);
-function observation(entry: Evidence): boolean { return OBSERVATION_TOOLS.has(entry.name) && successful(entry); }
+function observation(entry: Evidence): boolean { return (OBSERVATION_TOOLS.has(entry.name) || entry.pageObserved === true) && successful(entry); }
 function unknownEffect(entry: Evidence): boolean { return entry.effectUnknown; }
 
 /** Release only the matching run, so a late cleanup cannot evict its replacement. */

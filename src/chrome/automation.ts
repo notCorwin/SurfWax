@@ -1131,6 +1131,8 @@ export class AutomationRuntime {
 
   async locatorValue(tabId: number, spec: LocatorSpec, operation: string, args: unknown[] = [], fileChooser?: FileChooserRecord, dispatch?: () => Promise<void>): Promise<unknown> {
     const operationSignal = this.context.signal;
+    // Reject malformed keys before locator resolution or focus can have effects.
+    if (operation === "press") parseKeyboardChord(String(args[0] ?? ""));
     return this.action(tabId, operation, spec, async () => {
       validateLocator(spec);
       if (operation === "dragTo") {
@@ -1211,7 +1213,8 @@ export class AutomationRuntime {
         return this.afterAction(session);
       }
       if (operation === "focus" || operation === "blur") {
-        const objectId = await this.resolveOne(session, spec);
+        const objectId = await this.resolveConditionTarget(session, spec);
+        if (!objectId) throw automationError("not-found", { locator: spec });
         const targetSession = this.objectSession(session, objectId);
         if (operation === "focus") {
           const node = await this.describe(targetSession, objectId);

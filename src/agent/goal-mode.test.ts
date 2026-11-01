@@ -7,6 +7,13 @@ import { createAgent } from "./runner";
 import { activeContext, IncrementalActiveContext } from "./context-choice";
 import { createChatTransport, type SidePanelMessage } from "./transport";
 import { GOAL_SCHEMA, localEvidence, releaseRunEvidence, runEvidence, validateGoal, type Goal } from "./goal-completion";
+import { reviewGoal } from "./goal-review";
+
+// These tests exercise the execution/evidence protocol. Semantic verdicts have
+// their own model-backed tests in goal-review.test.ts.
+vi.mock("./goal-review", async (original) => ({ ...await original<typeof import("./goal-review")>(),
+  reviewGoal: vi.fn(async () => ({ accept: true, reason: "Observed outcome satisfies the requested task", remaining: [] })),
+}));
 
 vi.mock("./coordinator", () => ({ claimConversationRun: async (_id: string, signal?: AbortSignal) => ({
   signal: signal ?? new AbortController().signal, finish: vi.fn(),
@@ -28,6 +35,23 @@ function fixture(model: MockLanguageModelV4, executorExtra: object = {}) {
 const options = () => ({ trigger: "submit-message" as const, chatId: "thread", messages: [user] });
 
 describe("goal mode", () => {
+  it("continues browser work after semantic rejection instead of accepting an incomplete summary", async () => {
+    vi.mocked(reviewGoal).mockResolvedValueOnce({ accept: false, reason: "Requested exact date is missing", remaining: ["Read and deliver the exact release date"] });
+    let step = 0;
+    const model = new MockLanguageModelV4({ doGenerate: async () => {
+      step++;
+      if (step === 1 || step === 3) return calls(call(`read-${step}`, "inspect_page", {}));
+      return calls(call(`goal-${step}`, "complete_goal", { taskType: "browser", status: "completed",
+        summary: step === 2 ? "Release is recent; exact date not checked" : "Release date is 2026-10-01", evidence: [{ toolCallId: `read-${step - 1}`, observation: "Release details read" }] }));
+    } });
+    const { logger, events } = fixture(model);
+    const executor = { browserContext: async () => ({ tabs: [] }), inspect: async () => ({ snapshot: "Release date 2026-10-01" }) } as unknown as ChromeExecutor;
+    await createAgent({ model: { baseURL: "https://test/v1", model: "test", contextWindowOverride: 1_000_000 }, languageModel: model, executor, logger, conversationId: "thread", goalMode: true }).generate({ prompt: "Read the exact release date" });
+    expect(step).toBe(4);
+    expect(events.find((event) => event.type === "tool.failed" && event.toolCallId === "goal-2")?.output).toMatchObject({ error: { code: "goal-incomplete", message: expect.stringContaining("exact date") } });
+    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "goal-4")?.output).toMatchObject({ ok: true });
+  });
+
   it("sends a root object schema in an OpenAI Responses function and validates each goal variant", async () => {
     const requests: any[] = [];
     const fetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
@@ -86,6 +110,12 @@ describe("goal mode", () => {
     expect(validateGoal(goal("false"), [falseVerification])).toContain("successful terminal");
     expect(validateGoal(goal("no-verification"), [noVerification])).toContain("successful terminal");
     expect(validateGoal(goal("dispatch"), [dispatch])).toContain("successful observation");
+    const pageSnapshot = { observationId: "observation", tabId: 12, documentId: "doc", mode: "full", items: [{ line: "Approved" }] };
+    expect(validateGoal(goal("post-action"), [localEvidence("post-action", "click", { ok: true, pageSnapshot }, 3)])).toBeUndefined();
+    for (const snapshot of [{ ...pageSnapshot, mode: "pending" }, { ...pageSnapshot, observationId: undefined }, { ...pageSnapshot, pending: true }]) {
+      expect(validateGoal(goal("unobserved"), [localEvidence("unobserved", "click", { ok: true, pageSnapshot: snapshot }, 3)])).toContain("successful observation");
+    }
+    expect(validateGoal(goal("pending"), [localEvidence("pending", "click", { ok: true, pageSnapshotStatus: { state: "pending" } }, 3)])).toContain("successful observation");
     expect(validateGoal(goal("observed"), [good, unknown])).toContain("unknown");
     expect(validateGoal(goal("verified"), [good, unknown, verified])).toContain("unknown");
     const resolved = (id: string, target: string): Goal => ({ taskType: "browser", status: "completed", summary: "Done", evidence: [{ toolCallId: id, observation: "Outcome checked", resolves: [target] }] });

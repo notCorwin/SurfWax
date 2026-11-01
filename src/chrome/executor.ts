@@ -17,6 +17,7 @@ import { DeferredProgramPage, PROGRAM_HANDLE_ASSERT_LIVE, PROGRAM_HANDLE_SESSION
 import { EventSubscriptions, type BrowserEventKind, type EventOwner } from "./event-subscriptions";
 import { keyboardParams, macEditingCommands, parseKeyboardChord } from "./automation-utils";
 import { heldKeyIdentity, inputKeyIdentity, inputSemanticKey } from "./input-state";
+import { linkedFilename } from "./file-metadata";
 
 type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
 type DebuggerTarget = chrome.debugger.TargetInfo;
@@ -1017,21 +1018,20 @@ export class ChromeExecutor {
         for (const byte of bytes) binary += String.fromCharCode(byte);
         return this.storeArtifact(filename, btoa(binary), response.headers.get("content-type") || "application/octet-stream");
       }),
-      importLink: (tabId: number, target: unknown, filename?: string) => call("artifacts.importLink", true, async () => {
+      importLink: (tabId: number, target: unknown) => call("artifacts.importLink", true, async () => {
         const raw = await this.boundPage(tabId, state);
         const locator = await this.locatorFor(raw, target);
         await scope.dispatched();
-        const file = await locator.evaluate(`async (element, filename) => {
+        const file = await locator.evaluate(`async element => {
           if (!(element instanceof HTMLAnchorElement) || !element.hasAttribute('href')) throw new Error('Target must be a link with an href');
-          const name = filename || element.getAttribute('download');
-          if (!name) throw new Error('A filename or nonempty download attribute is required');
           const response = await fetch(element.href);
           if (!response.ok) throw new Error('Could not import linked file: HTTP ' + response.status);
+          const name = (${linkedFilename.toString()})(element.getAttribute('download'), response.headers.get('content-disposition'), response.url || element.href);
           const bytes = new Uint8Array(await response.arrayBuffer());
           let binary = '';
           for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
           return { filename: name, mimeType: response.headers.get('content-type') || 'application/octet-stream', base64: btoa(binary) };
-        }`, filename);
+        }`);
         throwIfAborted(scope.signal);
         return this.storeArtifact(file.filename, file.base64, file.mimeType);
       }, sourceFor(tabId)),

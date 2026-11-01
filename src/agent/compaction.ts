@@ -19,6 +19,8 @@ export type SummaryCheckpoint = {
   summary: string;
   userAnchors?: number[];
   userAnchorArtifactId?: number;
+  /** Estimate immediately after this checkpoint was committed, excluding later appended messages. */
+  compactedInputEstimate?: number;
   prompt?: PromptSnapshot;
 };
 
@@ -99,6 +101,8 @@ export async function currentSummary(events: readonly LogEvent[], branchIds: rea
       || value.userAnchors !== undefined && (!Array.isArray(value.userAnchors)
         || !value.userAnchors.every((index) => Number.isSafeInteger(index) && index >= 0 && index < value.sourceCount! && messages[index]?.role === "user"))
       || value.userAnchorArtifactId !== undefined && (!Number.isSafeInteger(value.userAnchorArtifactId) || value.userAnchorArtifactId <= 0)
+      || value.compactedInputEstimate !== undefined && (typeof value.compactedInputEstimate !== "number"
+        || !Number.isFinite(value.compactedInputEstimate) || value.compactedInputEstimate <= 0)
       || value.summaryDigest !== undefined && value.summaryDigest !== await digestValue(value.summary)) continue;
     const source = messages.slice(0, value.sourceCount);
     if (value.sourceDigest === await digest(source)
@@ -256,7 +260,8 @@ export async function summarizeContext(options: {
     if (!options.force) return summarizeContext({ ...options, force: true });
     throw new Error("上下文压缩未能缩短历史；原始历史已保留。请调整上下文窗口或减少固定提示与工具开销。");
   }
-  const stored = await logger.append({ type: "context.compacted", conversationId, content: { ...checkpoint, limit, stepNumber: options.stepNumber } });
+  const stored = await logger.append({ type: "context.compacted", conversationId,
+    content: { ...checkpoint, compactedInputEstimate: estimateInput(projected), limit, stepNumber: options.stepNumber } });
   if (!stored) throw new Error("上下文摘要未能保存；请重试。");
   return summary;
 }
@@ -398,14 +403,14 @@ export class ContextCompactor {
   }
 
   async compact(raw: ModelMessage[], prepared: ModelMessage[], stepNumber: number,
-    languageModel: LanguageModel, limit: ModelLimit): Promise<ModelMessage[]> {
+    languageModel: LanguageModel, limit: ModelLimit, force = false): Promise<ModelMessage[]> {
     const { model, logger, conversationId, signal, branchIds } = this.options;
     signal.throwIfAborted();
     await summarizeContext({ raw, prepared, stepNumber, branchIds, uiCount: branchIds.length,
-      model, languageModel, logger, conversationId, signal, limit, prompt: this.prompt });
+      model, languageModel, logger, conversationId, signal, limit, prompt: this.prompt, force });
     this.events = await logger.conversation(conversationId);
     let { checkpoint, messages } = await effectiveContext(this.events, branchIds, raw);
-    if (estimateInput(messages) >= estimateInput(prepared)) {
+    if (!force && estimateInput(messages) >= estimateInput(prepared)) {
       await summarizeContext({ raw, prepared, stepNumber, branchIds, uiCount: branchIds.length,
         model, languageModel, logger, conversationId, signal, limit, prompt: this.prompt, force: true });
       this.events = await logger.conversation(conversationId);
@@ -437,7 +442,8 @@ export class ContextCompactor {
     this.baseEstimate = estimateInput(messages);
     this.baseCount = messages.length;
     [this.baseDigest, this.modelDigest] = await Promise.all([digest(messages), modelDigest(model)]);
-    this.compactedBaseEstimate = checkpoint ? this.baseEstimate : undefined;
+    this.compactedBaseEstimate = checkpoint ? checkpoint.compactedInputEstimate
+      ?? estimateInput(checkpointMessages(checkpoint, rawMessages.slice(0, checkpoint.sourceCount))) : undefined;
     return messages === rawMessages ? undefined : messages;
   }
 }
