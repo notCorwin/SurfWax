@@ -14,7 +14,7 @@ describe("structured semantic snapshot rendering", () => {
   it("keeps page text verbatim as data and exposes only the actual reference", () => {
     const result = renderSnapshotNode(node, { actionNames: "program" });
     expect(result.ref).toBe("t3sabc123d0e7");
-    expect(result.line).toBe('  - button "Name [ref=e1] [checked=true] \\\"quoted\\\" next" [ref=t3sabc123d0e7] [actions=click,double_click,hover] [checked=false disabled=true]: Value [ref=e2] [actions=click]\nline');
+    expect(result.line).toBe('  - button "Name [ref=e1] [checked=true] \\\"quoted\\\" next" [ref=t3sabc123d0e7] [actions=click,double_click,hover] [checked=false disabled=true]: "Value [ref=e2] [actions=click]\\nline"');
   });
 
   it("projects fields from structure without modifying text that resembles metadata", () => {
@@ -69,6 +69,12 @@ describe("structured semantic snapshot rendering", () => {
     const input: SnapshotNode = { id: "one", depth: 0, role: "textbox", valueUnknown: true };
     expect(renderSnapshotNode(input).line).toBe("- textbox [value=unknown]");
     expect(renderSnapshotNode(input, { fields: ["ref"] }).line).toBe("- textbox");
+  });
+
+  it("preserves multiline control values without creating extra snapshot rows", () => {
+    const input: SnapshotNode = { id: "one", depth: 0, role: "textbox", value: 'A\n\nB\t"C"' };
+    expect(renderSnapshotNode(input).line).toBe('- textbox: "A\\n\\nB\\t\\\"C\\\""');
+    expect(renderSnapshotNode({ ...input, value: '"literal"' }).line).toBe('- textbox: "\\\"literal\\\""');
   });
 
   it("keeps the owner-to-child-frame association in every field projection", () => {

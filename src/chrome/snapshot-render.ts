@@ -62,7 +62,7 @@ export function renderSnapshotNode(
     const state = stateNames.filter((key) => node.state![key] !== undefined).map((key) => `${key}=${node.state![key]}`).join(" ");
     if (state) line += ` [${state}]`;
   }
-  if (fields.has("text") && value && value !== name) line += `: ${value}`;
+  if (fields.has("text") && value && value !== name) line += `: ${value.startsWith('"') || /[\u0000-\u001f\u007f]/.test(value) ? JSON.stringify(value) : value}`;
   if (fields.has("text") && node.valueUnknown) line += " [value=unknown]";
   if (fields.has("text") && node.placeholder?.status === "unknown") line += " [placeholder=unknown]";
   else if (fields.has("text") && node.placeholder?.status === "visible" && node.placeholder.text !== name)

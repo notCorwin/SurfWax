@@ -7,6 +7,7 @@ import { compactToolResult, createProgramTools, prepareToolMessages, repairProgr
 import { callUserScript } from "./script-client";
 import { ToolScheduler } from "./tool-scheduler";
 import { SNAPSHOT_DELIVERY_COMMIT, type SnapshotDeliveryLease } from "./snapshot-wire";
+import { decodeSnapshotLines } from "./snapshot-line-dictionary";
 
 function mockSnapshot(tabId: number, lines: string[] = [], cursor?: string, delivery: SnapshotDeliveryLease = { begin: vi.fn(() => true), finish: vi.fn(), cancel: vi.fn() }) {
   const items = lines.map((line, index) => ({ id: `node-${index}`, line }));
@@ -20,6 +21,24 @@ function mockSnapshot(tabId: number, lines: string[] = [], cursor?: string, deli
 }
 
 describe("browser tools", () => {
+  it("persists and delivers a lossless page-local dictionary after acquiring its snapshot lease", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: testEventStore(events) });
+    const delivery = { begin: vi.fn(() => true), finish: vi.fn(), cancel: vi.fn() };
+    const page = mockSnapshot(4, Array(12).fill("  - StaticText [name=unknown]"), undefined, delivery);
+    const executor = { inspect: vi.fn(async () => page) } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor, { logger, conversationId: "thread" }) as Record<string, any>;
+    const result = await tools.inspect_page.execute({}, { toolCallId: "inspect" });
+    expect(result.lineDictionary).toEqual(["  - StaticText [name=unknown]"]);
+    expect(result.items.every((item: any) => item.line === 0)).toBe(true);
+    expect(decodeSnapshotLines(result)).toEqual(page.items);
+    expect(result.truncation).toEqual(page.truncation);
+    expect(events.find((event) => event.type === "tool.finished")).toMatchObject({ output: result });
+    expect(delivery.begin).toHaveBeenCalledOnce();
+    expect(delivery.finish).toHaveBeenCalledOnce();
+    expect(delivery.cancel).not.toHaveBeenCalled();
+  });
+
   it("returns a budgeted inspection page inline with its continuation and fragments intact", async () => {
     const events: LogEvent[] = [];
     const logger = new EventLogger({ store: testEventStore(events) });

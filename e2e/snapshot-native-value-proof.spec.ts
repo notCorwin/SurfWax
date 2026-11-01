@@ -5,18 +5,21 @@ test("batches native input paint evidence and rejects clipping, scrolling and oc
   const browser = await chromium.launch({ headless: true, executablePath: process.env.SURFWAX_CHROME_PATH });
   try {
     const page = await browser.newPage({ viewport: { width: 1000, height: 700 } });
-    await page.setContent(`<style>input {font:16px monospace; display:block; margin:8px; border-radius:0;}</style>
+    await page.setContent(`<style>input,textarea {font:16px monospace; display:block; margin:8px; border-radius:0; resize:none;}</style>
       <input id="wide" value="VISIBLE_VALUE" style="width:300px">
       <input id="other" value="OTHER_VALUE" style="width:300px">
       <input id="zero" value="ZERO_HIDDEN_VALUE" style="font-size:0;width:300px;height:24px">
-      <input id="narrow" value="ABCD_HIDDEN_SUFFIX" style="width:25px">`);
+      <input id="narrow" value="ABCD_HIDDEN_SUFFIX" style="width:25px">
+      <textarea id="multiline" style="width:300px;height:100px">FIRST\n\nSECOND</textarea>
+      <textarea id="wrapped" style="width:70px;height:100px">FIRSTSECONDTHIRD</textarea>
+      <textarea id="short" style="width:300px;height:30px">FIRST\nSECOND\nHIDDEN_ABC</textarea>`);
     const cdp = await page.context().newCDPSession(page); await cdp.send("DOM.enable");
     const prove = async (selectors: string[], flags = [true, true]) => {
       const tree = await cdp.send("DOM.getDocument", { depth: -1, pierce: true });
       const nodes: any[] = []; const walk = (node: any) => { nodes.push(node); for (const child of [...node.shadowRoots ?? [], ...node.children ?? []]) walk(child); }; walk(tree.root);
       const requests: Array<{ expected: string }> = [], textObjects: Array<{ objectId: string }> = [];
       for (const selector of selectors) {
-        const host = nodes.find(n => n.nodeName === "INPUT" && n.attributes?.includes(selector.slice(1)));
+        const host = nodes.find(n => ["INPUT", "TEXTAREA"].includes(n.nodeName) && n.attributes?.includes(selector.slice(1)));
         const root = host?.shadowRoots?.find((n: any) => n.shadowRootType === "user-agent");
         const text = root?.children?.flatMap((n: any) => n.children ?? []).find((n: any) => n.nodeType === 3);
         expect(text).toBeTruthy();
@@ -32,6 +35,25 @@ test("batches native input paint evidence and rejects clipping, scrolling and oc
     const initial = await prove(["#wide", "#other", "#zero", "#narrow"]);
     expect(initial.values).toEqual([expect.objectContaining({ text: "VISIBLE_VALUE" }), expect.objectContaining({ text: "OTHER_VALUE" }), null, null]);
     expect(await prove(["#wide", "#other"])).toMatchObject({ scene: initial.scene });
+    const multi = page.locator("#multiline"), originalMulti = await multi.screenshot();
+    await multi.evaluate((host) => { (host as HTMLTextAreaElement).value = "FIRST\nSECOND"; });
+    expect((await multi.screenshot()).equals(originalMulti)).toBe(false);
+    await multi.evaluate((host) => { (host as HTMLTextAreaElement).value = "FIRST\n\nSECOND"; });
+    expect((await prove(["#multiline", "#wrapped", "#short"])).values).toEqual([
+      expect.objectContaining({ text: "FIRST\n\nSECOND" }), expect.objectContaining({ text: "FIRSTSECONDTHIRD" }), null,
+    ]);
+    await multi.evaluate((host) => { (host as HTMLTextAreaElement).value = "FIRST\n\nSECOND\n"; });
+    // A trailing empty line need not paint any additional pixels.
+    expect((await multi.screenshot()).equals(originalMulti)).toBe(true);
+    expect((await prove(["#multiline"])).values).toEqual([null]);
+    await multi.evaluate((host) => { (host as HTMLTextAreaElement).value = "FIRST\n\nSECOND"; });
+    const short = page.locator("#short"), originalShort = await short.screenshot();
+    await short.evaluate((host) => { (host as HTMLTextAreaElement).value = "FIRST\nSECOND\nHIDDEN_XYZ"; });
+    expect((await short.screenshot()).equals(originalShort)).toBe(true);
+    expect((await prove(["#short"])).values).toEqual([null]);
+    await short.evaluate((host) => { (host as HTMLTextAreaElement).scrollTop = 100; });
+    expect(await short.evaluate((host) => (host as HTMLTextAreaElement).scrollTop)).toBeGreaterThan(0);
+    expect((await prove(["#short"])).values).toEqual([null]);
     const input = page.locator("#wide"), withoutTrailingSpace = await input.screenshot();
     await input.evaluate((host) => { (host as HTMLInputElement).value = "VISIBLE_VALUE   "; });
     // The full Range has a positive width, but extra trailing spaces do not

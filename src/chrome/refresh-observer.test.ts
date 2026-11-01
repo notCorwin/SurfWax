@@ -5,6 +5,7 @@ import { observePageRefreshes } from "./refresh-observer";
 import { SNAPSHOT_DELIVERY_COMMIT } from "./snapshot-wire";
 import { ChromeExecutor } from "./executor";
 import { createProgramTools } from "./tool";
+import { decodeSnapshotLines } from "./snapshot-line-dictionary";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -43,6 +44,23 @@ function harness(inspect = vi.fn<() => Promise<unknown>>(async () => ({ snapshot
 afterEach(() => vi.unstubAllGlobals());
 
 describe("observePageRefreshes", () => {
+  it("sends a lossless page-local dictionary for repeated refresh lines", async () => {
+    const items = Array.from({ length: 12 }, (_, index) => ({ id: String(index), line: "  - StaticText [name=unknown]" }));
+    const page = { observationId: "observation", tabId: 1, documentId: 1, url: "https://example.test/", title: "Page",
+      viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "full", items,
+      truncation: { truncated: false, total: items.length, returned: items.length, offset: 0, charOffset: 0,
+        nextOffset: items.length, nextCharOffset: 0, budget: 12000, used: new TextEncoder().encode(JSON.stringify(items)).byteLength, baselineComplete: true } };
+    const h = harness(vi.fn(async () => page));
+    h.update("loading"); h.update("complete");
+    const [message] = await h.observer.drain();
+    const text = message!.parts[0]!.type === "text" ? message!.parts[0]!.text : "";
+    const sent = JSON.parse(text.split("\n")[2]!);
+    expect(sent.lineDictionary).toEqual(["  - StaticText [name=unknown]"]);
+    expect(decodeSnapshotLines(sent)).toEqual(items);
+    expect(sent.truncation).toEqual(page.truncation);
+    h.observer.dispose();
+  });
+
   it("captures the bound tab immediately after its load completes", async () => {
     const h = harness();
     h.update("loading");

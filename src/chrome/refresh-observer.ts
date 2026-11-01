@@ -3,6 +3,7 @@ import { fromLogValue, type EventLogger } from "../logging";
 import type { ChromeExecutor } from "./executor";
 import { RefreshTracker, type PageRefresh } from "./refresh-tracker";
 import { SNAPSHOT_DELIVERY_COMMIT, type SnapshotDeliveryLease } from "./snapshot-wire";
+import { encodeSnapshotToolOutput } from "./snapshot-output-encoding";
 
 const SNAPSHOT_BUDGET = 12_000;
 const METADATA_BUDGET = 2_048;
@@ -113,8 +114,9 @@ export function observePageRefreshes(executor: ChromeExecutor, conversationId: s
             value = await boundMetadata(value, logger, conversationId, runId);
             signal.throwIfAborted();
             if (disposed || !tracker.isCurrent(refresh)) throw new Error("The document changed before its snapshot could be delivered.");
-            serializedValue = JSON.stringify(value);
             if (lease && !lease.begin()) throw new Error("The page snapshot changed before delivery.");
+            if (lease) value = encodeSnapshotToolOutput("inspect_page", value) as Record<string, unknown>;
+            serializedValue = JSON.stringify(value);
           } catch (error) {
             lease?.cancel(); lease = undefined;
             signal.throwIfAborted();

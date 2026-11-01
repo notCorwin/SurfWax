@@ -3843,11 +3843,12 @@ export class AutomationRuntime {
         if (!promise) { promise = readFramePaint(frameId); framePaintCache.set(frameId, promise); }
         return promise;
       };
-      type NativeValueRequest = { backendNodeId: number; expected: string };
-      type NativeValueBatch = { frameId: string; debuggee: Debuggee; requests: NativeValueRequest[]; result: NativeValueResult };
-      type NativeValueResult = { identities: Array<number | null>; scene: unknown; values: Array<{ text: string } | null> };
+      type NativeValueRequest = { backendNodeId: number; expected: string; tag: "input" | "textarea" };
+      type NativeValueBatch = { frameId: string; debuggee: Debuggee; requests: NativeValueRequest[]; frameSafe: boolean; shadowSafe: boolean; result: NativeValueResult };
+      type NativeValueProof = { text: string; segments?: Array<{ kind: "text" | "break"; value: string }> };
+      type NativeValueResult = { identities: Array<number[] | null>; scene: unknown; values: Array<NativeValueProof | null> };
       const nativeValueBatches: NativeValueBatch[] = [];
-      const readNativeValues = async (debuggee: Debuggee, frameId: string, requests: NativeValueRequest[]): Promise<NativeValueResult> => {
+      const readNativeValues = async (debuggee: Debuggee, frameId: string, requests: NativeValueRequest[], frameSafe: boolean, shadowSafe: boolean): Promise<NativeValueResult> => {
         const empty = (): NativeValueResult => ({ identities: requests.map(() => null), scene: null, values: requests.map(() => null) });
         if (!requests.length) return empty();
         const frame: FrameRefRecord = { frameId, debuggee, generation, revision: frameRevision,
@@ -3862,27 +3863,48 @@ export class AutomationRuntime {
             frameGuard();
             if (this.frameDocuments.get(key) !== document) throw automationError("stale-frame", { reason: "native-value-context-expired" });
           };
-          const resolved: Array<{ backendNodeId: number; objectId: string } | null> = [];
+          const resolved: Array<{ identities: number[]; objectId: string } | null> = [];
           for (let offset = 0; offset < requests.length; offset += 32) {
             const batch = requests.slice(offset, offset + 32);
             const values = await Promise.all(batch.map(async (request) => {
               try {
                 const result = await this.options.command(debuggee, "DOM.describeNode", { backendNodeId: request.backendNodeId, depth: -1, pierce: true });
                 check();
-                if (result.node?.backendNodeId !== request.backendNodeId || result.node?.nodeName !== "INPUT") return null;
+                if (result.node?.backendNodeId !== request.backendNodeId || result.node?.nodeName !== request.tag.toUpperCase()) return null;
                 const roots = (result.node.shadowRoots ?? []).filter((root: any) => root.shadowRootType === "user-agent");
                 if (roots.length !== 1) return null;
-                const pending = [...(roots[0].children ?? [])], matches: number[] = [];
-                while (pending.length) {
-                  const child = pending.pop();
-                  if (child?.nodeType === 3 && child.nodeValue === request.expected && Number.isSafeInteger(child.backendNodeId)) matches.push(child.backendNodeId);
-                  if (child?.shadowRoots?.length) return null;
-                  pending.push(...(child?.children ?? []));
+                let identities: number[], textId: number;
+                if (request.tag === "textarea") {
+                  const root = roots[0], children = root.children;
+                  if (!Number.isSafeInteger(root.backendNodeId) || !Array.isArray(children) || children.length !== 1) return null;
+                  const inner = children[0], parts = inner?.children;
+                  if (inner?.nodeName !== "DIV" || !Number.isSafeInteger(inner.backendNodeId) || !Array.isArray(parts) || !parts.length
+                    || parts.some((part: any) => !Number.isSafeInteger(part.backendNodeId) || part.shadowRoots?.length
+                      || !(part.nodeType === 3 && typeof part.nodeValue === "string" || part.nodeType === 1 && part.nodeName === "BR" && !part.children?.length))) return null;
+                  const last = parts.at(-1);
+                  const sentinel = request.expected.endsWith("\n") && last?.nodeName === "BR"
+                    && Array.isArray(last.attributes) && last.attributes.length === 2
+                    && last.attributes[0] === "id" && last.attributes[1] === "textarea-placeholder-break";
+                  const content = sentinel ? parts.slice(0, -1) : parts;
+                  if (content.map((part: any) => part.nodeType === 3 ? part.nodeValue : "\n").join("") !== request.expected) return null;
+                  const text = parts.find((part: any) => part.nodeType === 3 && part.nodeValue);
+                  if (!text) return null;
+                  textId = text.backendNodeId;
+                  identities = [root.backendNodeId, inner.backendNodeId, ...parts.map((part: any) => part.backendNodeId)];
+                } else {
+                  const pending = [...(roots[0].children ?? [])], matches: number[] = [];
+                  while (pending.length) {
+                    const child = pending.pop();
+                    if (child?.nodeType === 3 && child.nodeValue === request.expected && Number.isSafeInteger(child.backendNodeId)) matches.push(child.backendNodeId);
+                    if (child?.shadowRoots?.length) return null;
+                    pending.push(...(child?.children ?? []));
+                  }
+                  if (matches.length !== 1) return null;
+                  textId = matches[0]!; identities = [textId];
                 }
-                if (matches.length !== 1) return null;
-                const text = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: matches[0], executionContextId: contextId, objectGroup: group });
+                const text = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: textId, executionContextId: contextId, objectGroup: group });
                 check();
-                return typeof text.object?.objectId === "string" ? { backendNodeId: matches[0]!, objectId: text.object.objectId } : null;
+                return typeof text.object?.objectId === "string" ? { identities, objectId: text.object.objectId } : null;
               } catch { check(); return null; }
             }));
             resolved.push(...values);
@@ -3891,7 +3913,7 @@ export class AutomationRuntime {
           if (!active.length) return empty();
           const response = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: documentId,
             functionDeclaration: SNAPSHOT_NATIVE_VALUE_SOURCE, returnByValue: true,
-            arguments: [{ value: active.map(({ request }) => ({ expected: request.expected })) }, { value: true }, { value: true },
+            arguments: [{ value: active.map(({ request }) => ({ expected: request.expected })) }, { value: frameSafe }, { value: shadowSafe },
               ...active.map(({ text }) => ({ objectId: text.objectId }))] });
           check();
           const data = response.result?.value;
@@ -3899,7 +3921,7 @@ export class AutomationRuntime {
           const result = empty(); result.scene = data.scene;
           active.forEach(({ text, request, index }, position) => {
             const proof = data.values[position];
-            result.identities[index] = text.backendNodeId;
+            result.identities[index] = text.identities;
             if (proof && proof.text === request.expected) result.values[index] = proof;
           });
           return result;
@@ -3964,21 +3986,25 @@ export class AutomationRuntime {
         catch (error) { throw automationError("snapshot-unavailable", { reason: "invalid-dom-snapshot", detail: error instanceof Error ? error.message : String(error) }); }
         const nativeRequests: NativeValueRequest[] = evidence.items.flatMap((item) => {
           const type = (item.attributes?.type ?? "text").toLowerCase();
-          return item.kind === "control" && item.tag === "input" && item.valueVisible && item.value
-            && ["text", "search", "email", "tel", "url"].includes(type)
-            ? [{ backendNodeId: item.backendNodeId, expected: item.value }] : [];
+          return item.kind === "control" && item.valueVisible && item.value && (item.tag === "textarea"
+            || item.tag === "input" && ["text", "search", "email", "tel", "url"].includes(type))
+            ? [{ backendNodeId: item.backendNodeId, expected: item.value, tag: item.tag as "input" | "textarea" }] : [];
         });
         const nativeValues = new Map<number, string>();
-        const nativeIdentities = new Map<number, number>();
-        if (nativeRequests.length && noShadowRoots && (rootFrame || frameId !== session.rootFrameId)) {
-          const parentProof = rootFrame ? [] : await waitForCapture(framePaint(frameId));
-          if (parentProof) {
-            const result = await waitForCapture(readNativeValues(debuggee, frameId, nativeRequests));
-            result.values.forEach((value, index) => { if (value) nativeValues.set(nativeRequests[index]!.backendNodeId, value.text); });
+        const nativeProofs = new Map<number, NativeValueProof>();
+        const nativeIdentities = new Map<number, number[]>();
+        if (nativeRequests.length) {
+          const parentProof = rootFrame ? [] : noShadowRoots && frameId !== session.rootFrameId ? await waitForCapture(framePaint(frameId)) : null;
+          const frameSafe = Boolean(parentProof);
+          // Without a paint path, resolve UA identities only when a scoped
+          // observation needs them to establish region membership.
+          if (frameSafe && noShadowRoots || scopedRoot) {
+            const result = await waitForCapture(readNativeValues(debuggee, frameId, nativeRequests, frameSafe, noShadowRoots));
+            result.values.forEach((value, index) => { if (value) { nativeValues.set(nativeRequests[index]!.backendNodeId, value.text); nativeProofs.set(nativeRequests[index]!.backendNodeId, value); } });
             result.identities.forEach((id, index) => { if (id !== null) nativeIdentities.set(nativeRequests[index]!.backendNodeId, id); });
             if (nativeIdentities.size) {
-              nativeValueBatches.push({ frameId, debuggee, requests: nativeRequests, result });
-              if (parentProof.length) framePaintBatches.push(parentProof);
+              nativeValueBatches.push({ frameId, debuggee, requests: nativeRequests, frameSafe, shadowSafe: noShadowRoots, result });
+              if (nativeValues.size && parentProof?.length) framePaintBatches.push(parentProof);
             }
           }
         }
@@ -4115,6 +4141,24 @@ export class AutomationRuntime {
           const tag = index === undefined ? "" : snapshot.strings?.[doc.nodes.nodeName?.[index]]?.toUpperCase();
           return tag === "INPUT" || tag === "TEXTAREA" ? owner : undefined;
         };
+        // A multiline textarea has several UA text/BR children. Only use
+        // that ancestry when the complete ordered backend sequence matches
+        // the independently resolved user-agent shadow tree.
+        const nativeTextareaOwner = (leaf: any): any | undefined => {
+          if (!leaf || leaf.ignored || !["StaticText", "LineBreak"].includes(axValue(leaf.role))
+            || typeof leaf.backendDOMNodeId !== "number") return undefined;
+          const wrapper = byId.get(leaf.parentId), owner = wrapper && byId.get(wrapper.parentId);
+          if (!wrapper || wrapper.ignored || axValue(wrapper.role) !== "generic" || !owner || owner.ignored
+            || axValue(owner.role) !== "textbox" || maskedControl(owner) || !Array.isArray(owner.childIds)
+            || owner.childIds.length !== 1 || owner.childIds[0] !== wrapper.nodeId || !Array.isArray(wrapper.childIds)) return undefined;
+          const index = typeof owner.backendDOMNodeId === "number" ? domIndex.indexOf(owner.backendDOMNodeId) : undefined;
+          if (index === undefined || snapshot.strings?.[doc.nodes.nodeName?.[index]]?.toUpperCase() !== "TEXTAREA") return undefined;
+          const ids = nativeIdentities.get(owner.backendDOMNodeId);
+          if (!ids || ids.length !== wrapper.childIds.length + 2 || ids[1] !== wrapper.backendDOMNodeId
+            || !wrapper.childIds.includes(leaf.nodeId)
+            || wrapper.childIds.some((id: string, position: number) => byId.get(id)?.backendDOMNodeId !== ids[position + 2])) return undefined;
+          return owner;
+        };
         const scope = frameLabel ?? session.rootFrameId ?? "root";
         // Frame ID alone is insufficient: an OOPIF can be replaced by a new
         // debugger target without changing the frame ID or document generation.
@@ -4142,7 +4186,7 @@ export class AutomationRuntime {
         while (scan.length) {
           const { node, inherited, within, placeholderOwner } = scan.pop()!;
           const known = typeof node.backendDOMNodeId === "number" ? visibility.get(node.backendDOMNodeId) : undefined;
-          const nativeOwner = nativeValueOwner(node) ?? (axValue(node.role) === "generic" && node.childIds?.length === 1
+          const nativeOwner = nativeValueOwner(node) ?? nativeTextareaOwner(node) ?? (axValue(node.role) === "generic" && node.childIds?.length === 1
             ? nativeValueOwner(byId.get(node.childIds[0])) : undefined);
           if (scopeIndex && typeof node.backendDOMNodeId === "number" && !placeholderTextNodes.has(node.backendDOMNodeId) && scopeIndex.indexOf(node.backendDOMNodeId) === undefined
             && !otherFrameBackends?.has(node.backendDOMNodeId) && !nativeOwner && known !== false && !node.ignored
@@ -4216,7 +4260,7 @@ export class AutomationRuntime {
               return text;
             }
             // An input's internal value is handled on the control row.
-            const nativeOwner = nativeValueOwner(node);
+            const nativeOwner = nativeValueOwner(node) ?? nativeTextareaOwner(node);
             if (nativeOwner && !maskedControl(nativeOwner)) {
               if (nativeValues.get(nativeOwner.backendDOMNodeId) === original) return safeName(node, original);
               namesUnknown.add(node.nodeId); return "";
@@ -4241,6 +4285,22 @@ export class AutomationRuntime {
           if (original) namesUnknown.add(node.nodeId);
           return "";
         };
+        const provenTextareaChildren = new Set<string>();
+        for (const owner of nodes) {
+          const proof = nativeProofs.get(owner.backendDOMNodeId), wrapper = owner.childIds?.length === 1 ? byId.get(owner.childIds[0]) : undefined;
+          if (!proof?.segments || proof.text !== axValue(owner.value) || !wrapper || !plainEditable(wrapper)
+            || axValue(wrapper.name) || axValue(wrapper.value) || !Array.isArray(wrapper.childIds)
+            || wrapper.childIds.length !== proof.segments.length) continue;
+          const children = wrapper.childIds.map((id: string) => byId.get(id));
+          if (children.some((child: any, index: number) => {
+            const segment = proof.segments![index]!;
+            return !child || nativeTextareaOwner(child) !== owner || !plainEditable(child) || axValue(child.value)
+              || !Array.isArray(child.childIds) || child.childIds.some((id: string) => axValue(byId.get(id)?.role) !== "InlineTextBox")
+              || axValue(child.role) !== (segment.kind === "text" ? "StaticText" : "LineBreak")
+              || axValue(child.name) !== (segment.kind === "text" ? segment.value : "\n");
+          })) continue;
+          for (const child of children) provenTextareaChildren.add(child.nodeId);
+        }
         const start = lines.length;
         const lineBackends = new Map<string, number>();
         const axLines = new Map<string, string>();
@@ -4264,7 +4324,7 @@ export class AutomationRuntime {
           // is emitted in document order below; do not duplicate it here.
           const rawValue = axValue(node.value);
           const nativeValue = ["input", "textarea"].includes(editableTag ?? "") && !["checkbox", "radio", "switch"].includes(role);
-          const nativeLeafOwner = nativeValueOwner(node);
+          const nativeLeafOwner = nativeValueOwner(node) ?? nativeTextareaOwner(node);
           const valueUnknown = Boolean(rawValue) && (nativeValue && !maskedControl(node)
             && nativeValues.get(node.backendDOMNodeId) !== rawValue || nativeLeafOwner && nativeValues.get(nativeLeafOwner.backendDOMNodeId) !== rawValue);
           const value = maskedControl(node) || ["checkbox", "radio", "switch"].includes(role)
@@ -4290,9 +4350,10 @@ export class AutomationRuntime {
             && Boolean(name) && name === axValue(parent.value);
           const owner = nativeLeafOwner;
           const duplicateNativeValueText = singleTextLeaf && parentRole === "generic" && owner && !hidden(owner) && inScope(owner)
-            && nativeIdentities.get(owner.backendDOMNodeId) === node.backendDOMNodeId && !axValue(node.value)
+            && nativeIdentities.get(owner.backendDOMNodeId)?.includes(node.backendDOMNodeId) && !axValue(node.value)
             && (Boolean(name) && name === axValue(owner.value) || namesUnknown.has(node.nodeId));
-          const duplicateText = duplicateNamedText || duplicateValueText || duplicateNativeValueText;
+          const duplicateTextareaText = provenTextareaChildren.has(node.nodeId) && node !== traversalRoot && owner && !hidden(owner) && inScope(owner);
+          const duplicateText = duplicateNamedText || duplicateValueText || duplicateNativeValueText || duplicateTextareaText;
           const emittedRole = role && role !== "none" && role !== "InlineTextBox" && (role !== "generic" || editableControl || editableEvidence?.readonly && properties.focusable === true);
           if (emittedRole && typeof node.backendDOMNodeId === "number") covered.add(node.backendDOMNodeId);
           else if (emittedRole && pseudoTextOwner(node) !== undefined) covered.add(pseudoTextOwner(node)!);
@@ -4775,7 +4836,7 @@ export class AutomationRuntime {
             if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "frame-paint-unstable" });
             retriedUnstableCapture = true; continue;
           }
-          const afterNativeValues = await waitForCapture(Promise.all(nativeValueBatches.map((batch) => readNativeValues(batch.debuggee, batch.frameId, batch.requests))));
+          const afterNativeValues = await waitForCapture(Promise.all(nativeValueBatches.map((batch) => readNativeValues(batch.debuggee, batch.frameId, batch.requests, batch.frameSafe, batch.shadowSafe))));
           if (nativeValueBatches.some((batch, index) => JSON.stringify(batch.result) !== JSON.stringify(afterNativeValues[index]))) {
             if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "native-value-unstable" });
             retriedUnstableCapture = true; continue;
