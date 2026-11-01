@@ -9,6 +9,7 @@ import { createSnapshotDomIndex } from "./snapshot-dom-index";
 import { sameDOMSnapshot } from "./snapshot-consistency";
 import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
 import { projectTextPaint, sameTextPaintCandidates, TEXT_PAINT_CACHE_LOOKUP_SOURCE, TEXT_PAINT_CACHE_REGISTER_SOURCE, type TextPaintEvidence } from "./snapshot-text-paint";
+import { PLACEHOLDER_EVIDENCE_SOURCE, samePlaceholderEvidence, type PlaceholderEvidence } from "./snapshot-placeholder";
 import { createFrameVisibility } from "./frame-visibility";
 import { PROGRAM_EVENT_INVOKE } from "./program-handles";
 
@@ -3128,6 +3129,90 @@ export class AutomationRuntime {
         if (states.some((state) => typeof state !== "boolean")) throw automationError("snapshot-unavailable", { reason: "missing-frame-readiness" });
         return states.every(Boolean);
       };
+      type PlaceholderCandidate = { frameId: string; debuggee: Debuggee; backendNodeId: number; expected: string; hostHidden: boolean };
+      type PlaceholderProof = { evidence: PlaceholderEvidence; textBackendNodeId?: number };
+      const placeholderKey = (item: PlaceholderCandidate) => JSON.stringify([item.debuggee.sessionId ?? "", item.frameId, item.backendNodeId]);
+      const collectPlaceholders = async (items: PlaceholderCandidate[]): Promise<Map<string, PlaceholderProof>> => {
+        const result = new Map<string, PlaceholderProof>();
+        const groups = new Map<string, PlaceholderCandidate[]>();
+        for (const item of items) {
+          if (item.hostHidden) { result.set(placeholderKey(item), { evidence: { status: "hidden" } }); continue; }
+          const key = JSON.stringify([item.debuggee.sessionId ?? "", item.frameId]);
+          const group = groups.get(key) ?? []; group.push(item); groups.set(key, group);
+        }
+        const tasks = [...groups.values()].map(async (group) => {
+          const first = group[0]!, debuggee = first.debuggee;
+          const frame: FrameRefRecord = { frameId: first.frameId, debuggee, generation, revision: frameRevision,
+            conversationId: frameContext.conversationId, runId: frameContext.runId };
+          await this.frameDocument(session, frame, frameGuard);
+          const frameKey = JSON.stringify([session.tabId, first.frameId, debuggee.sessionId ?? null]);
+          const document = this.frameDocuments.get(frameKey);
+          const contextId = document?.executionContextId;
+          if (!Number.isSafeInteger(contextId)) throw automationError("snapshot-unavailable", { reason: "missing-placeholder-context" });
+          const placeholderGuard = () => {
+            frameGuard();
+            if (this.frameDocuments.get(frameKey) !== document) throw automationError("stale-frame", { reason: "placeholder-context-expired" });
+          };
+          const objectGroup = `surf-wax-placeholder:${crypto.randomUUID()}`;
+          try {
+            for (let offset = 0; offset < group.length; offset += 32) {
+              placeholderGuard();
+              const batch = group.slice(offset, offset + 32);
+              const settled = await Promise.allSettled(batch.map(async (item) => {
+                const described = await this.options.command(debuggee, "DOM.describeNode", { backendNodeId: item.backendNodeId, depth: -1, pierce: true });
+                placeholderGuard();
+                if (described.node?.backendNodeId !== item.backendNodeId) throw automationError("snapshot-unavailable", { reason: "placeholder-host-changed" });
+                const pending: any[] = [...(described.node.shadowRoots ?? [])], textIds: number[] = [];
+                while (pending.length) {
+                  const node = pending.pop(), attributes = node?.attributes ?? [];
+                  let pseudo = false;
+                  for (let index = 0; index + 1 < attributes.length; index += 2)
+                    if (attributes[index] === "pseudo" && attributes[index + 1] === "-webkit-input-placeholder") pseudo = true;
+                  if (pseudo && node.children?.length === 1 && node.children[0]?.nodeType === 3 && Number.isSafeInteger(node.children[0].backendNodeId))
+                    textIds.push(node.children[0].backendNodeId);
+                  for (const child of node?.children ?? []) pending.push(child);
+                  for (const shadow of node?.shadowRoots ?? []) pending.push(shadow);
+                }
+                const textBackendNodeId = textIds.length === 1 ? textIds[0] : undefined;
+                const host = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: item.backendNodeId, executionContextId: contextId, objectGroup });
+                placeholderGuard();
+                if (typeof host.object?.objectId !== "string") throw automationError("snapshot-unavailable", { reason: "missing-placeholder-host" });
+                let text: string | undefined;
+                if (textBackendNodeId !== undefined) {
+                  const resolved = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: textBackendNodeId, executionContextId: contextId, objectGroup });
+                  placeholderGuard(); text = resolved.object?.objectId;
+                  if (typeof text !== "string") throw automationError("snapshot-unavailable", { reason: "missing-placeholder-text" });
+                }
+                const response = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: host.object.objectId,
+                  functionDeclaration: PLACEHOLDER_EVIDENCE_SOURCE, arguments: [text ? { objectId: text } : { value: null }, { value: item.expected }], returnByValue: true });
+                placeholderGuard();
+                const value = response.result?.value;
+                if (response.exceptionDetails || !value || !["visible", "hidden", "unknown"].includes(value.status)
+                  || value.status === "visible" && (typeof value.text !== "string" || value.text !== item.expected))
+                  throw automationError("snapshot-unavailable", { reason: "placeholder-evidence-unavailable" });
+                const evidence: PlaceholderEvidence = value.status === "visible" && item.frameId !== session.rootFrameId
+                  ? { status: "unknown" } : value.status === "visible" ? { status: "visible", text: value.text } : { status: value.status };
+                return { evidence, ...(textBackendNodeId === undefined ? {} : { textBackendNodeId }) };
+              }));
+              const failed = settled.find((entry): entry is PromiseRejectedResult => entry.status === "rejected");
+              if (failed) throw failed.reason;
+              for (let index = 0; index < batch.length; index++) result.set(placeholderKey(batch[index]!), (settled[index] as PromiseFulfilledResult<PlaceholderProof>).value);
+            }
+          } finally { void this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup }).catch(() => undefined); }
+        });
+        const settled = await Promise.allSettled(tasks);
+        const failed = settled.find((entry): entry is PromiseRejectedResult => entry.status === "rejected");
+        if (failed) {
+          if (!changed() && failed.reason instanceof AutomationError && failed.reason.code === "stale-frame"
+            && failed.reason.detail.reason === "frame-context-expired")
+            throw automationError("stale-frame", { reason: "placeholder-context-expired" });
+          if (!changed() && (isDetachedNodeError(failed.reason) || isTransientNavigationError(failed.reason)))
+            throw automationError("stale-frame", { reason: "placeholder-node-detached" });
+          throw failed.reason;
+        }
+        return result;
+      };
+      let placeholderItems: PlaceholderCandidate[] = [], placeholderBefore = new Map<string, PlaceholderProof>();
       type TextProjection = { full: string; text: string };
       let trees: Array<{ debuggee: Debuggee; frameId: string | undefined; depth: number; tree: any; visibility: Map<number, boolean>; textProjections: Map<number, TextProjection>; candidates: SnapshotTextPaintCandidate[]; snapshot: any }>;
       let info: { url: string; title: string };
@@ -3272,13 +3357,41 @@ export class AutomationRuntime {
           const verified = await waitForCapture(selectRegionFrames(initialLayouts, false));
           if (verified.frameId !== regionFrameId || verified.selected.length !== capturedFrames.length || verified.selected.some((item, index) => item !== capturedFrames[index])) continue;
         }
+        placeholderItems = [];
+        const initialPaint = new Map(initialLayouts.map(({ debuggee, snapshot }) => {
+          const candidates: SnapshotTextPaintCandidate[] = [];
+          const visibility = snapshotVisibility(snapshot, { textPaintCandidates: candidates });
+          return [debuggee.sessionId ?? "", { visibility, candidates }] as const;
+        }));
+        for (const item of capturedFrames) {
+          const frameId = item.frameId ?? session.rootFrameId;
+          const layout = initialLayouts.find((entry) => sameDebuggee(entry.debuggee, item.debuggee));
+          const snapshot = layout?.snapshot;
+          const doc = snapshot?.documents?.find((entry: any) => snapshot.strings?.[entry.frameId] === frameId);
+          if (!frameId || !doc) throw automationError("snapshot-unavailable", { reason: "missing-dom-frame", frameId });
+          for (let index = 0; index < (doc.nodes?.backendNodeId?.length ?? 0); index++) {
+            const id = doc.nodes.backendNodeId[index], tag = snapshot.strings?.[doc.nodes.nodeName?.[index]]?.toLowerCase();
+            if ((tag !== "input" && tag !== "textarea") || !Number.isSafeInteger(id) || id <= 0) continue;
+            const attributes = doc.nodes.attributes?.[index] ?? [];
+            if (!Array.isArray(attributes) || attributes.length % 2) throw automationError("snapshot-unavailable", { reason: "invalid-dom-snapshot" });
+            for (let offset = 0; offset < attributes.length; offset += 2) {
+              const name = snapshot.strings?.[attributes[offset]];
+              if (typeof name !== "string") throw automationError("snapshot-unavailable", { reason: "invalid-dom-snapshot" });
+              if (name.toLowerCase() !== "placeholder") continue;
+              const expected = attributes[offset + 1] === -1 ? "" : snapshot.strings?.[attributes[offset + 1]];
+              if (typeof expected !== "string") throw automationError("snapshot-unavailable", { reason: "invalid-dom-snapshot" });
+              if (expected) placeholderItems.push({ frameId, debuggee: item.debuggee, backendNodeId: id, expected,
+                hostHidden: initialPaint.get(item.debuggee.sessionId ?? "")?.visibility.get(id) === false });
+            }
+          }
+        }
+        placeholderBefore = await waitForCapture(collectPlaceholders(placeholderItems));
         const [captured, layouts, pageInfo] = await waitForCapture(Promise.all([
           Promise.all(relevantFrames.map(async (item) => ({ ...item, tree: capturedFrames.includes(item)
             ? await this.options.command(item.debuggee, "Accessibility.getFullAXTree", allDebuggees.includes(item) ? {} : { frameId: item.frameId })
             : undefined }))),
           Promise.all(initialLayouts.map(async ({ debuggee, snapshot }) => {
-            const candidates: SnapshotTextPaintCandidate[] = [];
-            const visibility = snapshotVisibility(snapshot, { textPaintCandidates: candidates });
+            const { candidates, visibility } = initialPaint.get(debuggee.sessionId ?? "")!;
             const textProjections = new Map<number, TextProjection>();
             const byFrame = new Map<string, SnapshotTextPaintCandidate[]>();
             for (const candidate of candidates) {
@@ -3396,7 +3509,11 @@ export class AutomationRuntime {
       } catch (error) {
         guard();
         const stalePaintContext = error instanceof AutomationError && error.code === "stale-frame"
-          && ["text-paint-context-expired", "frame-context-expired"].includes(String(error.detail.reason));
+          && ["text-paint-context-expired", "frame-context-expired", "placeholder-context-expired", "placeholder-node-detached"].includes(String(error.detail.reason));
+        if (stalePaintContext && !changed() && error instanceof AutomationError && ["placeholder-context-expired", "placeholder-node-detached"].includes(String(error.detail.reason))) {
+          if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "placeholder-context-unstable" });
+          retriedUnstableCapture = true;
+        }
         if (!changed() && !isTransientNavigationError(error) && !isDetachedNodeError(error) && !stalePaintContext) throw error;
         await delay(changed() ? 0 : 50, signal); continue;
       }
@@ -3474,6 +3591,71 @@ export class AutomationRuntime {
         catch (error) { throw automationError("snapshot-unavailable", { reason: "invalid-dom-snapshot", detail: error instanceof Error ? error.message : String(error) }); }
         const domIndex = evidence.indexes.get(frameId);
         if (!domIndex) throw automationError("snapshot-unavailable", { reason: "missing-dom-frame", frameId });
+        const placeholders = new Map<number, PlaceholderProof>();
+        const placeholderTextNodes = new Set<number>();
+        const placeholderTextEvidence = new Map<number, PlaceholderEvidence>();
+        for (const item of placeholderItems) if (item.frameId === frameId && sameDebuggee(item.debuggee, debuggee)) {
+          const proof = placeholderBefore.get(placeholderKey(item));
+          if (!proof) throw automationError("snapshot-unavailable", { reason: "missing-placeholder-evidence" });
+          placeholders.set(item.backendNodeId, proof);
+          if (proof.textBackendNodeId !== undefined) { placeholderTextNodes.add(proof.textBackendNodeId); placeholderTextEvidence.set(proof.textBackendNodeId, proof.evidence); }
+        }
+        const tainted = new Uint8Array(doc.nodes.backendNodeId.length);
+        for (const [id, proof] of placeholders) if (proof.evidence.status !== "visible") {
+          const index = domIndex.indexOf(id);
+          if (index !== undefined) tainted[index] = 1;
+        }
+        for (let index = domIndex.preorder.length - 1; index >= 0; index--) {
+          const child = domIndex.preorder[index]!, parent = domIndex.parentAt(child);
+          if (tainted[child] && parent !== undefined) tainted[parent] = 1;
+        }
+        const hasTaintedPlaceholder = tainted.some(Boolean);
+        const activeSource = (node: any) => node.name?.sources?.find((source: any) => !source.superseded && source.value?.value !== undefined);
+        const placeholder = (node: any) => typeof node.backendDOMNodeId === "number" ? placeholders.get(node.backendDOMNodeId)?.evidence : undefined;
+        const namedByBackend = new Map<number, string[]>();
+        if (hasTaintedPlaceholder) for (const node of nodes) if (typeof node.backendDOMNodeId === "number") {
+          const entries = namedByBackend.get(node.backendDOMNodeId) ?? []; entries.push(node.nodeId); namedByBackend.set(node.backendDOMNodeId, entries);
+        }
+        const dependents = new Map<string, string[]>(), taintedNames = new Set<string>(), uncertainNames = new Set<string>();
+        const addDependency = (source: string, dependent: string) => {
+          const entries = dependents.get(source) ?? []; entries.push(dependent); dependents.set(source, entries);
+        };
+        if (hasTaintedPlaceholder) for (const node of nodes) {
+          const source = activeSource(node), own = placeholder(node);
+          if (own && own.status !== "visible" && source?.type === "placeholder") taintedNames.add(node.nodeId);
+          if (source?.type === "contents") for (const child of node.childIds ?? []) addDependency(child, node.nodeId);
+          if (!hasTaintedPlaceholder || !source) continue;
+          const related = [source.relatedNodes, source.attributeValue?.relatedNodes, source.value?.relatedNodes].filter(Array.isArray).flat();
+          if (source.type === "relatedElement" && !related.length && axValue(node.name)
+            && !(axValue(node.role) === "RootWebArea" && source.nativeSource === "title")) uncertainNames.add(node.nodeId);
+          for (const dependency of related) {
+            const backend = dependency?.backendDOMNodeId, index = domIndex.indexOf(backend);
+            if (index === undefined) uncertainNames.add(node.nodeId);
+            else if (tainted[index]) taintedNames.add(node.nodeId);
+            for (const target of namedByBackend.get(backend) ?? []) addDependency(target, node.nodeId);
+          }
+        }
+        const queue = [...taintedNames, ...uncertainNames], visited = new Set(queue);
+        for (let cursor = 0; cursor < queue.length; cursor++) for (const dependent of dependents.get(queue[cursor]!) ?? []) {
+          taintedNames.add(dependent);
+          if (!visited.has(dependent)) { visited.add(dependent); queue.push(dependent); }
+        }
+        const namesUnknown = new Set<string>(), unknownPlaceholderText = new Set<string>();
+        const safeName = (node: any, name: string) => {
+          const source = activeSource(node), own = placeholder(node);
+          if (unknownPlaceholderText.has(node.nodeId)) { namesUnknown.add(node.nodeId); return ""; }
+          if (name && !source && (own || hasTaintedPlaceholder && !["StaticText", "RootWebArea", "InlineTextBox"].includes(axValue(node.role)))) {
+            namesUnknown.add(node.nodeId); return "";
+          }
+          if (source?.type === "placeholder") {
+            if (!own) throw automationError("snapshot-unavailable", { reason: "missing-placeholder-evidence" });
+            return own.status === "visible" ? own.text : "";
+          }
+          if (name && (taintedNames.has(node.nodeId) || uncertainNames.has(node.nodeId)) && source?.type !== "contents") {
+            namesUnknown.add(node.nodeId); return "";
+          }
+          return name;
+        };
         const securityByBackend = new Map<number, string>();
         for (let row = 0; row < (doc.layout?.nodeIndex?.length ?? 0); row++) {
           const index = doc.layout.nodeIndex[row], backend = doc.nodes?.backendNodeId?.[index];
@@ -3511,21 +3693,30 @@ export class AutomationRuntime {
         // contents-derived name when a descendant was actually filtered.
         const hiddenSubtree = new Map<string, boolean>();
         const treeRoot = nodes.find((node) => !node.parentId) ?? nodes[0];
-        const order: any[] = [], scan: Array<{ node: any; inherited: boolean; within: boolean }> = treeRoot ? [{ node: treeRoot, inherited: false, within: false }] : [];
+        const order: any[] = [], scan: Array<{ node: any; inherited: boolean; within: boolean; placeholderOwner?: any }> = treeRoot ? [{ node: treeRoot, inherited: false, within: false }] : [];
         while (scan.length) {
-          const { node, inherited, within } = scan.pop()!;
+          const { node, inherited, within, placeholderOwner } = scan.pop()!;
           const known = typeof node.backendDOMNodeId === "number" ? visibility.get(node.backendDOMNodeId) : undefined;
-          if (scopeIndex && typeof node.backendDOMNodeId === "number" && scopeIndex.indexOf(node.backendDOMNodeId) === undefined
+          if (scopeIndex && typeof node.backendDOMNodeId === "number" && !placeholderTextNodes.has(node.backendDOMNodeId) && scopeIndex.indexOf(node.backendDOMNodeId) === undefined
             && !otherFrameBackends?.has(node.backendDOMNodeId) && known !== false && !node.ignored
             && !["", "none", "generic", "InlineTextBox"].includes(axValue(node.role)))
             throw automationError("snapshot-unavailable", { reason: "unknown-region-membership" });
           const isHidden = known === undefined ? inherited : !known;
           const isScoped = !scopeIndex || (typeof node.backendDOMNodeId === "number"
             ? scopeIndex.contains(regionNode!.node.backendNodeId, node.backendDOMNodeId) === true : within);
+          const owner = placeholder(node) ? node : placeholderOwner;
+          if (owner && owner !== node && axValue(node.role) === "StaticText" && placeholder(owner)?.status !== "visible"
+            && (typeof node.backendDOMNodeId !== "number" || known !== true)) {
+            // A single direct leaf equal to an unmasked control value is
+            // already represented by the control row; preserve that value.
+            const representedValue = node.parentId === owner.nodeId && owner.childIds?.length === 1
+              && !maskedControl(owner) && Boolean(axValue(owner.value)) && axValue(node.name) === axValue(owner.value);
+            if (!representedValue) unknownPlaceholderText.add(node.nodeId);
+          }
           effectiveHidden.set(node.nodeId, isHidden);
           scoped.set(node.nodeId, isScoped);
           order.push(node);
-          for (const id of node.childIds ?? []) { const child = byId.get(id); if (child) scan.push({ node: child, inherited: isHidden, within: isScoped }); }
+          for (const id of node.childIds ?? []) { const child = byId.get(id); if (child) scan.push({ node: child, inherited: isHidden, within: isScoped, placeholderOwner: owner }); }
         }
         const hidden = (node: any) => effectiveHidden.get(node.nodeId) === true;
         const inScope = (node: any) => scoped.get(node.nodeId) === true;
@@ -3536,11 +3727,14 @@ export class AutomationRuntime {
         };
         for (let index = order.length - 1; index >= 0; index--) {
           const node = order[index]!;
-          hiddenSubtree.set(node.nodeId, hidden(node) || !inScope(node) || maskedControl(node) || projected(node) !== undefined || (node.childIds ?? []).some((id: string) => hiddenSubtree.get(id)));
+          const textEvidence = placeholderTextEvidence.get(node.backendDOMNodeId);
+          hiddenSubtree.set(node.nodeId, hidden(node) || !inScope(node) || maskedControl(node) || unknownPlaceholderText.has(node.nodeId) || taintedNames.has(node.nodeId) || uncertainNames.has(node.nodeId) || placeholder(node)?.status === "hidden" || placeholder(node)?.status === "unknown" || textEvidence !== undefined && textEvidence.status !== "visible" || projected(node) !== undefined || (node.childIds ?? []).some((id: string) => hiddenSubtree.get(id)));
         }
         const visibleName = (node: any, original: string) => {
           const ownProjection = projected(node);
           if (ownProjection !== undefined) return ownProjection;
+          original = safeName(node, original);
+          if (activeSource(node)?.type === "placeholder") return original;
           const source = node.name?.sources?.find((item: any) => !item.superseded && item.value?.value !== undefined);
           if (!(node.childIds ?? []).some((id: string) => hiddenSubtree.get(id))) return original;
           if (source?.type !== "contents") return source || !scopedRoot ? original : "";
@@ -3555,14 +3749,18 @@ export class AutomationRuntime {
             const childRole = child.ignored ? "" : axValue(child.role);
             if (!hidden(child)) {
               if (childRole === "StaticText") {
-                parts.push(projected(child) ?? axValue(child.name));
+                const textEvidence = placeholderTextEvidence.get(child.backendDOMNodeId);
+                if (!textEvidence) parts.push(projected(child) ?? safeName(child, axValue(child.name)));
+                else if (textEvidence.status === "visible") parts.push(textEvidence.text);
                 continue;
               }
               // Embedded form controls contribute their value, not their own
               // accessible label or every option in their subtree.
               if (["textbox", "searchbox", "combobox", "listbox", "slider", "spinbutton", "scrollbar"].includes(childRole)) {
                 const valueText = child.properties?.find((property: any) => property.name === "valuetext");
-                const value = maskedControl(child) ? "" : axValue(valueText?.value) || axValue(child.value);
+                const ownPlaceholder = placeholder(child);
+                const value = maskedControl(child) ? "" : ownPlaceholder && ownPlaceholder.status !== "visible"
+                  ? axValue(child.value) : axValue(valueText?.value) || axValue(child.value);
                 if (value) parts.push(` ${value} `);
                 else if (childRole === "listbox" || childRole === "combobox") {
                   // Listboxes can expose their selection as AX option nodes
@@ -3587,7 +3785,7 @@ export class AutomationRuntime {
               // generic elements. Chrome separates such semantic objects from
               // surrounding text even when the markup has no whitespace.
               if (childRole && (childRole === "image" || childRole === "img" || childSource && childSource.type !== "contents")) {
-                const name = axValue(child.name);
+                const name = safeName(child, axValue(child.name));
                 if (name) parts.push(` ${name} `);
                 continue;
               }
@@ -3606,7 +3804,7 @@ export class AutomationRuntime {
         while (pending.length) {
           const { node, depth } = pending.pop()!;
           let childDepth = depth;
-          const role = node.ignored || hidden(node) || !inScope(node) ? "" : axValue(node.role); const originalName = axValue(node.name); const name = role ? visibleName(node, originalName) : ""; const value = maskedControl(node) ? "" : axValue(node.value);
+          const role = node.ignored || hidden(node) || !inScope(node) || axValue(node.role) === "StaticText" && placeholderTextNodes.has(node.backendDOMNodeId) ? "" : axValue(node.role); const originalName = axValue(node.name); const name = role ? visibleName(node, originalName) : ""; const value = maskedControl(node) ? "" : axValue(node.value);
           const parent = byId.get(node.parentId);
           const parentRole = parent && !parent.ignored && !hidden(parent) && inScope(parent) ? axValue(parent.role) : "";
           // A single static text leaf that exactly repeats its named semantic
@@ -3646,7 +3844,10 @@ export class AutomationRuntime {
             const childFrameId = typeof node.backendDOMNodeId === "number"
               ? childFramesByOwner.get(JSON.stringify([debuggee.sessionId ?? "", node.backendDOMNodeId])) : undefined;
             const childFrameRef = childFrameId ? capturedFrameRefs.get(childFrameId) : undefined;
-            const snapshotNode: SnapshotNode = { id: snapshotId, depth, role, name, value, ...(ref ? { ref, actions } : {}), ...(childFrameRef ? { childFrameRef } : {}), state };
+            const ownPlaceholder = placeholder(node);
+            const snapshotNode: SnapshotNode = { id: snapshotId, depth, role, name, value, ...(namesUnknown.has(node.nodeId) ? { nameUnknown: true } : {}),
+              ...(ownPlaceholder && ownPlaceholder.status !== "hidden" ? { placeholder: ownPlaceholder } : {}),
+              ...(ref ? { ref, actions } : {}), ...(childFrameRef ? { childFrameRef } : {}), state };
             const rendered = renderSnapshotNode(snapshotNode);
             lines.push({ id: snapshotId, line: rendered.line, ...(rendered.ref ? { ref: rendered.ref } : {}), node: snapshotNode });
             axLines.set(node.nodeId, snapshotId);
@@ -3858,7 +4059,8 @@ export class AutomationRuntime {
               const current = currentControls.get(item.backendNodeId);
               const matchedLabels: number[] = (current?.labels ?? []).filter((id: number) => labels.has(id))
                 .sort((left: number, right: number) => (positions.get(left) ?? 0) - (positions.get(right) ?? 0));
-              const name = visibleLabel(matchedLabels) || controlText.get(item.backendNodeId) || (tag === "input" && ["button", "submit", "reset"].includes(type) ? item.value ?? "" : "");
+              const directLabel = !item.attributes?.["aria-labelledby"] ? semanticName(item.attributes?.["aria-label"] ?? "") : "";
+              const name = directLabel || visibleLabel(matchedLabels) || controlText.get(item.backendNodeId) || (tag === "input" && ["button", "submit", "reset"].includes(type) ? item.value ?? "" : "");
               const state: Partial<Record<SnapshotStateName, unknown>> = {};
               if (item.checked !== undefined) state.checked = item.checked;
               if (item.masked) state.masked = true;
@@ -3885,7 +4087,8 @@ export class AutomationRuntime {
                 : ["checkbox", "radio", "switch"].includes(role) ? ["click", "check"] : ["combobox", "listbox"].includes(role) ? ["click", "select"] : ["click", "doubleClick", "hover"];
               const childFrameId = childFramesByOwner.get(JSON.stringify([debuggee.sessionId ?? "", item.backendNodeId]));
               const childFrameRef = childFrameId ? capturedFrameRefs.get(childFrameId) : undefined;
-              node = { id, depth, role, ...(name ? { name } : {}), ...(item.value && item.valueVisible && tag !== "select" && !["button", "submit", "reset"].includes(type) ? { value: item.value } : {}),
+              const ownPlaceholder = placeholders.get(item.backendNodeId)?.evidence;
+              node = { id, depth, role, ...(name ? { name } : {}), ...(ownPlaceholder && ownPlaceholder.status !== "hidden" ? { placeholder: ownPlaceholder } : {}), ...(item.value && item.valueVisible && tag !== "select" && !["button", "submit", "reset"].includes(type) ? { value: item.value } : {}),
                 ...(item.valueVisible && item.selectedOptions?.length ? { selectedLabels: item.selectedOptions.map(({ label }) => label) } : {}),
                 ...(ref ? { ref, actions } : {}), ...(childFrameRef ? { childFrameRef } : {}), state };
             }
@@ -3929,13 +4132,28 @@ export class AutomationRuntime {
       if (!changed()) {
         let confirmations: Array<{ debuggee: Debuggee; snapshot: any }>;
         try {
+          const after = await waitForCapture(collectPlaceholders(placeholderItems));
+          const changedPlaceholder = after.size !== placeholderBefore.size || [...placeholderBefore].some(([key, before]) => {
+            const next = after.get(key);
+            return !next || before.textBackendNodeId !== next.textBackendNodeId || !samePlaceholderEvidence(before.evidence, next.evidence);
+          });
+          if (changedPlaceholder) {
+            if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "placeholder-unstable" });
+            retriedUnstableCapture = true; continue;
+          }
           confirmations = await waitForCapture(Promise.all(relevantDebuggees.map(async ({ debuggee }) => ({ debuggee,
             snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true }) }))));
           if (changed()) continue;
           if (!await waitForCapture(framesAreReady())) { await delay(50, signal); continue; }
         } catch (error) {
           guard();
-          if (!changed() && !isTransientNavigationError(error) && !isDetachedNodeError(error)) throw error;
+          const stalePlaceholderContext = error instanceof AutomationError && error.code === "stale-frame"
+            && ["placeholder-context-expired", "frame-context-expired", "placeholder-node-detached"].includes(String(error.detail.reason));
+          if (stalePlaceholderContext && !changed()) {
+            if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "placeholder-context-unstable" });
+            retriedUnstableCapture = true;
+          }
+          if (!changed() && !isTransientNavigationError(error) && !isDetachedNodeError(error) && !stalePlaceholderContext) throw error;
           await delay(changed() ? 0 : 50, signal); continue;
         }
         if (changed()) continue;

@@ -7,6 +7,7 @@ import type { EventLogger } from "../logging";
 import { ChromeExecutor } from "./executor";
 import { createProgramTools, PROGRAM_TOOL_REGISTRY } from "./tool";
 import { ToolScheduler } from "./tool-scheduler";
+import { PLACEHOLDER_EVIDENCE_SOURCE } from "./snapshot-placeholder";
 
 const inspectText = (value: any) => value.items.map((item: any) => item.line).join("\n");
 
@@ -129,6 +130,37 @@ function textboxSnapshot(options: { value?: string; text?: string; role?: string
     return original(source, method, params);
   });
   return { runtime, command, value, text };
+}
+
+function placeholderSnapshot(options: { status?: string[]; label?: boolean; dependency?: boolean; transitive?: boolean; value?: string } = {}) {
+  const { runtime, command } = harness(), original = command.getMockImplementation()!;
+  const strings = ["root", "#document", "INPUT", "placeholder", "PRIVATE_HINT", "1", "visible", "static", "none", "auto", "ltr", "horizontal-tb", "block", "16px", "rgb(0, 0, 0)", "0px", "border-box", "clip", "BUTTON", options.value ?? "", "DIV"];
+  const style = [5, 6, 6, 6, 6, 7, 8, 8, 8, 8, 9, 8, 8, 8, 8, 8, 9, 10, 11, 12, 13, 14, 8, 15, 16, 8, 8, 17, 8, 8, 8];
+  const snapshot = { strings, documents: [{ frameId: 0, nodes: { backendNodeId: [1, 7, 9, 10], parentIndex: [-1, 0, 0, 0], nodeType: [9, 1, 1, 1], nodeName: [1, 2, options.dependency ? 18 : 20, options.transitive ? 18 : 20], nodeValue: [-1, -1, -1, -1], attributes: [[], [3, 4], [], []], inputValue: { index: [1], value: [19] } },
+    layout: { nodeIndex: [0, 1, 2, 3], bounds: Array.from({ length: 4 }, () => [0, 0, 100, 20]), styles: [[], style, style, style], text: [-1, -1, -1, -1] } }] };
+  const source = options.label ? { type: "attribute", value: { value: "Label" }, attribute: "aria-label" } : { type: "placeholder", value: { value: "PRIVATE_HINT" }, attribute: "placeholder" };
+  const related = (id: number) => ({ type: "relatedElement", attribute: "aria-labelledby", value: { value: "PRIVATE_HINT" }, attributeValue: { relatedNodes: [{ backendDOMNodeId: id }] } });
+  const nodes: any[] = [
+    { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["input", ...(options.dependency ? ["dependent"] : []), ...(options.transitive ? ["transitive"] : [])] },
+    { nodeId: "input", parentId: "root", backendDOMNodeId: 7, role: { value: "textbox" }, name: { value: options.label ? "Label" : "PRIVATE_HINT", sources: [source] }, value: { value: options.value ?? "" }, childIds: [] },
+    ...(options.dependency ? [{ nodeId: "dependent", parentId: "root", backendDOMNodeId: 9, role: { value: "button" }, name: { value: "PRIVATE_HINT", sources: [related(7)] }, childIds: [] }] : []),
+    ...(options.transitive ? [{ nodeId: "transitive", parentId: "root", backendDOMNodeId: 10, role: { value: "button" }, name: { value: "PRIVATE_HINT", sources: [related(9)] }, childIds: [] }] : []),
+  ];
+  let reads = 0;
+  command.mockImplementation(async (source, method, params) => {
+    if (method === "DOMSnapshot.captureSnapshot") return snapshot;
+    if (method === "Accessibility.getFullAXTree") return { nodes };
+    if (method === "Page.createIsolatedWorld") return { executionContextId: 31 };
+    if (method === "Runtime.evaluate" && params?.expression === "document") return { result: { objectId: "placeholder-document" } };
+    if (method === "DOM.describeNode" && params?.backendNodeId === 7) return { node: { backendNodeId: 7, shadowRoots: [{ children: [{ attributes: ["pseudo", "-webkit-input-placeholder"], children: [{ nodeType: 3, backendNodeId: 8 }] }] }] } };
+    if (method === "DOM.resolveNode" && params?.objectGroup?.startsWith("surf-wax-placeholder:")) return { object: { objectId: params.backendNodeId === 7 ? "placeholder-host" : "placeholder-text" } };
+    if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === PLACEHOLDER_EVIDENCE_SOURCE) {
+      const status = (options.status ?? ["visible"])[Math.min(reads++, (options.status ?? ["visible"]).length - 1)];
+      return { result: { value: status === "visible" ? { status, text: "PRIVATE_HINT" } : { status } } };
+    }
+    return original(source, method, params);
+  });
+  return { runtime, command, reads: () => reads };
 }
 
 describe("AutomationRuntime", () => {
@@ -1404,6 +1436,134 @@ describe("AutomationRuntime", () => {
     });
     const page = await runtime.createPage(3);
     await expect(page.inspect({}, page.locator("#leaf"))).rejects.toMatchObject({ code: "snapshot-unavailable", detail: { reason: "unknown-region-membership" } });
+    await runtime.abortSessions();
+  });
+
+  it.each([
+    { status: "visible", visible: true },
+    { status: "hidden", visible: false },
+    { status: "unknown", visible: false },
+  ])("projects a $status placeholder instead of exposing the unverified AX name", async ({ status, visible }) => {
+    const { runtime, command, reads } = placeholderSnapshot({ status: [status] });
+    const result = await (await runtime.createPage(3)).inspect();
+    const text = inspectText(result);
+    expect(text.includes("PRIVATE_HINT")).toBe(visible);
+    expect(text.includes("[placeholder=unknown]")).toBe(status === "unknown");
+    expect((result.items as any[]).find((item) => item.line.includes("textbox"))?.ref).toBeTruthy();
+    expect(reads()).toBe(2);
+    expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.releaseObjectGroup" && params?.objectGroup?.startsWith("surf-wax-placeholder:"))).toHaveLength(2);
+    await runtime.abortSessions();
+  });
+
+  it("retains an independent ARIA name and a visible placeholder", async () => {
+    const { runtime } = placeholderSnapshot({ label: true });
+    const result = await (await runtime.createPage(3)).inspect();
+    expect(inspectText(result)).toContain('textbox "Label"');
+    expect(inspectText(result)).toContain('[placeholder="PRIVATE_HINT"]');
+    await runtime.abortSessions();
+  });
+
+  it("keeps an independent ARIA name when its placeholder is hidden", async () => {
+    const { runtime } = placeholderSnapshot({ label: true, status: ["hidden"] });
+    const result = await (await runtime.createPage(3)).inspect();
+    expect(inspectText(result)).toContain('textbox "Label"');
+    expect(inspectText(result)).not.toContain("PRIVATE_HINT");
+    expect(inspectText(result)).not.toContain("name=unknown");
+    await runtime.abortSessions();
+  });
+
+  it("emits a filled value without emitting its nonpainted AX placeholder name", async () => {
+    const { runtime } = placeholderSnapshot({ status: ["hidden"], value: "typed" });
+    const result = await (await runtime.createPage(3)).inspect();
+    expect(inspectText(result)).toContain("typed");
+    expect(inspectText(result)).not.toContain("PRIVATE_HINT");
+    await runtime.abortSessions();
+  });
+
+  it("does not leak a hidden placeholder through an AX text child", async () => {
+    const { runtime, command } = placeholderSnapshot({ status: ["hidden"] }), original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method !== "Accessibility.getFullAXTree") return original(source, method, params);
+      const result = await original(source, method, params);
+      result.nodes[1].childIds = ["placeholder-text"];
+      result.nodes.push({ nodeId: "placeholder-text", parentId: "input", backendDOMNodeId: 8, role: { value: "StaticText" }, name: { value: "PRIVATE_HINT" }, childIds: [] });
+      return result;
+    });
+    const result = await (await runtime.createPage(3)).inspect();
+    expect(inspectText(result)).not.toContain("PRIVATE_HINT");
+    await runtime.abortSessions();
+  });
+
+  it("marks unidentified AX text below a hidden placeholder unknown while retaining a represented input value", async () => {
+    for (const value of ["", "typed"]) {
+      const { runtime, command } = placeholderSnapshot({ status: ["hidden"], value }), original = command.getMockImplementation()!;
+      command.mockImplementation(async (source, method, params) => {
+        if (method !== "Accessibility.getFullAXTree") return original(source, method, params);
+        const result = await original(source, method, params);
+        result.nodes[1].childIds = ["unidentified"];
+        result.nodes.push({ nodeId: "unidentified", parentId: "input", role: { value: "StaticText" }, name: { value: value || "PRIVATE_HINT" }, childIds: [] });
+        return result;
+      });
+      const result = await (await runtime.createPage(3)).inspect();
+      const text = inspectText(result);
+      expect(text).not.toContain("PRIVATE_HINT");
+      if (value) { expect(text).toContain(": typed"); expect(text).not.toContain("StaticText"); }
+      else expect(text).toContain("StaticText [name=unknown]");
+      await runtime.abortSessions();
+    }
+  });
+
+  it.each(["detached", "context", "context-entry"])("bounds repeated placeholder %s failures", async (mode) => {
+    const { runtime, command } = placeholderSnapshot(), original = command.getMockImplementation()!;
+    let attempts = 0;
+    command.mockImplementation(async (source, method, params) => {
+      if (mode === "detached" && method === "DOM.resolveNode" && params?.backendNodeId === 8 && params?.objectGroup?.startsWith("surf-wax-placeholder:")) {
+        attempts++; throw new Error("Node not found");
+      }
+      if (mode === "context" && method === "Runtime.callFunctionOn" && params?.functionDeclaration === PLACEHOLDER_EVIDENCE_SOURCE) {
+        attempts++; runtime.handleEvent({ tabId: 3 }, "Runtime.executionContextDestroyed", { executionContextId: 31 });
+      }
+      if (mode === "context-entry" && method === "Page.createIsolatedWorld") {
+        attempts++; runtime.handleEvent({ tabId: 3 }, "Runtime.executionContextDestroyed", { executionContextId: 31 });
+      }
+      return original(source, method, params);
+    });
+    await expect((await runtime.createPage(3)).inspect()).rejects.toMatchObject({ code: "snapshot-unavailable", detail: { reason: "placeholder-context-unstable" } });
+    expect(attempts).toBe(2);
+    await runtime.abortSessions();
+  });
+
+  it("marks transitive AX names unknown when they depend on a hidden placeholder", async () => {
+    const { runtime } = placeholderSnapshot({ status: ["hidden"], dependency: true, transitive: true });
+    const result = await (await runtime.createPage(3)).inspect();
+    expect(inspectText(result)).not.toContain("PRIVATE_HINT");
+    expect((result.items as any[]).filter((item) => item.line.includes("button [name=unknown]"))).toHaveLength(2);
+    await runtime.abortSessions();
+  });
+
+  it("retries a placeholder whose paint evidence changes during capture", async () => {
+    const { runtime, reads } = placeholderSnapshot({ status: ["visible", "hidden", "hidden", "hidden"] });
+    const result = await (await runtime.createPage(3)).inspect();
+    expect(inspectText(result)).not.toContain("PRIVATE_HINT");
+    expect(reads()).toBe(4);
+    await runtime.abortSessions();
+  });
+
+  it("cancels immediately but releases a placeholder group only after a late probe settles", async () => {
+    const { runtime, command } = placeholderSnapshot(), original = command.getMockImplementation()!;
+    const controller = new AbortController(); runtime.setContext({ signal: controller.signal });
+    let entered!: () => void, deliver!: (value: any) => void;
+    const waiting = new Promise<void>((resolve) => { entered = resolve; }), late = new Promise<any>((resolve) => { deliver = resolve; });
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === PLACEHOLDER_EVIDENCE_SOURCE) { entered(); return late; }
+      return original(source, method, params);
+    });
+    const pending = (await runtime.createPage(3)).inspect();
+    await waiting; controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObjectGroup" && params?.objectGroup?.startsWith("surf-wax-placeholder:"))).toBe(false);
+    deliver({ result: { value: { status: "hidden" } } });
+    await vi.waitFor(() => expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObjectGroup" && params?.objectGroup?.startsWith("surf-wax-placeholder:"))).toBe(true));
     await runtime.abortSessions();
   });
 

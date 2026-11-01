@@ -50,6 +50,15 @@ describe("structured semantic snapshot rendering", () => {
     expect(renderSnapshotNode(select, { fields: ["state"] }).line).toBe("- combobox");
   });
 
+  it("renders placeholder and name uncertainty without duplicating the visible name", () => {
+    const input: SnapshotNode = { id: "one", depth: 0, role: "textbox", name: "Label", placeholder: { status: "visible", text: 'A "hint"' } };
+    expect(renderSnapshotNode(input).line).toBe('- textbox "Label" [placeholder="A \\\"hint\\\""]');
+    expect(renderSnapshotNode({ ...input, name: 'A "hint"' }).line).toBe('- textbox "A \\\"hint\\\""');
+    expect(renderSnapshotNode({ ...input, name: "", nameUnknown: true, placeholder: { status: "unknown" } }).line)
+      .toBe("- textbox [name=unknown] [placeholder=unknown]");
+    expect(renderSnapshotNode(input, { fields: ["state"] }).line).toBe("- textbox");
+  });
+
   it("keeps the owner-to-child-frame association in every field projection", () => {
     const owner: SnapshotNode = { id: "owner", depth: 1, role: "Iframe", name: "Work item", childFrameRef: "f-handle" };
     expect(renderSnapshotNode(owner).line).toBe('  - Iframe "Work item" [frameRef=f-handle]');

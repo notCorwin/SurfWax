@@ -206,6 +206,26 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
 }
 
 const LARGE_RESULT_BYTES = 8 * 1024;
+const INSPECTION_RESULT_BYTES = 16 * 1024;
+// Only the native, already-paginated inspection envelope gets the larger
+// allowance. Unknown wrappers and additional fields retain artifact handling.
+const inspectionInteger = z.number().int().nonnegative();
+const inspectionPageSchema = z.object({
+  observationId: z.string(), tabId: inspectionInteger, documentId: inspectionInteger,
+  url: z.string(), title: z.string(),
+  viewport: z.object({ x: z.number(), y: z.number(), width: z.number(), height: z.number(), scale: z.number() }).strict(),
+  mode: z.enum(["full", "delta"]), reset: z.literal("previous-output-truncated").optional(),
+  items: z.array(z.object({ id: z.string(), line: z.string(), ref: z.string().optional(),
+    change: z.enum(["added", "updated", "removed", "moved"]).optional(), after: z.string().nullable().optional(),
+    fragment: z.object({ index: inspectionInteger, start: inspectionInteger, end: inspectionInteger, total: inspectionInteger }).strict().optional(),
+  }).strict()),
+  nextCursor: z.string().optional(),
+  truncation: z.object({ truncated: z.boolean(), total: inspectionInteger, returned: inspectionInteger,
+    offset: inspectionInteger, charOffset: inspectionInteger, nextOffset: inspectionInteger, nextCharOffset: inspectionInteger,
+    budget: inspectionInteger, used: inspectionInteger, reason: z.enum(["budget", "slice"]).optional(),
+    baselineComplete: z.boolean(), requiredBudget: inspectionInteger.optional(),
+  }).strict(),
+}).strict().refine((page) => page.truncation.returned === page.items.length);
 
 type VisualEvidence = { screenshot: Record<string, unknown>; context: Record<string, unknown>; path: Array<string | number> };
 
@@ -524,6 +544,8 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
   if (serialized === undefined) return value;
   const bytes = new TextEncoder().encode(serialized).byteLength;
   if (bytes <= LARGE_RESULT_BYTES) return value;
+  if (options.preserveInspectionStatus && bytes <= INSPECTION_RESULT_BYTES && inspectionPageSchema.safeParse(value).success
+    && previewEncoder.encode(JSON.stringify({ ...value as Record<string, unknown>, evidenceId: options.toolCallId ?? "" })).byteLength <= INSPECTION_RESULT_BYTES) return value;
   const storedValue = Object.hasOwn(options, "originalResult") && value && typeof value === "object" && !Array.isArray(value)
     ? { ...value, result: options.originalResult } : value;
   const event = await options.logger.append({ type: "tool.result.data", conversationId: options.conversationId, toolCallId: options.toolCallId, runId: options.runId, toolCallIdCanonical: options.toolCallIdCanonical, content: { bytes }, output: storedValue });

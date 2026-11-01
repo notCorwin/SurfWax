@@ -8,6 +8,22 @@ import { callUserScript } from "./script-client";
 import { ToolScheduler } from "./tool-scheduler";
 
 describe("browser tools", () => {
+  it("returns a budgeted inspection page inline with its continuation and fragments intact", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: testEventStore(events) });
+    const items = [{ id: "node-1", line: "海".repeat(3100), fragment: { index: 0, start: 0, end: 3100, total: 4000 } }];
+    const page = { observationId: "obs", tabId: 4, documentId: 1, url: "https://example.test/", title: "Page",
+      viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "full", items, nextCursor: "obs:0:3100",
+      truncation: { truncated: true, total: 2, returned: 1, offset: 0, charOffset: 0, nextOffset: 0, nextCharOffset: 3100,
+        budget: 12000, used: new TextEncoder().encode(JSON.stringify(items)).byteLength, reason: "budget", baselineComplete: false } };
+    const executor = { inspect: vi.fn(async () => page), pendingBackgroundJobs: () => [] } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor, { logger, conversationId: "thread" }) as Record<string, any>;
+    const result = await tools.inspect_page.execute({}, { toolCallId: "inspect" });
+    expect(new TextEncoder().encode(JSON.stringify(result)).byteLength).toBeGreaterThan(8192);
+    expect(result).toEqual({ ...page, evidenceId: "inspect" });
+    expect(events.filter((event) => event.type === "tool.result.data")).toHaveLength(0);
+  });
+
   it("attaches each action's snapshot before the next scheduled action, including failures", async () => {
     const order: string[] = [];
     const executor = {
@@ -873,6 +889,21 @@ describe("browser tools", () => {
     const value = { observationId: "obs", tabId: 41, documentId: 3, mode: "full", items, nextCursor: "cursor", truncation: { truncated: true, total: 100, returned: 50, budget: 15000, used: 14000, reason: "budget", baselineComplete: false } };
     const result = await compactToolResult(value, { logger, preserveInspectionStatus: true });
     expect(result).toMatchObject({ $ref: 18, observationId: "obs", tabId: 41, documentId: 3, mode: "full", nextCursor: "cursor", truncation: { truncated: true, reason: "budget", baselineComplete: false }, access: { artifactId: 18, path: ["items"], offset: 0, limit: expect.any(Number) } });
+  });
+
+  it("only exempts verified inspection pages within the complete byte limit", async () => {
+    const logger = { append: async (event: any) => ({ ...event, id: 18 }) } as EventLogger;
+    const makePage = (line: string) => ({ observationId: "obs", tabId: 41, documentId: 3, url: "https://example.test/", title: "Page",
+      viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "delta", items: [{ id: "node", line, change: "updated", after: null }], nextCursor: "obs:1:0",
+      truncation: { truncated: true, total: 2, returned: 1, offset: 0, charOffset: 0, nextOffset: 1, nextCharOffset: 0,
+        budget: 12000, used: 10000, reason: "budget", baselineComplete: false } });
+    const page = makePage("x".repeat(9000));
+    expect(await compactToolResult(page, { logger, preserveInspectionStatus: true, toolCallId: "call" })).toEqual(page);
+    for (const value of [makePage("x".repeat(17000)), { ...page, url: "y".repeat(17000) }, { ...page, unexpected: true }, { result: page }]) {
+      expect(await compactToolResult(value, { logger, preserveInspectionStatus: true, toolCallId: "call" })).toMatchObject({ $ref: 18 });
+    }
+    expect(await compactToolResult(page, { logger, preserveInspectionStatus: true, toolCallId: "x".repeat(17000) })).toMatchObject({ $ref: 18 });
+    expect(await compactToolResult(page, { logger })).toMatchObject({ $ref: 18 });
   });
 
   it("keeps request history integrity and access visible after compaction", async () => {

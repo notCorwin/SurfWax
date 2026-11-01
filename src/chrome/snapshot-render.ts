@@ -9,8 +9,10 @@ export type SnapshotNode = Readonly<{
   depth: number;
   role: string;
   name?: string;
+  nameUnknown?: boolean;
   value?: string;
   selectedLabels?: readonly string[];
+  placeholder?: Readonly<{ status: "visible"; text: string } | { status: "unknown" }>;
   /** A reference created by the browser runtime, not parsed from page text. */
   ref?: string;
   /** Run-bound handle for the child document, shared with its subtree marker. */
@@ -45,6 +47,7 @@ export function renderSnapshotNode(
   const name = node.name ?? "";
   const value = node.value ?? "";
   let line = `${"  ".repeat(node.depth)}- ${node.role}${fields.has("text") && name ? ` ${quote(name)}` : ""}`;
+  if (fields.has("text") && node.nameUnknown) line += " [name=unknown]";
   if (node.childFrameRef) line += ` [frameRef=${node.childFrameRef}]`;
   if (fields.has("ref") && node.ref && options.inlineRef !== false) line += ` [ref=${node.ref}]`;
   if (fields.has("actions") && node.actions?.length) {
@@ -56,6 +59,9 @@ export function renderSnapshotNode(
     if (state) line += ` [${state}]`;
   }
   if (fields.has("text") && value && value !== name) line += `: ${value}`;
+  if (fields.has("text") && node.placeholder?.status === "unknown") line += " [placeholder=unknown]";
+  else if (fields.has("text") && node.placeholder?.status === "visible" && node.placeholder.text !== name)
+    line += ` [placeholder=${quote(node.placeholder.text)}]`;
   if (fields.has("text") && node.selectedLabels?.length) line += ` [selected=${node.selectedLabels.map((label) => JSON.stringify(label)).join(",")}]`;
   return { id: node.id, line, ...(fields.has("ref") && node.ref ? { ref: node.ref } : {}) };
 }
