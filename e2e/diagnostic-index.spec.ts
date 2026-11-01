@@ -39,7 +39,7 @@ test("upgrades an actual v8 IndexedDB without rebuilding or deleting legacy reco
 test("indexes diagnostic capture events atomically in the canonical database", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
-  responses.push(commandResponse("execute_program", { code: `return await net.fetch({context:'page',url:${JSON.stringify(`${provider.origin}/target`)}});` }, "capture-fetch"),
+  responses.push(commandResponse("send_request", { context: "page", url: `${provider.origin}/target` }, "capture-fetch"),
     commandResponse("list_requests", {}, "list-capture"), textResponse("INDEXED_CAPTURE_OK"));
   const opened = await openExtension();
   try {
@@ -77,8 +77,17 @@ test("reads a capture beyond the live cache through the diagnostic index", async
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   responses.push(
-    commandResponse("execute_program", { timeoutMs: 90_000, code: `return await page.evaluate(async () => { for (let start = 0; start < 1020; start += 30) await Promise.all(Array.from({length: Math.min(30, 1020-start)}, (_, index) => fetch('/target?capture=' + (start+index)).then(response => response.text()))); return 'captured'; });` }, "many-requests"),
-    commandResponse("list_requests", { limit: 2 }, "first-capture-page"),
+    commandResponse("click", { target: { by: "css", value: "#start-capture" }, timeoutMs: 30_000 }, "many-requests"),
+    (request) => {
+      const result = JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
+      expect(result).toMatchObject({ ok: true });
+      return commandResponse("verify_state", { target: { by: "css", value: "#capture-status" }, textIncludes: "captured", timeoutMs: 90_000 }, "capture-complete");
+    },
+    (request) => {
+      const result = JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
+      expect(result).toMatchObject({ ok: true, result: { verified: true } });
+      return commandResponse("list_requests", { limit: 2 }, "first-capture-page");
+    },
     (request) => {
       const result = JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
       expect(result).toMatchObject({ ok: true, result: { integrity: "complete", hasMore: true, nextOffset: 2, requests: expect.any(Array) } });
@@ -89,6 +98,16 @@ test("reads a capture beyond the live cache through the diagnostic index", async
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage(); await target.goto(`${provider.origin}/automation`);
+    await target.evaluate(() => {
+      const button = document.createElement("button"); button.id = "start-capture"; button.textContent = "Capture requests";
+      const status = document.createElement("output"); status.id = "capture-status"; status.textContent = "waiting";
+      button.onclick = async () => {
+        for (let start = 0; start < 1020; start += 30)
+          await Promise.all(Array.from({ length: Math.min(30, 1020 - start) }, (_, index) => fetch(`/target?capture=${start + index}`).then((response) => response.text())));
+        status.textContent = "captured";
+      };
+      document.body.append(button, status);
+    });
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     await target.bringToFront();
     await opened.page.getByTestId("composer-input").fill("capture many requests and inspect the first page");

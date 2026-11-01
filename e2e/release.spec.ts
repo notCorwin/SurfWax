@@ -77,12 +77,18 @@ test('reloads a nonstream profile without changing branches, configuration, log 
     await opened.page.getByTestId('composer-input').fill('verify the upgraded runtime');
     await opened.page.getByTestId('composer-input').press('Enter');
     await expect(opened.page.locator('.markdown-body').last()).toContainText('UPGRADED_RUNTIME_READY');
-    expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(['inspect_page', 'execute_program']));
+    const tools = provider.requests[0].tools.map((tool: any) => tool.function.name);
+    expect(tools).toEqual(expect.arrayContaining(['inspect_page', 'take_screenshot', 'save_artifact']));
+    expect(tools).not.toContain('execute_program');
   } finally { await dispose(opened.context, profile, provider.server); }
 });
 
 test('download failure retains the artifact and a retry saves it without requesting permission or recapturing', async () => {
-  const responses: Parameters<typeof startProvider>[0] = [commandResponse("execute_program", { code: `return await page.screenshot(${JSON.stringify({ filename: 'retained.png', save: true })});` }, 'failed-save'), textResponse('SAVE_FAILED'), textResponse('保存重试')];
+  let artifactId = 0;
+  const responses: Parameters<typeof startProvider>[0] = [commandResponse('take_screenshot', {}, 'capture-save'), (request) => {
+    artifactId = JSON.parse(request.messages.findLast((entry: any) => entry.role === 'tool').content).result.artifact.id;
+    return commandResponse('save_artifact', { artifactId }, 'failed-save');
+  }, textResponse('SAVE_FAILED'), textResponse('保存重试')];
   const provider = await startProvider(responses);
   const opened = await openExtension();
   try {
@@ -100,24 +106,28 @@ test('download failure retains the artifact and a retry saves it without request
     await expect(opened.page.getByTestId('conversation-menu')).toContainText('保存重试');
     await expect(opened.page.getByTestId('download-permission')).toHaveCount(0);
     const events = await readEvents(opened.page);
-    const artifact = events.find(event => event.type === 'tool.result.data' && event.content?.filename === 'retained.png');
+    const artifact = events.find(event => event.type === 'tool.result.data' && event.id === artifactId);
     expect(artifact).toBeTruthy();
     expect(events.find(event => event.toolCallId === 'failed-save' && event.type === 'tool.failed')?.output)
-      .toMatchObject({ artifact: { id: artifact.id, filename: 'retained.png', saved: false } });
+      .toMatchObject({ artifact: { id: artifact.id, filename: artifact.content.filename, saved: false } });
     await opened.page.evaluate(() => { (globalThis as any).__downloadTest.fail = false; });
-    responses.push(commandResponse("execute_program", { code: `return await artifacts.save(${JSON.stringify(artifact.id)},${JSON.stringify(undefined)});` }, 'retry-save'), textResponse('SAVE_RETRIED'));
+    responses.push(commandResponse('save_artifact', { artifactId: artifact.id }, 'retry-save'), textResponse('SAVE_RETRIED'));
     await opened.page.getByTestId('composer-input').fill('save the stored artifact again');
     await opened.page.getByTestId('composer-input').press('Enter');
     await expect(opened.page.locator('.markdown-body').last()).toContainText('SAVE_RETRIED');
     expect(await opened.page.evaluate(() => (globalThis as any).__downloadTest)).toMatchObject({ attempts: 2, permissionRequests: 0 });
-    expect((await readEvents(opened.page)).filter(event => event.type === 'tool.result.data' && event.content?.filename === 'retained.png')).toHaveLength(1);
+    expect((await readEvents(opened.page)).filter(event => event.type === 'tool.result.data' && event.content?.filename === artifact.content.filename)).toHaveLength(1);
     expect((await readEvents(opened.page)).find(event => event.type === 'tool.finished' && event.toolCallId === 'retry-save')?.output.result)
       .toMatchObject({ artifact: { id: artifact.id, saved: true, downloadId: 777 } });
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
 test('stopping a pending download retains its artifact and closes the tool once', async () => {
-  const provider = await startProvider([commandResponse("execute_program", { code: `return await page.screenshot(${JSON.stringify({ filename: 'pending.png', save: true })});` }, 'pending-save')]);
+  let artifactId = 0;
+  const provider = await startProvider([commandResponse('take_screenshot', {}, 'capture-pending'), (request) => {
+    artifactId = JSON.parse(request.messages.findLast((entry: any) => entry.role === 'tool').content).result.artifact.id;
+    return commandResponse('save_artifact', { artifactId }, 'pending-save');
+  }]);
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage(); await target.goto(`${provider.origin}/target`);
@@ -134,12 +144,14 @@ test('stopping a pending download retains its artifact and closes the tool once'
     await opened.page.evaluate(() => (globalThis as any).__finishDownload());
     await expect(opened.page.getByRole('button', { name: '停止生成' })).toHaveCount(0);
     const events = await readEvents(opened.page);
-    expect(events.filter(event => event.type === 'tool.result.data' && event.content?.filename === 'pending.png')).toHaveLength(1);
+    const artifact = events.find(event => event.type === 'tool.result.data' && event.id === artifactId);
+    expect(artifact).toBeTruthy();
+    expect(events.filter(event => event.type === 'tool.result.data' && event.content?.filename === artifact.content.filename)).toHaveLength(1);
     const terminal = events.filter(event => ['tool.failed', 'tool.finished'].includes(event.type) && event.toolCallId === 'pending-save');
     expect(terminal).toHaveLength(1);
     expect(terminal[0]).toMatchObject({
       content: { status: 'interrupted', effectUnknown: true },
-      output: { error: { code: 'aborted', effectUnknown: true }, artifact: { filename: 'pending.png' } },
+      output: { error: { code: 'aborted', effectUnknown: true }, artifact: { filename: artifact.content.filename } },
       abort: { reason: { $type: 'error', name: 'AbortError' } },
     });
     await expect.poll(async () => (await readEvents(opened.page)).reverse().find(event => event.type === 'browser.job.state' && event.toolCallId === 'pending-save')?.content.state).toBe('cancelled');

@@ -9,6 +9,7 @@ export type OperationObserver = { start(operation: string, source: EventSource):
 const chains = new Set([
   "ref",
   "locator",
+  "uniqueScope",
   "frameLocator",
   "frameRef",
   "getByRole",

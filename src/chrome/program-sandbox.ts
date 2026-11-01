@@ -34,6 +34,7 @@ function workerMain(codecFactory: typeof createProgramCodec) {
   const chains = new Set([
     "ref",
     "locator",
+    "uniqueScope",
     "frameLocator",
     "frameRef",
     "getByRole",

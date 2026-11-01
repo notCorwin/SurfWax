@@ -12,11 +12,19 @@ test("reconstructs a semantic delta from the full snapshot with duplicate text a
     await target.goto(`${provider.origin}/target`);
     await target.evaluate(() => {
       document.body.innerHTML = `<main><button id="a">Same</button><button id="b">Same</button><button id="c">Third</button><textarea aria-label="Notes">first\nsecond</textarea></main>`;
+      const mutate = document.createElement("button"); mutate.id = "mutate"; mutate.textContent = "Update records";
+      mutate.onclick = () => {
+        const main = document.querySelector("main")!;
+        main.querySelector("#a")!.remove(); main.prepend(main.querySelector("#c")!);
+        main.querySelector("textarea")!.value = "changed\nvalue";
+        const added = document.createElement("button"); added.id = "d"; added.textContent = "Same"; main.append(added);
+      };
+      document.body.append(mutate);
     });
     let baseline: any, delta: any;
     responses.push(
       commandResponse("inspect_page", { budget: 12000 }, "baseline"),
-      (request) => { baseline = lastTool(request); expect(baseline.mode).toBe("full"); return commandResponse("execute_program", { code: `await page.evaluate(() => { const main=document.querySelector('main'); main.querySelector('#a').remove(); main.prepend(main.querySelector('#c')); main.querySelector('textarea').value='changed\\nvalue'; const added=document.createElement('button'); added.id='d'; added.textContent='Same'; main.append(added); });` }, "mutate"); },
+      (request) => { baseline = lastTool(request); expect(baseline.mode).toBe("full"); return commandResponse("click", { target: { by: "css", value: "#mutate" } }, "mutate"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("inspect_page", { since: baseline.observationId }, "delta"); },
       (request) => { delta = lastTool(request); expect(delta.mode).toBe("delta"); return commandResponse("inspect_page", {}, "fresh"); },
       (request) => {

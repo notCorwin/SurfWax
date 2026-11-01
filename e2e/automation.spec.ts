@@ -5,23 +5,27 @@ import { existsSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { PROGRAM_CATALOG_VERSION } from "../src/chrome/tool";
 
 
-import { test, p95, textResponse, assistantResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, delayedResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, nativePanel, submitNative, readNativeEvents, type MockResponse } from './fixtures';
+import { test, p95, textResponse, assistantResponse, commandResponse, delayedResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, nativePanel, submitNative, readNativeEvents, type MockResponse } from './fixtures';
 
 test("selects large tool output without creating another reference", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
+  let artifactRef = 0;
   try {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/target`);
+    await target.evaluate(() => { const main = document.querySelector("main")!; main.textContent = "LARGE_START" + "zx".repeat(6000); main.style.display = "none"; });
     responses.push(
-      toolResponse("return { url: 'https://example.com', snapshot: 'LARGE_START' + 'zx'.repeat(6000) }", "call-large"),
+      commandResponse("read_text", { target: { by: "css", value: "main" } }, "call-large"),
       (request) => {
         const message = request.messages.findLast((entry: any) => entry.role === "tool");
         const output = JSON.parse(message.content);
         expect(output.access.artifactId).toBe(output.$ref);
+        artifactRef = output.$ref;
         return commandResponse("read_artifact", { ...output.access, limit: 11 }, "call-select-large");
       },
       textResponse("DONE_COMPACT"),
@@ -41,8 +45,8 @@ test("selects large tool output without creating another reference", async () =>
     expect(JSON.stringify(requests[2].messages)).toContain("LARGE_START");
     const events = await readEvents(opened.page);
     const data = events.find((event) => event.type === "tool.result.data");
-    expect(data.output).toMatchObject({ ok: true, state: "succeeded", result: { url: "https://example.com", snapshot: "LARGE_START" + "zx".repeat(6000) } });
-    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-large")?.output.$ref).toBe(data.id);
+    expect(data.output).toMatchObject({ result: "LARGE_START" + "zx".repeat(6000) });
+    expect(artifactRef).toBe(data.id);
     expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-select-large")?.output.result).toBe("LARGE_START");
     expect(events.filter((event) => event.type === "tool.result.data")).toHaveLength(1);
     await opened.page.reload();
@@ -50,7 +54,7 @@ test("selects large tool output without creating another reference", async () =>
     await opened.page.locator(".conversation-item", {hasText:"引用测试"}).locator(".conversation-select").click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("DONE_COMPACT");
     await target.bringToFront();
-    responses.push(commandResponse("execute_program", { code: `return await artifacts.read(${data.id}, {path:["result","snapshot"],offset:0,limit:11});` }, "read-after-reload"), textResponse("RESTORED_READ"));
+    responses.push(commandResponse("read_artifact", { artifactId: data.id, path: ["result"], offset: 0, limit: 11 }, "read-after-reload"), textResponse("RESTORED_READ"));
     await opened.page.getByTestId("composer-input").fill("read the stored result in this restored conversation");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("RESTORED_READ");
@@ -94,7 +98,8 @@ test("inspects the page and fills and clicks with atomic tools", async () => {
     await expect.poll(() => target.locator("output").textContent()).toBe("Welcome me@example.com");
     expect(events.some((event) => event.type === "automation.action.finished" && event.toolCallId === "call-click")).toBe(true);
     const toolNames = provider.requests[0].tools.map((tool: any) => tool.function.name);
-    expect(toolNames).toEqual(expect.arrayContaining(["inspect_page", "fill", "click", "execute_program"]));
+    expect(toolNames).toEqual(expect.arrayContaining(["inspect_page", "fill", "click", "send_request"]));
+    expect(toolNames).not.toContain("execute_program");
     expect(new Set(toolNames).size).toBe(toolNames.length);
     expect(toolNames).not.toContain("run");
     expect(toolNames).not.toContain("inspect");
@@ -145,51 +150,6 @@ test("uploads a stored artifact through an independent tool", async () => {
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
-});
-
-test("reads an incremental artifact while its background program is still running", async () => {
-  const responses: MockResponse[] = [];
-  const provider = await startProvider(responses);
-  const opened = await openExtension();
-  try {
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/automation`);
-    let jobId = "", count = 0;
-    const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
-    const readProgress: MockResponse = (request) => {
-      const job = lastTool(request);
-      expect(job, JSON.stringify(job)).toHaveProperty("events");
-      const emitted = job.events.find((event: any) => event.operation === "emit" && event.output?.artifactId);
-      if (emitted) {
-        expect(job.terminal).toBe(false);
-        return commandResponse("read_artifact", { artifactId: emitted.output.artifactId, path: ["base64"] }, "read-running-artifact");
-      }
-      expect(job.terminal).toBe(false);
-      responses.unshift(readProgress);
-      return commandResponse("get_job", { jobId, after: job.nextCursor, waitMs: 10_000 }, `wait-artifact-progress-${++count}`);
-    };
-    const readCancelled: MockResponse = (request) => {
-      const job = lastTool(request);
-      if (job.terminal) { expect(job.state).toBe("cancelled"); return textResponse("RUNNING_ARTIFACT_OK"); }
-      responses.unshift(readCancelled);
-      return commandResponse("get_job", { jobId, after: job.nextCursor, waitMs: 10_000 }, `wait-artifact-cancel-${++count}`);
-    };
-    responses.push(
-      commandResponse("execute_program", { code: "const file = await artifacts.text('partial.txt', 'partial data'); await emit({artifactId:file.id}); await sleep(30000);", background: true, timeoutMs: 60000 }, "start-artifact-job"),
-      (request) => { jobId = lastTool(request).jobId; return commandResponse("get_job", { jobId, waitMs: 10_000 }, "get-artifact-progress"); },
-      readProgress,
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: "cGFydGlhbCBkYXRh" }); return commandResponse("cancel_job", { jobId }, "cancel-artifact-job"); },
-      readCancelled,
-      textResponse("读取任务的中间产物"),
-    );
-    await (await configure(opened.context, opened.page, provider.baseURL)).close();
-    await target.bringToFront();
-    await opened.page.getByTestId("composer-input").fill("read the partial artifact before the task finishes");
-    await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("RUNNING_ARTIFACT_OK", { timeout: 30_000 });
-    const events = await readEvents(opened.page);
-    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "read-running-artifact")?.output).toMatchObject({ ok: true, result: "cGFydGlhbCBkYXRh" });
-  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
 test("uploads multiple artifacts to a chooser across independent tool calls", async () => {
@@ -624,23 +584,17 @@ test("moves the trusted pointer before a semantic click and dispatches the click
   try {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/target`);
-    responses.push(commandResponse("execute_program", { code: `
-      await page.evaluate(() => {
-        const button = document.createElement('button');
-        button.textContent = 'Pointer target';
-        button.style.cssText = 'position:fixed;left:20px;top:20px;width:120px;height:40px';
-        button.onmousemove = event => { if (event.isTrusted) button.dataset.moved = 'yes'; };
-        button.onmousedown = () => { button.dataset.movedBeforePress = button.dataset.moved || 'no'; };
-        button.onclick = event => {
-          button.dataset.clicks = String(Number(button.dataset.clicks || 0) + 1);
-          button.dataset.trustedClick = String(event.isTrusted);
-        };
-        document.body.append(button);
-      });
-      await page.getByRole('button', {name:'Pointer target'}).click();
-      await check(await page.getByRole('button', {name:'Pointer target'}).getAttribute('data-moved-before-press') === 'yes', 'Pointer must move before press');
-      return true;
-    ` }, "pointer-before-click"), textResponse("POINTER_OK"), textResponse("原生指针"));
+    await target.evaluate(() => {
+      const button = document.createElement("button"); button.textContent = "Pointer target";
+      button.style.cssText = "position:fixed;left:20px;top:20px;width:120px;height:40px";
+      button.onmousemove = event => { if (event.isTrusted) button.dataset.moved = "yes"; };
+      button.onmousedown = () => { button.dataset.movedBeforePress = button.dataset.moved || "no"; };
+      button.onclick = event => { button.dataset.clicks = String(Number(button.dataset.clicks || 0) + 1); button.dataset.trustedClick = String(event.isTrusted); };
+      document.body.append(button);
+    });
+    responses.push(commandResponse("click", { target: { by: "role", value: "button", name: "Pointer target" } }, "pointer-before-click"),
+      commandResponse("read_attribute", { target: { by: "role", value: "button", name: "Pointer target" }, name: "data-moved-before-press" }, "pointer-verify"),
+      textResponse("POINTER_OK"), textResponse("原生指针"));
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     await target.mouse.move(220, 220);
     await opened.page.getByTestId("composer-input").fill("click the semantic target with native pointer input");
@@ -651,8 +605,8 @@ test("moves the trusted pointer before a semantic click and dispatches the click
     expect(await button.getAttribute("data-clicks")).toBe("1");
     expect(await button.getAttribute("data-trusted-click")).toBe("true");
     const events = await readEvents(opened.page);
-    expect(events.find(event => event.type === "tool.finished" && event.toolCallId === "pointer-before-click")?.output).toMatchObject({ok:true,state:"succeeded",result:true});
-    expect(events.some(event => event.type === "browser.job.progress" && event.toolCallId === "pointer-before-click" && event.content?.state === "verified")).toBe(true);
+    expect(events.find(event => event.type === "tool.finished" && event.toolCallId === "pointer-before-click")?.output).toMatchObject({ok:true,state:"succeeded"});
+    expect(events.find(event => event.type === "tool.finished" && event.toolCallId === "pointer-verify")?.output).toMatchObject({ok:true,result:"yes"});
     expect(events.filter(event => event.type === "automation.action.finished" && event.content?.operation === "click")).toHaveLength(1);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
@@ -667,14 +621,16 @@ for (const deviceScaleFactor of [1, 2]) test(`injects a screenshot and clicks it
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/visual`);
     responses.push(
-      commandResponse("execute_program", { code: `return await page.screenshot(${JSON.stringify({ type: "jpeg", filename: "internal-visual.jpg" })});` }, "call-visual-observe"),
+      commandResponse("take_screenshot", {}, "call-visual-observe"),
       (request) => {
         const tool = request.messages.findLast((message: any) => message.role === "tool");
         const result = JSON.parse(tool.content).result;
         const observationId = result.observationId;
         if (!observationId) throw new Error("Visual observation id was not returned to the model");
-        return commandResponse("execute_program", { code: `return await page.point(${JSON.stringify(observationId)},${JSON.stringify(50 * result.screenshot.scale)},${JSON.stringify(40 * result.screenshot.scale)},'click');` }, "call-visual-act");
+        return commandResponse("move_pointer", { observationId, x: 50 * result.screenshot.scale, y: 40 * result.screenshot.scale }, "call-visual-move");
       },
+      commandResponse("press_pointer", {}, "call-visual-press"),
+      commandResponse("release_pointer", {}, "call-visual-release"),
       textResponse("VISUAL_OK"), textResponse("视觉自动化"),
     );
     const options = await configure(opened.context, opened.page, provider.baseURL);
@@ -688,16 +644,16 @@ for (const deviceScaleFactor of [1, 2]) test(`injects a screenshot and clicks it
     await expect.poll(() => provider.requests.length).toBeGreaterThanOrEqual(2);
     const events = await readEvents(opened.page);
     const observation = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-visual-observe")?.output.result;
-    expect(observation?.screenshot?.mediaType).toBe("image/jpeg");
+    expect(observation?.screenshot?.mediaType).toBe("image/png");
     expect(observation?.viewport.scale).toBe(deviceScaleFactor);
     const artifact = events.find((event) => event.id === observation.artifact.id)?.output;
     const dimensions = await opened.page.evaluate(async (base64) => {
-      const image = await createImageBitmap(await (await fetch(`data:image/jpeg;base64,${base64}`)).blob());
+      const image = await createImageBitmap(await (await fetch(`data:image/png;base64,${base64}`)).blob());
       const dimensions = { width: image.width, height: image.height }; image.close(); return dimensions;
     }, artifact.base64);
     expect(observation.screenshot).toMatchObject(dimensions);
     expect(observation.screenshot.scale).toBe(dimensions.width / observation.viewport.width);
-    expect(observation?.artifact).toMatchObject({ id: expect.any(Number), filename: "internal-visual.jpg", mimeType: "image/jpeg", byteLength: expect.any(Number), saved: false });
+    expect(observation?.artifact).toMatchObject({ id: expect.any(Number), filename: expect.stringMatching(/\.png$/), mimeType: "image/png", byteLength: expect.any(Number), saved: false });
     expect(observation?.artifact).not.toHaveProperty("downloadId");
     expect(observation?.screenshot?.artifactId).toBe(observation?.artifact?.id);
     expect(await opened.page.evaluate(async () => chrome.permissions.contains({ permissions: ["downloads"] }))).toBe(true);
@@ -727,7 +683,7 @@ for (const suspendedFrames of [false, true]) test(`uses frameLocator inside a cr
     await target.goto(`${provider.origin}/complex`);
     const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/complex`);
     responses.push(
-      pageResponse("await page.frameLocator('iframe[src*=localhost]').getByRole('button', {name:'Frame action'}).click(); return 'FRAME_OK';", tab.id!, "call-page-frame"),
+      commandResponse("click", { tabId: tab.id!, target: { by: "role", value: "button", name: "Frame action", frame: { by: "css", value: 'iframe[src*=localhost]' } } }, "call-page-frame"),
       textResponse("FRAME_AUTOMATION_OK"),
       textResponse("跨域框架"),
     );
@@ -738,7 +694,7 @@ for (const suspendedFrames of [false, true]) test(`uses frameLocator inside a cr
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FRAME_AUTOMATION_OK", { timeout: 10_000 });
     await expect.poll(() => target.frames().find((frame) => frame.url().includes("localhost"))?.locator("body").getAttribute("data-clicked")).toBe("yes");
     const events = await readEvents(opened.page);
-    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-page-frame")?.output.result).toBe("FRAME_OK");
+    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-page-frame")?.output).toMatchObject({ ok: true, state: "succeeded" });
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -754,23 +710,20 @@ test("re-resolves replaced nodes and uses browser semantics through open shadow 
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/automation-dynamic`);
     const [tab] = await opened.page.evaluate((url) => chrome.tabs.query({ url }), `${provider.origin}/automation-dynamic`);
-    responses.push(
-      pageResponse(`
-const action = page.getByRole('button', {name:'Delayed action'});
-for (let index = 0; index < 50; index += 1) await action.click();
-await page.getByText('50', {exact:true}).waitFor({state:'visible'});
-await page.getByRole('button', {name:'Shadow action'}).click();
-return {count: await page.getByText('50', {exact:true}).innerText(), shadow: await page.locator('shadow-action').getAttribute('data-clicked')};
-`, tab.id!, "call-page-dynamic"),
-      textResponse("DYNAMIC_AUTOMATION_OK"),
-      textResponse("动态页面自动化"),
-    );
+    const action = { by: "role", value: "button", name: "Delayed action" };
+    for (let index = 0; index < 3; index++) {
+      responses.push(commandResponse("verify_state", { tabId: tab.id!, target: action, state: "enabled", timeoutMs: 10_000 }, `dynamic-ready-${index}`),
+        commandResponse("click", { tabId: tab.id!, target: action }, `dynamic-click-${index}`));
+    }
+    responses.push(commandResponse("click", { tabId: tab.id!, target: { by: "role", value: "button", name: "Shadow action" } }, "dynamic-shadow"),
+      commandResponse("read_attribute", { tabId: tab.id!, target: { by: "css", value: "shadow-action" }, name: "data-clicked" }, "call-page-dynamic"),
+      textResponse("DYNAMIC_AUTOMATION_OK"), textResponse("动态页面自动化"));
     await opened.page.getByTestId("composer-input").fill("exercise dynamic semantic automation");
     await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(target.locator("output")).toHaveText("50", { timeout: 30_000 });
+    await expect(target.locator("output")).toHaveText("3", { timeout: 30_000 });
     await expect(opened.page.locator(".markdown-body").last()).toContainText("DYNAMIC_AUTOMATION_OK", { timeout: 30_000 });
     const events = await readEvents(opened.page);
-    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-page-dynamic")?.output.result).toEqual({ count: "50", shadow: "yes" });
+    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-page-dynamic")?.output.result).toBe("yes");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -807,10 +760,10 @@ test("returns a tool result for a removed command and lets the agent recover", a
 
 test("binds each turn to the active tab and supplies all current-window tab metadata", async () => {
   const provider = await startProvider([
-    commandResponse("execute_program", { code: `return await (page.evaluate("() => { document.documentElement.dataset.contextTurn = 'first'; return true; }"));` }, "call-context-first"),
+    commandResponse("click", { target: { by: "css", value: "#context-action" } }, "call-context-first"),
     textResponse("FIRST_CONTEXT_DONE"),
     textResponse("标签页上下文"),
-    commandResponse("execute_program", { code: `return await (page.evaluate("() => { document.documentElement.dataset.contextTurn = 'second'; return true; }"));` }, "call-context-second"),
+    commandResponse("click", { target: { by: "css", value: "#context-action" } }, "call-context-second"),
     textResponse("SECOND_CONTEXT_DONE"),
   ]);
   const opened = await openExtension();
@@ -821,6 +774,12 @@ test("binds each turn to the active tab and supplies all current-window tab meta
     await first.goto(firstUrl);
     const second = await opened.context.newPage();
     await second.goto(secondUrl);
+    for (const [page, label] of [[first, "first"], [second, "second"]] as const) {
+      await page.evaluate((value) => {
+        const button = document.createElement("button"); button.id = "context-action"; button.textContent = "Mark active tab";
+        button.onclick = () => { document.documentElement.dataset.contextTurn = value; }; document.body.append(button);
+      }, label);
+    }
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     const windowCount = await opened.page.evaluate(async () => (await chrome.windows.getAll()).length);
@@ -974,7 +933,7 @@ test("shows a bounded diagnostic when the canonical event log fails", async () =
 
 
 
-test("uploads through a hidden chooser and preserves held input across independent commands", async () => {
+test("preserves held keyboard and pointer input across independent commands", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -982,11 +941,6 @@ test("uploads through a hidden chooser and preserves held input across independe
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/automation`);
     await target.evaluate(() => {
-      const upload = document.createElement("input"); upload.type = "file"; upload.multiple = true; upload.hidden = true;
-      upload.onchange = () => { document.body.dataset.uploaded = [...(upload.files ?? [])].map((file) => file.name).join(","); };
-      document.body.append(upload);
-      const other = document.createElement("input"); other.type = "file"; other.hidden = true; document.body.append(other);
-      const button = document.createElement("button"); button.id = "chooser"; button.textContent = "Upload hidden files"; button.onclick = () => upload.click(); document.body.append(button);
       const canvas = document.createElement("div"); canvas.style.cssText = "position:fixed;left:20px;top:200px;width:200px;height:40px;background:#eee";
       canvas.onpointerdown = () => { document.body.dataset.dragStarted = "yes"; };
       canvas.onpointermove = (event) => { if (event.buttons & 1) document.body.dataset.dragMoved = `${event.clientX}`; };
@@ -994,33 +948,36 @@ test("uploads through a hidden chooser and preserves held input across independe
       document.body.append(canvas);
     });
     responses.push(
-      commandResponse("execute_program", { code: `return await page.locator(${JSON.stringify("#chooser")}).click();` }, "chooser-open"),
-      commandResponse("execute_program", { code: `return await page.upload(${JSON.stringify([{ name: "first.txt", text: "first" }, { name: "second.txt", text: "second" }])});` }, "chooser-upload"),
-      commandResponse("execute_program", { code: `return await page.getByLabel(${JSON.stringify("Email")}).fill(${JSON.stringify("")});` }, "focus-email"),
-      commandResponse("execute_program", { code: `return await page.keyboard.down(${JSON.stringify("Shift")});` }, "hold-shift"),
-      commandResponse("execute_program", { code: `return await page.keyboard.press(${JSON.stringify("a")});` }, "shift-a"),
-      commandResponse("execute_program", { code: `return await page.keyboard.up(${JSON.stringify("Shift")});` }, "release-shift"),
-      commandResponse("execute_program", { code: `return await page.mouse.move(${JSON.stringify(40)},${JSON.stringify(215)});` }, "move-start"),
-      commandResponse("execute_program", { code: `return await page.mouse.down();` }, "drag-start"),
-      commandResponse("execute_program", { code: `return await page.mouse.move(${JSON.stringify(160)},${JSON.stringify(215)});` }, "drag-move"),
-      commandResponse("execute_program", { code: `return await page.mouse.up();` }, "drag-end"),
+      commandResponse("fill", { target: { by: "label", value: "Email" }, value: "" }, "focus-email"),
+      commandResponse("key_down", { key: "Shift" }, "hold-shift"),
+      commandResponse("press_key", { key: "a" }, "shift-a"),
+      commandResponse("key_up", { key: "Shift" }, "release-shift"),
+      commandResponse("inspect_page", {}, "pointer-observation"),
+      (request) => {
+        const observation = JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
+        responses.unshift(commandResponse("press_pointer", {}, "drag-start"),
+          commandResponse("move_pointer", { observationId: observation.observationId, x: 160, y: 215 }, "drag-move"),
+          commandResponse("release_pointer", {}, "drag-end"));
+        return commandResponse("move_pointer", { observationId: observation.observationId, x: 40, y: 215 }, "move-start");
+      },
       textResponse("CHOOSER_AND_INPUT_OK"), textResponse("上传和输入"),
     );
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
-    await opened.page.getByTestId("composer-input").fill("upload hidden files and use held keyboard and pointer input");
+    await opened.page.getByTestId("composer-input").fill("use held keyboard and pointer input");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("CHOOSER_AND_INPUT_OK");
     await expect(target.getByLabel("Email")).toHaveValue("A");
-    expect(await target.evaluate(() => ({ ...document.body.dataset }))).toMatchObject({ uploaded: "first.txt,second.txt", dragStarted: "yes", dragMoved: "160", dragReleased: "160,215" });
+    expect(await target.evaluate(() => ({ ...document.body.dataset }))).toMatchObject({ dragStarted: "yes", dragMoved: "160", dragReleased: "160,215" });
     const events = await readEvents(opened.page);
     expect(events.filter((event) => event.type === "tool.failed")).toEqual([]);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
-test("restores completed program receipts after a failed form assertion", async () => {
+test("restores completed tool receipts after a failed form verification", async () => {
   const provider = await startProvider([
-    commandResponse("execute_program", { code: "await page.getByLabel('Email').fill('saved@example.com'); await check(await page.getByLabel('Email').inputValue() === 'different@example.com', 'expected a different email'); await page.getByRole('button',{name:'Sign in'}).click();" }, "batch-partial"),
+    commandResponse("fill", { target: { by: "label", value: "Email" }, value: "saved@example.com" }, "batch-fill"),
+    commandResponse("verify_state", { target: { by: "label", value: "Email" }, valueEquals: "different@example.com" }, "batch-partial"),
     textResponse("PARTIAL_BATCH_REPORTED"), textResponse("批次恢复"),
   ]);
   const opened = await openExtension();
@@ -1034,10 +991,10 @@ test("restores completed program receipts after a failed form assertion", async 
     await expect(opened.page.locator(".markdown-body").last()).toContainText("PARTIAL_BATCH_REPORTED");
     const read = async () => (await readEvents(opened.page)).find((event) => ["tool.failed", "tool.finished"].includes(event.type) && event.toolCallId === "batch-partial")?.output;
     const result = await read();
-    expect(result).toMatchObject({ ok: false, state: "failed", result: { error: { message: "expected a different email" } } });
-    const receipts = (await readEvents(opened.page)).filter(event => event.type === "browser.job.progress" && event.toolCallId === "batch-partial");
-    expect(receipts).toEqual(expect.arrayContaining([expect.objectContaining({ content: expect.objectContaining({ operation: "page.getByLabel.fill", state: "completed" }) }), expect.objectContaining({ content: expect.objectContaining({ operation: "check", state: "not-dispatched" }), error: expect.any(Object) })]));
-    expect(receipts.some(event => event.content.operation.endsWith("click"))).toBe(false);
+    expect(result).toMatchObject({ ok: true, state: "succeeded", result: { verified: false, actual: "saved@example.com" } });
+    const events = await readEvents(opened.page);
+    expect(events.find(event => event.type === "tool.finished" && event.toolCallId === "batch-fill")?.output).toMatchObject({ ok: true });
+    expect(events.some(event => event.type === "automation.action.finished" && event.content.operation === "click")).toBe(false);
     await opened.page.reload();
     expect(await read()).toEqual(result);
     await expect(target.getByLabel("Email")).toHaveValue("saved@example.com");
@@ -1045,84 +1002,67 @@ test("restores completed program receipts after a failed form assertion", async 
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
-test("preserves program progress when its native Side Panel closes during a later wait", async () => {
-  const provider = await startProvider([commandResponse("execute_program", { code: "await page.getByLabel('Email').fill('persisted@example.com'); await page.locator('#never-created').waitFor({state:'visible'}); await page.getByRole('button',{name:'Sign in'}).click();", timeoutMs: 300_000 }, "native-partial-act")]);
+test("preserves completed tool progress when its native Side Panel closes during a later wait", async () => {
+  const provider = await startProvider([
+    commandResponse("fill", { target: { by: "label", value: "Email" }, value: "persisted@example.com" }, "native-partial-fill"),
+    commandResponse("verify_state", { target: { by: "css", value: "#never-created" }, state: "visible", timeoutMs: 300_000 }, "native-partial-act"),
+  ]);
   const opened = await openExtension();
   try {
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     const native = await nativePanel(opened, `${provider.origin}/automation`);
     await submitNative(native.panel, "complete the first action and wait for the next assertion");
     await expect(native.target.getByLabel("Email")).toHaveValue("persisted@example.com");
-    await expect.poll(async () => (await readNativeEvents(native.panel)).filter((event) => event.type === "browser.job.progress" && event.toolCallId === "native-partial-act" && event.content.operation === "page.getByLabel.fill" && event.content.state === "completed").length).toBe(1);
-    await expect.poll(async () => (await readNativeEvents(native.panel)).filter((event) => event.type === "automation.action.started" && event.toolCallId === "native-partial-act" && event.content.operation === "waitFor").length).toBe(1);
+    await expect.poll(async () => (await readNativeEvents(native.panel)).filter((event) => event.type === "tool.finished" && event.toolCallId === "native-partial-fill").length).toBe(1);
+    await expect.poll(async () => (await readNativeEvents(native.panel)).filter((event) => event.type === "tool.started" && event.toolCallId === "native-partial-act").length).toBe(1);
     await native.panel.close();
     expect((await native.browser.send("Target.closeTarget", { targetId: native.targetId })).success).toBe(true);
     const recovery = await opened.context.newPage(); await recovery.goto(`chrome-extension://${opened.extensionId}/sidepanel.html`);
     const results = async () => (await readEvents(recovery)).filter((event) => ["tool.failed", "tool.finished"].includes(event.type) && event.toolCallId === "native-partial-act");
     await expect.poll(async () => (await results()).length).toBe(1);
     const result = (await results())[0].output;
-    expect(result).toMatchObject({ ok: false, error: { effectUnknown: true } });
-    const receipts = (await readEvents(recovery)).filter(event => event.type === "browser.job.progress" && event.toolCallId === "native-partial-act");
-    expect(receipts.some(event => event.content.operation === "page.getByLabel.fill" && event.content.state === "completed")).toBe(true);
-    expect(receipts.some(event => event.content.operation.endsWith("click"))).toBe(false);
+    expect(result).toMatchObject({ ok: false });
+    const receipts = await readEvents(recovery);
+    expect(receipts.some(event => event.type === "tool.finished" && event.toolCallId === "native-partial-fill")).toBe(true);
+    expect(receipts.some(event => event.type === "automation.action.finished" && event.content.operation === "click")).toBe(false);
     await recovery.reload();
     expect((await results()).map((event) => event.output)).toEqual([result]);
     await expect(native.target.getByLabel("Email")).toHaveValue("persisted@example.com");
     await expect(native.target.locator("output")).toHaveText("");
-    expect(provider.requests).toHaveLength(1);
+    expect(provider.requests.filter(request => request.tools)).toHaveLength(2);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
-test("uploads multiple hidden files through a cross-origin frame chooser", async () => {
-  const provider = await startProvider([
-    commandResponse("execute_program", { code: `return await (page.frameLocator('iframe[src*=localhost]').getByRole('button', { name: 'Upload frame files' }).click());` }, "frame-chooser"),
-    commandResponse("execute_program", { code: `return await page.upload(${JSON.stringify([{ name: "frame-one.txt", text: "one" }, { name: "frame-two.txt", text: "two" }])});` }, "frame-upload"),
-    textResponse("FRAME_UPLOAD_OK"), textResponse("框架上传"),
-  ]);
-  const opened = await openExtension();
-  try {
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/complex`);
-    const frame = target.frames().find((frame) => frame.url().includes("localhost"))!;
-    await frame.evaluate(() => {
-      const input = document.createElement("input"); input.type = "file"; input.hidden = true; input.multiple = true;
-      input.onchange = () => { document.body.dataset.files = [...(input.files ?? [])].map((file) => file.name).join(","); };
-      document.body.append(input);
-      const unrelated = document.createElement("input"); unrelated.type = "file"; unrelated.hidden = true; document.body.append(unrelated);
-      const button = document.createElement("button"); button.textContent = "Upload frame files"; button.onclick = () => input.click(); document.body.append(button);
-    });
-    const options = await configure(opened.context, opened.page, provider.baseURL); await options.close();
-    await opened.page.getByTestId("composer-input").fill("upload files in the frame chooser");
-    await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("FRAME_UPLOAD_OK");
-    await expect(frame.locator("body")).toHaveAttribute("data-files", "frame-one.txt,frame-two.txt");
-    expect((await readEvents(opened.page)).filter((event) => event.type === "tool.failed")).toEqual([]);
-  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
-});
-
-test("rejects detached snapshot references and negative locator indexes below the beginning", async () => {
+test("rejects detached snapshot references after the page replaces a node", async () => {
   let ref = "";
   const responses: MockResponse[] = [
     commandResponse("inspect_page", {}, "original-ref"),
     (request) => {
       const message = request.messages.findLast((message: any) => message.role === "tool");
       ref = JSON.parse(message.content).items.find((item: any) => item.line.includes('button "Sign in"')).ref;
-      return commandResponse("execute_program", { code: `return await (page.getByRole('button', { name: 'Sign in' }).evaluate("button => { const replacement = button.cloneNode(true); replacement.onclick = () => document.body.dataset.replacementClicked = 'yes'; button.replaceWith(replacement); }"));` }, "replace-ref");
+      return commandResponse("click", { target: { by: "css", value: "#replace-signin" } }, "replace-ref");
     },
-    () => commandResponse("execute_program", { code: `return await page.ref(${JSON.stringify(ref)}).click();`, timeoutMs: 1000 }, "detached-ref"),
-    commandResponse("execute_program", { code: `return await ({ css: await page.locator('button').nth(-2).count(), text: await page.getByText('Sign in', { exact: true }).nth(-2).count() });` }, "negative-index"),
+    () => commandResponse("click", { target: { ref }, timeoutMs: 1000 }, "detached-ref"),
     textResponse("STALE_AND_INDEX_OK"), textResponse("引用与索引"),
   ];
   const provider = await startProvider(responses); const opened = await openExtension();
   try {
     const target = await opened.context.newPage(); await target.goto(`${provider.origin}/automation`);
+    await target.evaluate(() => {
+      const replace = document.createElement("button"); replace.id = "replace-signin"; replace.textContent = "Replace sign in";
+      replace.onclick = () => {
+        const button = document.querySelector("button:not(#replace-signin)")!;
+        const replacement = button.cloneNode(true) as HTMLButtonElement;
+        replacement.onclick = () => { document.body.dataset.replacementClicked = "yes"; }; button.replaceWith(replacement);
+      };
+      document.body.append(replace);
+    });
     const options = await configure(opened.context, opened.page, provider.baseURL); await options.close();
-    await opened.page.getByTestId("composer-input").fill("verify stale refs and locator indexes");
+    await opened.page.getByTestId("composer-input").fill("verify stale refs");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("STALE_AND_INDEX_OK");
     const events = await readEvents(opened.page);
     expect(events.find((event) => event.type === "tool.failed" && event.toolCallId === "detached-ref")?.output.error.code).toMatch(/stale|detached/);
-    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "negative-index")?.output.result).toEqual({ css: 0, text: 0 });
     expect(await target.locator("body").getAttribute("data-replacement-clicked")).toBeNull();
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
@@ -1134,15 +1074,30 @@ test("reads cross-frame response bodies and records complete diagnostic events",
   try {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/complex`);
+    const frame = target.frames().find((item) => item.url().includes("localhost"))!;
+    await frame.evaluate(() => {
+      const button = document.createElement("button"); button.id = "frame-diagnostic"; button.textContent = "Generate diagnostics";
+      button.onclick = () => { console.warn("frame-diagnostic"); void fetch("/frame"); }; document.body.append(button);
+    });
+    let subscriptionId = "", eventCursor = 0, waits = 0;
+    const waitResponse: MockResponse = (request) => {
+      const result = JSON.parse(request.messages.findLast((message: any) => message.role === "tool").content);
+      if (result.events.some((event: any) => event.kind === "response" && event.payload?.response?.url.endsWith("/frame"))) return commandResponse("list_requests", { limit: 100 }, "frame-requests");
+      expect(++waits).toBeLessThan(10); eventCursor = result.nextCursor; responses.unshift(waitResponse);
+      return commandResponse("wait_event", { subscriptionId, after: eventCursor, waitMs: 10_000 }, `frame-response-wait-${waits}`);
+    };
     responses.push(
-      commandResponse("execute_program", { code: `return await (page.frameLocator('iframe[src*=localhost]').locator('body').evaluate("async () => { console.warn('frame-diagnostic'); return (await fetch('/frame')).status; }"));` }, "frame-fetch"),
-      commandResponse("execute_program", { code: `return await net.requests(${JSON.stringify({ filter: "/frame$", limit: 10 })});` }, "frame-requests"),
+      commandResponse("read_console", { limit: 10 }, "frame-console-start"),
+      commandResponse("list_requests", { limit: 10 }, "frame-requests-start"),
+      commandResponse("subscribe_event", { kind: "response" }, "frame-subscribe"),
+      (request) => { subscriptionId = JSON.parse(request.messages.findLast((message: any) => message.role === "tool").content).subscriptionId; return commandResponse("click", { target: { by: "css", value: "#frame-diagnostic", frame: { by: "css", value: 'iframe[src*=localhost]' } } }, "frame-fetch"); },
+      () => { responses.unshift(waitResponse); return commandResponse("wait_event", { subscriptionId, waitMs: 10_000 }, "frame-response-wait"); },
       (request) => {
         const tool = request.messages.findLast((message: any) => message.role === "tool");
-        const requests = JSON.parse(tool.content).result.requests;
-        return commandResponse("execute_program", { code: `return await net.responseBody(${JSON.stringify(requests.at(-1).requestRef)});` }, "frame-response-body");
+        const requests = JSON.parse(tool.content).result.requests.filter((item: any) => item.url.endsWith("/frame"));
+        return commandResponse("read_response", { requestRef: requests.at(-1).requestRef }, "frame-response-body");
       },
-      commandResponse("execute_program", { code: `return await net.console(${JSON.stringify({ minLevel: "warning", limit: 10 })});` }, "frame-console"),
+      commandResponse("read_console", { limit: 10 }, "frame-console"),
       textResponse("FRAME_DIAGNOSTICS_OK"), textResponse("框架诊断"),
     );
     const options = await configure(opened.context, opened.page, provider.baseURL);
@@ -1165,12 +1120,17 @@ test("reads cross-frame response bodies and records complete diagnostic events",
 for (const format of ["legacy-user-tools", "system-tools"] as const) test(`continues ${format} history with current tools and rejects old names without rewriting receipts`, async () => {
   const provider = await startProvider([
     commandResponse("run-code", { code: "async page => { throw new Error('old entry executed'); }" }, "removed-old-entry"),
-    commandResponse("execute_program", { code: "const count = await page.evaluate(() => { const n = Number(document.body.dataset.migratedEffects || 0) + 1; document.body.dataset.migratedEffects = String(n); return n; }); await check(count === 1); return count;" }, "current-entry"),
+    commandResponse("click", { target: { by: "css", value: "#migrated-action" } }, "current-entry"),
     textResponse("MIGRATED_CURRENT_TOOLS"), textResponse("RETRY_CURRENT_TOOLS"),
   ]);
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage(); await target.goto(`${provider.origin}/target`);
+    await target.evaluate(() => {
+      const button = document.createElement("button"); button.id = "migrated-action"; button.textContent = "Apply action";
+      button.onclick = () => { document.body.dataset.migratedEffects = String(Number(document.body.dataset.migratedEffects || 0) + 1); };
+      document.body.append(button);
+    });
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.getByRole("tab", { name: "智能体" }).click();
     await options.getByLabel("自定义系统提示词").fill("PERSISTED_CUSTOM_GUIDANCE");
@@ -1198,17 +1158,17 @@ for (const format of ["legacy-user-tools", "system-tools"] as const) test(`conti
     expect(events.filter(event => event.type === "tool.failed" && event.toolCallId === "removed-old-entry")).toHaveLength(1);
     expect(JSON.stringify(events.find(event => event.type === "tool.failed" && event.toolCallId === "removed-old-entry")?.error)).toContain("run-code");
     expect(events.some(event => event.type === "automation.action.started" && event.toolCallId === "removed-old-entry")).toBe(false);
-    expect(events.find(event => event.type === "tool.finished" && event.toolCallId === "current-entry")?.output).toMatchObject({ ok: true, state: "succeeded", result: 1 });
-    expect(events.some(event => event.type === "browser.job.progress" && event.toolCallId === "current-entry" && event.content.operation === "check" && event.content.state === "verified")).toBe(true);
-    expect(events.filter(event => event.type === "context.prompt.updated").at(-1)?.content).toMatchObject({ migratedFrom: "formal-49-v2", prompt: { catalogVersion: "atomic-tools-v18", format: "system-tools" } });
+    expect(events.find(event => event.type === "tool.finished" && event.toolCallId === "current-entry")?.output).toMatchObject({ ok: true, state: "succeeded" });
+    expect(events.some(event => event.type === "automation.action.finished" && event.toolCallId === "current-entry")).toBe(true);
+    expect(events.filter(event => event.type === "context.prompt.updated").at(-1)?.content).toMatchObject({ migratedFrom: "formal-49-v2", prompt: { catalogVersion: PROGRAM_CATALOG_VERSION, format: "system-tools" } });
     const requests = provider.requests.filter(request => request.tools);
     expect(requests).toHaveLength(3);
-    for (const request of requests) expect(request.tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "execute_program", "list_jobs", "get_job", "cancel_job"]));
+    for (const request of requests) expect(request.tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "send_request", "list_jobs", "get_job", "cancel_job"]));
     expect(requests[0].messages[0].content).toMatch(/^PERSISTED_CUSTOM_GUIDANCE\n\nAvailable tools:/);
     expect(JSON.stringify(requests[0].messages)).toContain("HISTORICAL_RECEIPT");
     await opened.page.getByTestId("retry-user-message-button").last().click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("RETRY_CURRENT_TOOLS");
-    expect(provider.requests.filter(request => request.tools).at(-1).tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "execute_program", "list_jobs", "get_job", "cancel_job"]));
+    expect(provider.requests.filter(request => request.tools).at(-1).tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "send_request", "list_jobs", "get_job", "cancel_job"]));
     await expect(target.locator("body")).toHaveAttribute("data-migrated-effects", "1");
     for (const event of historical) expect((await readEvents(opened.page)).find(current => current.id === event.id)).toEqual(event);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }

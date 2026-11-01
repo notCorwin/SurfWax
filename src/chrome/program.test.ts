@@ -4,6 +4,7 @@ import { BrowserJobs } from "./jobs";
 import { createProgramTools, prepareToolMessages } from "./tool";
 import type { ChromeExecutor } from "./executor";
 import { ProgramScope } from "./program";
+import { ATOMIC_TOOL_REGISTRY } from "./atomic-tools";
 import { PROGRAM_EVENT_INVOKE } from "./program-handles";
 import { LocatorFacade, PageFacade, type AutomationRuntime } from "./automation";
 
@@ -47,6 +48,27 @@ function indexedLog() {
 }
 const context = { conversationId: "program-test" };
 afterEach(() => vi.useRealTimers());
+
+describe("scoped atomic program calls", () => {
+  it("passes the unique scope chain through ProgramScope to the locator runtime", async () => {
+    const { logger } = log();
+    const scope = new ProgramScope(new AbortController().signal, "job", context, logger);
+    const locatorValue = vi.fn(async (_tabId: number, _spec: unknown, _operation: string) => 1);
+    const runtime = {
+      locator: (tabId: number, query: unknown) => new LocatorFacade(runtime as unknown as AutomationRuntime, tabId, { queries: [query] } as never),
+      locatorValue,
+    };
+    const page = scope.wrap(new PageFacade(runtime as unknown as AutomationRuntime, 3));
+    const definition = ATOMIC_TOOL_REGISTRY.find((item) => item.name === "count_elements")!;
+    const code = definition.program({ target: { by: "role", value: "button", name: "Save", scope: { by: "css", value: ".row" } } }).code;
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+    expect(await new AsyncFunction("page", code)(page)).toBe(1);
+    expect(locatorValue).toHaveBeenCalledWith(3, { queries: [
+      { kind: "css", value: ".row" }, { kind: "uniqueScope", value: "" }, { kind: "role", value: "button", name: "Save" },
+    ] }, "count", []);
+    await scope.finish();
+  });
+});
 
 describe("canonical browser jobs", () => {
   it("reuses one large terminal artifact across paginated job reads and enforces conversation isolation", async () => {

@@ -28,15 +28,14 @@ type Batch = {
   bindingFailed: boolean;
   backgroundJobId?: string;
   failed: Set<string>;
-  allFailed: boolean;
   abort?: () => void;
   signal?: AbortSignal;
 };
 
-const bypass = new Set(["list_jobs", "get_job", "cancel_job", "read_api_reference", "wait_event", "unsubscribe_event"]);
+const bypass = new Set(["list_jobs", "get_job", "cancel_job", "wait_event", "unsubscribe_event"]);
 const reads = new Set([
-  "inspect_page", "find_elements", "list_frames", "read_text", "read_value", "read_attribute", "read_checked", "verify_state", "wait_for_url", "take_screenshot",
-  "list_tabs", "list_downloads", "read_artifact", "list_requests", "read_response", "read_console", "list_scripts", "read_script", "list_cdp_sessions", "subscribe_event",
+  "inspect_page", "find_elements", "list_frames", "read_text", "read_value", "read_attribute", "read_checked", "read_elements", "count_elements", "get_page_info", "verify_state", "wait_for_url", "take_screenshot",
+  "list_tabs", "list_downloads", "read_artifact", "list_requests", "read_response", "read_console", "list_scripts", "read_script", "subscribe_event",
 ]);
 // Releasing held input must stay possible after an earlier action failed.
 const cleanup = new Set(["key_up", "release_pointer"]);
@@ -60,22 +59,20 @@ function verificationOf(value: unknown): unknown {
 function resource(call: ScheduledToolCall, batch: Batch): string {
   const name = call.toolName ?? "";
   const input = inputOf(call.input);
-  if (name === "execute_program") return "*";
   if (name === "list_tabs" || name === "open_tab") return "browser";
   if (name.endsWith("_script") || name === "list_scripts") {
     const definition = inputOf(input.definition);
     return `script:${String(input.scriptId ?? definition.id ?? "*")}`;
   }
   if (["read_artifact", "create_text_artifact", "save_artifact"].includes(name)) return `artifact:${String(input.artifactId ?? "*")}`;
-  if (name === "fetch" && input.context === "extension") return "extension";
+  if (name === "import_file_from_url" || name === "send_request" && input.context === "extension") return "extension";
   const explicit = typeof input.tabId === "number" ? input.tabId : undefined;
   return `tab:${String(explicit ?? batch.boundTabId ?? "unbound")}`;
 }
 
 function failed(batch: Batch, call: ScheduledToolCall): void {
   const key = resource(call, batch);
-  if (key === "*") batch.allFailed = true;
-  else batch.failed.add(key);
+  batch.failed.add(key);
   if (call.toolName === "switch_tab") batch.bindingFailed = true;
 }
 
@@ -83,7 +80,7 @@ function blocked(batch: Batch, call: ScheduledToolCall): boolean {
   if (reads.has(call.toolName ?? "") || cleanup.has(call.toolName ?? "")) return false;
   const input = inputOf(call.input);
   const usesBinding = input.tabId === undefined && resource(call, batch).startsWith("tab:");
-  return batch.allFailed || batch.failed.has(resource(call, batch)) || (usesBinding && batch.bindingFailed);
+  return batch.failed.has(resource(call, batch)) || (usesBinding && batch.bindingFailed);
 }
 
 function completed(batch: Batch, call: ScheduledToolCall): void {
@@ -140,7 +137,7 @@ export class ToolScheduler {
 
   prepare(content: readonly ScheduledToolCall[], boundTabId?: number, signal?: AbortSignal): Error | undefined {
     if (this.batch?.abort && this.batch.signal) this.batch.signal.removeEventListener("abort", this.batch.abort);
-    const batch: Batch = { slots: new Map(), bypassIds: new Set(), boundTabId, bindingFailed: false, failed: new Set(), allFailed: false, signal };
+    const batch: Batch = { slots: new Map(), bypassIds: new Set(), boundTabId, bindingFailed: false, failed: new Set(), signal };
     this.batch = batch;
     // The model has not seen the current response's tool results yet: even if a
     // get_job in this response reads a terminal status, later preplanned browser

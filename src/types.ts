@@ -15,6 +15,7 @@ export type BrowserSelector = {
   name?: string;
   exact?: boolean;
   index?: number;
+  scope?: { by: "css"; value: string } | { by: "role"; value: string; name?: string; exact?: boolean };
   frame?: { by: "css"; value: string } | { ref: string };
 };
 

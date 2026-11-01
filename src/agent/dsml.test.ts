@@ -5,12 +5,12 @@ import type { EventLogger } from "../logging";
 import { dsmlMiddleware } from "./dsml";
 
 const tools = [
-  { type: "function", name: "execute_program", inputSchema: { type: "object" } },
+  { type: "function", name: "navigate", inputSchema: { type: "object" } },
   { type: "function", name: "inspect_page", inputSchema: { type: "object" } },
   { type: "function", name: "click", inputSchema: { type: "object" } },
 ] as any;
 const usage = { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } };
-const v41 = '<｜DSML｜ calls><｜DSML｜ invoke name="execute_program"><｜DSML｜ parameter name="code" string="true">await page.mouse.wheel(0,600);</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
+const v41 = '<｜DSML｜ calls><｜DSML｜ invoke name="navigate"><｜DSML｜ parameter name="url" string="true">https://example.com/</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
 const v4 = '<｜DSML｜tool_calls><｜DSML｜invoke name="inspect_page"></｜DSML｜invoke></｜DSML｜tool_calls>';
 
 async function generated(content: any[], logger?: EventLogger) {
@@ -31,7 +31,7 @@ describe("DSML model middleware", () => {
     const multiple = v41.replace("</｜DSML｜ calls>", '<｜DSML｜ invoke name="inspect_page"></｜DSML｜ invoke></｜DSML｜ calls>');
     const result = await generated([{ type: "text", text: multiple }]);
     expect(result.content).toMatchObject([
-      { type: "tool-call", toolName: "execute_program", input: '{"code":"await page.mouse.wheel(0,600);"}', dynamic: true },
+      { type: "tool-call", toolName: "navigate", input: '{"url":"https://example.com/"}', dynamic: true },
       { type: "tool-call", toolName: "inspect_page", input: "{}", dynamic: true },
     ]);
     expect(result.finishReason.unified).toBe("tool-calls");
@@ -58,12 +58,12 @@ describe("DSML model middleware", () => {
   });
 
   it.each([
-    ["unknown tool", v41.replace('name="execute_program"', 'name="invented"')],
-    ["invalid arguments", v41.replace('name="code"', 'name="wrong"')],
+    ["unknown tool", v41.replace('name="navigate"', 'name="invented"')],
+    ["invalid arguments", v41.replace('name="url"', 'name="wrong"')],
     ["incomplete markup", v41.slice(0, -16)],
     ["invalid opener", v41.replace('<｜DSML｜ calls>', '<｜DSML｜ unknown>')],
-    ["duplicate parameter", v41.replace('</｜DSML｜ invoke>', '<｜DSML｜ parameter name="code" string="true">return 2;</｜DSML｜ parameter></｜DSML｜ invoke>')],
-    ["removed legacy tool", v41.replace('name="execute_program"', 'name="run-code"')],
+    ["duplicate parameter", v41.replace('</｜DSML｜ invoke>', '<｜DSML｜ parameter name="url" string="true">return 2;</｜DSML｜ parameter></｜DSML｜ invoke>')],
+    ["removed legacy tool", v41.replace('name="navigate"', 'name="run-code"')],
   ])("preserves %s without executing it", async (_label, text) => {
     const record = vi.fn();
     const result = await generated([{ type: "text", text }], { record } as unknown as EventLogger);

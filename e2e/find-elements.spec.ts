@@ -25,6 +25,15 @@ test("preserves snapshot identities through reorder and removal, and expires the
         root.append(button);
       }
       document.body.append(root);
+      const mutate = document.createElement("button"); mutate.id = "mutate-search"; mutate.textContent = "Mutate search";
+      mutate.onclick = () => {
+        root.prepend(root.querySelector('[data-key="c"]')!);
+        root.querySelector('[data-key="b"]')!.remove();
+        const replacement = document.createElement("button");
+        replacement.className = "search-candidate"; replacement.dataset.key = "replacement"; replacement.textContent = "Same label";
+        replacement.onclick = () => { document.body.dataset.searchClicks = "WRONG"; }; root.append(replacement);
+      };
+      document.body.append(mutate);
     });
     const other = await opened.context.newPage();
     await other.goto(`${provider.origin}/target`);
@@ -46,15 +55,7 @@ test("preserves snapshot identities through reorder and removal, and expires the
         firstRef = page.elements[0].ref;
         cursor = page.nextCursor;
         staleCursor = cursor;
-        return commandResponse("execute_program", { code: `await page.evaluate(() => {
-          const root = document.querySelector('#search-list');
-          root.prepend(root.querySelector('[data-key="c"]'));
-          root.querySelector('[data-key="b"]').remove();
-          const replacement = document.createElement('button');
-          replacement.className = 'search-candidate'; replacement.dataset.key = 'replacement'; replacement.textContent = 'Same label';
-          replacement.onclick = () => { document.body.dataset.searchClicks = 'WRONG'; };
-          root.append(replacement);
-        });` }, "mutate-search");
+        return commandResponse("click", { target: { by: "css", value: "#mutate-search" } }, "mutate-search");
       },
       () => commandResponse("click", { target: { ref: removedRef }, timeoutMs: 3_000 }, "search-removed-ref"),
       (request) => {
@@ -75,7 +76,7 @@ test("preserves snapshot identities through reorder and removal, and expires the
         return commandResponse("click", { target: { ref: firstRef } }, "click-first");
       },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("click", { target: { ref: thirdRef } }, "click-third"); },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("execute_program", { code: "return await page.evaluate(() => document.body.dataset.searchClicks);" }, "check-search-clicks"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("read_attribute", { target: { by: "css", value: "body" }, name: "data-search-clicks" }, "check-search-clicks"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: "ac" }); return commandResponse("click", { tabId: otherTab!.id, target: { ref: firstRef }, timeoutMs: 3_000 }, "other-tab-ref"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "stale-ref" } }); return commandResponse("navigate", { url: `${provider.origin}/target` }, "search-navigate"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("find_elements", { target: selector, cursor: staleCursor, limit: 1 }, "search-stale-cursor"); },
@@ -119,6 +120,9 @@ test("finds stable nodes inside same-process and cross-origin frames", async () 
           root.append(button);
         }
         document.body.append(root);
+        const reorder = document.createElement("button"); reorder.id = "reorder-frame-search"; reorder.textContent = "Reorder frame search";
+        reorder.onclick = () => root.prepend(root.lastElementChild!);
+        document.body.append(reorder);
       });
     }
     const sameTarget = { by: "css", value: ".frame-search-candidate", frame: { by: "css", value: 'iframe[src="/same-frame"]' } };
@@ -126,10 +130,10 @@ test("finds stable nodes inside same-process and cross-origin frames", async () 
     let sameRef = "", crossRef = "";
     responses.push(
       commandResponse("find_elements", { target: sameTarget, limit: 1 }, "same-search"),
-      (request) => { const page = lastTool(request); expect(page).toMatchObject({ total: 2, hasMore: true, elements: [{ ref: expect.any(String) }] }); sameRef = page.elements[0].ref; return commandResponse("execute_program", { code: `await page.frameLocator('iframe[src="/same-frame"]').locator('#frame-search-list').evaluate(root => root.prepend(root.lastElementChild));` }, "same-reorder"); },
+      (request) => { const page = lastTool(request); expect(page).toMatchObject({ total: 2, hasMore: true, elements: [{ ref: expect.any(String) }] }); sameRef = page.elements[0].ref; return commandResponse("click", { target: { by: "css", value: "#reorder-frame-search", frame: sameTarget.frame } }, "same-reorder"); },
       () => commandResponse("click", { target: { ref: sameRef } }, "same-click"),
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("find_elements", { target: crossTarget, limit: 1 }, "cross-search"); },
-      (request) => { const page = lastTool(request); expect(page).toMatchObject({ total: 2, hasMore: true, elements: [{ ref: expect.any(String) }] }); crossRef = page.elements[0].ref; expect(crossRef).not.toBe(sameRef); return commandResponse("execute_program", { code: `await page.frameLocator('iframe[src*=localhost]').locator('#frame-search-list').evaluate(root => root.prepend(root.lastElementChild));` }, "cross-reorder"); },
+      (request) => { const page = lastTool(request); expect(page).toMatchObject({ total: 2, hasMore: true, elements: [{ ref: expect.any(String) }] }); crossRef = page.elements[0].ref; expect(crossRef).not.toBe(sameRef); return commandResponse("click", { target: { by: "css", value: "#reorder-frame-search", frame: crossTarget.frame } }, "cross-reorder"); },
       () => commandResponse("click", { target: { ref: crossRef } }, "cross-click"),
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return textResponse("FRAME_FIND_OK"); },
       textResponse("查找框架元素"),

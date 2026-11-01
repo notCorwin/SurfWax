@@ -1,13 +1,5 @@
-import { chromium, expect, type BrowserContext, type CDPSession, type Locator, type Page } from "@playwright/test";
-import { once } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { createServer, type Server } from "node:http";
-import { tmpdir } from "node:os";
-import { resolve } from "node:path";
-
-
-import { test, p95, textResponse, assistantResponse, delayedResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, nativePanel, openNativeSidePanel, submitNative, readNativeEvents, type MockResponse } from './fixtures';
+import { expect } from "@playwright/test";
+import { test, textResponse, assistantResponse, delayedResponse, commandResponse, startProvider, openExtension, dispose, configure, readEvents, attachTarget, nativePanel, openNativeSidePanel, submitNative, readNativeEvents, type MockResponse } from "./fixtures";
 
 function nativeAssistantText(panel: Awaited<ReturnType<typeof attachTarget>>) {
   return panel.evaluate<string>(`Array.from(document.querySelectorAll('[data-role="assistant"]'))
@@ -66,14 +58,14 @@ test("uses a large observation from the real side panel before acting on its ref
       (request) => {
         const message = request.messages.findLast((entry: any) => entry.role === "tool");
         const ref = JSON.parse(message.content).$ref;
-        return commandResponse("execute_program", { code: `return await artifacts.read(${JSON.stringify(ref)}, {path:["items"],offset:0,limit:5});` }, "call-read-snapshot");
+        return commandResponse("read_artifact", { artifactId: ref, path: ["items"], offset: 0, limit: 5 }, "call-read-snapshot");
       },
       (request) => {
         const message = request.messages.findLast((entry: any) => entry.role === "tool");
         const items = JSON.parse(message.content).result;
         const ref = items.find((item: any) => item.line.includes('button "Run exact action"'))?.ref;
         if (!ref) throw new Error("The selected snapshot did not contain the target ref");
-        return commandResponse("execute_program", { code: `await page.ref(${JSON.stringify(ref)}).click(); await page.locator('body[data-clicked=yes]').waitFor({state:'attached'});` }, "call-act-from-ref");
+        return commandResponse("click", { target: { ref } }, "call-act-from-ref");
       },
       textResponse("REAL_SIDE_PANEL_OK"),
       textResponse("真实侧边栏"),
@@ -112,8 +104,8 @@ test("uses a large observation from the real side panel before acting on its ref
 });
 
 
-test("executes a completed DSML scrolling program in the side panel", async () => {
-  const dsml = '<｜DSML｜ calls><｜DSML｜ invoke name="execute_program"><｜DSML｜ parameter name="code" string="true">await page.mouse.wheel(0,600);</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
+test("executes a completed DSML scroll in the side panel", async () => {
+  const dsml = '<｜DSML｜ calls><｜DSML｜ invoke name="scroll"><｜DSML｜ parameter name="deltaY" string="false">600</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
   const provider = await startProvider([
     textResponse(dsml),
     textResponse("SCROLL_OK"),
@@ -131,41 +123,32 @@ test("executes a completed DSML scrolling program in the side panel", async () =
     await expect.poll(() => target.evaluate(() => scrollY)).toBeGreaterThan(0);
     await expect(opened.page.locator('[data-role="assistant"]').last()).not.toContainText("DSML");
     const events = await readEvents(opened.page);
-    expect(events.filter((event) => event.type === "tool.finished" && event.content?.toolName === "execute_program")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "tool.finished" && event.content?.toolName === "scroll")).toHaveLength(1);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });
 
 
-test("executes a completed DSML page evaluation program in the side panel", async () => {
-  const func = "() => { const txt = document.body.innerText.replace(/\\s+/g,' '); const idx = txt.indexOf('知识点掌握度'); return JSON.stringify({around: txt.slice(idx, idx+500)}); }";
-  const dsml = `\n\n<｜DSML｜ calls><｜DSML｜ invoke name="execute_program"><｜DSML｜ parameter name="code" string="true">return await page.evaluate(${JSON.stringify(func)});</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>`;
-  const provider = await startProvider([
-    textResponse(dsml),
-    textResponse("EVAL_OK"),
-    textResponse("读取页面"),
-  ]);
+test("executes a completed DSML text read in the side panel", async () => {
+  const dsml = '<｜DSML｜ calls><｜DSML｜ invoke name="read_text"><｜DSML｜ parameter name="target" string="false">{"by":"css","value":"body"}</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
+  const provider = await startProvider([textResponse(dsml), textResponse("READ_OK"), textResponse("读取页面")]);
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/target`);
     await target.evaluate(() => { document.body.textContent = "知识点掌握度 72%"; });
-    const options = await configure(opened.context, opened.page, provider.baseURL);
-    await options.close();
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront();
     await opened.page.getByTestId("composer-input").fill("read the knowledge score");
     await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("EVAL_OK");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("READ_OK");
     await expect(opened.page.locator('[data-role="assistant"]').last()).not.toContainText("DSML");
-    const events = await readEvents(opened.page);
-    const terminal = events.filter((event) => event.type === "tool.finished" && event.content?.toolName === "execute_program");
+    const terminal = (await readEvents(opened.page)).filter((event) => event.type === "tool.finished" && event.content?.toolName === "read_text");
     expect(terminal).toHaveLength(1);
-    expect(JSON.parse(terminal[0].output.result)).toEqual({ around: "知识点掌握度 72%" });
-  } finally {
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
+    expect(terminal[0].output.result).toBe("知识点掌握度 72%");
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
-
 
 test("closing the panel cancels a pending complete response and continues only on request", async () => {
   const provider = await startProvider([delayedResponse(textResponse("CANCELLED_RESPONSE"), 30_000), textResponse("CONTINUED"), textResponse("恢复后的标题")]);
@@ -201,14 +184,15 @@ test("closing the panel prevents a queued chrome call from starting", async () =
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const targetUrl = `${provider.origin}/target`;
-  responses.push(queuedToolResponse(
-    "await new Promise((resolve) => setTimeout(resolve, 60_000)); return true;",
-    "await page.evaluate(() => { document.documentElement.dataset.queuedToolRan = 'yes'; }); return true;",
-  ));
+  responses.push(assistantResponse({ tool_calls: [
+    { id: "call-queued-0", type: "function", function: { name: "verify_state", arguments: JSON.stringify({ target: { by: "css", value: "#never-exists" }, state: "visible", timeoutMs: 60_000 }) } },
+    { id: "call-queued-1", type: "function", function: { name: "click", arguments: JSON.stringify({ target: { by: "role", value: "button", name: "Queued action" } }) } },
+  ] }));
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage();
     await target.goto(targetUrl);
+    await target.evaluate(() => { const button = document.createElement("button"); button.textContent = "Queued action"; button.onclick = () => { document.documentElement.dataset.queuedToolRan = "yes"; }; document.body.append(button); });
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
     await opened.page.getByTestId("composer-input").fill("queue two calls");
@@ -216,7 +200,7 @@ test("closing the panel prevents a queued chrome call from starting", async () =
     const process = opened.page.getByTestId("live-tool-calls");
     await expect(process).toHaveCount(1);
     await expect(process.locator(".activity[data-status]")).toHaveCount(2);
-    await expect(process.locator(".activity > summary").last()).toContainText("执行浏览器操作");
+    await expect(process.locator(".activity > summary").last()).toContainText("点击");
     await expect(process.locator('.activity[data-status="running"]').last()).toBeVisible();
     const runningLabel = process.locator('.activity[data-status="running"] > summary').last();
     await opened.page.emulateMedia({ colorScheme: "dark" });
@@ -251,20 +235,18 @@ test("operates on a selected tab while user pointer input remains available", as
     const secondIndex = urls.indexOf(otherUrl);
     expect(firstIndex).toBeGreaterThanOrEqual(0);
     expect(secondIndex).toBeGreaterThanOrEqual(0);
+    await second.evaluate(() => {
+      const button = document.createElement('button'); button.textContent = 'CDP target';
+      button.style.cssText = 'position:fixed;left:20px;top:20px;width:120px;height:40px';
+      button.onclick = () => { document.documentElement.dataset.cdpClicks = String(Number(document.documentElement.dataset.cdpClicks || 0) + 1); };
+      document.body.append(button);
+    });
     responses.push(
-      commandResponse("execute_program", { code: `return await browser.tabs.select(${tabs[firstIndex]!.id});` }, "call-select-first"),
+      commandResponse("switch_tab", { tabId: tabs[firstIndex]!.id }, "call-select-first"),
       commandResponse("inspect_page", {}, "call-snapshot-first"),
-      commandResponse("execute_program", { code: `return await browser.tabs.select(${tabs[secondIndex]!.id});` }, "call-select-second"),
-      commandResponse("execute_program", { code: `return await (page.evaluate(\`() => {
-        const button = document.createElement('button');
-        button.textContent = 'CDP target';
-        button.style.cssText = 'position:fixed;left:20px;top:20px;width:120px;height:40px';
-        button.onclick = () => { document.documentElement.dataset.cdpClicks = String(Number(document.documentElement.dataset.cdpClicks || 0) + 1); };
-        document.body.append(button);
-      }\`));` }, "call-create-target"),
-      commandResponse("execute_program", { code: `return await page.getByRole('button', { name: 'CDP target' }).click();` }, "call-click-target"),
-      commandResponse("execute_program", { code: ` await new Promise((resolve) => setTimeout(resolve, 1200)); return page.url(); ` }, "call-wait"),
-      textResponse("MULTI_TAB_OK"),
+      commandResponse("switch_tab", { tabId: tabs[secondIndex]!.id }, "call-select-second"),
+      commandResponse("click", { target: { by: "role", value: "button", name: "CDP target" } }, "call-click-target"),
+      delayedResponse(textResponse("MULTI_TAB_OK"), 1_200),
       textResponse("多标签操作"),
     );
     const options = await configure(opened.context, opened.page, provider.baseURL);
@@ -285,16 +267,17 @@ test("operates on a selected tab while user pointer input remains available", as
 
 test('closing a native Side Panel aborts its owner and prevents a queued page mutation', async () => {
   const calls = [
-    { name: 'execute_program', input: { code: "await page.getByLabel('Never exists').fill('waiting');", timeoutMs: 300_000 } },
-    { name: 'execute_program', input: { code: "return await page.evaluate(() => { document.documentElement.dataset.queuedNativeRan = 'yes'; return true; });" } },
+    { name: 'verify_state', input: { target: { by: 'label', value: 'Never exists' }, state: 'visible', timeoutMs: 300_000 } },
+    { name: 'click', input: { target: { by: 'role', value: 'button', name: 'Queued native action' } } },
   ];
   const provider = await startProvider([assistantResponse({ tool_calls: calls.map((call, index) => ({ id: `native-queue-${index}`, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.input) } })) })]);
   const opened = await openExtension();
   try {
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     const native = await nativePanel(opened, `${provider.origin}/target`);
+    await native.target.evaluate(() => { const button = document.createElement('button'); button.textContent = 'Queued native action'; button.onclick = () => { document.documentElement.dataset.queuedNativeRan = 'yes'; }; document.body.append(button); });
     await submitNative(native.panel, 'perform two queued actions');
-    await expect.poll(() => native.panel.evaluate<boolean>('document.body.textContent.includes("执行浏览器操作")')).toBe(true);
+    await expect.poll(() => native.panel.evaluate<boolean>('document.body.textContent.includes("检查页面状态")')).toBe(true);
     await expect.poll(async () => (await readNativeEvents(native.panel)).filter(event => event.type === 'tool.started' && event.toolCallId?.startsWith('native-queue-')).length).toBe(2);
     await native.panel.close();
     expect((await native.browser.send('Target.closeTarget', { targetId: native.targetId })).success).toBe(true);
@@ -309,7 +292,8 @@ test('closing a native Side Panel aborts its owner and prevents a queued page mu
 test('a native run stays in its owning window after another window becomes focused', async () => {
   const provider = await startProvider([
     commandResponse("inspect_page", {}, 'native-first-snapshot'),
-    delayedResponse(commandResponse('execute_program', { code: "await page.getByLabel('Email').fill('owner@example.com'); await page.getByRole('button',{name:'Sign in'}).click();" }, 'native-owner-act'), 1_000),
+    delayedResponse(commandResponse('fill', { target: { by: 'label', value: 'Email' }, value: 'owner@example.com' }, 'native-owner-fill'), 1_000),
+    commandResponse('click', { target: { by: 'role', value: 'button', name: 'Sign in' } }, 'native-owner-act'),
     textResponse('OWNER_WINDOW_DONE'), textResponse('窗口绑定'),
   ]);
   const opened = await openExtension();
@@ -331,7 +315,7 @@ test('a native run stays in its owning window after another window becomes focus
 test('a recoverable complete-response failure retries without repeating a completed browser effect', async () => {
   const effectId = 'retry-effect-once';
   const provider = await startProvider([
-    toolResponse("return await page.evaluate(() => { const root = document.documentElement; root.dataset.retryEffects = String(Number(root.dataset.retryEffects || 0) + 1); return { marker: 'RETRY_EFFECT_ACCEPTED', count: Number(root.dataset.retryEffects) }; });", effectId),
+    commandResponse("click", { target: { by: "role", value: "button", name: "RETRY_EFFECT_ACCEPTED" } }, effectId),
     { status: 503, error: 'temporary full-response failure' },
     textResponse('RETRY_RESPONSE_COMPLETE'), textResponse('恢复请求'),
   ]);
@@ -340,10 +324,11 @@ test('a recoverable complete-response failure retries without repeating a comple
   try {
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     native = await nativePanel(opened, `${provider.origin}/target`);
+    await native.target.evaluate(() => { const button = document.createElement('button'); button.textContent = 'RETRY_EFFECT_ACCEPTED'; button.onclick = () => { const root = document.documentElement; root.dataset.retryEffects = String(Number(root.dataset.retryEffects || 0) + 1); }; document.body.append(button); });
     await submitNative(native.panel, 'record one browser effect and retry a temporary full-response failure');
     await expect.poll(() => nativeAssistantText(native!.panel)).toContain('RETRY_RESPONSE_COMPLETE');
     await expect(native.target.locator('html')).toHaveAttribute('data-retry-effects', '1');
-    const agentRequests = provider.requests.filter(request => request.tools?.some((tool: any) => tool.function.name === "execute_program"));
+    const agentRequests = provider.requests.filter(request => request.tools?.some((tool: any) => tool.function.name === "click"));
     expect(agentRequests).toHaveLength(3);
     expect(agentRequests[2].messages).toEqual(agentRequests[1].messages);
     const resumedContext = JSON.stringify(agentRequests[2].messages);
@@ -371,7 +356,7 @@ test('two native side panels accept only one owner and closing the non-owner pre
   let releaseOwner!: () => void;
   const ownerMayFinish = new Promise<void>((resolveOwner) => { releaseOwner = resolveOwner; });
   const provider = await startProvider([
-    toolResponse("return await page.evaluate(() => { const root = document.documentElement; root.dataset.ownerEffects = String(Number(root.dataset.ownerEffects || 0) + 1); return { owner: true, count: Number(root.dataset.ownerEffects) }; });", 'native-owner-effect'),
+    commandResponse("click", { target: { by: "role", value: "button", name: "Owner effect" } }, 'native-owner-effect'),
     delayedResponse(textResponse('OWNER_SURVIVED_NONOWNER_CLOSE'), 0, ownerMayFinish),
     textResponse('多窗口互斥'),
   ]);
@@ -381,9 +366,10 @@ test('two native side panels accept only one owner and closing the non-owner pre
   try {
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     owner = await nativePanel(opened, `${provider.origin}/automation`);
+    await owner.target.evaluate(() => { const button = document.createElement('button'); button.textContent = 'Owner effect'; button.onclick = () => { const root = document.documentElement; root.dataset.ownerEffects = String(Number(root.dataset.ownerEffects || 0) + 1); }; document.body.append(button); });
     await submitNative(owner.panel, 'complete only the owning window task');
     await expect(owner.target.locator('html')).toHaveAttribute('data-owner-effects', '1');
-    await expect.poll(() => provider.requests.filter(request => request.tools?.some((tool: any) => tool.function.name === "execute_program")).length).toBe(2);
+    await expect.poll(() => provider.requests.filter(request => request.tools?.some((tool: any) => tool.function.name === "click")).length).toBe(2);
     const active = await owner.panel.evaluate<{ identity: { runId: string } }>(`chrome.runtime.sendMessage({ type: 'surf-wax:run-status' })`);
     expect(active.identity.runId).toBeTruthy();
     const secondWindow = await owner.panel.evaluate<{ id: number }>(`chrome.windows.create({ url: ${JSON.stringify(`${provider.origin}/target`)}, focused: true })`);
@@ -391,7 +377,7 @@ test('two native side panels accept only one owner and closing the non-owner pre
     await expect.poll(() => other!.panel.evaluate<string>(`document.querySelector('[data-testid="other-run-busy"]')?.textContent || ''`)).toContain('其他窗口已有任务运行');
     await submitNative(other.panel, 'this second task must not replace the owner');
     await expect.poll(() => other!.panel.evaluate<string>(`document.querySelector('[role="alert"]')?.textContent || ''`)).toContain('已有任务运行');
-    expect(provider.requests.filter(request => request.tools?.some((tool: any) => tool.function.name === "execute_program"))).toHaveLength(2);
+    expect(provider.requests.filter(request => request.tools?.some((tool: any) => tool.function.name === "click"))).toHaveLength(2);
     expect((await readNativeEvents(owner.panel)).filter(event => event.type === 'conversation.submitted')).toHaveLength(1);
     await other.panel.close();
     expect((await owner.browser.send('Target.closeTarget', { targetId: other.targetId })).success).toBe(true);

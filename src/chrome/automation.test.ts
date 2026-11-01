@@ -531,6 +531,35 @@ describe("AutomationRuntime", () => {
     } finally { host.remove(); await runtime.abortSessions(); }
   });
 
+  it("reads editable state consistently for text, readonly, disabled and unsupported controls", async () => {
+    const input = document.createElement("input"), select = document.createElement("select");
+    document.body.append(input, select);
+    let element: HTMLElement = input, unavailable = false;
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration.startsWith("function(condition)")) {
+        if (unavailable) return { result: { value: { present: true, actual: null } } };
+        const call = new Function(`return (${params.functionDeclaration})`)();
+        return { result: { value: call.apply(element, params.arguments.map((argument: any) => argument.value)) } };
+      }
+      return original(source, method, params);
+    });
+    try {
+      const locator = page.getByRole("button", { name: "Sign in" });
+      await expect(locator.readCondition("editable")).resolves.toEqual({ present: true, actual: true });
+      input.readOnly = true;
+      await expect(locator.readCondition("editable")).resolves.toEqual({ present: true, actual: false });
+      input.readOnly = false; input.disabled = true;
+      await expect(locator.readCondition("editable")).resolves.toEqual({ present: true, actual: false });
+      element = select;
+      await expect(locator.readCondition("editable")).resolves.toEqual({ present: true, actual: false });
+      unavailable = true;
+      await expect(locator.readCondition("editable")).rejects.toMatchObject({ code: "state-unavailable" });
+    } finally { input.remove(); select.remove(); await runtime.abortSessions(); }
+  });
+
   it("records an uncertain effect when the dispatched focus command fails", async () => {
     const records: any[] = [];
     const logger = { append: async (event: any) => { records.push(event); return { id: records.length, ...event }; } } as unknown as EventLogger;
@@ -1780,6 +1809,69 @@ describe("AutomationRuntime", () => {
     });
     await expect(page.ref("e1").click()).rejects.toThrow("detached");
     expect(command.mock.calls.filter(([, method]) => method === "Accessibility.queryAXTree")).toHaveLength(0);
+  });
+
+  it("checks CSS scope uniqueness when resolving the target after the DOM changes", async () => {
+    const { runtime, command } = harness();
+    const fixture = document.createElement("div");
+    fixture.innerHTML = '<section class="scope"></section>';
+    document.body.append(fixture);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.evaluate" && params.expression.includes("metadata"))
+        return { result: { value: new Function("document", `return ${params.expression}`)(fixture) } };
+      return original(source, method, params);
+    });
+    try {
+      const page = await runtime.createPage(3);
+      const target = page.locator(".scope").uniqueScope().locator("button");
+      fixture.insertAdjacentHTML("beforeend", '<section class="scope"><button>Wrong target</button></section>');
+      await expect(target.count()).rejects.toThrow(/invalid-scope/);
+    } finally { fixture.remove(); await runtime.abortSessions(); }
+  });
+
+  it("binds the unique role scope through later semantic resolution and rejects a detached scope", async () => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    const session = (runtime as any).sessions.get(3);
+    const original = command.getMockImplementation()!;
+    let added = false, detach = false;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.evaluate" && params.expression === "document") return { result: { objectId: "document" } };
+      if (method === "DOM.describeNode") return { node: { backendNodeId: params.objectId === "document" ? 1 : params.objectId === "scope" ? 2 : 3 } };
+      if (method === "DOM.resolveNode") return { object: { objectId: params.backendNodeId === 2 ? "scope" : "button" } };
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration === "function(){return this.isConnected}") return { result: { value: !detach } };
+      if (method === "Accessibility.queryAXTree") {
+        if (params.objectId === "document") return { nodes: [{ backendDOMNodeId: 2, role: { value: "region" }, name: { value: "Area" } }] };
+        expect(params.objectId).toBe("scope");
+        added = true; // A new matching scope appears after the original has been bound.
+        // The added scope has the only target; the previously bound scope has none.
+        return { nodes: [] };
+      }
+      return original(source, method, params);
+    });
+    const spec = page.getByRole("region", { name: "Area" }).uniqueScope().getByRole("button", { name: "Target" }).spec;
+    try {
+      const result = await (runtime as any).resolveSemantic(session, session.debuggee, spec);
+      expect(added).toBe(true); expect(result).toEqual([]);
+      detach = true;
+      await expect((runtime as any).resolveSemantic(session, session.debuggee, spec)).rejects.toMatchObject({ code: "invalid-scope", detail: { reason: "scope-detached" } });
+    } finally { await runtime.abortSessions(); }
+  });
+
+  it("does not retry a scoped action against a replacement scope", async () => {
+    const { runtime } = harness();
+    const page = await runtime.createPage(3);
+    const session = (runtime as any).sessions.get(3);
+    const spec = page.locator(".scope").uniqueScope().locator("button").spec;
+    const resolve = vi.spyOn(runtime as any, "resolveOnce").mockResolvedValueOnce(undefined).mockResolvedValue("replacement-target");
+    try {
+      await expect((runtime as any).waitActionableLocator(session, spec, false, false)).rejects.toMatchObject({ code: "not-found" });
+      expect(resolve).toHaveBeenCalledTimes(1);
+      resolve.mockClear().mockResolvedValueOnce(undefined).mockResolvedValue("replacement-target");
+      await expect((runtime as any).resolveOne(session, spec)).rejects.toMatchObject({ code: "not-found", detail: { reason: "scoped-target-not-found" } });
+      expect(resolve).toHaveBeenCalledTimes(1);
+    } finally { resolve.mockRestore(); await runtime.abortSessions(); }
   });
 
   it("treats negative CSS and text indices below the beginning as empty", async () => {

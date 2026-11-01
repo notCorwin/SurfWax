@@ -1245,6 +1245,20 @@ export class EventLogger {
     return (await store.all()).filter((event) => event.id > floor && event.runId && runIds.includes(event.runId) && types.includes(event.type));
   }
 
+  /** Incremental projection input paired with the log-maintenance epoch. */
+  async contextProjectionEvents(conversationId: string, afterId = -1): Promise<{ value: LogEvent[]; epoch: string }> {
+    if (!Number.isSafeInteger(afterId) || afterId < -1) throw new Error("Invalid context event cursor");
+    const types = [...RUN_EVENT_TYPES, "conversation.message", "conversation.branch.selected", "conversation.deleted", "conversation.restored",
+      "tool.started", "tool.finished", "tool.failed", "context.compacted"];
+    return this.readCanonicalSnapshot(async (store, floor) => {
+      const start = Math.max(floor, afterId);
+      const events = store.byTypes ? await store.byTypes(types, conversationId, start)
+        : (await store.all()).filter((event) => event.id > start && event.conversationId === conversationId && types.includes(event.type));
+      return events.filter((event) => event.id > start && event.conversationId === conversationId && types.includes(event.type))
+        .sort((left, right) => left.id - right.id);
+    });
+  }
+
   async restorationEvents(conversationId: string): Promise<LogEvent[]> {
     return this.readCanonical(async (store, floor) => {
       const lifecycle = await this.eventsByTypesAt(store, floor, [...RUN_EVENT_TYPES, "conversation.message", "conversation.branch.selected", "tool.finished", "tool.failed"], conversationId);

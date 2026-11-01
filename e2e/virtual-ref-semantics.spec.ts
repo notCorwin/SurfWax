@@ -18,6 +18,11 @@ test("does not retarget an issued ref after the same DOM node changes visible id
         document.body.dataset.received = `${document.body.dataset.received || ""}|${name}`;
       });
       document.body.append(list);
+      const updateAx = document.createElement("button"); updateAx.id = "rewrite-ax"; updateAx.textContent = "Update order";
+      updateAx.onclick = () => { document.querySelector("#virtual-ax")!.textContent = "Order B"; };
+      const updateCss = document.createElement("button"); updateCss.id = "rewrite-css"; updateCss.textContent = "Update invoice";
+      updateCss.onclick = () => { document.querySelector("#virtual-css")!.setAttribute("aria-label", "Invoice B"); };
+      document.body.append(updateAx, updateCss);
     });
     let axRef = "", cssRef = "";
     responses.push(
@@ -25,7 +30,7 @@ test("does not retarget an issued ref after the same DOM node changes visible id
       (request) => {
         axRef = lastTool(request).items.find((item: any) => item.line.includes('button "Order A"'))?.ref;
         expect(axRef).toEqual(expect.any(String));
-        return commandResponse("execute_program", { code: `await page.evaluate(() => { document.querySelector('#virtual-ax').textContent = 'Order B'; });` }, "rewrite-ax");
+        return commandResponse("click", { target: { by: "css", value: "#rewrite-ax" } }, "rewrite-ax");
       },
       () => commandResponse("click", { target: { ref: axRef } }, "old-ax"),
       (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "stale-ref" } }); return commandResponse("inspect_page", {}, "inspect-b"); },
@@ -37,7 +42,7 @@ test("does not retarget an issued ref after the same DOM node changes visible id
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("find_elements", { target: { by: "css", value: "#virtual-css" } }, "find-a"); },
       (request) => {
         cssRef = lastTool(request).elements[0].ref;
-        return commandResponse("execute_program", { code: `await page.evaluate(() => { document.querySelector('#virtual-css').setAttribute('aria-label', 'Invoice B'); });` }, "rewrite-css");
+        return commandResponse("click", { target: { by: "css", value: "#rewrite-css" } }, "rewrite-css");
       },
       () => commandResponse("click", { target: { ref: cssRef } }, "old-css"),
       (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "stale-ref" } }); return commandResponse("find_elements", { target: { by: "css", value: "#virtual-css" } }, "find-b"); },

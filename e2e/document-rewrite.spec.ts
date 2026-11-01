@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents, type MockResponse } from "./fixtures";
 
 test("allows page interaction after a document rewrite during a run", async () => {
   const responses: MockResponse[] = [];
@@ -9,16 +9,30 @@ test("allows page interaction after a document rewrite during a run", async () =
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/automation`);
     const markup = '<!doctype html><script>window.userKeys=0;window.addEventListener("keydown",()=>window.userKeys++,true)</script><input id="user-input"><button id="user-target" style="position:fixed;left:30px;top:60px" onclick="window.userClicks=(window.userClicks||0)+1">Target</button>';
+    await target.evaluate((html) => {
+      const button = document.createElement("button"); button.id = "rewrite-document"; button.textContent = "Rewrite document";
+      button.onclick = () => { document.open(); document.write(html); document.close(); };
+      document.body.append(button);
+    }, markup);
     responses.push(
-      commandResponse("execute_program", { timeoutMs: 20000, code: `await page.evaluate((markup) => { document.open(); document.write(markup); document.close(); }, ${JSON.stringify(markup)}); await sleep(9000); return 'REWRITE_WAIT_DONE';` }, "rewrite-and-wait"),
-      textResponse("REWRITE_WAIT_DONE"),
+      commandResponse("click", { target: { by: "css", value: "#rewrite-document" } }, "rewrite"),
+      (request) => {
+        const result = JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
+        expect(result).toMatchObject({ ok: true });
+        return commandResponse("verify_state", { target: { by: "css", value: "#user-target" }, textIncludes: "NEVER_MATCHES", timeoutMs: 9000 }, "rewrite-and-wait");
+      },
+      (request) => {
+        const result = JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
+        expect(result).toMatchObject({ ok: true, result: { verified: false, timedOut: true } });
+        return textResponse("REWRITE_WAIT_DONE");
+      },
     );
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     await target.bringToFront();
     await opened.page.getByTestId("composer-input").fill("rewrite the document and wait");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(target.locator("#user-target")).toBeVisible();
-    expect(provider.requests.filter((request) => Array.isArray(request.tools))).toHaveLength(1);
+    await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "tool.started" && event.toolCallId === "rewrite-and-wait")).toBe(true);
     await target.evaluate((markup) => { document.open(); document.write(markup); document.close(); }, markup);
     await expect(target.locator("#user-target")).toBeVisible();
     await target.mouse.click(45, 70);

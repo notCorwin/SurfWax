@@ -9,7 +9,7 @@ import type { ModelConfig } from "../types";
 import { inputBudget, modelSupportsImages, resolveModelLimit } from "./model-limits";
 import { resolvedBaseURL, sdkFor } from "./model-sdks";
 import { estimatePromptInput, type ContextCompactor } from "./compaction";
-import { activeContext } from "./context-choice";
+import { IncrementalActiveContext } from "./context-choice";
 import type { ReasoningEffort } from "./reasoning";
 import { dsmlMiddleware } from "./dsml";
 import { completionToolChoiceMiddleware, completionToolsMiddleware } from "./completion-tools";
@@ -62,8 +62,9 @@ function usesClaudePromptCache(config: ModelConfig): boolean {
 
 const READ_ONLY_TOOLS = new Set([
   "inspect_page", "find_elements", "list_frames", "read_text", "read_value", "read_attribute", "read_checked",
+  "count_elements", "read_elements", "get_page_info",
   "list_tabs", "list_downloads", "read_artifact", "list_requests", "read_response", "read_console",
-  "read_api_reference", "list_scripts", "read_script", "list_jobs", "get_job", "list_cdp_sessions",
+  "list_scripts", "read_script", "list_jobs", "get_job",
 ]);
 
 function signature(value: unknown): string {
@@ -111,6 +112,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
   const wireInstructions = () => cacheClaude ? { role: "system" as const, content: currentInstructions(), providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } } } : currentInstructions();
   const currentTools = () => PROMPT_TOOLS;
   const activeTools = () => currentTools().map(({ name }) => name);
+  const canonicalContext = logger && options.conversationId ? new IncrementalActiveContext(logger, options.conversationId) : undefined;
   let browserDigest: string | undefined;
   let loggedGuard: string | undefined;
   const completion = options.model.endpointType === "openai-completions"
@@ -168,8 +170,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         // The persisted UI projection can represent completed tool calls
         // differently from the SDK's response messages. Anchor to that
         // projection only when it describes the same sequence of roles.
-        const canonical = stepNumber > 0 && logger && options.conversationId
-          ? (await activeContext(logger, options.conversationId)).messages : undefined;
+        const canonical = stepNumber > 0 && canonicalContext ? (await canonicalContext.read()).messages : undefined;
         const persisted = prepared.filter((message) => !(message.role === "user" && Array.isArray(message.content)
           && message.content.length === 1 && message.content[0]?.type === "text"
           && message.content[0].text.startsWith("<browser-context>\nSupplemental state only.")));

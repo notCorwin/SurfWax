@@ -16,6 +16,9 @@ test("continues a frozen long semantic line without interpreting page text as a 
       button.id = "long-name";
       button.textContent = text;
       document.body.append(button);
+      const mutate = document.createElement("button"); mutate.id = "mutate-semantic"; mutate.textContent = "Update semantic line";
+      mutate.onclick = () => { button.textContent = "CHANGED_AFTER_CAPTURE"; };
+      document.body.append(mutate);
     }, original);
     let cursor = "", observationId = "", pages = 0;
     const consume: MockResponse = (request) => {
@@ -36,7 +39,7 @@ test("continues a frozen long semantic line without interpreting page text as a 
         const result = lastTool(request);
         expect(result).toMatchObject({ mode: "full", observationId: expect.any(String), nextCursor: expect.any(String) });
         observationId = result.observationId; cursor = result.nextCursor;
-        return commandResponse("execute_program", { code: "await page.evaluate(() => { document.querySelector('#long-name').textContent = 'CHANGED_AFTER_CAPTURE'; });" }, "mutate-semantic-page");
+        return commandResponse("click", { target: { by: "css", value: "#mutate-semantic" } }, "mutate-semantic-page");
       },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("inspect_page", { cursor, budget: 30000 }, "semantic-next-0"); },
       consume,

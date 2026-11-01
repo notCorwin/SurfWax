@@ -13,15 +13,15 @@ test("paginates a fixed job snapshot across model calls in Chrome", async () => 
     const ids: string[] = [];
     let cursor = "";
     responses.push(
-      commandResponse("execute_program", { code: "return 1;" }, "job-one"),
-      (request) => { ids.push(lastTool(request).jobId); return commandResponse("execute_program", { code: "return 2;" }, "job-two"); },
-      (request) => { ids.push(lastTool(request).jobId); return commandResponse("execute_program", { code: "return 3;" }, "job-three"); },
+      commandResponse("get_page_info", {}, "job-one"),
+      (request) => { ids.push(lastTool(request).jobId); return commandResponse("get_page_info", {}, "job-two"); },
+      (request) => { ids.push(lastTool(request).jobId); return commandResponse("get_page_info", {}, "job-three"); },
       (request) => { ids.push(lastTool(request).jobId); return commandResponse("list_jobs", { limit: 1 }, "page-one"); },
       (request) => {
         const page = lastTool(request);
         expect(page).toMatchObject({ jobs: [{ id: ids[0], state: "succeeded" }], hasMore: true, nextCursor: expect.any(String) });
         cursor = page.nextCursor;
-        return commandResponse("execute_program", { code: "return 4;" }, "later-job");
+        return commandResponse("get_page_info", {}, "later-job");
       },
       (request) => { const later = lastTool(request); expect(later.jobId).toEqual(expect.any(String)); expect(ids).not.toContain(later.jobId); return commandResponse("list_jobs", { limit: 1, cursor }, "page-two"); },
       (request) => {

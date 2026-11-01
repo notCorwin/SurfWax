@@ -98,7 +98,7 @@ describe("createAgent", () => {
       controller.abort();
       return { ok: false, error: { code: "aborted", retryable: false, effectUnknown: true } };
     } });
-    const model = new MockLanguageModelV4({ doGenerate: async () => tool("cancelled", "execute_program", { code: "return await page.title();" }) });
+    const model = new MockLanguageModelV4({ doGenerate: async () => tool("cancelled", "navigate", { url: "https://test/" }) });
     await createAgent({ model: config, languageModel: model, executor, logger, conversationId: "conversation", signal: controller.signal })
       .generate({ prompt: "inspect", abortSignal: controller.signal }).catch((error) => { expect(error.name).toBe("AbortError"); });
     await logger.closePendingTools("run", "conversation", controller.signal.reason);
@@ -108,13 +108,13 @@ describe("createAgent", () => {
       output: { ok: false, error: { code: "aborted", retryable: false, effectUnknown: true } } });
   });
 
-  it("records a large partial program failure with its full result exactly once", async () => {
+  it("records a large partial action failure with its full result exactly once", async () => {
     const { events, logger } = memoryLog();
     const failed = { ok: false, completed: [{ index: 0, type: "goto", result: { text: "completed".repeat(2000) } }],
       failed: { index: 1, error: { code: "expectation-failed", message: "Missing target" } }, notRun: [] };
     const executor = browserExecutor({ runProgram: vi.fn(async () => failed) });
     let step = 0;
-    const model = new MockLanguageModelV4({ doGenerate: async () => ++step === 1 ? tool("large-act", "execute_program", { code: "await page.goto('https://test/');" }) : text() });
+    const model = new MockLanguageModelV4({ doGenerate: async () => ++step === 1 ? tool("large-act", "navigate", { url: "https://test/" }) : text() });
     await createAgent({ model: config, languageModel: model, executor, logger, conversationId: "conversation" }).generate({ prompt: "act" });
     await logger.flush();
     const terminal = events.filter((event) => ["tool.failed", "tool.finished"].includes(event.type) && event.toolCallId === "large-act");
@@ -164,15 +164,15 @@ describe("createAgent", () => {
 
   it("detects repeated failures and read loops without limiting repeatable input", () => {
     const step = (toolName: string, output: unknown) => ({ toolResults: [{ toolName, input: {}, output }] });
-    expect(stagnationReason([step("execute_program", { ok: false }), step("execute_program", { ok: false })])).toBe("repeated-failure");
+    expect(stagnationReason([step("click", { ok: false }), step("click", { ok: false })])).toBe("repeated-failure");
     expect(stagnationReason([step("inspect_page", { text: "same" }), step("inspect_page", { text: "same" }), step("inspect_page", { text: "same" })])).toBe("repeated-read");
-    for (const name of ["find_elements", "list_frames", "list_downloads"]) expect(stagnationReason([step(name, { value: "same" }), step(name, { value: "same" }), step(name, { value: "same" })])).toBe("repeated-read");
-    expect(stagnationReason([step("execute_program", { ok: true }), step("execute_program", { ok: true }), step("execute_program", { ok: true })])).toBeUndefined();
+    for (const name of ["find_elements", "list_frames", "list_downloads", "count_elements", "read_elements", "get_page_info"]) expect(stagnationReason([step(name, { value: "same" }), step(name, { value: "same" }), step(name, { value: "same" })])).toBe("repeated-read");
+    expect(stagnationReason([step("click", { ok: true }), step("click", { ok: true }), step("click", { ok: true })])).toBeUndefined();
     expect(stagnationReason(Array.from({ length: 6 }, (_, index) => step(index % 2 ? "fill" : "click", { ok: true })))).toBeUndefined();
     expect(stagnationReason(Array.from({ length: 6 }, (_, index) => step(index % 2 ? "read_text" : "inspect_page", { text: "same" })))).toBe("two-call-cycle");
   });
 
-  it("executes a composable navigation program with stable instructions and complete-response callbacks", async () => {
+  it("executes navigation with stable instructions and complete-response callbacks", async () => {
     const { events, logger } = memoryLog();
     let step = 0;
     const prompts: string[] = [];
@@ -184,10 +184,11 @@ describe("createAgent", () => {
       expect(options.tools?.map((tool) => tool.name)).toEqual(PROGRAM_TOOL_REGISTRY.map(({ name }) => name));
       prompts.push(JSON.stringify(options.prompt));
       systemPrompts.push(String(options.prompt.find((message) => message.role === "system")?.content ?? ""));
-      return ++step === 1 ? tool("call-1", "execute_program", { code: "await page.goto('https://test');" }) : text();
+      return ++step === 1 ? tool("call-1", "navigate", { url: "https://test/" }) : text();
     } });
     const result = await createAgent({ model: config, languageModel: model, executor, instructions: "Custom guidance.", logger, conversationId: "conversation", onResponse: received }).generate({ prompt: "go" });
     expect(step).toBe(2);
+    expect(executor.runProgram).toHaveBeenCalledOnce();
     expect(received).toHaveBeenCalledTimes(2);
     expect(prompts[0]).toContain("<browser-context>");
     expect(prompts[0]).toContain("Other page");
@@ -234,14 +235,14 @@ describe("createAgent", () => {
       requests.push(JSON.parse(String(init?.body)));
       const first = requests.length === 1;
       return new Response(JSON.stringify({ id: `message-${requests.length}`, type: "message", role: "assistant", model: "claude-sonnet-4-5",
-        content: first ? [{ type: "tool_use", id: "tool-1", name: "read_api_reference", input: {} }] : [{ type: "text", text: "done" }],
+        content: first ? [{ type: "tool_use", id: "tool-1", name: "inspect_page", input: {} }] : [{ type: "text", text: "done" }],
         stop_reason: first ? "tool_use" : "end_turn", stop_sequence: null,
         usage: { input_tokens: 12000, output_tokens: 10, cache_creation_input_tokens: first ? 10000 : 0, cache_read_input_tokens: first ? 0 : 10000 },
       }), { status: 200, headers: { "content-type": "application/json" } });
     });
     const languageModel = createAnthropic({ apiKey: "test-key", fetch })("claude-sonnet-4-5");
     const model = { providerId: "anthropic", sdk: "@ai-sdk/anthropic", baseURL: "https://api.anthropic.com/v1", model: "claude-sonnet-4-5", contextWindowOverride: 256_000 } as ModelConfig;
-    const result = await createAgent({ model, languageModel, executor: browserExecutor(), instructions: "Custom guidance." }).generate({ prompt: "inspect" });
+    const result = await createAgent({ model, languageModel, executor: browserExecutor({ inspect: vi.fn(async () => ({ snapshot: "current" })) }), instructions: "Custom guidance." }).generate({ prompt: "inspect" });
     expect(result.text).toBe("done"); expect(requests).toHaveLength(2);
     expect(requests[0].tools).toEqual(requests[1].tools);
     expect(requests[0].tools).toHaveLength(PROGRAM_TOOL_REGISTRY.length);
@@ -260,7 +261,7 @@ describe("createAgent", () => {
       const summary = JSON.stringify(request.system).includes("Summarize the entire supplied conversation faithfully");
       const first = !summary && ++agentCalls === 1;
       return new Response(JSON.stringify({ id: `message-${requests.length}`, type: "message", role: "assistant", model: "claude-sonnet-4-5",
-        content: first ? [{ type: "tool_use", id: "tool-1", name: "read_api_reference", input: {} }] : [{ type: "text", text: summary ? "Summary of earlier work." : "done" }],
+        content: first ? [{ type: "tool_use", id: "tool-1", name: "inspect_page", input: {} }] : [{ type: "text", text: summary ? "Summary of earlier work." : "done" }],
         stop_reason: first ? "tool_use" : "end_turn", stop_sequence: null, usage: { input_tokens: 12000, output_tokens: 10 },
       }), { status: 200, headers: { "content-type": "application/json" } });
     });
@@ -269,7 +270,7 @@ describe("createAgent", () => {
     const model = { providerId: "anthropic", sdk: "@ai-sdk/anthropic", baseURL: "https://api.anthropic.com/v1", model: "claude-sonnet-4-5", contextWindowOverride: Math.ceil(estimated / 0.85), maxTokensOverride: 4096 } as ModelConfig;
     const languageModel = createAnthropic({ apiKey: "test-key", fetch })("claude-sonnet-4-5");
     const compactor = new ContextCompactor({ model, logger, conversationId: "conversation", branchIds: ["u"], signal: new AbortController().signal, prompt: instructions });
-    const result = await createAgent({ model, languageModel, executor: browserExecutor(), instructions: "Custom guidance.", logger, conversationId: "conversation", compactor }).generate({ prompt: "inspect" });
+    const result = await createAgent({ model, languageModel, executor: browserExecutor({ inspect: vi.fn(async () => ({ snapshot: "current" })) }), instructions: "Custom guidance.", logger, conversationId: "conversation", compactor }).generate({ prompt: "inspect" });
     expect(result.text).toBe("done");
     expect(events.some((event) => event.type === "context.compacted")).toBe(true);
     const agentRequests = requests.filter((request) => Array.isArray(request.tools));
@@ -298,35 +299,34 @@ describe("createAgent", () => {
     await createAgent({ model: { ...model, contextWindowOverride: 256_000 }, languageModel, executor: browserExecutor() }).generate({ prompt: "hello" });
   });
 
-  it("executes a complete DSML program and continues with its result", async () => {
+  it("executes a recovered DSML action and continues with its result", async () => {
     const { events, logger } = memoryLog();
     let step = 0;
-    const code = "await page.mouse.wheel(0, 600);";
-    const dsml = `<｜DSML｜ calls><｜DSML｜ invoke name="execute_program"><｜DSML｜ parameter name="code" string="true">${code}</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>`;
+    const dsml = `<｜DSML｜ calls><｜DSML｜ invoke name="navigate"><｜DSML｜ parameter name="url" string="true">https://test/</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>`;
     const executor = browserExecutor({ runProgram: vi.fn(async () => ({ ok: true })) });
     const model = new MockLanguageModelV4({ doGenerate: async () => text(++step === 1 ? dsml : "done") });
     const result = await createAgent({ model: config, languageModel: model, executor, logger, conversationId: "conversation" }).generate({ prompt: "scroll" });
     expect(step).toBe(2);
-    expect(executor.runProgram).toHaveBeenCalledWith({ code }, undefined, expect.any(Object));
+    expect(executor.runProgram).toHaveBeenCalledWith(expect.objectContaining({ code: expect.stringContaining("currentPage.goto(input.url)") }), undefined, expect.any(Object));
     expect(result.steps.flatMap((step) => step.toolResults)).toHaveLength(1);
     expect(result.text).toBe("done");
     await logger.flush();
-    expect(events).toEqual(expect.arrayContaining([expect.objectContaining({ type: "model.dsml.recovery", content: { recovered: true, toolNames: ["execute_program"] } })]));
+    expect(events).toEqual(expect.arrayContaining([expect.objectContaining({ type: "model.dsml.recovery", content: { recovered: true, toolNames: ["navigate"] } })]));
   });
 
-  it("continues beyond twenty calls and records repeated reads without disabling tools", async () => {
+  it("continues beyond one hundred calls and records repeated reads without disabling tools", async () => {
     const { events, logger } = memoryLog();
     let step = 0;
     const executor = browserExecutor({ inspect: vi.fn(async () => ({ text: "same" })) });
     const model = new MockLanguageModelV4({ doGenerate: async (options) => {
       expect(options.reasoning).toBeUndefined();
       expect(options.tools?.map((tool) => tool.name)).toEqual(PROGRAM_TOOL_REGISTRY.map(({ name }) => name));
-      return ++step <= 25 ? tool(`read-${step}`, "inspect_page", {}) : text("finished");
+      return ++step <= 121 ? tool(`read-${step}`, "inspect_page", {}) : text("finished");
     } });
     const result = await createAgent({ model: config, languageModel: model, executor, logger, conversationId: "conversation" }).generate({ prompt: "inspect" });
-    expect(step).toBe(26);
-    expect(executor.inspect).toHaveBeenCalledTimes(25);
-    expect(result.steps.flatMap((step) => step.toolResults)).toHaveLength(25);
+    expect(step).toBe(122);
+    expect(executor.inspect).toHaveBeenCalledTimes(121);
+    expect(result.steps.flatMap((step) => step.toolResults)).toHaveLength(121);
     expect(result.finishReason).toBe("stop");
     await logger.flush();
     expect(events).toEqual(expect.arrayContaining([expect.objectContaining({ type: "agent.loop-guard.triggered", content: { stepNumber: 3, reason: "repeated-read" } })]));

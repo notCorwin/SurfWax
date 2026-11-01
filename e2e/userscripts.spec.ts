@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 
-import { test, textResponse, toolResponse, pageResponse, commandResponse, startProvider, closeServer, openExtension, dispose, configure, enableUserScripts, readEvents, nameCurrentConversation, warnsOnLeave, expectThemeButton, type MockResponse } from './fixtures';
+import { test, textResponse, commandResponse, startProvider, closeServer, openExtension, dispose, configure, enableUserScripts, readEvents, nameCurrentConversation, warnsOnLeave, expectThemeButton, type MockResponse } from './fixtures';
 
 test("ships the MV3 Harness and user-script manager", async () => {
   const opened = await openExtension();

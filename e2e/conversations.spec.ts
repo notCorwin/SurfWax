@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 
 
-import { test, p95, textResponse, delayedResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
+import { test, p95, textResponse, delayedResponse, commandResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
 
 test("opens a bounded conversation dropdown below its trigger and keeps outside controls interactive", async () => {
   const provider = await startProvider([]);
@@ -114,12 +114,11 @@ test("opens a bounded conversation dropdown below its trigger and keeps outside 
   }
 });
 
-test("executes run through the page facade, restores the conversation, and clears the log", async () => {
+test("reads page information, restores the conversation, and clears the log", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const targetUrl = `${provider.origin}/target`;
-  const code = "return { title: await page.title(), url: await page.url() };";
-  responses.push(toolResponse(code), textResponse("META_OK"), textResponse("工具测试"));
+  responses.push(commandResponse("get_page_info", {}, "call-chrome-e2e"), textResponse("META_OK"), textResponse("工具测试"));
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage();
@@ -133,17 +132,17 @@ test("executes run through the page facade, restores the conversation, and clear
     await expect(opened.page.locator(".markdown-body").last()).toContainText("META_OK");
     const process = opened.page.getByTestId("tool-group-summary");
     await expect(process).toHaveCount(1);
-    await expect(process).toHaveText(/^执行浏览器操作 · \d+\.\d{2} 秒$/);
+    await expect(process).toHaveText(/^查看页面信息 · \d+\.\d{2} 秒$/);
     await expect(process.locator("summary, button")).toHaveCount(0);
     expect(await process.evaluate((element) => Boolean(element.compareDocumentPosition(document.querySelector('.markdown-body')!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
 
     await expect.poll(() => provider.requests.length).toBe(3);
     expect(provider.requests[0].reasoning_effort).toBe("minimal");
     expect(provider.requests[0].tools.map((tool: any) => tool.function.name)).not.toContain("browser");
-    expect(provider.requests[0].tools).toContainEqual(expect.objectContaining({ type: "function", function: expect.objectContaining({ name: "execute_program" }) }));
+    expect(provider.requests[0].tools).toContainEqual(expect.objectContaining({ type: "function", function: expect.objectContaining({ name: "get_page_info" }) }));
     const events = await readEvents(opened.page);
     const tool = events.find((event) => event.type === "tool.finished");
-    expect(tool).toMatchObject({ toolCallId: "call-chrome-e2e", input: { code: expect.stringContaining("await page.title()") }, latencyMs: expect.any(Number) });
+    expect(tool).toMatchObject({ toolCallId: "call-chrome-e2e", input: {}, latencyMs: expect.any(Number) });
     expect(tool.output.result).toMatchObject({ title: "Side Agent Target", url: targetUrl });
     expect(events.filter((event) => /^(model|request|tool)\./.test(event.type)).every((event) => typeof event.conversationId === "string")).toBe(true);
     const logicalMessages = [...new Map(events.filter((event) => event.type === "conversation.message")
@@ -224,7 +223,7 @@ test("queues multiple follow-up messages while running and dispatches them in FI
 
 test("sends a selected follow-up immediately, closes interrupted tools and keeps the remaining queue", async () => {
   const provider = await startProvider([
-    toolResponse("await new Promise((resolve) => setTimeout(resolve, 60_000)); return 'TOO_LATE'", "call-followup-interrupted"),
+    commandResponse("verify_state", { target: { by: "css", value: "main" }, textIncludes: "NEVER_MATCHES", timeoutMs: 60_000 }, "call-followup-interrupted"),
     textResponse("URGENT_DONE"),
     textResponse("LATER_DONE"),
   ]);

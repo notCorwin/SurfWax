@@ -39,9 +39,9 @@ test("text tools reject non-editable controls before focus or keyboard effects",
     for (let index = 0; index < actions.length; index++) responses.push((request) => {
       expect(lastTool(request), `${actions[index]!.tool} on ${actions[index]!.id}`).toMatchObject({ ok: false });
       return actions[index + 1] ? command(actions[index + 1]!, index + 1)
-        : commandResponse("execute_program", { code: "await page.locator('#select').waitFor({state:'editable'});", timeoutMs: 1200 }, "wait-select-editable");
+        : commandResponse("verify_state", { target: { by: "css", value: "#select" }, state: "editable", timeoutMs: 1200 }, "wait-select-editable");
     });
-    responses.push((request) => { expect(lastTool(request)).toMatchObject({ ok: false }); return textResponse("INVALID_CONTROLS_REJECTED"); }, textResponse("文本控件校验"));
+    responses.push((request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: { verified: false, timedOut: true } }); return textResponse("INVALID_CONTROLS_REJECTED"); }, textResponse("文本控件校验"));
     await target.bringToFront();
     await opened.page.getByTestId("composer-input").fill("Reject non-editable controls");
     await opened.page.getByTestId("composer-input").press("Enter");
@@ -237,19 +237,23 @@ test("targets an out-of-process frame across navigation without editing its sibl
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/target`);
     const crossURL = `${provider.origin.replace("127.0.0.1", "localhost")}/frame`;
+    // Install the second document's input before navigation in the test fixture.
+    await target.addInitScript(() => {
+      if (location.search === "?after=1") document.addEventListener("DOMContentLoaded", () => { document.body.innerHTML = '<input id="inner" value="after">'; });
+    });
     await target.evaluate((url) => {
       document.body.innerHTML = `<iframe id="other" srcdoc="<input id=inner value=other>"></iframe><iframe id="cross" src="${url}"></iframe>`;
     }, crossURL);
     const other = target.frameLocator("#other").locator("#inner");
     const cross = target.frameLocator("#cross").locator("body");
     await expect(cross).toContainText("frame ready");
-    await cross.evaluate((body) => { body.innerHTML = '<input id="inner" value="before">'; });
+    await cross.evaluate((body) => { body.innerHTML = '<input id="inner" value="before"><button id="navigate">Navigate frame</button>';
+      body.querySelector<HTMLButtonElement>("#navigate")!.onclick = () => { location.href = `${location.pathname}?after=1`; };
+    });
     await other.focus();
     responses.push(
       commandResponse("fill", { target: { by: "css", value: "#inner", frame: { by: "css", value: "#cross" } }, value: "first" }, "fill-oopif"),
-      (request) => { expect(lastTool(request), JSON.stringify(lastTool(request))).toMatchObject({ ok: true }); return commandResponse("execute_program", { code: `
-await page.evaluate(async url => { const frame = document.querySelector('#cross'); await new Promise(resolve => { frame.onload = resolve; frame.src = url + '?after=1'; }); }, ${JSON.stringify(crossURL)});
-await page.frameLocator('#cross').locator('body').evaluate(body => { body.innerHTML = '<input id="inner" value="after">'; });` }, "navigate-oopif"); },
+      (request) => { expect(lastTool(request), JSON.stringify(lastTool(request))).toMatchObject({ ok: true }); return commandResponse("click", { target: { by: "css", value: "#navigate", frame: { by: "css", value: "#cross" } }, timeoutMs: 15_000 }, "navigate-oopif"); },
       (request) => { expect(lastTool(request), JSON.stringify(lastTool(request))).toMatchObject({ ok: true }); return commandResponse("fill", { target: { by: "css", value: "#inner", frame: { by: "css", value: "#cross" } }, value: "second" }, "fill-new-oopif"); },
       (request) => { expect(lastTool(request), JSON.stringify(lastTool(request))).toMatchObject({ ok: true }); return textResponse("OOPIF_INPUT_OK"); },
       textResponse("跨进程框架输入"),

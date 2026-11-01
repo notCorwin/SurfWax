@@ -20,6 +20,11 @@ test("discovers nested frames and uses their references for browser actions", as
         document.body.append(button);
       });
     }
+    await targetPage.evaluate(() => {
+      const button = document.createElement("button"); button.id = "remove-cross-frame"; button.textContent = "Remove cross frame";
+      button.onclick = () => document.querySelector('iframe[src*=localhost]')!.remove();
+      document.body.append(button);
+    });
     await cross.evaluate((url) => {
       const nested = document.createElement("iframe");
       nested.src = url;
@@ -54,7 +59,7 @@ test("discovers nested frames and uses their references for browser actions", as
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("find_elements", { target: { by: "role", value: "button", name: "Frame action", frame: { ref: crossRef } } }, "find-discovered-frame"); },
       (request) => { expect(lastTool(request)).toMatchObject({ total: 1, elements: [{ ref: expect.any(String), role: "button" }] }); return commandResponse("click", { target: { by: "role", value: "button", name: "Frame action", frame: { ref: crossRef } } }, "click-discovered-frame"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("read_text", { target: { by: "css", value: "main", frame: { ref: nestedRef } } }, "read-nested-frame"); },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: "same origin" }); return commandResponse("execute_program", { code: "await page.evaluate(() => document.querySelector('iframe[src*=localhost]').remove());" }, "remove-cross-frame"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: "same origin" }); return commandResponse("click", { target: { by: "css", value: "#remove-cross-frame" } }, "remove-cross-frame"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("find_elements", { target: { by: "css", value: "main", frame: { ref: nestedRef } }, timeoutMs: 3000 }, "stale-frame-ref"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "stale-frame" } }); return commandResponse("list_frames", { limit: 1, cursor: oldCursor }, "stale-frame-cursor"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: false }); return textResponse("FRAME_DISCOVERY_OK"); },

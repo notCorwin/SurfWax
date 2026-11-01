@@ -1,34 +1,34 @@
 import { expect } from "@playwright/test";
-import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents } from "./fixtures";
+import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents, type MockResponse } from "./fixtures";
 
-test("preserves accessible locator semantics across scopes, shadow roots, refs, and frames", async () => {
-  test.setTimeout(150000);
-  const provider = await startProvider([
-    commandResponse("execute_program", { timeoutMs: 90000, code: `
-const scope = page.locator('.scope');
-const snapshot = await page.inspect();
-const row = snapshot.items.find(item => item.line.includes('article "Audit scope"'));
-if (!row?.ref) throw new Error('Missing article reference');
-const frame = page.frameLocator('#local');
-return {
-  rootSubstring: await page.getByRole('button', {name:'sav'}).count(),
-  rootExact: await page.getByRole('button', {name:'Save', exact:true}).count(),
-  rootEmpty: await page.getByRole('button', {name:'', exact:true}).count(),
-  rootHiddenName: await page.getByRole('button', {name:'Save draft', exact:true}).count(),
-  rootLabelSubstring: await page.getByLabel('billing').count(),
-  frameExact: await frame.getByRole('button', {name:'Save', exact:true}).count(),
-  frameHiddenName: await frame.getByRole('button', {name:'Save draft', exact:true}).count(),
-  frameListbox: await frame.getByRole('listbox').count(),
-  frameCombobox: await frame.getByRole('combobox').count(),
-  chainedExact: await scope.getByRole('button', {name:'Save', exact:true}).count(),
-  chainedListbox: await scope.getByRole('listbox').count(),
-  refExact: await page.ref(row.ref).getByRole('button', {name:'Save', exact:true}).count(),
-  filtered: await page.locator('article').filter({has:page.getByRole('listbox')}).count(),
-  shadowExact: await page.locator('#host').getByRole('button', {name:'Shadow', exact:true}).count(),
-  selfExcluded: await page.getByRole('button', {name:'Self', exact:true}).getByRole('button', {name:'Self', exact:true}).count(),
-};` }, "accessibility-semantics"),
-    textResponse("SEMANTICS_DONE"), textResponse("语义定位"),
-  ]);
+test("preserves accessible locator semantics across unique scopes, shadow roots, and frames", async () => {
+  test.setTimeout(210_000);
+  const cases = [
+    { key: "rootSubstring", target: { by: "role", value: "button", name: "sav" }, expected: 1 },
+    { key: "rootExact", target: { by: "role", value: "button", name: "Save", exact: true }, expected: 1 },
+    { key: "rootEmpty", target: { by: "role", value: "button", name: "", exact: true }, expected: 1 },
+    { key: "rootHiddenName", target: { by: "role", value: "button", name: "Save draft", exact: true }, expected: 0 },
+    { key: "rootLabelSubstring", target: { by: "label", value: "billing" }, expected: 1 },
+    { key: "frameExact", target: { by: "role", value: "button", name: "Save", exact: true, frame: { by: "css", value: "#local" } }, expected: 1 },
+    { key: "frameHiddenName", target: { by: "role", value: "button", name: "Save draft", exact: true, frame: { by: "css", value: "#local" } }, expected: 0 },
+    { key: "frameListbox", target: { by: "role", value: "listbox", frame: { by: "css", value: "#local" } }, expected: 1 },
+    { key: "frameCombobox", target: { by: "role", value: "combobox", frame: { by: "css", value: "#local" } }, expected: 0 },
+    { key: "shadowExact", target: { by: "role", value: "button", name: "Shadow", exact: true, scope: { by: "css", value: "#host" } }, expected: 1 },
+    { key: "selfExcluded", target: { by: "role", value: "button", name: "Self", exact: true, scope: { by: "role", value: "button", name: "Self", exact: true } }, expected: 0 },
+  ];
+  const responses: MockResponse[] = [];
+  const command = (item: typeof cases[number]) => commandResponse("count_elements", { target: item.target }, `semantics-${item.key}`);
+  const last = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
+  responses.push(command(cases[0]!));
+  for (let index = 1; index < cases.length; index++) responses.push((request) => {
+    expect(last(request), cases[index - 1]!.key).toMatchObject({ ok: true, result: cases[index - 1]!.expected });
+    return command(cases[index]!);
+  });
+  responses.push((request) => {
+    expect(last(request), cases.at(-1)!.key).toMatchObject({ ok: true, result: cases.at(-1)!.expected });
+    return textResponse("SEMANTICS_DONE");
+  }, textResponse("语义定位"));
+  const provider = await startProvider(responses);
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage();
@@ -44,12 +44,9 @@ return {
     await target.bringToFront();
     await opened.page.getByTestId("composer-input").fill("Inspect the controls");
     await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("SEMANTICS_DONE", { timeout: 120000 });
-    const event = (await readEvents(opened.page)).find((entry) => entry.toolCallId === "accessibility-semantics" && ["tool.finished", "tool.failed"].includes(entry.type));
-    expect(event?.output).toMatchObject({ ok: true, result: {
-      rootSubstring: 1, rootExact: 1, rootEmpty: 1, rootHiddenName: 0, rootLabelSubstring: 1,
-      frameExact: 1, frameHiddenName: 0, frameListbox: 1, frameCombobox: 0,
-      chainedExact: 1, chainedListbox: 1, refExact: 1, filtered: 1, shadowExact: 1, selfExcluded: 0,
-    } });
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("SEMANTICS_DONE", { timeout: 180_000 });
+    const events = await readEvents(opened.page);
+    for (const item of cases) expect(events.find((entry) => entry.toolCallId === `semantics-${item.key}` && entry.type === "tool.finished")?.output)
+      .toMatchObject({ ok: true, result: item.expected });
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

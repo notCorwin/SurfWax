@@ -15,19 +15,25 @@ test("operates on a replacement OOPIF after repeated attachment and removal", as
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/target`);
     const url = `${provider.origin.replace("127.0.0.1", "localhost")}/frame`;
+    await target.evaluate((frameUrl) => {
+      const button = document.createElement("button"); button.id = "replace-frames"; button.textContent = "Replace frames";
+      const status = document.createElement("output"); status.id = "replacement-status"; status.textContent = "waiting";
+      button.onclick = async () => {
+        for (let i = 0; i < 8; i++) {
+          const frame = document.createElement("iframe"); frame.src = `${frameUrl}?old=${i}`;
+          document.body.append(frame); await new Promise((resolve) => setTimeout(resolve, 0)); frame.remove();
+        }
+        const frame = document.createElement("iframe"); frame.id = "replacement"; frame.src = `${frameUrl}?new=1`;
+        await new Promise<void>((resolve, reject) => { frame.onload = () => resolve(); frame.onerror = reject; document.body.append(frame); });
+        status.textContent = "ready";
+      };
+      document.body.append(button, status);
+    }, url);
     responses.push(
-      commandResponse("execute_program", { timeoutMs: 30000, code: `
-await page.evaluate(async url => {
-  for (let i = 0; i < 8; i++) {
-    const frame = document.createElement('iframe'); frame.src = url + '?old=' + i;
-    document.body.append(frame); await new Promise(resolve => setTimeout(resolve, 0)); frame.remove();
-  }
-  const frame = document.createElement('iframe'); frame.id = 'replacement'; frame.src = url + '?new=1';
-  await new Promise((resolve, reject) => { frame.onload = resolve; frame.onerror = reject; document.body.append(frame); });
-}, ${JSON.stringify(url)});
-await page.frameLocator('#replacement').getByRole('button', {name:'Frame action'}).click();
-return 'clicked';` }, "replace-frames"),
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: "clicked" }); return commandResponse("list_frames", {}, "frames-after-replace"); },
+      commandResponse("click", { target: { by: "css", value: "#replace-frames" }, timeoutMs: 30_000 }, "replace-frames"),
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("verify_state", { target: { by: "css", value: "#replacement-status" }, textIncludes: "ready", timeoutMs: 30_000 }, "replacement-ready"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: { verified: true } }); return commandResponse("click", { target: { by: "role", value: "button", name: "Frame action", frame: { by: "css", value: "#replacement" } } }, "click-replacement"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("list_frames", {}, "frames-after-replace"); },
       (request) => {
         const result = lastTool(request);
         expect(result).toMatchObject({ total: 2, frames: expect.any(Array) });
@@ -54,32 +60,30 @@ test("observes and operates on the same iframe after repeated process swaps", as
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/target`);
     const crossUrl = `${provider.origin.replace("127.0.0.1", "localhost")}/frame`;
+    await target.evaluate(({ same, cross }) => {
+      const button = document.createElement("button"); button.id = "swap-frames"; button.textContent = "Swap frame process";
+      const status = document.createElement("output"); status.id = "swap-status"; status.textContent = "waiting";
+      button.onclick = async () => {
+        document.querySelectorAll("iframe").forEach((frame) => frame.remove());
+        const frame = document.createElement("iframe"); frame.id = "switching-frame"; document.body.appendChild(frame);
+        for (let i = 0; i < 4; i++) for (const url of [same, cross]) {
+          await new Promise<void>((resolve, reject) => { frame.onload = () => resolve(); frame.onerror = reject; frame.src = `${url}?swap=${i}`; });
+        }
+        status.textContent = "swapped";
+      };
+      document.body.append(button, status);
+    }, { same: `${provider.origin}/same-frame`, cross: crossUrl });
     responses.push(
-      commandResponse("execute_program", { timeoutMs: 30000, code: `
-await page.evaluate(async ({same, cross}) => {
-  document.querySelectorAll('iframe').forEach(frame => frame.remove());
-  const frame = document.createElement('iframe');
-  frame.id = 'switching-frame';
-  document.body.appendChild(frame);
-  for (let i = 0; i < 4; i++) {
-    for (const url of [same, cross]) {
-      await new Promise((resolve, reject) => {
-        frame.onload = resolve;
-        frame.onerror = reject;
-        frame.src = url + '?swap=' + i;
-      });
-    }
-  }
-}, ${JSON.stringify({ same: `${provider.origin}/same-frame`, cross: crossUrl })});
-return 'swapped';` }, "swap-frame-process"),
-      (request) => { const result = lastTool(request); expect(result, JSON.stringify(result)).toMatchObject({ ok: true, result: "swapped" }); return commandResponse("list_frames", {}, "frames-after-swaps"); },
+      commandResponse("click", { target: { by: "css", value: "#swap-frames" }, timeoutMs: 30_000 }, "swap-frame-process"),
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("verify_state", { target: { by: "css", value: "#swap-status" }, textIncludes: "swapped", timeoutMs: 30_000 }, "swaps-ready"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: { verified: true } }); return commandResponse("list_frames", {}, "frames-after-swaps"); },
       (request) => {
         const result = lastTool(request);
         expect(result, JSON.stringify(result)).toMatchObject({ total: 2, frames: expect.any(Array) });
         expect(result.frames.some((frame: any) => frame.url.includes("swap=3") && frame.url.includes("localhost"))).toBe(true);
-        return commandResponse("execute_program", { code: `await page.frameLocator('#switching-frame').getByRole('button', {name:'Frame action'}).click(); return 'clicked';` }, "click-after-swaps");
+        return commandResponse("click", { target: { by: "role", value: "button", name: "Frame action", frame: { by: "css", value: "#switching-frame" } } }, "click-after-swaps");
       },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: "clicked" }); return textResponse("FRAME_PROCESS_SWAP_OK"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return textResponse("FRAME_PROCESS_SWAP_OK"); },
       textResponse("框架进程切换"),
     );
     await target.bringToFront();

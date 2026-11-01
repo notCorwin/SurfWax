@@ -13,10 +13,10 @@ import { test,
   openExtension,
   startProvider,
   textResponse,
-  toolResponse,
+  commandResponse,
 } from "./fixtures";
 
-test("executes a sandbox program without crashing the live development extension", async () => {
+test("executes an atomic browser action without crashing the live development extension", async () => {
   const directory = await mkdtemp(resolve(tmpdir(), "surf-wax-live-dev-"));
   const extension = resolve(directory, "extension");
   const previousPort = process.env.SURFWAX_DEV_PORT;
@@ -26,9 +26,7 @@ test("executes a sandbox program without crashing the live development extension
   const responses: Parameters<typeof startProvider>[0] = [];
   const provider = await startProvider(responses);
   const targetUrl = `${provider.origin}/target`;
-  responses.push(toolResponse(`let blocked=false; try { await fetch(${JSON.stringify(targetUrl)}); } catch { blocked=true; }
-await check(blocked, "development program worker must not bypass mediated network capabilities");
-await page.goto(${JSON.stringify(targetUrl)}); return await page.title();`), textResponse("DEV_SANDBOX_OK"));
+  responses.push(commandResponse("navigate", { url: targetUrl }, "development-navigate"), textResponse("DEV_SANDBOX_OK"));
   const vite = await createViteServer();
   let opened: Awaited<ReturnType<typeof openExtension>> | undefined;
   try {
@@ -39,6 +37,7 @@ await page.goto(${JSON.stringify(targetUrl)}); return await page.title();`), tex
     await target.goto(targetUrl);
     const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.close();
+    await target.bringToFront();
     await opened.page.getByTestId("composer-input").fill("run through the development sandbox");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("DEV_SANDBOX_OK");

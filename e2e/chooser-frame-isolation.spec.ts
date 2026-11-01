@@ -21,7 +21,7 @@ for (const kind of ["same-process", "cross-process", "nested-in-oopif"] as const
     const container = kind === "nested-in-oopif" ? target.frameLocator("#outer") : target;
     await container.locator("body").evaluate((body, url) => {
       for (const id of ["chooser-frame", "sibling-frame"]) {
-        const frame = body.ownerDocument.createElement("iframe"); frame.id = id; frame.style.cssText = "width:320px;height:180px"; frame.src = url; body.append(frame);
+        const frame = body.ownerDocument.createElement("iframe"); frame.id = id; frame.name = id; frame.style.cssText = "width:320px;height:180px"; frame.src = url; body.append(frame);
       }
     }, `${frameOrigin}/same-frame`);
     const frame = container.frameLocator("#chooser-frame");
@@ -32,18 +32,24 @@ for (const kind of ["same-process", "cross-process", "nested-in-oopif"] as const
       input.onchange = () => { body.dataset.file = input.files?.[0]?.name ?? ""; };
     });
     await expect(container.frameLocator("#sibling-frame").locator("body")).toBeVisible();
-    let artifactId = 0, subscriptionId = "", chooserId = "";
+    let artifactId = 0, subscriptionId = "", chooserId = "", nestedRef = "";
     responses.push(
       commandResponse("create_text_artifact", { filename: "retained.txt", text: "file" }, "artifact"),
-      (request) => { artifactId = lastTool(request).result.id; return commandResponse("subscribe_event", { kind: "filechooser" }, "subscribe"); },
-      (request) => {
-        subscriptionId = lastTool(request).subscriptionId;
-        if (kind === "nested-in-oopif") return commandResponse("execute_program", {
-          code: "return await page.frameLocator('#outer').frameLocator('#chooser-frame').locator('#open').click();", background: true,
-        }, "open");
-        return commandResponse("click", { target: { by: "css", value: "#open", frame: { by: "css", value: "#chooser-frame" } }, background: true }, "open");
-      },
+      (request) => { artifactId = lastTool(request).result.id; return kind === "nested-in-oopif"
+        ? commandResponse("list_frames", {}, "discover-chooser-frame")
+        : commandResponse("subscribe_event", { kind: "filechooser" }, "subscribe"); },
     );
+    if (kind === "nested-in-oopif") responses.push((request) => {
+      const frames = lastTool(request).frames;
+      nestedRef = frames.find((item: any) => item.name === "chooser-frame")?.frameRef;
+      expect(nestedRef).toEqual(expect.any(String));
+      return commandResponse("subscribe_event", { kind: "filechooser" }, "subscribe");
+    });
+    responses.push((request) => {
+      subscriptionId = lastTool(request).subscriptionId;
+      const frame = kind === "nested-in-oopif" ? { ref: nestedRef } : { by: "css", value: "#chooser-frame" };
+      return commandResponse("click", { target: { by: "css", value: "#open", frame }, background: true }, "open");
+    });
     responses.push(() => commandResponse("wait_event", { subscriptionId, waitMs: 10000 }, "chooser"));
     responses.push(
       (request) => {

@@ -1,32 +1,28 @@
-import { chromium, expect, type BrowserContext, type CDPSession, type Locator, type Page } from "@playwright/test";
-import { once } from "node:events";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { createServer, type Server } from "node:http";
-import { tmpdir } from "node:os";
-import { resolve } from "node:path";
-
-
-import { test, p95, textResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
+import { expect } from "@playwright/test";
+import { writeFile } from "node:fs/promises";
+import { test, p95, textResponse, assistantResponse, startProvider, openExtension, dispose, configure, readEvents, type MockResponse } from './fixtures';
 
 test("keeps 100 semantic locate-and-action operations at p95 <= 100ms", { tag: "@performance" }, async () => {
+  test.setTimeout(300_000);
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/performance`);
-    responses.push(commandResponse("execute_program", { timeoutMs: 30000, code: "for(let i=0;i<100;i++) await page.getByRole('button',{name:'Increment'}).click(); const count=await page.locator('output').innerText(); await check(count==='100','all 100 native clicks must change the counter'); return count;" }, "call-performance"), textResponse("PERFORMANCE_OK"), textResponse("性能"));
+    responses.push(assistantResponse({ tool_calls: Array.from({ length: 100 }, (_, index) => ({ id: `call-performance-${index}`, type: "function", function: { name: "click", arguments: JSON.stringify({ target: { by: "role", value: "button", name: "Increment" }, timeoutMs: 30_000 }) } })) }), textResponse("PERFORMANCE_OK"), textResponse("性能"));
     const options = await configure(opened.context, opened.page, provider.baseURL); await options.close();
     // This harness opens the panel in a tab; a real Side Panel retains page focus.
     await target.bringToFront();
     await expect.poll(() => target.evaluate(() => document.hasFocus())).toBe(true);
     await opened.page.getByTestId("composer-input").fill("benchmark semantic actions"); await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(target.locator("output")).toHaveText("100", { timeout: 30_000 });
+    await expect(target.locator("output")).toHaveText("100", { timeout: 270_000 });
     await expect(opened.page.locator(".markdown-body").last()).toContainText("PERFORMANCE_OK");
     const events = await readEvents(opened.page);
-    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-performance")?.output).toMatchObject({ ok: true, state: "succeeded", result: "100" });
-    const latencies = events.filter((event) => event.type === "automation.action.finished" && event.toolCallId === "call-performance" && event.content.operation === "click").map((event) => event.latencyMs);
+    const terminals = events.filter((event) => event.type === "tool.finished" && event.toolCallId?.startsWith("call-performance-"));
+    expect(terminals).toHaveLength(100);
+    expect(terminals.every((event) => event.output?.ok === true)).toBe(true);
+    const latencies = events.filter((event) => event.type === "automation.action.finished" && event.toolCallId?.startsWith("call-performance-") && event.content.operation === "click").map((event) => event.latencyMs);
     const evidence = test.info().outputPath("semantic-action-latencies.json");
     await writeFile(evidence, JSON.stringify({ p95Ms: p95(latencies), samples: latencies }, null, 2));
     await test.info().attach("semantic-action-latencies", { path: evidence, contentType: "application/json" });

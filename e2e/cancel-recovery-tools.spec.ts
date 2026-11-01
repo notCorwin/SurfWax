@@ -35,20 +35,14 @@ for (const seed of [17, 72]) test(`checks a committed write after cancelling its
     }
     expect(result).toMatchObject({ terminal: true, state: "cancelled" });
     cancelled = true;
-    return commandResponse("execute_program", { timeoutMs: 30_000, code: `
-      const desk = page.frameLocator('iframe[title="Recovery desk"]');
-      await desk.getByRole('button', {name:'Check status'}).click();
-      await desk.locator('#check-status').filter({hasText:${JSON.stringify(`Completed ${fixture.evidence().expectedReference}`)}}).waitFor();
-      return 'verified';` }, "verify-write");
+    return commandResponse("click", { target: { by: "role", value: "button", name: "Check status", frame: { by: "css", value: 'iframe[title="Recovery desk"]' } } }, "check-write");
   });
   try {
     const target = await opened.context.newPage(); await target.goto(fixture.origin);
-    responses.push(commandResponse("execute_program", { background: true, timeoutMs: 60_000, code: `
-      const desk = page.frameLocator('iframe[title="Recovery desk"]');
-      await desk.getByLabel('Transaction reference').fill(${JSON.stringify(fixture.evidence().expectedReference)});
-      await desk.getByRole('button', {name:'Submit transaction'}).click();
-      await desk.locator('#submit-status').filter({hasText:'Submitted'}).waitFor();
-      return 'unexpected confirmation';` }, "submit-write"),
+    const frame = { by: "css", value: 'iframe[title="Recovery desk"]' };
+    responses.push(commandResponse("fill", { target: { by: "label", value: "Transaction reference", frame }, value: fixture.evidence().expectedReference }, "fill-reference"),
+    after((result) => { expect(result.ok).toBe(true); return commandResponse("click", { target: { by: "role", value: "button", name: "Submit transaction", frame } }, "submit-write"); }),
+    after((result) => { expect(result.ok).toBe(true); return commandResponse("verify_state", { background: true, timeoutMs: 60_000, target: { by: "css", value: "#submit-status", frame }, textIncludes: "Submitted" }, "wait-confirmation"); }),
     after((result) => {
       expect(result).toMatchObject({ accepted: true, complete: false, jobId: expect.any(String) });
       jobId = result.jobId;
@@ -56,7 +50,8 @@ for (const seed of [17, 72]) test(`checks a committed write after cancelling its
       return commandResponse("get_job", { jobId, waitMs: 1000 }, `commit-poll-${++polls}`);
     }),
     waitForCancellation,
-    after((result) => { expect(result).toMatchObject({ ok: true, state: "succeeded", result: "verified" }); return done(); }),
+    after((result) => { expect(result.ok).toBe(true); return commandResponse("verify_state", { timeoutMs: 10_000, target: { by: "css", value: "#check-status", frame }, textIncludes: `Completed ${fixture.evidence().expectedReference}` }, "verify-write"); }),
+    after((result) => { expect(result).toMatchObject({ ok: true, result: { verified: true } }); return done(); }),
     textResponse("Recovery"));
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     await target.bringToFront();

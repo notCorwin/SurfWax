@@ -1,4 +1,4 @@
-import { expect, test, startProvider, textResponse, delayedResponse, toolResponse, configure, openExtension, dispose, readEvents, startNewConversation, focusPageControl } from './fixtures';
+import { expect, test, startProvider, textResponse, delayedResponse, assistantResponse, configure, openExtension, dispose, readEvents, startNewConversation, focusPageControl } from './fixtures';
 
 const largeReply = 'OLD_CONTEXT_MARKER ' + 'page observation '.repeat(8_000);
 const summary = 'Earlier page observations and the user request have been recorded.';
@@ -121,7 +121,7 @@ test("updates context while a reply is pending and when switching branches", asy
 
 test("anchors context usage to provider-reported input tokens", async () => {
   const provider = await startProvider([
-    toolResponse("return true", "call-usage-e2e", { promptTokens: 10_000, completionTokens: 5, cachedTokens: 3_000 }),
+    assistantResponse({ tool_calls: [{ id: "call-usage-e2e", type: "function", function: { name: "list_tabs", arguments: "{}" } }] }, { promptTokens: 10_000, completionTokens: 5, cachedTokens: 3_000 }),
     textResponse("USAGE_ANCHOR_REPLY", { promptTokens: 30_000, completionTokens: 5, cachedTokens: 12_000 }),
     textResponse("用量测试"),
     textResponse("SECOND_USAGE_REPLY", { promptTokens: 20_000, completionTokens: 5, cachedTokens: 7_000 }),
@@ -208,7 +208,7 @@ test('automatically summarizes and retries the same request after provider conte
     expect(events.some(event => event.type === 'context.choice.required')).toBe(false);
     const agentRequests = provider.requests.filter(request => request.tools?.length);
     expect(agentRequests).toHaveLength(2);
-    expect(agentRequests[0].tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(['inspect_page', 'execute_program']));
+    expect(agentRequests[0].tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(['inspect_page', 'get_page_info']));
     expect(agentRequests[1].tools).toEqual(agentRequests[0].tools);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

@@ -17,8 +17,8 @@ function logger() {
 }
 const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 5, text: 5, reasoning: 0 } };
 const reply = (text = "Recovered") => ({ content: [{ type: "text" as const, text }], finishReason: { unified: "stop" as const, raw: "stop" }, usage, warnings: [] });
-const call = (id: string, code: string, toolName = "execute_program") => ({ content: [{ type: "text" as const, text: "Ready to act" },
-  { type: "tool-call" as const, toolCallId: id, toolName, input: JSON.stringify({ code }) }],
+const call = (id: string, url: string, toolName = "navigate") => ({ content: [{ type: "text" as const, text: "Ready to act" },
+  { type: "tool-call" as const, toolCallId: id, toolName, input: JSON.stringify({ url }) }],
   finishReason: { unified: "tool-calls" as const, raw: "tool_calls" }, usage, warnings: [] });
 const user: SidePanelMessage = { id: "user", role: "user", parts: [{ type: "text", text: "Continue" }] };
 function setup(model: MockLanguageModelV4, log = logger(), executor = { browserContext: async () => ({ tabs: [] }), runProgram: vi.fn(async () => ({ ok: true })) }) {
@@ -85,7 +85,7 @@ describe("complete-response transport", () => {
       },
       async all() { return [...events]; }, async clear() {},
     } });
-    const { factory, executor } = setup(new MockLanguageModelV4({ doGenerate: async () => call("effect", "return 1;", stage === "invalid-result" ? "missing-tool" : "execute_program") }), log);
+    const { factory, executor } = setup(new MockLanguageModelV4({ doGenerate: async () => call("effect", "https://example.com/", stage === "invalid-result" ? "missing-tool" : "navigate") }), log);
     const cleanup = vi.fn(async () => undefined);
     await expect(createChatTransport(factory, log, "thread", cleanup).sendMessages(options())).rejects.toBe(failure);
     expect(executor.runProgram).toHaveBeenCalledTimes(stage === "tool-result" ? 1 : 0);
@@ -99,10 +99,10 @@ describe("complete-response transport", () => {
     const executor = { browserContext: async () => ({ tabs: [] }), runProgram: vi.fn(async () => {
       const saved = (await log.repository("thread")).messages.at(-1)!.message;
       expect(saved.parts).toEqual(expect.arrayContaining([expect.objectContaining({ text: "Ready to act", state: "done" }),
-        expect.objectContaining({ toolCallId: "effect", state: "input-available", input: { code: "return 1;" } })]));
+        expect.objectContaining({ toolCallId: "effect", state: "input-available", input: { url: "https://example.com/" } })]));
       return { ok: true };
     }) };
-    const { factory } = setup(new MockLanguageModelV4({ doGenerate: async () => ++step === 1 ? call("effect", "return 1;") : reply() }), log, executor);
+    const { factory } = setup(new MockLanguageModelV4({ doGenerate: async () => ++step === 1 ? call("effect", "https://example.com/") : reply() }), log, executor);
     const snapshots: SidePanelMessage[] = [];
     const result = await createChatTransport(factory, log, "thread").sendMessages({ ...options(), onMessage: (message) => { snapshots.push(message); } });
     expect(result.parts).toEqual(expect.arrayContaining([expect.objectContaining({ text: "Recovered", state: "done" }),
@@ -115,7 +115,7 @@ describe("complete-response transport", () => {
   it("records exactly one result for an invalid call before continuing", async () => {
     let step = 0;
     const { factory, executor, log } = setup(new MockLanguageModelV4({
-      doGenerate: async () => ++step === 1 ? call("invalid", "return 1;", "missing-tool") : reply(),
+      doGenerate: async () => ++step === 1 ? call("invalid", "https://example.com/", "missing-tool") : reply(),
     }));
     const result = await createChatTransport(factory, log, "thread").sendMessages(options());
     expect(executor.runProgram).not.toHaveBeenCalled();
@@ -133,7 +133,7 @@ describe("complete-response transport", () => {
       if (record.type === "tool.failed" && !rejected) { rejected = true; return Promise.reject(failure); }
       return append(record);
     });
-    const { factory, executor } = setup(new MockLanguageModelV4({ doGenerate: async () => call("invalid", "return 1;", "missing-tool") }), log);
+    const { factory, executor } = setup(new MockLanguageModelV4({ doGenerate: async () => call("invalid", "https://example.com/", "missing-tool") }), log);
     await expect(createChatTransport(factory, log, "thread").sendMessages(options())).rejects.toBe(failure);
     expect(executor.runProgram).not.toHaveBeenCalled();
     expect((await log.all()).filter((event) => event.toolCallId === "invalid" && event.type === "tool.failed")).toHaveLength(1);
@@ -170,7 +170,7 @@ describe("complete-response transport", () => {
     const prompts: string[] = [];
     const { factory, executor, log } = setup(new MockLanguageModelV4({ doGenerate: async (options) => {
       prompts.push(JSON.stringify(options.prompt));
-      if (++request === 1) return call("effect", "return 1;");
+      if (++request === 1) return call("effect", "https://example.com/");
       if (request === 2) throw new TypeError("Response body connection lost");
       return reply();
     } }));

@@ -19,8 +19,8 @@ function choiceHarness(reply: string) {
   const model = wrapLanguageModel({ model: createOpenAI({ apiKey: "test", baseURL: config.baseURL, fetch }).completion("test"),
     middleware: [completionToolChoiceMiddleware(), dsmlMiddleware(), completionToolsMiddleware()] });
   const execute = vi.fn(async () => "done");
-  const tools = { execute_program: tool({ inputSchema: z.object({ code: z.string().min(1) }), execute }),
-    read_api_reference: tool({ inputSchema: z.object({}), execute }) };
+  const tools = { navigate: tool({ inputSchema: z.object({ url: z.string().min(1) }), execute }),
+    get_page_info: tool({ inputSchema: z.object({}), execute }) };
   return { model, tools, execute, fetch };
 }
 
@@ -44,14 +44,14 @@ function harness(responses: string[], settings: { shape?: boolean; finishReason?
 
 describe("text completion browser tool protocol", () => {
   it.each([false, true])("round-trips an actual SDK completion tool call and preserves the prompt prefix (catalog shape=%s)", async (shape) => {
-    const h = harness([call("execute_program", { code: "return 2;" }), "finished"], { shape });
+    const h = harness([call("navigate", { url: "https://example.com/2" }), "finished"], { shape });
     const result = await h.agent.generate({ prompt: "Perform the action" });
     expect(result.text).toBe("finished");
     expect(h.runProgram).toHaveBeenCalledOnce();
     expect(h.requests).toHaveLength(2);
     expect(h.requests[0]!.url).toBe("https://provider.test/v1/completions");
     expect(h.requests[0]!.body.tools).toBeUndefined();
-    expect(h.requests[0]!.body.prompt).toContain('"name":"execute_program"');
+    expect(h.requests[0]!.body.prompt).toContain('"name":"navigate"');
     expect(h.requests[0]!.body.prompt).toContain('"name":"click"');
     expect(h.requests[0]!.body.prompt).toContain("Text-mode browser tools use JSON Schema draft-07");
     expect(h.requests[1]!.body.prompt).toContain("SURFWAX_TOOL_RESULTS:");
@@ -60,13 +60,13 @@ describe("text completion browser tool protocol", () => {
     const secondPrompt: string = h.requests[1]!.body.prompt;
     const callRecord = JSON.parse(secondPrompt.split("SURFWAX_TOOL_CALLS:").at(-1)!.split("\n")[0]!);
     const results = JSON.parse(secondPrompt.split("SURFWAX_TOOL_RESULTS:").at(-1)!.split("\n")[0]!);
-    expect(callRecord).toEqual([{ id: expect.any(String), name: "execute_program", arguments: { code: "return 2;" } }]);
-    expect(results).toEqual([{ id: callRecord[0].id, name: "execute_program", output: expect.anything() }]);
+    expect(callRecord).toEqual([{ id: expect.any(String), name: "navigate", arguments: { url: "https://example.com/2" } }]);
+    expect(results).toEqual([{ id: callRecord[0].id, name: "navigate", output: expect.anything() }]);
   });
 
   it("rejects malformed or unknown calls before dispatching any effect", async () => {
     for (const output of ["SURFWAX_TOOL_CALLS:[", call("invented", {}),
-      'SURFWAX_TOOL_CALLS:[{"name":"execute_program","arguments":{"code":"return 1"}},{"name":"invented","arguments":{}}]']) {
+      'SURFWAX_TOOL_CALLS:[{"name":"navigate","arguments":{"url":"https://example.com/1"}},{"name":"invented","arguments":{}}]']) {
       const h = harness([output]);
       await expect(h.agent.generate({ prompt: "act" })).rejects.toMatchObject({ code: "completion-tool-protocol" });
       expect(h.runProgram).not.toHaveBeenCalled();
@@ -75,7 +75,7 @@ describe("text completion browser tool protocol", () => {
   });
 
   it("passes invalid schema arguments through the SDK as an error result without executing", async () => {
-    const h = harness([call("execute_program", {}), "failed safely"]);
+    const h = harness([call("navigate", {}), "failed safely"]);
     const result = await h.agent.generate({ prompt: "act" });
     expect(result.text).toBe("failed safely");
     expect(h.runProgram).not.toHaveBeenCalled();
@@ -85,7 +85,7 @@ describe("text completion browser tool protocol", () => {
   });
 
   it("keeps every prior prompt stable across several tool rounds", async () => {
-    const h = harness([call("execute_program", { code: "return 1;" }), call("execute_program", { code: "return 2;" }), "done"]);
+    const h = harness([call("navigate", { url: "https://example.com/1" }), call("navigate", { url: "https://example.com/2" }), "done"]);
     expect((await h.agent.generate({ prompt: "complete both" })).text).toBe("done");
     expect(h.runProgram).toHaveBeenCalledTimes(2);
     expect(h.requests).toHaveLength(3);
@@ -95,13 +95,13 @@ describe("text completion browser tool protocol", () => {
   });
 
   it("does not interpret ordinary JSON as a tool call", async () => {
-    const h = harness(['{"name":"execute_program","arguments":{"code":"return 1;"}}']);
-    expect((await h.agent.generate({ prompt: "return JSON" })).text).toContain('"name":"execute_program"');
+    const h = harness(['{"name":"navigate","arguments":{"url":"https://example.com/1"}}']);
+    expect((await h.agent.generate({ prompt: "return JSON" })).text).toContain('"name":"navigate"');
     expect(h.runProgram).not.toHaveBeenCalled();
   });
 
   it("preserves a fenced literal tool-call example as text without dispatch", async () => {
-    const example = `\`\`\`text\n${call("execute_program", { code: "return 1;" })}\n\`\`\``;
+    const example = `\`\`\`text\n${call("navigate", { url: "https://example.com/1" })}\n\`\`\``;
     const h = harness([example]);
     expect((await h.agent.generate({ prompt: "Show a literal tool-call example; do not execute it" })).text).toBe(example);
     expect(h.runProgram).not.toHaveBeenCalled();
@@ -118,7 +118,7 @@ describe("text completion browser tool protocol", () => {
   });
 
   it("preserves the existing DSML recovery while making its result readable on the next completion", async () => {
-    const dsml = '<｜DSML｜ calls><｜DSML｜ invoke name="execute_program"><｜DSML｜ parameter name="code" string="true">return 2;</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
+    const dsml = '<｜DSML｜ calls><｜DSML｜ invoke name="navigate"><｜DSML｜ parameter name="url" string="true">https://example.com/2</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
     const h = harness([dsml, "done"]);
     expect((await h.agent.generate({ prompt: "act" })).text).toBe("done");
     expect(h.runProgram).toHaveBeenCalledOnce();
@@ -126,8 +126,8 @@ describe("text completion browser tool protocol", () => {
   });
 
   it.each(["length", "content_filter", "unrecognized"])('refuses tool-prefixed responses with finish_reason %s before effects', async (finishReason) => {
-    const dsml = '<｜DSML｜ calls><｜DSML｜ invoke name="execute_program"><｜DSML｜ parameter name="code" string="true">return 2;</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
-    for (const response of [call("execute_program", { code: "return 2;" }), dsml]) {
+    const dsml = '<｜DSML｜ calls><｜DSML｜ invoke name="navigate"><｜DSML｜ parameter name="url" string="true">https://example.com/2</｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>';
+    for (const response of [call("navigate", { url: "https://example.com/2" }), dsml]) {
       const h = harness([response], { finishReason });
       await expect(h.agent.generate({ prompt: "act" })).rejects.toMatchObject({ code: "completion-tool-protocol" });
       expect(h.requests).toHaveLength(1);
@@ -136,7 +136,7 @@ describe("text completion browser tool protocol", () => {
   });
 
   it("provides a safe buffered stream by using completion generation before emitting calls", async () => {
-    const h = harness([call("execute_program", { code: "return 2;" }), "done"]);
+    const h = harness([call("navigate", { url: "https://example.com/2" }), "done"]);
     const result = await h.agent.stream({ prompt: "act" });
     await result.consumeStream();
     expect(await result.text).toBe("done");
@@ -148,19 +148,19 @@ describe("text completion browser tool protocol", () => {
   it.each(["required", "tool"] as const)("rejects plain text when tool choice is %s", async (mode) => {
     const h = choiceHarness("I will do that.");
     await expect(generateText({ model: h.model, prompt: "act", tools: h.tools,
-      toolChoice: mode === "tool" ? { type: "tool", toolName: "execute_program" } : "required" }))
+      toolChoice: mode === "tool" ? { type: "tool", toolName: "navigate" } : "required" }))
       .rejects.toMatchObject({ code: "completion-tool-protocol" });
     expect(h.execute).not.toHaveBeenCalled();
   });
 
   it("checks a specific tool choice after DSML recovery before any tool executes", async () => {
-    const wrong = choiceHarness(dsmlCall("read_api_reference"));
+    const wrong = choiceHarness(dsmlCall("get_page_info"));
     await expect(generateText({ model: wrong.model, prompt: "act", tools: wrong.tools,
-      toolChoice: { type: "tool", toolName: "execute_program" } })).rejects.toMatchObject({ code: "completion-tool-protocol" });
+      toolChoice: { type: "tool", toolName: "navigate" } })).rejects.toMatchObject({ code: "completion-tool-protocol" });
     expect(wrong.execute).not.toHaveBeenCalled();
-    const right = choiceHarness(dsmlCall("execute_program", '<｜DSML｜ parameter name="code" string="true">return 2;</｜DSML｜ parameter>'));
+    const right = choiceHarness(dsmlCall("navigate", '<｜DSML｜ parameter name="url" string="true">https://example.com/2</｜DSML｜ parameter>'));
     await generateText({ model: right.model, prompt: "act", tools: right.tools,
-      toolChoice: { type: "tool", toolName: "execute_program" } });
+      toolChoice: { type: "tool", toolName: "navigate" } });
     expect(right.execute).toHaveBeenCalledOnce();
   });
 });

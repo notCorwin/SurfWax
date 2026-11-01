@@ -37,10 +37,17 @@ for (const crossAgain of [false, true]) test(`resolves a same-process frame insi
     const inner = crossAgain ? same.frameLocator("#nested") : same;
     const selector = crossAgain ? "button" : "#action";
     await expect(inner.locator(selector)).toBeVisible();
-    const path = crossAgain ? "page.frameLocator('#outer').frameLocator('#same').frameLocator('#nested').locator('button')"
-      : "page.frameLocator('#outer').frameLocator('#same').locator('#action')";
-    responses.push(commandResponse("execute_program", { code: `await ${path}.click(); return 'clicked';`, timeoutMs: 15000 }, "nested-click"),
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: "clicked" }); return textResponse("NESTED_FRAME_OK"); },
+    responses.push(commandResponse("list_frames", {}, "nested-frames"),
+      (request) => {
+        const result = lastTool(request);
+        expect(result).toMatchObject({ total: crossAgain ? 4 : 3, hasMore: false, frames: expect.any(Array) });
+        const parents = new Set(result.frames.map((frame: any) => frame.parentFrameRef).filter(Boolean));
+        const leaf = result.frames.filter((frame: any) => !parents.has(frame.frameRef));
+        expect(leaf).toHaveLength(1);
+        expect(leaf[0].parentFrameRef).toEqual(expect.any(String));
+        return commandResponse("click", { target: { by: "css", value: selector, frame: { ref: leaf[0].frameRef } }, timeoutMs: 15_000 }, "nested-click");
+      },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return textResponse("NESTED_FRAME_OK"); },
       textResponse("嵌套框架"));
     await target.bringToFront();
     await opened.page.getByTestId("composer-input").fill("Click the nested action");

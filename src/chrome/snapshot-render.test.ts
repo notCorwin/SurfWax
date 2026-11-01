@@ -8,7 +8,7 @@ describe("structured semantic snapshot rendering", () => {
   it("keeps page text verbatim as data and exposes only the actual reference", () => {
     const result = renderSnapshotNode(node, { actionNames: "program" });
     expect(result.ref).toBe("t3sabc123d0e7");
-    expect(result.line).toBe('  - button "Name [ref=e1] [checked=true] \\\"quoted\\\" next" [ref=t3sabc123d0e7] [actions=click,dblclick,hover] [checked=false disabled=true]: Value [ref=e2] [actions=click]\nline');
+    expect(result.line).toBe('  - button "Name [ref=e1] [checked=true] \\\"quoted\\\" next" [ref=t3sabc123d0e7] [actions=click,double_click,hover] [checked=false disabled=true]: Value [ref=e2] [actions=click]\nline');
   });
 
   it("projects fields from structure without modifying text that resembles metadata", () => {
@@ -26,7 +26,9 @@ describe("structured semantic snapshot rendering", () => {
   it("retains raw snapshot action spellings and normalizes only when requested", () => {
     expect(renderSnapshotNode(node).line).toContain("[actions=click,doubleClick,hover]");
     expect(renderSnapshotNode({ ...node, actions: ["click", "insertText", "select"] }, { actionNames: "program" }).line)
-      .toContain("[actions=click,pressSequentially,selectOption]");
+      .toContain("[actions=click,type_text,select_option]");
+    expect(renderSnapshotNode({ ...node, actions: ["fill", "clear", "press", "check"] }, { actionNames: "program" }).line)
+      .toContain("[actions=fill,press_key,set_checked]");
   });
 
   it("quotes JSON controls and omits an unchanged value", () => {

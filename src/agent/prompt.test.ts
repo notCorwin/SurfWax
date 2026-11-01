@@ -1,7 +1,7 @@
 import { MockLanguageModelV4 } from "ai/test";
 import { describe, expect, it, vi } from "vitest";
 import { EventLogger, fromLogValue, type LogEvent } from "../logging";
-import { PROGRAM_CATALOG_VERSION, PROGRAM_TOOL_CONTEXT as TOOL_CONTEXT, runInputSchema } from "../chrome/tool";
+import { PROGRAM_CATALOG_VERSION, PROGRAM_TOOL_CONTEXT as TOOL_CONTEXT } from "../chrome/tool";
 import { createPromptSnapshot, ensureConversationPrompt, readPromptSnapshot } from "./prompt";
 import { contextPressure, estimatePromptInput, summarizeContext } from "./compaction";
 import { retryModelOperation } from "./model";
@@ -60,9 +60,7 @@ describe("canonical prompt versions", () => {
     const over = await contextPressure({ raw: [...raw, { role: "user", content: "one more token" }], branchIds: ["u"], events: [], model, instructions, tools, limit: { ...limit, input: estimated * 1.25 } });
     expect(over!.estimated).toBeGreaterThan(over!.threshold);
   });
-  it("accepts programs longer than 100 operations without a step limit", () => {
-    expect(runInputSchema.safeParse({ code: "for (let i=0;i<121;i++) await page.getByRole('button', {name:'Increment'}).click();" }).success).toBe(true);
-  });
+
 });
 it("retries read-only model work beyond old limits, caps every delay and stops on permanent errors or abort", async () => {
   let calls = 0; const sleep = vi.fn(async (_ms: number) => {}); const controller = new AbortController();

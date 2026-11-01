@@ -3,7 +3,7 @@ import { test, commandResponse, startProvider, openExtension, dispose, configure
 
 test("rolls back every artifact part when a later write batch fails", async () => {
   const responses: MockResponse[] = [
-    commandResponse("execute_program", { code: 'return "abc".repeat(500000);' }, "large-result"),
+    commandResponse("read_text", { target: { by: "css", value: "main" } }, "large-result"),
   ];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -11,6 +11,7 @@ test("rolls back every artifact part when a later write batch fails", async () =
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/target`);
+    await target.evaluate(() => { document.querySelector("main")!.textContent = "abc".repeat(500000); });
     await opened.page.evaluate(() => {
       const state = globalThis as any;
       const add = IDBObjectStore.prototype.add;

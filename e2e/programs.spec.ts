@@ -1,924 +1,168 @@
 import { expect } from "@playwright/test";
-import { test,
-  commandResponse,
-  delayedResponse,
-  textResponse,
-  startProvider,
-  openExtension,
-  configure,
-  nameCurrentConversation,
-  readEvents,
-  dispose,
-  enableUserScripts,
-  reloadUpgradedExtension,
-  nativePanel,
-  submitNative,
-  readNativeEvents,
-  type MockResponse,
-} from "./fixtures";
+import { test, commandResponse, delayedResponse, textResponse, startProvider, openExtension, configure, nameCurrentConversation, readEvents, dispose, enableUserScripts, reloadUpgradedExtension, nativePanel, submitNative, readNativeEvents, type MockResponse } from "./fixtures";
 
 function lastTool(request: any) {
-  const value = request.messages.findLast(
-    (message: any) => message.role === "tool",
-  ).content;
-  return JSON.parse(
-    Array.isArray(value)
-      ? value.find((part: any) => part.type === "text").text
-      : value,
-  );
+  const value = request.messages.findLast((message: any) => message.role === "tool").content;
+  return JSON.parse(Array.isArray(value) ? value.find((part: any) => part.type === "text").text : value);
 }
-async function evidence(page: any, provider: any) {
-  await test.info().attach("program-evidence", {
-    body: JSON.stringify({
-      requests: provider.requests,
-      events: await readEvents(page),
-    }),
-    contentType: "application/json",
-  });
-}
-async function submit(page: any) {
-  await page
-    .getByTestId("composer-input")
-    .fill("Exercise the composable browser program");
+async function submit(page: any, prompt = "Exercise browser tools") {
+  await page.getByTestId("composer-input").fill(prompt);
   await page.getByTestId("composer-input").press("Enter");
 }
 
-test("reuses live program pages and rejects handles after their tab closes", async () => {
-  const provider = await startProvider([
-    commandResponse("execute_program", { timeoutMs: 20000, code: `
-const other = await browser.tabs.open(${JSON.stringify("about:blank")});
-const id = other.tabId;
-const pages = await Promise.all(Array.from({length: 20}, () => browser.page(id)));
-for (const current of pages) await check(await current.url() === 'about:blank');
-for (let i = 0; i < 30; i++) await browser.page(id);
-const locator = other.locator('body');
-await browser.tabs.close(id);
-let pageStale = false, locatorStale = false;
-try { await other.url(); } catch (error) { pageStale = String(error.message).includes('stale-page'); }
-try { await locator.count(); } catch (error) { locatorStale = String(error.message).includes('stale-page'); }
-await check(pageStale && locatorStale, 'closed page and locator must be stale');
-return {pageStale, locatorStale};` }, "page-lifetime"),
-    (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: { pageStale: true, locatorStale: true } }); return textResponse("PAGE_LIFETIME_OK"); },
-  ]);
-  const opened = await openExtension();
-  try {
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/automation`);
-    const options = await configure(opened.context, opened.page, provider.baseURL);
-    await options.close();
-    await target.bringToFront();
-    await submit(opened.page);
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("PAGE_LIFETIME_OK", { timeout: 30000 });
-  } finally {
-    await evidence(opened.page, provider);
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-test("completes after a race abandons a pending browser RPC", async () => {
-  const provider = await startProvider([
-    commandResponse("execute_program", { code: "return await Promise.race([page.waitForEvent('popup'), sleep(50).then(() => 'timeout')]);" }, "race"),
-    textResponse("ABANDONED_RPC_OK"),
-  ]);
-  const opened = await openExtension();
-  try {
-    const options = await configure(opened.context, opened.page, provider.baseURL);
-    await options.close();
-    await submit(opened.page);
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("ABANDONED_RPC_OK", { timeout: 15_000 });
-    const result = (await readEvents(opened.page)).find((event) => event.type === "tool.finished" && event.toolCallId === "race")?.output;
-    expect(result).toMatchObject({ result: "timeout" });
-  } finally {
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-test("publishes atomic tools, defaults vision inspection to text, and captures pixels only on demand", async () => {
+// Dialog, chooser, cross-origin frame and download handoffs are covered by
+// dispatch-tools, chooser-prompt-tools and binary-transfer-tools respectively.
+test("publishes atomic tools, defaults vision inspection to text, and acts using screenshot coordinates", async () => {
   const provider = await startProvider([
     commandResponse("inspect_page", {}, "text-default"),
-    (request) => {
-      expect(lastTool(request)).not.toHaveProperty("screenshot");
-      return commandResponse("take_screenshot", {}, "pixels-requested");
-    },
+    (request) => { expect(lastTool(request)).not.toHaveProperty("screenshot"); return commandResponse("take_screenshot", {}, "pixels-requested"); },
     (request) => {
       const image = lastTool(request).result;
-      expect(image).toMatchObject({
-        tabId: expect.any(Number),
-        documentId: expect.any(Number),
-      });
-      if (!image.screenshot)
-        return textResponse(
-          `UNEXPECTED_IMAGE_RESULT: ${JSON.stringify(image)}`,
-        );
-      return commandResponse(
-        "execute_program",
-        {
-          code: `await page.point(${JSON.stringify(image.observationId)}, ${50 * image.screenshot.scale}, ${40 * image.screenshot.scale}, 'click'); await check(await page.evaluate(() => document.body.dataset.clicked) === 'yes'); return await page.inspect();`,
-        },
-        "visual-program",
-      );
+      expect(image).toMatchObject({ tabId: expect.any(Number), documentId: expect.any(Number), observationId: expect.any(String), screenshot: expect.any(Object) });
+      return commandResponse("move_pointer", { observationId: image.observationId, x: 50 * image.screenshot.scale, y: 40 * image.screenshot.scale }, "visual-move");
     },
-    textResponse("TEXT_AND_PIXELS_VERIFIED"),
+    (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("press_pointer", {}, "visual-down"); },
+    (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("release_pointer", {}, "visual-up"); },
+    (request) => { expect(lastTool(request).ok).toBe(true); return textResponse("TEXT_AND_PIXELS_VERIFIED"); },
+    textResponse("视觉测试"),
   ]);
   const opened = await openExtension();
   try {
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/visual`);
-    const options = await configure(
-      opened.context,
-      opened.page,
-      provider.baseURL,
-    );
+    const target = await opened.context.newPage(); await target.goto(`${provider.origin}/visual`);
+    const options = await configure(opened.context, opened.page, provider.baseURL);
     await options.getByLabel("图片输入能力").click();
     await options.getByRole("option", { name: "支持", exact: true }).click();
     await options.getByRole("button", { name: "保存配置" }).click();
-    await expect(options.getByRole("status")).toContainText("配置已保存");
-    await options.close();
-    await nameCurrentConversation(opened.page, "Program vision");
-    await target.bringToFront();
-    await submit(opened.page);
-    await expect(opened.page.locator(".markdown-body").last()).toContainText(
-      "TEXT_AND_PIXELS_VERIFIED",
-    );
-    expect(
-      provider.requests[0].tools.map((item: any) => item.function.name),
-    ).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "execute_program", "list_jobs", "get_job", "cancel_job"]));
+    await expect(options.getByRole("status")).toContainText("配置已保存"); await options.close();
+    await target.bringToFront(); await submit(opened.page);
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("TEXT_AND_PIXELS_VERIFIED");
+    const names = provider.requests[0].tools.map((item: any) => item.function.name);
+    expect(names).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "move_pointer", "press_pointer", "release_pointer"]));
+    expect(names).not.toContain("execute_program");
     const events = await readEvents(opened.page);
-    expect(
-      events.find(
-        (event) =>
-          event.type === "tool.finished" && event.toolCallId === "text-default",
-      ).output,
-    ).toMatchObject({
-      mode: "full",
-      items: expect.any(Array),
-      tabId: expect.any(Number),
-      documentId: expect.any(Number),
-    });
-    expect(
-      events.filter(
-        (event) =>
-          event.type === "tool.result.data" &&
-          event.content?.mimeType?.startsWith("image/"),
-      ),
-    ).toHaveLength(1);
-    expect(
-      events.find(
-        (event) =>
-          event.type === "tool.finished" &&
-          event.toolCallId === "visual-program",
-      ).output,
-    ).toMatchObject({ ok: true, state: "succeeded" });
-    expect(
-      events.some(
-        (event) =>
-          event.type === "browser.job.progress" &&
-          event.content?.state === "verified",
-      ),
-    ).toBe(true);
-    expect(await target.evaluate(() => document.body.dataset.clicked)).toBe(
-      "yes",
-    );
-    await expect(
-      opened.page.locator("iframe[src*=program-sandbox]"),
-    ).toHaveCount(0);
-  } finally {
-    await evidence(opened.page, provider);
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-test("composes same-process and cross-origin frames, chooser replies, native dialogs, held input, and downloads", async () => {
-  const responses: any[] = [];
-  const provider = await startProvider(responses);
-  const opened = await openExtension();
-  try {
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/complex`);
-    target.on("dialog", () => {}); // Let the agent handle the dialog instead of Playwright's automatic dismissal.
-    const frame = target
-      .frames()
-      .find((frame) => frame.url().includes("localhost"))!;
-    await frame.evaluate(() => {
-      const input = document.createElement("input");
-      input.type = "file";
-      input.hidden = true;
-      input.multiple = true;
-      input.onchange = () => {
-        document.body.dataset.files = [...(input.files ?? [])]
-          .map((file) => file.name)
-          .join(",");
-      };
-      document.body.append(input);
-      const chooser = document.createElement("button");
-      chooser.textContent = "Upload files";
-      chooser.onclick = () => input.click();
-      document.body.append(chooser);
-    });
-    await target.evaluate(() => {
-      const button = document.createElement("button");
-      button.textContent = "Prompt";
-      button.onclick = () => {
-        document.body.dataset.answer =
-          prompt("Question", "initial") ?? "cancelled";
-      };
-      document.body.append(button);
-      const input = document.createElement("input");
-      input.id = "held";
-      document.body.append(input);
-      const drag = document.createElement("div");
-      drag.style.cssText =
-        "position:fixed;left:20px;top:300px;width:200px;height:40px;background:#eee";
-      drag.onpointermove = (event) => {
-        if (event.buttons & 1)
-          document.body.dataset.dragged = String(event.clientX);
-      };
-      document.body.append(drag);
-    });
-    await (
-      await configure(opened.context, opened.page, provider.baseURL)
-    ).close();
-    await nameCurrentConversation(opened.page, "Program capabilities");
-    let jobId = "", polls = 0;
-    let completed: any;
-    const poll: MockResponse = (request) => {
-      const job = lastTool(request);
-      if (job.terminal) {
-        expect(job).toMatchObject({ ok: true, state: "succeeded" });
-        completed = job;
-        return textResponse("CAPABILITIES_VERIFIED");
-      }
-      responses.unshift(poll);
-      return commandResponse("get_job", { jobId, after: job.nextCursor, limit: 1, waitMs: 10_000 }, `capabilities-poll-${++polls}`);
-    };
-    responses.push(
-      commandResponse(
-        "execute_program",
-        {
-          timeoutMs: 20000,
-          code: `
-const same = page.frameLocator('iframe[src="/same-frame"]');
-const cross = page.frameLocator('iframe[src*=localhost]');
-await same.locator('main').evaluate(el => { el.textContent = 'same updated'; });
-await cross.getByRole('button', { name: 'Frame action' }).click();
-const chooserWait = page.waitForEvent('filechooser');
-await cross.getByRole('button', { name: 'Upload files' }).click();
-const chooser = await chooserWait; await check(chooser.isMultiple());
-await chooser.setFiles([{name:'one.txt',text:'one'},{name:'two.txt',text:'two'}]);
-const dialogWait = page.waitForEvent('dialog');
-const click = page.getByRole('button', { name: 'Prompt' }).click();
-const dialog = await dialogWait; await check(dialog.message() === 'Question'); await dialog.accept('accepted'); await click;
-await page.locator('#held').focus(); await page.keyboard.down('Shift'); await page.keyboard.press('a'); await page.keyboard.up('Shift');
-await page.mouse.move(40,315); await page.mouse.down(); await page.mouse.move(160,315); await page.mouse.up();
-await check(await page.locator('#held').inputValue() === 'A');
-await check(await page.evaluate(() => document.body.dataset.answer) === 'accepted');
-await check(await cross.locator('body').getAttribute('data-files') === 'one.txt,two.txt');
-const popupWait = page.waitForEvent('popup');
-await page.evaluate(url => { window.open(url,'_blank'); }, ${JSON.stringify(provider.origin + "/visual")});
-const popup = await popupWait;
-const popupText = await popup.observe(); await check(popupText.tabId === popup.tabId && !popupText.screenshot);
-await popup.keyboard.press('Escape'); await browser.tabs.close(popup.tabId);
-const pdf = await page.pdf(); await check(pdf.artifact.mimeType === 'application/pdf');
-let missingArtifact = false; try { await artifacts.save(999999); } catch { missingArtifact = true; } await check(missingArtifact);
-const artifact = await artifacts.text('program-notes.txt','captured text');
-await check((await artifacts.read(artifact.id)).base64 === 'Y2FwdHVyZWQgdGV4dA==');
-return await artifacts.save(artifact.id);
-`,
-        },
-        "all-capabilities",
-      ),
-      (request: any) => {
-        const result = lastTool(request);
-        if (result.state === "blocked") {
-          jobId = result.jobId;
-          responses.unshift(poll);
-          return commandResponse("get_job", { jobId, limit: 1 }, "capabilities-job");
-        }
-        completed = result;
-        return textResponse("CAPABILITIES_VERIFIED");
-      },
-    );
-    await target.bringToFront();
-    await submit(opened.page);
-    await expect(opened.page.locator(".markdown-body").last()).toContainText(
-      "CAPABILITIES_VERIFIED",
-      { timeout: 30000 },
-    );
-    await expect(
-      target.frameLocator('iframe[src="/same-frame"]').locator("main"),
-    ).toHaveText("same updated");
-    await expect(frame.locator("body")).toHaveAttribute("data-clicked", "yes");
-    await expect(target.locator("body")).toHaveAttribute("data-dragged", "160");
-    const events = await readEvents(opened.page);
-    expect(events.filter((event) => event.type === "tool.failed")).toEqual([]);
-    for (const operation of ["event.accept", "event.setFiles"]) {
-      const receipts = events.filter((event) => event.type === "browser.job.progress" && event.content.operation === operation);
-      expect(receipts.map((event) => event.content.state)).toEqual(["not-dispatched", "dispatched-unknown", "completed"]);
-    }
-    const saves = events.filter(
-      (event) =>
-        event.type === "browser.job.progress" &&
-        event.content.operation === "artifacts.save",
-    );
-    const rejectedSave = saves.filter(
-      (event) => event.content.sequence === saves[0].content.sequence,
-    );
-    expect(rejectedSave).toHaveLength(2);
-    expect(
-      rejectedSave.every((event) => event.content.state === "not-dispatched"),
-    ).toBe(true);
-    expect(
-      saves.filter((event) => event.content.state === "dispatched-unknown"),
-    ).toHaveLength(1);
-    expect(completed).toMatchObject({
-      ok: true,
-      result: { artifact: { saved: true, downloadId: expect.any(Number) } },
-    });
-  } finally {
-    await evidence(opened.page, provider);
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-test("keeps network domains explicit, exposes protocol and tabs, and rejects stale document refs", async () => {
-  let baseline: any;
-  let ref = "";
-  const responses: any[] = [];
-  const provider = await startProvider(responses);
-  const opened = await openExtension();
-  responses.push(
-    commandResponse("inspect_page", {}, "owned-baseline"),
-    (request: any) => {
-      baseline = lastTool(request);
-      ref = baseline.items.find((item: any) => item.line.includes('button "Sign in"')).ref;
-      return commandResponse(
-        "execute_program",
-        {
-          timeoutMs: 20000,
-          code: `let denied = false; try { await net.fetch({context:'page',url:${JSON.stringify(provider.origin.replace("127.0.0.1", "localhost") + "/frame")}}); } catch { denied = true; } await check(denied,'page CORS must reject'); return denied;`,
-        },
-        "page-cors-unknown",
-      );
-    },
-    (request: any) => {
-      expect(lastTool(request)).toMatchObject({ ok: false, error: { effectUnknown: true } });
-      return commandResponse("click", { target: { ref } }, "ref-after-unknown");
-    },
-    (request: any) => {
-      expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "stale-ref" } });
-      return commandResponse("inspect_page", {}, "owned-rebaseline");
-    },
-    (request: any) => {
-      baseline = lastTool(request);
-      ref = baseline.items.find((item: any) => item.line.includes('button "Sign in"')).ref;
-      return commandResponse(
-        "execute_program",
-        {
-          timeoutMs: 20000,
-          code: `
-await check(await page.ref(${JSON.stringify(ref)}).isVisible(), 'the new baseline ref is valid before navigation');
-const fetched = await net.fetch({context:'extension',url:${JSON.stringify(provider.origin.replace("127.0.0.1", "localhost") + "/frame")}}); await check(fetched.ok && fetched.body.includes('Frame action'));
-const isolated = await browser.runIn({kind:'page',tabId:page.tabId,world:'ISOLATED'}, "globalThis.onlyIsolated=7; return onlyIsolated;");
-let worldRequired = false; try { await browser.runIn({kind:'page',tabId:page.tabId},'return true;'); } catch(error) { worldRequired = error.message.includes('explicit'); } await check(worldRequired);
-await check(await page.evaluate(() => globalThis.onlyIsolated) === undefined);
-const cdp = await protocol.send({tabId:page.tabId},'Runtime.evaluate',{expression:'document.title',returnByValue:true}); await check(cdp.result.value === 'Automation Target');
-await check((await protocol.sessions()).every(session => session.tabId === page.tabId));
-const other = await browser.tabs.open(${JSON.stringify(provider.origin + "/target")}); await other.waitForURL(new RegExp('/target')); await check((await browser.tabs.list()).some(tab => tab.tabId === other.tabId || tab.id === other.tabId)); await browser.tabs.close(other.tabId);
-await page.goto(${JSON.stringify(provider.origin + "/complex-next")}); await page.waitForURL(/complex-next/);
-let stale = false; try { await page.ref(${JSON.stringify(ref)}).click(); } catch (error) { stale=String(error.message).includes('stale-ref'); } await check(stale);
-return { isolated, requests:await net.requests(), console:await net.console(), observation:await page.inspect() };
-`,
-        },
-        "domains-and-ownership",
-      );
-    },
-    textResponse("DOMAINS_AND_OWNERSHIP_VERIFIED"),
-  );
-  try {
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/automation`);
-    await (
-      await configure(opened.context, opened.page, provider.baseURL)
-    ).close();
-    await nameCurrentConversation(opened.page, "Program domains");
-    await target.bringToFront();
-    await submit(opened.page);
-    await expect(opened.page.locator(".markdown-body").last()).toContainText(
-      "DOMAINS_AND_OWNERSHIP_VERIFIED",
-      { timeout: 30000 },
-    );
-    await expect(target).toHaveURL(`${provider.origin}/complex-next`);
-    const result = (await readEvents(opened.page)).find(
-      (event) =>
-        event.type === "tool.finished" &&
-        event.toolCallId === "domains-and-ownership",
-    ).output;
-    expect(result).toMatchObject({
-      ok: true,
-      result: { observation: { documentId: expect.any(Number), mode: "full" } },
-    });
-    expect(result.result.observation.documentId).toBeGreaterThan(
-      baseline.documentId,
-    );
-  } finally {
-    await evidence(opened.page, provider);
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
+    expect(events.find((event) => event.type === "tool.finished" && event.toolCallId === "text-default")?.output).toMatchObject({ mode: "full", items: expect.any(Array) });
+    expect(events.filter((event) => event.type === "tool.result.data" && event.content?.mimeType?.startsWith("image/"))).toHaveLength(1);
+    expect(await target.evaluate(() => document.body.dataset.clicked)).toBe("yes");
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
 test("persists MAIN and USER_SCRIPT matching and enablement through extension reload", async () => {
-  const responses: any[] = [];
-  const provider = await startProvider(responses);
-  const opened = await openExtension();
-  const main = {
-    id: "program-main",
-    matches: [`${provider.origin}/*`],
-    excludeMatches: [`${provider.origin}/frame`],
-    js: [{ code: "document.documentElement.dataset.mainScript='first'" }],
-    world: "MAIN",
-    runAt: "document_end",
-  };
-  const user = {
-    id: "program-user",
-    matches: [`${provider.origin}/*`],
-    js: [{ code: "document.documentElement.dataset.userScript='yes'" }],
-    world: "USER_SCRIPT",
-    runAt: "document_end",
-  };
-  responses.push(
-    commandResponse(
-      "execute_program",
-      {
-        code: `await browser.scripts.create(${JSON.stringify(main)}); await browser.scripts.create(${JSON.stringify(user)}); await browser.scripts.setEnabled('program-main',false); await browser.scripts.edit('program-main',{js:[{code:"document.documentElement.dataset.mainScript='edited'"}]}); await check((await browser.scripts.read('program-main')).enabled === false); return await browser.scripts.list();`,
-      },
-      "persistent-create",
-    ),
-    textResponse("SCRIPTS_PERSISTED"),
-  );
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses), opened = await openExtension();
+  const main = { id: "program-main", matches: [`${provider.origin}/*`], excludeMatches: [`${provider.origin}/frame`], js: [{ code: "document.documentElement.dataset.mainScript='first'" }], world: "MAIN", runAt: "document_end" };
+  const user = { id: "program-user", matches: [`${provider.origin}/*`], js: [{ code: "document.documentElement.dataset.userScript='yes'" }], world: "USER_SCRIPT", runAt: "document_end" };
   try {
     await enableUserScripts(opened.context, opened.extensionId, opened.page);
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/automation`);
-    await (
-      await configure(opened.context, opened.page, provider.baseURL)
-    ).close();
-    await nameCurrentConversation(opened.page, "Program scripts");
-    await target.bringToFront();
-    await submit(opened.page);
-    await expect(opened.page.locator(".markdown-body").last()).toContainText(
-      "SCRIPTS_PERSISTED",
+    const target = await opened.context.newPage(); await target.goto(`${provider.origin}/automation`);
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await nameCurrentConversation(opened.page, "Script persistence");
+    responses.push(
+      commandResponse("create_script", { definition: main }, "create-main"),
+      (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("create_script", { definition: user }, "create-user"); },
+      (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("set_script_enabled", { scriptId: main.id, enabled: false }, "disable-main"); },
+      (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("update_script", { scriptId: main.id, changes: { js: [{ code: "document.documentElement.dataset.mainScript='edited'" }] } }, "edit-main"); },
+      (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("read_script", { scriptId: main.id }, "read-main"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: { enabled: false, script: { js: [{ code: expect.stringContaining("edited") }] } } }); return textResponse("SCRIPTS_PERSISTED"); },
+      textResponse("用户脚本"),
     );
+    await target.bringToFront(); await submit(opened.page);
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("SCRIPTS_PERSISTED");
     await reloadUpgradedExtension(opened);
-    expect(
-      await opened.page.evaluate(async () =>
-        (await chrome.userScripts.getScripts()).map(({ id, world }) => ({
-          id,
-          world,
-        })),
-      ),
-    ).toEqual([{ id: "program-user", world: "USER_SCRIPT" }]);
+    expect(await opened.page.evaluate(async () => (await chrome.userScripts.getScripts()).map(({ id, world }) => ({ id, world })))).toEqual([{ id: "program-user", world: "USER_SCRIPT" }]);
     responses.push(
-      commandResponse(
-        "execute_program",
-        {
-          timeoutMs: 20000,
-          code: `const disabled=await browser.scripts.read('program-main'); await check(!disabled.enabled && disabled.script.js[0].code.includes('edited')); await browser.scripts.setEnabled('program-main',true); await page.reload(); for(let i=0;i<100 && await page.evaluate(() => document.documentElement.dataset.userScript) !== 'yes';i++) await sleep(20); await check(await page.evaluate(() => document.documentElement.dataset.mainScript) === 'edited'); await check(await page.evaluate(() => document.documentElement.dataset.userScript) === 'yes'); return await browser.scripts.list();`,
-        },
-        "persistent-restored",
-      ),
-      textResponse("SCRIPTS_RESTORED"),
+      commandResponse("read_script", { scriptId: main.id }, "read-restored"),
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: { enabled: false, script: { js: [{ code: expect.stringContaining("edited") }] } } }); return commandResponse("set_script_enabled", { scriptId: main.id, enabled: true }, "enable-main"); },
+      (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("reload", {}, "reload-script-target"); },
+      (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("list_scripts", {}, "list-restored"); },
+      (request) => { expect(lastTool(request).ok).toBe(true); return textResponse("SCRIPTS_RESTORED"); },
+      textResponse("恢复脚本"),
     );
-    await target.bringToFront();
-    await submit(opened.page);
-    await expect(opened.page.locator(".markdown-body").last()).toContainText(
-      "SCRIPTS_RESTORED",
-    );
-    expect(
-      (await readEvents(opened.page)).filter(
-        (event) => event.type === "tool.failed",
-      ),
-    ).toEqual([]);
-  } finally {
-    await evidence(opened.page, provider);
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
+    await target.bringToFront(); await submit(opened.page);
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("SCRIPTS_RESTORED");
+    await expect(target.locator("html")).toHaveAttribute("data-main-script", "edited");
+    await expect(target.locator("html")).toHaveAttribute("data-user-script", "yes");
+    await target.goto(`${provider.origin}/frame`);
+    await expect(target.locator("html")).not.toHaveAttribute("data-main-script");
+    await expect(target.locator("html")).toHaveAttribute("data-user-script", "yes");
+    expect((await readEvents(opened.page)).filter((event) => event.type === "tool.failed")).toEqual([]);
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
-test("terminates synchronous timeout and abnormal worker exit, then recovers after a partial failed program", async () => {
+test("preserves a completed form effect after an action fails and recovers", async () => {
   const provider = await startProvider([
-    commandResponse(
-      "execute_program",
-      { timeoutMs: 300, code: "while(true){}" },
-      "cpu-timeout",
-    ),
-    commandResponse(
-      "execute_program",
-      {
-        timeoutMs: 2000,
-        code: "await page.evaluate(() => { document.body.dataset.pagePartial='yes'; while(true){} });",
-      },
-      "page-loop-timeout",
-    ),
-    commandResponse("execute_program", { code: "self.close()" }, "worker-exit"),
-    commandResponse(
-      "execute_program",
-      {
-        code: "await page.getByLabel('Email').fill('kept@example.com'); await check(false,'intentional outcome failure'); await page.getByRole('button',{name:'Sign in'}).click();",
-      },
-      "partial-program",
-    ),
-    commandResponse(
-      "execute_program",
-      {
-        code: "await check(await page.evaluate(() => document.body.dataset.pagePartial) === 'yes'); await check(await page.getByLabel('Email').inputValue() === 'kept@example.com'); await check(await page.locator('output').innerText() === ''); await page.getByRole('button',{name:'Sign in'}).click(); await check(await page.locator('output').innerText() === 'Welcome kept@example.com'); return await page.inspect();",
-      },
-      "partial-recovery",
-    ),
-    textResponse("TIMEOUT_EXIT_AND_RECOVERY_VERIFIED"),
+    commandResponse("fill", { target: { by: "label", value: "Email" }, value: "kept@example.com" }, "partial-fill"),
+    (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("click", { target: { by: "role", value: "button", name: "Missing action" } }, "missing-action"); },
+    (request) => { expect(lastTool(request).ok).toBe(false); return commandResponse("read_value", { target: { by: "label", value: "Email" } }, "retained-value"); },
+    (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: "kept@example.com" }); return commandResponse("click", { target: { by: "role", value: "button", name: "Sign in" } }, "recover-submit"); },
+    (request) => { expect(lastTool(request).ok).toBe(true); return textResponse("FAILURE_RECOVERED"); },
+    textResponse("操作恢复"),
   ]);
   const opened = await openExtension();
   try {
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/automation`);
-    await (
-      await configure(opened.context, opened.page, provider.baseURL)
-    ).close();
-    await nameCurrentConversation(opened.page, "Program failure");
-    await target.bringToFront();
-    await submit(opened.page);
-    await expect(opened.page.locator(".markdown-body").last()).toContainText(
-      "TIMEOUT_EXIT_AND_RECOVERY_VERIFIED",
-    );
+    const target = await opened.context.newPage(); await target.goto(`${provider.origin}/automation`);
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront(); await submit(opened.page);
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FAILURE_RECOVERED");
+    await expect(target.locator("output")).toHaveText("Welcome kept@example.com");
     const events = await readEvents(opened.page);
-    expect(
-      events.find(
-        (event) =>
-          event.type === "tool.failed" && event.toolCallId === "cpu-timeout",
-      ).output,
-    ).toMatchObject({
-      state: "failed",
-      error: { code: "timeout", retryable: false },
-    });
-    expect(
-      events.find(
-        (event) =>
-          event.type === "tool.failed" &&
-          event.toolCallId === "page-loop-timeout",
-      ).output,
-    ).toMatchObject({
-      state: "failed",
-      error: { code: "timeout", retryable: false, effectUnknown: true },
-    });
-    expect(
-      events.find(
-        (event) =>
-          event.type === "tool.failed" && event.toolCallId === "worker-exit",
-      ).output.error.message,
-    ).toContain("worker exited");
-    expect(
-      events.filter(
-        (event) =>
-          event.type === "browser.job.progress" &&
-          event.toolCallId === "partial-program" &&
-          event.content.operation.endsWith("click"),
-      ),
-    ).toEqual([]);
-    expect(
-      events.find(
-        (event) =>
-          event.type === "tool.finished" &&
-          event.toolCallId === "partial-recovery",
-      ).output.ok,
-    ).toBe(true);
-    await expect(
-      opened.page.locator("iframe[src*=program-sandbox]"),
-    ).toHaveCount(0);
-  } finally {
-    await evidence(opened.page, provider);
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
+    expect(events.filter((event) => event.type === "tool.failed" && event.toolCallId === "missing-action")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "tool.finished" && event.toolCallId === "recover-submit")).toHaveLength(1);
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
-test("panel reload interrupts the owned job, preserves receipts, and prevents delayed browser effects", async () => {
-  const responses: MockResponse[] = [
-    commandResponse(
-      "execute_program",
-      {
-        background: true,
-        code: "await page.evaluate(() => {document.body.dataset.partial='1'}); await emit('ready-to-reload'); await sleep(60000); await page.evaluate(() => {document.body.dataset.late='yes'});",
-      },
-      "reload-job",
-    ),
-    delayedResponse(textResponse("unreachable"), 0, new Promise<void>(() => undefined)),
-  ];
-  const provider = await startProvider(responses);
-  const opened = await openExtension();
-  try {
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/automation`);
-    await (
-      await configure(opened.context, opened.page, provider.baseURL)
-    ).close();
-    await nameCurrentConversation(opened.page, "Program restart");
-    await target.bringToFront();
-    await submit(opened.page);
-    await expect
-      .poll(async () =>
-        (await readEvents(opened.page)).some(
-          (event) =>
-            event.type === "browser.job.progress" &&
-            event.output === "ready-to-reload",
-        ),
-      )
-      .toBe(true);
-    const job = (await readEvents(opened.page)).find(
-      (event) =>
-        event.type === "browser.job.state" && event.toolCallId === "reload-job",
-    ).content.jobId;
-    await opened.page.reload();
-    await expect(opened.page.getByTestId("composer-input")).toBeEnabled();
-    await opened.page.getByTestId("conversation-menu").click();
-    await opened.page
-      .locator(".conversation-item", { hasText: "Program restart" })
-      .locator(".conversation-select")
-      .click();
-    responses.push(
-      commandResponse("get_job", { jobId: job }, "reloaded-status"),
-      commandResponse(
-        "execute_program",
-        {
-          code: "await check(await page.evaluate(() => document.body.dataset.partial) === '1'); await check(await page.evaluate(() => document.body.dataset.late) === undefined); return await page.inspect();",
-        },
-        "reloaded-recovery",
-      ),
-      textResponse("RESTART_RECEIPTS_VERIFIED"),
-    );
-    await target.bringToFront();
-    await expect(opened.page.getByTestId("interrupted-message")).toBeVisible();
-    await opened.page.getByTestId("continue-interrupted").click();
-    await expect(opened.page.locator(".markdown-body").last()).toContainText(
-      "RESTART_RECEIPTS_VERIFIED",
-    );
-    const status = (await readEvents(opened.page)).find(
-      (event) =>
-        event.toolCallId === "reloaded-status" && event.type === "tool.failed",
-    ).output;
-    expect(["interrupted", "cancelled"]).toContain(status.state);
-    expect(status.terminal).toBe(true);
-    expect(
-      status.events.some(
-        (event: any) =>
-          event.operation === "emit" && event.output === "ready-to-reload",
-      ),
-    ).toBe(true);
-    expect(
-      await target.evaluate(() => document.body.dataset.late),
-    ).toBeUndefined();
-    await expect(
-      opened.page.locator("iframe[src*=program-sandbox]"),
-    ).toHaveCount(0);
-  } finally {
-    await evidence(opened.page, provider);
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-test("the real native Side Panel owns a sandbox program and cleans held input when closed", async () => {
-  const provider = await startProvider([
-    commandResponse(
-      "execute_program",
-      {
-        background: true,
-        code: "await page.getByLabel('Email').fill('native@example.com'); await page.keyboard.down('Shift'); await emit('native-ready'); await page.evaluate(() => { console.log('native-page-loop'); while(true){} });",
-      },
-      "native-program",
-    ),
-    delayedResponse(textResponse("unreachable"), 0, new Promise<void>(() => undefined)),
-  ]);
-  const opened = await openExtension();
-  try {
-    await (
-      await configure(opened.context, opened.page, provider.baseURL)
-    ).close();
-    const native = await nativePanel(opened, `${provider.origin}/automation`);
-    await native.target.evaluate(() =>
-      document.addEventListener("keyup", (event) => {
-        if (event.key === "Shift") document.body.dataset.shiftReleased = "yes";
-      }),
-    );
-    await submitNative(native.panel, "run the native sandbox program");
-    await expect
-      .poll(async () =>
-        (await readNativeEvents(native.panel)).some(
-          (event) =>
-            event.type === "browser.job.progress" &&
-            event.output === "native-ready",
-        ),
-      )
-      .toBe(true);
-    expect(
-      provider.requests[0].tools.map((tool: any) => tool.function.name),
-    ).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "execute_program", "list_jobs", "get_job", "cancel_job"]));
-    await expect
-      .poll(async () =>
-        (await readNativeEvents(native.panel)).some(
-          (event) =>
-            event.type === "browser.diagnostic" &&
-            event.content?.method === "Runtime.consoleAPICalled" &&
-            event.output?.args?.some(
-              (argument: any) => argument.value === "native-page-loop",
-            ),
-        ),
-      )
-      .toBe(true);
-    await native.panel.close();
-    expect(
-      (
-        await native.browser.send("Target.closeTarget", {
-          targetId: native.targetId,
-        })
-      ).success,
-    ).toBe(true);
-    await expect(native.target.locator("body")).toHaveAttribute(
-      "data-shift-released",
-      "yes",
-    );
-    await expect(native.target.getByLabel("Email")).toHaveValue(
-      "native@example.com",
-    );
-    const recovery = await opened.context.newPage();
-    await recovery.goto(
-      `chrome-extension://${opened.extensionId}/sidepanel.html`,
-    );
-    const events = await readEvents(recovery);
-    expect(
-      events.some(
-        (event) =>
-          event.type === "browser.job.progress" &&
-          event.toolCallId === "native-program" &&
-          event.output === "native-ready",
-      ),
-    ).toBe(true);
-    await test.info().attach("native-program-events", {
-      body: JSON.stringify(events),
-      contentType: "application/json",
-    });
-  } finally {
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-test("composes form operations and returns only text changes with owned references", async () => {
-  const provider = await startProvider([
-    commandResponse("inspect_page", {}, "form-before"),
-    (request) => {
-      const observation = lastTool(request);
-      const email = observation.items.find((item: any) => item.line.includes('textbox "Email"')).ref;
-      const button = observation.items.find((item: any) => item.line.includes('button "Sign in"')).ref;
-      return commandResponse(
-        "execute_program",
-        {
-          code: `const full=await page.snapshot(); await check(full.tabId === page.tabId && full.items.some(item => item.ref === ${JSON.stringify(email)})); await page.ref(${JSON.stringify(email)}).fill('me@example.com'); await page.ref(${JSON.stringify(button)}).click(); await check((await page.locator('output').innerText()).includes('Welcome me@example.com')); return await page.inspect({ since: ${JSON.stringify(observation.observationId)} });`,
-        },
-        "form-batch",
-      );
-    },
-    textResponse("FORM_PROGRAM_VERIFIED"),
-  ]);
-  const opened = await openExtension();
-  try {
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/automation`);
-    await (
-      await configure(opened.context, opened.page, provider.baseURL)
-    ).close();
-    await nameCurrentConversation(opened.page, "Program form");
-    await target.bringToFront();
-    await submit(opened.page);
-    await expect(target.locator("output")).toHaveText("Welcome me@example.com");
-    await expect(opened.page.locator(".markdown-body").last()).toContainText(
-      "FORM_PROGRAM_VERIFIED",
-    );
-    const events = await readEvents(opened.page);
-    const result = events.find(
-      (event) =>
-        event.type === "tool.finished" && event.toolCallId === "form-batch",
-    ).output;
-    expect(result).toMatchObject({
-      ok: true,
-      result: {
-        mode: "delta",
-        items: expect.any(Array),
-        truncation: { truncated: false },
-      },
-    });
-    expect(result.result).not.toHaveProperty("snapshot");
-    expect(JSON.stringify(result.result.items)).toContain(
-      "Welcome me@example.com",
-    );
-    expect(
-      events.filter(
-        (event) =>
-          event.type === "browser.job.progress" &&
-          event.content?.state === "completed",
-      ).length,
-    ).toBeGreaterThanOrEqual(4);
-  } finally {
-    await evidence(opened.page, provider);
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-test("queries and cancels a synchronous infinite program while preserving prior effects", async () => {
-  let jobId: string;
-  let terminalCallId = "job-cancel";
-  let sequence = 0;
+test("panel reload interrupts a background wait while retaining the preceding browser effect", async () => {
   const responses: MockResponse[] = [];
-  const afterTerminal: MockResponse = (request) => {
-    const job = lastTool(request);
-    if (!job.terminal) {
-      responses.unshift(afterTerminal);
-      terminalCallId = `job-terminal-${++sequence}`;
-      return commandResponse("get_job", { jobId, after: job.nextCursor, waitMs: 1000 }, terminalCallId);
-    }
-    return commandResponse("execute_program", {
-      code: "await check(await page.locator('output').innerText() === '1'); return await page.inspect();",
-    }, "job-recovery");
-  };
-  const afterProgress: MockResponse = (request) => {
-    const job = lastTool(request);
-    expect(job.terminal).toBe(false);
-    if (!job.events.some((event: any) => event.operation === "emit" && event.output === "first input completed")) {
-      responses.unshift(afterProgress);
-      return commandResponse("get_job", { jobId, after: job.nextCursor, waitMs: 1000 }, `job-progress-${++sequence}`);
-    }
-    return commandResponse("cancel_job", { jobId }, "job-cancel");
-  };
-  responses.push(
-    commandResponse(
-      "execute_program",
-      {
-        background: true,
-        code: "await page.getByRole('button', { name: 'Increment' }).click(); await emit('first input completed'); while (true) {}",
-      },
-      "infinite-job",
-    ),
-    (request) => {
-      jobId = lastTool(request).jobId;
-      return commandResponse("get_job", { jobId: jobId, waitMs: 1000 },
-        "job-responsive",
-      );
-    },
-    afterProgress,
-    afterTerminal,
-    textResponse("CANCELLED_WITHOUT_ROLLBACK"),
-  );
-  const provider = await startProvider(responses);
+  const provider = await startProvider(responses), opened = await openExtension();
+  try {
+    const target = await opened.context.newPage(); await target.goto(`${provider.origin}/performance`);
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await nameCurrentConversation(opened.page, "Background restart");
+    let jobId = "";
+    responses.push(
+      commandResponse("click", { target: { by: "role", value: "button", name: "Increment" } }, "increment-before-reload"),
+      (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("verify_state", { target: { by: "css", value: "#never-exists" }, state: "visible", timeoutMs: 60_000, background: true }, "reload-job"); },
+      (request) => { const result = lastTool(request); expect(result).toMatchObject({ accepted: true, complete: false, jobId: expect.any(String) }); jobId = result.jobId; return delayedResponse(textResponse("unreachable"), 0, new Promise<void>(() => undefined)) as any; },
+    );
+    await target.bringToFront(); await submit(opened.page);
+    await expect.poll(() => jobId).not.toBe("");
+    await expect(target.locator("output")).toHaveText("1");
+    await opened.page.reload(); await expect(opened.page.getByTestId("composer-input")).toBeEnabled();
+    await opened.page.getByTestId("conversation-menu").click();
+    await opened.page.locator(".conversation-item", { hasText: "Background restart" }).locator(".conversation-select").click();
+    responses.push(
+      commandResponse("get_job", { jobId }, "reloaded-status"),
+      (request) => { expect(lastTool(request)).toMatchObject({ terminal: true }); return commandResponse("read_text", { target: { by: "css", value: "output" } }, "reloaded-value"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: "1" }); return textResponse("RESTART_RECEIPTS_VERIFIED"); },
+    );
+    await target.bringToFront(); await expect(opened.page.getByTestId("interrupted-message")).toBeVisible();
+    await opened.page.getByTestId("continue-interrupted").click();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("RESTART_RECEIPTS_VERIFIED");
+    const events = await readEvents(opened.page);
+    const status = events.find((event) => event.toolCallId === "reloaded-status" && ["tool.failed", "tool.finished"].includes(event.type))?.output;
+    expect(["interrupted", "cancelled"]).toContain(status.state); expect(status.terminal).toBe(true);
+    expect(events.filter((event) => event.type === "tool.finished" && event.toolCallId === "increment-before-reload")).toHaveLength(1);
+    await expect(target.locator("output")).toHaveText("1");
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});
+
+test("closing the native Side Panel releases held input while an operation waits", async () => {
+  const provider = await startProvider([
+    commandResponse("fill", { target: { by: "label", value: "Email" }, value: "native@example.com" }, "native-fill"),
+    commandResponse("key_down", { key: "Shift" }, "native-held-key"),
+    commandResponse("verify_state", { target: { by: "css", value: "#never-exists" }, state: "visible", timeoutMs: 60_000 }, "native-wait"),
+  ]);
   const opened = await openExtension();
   try {
-    const target = await opened.context.newPage();
-    await target.goto(`${provider.origin}/performance`);
-    await (
-      await configure(opened.context, opened.page, provider.baseURL)
-    ).close();
-    await nameCurrentConversation(opened.page, "Program cancel");
-    await target.bringToFront();
-    await submit(opened.page);
-    await expect(opened.page.locator(".markdown-body").last()).toContainText(
-      "CANCELLED_WITHOUT_ROLLBACK",
-      { timeout: 30000 },
-    );
-    await expect(target.locator("output")).toHaveText("1");
-    const events = await readEvents(opened.page);
-    expect(
-      events.find(
-        (event) =>
-          event.type === "tool.finished" &&
-          event.toolCallId === "job-responsive",
-      ).output,
-    ).toMatchObject({ id: jobId!, terminal: false });
-    expect(
-      events.find(
-        (event) =>
-          event.type === "tool.failed" && event.toolCallId === terminalCallId,
-      ).output,
-    ).toMatchObject({
-      id: jobId!,
-      state: "cancelled",
-      terminal: true,
-      ok: false,
-    });
-    expect(
-      events.find(
-        (event) =>
-          event.type === "tool.finished" && event.toolCallId === "job-recovery",
-      ).output,
-    ).toMatchObject({ ok: true });
-    await expect(
-      opened.page.locator("iframe[src*=program-sandbox]"),
-    ).toHaveCount(0);
-  } finally {
-    await evidence(opened.page, provider);
-    await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    const native = await nativePanel(opened, `${provider.origin}/automation`);
+    await native.target.evaluate(() => document.addEventListener("keyup", (event) => { if (event.key === "Shift") document.body.dataset.shiftReleased = "yes"; }));
+    await submitNative(native.panel, "fill the field, hold Shift and wait");
+    await expect.poll(async () => (await readNativeEvents(native.panel)).some((event) => event.type === "tool.started" && event.toolCallId === "native-wait")).toBe(true);
+    await native.panel.close();
+    expect((await native.browser.send("Target.closeTarget", { targetId: native.targetId })).success).toBe(true);
+    await expect(native.target.locator("body")).toHaveAttribute("data-shift-released", "yes");
+    await expect(native.target.getByLabel("Email")).toHaveValue("native@example.com");
+    const recovery = await opened.context.newPage(); await recovery.goto(`chrome-extension://${opened.extensionId}/sidepanel.html`);
+    expect((await readEvents(recovery)).filter((event) => event.type === "tool.finished" && event.toolCallId === "native-held-key")).toHaveLength(1);
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

@@ -9,7 +9,7 @@ import { gunzipSync } from "node:zlib";
 import bundledCatalogGzip from "../src/data/models-dev-api";
 
 
-import { test, p95, textResponse, toolResponse, pageResponse, commandResponse, queuedToolResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
+import { test, p95, textResponse, commandResponse, startProvider, closeServer, openExtension, dispose, selectProvider, configure, themeColors, expectThemeButton, startNewConversation, nameCurrentConversation, enableUserScripts, readEvents, attachTarget, warnsOnLeave, type MockResponse } from './fixtures';
 
 type CatalogFixture = Record<string, {
   name?: string;
@@ -256,7 +256,7 @@ test("uses a global custom system prompt and hides disabled advanced settings", 
     expect(system?.content).toMatch(/^You are a custom browser agent\.\n\n/);
     expect(system?.content).toContain("Available tools:");
     expect(system?.content).toContain("- inspect_page:");
-    expect(provider.requests[0].tools.map((tool:any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "execute_program", "list_jobs", "get_job", "cancel_job"]));
+    expect(provider.requests[0].tools.map((tool:any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "get_page_info", "list_jobs", "get_job", "cancel_job"]));
     expect(JSON.stringify(user)).not.toContain("Available tools:");
     await expect(opened.page.locator('[data-role="user"]')).not.toContainText("Available tools:");
   } finally {

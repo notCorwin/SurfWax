@@ -2,6 +2,7 @@ import type { EventLogger } from "../logging";
 import type { BrowserTarget, PageExecutionTarget } from "../types";
 import { AutomationRuntime, FILE_UPLOAD_FUNCTION, LocatorFacade } from "./automation";
 import { requireDebuggee } from "./debuggee";
+import { scheduleDeadline } from "./deadline";
 import { downloadArtifact } from "./downloads";
 import { listDownloads as queryDownloads, type DownloadListInput } from "./download-query";
 import { BrowserDiagnostics } from "./diagnostics";
@@ -11,9 +12,8 @@ import { ProgramScope, type OperationObserver } from "./program";
 import { ForegroundBlockers, type BlockerJob, type BlockerOperation } from "./foreground-blockers";
 import type { InspectOptions } from "./automation";
 import { callUserScript } from "./script-client";
-import { executeSandboxProgram } from "./program-host";
+import { executeSandboxProgram, type ProgramHostState } from "./program-host";
 import { DeferredProgramPage, PROGRAM_HANDLE_ASSERT_LIVE, PROGRAM_HANDLE_SESSION } from "./program-handles";
-import { estimateProgramTimeoutMs } from "./program-timeout";
 import { EventSubscriptions, type BrowserEventKind, type EventOwner } from "./event-subscriptions";
 import { keyboardParams, macEditingCommands, parseKeyboardChord } from "./automation-utils";
 import { heldKeyIdentity, inputKeyIdentity, inputSemanticKey } from "./input-state";
@@ -79,7 +79,7 @@ export function parseLocatorTarget(value: unknown): BrowserTarget {
   if (simple) {
     const by = ({ Text: "text", Label: "label", Placeholder: "placeholder", AltText: "alt", Title: "title", TestId: "testId" } as const)[simple[1] as "Text"];
     const options = simple[3]?.trim();
-    if (options && !/^exact\s*:\s*(?:true|false)$/.test(options)) throw new Error(`AutomationError[invalid-target]: Unsupported locator expression ${JSON.stringify(input)}; use a structured target or run`);
+    if (options && !/^exact\s*:\s*(?:true|false)$/.test(options)) throw new Error(`AutomationError[invalid-target]: Unsupported locator expression ${JSON.stringify(input)}; use a structured target`);
     return { by, value: readQuoted(simple[2]!), ...(options ? { exact: /true$/.test(options) } : {}) };
   }
   const role = /^getByRole\((['"][\s\S]*?['"])(?:\s*,\s*\{([\s\S]*)\})?\)$/.exec(input);
@@ -87,10 +87,10 @@ export function parseLocatorTarget(value: unknown): BrowserTarget {
     const options = role[2] ?? "";
     const name = /\bname\s*:\s*(['"][\s\S]*?['"])(?:\s*,|$)/.exec(options)?.[1];
     const unsupportedOptions = options.replace(/\bname\s*:\s*(['"][\s\S]*?['"])/, "").replace(/\bexact\s*:\s*(?:true|false)/, "").replace(/[\s,]/g, "");
-    if (unsupportedOptions) throw new Error(`AutomationError[invalid-target]: Unsupported locator expression ${JSON.stringify(input)}; use a structured target or run`);
+    if (unsupportedOptions) throw new Error(`AutomationError[invalid-target]: Unsupported locator expression ${JSON.stringify(input)}; use a structured target`);
     return { by: "role", value: readQuoted(role[1]!), ...(name ? { name: readQuoted(name) } : {}), ...(/\bexact\s*:\s*true\b/.test(options) ? { exact: true } : {}) };
   }
-  if (/^[A-Za-z_$][\w$]*\s*\(/.test(input)) throw new Error(`AutomationError[invalid-target]: Unsupported locator expression ${JSON.stringify(input)}; use a structured target or run`);
+  if (/^[A-Za-z_$][\w$]*\s*\(/.test(input)) throw new Error(`AutomationError[invalid-target]: Unsupported locator expression ${JSON.stringify(input)}; use a structured target`);
   return { by: "css", value: input };
 }
 
@@ -369,7 +369,7 @@ export class ChromeExecutor {
     // explicit inspections and the snapshot captured after each operation.
     const timeoutMs = input.timeoutMs ?? DEFAULT_INSPECT_TIMEOUT_MS;
     const deadline = new AbortController();
-    const timer = setTimeout(() => deadline.abort(new DOMException(`Page inspection timed out after ${timeoutMs}ms`, "TimeoutError")), timeoutMs);
+    const cancelDeadline = scheduleDeadline(timeoutMs, () => deadline.abort(new DOMException(`Page inspection timed out after ${timeoutMs}ms`, "TimeoutError")));
     const signals = [signal, context.runSignal, deadline.signal].filter((value): value is AbortSignal => value !== undefined);
     const effectiveSignal = AbortSignal.any(signals);
     try {
@@ -385,11 +385,11 @@ export class ChromeExecutor {
             if (!context.visualEnabled) throw new Error("AutomationError[visual-unavailable]: Image input is disabled or unsupported by the selected model");
             return await this.captureScreenshot(page, { target: input.region });
           }
-          const region = input.region === undefined ? undefined : this.locatorFor(page, input.region);
+          const region = input.region === undefined ? undefined : await this.locatorFor(page, input.region);
           return await page.inspect(input, region);
         } finally { this.activeSignal = undefined; this.activeContext = {}; await this.automation.clearContext(); }
       }, effectiveSignal, undefined, false);
-    } finally { clearTimeout(timer); }
+    } finally { cancelDeadline(); }
   }
 
   listFrames(input: { tabId?: number; cursor?: string; limit?: number; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
@@ -419,7 +419,7 @@ export class ChromeExecutor {
         throwIfAborted(combined);
         const page = input.tabId === undefined ? await this.pageFor(state) : await this.boundPage(input.tabId, state);
         throwIfAborted(combined);
-        const locator = this.locatorFor(page, input.target);
+        const locator = await this.locatorFor(page, input.target);
         if (!locator?.spec) throw new Error("AutomationError[invalid-target]: Search requires a locator target");
         return await this.automation.findElements(page.tabId, locator, { cursor: input.cursor, limit: input.limit });
       } finally { this.activeSignal = undefined; this.activeContext = {}; await this.automation.clearContext(); }
@@ -441,8 +441,8 @@ export class ChromeExecutor {
     let blocker: BlockerJob | undefined;
     let ready!: (job: BlockerJob | undefined) => void;
     const blockerReady = new Promise<BlockerJob | undefined>((resolve) => { ready = resolve; });
-    const timeoutMs = input.timeoutMs ?? input.defaultTimeoutMs ?? estimateProgramTimeoutMs(input.code);
-    const timeoutSource = input.timeoutMs !== undefined ? "explicit" : input.defaultTimeoutMs !== undefined ? "default" : "estimated";
+    const timeoutMs = input.timeoutMs ?? input.defaultTimeoutMs ?? 40_000;
+    const timeoutSource = input.timeoutMs !== undefined ? "explicit" : "default";
     const id = await this.awaitAbort(this.jobs.start(jobContext, jobSignal, (combined, jobId, started) => this.enqueueAbortable(async (deadline) => {
       if (this.disposed) throw new Error("Chrome executor has been disposed");
       if (input.background) this.runOwnerFor(context);
@@ -450,6 +450,14 @@ export class ChromeExecutor {
       (deadline ?? combined).throwIfAborted();
       const lifetime = new AbortController();
       const programSignal = AbortSignal.any([deadline ?? combined, lifetime.signal]);
+      let hostState: ProgramHostState | undefined;
+      const recordTimeoutPhase = () => {
+        const reason = programSignal.reason;
+        if (!reason || typeof reason !== "object" || !("name" in reason) || reason.name !== "TimeoutError") return;
+        this.logger?.record({ type: "browser.program.timeout-phase", conversationId: context.conversationId, ...context.logIdentity,
+          content: { jobId, ...(hostState ? { phase: "program-host", ...hostState } : { phase: "browser-state" }) } });
+      };
+      programSignal.addEventListener("abort", recordTimeoutPhase, { once: true });
       this.activeSignal = programSignal; this.activeContext = context;
       this.automation.setContext({ ...context, signal: programSignal }); this.diagnostics.bind(context);
       let owner: EventOwner | undefined;
@@ -482,7 +490,7 @@ export class ChromeExecutor {
       };
       try {
         scope.guard();
-        const state = await this.currentBrowserState(true);
+        const state = await this.awaitAbort(this.currentBrowserState(true, programSignal), programSignal);
         pages = this.programPages(scope, state);
         const initial = { ...state };
         const page = new DeferredProgramPage(initial.tabId, async () => {
@@ -494,7 +502,7 @@ export class ChromeExecutor {
         const capabilities = this.programCapabilities(page, state, scope, pages);
         scope.guard();
         if (input.background) this.runOwnerFor(context);
-        const result = await this.programHost(input.code, capabilities, programSignal);
+        const result = await this.programHost(input.code, capabilities, programSignal, (state) => { hostState = state; });
         // User code may abandon a losing Promise.race branch. Revoke its
         // capabilities before terminating in-flight browser work.
         const requiresStop = scope.hasPending || scope.effectUnknown;
@@ -515,6 +523,7 @@ export class ChromeExecutor {
         if (scope.effectUnknown) Object.assign(failure, { effectUnknown: true });
         throw failure;
       } finally {
+        programSignal.removeEventListener("abort", recordTimeoutPhase);
         pages?.dispose();
         scope.revoke(); lifetime.abort("program-ended");
         if (blocker) this.blockers.settle(blocker);
@@ -1022,7 +1031,7 @@ export class ChromeExecutor {
       if (key === "pdf") return (options: { filename?: string; save?: boolean } = {}) => call("page.pdf", () => this.capturePdf(raw.tabId, options.filename, options.save));
       if (key === "drop") return (target: unknown, options: { files?: any[]; data?: Record<string, string> }) => call("page.drop", async () => {
         const files = await this.normalizeFiles(options.files ?? []);
-        return this.locatorFor(raw, target).evaluate(`(el, payload) => {
+        return (await this.locatorFor(raw, target)).evaluate(`(el, payload) => {
           const transfer = new DataTransfer();
           for (const file of payload.files) { const bytes = file.base64 ? Uint8Array.from(atob(file.base64), c => c.charCodeAt(0)) : new TextEncoder().encode(file.text || ""); transfer.items.add(new File([bytes], file.name, {type:file.mimeType || "application/octet-stream"})); }
           for (const [type, value] of Object.entries(payload.data)) transfer.setData(type, value);
@@ -1088,6 +1097,34 @@ export class ChromeExecutor {
       read: (id: number, selection = {}) => call("artifacts.read", false, () => this.logger!.result(id, selection, this.activeContext.conversationId)),
       save: (id: number, filename?: string) => call("artifacts.save", true, () => this.saveArtifact(id, filename)),
       text: (filename: string, text: string, mimeType = "text/plain", save = false) => call("artifacts.text", save, () => this.storeText(filename, text, mimeType, save)),
+      importUrl: (url: string, filename: string) => call("artifacts.importUrl", true, async () => {
+        await scope.dispatched();
+        const response = await fetch(url, { signal: scope.signal });
+        if (!response.ok) throw new Error(`Could not import file: HTTP ${response.status}`);
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        throwIfAborted(scope.signal);
+        let binary = "";
+        for (const byte of bytes) binary += String.fromCharCode(byte);
+        return this.storeArtifact(filename, btoa(binary), response.headers.get("content-type") || "application/octet-stream");
+      }),
+      importLink: (tabId: number, target: unknown, filename?: string) => call("artifacts.importLink", true, async () => {
+        const raw = await this.boundPage(tabId, state);
+        const locator = await this.locatorFor(raw, target);
+        await scope.dispatched();
+        const file = await locator.evaluate(`async (element, filename) => {
+          if (!(element instanceof HTMLAnchorElement) || !element.hasAttribute('href')) throw new Error('Target must be a link with an href');
+          const name = filename || element.getAttribute('download');
+          if (!name) throw new Error('A filename or nonempty download attribute is required');
+          const response = await fetch(element.href);
+          if (!response.ok) throw new Error('Could not import linked file: HTTP ' + response.status);
+          const bytes = new Uint8Array(await response.arrayBuffer());
+          let binary = '';
+          for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+          return { filename: name, mimeType: response.headers.get('content-type') || 'application/octet-stream', base64: btoa(binary) };
+        }`, filename);
+        throwIfAborted(scope.signal);
+        return this.storeArtifact(file.filename, file.base64, file.mimeType);
+      }, sourceFor(tabId)),
     };
     return { page, browser, net, protocol, artifacts,
       emit: (value: unknown) => scope.emit(value), check: (condition: unknown, message?: string) => scope.check(condition, message), sleep: (ms: number) => scope.sleep(ms) };
@@ -1101,9 +1138,9 @@ export class ChromeExecutor {
     this.tail = new Promise<void>((resolve) => { release = resolve; });
     const started = previous.then(() => {
       const timeout = timeoutMs ? new AbortController() : undefined;
-      const timer = timeout ? setTimeout(() => timeout.abort(new DOMException(`Operation timed out after ${timeoutMs}ms`, "TimeoutError")), timeoutMs) : undefined;
+      const cancelDeadline = timeout ? scheduleDeadline(timeoutMs!, () => timeout.abort(new DOMException(`Operation timed out after ${timeoutMs}ms`, "TimeoutError"))) : undefined;
       const combined = timeout ? signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal : signal;
-      const clearDeadline = () => { if (timer !== undefined) clearTimeout(timer); };
+      const clearDeadline = () => { cancelDeadline?.(); };
       if (combined?.aborted) { clearDeadline(); release(); combined.throwIfAborted(); }
       operationStarted = true;
       const work = Promise.resolve().then(() => run(combined));
@@ -1119,11 +1156,16 @@ export class ChromeExecutor {
     }).then(({ work, combined }) => awaitCleanup ? work : this.awaitAbort(work, combined, mayHaveEffect));
   }
 
-  private locatorFor(page: any, raw: unknown): any {
+  private async locatorFor(page: any, raw: unknown): Promise<any> {
     const target = parseLocatorTarget(raw);
     if ("point" in target) return { click: (options?: unknown) => page.point(target.point.observationId, target.point.x, target.point.y, "click", options), dblclick: (options?: unknown) => page.point(target.point.observationId, target.point.x, target.point.y, "dblclick", options), hover: () => page.point(target.point.observationId, target.point.x, target.point.y, "hover") };
     if ("ref" in target) return page.ref(target.ref);
     let scope = target.frame ? "ref" in target.frame ? page.frameRef(target.frame.ref) : page.frameLocator(target.frame.value) : page;
+    if (target.scope) {
+      const selected = target.scope.by === "css" ? scope.locator(target.scope.value)
+        : scope.getByRole(target.scope.value, { name: target.scope.name, exact: target.scope.exact });
+      scope = selected.uniqueScope();
+    }
     const options = { exact: target.exact };
     let locator = target.by === "role" ? scope.getByRole(target.value, { ...options, name: target.name })
       : target.by === "text" ? scope.getByText(target.value, options)
@@ -1184,15 +1226,18 @@ export class ChromeExecutor {
     }, signal, timeoutMs);
   }
 
-  private async currentBrowserState(allowClosed = false): Promise<BrowserState> {
+  private async currentBrowserState(allowClosed = false, signal?: AbortSignal): Promise<BrowserState> {
+    throwIfAborted(signal);
     const existing = this.browserState;
     if (existing) {
       if (allowClosed) return existing;
       const window = await this.chromeApi.windows.get(existing.windowId).catch(() => undefined);
+      throwIfAborted(signal);
       if (window) return existing;
       throw new Error("CommandError[window-closed]: The bound Chrome window was closed");
     }
     const window = await this.chromeApi.windows.getCurrent({ populate: true });
+    throwIfAborted(signal);
     if (!Number.isInteger(window.id)) throw new Error("CommandError[no-window]: Could not resolve the current Chrome window");
     const selected = window.tabs?.find((tab) => tab.active) ?? window.tabs?.[0];
     const state = { windowId: window.id!, tabId: selected?.id };
@@ -1315,7 +1360,7 @@ export class ChromeExecutor {
       const contentSize = metrics.cssContentSize ?? metrics.contentSize;
       if (contentSize) params.clip = { ...contentSize, scale: 1 };
     } else if (input.target) {
-      const locator = this.locatorFor(page, input.target);
+      const locator = await this.locatorFor(page, input.target);
       if (!locator?.spec) throw new Error("AutomationError[invalid-target]: Screenshot requires a locator target");
       const box = await this.automation.screenshotClip(page.tabId, locator.spec);
       params.clip = { ...box, scale: input.hires ? await page.evaluate("() => devicePixelRatio") : 1 };

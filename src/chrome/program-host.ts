@@ -2,13 +2,25 @@ import { LocatorFacade, PageFacade } from "./automation";
 import { DeferredProgramPage, ProgramHandles } from "./program-handles";
 import { createProgramCodec } from "./program-codec";
 
+export type ProgramHostState = {
+  stage: "iframe-loading" | "sandbox-initializing" | "worker-running";
+  receivedRpc: boolean;
+  pendingBindings: number;
+  pendingOperations: number;
+};
+
 /** Control stays in the Side Panel. Arbitrary program computation runs only in a disposable sandbox worker. */
 export async function executeSandboxProgram(
   code: string,
   capabilities: Record<string, unknown>,
   signal: AbortSignal,
+  onState?: (state: ProgramHostState) => void,
 ): Promise<unknown> {
   signal.throwIfAborted();
+  let stage: ProgramHostState["stage"] = "iframe-loading";
+  let receivedRpc = false, pendingBindings = 0, pendingOperations = 0;
+  const report = () => onState?.({ stage, receivedRpc, pendingBindings, pendingOperations });
+  report();
   const frame = document.createElement("iframe");
   const token = crypto.randomUUID();
   frame.hidden = true;
@@ -125,6 +137,7 @@ export async function executeSandboxProgram(
       frame.onerror = () => fail(new Error("Program sandbox could not load"));
       frame.onload = () => {
         if (disposed) return;
+        stage = "sandbox-initializing"; report();
         frame.contentWindow!.postMessage(
           { type: "surf-wax:program-init", token },
           "*",
@@ -136,6 +149,7 @@ export async function executeSandboxProgram(
         if (disposed) return;
         if (signal.aborted) return;
         if (message.type === "ready") {
+          stage = "worker-running"; report();
           try {
             channel.port1.postMessage({
               type: "run",
@@ -148,10 +162,13 @@ export async function executeSandboxProgram(
           return;
         }
         if (message.type === "rpc") {
+          receivedRpc = true;
           const task = (async () => {
             try {
               signal.throwIfAborted();
-              await bindReferences(message.reference, message.args);
+              pendingBindings++; report();
+              try { await bindReferences(message.reference, message.args); }
+              finally { pendingBindings--; report(); }
               signal.throwIfAborted();
               const operation = resolve(message.reference);
               if (
@@ -159,7 +176,10 @@ export async function executeSandboxProgram(
                 !Array.isArray(message.args)
               )
                 throw new Error("Invalid program capability call");
-              const value = await operation(...decode(message.args));
+              pendingOperations++; report();
+              let value: unknown;
+              try { value = await operation(...decode(message.args)); }
+              finally { pendingOperations--; report(); }
               signal.throwIfAborted();
               if (!disposed)
                 channel.port1.postMessage({

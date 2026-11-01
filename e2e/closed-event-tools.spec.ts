@@ -8,7 +8,7 @@ test("recovers a paginated audit event stream after its source window closes", a
   test.setTimeout(150_000);
   const fixture = await closedEventFixture(17), responses: MockResponse[] = [];
   const provider = await startProvider(responses), opened = await openExtension();
-  let problem: unknown, sourceId = -1, rootId = -1, subscriptionId = "", cursor = 0, beforeCloseCursor = 0, polls = 0;
+  let problem: unknown, sourceId = -1, rootId = -1, subscriptionId = "", cursor = 0, beforeCloseCursor = 188, polls = 0;
   const received: string[] = [];
   const done = () => textResponse("CLOSED_EVENT_TOOLS_DONE");
   const after = (handler: (result: any) => ReturnType<typeof commandResponse>): MockResponse => {
@@ -54,12 +54,7 @@ test("recovers a paginated audit event stream after its source window closes", a
     }
     expect(cursor).toBe(189);
     expect(received).toHaveLength(180);
-    return commandResponse("execute_program", { timeoutMs: 30_000, code: `
-      const destination = (await browser.page(${rootId})).frameLocator('iframe[title="Destination"]');
-      await destination.getByLabel('Audit codes').evaluate((input, value) => {
-        input.value = value; input.dispatchEvent(new Event('input', {bubbles:true}));
-      }, ${JSON.stringify(received.join("\n"))});
-      await destination.getByRole('button', {name:'Submit audit'}).click(); return 'done';` }, "event-submit");
+    return commandResponse("fill", { tabId: rootId, target: { by: "label", value: "Audit codes", frame: { by: "css", value: 'iframe[title="Destination"]' } }, value: received.join("\n") }, "event-fill");
   });
   const readBeforeClose: MockResponse = after((result) => {
     expect(result.overflow).toBeUndefined();
@@ -68,17 +63,21 @@ test("recovers a paginated audit event stream after its source window closes", a
     beforeCloseCursor = result.nextCursor;
     if (result.events.some((event: any) => event.payload?.args?.[0]?.value === "HEARTBEAT 179")) {
       expect(beforeCloseCursor).toBe(189);
-      return commandResponse("execute_program", { timeoutMs: 30_000, code: `
-        const source = await browser.page(${sourceId});
-        await source.getByRole('button', {name:'Close source'}).evaluate(button => { setTimeout(() => button.click(), 0); });
-        for (let index = 0; index < 100; index++) {
-          if (!(await browser.tabs.list()).some(tab => tab.id === ${sourceId})) return 'closed';
-          await sleep(50);
-        }
-        throw new Error('Source window did not close');` }, "event-close");
+      return commandResponse("click", { tabId: sourceId, target: { by: "role", value: "button", name: "Close source" }, timeoutMs: 30_000 }, "event-close");
     }
     responses.unshift(readBeforeClose);
     return commandResponse("wait_event", { subscriptionId, after: beforeCloseCursor, limit: 10, waitMs: 10_000 }, `event-ready-${beforeCloseCursor}`);
+  });
+  let closeChecks = 0;
+  const awaitClosed: MockResponse = after((result) => {
+    expect(result.result, JSON.stringify(result)).toEqual(expect.any(Array));
+    if (result.result.some((tab: any) => tab.id === sourceId)) {
+      if (++closeChecks > 100) throw new Error("Source window did not close");
+      responses.unshift(awaitClosed);
+      return commandResponse("list_tabs", {}, `event-close-check-${closeChecks}`);
+    }
+    responses.unshift(readPage);
+    return commandResponse("wait_event", { subscriptionId, after: 0, limit: 10, waitMs: 10_000 }, "event-page-first");
   });
   const finish: MockResponse = (request) => {
     const message = request.messages.findLast((item: any) => item.role === "tool");
@@ -89,24 +88,26 @@ test("recovers a paginated audit event stream after its source window closes", a
   };
   try {
     const target = await opened.context.newPage(); await target.goto(fixture.origin);
-    responses.push(commandResponse("execute_program", { timeoutMs: 30_000, code: `
-      const waiting = page.waitForEvent('popup');
-      await page.getByRole('button', {name:'Open source'}).click();
-      const popup = await waiting; return {sourceId:popup.tabId, rootId:page.tabId};` }, "event-open"),
-    awaitJob((result) => {
-      sourceId = result.result.sourceId; rootId = result.result.rootId;
-      expect(sourceId).toEqual(expect.any(Number)); expect(rootId).toEqual(expect.any(Number));
+    responses.push(commandResponse("list_tabs", {}, "event-root"),
+    after((result) => {
+      rootId = result.result.find((tab: any) => tab.url === `${fixture.origin}/`)?.id;
+      expect(rootId).toEqual(expect.any(Number));
+      return commandResponse("click", { tabId: rootId, target: { by: "role", value: "button", name: "Open source" }, timeoutMs: 30_000 }, "event-open");
+    }),
+    awaitJob(() => commandResponse("list_tabs", {}, "event-find-source")),
+    after((result) => {
+      sourceId = result.result.find((tab: any) => tab.url?.endsWith("/source"))?.id;
+      expect(sourceId).toEqual(expect.any(Number));
       return commandResponse("subscribe_event", { tabId: sourceId, kind: "console" }, "event-subscribe");
     }),
     after((result) => {
       subscriptionId = result.subscriptionId; expect(subscriptionId).toEqual(expect.any(String));
-      return commandResponse("execute_program", { timeoutMs: 30_000, code: `
-        const source = await browser.page(${sourceId});
-        await source.getByRole('button', {name:'Generate audit log'}).click();
-        await source.locator('#status').filter({hasText:'Ready to close'}).waitFor(); return 'ready';` }, "event-generate");
+      return commandResponse("click", { tabId: sourceId, target: { by: "role", value: "button", name: "Generate audit log" }, timeoutMs: 30_000 }, "event-generate");
     }),
-    awaitJob(() => { responses.unshift(readBeforeClose); return commandResponse("wait_event", { subscriptionId, after: 0, limit: 10, waitMs: 10_000 }, "event-ready-first"); }),
-    awaitJob(() => { responses.unshift(readPage); return commandResponse("wait_event", { subscriptionId, after: 0, limit: 10 }, "event-page-first"); }),
+    awaitJob(() => commandResponse("verify_state", { tabId: sourceId, target: { by: "css", value: "#status" }, textIncludes: "Ready to close", timeoutMs: 10_000 }, "event-ready")),
+    after((result) => { expect(result).toMatchObject({ ok: true, result: { verified: true } }); responses.unshift(readBeforeClose); return commandResponse("wait_event", { subscriptionId, after: beforeCloseCursor, limit: 1, waitMs: 10_000 }, "event-ready-first"); }),
+    awaitJob(() => { responses.unshift(awaitClosed); return commandResponse("list_tabs", {}, "event-close-check"); }),
+    awaitJob(() => commandResponse("click", { tabId: rootId, target: { by: "role", value: "button", name: "Submit audit", frame: { by: "css", value: 'iframe[title="Destination"]' } }, timeoutMs: 30_000 }, "event-submit")),
     awaitJob(() => commandResponse("unsubscribe_event", { subscriptionId }, "event-unsubscribe")),
     finish,
     textResponse("Audit"));

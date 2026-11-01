@@ -2,7 +2,7 @@ import { test, expect, assistantResponse, delayedResponse, textResponse, startPr
 
 test("keeps message, tool and waiting rows on the same spacing and type scale", async () => {
   const lines = ["我来帮你探索这个网站。让我先查看当前页面内容。", "让我继续浏览页面，收集更多内容。", "继续浏览页面内容。", "主页面内容已经扫描完毕。让我进一步查看页面导航和分类结构。"];
-  const replies = lines.map((content, index) => assistantResponse({ content, tool_calls: Array.from({ length: index === lines.length - 1 ? 2 : 1 }, (_, call) => ({ id: `visual-${index}-${call}`, type: "function", function: { name: "execute_program", arguments: JSON.stringify({ code: "return await page.title();" }) } })) }));
+  const replies = lines.map((content, index) => assistantResponse({ content, tool_calls: Array.from({ length: index === lines.length - 1 ? 2 : 1 }, (_, call) => ({ id: `visual-${index}-${call}`, type: "function", function: { name: "get_page_info", arguments: JSON.stringify({}) } })) }));
   const provider = await startProvider([...replies, delayedResponse(textResponse("完成"), 30000)]);
   const opened = await openExtension();
   try {

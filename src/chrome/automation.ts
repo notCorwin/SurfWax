@@ -21,7 +21,7 @@ function eventWithDispatch<T extends object>(event: T, invoke: (operation: strin
   return event;
 }
 type Query = {
-  kind: "role" | "text" | "label" | "placeholder" | "alt" | "title" | "testId" | "css" | "frame" | "frameRef" | "filter" | "index";
+  kind: "role" | "text" | "label" | "placeholder" | "alt" | "title" | "testId" | "css" | "frame" | "frameRef" | "filter" | "index" | "uniqueScope";
   value: string;
   name?: string;
   exact?: boolean;
@@ -242,6 +242,10 @@ const STRUCTURED_FILL_SOURCE = `function(type, value, apply) {
   return { value: this.value };
 }`;
 
+const EDITABLE_STATE_SOURCE = `function(kind, disabled) {
+  return !disabled && !this.readOnly && this.getAttribute("aria-readonly") !== "true" && kind !== "unsupported" && kind !== "detached";
+}`;
+
 // Shared by reads and mutations so ARIA controls and native inputs use the
 // same checked-state semantics. Mixed or missing state is never treated as false.
 const CHECKED_STATE_SOURCE = `function() {
@@ -311,9 +315,9 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument, refs) 
       if (ariaLabel?.trim()) return equal(ariaLabel, query.value);
       return el.labels ? [...el.labels].some(label => equal(labelText(label), query.value)) : false;
     }
-    if (query.kind === "placeholder") return equal(el.getAttribute("placeholder"), query.value);
-    if (query.kind === "alt") return equal(el.getAttribute("alt"), query.value);
-    if (query.kind === "title") return equal(el.getAttribute("title"), query.value);
+    if (query.kind === "placeholder") return el.hasAttribute("placeholder") && equal(el.getAttribute("placeholder"), query.value);
+    if (query.kind === "alt") return el.hasAttribute("alt") && equal(el.getAttribute("alt"), query.value);
+    if (query.kind === "title") return el.hasAttribute("title") && equal(el.getAttribute("title"), query.value);
     if (query.kind === "testId") return el.getAttribute("data-testid") === query.value;
     return false;
   };
@@ -330,6 +334,10 @@ const RESOLVER_SOURCE = String.raw`function(spec, metadata, rootDocument, refs) 
       current = ancestor === root && node !== root ? [node] : [];
     }
     for (const item of locator.queries) {
+      if (item.kind === "uniqueScope") {
+        if (current.length !== 1) throw new Error("AutomationError[invalid-scope]: Expected exactly one scope, found " + current.length);
+        continue;
+      }
       if (item.kind === "filter") {
         if (item.hasText !== undefined) current = current.filter(el => visibleText(el).toLowerCase().includes(normalize(item.hasText).toLowerCase()));
         if (item.has) current = current.filter(el => resolve(el, item.has).length > 0);
@@ -1131,7 +1139,7 @@ export class AutomationRuntime {
       if (operation === "count") return (await this.resolveMetadata(session, spec)).length;
       if (operation === "readCondition") {
         const condition = args[0];
-        if (!["text", "value", "visible", "enabled", "checked"].includes(String(condition))) throw automationError("invalid-condition", { condition });
+        if (!["text", "value", "visible", "enabled", "editable", "checked"].includes(String(condition))) throw automationError("invalid-condition", { condition });
         const objectId = await this.resolveConditionTarget(session, spec);
         if (!objectId) return { present: false, actual: null };
         const observation = await this.callOn(this.objectSession(session, objectId), objectId, `function(condition) {
@@ -1143,7 +1151,10 @@ export class AutomationRuntime {
             const rect = this.getBoundingClientRect(), style = getComputedStyle(this);
             actual = rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
           } else if (condition === "enabled") actual = !(${DISABLED_STATE_SOURCE}).call(this);
-          else {
+          else if (condition === "editable") {
+            const kind = (${TEXT_INPUT_KIND_SOURCE}).call(this);
+            actual = (${EDITABLE_STATE_SOURCE}).call(this, kind, (${DISABLED_STATE_SOURCE}).call(this));
+          } else {
             const state = (${CHECKED_STATE_SOURCE}).call(this);
             actual = state.value;
             invalidChecked = !state.supported || state.value === null;
@@ -1154,6 +1165,8 @@ export class AutomationRuntime {
         if (!observation || typeof observation.present !== "boolean" || !Object.hasOwn(observation, "actual"))
           throw automationError("state-unavailable", { reason: "invalid-condition-observation" });
         if (observation.invalidChecked) throw automationError("invalid-checked-state", { reason: "unsupported-or-indeterminate" });
+        if (observation.present && condition === "editable" && typeof observation.actual !== "boolean")
+          throw automationError("state-unavailable", { reason: "missing-editable-state" });
         return { present: observation.present, actual: observation.actual };
       }
       if (operation === "waitFor") {
@@ -1976,8 +1989,22 @@ export class AutomationRuntime {
         }
         current = filtered;
       };
+      let boundScope: LocatedNode | undefined;
+      const guardScope = async () => {
+        if (!boundScope) return;
+        const result = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: boundScope.objectId,
+          functionDeclaration: "function(){return this.isConnected}", returnByValue: true });
+        if (result.exceptionDetails || result.result?.value !== true) throw automationError("invalid-scope", { reason: "scope-detached" });
+      };
       for (const query of locator.queries) {
         throwIfAborted(this.context.signal);
+        await guardScope();
+        if (query.kind === "uniqueScope") {
+          if (current.length !== 1) throw automationError("invalid-scope", { count: current.length });
+          boundScope = current[0];
+          await guardScope();
+          continue;
+        }
         if (query.kind === "filter") { await filter(query.hasText, query.has); continue; }
         if (query.kind === "index") {
           const index = query.index! < 0 ? current.length + query.index! : query.index!;
@@ -1988,7 +2015,9 @@ export class AutomationRuntime {
         const groups = await Promise.all(current.map((node) => query.kind === "role" ? semanticStep(node, query) : domStep(node, query)));
         current = unique(groups.flat());
       }
+      await guardScope();
       if (locator.has || locator.hasText !== undefined) await filter(locator.hasText, locator.has);
+      await guardScope();
       if (locator.index !== undefined) {
         const index = locator.index < 0 ? current.length + locator.index : locator.index;
         current = current[index] ? [current[index]!] : [];
@@ -2028,6 +2057,7 @@ export class AutomationRuntime {
       const resolved = await this.resolveOnce(session, spec, (matches) => { candidates = matches; });
       this.recordAttempt(session, spec, ++attempt, resolved ? "resolved" : "no-candidate", candidates);
       if (resolved) return resolved;
+      if (spec.queries.some((query) => query.kind === "uniqueScope")) throw automationError("not-found", { locator: spec, reason: "scoped-target-not-found" });
       await delay(50, this.context.signal);
     }
   }
@@ -2428,7 +2458,7 @@ export class AutomationRuntime {
       const style = getComputedStyle(this); let x = rect.left + rect.width / 2; let y = rect.top + rect.height / 2;
       const disabled = (${DISABLED_STATE_SOURCE}).call(this);
       const editKind = (${TEXT_INPUT_KIND_SOURCE}).call(this);
-      const editable = !disabled && !this.readOnly && this.getAttribute("aria-readonly") !== "true" && editKind !== "unsupported" && editKind !== "detached";
+      const editable = (${EDITABLE_STATE_SOURCE}).call(this, editKind, disabled);
       return { connected: true, x, y, width: rect.width, height: rect.height, visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none", stable: true, enabled: !disabled, editable, editKind, receivesEvents: pointer, checked: (${CHECKED_STATE_SOURCE}).call(this).value };
     }`, [scroll, pointer]);
       if (!pointer || !value.connected || !value.visible) return value as ElementState;
@@ -2487,6 +2517,7 @@ export class AutomationRuntime {
 
   private async waitActionableLocator(session: Session, spec: LocatorSpec, editable: boolean, pointer: boolean, stable = pointer, enabled = true, failFast = false): Promise<{ objectId: string; targetSession: Session; state: ElementState }> {
     let attempt = 0;
+    const singleResolution = failFast || spec.queries.some((query) => query.kind === "uniqueScope");
     while (true) {
       throwIfAborted(this.context.signal);
       let candidates: Candidate[] = [];
@@ -2494,7 +2525,7 @@ export class AutomationRuntime {
       attempt += 1;
       if (!objectId) {
         this.recordAttempt(session, spec, attempt, "no-candidate", candidates);
-        if (failFast) throw automationError("not-found", { locator: spec, lastObservation: this.waitDiagnostic() });
+        if (singleResolution) throw automationError("not-found", { locator: spec, lastObservation: this.waitDiagnostic() });
         await delay(50, this.context.signal); continue;
       }
       const targetSession = this.objectSession(session, objectId);
@@ -2511,7 +2542,7 @@ export class AutomationRuntime {
       if (spec.ref && !state?.connected) throw automationError("detached", { ref: spec.ref, reason: "node-removed" });
       if (editable && state?.connected && state.editKind === "unsupported") throw automationError("invalid-editable-target", { reason: "not-a-text-input" });
       if (state?.connected && state.visible && (!stable || state.stable) && (!enabled || state.enabled) && (!editable || state.editable) && (!pointer || state.receivesEvents)) return { objectId, targetSession, state };
-      if (failFast) {
+      if (singleResolution) {
         if (reason === "intercepted" && state) {
           try { state.blocker = await this.clickBlocker(session, targetSession, objectId, state); }
           catch (error) {
@@ -3112,6 +3143,7 @@ export class LocatorFacade {
   }
   private chain(query: Query) { const spec = flushLocator(this.spec); return new LocatorFacade(this.runtime, this.tabId, { ...spec, queries: [...spec.queries, query] }); }
   locator(value: string) { return this.chain({ kind: "css", value }); }
+  uniqueScope() { return this.chain({ kind: "uniqueScope", value: "" }); }
   frameLocator(value: string) { return this.chain({ kind: "frame", value }); }
   getByRole(value: string, options: { name?: string; exact?: boolean } = {}) { return this.chain({ kind: "role", value, ...options }); }
   getByText(value: string, options: { exact?: boolean } = {}) { return this.chain({ kind: "text", value, ...options }); }
@@ -3128,7 +3160,7 @@ export class LocatorFacade {
   last() { return this.nth(-1); }
   nth(index: number) { return new LocatorFacade(this.runtime, this.tabId, { ...flushLocator(this.spec), index }); }
   count() { return this.run("count"); }
-  readCondition(condition: "text" | "value" | "visible" | "enabled" | "checked") { return this.run("readCondition", condition); }
+  readCondition(condition: "text" | "value" | "visible" | "enabled" | "editable" | "checked") { return this.run("readCondition", condition); }
   waitFor(options: { state?: WaitState } = {}) { return this.run("waitFor", options); }
   click(options?: { button?: "left" | "right" | "middle"; modifiers?: string[] }) { return this.run("click", options); }
   dblclick(options?: { button?: "left" | "right" | "middle"; modifiers?: string[] }) { return this.run("dblclick", options); }

@@ -25,6 +25,9 @@ for (const nestedOrigin of ["cross-process", "same-process"] as const) test(`rej
       cover.style.cssText = "position:fixed;inset:0;z-index:2147480000";
       cover.onclick = () => { body.dataset.coverClicked = "yes"; };
       body.append(cover);
+      const remove = document.createElement("button"); remove.id = "remove-inner"; remove.textContent = "Remove inner cover";
+      remove.style.cssText = "position:fixed;top:0;left:0;z-index:2147480001";
+      remove.onclick = () => cover.remove(); body.append(remove);
     }, `${nestedOrigin === "same-process" ? provider.origin.replace("127.0.0.1", "localhost") : provider.origin}/frame`);
     const inner = outer.frameLocator("#nested");
     await inner.getByRole("button", { name: "Frame action" }).waitFor();
@@ -37,25 +40,36 @@ for (const nestedOrigin of ["cross-process", "same-process"] as const) test(`rej
       cover.style.cssText = "position:fixed;inset:0;z-index:2147480000";
       cover.onclick = () => { document.body.dataset.coverClicked = "yes"; };
       document.body.append(cover);
+      const remove = document.createElement("button"); remove.id = "remove-parent"; remove.textContent = "Remove parent cover";
+      remove.style.cssText = "position:fixed;top:0;left:0;z-index:2147480001";
+      remove.onclick = () => cover.remove(); document.body.append(remove);
     });
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
-    const click = `await page.frameLocator('iframe[src*=localhost]').frameLocator('#nested').getByRole('button', { name: 'Frame action' }).click(); return 'clicked';`;
-    let started = 0;
+    let started = 0, nestedRef = "";
+    const click = (id: string) => commandResponse("click", { target: { by: "role", value: "button", name: "Frame action", frame: { ref: nestedRef } }, timeoutMs: 20_000 }, id);
     responses.push(
-      () => { started = Date.now(); return commandResponse("execute_program", { timeoutMs: 20000, code: click }, "blocked-parent"); },
+      commandResponse("list_frames", {}, "discover-frames"),
+      (request) => {
+        const frames = lastTool(request).frames;
+        const parents = new Set(frames.map((frame: any) => frame.parentFrameRef).filter(Boolean));
+        const outerFrame = frames.find((frame: any) => frame.url.includes("localhost") && parents.has(frame.frameRef));
+        const nestedFrame = frames.find((frame: any) => frame.parentFrameRef === outerFrame?.frameRef);
+        expect(nestedFrame?.frameRef).toEqual(expect.any(String)); nestedRef = nestedFrame.frameRef;
+        started = Date.now(); return click("blocked-parent");
+      },
       (request) => {
         expect(Date.now() - started).toBeLessThan(10_000);
         expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "intercepted" } });
-        return commandResponse("execute_program", { code: `await page.evaluate(() => document.querySelector('#parent-cover').remove());` }, "remove-parent");
+        return commandResponse("click", { target: { by: "css", value: "#remove-parent" } }, "remove-parent");
       },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); started = Date.now(); return commandResponse("execute_program", { timeoutMs: 20000, code: click }, "blocked-inner"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); started = Date.now(); return click("blocked-inner"); },
       (request) => {
         expect(Date.now() - started).toBeLessThan(10_000);
         expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "intercepted" } });
-        return commandResponse("execute_program", { code: `await page.frameLocator('iframe[src*=localhost]').locator('#inner-cover').evaluate(element => element.remove());` }, "remove-inner");
+        return commandResponse("click", { target: { by: "css", value: "#remove-inner", frame: { by: "css", value: 'iframe[src*=localhost]' } } }, "remove-inner");
       },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("execute_program", { timeoutMs: 20000, code: click }, "frame-click"); },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: "clicked" }); return textResponse("FRAME_CLICK_DONE"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return click("frame-click"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return textResponse("FRAME_CLICK_DONE"); },
       textResponse("嵌套框架点击"),
     );
     await target.bringToFront();
@@ -91,19 +105,22 @@ test("rejects a click blocked by a parent overlay above a same-process frame", a
       cover.style.cssText = "position:fixed;inset:0;z-index:2147480000";
       cover.onclick = () => { document.body.dataset.coverClicked = "yes"; };
       document.body.append(cover);
+      const remove = document.createElement("button"); remove.id = "remove-parent"; remove.textContent = "Remove parent cover";
+      remove.style.cssText = "position:fixed;top:0;left:0;z-index:2147480001";
+      remove.onclick = () => cover.remove(); document.body.append(remove);
     });
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
-    const click = `await page.frameLocator('iframe[src="/same-frame"]').getByRole('button', { name: 'Frame action' }).click(); return 'clicked';`;
+    const click = (id: string) => commandResponse("click", { target: { by: "role", value: "button", name: "Frame action", frame: { by: "css", value: 'iframe[src="/same-frame"]' } }, timeoutMs: 20_000 }, id);
     let started = 0;
     responses.push(
-      () => { started = Date.now(); return commandResponse("execute_program", { timeoutMs: 20000, code: click }, "blocked-same"); },
+      () => { started = Date.now(); return click("blocked-same"); },
       (request) => {
         expect(Date.now() - started).toBeLessThan(10_000);
         expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "intercepted" } });
-        return commandResponse("execute_program", { code: `await page.evaluate(() => document.querySelector('#parent-cover').remove());` }, "remove-cover");
+        return commandResponse("click", { target: { by: "css", value: "#remove-parent" } }, "remove-cover");
       },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("execute_program", { timeoutMs: 20000, code: click }, "same-click"); },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: "clicked" }); return textResponse("FRAME_CLICK_DONE"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return click("same-click"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return textResponse("FRAME_CLICK_DONE"); },
       textResponse("同源框架点击"),
     );
     await target.bringToFront();

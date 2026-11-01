@@ -48,12 +48,10 @@ test("stops targeted keyboard input when page handlers redirect focus", async ()
 
 test("keeps normal targeted typing usable inside shadow roots and cross-origin frames", async () => {
   const provider = await startProvider([
-    commandResponse("execute_program", { code: `
-await page.locator('#shadow-host').locator('input').fill('shadow');
-await page.frameLocator('iframe[src*="localhost"]').locator('#frame-input').fill('frame');
-await page.frameLocator('iframe[src*="localhost"]').locator('#frame-input').pressSequentially('!');
-return true;` }, "shadow-frame-input"),
-    (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: true }); return textResponse("FOCUS_FRAMES_OK"); },
+    commandResponse("fill", { target: { by: "css", value: "input", scope: { by: "css", value: "#shadow-host" } }, value: "shadow" }, "shadow-input"),
+    (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("fill", { target: { by: "css", value: "#frame-input", frame: { by: "css", value: 'iframe[src*="localhost"]' } }, value: "frame" }, "frame-input"); },
+    (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("type_text", { target: { by: "css", value: "#frame-input", frame: { by: "css", value: 'iframe[src*="localhost"]' } }, text: "!" }, "frame-type"); },
+    (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return textResponse("FOCUS_FRAMES_OK"); },
     textResponse("Focus frames"),
   ]);
   const opened = await openExtension();

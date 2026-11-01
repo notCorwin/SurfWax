@@ -25,13 +25,13 @@ export type RenderedSnapshotNode = Readonly<{
 
 const allFields: readonly SnapshotField[] = ["text", "state", "ref", "actions"];
 const stateNames: readonly SnapshotStateName[] = ["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly"];
-const programActions: Readonly<Record<string, string>> = { doubleClick: "dblclick", insertText: "pressSequentially", select: "selectOption" };
+const toolActions: Readonly<Record<string, string>> = { doubleClick: "double_click", insertText: "type_text", select: "select_option", clear: "fill", press: "press_key", check: "set_checked" };
 
 /**
  * Render from structured AX fields, so page-supplied names and values never
  * become instructions to replace, add or remove an action reference. `raw`
- * keeps the historical page.snapshot action spelling; `program` uses the
- * execute_program API spellings used in inspect_page.
+ * keeps the internal page.snapshot action spelling; `program` uses the
+ * model-visible tool names used in inspect_page.
  */
 export function renderSnapshotNode(
   node: SnapshotNode,
@@ -44,7 +44,7 @@ export function renderSnapshotNode(
   let line = `${"  ".repeat(node.depth)}- ${node.role}${fields.has("text") && name ? ` ${quote(name)}` : ""}`;
   if (fields.has("ref") && node.ref && options.inlineRef !== false) line += ` [ref=${node.ref}]`;
   if (fields.has("actions") && node.actions?.length) {
-    const actions = options.actionNames === "program" ? node.actions.map((action) => programActions[action] ?? action) : node.actions;
+    const actions = options.actionNames === "program" ? [...new Set(node.actions.map((action) => toolActions[action] ?? action))] : node.actions;
     line += ` [actions=${actions.join(",")}]`;
   }
   if (fields.has("state") && node.state) {

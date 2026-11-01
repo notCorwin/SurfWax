@@ -58,24 +58,8 @@ export function assistantResponse(message: Record<string, unknown>, usage?: { pr
   return completion(message, usage);
 }
 
-export function toolResponse(code: string, id = "call-chrome-e2e", usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number }): CompletionResponse {
-  return completion({ tool_calls: [{ id, type: "function", function: { name: "execute_program", arguments: JSON.stringify({ code }) } }] }, usage);
-}
-
-export function pageResponse(code: string, tabId: number, id = "call-page-e2e"): CompletionResponse {
-  return toolResponse(`{ const page = await browser.page(${tabId}); ${code} }`, id);
-}
-
 export function commandResponse(name: string, input: object, id: string): CompletionResponse {
   return completion({ tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(input) } }] });
-}
-
-export function queuedToolResponse(firstCode: string, secondCode: string): CompletionResponse {
-  return completion({ tool_calls: [firstCode, secondCode].map((code, index) => ({
-    id: `call-queued-${index}`,
-    type: "function",
-    function: { name: "execute_program", arguments: JSON.stringify({ code }) },
-  })) });
 }
 
 export type MockResponse = CompletionResponse | { status: number; error: string } | {

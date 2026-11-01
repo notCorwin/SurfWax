@@ -19,18 +19,30 @@ test("scoped locators resolve aria-labelledby in their own document or shadow ro
       shadow.querySelector("button")!.addEventListener("click", () => { host.dataset.clicked = "shadow"; });
     });
     await expect.poll(() => target.frames().some((frame) => frame.url() === "about:srcdoc")).toBe(true);
-    const code = `const frame = page.frameLocator('#local').locator('section');
-await frame.getByLabel('Frame email', {exact:true}).fill('frame-value');
-await frame.getByRole('button', {name:'Frame submit', exact:true}).click();
-await page.locator('#host').locator('section').getByRole('button', {name:'Shadow submit', exact:true}).click();
-return 'scoped-ok';`;
-    responses.push(commandResponse("execute_program", { code, timeoutMs: 10000 }, "scoped-labelledby"), textResponse("LABELLED_BY_SCOPES_OK"), textResponse("框架标签"));
+    const frameTarget = { by: "css", value: "#local" }, scope = { by: "css", value: "section" };
+    responses.push(
+      commandResponse("fill", { target: { by: "label", value: "Frame email", exact: true, frame: frameTarget, scope }, value: "frame-value" }, "scoped-frame-fill"),
+      (request) => {
+        const result = JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
+        expect(result).toMatchObject({ ok: true });
+        return commandResponse("click", { target: { by: "role", value: "button", name: "Frame submit", exact: true, frame: frameTarget, scope } }, "scoped-frame-click");
+      },
+      (request) => {
+        const result = JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
+        expect(result).toMatchObject({ ok: true });
+        return commandResponse("click", { target: { by: "role", value: "button", name: "Shadow submit", exact: true, scope } }, "scoped-shadow-click");
+      },
+      (request) => { const result = JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content); expect(result).toMatchObject({ ok: true }); return textResponse("LABELLED_BY_SCOPES_OK"); },
+      textResponse("框架标签"),
+    );
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     await target.bringToFront();
     await opened.page.getByTestId("composer-input").fill("fill the frame and click both scoped controls");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("LABELLED_BY_SCOPES_OK", { timeout: 30000 });
-    expect((await readEvents(opened.page)).find((event) => event.toolCallId === "scoped-labelledby" && ["tool.finished", "tool.failed"].includes(event.type))?.output).toMatchObject({ ok: true, result: "scoped-ok" });
+    const events = await readEvents(opened.page);
+    for (const id of ["scoped-frame-fill", "scoped-frame-click", "scoped-shadow-click"])
+      expect(events.find((event) => event.toolCallId === id && ["tool.finished", "tool.failed"].includes(event.type))?.output).toMatchObject({ ok: true });
     const frame = target.frames().find((item) => item.url() === "about:srcdoc")!;
     await expect(frame.locator("input")).toHaveValue("frame-value");
     await expect(frame.locator("body")).toHaveAttribute("data-clicked", "frame");

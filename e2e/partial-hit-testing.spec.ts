@@ -33,8 +33,8 @@ test("clicks an exposed portion of a target and refuses a completely covered tar
     responses.push(
       commandResponse("click", { target: { by: "css", value: "#partial" } }, "partial-click"),
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("click", { target: { by: "css", value: "#rotated" } }, "rotated-click"); },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("execute_program", { code: `await page.frameLocator('#test-frame').locator('#frame-button').click(); return 'clicked';` }, "frame-click"); },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: "clicked" }); return commandResponse("click", { target: { by: "css", value: "#blocked" } }, "blocked-click"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("click", { target: { by: "css", value: "#frame-button", frame: { by: "css", value: "#test-frame" } } }, "frame-click"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("click", { target: { by: "css", value: "#blocked" } }, "blocked-click"); },
       (request) => { const output = lastTool(request); expect(output).toMatchObject({ ok: false, error: { code: "intercepted" } }); expect(JSON.stringify(output)).toContain("full-cover"); return textResponse("HIT_TEST_DONE"); },
       textResponse("点击命中测试"),
     );

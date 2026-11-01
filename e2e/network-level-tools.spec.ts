@@ -3,54 +3,77 @@ import { test, commandResponse, textResponse, startProvider, openExtension, disp
 import { networkFixture, networkScore } from "./evaluation/network-level-fixture";
 import { completedProgramOperations, toolLifecycleEvidence } from "./evaluation/tool-lifecycle";
 
+const lastTool = (request: any) => {
+  const content = request.messages.findLast((entry: any) => entry.role === "tool").content;
+  return JSON.parse(Array.isArray(content) ? content.find((part: any) => part.type === "text").text : content);
+};
+const frame = { by: "css", value: 'iframe[title="Response desk"]' };
+const button = (name: string) => ({ by: "role", value: "button", name, frame });
+
 // Scripted choices validate the network tool path, not a model's performance.
 test("extension distinguishes concurrent same-URL responses using their request references", async () => {
-  test.setTimeout(90_000);
+  test.setTimeout(120_000);
   const fixture = await networkFixture(17), responses: MockResponse[] = [];
   const provider = await startProvider(responses), opened = await openExtension();
   try {
     const target = await opened.context.newPage();
     await target.goto(fixture.origin);
-    let result: any;
-    const step: MockResponse = (request) => {
-      const message = request.messages.findLast((entry: any) => entry.role === "tool");
-      if (!message) { responses.unshift(step); return textResponse("Response desk"); }
-      result = JSON.parse(message.content);
-      return textResponse("NETWORK_IDENTITY_TOOL_DONE");
-    };
-    responses.push(commandResponse("execute_program", { timeoutMs: 60_000, code: `
-      const desk = page.frameLocator('iframe[title="Response desk"]');
-      // Bind and observe before the run; requests made before attachment are not history.
-      await desk.getByRole('button', {name:'Run requests'}).count();
-      await net.requests({limit:100});
-      await desk.getByRole('button', {name:'Run requests'}).click();
-      await desk.locator('#state').filter({hasText:'Responses ready'}).waitFor();
-      const captured = await net.requests({limit:100});
-      if (captured.integrity !== 'complete' || captured.hasMore !== false) throw new Error('Network history is incomplete');
-      const refs = captured.requests.filter(item => item.method === 'POST' && item.url.endsWith('/sample'));
-      if (refs.length !== 6 || new Set(refs.map(item => item.requestRef)).size !== 6) throw new Error('Expected six distinct captured requests');
-      const values = {};
-      for (const entry of refs) {
-        const body = await net.responseBody(entry.requestRef);
-        if (typeof body !== 'string') throw new Error('Response body unavailable');
-        const response = JSON.parse(body);
-        if (typeof response.name !== 'string' || typeof response.code !== 'string' || values[response.name]) throw new Error('Invalid or duplicate response');
-        values[response.name] = response.code;
+    let refs: any[] = [], index = 0, failure: unknown;
+    const values = new Map<string, string>();
+    const afterFill: MockResponse = (request) => {
+      expect(lastTool(request).ok).toBe(true);
+      index++;
+      if (index < refs.length) {
+        responses.unshift(afterRead);
+        return commandResponse("read_response", { requestRef: refs[index].requestRef }, `response-${index}`);
       }
-      for (const [name, code] of Object.entries(values)) await desk.getByLabel(name + ' code', {exact:true}).fill(code);
-      await desk.getByRole('button', {name:'Submit codes'}).click();
-      return {references: refs.length, unique: new Set(refs.map(item => item.requestRef)).size, names: Object.keys(values).length, historyComplete: true};`,
-    }, "network-identity"), step, textResponse("Response desk"));
+      expect(values.size).toBe(6);
+      responses.unshift(afterSubmit);
+      return commandResponse("click", { target: button("Submit codes") }, "submit");
+    };
+    const afterRead: MockResponse = (request) => {
+      const result = lastTool(request);
+      if (!result.ok) { failure = result; return textResponse("NETWORK_IDENTITY_TOOL_FAILED"); }
+      expect(result.ok).toBe(true);
+      expect(typeof result.result).toBe("string");
+      const response = JSON.parse(result.result);
+      expect(typeof response.name).toBe("string");
+      expect(typeof response.code).toBe("string");
+      expect(values.has(response.name)).toBe(false);
+      values.set(response.name, response.code);
+      responses.unshift(afterFill);
+      return commandResponse("fill", { target: { by: "label", value: `${response.name} code`, exact: true, frame }, value: response.code }, `fill-${index}`);
+    };
+    const afterSubmit: MockResponse = (request) => {
+      expect(lastTool(request).ok).toBe(true);
+      responses.unshift((request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: { verified: true } }); return textResponse("NETWORK_IDENTITY_TOOL_DONE"); });
+      return commandResponse("verify_state", { target: { by: "css", value: "#notice", frame }, textIncludes: "Codes submitted", timeoutMs: 10_000 }, "verify-submit");
+    };
+    responses.push(
+      commandResponse("count_elements", { target: button("Run requests") }, "bind-frame"),
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: 1 }); return commandResponse("list_requests", { limit: 100 }, "start-capture"); },
+      (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("click", { target: button("Run requests") }, "run-requests"); },
+      (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("verify_state", { target: { by: "css", value: "#state", frame }, textIncludes: "Responses ready", timeoutMs: 20_000 }, "wait-responses"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: { verified: true } }); return commandResponse("list_requests", { limit: 100 }, "captured-requests"); },
+      (request) => {
+        const result = lastTool(request);
+        expect(result).toMatchObject({ ok: true, result: { integrity: "complete", hasMore: false } });
+        refs = result.result.requests.filter((item: any) => item.method === "POST" && item.url.endsWith("/sample"));
+        expect(refs).toHaveLength(6);
+        expect(new Set(refs.map((item) => item.requestRef)).size).toBe(6);
+        responses.unshift(afterRead);
+        return commandResponse("read_response", { requestRef: refs[0].requestRef }, "response-0");
+      },
+      textResponse("Response desk"),
+    );
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     await target.bringToFront();
     await opened.page.getByTestId("composer-input").fill(fixture.prompt);
     await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.locator(".markdown-body").last()).toContainText("NETWORK_IDENTITY_TOOL_DONE", { timeout: 75_000 });
-    const events = await readEvents(opened.page);
-    expect(result, JSON.stringify(events.filter((event) => event.type === "browser.job.progress").map((event) => event.content))).toMatchObject({
-      ok: true, state: "succeeded", result: { references: 6, unique: 6, names: 6, historyComplete: true },
-    });
+    await expect(opened.page.locator(".markdown-body").last()).toContainText(/NETWORK_IDENTITY_TOOL_(DONE|FAILED)/, { timeout: 100_000 });
+    expect(failure, JSON.stringify(failure)).toBeUndefined();
     await expect.poll(() => networkScore(fixture.evidence())).toBe(true);
+    const events = await readEvents(opened.page);
     const operations = completedProgramOperations(events);
     expect(operations["net.requests"]).toBeGreaterThanOrEqual(2);
     expect(operations["net.responseBody"]).toBe(6);

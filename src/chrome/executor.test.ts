@@ -88,8 +88,27 @@ function programHarness(work: (capabilities: any, signal: AbortSignal) => Promis
   };
   (executor as any).pageFor = vi.fn(async (state: any) => ({ ...raw, tabId: state.tabId }));
   (executor as any).automation.sessionIdentity = (id: number) => { if (!tabs.some(tab => tab.id === id)) return undefined; if (!sessions.has(id)) sessions.set(id, {}); return sessions.get(id); };
-  return { ...log, fake, tabs, raw, executor, sessions, onRemoved, listeners, setRunIdentity: (value: typeof runIdentity) => { runIdentity = value; }, run: (signal?: AbortSignal, input: { timeoutMs?: number; background?: boolean } = {}) => executor.runProgram({ code: "fixture program", ...input }, signal, { conversationId: "conversation", visualEnabled: true, ...(input.background ? { logIdentity: { runId: "run", toolCallId: "1:program", toolCallIdCanonical: true as const } } : {}) }) };
+  return { ...log, fake, tabs, raw, executor, sessions, onRemoved, listeners, setRunIdentity: (value: typeof runIdentity) => { runIdentity = value; }, run: (signal?: AbortSignal, input: { timeoutMs?: number; defaultTimeoutMs?: number; background?: boolean } = {}) => executor.runProgram({ code: "fixture program", ...input }, signal, { conversationId: "conversation", visualEnabled: true, ...(input.background ? { logIdentity: { runId: "run", toolCallId: "1:program", toolCallIdCanonical: true as const } } : {}) }) };
 }
+
+describe("structured locator scope", () => {
+  it("applies one scope within the requested frame and rejects zero or multiple roots", async () => {
+    const fake = fakeChrome();
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never });
+    const targetLocator = { spec: { queries: [] } };
+    const getByLabel = vi.fn(() => targetLocator);
+    const region = { uniqueScope: vi.fn(() => ({ getByLabel })) };
+    const getByRole = vi.fn(() => region);
+    const frameLocator = vi.fn(() => ({ getByRole }));
+    const target = { by: "label", value: "", frame: { by: "css", value: "iframe" }, scope: { by: "role", value: "region", name: "Area", exact: true } };
+    expect(await (executor as any).locatorFor({ frameLocator }, target)).toBe(targetLocator);
+    expect(frameLocator).toHaveBeenCalledWith("iframe");
+    expect(getByRole).toHaveBeenCalledWith("region", { name: "Area", exact: true });
+    expect(getByLabel).toHaveBeenCalledWith("", { exact: undefined });
+    expect(region.uniqueScope).toHaveBeenCalledOnce();
+    executor.dispose();
+  });
+});
 
 describe("ChromeExecutor programs", () => {
   it("runs page-independent operations without a bound tab or a live bound window", async () => {
@@ -454,6 +473,35 @@ describe("ChromeExecutor programs", () => {
     expect(await (h.executor as any).saveArtifact(id)).toMatchObject({ artifact: { id, filename: "internal.txt", saved: true, downloadId: 17 } });
     expect(h.fake.chromeApi.downloads.download).toHaveBeenCalledTimes(2); h.executor.dispose();
   });
+  it("imports a binary URL into the canonical artifact without changing its bytes", async () => {
+    const bytes = new Uint8Array([0, 255, 128, 10, 65]);
+    const fetchFile = vi.fn().mockResolvedValueOnce(new Response(bytes, { headers: { "content-type": "application/octet-stream" } }))
+      .mockResolvedValueOnce(new Response("missing", { status: 404 }));
+    vi.stubGlobal("fetch", fetchFile);
+    const h = programHarness(async ({ artifacts }) => artifacts.importUrl("https://example.com/file", "sample.bin"));
+    const result: any = await h.run();
+    expect(result).toMatchObject({ ok: true, result: { filename: "sample.bin", mimeType: "application/octet-stream", byteLength: 5, saved: false } });
+    expect(await h.logger.result(result.result.id, {}, "conversation")).toEqual({ filename: "sample.bin", mimeType: "application/octet-stream", base64: "AP+ACkE=" });
+    expect(fetchFile).toHaveBeenCalledWith("https://example.com/file", expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    expect(await h.run()).toMatchObject({ ok: false, result: { error: { message: "Could not import file: HTTP 404" } } });
+    expect(h.events.filter(event => event.type === "tool.result.data")).toHaveLength(1);
+    h.executor.dispose();
+  });
+  it("imports a link through its selected frame and persists its binary result", async () => {
+    const evaluate = vi.fn(async () => ({ filename: "sample.bin", mimeType: "application/octet-stream", base64: "AP+ACkE=" }));
+    const locator = vi.fn(() => ({ evaluate }));
+    const frameLocator = vi.fn(() => ({ locator }));
+    const target = { by: "css", value: "#file", frame: { by: "css", value: "#source" } };
+    const h = programHarness(async ({ artifacts }) => artifacts.importLink(41, target));
+    (h.raw as any).frameLocator = frameLocator;
+    const result: any = await h.run();
+    expect(result).toMatchObject({ ok: true, result: { filename: "sample.bin", mimeType: "application/octet-stream", byteLength: 5, saved: false } });
+    expect(frameLocator).toHaveBeenCalledWith("#source");
+    expect(locator).toHaveBeenCalledWith("#file");
+    expect(evaluate).toHaveBeenCalledWith(expect.stringContaining("fetch(element.href)"), undefined);
+    expect(await h.logger.result(result.result.id, {}, "conversation")).toEqual({ filename: "sample.bin", mimeType: "application/octet-stream", base64: "AP+ACkE=" });
+    h.executor.dispose();
+  });
   it("exposes no raw Chrome API or execution globals through program capabilities", async () => {
     const h = programHarness(async (caps) => {
       for (const name of ["chrome", "__surfWaxBrowser", "__surfWaxDebugger", "__surfWaxResult"]) expect(caps).not.toHaveProperty(name);
@@ -461,11 +509,45 @@ describe("ChromeExecutor programs", () => {
     });
     expect(await h.run()).toMatchObject({ ok: true, result: ["artifacts", "browser", "check", "emit", "net", "page", "protocol", "sleep"] }); h.executor.dispose();
   });
-  it("applies an estimated program deadline and honors an explicit deadline", async () => {
+  it("applies a default program deadline and honors an explicit deadline", async () => {
     const h = programHarness(async () => 1); const timer = vi.spyOn(globalThis, "setTimeout");
-    expect(await h.run()).toMatchObject({ ok: true, timeoutMs: 30000, timeoutSource: "estimated" }); expect(timer.mock.calls.some(([, delay]) => delay === 30000)).toBe(true);
-    expect(await h.run(undefined, { timeoutMs: 37 })).toMatchObject({ ok: true, timeoutMs: 37, timeoutSource: "explicit" }); expect(timer.mock.calls.some(([, delay]) => delay === 37)).toBe(true);
+    expect(await h.run()).toMatchObject({ ok: true, timeoutMs: 40000, timeoutSource: "default" }); expect(timer.mock.calls.some(([, delay]) => delay === 40000)).toBe(true);
+    expect(await h.run(undefined, { defaultTimeoutMs: 5_000 })).toMatchObject({ ok: true, timeoutMs: 5_000, timeoutSource: "default" });
+    expect(await h.run(undefined, { timeoutMs: 37, defaultTimeoutMs: 5_000 })).toMatchObject({ ok: true, timeoutMs: 37, timeoutSource: "explicit" }); expect(timer.mock.calls.some(([, delay]) => delay === 37)).toBe(true);
     timer.mockRestore(); h.executor.dispose();
+  });
+  it("records a bounded host phase only when the execution deadline expires", async () => {
+    const h = programHarness(async () => 1);
+    (h.executor as any).programHost = (_code: string, _capabilities: unknown, signal: AbortSignal, onState: (state: unknown) => void) => {
+      onState({ stage: "sandbox-initializing", receivedRpc: false, pendingBindings: 0, pendingOperations: 0 });
+      return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    };
+    expect(await h.run(undefined, { timeoutMs: 25 })).toMatchObject({ ok: false, result: { error: { code: "timeout" } } });
+    await h.logger.flush();
+    const diagnostic = h.events.find((event) => event.type === "browser.program.timeout-phase");
+    expect(diagnostic?.content).toMatchObject({ phase: "program-host", stage: "sandbox-initializing", receivedRpc: false, pendingBindings: 0, pendingOperations: 0 });
+    expect(JSON.stringify(diagnostic)).not.toContain("fixture program");
+    h.executor.dispose();
+  });
+  it("times out a stalled browser-state read and ignores its late result", async () => {
+    const h = programHarness(async () => 1);
+    let release!: (value: object) => void;
+    const getCurrent = (h.fake.chromeApi as any).windows.getCurrent as ReturnType<typeof vi.fn>;
+    getCurrent.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    const host = vi.fn(async () => "done");
+    (h.executor as any).programHost = host;
+    const pending = h.run(undefined, { timeoutMs: 25 });
+    expect(await pending).toMatchObject({ ok: false, result: { error: { code: "timeout" } } });
+    await h.logger.flush();
+    expect(h.events.find((event) => event.type === "browser.program.timeout-phase")?.content).toMatchObject({ phase: "browser-state" });
+    expect(host).not.toHaveBeenCalled();
+    release({ id: 7, tabs: [{ id: 41, active: true }] });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.executor.boundTabId).toBeUndefined();
+    expect(host).not.toHaveBeenCalled();
+    expect(await h.run()).toMatchObject({ ok: true, result: "done" });
+    expect(host).toHaveBeenCalledOnce();
+    h.executor.dispose();
   });
   it("never retries a failed world or silently substitutes an available MAIN host for USER_SCRIPT", async () => {
     let world = "USER_SCRIPT";

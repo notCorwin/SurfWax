@@ -66,7 +66,8 @@ describe("browser tools", () => {
     const metadata = { filename: operation === "screenshot" ? "screen.png" : "page.pdf", mimeType: operation === "screenshot" ? "image/png" : "application/pdf", byteLength: 1 };
     const stored = operation === "save" ? await logger.append({ type: "tool.result.data", conversationId: "conversation", runId: "previous-run", content: metadata,
       output: { ...metadata, base64: "eA==" } }) : undefined;
-    const input = { code: operation === "save" ? `return await artifacts.save(${stored!.id});` : `return await page.${operation}({save:true});` };
+    const input = operation === "save" ? { artifactId: stored!.id } : {};
+    const toolName = operation === "save" ? "save_artifact" : operation === "pdf" ? "create_pdf" : "take_screenshot";
     logger.beginRun("conversation", "run"); logger.setRunPhase("run", 1);
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
     let artifactId = stored?.id;
@@ -83,13 +84,13 @@ describe("browser tools", () => {
     };
     const controller = new AbortController();
     const tools = createProgramTools(executor, { logger, conversationId: "conversation", callId: () => "sdk" }) as Record<string, any>;
-    const pending = tools.execute_program.execute(input, { toolCallId: "capture", abortSignal: controller.signal });
+    const pending = tools[toolName].execute(input, { toolCallId: "capture", abortSignal: controller.signal });
     await ready; logger.setRunPhase("run", 2); controller.abort("sidepanel-closed");
     const result = await pending;
     expect(workFinished).toBe(false);
     expect(result).toMatchObject({ ok: false, error: { code: "aborted", message: "sidepanel-closed", effectUnknown: true }, artifact: { id: artifactId, ...metadata } });
     expect(result).not.toHaveProperty("artifact.saved"); expect(JSON.stringify(result)).not.toContain("eA==");
-    await logger.append({ type: "tool.failed", conversationId: "conversation", toolCallId: "capture", content: { callId: "sdk", toolName: "execute_program" }, input, output: result, error: result.error });
+    await logger.append({ type: "tool.failed", conversationId: "conversation", toolCallId: "capture", content: { callId: "sdk", toolName }, input, output: result, error: result.error });
     await logger.closePendingTools("run", "conversation", "owner-disconnected");
     expect(events.filter((event) => event.type === "tool.failed")).toHaveLength(1);
     expect(events.find((event) => event.type === "tool.failed")).toMatchObject({ toolCallId: "1:capture", output: result });
@@ -101,7 +102,7 @@ describe("browser tools", () => {
     const append = vi.fn(async () => ({ id: 7 }));
     const logger = { append, toolIdentity: () => ({ toolCallId: "call", toolCallIdCanonical: true }) } as unknown as EventLogger;
     const tools = createProgramTools({ runProgram: vi.fn(async () => failed) } as unknown as ChromeExecutor, { logger, conversationId: "conversation" }) as Record<string, any>;
-    const result = await tools.execute_program.execute({ code: "await check(false);" }, { toolCallId: "call" });
+    const result = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "call" });
     expect(result).toMatchObject({ $ref: 7, ok: false, state: "failed", error: { ...failed.result.error, retryable: false }, resultAccess: { artifactId: 7, path: ["result"] } });
     expect(JSON.stringify(result).length).toBeLessThan(8000);
     expect(append).toHaveBeenCalledTimes(3);
@@ -119,7 +120,7 @@ describe("browser tools", () => {
     let finish!: (value: unknown) => void;
     const runProgram = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
     const tools = createProgramTools({ runProgram } as unknown as ChromeExecutor, { logger, conversationId: "conversation" }) as Record<string, any>;
-    const pending = tools.execute_program.execute({ code: "return await page.evaluate(() => null);" }, { toolCallId: "call" });
+    const pending = tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "call" });
     await vi.waitFor(() => expect(runProgram).toHaveBeenCalled());
     phase = 2; finish({ ok: true, result: "original".repeat(2000) });
     await expect(pending).resolves.toMatchObject({ $ref: 7, access: { path: ["result"] } });
@@ -182,7 +183,7 @@ describe("browser tools", () => {
   it("preserves small program results and data fields that resemble sidecar metadata", async () => {
     const programResult = { undefinedPaths: ["ordinary data"], holePaths: { x: undefined }, rows: [undefined, , null] };
     const tools = createProgramTools({ runProgram: vi.fn(async () => ({ ok: true, result: programResult })) } as unknown as ChromeExecutor) as Record<string, any>;
-    const output = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "program" });
+    const output = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "program" });
     expect(JSON.parse(JSON.stringify(output))).toEqual({ ok: true,
       result: { undefinedPaths: ["ordinary data"], holePaths: { x: null }, rows: [null, null, null] },
       undefinedPaths: [["holePaths", "x"], ["rows", 0]], holePaths: [["rows", 1]] });
@@ -192,7 +193,7 @@ describe("browser tools", () => {
     const value = { nan: NaN, positive: Infinity, negative: -Infinity, zero: -0, big: 123n,
       literal: { $type: "bigint", value: "123" } };
     const tools = createProgramTools({ runProgram: vi.fn(async () => ({ ok: true, result: value })) } as unknown as ChromeExecutor) as Record<string, any>;
-    const output = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "program" });
+    const output = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "program" });
     expect(JSON.parse(JSON.stringify(output))).toEqual({ ok: true,
       result: { nan: null, positive: null, negative: null, zero: null, big: null, literal: value.literal },
       numberPaths: [{ path: ["nan"], value: "NaN" }, { path: ["positive"], value: "Infinity" }, { path: ["negative"], value: "-Infinity" }, { path: ["zero"], value: "-0" }],
@@ -206,7 +207,7 @@ describe("browser tools", () => {
       regexp, map: new Map([[123n, new Set([undefined, new Date("2024-01-01T00:00:00Z")])]]),
       literal: { typePaths: [{ path: [], type: "date" }], $type: "date", value: "ordinary" } };
     const tools = createProgramTools({ runProgram: vi.fn(async () => ({ ok: true, result: value })) } as unknown as ChromeExecutor) as Record<string, any>;
-    const output = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "program" });
+    const output = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "program" });
     expect(JSON.parse(JSON.stringify(output))).toEqual({ ok: true,
       result: { date: "2020-01-02T03:04:05.000Z", invalid: null, buffer: "AP8=", view: "CAk=",
         regexp: { source: "x+", flags: "gi", lastIndex: 4 }, map: [[null, [null, "2024-01-01T00:00:00.000Z"]]], literal: value.literal },
@@ -223,7 +224,7 @@ describe("browser tools", () => {
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
     vi.spyOn(executor, "runProgram").mockResolvedValue({ ok: true, result: { date: new Date("2020-01-01Z"), bytes: new Uint8Array([1, 2]), large: "x".repeat(10000) } });
     const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
-    const output = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "program" });
+    const output = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "program" });
     expect(output).toMatchObject({ $ref: expect.any(Number), typeCount: 2, typePathsAccess: { path: ["typePaths"], offset: 0 } });
     expect(await tools.read_artifact.execute({ ...output.typePathsAccess, limit: 2 }, { toolCallId: "paths" })).toEqual({ ok: true, result: [
       { path: ["date"], type: "date" }, { path: ["bytes"], type: "typed-array", name: "Uint8Array" },
@@ -240,19 +241,19 @@ describe("browser tools", () => {
     const run = vi.spyOn(executor, "runProgram");
     const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
     run.mockResolvedValueOnce({ ok: true, result: new Map(Array.from({ length: 40000 }, (_, index) => [index, index * 2])) });
-    const map = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "map" });
+    const map = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "map" });
     expect(map).toMatchObject({ sidecarsDeferred: true, resultAccess: { path: ["result"], offset: 0, limit: 25 } });
     expect(await tools.read_artifact.execute({ ...map.resultAccess, offset: 39998, limit: 2 }, { toolCallId: "map-page" }))
       .toEqual({ ok: true, result: [[39998, 79996], [39999, 79998]], typePaths: [{ path: [], type: "map" }] });
     const numbers = new Uint16Array(30000); numbers[29000] = 258;
     run.mockResolvedValueOnce({ ok: true, result: numbers });
-    const binary = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "binary" });
+    const binary = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "binary" });
     expect(binary).toMatchObject({ sidecarsDeferred: true, resultAccess: { path: ["result"], offset: 0, limit: 1536 } });
     expect(await tools.read_artifact.execute({ ...binary.resultAccess, offset: 29000, limit: 1 }, { toolCallId: "binary-page" }))
       .toEqual({ ok: true, result: btoa(String.fromCharCode(...new Uint8Array(numbers.buffer, 58000, 2))), typePaths: [{ path: [], type: "typed-array", name: "Uint16Array" }] });
     const compact = new Uint16Array(10000); compact[9000] = 513;
     run.mockResolvedValueOnce({ ok: true, result: compact });
-    const compacted = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "compact-binary" });
+    const compacted = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "compact-binary" });
     expect(compacted).toMatchObject({ typeCount: 1, resultAccess: { path: ["result"], offset: 0, limit: 1536 } });
     expect(await tools.read_artifact.execute({ ...compacted.resultAccess, offset: 9000, limit: 1 }, { toolCallId: "compact-binary-page" }))
       .toEqual({ ok: true, result: btoa(String.fromCharCode(...new Uint8Array(compact.buffer, 18000, 2))), typePaths: [{ path: [], type: "typed-array", name: "Uint16Array" }] });
@@ -266,7 +267,7 @@ describe("browser tools", () => {
     const value = { nan: NaN, big: 123n, zero: -0, literal: { $type: "bigint", value: "123" }, large: "x".repeat(10000) };
     vi.spyOn(executor, "runProgram").mockResolvedValue({ ok: true, result: value });
     const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
-    const output = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "program" });
+    const output = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "program" });
     expect(output).toMatchObject({ $ref: expect.any(Number), numberCount: 2, bigintCount: 1,
       numberPathsAccess: { path: ["numberPaths"], offset: 0 }, bigintPathsAccess: { path: ["bigintPaths"], offset: 0 } });
     expect(await tools.read_artifact.execute({ ...output.bigintPathsAccess, limit: 1 }, { toolCallId: "paths" }))
@@ -326,7 +327,7 @@ describe("browser tools", () => {
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
     vi.spyOn(executor, "runProgram").mockResolvedValue(failed);
     const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
-    const output = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "failure" });
+    const output = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "failure" });
     expect(output).toMatchObject({ ok: false, envelopeWrapped: true, error: { code: "timeout", effectUnknown: true }, undefinedCount: 1,
       undefinedPathsAccess: { path: ["undefinedPaths"], offset: 0 }, resultAccess: { path: ["result"] } });
     expect(await tools.read_artifact.execute({ ...output.undefinedPathsAccess, limit: 1 }, { toolCallId: "paths" }))
@@ -355,7 +356,7 @@ describe("browser tools", () => {
       result: { screenshot: { artifactId: 7, mediaType: "image/png" }, optional: undefined, large: "y".repeat(10000) },
       holePaths: ["ordinary data"] });
     const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
-    const output = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "visual" });
+    const output = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "visual" });
     expect(output).toMatchObject({ envelopeWrapped: true, screenshot: { artifactId: 7, mediaType: "image/png" }, undefinedCount: 1 });
     expect(await tools.read_artifact.execute({ ...output.undefinedPathsAccess, limit: 1 }, { toolCallId: "paths" }))
       .toEqual({ ok: true, result: [["result", "optional"]] });
@@ -370,12 +371,12 @@ describe("browser tools", () => {
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
     vi.spyOn(executor, "runProgram").mockResolvedValueOnce(failure).mockResolvedValueOnce(visual);
     const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
-    const failed = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "failure" });
+    const failed = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "failure" });
     expect(failed).toMatchObject({ ok: false, error: { code: "timeout", effectUnknown: true }, undefinedCount: 1,
       undefinedPathsAccess: { path: ["undefinedPaths"], offset: 0 } });
     expect(await tools.read_artifact.execute({ ...failed.undefinedPathsAccess, limit: 1 }, { toolCallId: "failure-path" }))
       .toEqual({ ok: true, result: [["before"]] });
-    const screenshot = await tools.execute_program.execute({ code: "return 2;" }, { toolCallId: "visual" });
+    const screenshot = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "visual" });
     expect(screenshot).toMatchObject({ screenshot: { artifactId: 7, mediaType: "image/png" }, undefinedCount: 1,
       undefinedPathsAccess: { path: ["undefinedPaths"], offset: 0 } });
     expect(await tools.read_artifact.execute({ ...screenshot.undefinedPathsAccess, limit: 1 }, { toolCallId: "visual-path" }))
@@ -391,7 +392,7 @@ describe("browser tools", () => {
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
     vi.spyOn(executor, "runProgram").mockResolvedValue({ ok: true, result: rows });
     const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
-    const output = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "program" });
+    const output = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "program" });
     expect(output).toMatchObject({ $ref: expect.any(Number), undefinedCount: 1500, holeCount: 1498, bigintCount: 1, numberCount: 1,
       undefinedPathsAccess: { path: ["undefinedPaths"], offset: 0 }, holePathsAccess: { path: ["holePaths"], offset: 0 } });
     expect(await tools.read_artifact.execute({ ...output.undefinedPathsAccess, limit: 2 }, { toolCallId: "undefined-paths" }))
@@ -410,7 +411,7 @@ describe("browser tools", () => {
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
     vi.spyOn(executor, "runProgram").mockResolvedValue({ ok: true, result: rows });
     const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
-    const output = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "program" });
+    const output = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "program" });
     expect(output).toMatchObject({ $ref: expect.any(Number), sidecarsDeferred: true,
       resultAccess: { path: ["result"], offset: 0, limit: 25 } });
     expect(JSON.stringify(output).length).toBeLessThan(2000);
@@ -442,7 +443,7 @@ describe("browser tools", () => {
     const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
     vi.spyOn(executor, "runProgram").mockResolvedValue({ ok: true, result: rows });
     const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
-    const first = await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "first" });
+    const first = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "first" });
     const suffix = await tools.read_artifact.execute({ artifactId: first.$ref, path: ["result"], offset: 2 }, { toolCallId: "suffix" });
     expect(suffix).toMatchObject({ sidecarsDeferred: true, resultAccess: { path: ["result"], offset: 0 } });
     const page = await tools.read_artifact.execute({ ...suffix.resultAccess, limit: 8 }, { toolCallId: "page" });
@@ -468,11 +469,11 @@ describe("browser tools", () => {
       .toMatchObject({ sidecarsDeferred: true, verification: { verified: false, timedOut: true, present: true } });
     expect(await tools.list_requests.execute({}, { toolCallId: "requests" }))
       .toMatchObject({ integrity: "incomplete", hasMore: null, nextOffset: 42, reason: "diagnostic-log-incomplete", access: { path: ["result", "requests"] } });
-    expect(await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "handoff" }))
+    expect(await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "handoff" }))
       .toMatchObject({ accepted: true, complete: false, jobId: "job", blockedBy: { kind: "dialog", dialogId: "dialog-1" }, blockedByAccess: { path: ["blockedBy"] } });
-    expect(await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "failed" }))
+    expect(await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "failed" }))
       .toMatchObject({ ok: false, state: "failed", error: { code: "timeout", effectUnknown: true }, receipts: { jobId: "job", after: 3 }, receiptsAccess: { path: ["receipts"] } });
-    expect(await tools.execute_program.execute({ code: "return 1;" }, { toolCallId: "screenshot" }))
+    expect(await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "screenshot" }))
       .toMatchObject({ screenshot: { artifactId: 9, mediaType: "image/png" }, visualAccess: { path: ["result"] }, artifact: { id: 4, filename: "page.png" }, artifactAccess: { path: ["artifact"] } });
   });
 
@@ -514,8 +515,8 @@ describe("browser tools", () => {
     const tools = createProgramTools({} as ChromeExecutor) as Record<string, any>;
     expect(Object.keys(tools)).toEqual(PROGRAM_TOOL_REGISTRY.map(({ name }) => name));
     expect(new Set(Object.keys(tools)).size).toBe(PROGRAM_TOOL_REGISTRY.length);
-    for (const name of ["inspect_page", "find_elements", "list_frames", "click", "fill", "set_checked", "navigate", "list_tabs", "read_artifact", "execute_program", "list_jobs", "get_job", "cancel_job"]) expect(tools).toHaveProperty(name);
-    for (const name of ["inspect", "run", "jobs", "snapshot", "act", "run-code", "browser", "result", "search-tools", "install"]) expect(tools).not.toHaveProperty(name);
+    for (const name of ["inspect_page", "find_elements", "list_frames", "click", "fill", "set_checked", "navigate", "list_tabs", "read_artifact", "list_jobs", "get_job", "cancel_job"]) expect(tools).toHaveProperty(name);
+    for (const name of ["inspect", "run", "jobs", "snapshot", "act", "run-code", "browser", "result", "search-tools", "install", "execute_program", "read_api_reference", "evaluate_js", "send_cdp"]) expect(tools).not.toHaveProperty(name);
     expect(Object.values(tools).every((tool) => tool.deferLoading !== true)).toBe(true);
     for (const { name, summary } of PROGRAM_TOOL_REGISTRY) expect(PROGRAM_TOOL_CONTEXT).toContain(`- ${name}: ${summary}`);
   });
@@ -524,22 +525,16 @@ describe("browser tools", () => {
     expect(metadata.every(({ description, parameters }) => Boolean(description) && parameters.type === "object")).toBe(true);
     expect(new TextEncoder().encode(PROGRAM_TOOL_CONTEXT).byteLength).toBeLessThanOrEqual(15000);
   });
-  it("loads the detailed program API only when requested", async () => {
-    const tools = createProgramTools({} as ChromeExecutor) as Record<string, any>;
-    expect(PROGRAM_TOOL_CONTEXT).not.toContain("locators: chain/filter");
-    await expect(tools.read_api_reference.execute({}, { toolCallId: "reference" })).resolves.toMatchObject({ reference: expect.stringContaining("locators: chain/filter") });
-  });
   it("strictly validates action and job schemas", () => {
     const tools = createProgramTools({} as ChromeExecutor) as Record<string, any>;
     expect(tools.inspect_page.inputSchema.parse({ region: { by: "label", value: "Email" }, fields: ["text", "ref"], budget: 100 })).toHaveProperty("budget", 100);
     expect(() => tools.inspect_page.inputSchema.parse({ readonly: true })).toThrow();
-    expect(() => tools.execute_program.inputSchema.parse({ code: "return 1;", world: "MAIN" })).toThrow();
     expect(() => tools.cancel_job.inputSchema.parse({})).toThrow();
     expect(tools.get_job.inputSchema.parse({ jobId: "one", waitMs: 30001 })).toMatchObject({ waitMs: 30001 });
     expect(tools.list_jobs.inputSchema.parse({})).toEqual({});
     expect(() => tools.fill.inputSchema.parse({ target: { by: "label", value: "Email" } })).toThrow();
     expect(tools.set_checked.inputSchema.parse({ target: { ref: "e1" }, checked: false })).toMatchObject({ checked: false });
-    expect(() => tools.fetch.inputSchema.parse({ url: "https://example.com" })).toThrow();
+    expect(() => tools.send_request.inputSchema.parse({ url: "https://example.com" })).toThrow();
   });
   it("dispatches a fill with arbitrary input as data and logs its result", async () => {
     const events: any[] = [];
@@ -573,13 +568,13 @@ describe("browser tools", () => {
     expect(events.map((event) => event.type)).toEqual(["tool.started", "tool.failed"]);
     expect(events[1]).toMatchObject({ content: { toolName: "click" }, input, output: result, latencyMs: expect.any(Number) });
   });
-  it.each(["click", "execute_program"])("marks an interrupted %s as effect-unknown after execution begins", async (name) => {
+  it.each(["click", "navigate"])("marks an interrupted %s as effect-unknown after execution begins", async (name) => {
     const events: any[] = [];
     const logger = { append: async (event: any) => { events.push(event); return { ...event, id: events.length }; }, toolIdentity: () => ({ toolCallId: "call", toolCallIdCanonical: true }) } as unknown as EventLogger;
     const controller = new AbortController();
     const runProgram = vi.fn(async () => { controller.abort("cancelled"); throw new DOMException("cancelled", "AbortError"); });
     const tools = createProgramTools({ runProgram } as unknown as ChromeExecutor, { logger, conversationId: "conversation" }) as Record<string, any>;
-    const input = name === "click" ? { target: { ref: "e1" } } : { code: "await page.goto('https://example.com');" };
+    const input = name === "click" ? { target: { ref: "e1" } } : { url: "https://example.com" };
     const result = await tools[name].execute(input, { toolCallId: "call", abortSignal: controller.signal });
     expect(result).toMatchObject({ ok: false, error: { code: "aborted", effectUnknown: true, retryable: false } });
     expect(events.map((event) => event.type)).toEqual(["tool.started", "tool.failed"]);
@@ -687,14 +682,14 @@ describe("browser tools", () => {
   it("repairs only lossless current tool names/stringified JSON and never translates old names", async () => {
     const tools = createProgramTools({} as ChromeExecutor);
     await expect(repairProgramToolCall({ toolCall: { toolCallId: "1", toolName: "INSPECT-PAGE", input: JSON.stringify("{}") }, tools } as any)).resolves.toMatchObject({ toolName: "inspect_page", input: "{}" });
-    for (const name of ["run", "jobs", "inspect", "run-code", "RUN_CODE", "act", "snapshot", "userscript-list"]) {
+    for (const name of ["run", "jobs", "inspect", "run-code", "RUN_CODE", "act", "snapshot", "userscript-list", "execute_program", "read_api_reference", "evaluate_js", "send_cdp"]) {
       await expect(repairProgramToolCall({ toolCall: { toolCallId: "old", toolName: name, input: "{}" }, tools } as any)).resolves.toBeNull();
     }
   });
-  it("never suggests retrying timed-out programs with uncertain effects", async () => {
+  it("never suggests retrying timed-out actions with uncertain effects", async () => {
     const error = Object.assign(new DOMException("late Chrome response", "TimeoutError"), { effectUnknown: true });
     const tools = createProgramTools({ runProgram: async () => { throw error; } } as unknown as ChromeExecutor) as Record<string, any>;
-    await expect(tools.execute_program.execute({ code: "await browser.tabs.open();" }, { toolCallId: "call" })).resolves.toEqual({
+    await expect(tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "call" })).resolves.toEqual({
       ok: false, error: { code: "timeout", message: "late Chrome response", retryable: false, effectUnknown: true },
     });
   });
@@ -728,7 +723,7 @@ describe("browser tools", () => {
     const logger = { append: async (event: any) => { appended.push(event); return { ...event, id: 15 }; } } as EventLogger;
     const value = { ok: true, result: [{ operation: "emit", output: "large".repeat(20_000) }] };
     const result = await compactToolResult(value, { logger }) as any;
-    expect(result).toMatchObject({ $ref: 15, access: { artifactId: 15, path: ["result"], offset: 0, limit: 1 }, oversizedItem: { path: ["result", 0], guidance: expect.stringContaining("execute_program") }, resultOversizedItem: { path: ["result", 0] } });
+    expect(result).toMatchObject({ $ref: 15, access: { artifactId: 15, path: ["result"], offset: 0, limit: 1 }, oversizedItem: { path: ["result", 0], guidance: expect.stringContaining("read_artifact") }, resultOversizedItem: { path: ["result", 0] } });
     expect(new TextEncoder().encode(JSON.stringify(result.preview)).byteLength).toBeLessThanOrEqual(4096);
     expect(JSON.stringify(result.preview)).not.toContain("large".repeat(100));
     expect(appended[0].output).toBe(value);

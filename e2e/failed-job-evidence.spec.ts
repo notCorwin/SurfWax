@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { test, queuedToolResponse, textResponse, startProvider, openExtension, configure, dispose, readEvents, type MockResponse } from "./fixtures";
+import { test, assistantResponse, textResponse, startProvider, openExtension, configure, dispose, readEvents, type MockResponse } from "./fixtures";
 import { fromLogValue } from "../src/logging";
 import { browserJobsSettled } from "./evaluation/job-evidence";
 import { evaluateResultEvidence } from "./evaluation/result-evidence";
@@ -7,10 +7,13 @@ import { toolLifecycleEvidence } from "./evaluation/tool-lifecycle";
 
 // The first real job fails without a browser effect; the scheduler rejects the
 // second call before creating any job. The provider does not use a real LLM.
-test("failed program jobs need terminal evidence while undispatched failures do not", async () => {
+test("failed browser jobs need terminal evidence while undispatched failures do not", async () => {
   test.setTimeout(90_000);
   const responses: MockResponse[] = [
-    queuedToolResponse("throw new Error('known failure');", "return 7;"),
+    assistantResponse({ tool_calls: [
+      { id: "call-queued-0", type: "function", function: { name: "click", arguments: JSON.stringify({ target: { by: "css", value: "#missing" } }) } },
+      { id: "call-queued-1", type: "function", function: { name: "fill", arguments: JSON.stringify({ target: { by: "label", value: "Email" }, value: "ignored" }) } },
+    ] }),
     textResponse("FAILED_JOB_EVIDENCE_DONE"), textResponse("Failure evidence"),
   ];
   const provider = await startProvider(responses), opened = await openExtension();
@@ -25,7 +28,7 @@ test("failed program jobs need terminal evidence while undispatched failures do 
     const failed = events.find((event) => event.type === "tool.failed" && event.toolCallId === "call-queued-0");
     const rejected = events.find((event) => event.type === "tool.failed" && event.toolCallId === "call-queued-1");
     expect(failed).toBeDefined(); expect(rejected).toBeDefined();
-    expect(fromLogValue(failed.output, failed.valueEncoding)).toMatchObject({ jobId: expect.any(String), ok: false, state: "failed", error: { code: "execution-failed", message: "known failure" } });
+    expect(fromLogValue(failed.output, failed.valueEncoding)).toMatchObject({ jobId: expect.any(String), ok: false, state: "failed", error: { code: "not-found" } });
     expect(fromLogValue(rejected.output, rejected.valueEncoding)).toMatchObject({ ok: false, error: { code: "prior-action-failed" } });
     expect(events.filter((event) => event.type === "browser.job.state" && event.toolCallId === "call-queued-1")).toHaveLength(0);
     expect(browserJobsSettled([rejected])).toBe(true);

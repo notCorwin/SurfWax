@@ -4,7 +4,7 @@ import { MockLanguageModelV4 } from "ai/test";
 import { z } from "zod";
 import { ToolScheduler } from "./tool-scheduler";
 
-const names = ["click", "fill", "inspect_page", "verify_state", "switch_tab", "key_up", "execute_program", "get_job", "cancel_job", "subscribe_event", "wait_event", "handle_dialog", "upload_file", "list_downloads", "read_artifact", "read_api_reference"];
+const names = ["click", "fill", "inspect_page", "verify_state", "switch_tab", "key_up", "get_job", "cancel_job", "subscribe_event", "wait_event", "handle_dialog", "upload_file", "list_downloads", "read_artifact"];
 const call = (toolCallId: string, toolName: string, input: unknown = {}, extra = {}) => ({ type: "tool-call", toolCallId, toolName, input, ...extra });
 function latch() {
   let release!: () => void;
@@ -196,10 +196,10 @@ describe("model response tool scheduling", () => {
 
   it("lets job and event operations proceed without waiting for browser actions", async () => {
     const scheduler = new ToolScheduler(names);
-    scheduler.prepare([call("bg", "execute_program", { background: true }), call("job", "get_job"), call("cancel", "cancel_job"), call("event", "wait_event"), call("dialog", "handle_dialog"), call("api", "read_api_reference")], 1);
+    scheduler.prepare([call("bg", "click", { background: true }), call("job", "get_job"), call("cancel", "cancel_job"), call("event", "wait_event"), call("dialog", "handle_dialog")], 1);
     const gate = latch();
     const bg = scheduler.run("bg", async () => { await gate.promise; return { accepted: true }; });
-    await expect(Promise.all(["job", "cancel", "event", "dialog", "api"].map((id) => scheduler.run(id, async () => id)))).resolves.toEqual(["job", "cancel", "event", "dialog", "api"]);
+    await expect(Promise.all(["job", "cancel", "event", "dialog"].map((id) => scheduler.run(id, async () => id)))).resolves.toEqual(["job", "cancel", "event", "dialog"]);
     gate.release();
     await bg;
   });
