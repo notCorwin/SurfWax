@@ -437,7 +437,7 @@ test("renders a complete Markdown response without blocking draft input", async 
 });
 
 
-test("keeps jump-to-bottom usable after a long complete response", async () => {
+test("follows the bottom through layout changes while respecting manual scrolling", async () => {
   const longReply = "SCROLL_LINE\n\n".repeat(400) + Array.from({ length: 500 }, (_, index) => index % 40 === 0 ? `\nline ${index}\n` : ".").join("") + "FINAL_SCROLL_MARKER";
   const provider = await startProvider([textResponse(longReply), textResponse("滚动测试")]);
   const opened = await openExtension();
@@ -457,8 +457,27 @@ test("keeps jump-to-bottom usable after a long complete response", async () => {
     const box = await viewport.boundingBox();
     if (!box) throw new Error("thread viewport has no bounding box");
     await opened.page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await opened.page.mouse.wheel(0, 500);
+    await opened.page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await opened.page.setViewportSize({ width: 430, height: 650 });
+    await expect.poll(remaining).toBeLessThanOrEqual(1);
+    const growLastTurn = async () => {
+      const height = await viewport.evaluate((element) => element.scrollHeight);
+      await viewport.locator(".conversation-turn").last().evaluate((turn) => {
+        const extra = document.createElement("div");
+        extra.style.height = "400px";
+        turn.append(extra);
+      });
+      await expect.poll(() => viewport.evaluate((element) => element.scrollHeight)).toBeGreaterThan(height + 350);
+    };
+    await growLastTurn();
+    await expect.poll(remaining).toBeLessThanOrEqual(1);
     await opened.page.mouse.wheel(0, -1_200);
     await expect.poll(remaining).toBeGreaterThan(500);
+    const position = await viewport.evaluate((element) => element.scrollTop);
+    await growLastTurn();
+    await expect.poll(remaining).toBeGreaterThan(500);
+    await expect.poll(() => viewport.evaluate((element) => element.scrollTop)).toBe(position);
 
     const jump = opened.page.getByRole("button", { name: "滚动到底部" });
     await expect(jump).toBeVisible();
@@ -466,6 +485,8 @@ test("keeps jump-to-bottom usable after a long complete response", async () => {
     await jump.click();
     await expect.poll(remaining).toBeLessThanOrEqual(1);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FINAL_SCROLL_MARKER");
+    await growLastTurn();
+    await expect.poll(remaining).toBeLessThanOrEqual(1);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
