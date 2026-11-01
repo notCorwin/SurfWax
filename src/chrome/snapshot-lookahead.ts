@@ -24,8 +24,8 @@ const MAX_PREVIEW_LINE = 512;
  * Spend part of an already-paginated first full page on complete later rows.
  * The main page remains a consecutive prefix and its cursor still points into
  * the original frozen line. The lookahead neither advances the cursor nor
- * contributes to a complete baseline. Explicit limits retain their original
- * meaning and therefore disable the additional preview.
+ * contributes to a complete baseline. An explicit limit bounds the original
+ * source window as well as the number of primary and preview rows combined.
  *
  * Budget includes the exact JSON encoding of both payload fields:
  * UTF8(JSON.stringify({ items: page.fragments, lookahead })).byteLength.
@@ -38,7 +38,7 @@ export function snapshotLookahead(
   options: { budget: number; limit?: number; position?: SnapshotPosition; mode: "full" | "delta" },
 ): SnapshotLookaheadResult {
   const original: SnapshotLookaheadResult = { page };
-  if (options.mode !== "full" || options.limit !== undefined || !Number.isSafeInteger(options.budget) || options.budget < 2
+  if (options.mode !== "full" || !Number.isSafeInteger(options.budget) || options.budget < 2
     || options.position && (options.position.index !== 0 || options.position.charOffset !== 0)
     || !page.hasMore || page.reason !== "budget" || !page.next || !page.fragments.length) return original;
   const last = page.fragments.at(-1)!, fragment = last.fragment;
@@ -57,7 +57,8 @@ export function snapshotLookahead(
   const lookahead: SnapshotLookahead = { nonAuthoritative: true, items: lookaheadItems };
   let combinedBytes = jsonBytes({ items: fragments, lookahead });
   if (combinedBytes > options.budget) return original;
-  for (let index = fragment.index + 1; index < source.length; index++) {
+  const previewEnd = Math.min(source.length, options.limit ?? source.length);
+  for (let index = fragment.index + 1; index < previewEnd; index++) {
     const item = source[index]!;
     // A preview never pretends that an incomplete long line is complete.
     if (item.line.length > MAX_PREVIEW_LINE || item.change !== undefined || item.after !== undefined) continue;

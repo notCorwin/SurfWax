@@ -111,11 +111,12 @@ test("preview exposes a later target without changing frozen pagination or delta
       document.querySelector("p")!.textContent = text;
       document.querySelector("button")!.addEventListener("click", () => { document.querySelector("output")!.textContent = "STATUS_DONE"; });
     }, label);
-    const begin = call("inspect_page", { budget }, (value) => {
+    const begin = call("inspect_page", { budget, limit: 100 }, (value) => {
       first = value;
       expect(value).toMatchObject({ mode: "full", items: expect.any(Array), lookahead: { items: expect.any(Array) } });
       expect(value.$ref).toBeUndefined();
       expect(Buffer.byteLength(JSON.stringify({ items: value.items, lookahead: value.lookahead }))).toBeLessThanOrEqual(budget);
+      expect(value.items.length + value.lookahead.items.length).toBeLessThanOrEqual(100);
       expect(value.truncation.baselineComplete).toBe(false);
       initialPages.push(value);
       const cursor = initial.append(value);

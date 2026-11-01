@@ -46,6 +46,7 @@ test("serves normal snapshot pages inline and preserves artifact access for over
       oversized = result;
       expect(result.$ref).toEqual(expect.any(Number));
       expect(result.access).toMatchObject({ artifactId: result.$ref, path: ["items"] });
+      expect(result.cursorNote).toContain("Read all items");
       expect(result.nextCursor).toBeUndefined();
       returned = result.truncation.returned;
       expect(returned).toBeGreaterThan(80);

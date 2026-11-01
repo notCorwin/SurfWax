@@ -86,11 +86,44 @@ describe("snapshot lookahead", () => {
     expect(snapshotLookahead(source, original, { budget: 1000, mode: "full" })).toEqual({ page: original });
   });
 
+  it("previews within an explicit source window while preserving the cursor and row limit", () => {
+    const source = sample();
+    source.splice(2, 0, { id: "skipped", line: "z".repeat(600) });
+    for (let index = 0; index < 150; index++) source.push({ id: `row-${index}`, line: `- row ${index}` });
+    const budget = 12_000, limit = 100;
+    const original = paginateSnapshot(source, { budget, limit });
+    const { page, lookahead, combinedBytes } = snapshotLookahead(source, original, { budget, limit, mode: "full" });
+    expect(lookahead?.items.some((item) => item.id === "next")).toBe(true);
+    expect(lookahead?.items.some((item) => item.id === "skipped")).toBe(false);
+    expect(lookahead!.items.every((item) => item.index < limit)).toBe(true);
+    expect(page.fragments.length + lookahead!.items.length).toBeLessThanOrEqual(limit);
+    expect(combinedBytes).toBe(bytes({ items: page.fragments, lookahead }));
+    expect(combinedBytes).toBeLessThanOrEqual(budget);
+    const reconstructed = new Map<string, string>();
+    let current = page;
+    for (;;) {
+      for (const item of current.fragments) reconstructed.set(item.id, (reconstructed.get(item.id) ?? "") + item.line);
+      if (!current.next) break;
+      current = paginateSnapshot(source, { budget, limit, position: current.next });
+    }
+    expect([...reconstructed]).toEqual(source.map(({ id, line }) => [id, line]));
+  });
+
+  it("does not preview when primary fragments exhaust the explicit limit", () => {
+    const source = sample(), budget = 12_000;
+    const limit = 2, page = paginateSnapshot(source, { budget, limit });
+    expect(page.reason).toBe("budget");
+    expect(page.fragments).toHaveLength(limit);
+    expect(snapshotLookahead(source, page, { budget, limit, mode: "full" })).toEqual({ page });
+    const one = paginateSnapshot(source, { budget, limit: 1 });
+    expect(snapshotLookahead(source, one, { budget, limit: 1, mode: "full" })).toEqual({ page: one });
+  });
+
   it.each([
-    { mode: "delta" as const }, { mode: "full" as const, limit: 1 },
+    { mode: "delta" as const },
     { mode: "full" as const, position: { index: 0, charOffset: 1 } },
     { mode: "full" as const, position: { index: 1, charOffset: 0 } },
-  ])("does not preview deltas, explicit limits, or continuation positions", (options) => {
+  ])("does not preview deltas or continuation positions", (options) => {
     const source = sample(), page = paginateSnapshot(source, { budget: 12_000 });
     expect(snapshotLookahead(source, page, { budget: 12_000, ...options })).toEqual({ page });
   });

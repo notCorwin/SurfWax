@@ -888,7 +888,7 @@ describe("browser tools", () => {
     const items = Array.from({ length: 50 }, (_, index) => ({ id: `node-${index}`, line: "x".repeat(250) }));
     const value = { observationId: "obs", tabId: 41, documentId: 3, mode: "full", items, nextCursor: "cursor", truncation: { truncated: true, total: 100, returned: 50, budget: 15000, used: 14000, reason: "budget", baselineComplete: false } };
     const result = await compactToolResult(value, { logger, preserveInspectionStatus: true });
-    expect(result).toMatchObject({ $ref: 18, observationId: "obs", tabId: 41, documentId: 3, mode: "full", nextCursor: "cursor", truncation: { truncated: true, reason: "budget", baselineComplete: false }, access: { artifactId: 18, path: ["items"], offset: 0, limit: expect.any(Number) } });
+    expect(result).toMatchObject({ $ref: 18, observationId: "obs", tabId: 41, documentId: 3, mode: "full", nextCursor: "cursor", cursorNote: expect.stringContaining("Read all items"), truncation: { truncated: true, reason: "budget", baselineComplete: false }, access: { artifactId: 18, path: ["items"], offset: 0, limit: expect.any(Number) } });
   });
 
   it("only exempts verified inspection pages within the complete byte limit", async () => {
@@ -930,7 +930,7 @@ describe("browser tools", () => {
     vi.spyOn(executor, "inspect").mockResolvedValue(page);
     const tools = createProgramTools(executor, { logger, conversationId: "thread" }) as Record<string, any>;
     const output = await tools.inspect_page.execute({}, { toolCallId: "inspect" });
-    expect(output).toMatchObject({ sidecarsDeferred: true, lookaheadNonAuthoritative: true, lookaheadCount: 1,
+    expect(output).toMatchObject({ sidecarsDeferred: true, cursorNote: expect.stringContaining("Read all items"), lookaheadNonAuthoritative: true, lookaheadCount: 1,
       lookaheadAccess: { path: ["lookahead", "items"], offset: 0, limit: expect.any(Number) }, truncation: { withLookahead } });
     const read = await tools.read_artifact.execute(output.lookaheadAccess, { toolCallId: "read" });
     expect(read).toMatchObject({ ok: true, result: lookahead.items });
