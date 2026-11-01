@@ -271,7 +271,13 @@ test("@real-model browser task", async () => {
       toolsWithExactlyOneTerminal: result.lifecycleVerified, toolLifecycle };
     const directory = resolve(process.env.SURFWAX_EVAL_REPORT_DIR ?? ".dev/verification/model-evals");
     await mkdir(directory, { recursive: true });
-    await writeFile(resolve(directory, `${Date.now()}-${seed}-${randomUUID()}.json`), JSON.stringify(report, null, 2), { flag: "wx" });
+    const reportName = `${Date.now()}-${seed}-${randomUUID()}.json`;
+    await writeFile(resolve(directory, reportName), JSON.stringify(report, null, 2), { flag: "wx" });
+    if (process.env.SURFWAX_EVAL_EVENTS_DIR) {
+      const eventsDirectory = resolve(process.env.SURFWAX_EVAL_EVENTS_DIR);
+      await mkdir(eventsDirectory, { recursive: true });
+      await writeFile(resolve(eventsDirectory, reportName), JSON.stringify(events, null, 2), { flag: "wx", mode: 0o600 });
+    }
     if (opened) await dispose(opened.context, opened.userDataDirectory);
     if (fixture) await closeServer(fixture.server);
     await closeServer(proxy.server);

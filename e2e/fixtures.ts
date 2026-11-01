@@ -330,6 +330,9 @@ export async function selectProvider(options: Page, query: string, optionName: s
 }
 
 export async function configure(context: BrowserContext, page: Page, baseURL: string, contextWindow = 1_000_000, settings: { goalMode?: boolean } = { goalMode: false }): Promise<Page> {
+  // Development pages can reload while CRXJS initializes. Wait for the app
+  // before executing storage operations in its document context.
+  await expect(page.getByTestId("open-settings")).toBeVisible();
   if (settings.goalMode !== undefined) await page.evaluate((goalMode) => chrome.storage.local.set({ "side-agent:goal-mode": goalMode }), settings.goalMode);
   const [options] = await Promise.all([context.waitForEvent("page"), page.getByTestId("open-settings").click()]);
   await options.waitForLoadState("domcontentloaded");

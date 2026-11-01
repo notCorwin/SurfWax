@@ -52,7 +52,7 @@ export default defineConfig({
     host: "localhost",
     port: devPort,
     strictPort: true,
-    watch: { ignored: ["**/.dev/check-dist/**"] },
+    watch: { ignored: ["**/.dev/**", "**/playwright-report/**", "**/test-results/**"] },
     cors: {
       origin: [/chrome-extension:\/\//],
     },
