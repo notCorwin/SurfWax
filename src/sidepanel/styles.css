@@ -244,6 +244,16 @@ p {
   line-height: var(--transcript-line-height);
 }
 
+.goal-status {
+  margin: 0;
+  font-size: var(--type-caption);
+  color: var(--muted-foreground);
+}
+
+.goal-status[data-status="blocked"] {
+  color: var(--destructive);
+}
+
 .interrupted-message {
   display: flex;
   align-items: center;
@@ -434,6 +444,10 @@ p {
 .transcript-activity[data-status="running"] > summary::before,
 .transcript-activity.transcript-waiting::before {
   background: var(--brand);
+}
+
+.transcript-activity[data-status="blocked"] > summary::before {
+  background: var(--destructive);
 }
 
 .transcript-activity > summary::after {

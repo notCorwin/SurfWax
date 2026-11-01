@@ -3,6 +3,7 @@ import { z } from "zod";
 import { EventLogger, type LogEvent } from "../logging";
 import { testEventStore } from "../test-event-store";
 import { parseLocatorTarget, ChromeExecutor } from "./executor";
+import { toolErrorSemantics } from "./job-result";
 import { compactToolResult, createProgramTools, prepareToolMessages, repairProgramToolCall, PROGRAM_TOOL_REGISTRY, PROGRAM_TOOL_CONTEXT } from "./tool";
 import { callUserScript } from "./script-client";
 import { ToolScheduler } from "./tool-scheduler";
@@ -564,9 +565,26 @@ describe("browser tools", () => {
     const tools = createProgramTools({ runProgram } as unknown as ChromeExecutor, { logger, conversationId: "conversation" }) as Record<string, any>;
     const input = { target: { ref: "e1" } };
     const result = await tools.click.execute(input, { toolCallId: "call" });
-    expect(result).toMatchObject({ ok: false, error: { code: "stale-ref", retryable: false } });
+    expect(result).toMatchObject({ ok: false, error: { code: "stale-ref", retryable: true, recoverable: true, dispatched: false, nextStep: expect.stringContaining("Nothing was dispatched") } });
     expect(events.map((event) => event.type)).toEqual(["tool.started", "tool.failed"]);
     expect(events[1]).toMatchObject({ content: { toolName: "click" }, input, output: result, latencyMs: expect.any(Number) });
+  });
+  it.each(["not-found", "strict-mode", "intercepted", "stale-ref"])("reports %s as recoverable and undispatched", async (code) => {
+    const tools = createProgramTools({ runProgram: async () => ({ ok: false, result: { error: { code, message: code } } }) } as unknown as ChromeExecutor) as Record<string, any>;
+    const result = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "call" });
+    expect(result.error).toMatchObject({ code, retryable: true, recoverable: true, dispatched: false });
+    expect(result.error.nextStep).toContain("Nothing was dispatched");
+  });
+  it("classifies undispatched misses as recoverable and uncertain effects as already sent", async () => {
+    for (const code of ["not-found", "strict-mode", "intercepted", "stale-ref"])
+      expect(toolErrorSemantics({ code })).toMatchObject({ recoverable: true, dispatched: false, retryable: true, nextStep: expect.stringContaining("Nothing was dispatched") });
+    expect(toolErrorSemantics({ code: "not-found", effectUnknown: true })).toMatchObject({ recoverable: false, dispatched: true, retryable: false });
+    expect(toolErrorSemantics({ code: "tool-error", dispatchState: "not-dispatched" })).toMatchObject({ recoverable: true, dispatched: false, retryable: true });
+    expect(toolErrorSemantics({ code: "timeout" })).toMatchObject({ retryable: true, recoverable: true, dispatched: false });
+    expect(toolErrorSemantics({ code: "timeout", effectUnknown: true }).retryable).toBe(false);
+    const tools = createProgramTools({ runProgram: async () => { throw Object.assign(new Error("missing"), { dispatchState: "not-dispatched" }); } } as unknown as ChromeExecutor) as Record<string, any>;
+    const missed = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "call" });
+    expect(missed.error).toMatchObject({ recoverable: true, dispatched: false, retryable: true, nextStep: expect.stringContaining("Nothing was dispatched") });
   });
   it.each(["click", "navigate"])("marks an interrupted %s as effect-unknown after execution begins", async (name) => {
     const events: any[] = [];
@@ -690,7 +708,10 @@ describe("browser tools", () => {
     const error = Object.assign(new DOMException("late Chrome response", "TimeoutError"), { effectUnknown: true });
     const tools = createProgramTools({ runProgram: async () => { throw error; } } as unknown as ChromeExecutor) as Record<string, any>;
     await expect(tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "call" })).resolves.toEqual({
-      ok: false, error: { code: "timeout", message: "late Chrome response", retryable: false, effectUnknown: true },
+      ok: false, error: {
+        code: "timeout", message: "late Chrome response", retryable: false, recoverable: false, dispatched: true, effectUnknown: true,
+        nextStep: "The action may have changed the page. Inspect it and do not repeat the action until you know the outcome.",
+      },
     });
   });
   it("stores large non-visual results once and returns a useful reference", async () => {

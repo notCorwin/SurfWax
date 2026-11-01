@@ -21,6 +21,10 @@ describe("tool activity", () => {
       .toEqual({ status: "error", label: "填写 · 已中断" });
     expect(toolActivity(tool("click", "complete"), "cancelled"))
       .toEqual({ status: "complete", label: "点击" });
+    expect(toolActivity(tool("complete_goal", "complete", { result: { ok: true, status: "blocked", summary: "login" } })))
+      .toEqual({ status: "blocked", label: "目标受阻" });
+    expect(toolActivity(tool("complete_goal", "complete", { result: { ok: true, status: "completed", summary: "done" } })))
+      .toEqual({ status: "complete", label: "目标完成" });
   });
 });
 

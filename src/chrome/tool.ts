@@ -6,7 +6,7 @@ import type { EventLogger } from "../logging";
 import type { ChromeExecutor } from "./executor";
 import { ATOMIC_TOOL_REGISTRY } from "./atomic-tools";
 import type { ToolScheduler } from "./tool-scheduler";
-import { jobResultReferenceInfo } from "./job-result";
+import { jobResultReferenceInfo, toolErrorSemantics } from "./job-result";
 import { elementTargetSchema } from "./element-target";
 
 const timeoutMs = z.number().int().positive().optional();
@@ -84,9 +84,12 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
         const cause = abortSignal?.aborted && !(error instanceof Error)
           ? new DOMException(abortSignal.reason instanceof Error ? abortSignal.reason.message : String(abortSignal.reason ?? error ?? "Operation aborted"), "AbortError")
           : error;
-        const failure = toolFailure(cause); failure.error.retryable = false;
+        const failure = toolFailure(cause);
         const chooserUpload = definition.name === "upload_file" && input && typeof input === "object" && "chooserId" in input && typeof input.chooserId === "string";
-        if (executing && !chooserUpload && definition.name !== "read_artifact" && abortSignal?.aborted && definition.program && !failure.error.effectUnknown) failure.error.effectUnknown = true;
+        if (executing && !chooserUpload && definition.name !== "read_artifact" && abortSignal?.aborted && definition.program && !failure.error.effectUnknown) {
+          failure.error.effectUnknown = true;
+          Object.assign(failure.error, toolErrorSemantics({ code: failure.error.code, effectUnknown: true }));
+        }
         if (!failure.artifact && options.logger && identity?.runId) {
           const artifact = await options.logger.toolArtifact(options.conversationId!, identity).catch(() => undefined);
           if (artifact) failure.artifact = artifact;
@@ -131,7 +134,7 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
           const jobRef = jobResultReferenceInfo((result as any)?.result);
           const failure = (result as any)?.ok === false ? (result as any).error ?? (result as any).failed?.error ?? jobRef?.info.error ?? (result as any).result?.error : undefined;
           const artifact = (result as any)?.result?.artifact;
-          const envelope = failure ? { ...result as object, ...(artifact ? { artifact } : {}), error: { ...failure, retryable: false } } : result;
+          const envelope = failure ? { ...result as object, ...(artifact ? { artifact } : {}), error: { ...failure, ...toolErrorSemantics(failure) } } : result;
           if (jobRef) {
             const { result: _result, ...rest } = envelope as Record<string, unknown>;
             const compact = normalizationExceedsBudget(rest)
@@ -366,7 +369,8 @@ function boundedError(error: unknown): unknown {
     const message = excerpt(record.message, 2048); result.message = message.value;
     if (message.truncated) result.messageTruncated = true;
   }
-  for (const field of ["retryable", "effectUnknown"]) if (typeof record[field] === "boolean") result[field] = record[field];
+  for (const field of ["retryable", "recoverable", "dispatched", "effectUnknown"]) if (typeof record[field] === "boolean") result[field] = record[field];
+  const nextStep = exactText(record.nextStep, 400); if (nextStep !== undefined) result.nextStep = nextStep;
   return result;
 }
 
@@ -592,14 +596,15 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
       ...(typeof verification.present === "boolean" ? { present: verification.present } : {}) } } : {}) };
 }
 
-function toolFailure(error: unknown): { ok: false; error: { code: string; message: string; retryable: boolean; effectUnknown?: boolean }; artifact?: unknown } {
+function toolFailure(error: unknown): { ok: false; error: { code: string; message: string; retryable: boolean; recoverable: boolean; dispatched: boolean; nextStep: string; effectUnknown?: boolean }; artifact?: unknown } {
   const message = error instanceof Error || error instanceof DOMException ? error.message : String(error);
   const code = error instanceof DOMException && error.name === "AbortError" ? "aborted"
     : error instanceof DOMException && error.name === "TimeoutError" ? "timeout"
     : error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code
     : /(?:Command|Automation)Error\[([^\]]+)\]/.exec(message)?.[1] ?? "tool-error";
   const effectUnknown = Boolean(error && typeof error === "object" && "effectUnknown" in error && error.effectUnknown);
-  return { ok: false, error: { code, message, retryable: code === "timeout" && !effectUnknown, ...(effectUnknown ? { effectUnknown: true } : {}) }, ...(error && typeof error === "object" && "artifact" in error ? { artifact: error.artifact } : {}) };
+  const dispatchState = error && typeof error === "object" && "dispatchState" in error ? error.dispatchState : undefined;
+  return { ok: false, error: { code, message, ...toolErrorSemantics({ code, effectUnknown, dispatchState }), ...(effectUnknown ? { effectUnknown: true } : {}) }, ...(error && typeof error === "object" && "artifact" in error ? { artifact: error.artifact } : {}) };
 }
 
 export const repairProgramToolCall: ToolCallRepairFunction<Record<string, ReturnType<typeof dynamicTool>>> = async ({ toolCall, tools }) => {

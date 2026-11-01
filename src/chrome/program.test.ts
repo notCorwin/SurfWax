@@ -911,7 +911,7 @@ describe("canonical browser jobs", () => {
       await jobs.completion(id, context.conversationId),
     ).toMatchObject({
       state: "failed",
-      result: { error: { code: "timeout", retryable: false } },
+      result: { error: { code: "timeout", retryable: true, recoverable: true, dispatched: false } },
     });
   });
 });

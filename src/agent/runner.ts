@@ -5,7 +5,7 @@ import { createProgramTools, prepareToolMessages, repairProgramToolCall, PROGRAM
 import { ToolScheduler } from "../chrome/tool-scheduler";
 import { ChromeExecutor } from "../chrome/executor";
 import type { BrowserContext } from "../chrome/executor";
-import type { EventLogger } from "../logging";
+import { fromLogValue, type EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
 import { inputBudget, modelSupportsImages, resolveModelLimit } from "./model-limits";
 import { resolvedBaseURL, sdkFor } from "./model-sdks";
@@ -34,10 +34,60 @@ export type CreateAgentOptions = {
   goalMode?: boolean;
 };
 
-const GOAL_SCHEMA = z.object({ status: z.enum(["completed", "blocked"]), summary: z.string().min(1).describe("Explain the outcome or the information needed to continue.") }).strict();
-const GOAL_DESCRIPTION = "Finish the current goal with a concise outcome, or explain a blocker that requires the user. Call this tool alone after all work and background jobs have finished.";
-export const GOAL_INSTRUCTIONS = "\n\nGoal mode: continue working until the outcome is achieved or user input is required. To end the work, call complete_goal alone with the outcome or blocker; plain text does not end the work.\n- complete_goal: Finish the goal or report a blocker to the user.";
+const GOAL_BLOCKERS = ["user-input", "login", "captcha", "permission", "site-down"] as const;
+const GOAL_SCHEMA = z.object({
+  status: z.enum(["completed", "blocked"]),
+  summary: z.string().min(1).describe("Explain the outcome, or the user action needed to continue."),
+  blocker: z.enum(GOAL_BLOCKERS).optional().describe("Required when status is blocked. user-input, login (including 2FA), captcha, permission, or site-down."),
+  attempts: z.number().int().positive().optional().describe("Required when status is blocked. How many distinct approaches were already tried."),
+}).strict();
+const GOAL_DESCRIPTION = "Finish the current goal, or report a genuine blocker that needs the user. status completed means the outcome is done. status blocked requires blocker (user-input, login, captcha, permission, or site-down) and attempts. Recoverable errors are not blockers. Call this tool alone after all work and background jobs have finished.";
+export const GOAL_INSTRUCTIONS = "Goal mode: keep working until the user's outcome is achieved or the user must take over. Recoverable tool errors are not blockers. When an error is recoverable, dispatched is false, or it includes nextStep, re-observe the page and try a different action. Do not repeat an operation whose effects are unknown; inspect the page first. End only by calling complete_goal alone. Plain text does not end the work. status completed means the outcome is done. status blocked is only for user-input, login (including 2FA), captcha, permission, or site-down, and must include blocker and attempts. The first blocked report after only recoverable errors is rejected. - complete_goal: Finish the goal, or report a genuine user blocker.";
 export const GOAL_TOOLS = [...PROMPT_TOOLS, { type: "function", name: "complete_goal", description: GOAL_DESCRIPTION, inputSchema: z.toJSONSchema(GOAL_SCHEMA, { target: "draft-7", unrepresentable: "any" }) }];
+
+/** Place goal guidance before the tool catalogue so it is not buried under the base stop rules. */
+export function withGoalInstructions(instructions: string): string {
+  const marker = "\n\nAvailable tools:\n";
+  const index = instructions.lastIndexOf(marker);
+  const block = `\n\n${GOAL_INSTRUCTIONS}`;
+  return index === -1 ? `${instructions}${block}` : `${instructions.slice(0, index)}${block}${instructions.slice(index)}`;
+}
+
+const RECOVERABLE_CODES = new Set(["not-found", "strict-mode", "intercepted", "stale-ref", "stale-observation", "prior-action-failed"]);
+
+function isRecoverableToolError(error: Record<string, unknown>): boolean {
+  if (error.effectUnknown === true) return false;
+  if (error.recoverable === true) return true;
+  if (error.recoverable === false) return false;
+  const code = typeof error.code === "string" ? error.code : "";
+  return RECOVERABLE_CODES.has(code) || error.dispatched === false && error.retryable === true;
+}
+
+function goalRejection(code: string, message: string, nextStep: string) {
+  return { ok: false as const, error: { code, message, nextStep, recoverable: true, dispatched: false, retryable: false } };
+}
+
+async function goalFailureHistory(logger: EventLogger, conversationId: string, runId: string): Promise<{ recoverableOnly: boolean; blockedRejections: number }> {
+  const events = await logger.conversation(conversationId);
+  let failures = 0;
+  let recoverable = 0;
+  let blockedRejections = 0;
+  for (const event of events) {
+    if (event.type !== "tool.failed" || event.runId !== runId) continue;
+    const content = fromLogValue(event.content, event.valueEncoding) as { toolName?: unknown } | null;
+    const output = fromLogValue(event.output, event.valueEncoding) as { error?: unknown } | null;
+    const error = output && typeof output === "object" && output.error && typeof output.error === "object" && !Array.isArray(output.error)
+      ? output.error as Record<string, unknown> : undefined;
+    if (content?.toolName === "complete_goal") {
+      if (error?.code === "recoverable-errors") blockedRejections += 1;
+      continue;
+    }
+    if (!error) continue;
+    failures += 1;
+    if (isRecoverableToolError(error)) recoverable += 1;
+  }
+  return { recoverableOnly: failures > 0 && recoverable === failures, blockedRejections };
+}
 
 type BrowserAgentTools = ReturnType<typeof createProgramTools>;
 function browserContextMessage(context: BrowserContext): string {
@@ -93,9 +143,18 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         throw new DOMException("日志维护已阻止工具启动。", "AbortError");
       abortSignal?.throwIfAborted();
       const pending = options.executor.pendingBackgroundJobs?.() ?? [];
+      const goal = input as z.infer<typeof GOAL_SCHEMA>;
+      const history = goal.status === "blocked" && logger && options.conversationId && identity?.runId
+        ? await goalFailureHistory(logger, options.conversationId, identity.runId) : undefined;
+      // ponytail: one recoverable-errors rejection per run, then attempts>=2 is accepted. A model can claim a second approach without making one. Upgrade: require a new non-goal tool call after the rejection.
       const output = !goalCallAlone ? { ok: false, error: { code: "goal-call-not-alone", message: "Call complete_goal alone after observing all other tool results." } }
         : pending.length ? { ok: false, error: { code: "background-jobs-pending", message: "Wait for all background jobs to finish before completing the goal." } }
-        : { ok: true, ...(input as z.infer<typeof GOAL_SCHEMA>) };
+        : goal.status === "completed" ? { ok: true as const, ...goal }
+        : !goal.blocker ? goalRejection("blocker-required", "status blocked requires blocker: user-input, login, captcha, permission, or site-down.", "If the page can still be operated, re-observe it and try a different action. Use blocked only for login, a captcha, permission, a site that is down, or information only the user knows.")
+        : !goal.attempts ? goalRejection("attempts-required", "status blocked requires attempts, the number of distinct approaches already tried.", "Inspect the page and try a different action before reporting a blocker.")
+        : history?.recoverableOnly && history.blockedRejections === 0 ? goalRejection("recoverable-errors", "Recent tool errors are recoverable, so the goal is not blocked.", "Re-observe the page with inspect_page and try a different element or action. Follow each error nextStep. Do not repeat the same failed call.")
+        : history?.recoverableOnly && goal.attempts < 2 ? goalRejection("attempts-required", "A blocked report after only recoverable errors needs attempts of at least 2.", "Try one more distinct approach, then call complete_goal again with blocker and the number of approaches you tried.")
+        : { ok: true as const, ...goal };
       if (logger && !await logger.append({ type: output.ok ? "tool.finished" : "tool.failed", conversationId: options.conversationId,
         content: { callId, toolName: "complete_goal" }, input, output, toolCallId, ...identity, ...(!output.ok ? { error: output.error } : {}), latencyMs: Math.max(0, performance.now() - start) }))
         throw new DOMException("日志维护已阻止工具结果保存。", "AbortError");
@@ -109,7 +168,10 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     tools[last] = { ...tools[last]!, providerOptions: { ...tools[last]!.providerOptions, anthropic: { ...tools[last]!.providerOptions?.anthropic, cacheControl: { type: "ephemeral" } } } };
   }
   let limit: ReturnType<typeof resolveModelLimit> | undefined;
-  const currentInstructions = () => createPromptSnapshot(options.compactor?.prompt?.source ?? initialPrompt.source).instructions + (options.goalMode ? GOAL_INSTRUCTIONS : "");
+  const currentInstructions = () => {
+    const instructions = createPromptSnapshot(options.compactor?.prompt?.source ?? initialPrompt.source).instructions;
+    return options.goalMode ? withGoalInstructions(instructions) : instructions;
+  };
   const wireInstructions = () => cacheClaude ? { role: "system" as const, content: currentInstructions(), providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } } } : currentInstructions();
   const currentTools = () => options.goalMode ? GOAL_TOOLS : PROMPT_TOOLS;
   const activeTools = () => currentTools().map(({ name }) => name);

@@ -9,9 +9,9 @@ const BASE_INSTRUCTIONS = [
   "Start with inspect_page for referenced semantic text. Use find_elements to identify ambiguous matches and act on the appropriate returned ref. Use list_frames to discover embedded documents and their frame refs. Use take_screenshot only for images, layout, Canvas, or unresolved ambiguity; text is the default even for vision models. Never guess unseen targets.",
   "Choose the individual tool matching each action. For multi-step work, inspect each result and continue with the appropriate next action. Use bounded waits and bulk-read tools where available.",
   "Read large $ref outputs with read_artifact and the supplied access fields. Use fill_from_artifact to fill a stored text or string result directly without copying its contents into tool arguments.",
-  "A completed operation confirms dispatch and return, not business success. Inspect the state and check the intended outcome before claiming success. Never blindly retry an operation whose effects are unknown.",
+  "A completed operation confirms dispatch and return, not business success. Inspect the state and check the intended outcome before claiming success. Do not repeat an operation whose effects are unknown; inspect the page and follow the error nextStep.",
   "Operations start in the current Chrome window and use stable tab IDs. Tab discovery spans browser windows; use windowId to distinguish them. Subscribe to events before triggering actions. Page and extension network contexts must be explicit.",
-  "Stop immediately once the requested outcome is satisfied. If progress is blocked or targets remain genuinely ambiguous, explain the blocker and ask only for the information required to continue.",
+  "Stop once the requested outcome is satisfied. A missing target, strict-mode match, intercepted action, or stale ref is recoverable: re-observe and try another approach. Ask the user only for login, a captcha, permission, a site that is down, or information only the user knows.",
   "Use save_artifact when saving, downloading, or exporting a file is needed to fulfill the user's request, taking the full conversation into account.",
 ].join(" ");
 

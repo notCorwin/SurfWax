@@ -38,6 +38,7 @@ export function toolAction(part: ToolAction): string {
   // A CSS selector or opaque ref is not a useful human-facing element name.
   const targetName = target && target.by !== "css" && target.by !== "testId" && target.by !== undefined
     ? shortText(target.name) ?? (target.by === "role" ? undefined : shortText(target.value)) : undefined;
+  if (part.toolName === "complete_goal") return args?.status === "blocked" ? "报告阻碍" : "完成目标";
   const action = labels[part.toolName] ?? "执行浏览器操作";
   if (targetName && ["click", "double_click", "hover", "focus_element", "blur_element", "fill", "fill_from_artifact", "type_text", "read_text", "read_value", "read_checked", "read_attribute", "select_option", "set_checked"].includes(part.toolName)) return `${action}「${targetName}」`;
   if (["press_key", "key_down", "key_up"].includes(part.toolName)) {

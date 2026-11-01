@@ -57,7 +57,7 @@ type ToolActivityPart = {
   readonly interrupted?: boolean;
 };
 
-export function toolActivity(part: ToolActivityPart, phase: ActivityPhase = "settled", now = Date.now()): { status: "running" | "error" | "complete"; label: string } {
+export function toolActivity(part: ToolActivityPart, phase: ActivityPhase = "settled", now = Date.now()): { status: "running" | "error" | "complete" | "blocked"; label: string } {
   const name = toolAction({ toolName: part.toolName, args: part.args });
   const active = part.status.type === "running" || part.status.type === "requires-action";
   const elapsed = typeof part.durationMs === "number" && Number.isFinite(part.durationMs) && part.durationMs >= 0 ? part.durationMs
@@ -67,6 +67,11 @@ export function toolActivity(part: ToolActivityPart, phase: ActivityPhase = "set
   const aborted = error && typeof error === "object" && "code" in error && (error.code === "aborted" || error.code === "interrupted");
   if (part.interrupted || aborted || (part.status.type === "running" || part.status.type === "requires-action") && phase === "cancelled") {
     return { status: "error", label: `${name} · 已中断${duration}` };
+  }
+  if (part.toolName === "complete_goal" && part.result && typeof part.result === "object" && (part.result as { ok?: unknown }).ok === true) {
+    const goalStatus = (part.result as { status?: unknown }).status;
+    if (goalStatus === "blocked") return { status: "blocked", label: `目标受阻${duration}` };
+    if (goalStatus === "completed") return { status: "complete", label: `目标完成${duration}` };
   }
   if (part.status.type === "incomplete" || part.isError) return { status: "error", label: `${name} · 未完成${duration}` };
   if (part.status.type === "running" || part.status.type === "requires-action") {

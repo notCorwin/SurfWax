@@ -63,7 +63,10 @@ export function toolGroupDuration(tools: readonly ToolPart[]): number | undefine
 
 export function ToolGroupView({ group }: { group: ToolGroup }) {
   const phase = useContext(ActivityPhaseContext);
-  const failures = group.tools.filter((part) => toolActivity(part, phase).status === "error");
+  const failures = group.tools.filter((part) => {
+    const status = toolActivity(part, phase).status;
+    return status === "error" || status === "blocked";
+  });
   if (group.live) return <div data-testid="live-tool-calls" className="transcript-activity-list flex flex-col">
     {group.tools.filter((part, index) => index >= group.tools.length - 3 || failures.includes(part)).map((part) => <ToolFallback key={part.toolCallId} {...part} />)}
   </div>;

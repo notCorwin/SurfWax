@@ -69,6 +69,9 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
       <Button type="button" variant="ghost" size="icon-xs" disabled={message.userBranch.number >= message.userBranch.count} aria-label="下一个消息版本" title="下一个消息版本" onClick={() => command(() => runtime.thread.getMessageById(message.userBranch!.id).switchToBranch({ position: "next" }))}><ChevronRightIcon aria-hidden="true" /></Button>
     </div>}
   </MessageFooter>, [runtime, user, message.id, message.branchCount, message.branchNumber, message.userBranch, copied, editing, running, locked, command]);
+  const goal = [...parts].reverse().find((part) => part.type === "tool-call" && part.toolName === "complete_goal" && part.result && typeof part.result === "object"
+    && (part.result as { ok?: unknown }).ok === true && ((part.result as { status?: unknown }).status === "blocked" || (part.result as { status?: unknown }).status === "completed"));
+  const goalStatus = goal?.type === "tool-call" ? (goal.result as { status: "blocked" | "completed" }).status : undefined;
   const hasVisiblePart = parts.some((part, index) => part.type === "tool-call" ? Boolean(toolGroupAt(timeline, message.id, index))
     : part.type === "reasoning" ? Boolean(part.text.trim()) || part.status.type === "running" : Boolean(part.text.trim()));
   if (!user && !hasVisiblePart && message.metadata.custom?.interrupted !== true
@@ -89,6 +92,8 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
           })}>保存并重新生成</Button>
         </div>}
       </form> : renderParts()}
+      {!user && goalStatus === "blocked" && <p className="goal-status" data-testid="goal-blocked" data-status="blocked">目标受阻，需要你处理之后才能继续。</p>}
+      {!user && goalStatus === "completed" && <p className="goal-status" data-testid="goal-completed" data-status="completed">目标已完成。</p>}
       {!user && message.metadata.custom?.interrupted === true && <div className="interrupted-message" data-testid="interrupted-message">
         <span>回复已中断</span>{latest && <Button type="button" size="sm" variant="outline" disabled={locked} data-testid="continue-interrupted" onClick={() => command(() => runtimeCommands.thread.append(CONTINUE_INTERRUPTED_TEXT))}>继续</Button>}
       </div>}

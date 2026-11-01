@@ -38,6 +38,8 @@ describe("goal mode", () => {
     expect(prompts).toHaveLength(3);
     expect(prompts[2]).toContain("Progress 1");
     expect(prompts[2]).toContain("Progress 2");
+    expect(prompts[2]).toContain("The user's goal is still: Work on the goal");
+    expect(prompts[0]!.indexOf("Goal mode: keep working")).toBeLessThan(prompts[0]!.indexOf("Available tools:"));
     expect(prompts[2]!.match(/Goal mode is still active/g)).toHaveLength(2);
     expect(result.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "text", text: "Finished the task." })]));
     expect(events.filter((event) => event.type === "agent.goal.continued")).toHaveLength(2);
@@ -64,6 +66,7 @@ describe("goal mode", () => {
     await createChatTransport(ordinaryFactory, logger, "thread").sendMessages({ ...options(), messages: [user, result, nextUser] });
     expect(ordinaryPrompts).toHaveLength(1);
     expect(ordinaryPrompts[0]!.match(/Goal mode is still active/g)).toHaveLength(2);
+    expect(ordinaryPrompts[0]).not.toContain("Goal mode: keep working");
     expect(ordinaryPrompts[0]).toContain("Finished the task.");
   });
 
@@ -75,7 +78,7 @@ describe("goal mode", () => {
       if (count === 1) return calls(call("parallel", "complete_goal", { status: "completed", summary: "too soon" }), call("read", "inspect_page", {}));
       if (count === 2) return calls(call("pending", "complete_goal", { status: "completed", summary: "too soon" }));
       pending = false;
-      return calls(call("done", "complete_goal", { status: "blocked", summary: "Need a login." }));
+      return calls(call("done", "complete_goal", { status: "blocked", summary: "Need a login.", blocker: "login", attempts: 1 }));
     } });
     const { events, logger, factory } = fixture(model, { pendingBackgroundJobs: () => pending ? ["job"] : [], inspect: async () => ({ snapshot: "page" }) });
     const result = await createChatTransport(factory, logger, "thread", undefined, undefined, undefined, undefined, true).sendMessages(options());
@@ -114,6 +117,40 @@ describe("goal mode", () => {
     expect(count).toBe(2);
     expect(events.some((event) => event.type === "tool.failed" && event.toolCallId === "invalid")).toBe(true);
     expect(events.some((event) => event.type === "tool.finished" && event.toolCallId === "done")).toBe(true);
+  });
+
+  it("rejects the first blocked completion after only recoverable errors, then accepts a later genuine blocker", async () => {
+    let count = 0;
+    const model = new MockLanguageModelV4({ doGenerate: async () => {
+      count += 1;
+      if (count === 1) return calls(call("click", "click", { target: { ref: "e1" } }));
+      if (count === 2) return calls(call("early", "complete_goal", { status: "blocked", summary: "Cannot click", blocker: "user-input", attempts: 2 }));
+      return calls(call("done", "complete_goal", { status: "blocked", summary: "Need a login.", blocker: "login", attempts: 2 }));
+    } });
+    const { events, logger, factory } = fixture(model, { runProgram: async () => ({ ok: false, error: { code: "stale-ref", message: "Element no longer exists" } }) });
+    const result = await createChatTransport(factory, logger, "thread", undefined, undefined, undefined, undefined, true).sendMessages(options());
+    expect(count).toBe(3);
+    const rejected = events.find((event) => event.type === "tool.failed" && event.toolCallId === "early");
+    expect(rejected?.output).toMatchObject({ ok: false, error: { code: "recoverable-errors", nextStep: expect.stringContaining("inspect_page") } });
+    expect(events.find((event) => event.type === "tool.failed" && event.toolCallId === "click")?.output).toMatchObject({
+      error: { code: "stale-ref", recoverable: true, dispatched: false, retryable: true, nextStep: expect.stringContaining("Nothing was dispatched") },
+    });
+    expect(result.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "text", text: "Need a login." })]));
+  });
+
+  it("rejects a blocked completion that names no blocker, and accepts a login blocker when nothing failed", async () => {
+    let count = 0;
+    const model = new MockLanguageModelV4({ doGenerate: async () => {
+      count += 1;
+      return count === 1
+        ? calls(call("open", "complete_goal", { status: "blocked", summary: "Stuck" }))
+        : calls(call("done", "complete_goal", { status: "blocked", summary: "Need a login.", blocker: "login", attempts: 1 }));
+    } });
+    const { events, logger, factory } = fixture(model);
+    const result = await createChatTransport(factory, logger, "thread", undefined, undefined, undefined, undefined, true).sendMessages(options());
+    expect(count).toBe(2);
+    expect(events.find((event) => event.type === "tool.failed" && event.toolCallId === "open")?.output).toMatchObject({ ok: false, error: { code: "blocker-required", nextStep: expect.any(String) } });
+    expect(result.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "text", text: "Need a login." })]));
   });
 
   it("allows the user to pause after a text response", async () => {

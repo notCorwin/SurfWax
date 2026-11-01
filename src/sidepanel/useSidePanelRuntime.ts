@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import { abortAllConversationWork } from "../agent/coordinator";
 import { ensureConversationPrompt, PROMPT_TOOLS } from "../agent/prompt";
-import { createAgent, GOAL_INSTRUCTIONS, GOAL_TOOLS } from "../agent/runner";
+import { createAgent, GOAL_TOOLS, withGoalInstructions } from "../agent/runner";
 import { ContextCompactor } from "../agent/compaction";
 import { createModel } from "../agent/model";
 import { ensureAutomaticContextSummary } from "../agent/context-choice";
@@ -48,7 +48,7 @@ export function useSidePanelRuntime(config: ModelConfig, systemPrompt: string | 
         compactor: new ContextCompactor({ model: config, logger, conversationId, branchIds, signal, prompt }) });
     }, logger, conversationId, () => executor.endRun(), async (signal) => {
       const prompt = await ensureConversationPrompt(logger, conversationId, systemPrompt);
-      await ensureAutomaticContextSummary(logger, conversationId, config, signal, { forced: true, instructions: prompt.instructions + (goalMode ? GOAL_INSTRUCTIONS : ""), tools: goalMode ? GOAL_TOOLS : PROMPT_TOOLS });
+      await ensureAutomaticContextSummary(logger, conversationId, config, signal, { forced: true, instructions: goalMode ? withGoalInstructions(prompt.instructions) : prompt.instructions, tools: goalMode ? GOAL_TOOLS : PROMPT_TOOLS });
     }, systemPrompt, async (signal) => {
       const observer = observePageRefreshes(executor, conversationId, signal);
       try {

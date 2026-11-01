@@ -71,6 +71,26 @@ describe("tool timeline", () => {
     expect(html).toContain('data-status="error"');
   });
 
+  it("shows a blocked goal differently from a completed goal", () => {
+    const goal = (status: "blocked" | "completed"): Tool => ({
+      ...tool(status), toolName: "complete_goal", args: { status, summary: "done" }, result: { ok: true, status, summary: "done" },
+    });
+    const runtime = { thread: { getMessageById: () => ({ getCopyText: () => "" }) } } as unknown as RuntimeView["runtime"];
+    const render = (status: "blocked" | "completed") => {
+      const item = message("a", [goal(status), text("summary")]);
+      return renderToStaticMarkup(createElement(RuntimeViewContext.Provider, { value: { runtime, thread: runtime.thread, getState: runtime.thread.getState } },
+        createElement(MessageRow, { message: item, messages: [item], running: false, locked: false, latest: true, timeline: projectToolTimeline([item], false), command: () => {} })));
+    };
+    const blocked = render("blocked");
+    expect(blocked).toContain('data-testid="goal-blocked"');
+    expect(blocked).toContain('data-status="blocked"');
+    expect(blocked).toContain("目标受阻，需要你处理之后才能继续。");
+    const completed = render("completed");
+    expect(completed).toContain('data-testid="goal-completed"');
+    expect(completed).toContain("目标已完成。");
+    expect(completed).not.toContain("goal-blocked");
+  });
+
   it("renders text and tool groups in chronological order across assistant messages", () => {
     const messages = [message("a", [text("BEFORE"), tool("1")]), message("b", [tool("2"), text("AFTER")])];
     const timeline = projectToolTimeline(messages, false);

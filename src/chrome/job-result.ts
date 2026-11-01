@@ -2,6 +2,41 @@ import { isArrayBuffer, isMap, isSet, viewLayout } from "../log-graph";
 import { normalizationExceedsBudget, normalizeResultEnvelope } from "../tool-result-values";
 
 export type JobResultInfo = { limit?: number; error?: Record<string, unknown>; artifact?: Record<string, unknown>; screenshot?: Record<string, unknown>; inlineScreenshot?: boolean; visualContext?: Record<string, unknown> };
+
+const UNDISPATCHED_CODES = new Set(["not-found", "strict-mode", "intercepted", "stale-ref", "stale-observation", "prior-action-failed"]);
+const UNDISPATCHED_NEXT: Record<string, string> = {
+  "not-found": "Nothing was dispatched. Inspect the page and choose a different element.",
+  "strict-mode": "Nothing was dispatched. Narrow the locator to one element, then retry.",
+  "intercepted": "Nothing was dispatched. Dismiss what covers the target or choose another element, then retry.",
+  "stale-ref": "Nothing was dispatched. Re-observe the page and use a fresh ref.",
+  "stale-observation": "Nothing was dispatched. Call inspect_page again and continue from the new snapshot.",
+  "prior-action-failed": "Nothing was dispatched. An earlier call in this step failed. Inspect the page and try a different action.",
+};
+
+/** Classify a tool failure for the model: whether it can continue, and whether input was sent. */
+export function toolErrorSemantics(input: { code?: unknown; effectUnknown?: unknown; dispatchState?: unknown } | undefined): { retryable: boolean; recoverable: boolean; dispatched: boolean; nextStep: string } {
+  const code = typeof input?.code === "string" && input.code ? input.code : "tool-error";
+  if (input?.effectUnknown === true) return {
+    retryable: false, recoverable: false, dispatched: true,
+    nextStep: "The action may have changed the page. Inspect it and do not repeat the action until you know the outcome.",
+  };
+  if (input?.dispatchState === "not-dispatched" || UNDISPATCHED_CODES.has(code)) return {
+    retryable: true, recoverable: true, dispatched: false,
+    nextStep: UNDISPATCHED_NEXT[code] ?? "Nothing was dispatched. Inspect the page and try a different approach.",
+  };
+  if (code === "timeout") return {
+    retryable: true, recoverable: true, dispatched: false,
+    nextStep: "The wait ended before an effect was confirmed. Inspect the page, then retry with a bounded wait if it is still missing.",
+  };
+  if (code === "aborted") return {
+    retryable: false, recoverable: false, dispatched: false,
+    nextStep: "The action was interrupted before it was dispatched.",
+  };
+  return {
+    retryable: false, recoverable: false, dispatched: false,
+    nextStep: "Inspect the page before choosing a different action. Do not repeat this call unchanged.",
+  };
+}
 const references = new WeakMap<object, { id: number; info: JobResultInfo }>();
 export function jobResultReference(id: number, info: JobResultInfo): object {
   const reference = Object.freeze({});
@@ -36,12 +71,15 @@ export function describeJobResult(value: unknown): JobResultInfo {
     };
     const errorValue = own(value, "error");
     if (own(value, "ok") === false && errorValue && typeof errorValue === "object") {
-      const error: Record<string, unknown> = { retryable: false };
-      for (const key of ["code", "message"]) {
-        const field = own(errorValue, key);
-        if (typeof field === "string") error[key] = field.slice(0, key === "code" ? 128 : 2000);
-      }
-      if (own(errorValue, "effectUnknown") === true) error.effectUnknown = true;
+      const code = own(errorValue, "code");
+      const message = own(errorValue, "message");
+      const effectUnknown = own(errorValue, "effectUnknown") === true;
+      const error: Record<string, unknown> = {
+        ...toolErrorSemantics({ code, effectUnknown, dispatchState: own(errorValue, "dispatchState") }),
+        ...(typeof code === "string" ? { code: code.slice(0, 128) } : {}),
+        ...(typeof message === "string" ? { message: message.slice(0, 2000) } : {}),
+        ...(effectUnknown ? { effectUnknown: true } : {}),
+      };
       info.error = error;
       const source = own(value, "artifact");
       if (source && typeof source === "object") {

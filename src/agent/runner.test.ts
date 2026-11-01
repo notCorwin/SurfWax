@@ -128,7 +128,10 @@ describe("createAgent", () => {
     const stored = events.filter((event) => event.type === "tool.result.data" && event.id === output.$ref);
     expect(stored).toHaveLength(1);
     expect(stored[0]).toMatchObject({ conversationId: "conversation", toolCallId: "large-act" });
-    await expect(logger.result(output.$ref, {}, "conversation")).resolves.toEqual({ ...failed, error: { ...failed.failed.error, retryable: false } });
+    await expect(logger.result(output.$ref, {}, "conversation")).resolves.toEqual({ ...failed, error: {
+      ...failed.failed.error, retryable: false, recoverable: false, dispatched: false,
+      nextStep: "Inspect the page before choosing a different action. Do not repeat this call unchanged.",
+    } });
     await expect(logger.result(output.$ref, { path: output.access.path }, "conversation")).resolves.toEqual(failed.completed);
   });
 

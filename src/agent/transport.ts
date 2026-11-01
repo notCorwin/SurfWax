@@ -35,6 +35,22 @@ export function followupDispatch(message: SidePanelMessage | undefined): { id: s
 
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 
+function messageText(message: { parts?: readonly { type?: string; text?: string }[] } | undefined): string {
+  return message?.parts?.flatMap((part) => part.type === "text" && typeof part.text === "string" ? [part.text] : []).join("\n") ?? "";
+}
+
+/** Restate the open goal and push another observation instead of offering stop as an equal choice. */
+function goalContinuationReminder(goal: string): string {
+  const text = goal.replace(/\s+/g, " ").trim();
+  const quoted = text ? text.length > 400 ? `${text.slice(0, 400)}…` : text : "";
+  return [
+    "Goal mode is still active.",
+    quoted ? `The user's goal is still: ${quoted}` : "The user's goal is still unfinished.",
+    "Re-observe the page with inspect_page, then take a different action. Follow nextStep when an error is recoverable or dispatched is false. Do not stop because a tool failed.",
+    "Call complete_goal with status completed only when that goal is done. Call it with status blocked only when the user must log in, pass a captcha, grant permission, wait for a site that is down, or provide information. Include blocker and attempts.",
+  ].join(" ");
+}
+
 /** Each publication contains complete model content or a completed tool result. */
 export function createChatTransport(agent: AgentFactory, logger: EventLogger, conversationId: string, cleanup?: () => Promise<void>, onContextOverflow?: (signal: AbortSignal) => Promise<void>, systemPrompt?: string, observeRefreshes?: (signal: AbortSignal) => Promise<RefreshObserver>, goalMode = false): ConversationTransport {
   return {
@@ -220,7 +236,7 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
               const segment = response.parts.slice(goalOffset);
               const assistantSegment: SidePanelMessage = { id: crypto.randomUUID(), role: "assistant", parts: segment.some((part) => part.type !== "step-start") ? segment : [{ type: "text", text: "(No response.)" }] };
               goalSegments.push(assistantSegment);
-              const reminder = "Goal mode is still active. Continue the work, or call complete_goal alone to report the outcome or a blocker requiring user input.";
+              const reminder = goalContinuationReminder(messageText(userMessage));
               const reminderMessage: SidePanelMessage = { id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text: reminder }] };
               goalSegments.push(reminderMessage);
               goalOffset = response.parts.length;

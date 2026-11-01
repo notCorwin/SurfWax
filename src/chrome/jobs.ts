@@ -1,5 +1,5 @@
 import { fromLogValue, type EventLogger, type LogEvent } from "../logging";
-import { describeJobResult, jobResultReference, shouldStoreJobResult, type JobResultInfo } from "./job-result";
+import { describeJobResult, jobResultReference, shouldStoreJobResult, toolErrorSemantics, type JobResultInfo } from "./job-result";
 
 export type JobContext = {
   conversationId: string;
@@ -142,6 +142,15 @@ export class BrowserJobs {
         const timedOut =
           (combined.reason ?? error) instanceof DOMException &&
           (combined.reason ?? error).name === "TimeoutError";
+        const code = timedOut
+          ? "timeout"
+          : combined.aborted
+            ? "aborted"
+            : (/^(?:Automation|Command)Error\[([^\]]+)\]/.exec(
+                error instanceof Error ? error.message : String(error),
+              )?.[1] ?? "execution-failed");
+        const effectUnknown = (error as any)?.effectUnknown === true;
+        const dispatchState = (error as any)?.dispatchState === "not-dispatched" ? "not-dispatched" : undefined;
         await this.write(
           context,
           id,
@@ -152,16 +161,10 @@ export class BrowserJobs {
               ? { artifact: (error as any).artifact }
               : {}),
             error: {
-              code: timedOut
-                ? "timeout"
-                : combined.aborted
-                  ? "aborted"
-                  : (/^(?:Automation|Command)Error\[([^\]]+)\]/.exec(
-                      error instanceof Error ? error.message : String(error),
-                    )?.[1] ?? "execution-failed"),
+              code,
               message: error instanceof Error ? error.message : String(error),
-              retryable: false,
-              ...((error as any)?.effectUnknown ? { effectUnknown: true } : {}),
+              ...toolErrorSemantics({ code, effectUnknown, dispatchState }),
+              ...(effectUnknown ? { effectUnknown: true } : {}),
             },
           },
         );
@@ -378,8 +381,8 @@ export class BrowserJobs {
                   code: "host-lost",
                   message:
                     "Execution host ended; inspect receipts and page state before continuing",
+                  ...toolErrorSemantics({ code: "host-lost", effectUnknown: entry.state !== "queued" }),
                   effectUnknown: entry.state !== "queued",
-                  retryable: false,
                 },
               },
             },
