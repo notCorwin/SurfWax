@@ -84,6 +84,11 @@ describe("atomic browser tool programs", () => {
     expect(() => definition("fill").program({ target: { ref: "e1" }, value: "x", extra: true })).toThrow();
     expect(() => definition("fetch").program({ url: "https://example.com" })).toThrow();
     expect(definition("click").program({ target: { ref: "e1" }, timeoutMs: 500 }).timeoutMs).toBe(500);
+    for (const name of ["click", "double_click"]) {
+      expect(definition(name).program({ target: { ref: "e1" } })).toMatchObject({ defaultTimeoutMs: 5_000 });
+      expect(definition(name).program({ target: { ref: "e1" }, timeoutMs: 60_000 })).toMatchObject({ timeoutMs: 60_000 });
+      expect(definition(name).program({ target: { ref: "e1" }, timeoutMs: 60_000 })).not.toHaveProperty("defaultTimeoutMs");
+    }
     expect(definition("click").program({ target: { ref: "e1" }, background: true })).toMatchObject({ background: true });
     expect(() => definition("read_text").program({ target: { ref: "e1" }, background: true })).toThrow();
     expect(() => definition("verify_state").program({ target: { ref: "e1" } })).toThrow();

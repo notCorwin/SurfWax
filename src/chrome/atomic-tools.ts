@@ -21,7 +21,7 @@ export type AtomicToolDefinition = {
   summary: string;
   description: string;
   inputSchema: z.ZodType<any>;
-  program: (input: unknown) => { code: string; timeoutMs?: number; background?: boolean };
+  program: (input: unknown) => { code: string; timeoutMs?: number; defaultTimeoutMs?: number; background?: boolean };
 };
 
 // Actions that can cause dialogs, navigation, downloads or other long-lived
@@ -44,7 +44,9 @@ function define(name: string, description: string, inputSchema: z.ZodType<any>, 
       const programTimeout = name === "verify_state" && parsed.timeoutMs !== undefined
         ? parsed.timeoutMs === 0 ? undefined : parsed.timeoutMs + 10_000
         : parsed.timeoutMs;
-      return { code, ...(programTimeout === undefined ? {} : { timeoutMs: programTimeout }), ...(parsed.background ? { background: true } : {}) };
+      return { code, ...(programTimeout === undefined ? {} : { timeoutMs: programTimeout }),
+        ...((name === "click" || name === "double_click") && programTimeout === undefined ? { defaultTimeoutMs: 5_000 } : {}),
+        ...(parsed.background ? { background: true } : {}) };
     },
   };
 }
@@ -57,8 +59,8 @@ const targetAction = (name: string, summary: string, method: string) => define(n
 
 /** Only capabilities supported by the existing program host are registered here. */
 export const ATOMIC_TOOL_REGISTRY: readonly AtomicToolDefinition[] = Object.freeze([
-  targetAction("click", "Click exactly one matching element.", "click"),
-  targetAction("double_click", "Double-click exactly one matching element.", "dblclick"),
+  targetAction("click", "Click exactly one matching element. Defaults to a 5 second execution timeout; set timeoutMs to wait longer.", "click"),
+  targetAction("double_click", "Double-click exactly one matching element. Defaults to a 5 second execution timeout; set timeoutMs to wait longer.", "dblclick"),
   targetAction("hover", "Move the pointer over exactly one matching element.", "hover"),
   targetAction("focus_element", "Focus exactly one matching element.", "focus"),
   targetAction("blur_element", "Blur exactly one matching element.", "blur"),

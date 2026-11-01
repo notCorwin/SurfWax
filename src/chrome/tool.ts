@@ -33,7 +33,7 @@ const unsubscribeEventInputSchema = z.object({ subscriptionId: z.string().min(1)
 const handleDialogInputSchema = z.object({ dialogId: z.string().min(1), accept: z.boolean(), prompt: z.string().optional() }).strict()
   .refine((input) => input.accept || input.prompt === undefined, "prompt requires accept=true");
 
-type ToolDefinition = { name: string; inputSchema: z.ZodType<any>; summary: string; description: string; program?: (input: any) => { code: string; timeoutMs?: number; background?: boolean } };
+type ToolDefinition = { name: string; inputSchema: z.ZodType<any>; summary: string; description: string; program?: (input: any) => { code: string; timeoutMs?: number; defaultTimeoutMs?: number; background?: boolean } };
 // These calls manage stored data or coordinate work, rather than operate a page.
 // In particular they must remain usable while a background job holds the queue.
 const NO_PAGE_CAPTURE = new Set(["inspect_page", "read_api_reference", "read_artifact", "list_jobs", "subscribe_event", "wait_event", "unsubscribe_event", "list_downloads"]);

@@ -426,7 +426,7 @@ export class ChromeExecutor {
     }, effectiveSignal, input.timeoutMs, false);
   }
 
-  async runProgram(input: { code: string; background?: boolean; timeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+  async runProgram(input: { code: string; background?: boolean; timeoutMs?: number; defaultTimeoutMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
     if (!context.conversationId || !this.logger) throw new Error("Programs require a conversation and canonical event log");
     if (input.background) this.runOwnerFor(context);
     const epoch = this.backgroundEpoch;
@@ -441,7 +441,8 @@ export class ChromeExecutor {
     let blocker: BlockerJob | undefined;
     let ready!: (job: BlockerJob | undefined) => void;
     const blockerReady = new Promise<BlockerJob | undefined>((resolve) => { ready = resolve; });
-    const timeoutMs = input.timeoutMs ?? estimateProgramTimeoutMs(input.code);
+    const timeoutMs = input.timeoutMs ?? input.defaultTimeoutMs ?? estimateProgramTimeoutMs(input.code);
+    const timeoutSource = input.timeoutMs !== undefined ? "explicit" : input.defaultTimeoutMs !== undefined ? "default" : "estimated";
     const id = await this.awaitAbort(this.jobs.start(jobContext, jobSignal, (combined, jobId, started) => this.enqueueAbortable(async (deadline) => {
       if (this.disposed) throw new Error("Chrome executor has been disposed");
       if (input.background) this.runOwnerFor(context);
@@ -532,7 +533,7 @@ export class ChromeExecutor {
       signal?.removeEventListener("abort", forwardTool);
       void this.jobs.waitForOwner(id, context.conversationId).then(cleanupSignals, cleanupSignals);
       this.pendingBackground.set(id, { conversationId: context.conversationId, terminalObserved: false });
-      return { jobId: id, state: "queued", accepted: true, complete: false, timeoutMs, timeoutSource: input.timeoutMs === undefined ? "estimated" : "explicit" };
+      return { jobId: id, state: "queued", accepted: true, complete: false, timeoutMs, timeoutSource };
     }
     const completion = this.jobs.completion(id, context.conversationId) as Promise<any>;
     void completion.then(cleanupSignals, cleanupSignals);
@@ -547,7 +548,7 @@ export class ChromeExecutor {
       if (this.disposed || epoch !== this.backgroundEpoch) throw new DOMException("Run ended before the job was accepted", "AbortError");
       signal?.removeEventListener("abort", forwardTool);
       this.pendingBackground.set(id, { conversationId: context.conversationId, terminalObserved: false });
-      return { jobId: id, state: "blocked", accepted: true, complete: false, blockedBy: { kind: "dialog", ...outcome.value.dialog, evidenceId: outcome.value.evidenceId }, timeoutMs, timeoutSource: input.timeoutMs === undefined ? "estimated" : "explicit" };
+      return { jobId: id, state: "blocked", accepted: true, complete: false, blockedBy: { kind: "dialog", ...outcome.value.dialog, evidenceId: outcome.value.evidenceId }, timeoutMs, timeoutSource };
     }
     if (outcome.kind === "blocker" && outcome.value.status === "persistence-failed") {
       controller.abort(outcome.value.error);
@@ -555,7 +556,7 @@ export class ChromeExecutor {
     }
     const status = outcome.kind === "complete" ? outcome.status : await completion;
     if (!status.terminal) throw new Error("CommandError[job-not-terminal]: Program host ended without a terminal receipt");
-    return { jobId: id, ok: status.ok, state: status.state, result: status.result, timeoutMs, timeoutSource: input.timeoutMs === undefined ? "estimated" : "explicit", receipts: { tool: "get_job", jobId: id, after: 0 } };
+    return { jobId: id, ok: status.ok, state: status.state, result: status.result, timeoutMs, timeoutSource, receipts: { tool: "get_job", jobId: id, after: 0 } };
   }
 
   pendingBackgroundJobs(): readonly string[] {
