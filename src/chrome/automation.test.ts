@@ -45,7 +45,8 @@ function harness(
   const command = vi.fn(async (_debuggee: chrome.debugger.Debuggee, method: string, params?: any): Promise<any> => {
     calls.push({ method, params });
     if (method === "Performance.getMetrics") return { metrics: [{ name: "Timestamp", value: 0 }] };
-    if (method === "DOMSnapshot.captureSnapshot") return { strings: [], documents: [{ nodes: { backendNodeId: [], parentIndex: [] }, layout: { nodeIndex: [], bounds: [], styles: [] } }] };
+    if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root", url: "https://example.test/" } } };
+    if (method === "DOMSnapshot.captureSnapshot") return { strings: ["root"], documents: [{ frameId: 0, nodes: { backendNodeId: [], parentIndex: [], nodeType: [], nodeName: [] }, layout: { nodeIndex: [], bounds: [], styles: [] } }] };
     if (method === "Accessibility.getFullAXTree") return { nodes: [
       { nodeId: "root", role: { value: "RootWebArea" }, name: { value: "Test" }, childIds: metadata.map((_, index) => `node-${index}`) },
       ...metadata.map((item: any, index) => ({
@@ -502,6 +503,9 @@ describe("AutomationRuntime", () => {
   it("uses the flattened tree consistently when reading inherited disabled state", async () => {
     const host = document.createElement("div");
     const button = document.createElement("button");
+    // jsdom does not implement Chrome's checkVisibility; this test concerns
+    // disabled inheritance, and real paint behavior is covered by browser e2e.
+    Object.defineProperty(button, "checkVisibility", { value: () => true });
     button.textContent = "Sign in";
     host.append(button);
     const shadow = host.attachShadow({ mode: "open" });
@@ -1130,9 +1134,9 @@ describe("AutomationRuntime", () => {
     ];
     command.mockImplementation(async (source, method, params) => {
       if (method === "Accessibility.getFullAXTree") return { nodes };
-      if (method === "DOMSnapshot.captureSnapshot") return { strings: ["1", "0", "visible", "auto"], documents: [{
-        nodes: { backendNodeId: [7, 8, 9], parentIndex: [-1, -1, -1] },
-        layout: { nodeIndex: [0, 1, 2], bounds: [[0, 0, 100, 20], [0, 0, 100, 20], [0, 0, 100, 20]], styles: [[0, 2, 2, 2, 3], [1, 2, 2, 2, 3], [0, 2, 2, 2, 3]] },
+      if (method === "DOMSnapshot.captureSnapshot") return { strings: ["1", "0", "visible", "auto", "root", "BUTTON", "INPUT", "#text", "restored"], documents: [{
+        frameId: 4, nodes: { backendNodeId: [7, 8, 9], parentIndex: [-1, -1, -1], nodeType: [1, 1, 3], nodeName: [5, 6, 7], nodeValue: [-1, -1, 8] },
+        layout: { nodeIndex: [0, 1, 2], text: [-1, -1, 8], bounds: [[0, 0, 100, 20], [0, 0, 100, 20], [0, 0, 100, 20]], styles: [[0, 2, 2, 2, 3], [1, 2, 2, 2, 3], [0, 2, 2, 2, 3]] },
       }] };
       return original(source, method, params);
     });
@@ -1158,7 +1162,7 @@ describe("AutomationRuntime", () => {
       { nodeId: "alias", parentId: "button", role: { value: "generic" }, name: named("Known alias", "attribute"), childIds: ["alias-text"] },
       { nodeId: "alias-text", parentId: "alias", role: { value: "StaticText" }, name: named("Original text") },
       { nodeId: "range", parentId: "button", role: { value: "slider" }, name: named("Size", "attribute"), value: { value: 35 } },
-      { nodeId: "select", parentId: "button", role: { value: "combobox" }, value: { value: "Selected choice" }, childIds: ["unselected"] },
+      { nodeId: "select", parentId: "button", backendDOMNodeId: 9, role: { value: "combobox" }, value: { value: "Selected choice" }, childIds: ["unselected"] },
       { nodeId: "unselected", parentId: "select", role: { value: "StaticText" }, name: named("Unselected choice") },
       { nodeId: "list", parentId: "button", role: { value: "listbox" }, childIds: ["selected", "other"] },
       { nodeId: "selected", parentId: "list", role: { value: "option" }, properties: [{ name: "selected", value: { value: true } }], childIds: ["selected-text"] },
@@ -1169,9 +1173,9 @@ describe("AutomationRuntime", () => {
     ];
     command.mockImplementation(async (source, method, params) => {
       if (method === "Accessibility.getFullAXTree") return { nodes };
-      if (method === "DOMSnapshot.captureSnapshot") return { strings: ["1", "0", "visible", "auto"], documents: [{
-        nodes: { backendNodeId: [7, 8], parentIndex: [-1, -1] },
-        layout: { nodeIndex: [0, 1], bounds: [[0, 0, 100, 20], [0, 0, 100, 20]], styles: [[0, 2, 2, 2, 3], [1, 2, 2, 2, 3]] },
+      if (method === "DOMSnapshot.captureSnapshot") return { strings: ["1", "0", "visible", "auto", "root", "BUTTON", "#text", "HIDDEN", "SELECT", "none"], documents: [{
+        frameId: 4, nodes: { backendNodeId: [7, 8, 9], parentIndex: [-1, -1, -1], nodeType: [1, 3, 1], nodeName: [5, 6, 8], nodeValue: [-1, 7, -1] },
+        layout: { nodeIndex: [0, 1, 2], text: [-1, 7, -1], bounds: [[0, 0, 100, 20], [0, 0, 100, 20], [0, 0, 100, 20]], styles: [[0, 2, 2, 2, 3], [1, 2, 2, 2, 3], [0, 2, 2, 2, 3, ...Array(21).fill(0), 9]] },
       }] };
       return original(source, method, params);
     });
@@ -1184,6 +1188,34 @@ describe("AutomationRuntime", () => {
     expect(button.line).not.toContain("Unselected choice");
     expect(button.line).not.toContain("Other");
     expect((runtime as any).sessions.get(3).refs.get(button.ref).name).toBe(originalName);
+    await runtime.abortSessions();
+  });
+
+  it("discards the old AX text if the same DOM node changes during capture", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let captures = 0, axCaptures = 0;
+    const snapshot = (value: "A" | "B") => {
+      const strings = ["root", "#document", "#text", "A", "B", "1", "visible", "auto", "static", "none", "16px", "rgb(0, 0, 0)", "ltr", "horizontal-tb", "block", "0px", "border-box", "clip"];
+      const style = [5,6,6,6,6,8,9,9,9,9,7,9,9,9,9,9,7,12,13,14,10,11,9,15,16,9,9,17,9,9,9].map(Number);
+      const text = value === "A" ? 3 : 4;
+      return { strings, documents: [{ frameId: 0, nodes: { backendNodeId: [1, 7], parentIndex: [-1, 0], nodeType: [9, 3], nodeName: [1, 2], nodeValue: [-1, text] },
+        layout: { nodeIndex: [0, 1], text: [-1, text], bounds: [[0, 0, 100, 100], [0, 0, 30, 20]], styles: [[], style] } }] };
+    };
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOMSnapshot.captureSnapshot") return snapshot(++captures === 1 ? "A" : "B");
+      if (method === "Accessibility.getFullAXTree") {
+        const value = ++axCaptures === 1 ? "A" : "B";
+        return { nodes: [{ nodeId: "root", role: { value: "RootWebArea" }, childIds: ["text"] },
+          { nodeId: "text", parentId: "root", backendDOMNodeId: 7, role: { value: "StaticText" }, name: { value } }] };
+      }
+      return original(source, method, params);
+    });
+    const result = await (await runtime.createPage(3)).inspect();
+    expect(inspectText(result)).toContain('StaticText "B"');
+    expect(inspectText(result)).not.toContain('StaticText "A"');
+    expect(axCaptures).toBe(2);
+    expect(captures).toBe(4);
     await runtime.abortSessions();
   });
 
@@ -1207,6 +1239,44 @@ describe("AutomationRuntime", () => {
     await runtime.abortSessions();
     const replacement = await (await runtime.createPage(3)).inspect();
     expect((replacement.items as any[]).some((item) => item.ref === ref)).toBe(false);
+  });
+
+  it("rejects all observations from an earlier debugger session even when the tab and document generation are reused", async () => {
+    const { runtime, calls } = harness();
+    const page = await runtime.createPage(3);
+    const old = await page.inspect() as any;
+    const visual = await runtime.observe(3, "visual") as any;
+    runtime.handleDetach({ tabId: 3 });
+    const replacement = await runtime.createPage(3);
+    const fresh = await replacement.inspect() as any;
+    expect(old.documentId).toBe(fresh.documentId);
+    await expect(replacement.inspect({ since: old.observationId })).rejects.toMatchObject({ code: "stale-observation" });
+    await expect(runtime.observe(3, "semantic", visual.observationId)).rejects.toMatchObject({ code: "stale-observation" });
+    await expect(runtime.ensureObservation(3, visual.observationId)).rejects.toMatchObject({ code: "stale-observation" });
+    const before = calls.filter(({ method }) => method === "Input.dispatchMouseEvent").length;
+    await expect(runtime.point(3, visual.observationId, 1, 1, "click")).rejects.toMatchObject({ code: "stale-observation" });
+    expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent")).toHaveLength(before);
+    await runtime.abortSessions();
+  });
+
+  it("uses short stable semantic item IDs while retaining long frame IDs outside item identity", async () => {
+    const { runtime, command } = harness([{ role: "button", name: "Save" }]);
+    const original = command.getMockImplementation()!;
+    const frameId = "FRAME-12345678901234567890123456789012";
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: frameId } } };
+      if (method === "DOMSnapshot.captureSnapshot") return { strings: [frameId], documents: [{ frameId: 0, nodes: { backendNodeId: [], parentIndex: [], nodeType: [], nodeName: [] }, layout: { nodeIndex: [], bounds: [], styles: [] } }] };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    const first = await page.inspect() as any;
+    const second = await page.inspect({ since: first.observationId }) as any;
+    expect(first.items.map((item: any) => item.id)).toEqual(["f1:ax:root", "f1:ax:node-0"]);
+    expect(second).toMatchObject({ mode: "delta", items: [] });
+    const ref = first.items.find((item: any) => item.ref)?.ref;
+    expect(ref).toMatch(/^t3s[a-f0-9]+d0e1$/);
+    await expect(page.ref(ref).count()).resolves.toBe(1);
+    await runtime.abortSessions();
   });
 
   it("keeps AX row identities distinct when two semantic nodes share a backend node", async () => {

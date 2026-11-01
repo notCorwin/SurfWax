@@ -21,11 +21,32 @@ function harness() {
     if (method === "Runtime.evaluate" && params.expression === "document.readyState === 'complete'") return { result: { value: true } };
     if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root" } } };
     if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
-    if (method === "DOMSnapshot.captureSnapshot") return { strings: [], documents: [{ nodes: { backendNodeId: [], parentIndex: [] }, layout: { nodeIndex: [], bounds: [], styles: [] } }] };
+    if (method === "DOMSnapshot.captureSnapshot") {
+      // Model a document and the same live button/text nodes returned by AX.
+      // Strings are CDP string-table indexes, including -1 for absent values.
+      const strings: string[] = [];
+      const intern = (value: string) => { const index = strings.indexOf(value); return index < 0 ? strings.push(value) - 1 : index; };
+      const frameId = intern("root"), document = intern("#document"), button = intern("BUTTON"), text = intern("#text");
+      const style = ["1", "visible", "visible", "visible", "visible", "static", "none", "none", "none", "none", "auto", "none", "none", "none", "none", "none", "auto", "ltr", "horizontal-tb", "block", "16px", "rgb(0, 0, 0)", "none", "0px", "border-box", "none", "none", "clip", "none", "none", "none"].map(intern);
+      const backendNodeId = [1000], parentIndex = [-1], nodeType = [9], nodeName = [document], nodeValue = [-1];
+      const layoutText = [-1], bounds = [[0, 0, 100, 100]], styles = [[] as number[]];
+      for (const id of order) {
+        const node = nodes.get(id)!; if (!node.connected) continue;
+        const parent = backendNodeId.length, value = intern(node.name);
+        backendNodeId.push(id, 100 + id); parentIndex.push(0, parent); nodeType.push(1, 3); nodeName.push(button, text); nodeValue.push(-1, value);
+        layoutText.push(-1, value); bounds.push([0, 0, 100, 20], [0, 0, 100, 20]); styles.push(style, style);
+      }
+      return { strings, documents: [{ frameId, nodes: { backendNodeId, parentIndex, nodeType, nodeName, nodeValue },
+        layout: { nodeIndex: backendNodeId.map((_, index) => index), text: layoutText, bounds, styles } }] };
+    }
     if (method === "Accessibility.getFullAXTree") return { nodes: [
-      { nodeId: "root-node", role: { value: "RootWebArea" }, name: { value: "Test" }, childIds: order.map(id => `ax:${id}`) },
-      ...order.map(id => nodes.get(id)!).filter(node => node.connected).map(node => ({ nodeId: `ax:${node.id}`, parentId: "root-node", backendDOMNodeId: node.id,
-        role: { value: node.role }, name: { value: node.name }, properties: [{ name: "focusable", value: { value: true } }] })),
+      { nodeId: "root-node", backendDOMNodeId: 1000, role: { value: "RootWebArea" }, name: { value: "Test" }, childIds: order.map(id => `ax:${id}`) },
+      ...order.map(id => nodes.get(id)!).filter(node => node.connected).flatMap(node => [
+        { nodeId: `ax:${node.id}`, parentId: "root-node", backendDOMNodeId: node.id, childIds: [`text:${node.id}`],
+          role: { value: node.role }, name: { value: node.name }, properties: [{ name: "focusable", value: { value: true } }] },
+        { nodeId: `text:${node.id}`, parentId: `ax:${node.id}`, backendDOMNodeId: 100 + node.id,
+          role: { value: "StaticText" }, name: { value: node.name }, childIds: [] },
+      ]),
     ] };
     if (method === "Runtime.evaluate" && params.expression.includes("({url:")) return { result: { value: { url: "https://example.test/", title: "Test" } } };
     if (method === "Runtime.evaluate" && params.expression.includes("({x:scrollX")) return { result: { value: { x: 0, y: 0, width: 100, height: 50, scale: 1 } } };

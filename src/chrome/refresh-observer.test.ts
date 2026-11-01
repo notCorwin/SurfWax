@@ -7,7 +7,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function harness(inspect = vi.fn(async () => ({ snapshot: "loaded page" }))) {
+function harness(inspect = vi.fn<() => Promise<unknown>>(async () => ({ snapshot: "loaded page" }))) {
   let updated: ((tabId: number, change: chrome.tabs.OnUpdatedInfo, tab: chrome.tabs.Tab) => void) | undefined;
   let removed: ((tabId: number, info: chrome.tabs.OnRemovedInfo) => void) | undefined;
   const onUpdated = {
@@ -22,7 +22,7 @@ function harness(inspect = vi.fn(async () => ({ snapshot: "loaded page" }))) {
   const unsubscribe = vi.fn();
   const executor = { boundTabId: 1, inspect, onBoundTabChanged: vi.fn(() => unsubscribe) };
   const controller = new AbortController();
-  const observer = observePageRefreshes(executor as never, "conversation", controller.signal);
+  const observer = observePageRefreshes(executor as never, "conversation", controller.signal, "run");
   return {
     observer, controller, inspect, onUpdated, onRemoved, unsubscribe,
     update: (status: "loading" | "complete", tabId = 1) => updated?.(tabId, { status }, {} as chrome.tabs.Tab),
@@ -37,12 +37,32 @@ describe("observePageRefreshes", () => {
     h.update("loading");
     expect(h.inspect).not.toHaveBeenCalled();
     h.update("complete");
-    expect(h.inspect).toHaveBeenCalledWith({ tabId: 1, budget: Number.MAX_SAFE_INTEGER }, h.controller.signal,
-      { conversationId: "conversation", runSignal: h.controller.signal });
+    expect(h.inspect).toHaveBeenCalledWith({ tabId: 1, budget: 12_000 }, h.controller.signal,
+      { conversationId: "conversation", runId: "run", runSignal: h.controller.signal });
     const [message] = await h.observer.drain();
     expect(message).toMatchObject({ role: "user", metadata: { custom: { pageRefresh: true } }, parts: [
       { type: "text", text: expect.stringContaining('"snapshot":"loaded page"') },
     ] });
+    h.observer.dispose();
+  });
+
+  it("preserves the frozen snapshot cursor and explicitly bounds oversized metadata", async () => {
+    const h = harness(vi.fn(async () => ({ tabId: 1, observationId: "observation", url: `https://example.com/${"海".repeat(2000)}`,
+      title: "😀".repeat(1000), mode: "full", items: [{ id: "a", line: "visible" }], nextCursor: "cursor:1:0",
+      truncation: { truncated: true, budget: 12_000, used: 100 } })));
+    h.update("loading");
+    h.update("complete");
+    h.update("complete");
+    const [message] = await h.observer.drain();
+    expect(h.inspect).toHaveBeenCalledOnce();
+    const text = message!.parts[0]!.type === "text" ? message!.parts[0]!.text : "";
+    expect(text).toContain("inspect_page using the same tabId and cursor");
+    const observation = JSON.parse(text.split("\n")[2]!);
+    expect(observation).toMatchObject({ tabId: 1, observationId: "observation", nextCursor: "cursor:1:0",
+      items: [{ id: "a", line: "visible" }], metadataTruncated: ["url", "title"], truncation: { truncated: true } });
+    expect(new TextEncoder().encode(observation.url).length).toBeLessThanOrEqual(2048);
+    expect(new TextEncoder().encode(observation.title).length).toBeLessThanOrEqual(2048);
+    expect(observation.title).not.toMatch(/[\uD800-\uDBFF]$/);
     h.observer.dispose();
   });
 
@@ -75,8 +95,24 @@ describe("observePageRefreshes", () => {
     first.resolve({ snapshot: "stale page" });
     const messages = await h.observer.drain();
     expect(messages).toHaveLength(2);
-    expect(JSON.stringify(messages[0])).toContain("The document changed while it was being captured.");
+    expect(JSON.stringify(messages[0])).toContain("The document changed before its snapshot could be delivered.");
     expect(JSON.stringify(messages[0])).not.toContain("stale page");
+    expect(JSON.stringify(messages[1])).toContain("new page");
+    h.observer.dispose();
+  });
+
+  it("does not deliver a completed capture after a newer navigation and retains the new snapshot", async () => {
+    const inspect = vi.fn().mockResolvedValueOnce({ snapshot: "old page" }).mockResolvedValueOnce({ snapshot: "new page" });
+    const h = harness(inspect);
+    h.update("loading");
+    h.update("complete");
+    await Promise.resolve();
+    h.update("loading");
+    h.update("complete");
+    const messages = await h.observer.drain();
+    expect(messages).toHaveLength(2);
+    expect(JSON.stringify(messages[0])).toContain("The document changed before its snapshot could be delivered.");
+    expect(JSON.stringify(messages[0])).not.toContain("old page");
     expect(JSON.stringify(messages[1])).toContain("new page");
     h.observer.dispose();
   });

@@ -4,6 +4,8 @@ import { waitForDocumentFrame } from "./dom-frame";
 import { abortError, axValue, delay, imageSize, isTransientNavigationError, keyboardParams, modifierMask, parseKeyboardChord, throwIfAborted } from "./automation-utils";
 import { diffSnapshot, paginateSnapshot, type SnapshotItem, type SnapshotPosition } from "./snapshot-pagination";
 import { renderSnapshotNode, type SnapshotNode, type SnapshotStateName } from "./snapshot-render";
+import { snapshotDomSupplement, type SnapshotDomEvidence } from "./snapshot-dom";
+import { sameDOMSnapshot } from "./snapshot-consistency";
 import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
 import { projectTextPaint, sameTextPaintCandidates, TEXT_PAINT_CACHE_LOOKUP_SOURCE, TEXT_PAINT_CACHE_REGISTER_SOURCE, type TextPaintEvidence } from "./snapshot-text-paint";
 import { createFrameVisibility } from "./frame-visibility";
@@ -13,7 +15,7 @@ const EVALUATION_CODEC_FACTORY = `(${createLogGraphCodec.toString()})({ verifyIn
 
 type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
 type Command = (debuggee: Debuggee, method: string, params?: object) => Promise<any>;
-type RunContext = { signal?: AbortSignal; conversationId?: string; toolCallId?: string; logIdentity?: { runId?: string; toolCallId: string; toolCallIdCanonical: true } };
+type RunContext = { signal?: AbortSignal; conversationId?: string; runId?: string; toolCallId?: string; logIdentity?: { runId?: string; toolCallId: string; toolCallIdCanonical: true } };
 type Waiter = { resolve: (value: any) => void; reject: (error: Error) => void };
 type FileChooserRecord = { backendNodeId: number; debuggee: Debuggee; mode: string; frameId?: string };
 type FileChooserClaim = { assert: () => void; finish: (outcome: "handled" | "not-dispatched" | "uncertain") => void };
@@ -35,7 +37,7 @@ type WaitState = "attached" | "detached" | "visible" | "hidden" | "enabled" | "e
 type RefRecord = { backendNodeId: number; frameId?: string; debuggee: Debuggee; role: string; name: string; generation: number; identitySource: "ax" | "dom" };
 type FrameRefRecord = { frameId: string; debuggee: Debuggee; generation: number; revision: number; conversationId?: string; runId?: string };
 type FrameDocument = { session: Session; frame: FrameRefRecord; promise: Promise<string>; objectId?: string; executionContextId?: number;
-  paintCacheToken: string; paintCacheWarm?: boolean; paintCacheTail?: Promise<void> };
+  paintCacheToken: string; paintCacheWarm?: boolean; paintCacheTail?: Promise<void>; backendNodeId?: number };
 type FrameListSnapshot = { id: string; session: Session; generation: number; revision: number; conversationId?: string; runId?: string; frames: Array<Record<string, unknown>> };
 type SnapshotLine = { id: string; line: string; ref?: string; node?: SnapshotNode };
 type InspectSnapshot = {
@@ -51,6 +53,7 @@ type SearchSnapshot = {
 };
 export type InspectOptions = { cursor?: string; since?: string; fields?: Array<"text" | "state" | "ref" | "actions">; budget?: number; offset?: number; limit?: number; depth?: number; recentRefs?: readonly string[] };
 type ObservationRecord = {
+  session: Session;
   observationId: string;
   tabId: number;
   documentId: number;
@@ -70,6 +73,8 @@ type Session = {
   ready?: Promise<void>;
   generation: number;
   nextRef: number;
+  nextSnapshotScope: number;
+  snapshotScopes: Map<string, string>;
   refs: Map<string, RefRecord>;
   refsByNode: Map<string, string>;
   refUsage: Map<string, string>;
@@ -106,6 +111,7 @@ type ElementState = {
   quad?: number[];
   blocker?: Record<string, unknown>;
   pointerCandidates?: Array<{ x: number; y: number }>;
+  frameId?: string;
 };
 
 /** Map a normalized point into a CSS content quad, including perspective. */
@@ -721,6 +727,12 @@ export class AutomationRuntime {
 
   private invalidate(session: Session, preserveChooser = false): void {
     session.generation += 1;
+    // Document references still expire, but a child navigation must not
+    // rename unrelated frames. Retire scopes no longer represented by the
+    // current frame/target graph and never recycle their numbers.
+    const activeScopes = new Set([...session.frames].map(([frameId, debuggee]) => JSON.stringify([frameId, debuggee.sessionId ?? null])));
+    if (session.rootFrameId) activeScopes.add(JSON.stringify([session.rootFrameId, null]));
+    for (const key of session.snapshotScopes.keys()) if (!activeScopes.has(key)) session.snapshotScopes.delete(key);
     this.invalidateFrames(session);
     this.clearSearches(session.tabId);
     this.clearInspections(session.tabId);
@@ -788,10 +800,10 @@ export class AutomationRuntime {
       const viewport = await this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})") as ObservationRecord["viewport"];
       const observationId = globalThis.crypto.randomUUID();
       const previous = since ? this.observations.get(since) : undefined;
-      if (since && (!previous || previous.tabId !== tabId || previous.documentId !== session.generation)) {
+      if (since && (!previous || previous.session !== session || previous.tabId !== tabId || previous.documentId !== session.generation)) {
         throw automationError("stale-observation", { observationId: since, reason: "expired-document" });
       }
-      const record: ObservationRecord = { observationId, tabId, documentId: session.generation, ...captured, viewport };
+      const record: ObservationRecord = { session, observationId, tabId, documentId: session.generation, ...captured, viewport };
       session.lastSnapshot = captured.lines;
       const before = new Map(previous?.lines.map((item) => [item.id, item.line]));
       const after = new Map(captured.lines.map((item) => [item.id, item.line]));
@@ -846,7 +858,7 @@ export class AutomationRuntime {
       }
       const generation = session.generation;
       const signal = this.context.signal;
-      const conversationId = this.context.conversationId, runId = this.context.logIdentity?.runId;
+      const conversationId = this.context.conversationId, runId = this.context.logIdentity?.runId ?? this.context.runId;
       const guard = () => {
         throwIfAborted(signal);
         if (this.sessions.get(tabId) !== session || session.generation !== generation) throw automationError("stale-observation", { reason: "document-or-session-changed" });
@@ -870,7 +882,7 @@ export class AutomationRuntime {
       } else {
         const scopeKey = JSON.stringify([region ?? null, options.fields ?? ["text", "state", "ref", "actions"], options.depth ?? null]);
         const previous = options.since ? this.observations.get(options.since) : undefined;
-        if (options.since && (!previous || previous.tabId !== tabId || previous.documentId !== generation || previous.scopeKey !== scopeKey))
+        if (options.since && (!previous || previous.session !== session || previous.tabId !== tabId || previous.documentId !== generation || previous.scopeKey !== scopeKey))
           throw automationError("stale-observation", { observationId: options.since, reason: "document-or-scope-changed" });
         const captured = await this.captureSnapshot(session, region);
         guard();
@@ -894,7 +906,7 @@ export class AutomationRuntime {
         const index = options.offset ?? 0;
         if (!Number.isSafeInteger(index) || index < 0 || index > source.length) throw automationError("invalid-offset", { offset: index, total: source.length });
         position = { index, charOffset: 0 };
-        const record: ObservationRecord = { observationId, tabId, documentId: generation, ...captured, lines, viewport, scopeKey, incomplete: true };
+        const record: ObservationRecord = { session, observationId, tabId, documentId: generation, ...captured, lines, viewport, scopeKey, incomplete: true };
         this.rememberObservation(record);
         saved = { id: observationId, session, generation, conversationId, runId, record, source, mode: changes ? "delta" : "full",
           ...(previous?.incomplete ? { reset: "previous-output-truncated" } : {}), expected: position, eligibleForBaseline: index === 0 };
@@ -930,7 +942,7 @@ export class AutomationRuntime {
     const session = await this.session(tabId);
     return this.action(tabId, operation, null, async () => {
       const observation = this.observations.get(observationId);
-      if (!observation || observation.tabId !== tabId || observation.documentId !== session.generation) {
+      if (!observation || observation.session !== session || observation.tabId !== tabId || observation.documentId !== session.generation) {
         throw automationError("stale-observation", { observationId, reason: "expired-document" });
       }
       const viewport = await this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})") as ObservationRecord["viewport"];
@@ -958,7 +970,7 @@ export class AutomationRuntime {
   async ensureObservation(tabId: number, observationId: string): Promise<void> {
     const session = await this.session(tabId);
     const observation = this.observations.get(observationId);
-    if (!observation || observation.tabId !== tabId || observation.documentId !== session.generation) {
+    if (!observation || observation.session !== session || observation.tabId !== tabId || observation.documentId !== session.generation) {
       throw automationError("stale-observation", { observationId, reason: "expired-document" });
     }
   }
@@ -1474,6 +1486,8 @@ export class AutomationRuntime {
         debuggee: { tabId },
         generation: 0,
         nextRef: 1,
+        nextSnapshotScope: 1,
+        snapshotScopes: new Map(),
         refs: new Map(),
         refsByNode: new Map(),
         refUsage: new Map(),
@@ -1515,12 +1529,27 @@ export class AutomationRuntime {
     return session;
   }
 
+  /** Reuse the same run-bound frame handle for list_frames and snapshots. */
+  private rememberFrameRef(session: Session, frameId: string, debuggee: Debuggee, context: { conversationId?: string; runId?: string }): string {
+    const { conversationId, runId } = context;
+    const key = JSON.stringify([conversationId, runId, frameId]);
+    const previous = session.frameRefsById.get(key);
+    const record = previous ? session.frameRefs.get(previous) : undefined;
+    if (record && record.generation === session.generation && record.revision === session.frameRevision
+      && record.debuggee.tabId === debuggee.tabId && record.debuggee.sessionId === debuggee.sessionId) return previous!;
+    if (previous) session.frameRefs.delete(previous);
+    const ref = `f${crypto.randomUUID()}`;
+    session.frameRefs.set(ref, { frameId, debuggee, generation: session.generation, revision: session.frameRevision, conversationId, runId });
+    session.frameRefsById.set(key, ref);
+    return ref;
+  }
+
   /** Capture a bounded page of a stable, run-scoped frame-tree snapshot. */
   async listFrames(tabId: number, options: { cursor?: string; limit?: number } = {}): Promise<Record<string, unknown>> {
     return this.action(tabId, "list_frames", null, async () => {
       const session = await this.session(tabId);
       const generation = session.generation, revision = session.frameRevision;
-      const signal = this.context.signal, conversationId = this.context.conversationId, runId = this.context.logIdentity?.runId;
+      const signal = this.context.signal, conversationId = this.context.conversationId, runId = this.context.logIdentity?.runId ?? this.context.runId;
       const limit = options.limit ?? 25;
       if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw automationError("invalid-limit", { limit });
       const guard = () => {
@@ -1560,7 +1589,7 @@ export class AutomationRuntime {
         for (const { source, tree } of trees) visit(tree, source);
         if (!frames.size) throw automationError("frame-unavailable", { reason: "missing-frame-tree" });
         const refs = new Map<string, string>();
-        for (const frameId of frames.keys()) refs.set(frameId, session.frameRefsById.get(JSON.stringify([conversationId, runId, frameId])) ?? `f${crypto.randomUUID()}`);
+        for (const [frameId, item] of frames) refs.set(frameId, this.rememberFrameRef(session, frameId, item.source, { conversationId, runId }));
         const result = [...frames].map(([frameId, item]) => {
           const frameRef = refs.get(frameId)!;
           const url = String(item.frame.url ?? ""); const name = String(item.frame.name ?? "");
@@ -1569,8 +1598,6 @@ export class AutomationRuntime {
             url: url.slice(0, 1024), ...(url.length > 1024 ? { urlTruncated: true } : {}),
             ...(name ? { name: name.slice(0, 160) } : {}), ...(name.length > 160 ? { nameTruncated: true } : {}),
             source: { tabId, ...(item.source.sessionId ? { sessionId: item.source.sessionId } : {}) } };
-          session.frameRefs.set(frameRef, { frameId, debuggee: item.source, generation, revision, conversationId, runId });
-          session.frameRefsById.set(JSON.stringify([conversationId, runId, frameId]), frameRef);
           return metadata;
         });
         guard();
@@ -1824,7 +1851,10 @@ export class AutomationRuntime {
     const previous = session.refsByNode.get(sourceIdentity);
     const old = previous ? session.refs.get(previous) : undefined;
     if (old && old.generation === record.generation && old.identitySource === record.identitySource
+      && old.debuggee.tabId === record.debuggee.tabId && old.debuggee.sessionId === record.debuggee.sessionId
+      && (old.frameId === undefined || record.frameId === undefined || old.frameId === record.frameId)
       && old.role === record.role && old.name === record.name) {
+      if (old.frameId === undefined && record.frameId !== undefined) old.frameId = record.frameId;
       this.touchRef(session, previous!);
       return previous!;
     }
@@ -2293,7 +2323,7 @@ export class AutomationRuntime {
       const ref = scoped.queries[0]!.value;
       const frame = session.frameRefs.get(ref);
       if (!frame || frame.generation !== session.generation || frame.revision !== session.frameRevision
-        || frame.conversationId !== this.context.conversationId || frame.runId !== this.context.logIdentity?.runId) throw automationError("stale-frame", { ref });
+        || frame.conversationId !== this.context.conversationId || frame.runId !== (this.context.logIdentity?.runId ?? this.context.runId)) throw automationError("stale-frame", { ref });
       const guard = () => {
         throwIfAborted(this.context.signal);
         if (this.sessions.get(session.tabId) !== session || session.frameRefs.get(ref) !== frame || frame.generation !== session.generation || frame.revision !== session.frameRevision)
@@ -2461,10 +2491,13 @@ export class AutomationRuntime {
       if (scroll) this.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
       const rect = this.getBoundingClientRect();
       const style = getComputedStyle(this); let x = rect.left + rect.width / 2; let y = rect.top + rect.height / 2;
+      // checkVisibility includes opacity on composed ancestors (including
+      // shadow hosts) but intentionally ignores viewport intersection.
+      const painted = this.checkVisibility({ opacityProperty: true, visibilityProperty: true });
       const disabled = (${DISABLED_STATE_SOURCE}).call(this);
       const editKind = (${TEXT_INPUT_KIND_SOURCE}).call(this);
       const editable = (${EDITABLE_STATE_SOURCE}).call(this, editKind, disabled);
-      return { connected: true, x, y, width: rect.width, height: rect.height, visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none", stable: true, enabled: !disabled, editable, editKind, receivesEvents: pointer, checked: (${CHECKED_STATE_SOURCE}).call(this).value };
+      return { connected: true, x, y, width: rect.width, height: rect.height, visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" && painted, stable: true, enabled: !disabled, editable, editKind, receivesEvents: pointer, checked: (${CHECKED_STATE_SOURCE}).call(this).value };
     }`, [scroll, pointer]);
       if (!pointer || !value.connected || !value.visible) return value as ElementState;
       // CDP quads are relative to this debugger target's viewport and already
@@ -2487,6 +2520,87 @@ export class AutomationRuntime {
     return { ...next, stable: next.stable && first.x === next.x && first.y === next.y
       && first.width === next.width && first.height === next.height
       && (!pointer || first.quad?.every((value, index) => value === next.quad?.[index]) === true) };
+  }
+
+  /** Bind a resolved element to its actual frame, even for same-process frames. */
+  private async actionFrameId(session: Session, targetSession: Session, objectId: string, spec?: LocatorSpec): Promise<string> {
+    const source = targetSession.debuggee;
+    const candidates = [...session.frames].filter(([, debuggee]) => debuggee.tabId === source.tabId && debuggee.sessionId === source.sessionId);
+    const known = spec?.ref ? session.refs.get(spec.ref)?.frameId : undefined;
+    if (known && candidates.some(([id]) => id === known)) return known;
+    if (candidates.length === 1) return candidates[0]![0];
+    if (!candidates.length) throw automationError("frame-unavailable", { reason: "missing-target-frame" });
+    const generation = session.generation, revision = session.frameRevision;
+    const guard = () => {
+      throwIfAborted(this.context.signal);
+      if (this.sessions.get(session.tabId) !== session || session.generation !== generation || session.frameRevision !== revision)
+        throw automationError("stale-frame", { reason: "frame-tree-changed" });
+    };
+    const group = `surf-wax-frame-identify:${crypto.randomUUID()}`;
+    try {
+      const document = await this.options.command(source, "Runtime.callFunctionOn", { objectId, functionDeclaration: "function(){return this.ownerDocument}", objectGroup: group });
+      guard();
+      if (document.exceptionDetails || !document.result?.objectId) throw automationError("frame-unavailable", { reason: "missing-target-document" });
+      const target = (await this.options.command(source, "DOM.describeNode", { objectId: document.result.objectId })).node?.backendNodeId;
+      guard();
+      if (!Number.isSafeInteger(target) || target <= 0) throw automationError("frame-unavailable", { reason: "missing-target-document-identity" });
+      const ids = await Promise.all(candidates.map(async ([frameId, debuggee]) => {
+        const frame: FrameRefRecord = { frameId, debuggee, generation, revision, conversationId: this.context.conversationId,
+          runId: this.context.logIdentity?.runId ?? this.context.runId };
+        const documentId = await this.frameDocument(session, frame, guard);
+        const key = JSON.stringify([session.tabId, frameId, debuggee.sessionId ?? null]);
+        const entry = this.frameDocuments.get(key);
+        if (!entry) throw automationError("stale-frame", { reason: "frame-context-expired" });
+        if (entry.backendNodeId === undefined) {
+          const value = (await this.options.command(debuggee, "DOM.describeNode", { objectId: documentId })).node?.backendNodeId;
+          guard();
+          if (!Number.isSafeInteger(value) || value <= 0) throw automationError("frame-unavailable", { reason: "missing-frame-document-identity" });
+          entry.backendNodeId = value;
+        }
+        return { frameId, backendNodeId: entry.backendNodeId };
+      }));
+      guard();
+      const matches = ids.filter((item) => item.backendNodeId === target);
+      if (matches.length !== 1) throw automationError("frame-unavailable", { reason: "ambiguous-target-document" });
+      return matches[0]!.frameId;
+    } finally { await this.options.command(source, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined); }
+  }
+
+  /** Check every iframe owner, including same-process and cross-origin frames. */
+  private async frameOwnersVisible(session: Session, frameId: string): Promise<boolean> {
+    const generation = session.generation, revision = session.frameRevision, root = session.rootFrameId;
+    if (!root) throw automationError("frame-unavailable", { reason: "missing-root-frame" });
+    const guard = () => {
+      throwIfAborted(this.context.signal);
+      if (this.sessions.get(session.tabId) !== session || session.generation !== generation || session.frameRevision !== revision)
+        throw automationError("stale-frame", { reason: "frame-tree-changed" });
+    };
+    const visited = new Set<string>();
+    let current = frameId;
+    while (current !== root) {
+      guard();
+      if (visited.has(current)) throw automationError("frame-unavailable", { reason: "cyclic-frame-ancestry" });
+      visited.add(current);
+      const parentId = session.frameParents.get(current), parent = parentId ? session.frames.get(parentId) : undefined;
+      if (!parentId || !parent) throw automationError("frame-unavailable", { reason: "missing-frame-owner" });
+      const group = `surf-wax-frame-visible:${crypto.randomUUID()}`;
+      try {
+        const owner = await this.options.command(parent, "DOM.getFrameOwner", { frameId: current });
+        guard();
+        if (!owner?.backendNodeId) throw automationError("frame-unavailable", { reason: "missing-frame-owner" });
+        const resolved = await this.options.command(parent, "DOM.resolveNode", { backendNodeId: owner.backendNodeId, objectGroup: group });
+        guard();
+        if (!resolved.object?.objectId) throw automationError("frame-unavailable", { reason: "missing-frame-owner-object" });
+        const response = await this.options.command(parent, "Runtime.callFunctionOn", { objectId: resolved.object.objectId, returnByValue: true,
+          functionDeclaration: "function(){return this.isConnected && this.checkVisibility({opacityProperty:true,visibilityProperty:true})}" });
+        guard();
+        if (response.exceptionDetails || typeof response.result?.value !== "boolean") throw automationError("frame-unavailable", { reason: "missing-frame-visibility" });
+        if (!response.result.value) return false;
+      } finally { await this.options.command(parent, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined); }
+      current = parentId;
+    }
+    guard();
+    return true;
   }
 
   private async waitForLocatorState(session: Session, spec: LocatorSpec, state: WaitState, checked = true): Promise<void> {
@@ -2540,6 +2654,10 @@ export class AutomationRuntime {
         if (spec.ref) throw automationError("detached", { ref: spec.ref, reason: error instanceof Error ? error.message : String(error) });
         return undefined;
       });
+      if (state?.connected && state.visible) {
+        state.frameId = await this.actionFrameId(session, targetSession, objectId, spec);
+        state.visible = await this.frameOwnersVisible(session, state.frameId);
+      }
       if (state?.connected && state.visible && state.receivesEvents && pointer)
         await this.selectPointerPoint(session, targetSession, objectId, state);
       const reason = !state?.connected ? "detached" : !state.visible ? "not-visible" : stable && !state.stable ? "not-stable" : enabled && !state.enabled ? "disabled" : editable && !state.editable ? "not-editable" : pointer && !state.receivesEvents ? "intercepted" : "actionable";
@@ -2567,6 +2685,10 @@ export class AutomationRuntime {
       throwIfAborted(this.context.signal);
       const state = await this.elementState(target.targetSession, target.objectId, true, true);
       if (!state.connected) throw automationError("detached", { reason: "bound-target-removed" });
+      if (state.visible && target.state.frameId) {
+        state.frameId = target.state.frameId;
+        state.visible = await this.frameOwnersVisible(session, state.frameId);
+      }
       if (state.visible && state.receivesEvents) await this.selectPointerPoint(session, target.targetSession, target.objectId, state);
       if (state.visible && state.stable && (!enabled || state.enabled) && state.receivesEvents) return { ...target, state };
       await delay(50, this.context.signal);
@@ -2770,6 +2892,7 @@ export class AutomationRuntime {
 
   private async captureSnapshot(session: Session, region?: LocatorSpec): Promise<{ url: string; title: string; lines: SnapshotLine[] }> {
     const signal = this.context.signal;
+    const frameContext = { conversationId: this.context.conversationId, runId: this.context.logIdentity?.runId ?? this.context.runId };
     const guard = () => {
       throwIfAborted(signal);
       if (this.sessions.get(session.tabId) !== session) throw automationError("stale-session", { reason: "session-changed-during-capture" });
@@ -2793,7 +2916,7 @@ export class AutomationRuntime {
         if (onAbort) { signal?.removeEventListener("abort", onAbort); session.lifetime.signal.removeEventListener("abort", onAbort); }
       }
     };
-    let retriedTextPaint = false;
+    let retriedUnstableCapture = false;
     let retryGeneration: number | undefined, retryFrameRevision: number | undefined;
     while (true) {
       guard();
@@ -2811,7 +2934,7 @@ export class AutomationRuntime {
       }
       const generation = session.generation, frameRevision = session.frameRevision;
       if (retryGeneration !== generation || retryFrameRevision !== frameRevision) {
-        retryGeneration = generation; retryFrameRevision = frameRevision; retriedTextPaint = false;
+        retryGeneration = generation; retryFrameRevision = frameRevision; retriedUnstableCapture = false;
       }
       const changed = () => generation !== session.generation || frameRevision !== session.frameRevision;
       const regionTask = region ? this.resolveOnce(session, region) : undefined;
@@ -2865,7 +2988,7 @@ export class AutomationRuntime {
         return states.every(Boolean);
       };
       type TextProjection = { full: string; text: string };
-      let trees: Array<{ debuggee: Debuggee; frameId: string | undefined; depth: number; tree: any; visibility: Map<number, boolean>; textProjections: Map<number, TextProjection> }>;
+      let trees: Array<{ debuggee: Debuggee; frameId: string | undefined; depth: number; tree: any; visibility: Map<number, boolean>; textProjections: Map<number, TextProjection>; candidates: SnapshotTextPaintCandidate[]; snapshot: any }>;
       let info: { url: string; title: string };
       try {
         // A newly attached iframe must finish enabling its domains before AX
@@ -2875,13 +2998,16 @@ export class AutomationRuntime {
         if (changed()) { await delay(0, signal); continue; }
         if (!await waitForCapture(framesAreReady())) { await delay(50, signal); continue; }
         if (changed()) { await delay(0, signal); continue; }
+        // Bracket AX and live DOM reads with bulk DOM captures. This detects
+        // ordinary page changes that do not advance the document generation.
+        const initialLayouts = await waitForCapture(Promise.all(allDebuggees.map(async ({ debuggee }) => ({ debuggee,
+          snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true }) }))));
         const [captured, layouts, pageInfo] = await waitForCapture(Promise.all([
           Promise.all(frames.map(async (item) => ({ ...item, tree: !regionDebuggee || sameDebuggee(item.debuggee, regionDebuggee)
             ? await this.options.command(item.debuggee, "Accessibility.getFullAXTree", allDebuggees.includes(item) ? {} : { frameId: item.frameId })
             : undefined }))),
-          Promise.all(allDebuggees.map(async ({ debuggee }) => {
+          Promise.all(initialLayouts.map(async ({ debuggee, snapshot }) => {
             const candidates: SnapshotTextPaintCandidate[] = [];
-            const snapshot = await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true });
             const visibility = snapshotVisibility(snapshot, { textPaintCandidates: candidates });
             const textProjections = new Map<number, TextProjection>();
             const byFrame = new Map<string, SnapshotTextPaintCandidate[]>();
@@ -2990,17 +3116,7 @@ export class AutomationRuntime {
                 if (dispatched) await this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup }).catch(() => undefined);
               }
             }));
-            // The page can change text styles or clipping between the bulk
-            // layout capture and the later live selection/style analysis.
-            // Recheck only when the capture actually needed such analysis.
-            if (candidates.length) {
-              const confirmation = await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true });
-              guard();
-              const confirmedCandidates: SnapshotTextPaintCandidate[] = [];
-              snapshotVisibility(confirmation, { textPaintCandidates: confirmedCandidates });
-              if (!sameTextPaintCandidates(candidates, confirmedCandidates)) throw automationError("stale-snapshot", { reason: "text-paint-changed-during-capture" });
-            }
-            return { debuggee, visibility, textProjections };
+            return { debuggee, visibility, textProjections, candidates, snapshot };
           })),
           this.pageValue(session.tabId, "({url:location.href,title:document.title})") as Promise<{ url: string; title: string }>,
         ]));
@@ -3011,12 +3127,7 @@ export class AutomationRuntime {
         guard();
         const stalePaintContext = error instanceof AutomationError && error.code === "stale-frame"
           && ["text-paint-context-expired", "frame-context-expired"].includes(String(error.detail.reason));
-        const staleTextPaint = error instanceof AutomationError && error.code === "stale-snapshot" && error.detail.reason === "text-paint-changed-during-capture";
-        if (staleTextPaint && !changed()) {
-          if (retriedTextPaint) throw automationError("snapshot-unavailable", { reason: "text-paint-unstable" });
-          retriedTextPaint = true;
-        }
-        if (!changed() && !isTransientNavigationError(error) && !isDetachedNodeError(error) && !stalePaintContext && !staleTextPaint) throw error;
+        if (!changed() && !isTransientNavigationError(error) && !isDetachedNodeError(error) && !stalePaintContext) throw error;
         await delay(changed() ? 0 : 50, signal); continue;
       }
       guard();
@@ -3034,6 +3145,7 @@ export class AutomationRuntime {
       // hidden. Reuse the per-target layout indexes for all host elements.
       const visibilityBySession = new Map(trees.map(({ debuggee, visibility }) => [debuggee.sessionId ?? "", visibility]));
       const owners = new Map<string, boolean>();
+      const childFramesByOwner = new Map<string, string>();
       if (frames.some((item) => item.frameId)) {
         const rootFrameId = session.rootFrameId;
         if (!rootFrameId) throw automationError("snapshot-unavailable", { reason: "missing-root-frame" });
@@ -3058,6 +3170,7 @@ export class AutomationRuntime {
             const visible = visibilityBySession.get(parent.sessionId ?? "")?.get(owner?.backendNodeId);
             if (visible === undefined) throw automationError("snapshot-unavailable", { reason: "missing-frame-owner-visibility", frameId });
             owners.set(frameId, visible);
+            childFramesByOwner.set(JSON.stringify([parent.sessionId ?? "", owner.backendNodeId]), frameId);
           })));
         } catch (error) {
           guard();
@@ -3071,14 +3184,44 @@ export class AutomationRuntime {
           if (visible === "hidden") item.tree = undefined;
         }
       }
+      // Only frames whose own subtree was captured and whose entire owner
+      // chain is visible receive a model-visible, actionable frame handle.
+      const capturedFrameRefs = new Map<string, string>();
+      for (const item of trees) {
+        const frameId = item.frameId ?? session.rootFrameId;
+        if (item.tree && frameId) capturedFrameRefs.set(frameId, this.rememberFrameRef(session, frameId, item.debuggee, frameContext));
+      }
       const lines: SnapshotLine[] = [];
-      const render = (nodes: any[], visibility: Map<number, boolean>, textProjections: Map<number, TextProjection>, debuggee: Debuggee, frameLabel?: string, frameDepth = 0) => {
+      const render = async (nodes: any[], visibility: Map<number, boolean>, textProjections: Map<number, TextProjection>, snapshot: any, debuggee: Debuggee, frameLabel?: string, frameDepth = 0) => {
         if (regionDebuggee && !sameDebuggee(regionDebuggee, debuggee)) return;
         const byId = new Map(nodes.map((node) => [node.nodeId, node]));
+        const frameId = frameLabel ?? session.rootFrameId;
+        if (!frameId) throw automationError("snapshot-unavailable", { reason: "missing-root-frame" });
+        const doc = snapshot.documents?.find((document: any) => snapshot.strings?.[document.frameId] === frameId);
+        if (!doc) throw automationError("snapshot-unavailable", { reason: "missing-dom-frame", frameId });
+        const securityByBackend = new Map<number, string>();
+        for (let row = 0; row < (doc.layout?.nodeIndex?.length ?? 0); row++) {
+          const index = doc.layout.nodeIndex[row], backend = doc.nodes?.backendNodeId?.[index];
+          const security = snapshot.strings?.[doc.layout.styles?.[row]?.[26]];
+          if (typeof backend === "number" && typeof security === "string") securityByBackend.set(backend, security);
+        }
+        // AX may return a raw textbox value even when CSS paints only masking
+        // glyphs. Unknown security is not proof that raw characters are visible.
+        const maskedControl = (node: any) => ["textbox", "searchbox", "combobox", "spinbutton"].includes(axValue(node.role))
+          && securityByBackend.get(node.backendDOMNodeId) !== "none";
         const scope = frameLabel ?? session.rootFrameId ?? "root";
-        if (frameLabel) lines.push({ id: `${scope}:frame`, line: `${"  ".repeat(frameDepth)}- iframe [frame=${frameLabel}]` });
+        // Frame ID alone is insufficient: an OOPIF can be replaced by a new
+        // debugger target without changing the frame ID or document generation.
+        const scopeKey = JSON.stringify([scope, debuggee.sessionId ?? null]);
+        let snapshotScope = session.snapshotScopes.get(scopeKey);
+        if (!snapshotScope) {
+          snapshotScope = `f${(session.nextSnapshotScope++).toString(36)}`;
+          session.snapshotScopes.set(scopeKey, snapshotScope);
+        }
+        if (frameLabel) lines.push({ id: `${snapshotScope}:doc`, line: `${"  ".repeat(frameDepth)}- frame-document [frameRef=${capturedFrameRefs.get(frameLabel)}]` });
+        // The region may be omitted entirely by AX (for example aria-hidden).
+        // Its DOM frame/identity is independently resolved and validated below.
         const root = regionNode ? nodes.find((node) => node.backendDOMNodeId === regionNode.node.backendNodeId) : nodes.find((node) => !node.parentId) ?? nodes[0];
-        if (regionNode && !root) throw automationError("snapshot-region-unavailable", { locator: region });
         // Internal AX descendants (notably input value text) may have no DOM
         // snapshot entry. Inherit their nearest known ancestor's state, while
         // still allowing a known visible descendant to override it.
@@ -3105,7 +3248,7 @@ export class AutomationRuntime {
         };
         for (let index = order.length - 1; index >= 0; index--) {
           const node = order[index]!;
-          hiddenSubtree.set(node.nodeId, hidden(node) || projected(node) !== undefined || (node.childIds ?? []).some((id: string) => hiddenSubtree.get(id)));
+          hiddenSubtree.set(node.nodeId, hidden(node) || maskedControl(node) || projected(node) !== undefined || (node.childIds ?? []).some((id: string) => hiddenSubtree.get(id)));
         }
         const visibleName = (node: any, original: string) => {
           const ownProjection = projected(node);
@@ -3129,7 +3272,7 @@ export class AutomationRuntime {
               // accessible label or every option in their subtree.
               if (["textbox", "searchbox", "combobox", "listbox", "slider", "spinbutton", "scrollbar"].includes(childRole)) {
                 const valueText = child.properties?.find((property: any) => property.name === "valuetext");
-                const value = axValue(valueText?.value) || axValue(child.value);
+                const value = maskedControl(child) ? "" : axValue(valueText?.value) || axValue(child.value);
                 if (value) parts.push(` ${value} `);
                 else if (childRole === "listbox" || childRole === "combobox") {
                   // Listboxes can expose their selection as AX option nodes
@@ -3164,28 +3307,47 @@ export class AutomationRuntime {
           }
           return parts.join("").replace(/\s+/g, " ").trim();
         };
+        const start = lines.length;
+        const lineBackends = new Map<string, number>();
+        const covered = new Set<number>();
         const pending: Array<{ node: any; depth: number }> = root ? [{ node: root, depth: frameLabel ? frameDepth + 1 : 0 }] : [];
         while (pending.length) {
           const { node, depth } = pending.pop()!;
           let childDepth = depth;
-          const role = node.ignored || hidden(node) ? "" : axValue(node.role); const originalName = axValue(node.name); const name = visibleName(node, originalName); const value = axValue(node.value);
-          if (role && role !== "none" && role !== "generic" && role !== "InlineTextBox") {
+          const role = node.ignored || hidden(node) ? "" : axValue(node.role); const originalName = axValue(node.name); const name = visibleName(node, originalName); const value = maskedControl(node) ? "" : axValue(node.value);
+          const parent = byId.get(node.parentId);
+          const parentRole = parent && !parent.ignored && !hidden(parent) ? axValue(parent.role) : "";
+          // A single static text leaf that exactly repeats its named semantic
+          // parent carries no additional content or action. Do not collapse
+          // siblings, independently named controls, or a selected region root.
+          const duplicateText = node !== root && role === "StaticText" && parent && parent.childIds?.length === 1
+            && ["button", "link", "heading", "checkbox", "radio", "tab", "option", "menuitem"].includes(parentRole)
+            && !node.properties?.some((property: any) => property.name === "focusable" && property.value?.value)
+            && (node.childIds ?? []).every((id: string) => axValue(byId.get(id)?.role) === "InlineTextBox")
+            && Boolean(name) && name === visibleName(parent, axValue(parent.name));
+          if (role && role !== "none" && role !== "generic" && role !== "InlineTextBox" && typeof node.backendDOMNodeId === "number") covered.add(node.backendDOMNodeId);
+          if (role && role !== "none" && role !== "generic" && role !== "InlineTextBox" && !duplicateText) {
             let ref = "";
             const identity = `${scope}:${node.backendDOMNodeId ?? node.nodeId}`;
             if (node.backendDOMNodeId && (INTERACTIVE_ROLES.has(role) || node.properties?.some((property: any) => property.name === "focusable" && property.value?.value))) {
-              ref = this.rememberRef(session, identity, { backendNodeId: node.backendDOMNodeId, frameId: node.frameId, debuggee, role, name: semanticName(originalName), generation, identitySource: "ax" });
+              ref = this.rememberRef(session, identity, { backendNodeId: node.backendDOMNodeId, frameId: frameLabel ?? session.rootFrameId, debuggee, role, name: semanticName(originalName), generation, identitySource: "ax" });
             }
             const properties = Object.fromEntries((node.properties ?? []).map((property: any) => [property.name, property.value?.value]));
             const state: Partial<Record<SnapshotStateName, unknown>> = Object.fromEntries(["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly"].filter((key) => properties[key] !== undefined).map((key) => [key, properties[key]]));
+            if (maskedControl(node)) state.masked = true;
             const actions = !ref ? [] : ["textbox", "searchbox", "spinbutton"].includes(role) ? ["click", "fill", "clear", "press", "insertText"]
               : ["checkbox", "radio", "switch"].includes(role) ? ["click", "check"]
               : ["combobox", "listbox"].includes(role) ? ["click", "select"] : ["click", "doubleClick", "hover"];
             // AX node IDs identify semantic rows; multiple AX rows can refer
             // to the same backend DOM node and therefore share an action ref.
-            const snapshotId = `${scope}:ax:${node.nodeId}`;
-            const snapshotNode: SnapshotNode = { id: snapshotId, depth, role, name, value, ...(ref ? { ref, actions } : {}), state };
+            const snapshotId = `${snapshotScope}:ax:${node.nodeId}`;
+            const childFrameId = typeof node.backendDOMNodeId === "number"
+              ? childFramesByOwner.get(JSON.stringify([debuggee.sessionId ?? "", node.backendDOMNodeId])) : undefined;
+            const childFrameRef = childFrameId ? capturedFrameRefs.get(childFrameId) : undefined;
+            const snapshotNode: SnapshotNode = { id: snapshotId, depth, role, name, value, ...(ref ? { ref, actions } : {}), ...(childFrameRef ? { childFrameRef } : {}), state };
             const rendered = renderSnapshotNode(snapshotNode);
             lines.push({ id: snapshotId, line: rendered.line, ...(rendered.ref ? { ref: rendered.ref } : {}), node: snapshotNode });
+            if (typeof node.backendDOMNodeId === "number") lineBackends.set(snapshotId, node.backendDOMNodeId);
             childDepth += 1;
           }
           const children: string[] = node.childIds ?? [];
@@ -3194,17 +3356,269 @@ export class AutomationRuntime {
             if (child) pending.push({ node: child, depth: childDepth });
           }
         }
+        let evidence: ReturnType<typeof snapshotDomSupplement>;
+        try { evidence = snapshotDomSupplement(snapshot, { frameId, visibility, textProjections, covered: new Set() }); }
+        catch (error) { throw automationError("snapshot-unavailable", { reason: "invalid-dom-snapshot", detail: error instanceof Error ? error.message : String(error) }); }
+        const domIndex = evidence.indexes.get(frameId);
+        if (!domIndex) throw automationError("snapshot-unavailable", { reason: "missing-dom-frame", frameId });
+        const positions = new Map<number, number>();
+        for (let position = 0; position < domIndex.preorder.length; position++) {
+          const id = domIndex.backendAt(domIndex.preorder[position]!);
+          if (id !== undefined) positions.set(id, position);
+        }
+        // Scoped output remains inside the region, but an input can have a
+        // visible associated label elsewhere in the same document or shadow
+        // tree. Retain whole-frame text solely for verified label names.
+        const frameEvidence = evidence.items.sort((a, b) => positions.get(a.backendNodeId)! - positions.get(b.backendNodeId)!);
+        const allEvidence = regionNode ? frameEvidence.filter((item) => domIndex.contains(regionNode.node.backendNodeId, item.backendNodeId) === true) : frameEvidence;
+        const extra = allEvidence.filter((item) => !covered.has(item.backendNodeId));
+        const depths = new Map<number, number>();
+        for (const line of lines.slice(start)) {
+          const backend = lineBackends.get(line.id);
+          if (backend !== undefined && line.node && !depths.has(backend)) depths.set(backend, line.node.depth);
+        }
+        const controls = new Set(extra.filter((item) => item.kind === "control" && item.tag !== "iframe" && item.tag !== "frame").map((item) => item.backendNodeId));
+        const nearestControl = domIndex.nearestMarkedAncestors(controls);
+        const controlParts = new Map<number, SnapshotDomEvidence[]>();
+        for (const item of allEvidence) if (item.kind === "text") {
+          const ancestor = nearestControl[item.nodeIndex]!;
+          const control = ancestor < 0 ? undefined : domIndex.backendAt(ancestor);
+          if (control !== undefined) { const parts = controlParts.get(control) ?? []; parts.push(item); controlParts.set(control, parts); }
+        }
+        const controlText = new Map([...controlParts].map(([id, parts]) => [id, parts.map((part) => part.text ?? "").join("").replace(/\s+/g, " ").trim()]));
+        // The snapshot provides painted text, while the live label object
+        // association determines tree scope and duplicate-id behavior.
+        const labels = new Map<number, { parts: string[] }>();
+        let documentLabelCount = 0;
+        for (let index = 0; index < doc.nodes.backendNodeId.length; index++) {
+          if (snapshot.strings[doc.nodes.nodeName[index]]?.toLowerCase() !== "label") continue;
+          documentLabelCount++;
+          const id = doc.nodes.backendNodeId[index];
+          if (visibility.get(id) === true) labels.set(id, { parts: [] });
+        }
+        const nearestLabel = domIndex.nearestMarkedAncestors(new Set(labels.keys()));
+        for (const item of frameEvidence) if (item.kind === "text") {
+          const ancestor = nearestLabel[item.nodeIndex]!;
+          const id = ancestor < 0 ? undefined : domIndex.backendAt(ancestor);
+          if (id !== undefined) labels.get(id)?.parts.push(item.text ?? "");
+        }
+        const visibleLabel = (ids: readonly number[]): string => ids
+          .map((id) => labels.get(id)!.parts.join("").replace(/\s+/g, " ").trim()).filter(Boolean).join(" ");
+        const omitText = new Set<number>();
+        for (const [id, parts] of controlParts) if (parts.length === 1 && parts[0]!.text?.replace(/\s+/g, " ").trim() === controlText.get(id)) omitText.add(parts[0]!.backendNodeId);
+        const marked = new Set(depths.keys());
+        for (const item of extra) if (item.kind === "control" || item.kind === "text" && !!item.text?.trim() && !omitText.has(item.backendNodeId)) marked.add(item.backendNodeId);
+        const nearestEmitted = domIndex.nearestMarkedAncestors(marked);
+        const group = controls.size ? `surf-wax-dom-snapshot:${crypto.randomUUID()}` : undefined;
+        const additions: Array<{ position: number; line: SnapshotLine }> = [];
+        try {
+          const currentControls = new Map<number, any>();
+          const controlItems = extra.filter((item) => controls.has(item.backendNodeId));
+          const controlObjects = new Map<number, string>();
+          let associationCount = 0;
+          for (let offset = 0; offset < controlItems.length; offset += 32) {
+            const batch = controlItems.slice(offset, offset + 32);
+            const pending = batch.map(async (item) => {
+              frameGuard();
+              const resolved = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: item.backendNodeId, objectGroup: group });
+              frameGuard();
+              if (!resolved.object?.objectId) throw automationError("snapshot-unavailable", { reason: "missing-dom-control" });
+              const objectId = resolved.object.objectId as string;
+              const response = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId, returnByValue: true,
+                functionDeclaration: `function(){const labels=this.labels;return {meta:(${SEARCH_META_SOURCE}).call(this,true), attributes:Object.fromEntries([...this.attributes].map(a=>[a.name.toLowerCase(),a.value])), value: typeof this.value === "string" ? this.value : undefined, checked: typeof this.checked === "boolean" ? this.checked : undefined, labelCount: labels == null ? 0 : labels.length}}` });
+              frameGuard();
+              if (response.exceptionDetails) throw automationError("snapshot-unavailable", { reason: "dom-control-read-failed" });
+              return { objectId, value: response.result?.value };
+            });
+            const results = await Promise.allSettled(pending);
+            const error = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+            if (error) throw error.reason;
+            results.forEach((result, index) => {
+              const { objectId, value } = (result as PromiseFulfilledResult<any>).value;
+              const count = value?.labelCount;
+              if (!Number.isSafeInteger(count) || count < 0 || count > documentLabelCount - associationCount)
+                throw automationError("snapshot-unavailable", { reason: "dom-label-count-inconsistent" });
+              associationCount += count;
+              controlObjects.set(batch[index]!.backendNodeId, objectId);
+              currentControls.set(batch[index]!.backendNodeId, { ...value, labels: [] });
+            });
+          }
+          // Read only actual live associations, rather than resolving every
+          // label sharing a potentially duplicated HTML id for every control.
+          // The sum is bounded by document labels because a label has at most
+          // one labeled control; inconsistency indicates a changing capture.
+          const associatedControls = controlItems.filter((item) => currentControls.get(item.backendNodeId).labelCount > 0);
+          const labelHandles: Array<{ controlId: number; objectId: string }> = [];
+          for (let offset = 0; offset < associatedControls.length; offset += 32) {
+            const batch = associatedControls.slice(offset, offset + 32);
+            const pending = batch.map(async (item) => {
+              frameGuard();
+              const response = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: controlObjects.get(item.backendNodeId), objectGroup: group,
+                functionDeclaration: "function(){return Array.from(this.labels || [])}" });
+              frameGuard();
+              if (response.exceptionDetails || typeof response.result?.objectId !== "string")
+                throw automationError("snapshot-unavailable", { reason: "dom-label-list-unavailable" });
+              const properties = await this.options.command(debuggee, "Runtime.getProperties", { objectId: response.result.objectId, ownProperties: true });
+              frameGuard();
+              if (properties.exceptionDetails || !Array.isArray(properties.result)) throw automationError("snapshot-unavailable", { reason: "dom-label-list-unavailable" });
+              const count = currentControls.get(item.backendNodeId).labelCount as number;
+              const length = properties.result.find((property: any) => property.name === "length")?.value?.value;
+              if (length !== count) throw automationError("snapshot-unavailable", { reason: "dom-label-count-inconsistent" });
+              const handles: string[] = new Array(count);
+              for (const property of properties.result) {
+                if (typeof property.name !== "string" || !/^(?:0|[1-9]\d*)$/.test(property.name)) continue;
+                const index = Number(property.name), objectId = property.value?.objectId;
+                if (!Number.isSafeInteger(index) || index < 0 || index >= count || handles[index] !== undefined || typeof objectId !== "string")
+                  throw automationError("snapshot-unavailable", { reason: "dom-label-identity-unavailable" });
+                handles[index] = objectId;
+              }
+              if (handles.some((value) => typeof value !== "string") || Object.keys(handles).length !== count)
+                throw automationError("snapshot-unavailable", { reason: "dom-label-identity-unavailable" });
+              return handles;
+            });
+            const results = await Promise.allSettled(pending);
+            const error = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+            if (error) throw error.reason;
+            results.forEach((result, index) => {
+              for (const objectId of (result as PromiseFulfilledResult<string[]>).value)
+                labelHandles.push({ controlId: batch[index]!.backendNodeId, objectId });
+            });
+          }
+          const claimedLabels = new Set<number>();
+          for (let offset = 0; offset < labelHandles.length; offset += 32) {
+            const batch = labelHandles.slice(offset, offset + 32);
+            frameGuard();
+            const pending = batch.map(({ objectId }) => this.options.command(debuggee, "DOM.describeNode", { objectId, depth: 0 }));
+            const results = await Promise.allSettled(pending);
+            frameGuard();
+            const error = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+            if (error) throw error.reason;
+            results.forEach((result, index) => {
+              const node = (result as PromiseFulfilledResult<any>).value?.node;
+              const id = node?.backendNodeId;
+              if (!Number.isSafeInteger(id) || id <= 0 || node.nodeType !== 1 || String(node.nodeName).toLowerCase() !== "label"
+                || domIndex.indexOf(id) === undefined || claimedLabels.has(id))
+                throw automationError("snapshot-unavailable", { reason: "dom-label-identity-unavailable" });
+              claimedLabels.add(id);
+              currentControls.get(batch[index]!.controlId).labels.push(id);
+            });
+          }
+          for (const item of extra) {
+            if (item.kind === "text" && (omitText.has(item.backendNodeId) || !item.text?.trim())) continue;
+            const parentIndex = nearestEmitted[item.nodeIndex]!;
+            const parent = parentIndex < 0 ? undefined : domIndex.backendAt(parentIndex);
+            const depth = parent === undefined || !depths.has(parent) ? (frameLabel ? frameDepth + 1 : 0) : depths.get(parent)! + 1;
+            const id = `${snapshotScope}:dom:${item.backendNodeId}`;
+            let node: SnapshotNode;
+            if (item.kind === "text") node = { id, depth, role: "StaticText", name: item.text };
+            else {
+              const tag = item.tag!;
+              const type = (item.attributes?.type ?? "text").toLowerCase();
+              const role = tag === "iframe" || tag === "frame" ? "iframe" : tag === "button" ? "button" : tag === "a" ? "link" : tag === "select" ? "combobox" : tag === "textarea" ? "textbox"
+                : tag === "input" ? ({ checkbox: "checkbox", radio: "radio", range: "slider", number: "spinbutton", search: "searchbox", button: "button", submit: "button", reset: "button" } as Record<string, string>)[type] ?? "textbox"
+                  : item.attributes?.role?.trim() === "button" ? "button" : "generic";
+              const current = currentControls.get(item.backendNodeId);
+              const matchedLabels: number[] = (current?.labels ?? []).filter((id: number) => labels.has(id))
+                .sort((left: number, right: number) => (positions.get(left) ?? 0) - (positions.get(right) ?? 0));
+              const name = visibleLabel(matchedLabels) || controlText.get(item.backendNodeId) || (tag === "input" && ["button", "submit", "reset"].includes(type) ? item.value ?? "" : "");
+              const state: Partial<Record<SnapshotStateName, unknown>> = {};
+              if (item.checked !== undefined) state.checked = item.checked;
+              if (item.masked) state.masked = true;
+              for (const key of ["disabled", "required", "readonly"] as const) if (Object.hasOwn(item.attributes ?? {}, key)) state[key] = true;
+              let ref = "";
+              if (tag !== "iframe" && tag !== "frame") {
+                if (current?.meta?.connected !== true || current.meta.tag !== tag
+                  // Inline style can animate without changing visibility;
+                  // the final DOM confirmation compares its actual effects.
+                  || JSON.stringify(Object.entries(current.attributes ?? {}).filter(([key]) => key !== "style").sort()) !== JSON.stringify(Object.entries(item.attributes ?? {}).filter(([key]) => key !== "style").sort())
+                  || item.value !== undefined && current.value !== item.value || item.checked !== undefined && current.checked !== item.checked)
+                  throw automationError("snapshot-unavailable", { reason: "dom-control-changed-during-capture" });
+                // Never bind a DOM ref unless its live identity matches the
+                // visible name and native role actually exposed in this snapshot.
+                const privateValueIdentity = !name && item.value !== undefined && (item.masked || item.valueVisible)
+                  && current.meta.identityName === semanticName(item.value);
+                if (!current.meta.identityTooLarge && current.meta.identityRole === role && (current.meta.identityName === name || privateValueIdentity)) {
+                  // DOM identity may be derived from the current input value.
+                  // Keep it only in the private ref record, never in its label.
+                  ref = this.rememberRef(session, `${scope}:${item.backendNodeId}`, { backendNodeId: item.backendNodeId, frameId, debuggee, role, name: current.meta.identityName, generation, identitySource: "dom" });
+                }
+              }
+              const actions = !ref ? [] : ["textbox", "searchbox", "spinbutton"].includes(role) ? ["click", "fill", "clear", "press", "insertText"]
+                : ["checkbox", "radio", "switch"].includes(role) ? ["click", "check"] : ["combobox", "listbox"].includes(role) ? ["click", "select"] : ["click", "doubleClick", "hover"];
+              const childFrameId = childFramesByOwner.get(JSON.stringify([debuggee.sessionId ?? "", item.backendNodeId]));
+              const childFrameRef = childFrameId ? capturedFrameRefs.get(childFrameId) : undefined;
+              node = { id, depth, role, ...(name ? { name } : {}), ...(item.value && item.valueVisible && tag !== "select" && !["button", "submit", "reset"].includes(type) ? { value: item.value } : {}),
+                ...(item.valueVisible && item.selectedOptions?.length ? { selectedLabels: item.selectedOptions.map(({ label }) => label) } : {}),
+                ...(ref ? { ref, actions } : {}), ...(childFrameRef ? { childFrameRef } : {}), state };
+            }
+            depths.set(item.backendNodeId, depth);
+            const rendered = renderSnapshotNode(node);
+            additions.push({ position: positions.get(item.backendNodeId) ?? Number.MAX_SAFE_INTEGER, line: { id, line: rendered.line, ...(rendered.ref ? { ref: rendered.ref } : {}), node } });
+          }
+        } finally { if (group) await this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined); }
+        frameGuard();
+        // Merge into the original AX order without reordering AX siblings.
+        // DOM document order positions only locate the next represented node.
+        const original = lines.splice(start);
+        let next = 0;
+        for (const line of original) {
+          const backend = lineBackends.get(line.id), position = backend === undefined ? undefined : positions.get(backend);
+          while (position !== undefined && next < additions.length && additions[next]!.position < position) lines.push(additions[next++]!.line);
+          lines.push(line);
+        }
+        while (next < additions.length) lines.push(additions[next++]!.line);
       };
-      if (regionNode && !trees.some(({ tree }) => tree?.nodes?.some((node: any) => node.backendDOMNodeId === regionNode.node.backendNodeId)))
-        throw automationError("snapshot-region-unavailable", { locator: region });
-      for (const { debuggee, frameId, depth, tree, visibility, textProjections } of trees) if (tree && (!regionNode || tree.nodes?.some((node: any) => node.backendDOMNodeId === regionNode.node.backendNodeId)))
-        render(tree.nodes ?? [], visibility, textProjections, debuggee, frameId, depth);
+      // Match the captured DOM node to exactly one frame in the resolved
+      // debugger target. AX can omit the region, but another frame with the
+      // same backend ID must never be accepted as its replacement.
+      const regionMatches = regionNode ? trees.filter(({ debuggee, frameId, tree, snapshot }) => {
+        if (!tree || !regionDebuggee || !sameDebuggee(debuggee, regionDebuggee)) return false;
+        const wanted = frameId ?? session.rootFrameId;
+        return snapshot.documents?.some((doc: any) => snapshot.strings?.[doc.frameId] === wanted
+          && doc.nodes?.backendNodeId?.includes(regionNode.node.backendNodeId));
+      }) : [];
+      if (regionNode && regionMatches.length !== 1) throw automationError("snapshot-region-unavailable", { locator: region });
+      for (const item of trees) {
+        const { debuggee, frameId, depth, tree, visibility, textProjections, snapshot } = item;
+        if (tree && (!regionNode || regionMatches[0] === item))
+          await waitForCapture(render(tree.nodes ?? [], visibility, textProjections, snapshot, debuggee, frameId, depth));
+      }
       const ids = new Set<string>();
       for (const { id } of lines) {
         if (ids.has(id)) throw automationError("snapshot-unavailable", { reason: "duplicate-semantic-id", id });
         ids.add(id);
       }
-      if (!changed()) return { ...info, lines };
+      if (!changed()) {
+        let confirmations: Array<{ debuggee: Debuggee; snapshot: any }>;
+        try {
+          confirmations = await waitForCapture(Promise.all(allDebuggees.map(async ({ debuggee }) => ({ debuggee,
+            snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true }) }))));
+          if (changed()) continue;
+          if (!await waitForCapture(framesAreReady())) { await delay(50, signal); continue; }
+        } catch (error) {
+          guard();
+          if (!changed() && !isTransientNavigationError(error) && !isDetachedNodeError(error)) throw error;
+          await delay(changed() ? 0 : 50, signal); continue;
+        }
+        if (changed()) continue;
+        let unstable = false, unstablePaint = false;
+        for (const confirmation of confirmations) {
+          const initial = trees.find(({ debuggee }) => sameDebuggee(debuggee, confirmation.debuggee));
+          if (initial && sameDOMSnapshot(initial.snapshot, confirmation.snapshot,
+            { visibility: initial.visibility, textPaintCandidates: initial.candidates, paintAdjusted: true })) continue;
+          unstable = true;
+          const after: SnapshotTextPaintCandidate[] = [];
+          try { snapshotVisibility(confirmation.snapshot, { textPaintCandidates: after }); }
+          catch { throw automationError("snapshot-unavailable", { reason: "invalid-dom-confirmation" }); }
+          if (initial && !sameTextPaintCandidates(initial.candidates, after)) unstablePaint = true;
+        }
+        if (unstable) {
+          if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: unstablePaint ? "text-paint-unstable" : "dom-unstable" });
+          retriedUnstableCapture = true;
+          continue;
+        }
+        return { ...info, lines };
+      }
     }
   }
 

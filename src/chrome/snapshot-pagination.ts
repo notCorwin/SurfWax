@@ -11,49 +11,50 @@ export type SnapshotItem = Readonly<{
 /** The caller must bind this position to its snapshot, owner, tab and document. */
 export type SnapshotPosition = Readonly<{ index: number; charOffset: number }>;
 
-/** Compare frozen snapshots in linear time, preserving their order and identity. */
+/** Compare frozen snapshots while minimizing unchanged nodes that must move. */
 export function diffSnapshot(before: readonly SnapshotItem[], after: readonly SnapshotItem[]): SnapshotItem[] {
-  type Link = { id: string; item?: SnapshotItem; previous?: Link; next?: Link };
-  const head: Link = { id: "" };
-  const prior = new Map<string, Link>();
+  const prior = new Map<string, { item: SnapshotItem; index: number }>();
   const current = new Set<string>();
   for (const item of after) {
     if (current.has(item.id)) throw new Error(`Duplicate semantic snapshot id: ${item.id}`);
     current.add(item.id);
   }
   const changes: SnapshotItem[] = [];
-  let tail = head;
-  for (const item of before) {
+  before.forEach((item, index) => {
     if (prior.has(item.id)) throw new Error(`Duplicate semantic snapshot id: ${item.id}`);
-    const node: Link = { id: item.id, item };
-    prior.set(item.id, node);
-    if (!current.has(item.id)) { changes.push({ ...item, change: "removed" }); continue; }
-    node.previous = tail; tail.next = node; tail = node;
-  }
-  let predecessor = head;
+    prior.set(item.id, { item, index });
+    // A removed node is no longer visible or actionable. The consumer only
+    // needs its identity to remove it from the baseline.
+    if (!current.has(item.id)) changes.push({ id: item.id, line: "", change: "removed" });
+  });
+
+  // A changed item must be sent anyway, so only unchanged items need to be
+  // retained in the longest increasing subsequence of previous positions.
+  // All remaining items can be upserted after their final predecessor.
+  const candidates: { id: string; index: number; previous: number }[] = [];
+  const tails: number[] = [];
   for (const item of after) {
-    const node = prior.get(item.id);
-    if (!node) {
-      const added: Link = { id: item.id, item, previous: predecessor, next: predecessor.next };
-      if (added.next) added.next.previous = added;
-      predecessor.next = added;
-      changes.push({ ...item, change: "added", after: predecessor === head ? null : predecessor.id });
-      predecessor = added;
-      continue;
+    const old = prior.get(item.id);
+    if (!old || old.item.line !== item.line || old.item.ref !== item.ref) continue;
+    let low = 0, high = tails.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (candidates[tails[middle]!]!.index < old.index) low = middle + 1;
+      else high = middle;
     }
-    const changed = node.item!.line !== item.line || node.item!.ref !== item.ref;
-    const moved = node.previous !== predecessor;
-    if (changed || moved) {
-      changes.push({ ...item, change: changed ? "updated" : "moved", after: predecessor === head ? null : predecessor.id });
-      if (moved) {
-        node.previous!.next = node.next;
-        if (node.next) node.next.previous = node.previous;
-        node.previous = predecessor; node.next = predecessor.next;
-        if (node.next) node.next.previous = node;
-        predecessor.next = node;
-      }
-    }
-    predecessor = node;
+    const candidate = candidates.length;
+    candidates.push({ id: item.id, index: old.index, previous: low ? tails[low - 1]! : -1 });
+    tails[low] = candidate;
+  }
+  const retained = new Set<string>();
+  for (let index = tails.at(-1) ?? -1; index !== -1; index = candidates[index]!.previous) retained.add(candidates[index]!.id);
+
+  for (let index = 0; index < after.length; index++) {
+    const item = after[index]!, old = prior.get(item.id);
+    const predecessor = index ? after[index - 1]!.id : null;
+    if (!old) changes.push({ ...item, change: "added", after: predecessor });
+    else if (old.item.line !== item.line || old.item.ref !== item.ref) changes.push({ ...item, change: "updated", after: predecessor });
+    else if (!retained.has(item.id)) changes.push({ ...item, change: "moved", after: predecessor });
   }
   return changes;
 }

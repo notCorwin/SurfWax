@@ -1,7 +1,7 @@
 import { quote } from "./automation-utils";
 
 export type SnapshotField = "text" | "state" | "ref" | "actions";
-export type SnapshotStateName = "checked" | "disabled" | "expanded" | "pressed" | "selected" | "required" | "readonly";
+export type SnapshotStateName = "checked" | "disabled" | "expanded" | "pressed" | "selected" | "required" | "readonly" | "masked";
 
 /** Data received from one AX node, before it is rendered into page text. */
 export type SnapshotNode = Readonly<{
@@ -10,8 +10,11 @@ export type SnapshotNode = Readonly<{
   role: string;
   name?: string;
   value?: string;
+  selectedLabels?: readonly string[];
   /** A reference created by the browser runtime, not parsed from page text. */
   ref?: string;
+  /** Run-bound handle for the child document, shared with its subtree marker. */
+  childFrameRef?: string;
   actions?: readonly string[];
   state?: Readonly<Partial<Record<SnapshotStateName, unknown>>>;
 }>;
@@ -24,7 +27,7 @@ export type RenderedSnapshotNode = Readonly<{
 }>;
 
 const allFields: readonly SnapshotField[] = ["text", "state", "ref", "actions"];
-const stateNames: readonly SnapshotStateName[] = ["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly"];
+const stateNames: readonly SnapshotStateName[] = ["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly", "masked"];
 const toolActions: Readonly<Record<string, string>> = { doubleClick: "double_click", insertText: "type_text", select: "select_option", clear: "fill", press: "press_key", check: "set_checked" };
 
 /**
@@ -42,6 +45,7 @@ export function renderSnapshotNode(
   const name = node.name ?? "";
   const value = node.value ?? "";
   let line = `${"  ".repeat(node.depth)}- ${node.role}${fields.has("text") && name ? ` ${quote(name)}` : ""}`;
+  if (node.childFrameRef) line += ` [frameRef=${node.childFrameRef}]`;
   if (fields.has("ref") && node.ref && options.inlineRef !== false) line += ` [ref=${node.ref}]`;
   if (fields.has("actions") && node.actions?.length) {
     const actions = options.actionNames === "program" ? [...new Set(node.actions.map((action) => toolActions[action] ?? action))] : node.actions;
@@ -52,5 +56,6 @@ export function renderSnapshotNode(
     if (state) line += ` [${state}]`;
   }
   if (fields.has("text") && value && value !== name) line += `: ${value}`;
+  if (fields.has("text") && node.selectedLabels?.length) line += ` [selected=${node.selectedLabels.map((label) => JSON.stringify(label)).join(",")}]`;
   return { id: node.id, line, ...(fields.has("ref") && node.ref ? { ref: node.ref } : {}) };
 }

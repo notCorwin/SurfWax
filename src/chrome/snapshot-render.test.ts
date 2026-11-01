@@ -43,4 +43,16 @@ describe("structured semantic snapshot rendering", () => {
     expect(result.line).toBe("- checkbox [checked=false disabled=null selected=0]");
     expect(() => renderSnapshotNode({ id: "one", depth: -1, role: "button" })).toThrow("depth");
   });
+
+  it("displays selected labels without requiring internal option values", () => {
+    const select: SnapshotNode = { id: "select", depth: 0, role: "combobox", name: "Color", selectedLabels: ["Blue label"] };
+    expect(renderSnapshotNode(select).line).toBe('- combobox "Color" [selected="Blue label"]');
+    expect(renderSnapshotNode(select, { fields: ["state"] }).line).toBe("- combobox");
+  });
+
+  it("keeps the owner-to-child-frame association in every field projection", () => {
+    const owner: SnapshotNode = { id: "owner", depth: 1, role: "Iframe", name: "Work item", childFrameRef: "f-handle" };
+    expect(renderSnapshotNode(owner).line).toBe('  - Iframe "Work item" [frameRef=f-handle]');
+    expect(renderSnapshotNode(owner, { fields: ["ref"] }).line).toBe("  - Iframe [frameRef=f-handle]");
+  });
 });

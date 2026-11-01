@@ -2,6 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import { AutomationRuntime } from "./automation";
 import { TEXT_PAINT_CACHE_LOOKUP_SOURCE, TEXT_PAINT_CACHE_REGISTER_SOURCE } from "./snapshot-text-paint";
 
+function emptyFrameDocument(frameId: number) {
+  return { frameId, nodes: { backendNodeId: [], parentIndex: [], nodeType: [], nodeName: [] },
+    layout: { nodeIndex: [], bounds: [], styles: [] } };
+}
+
 function textPaintSnapshot() {
   const strings: string[] = [];
   const id = (value: string) => { const found = strings.indexOf(value); return found < 0 ? strings.push(value) - 1 : found; };
@@ -13,7 +18,62 @@ function textPaintSnapshot() {
     layout: { nodeIndex: [0, 1, 2, 3, 4], bounds: [[0, 0, 500, 500], [0, 0, 100, 100], [0, 0, 100, 100], [0, 0, 100, 20], [0, 30, 100, 20]],
       styles: [[], style, style, style, style], text: text.map(id) },
     textBoxes: { layoutIndex: [3, 4], start: [0, 0], length: [11, 11], bounds: [[0, 0, 100, 20], [0, 30, 100, 20]] },
-  }] };
+  }, emptyFrameDocument(id("same")), emptyFrameDocument(id("cross"))] };
+}
+
+function duplicateLabelSnapshot(labelCount: number, controlCount: number) {
+  const snapshot = textPaintSnapshot(), document = snapshot.documents[0]!;
+  const intern = (value: string) => {
+    const existing = snapshot.strings.indexOf(value);
+    return existing < 0 ? snapshot.strings.push(value) - 1 : existing;
+  };
+  const nodes = document.nodes as any, layout = document.layout as any;
+  nodes.attributes = nodes.backendNodeId.map(() => []);
+  const opaque = intern("rgb(0, 0, 0)");
+  for (const style of layout.styles) if (style.length) style[21] = opaque;
+  const style = [...layout.styles[1]];
+  const add = (id: number, parent: number, type: number, name: string, text: string, attributes: number[] = []) => {
+    const index = nodes.backendNodeId.length;
+    nodes.backendNodeId.push(id); nodes.parentIndex.push(parent); nodes.nodeType.push(type);
+    nodes.nodeName.push(intern(name)); nodes.nodeValue.push(intern(text)); nodes.attributes.push(attributes);
+    layout.nodeIndex.push(index); layout.bounds.push([0, 0, 100, 20]); layout.styles.push(style); layout.text.push(intern(text));
+    return index;
+  };
+  const forKey = intern("for"), idKey = intern("id"), shared = intern("same-id");
+  for (let i = 0; i < labelCount; i++) {
+    const parent = add(20_000 + i, 0, 1, "LABEL", "", [forKey, shared]);
+    add(30_000 + i, parent, 3, "#text", `Label${i}`);
+  }
+  for (let i = 0; i < controlCount; i++) add(10_000 + i, 0, 1, "INPUT", "", [idKey, shared]);
+  return snapshot;
+}
+
+function labelCaptureHarness(labelCount: number, controlCount: number) {
+  const { runtime, command } = harness(), original = command.getMockImplementation()!;
+  const snapshot = duplicateLabelSnapshot(labelCount, controlCount);
+  const labelName = Array.from({ length: labelCount }, (_, i) => `Label${i}`).join(" ");
+  command.mockImplementation(async (source, method, params = {}) => {
+    if (method === "DOMSnapshot.captureSnapshot" && !source.sessionId) return snapshot;
+    if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+    if (method === "DOM.resolveNode" && params.objectGroup?.startsWith("surf-wax-dom-snapshot:")) return { object: { objectId: `control-${params.backendNodeId}` } };
+    if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("labelCount:")) {
+      const first = params.objectId === "control-10000";
+      return { result: { value: { meta: { connected: true, tag: "input", identityRole: "textbox", identityName: first ? labelName : "" },
+        attributes: { id: "same-id" }, labelCount: first ? labelCount : 0 } } };
+    }
+    if (method === "Runtime.callFunctionOn" && params.functionDeclaration === "function(){return Array.from(this.labels || [])}")
+      return { result: { objectId: "label-array" } };
+    if (method === "Runtime.getProperties" && params.objectId === "label-array") return { result: [
+      ...Array.from({ length: labelCount }, (_, i) => ({ name: String(i), value: { objectId: `label-${i}` } })),
+      { name: "length", value: { value: labelCount } },
+    ] };
+    if (method === "DOM.describeNode" && params.objectId?.startsWith("label-")) return { node: {
+      backendNodeId: 20_000 + Number(params.objectId.slice(6)), nodeType: 1, nodeName: "LABEL",
+    } };
+    if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+    return original(source, method, params);
+  });
+  return { runtime, command, labelName };
 }
 
 function harness() {
@@ -32,10 +92,16 @@ function harness() {
     if (method === "Accessibility.queryAXTree") return { nodes: [{ nodeId: "node", backendDOMNodeId: 8, role: { value: "button" }, name: { value: params.objectId ?? "wrong-root" } }] };
     if (method === "Accessibility.getPartialAXTree") return { nodes: [{ backendDOMNodeId: 8, role: { value: "button" }, name: { value: "doc-31" } }] };
     if (method === "DOM.getFrameOwner") return { backendNodeId: { same: 101, cross: 102, nested: 103 }[params.frameId as "same" | "cross" | "nested"] };
-    if (method === "DOMSnapshot.captureSnapshot") return { strings: ["1", "visible", "auto"], documents: [{
-      nodes: { backendNodeId: [101, 102, 103], parentIndex: [-1, -1, -1] },
-      layout: { nodeIndex: [0, 1, 2], bounds: [[0, 0, 100, 100], [0, 0, 100, 100], [0, 0, 100, 100]], styles: [[0, 1, 1, 1, 2], [0, 1, 1, 1, 2], [0, 1, 1, 1, 2]] },
-    }] };
+    if (method === "DOMSnapshot.captureSnapshot") {
+      const strings = ["1", "visible", "auto", "IFRAME", "root", "same", "cross", "nested"];
+      const document = (frameId: number, backendNodeId: number[]) => ({ frameId,
+        nodes: { backendNodeId, parentIndex: backendNodeId.map(() => -1), nodeType: backendNodeId.map(() => 1), nodeName: backendNodeId.map(() => 3) },
+        layout: { nodeIndex: backendNodeId.map((_, index) => index), bounds: backendNodeId.map(() => [0, 0, 100, 100]), styles: backendNodeId.map(() => [0, 1, 1, 1, 2]) } });
+      return { strings, documents: source.sessionId === "nested-child" || source.sessionId === "new-child"
+        ? [emptyFrameDocument(7)] : source.sessionId
+          ? [document(6, [103]), emptyFrameDocument(7)]
+          : [document(4, [101, 102]), emptyFrameDocument(5), emptyFrameDocument(6)] };
+    }
     if (method === "DOM.resolveNode") return { object: { objectId: "node-object" } };
     if (method === "Runtime.callFunctionOn") return { result: { value: { connected: true, role: "button", name: "Open", tag: "button", text: "Open" } } };
     return {};
@@ -47,6 +113,46 @@ function harness() {
 }
 
 describe("frame tree discovery", () => {
+  it("resolves only actual label associations when many controls share an id", async () => {
+    const labelCount = 80, controlCount = 80;
+    const { runtime, command, labelName } = labelCaptureHarness(labelCount, controlCount);
+    try {
+      const snapshot = await (await runtime.createPage(3)).snapshot();
+      expect(snapshot.snapshot).toContain(`textbox "${labelName}"`);
+      expect(command.mock.calls.filter(([, method, params]) => method === "DOM.resolveNode" && params.objectGroup?.startsWith("surf-wax-dom-snapshot:"))).toHaveLength(controlCount);
+      expect(command.mock.calls.filter(([, method]) => method === "Runtime.getProperties")).toHaveLength(1);
+      expect(command.mock.calls.filter(([, method, params]) => method === "DOM.describeNode" && params.objectId?.startsWith("label-"))).toHaveLength(labelCount);
+      expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("labelCount:"))
+        .every(([, , params]) => !params.arguments?.length)).toBe(true);
+    } finally { await runtime.abortSessions(); }
+  });
+
+  it("stops label resolution after abort and releases its object group after in-flight commands settle", async () => {
+    const { runtime, command } = labelCaptureHarness(40, 1), original = command.getMockImplementation()!;
+    let release!: () => void, notify!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { notify = resolve; });
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOM.describeNode" && params.objectId === "label-0") { notify(); await held; }
+      return original(source, method, params);
+    });
+    const controller = new AbortController();
+    runtime.setContext({ signal: controller.signal });
+    const pending = (await runtime.createPage(3)).inspect();
+    void pending.catch(() => undefined);
+    try {
+      await entered;
+      const rejection = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      controller.abort();
+      await rejection;
+      const released = () => command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObjectGroup" && params.objectGroup?.startsWith("surf-wax-dom-snapshot:"));
+      expect(released()).toBe(false);
+      release();
+      await vi.waitFor(() => expect(released()).toBe(true));
+      expect(command.mock.calls.filter(([, method, params]) => method === "DOM.describeNode" && params.objectId?.startsWith("label-"))).toHaveLength(32);
+    } finally { release(); await runtime.abortSessions(); }
+  });
+
   it.each(["during-confirmation", "between-attempts"] as const)("resets text-paint retry budget after navigation %s", async (when) => {
     const { runtime, command } = harness();
     const original = command.getMockImplementation()!;
@@ -77,7 +183,8 @@ describe("frame tree discovery", () => {
       return original(source, method, params);
     });
     expect((await (await runtime.createPage(3)).snapshot()).snapshot).toContain('StaticText "Hidden item"');
-    expect(layouts).toBe(5);
+    // The stable retry has a final post-AX DOM confirmation.
+    expect(layouts).toBe(6);
     await runtime.abortSessions();
   });
   it.each([false, true])("rechecks text paint inputs and bounds retries when changing continuously: %s", async (unstable) => {
@@ -112,7 +219,8 @@ describe("frame tree discovery", () => {
       expect(layouts).toBe(4);
     } else {
       expect((await page.snapshot()).snapshot).toContain('StaticText "Hidden item"');
-      expect(layouts).toBe(3);
+      // One more capture verifies that the final AX and DOM views agree.
+      expect(layouts).toBe(4);
     }
     expect(axCaptures).toBe(2);
     await runtime.abortSessions();
@@ -441,10 +549,10 @@ describe("frame tree discovery", () => {
         return { nodes: [{ nodeId: "shared-id", backendDOMNodeId: params.frameId === "same" ? 8 : params.frameId === "cross" ? 9 : 7,
           role: { value: "button" }, name: { value: name }, childIds: [] }] };
       }
-      if (method === "DOMSnapshot.captureSnapshot") return { strings: ["1", "0", "visible", "auto"], documents: [{
-        nodes: { backendNodeId: [101, 102], parentIndex: [-1, -1] },
+      if (method === "DOMSnapshot.captureSnapshot") return { strings: ["1", "0", "visible", "auto", "IFRAME", "root", "same", "cross"], documents: [{
+        frameId: 5, nodes: { backendNodeId: [101, 102], parentIndex: [-1, -1], nodeType: [1, 1], nodeName: [4, 4] },
         layout: { nodeIndex: [0, 1], bounds: [[0, 0, 100, 100], [0, 0, 100, 100]], styles: [[hideSame ? 1 : 0, 2, 2, 2, 3], [0, 2, 2, 2, 3]] },
-      }] };
+      }, emptyFrameDocument(6), emptyFrameDocument(7)] };
       if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
       if (method === "Runtime.evaluate" && params.expression?.includes("({x:scrollX")) return { result: { value: { x: 0, y: 0, width: 100, height: 100, scale: 1 } } };
       return original(source, method, params);
@@ -495,12 +603,123 @@ describe("frame tree discovery", () => {
     await runtime.abortSessions();
   });
 
+  it("keeps frame scopes stable on attachment and replaces semantic IDs and refs when the target changes", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "Accessibility.getFullAXTree") {
+        const child = !!source.sessionId && !params.frameId;
+        return { nodes: [{ nodeId: "shared-ax", backendDOMNodeId: 8, ...(child ? { frameId: "cross" } : {}),
+          role: { value: "button" }, name: { value: child ? "Cross control" : params.frameId ? "Other control" : "Root control" }, childIds: [] }] };
+      }
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({x:scrollX")) return { result: { value: { x: 0, y: 0, width: 100, height: 100, scale: 1 } } };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    const initial: any = await page.inspect();
+    const root = initial.items.find((item: any) => item.line.includes('button "Root control"'));
+    runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "old-child", targetInfo: { type: "iframe", targetId: "cross" } });
+    const attached: any = await page.inspect({ since: initial.observationId });
+    expect(attached.mode).toBe("delta");
+    expect(attached.items.some((item: any) => item.id === root.id)).toBe(false);
+    const old = attached.items.find((item: any) => item.line.includes('button "Cross control"'));
+    expect(old).toMatchObject({ change: "added", ref: expect.any(String) });
+    runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "replacement-child", targetInfo: { type: "iframe", targetId: "cross" } });
+    const changed: any = await page.inspect({ since: attached.observationId });
+    expect(changed.documentId).toBe(initial.documentId);
+    expect(changed.items).toEqual(expect.arrayContaining([expect.objectContaining({ id: old.id, change: "removed" })]));
+    const replacement = changed.items.find((item: any) => item.line.includes('button "Cross control"') && item.change === "added");
+    expect(replacement).toMatchObject({ ref: expect.any(String) });
+    expect(replacement.id).not.toBe(old.id);
+    expect(replacement.ref).not.toBe(old.ref);
+    await expect(page.ref(old.ref).count()).rejects.toMatchObject({ code: "stale-ref" });
+    await runtime.abortSessions();
+  });
+
+  it.each([false, true])("uses the same actionable run-bound frame handle when the owner is AX-ignored: %s", async (ignored) => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "Accessibility.getFullAXTree") {
+        if (!source.sessionId && !params.frameId) return { nodes: [
+          { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["owner"] },
+          { nodeId: "owner", parentId: "root", backendDOMNodeId: 102, ignored, role: { value: "Iframe" }, name: { value: "Work item" }, childIds: [] },
+        ] };
+        return { nodes: [{ nodeId: "child", role: { value: "heading" }, name: { value: "Child document" }, childIds: [] }] };
+      }
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({x:scrollX")) return { result: { value: { x: 0, y: 0, width: 100, height: 100, scale: 1 } } };
+      return original(source, method, params);
+    });
+    runtime.setContext({ conversationId: "c", runId: "run" });
+    const page = await runtime.createPage(3);
+    runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "child", targetInfo: { type: "iframe", targetId: "cross" } });
+    const capture: any = await page.inspect();
+    const owner = capture.items.find((item: any) => ignored ? item.id.endsWith(":dom:102") : item.line.includes('Iframe "Work item"'));
+    expect(owner).toEqual(expect.any(Object));
+    const ref = /\[frameRef=(f[^\]]+)\]/.exec(owner.line)?.[1];
+    expect(ref).toEqual(expect.any(String));
+    expect(owner.line).not.toContain("[frame=");
+    const marker = capture.items.find((item: any) => item.line.includes(`- frame-document [frameRef=${ref}]`));
+    expect(marker.id).toMatch(/^f[0-9a-z]+:doc$/);
+    const listed: any = await runtime.listFrames(3);
+    expect(listed.frames.find((frame: any) => frame.url === "https://cross.test/").frameRef).toBe(ref);
+    // Different runs cannot reuse the handle; a refresh capture using
+    // context.runId shares it with tool calls whose logIdentity names that run.
+    runtime.setContext({ conversationId: "c", runId: "other-run" });
+    await expect(page.frameRef(ref!).getByRole("button").count()).rejects.toMatchObject({ code: "stale-frame" });
+    runtime.setContext({ conversationId: "c", logIdentity: { runId: "run", toolCallId: "call", toolCallIdCanonical: true } });
+    await expect(page.frameRef(ref!).getByRole("button").count()).resolves.toBe(1);
+    runtime.handleEvent({ tabId: 3 }, "Page.frameDetached", { frameId: "cross" });
+    await expect(page.frameRef(ref!).getByRole("button").count()).rejects.toMatchObject({ code: "stale-frame" });
+    await runtime.abortSessions();
+  });
+
+  it("binds snapshot frame handles to the context that began capture", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let release!: () => void, notify!: () => void, held = false;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { notify = resolve; });
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "Accessibility.getFullAXTree") {
+        if (!source.sessionId && !params.frameId && !held) { held = true; notify(); await hold; }
+        return { nodes: [] };
+      }
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({x:scrollX")) return { result: { value: { x: 0, y: 0, width: 100, height: 100, scale: 1 } } };
+      return original(source, method, params);
+    });
+    runtime.setContext({ conversationId: "c", runId: "initial-run" });
+    const page = await runtime.createPage(3);
+    const pending = page.inspect();
+    await entered;
+    runtime.setContext({ conversationId: "c", runId: "other-run" });
+    release();
+    const capture: any = await pending;
+    const marker = capture.items.find((item: any) => item.id.endsWith(":doc"));
+    const ref = /\[frameRef=(f[^\]]+)\]/.exec(marker.line)?.[1];
+    expect(ref).toEqual(expect.any(String));
+    await expect(page.frameRef(ref!).getByRole("button").count()).rejects.toMatchObject({ code: "stale-frame" });
+    runtime.setContext({ conversationId: "c", runId: "initial-run" });
+    await expect(page.frameRef(ref!).getByRole("button").count()).resolves.toBe(1);
+    await runtime.abortSessions();
+  });
+
   it("captures only the target session for a cross-process region", async () => {
     const { runtime, command } = harness();
     const original = command.getMockImplementation()!;
     command.mockImplementation(async (source, method, params = {}) => {
       if (method === "Accessibility.getFullAXTree") return { nodes: [{ nodeId: "target-ax", backendDOMNodeId: 8, role: { value: "button" }, name: { value: "Regional target" }, childIds: [] }] };
       if (method === "DOM.describeNode") return { node: { backendNodeId: 8 } };
+      if (method === "DOMSnapshot.captureSnapshot" && source.sessionId === "child") {
+        const snapshot = await original(source, method, params);
+        const doc = snapshot.documents[0]; snapshot.strings.push("BUTTON");
+        doc.nodes.backendNodeId.push(8); doc.nodes.parentIndex.push(-1); doc.nodes.nodeType.push(1); doc.nodes.nodeName.push(snapshot.strings.length - 1);
+        doc.layout.nodeIndex.push(doc.nodes.backendNodeId.length - 1); doc.layout.bounds.push([0, 0, 100, 20]); doc.layout.styles.push([0, 1, 1, 1, 2]);
+        return snapshot;
+      }
       if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
       if (method === "Runtime.evaluate" && params.expression?.includes("({x:scrollX")) return { result: { value: { x: 0, y: 0, width: 100, height: 100, scale: 1 } } };
       return original(source, method, params);
@@ -516,6 +735,91 @@ describe("frame tree discovery", () => {
       [{ tabId: 3, sessionId: "child" }, "Accessibility.getFullAXTree", { frameId: "nested" }],
     ]);
     await runtime.abortSessions();
+  });
+
+  it.each([
+    ["navigation", "snapshot"], ["navigation", "inspect"], ["target-detach", "snapshot"], ["target-detach", "inspect"],
+  ] as const)("discards the old observation when %s occurs during the final DOM capture of %s", async (event, mode) => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let release!: () => void, notify!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { notify = resolve; });
+    let rootLayouts = 0, rootAX = 0, changed = false;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOMSnapshot.captureSnapshot" && !source.sessionId && ++rootLayouts === 2) {
+        notify(); await hold;
+      }
+      if (method === "Accessibility.getFullAXTree") {
+        if (source.sessionId || params.frameId) return { nodes: [] };
+        rootAX++;
+        return { nodes: [{ nodeId: "root-ax", role: { value: "heading" }, name: { value: changed ? "New document" : "Old document" }, childIds: [] }] };
+      }
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({x:scrollX")) return { result: { value: { x: 0, y: 0, width: 100, height: 100, scale: 1 } } };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    if (event === "target-detach") runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "child", targetInfo: { type: "iframe", targetId: "cross" } });
+    const pending = mode === "snapshot" ? page.snapshot() : page.inspect();
+    try {
+      await entered;
+      changed = true;
+      if (event === "navigation") runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "root" } });
+      else runtime.handleEvent({ tabId: 3 }, "Target.detachedFromTarget", { sessionId: "child" });
+      release();
+      let text: string;
+      if (mode === "snapshot") text = (await pending as any).snapshot;
+      else {
+        // inspect pins the starting generation, so it rejects instead of
+        // publishing a new document under the old observation's identity.
+        await expect(pending).rejects.toMatchObject({ code: "stale-observation" });
+        const fresh: any = await page.inspect();
+        text = fresh.items.map((item: any) => item.line).join("\n");
+      }
+      expect(text).toContain('heading "New document"');
+      expect(text).not.toContain('heading "Old document"');
+      expect(rootAX).toBe(mode === "snapshot" ? 2 : 3);
+      expect(rootLayouts).toBe(mode === "snapshot" ? 4 : 6);
+    } finally { release(); await runtime.abortSessions(); }
+  });
+
+  it("aborts while resolving an AX-ignored visible control, before the CDP promise settles", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let release!: () => void, notify!: () => void;
+    const hold = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { notify = resolve; });
+    let resolved = false;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOMSnapshot.captureSnapshot" && !source.sessionId) {
+        const snapshot = await original(source, method, params);
+        const doc = snapshot.documents[0];
+        snapshot.strings.push("BUTTON");
+        doc.nodes.backendNodeId.push(500); doc.nodes.parentIndex.push(-1); doc.nodes.nodeType.push(1); doc.nodes.nodeName.push(snapshot.strings.length - 1);
+        doc.layout.nodeIndex.push(doc.nodes.backendNodeId.length - 1); doc.layout.bounds.push([0, 0, 100, 20]); doc.layout.styles.push([0, 1, 1, 1, 2]);
+        return snapshot;
+      }
+      if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+      if (method === "DOM.resolveNode" && params.backendNodeId === 500) {
+        notify(); await hold; resolved = true; return { object: { objectId: "late-control" } };
+      }
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      return original(source, method, params);
+    });
+    const controller = new AbortController();
+    runtime.setContext({ signal: controller.signal });
+    const pending = (await runtime.createPage(3)).inspect();
+    try {
+      await entered;
+      const rejection = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      controller.abort();
+      await rejection;
+      expect(resolved).toBe(false);
+      expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObjectGroup" && params.objectGroup?.startsWith("surf-wax-dom-snapshot:"))).toBe(false);
+      release();
+      await vi.waitFor(() => expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObjectGroup" && params.objectGroup?.startsWith("surf-wax-dom-snapshot:"))).toBe(true));
+    } finally { release(); await runtime.abortSessions(); }
   });
 
   it("does not return a capture after cancellation while AX is in flight", async () => {

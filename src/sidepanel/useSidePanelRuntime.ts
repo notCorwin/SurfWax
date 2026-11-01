@@ -49,8 +49,8 @@ export function useSidePanelRuntime(config: ModelConfig, systemPrompt: string | 
     }, logger, conversationId, () => executor.endRun(), async (signal) => {
       const prompt = await ensureConversationPrompt(logger, conversationId, systemPrompt);
       await ensureAutomaticContextSummary(logger, conversationId, config, signal, { forced: true, instructions: prompt.instructions + (goalMode ? GOAL_INSTRUCTIONS : ""), tools: goalMode ? GOAL_TOOLS : PROMPT_TOOLS });
-    }, systemPrompt, async (signal) => {
-      const observer = observePageRefreshes(executor, conversationId, signal);
+    }, systemPrompt, async (signal, runId) => {
+      const observer = observePageRefreshes(executor, conversationId, signal, runId);
       try {
         await executor.beginRun();
         signal.throwIfAborted();

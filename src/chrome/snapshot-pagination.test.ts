@@ -8,10 +8,50 @@ describe("semantic snapshot differences", () => {
     const before = [{ id: "a", line: "A" }, { id: "b", line: "B" }, { id: "c", line: "C" }, { id: "d", line: "D" }];
     const after = [{ id: "c", line: "new C", ref: "ref-c" }, { id: "a", line: "A" }, { id: "e", line: "E" }, { id: "d", line: "D" }];
     expect(diffSnapshot(before, after)).toEqual([
-      { id: "b", line: "B", change: "removed" },
+      { id: "b", line: "", change: "removed" },
       { id: "c", line: "new C", ref: "ref-c", change: "updated", after: null },
       { id: "e", line: "E", change: "added", after: "a" },
     ]);
+  });
+
+  it("paginates removals without exposing old text or refs and reconstructs mixed changes", () => {
+    const before = [
+      { id: "old-a", line: "hidden A ".repeat(1000), ref: "old-ref-a" },
+      { id: "old-b", line: "hidden B", ref: "old-ref-b" },
+      { id: "same", line: "kept", ref: "kept-ref" },
+      { id: "changed", line: "old value", ref: "changed-ref" },
+    ];
+    const after = [
+      { id: "changed", line: "new value", ref: "changed-ref" },
+      { id: "same", line: "kept", ref: "kept-ref" },
+      { id: "new", line: "new row", ref: "new-ref" },
+    ];
+    const changes = diffSnapshot(before, after);
+    expect(changes.slice(0, 2)).toEqual([
+      { id: "old-a", line: "", change: "removed" },
+      { id: "old-b", line: "", change: "removed" },
+    ]);
+    expect(JSON.stringify(changes)).not.toMatch(/hidden|old-ref/);
+    const delivered: SnapshotItem[] = [];
+    let position: SnapshotPosition | undefined;
+    do {
+      const page = paginateSnapshot(changes, { budget: 160, limit: 1, position });
+      expect(page.usedBytes).toBeLessThanOrEqual(160);
+      expect(page.fragments).toHaveLength(1);
+      expect(page.fragments[0]!.fragment).toBeUndefined();
+      delivered.push(...page.fragments);
+      position = page.next;
+    } while (position);
+    const reconstructed = before.map((item) => ({ ...item }));
+    for (const change of delivered) {
+      const index = reconstructed.findIndex((item) => item.id === change.id);
+      if (change.change === "removed") { expect(index).toBeGreaterThanOrEqual(0); reconstructed.splice(index, 1); continue; }
+      if (index >= 0) reconstructed.splice(index, 1);
+      const predecessor = change.after === null ? -1 : reconstructed.findIndex((item) => item.id === change.after);
+      expect(change.after === null || predecessor >= 0).toBe(true);
+      reconstructed.splice(predecessor + 1, 0, { id: change.id, line: change.line, ref: change.ref! });
+    }
+    expect(reconstructed).toEqual(after);
   });
 
   it("handles large unchanged snapshots and a change at the end", () => {
@@ -19,6 +59,22 @@ describe("semantic snapshot differences", () => {
     const after = before.map((item) => ({ ...item }));
     after[39_999]!.line = "updated";
     expect(diffSnapshot(before, after)).toEqual([{ id: "node-39999", line: "updated", change: "updated", after: "node-39998" }]);
+  });
+
+  it("represents a rotation with one move, in either direction", () => {
+    const before = Array.from({ length: 10_000 }, (_, index) => ({ id: `row-${index}`, line: `row ${index}` }));
+    expect(diffSnapshot(before, [...before.slice(1), before[0]!])).toEqual([
+      { ...before[0], change: "moved", after: "row-9999" },
+    ]);
+    expect(diffSnapshot(before, [before.at(-1)!, ...before.slice(0, -1)])).toEqual([
+      { ...before.at(-1), change: "moved", after: null },
+    ]);
+  });
+
+  it("uses a required update to perform a move without moving unchanged items", () => {
+    const before = [{ id: "a", line: "A" }, { id: "b", line: "B" }, { id: "c", line: "C" }];
+    const after = [{ id: "b", line: "changed B" }, before[0]!, before[2]!];
+    expect(diffSnapshot(before, after)).toEqual([{ id: "b", line: "changed B", change: "updated", after: null }]);
   });
 
   it("provides identities that reconstruct duplicate lines, embedded newlines and reordered content", () => {
@@ -99,7 +155,7 @@ describe("immutable semantic snapshot pagination", () => {
 
   it("preserves delta identity, order, and change metadata across pages", () => {
     const items: SnapshotItem[] = [
-      { id: "a", line: "alpha", change: "removed" },
+      { id: "a", line: "", change: "removed" },
       { id: "b", ref: "t3sabc123d0e1", line: "beta😀".repeat(80), change: "updated", after: "a" },
       { id: "c", line: "", change: "added", after: null },
     ];
