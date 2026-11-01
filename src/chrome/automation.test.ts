@@ -1390,6 +1390,23 @@ describe("AutomationRuntime", () => {
     await runtime.abortSessions();
   });
 
+  it("uses an unobscured point of a transformed target when its center is blocked", async () => {
+    const { runtime, command, calls } = harness();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.getContentQuads") return { quads: [[10, 10, 50, 30, 40, 50, 0, 30]] };
+      if (method === "DOM.getNodeForLocation" && params.x === 25 && params.y === 30) throw new Error("No node found at given location");
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    await expect(page.getByRole("button", { name: "Sign in" }).click()).resolves.toMatchObject({ performed: true });
+    const tested = command.mock.calls.filter(([, method]) => method === "DOM.getNodeForLocation").map(([, , params]) => params);
+    expect(tested).toEqual([{ x: 25, y: 30 }, { x: 15, y: 25 }]);
+    expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent").map(({ params }) => [params.x, params.y]))
+      .toEqual([[15, 25], [15, 25], [15, 25]]);
+    await runtime.abortSessions();
+  });
+
   it("re-resolves a locator when a framework replaces the node during hover actionability", async () => {
     const blocked = { connected: false, x: 0, y: 0, visible: false, stable: false, enabled: false, editable: false, receivesEvents: false, checked: false };
     const ready = { connected: true, x: 10, y: 12, visible: true, stable: true, enabled: true, editable: true, receivesEvents: true, checked: false };
@@ -1408,6 +1425,43 @@ describe("AutomationRuntime", () => {
     const page = await runtime.createPage(3);
     await expect(page.getByRole("button", { name: "Sign in" })[operation]()).rejects.toMatchObject({ code: "intercepted" });
     expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent")).toHaveLength(0);
+  });
+
+  it("identifies the element that intercepted a click", async () => {
+    const blocked = { connected: true, x: 10, y: 12, visible: true, stable: true, enabled: true, editable: true, receivesEvents: false, checked: false };
+    const { runtime, command, calls } = harness(undefined, [blocked]);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.getNodeForLocation") return { backendNodeId: 15, frameId: "root-frame" };
+      if (method === "DOM.describeNode" && params.backendNodeId === 15) return { node: { nodeName: "DIV", attributes: ["id", "cookie-dialog"] } };
+      if (method === "DOM.resolveNode" && params.backendNodeId === 15) return { object: { objectId: "blocker-node" } };
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration.startsWith("function(hit)")) return { result: { value: false } };
+      if (method === "Accessibility.getPartialAXTree" && params.backendNodeId === 15) return { nodes: [{ backendDOMNodeId: 15, role: { value: "dialog" }, name: { value: "Privacy settings" } }] };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    await expect(page.getByRole("button", { name: "Sign in" }).click()).rejects.toMatchObject({
+      code: "intercepted",
+      detail: { lastObservation: { state: { blocker: { reason: "hit-other-element", tag: "div", id: "cookie-dialog", role: "dialog", name: "Privacy settings", frameId: "root-frame" } } } },
+    });
+    expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent")).toHaveLength(0);
+  });
+
+  it("identifies an interceptor in the parent of an out-of-process frame", async () => {
+    const { runtime, command } = harness();
+    await runtime.createPage(3);
+    const session = (runtime as any).sessions.get(3);
+    const child = { tabId: 3, sessionId: "child" };
+    session.frames.set("child-frame", child);
+    (runtime as any).frameGeometry = vi.fn(async () => ({ parent: { tabId: 3 }, owner: { backendNodeId: 19 }, quad: [0, 0, 100, 0, 100, 100, 0, 100], size: { width: 100, height: 100 } }));
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.getNodeForLocation") return sessionIdOf(source) === "child" ? { backendNodeId: 7 } : { backendNodeId: 15, frameId: "parent-frame" };
+      if (method === "DOM.describeNode" && params.backendNodeId === 15) return { node: { nodeName: "DIV", attributes: ["id", "overlay"] } };
+      return original(source, method, params);
+    });
+    const blocker = await (runtime as any).clickBlocker(session, { ...session, debuggee: child }, "node-1", { x: 10, y: 12 });
+    expect(blocker).toMatchObject({ reason: "hit-other-element", tag: "div", id: "overlay", frameId: "parent-frame" });
   });
 
   it("fails immediately when a click target is missing", async () => {

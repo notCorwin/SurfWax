@@ -100,6 +100,8 @@ type ElementState = {
   checked: boolean | null;
   connected: boolean;
   quad?: number[];
+  blocker?: Record<string, unknown>;
+  pointerCandidates?: Array<{ x: number; y: number }>;
 };
 
 /** Map a normalized point into a CSS content quad, including perspective. */
@@ -385,6 +387,68 @@ export class AutomationRuntime {
   private readonly frameDocuments = new Map<string, FrameDocument>();
 
   private waitDiagnostic() { return this.lastWait; }
+
+  /** Describe the actual hit node, including a blocker in an embedding frame. */
+  private async clickBlocker(session: Session, targetSession: Session, objectId: string, position: { x: number; y: number }): Promise<Record<string, unknown> | undefined> {
+    let debuggee = targetSession.debuggee;
+    let expectedNodeId = (await this.describe(targetSession, objectId))?.backendNodeId;
+    let target = true;
+    while (true) {
+      if (position.x < 0 || position.y < 0) return { reason: "outside-viewport", x: position.x, y: position.y };
+      const metrics = await this.options.command(debuggee, "Page.getLayoutMetrics", {});
+      const viewport = metrics.cssLayoutViewport ?? metrics.layoutViewport;
+      let hit: any;
+      try {
+        hit = await this.options.command(debuggee, "DOM.getNodeForLocation", {
+          x: Math.floor(position.x + (viewport?.pageX ?? 0)), y: Math.floor(position.y + (viewport?.pageY ?? 0)),
+        });
+      } catch (error) {
+        if (error instanceof Error && /No node found at given location/i.test(error.message)) return { reason: "no-hit-node", x: position.x, y: position.y };
+        throw error;
+      }
+      let matches = hit.backendNodeId === expectedNodeId;
+      if (!matches && target && hit.backendNodeId) {
+        const group = `surf-wax-blocker:${crypto.randomUUID()}`;
+        try {
+          const resolved = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: hit.backendNodeId, objectGroup: group });
+          if (resolved.object?.objectId) {
+            const result = await this.options.command(debuggee, "Runtime.callFunctionOn", {
+              objectId, arguments: [{ objectId: resolved.object.objectId }], returnByValue: true,
+              functionDeclaration: "function(hit){for(let node=hit;node;node=node.parentNode || node.host) if(node===this)return true;return false}",
+            });
+            matches = result.result?.value === true;
+          }
+          if (!matches && hit.frameId) {
+            const node = await this.describe(targetSession, objectId);
+            if (node?.nodeName === "IFRAME") {
+              const owner = await this.options.command(debuggee, "DOM.getFrameOwner", { frameId: hit.frameId });
+              matches = owner.backendNodeId === expectedNodeId;
+            }
+          }
+        } finally { void this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined); }
+      }
+      if (!matches) {
+        if (!hit.backendNodeId) return { reason: "unknown-hit-node", x: position.x, y: position.y };
+        const node = (await this.options.command(debuggee, "DOM.describeNode", { backendNodeId: hit.backendNodeId })).node;
+        const ax = await this.options.command(debuggee, "Accessibility.getPartialAXTree", { backendNodeId: hit.backendNodeId, fetchRelatives: false }).catch(() => undefined);
+        const semantic = ax?.nodes?.find((item: any) => item.backendDOMNodeId === hit.backendNodeId) ?? ax?.nodes?.[0];
+        const attributes = Array.isArray(node?.attributes) ? node.attributes : [];
+        const idIndex = attributes.indexOf("id");
+        const id = idIndex >= 0 ? attributes[idIndex + 1] : undefined;
+        return { reason: "hit-other-element", ...(typeof node?.nodeName === "string" ? { tag: node.nodeName.toLowerCase().slice(0, 80) } : {}),
+          ...(typeof semantic?.role?.value === "string" ? { role: semantic.role.value.slice(0, 80) } : {}),
+          ...(typeof semantic?.name?.value === "string" ? { name: semantic.name.value.slice(0, 160) } : {}),
+          ...(typeof id === "string" && id ? { id: id.slice(0, 160) } : {}),
+          ...(typeof hit.frameId === "string" ? { frameId: hit.frameId } : {}), x: position.x, y: position.y };
+      }
+      if (!debuggee.sessionId) return undefined;
+      const frameId = [...session.frames].find(([, item]) => item.sessionId === debuggee.sessionId)?.[0];
+      if (!frameId) return undefined;
+      const { parent, owner, quad, size } = await this.frameGeometry(session, debuggee, frameId);
+      position = projectQuad(quad, position.x / size.width, position.y / size.height);
+      debuggee = parent; expectedNodeId = owner.backendNodeId; target = false;
+    }
+  }
 
   private recordAttempt(session: Session, locator: LocatorSpec, attempt: number, reason: string, candidates: Candidate[], state?: ElementState): void {
     const summary = candidates.slice(0, 5).map(({ role, name, tag, text, ref }) => ({ role, name, tag, text, ref }));
@@ -2360,15 +2424,10 @@ export class AutomationRuntime {
       if (scroll) this.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
       const rect = this.getBoundingClientRect();
       const style = getComputedStyle(this); let x = rect.left + rect.width / 2; let y = rect.top + rect.height / 2;
-      let hit = null;
-      if (pointer) {
-        hit = this.ownerDocument.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
-        while (hit?.shadowRoot) { const nested = hit.shadowRoot.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); if (!nested || nested === hit) break; hit = nested; }
-      }
       const disabled = (${DISABLED_STATE_SOURCE}).call(this);
       const editKind = (${TEXT_INPUT_KIND_SOURCE}).call(this);
       const editable = !disabled && !this.readOnly && this.getAttribute("aria-readonly") !== "true" && editKind !== "unsupported" && editKind !== "detached";
-      return { connected: true, x, y, width: rect.width, height: rect.height, visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none", stable: true, enabled: !disabled, editable, editKind, receivesEvents: Boolean(hit && (hit === this || this.contains(hit))), checked: (${CHECKED_STATE_SOURCE}).call(this).value };
+      return { connected: true, x, y, width: rect.width, height: rect.height, visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none", stable: true, enabled: !disabled, editable, editKind, receivesEvents: pointer, checked: (${CHECKED_STATE_SOURCE}).call(this).value };
     }`, [scroll, pointer]);
       if (!pointer || !value.connected || !value.visible) return value as ElementState;
       // CDP quads are relative to this debugger target's viewport and already
@@ -2376,7 +2435,12 @@ export class AutomationRuntime {
       const result = await this.options.command(session.debuggee, "DOM.getContentQuads", { objectId });
       const quad = (result.quads ?? []).find((candidate: unknown) => Array.isArray(candidate) && candidate.length === 8 && candidate.every(Number.isFinite));
       if (!quad) throw automationError("not-visible", { reason: "missing-content-quad" });
-      return { ...value, ...projectQuad(quad, 0.5, 0.5), quad } as ElementState;
+      // Project candidates from the actual content quad, not the axis-aligned
+      // DOM rect: rotated and transformed elements need the same coordinates
+      // for hit testing and for the eventual browser input.
+      const fractions = [0.5, 0.25, 0.75, 0.125, 0.875];
+      const pointerCandidates = fractions.flatMap((v) => fractions.map((u) => projectQuad(quad, u, v)));
+      return { ...value, ...pointerCandidates[0], quad, pointerCandidates } as ElementState;
     };
     const first = await read();
     if (!first.connected) return first;
@@ -2439,13 +2503,22 @@ export class AutomationRuntime {
         return undefined;
       });
       if (state?.connected && state.visible && state.receivesEvents && pointer)
-        state.receivesEvents = await this.frameReceivesEvents(session, targetSession, objectId, state);
+        await this.selectPointerPoint(session, targetSession, objectId, state);
       const reason = !state?.connected ? "detached" : !state.visible ? "not-visible" : stable && !state.stable ? "not-stable" : enabled && !state.enabled ? "disabled" : editable && !state.editable ? "not-editable" : pointer && !state.receivesEvents ? "intercepted" : "actionable";
       this.recordAttempt(session, spec, attempt, reason, candidates, state);
       if (spec.ref && !state?.connected) throw automationError("detached", { ref: spec.ref, reason: "node-removed" });
       if (editable && state?.connected && state.editKind === "unsupported") throw automationError("invalid-editable-target", { reason: "not-a-text-input" });
       if (state?.connected && state.visible && (!stable || state.stable) && (!enabled || state.enabled) && (!editable || state.editable) && (!pointer || state.receivesEvents)) return { objectId, targetSession, state };
-      if (failFast) throw automationError(reason, { locator: spec, lastObservation: this.waitDiagnostic() });
+      if (failFast) {
+        if (reason === "intercepted" && state) {
+          try { state.blocker = await this.clickBlocker(session, targetSession, objectId, state); }
+          catch (error) {
+            if (error instanceof Error && error.name === "AbortError") throw error;
+            // Diagnostics must not replace the original actionability error.
+          }
+        }
+        throw automationError(reason, { locator: spec, lastObservation: this.waitDiagnostic() });
+      }
       await delay(50, this.context.signal);
     }
   }
@@ -2456,7 +2529,7 @@ export class AutomationRuntime {
       throwIfAborted(this.context.signal);
       const state = await this.elementState(target.targetSession, target.objectId, true, true);
       if (!state.connected) throw automationError("detached", { reason: "bound-target-removed" });
-      if (state.visible && state.receivesEvents) state.receivesEvents = await this.frameReceivesEvents(session, target.targetSession, target.objectId, state);
+      if (state.visible && state.receivesEvents) await this.selectPointerPoint(session, target.targetSession, target.objectId, state);
       if (state.visible && state.stable && (!enabled || state.enabled) && state.receivesEvents) return { ...target, state };
       await delay(50, this.context.signal);
     }
@@ -2464,6 +2537,19 @@ export class AutomationRuntime {
 
   private async toRootPoint(session: Session, targetSession: Session, state: ElementState): Promise<{ x: number; y: number }> {
     return (await this.toRootPoints(session, targetSession, [state]))[0]!;
+  }
+
+  /** Find a point which really reaches the target through all frame boundaries. */
+  private async selectPointerPoint(session: Session, targetSession: Session, objectId: string, state: ElementState): Promise<void> {
+    const points = state.pointerCandidates ?? [state];
+    delete state.pointerCandidates;
+    for (const point of points) {
+      if (await this.frameReceivesEvents(session, targetSession, objectId, point)) {
+        state.x = point.x; state.y = point.y; state.receivesEvents = true;
+        return;
+      }
+    }
+    state.receivesEvents = false;
   }
 
   /** A hit inside an OOPIF is actionable only if every embedding frame receives that point. */
@@ -2501,7 +2587,16 @@ export class AutomationRuntime {
         const targetDocument = await documentId(objectId);
         const hitDocument = await documentId(found.object.objectId);
         if (!targetDocument || !hitDocument) throw automationError("state-unavailable", { reason: "missing-hit-document-identity" });
-        if (targetDocument !== hitDocument) {
+        if (targetDocument === hitDocument) {
+          // A same-document hit can still be an unrelated overlay. Traverse
+          // the composed ancestry so descendants inside shadow roots count.
+          const relation = await this.options.command(debuggee, "Runtime.callFunctionOn", {
+            objectId: found.object.objectId,
+            functionDeclaration: "function(target){ for (let node = this; node; node = node.parentNode || node.host) if (node === target) return true; return false; }",
+            arguments: [{ objectId }], returnByValue: true,
+          });
+          if (relation.result?.value !== true) return false;
+        } else {
           if (targetNode.nodeName !== "IFRAME" || !hit.frameId) return false;
           const owner = await this.options.command(debuggee, "DOM.getFrameOwner", { frameId: hit.frameId });
           if (owner.backendNodeId !== targetNode.backendNodeId) return false;
