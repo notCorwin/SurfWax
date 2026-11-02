@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { AutomationRuntime } from "./automation";
+import { AutomationRuntime, snapshotGeometry } from "./automation";
 import { encodeLogGraph } from "../log-graph";
 import { EventSubscriptions } from "./event-subscriptions";
 import { ProgramScope } from "./program";
@@ -13,6 +13,15 @@ import { SNAPSHOT_DELIVERY_COMMIT } from "./snapshot-wire";
 
 const inspectText = (value: any) => value.items.map((item: any) => item.line).join("\n");
 const deliver = (value: any) => { const lease = value[SNAPSHOT_DELIVERY_COMMIT]; expect(lease.begin()).toBe(true); lease.finish(); };
+
+it("invalidates frozen geometry when an element is reparented without moving its box", async () => {
+  const doc = { frameId: 0, scrollOffsetX: 0, scrollOffsetY: 0,
+    nodes: { backendNodeId: [1, 2, 3], parentIndex: [-1, 0, 0] },
+    layout: { nodeIndex: [0, 1, 2], bounds: [[0, 0, 100, 100], [0, 0, 10, 10], [0, 0, 10, 10]], styles: [[], [], []] } };
+  const capture = (document: typeof doc) => [{ debuggee: { tabId: 3 }, snapshot: { strings: ["root"], documents: [document] } }];
+  const changed = structuredClone(doc); changed.nodes.parentIndex[2] = 1;
+  expect(await snapshotGeometry(capture(doc))).not.toBe(await snapshotGeometry(capture(changed)));
+});
 
 function fillReferencePool(runtime: AutomationRuntime, count: number) {
   const session = (runtime as any).sessions.get(3);
@@ -50,7 +59,8 @@ function harness(
   // alone does not prove that a label is painted.
   const visibleSnapshot = () => {
     const strings = ["root", "#document", "#text", "1", "visible", "static", "none", "auto", "ltr", "horizontal-tb", "block", "16px", "rgb(0, 0, 0)", "0px", "border-box", "clip"];
-    const add = (value: string) => { const index = strings.indexOf(value); return index < 0 ? strings.push(value) - 1 : index; };
+    const stringIds = new Map(strings.map((value, index) => [value, index]));
+    const add = (value: string) => { let index = stringIds.get(value); if (index === undefined) { index = strings.length; strings.push(value); stringIds.set(value, index); } return index; };
     const style = [3, 4, 4, 4, 4, 5, 6, 6, 6, 6, 7, 6, 6, 6, 6, 6, 7, 8, 9, 10, 11, 12, 6, 13, 14, 6, 6, 15, 6, 6, 6];
     const nodes = { backendNodeId: [1], parentIndex: [-1], nodeType: [9], nodeName: [1], nodeValue: [-1], attributes: [[]] as number[][] };
     const layout = { nodeIndex: [0], bounds: [[0, 0, 1000, 1000]], styles: [[]] as number[][], text: [-1] };
@@ -130,7 +140,33 @@ function harness(
   const pressChord = vi.fn(async (_debuggee: any, _chord: string, _signal?: AbortSignal) => undefined);
   const runtime = new AutomationRuntime({
     chromeApi: { tabs: { query: async () => [{ id: 3 }], onCreated: tabsCreated }, downloads: { onCreated: downloadsCreated } } as never,
-    command,
+    command: async (source, method, params) => {
+      const response = await command(source, method, params);
+      if (method !== "DOMSnapshot.captureSnapshot") return response;
+      // Most fixtures exercise semantics, not viewport clipping. Supply the
+      // complete viewport fields which Chrome normally includes in a capture.
+      const snapshot = structuredClone(response);
+      for (const document of snapshot.documents ?? []) {
+        document.scrollOffsetX ??= 0;
+        document.scrollOffsetY ??= 0;
+        let node = document.nodes.nodeName.findIndex((name: number) => snapshot.strings[name] === "#document");
+        if (node < 0) {
+          node = document.nodes.backendNodeId.length;
+          let name = snapshot.strings.indexOf("#document");
+          if (name < 0) name = snapshot.strings.push("#document") - 1;
+          for (const [field, value] of [["backendNodeId", 2_000_000_000], ["parentIndex", -1], ["nodeType", 9], ["nodeName", name], ["nodeValue", -1], ["attributes", []]] as const)
+            if (Array.isArray(document.nodes[field])) document.nodes[field].push(value);
+        }
+        let layout = document.layout.nodeIndex.indexOf(node);
+        if (layout < 0) {
+          layout = document.layout.nodeIndex.push(node) - 1;
+          document.layout.bounds.push([0, 0, 100000, 100000]);
+          document.layout.styles.push([]);
+          if (Array.isArray(document.layout.text)) document.layout.text.push(-1);
+        } else document.layout.bounds[layout] = [0, 0, 100000, 100000];
+      }
+      return snapshot;
+    },
     pressChord,
     detach,
     onDispatch,

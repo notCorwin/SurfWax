@@ -100,14 +100,20 @@ test("preview exposes a later target without changing frozen pagination or delta
     expect(fragment?.line.length).toBeGreaterThan(256);
     firstLabelPrefix = fragment.line.slice(0, 255);
     expect(baseline.find((item) => item.line.includes(label))?.line.slice(0, 255)).toBe(firstLabelPrefix);
-    return beginDelta();
+    return call("click", { target: { by: "role", value: "button", name: "Unique action", exact: true } }, (outcome) => {
+      clicked = outcome;
+      expect(outcome).toMatchObject({ ok: true });
+      return beginDelta();
+    });
   };
   try {
     const target = await opened.context.newPage();
     await target.setViewportSize({ width: 1280, height: 900 });
     await target.goto(`${provider.origin}/target`);
     await target.evaluate((text) => {
-      document.body.innerHTML = '<style>p{width:800px;overflow-wrap:anywhere}button{position:fixed;top:4px;left:4px}</style><main><p></p><button>Unique action</button><output>STATUS_READY</output></main>';
+      // Keep the entire long text and status on screen; pagination is about the
+      // wire budget, not about exposing content beyond the current viewport.
+      document.body.innerHTML = '<style>p{margin-top:60px;width:1100px;font:1px/2px monospace;overflow-wrap:anywhere}button{position:fixed;top:4px;left:4px}</style><main><p></p><button>Unique action</button><output>STATUS_READY</output></main>';
       document.querySelector("p")!.textContent = text;
       document.querySelector("button")!.addEventListener("click", () => { document.querySelector("output")!.textContent = "STATUS_DONE"; });
     }, label);
@@ -125,11 +131,7 @@ test("preview exposes a later target without changing frozen pagination or delta
       expect(previewTarget).toMatchObject({ index: expect.any(Number), id: expect.any(String) });
       expect(value.lookahead.items.every((item: SemanticItem) => item.ref === undefined)).toBe(true);
       expect(value.items.some((item: SemanticItem) => item.id === previewTarget.id)).toBe(false);
-      return call("click", { target: { by: "role", value: "button", name: "Unique action", exact: true } }, (outcome) => {
-        clicked = outcome;
-        expect(outcome).toMatchObject({ ok: true });
-        return page(initial, initialPages, cursor!, afterInitial);
-      });
+      return page(initial, initialPages, cursor!, afterInitial);
     });
     responses.unshift(begin); responses.push(textResponse("Inspect the page"));
     await (await configure(opened.context, opened.page, provider.baseURL)).close();

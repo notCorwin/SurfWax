@@ -1,10 +1,10 @@
 import { expect } from "@playwright/test";
-import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents, type MockResponse } from "./fixtures";
+import { test, commandResponse, delayedResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents, type MockResponse } from "./fixtures";
 
 const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
 const button = (items: any[], name: string) => items.find((item) => item.line.includes(`button "${name}"`));
 
-test("snapshot excludes unreachable offscreen content but keeps scroll-reachable and partially visible content", async () => {
+test("snapshot excludes offscreen content until root, nested and frame scrolling makes it visible", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -116,6 +116,9 @@ test("snapshot excludes unreachable offscreen content but keeps scroll-reachable
     };
     const fixedRuns = await target.locator("#fixed-partial").evaluate(visibleRuns);
     const frameRuns = await frame.locator("#frame-partial").evaluate(visibleRuns);
+    let revealRoot!: () => void, revealNested!: () => void;
+    const rootGate = new Promise<void>((resolve) => { revealRoot = resolve; });
+    const nestedGate = new Promise<void>((resolve) => { revealNested = resolve; });
     let baseline: any;
     responses.push(
       commandResponse("inspect_page", { budget: 12000 }, "offscreen-before"),
@@ -129,6 +132,8 @@ test("snapshot excludes unreachable offscreen content but keeps scroll-reachable
         return commandResponse("click", { target: { ref: button(baseline.items, "Reveal offscreen")?.ref } }, "offscreen-reveal");
       },
       () => commandResponse("inspect_page", { since: baseline.observationId, budget: 12000 }, "offscreen-delta"),
+      delayedResponse(commandResponse("inspect_page", { budget: 12000 }, "scroll-root"), 0, rootGate),
+      ((request: any) => delayedResponse(commandResponse("inspect_page", { since: lastTool(request).observationId, budget: 12000 }, "scroll-nested"), 0, nestedGate) as any),
       textResponse("OFFSCREEN_OK"),
       textResponse("屏幕外内容测试"),
     );
@@ -136,6 +141,19 @@ test("snapshot excludes unreachable offscreen content but keeps scroll-reachable
     await target.bringToFront();
     await opened.page.getByTestId("composer-input").fill("Inspect the page and reveal offscreen content");
     await opened.page.getByTestId("composer-input").press("Enter");
+    const finished = async (id: string) => (await readEvents(opened.page)).find((event) => event.type === "tool.finished" && event.toolCallId === id);
+    await expect.poll(() => finished("offscreen-delta"), { timeout: 45_000 }).toBeTruthy();
+    await target.evaluate(() => window.scrollTo(0, 10000));
+    revealRoot();
+    await expect.poll(() => finished("scroll-root"), { timeout: 45_000 }).toBeTruthy();
+    await target.evaluate(() => {
+      window.scrollTo(0, 0);
+      document.getElementById("ltr")!.scrollLeft = 10000;
+      document.getElementById("rtl")!.scrollLeft = -10000;
+      document.getElementById("vertical")!.scrollLeft = -10000;
+      (document.getElementById("child-frame") as HTMLIFrameElement).contentWindow!.scrollTo(0, 10000);
+    });
+    revealNested();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("OFFSCREEN_OK", { timeout: 45_000 });
     const events = await readEvents(opened.page);
     const output = (id: string) => events.find((event) => ["tool.finished", "tool.failed"].includes(event.type) && event.toolCallId === id)?.output;
@@ -145,7 +163,14 @@ test("snapshot excludes unreachable offscreen content but keeps scroll-reachable
       expect(JSON.stringify(before.items)).not.toContain(name);
     }
     for (const name of ["Root right reachable", "Root below reachable", "LTR scroller reachable", "RTL scroller reachable", "Vertical scroller reachable", "Transformed fixed reachable", "Frame below reachable"]) {
-      expect(button(before.items, name)?.ref, name).toBeTruthy();
+      expect(JSON.stringify(before), name).not.toContain(name);
+    }
+    const previousBelow = button(output("scroll-root").items, "Root below reachable");
+    expect(previousBelow?.ref).toBeTruthy();
+    expect(output("scroll-nested").mode).toBe("delta");
+    expect(output("scroll-nested").items).toContainEqual(expect.objectContaining({ id: previousBelow.id, change: "removed" }));
+    for (const name of ["LTR scroller reachable", "RTL scroller reachable", "Vertical scroller reachable", "Frame below reachable"]) {
+      expect(button(output("scroll-nested").items, name), name).toMatchObject({ ref: expect.any(String), change: "added" });
     }
     for (const [id, runs] of [["offscreen-partial", fixedRuns], ["offscreen-frame-partial", frameRuns]] as const) {
       const partial = output(id)?.items?.find((item: any) => /\bbutton(?:\s|$)/.test(item.line) && item.ref);
@@ -166,7 +191,7 @@ test("snapshot excludes unreachable offscreen content but keeps scroll-reachable
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
-test("snapshot preserves content reachable by negative root scrolling in RTL documents", async () => {
+test("snapshot exposes RTL root content only after negative scrolling makes it visible", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -194,15 +219,214 @@ test("snapshot preserves content reachable by negative root scrolling in RTL doc
     expect(actual.minimum).toBeLessThan(0);
     expect(actual.hiddenRight).toBe(true);
     expect(actual.reachable).toBe(true);
-    responses.push(commandResponse("inspect_page", { budget: 12000 }, "rtl-snapshot"), textResponse("RTL_OFFSCREEN_OK"), textResponse("RTL 测试"));
+    let reveal!: () => void;
+    const gate = new Promise<void>((resolve) => { reveal = resolve; });
+    responses.push(commandResponse("inspect_page", { budget: 12000 }, "rtl-snapshot"),
+      delayedResponse(commandResponse("inspect_page", { budget: 12000 }, "rtl-scrolled"), 0, gate),
+      textResponse("RTL_OFFSCREEN_OK"), textResponse("RTL 测试"));
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     await target.bringToFront();
     await opened.page.getByTestId("composer-input").fill("Inspect the RTL page");
     await opened.page.getByTestId("composer-input").press("Enter");
+    await expect.poll(async () => (await readEvents(opened.page)).some((event) => event.type === "tool.finished" && event.toolCallId === "rtl-snapshot"), { timeout: 45_000 }).toBe(true);
+    await target.evaluate(() => window.scrollTo(-10000, 0));
+    reveal();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("RTL_OFFSCREEN_OK", { timeout: 45_000 });
     const events = await readEvents(opened.page);
     const result = events.find((event) => event.type === "tool.finished" && event.toolCallId === "rtl-snapshot")?.output;
-    expect(button(result.items, "RTL root reachable")?.ref).toBeTruthy();
-    expect(button(result.items, "RTL root hidden")).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain("RTL root reachable");
+    expect(JSON.stringify(result)).not.toContain("RTL root hidden");
+    const scrolled = events.find((event) => event.type === "tool.finished" && event.toolCallId === "rtl-scrolled")?.output;
+    expect(button(scrolled.items, "RTL root reachable")?.ref).toBeTruthy();
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});
+
+test("snapshot intersects iframe content with the visible parent viewport and ancestor clips", async () => {
+  const provider = await startProvider([
+    commandResponse("inspect_page", { budget: 12000 }, "frame-clips"),
+    textResponse("FRAME_CLIPS_OK"), textResponse("Frame clips"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.setViewportSize({ width: 1280, height: 720 });
+    await target.goto(`${provider.origin}/target`);
+    await target.evaluate(() => {
+      document.body.style.margin = "0";
+      document.body.innerHTML = `<iframe id="viewport-frame" style="position:fixed;left:-100px;top:40px;width:220px;height:100px;border:0"></iframe>
+        <div style="position:fixed;left:250px;top:40px;width:100px;height:100px;overflow:hidden"><iframe id="clipped-frame" style="width:240px;height:100px;border:0"></iframe></div>`;
+      (document.getElementById("viewport-frame") as HTMLIFrameElement).srcdoc = `<!doctype html><style>body{margin:0}</style>
+        <button style="position:absolute;left:10px;top:10px">VF_OUT</button>
+        <button style="position:absolute;left:115px;top:50px">VF_IN</button>`;
+      (document.getElementById("clipped-frame") as HTMLIFrameElement).srcdoc = `<!doctype html><style>body{margin:0}</style>
+        <button style="position:absolute;left:5px;top:10px">CLIP_IN</button>
+        <button style="position:absolute;left:130px;top:50px">CLIP_OUT</button>`;
+    });
+    await expect(target.frameLocator("#viewport-frame").locator("button")).toHaveCount(2);
+    await expect(target.frameLocator("#clipped-frame").locator("button")).toHaveCount(2);
+    await target.frameLocator("#clipped-frame").locator("body").evaluate(() => {
+      const nested = document.createElement("iframe");
+      nested.id = "nested-frame";
+      nested.style.cssText = "position:absolute;left:40px;top:65px;width:110px;height:30px;border:0";
+      nested.srcdoc = `<!doctype html><style>body{margin:0}button{position:absolute;top:0}</style><button style="left:0">D_IN</button><button style="left:70px">D_OUT</button>`;
+      document.body.append(nested);
+    });
+    await expect(target.frameLocator("#clipped-frame").frameLocator("#nested-frame").locator("button")).toHaveCount(2);
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("Inspect visible frame contents");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FRAME_CLIPS_OK", { timeout: 45_000 });
+    const events = await readEvents(opened.page);
+    const capture = events.find((event) => ["tool.finished", "tool.failed"].includes(event.type) && event.toolCallId === "frame-clips");
+    expect(capture).toMatchObject({ type: "tool.finished", output: { items: expect.any(Array) } });
+    const result = capture!.output;
+    expect(JSON.stringify(result)).toContain("VF_IN");
+    expect(JSON.stringify(result)).toContain("CLIP_IN");
+    expect(JSON.stringify(result)).toContain("D_IN");
+    expect(JSON.stringify(result)).not.toContain("VF_OUT");
+    expect(JSON.stringify(result)).not.toContain("CLIP_OUT");
+    expect(JSON.stringify(result)).not.toContain("D_OUT");
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});
+
+test("snapshot excludes ordinary elements completely covered by opaque content", async () => {
+  const provider = await startProvider([commandResponse("inspect_page", { budget: 12000 }, "opaque"), textResponse("OPAQUE_DONE"), textResponse("Opaque")]);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.setViewportSize({ width: 1280, height: 720 });
+    await target.goto(`${provider.origin}/target`);
+    await target.evaluate(() => {
+      document.body.innerHTML = `<button style="position:absolute;left:20px;top:30px">OPEN_BUTTON</button>
+        <button style="position:absolute;left:20px;top:120px">COVERED_BUTTON</button>
+        <p style="position:absolute;left:20px;top:150px">COVERED_TEXT</p>
+        <div style="position:absolute;left:0;top:100px;width:400px;height:160px;background:rgb(22,22,22);z-index:1;pointer-events:none"></div>`;
+    });
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("Inspect what is visible");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("OPAQUE_DONE", { timeout: 45_000 });
+    const result = (await readEvents(opened.page)).find((event) => event.type === "tool.finished" && event.toolCallId === "opaque")?.output;
+    expect(JSON.stringify(result)).toContain("OPEN_BUTTON");
+    expect(JSON.stringify(result)).not.toContain("COVERED_BUTTON");
+    expect(JSON.stringify(result)).not.toContain("COVERED_TEXT");
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});
+
+test("partially occluded button keeps its ref without exposing covered text", async () => {
+  const provider = await startProvider([commandResponse("inspect_page", { budget: 12000 }, "partial-opaque"), textResponse("PARTIAL_OPAQUE_DONE"), textResponse("Partial opaque")]);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.setViewportSize({ width: 1280, height: 720 });
+    await target.goto(`${provider.origin}/target`);
+    await target.evaluate(() => {
+      document.body.innerHTML = `<button style="position:absolute;left:20px;top:30px">CONTROL_VISIBLE</button>
+        <button id="partial" style="position:absolute;left:20px;top:120px;width:300px;height:40px">PARTIALLY_OCCLUDED_BUTTON</button>
+        <div id="cover" style="position:absolute;left:170px;top:120px;width:150px;height:40px;background:white;z-index:1;pointer-events:none"></div>`;
+    });
+    const geometry = await target.evaluate(() => {
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById("partial")!);
+      const text = range.getBoundingClientRect(), cover = document.getElementById("cover")!.getBoundingClientRect();
+      return { textLeft: text.left, textRight: text.right, coverLeft: cover.left, coverRight: cover.right };
+    });
+    expect(geometry.textLeft).toBeLessThan(geometry.coverLeft);
+    expect(geometry.textRight).toBeGreaterThan(geometry.coverLeft);
+    expect(geometry.textRight).toBeLessThanOrEqual(geometry.coverRight);
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("Inspect the visible controls");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("PARTIAL_OPAQUE_DONE", { timeout: 45_000 });
+    const result = (await readEvents(opened.page)).find((event) => event.type === "tool.finished" && event.toolCallId === "partial-opaque")?.output;
+    expect(JSON.stringify(result)).toContain("CONTROL_VISIBLE");
+    expect(JSON.stringify(result)).not.toContain("PARTIALLY_OCCLUDED_BUTTON");
+    expect(result.items.filter((item: any) => /\bbutton(?:\s|$)/.test(item.line) && typeof item.ref === "string")).toHaveLength(2);
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});
+
+test("snapshot retains visible text above an opaque negative z-index background", async () => {
+  const provider = await startProvider([commandResponse("inspect_page", { budget: 12000 }, "negative-z"), textResponse("NEGATIVE_Z_DONE"), textResponse("Negative z")]);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.setViewportSize({ width: 1280, height: 720 });
+    await target.goto(`${provider.origin}/target`);
+    await target.evaluate(() => {
+      document.body.innerHTML = `<p id="front" style="color:black">TEXT_ABOVE_NEGATIVE_BACKGROUND</p>
+        <div style="position:fixed;inset:0;z-index:-1;background:white;pointer-events:none"></div>
+        <p style="position:absolute;left:200px;top:60px;z-index:2;color:black">TEXT_ABOVE_LOWER_STACKING</p>
+        <div style="position:absolute;left:180px;top:60px;width:360px;height:70px;z-index:1;background:white;pointer-events:none"></div>`;
+    });
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("Inspect the page");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("NEGATIVE_Z_DONE", { timeout: 45_000 });
+    const result = (await readEvents(opened.page)).find((event) => event.type === "tool.finished" && event.toolCallId === "negative-z")?.output;
+    expect(JSON.stringify(result)).toContain("TEXT_ABOVE_NEGATIVE_BACKGROUND");
+    expect(JSON.stringify(result)).toContain("TEXT_ABOVE_LOWER_STACKING");
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});
+
+for (const kind of ["root", "nested", "opacity", "occlusion", "reparent"] as const) test(`a ${kind} change cannot continue a frozen snapshot with no-longer-visible content`, async () => {
+  test.setTimeout(90_000);
+  const responses: MockResponse[] = [];
+  const provider = await startProvider(responses);
+  const opened = await openExtension();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let cursor: string | undefined;
+  let initialResult: any;
+  try {
+    const target = await opened.context.newPage();
+    await target.setViewportSize({ width: 1280, height: 720 });
+    await target.goto(`${provider.origin}/target`);
+    await target.evaluate((scrollKind) => {
+      document.body.style.margin = "0";
+      const rows = Array.from({ length: 60 }, (_, i) => `<p>OLD_VISIBLE_ROW_${i}_${"x".repeat(60)}</p>`).join("");
+      const content = `${rows}<div style="height:1600px"></div><p>NEW_VISIBLE_AFTER_SCROLL</p>`;
+      document.body.innerHTML = `<style>p{font:6px/8px monospace;margin:0}</style>${scrollKind === "nested" ? `<main id="scroll-box" style="height:500px;overflow:auto">${content}</main>` : scrollKind === "reparent" ? `<main id="content" style="position:absolute;left:0;top:0;width:100%">${content}</main><main id="hidden" style="position:absolute;left:0;top:0;width:100%;opacity:0"></main>` : `<main id="content">${content}</main>`}`;
+      if (scrollKind === "occlusion") {
+        document.getElementById("content")!.style.cssText = "position:relative;z-index:2";
+        const cover = document.createElement("div");
+        cover.id = "cover";
+        cover.style.cssText = "position:fixed;inset:0;background:white;z-index:1;pointer-events:none";
+        document.body.append(cover);
+      }
+    }, kind);
+    responses.push(commandResponse("inspect_page", { budget: 400 }, "cursor-initial"),
+      ((request: any) => {
+        initialResult = lastTool(request);
+        cursor = initialResult.nextCursor;
+        return delayedResponse(commandResponse("inspect_page", { cursor, budget: 400 }, "cursor-after-scroll"), 0, gate) as any;
+      }), textResponse("SCROLL_CURSOR_DONE"), textResponse("Scroll cursor"));
+    await (await configure(opened.context, opened.page, provider.baseURL)).close();
+    await target.bringToFront();
+    await opened.page.getByTestId("composer-input").fill("Inspect and continue");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect.poll(() => initialResult, { timeout: 45_000 }).toBeDefined();
+    expect(initialResult).toMatchObject({ nextCursor: expect.any(String) });
+    const boxes = (elements: Element[]) => elements.map((element) => {
+      const rect = element.getBoundingClientRect();
+      return { text: element.textContent, x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    });
+    const originalBoxes = kind === "reparent" ? await target.locator("#content p").evaluateAll(boxes) : null;
+    await target.evaluate((scrollKind) => {
+      if (scrollKind === "nested") document.getElementById("scroll-box")!.scrollTop = 10000;
+      else if (scrollKind === "opacity") document.getElementById("content")!.style.opacity = "0";
+      else if (scrollKind === "occlusion") document.getElementById("cover")!.style.zIndex = "9999";
+      else if (scrollKind === "reparent") document.getElementById("hidden")!.append(...document.getElementById("content")!.childNodes);
+      else window.scrollTo(0, 10000);
+    }, kind);
+    if (kind === "reparent") expect(await target.locator("#hidden p").evaluateAll(boxes)).toEqual(originalBoxes);
+    release();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("SCROLL_CURSOR_DONE", { timeout: 45_000 });
+    const event = (await readEvents(opened.page)).find((item) => ["tool.finished", "tool.failed"].includes(item.type) && item.toolCallId === "cursor-after-scroll");
+    expect(event).toMatchObject({ type: "tool.failed", output: { ok: false, error: { code: "stale-observation" } } });
+    expect(JSON.stringify(event!.output)).not.toContain("OLD_VISIBLE_ROW_");
+  } finally { release(); await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

@@ -36,7 +36,7 @@ function harness() {
         backendNodeId.push(id, 100 + id); parentIndex.push(0, parent); nodeType.push(1, 3); nodeName.push(button, text); nodeValue.push(-1, value);
         layoutText.push(-1, value); bounds.push([0, 0, 100, 20], [0, 0, 100, 20]); styles.push(style, style);
       }
-      return { strings, documents: [{ frameId, nodes: { backendNodeId, parentIndex, nodeType, nodeName, nodeValue },
+      return { strings, documents: [{ frameId, scrollOffsetX: 0, scrollOffsetY: 0, nodes: { backendNodeId, parentIndex, nodeType, nodeName, nodeValue },
         layout: { nodeIndex: backendNodeId.map((_, index) => index), text: layoutText, bounds, styles } }] };
     }
     if (method === "Accessibility.getFullAXTree") return { nodes: [

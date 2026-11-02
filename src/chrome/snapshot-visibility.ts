@@ -1,8 +1,12 @@
+import { applySnapshotOcclusion } from "./snapshot-occlusion";
+
 /** Style order must match the DOMSnapshot.captureSnapshot request. */
-export const SNAPSHOT_COMPUTED_STYLES = ["opacity", "overflow-x", "overflow-y", "visibility", "content-visibility", "position", "transform", "filter", "perspective", "contain", "will-change", "backdrop-filter", "translate", "rotate", "scale", "clip-path", "clip", "direction", "writing-mode", "display", "font-size", "-webkit-text-fill-color", "text-shadow", "-webkit-text-stroke-width", "background-clip", "text-transform", "-webkit-text-security", "text-overflow", "-webkit-line-clamp", "mask-image", "-webkit-mask-box-image-source", "float", "white-space", "-webkit-user-modify"] as const;
+export const SNAPSHOT_COMPUTED_STYLES = ["opacity", "overflow-x", "overflow-y", "visibility", "content-visibility", "position", "transform", "filter", "perspective", "contain", "will-change", "backdrop-filter", "translate", "rotate", "scale", "clip-path", "clip", "direction", "writing-mode", "display", "font-size", "-webkit-text-fill-color", "text-shadow", "-webkit-text-stroke-width", "background-clip", "text-transform", "-webkit-text-security", "text-overflow", "-webkit-line-clamp", "mask-image", "-webkit-mask-box-image-source", "float", "white-space", "-webkit-user-modify", "background-color", "border-radius", "mix-blend-mode", "box-shadow", "outline-style", "z-index", "isolation", "container-type"] as const;
 
 type Interval = readonly [number, number];
-type Clip = { x: Interval; y: Interval };
+export type SnapshotClip = { x: Interval; y: Interval };
+export type SnapshotFrameOwner = { rect: SnapshotClip; clip: SnapshotClip; safe: boolean };
+type Clip = SnapshotClip;
 const infinite: Interval = [-Infinity, Infinity];
 const intersection = (a: Interval, b: Interval): Interval => [Math.max(a[0], b[0]), Math.min(a[1], b[1])];
 const intersects = (a: Interval, b: Interval) => a[1] > b[0] && a[0] < b[1] && b[1] > b[0];
@@ -43,24 +47,6 @@ function transparentColor(value: string): boolean {
   if (color === "transparent") return true;
   return /^rgba\([^()]*,\s*(?:0+(?:\.0*)?|\.0+)%?\s*\)$/.test(color)
     || /^(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\([^()]*\/\s*(?:0+(?:\.0*)?|\.0+)%?\s*\)$/.test(color);
-}
-
-type ScrollDirections = { x: "positive" | "negative" | "unknown"; y: "positive" | "unknown" };
-const unknownDirections: ScrollDirections = { x: "unknown", y: "unknown" };
-
-/** Reverse flex/grid and non-horizontal writing can move the scroll origin. */
-function scrollDirections(style: (index: number) => string): ScrollDirections {
-  const direction = style(17), writing = style(18), display = style(19);
-  if (writing !== "horizontal-tb" || !["block", "inline-block", "flow-root"].includes(display)
-    || (direction !== "ltr" && direction !== "rtl")) return unknownDirections;
-  return { x: direction === "rtl" ? "negative" : "positive", y: "positive" };
-}
-
-/** Overestimate reachable positions whenever scroll direction is uncertain. */
-function scrollRange(size: number, viewport: number, direction: "positive" | "negative" | "unknown"): Interval {
-  // CDP dimensions can be rounded to integral CSS pixels.
-  const distance = Math.max(0, size - viewport) + 1;
-  return [direction === "positive" ? 0 : -distance, direction === "negative" ? 0 : distance];
 }
 
 const zeroLength = /^[+-]?(?:0+(?:\.0*)?|\.0+)(?:px|%)?$/;
@@ -150,11 +136,11 @@ function emptyLegacyClip(value: string, position: string): boolean {
 
 /**
  * Index the visual state of DOM nodes from one target's bulk layout capture.
- * This deliberately excludes the viewport from clipping: content beyond the
- * viewport or a scrollable container can still be reached by scrolling.
+ * Clip against the current viewport and current scroll-container apertures.
+ * Content becomes visible only after the corresponding scroll occurs.
  * Missing layout does not imply a hidden subtree (e.g. display:contents).
  */
-export function snapshotVisibility(snapshot: any, options: { textPaintCandidates?: SnapshotTextPaintCandidate[] } = {}): Map<number, boolean> {
+export function snapshotVisibility(snapshot: any, options: { textPaintCandidates?: SnapshotTextPaintCandidate[]; partialFrames?: Set<number>; requireViewport?: boolean; frameClips?: ReadonlyMap<string, SnapshotClip>; frameOwners?: Map<number, SnapshotFrameOwner> } = {}): Map<number, boolean> {
   if (!Array.isArray(snapshot?.documents) || !Array.isArray(snapshot?.strings)) throw new Error("Invalid DOM snapshot");
   const result = new Map<number, boolean>();
   const strings: string[] = snapshot.strings;
@@ -184,38 +170,26 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
       });
     }
     const nodeName = (index: number) => strings[nodes.nodeName?.[index]]?.toUpperCase();
-    const styleFor = (nodeIndex: number, position: number) => {
-      const layoutIndex = layoutByNode.get(nodeIndex);
-      return layoutIndex === undefined ? "" : strings[layout.styles[layoutIndex]?.[position]] ?? "";
-    };
     const documentNode = nodes.backendNodeId.findIndex((_: unknown, index: number) => nodeName(index) === "#DOCUMENT");
     const documentLayout = layoutByNode.get(documentNode);
     const viewport: number[] = documentLayout === undefined ? [] : layout.bounds[documentLayout] ?? [];
-    // BODY direction and writing-mode can propagate to the viewport, even in
-    // standards mode. Only infer a directional range when both agree.
-    // A document type node is also named "html"; it has no computed style.
-    const isElement = (index: number) => nodes.nodeType?.[index] === undefined || nodes.nodeType[index] === 1;
-    const html = nodes.backendNodeId.findIndex((_: unknown, index: number) => isElement(index) && nodeName(index) === "HTML");
-    const body = nodes.backendNodeId.findIndex((_: unknown, index: number) => isElement(index) && nodeName(index) === "BODY");
-    const htmlDirections = scrollDirections((position) => styleFor(html, position));
-    const bodyDirections = scrollDirections((position) => styleFor(body, position));
-    const rootDirections = htmlDirections.x === bodyDirections.x && htmlDirections.y === bodyDirections.y ? htmlDirections : unknownDirections;
-    const viewportAxis = (axis: 0 | 1): { reachable: Interval; fixed: Interval; known: boolean } => {
-      const extent = viewport[axis + 2], content = axis === 0 ? document.contentWidth : document.contentHeight;
+    const viewportAxis = (axis: 0 | 1): { clip: Interval; known: boolean } => {
+      const extent = viewport[axis + 2];
       const offset = axis === 0 ? document.scrollOffsetX : document.scrollOffsetY;
       if (!(typeof extent === "number" && Number.isFinite(extent) && extent > 0
-        && typeof content === "number" && Number.isFinite(content) && content >= 0
-        && typeof offset === "number" && Number.isFinite(offset))) return { reachable: infinite, fixed: infinite, known: false };
-      const [minimum, maximum] = scrollRange(content, extent, axis === 0 ? rootDirections.x : rootDirections.y);
-      return { reachable: [minimum - 1, maximum + extent + 1], fixed: [offset - 1, offset + extent + 1], known: true };
+        && typeof offset === "number" && Number.isFinite(offset))) return { clip: infinite, known: false };
+      return { clip: [offset, offset + extent], known: true };
     };
     const horizontalViewport = viewportAxis(0), verticalViewport = viewportAxis(1);
-    const documentClip: Clip = { x: horizontalViewport.reachable, y: verticalViewport.reachable };
-    const viewportClip: Clip = { x: horizontalViewport.fixed, y: verticalViewport.fixed };
+    if (options.requireViewport && (!horizontalViewport.known || !verticalViewport.known)) throw new Error("Missing viewport geometry");
+    const frameId = strings[document.frameId];
+    const frameClip = typeof frameId === "string" ? options.frameClips?.get(frameId) : undefined;
+    const viewportClip: Clip = { x: frameClip ? intersection(horizontalViewport.clip, frameClip.x) : horizontalViewport.clip,
+      y: frameClip ? intersection(verticalViewport.clip, frameClip.y) : verticalViewport.clip };
+    const documentClip = viewportClip;
     // Pseudo highlights may recolor or resize text without changing the text
     // layout's computed styles. Candidates stay visible until the caller has
     // checked their actual selection and pseudo-element state.
-    const frameId = strings[document.frameId];
     // A visible ::first-letter has its own layout node, while the AX text row
     // still refers to the original #text node, potentially deep in the block.
     type FirstLetter = { text?: string; backendNodeId?: number; visibleFill: boolean; matched: boolean; fullyWithinClip: boolean };
@@ -316,7 +290,20 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
         // Zero-size structural containers may still contain visible overflow.
         // They have no visual box of their own, but must not hide descendants.
         const outsideClip = hasBounds && ((bounds[2]! > 0 && !intersects(x, clip.x)) || (bounds[3]! > 0 && !intersects(y, clip.y)));
-        const emptyFrame = (tagName === "IFRAME" || tagName === "FRAME") && hasBounds && (bounds[2]! <= 0 || bounds[3]! <= 0);
+        const isFrame = tagName === "IFRAME" || tagName === "FRAME";
+        if (isFrame && hasBounds && typeof nodes.backendNodeId[index] === "number") options.frameOwners?.set(nodes.backendNodeId[index], {
+          rect: { x: clientX, y: clientY }, clip: { x: intersection(clip.x, clientX), y: intersection(clip.y, clientY) },
+          safe: horizontalViewport.known && verticalViewport.known && axisAligned && client.length >= 4 && offset.length >= 4
+            && client.every(Number.isFinite) && offset.every(Number.isFinite),
+        });
+        // Child documents have their own coordinate system. Without a proof
+        // mapping a partial owner clip into that system, suppress its subtree
+        // rather than exposing content hidden outside the parent's aperture.
+        const partialFrame = isFrame && hasBounds && (x[0] < clip.x[0] || x[1] > clip.x[1] || y[0] < clip.y[0] || y[1] > clip.y[1]);
+        const emptyFrame = isFrame && hasBounds && (bounds[2]! <= 0 || bounds[3]! <= 0);
+        if (partialFrame && !outsideClip && !transparent && !contentHidden && !emptyClip
+          && visibility !== "hidden" && visibility !== "collapse" && bounds[2]! > 0 && bounds[3]! > 0 && typeof nodes.backendNodeId[index] === "number")
+          options.partialFrames?.add(nodes.backendNodeId[index]);
         const isText = nodes.nodeType?.[index] === 3;
         const pseudoType = tagName === "::BEFORE" ? "before" : tagName === "::AFTER" ? "after" : undefined;
         const pseudoText = pseudoType ? strings[layout.text?.[layoutIndex]] : undefined;
@@ -324,7 +311,11 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
         const fontSize = style(20), fill = style(21), shadow = style(22), stroke = style(23);
         const zeroText = isPaintedText && fontSize === "0px" && hasBounds && bounds[2] === 0 && bounds[3] === 0 && !paintedTextRisk && !svg;
         const transparentText = isPaintedText && transparentColor(fill) && shadow === "none" && stroke === "0px" && !paintedTextRisk && !svg;
-        visible = !transparent && !contentHidden && !emptyClip && visibility !== "hidden" && visibility !== "collapse" && !outsideClip && !emptyFrame;
+        // Live text-paint checks run within the child frame and cannot see an
+        // inherited parent aperture. Never expose the rest of a crossing run.
+        const crossesFrameClip = isPaintedText && frameClip && hasBounds
+          && (x[0] < frameClip.x[0] || x[1] > frameClip.x[1] || y[0] < frameClip.y[0] || y[1] > frameClip.y[1]);
+        visible = !transparent && !contentHidden && !emptyClip && visibility !== "hidden" && visibility !== "collapse" && !outsideClip && !emptyFrame && !crossesFrameClip;
         if (tagName === "::FIRST-LETTER" && firstLetter && firstLetter.backendNodeId === nodes.backendNodeId[index]) {
           firstLetter.fullyWithinClip = visible && !textClipRisk && axisAligned && hasBounds && bounds[2]! > 0 && bounds[3]! > 0
             && bounds[0]! >= clip.x[0] && bounds[1]! >= clip.y[0]
@@ -385,27 +376,11 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
           }
         }
         const overflowX = style(1), overflowY = style(2);
-        const scroll: number[] = layout.scrollRects?.[layoutIndex] ?? [];
-        const directions = scrollDirections(style);
-        const clipAxis = (axis: 0 | 1, overflow: string, parentClip: Interval, boundsAxis: Interval): Interval => {
-          if (overflow === "hidden" || overflow === "clip") return intersection(parentClip, boundsAxis);
-          if (overflow === "auto" || overflow === "scroll") {
-            const exposed = intersection(parentClip, boundsAxis);
-            if (!intersects(boundsAxis, parentClip)) return [0, 0];
-            // Rectangles are unavailable or unreliable under rotated and
-            // perspective transforms: retain the existing conservative view.
-            if (!axisAligned || client.length < 4 || offset.length < 4 || scroll.length < 4
-              || !client.every(Number.isFinite) || !offset.every(Number.isFinite) || !scroll.every(Number.isFinite)
-              || offset[axis + 2]! <= 0 || client[axis + 2]! < 0 || scroll[axis + 2]! < 0) return infinite;
-            const scale = bounds[axis + 2]! / offset[axis + 2]!;
-            if (!(scale > 0 && Number.isFinite(scale))) return infinite;
-            const [minimum, maximum] = scrollRange(scroll[axis + 2]!, client[axis + 2]!, axis === 0 ? directions.x : directions.y);
-            const current = scroll[axis]!;
-            return [exposed[0] + (minimum - current) * scale - 1, exposed[1] + (maximum - current) * scale + 1];
-          }
+        const clipAxis = (overflow: string, parentClip: Interval, boundsAxis: Interval): Interval => {
+          if (["hidden", "clip", "auto", "scroll"].includes(overflow)) return intersection(parentClip, boundsAxis);
           return parentClip;
         };
-        if (hasBounds) clip = { x: clipAxis(0, overflowX, clip.x, clientX), y: clipAxis(1, overflowY, clip.y, clientY) };
+        if (hasBounds) clip = { x: clipAxis(overflowX, clip.x, clientX), y: clipAxis(overflowY, clip.y, clientY) };
         const establishesFixed = [style(6), style(7), style(8), style(11), style(12), style(13), style(14)].some((value) => value !== "" && value !== "none")
           || /\b(layout|paint|strict|content)\b/.test(style(9))
           || /\b(transform|translate|rotate|scale|filter|perspective|contain|backdrop-filter)\b/.test(style(10));
@@ -418,5 +393,6 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
       contexts[index] = { transparent, contentHidden, emptyClip, clip, absoluteClip, fixedClip, axisAligned, paintedTextRisk, textClipRisk, hardTextClipRisk, ellipsis, svg, firstLetter };
     }
   }
+  applySnapshotOcclusion(snapshot, result);
   return result;
 }

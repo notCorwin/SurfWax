@@ -100,7 +100,7 @@ test("restores long refresh metadata and continues a bounded snapshot in the sam
       documents++;
       const rows = Array.from({ length: 160 }, (_, index) => `<p>Record ${index}: ${"content ".repeat(14)}</p>`).join("");
       const body = documents === 1 ? "<!doctype html><title>Before</title><main>Initial</main>"
-        : `<!doctype html><title>${completeTitle}</title><main>${rows}<p>REFRESH_PAGE_LAST_ITEM</p><p id="loaded">not loaded</p></main><img src="/refresh-pagination-held"><script>window.addEventListener('load', () => {document.querySelector('#loaded').textContent = 'REFRESH_PAGE_LOADED_MARKER'})</script>`;
+        : `<!doctype html><title>${completeTitle}</title><style>p{font:1px/3px monospace;margin:0}</style><main>${rows}<p>REFRESH_PAGE_LAST_ITEM</p><p id="loaded">not loaded</p></main><img src="/refresh-pagination-held"><script>window.addEventListener('load', () => {document.querySelector('#loaded').textContent = 'REFRESH_PAGE_LOADED_MARKER'})</script>`;
       await route.fulfill({ contentType: "text/html; charset=utf-8", body });
     });
     await target.route("**/refresh-pagination-held", async (route) => { await loadMayFinish; await route.fulfill({ status: 204, body: "" }); });

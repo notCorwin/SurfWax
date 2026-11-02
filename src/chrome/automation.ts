@@ -13,7 +13,7 @@ import { createSnapshotDomIndex } from "./snapshot-dom-index";
 import { snapshotRenderOrder } from "./snapshot-render-order";
 import { snapshotSlottedNodes } from "./snapshot-slot-index";
 import { sameDOMSnapshot } from "./snapshot-consistency";
-import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
+import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility, type SnapshotClip, type SnapshotFrameOwner, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
 import { projectTextPaint, sameTextPaintCandidates, TEXT_PAINT_CACHE_LOOKUP_SOURCE, TEXT_PAINT_CACHE_REGISTER_SOURCE, type TextPaintEvidence } from "./snapshot-text-paint";
 import { axEllipsisCandidate, confirmAxEllipsis, type AxEllipsisCandidate } from "./snapshot-ax-ellipsis";
 import { AX_ELLIPSIS_GEOMETRY_SOURCE } from "./snapshot-ellipsis-geometry";
@@ -57,7 +57,19 @@ type InspectSnapshot = {
   id: string; session: Session; generation: number; frameRevision: number; conversationId?: string; runId?: string;
   record: ObservationRecord; source: SnapshotItem[]; mode: "full" | "delta"; reset?: string;
   expected?: SnapshotPosition; eligibleForBaseline: boolean; delivery?: symbol;
+  geometry: string; geometrySources: Debuggee[];
 };
+
+/** A continuation may reuse frozen rows only while their capture geometry is current. */
+export async function snapshotGeometry(layouts: Array<{ debuggee: Debuggee; snapshot: any }>): Promise<string> {
+  const data = layouts.map(({ debuggee, snapshot }) => [debuggee.sessionId ?? "", (snapshot.documents ?? []).map((doc: any) => [
+    snapshot.strings?.[doc.frameId], doc.scrollOffsetX, doc.scrollOffsetY, doc.nodes?.backendNodeId, doc.nodes?.parentIndex,
+    doc.layout?.nodeIndex, doc.layout?.bounds, doc.layout?.clientRects, doc.layout?.offsetRects, doc.layout?.scrollRects,
+    doc.layout?.styles?.map((style: number[]) => style.map((index) => snapshot.strings?.[index])), doc.layout?.paintOrders, doc.textBoxes?.bounds,
+  ])]);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(data)));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 export type FindOptions = { cursor?: string; limit?: number };
 type SearchSnapshot = {
   id: string; tabId: number; generation: number; session: Session; key: string;
@@ -921,6 +933,11 @@ export class AutomationRuntime {
           || this.observations.get(snapshot.id) !== snapshot.record)
           throw automationError("stale-observation", { reason: "expired-or-mismatched-cursor" });
         saved = snapshot;
+        const currentGeometry = await Promise.all(saved.geometrySources.map(async (debuggee) => ({ debuggee,
+          snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true, includePaintOrder: true }) })));
+        guard();
+        if (await snapshotGeometry(currentGeometry) !== saved.geometry)
+          throw automationError("stale-observation", { reason: "snapshot-geometry-changed" });
         this.rememberObservation(saved.record);
         position = { index: Number(match[2]), charOffset: Number(match[3]) };
         this.inspectionSnapshots.delete(saved.id); this.inspectionSnapshots.set(saved.id, saved);
@@ -956,7 +973,7 @@ export class AutomationRuntime {
         position = { index, charOffset: 0 };
         const record: ObservationRecord = { session, observationId, tabId, documentId: generation, ...captured, lines, viewport, scopeKey, incomplete: true };
         this.rememberObservation(record);
-        saved = { id: observationId, session, generation, frameRevision: captured.frameRevision, conversationId, runId, record, source, mode: changes ? "delta" : "full",
+        saved = { id: observationId, session, generation, frameRevision: captured.frameRevision, conversationId, runId, record, source, mode: changes ? "delta" : "full", geometry: captured.geometry, geometrySources: captured.geometrySources,
           ...(previous?.incomplete ? { reset: "previous-output-truncated" } : {}), expected: position, eligibleForBaseline: index === 0 };
         this.inspectionSnapshots.set(saved.id, saved);
         while (this.inspectionSnapshots.size > 32) this.inspectionSnapshots.delete(this.inspectionSnapshots.keys().next().value!);
@@ -3108,7 +3125,7 @@ export class AutomationRuntime {
     }
   }
 
-  private async captureSnapshot(session: Session, region?: LocatorSpec): Promise<{ url: string; title: string; lines: SnapshotLine[]; frameRevision: number; regionIdentity?: string }> {
+  private async captureSnapshot(session: Session, region?: LocatorSpec): Promise<{ url: string; title: string; lines: SnapshotLine[]; frameRevision: number; regionIdentity?: string; geometry: string; geometrySources: Debuggee[] }> {
     const signal = this.context.signal;
     const frameContext = { conversationId: this.context.conversationId, runId: this.context.logIdentity?.runId ?? this.context.runId };
     const guard = () => {
@@ -3421,8 +3438,9 @@ export class AutomationRuntime {
       };
       let placeholderItems: PlaceholderCandidate[] = [], placeholderBefore = new Map<string, PlaceholderProof>();
       type TextProjection = { full: string; text: string };
-      let trees: Array<{ debuggee: Debuggee; frameId: string | undefined; depth: number; tree: any; visibility: Map<number, boolean>; textProjections: Map<number, TextProjection>; unknownText: Set<number>; paintEvidence: Map<number, TextPaintEvidence>; candidates: SnapshotTextPaintCandidate[]; snapshot: any }>;
+      let trees: Array<{ debuggee: Debuggee; frameId: string | undefined; depth: number; tree: any; visibility: Map<number, boolean>; partialFrames: Set<number>; textProjections: Map<number, TextProjection>; unknownText: Set<number>; paintEvidence: Map<number, TextPaintEvidence>; candidates: SnapshotTextPaintCandidate[]; snapshot: any }>;
       let info: { url: string; title: string };
+      const frameClips = new Map<string, SnapshotClip>();
       try {
         // A scoped request discovers its frame membership from a preliminary
         // DOM capture before waiting for document loads. The subsequent D0
@@ -3431,7 +3449,7 @@ export class AutomationRuntime {
         const captureLayout = async (debuggee: Debuggee): Promise<Layout> => {
           if (debuggee.sessionId) await session.frameReady.get(debuggee.sessionId);
           frameGuard();
-          return { debuggee, snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true }) };
+          return { debuggee, snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true, includePaintOrder: true }) };
         };
         const selectRegionFrames = async (layouts: Layout[], allowCapture: boolean) => {
           if (!regionNode || !regionDebuggee) return { frameId: undefined, selected: frames };
@@ -3564,11 +3582,51 @@ export class AutomationRuntime {
           const verified = await waitForCapture(selectRegionFrames(initialLayouts, false));
           if (verified.frameId !== regionFrameId || verified.selected.length !== capturedFrames.length || verified.selected.some((item, index) => item !== capturedFrames[index])) continue;
         }
+        // Map each parent's visible iframe aperture into the child document's
+        // coordinates before interpreting any child content. Work from parents
+        // to children so nested frame clips compose.
+        const parentVisibility = new Map<string, { state: Map<number, boolean>; partialFrames: Set<number>; frameOwners: Map<number, SnapshotFrameOwner> }>();
+        for (const item of [...relevantFrames].sort((a, b) => a.depth - b.depth)) {
+          const childId = item.frameId;
+          if (!childId || childId === session.rootFrameId) continue;
+          const parentId = session.frameParents.get(childId), parent = parentId && session.frames.get(parentId);
+          const parentLayout = parent && initialLayouts.find((entry) => sameDebuggee(entry.debuggee, parent));
+          const childLayout = initialLayouts.find((entry) => sameDebuggee(entry.debuggee, item.debuggee));
+          if (!parent || !parentLayout || !childLayout) throw automationError("snapshot-unavailable", { reason: "missing-frame-parent", frameId: childId });
+          const owner = await this.options.command(parent, "DOM.getFrameOwner", { frameId: childId });
+          frameGuard();
+          let evidence = parentVisibility.get(parentId!);
+          if (!evidence) {
+            const partialFrames = new Set<number>();
+            const frameOwners = new Map<number, SnapshotFrameOwner>();
+            const state = snapshotVisibility(parentLayout.snapshot, { frameClips, frameOwners, partialFrames, requireViewport: true });
+            evidence = { state, partialFrames, frameOwners };
+            parentVisibility.set(parentId!, evidence);
+          }
+          const { state, partialFrames, frameOwners } = evidence;
+          const geometry = frameOwners.get(owner?.backendNodeId);
+          if (state.get(owner?.backendNodeId) !== true) continue;
+          if (!partialFrames.has(owner.backendNodeId)) continue;
+          const doc = childLayout.snapshot.documents?.find((entry: any) => childLayout.snapshot.strings?.[entry.frameId] === childId);
+          const root = doc?.nodes?.nodeName?.findIndex((name: number) => childLayout.snapshot.strings?.[name] === "#document");
+          const index = doc?.layout?.nodeIndex?.indexOf(root), bounds = index >= 0 ? doc.layout.bounds[index] : undefined;
+          const offsets = [doc?.scrollOffsetX, doc?.scrollOffsetY];
+          if (!geometry?.safe || !Array.isArray(bounds) || bounds.length < 4 || !bounds.every(Number.isFinite)
+            || !offsets.every((value) => typeof value === "number" && Number.isFinite(value)))
+            throw automationError("snapshot-unavailable", { reason: "partially-clipped-frame", frameId: childId });
+          const mapped = ([start, end]: readonly [number, number], [left, right]: readonly [number, number], size: number, offset: number): readonly [number, number] => {
+            const scale = (right - left) / size;
+            if (!(size > 0 && Number.isFinite(scale) && scale > 0)) throw automationError("snapshot-unavailable", { reason: "partially-clipped-frame", frameId: childId });
+            return [offset + (start - left) / scale, offset + (end - left) / scale];
+          };
+          frameClips.set(childId, { x: mapped(geometry.clip.x, geometry.rect.x, bounds[2], offsets[0]), y: mapped(geometry.clip.y, geometry.rect.y, bounds[3], offsets[1]) });
+        }
         placeholderItems = [];
         const initialPaint = new Map(initialLayouts.map(({ debuggee, snapshot }) => {
           const candidates: SnapshotTextPaintCandidate[] = [];
-          const visibility = snapshotVisibility(snapshot, { textPaintCandidates: candidates });
-          return [debuggee.sessionId ?? "", { visibility, candidates }] as const;
+          const partialFrames = new Set<number>();
+          const visibility = snapshotVisibility(snapshot, { textPaintCandidates: candidates, partialFrames, frameClips, requireViewport: true });
+          return [debuggee.sessionId ?? "", { visibility, candidates, partialFrames }] as const;
         }));
         for (const item of capturedFrames) {
           const frameId = item.frameId ?? session.rootFrameId;
@@ -3601,7 +3659,7 @@ export class AutomationRuntime {
             ? await this.options.command(item.debuggee, "Accessibility.getFullAXTree", allDebuggees.includes(item) ? {} : { frameId: item.frameId })
             : undefined }))),
           Promise.all(initialLayouts.map(async ({ debuggee, snapshot }) => {
-            const { candidates, visibility } = initialPaint.get(debuggee.sessionId ?? "")!;
+            const { candidates, visibility, partialFrames } = initialPaint.get(debuggee.sessionId ?? "")!;
             const textProjections = new Map<number, TextProjection>();
             const unknownText = new Set<number>();
             const paintEvidence = new Map<number, TextPaintEvidence>();
@@ -3713,7 +3771,7 @@ export class AutomationRuntime {
                 if (dispatched) await this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup }).catch(() => undefined);
               }
             }));
-            return { debuggee, visibility, textProjections, unknownText, paintEvidence, candidates, snapshot };
+            return { debuggee, visibility, partialFrames, textProjections, unknownText, paintEvidence, candidates, snapshot };
           })),
           this.pageValue(session.tabId, "({url:location.href,title:document.title})") as Promise<{ url: string; title: string }>,
         ]));
@@ -3745,6 +3803,7 @@ export class AutomationRuntime {
       // AX tree alone cannot tell us whether any host in the frame chain is
       // hidden. Reuse the per-target layout indexes for all host elements.
       const visibilityBySession = new Map(trees.map(({ debuggee, visibility }) => [debuggee.sessionId ?? "", visibility]));
+      const partialFramesBySession = new Map(trees.map(({ debuggee, partialFrames }) => [debuggee.sessionId ?? "", partialFrames]));
       const owners = new Map<string, boolean>();
       const childFramesByOwner = new Map<string, string>();
       if (relevantFrames.some((item) => item.frameId)) {
@@ -3768,6 +3827,8 @@ export class AutomationRuntime {
             const parent = parentId && session.frames.get(parentId);
             if (!parent) throw automationError("snapshot-unavailable", { reason: "missing-frame-parent", frameId });
             const owner = await this.options.command(parent, "DOM.getFrameOwner", { frameId });
+            if (partialFramesBySession.get(parent.sessionId ?? "")?.has(owner?.backendNodeId) && !frameClips.has(frameId))
+              throw automationError("snapshot-unavailable", { reason: "partially-clipped-frame", frameId });
             const visible = visibilityBySession.get(parent.sessionId ?? "")?.get(owner?.backendNodeId);
             if (visible === undefined) throw automationError("snapshot-unavailable", { reason: "missing-frame-owner-visibility", frameId });
             owners.set(frameId, visible);
@@ -4941,7 +5002,7 @@ export class AutomationRuntime {
             retriedUnstableCapture = true; continue;
           }
           confirmations = await waitForCapture(Promise.all(relevantDebuggees.map(async ({ debuggee }) => ({ debuggee,
-            snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true }) }))));
+            snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true, includePaintOrder: true }) }))));
           if (changed()) continue;
           if (!await waitForCapture(framesAreReady())) { await delay(50, signal); continue; }
         } catch (error) {
@@ -4973,7 +5034,7 @@ export class AutomationRuntime {
             if (value !== undefined) visibility.set(id, value);
           }
           if (initial && visibility && sameDOMSnapshot(relevantDocuments(initial.snapshot), relevantDocuments(confirmation.snapshot),
-            { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true })) continue;
+            { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true, frameClips })) continue;
           unstable = true;
           const after: SnapshotTextPaintCandidate[] = [];
           try { snapshotVisibility(confirmation.snapshot, { textPaintCandidates: after }); }
@@ -4985,7 +5046,7 @@ export class AutomationRuntime {
           retriedUnstableCapture = true;
           continue;
         }
-        return { ...info, lines, frameRevision, ...(regionNode ? { regionIdentity: JSON.stringify([regionDebuggee?.sessionId ?? "", regionFrameId, regionNode.node.backendNodeId]) } : {}) };
+        return { ...info, lines, frameRevision, geometry: await snapshotGeometry(confirmations), geometrySources: confirmations.map(({ debuggee }) => debuggee), ...(regionNode ? { regionIdentity: JSON.stringify([regionDebuggee?.sessionId ?? "", regionFrameId, regionNode.node.backendNodeId]) } : {}) };
       }
     }
   }

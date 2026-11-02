@@ -93,6 +93,19 @@ describe("DOM snapshot consistency", () => {
     expect(sameDOMSnapshot(before, after)).toBe(true);
   });
 
+  it("rejects a document scroll between captures even when the same nodes remain visible", () => {
+    const before = fixture(), after = fixture(true);
+    after.documents[0]!.scrollOffsetY = 1;
+    expect(sameDOMSnapshot(before, after)).toBe(false);
+  });
+
+  it("rejects movement of a partially clipped iframe between captures", () => {
+    const before = fixture(), after = fixture(true);
+    for (const snapshot of [before, after]) snapshot.documents[0]!.nodes.nodeName[3] = intern(snapshot, "IFRAME");
+    after.documents[0]!.layout.bounds[3]![0] = 11;
+    expect(sameDOMSnapshot(before, after)).toBe(false);
+  });
+
   it("detects a visible node becoming clipped even when text and style attributes are unchanged", () => {
     const before = fixture(), after = fixture(true);
     after.documents[0]!.layout.bounds[2]![0] = -1000;

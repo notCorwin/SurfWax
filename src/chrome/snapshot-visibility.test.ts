@@ -196,7 +196,7 @@ describe("snapshot visual visibility", () => {
     expect([...state.values()]).toEqual([true, false, false, false, false, false, true, true, true, true]);
   });
 
-  it("filters non-scrollable clipping while preserving offscreen scrollable content", () => {
+  it("clips both scrollable and non-scrollable containers to their current aperture", () => {
     const state = snapshotVisibility(capture([
       { parent: -1, bounds: [0, 0, 500, 500] },
       { parent: 0, bounds: [0, 0, 0, 0], x: "hidden", y: "hidden" },
@@ -206,7 +206,7 @@ describe("snapshot visual visibility", () => {
       { parent: 0, bounds: [0, 1000, 20, 20] },
     ]));
     expect(state.get(3)).toBe(false);
-    expect(state.get(5)).toBe(true);
+    expect(state.get(5)).toBe(false);
     expect(state.get(6)).toBe(true);
   });
 
@@ -279,7 +279,7 @@ describe("snapshot visual visibility", () => {
     expect([...state.values()]).toEqual([true, false, false, false, false, false, true, true, false, false, false, true, false, true]);
   });
 
-  it("uses the document's scroll reachability and retains viewport-fixed and transformed fixed content appropriately", () => {
+  it("uses the current document viewport for normal and fixed content", () => {
     const state = snapshotVisibility(capture([
       { parent: -1, name: "#document", bounds: [0, 0, 800, 600] },
       { parent: 0, name: "HTML", bounds: [0, 0, 800, 1800] },
@@ -291,10 +291,10 @@ describe("snapshot visual visibility", () => {
       { parent: 2, bounds: [0, 1200, 100, 100], transform: "matrix(1, 0, 0, 1, 0, 0)" },
       { parent: 7, bounds: [20, 1220, 20, 20], position: "fixed" },
     ], { contentWidth: 2000, contentHeight: 1800, scrollOffsetX: 0, scrollOffsetY: 500 }));
-    expect([state.get(4), state.get(5), state.get(6), state.get(7), state.get(9)]).toEqual([false, true, false, true, true]);
+    expect([state.get(4), state.get(5), state.get(6), state.get(7), state.get(9)]).toEqual([false, false, false, true, false]);
   });
 
-  it("uses RTL document bounds and keeps ambiguous writing modes and reversed layout conservative", () => {
+  it("does not expose offscreen content for RTL or ambiguous writing modes", () => {
     const make = (direction: string, writing = "horizontal-tb", display = "block") => snapshotVisibility(capture([
       { parent: -1, name: "#document", bounds: [0, 0, 800, 600] },
       { parent: 0, name: "HTML", bounds: [0, 0, 800, 600], direction, writing, display },
@@ -303,14 +303,14 @@ describe("snapshot visual visibility", () => {
       { parent: 2, bounds: [1100, 20, 20, 20], position: "absolute" },
       { parent: 2, bounds: [-9999, 20, 20, 20], position: "absolute" },
     ], { contentWidth: 1800, contentHeight: 600, scrollOffsetX: 0, scrollOffsetY: 0 }));
-    expect([make("ltr").get(4), make("ltr").get(5)]).toEqual([false, true]);
-    expect([make("rtl").get(4), make("rtl").get(5)]).toEqual([true, false]);
-    expect([make("ltr", "vertical-rl").get(4), make("ltr", "vertical-rl").get(5)]).toEqual([true, true]);
-    expect([make("ltr", "horizontal-tb", "flex").get(4), make("ltr", "horizontal-tb", "flex").get(5)]).toEqual([true, true]);
+    expect([make("ltr").get(4), make("ltr").get(5)]).toEqual([false, false]);
+    expect([make("rtl").get(4), make("rtl").get(5)]).toEqual([false, false]);
+    expect([make("ltr", "vertical-rl").get(4), make("ltr", "vertical-rl").get(5)]).toEqual([false, false]);
+    expect([make("ltr", "horizontal-tb", "flex").get(4), make("ltr", "horizontal-tb", "flex").get(5)]).toEqual([false, false]);
     expect(make("rtl").get(6)).toBe(false);
   });
 
-  it("selects the HTML element, not the html doctype, for document scroll direction", () => {
+  it("clips document content regardless of doctype and writing direction", () => {
     const state = snapshotVisibility(capture([
       { parent: -1, name: "#document", type: 9, bounds: [0, 0, 800, 600] },
       { parent: 0, name: "html", type: 10 },
@@ -319,10 +319,10 @@ describe("snapshot visual visibility", () => {
       { parent: 3, bounds: [-900, 20, 20, 20], position: "absolute" },
       { parent: 3, bounds: [1100, 20, 20, 20], position: "absolute" },
     ], { contentWidth: 1800, contentHeight: 600, scrollOffsetX: 0, scrollOffsetY: 0 }));
-    expect([state.get(5), state.get(6)]).toEqual([true, false]);
+    expect([state.get(5), state.get(6)]).toEqual([false, false]);
   });
 
-  it("bounds nested scroll content while retaining both reverse and partial scroll ranges", () => {
+  it("clips nested scroll content in both directions", () => {
     const make = (direction: string, display = "block", current = 0) => snapshotVisibility(capture([
       { parent: -1, name: "#document", bounds: [0, 0, 800, 600] },
       { parent: 0, name: "HTML", bounds: [0, 0, 800, 600] },
@@ -332,10 +332,10 @@ describe("snapshot visual visibility", () => {
       { parent: 3, bounds: [750 - current, 70, 20, 20], position: "absolute" },
       { parent: 3, bounds: [-9999, 70, 20, 20], position: "absolute" },
     ], { contentWidth: 800, contentHeight: 600, scrollOffsetX: 0, scrollOffsetY: 0 }));
-    expect([make("ltr").get(5), make("ltr").get(6), make("ltr").get(7)]).toEqual([false, true, false]);
-    expect([make("rtl").get(5), make("rtl").get(6)]).toEqual([true, false]);
-    expect([make("ltr", "flex").get(5), make("ltr", "flex").get(6)]).toEqual([true, true]);
-    expect([make("ltr", "block", 200).get(5), make("ltr", "block", 200).get(6)]).toEqual([false, true]);
+    expect([make("ltr").get(5), make("ltr").get(6), make("ltr").get(7)]).toEqual([false, false, false]);
+    expect([make("rtl").get(5), make("rtl").get(6)]).toEqual([false, false]);
+    expect([make("ltr", "flex").get(5), make("ltr", "flex").get(6)]).toEqual([false, false]);
+    expect([make("ltr", "block", 200).get(5), make("ltr", "block", 200).get(6)]).toEqual([false, false]);
   });
 
   it("retains conservative behavior when viewport or scroll geometry is unavailable", () => {
@@ -345,17 +345,50 @@ describe("snapshot visual visibility", () => {
       { parent: 0, bounds: [10, 10, 100, 100], x: "auto", y: "auto" },
       { parent: 2, bounds: [-9999, 0, 20, 20] },
     ]));
-    expect([state.get(2), state.get(4)]).toEqual([true, true]);
+    expect([state.get(2), state.get(4)]).toEqual([true, false]);
   });
 
   it("does not silently accept a failed or incomplete layout capture", () => {
     expect(() => snapshotVisibility({})).toThrow("Invalid DOM snapshot");
     expect(() => snapshotVisibility({ strings: [], documents: [{}] })).toThrow("Invalid DOM snapshot document");
+    expect(() => snapshotVisibility(capture([{ parent: -1, name: "#document", type: 9, bounds: [0, 0, 800, 600] }]), { requireViewport: true }))
+      .toThrow("Missing viewport geometry");
   });
 
   it("marks a frame without a layout box hidden", () => {
     const state = snapshotVisibility(capture([{ parent: -1, bounds: [0, 0, 500, 500] }, { parent: 0, name: "IFRAME" }, { parent: 0, name: "IFRAME", bounds: [0, 0, 0, 100] }]));
     expect(state.get(2)).toBe(false);
     expect(state.get(3)).toBe(false);
+  });
+
+  it("distinguishes a partially clipped frame from a wholly hidden one", () => {
+    const partialFrames = new Set<number>();
+    const state = snapshotVisibility(capture([
+      { parent: -1, name: "#document", type: 9, bounds: [0, 0, 100, 100] },
+      { parent: 0, name: "IFRAME", bounds: [80, 20, 40, 40] },
+      { parent: 0, name: "IFRAME", bounds: [110, 20, 40, 40] },
+      { parent: 0, name: "IFRAME", bounds: [10, 20, 40, 40] },
+    ], { scrollOffsetX: 0, scrollOffsetY: 0 }), { partialFrames });
+    expect([state.get(2), state.get(3), state.get(4)]).toEqual([true, false, true]);
+    expect([...partialFrames]).toEqual([2]);
+  });
+
+  it("clips a child document to the visible portion of its owner", () => {
+    const state = snapshotVisibility(capture([
+      { parent: -1, name: "#document", type: 9, bounds: [0, 0, 100, 100] },
+      { parent: 0, bounds: [10, 10, 20, 20] },
+      { parent: 0, bounds: [80, 10, 20, 20] },
+    ], { scrollOffsetX: 0, scrollOffsetY: 0 }), { frameClips: new Map([["test-frame", { x: [0, 50], y: [0, 100] }]]) });
+    expect([state.get(2), state.get(3)]).toEqual([true, false]);
+  });
+
+  it("does not expose an entire text run crossing an inherited frame clip", () => {
+    const candidates: SnapshotTextPaintCandidate[] = [];
+    const state = snapshotVisibility(capture([
+      { parent: -1, name: "#document", type: 9, bounds: [0, 0, 100, 100] },
+      { parent: 0, type: 3, bounds: [40, 10, 30, 20], value: "VISIBLE HIDDEN" },
+    ], { scrollOffsetX: 0, scrollOffsetY: 0 }), { frameClips: new Map([["test-frame", { x: [0, 50], y: [0, 100] }]]), textPaintCandidates: candidates });
+    expect(state.get(2)).toBe(false);
+    expect(candidates).toEqual([]);
   });
 });

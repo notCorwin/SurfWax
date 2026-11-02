@@ -1,5 +1,5 @@
 import { sameTextPaintCandidates } from "./snapshot-text-paint";
-import { snapshotVisibility, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
+import { snapshotVisibility, type SnapshotClip, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
 
 export type SnapshotConsistencyEvidence = Readonly<{
   /** Result derived from the exact left-hand capture. */
@@ -7,6 +7,7 @@ export type SnapshotConsistencyEvidence = Readonly<{
   textPaintCandidates: readonly SnapshotTextPaintCandidate[];
   /** The caller applied live paint projections to candidate visibility. */
   paintAdjusted?: boolean;
+  frameClips?: ReadonlyMap<string, SnapshotClip>;
 }>;
 
 /** Compare two CDP captures by page semantics, not string-table positions or
@@ -100,16 +101,36 @@ export function sameDOMSnapshot(left: any, right: any, before?: SnapshotConsiste
   };
   const textBoxes = (a: any, b: any) => known(a, textBoxKeys) && known(b, textBoxKeys)
     && compareFields(a, b, ["layoutIndex", "start", "length"], numericArray);
+  const frameGeometry = (a: any, b: any) => {
+    const indices = new Set<number>();
+    for (let index = 0; index < a.nodes.nodeName.length; index++) {
+      const tag = leftStrings[a.nodes.nodeName[index]]?.toUpperCase();
+      if (tag !== "IFRAME" && tag !== "FRAME") continue;
+      for (let parent = index; parent >= 0 && !indices.has(parent); parent = a.nodes.parentIndex[parent]) indices.add(parent);
+    }
+    for (const index of indices) {
+      const leftIndex = a.layout.nodeIndex.indexOf(index), rightIndex = b.layout.nodeIndex.indexOf(index);
+      if (leftIndex !== rightIndex) return false;
+      if (leftIndex < 0) continue;
+      for (const field of ["bounds", "clientRects", "offsetRects", "scrollRects"]) {
+        if (!optional(a.layout[field]?.[leftIndex], b.layout[field]?.[rightIndex], numericArray)) return false;
+      }
+      const leftStyle = a.layout.styles[leftIndex], rightStyle = b.layout.styles[rightIndex];
+      if (![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16].every((key) => optional(leftStyle?.[key], rightStyle?.[key], string))) return false;
+    }
+    return true;
+  };
   const document = (a: any, b: any) => known(a, documentKeys) && known(b, documentKeys)
     && a.frameId !== -1 && b.frameId !== -1 && string(a.frameId, b.frameId) && Boolean(leftStrings[a.frameId]) && Boolean(rightStrings[b.frameId])
+    && compareFields(a, b, ["scrollOffsetX", "scrollOffsetY"], scalar)
     && compareFields(a, b, documentStrings, string)
-    && nodes(a.nodes, b.nodes) && layout(a.layout, b.layout) && optional(a.textBoxes, b.textBoxes, textBoxes);
+    && nodes(a.nodes, b.nodes) && layout(a.layout, b.layout) && frameGeometry(a, b) && optional(a.textBoxes, b.textBoxes, textBoxes);
   if (!array(left.documents, right.documents, document)) return false;
   try {
     const computed: SnapshotTextPaintCandidate[] = [], b: SnapshotTextPaintCandidate[] = [];
     const aVisibility = before?.visibility ?? snapshotVisibility(left, { textPaintCandidates: computed });
     const a = before?.textPaintCandidates ?? computed;
-    const bVisibility = snapshotVisibility(right, { textPaintCandidates: b });
+    const bVisibility = snapshotVisibility(right, { textPaintCandidates: b, frameClips: before?.frameClips });
     if (!sameTextPaintCandidates(a, b) || aVisibility.size !== bVisibility.size) return false;
     // The producer may have changed only candidate visibility after live paint
     // analysis. A candidate existed only when it was initially visible.

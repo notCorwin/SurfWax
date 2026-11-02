@@ -124,7 +124,30 @@ function harness() {
     return {};
   });
   const runtime = new AutomationRuntime({ chromeApi: { tabs: { query: async () => [{ id: 3 }] } } as never,
-    command, pressChord: async () => {}, detach: async () => {} });
+    command: async (source, method, params) => {
+      const result = await command(source, method, params);
+      if (method !== "DOMSnapshot.captureSnapshot") return result;
+      // Add the viewport metadata returned by Chrome to synthetic frame DOMs.
+      const snapshot = structuredClone(result);
+      for (const doc of snapshot.documents ?? []) {
+        doc.scrollOffsetX ??= 0; doc.scrollOffsetY ??= 0;
+        let node = doc.nodes.nodeName.findIndex((name: number) => snapshot.strings[name] === "#document");
+        if (node < 0) {
+          node = doc.nodes.backendNodeId.length;
+          let name = snapshot.strings.indexOf("#document");
+          if (name < 0) name = snapshot.strings.push("#document") - 1;
+          for (const [field, value] of [["backendNodeId", 2_000_000_000 + doc.frameId], ["parentIndex", -1], ["nodeType", 9], ["nodeName", name], ["nodeValue", -1], ["attributes", []]] as const)
+            if (Array.isArray(doc.nodes[field])) doc.nodes[field].push(value);
+        }
+        let layout = doc.layout.nodeIndex.indexOf(node);
+        if (layout < 0) {
+          layout = doc.layout.nodeIndex.push(node) - 1;
+          doc.layout.bounds.push([0, 0, 100000, 100000]); doc.layout.styles.push([]);
+          if (Array.isArray(doc.layout.text)) doc.layout.text.push(-1);
+        }
+      }
+      return snapshot;
+    }, pressChord: async () => {}, detach: async () => {} });
   runtime.setContext({ conversationId: "c", logIdentity: { runId: "run", toolCallId: "call", toolCallIdCanonical: true } });
   return { runtime, command };
 }
