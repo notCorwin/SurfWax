@@ -1,11 +1,21 @@
 # Surf Wax
 
-Chrome 侧边栏智能体（Agent），让它替你点击、输入、浏览，完成复杂网页任务。
+Chrome 侧边栏智能体（Agent），让它替你浏览、点击、输入，完成复杂网页任务。
 
 ## 为何使用 Surf Wax
 
-- **BYOK**：原生支持自定义 Provider。
-- **定制快照技术（Snapshot）**：
-  - 只提取肉眼可见的内容，模拟真人浏览。
-  - 专为 LLM 设计，节省令牌（Token）。
-- **生成脚本**：LLM 能够编写持久化 Userscript，并自主验证、逐轮改进。
+### BYOK
+
+- 自定义 Provider 和 Model，支持 Tool Calling 就可以用。
+- 支持现代推理端点：OpenAI Response、Anthropic Messages、Google (v1) Interactions。
+
+### Snapshot
+
+- 专为 LLM 定制的网页快照技术，节省令牌（Tokens）。
+- 只提取肉眼可见的内容，模拟真人浏览。
+
+### Userscript
+
+- 根据用户需要，生成持久化网页 JavaScript 脚本。
+- 借助此项目的浏览器工具，智能体可以自主验证脚本可用性。
+- 智能体可以根据反馈持续改进脚本。
