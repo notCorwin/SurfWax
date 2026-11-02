@@ -13,6 +13,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { registerBackgroundRequest, waitForConversationRun } from "@/agent/coordinator";
 import { modelMessages } from "@/agent/context-choice";
+import { modelDiagnosticContext } from "@/agent/diagnostics";
 import { contextPressure } from "@/agent/compaction";
 import { summarizeTokenUsage, type TokenUsageField, type TokenUsageSummary } from "@/agent/token-usage";
 import { canAutoDispatchFollowup, FOLLOWUP_EVENT_TYPES, rebuildFollowups, type FollowupMessage } from "@/agent/followups";
@@ -131,7 +132,7 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
     const controller = new AbortController();
     const unregisterRequest = registerBackgroundRequest(controller, conversationId);
     controller.signal.addEventListener("abort", unregisterRequest, { once: true });
-    const limit = resolveModelLimit(config, { signal: controller.signal });
+    const limit = resolveModelLimit(config, { signal: controller.signal, diagnosticContext: modelDiagnosticContext(logger, conversationId) });
     let events: ReturnType<EventLogger["contextEvents"]> | undefined;
     let repository: ReturnType<EventLogger["repository"]> | undefined;
     publishUsage({ state: "loading" });

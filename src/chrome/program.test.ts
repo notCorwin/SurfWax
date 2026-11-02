@@ -74,7 +74,7 @@ describe("canonical browser jobs", () => {
   it("reports a terminal persistence failure with the job and original execution cause", async () => {
     const { logger } = indexedLog();
     const jobs = new BrowserJobs(logger);
-    const execution = new Error("browser command failed");
+    const execution = new Error("browser command failed token=secret123");
     const persistence = new Error("storage quota exceeded");
     const append = logger.appendIfEpoch.bind(logger);
     vi.spyOn(logger, "appendIfEpoch").mockImplementation((record, epoch, expected) =>
@@ -88,7 +88,8 @@ describe("canonical browser jobs", () => {
     await done;
     const [, details] = report.mock.calls[0]!;
     expect(details).toMatchObject({ jobId: id, conversationId: context.conversationId, phase: "write-failed" });
-    expect((details as any).error.errors).toEqual([execution, persistence]);
+    expect((details as any).error.errors).toMatchObject([{ message: "browser command failed token=[redacted]" }, { message: "storage quota exceeded" }]);
+    expect((details as any).error.errors[0].stack).not.toContain("secret123");
     await expect(jobs.query({ action: "status", id }, context.conversationId)).rejects.toMatchObject({ errors: [execution, persistence] });
     report.mockRestore();
   });
@@ -946,7 +947,8 @@ describe("canonical browser jobs", () => {
     ).toMatchObject({
       state: "interrupted",
       result: {
-        error: { code: "host-lost", retryable: false, effectUnknown: true },
+        error: { code: "execution-state-unknown", retryable: false, effectUnknown: true,
+          message: expect.stringContaining("terminal write may have failed") },
       },
     });
     await recovered.query(

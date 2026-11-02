@@ -41,7 +41,7 @@ export function endpointEfforts(catalog: unknown, modelId: string): ReasoningEff
 }
 
 export class ReasoningSettings {
-  private readonly operationId = crypto.randomUUID();
+  readonly operationId = crypto.randomUUID();
   private report(phase: string, error: unknown, status?: number): void {
     modelDiagnostic(this.operationId, "reasoning-settings", phase, error, this.options.onDiagnostic, status);
   }

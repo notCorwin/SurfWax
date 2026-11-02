@@ -33,6 +33,19 @@ describe("browser tools", () => {
     const event = events.find((item) => item.type === "tool.failed")!;
     expect(fromLogValue(event.content, event.valueEncoding)).toMatchObject({ toolName: "click", failureCause: { message: "command failed", cause: { message: "debugger detached" } } });
   });
+
+  it("does not persist credentials from a failed browser command", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: testEventStore(events) });
+    const cause = new Error("request https://example.test/path?token=secret123 failed");
+    const executor = { runProgram: async () => { throw new Error("Authorization: Bearer secret456", { cause }); } } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor, { logger, conversationId: "thread" }) as Record<string, any>;
+    await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "call" });
+    const event = events.find((item) => item.type === "tool.failed")!;
+    const content = fromLogValue(event.content, event.valueEncoding) as any;
+    expect(content.failureCause.cause.message).toContain("example.test/path");
+    expect(JSON.stringify(event)).not.toMatch(/secret123|secret456/);
+  });
   it("persists and delivers a lossless page-local dictionary after acquiring its snapshot lease", async () => {
     const events: LogEvent[] = [];
     const logger = new EventLogger({ store: testEventStore(events) });

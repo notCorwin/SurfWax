@@ -4,6 +4,7 @@ import type { ModelConfig } from "../types";
 import { createPromptSnapshot, readPromptSnapshot, PROMPT_TOOLS, type PromptSnapshot } from "./prompt";
 import { inputBudget, resolveModelLimit, type ModelLimit } from "./model-limits";
 import { retryModelOperation } from "./model";
+import { modelDiagnosticContext } from "./diagnostics";
 
 export const SUMMARY_PREFIX = "Earlier conversation summary:\n";
 const SUMMARY_INSTRUCTIONS = "Summarize the entire supplied conversation faithfully so another agent can continue the browser task. Record the original goal and constraints; unfinished steps and blockers; verified facts and their sources; page and tab identities; completed or uncertain side effects and errors; recovery instructions; and exact data, identifiers, URLs and artifact references needed later. Distinguish verified outcomes from assumptions and dispatched actions. Do not invent facts. Return only the continuation summary.";
@@ -159,9 +160,10 @@ function summarySourceCount(raw: readonly ModelMessage[], limit: ModelLimit): nu
 export async function contextPressure(options: {
   raw: ModelMessage[]; branchIds: string[]; events: LogEvent[]; model: ModelConfig;
   limit?: ModelLimit; signal?: AbortSignal;
+  logger?: EventLogger; conversationId?: string;
   instructions?: unknown; tools?: readonly Record<string, unknown>[];
 }): Promise<{ limit: ModelLimit; estimated: number; threshold: number; messages: ModelMessage[] } | undefined> {
-  const limit = options.limit ?? await resolveModelLimit(options.model, { signal: options.signal });
+  const limit = options.limit ?? await resolveModelLimit(options.model, { signal: options.signal, diagnosticContext: modelDiagnosticContext(options.logger, options.conversationId) });
   if (!limit) return undefined;
   const { checkpoint, messages } = await effectiveContext(options.events, options.branchIds, options.raw);
   const currentEstimate = estimateInput(messages);
@@ -215,7 +217,7 @@ export async function summarizeContext(options: {
   // Every trigger (in-run pressure, overflow recovery, and post-turn upkeep)
   // converges here. Reuse an already committed checkpoint for the exact same
   // branch instead of allowing sequential triggers to summarize it twice.
-  const limit = options.limit ?? await resolveModelLimit(options.model, { signal });
+  const limit = options.limit ?? await resolveModelLimit(options.model, { signal, diagnosticContext: modelDiagnosticContext(logger, conversationId) });
   if (!limit) throw new Error("无法取得模型上下文窗口；请手动设置窗口大小。");
   const sourceCount = options.force ? raw.length : summarySourceCount(raw, limit);
   if (!options.force && priorCheckpoint && sourceCount <= priorCheckpoint.sourceCount) return priorCheckpoint.summary;
@@ -430,7 +432,7 @@ export class ContextCompactor {
     const { model, logger, conversationId, signal, branchIds } = this.options;
     signal.throwIfAborted();
     if (stepNumber > 0) return undefined;
-    const limit = await resolveModelLimit(model, { signal });
+    const limit = await resolveModelLimit(model, { signal, diagnosticContext: modelDiagnosticContext(logger, conversationId) });
     if (!limit && !this.warned) {
       void logger.append({ type: "context.limit.unavailable", conversationId, content: { model: model.model } });
       this.warned = true;

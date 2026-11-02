@@ -15,6 +15,6 @@ it("records the conversation and original error when title recovery cannot read 
   const root = createRoot(document.createElement("div"));
   await act(async () => root.render(<RecoverConversationTitles logger={logger} config={{ model: "model" } as ModelConfig} />));
   await act(async () => listener({ type: "conversation.finished", conversationId: "conversation" } as LogEvent));
-  expect(telemetry).toHaveBeenCalledWith(expect.objectContaining({ type: "model.title.recovery-failed", conversationId: "conversation", error }));
+  expect(telemetry).toHaveBeenCalledWith(expect.objectContaining({ type: "model.title.recovery-failed", conversationId: "conversation", error: expect.objectContaining({ message: error.message }) }));
   await act(async () => root.unmount());
 });

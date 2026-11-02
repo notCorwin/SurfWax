@@ -1,5 +1,6 @@
 import { convertToModelMessages, type Agent, type ContentPart, type LanguageModelCallEndEvent, type UIMessage } from "ai";
 import { fromLogValue, type ConversationMessage, type EventLogger } from "../logging";
+import { safeDiagnosticError } from "../diagnostic-error";
 import { normalizeRecoveredToolOutput } from "../tool-result-values";
 import { claimConversationRun } from "./coordinator";
 import { ensureConversationPrompt } from "./prompt";
@@ -281,7 +282,7 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
         } catch (terminalError) {
           if (terminalError === error) throw error;
           const failure = new AggregateError([error, terminalError], "Conversation failed and its terminal state could not be recorded", { cause: error });
-          console.error("[Surf Wax] conversation.terminal-failed", { conversationId, runId: currentRunId, error: failure });
+          console.error("[Surf Wax] conversation.terminal-failed", { conversationId, runId: currentRunId, error: safeDiagnosticError(failure) });
           throw failure;
         }
         throw error;

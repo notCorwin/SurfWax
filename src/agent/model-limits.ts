@@ -1,6 +1,6 @@
 import { isModelSdk, type JsonValue, type ModelConfig, type ModelProviderOverride, type ModelSdk } from "../types";
 import { defaultBaseURL, isCloudflareGateway, providerSettingFields, resolvedBaseURL, sdkFor, type ProviderSettingField } from "./model-sdks";
-import { modelDiagnostic, type ModelDiagnostic } from "./diagnostics";
+import { linkModelDiagnostic, modelDiagnostic, type ModelDiagnostic, type ModelDiagnosticContext } from "./diagnostics";
 import bundledCatalogGzip, { metadata as bundledCatalogMetadata } from "../data/models-dev-api";
 
 export const CATALOG_CACHE_KEY = "side-agent:model-catalog";
@@ -264,8 +264,8 @@ export function modelPresetFields(config: ModelConfig, preset?: ModelProviderPre
   return providerSettingFields({ id: isCloudflareGateway(config) ? "cloudflare-ai-gateway" : config.providerId ?? "custom", npm: config.modelProvider?.npm ?? sdkFor(config), api: config.baseURL, env: preset?.env });
 }
 
-const catalogRequests = new WeakMap<typeof globalThis.fetch, Map<string, Promise<ModelCatalog>>>();
-const backgroundCatalogRefreshes = new WeakMap<typeof globalThis.fetch, Promise<ModelCatalog>>();
+const catalogRequests = new WeakMap<typeof globalThis.fetch, Map<string, { operationId: string; promise: Promise<ModelCatalog> }>>();
+const backgroundCatalogRefreshes = new WeakMap<typeof globalThis.fetch, { operationId: string; promise: Promise<ModelCatalog> }>();
 const catalogRevisions = new WeakMap<ModelCatalog, string>();
 
 function cachedCatalogRevision(cached?: CachedCatalog): string {
@@ -273,14 +273,13 @@ function cachedCatalogRevision(cached?: CachedCatalog): string {
 }
 
 export function loadModelCatalog(
-  options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; refresh?: boolean; onStale?: (error: unknown) => void; bundledFallback?: boolean; staleFallback?: boolean; validateCompleteness?: boolean; onDiagnostic?: (diagnostic: ModelDiagnostic) => void; diagnosticOperationId?: string } = {},
+  options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; refresh?: boolean; onStale?: (error: unknown) => void; bundledFallback?: boolean; staleFallback?: boolean; validateCompleteness?: boolean; onDiagnostic?: (diagnostic: ModelDiagnostic) => void; diagnosticOperationId?: string; diagnosticContext?: ModelDiagnosticContext } = {},
 ): Promise<ModelCatalog> {
   const storage = options.storage ?? (typeof chrome !== "undefined" ? chrome.storage?.local : undefined);
   const validateCompleteness = options.validateCompleteness ?? !options.fetch;
-  const task = async () => {
+  const task = async (operationId = options.diagnosticOperationId ?? crypto.randomUUID()) => {
     options.signal?.throwIfAborted();
-    const operationId = options.diagnosticOperationId ?? crypto.randomUUID();
-    const report = (phase: string, error: unknown) => modelDiagnostic(operationId, "catalog", phase, error, options.onDiagnostic);
+    const report = (phase: string, error: unknown) => modelDiagnostic(operationId, "catalog", phase, error, options.onDiagnostic, undefined, options.diagnosticContext);
     const stored = storage ? (await storage.get(CATALOG_CACHE_KEY).catch((error) => { report("cache-read", error); return { [CATALOG_CACHE_KEY]: undefined }; }))[CATALOG_CACHE_KEY] as CachedCatalog | undefined : undefined;
     let cached = stored?.version === CATALOG_CACHE_VERSION ? stored : undefined;
     try { if (cached?.catalog && validateCompleteness) validateCatalog(cached.catalog); } catch (error) { report("cache-validation", error); cached = undefined; }
@@ -314,14 +313,15 @@ export function loadModelCatalog(
     if (!cached?.catalog && !options.refresh && !options.fetch && options.bundledFallback !== false) {
       const catalog = await fallbackToBundle();
       const fetcher = globalThis.fetch;
-      if (!backgroundCatalogRefreshes.has(fetcher)) {
+      const existingRefresh = backgroundCatalogRefreshes.get(fetcher);
+      if (!existingRefresh) {
         const refresh = fetchCatalog().catch((error) => {
           if (!options.signal?.aborted) { report("background-refresh", error); options.onStale?.(error); }
           throw error;
         }).finally(() => backgroundCatalogRefreshes.delete(fetcher));
-        backgroundCatalogRefreshes.set(fetcher, refresh);
+        backgroundCatalogRefreshes.set(fetcher, { operationId, promise: refresh });
         void refresh.catch(() => undefined);
-      }
+      } else linkModelDiagnostic(options.diagnosticContext, existingRefresh.operationId, "catalog-background-refresh");
       return catalog;
     }
     try {
@@ -347,13 +347,15 @@ export function loadModelCatalog(
   let catalogPending = catalogRequests.get(fetcher);
   if (!catalogPending) { catalogPending = new Map(); catalogRequests.set(fetcher, catalogPending); }
   const existing = catalogPending.get(CATALOG_URL);
-  if (existing) return existing;
-  const result = task().finally(() => catalogPending!.delete(CATALOG_URL));
-  catalogPending.set(CATALOG_URL, result);
+  if (existing) { linkModelDiagnostic(options.diagnosticContext, existing.operationId, "catalog"); return existing.promise; }
+  const operationId = options.diagnosticOperationId ?? crypto.randomUUID();
+  linkModelDiagnostic(options.diagnosticContext, operationId, "catalog");
+  const result = task(operationId).finally(() => catalogPending!.delete(CATALOG_URL));
+  catalogPending.set(CATALOG_URL, { operationId, promise: result });
   return result;
 }
 
-const limitRequests = new WeakMap<typeof globalThis.fetch, Map<string, Promise<ModelLimit | undefined>>>();
+const limitRequests = new WeakMap<typeof globalThis.fetch, Map<string, { operationId: string; promise: Promise<ModelLimit | undefined> }>>();
 // Derived matches need not be persisted separately from the authoritative catalog.
 // Keep a few revisions so an in-flight lookup against an older snapshot cannot
 // invalidate results from a newer one.
@@ -365,14 +367,13 @@ export function modelLimitKey(config: ModelConfig): string {
 
 export function resolveModelLimit(
   config: ModelConfig,
-  options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; onDiagnostic?: (diagnostic: ModelDiagnostic) => void } = {},
+  options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; onDiagnostic?: (diagnostic: ModelDiagnostic) => void; diagnosticContext?: ModelDiagnosticContext } = {},
 ): Promise<ModelLimit | undefined> {
   const key = modelLimitKey(config);
-  const task = async (): Promise<ModelLimit | undefined> => {
+  const task = async (operationId = crypto.randomUUID()): Promise<ModelLimit | undefined> => {
     if (validLimit(config.contextWindowOverride)) {
       return { provider: "manual", model: config.model, context: config.contextWindowOverride, source: "manual" } as ModelLimit;
     }
-    const operationId = crypto.randomUUID();
     try {
       const catalog = await loadModelCatalog({ ...options, diagnosticOperationId: operationId });
       const catalogRevision = catalogRevisions.get(catalog) ?? cachedCatalogRevision();
@@ -390,7 +391,7 @@ export function resolveModelLimit(
       return match;
     } catch (error) {
       if (options.signal?.aborted) throw error;
-      modelDiagnostic(operationId, "model-limit", "resolution", error, options.onDiagnostic);
+      modelDiagnostic(operationId, "model-limit", "resolution", error, options.onDiagnostic, undefined, options.diagnosticContext);
       return { provider: "unknown", model: config.model, context: 256_000, source: "estimated" };
     }
   };
@@ -399,9 +400,11 @@ export function resolveModelLimit(
   let pending = limitRequests.get(fetcher);
   if (!pending) { pending = new Map(); limitRequests.set(fetcher, pending); }
   const existing = pending.get(key);
-  if (existing) return existing;
-  const result = task().finally(() => pending!.delete(key));
-  pending.set(key, result);
+  if (existing) { linkModelDiagnostic(options.diagnosticContext, existing.operationId, "model-limit"); return existing.promise; }
+  const operationId = crypto.randomUUID();
+  linkModelDiagnostic(options.diagnosticContext, operationId, "model-limit");
+  const result = task(operationId).finally(() => pending!.delete(key));
+  pending.set(key, { operationId, promise: result });
   return result;
 }
 

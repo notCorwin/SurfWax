@@ -72,7 +72,7 @@ export function delayedResponse(response: CompletionResponse, delayMs: number, s
 
 const providerRequests: any[][] = [];
 
-export async function startProvider(responses: MockResponse[], delayMs = 0, summaryText?: string, supportedEfforts = ["minimal", "low", "medium", "high", "xhigh"], summaryDelayMs = 0, summaryFailures = 0): Promise<{
+export async function startProvider(responses: MockResponse[], delayMs = 0, summaryText?: string, supportedEfforts = ["minimal", "low", "medium", "high", "xhigh"], summaryDelayMs = 0, summaryFailures = 0, reviewResponses: string[] = []): Promise<{
   baseURL: string;
   origin: string;
   requests: any[];
@@ -187,7 +187,7 @@ export async function startProvider(responses: MockResponse[], delayMs = 0, summ
       // Real-model evaluation forwards this request to the configured model.
       if (requestBody.messages?.some((message: any) => message.role === "system" && String(message.content).startsWith("SURFWAX_GOAL_REVIEW"))) {
         response.writeHead(200, JSON_HEADERS);
-        response.end(JSON.stringify(textResponse(JSON.stringify({ accept: true, reason: "Scripted provider acknowledges the supplied goal", remaining: [] }))));
+        response.end(JSON.stringify(textResponse(reviewResponses.shift() ?? JSON.stringify({ accept: true, reason: "Scripted provider acknowledges the supplied goal", remaining: [] }))));
         return;
       }
       const isSummary = summaryText && JSON.stringify(requestBody).includes("Summarize the entire supplied conversation faithfully");

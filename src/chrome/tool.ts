@@ -2,6 +2,7 @@ import { normalizationExceedsBudget, normalizeResultEnvelope } from "../tool-res
 import { isArrayBuffer, viewLayout } from "../log-graph";
 import { dynamicTool, type ToolCallRepairFunction } from "ai";
 import { z } from "zod";
+import { safeDiagnosticError, safeDiagnosticText } from "../diagnostic-error";
 import type { EventLogger } from "../logging";
 import type { ChromeExecutor } from "./executor";
 import { ATOMIC_TOOL_REGISTRY } from "./atomic-tools";
@@ -87,7 +88,7 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
         return output;
       };
       const failureFor = async (error: unknown, executing: boolean) => {
-        failureCause = error;
+        failureCause = safeDiagnosticError(error);
         const cause = abortSignal?.aborted && !(error instanceof Error)
           ? new DOMException(abortSignal.reason instanceof Error ? abortSignal.reason.message : String(abortSignal.reason ?? error ?? "Operation aborted"), "AbortError")
           : error;
@@ -710,7 +711,7 @@ function recoveryError<T extends Record<string, any>>(error: T, toolName: string
 }
 
 function toolFailure(error: unknown): { ok: false; error: { code: string; message: string; retryable?: boolean; effectUnknown?: boolean; recovery?: string }; artifact?: unknown } {
-  const message = error instanceof Error || error instanceof DOMException ? error.message : String(error);
+  const message = safeDiagnosticText(error instanceof Error || error instanceof DOMException ? error.message : String(error));
   const code = error instanceof DOMException && error.name === "AbortError" ? "aborted"
     : error instanceof DOMException && error.name === "TimeoutError" ? "timeout"
     : error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code

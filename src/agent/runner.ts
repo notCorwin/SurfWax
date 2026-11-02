@@ -7,6 +7,8 @@ import { ChromeExecutor } from "../chrome/executor";
 import type { BrowserContext } from "../chrome/executor";
 import type { EventLogger } from "../logging";
 import type { ModelConfig } from "../types";
+import { modelDiagnosticContext } from "./diagnostics";
+import { safeDiagnosticText } from "../diagnostic-error";
 import { inputBudget, modelSupportsImages, resolveModelLimit } from "./model-limits";
 import { resolvedBaseURL, sdkFor } from "./model-sdks";
 import { estimatePromptInput, hasSummarizableHistory, type ContextCompactor } from "./compaction";
@@ -69,6 +71,7 @@ function usesClaudePromptCache(config: ModelConfig): boolean {
 
 export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, BrowserAgentTools> {
   const logger = options.logger;
+  const diagnosticContext = modelDiagnosticContext(logger, options.conversationId);
   let callId: string | undefined;
   let boundTabId: number | undefined;
   const scheduler = new ToolScheduler(PROGRAM_TOOL_REGISTRY.map(({ name }) => name), () => options.executor.pendingBackgroundJobs?.() ?? []);
@@ -78,7 +81,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     callId: () => callId,
     visualEnabled: (() => {
       let supported: Promise<boolean> | undefined;
-      return () => supported ??= modelSupportsImages(options.model, { signal: options.signal });
+      return () => supported ??= modelSupportsImages(options.model, { signal: options.signal, diagnosticContext });
     })(),
   };
   const tools = createProgramTools(options.executor, toolOptions);
@@ -116,7 +119,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         : { ok: true, ...(input as z.infer<typeof GOAL_SCHEMA>) };
       if (output.ok) {
         try {
-          const reviewLimit = await (limit ??= resolveModelLimit(options.model, { signal: options.signal }));
+          const reviewLimit = await (limit ??= resolveModelLimit(options.model, { signal: options.signal, diagnosticContext }));
           const budget = reviewLimit ? { input: inputBudget(reviewLimit), output: Math.min(reviewLimit.output ?? 2048, Math.max(1, Math.floor(reviewLimit.context / 4))) } : undefined;
           const proposed = input as z.infer<typeof GOAL_SCHEMA>;
           const context = goalReviewContext(reviewContext, budget ? Math.floor(budget.input * 0.75) : undefined, reviewRequirements,
@@ -133,7 +136,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
           if (!verdict.accept) output = { ok: false, error: { code: "goal-incomplete", message: [verdict.reason, ...verdict.remaining].join("\n") } };
         } catch (error) {
           (abortSignal ?? options.signal)?.throwIfAborted();
-          output = { ok: false, error: { code: "goal-review-unavailable", message: error instanceof Error ? error.message : String(error) } };
+          output = { ok: false, error: { code: "goal-review-unavailable", message: safeDiagnosticText(error instanceof Error ? error.message : String(error)) } };
         }
       }
       (abortSignal ?? options.signal)?.throwIfAborted();
@@ -187,7 +190,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       const browserChanged = stepNumber === 0 || nextBrowserDigest !== browserDigest;
       browserDigest = nextBrowserDigest;
       if (browserChanged) logger?.telemetry({ type: "browser.context.prepared", conversationId: options.conversationId, content: { stepNumber, ...browserContext } });
-      const modelLimit = await (limit ??= resolveModelLimit(options.model, { signal: options.signal }));
+      const modelLimit = await (limit ??= resolveModelLimit(options.model, { signal: options.signal, diagnosticContext }));
       const prepareMessages = async (source: typeof prepared) => prepareToolMessages(
         source,
         stepNumber,

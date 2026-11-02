@@ -45,7 +45,7 @@ describe("complete-response transport", () => {
     let caught: unknown;
     try { await createChatTransport(factory as never, log, "thread").sendMessages(options()); } catch (error) { caught = error; }
     expect(caught).toMatchObject({ errors: [original, reconciliation], cause: original });
-    expect(report).toHaveBeenCalledWith("[Surf Wax] conversation.terminal-failed", expect.objectContaining({ conversationId: "thread", runId: expect.any(String), error: caught }));
+    expect(report).toHaveBeenCalledWith("[Surf Wax] conversation.terminal-failed", expect.objectContaining({ conversationId: "thread", runId: expect.any(String), error: expect.objectContaining({ errors: [expect.objectContaining({ message: "agent failed" }), expect.objectContaining({ message: "log read failed" })] }) }));
     report.mockRestore();
   });
   it("leaves a follow-up queued when its atomic submission fails, then dispatches it once on retry", async () => {

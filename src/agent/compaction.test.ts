@@ -8,6 +8,7 @@ import { ContextCompactor, contextPressure, effectiveContext, estimatePromptInpu
 function fixture() {
   const events: LogEvent[] = [];
   const logger = {
+    toolIdentity: (_conversationId: string, toolCallId: string) => ({ toolCallId, toolCallIdCanonical: true }),
     async append(record: Partial<LogEvent>) {
       const event = { id: events.length + 1, timestamp: new Date().toISOString(), content: null, ...record } as LogEvent;
       events.push(event);

@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { applyModelPreset, contextUsedPercent, inputBudget, loadModelCatalog, matchModel, modelPresetFields, modelProviderPresets, modelSupportsImages, normalizeModelProviderOverride, resolveModelLimit } from "./model-limits";
 import { modelConfigErrors, sdkFor } from "./model-sdks";
 import { metadata as bundledMetadata } from "../data/models-dev-api";
+import { EventLogger, fromLogValue, type LogEvent } from "../logging";
+import { testEventStore } from "../test-event-store";
+import { modelDiagnosticContext } from "./diagnostics";
 
 const catalog = {
   openai: { api: "https://api.openai.com/v1", models: {
@@ -352,6 +355,25 @@ describe("models.dev limit matching", () => {
 });
 
 describe("model catalog diagnostics", () => {
+  it("links concurrent consumers to the same shared operation without duplicating its request", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: testEventStore(events) });
+    logger.beginRun("one", "run-one"); logger.beginRun("two", "run-two");
+    const fetch = vi.fn(async () => { throw new Error("offline"); });
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const config = { baseURL: "https://unknown.test/v1", model: "unique-concurrency-test" };
+      const first = resolveModelLimit(config, { diagnosticContext: modelDiagnosticContext(logger, "one") });
+      const second = resolveModelLimit(config, { diagnosticContext: modelDiagnosticContext(logger, "two") });
+      expect(second).toBe(first);
+      await Promise.all([first, second]);
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+      await logger.flush();
+      const links = events.filter((event) => event.type === "model.metadata.linked" && (fromLogValue(event.content, event.valueEncoding) as any).operation === "model-limit");
+      expect(links.map((event) => [event.conversationId, event.runId])).toEqual([["one", "run-one"], ["two", "run-two"]]);
+      expect(new Set(links.map((event) => (fromLogValue(event.content, event.valueEncoding) as any).operationId)).size).toBe(1);
+    } finally { vi.unstubAllGlobals(); }
+  });
   it("correlates cache read and fetch failures without exposing credentials while falling back", async () => {
     const diagnostics: import("./diagnostics").ModelDiagnostic[] = [];
     const limit = await resolveModelLimit({ baseURL: "https://provider.test/v1", model: "missing" }, {

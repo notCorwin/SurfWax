@@ -6,6 +6,7 @@ import { Thread } from "../components/chat/thread";
 import { Empty, EmptyHeader, EmptyTitle, EmptyMedia, EmptyContent } from "../components/ui/empty";
 import { Button } from "../components/ui/button";
 import { ErrorNotice } from "../components/ui/error-notice";
+import { safeDiagnosticError } from "../diagnostic-error";
 import { generateConversationTitle } from "../conversations";
 import { activeContext, ensureAutomaticContextSummary } from "../agent/context-choice";
 import { contextPressure } from "../agent/compaction";
@@ -109,7 +110,7 @@ export function App() {
 }
 
 function DiagnosticNotice({ logger, type, summary, error }: { logger: EventLogger; type: string; summary: string; error: unknown }) {
-  useEffect(() => { if (error !== undefined) logger.telemetry({ type, content: { operation: type }, error }); }, [logger, type, error]);
+  useEffect(() => { if (error !== undefined) logger.telemetry({ type, content: { operation: type }, error: safeDiagnosticError(error) }); }, [logger, type, error]);
   return error === undefined ? null : <ErrorNotice summary={summary} error={error} />;
 }
 
@@ -171,7 +172,7 @@ export function RecoverConversationTitles({ logger, config }: { logger: EventLog
         if ([...latest].reverse().find((event) => event.type.startsWith("model.title."))?.type !== "model.title.failed") throw error;
       }
     };
-    const report = (error: unknown, conversationId?: string) => logger.telemetry({ type: "model.title.recovery-failed", conversationId, content: { operation: "recover-title" }, error });
+    const report = (error: unknown, conversationId?: string) => logger.telemetry({ type: "model.title.recovery-failed", conversationId, content: { operation: "recover-title" }, error: safeDiagnosticError(error) });
     void logger.summaryEvents().then((events) => Promise.all(
       rebuildConversationList(events).map(({ id }) => recoverTitle(id).catch((error) => report(error, id))),
     )).catch((error) => report(error));
@@ -265,7 +266,7 @@ export function ConversationView({ config, logger, threadId, drafts, goalMode, o
         const overflow = lastRun?.type === "conversation.failed"
           && /context.{0,30}(length|window|token)|maximum.{0,30}token/i.test(JSON.stringify(lastRun.error))
           && (!before.checkpoint || before.checkpoint.eventId < lastRun.id);
-        const pressure = await contextPressure({ raw: before.raw, branchIds: before.branchIds, events: before.events, model: config, signal: controller.signal });
+        const pressure = await contextPressure({ raw: before.raw, branchIds: before.branchIds, events: before.events, model: config, signal: controller.signal, logger, conversationId });
         if (!active) return;
         if (!force && !overflow && (!pressure || pressure.estimated <= pressure.threshold)) {
           setContextStatus(before.checkpoint ? { message: "历史上下文已被压缩成摘要", error: false } : undefined);

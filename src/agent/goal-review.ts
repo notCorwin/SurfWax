@@ -1,4 +1,5 @@
 import { safeDiagnosticText } from "./diagnostics";
+import { safeDiagnosticError } from "../diagnostic-error";
 import { generateText, type LanguageModel, type ModelMessage } from "ai";
 import { z } from "zod";
 import type { EventLogger } from "../logging";
@@ -132,7 +133,7 @@ export async function reviewGoal(options: {
     return verdict;
   } catch (error) {
     await options.logger?.append({ type: "agent.goal.review.failed", conversationId: options.conversationId,
-      content: { reviewId, aborted: signal.aborted, ...(result ? { responseText: safeDiagnosticText(result.text), responseTruncated: result.text.length > 2048 } : {}) }, error, usage: result?.usage, stopReason: result?.finishReason, providerMetadata: result?.providerMetadata, latencyMs: Math.max(0, performance.now() - started) });
+      content: { reviewId, aborted: signal.aborted, ...(result ? { responseText: safeDiagnosticText(result.text), responseTruncated: result.text.length > 2048 } : {}) }, error: safeDiagnosticError(error), usage: result?.usage, stopReason: result?.finishReason, latencyMs: Math.max(0, performance.now() - started) });
     throw error;
   }
 }

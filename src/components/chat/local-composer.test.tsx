@@ -34,7 +34,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 function loggerWith(append: (record: unknown) => Promise<LogEvent | undefined>): EventLogger {
-  return { append, subscribe: () => () => {}, followupEvents: async () => [], modelUsageEvents: async () => [], contextEvents: async () => [], repository: async () => ({ messages: [] }) } as unknown as EventLogger;
+  return { append, telemetry: () => {}, toolIdentity: (_conversationId: string, toolCallId: string) => ({ toolCallId, toolCallIdCanonical: true }), subscribe: () => () => {}, followupEvents: async () => [], modelUsageEvents: async () => [], contextEvents: async () => [], repository: async () => ({ messages: [] }) } as unknown as EventLogger;
 }
 async function mount(logger: EventLogger) {
   await act(async () => root.render(<TooltipProvider><LocalComposer config={config} logger={logger} conversationId="one" draft="keep this message" onDraftChange={() => {}} goalMode={false} onGoalModeChange={() => {}} /></TooltipProvider>));

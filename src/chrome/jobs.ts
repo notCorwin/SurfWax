@@ -1,4 +1,5 @@
 import { fromLogValue, type EventLogger, type LogEvent } from "../logging";
+import { safeDiagnosticError } from "../diagnostic-error";
 import { describeJobResult, jobResultReference, shouldStoreJobResult, type JobResultInfo } from "./job-result";
 
 export type JobContext = {
@@ -191,7 +192,7 @@ export class BrowserJobs {
           `Browser job ${id} could not persist its terminal state (${phase})`, { cause: error });
         this.persistenceFailures.set(id, { conversationId: context.conversationId, error: failure });
         if (this.persistenceFailures.size > 1000) this.persistenceFailures.delete(this.persistenceFailures.keys().next().value!);
-        console.error("[Surf Wax] browser.job.persistence-failed", { conversationId: context.conversationId, jobId: id, ...context.logIdentity, phase, error: failure });
+        console.error("[Surf Wax] browser.job.persistence-failed", { conversationId: context.conversationId, jobId: id, ...context.logIdentity, phase, error: safeDiagnosticError(failure) });
       } finally {
         this.finishedDuringReads.add(id);
         this.releaseFinishedOwners();
@@ -403,9 +404,9 @@ export class BrowserJobs {
               output: {
                 ok: false,
                 error: {
-                  code: "host-lost",
+                  code: "execution-state-unknown",
                   message:
-                    "Execution host ended; inspect receipts and page state before continuing",
+                    "Execution owner is unavailable and no terminal state was saved. The host may have ended or the terminal write may have failed; inspect receipts and page state before continuing.",
                   effectUnknown: entry.state !== "queued",
                   retryable: false,
                 },

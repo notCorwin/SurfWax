@@ -1,4 +1,5 @@
 import { fromLogValue, type EventLogger } from "../logging";
+import { safeDiagnosticError } from "../diagnostic-error";
 
 type Debuggee = chrome.debugger.Debuggee & { sessionId?: string };
 export type NetworkRecord = {
@@ -88,7 +89,7 @@ export class BrowserDiagnostics {
     const kind = method === "Network.enable" ? "network" : method === "Log.enable" ? "console" : undefined;
     if (kind) { const failures = state.captureFailures ?? new Set(); failures.add(kind); state.captureFailures = failures; this.captureFailures.set(source.tabId, failures); state.revision++; state.pages.clear(); }
     this.logger?.telemetry({ type: "browser.diagnostic.capture-failed", ...this.context, ...this.context.logIdentity,
-      content: { source, method }, error });
+      content: { source, method }, error: safeDiagnosticError(error) });
   }
   handle(source: Debuggee, method: string, params: any): void {
     const tabId = source.tabId;

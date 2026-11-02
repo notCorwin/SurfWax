@@ -2,6 +2,7 @@ import { APICallError, type LanguageModel } from "ai";
 import type { EventLogger } from "../logging";
 import type { ModelConfig, ModelSdk } from "../types";
 import { REASONING_EFFORTS, reasoningSettingsFor, type ReasoningEffort, type ReasoningSettings } from "./reasoning";
+import { linkModelDiagnostic, modelDiagnosticContext } from "./diagnostics";
 import { googleCredentials, isCloudflareGateway, modelConfigErrors, resolvedBaseURL, sdkFor, settingsFor } from "./model-sdks";
 import { loadProviderModule, providerAdapterFor, type ProviderModuleLoader } from "./provider-adapters";
 
@@ -544,9 +545,11 @@ export async function createModel(config: ModelConfig, logger?: EventLogger, con
       ? AbortSignal.any([options.signal, request.signal]) : request.signal }));
   };
   const baseRetryingFetch = createRetryingFetch({ logger, conversationId, fetch: runFetch, signal: options.signal });
+  const reasoningSettings = adapter.protocol === "openai-compatible" ? reasoningSettingsFor(config) : undefined;
+  if (reasoningSettings) linkModelDiagnostic(modelDiagnosticContext(logger, conversationId), reasoningSettings.operationId, "reasoning-settings");
   const retryingFetch = createRetryingFetch({
     logger, conversationId, fetch: runFetch, signal: options.signal,
-    reasoningSettings: adapter.protocol === "openai-compatible" ? reasoningSettingsFor(config) : undefined,
+    reasoningSettings,
   });
   const module = await loadProviderModule(sdk, options.loaders?.[sdk]);
   options.signal?.throwIfAborted();

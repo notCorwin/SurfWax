@@ -1,4 +1,5 @@
 import type { EventLogger } from "../logging";
+import { safeDiagnosticError } from "../diagnostic-error";
 import { scriptChanges, scriptDefinition, scriptId } from "./schema";
 
 export const USER_SCRIPTS_STORAGE_KEY = "side-agent:user-scripts";
@@ -66,7 +67,7 @@ export async function restoreUserScripts(options: { chromeApi?: UserScriptsChrom
       try { await api.register([script]); }
       catch (error) {
         try { await api.register([current]); } catch (rollbackError) {
-          options.logger?.telemetry({ type: "userscript.rollback.failed", content: { scriptId: script.id, operation: "restore", step: "register-previous" }, error: rollbackError });
+          options.logger?.telemetry({ type: "userscript.rollback.failed", content: { scriptId: script.id, operation: "restore", step: "register-previous" }, error: safeDiagnosticError(rollbackError) });
           throw new AggregateError([error, rollbackError], `User script ${script.id} restore failed: ${String(error)}; rollback registration failed: ${String(rollbackError)}`, { cause: error });
         }
         throw error;
@@ -209,7 +210,7 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
       if (registered) try { await chromeApi.userScripts.unregister({ ids: [scriptIdValue] }); } catch (failure) { failures.push({ step: "unregister-replacement", error: failure }); }
       if (removed && previous) try { await chromeApi.userScripts.register([previous]); } catch (failure) { failures.push({ step: "register-previous", error: failure }); }
       if (failures.length) {
-        options.logger?.telemetry({ type: "userscript.rollback.failed", content: { scriptId: scriptIdValue, operation: method, failures }, error });
+        options.logger?.telemetry({ type: "userscript.rollback.failed", content: { scriptId: scriptIdValue, operation: method, failures: failures.map((failure) => ({ ...failure, error: safeDiagnosticError(failure.error) })) }, error: safeDiagnosticError(error) });
         throw new AggregateError([error, ...failures.map((failure) => failure.error)], `User script ${scriptIdValue} ${method} failed: ${String(error)}; rollback failed: ${failures.map(({ step, error: failure }) => `${step}: ${String(failure)}`).join("; ")}`, { cause: error });
       }
       throw error;

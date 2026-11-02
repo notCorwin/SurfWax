@@ -1,4 +1,5 @@
 import { EventLogger, fromLogValue } from "./logging";
+import { safeDiagnosticError } from "./diagnostic-error";
 import { BackgroundRunCoordinator } from "./agent/background-coordinator";
 import type { RunIdentity } from "./agent/coordinator";
 import { recoverBrowserInput } from "./chrome/input-recovery";
@@ -108,7 +109,7 @@ chrome.runtime.onConnect.addListener((port) => {
       const results = await Promise.allSettled(cleanups.map((cleanup) => cleanup()));
       results.forEach((result, index) => {
         if (result.status === "rejected") eventLogger.telemetry({ type: "run.cleanup.failed", runId: identity.runId,
-          content: { operation: "owner-disconnected", cleanupIndex: index, cleanupCount: cleanups.length }, error: result.reason });
+          content: { operation: "owner-disconnected", cleanupIndex: index, cleanupCount: cleanups.length }, error: safeDiagnosticError(result.reason) });
       });
       ownerCleanups.delete(identity.runId);
       const owner = runs.release(port);
@@ -377,7 +378,7 @@ chrome.runtime.onConnect.addListener((port) => {
     const debuggees = [...sessions.values()];
     sessions.clear();
     cleanupTask = track((async () => {
-      const report = (step: string, target: unknown, error: unknown) => eventLogger.telemetry({ type: "run.cleanup.failed", runId: validatedRunId, content: { operation: "debugger-cleanup", step, target }, error });
+      const report = (step: string, target: unknown, error: unknown) => eventLogger.telemetry({ type: "run.cleanup.failed", runId: validatedRunId, content: { operation: "debugger-cleanup", step, target }, error: safeDiagnosticError(error) });
       await Promise.all([...runtimeEvaluations.values()].map(({debuggee}) => chrome.debugger.sendCommand(debuggee,"Runtime.terminateExecution").catch((error) => report("terminate-execution", debuggee, error))));
       await Promise.all([...heldInput.keys()].map((key) => releaseHeldInput(key).catch((error) => report("release-input", key, error))));
       await Promise.all(debuggees.map((debuggee) => chrome.debugger.detach(debuggee).catch((error) => report("detach", debuggee, error))));

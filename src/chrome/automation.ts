@@ -1,4 +1,5 @@
 import type { EventLogger } from "../logging";
+import { safeDiagnosticError } from "../diagnostic-error";
 import { createLogGraphCodec, decodeLogGraph, encodeLogGraph } from "../log-graph";
 import { waitForDocumentFrame } from "./dom-frame";
 import { abortError, axValue, delay, imageSize, isTransientNavigationError, keyboardParams, modifierMask, parseKeyboardChord, throwIfAborted } from "./automation-utils";
@@ -3800,7 +3801,7 @@ export class AutomationRuntime {
         if (proofFailures.has(key)) return;
         proofFailures.add(key);
         this.options.logger?.telemetry({ type: "browser.snapshot.proof-failed", ...frameContext, ...this.context.logIdentity,
-          content: { tabId: session.tabId, frameId, source: debuggee, stage }, error });
+          content: { tabId: session.tabId, frameId, source: debuggee, stage }, error: safeDiagnosticError(error) });
       };
       // Prove the entire owner is free of competing paint at each level. This
       // intentionally needs no coordinate mapping between frame viewports.
