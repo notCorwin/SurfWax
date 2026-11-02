@@ -44,6 +44,22 @@ function harness(inspect = vi.fn<() => Promise<unknown>>(async () => ({ snapshot
 afterEach(() => vi.unstubAllGlobals());
 
 describe("observePageRefreshes", () => {
+  it("records the precise load still blocking delivery without changing the wait", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      h.update("loading");
+      const pending = h.observer.drain();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await h.logger.flush();
+      const events = await h.logger.conversation("conversation");
+      expect(events).toContainEqual(expect.objectContaining({ type: "browser.refresh.waiting", runId: "run",
+        content: expect.objectContaining({ tabId: 1, generation: 1, phase: "awaiting-load-complete", elapsedMs: 10_000 }) }));
+      h.update("complete");
+      await pending;
+      h.observer.dispose();
+    } finally { vi.useRealTimers(); }
+  });
   it("sends a lossless page-local dictionary for repeated refresh lines", async () => {
     const items = Array.from({ length: 12 }, (_, index) => ({ id: String(index), line: "  - StaticText [name=unknown]" }));
     const page = { observationId: "observation", tabId: 1, documentId: 1, url: "https://example.test/", title: "Page",

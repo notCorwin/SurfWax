@@ -3794,6 +3794,14 @@ export class AutomationRuntime {
       type FramePaintProof = { frameId: string; parentId: string; backendNodeId: number; value: unknown };
       const framePaintBatches: FramePaintProof[][] = [];
       const framePaintCache = new Map<string, Promise<FramePaintProof[] | null>>();
+      const proofFailures = new Set<string>();
+      const proofFailed = (stage: string, frameId: string, debuggee: Debuggee, error: unknown) => {
+        const key = JSON.stringify([stage, frameId, debuggee.sessionId]);
+        if (proofFailures.has(key)) return;
+        proofFailures.add(key);
+        this.options.logger?.telemetry({ type: "browser.snapshot.proof-failed", ...frameContext, ...this.context.logIdentity,
+          content: { tabId: session.tabId, frameId, source: debuggee, stage }, error });
+      };
       // Prove the entire owner is free of competing paint at each level. This
       // intentionally needs no coordinate mapping between frame viewports.
       const readFramePaint = async (frameId: string): Promise<FramePaintProof[] | null> => {
@@ -3828,10 +3836,12 @@ export class AutomationRuntime {
             const response = await this.options.command(parent, "Runtime.callFunctionOn", { objectId: node.object.objectId,
               arguments: [{ value: true }], functionDeclaration: SNAPSHOT_FRAME_PAINT_SOURCE, returnByValue: true });
             check();
-            if (response.exceptionDetails || !response.result?.value) return null;
+            if (response.exceptionDetails) { proofFailed("frame-paint-evaluate", current, parent, response.exceptionDetails); return null; }
+            if (!response.result?.value) return null;
             proof.push({ frameId: current, parentId, backendNodeId: owner.backendNodeId, value: response.result.value });
-          } catch {
+          } catch (error) {
             frameGuard();
+            proofFailed("frame-paint", current, parent, error);
             return null;
           } finally { void this.options.command(parent, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined); }
           current = parentId;
@@ -3908,7 +3918,7 @@ export class AutomationRuntime {
                 const text = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: textId, executionContextId: contextId, objectGroup: group });
                 check();
                 return typeof text.object?.objectId === "string" ? { identities, objectId: text.object.objectId } : null;
-              } catch { check(); return null; }
+              } catch (error) { check(); proofFailed("native-value-resolve", frameId, debuggee, error); return null; }
             }));
             resolved.push(...values);
           }
@@ -3940,14 +3950,14 @@ export class AutomationRuntime {
               check();
               if (typeof text.object?.objectId !== "string" || typeof option.object?.objectId !== "string") return null;
               return { identities: [request.backendNodeId, roots[0].backendNodeId, inners[0].backendNodeId, parts[0].backendNodeId, request.optionId], text: text.object.objectId, option: option.object.objectId };
-            } catch { check(); return null; }
+            } catch (error) { check(); proofFailed("select-value-resolve", frameId, debuggee, error); return null; }
           });
           const resolvedHosts = await resolveInBatches(hosts, async (host) => {
             try {
               const result = await this.options.command(debuggee, "DOM.resolveNode", { backendNodeId: host.backendNodeId, executionContextId: contextId, objectGroup: group });
               check();
               return typeof result.object?.objectId === "string" ? result.object.objectId as string : null;
-            } catch { check(); return null; }
+            } catch (error) { check(); proofFailed("select-host-resolve", frameId, debuggee, error); return null; }
           });
           const activeSelects = selects.flatMap((request, index) => resolvedSelects[index] ? [{ request, resolved: resolvedSelects[index]!, index }] : []);
           const activeHosts = hosts.flatMap((host, index) => resolvedHosts[index] ? [{ host, objectId: resolvedHosts[index]!, index }] : []);
@@ -3958,6 +3968,7 @@ export class AutomationRuntime {
               ...active.map(({ text }) => ({ objectId: text.objectId })), ...activeSelects.flatMap(({ resolved }) => [{ objectId: resolved.text }, { objectId: resolved.option }]), ...activeHosts.map(({ objectId }) => ({ objectId }))] });
           check();
           const data = response.result?.value;
+          if (response.exceptionDetails) proofFailed("control-paint-evaluate", frameId, debuggee, response.exceptionDetails);
           if (response.exceptionDetails || !data || !Array.isArray(data.nativeValues) || data.nativeValues.length !== active.length
             || !Array.isArray(data.selectValues) || data.selectValues.length !== activeSelects.length
             || !Array.isArray(data.selectStates) || data.selectStates.length !== activeHosts.length) return empty();
@@ -3974,7 +3985,7 @@ export class AutomationRuntime {
           });
           activeHosts.forEach(({ index }, position) => { result.selectStates[index] = data.selectStates[position]; });
           return result;
-        } catch { frameGuard(); return empty(); }
+        } catch (error) { frameGuard(); proofFailed("control-paint", frameId, debuggee, error); return empty(); }
         finally { void this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined); }
       };
       const lines: SnapshotLine[] = [];

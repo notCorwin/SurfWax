@@ -35,6 +35,19 @@ function setup(model: MockLanguageModelV4, log = logger(), executor = { browserC
 const options = () => ({ trigger: "submit-message" as const, chatId: "thread", messages: [user], abortSignal: new AbortController().signal });
 
 describe("complete-response transport", () => {
+  it("retains the original failure when terminal reconciliation also fails", async () => {
+    const log = logger();
+    const original = new Error("agent failed");
+    const reconciliation = new Error("log read failed");
+    const report = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(log, "closePendingTools").mockRejectedValue(reconciliation);
+    const factory = vi.fn(async () => { throw original; });
+    let caught: unknown;
+    try { await createChatTransport(factory as never, log, "thread").sendMessages(options()); } catch (error) { caught = error; }
+    expect(caught).toMatchObject({ errors: [original, reconciliation], cause: original });
+    expect(report).toHaveBeenCalledWith("[Surf Wax] conversation.terminal-failed", expect.objectContaining({ conversationId: "thread", runId: expect.any(String), error: caught }));
+    report.mockRestore();
+  });
   it("leaves a follow-up queued when its atomic submission fails, then dispatches it once on retry", async () => {
     const store = testEventStore();
     const batch = store.appendMany.bind(store);

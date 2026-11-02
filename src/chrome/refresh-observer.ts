@@ -92,7 +92,8 @@ export function observePageRefreshes(executor: ChromeExecutor, conversationId: s
     async drain() {
       const completed: Array<{ refresh: PageRefresh; observation: unknown }> = [];
       do {
-        await tracker.waitForSettled();
+        await tracker.waitForSettled((state) => logger.telemetry({ type: "browser.refresh.waiting", conversationId, runId,
+          content: { ...state, phase: "awaiting-load-complete" } }));
         tracker.drain();
         const pending = captures.splice(0);
         const observations = await Promise.all(pending.map(({ observation }) => observation));

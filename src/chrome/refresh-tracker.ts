@@ -77,12 +77,22 @@ export class RefreshTracker {
   }
 
   /** Wait until the currently bound tab has no observed load in progress. */
-  async waitForSettled(): Promise<void> {
+  async waitForSettled(onWaiting?: (state: { tabId: number; generation: number; elapsedMs: number }) => void): Promise<void> {
+    const started = Date.now();
+    let reported = false;
     while (!this.disposed) {
       this.signal?.throwIfAborted();
       const tabId = this.targetTab();
       if (tabId === undefined || !this.loading.has(tabId)) return;
-      await new Promise<void>((resolve) => this.waiters.add(resolve));
+      await new Promise<void>((resolve) => {
+        const wake = () => { if (timer !== undefined) clearTimeout(timer); resolve(); };
+        const timer = !reported && onWaiting ? setTimeout(() => {
+          reported = true;
+          const load = this.loading.get(tabId);
+          if (load && this.targetTab() === tabId) onWaiting({ tabId, generation: load.generation, elapsedMs: Date.now() - started });
+        }, 10_000) : undefined;
+        this.waiters.add(wake);
+      });
     }
     this.signal?.throwIfAborted();
   }

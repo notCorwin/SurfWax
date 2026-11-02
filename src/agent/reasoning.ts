@@ -1,3 +1,4 @@
+import { modelDiagnostic, type ModelDiagnostic } from "./diagnostics";
 import { registerBackgroundRequest } from "./coordinator";
 import type { ModelConfig } from "../types";
 import { resolveModelLimit } from "./model-limits";
@@ -40,6 +41,10 @@ export function endpointEfforts(catalog: unknown, modelId: string): ReasoningEff
 }
 
 export class ReasoningSettings {
+  private readonly operationId = crypto.randomUUID();
+  private report(phase: string, error: unknown, status?: number): void {
+    modelDiagnostic(this.operationId, "reasoning-settings", phase, error, this.options.onDiagnostic, status);
+  }
   private state: ReasoningState = { selected: null, choices: REASONING_EFFORTS, source: "unknown", ready: false };
   private listeners = new Set<() => void>();
   private rejected = new Set<ReasoningEffort>();
@@ -52,6 +57,7 @@ export class ReasoningSettings {
     storage?: Storage;
     fetch?: typeof globalThis.fetch;
     modelLimit?: typeof resolveModelLimit;
+    onDiagnostic?: (diagnostic: ModelDiagnostic) => void;
   } = {}) {
     this.ready = this.initialize();
   }
@@ -101,27 +107,27 @@ export class ReasoningSettings {
     if (!this.state.ready || !this.state.choices.includes(effort)) return;
     this.manual = true;
     this.publish({ ...this.state, selected: effort });
-    void this.persist().catch(() => undefined);
+    void this.persist().catch((error) => this.report("persist", error));
   }
 
   reject(effort: ReasoningEffort, supported?: readonly ReasoningEffort[], fieldUnsupported = false): ReasoningEffort | null {
     if (fieldUnsupported) {
       this.fieldUnsupported = true;
       this.publish({ selected: null, choices: [], source: this.state.source, ready: true });
-      void this.persist().catch(() => undefined);
+      void this.persist().catch((error) => this.report("persist", error));
       return null;
     }
     this.rejected.add(effort);
     const choices = (supported ?? this.state.choices).filter((candidate) => !this.rejected.has(candidate));
     const next = choices[0] ?? null;
     this.publish({ ...this.state, choices, selected: next });
-    void this.persist().catch(() => undefined);
+    void this.persist().catch((error) => this.report("persist", error));
     return next;
   }
 
   private async initialize(): Promise<void> {
     const storage = this.storage();
-    const saved = storage ? (await storage.get(STORAGE_KEY).catch(() => ({} as Record<string, unknown>)))[STORAGE_KEY] : undefined;
+    const saved = storage ? (await storage.get(STORAGE_KEY).catch((error) => { this.report("storage-read", error); return {} as Record<string, unknown>; }))[STORAGE_KEY] : undefined;
     const value = saved && typeof saved === "object" ? (saved as Record<string, unknown>)[this.key()] : undefined;
     const stored = value && typeof value === "object" ? value as SavedSettings : undefined;
     const manual = REASONING_EFFORTS.find((effort) => effort === (stored?.manual ?? value));
@@ -133,7 +139,7 @@ export class ReasoningSettings {
     const initialChoices = this.fieldUnsupported ? [] : REASONING_EFFORTS.filter((effort) => !this.rejected.has(effort));
     this.publish({ selected: manual && initialChoices.includes(manual) ? manual : null, choices: initialChoices, source: "unknown", ready: true });
     const unregister = registerBackgroundRequest(this.controller);
-    void this.discover().catch(() => undefined).finally(unregister);
+    void this.discover().catch((error) => { if (!this.controller.signal.aborted) this.report("discover", error); }).finally(unregister);
   }
 
   private async discover(): Promise<void> {
@@ -144,10 +150,16 @@ export class ReasoningSettings {
     const endpoint = !probesModels ? undefined : await fetcher(`${baseURL}/models`, {
         headers: { Authorization: `Bearer ${settingsFor(this.config).apiKey}` },
         signal: AbortSignal.any([this.controller.signal, AbortSignal.timeout(5_000)]),
-      }).then((response) => response.ok ? response.json() : undefined).then((body) => endpointEfforts(body, this.config.model)).catch(() => undefined);
+      }).then((response) => {
+        if (!response.ok && response.status !== 404 && response.status !== 405) this.report("endpoint-http", new Error(`Models endpoint HTTP ${response.status}`), response.status);
+        return response.ok ? response.json() : undefined;
+      }).then((body) => endpointEfforts(body, this.config.model)).catch((error) => {
+        if (!this.controller.signal.aborted) this.report("endpoint-fetch", error);
+        return undefined;
+      });
     const catalog = endpoint === undefined
       ? await (this.options.modelLimit ?? resolveModelLimit)({ ...this.config, contextWindowOverride: undefined }, { signal: this.controller.signal })
-        .then((limit) => efforts(limit?.reasoningEfforts)).catch(() => undefined)
+        .then((limit) => efforts(limit?.reasoningEfforts)).catch((error) => { if (!this.controller.signal.aborted) this.report("catalog-lookup", error); return undefined; })
       : undefined;
     this.controller.signal.throwIfAborted();
     const source: ReasoningSource = endpoint !== undefined ? "endpoint" : catalog !== undefined ? "models.dev" : "unknown";

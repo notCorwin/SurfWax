@@ -71,6 +71,27 @@ describe("scoped atomic program calls", () => {
 });
 
 describe("canonical browser jobs", () => {
+  it("reports a terminal persistence failure with the job and original execution cause", async () => {
+    const { logger } = indexedLog();
+    const jobs = new BrowserJobs(logger);
+    const execution = new Error("browser command failed");
+    const persistence = new Error("storage quota exceeded");
+    const append = logger.appendIfEpoch.bind(logger);
+    vi.spyOn(logger, "appendIfEpoch").mockImplementation((record, epoch, expected) =>
+      (record.content as any)?.state === "failed" ? Promise.reject(persistence) : append(record, epoch, expected));
+    const report = vi.spyOn(console, "error").mockImplementation(() => {});
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const id = await jobs.start(context, undefined, async (_signal, _id, started) => { await started(); await gate; throw execution; });
+    const done = jobs.waitForOwner(id, context.conversationId);
+    release();
+    await done;
+    const [, details] = report.mock.calls[0]!;
+    expect(details).toMatchObject({ jobId: id, conversationId: context.conversationId, phase: "write-failed" });
+    expect((details as any).error.errors).toEqual([execution, persistence]);
+    await expect(jobs.query({ action: "status", id }, context.conversationId)).rejects.toMatchObject({ errors: [execution, persistence] });
+    report.mockRestore();
+  });
   it("does not start browser work after recovery wins a delayed running receipt", async () => {
     const { logger, events } = indexedLog();
     const jobs = new BrowserJobs(logger);

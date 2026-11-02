@@ -65,7 +65,10 @@ export async function restoreUserScripts(options: { chromeApi?: UserScriptsChrom
       await api.unregister({ ids: [script.id] });
       try { await api.register([script]); }
       catch (error) {
-        await api.register([current]).catch(() => undefined);
+        try { await api.register([current]); } catch (rollbackError) {
+          options.logger?.telemetry({ type: "userscript.rollback.failed", content: { scriptId: script.id, operation: "restore", step: "register-previous" }, error: rollbackError });
+          throw new AggregateError([error, rollbackError], `User script ${script.id} restore failed: ${String(error)}; rollback registration failed: ${String(rollbackError)}`, { cause: error });
+        }
         throw error;
       }
     }
@@ -202,8 +205,13 @@ export function callUserScripts(method: string, args: unknown[], options: { chro
     } catch (error) {
       // Storage is still authoritative. Restore the previous projection when
       // possible; startup reconciliation repairs an interrupted rollback.
-      if (registered) await chromeApi.userScripts.unregister({ ids: [scriptIdValue] }).catch(() => undefined);
-      if (removed && previous) await chromeApi.userScripts.register([previous]).catch(() => undefined);
+      const failures: Array<{ step: string; error: unknown }> = [];
+      if (registered) try { await chromeApi.userScripts.unregister({ ids: [scriptIdValue] }); } catch (failure) { failures.push({ step: "unregister-replacement", error: failure }); }
+      if (removed && previous) try { await chromeApi.userScripts.register([previous]); } catch (failure) { failures.push({ step: "register-previous", error: failure }); }
+      if (failures.length) {
+        options.logger?.telemetry({ type: "userscript.rollback.failed", content: { scriptId: scriptIdValue, operation: method, failures }, error });
+        throw new AggregateError([error, ...failures.map((failure) => failure.error)], `User script ${scriptIdValue} ${method} failed: ${String(error)}; rollback failed: ${failures.map(({ step, error: failure }) => `${step}: ${String(failure)}`).join("; ")}`, { cause: error });
+      }
       throw error;
     }
     return { id: scriptIdValue, enabled };

@@ -13,6 +13,17 @@ function request(index: number) { return { requestId: `${index}`, request: { met
 function message(text: string) { return { type: "log", args: [{ value: text }] }; }
 
 describe("BrowserDiagnostics", () => {
+  it("reports failed child-frame capture and its originating command", async () => {
+    const { diagnostics, logger, events } = harness();
+    logger.beginRun("conversation", "run");
+    diagnostics.bind({ conversationId: "conversation", logIdentity: logger.toolIdentity("conversation", "inspect") });
+    diagnostics.captureFailed({ tabId: 1, sessionId: "child" }, "Network.enable", new Error("CDP refused"));
+    expect(await diagnostics.requests(1, {})).toMatchObject({ integrity: "incomplete", reason: "diagnostic-capture-failed", hasMore: null });
+    expect(await diagnostics.console(1, {})).toMatchObject({ integrity: "complete" });
+    await logger.flush();
+    expect(events).toContainEqual(expect.objectContaining({ type: "browser.diagnostic.capture-failed", runId: "run",
+      content: expect.objectContaining({ method: "Network.enable", source: { tabId: 1, sessionId: "child" } }), error: expect.objectContaining({ message: "CDP refused" }) }));
+  });
   it("keeps diagnostic events in the operation's original phase", async () => {
     const { diagnostics, logger, events } = harness();
     logger.beginRun("conversation", "run"); logger.setRunPhase("run", 1);

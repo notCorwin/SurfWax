@@ -140,8 +140,8 @@ function harness(
   return { runtime, calls, command, pressChord, detach, tabsCreated, onDispatch };
 }
 
-function textboxSnapshot(options: { value?: string; text?: string; role?: string; masked?: boolean; properties?: any[]; actions?: string[]; sibling?: boolean; independent?: boolean } = {}) {
-  const { runtime, command } = harness();
+function textboxSnapshot(options: { value?: string; text?: string; role?: string; masked?: boolean; properties?: any[]; actions?: string[]; sibling?: boolean; independent?: boolean; logger?: { telemetry: ReturnType<typeof vi.fn> } } = {}) {
+  const { runtime, command } = harness(undefined, undefined, options.logger);
   const original = command.getMockImplementation()!;
   const value = options.value ?? "DSP-17-A/7", text = options.text ?? value;
   const strings = ["root", "#document", "INPUT", "SPAN", "1", "visible", "static", "none", "auto", "ltr", "horizontal-tb", "block", "16px", "rgb(0, 0, 0)", "0px", "border-box", "clip", "disc"];
@@ -1561,6 +1561,22 @@ describe("AutomationRuntime", () => {
     expect(inspectText(result)).toContain("[value=unknown]");
     expect(inspectText(result)).not.toContain("StaticText");
     expect((result.items as any[]).find((item) => item.line.includes("textbox"))?.ref).toBeTruthy();
+    await runtime.abortSessions();
+  });
+
+  it("records the frame and cause when a native value proof command fails", async () => {
+    const logger = { telemetry: vi.fn() };
+    const { runtime, command, value } = textboxSnapshot({ logger });
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.callFunctionOn" && params?.functionDeclaration === SNAPSHOT_CONTROL_PAINT_SOURCE)
+        throw new Error("proof command failed");
+      return original(source, method, params);
+    });
+    const result = await (await runtime.createPage(3)).inspect();
+    expect(inspectText(result)).not.toContain(value);
+    expect(logger.telemetry).toHaveBeenCalledWith(expect.objectContaining({ type: "browser.snapshot.proof-failed",
+      content: expect.objectContaining({ tabId: 3, frameId: "root", stage: "control-paint" }), error: expect.objectContaining({ message: "proof command failed" }) }));
     await runtime.abortSessions();
   });
 

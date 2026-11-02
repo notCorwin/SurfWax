@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { EventLogger, type LogEvent } from "../logging";
+import { EventLogger, fromLogValue, type LogEvent } from "../logging";
 import { testEventStore } from "../test-event-store";
 import { parseLocatorTarget, ChromeExecutor } from "./executor";
 import { compactToolResult, createProgramTools, prepareToolMessages, repairProgramToolCall, PROGRAM_TOOL_REGISTRY, PROGRAM_TOOL_CONTEXT } from "./tool";
@@ -21,6 +21,18 @@ function mockSnapshot(tabId: number, lines: string[] = [], cursor?: string, deli
 }
 
 describe("browser tools", () => {
+  it("keeps the original exception chain in the tool failure event", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: testEventStore(events) });
+    const cause = new Error("debugger detached");
+    const error = new Error("command failed", { cause });
+    const executor = { runProgram: async () => { throw error; } } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor, { logger, conversationId: "thread" }) as Record<string, any>;
+    const result = await tools.click.execute({ target: { ref: "e1" } }, { toolCallId: "call" });
+    expect(result).toMatchObject({ ok: false, error: { message: "command failed" } });
+    const event = events.find((item) => item.type === "tool.failed")!;
+    expect(fromLogValue(event.content, event.valueEncoding)).toMatchObject({ toolName: "click", failureCause: { message: "command failed", cause: { message: "debugger detached" } } });
+  });
   it("persists and delivers a lossless page-local dictionary after acquiring its snapshot lease", async () => {
     const events: LogEvent[] = [];
     const logger = new EventLogger({ store: testEventStore(events) });

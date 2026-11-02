@@ -1,8 +1,8 @@
 import { afterEach, expect, it, vi } from "vitest";
 
-const boot = vi.hoisted(() => ({ inputStateEvents: vi.fn(), append: vi.fn(), recoverDanglingRuns: vi.fn() }));
+const boot = vi.hoisted(() => ({ inputStateEvents: vi.fn(), append: vi.fn(), recoverDanglingRuns: vi.fn(), telemetry: vi.fn() }));
 vi.mock("./logging", () => ({
-  EventLogger: class { inputStateEvents = boot.inputStateEvents; append = boot.append; recoverDanglingRuns = boot.recoverDanglingRuns; },
+  EventLogger: class { inputStateEvents = boot.inputStateEvents; append = boot.append; recoverDanglingRuns = boot.recoverDanglingRuns; telemetry = boot.telemetry; },
   fromLogValue: (value: unknown) => value,
 }));
 
@@ -43,6 +43,7 @@ async function inputBridge(sendCommand: ReturnType<typeof vi.fn>) {
   boot.inputStateEvents.mockReset().mockResolvedValue([]);
   boot.recoverDanglingRuns.mockReset().mockResolvedValue(undefined);
   boot.append.mockReset().mockResolvedValue({ id: 1 });
+  boot.telemetry.mockReset();
   const connects: ((port: chrome.runtime.Port) => void)[] = [];
   const event = () => ({ addListener: vi.fn(), removeListener: vi.fn() });
   vi.stubGlobal("chrome", {
@@ -73,6 +74,16 @@ async function inputBridge(sendCommand: ReturnType<typeof vi.fn>) {
   const { bridge, send, disconnect } = connectBridge();
   return { bridge, send, disconnect, connectBridge, finishOwner: () => ownerMessage({ type: "finished" }) };
 }
+
+it("reports cleanup persistence failure with the run and cleanup step", async () => {
+  const sendCommand = vi.fn(async () => ({}));
+  const { bridge, send, disconnect } = await inputBridge(sendCommand);
+  send("down", "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Shift", code: "ShiftLeft" });
+  await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledWith({ id: "down", result: {} }));
+  boot.append.mockRejectedValueOnce(new Error("cleanup storage failed"));
+  disconnect();
+  await vi.waitFor(() => expect(boot.telemetry).toHaveBeenCalledWith(expect.objectContaining({ type: "run.cleanup.failed", runId: "run", content: expect.objectContaining({ step: "release-input" }), error: expect.objectContaining({ message: "cleanup storage failed" }) })));
+});
 
 it("does not interpret internal automation controls supplied by raw CDP", async () => {
   const sendCommand = vi.fn(async () => ({}));
@@ -144,7 +155,7 @@ it("does not dispatch or leave a held key if the intent log write fails", async 
     return { id: 1 };
   });
   send("key", "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Shift", code: "ShiftLeft" });
-  await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledWith({ id: "key", error: "intent write failed", dispatchState: "not-dispatched" }));
+  await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledWith(expect.objectContaining({ id: "key", error: "intent write failed", errorDetails: expect.objectContaining({ message: "intent write failed" }), dispatchState: "not-dispatched" })));
   disconnect(); await vi.waitFor(() => expect(bridge.disconnect).toHaveBeenCalled());
   expect(sendCommand.mock.calls.some(([, method]) => method === "Input.dispatchKeyEvent")).toBe(false);
 });
@@ -173,9 +184,9 @@ it("preserves failed releases in the canonical log for subsequent recovery", asy
   send("press", "Input.dispatchMouseEvent", { type: "mousePressed", button: "left", x: 5, y: 7 });
   await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledWith({ id: "press", result: {} }));
   send("up", "Input.dispatchKeyEvent", { type: "keyUp", key: "Shift" });
-  await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledWith({ id: "up", error: "release failed", effectUnknown: true }));
+  await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledWith(expect.objectContaining({ id: "up", error: "release failed", errorDetails: expect.objectContaining({ message: "release failed" }), effectUnknown: true })));
   send("release", "Input.dispatchMouseEvent", { type: "mouseReleased", button: "left" });
-  await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledWith({ id: "release", error: "release failed", effectUnknown: true }));
+  await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledWith(expect.objectContaining({ id: "release", error: "release failed", errorDetails: expect.objectContaining({ message: "release failed" }), effectUnknown: true })));
   disconnect();
   await vi.waitFor(() => expect(bridge.disconnect).toHaveBeenCalled());
   const states = boot.append.mock.calls.map(([entry]) => entry).filter(entry => entry.type === "browser.input.state");

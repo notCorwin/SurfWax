@@ -22,7 +22,11 @@ describe("independent goal review", () => {
     await expect(reviewGoal({ goal, context, model, logger, signal: controller.signal })).rejects.toThrow();
     expect(events.map((event) => event.type)).toEqual(["agent.goal.review.started", "agent.goal.review.failed"]);
     expect(events[1]!.content).toMatchObject({ reviewId: (events[0]!.content as { reviewId: string }).reviewId, aborted: abort });
-    if (!abort) expect(events[1]!.usage).toBeDefined();
+    if (!abort) {
+      expect(events[1]!.usage).toBeDefined();
+      expect(events[1]!.content).toMatchObject({ responseText: "not JSON" });
+      expect(events[1]!.stopReason).toBe("stop");
+    }
   });
 
   it("uses original requirements after compaction and refuses truncated requirements before sending", async () => {

@@ -61,6 +61,7 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
       const identity = options.conversationId ? options.logger?.toolIdentity(options.conversationId, toolCallId) : undefined;
       const callId = options.callId?.();
       const startedAt = performance.now();
+      let failureCause: unknown;
       if (options.logger) {
         const started = await options.logger.append({ type: "tool.started", conversationId: options.conversationId,
           content: { callId, toolName: definition.name }, input, toolCallId, ...identity });
@@ -77,7 +78,7 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
           const effectUnknown = Boolean(error && typeof error === "object" && "effectUnknown" in error && error.effectUnknown);
           const latencyMs = Math.max(0, performance.now() - startedAt);
           const terminal = await options.logger.append({ type: failed ? "tool.failed" : "tool.finished", conversationId: options.conversationId,
-            content: { callId, toolName: definition.name, ...(interrupted ? { status: "interrupted", effectUnknown } : {}) },
+            content: { callId, toolName: definition.name, ...(failureCause === undefined ? {} : { failureCause }), ...(interrupted ? { status: "interrupted", effectUnknown } : {}) },
             input, output, toolCallId, ...identity, ...(failed ? { error } : {}),
             ...(interrupted ? { abort: { reason: Object.assign(new Error(String(abortSignal?.reason ?? "Operation aborted")), { name: "AbortError" }) } } : {}),
             latencyMs });
@@ -86,6 +87,7 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
         return output;
       };
       const failureFor = async (error: unknown, executing: boolean) => {
+        failureCause = error;
         const cause = abortSignal?.aborted && !(error instanceof Error)
           ? new DOMException(abortSignal.reason instanceof Error ? abortSignal.reason.message : String(abortSignal.reason ?? error ?? "Operation aborted"), "AbortError")
           : error;

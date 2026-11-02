@@ -2,6 +2,7 @@ import type { EventLogger } from "../logging";
 import type { BrowserTarget } from "../types";
 import { AutomationRuntime, FILE_UPLOAD_FUNCTION, LocatorFacade } from "./automation";
 import { requireDebuggee } from "./debuggee";
+import { decodeBridgeError, type BridgeError } from "./bridge-error";
 import { scheduleDeadline } from "./deadline";
 import { downloadArtifact } from "./downloads";
 import { listDownloads as queryDownloads, type DownloadListInput } from "./download-query";
@@ -159,7 +160,7 @@ export class ChromeExecutor {
     this.programHost = options.programHost ?? executeSandboxProgram;
     this.diagnostics = new BrowserDiagnostics(this.logger);
     if (!this.chromeApi?.debugger) throw new Error("Chrome extension debugger API is unavailable");
-    const pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason: Error) => void; input: boolean }>();
+    const pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason: Error) => void; input: boolean; method: string; source: unknown }>();
     const listeners = { onEvent: new Set<(...args: any[]) => void>(), onDetach: new Set<(...args: any[]) => void>() };
     const event = (name: keyof typeof listeners) => ({
       addListener: (listener: (...args: any[]) => void) => listeners[name].add(listener),
@@ -181,14 +182,15 @@ export class ChromeExecutor {
       const port = this.chromeApi.runtime?.connect?.({ name: "surf-wax-debugger" });
       if (!port) return undefined;
       this.port = port;
-      port.onMessage.addListener((message: { id?: string; event?: keyof typeof listeners; args?: any[]; result?: unknown; error?: string; effectUnknown?: boolean; dispatchState?: "not-dispatched" }) => {
+      port.onMessage.addListener((message: { id?: string; event?: keyof typeof listeners; args?: any[]; result?: unknown; error?: string; errorDetails?: BridgeError; effectUnknown?: boolean; dispatchState?: "not-dispatched" }) => {
         if (this.port !== port) return;
         if (message.event && listeners[message.event]) {
           for (const listener of listeners[message.event]) listener(...(message.args ?? []));
         } else if (message.id) {
           const request = pending.get(message.id);
           pending.delete(message.id);
-          if (message.error) request?.reject(Object.assign(new Error(message.error), message.effectUnknown ? { effectUnknown: true } : {}, message.dispatchState === "not-dispatched" ? { dispatchState: "not-dispatched" } : {}));
+          if (message.error) request?.reject(Object.assign(message.errorDetails ? decodeBridgeError(message.errorDetails) : new Error(message.error),
+            { command: request?.method, source: request?.source }, message.effectUnknown ? { effectUnknown: true } : {}, message.dispatchState === "not-dispatched" ? { dispatchState: "not-dispatched" } : {}));
           else request?.resolve(message.result);
         }
       });
@@ -210,7 +212,7 @@ export class ChromeExecutor {
         }
         return new Promise((resolve, reject) => {
           const id = globalThis.crypto.randomUUID();
-          pending.set(id, { resolve, reject, input });
+          pending.set(id, { resolve, reject, input, method: method === "sendCommand" ? String(args[1]) : method, source: args[0] });
           try { port.postMessage({ id, method, args, ...getRunIdentity(), operationId: crypto.randomUUID(), ...(rawCdp ? { rawCdp: true } : {}) }); }
           catch (error) {
             disconnect(port, error instanceof Error ? error : new Error(String(error)));
@@ -1338,8 +1340,9 @@ export class ChromeExecutor {
     if (method === "Target.attachedToTarget" && params?.targetInfo?.type === "iframe") {
       const debuggee = { tabId, sessionId: params.sessionId };
       await Promise.all([
-        ...["Network", "Log"].map((domain) => this.bridgeCommand(debuggee, `${domain}.enable`, {}).catch(() => undefined)),
-        this.bridgeCommand(debuggee, "Page.setInterceptFileChooserDialog", { enabled: true }).catch(() => undefined),
+        ...["Network.enable", "Log.enable", "Page.setInterceptFileChooserDialog"].map((command) =>
+          this.bridgeCommand(debuggee, command, command.startsWith("Page.") ? { enabled: true } : {})
+            .catch((error) => { this.diagnostics.captureFailed(debuggee, command, error); })),
       ]);
     }
   }

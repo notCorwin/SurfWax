@@ -115,3 +115,22 @@ describe("reasoning settings", () => {
     expect(local.set).not.toHaveBeenCalled();
   });
 });
+
+describe("reasoning diagnostics", () => {
+  it("reports discovery and persistence failures under the same operation without exposing credentials", async () => {
+    const diagnostics: import("./diagnostics").ModelDiagnostic[] = [];
+    const settings = new ReasoningSettings(config, {
+      storage: { async get() { return {}; }, async set() { throw new Error("disk full"); } },
+      fetch: async () => { throw new Error("network Bearer secret"); },
+      modelLimit: async () => undefined,
+      onDiagnostic: (event) => diagnostics.push(event),
+    });
+    await settings.ready;
+    await vi.waitFor(() => expect(diagnostics.some((event) => event.phase === "endpoint-fetch")).toBe(true));
+    settings.select("high");
+    await vi.waitFor(() => expect(diagnostics.some((event) => event.phase === "persist")).toBe(true));
+    expect(new Set(diagnostics.map((event) => event.operationId)).size).toBe(1);
+    expect(JSON.stringify(diagnostics)).not.toContain("Bearer secret");
+    expect(diagnostics.find((event) => event.phase === "persist")?.error.message).toBe("disk full");
+  });
+});

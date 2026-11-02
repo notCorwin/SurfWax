@@ -4,6 +4,7 @@ import type { RunIdentity } from "./agent/coordinator";
 import { recoverBrowserInput } from "./chrome/input-recovery";
 import { createHeldInputState, debuggeeKey, heldKeyIdentity, shouldPersistInputState, updateHeldInputState, type HeldInputState } from "./chrome/input-state";
 import { targetEditor } from "./chrome/target-editor";
+import { encodeBridgeError } from "./chrome/bridge-error";
 import { requireDebuggee } from "./chrome/debuggee";
 import { callUserScripts, restoreUserScripts, serializeUserScripts, USER_SCRIPTS_ERROR_KEY } from "./userscripts/persistence";
 
@@ -103,7 +104,12 @@ chrome.runtime.onConnect.addListener((port) => {
     if (!identity || !runs.owns(port)) return;
     runs.cancel(port, "owner-disconnected");
     void track((async () => {
-      await Promise.allSettled([...(ownerCleanups.get(identity.runId) ?? [])].map((cleanup) => cleanup()));
+      const cleanups = [...(ownerCleanups.get(identity.runId) ?? [])];
+      const results = await Promise.allSettled(cleanups.map((cleanup) => cleanup()));
+      results.forEach((result, index) => {
+        if (result.status === "rejected") eventLogger.telemetry({ type: "run.cleanup.failed", runId: identity.runId,
+          content: { operation: "owner-disconnected", cleanupIndex: index, cleanupCount: cleanups.length }, error: result.reason });
+      });
       ownerCleanups.delete(identity.runId);
       const owner = runs.release(port);
       if (!owner) return;
@@ -356,7 +362,7 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       if (!closed) port.postMessage({ id, result });
     } catch (error) {
-      if (!closed) port.postMessage({ id, error: error instanceof Error ? error.message : String(error),
+      if (!closed) port.postMessage({ id, error: error instanceof Error ? error.message : String(error), errorDetails: encodeBridgeError(error),
         ...(trackedInput && !nativeInputAttempted ? { dispatchState: "not-dispatched" } : {}),
         ...((error as any)?.effectUnknown || trackedInput && nativeInputAttempted ? { effectUnknown: true } : {}) });
     }
@@ -371,9 +377,10 @@ chrome.runtime.onConnect.addListener((port) => {
     const debuggees = [...sessions.values()];
     sessions.clear();
     cleanupTask = track((async () => {
-      await Promise.allSettled([...runtimeEvaluations.values()].map(({debuggee}) => chrome.debugger.sendCommand(debuggee,"Runtime.terminateExecution")));
-      await Promise.allSettled([...heldInput.keys()].map(releaseHeldInput));
-      await Promise.all(debuggees.map((debuggee) => chrome.debugger.detach(debuggee).catch(() => undefined)));
+      const report = (step: string, target: unknown, error: unknown) => eventLogger.telemetry({ type: "run.cleanup.failed", runId: validatedRunId, content: { operation: "debugger-cleanup", step, target }, error });
+      await Promise.all([...runtimeEvaluations.values()].map(({debuggee}) => chrome.debugger.sendCommand(debuggee,"Runtime.terminateExecution").catch((error) => report("terminate-execution", debuggee, error))));
+      await Promise.all([...heldInput.keys()].map((key) => releaseHeldInput(key).catch((error) => report("release-input", key, error))));
+      await Promise.all(debuggees.map((debuggee) => chrome.debugger.detach(debuggee).catch((error) => report("detach", debuggee, error))));
     })());
     void cleanupTask.finally(() => { try { port.disconnect(); } catch { /* Already disconnected. */ } });
     return cleanupTask;

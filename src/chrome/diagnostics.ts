@@ -14,7 +14,7 @@ type ConsoleList = { messages: ConsoleRecord[]; integrity: "complete" | "incompl
 type CachedPage = { value: RequestList | ConsoleList; logEpoch?: string; conversationId?: string; revision: number };
 type State = { epoch: string; revision: number; nextRequest: number; nextConsole: number; consoleGeneration: number; network: NetworkRecord[]; networkLatest: Map<string, NetworkRecord>; console: ConsoleRecord[]; pendingHeaders: Map<string, PendingHeaders>;
   historical: Map<string, NetworkRecord>; pages: Map<string, CachedPage>; latest: Map<string, number>; invalidations: Map<string, number>; invalidBefore: number;
-  replayComplete?: boolean; replayEpoch?: string };
+  captureFailures?: Set<"network" | "console">; replayComplete?: boolean; replayEpoch?: string };
 const CACHE_LIMIT = 1000;
 const HISTORY_CACHE_LIMIT = 128;
 const PAGE_CACHE_LIMIT = 16;
@@ -62,6 +62,8 @@ async function waitFor<T>(task: Promise<T>, signal?: AbortSignal): Promise<T> {
 /** Disposable diagnostic caches. Raw CDP telemetry is best effort; history replay reports gaps explicitly. */
 export class BrowserDiagnostics {
   private readonly tabs = new Map<number, State>();
+  // A reset of the visible history cannot repair a failed CDP subscription.
+  private readonly captureFailures = new Map<number, Set<"network" | "console">>();
   private readonly restorations = new WeakMap<State, { revision: number; conversationId: string; task: Promise<State> }>();
   private readonly replays = new WeakMap<State, { revision: number; conversationId: string; lastId: number; logEpoch: string; state: State }>();
   private context: { conversationId?: string; toolCallId?: string; logIdentity?: { runId?: string; toolCallId: string; toolCallIdCanonical: true } } = {};
@@ -74,12 +76,20 @@ export class BrowserDiagnostics {
   }
   private state(tabId: number): State {
     let state = this.tabs.get(tabId);
-    if (!state) { state = { epoch: crypto.randomUUID(), revision: 0, nextRequest: 0, nextConsole: 0, consoleGeneration: 0, network: [], networkLatest: new Map(), console: [], pendingHeaders: new Map(), historical: new Map(), pages: new Map(), latest: new Map(), invalidations: new Map(), invalidBefore: 0 }; this.tabs.set(tabId, state); }
+    if (!state) { state = { epoch: crypto.randomUUID(), revision: 0, nextRequest: 0, nextConsole: 0, consoleGeneration: 0, network: [], networkLatest: new Map(), console: [], pendingHeaders: new Map(), historical: new Map(), pages: new Map(), latest: new Map(), invalidations: new Map(), invalidBefore: 0, captureFailures: this.captureFailures.get(tabId) }; this.tabs.set(tabId, state); }
     return state;
   }
-  remove(tabId: number): void { this.tabs.delete(tabId); }
-  clear(): void { this.tabs.clear(); this.context = {}; }
+  remove(tabId: number): void { this.tabs.delete(tabId); this.captureFailures.delete(tabId); }
+  clear(): void { this.tabs.clear(); this.captureFailures.clear(); this.context = {}; }
   reset(tabId: number): void { this.tabs.delete(tabId); this.state(tabId); }
+  captureFailed(source: Debuggee, method: string, error: unknown): void {
+    if (source.tabId === undefined) return;
+    const state = this.state(source.tabId);
+    const kind = method === "Network.enable" ? "network" : method === "Log.enable" ? "console" : undefined;
+    if (kind) { const failures = state.captureFailures ?? new Set(); failures.add(kind); state.captureFailures = failures; this.captureFailures.set(source.tabId, failures); state.revision++; state.pages.clear(); }
+    this.logger?.telemetry({ type: "browser.diagnostic.capture-failed", ...this.context, ...this.context.logIdentity,
+      content: { source, method }, error });
+  }
   handle(source: Debuggee, method: string, params: any): void {
     const tabId = source.tabId;
     if (tabId === undefined) return;
@@ -257,6 +267,7 @@ export class BrowserDiagnostics {
           integrity = "incomplete"; reason = "diagnostic-log-unavailable";
         }
       }
+      if (state.captureFailures?.has("network")) { integrity = "incomplete"; reason = "diagnostic-capture-failed"; }
       const filtered = records.filter((record) => {
         const isStatic = ["Image", "Font", "Stylesheet", "Script", "Media"].includes(record.resourceType ?? "") && !record.failed && (record.status ?? 0) < 400;
         return (input.static || !isStatic) && (!matcher || matcher.test(record.url));
@@ -330,6 +341,7 @@ export class BrowserDiagnostics {
           integrity = "incomplete"; reason = "diagnostic-log-unavailable";
         }
       }
+      if (state.captureFailures?.has("console")) { integrity = "incomplete"; reason = "diagnostic-capture-failed"; }
       const filtered = records.filter((message) => (rank[message.level] ?? 1) >= (rank[input.minLevel ?? "info"] ?? 1));
       const messages = filtered.slice(offset, offset + limit);
       const hasKnownMore = filtered.length > offset + limit;

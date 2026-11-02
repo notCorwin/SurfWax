@@ -69,6 +69,15 @@ async function replaceSettings(settings: unknown) {
 }
 
 describe("sidepanel configuration refresh", () => {
+  it("retains the last configuration and exposes the cause when a later read fails", async () => {
+    values[MODEL_CONFIG_STORAGE_KEY] = custom("initial");
+    await act(async () => root.render(<Harness />));
+    await vi.waitFor(() => expect(latest.configured).toBe(true));
+    vi.mocked(chrome.storage.local.get).mockRejectedValueOnce(new Error("settings storage unavailable"));
+    await replaceSettings(custom("changed"));
+    expect(latest.config.model).toBe("initial");
+    expect(latest.error).toEqual(expect.objectContaining({ message: "settings storage unavailable" }));
+  });
   it("uses the bundled catalog immediately when offline without changing settings", async () => {
     values[MODEL_CONFIG_STORAGE_KEY] = { ...legacy(), profiles: { openai: { ...legacy().profiles.openai, model: "gpt-5" } } };
     const original = values[MODEL_CONFIG_STORAGE_KEY];

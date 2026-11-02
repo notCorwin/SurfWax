@@ -273,10 +273,17 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
         }
       } catch (error) {
         const aborted = lease.signal.aborted || error instanceof Error && error.name === "AbortError";
-        await reconcileTools(errorText(error));
-        await logger.append({ type: aborted ? "conversation.aborted" : "conversation.failed", conversationId, runId: currentRunId,
-          content: response.parts.length ? { messageId: response.id } : null,
-          ...(aborted ? { abort: { reason: lease.signal.reason ?? errorText(error) } } : { error }) });
+        try {
+          await reconcileTools(errorText(error));
+          await logger.append({ type: aborted ? "conversation.aborted" : "conversation.failed", conversationId, runId: currentRunId,
+            content: response.parts.length ? { messageId: response.id } : null,
+            ...(aborted ? { abort: { reason: lease.signal.reason ?? errorText(error) } } : { error }) });
+        } catch (terminalError) {
+          if (terminalError === error) throw error;
+          const failure = new AggregateError([error, terminalError], "Conversation failed and its terminal state could not be recorded", { cause: error });
+          console.error("[Surf Wax] conversation.terminal-failed", { conversationId, runId: currentRunId, error: failure });
+          throw failure;
+        }
         throw error;
       } finally {
         refreshObserver?.dispose();

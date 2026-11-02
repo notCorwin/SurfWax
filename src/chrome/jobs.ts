@@ -76,6 +76,9 @@ type JobProjection = {
 /** Only controllers and completion notifications live in memory. All job state is a log projection. */
 export class BrowserJobs {
   private readonly live = new Map<string, LiveJob>();
+  // A failed terminal write cannot be represented in the failed canonical store.
+  // Keep its cause while this host lives so recovery does not invent host-lost.
+  private readonly persistenceFailures = new Map<string, { conversationId: string; error: unknown }>();
   private recoveryReaders = 0;
   private readonly recovering = new Map<string, Promise<void>>();
   private readonly finishedDuringReads = new Set<string>();
@@ -134,13 +137,15 @@ export class BrowserJobs {
     void (async () => {
       let acceptingStart = true;
       let startPromise: Promise<void> | undefined;
+      let executionError: unknown;
+      let phase = "execute";
       const started = () => {
         if (!acceptingStart || startPromise) return Promise.reject(new Error("Browser job may only start once while executing"));
         startPromise = this.write(context, id, "running");
         void startPromise.catch(() => undefined);
         return startPromise;
       };
-      try {
+      try { try {
         combined.throwIfAborted();
         const result = await execute(combined, id, started);
         acceptingStart = false;
@@ -148,13 +153,16 @@ export class BrowserJobs {
         // terminal write race the queued-to-running transition.
         if (startPromise) await startPromise;
         combined.throwIfAborted();
+        phase = "write-succeeded";
         await this.write(context, id, "succeeded", result);
       } catch (error) {
+        executionError = error;
         acceptingStart = false;
         if (startPromise) await startPromise.catch(() => undefined);
         const timedOut =
           (combined.reason ?? error) instanceof DOMException &&
           (combined.reason ?? error).name === "TimeoutError";
+        phase = "write-failed";
         await this.write(
           context,
           id,
@@ -178,16 +186,18 @@ export class BrowserJobs {
             },
           },
         );
+      } } catch (error) {
+        const failure = new AggregateError([executionError, error].filter((item) => item !== undefined),
+          `Browser job ${id} could not persist its terminal state (${phase})`, { cause: error });
+        this.persistenceFailures.set(id, { conversationId: context.conversationId, error: failure });
+        if (this.persistenceFailures.size > 1000) this.persistenceFailures.delete(this.persistenceFailures.keys().next().value!);
+        console.error("[Surf Wax] browser.job.persistence-failed", { conversationId: context.conversationId, jobId: id, ...context.logIdentity, phase, error: failure });
       } finally {
         this.finishedDuringReads.add(id);
         this.releaseFinishedOwners();
         finish();
       }
-    })().catch(() => {
-      this.finishedDuringReads.add(id);
-      this.releaseFinishedOwners();
-      finish();
-    });
+    })();
     return id;
   }
 
@@ -371,6 +381,8 @@ export class BrowserJobs {
   /** Recover abandoned jobs only after re-reading their latest durable state. */
   private async recoverLost(conversationId: string, id: string): Promise<void> {
     if (!this.logger) throw new Error("Jobs require the canonical event log");
+    const failure = this.persistenceFailures.get(id);
+    if (failure?.conversationId === conversationId) throw failure.error;
     const key = JSON.stringify([conversationId, id]);
     let pending = this.recovering.get(key);
     if (!pending) {

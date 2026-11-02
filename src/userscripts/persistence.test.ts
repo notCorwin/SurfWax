@@ -109,6 +109,32 @@ describe("user script persistence", () => {
     expect(set).toHaveBeenCalledTimes(1);
   });
 
+  it("reports both the original write failure and each failed rollback step", async () => {
+    const script = { id: "saved", matches: ["<all_urls>"], js: [{ code: "1" }] };
+    const fake = fakeChrome({ registered: [script], stored: { [USER_SCRIPTS_STORAGE_KEY]: [script] } });
+    vi.spyOn(fake.chromeApi.storage.local, "set").mockRejectedValueOnce(new Error("disk unavailable"));
+    fake.api.unregister.mockImplementationOnce(fake.api.unregister.getMockImplementation()!).mockRejectedValueOnce(new Error("unregister denied"));
+    fake.api.register.mockImplementationOnce(fake.api.register.getMockImplementation()!).mockRejectedValueOnce(new Error("restore denied"));
+    const telemetry = vi.fn();
+    let failure: unknown;
+    try { await callUserScripts("edit", [{ id: script.id, changes: { js: [{ code: "2" }] } }], { chromeApi: fake.chromeApi as never, logger: { telemetry } as never }); } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect(String(failure)).toContain("disk unavailable");
+    expect(String(failure)).toContain("unregister denied");
+    expect(String(failure)).toContain("restore denied");
+    expect(telemetry).toHaveBeenCalledWith(expect.objectContaining({ type: "userscript.rollback.failed", content: expect.objectContaining({ scriptId: "saved", operation: "edit", failures: expect.arrayContaining([expect.objectContaining({ step: "unregister-replacement" }), expect.objectContaining({ step: "register-previous" })]) }) }));
+  });
+
+  it("reports a restore rollback failure separately from the rejected replacement", async () => {
+    const previous = { id: "saved", matches: ["<all_urls>"], js: [{ code: "1" }] };
+    const desired = { ...previous, js: [{ code: "2" }] };
+    const fake = fakeChrome({ registered: [previous], stored: { [USER_SCRIPTS_STORAGE_KEY]: [desired] } });
+    fake.api.register.mockRejectedValueOnce(new Error("replacement denied")).mockRejectedValueOnce(new Error("rollback denied"));
+    const telemetry = vi.fn();
+    await expect(restoreUserScripts({ chromeApi: fake.chromeApi as never, logger: { telemetry } as never })).rejects.toThrow(/replacement denied.*rollback denied/);
+    expect(telemetry).toHaveBeenCalledWith(expect.objectContaining({ type: "userscript.rollback.failed", content: expect.objectContaining({ scriptId: "saved", step: "register-previous" }) }));
+  });
+
   it("restores missing and changed definitions without unregistering other scripts", async () => {
     const legacy = { id: "legacy", matches: ["<all_urls>"], js: [{ code: "1" }] };
     const fake = fakeChrome({ registered: [legacy] });

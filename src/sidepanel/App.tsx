@@ -86,7 +86,7 @@ export function App() {
   }
 
   if (session.configured) {
-    return <ConfiguredChat config={session.config} systemPrompt={session.systemPrompt} logger={logger} onError={setFatal} />;
+    return <><DiagnosticNotice logger={logger} type="sidepanel.config.refresh-failed" summary="配置刷新失败；当前仍使用上次读取的配置。" error={session.error} /><ConfiguredChat config={session.config} systemPrompt={session.systemPrompt} logger={logger} onError={setFatal} /></>;
   }
 
   return (
@@ -106,6 +106,11 @@ export function App() {
       </section>
     </main>
   );
+}
+
+function DiagnosticNotice({ logger, type, summary, error }: { logger: EventLogger; type: string; summary: string; error: unknown }) {
+  useEffect(() => { if (error !== undefined) logger.telemetry({ type, content: { operation: type }, error }); }, [logger, type, error]);
+  return error === undefined ? null : <ErrorNotice summary={summary} error={error} />;
 }
 
 function ConfiguredChat({ config, systemPrompt, logger, onError }: { config: ModelConfig; systemPrompt?: string; logger: EventLogger; onError: (error: unknown) => void }) {
@@ -150,7 +155,7 @@ function ConfiguredChat({ config, systemPrompt, logger, onError }: { config: Mod
   return <ConfiguredRuntime config={config} systemPrompt={systemPrompt} logger={logger} initialThreadId={initialThreadId ?? undefined} goalMode={goalMode} onGoalModeChange={changeGoalMode} />;
 }
 
-function RecoverConversationTitles({ logger, config }: { logger: EventLogger; config: ModelConfig }) {
+export function RecoverConversationTitles({ logger, config }: { logger: EventLogger; config: ModelConfig }) {
   useEffect(() => {
     const recoverTitle = async (conversationId: string) => {
       const events = await logger.summaryEvents(conversationId);
@@ -158,13 +163,20 @@ function RecoverConversationTitles({ logger, config }: { logger: EventLogger; co
       const lastTitleLifecycle = [...events].reverse().find((event) => event.type.startsWith("model.title."));
       if (!summary || summary.title !== "新对话" || !events.some((event) => event.type === "conversation.finished")) return;
       if (lastTitleLifecycle?.type === "model.title.finished" || lastTitleLifecycle?.type === "model.title.failed") return;
-      await generateConversationTitle(logger, config, conversationId);
+      try { await generateConversationTitle(logger, config, conversationId); }
+      catch (error) {
+        // Generation normally records its own failure, but that write can fail.
+        // Verify the receipt before suppressing the recovery diagnostic.
+        const latest = await logger.summaryEvents(conversationId).catch(() => []);
+        if ([...latest].reverse().find((event) => event.type.startsWith("model.title."))?.type !== "model.title.failed") throw error;
+      }
     };
-    void logger.summaryEvents().then((events) => Promise.allSettled(
-      rebuildConversationList(events).map(({ id }) => recoverTitle(id)),
-    ));
+    const report = (error: unknown, conversationId?: string) => logger.telemetry({ type: "model.title.recovery-failed", conversationId, content: { operation: "recover-title" }, error });
+    void logger.summaryEvents().then((events) => Promise.all(
+      rebuildConversationList(events).map(({ id }) => recoverTitle(id).catch((error) => report(error, id))),
+    )).catch((error) => report(error));
     return logger.subscribe((event) => {
-      if (event.type === "conversation.finished" && event.conversationId) void recoverTitle(event.conversationId).catch(() => undefined);
+      if (event.type === "conversation.finished" && event.conversationId) void recoverTitle(event.conversationId).catch((error) => report(error, event.conversationId));
     });
   }, [config, logger]);
   return null;
@@ -185,17 +197,17 @@ function ConfiguredConversation({ config, logger, goalMode, onGoalModeChange }: 
     <main className="app-shell" data-testid="sidepanel-shell">
       <RecoverConversationTitles logger={logger} config={config} />
       <Header conversation logger={logger} />
-      <RunOwnershipNotice />
+      <RunOwnershipNotice logger={logger} />
       <ConversationView key={threadId} config={config} logger={logger} threadId={threadId} drafts={drafts.current} goalMode={goalMode} onGoalModeChange={onGoalModeChange} />
     </main>
   );
 }
 
-function RunOwnershipNotice() {
-  const { otherRunning } = useRunState();
-  return otherRunning
+function RunOwnershipNotice({ logger }: { logger: EventLogger }) {
+  const { otherRunning, error } = useRunState();
+  return <><DiagnosticNotice logger={logger} type="sidepanel.run-status.failed" summary="无法查询运行状态；显示的状态可能已过期。" error={error} />{otherRunning
     ? <p role="status" data-testid="other-run-busy" className="conversation-notice">其他窗口已有任务运行；请等待完成或在原侧栏停止任务。</p>
-    : null;
+    : null}</>;
 }
 
 export function ConversationView({ config, logger, threadId, drafts, goalMode, onGoalModeChange }: { config: ModelConfig; logger: EventLogger; threadId: string; drafts: Map<string, string>; goalMode: boolean; onGoalModeChange: (value: boolean) => void }) {

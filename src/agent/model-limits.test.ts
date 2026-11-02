@@ -350,3 +350,26 @@ describe("models.dev limit matching", () => {
     expect(ordinary.providerSettings).toEqual(profile.providerSettings);
   });
 });
+
+describe("model catalog diagnostics", () => {
+  it("correlates cache read and fetch failures without exposing credentials while falling back", async () => {
+    const diagnostics: import("./diagnostics").ModelDiagnostic[] = [];
+    const limit = await resolveModelLimit({ baseURL: "https://provider.test/v1", model: "missing" }, {
+      storage: { async get() { throw new Error("disk denied"); }, async set() {} },
+      fetch: async () => { throw new Error("offline Bearer top-secret"); },
+      onDiagnostic: (event) => diagnostics.push(event),
+    });
+    expect(limit).toMatchObject({ source: "estimated", context: 256_000 });
+    expect(diagnostics.map((item) => item.phase)).toEqual(["cache-read", "fetch", "resolution"]);
+    expect(new Set(diagnostics.map((item) => item.operationId)).size).toBe(1);
+    expect(JSON.stringify(diagnostics)).not.toContain("top-secret");
+    expect(diagnostics[1]?.error.message).toContain("offline");
+  });
+  it("records storage write failure without changing the fetched catalog", async () => {
+    const diagnostics: import("./diagnostics").ModelDiagnostic[] = [];
+    const result = await loadModelCatalog({ storage: { async get() { return {}; }, async set() { throw new Error("quota exceeded"); } },
+      fetch: async () => Response.json({ example: { id: "example", models: {} } }), onDiagnostic: (event) => diagnostics.push(event) });
+    expect(result).toHaveProperty("example");
+    expect(diagnostics).toMatchObject([{ phase: "cache-write", error: { message: "quota exceeded" } }]);
+  });
+});

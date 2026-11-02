@@ -61,6 +61,25 @@ function memoryLog() {
   } });
   return { logger, events };
 }
+
+describe("iframe diagnostic subscription failures", () => {
+  it("records the command and makes the affected capture explicitly incomplete", async () => {
+    const fake = fakeChrome();
+    const { logger, events } = memoryLog();
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never, logger });
+    (executor as any).networkEnabled.add(41);
+    (executor as any).bridgeCommand = vi.fn(async (_source: unknown, method: string) => {
+      if (method === "Network.enable") throw new Error("CDP unavailable");
+      return {};
+    });
+    await (executor as any).handleCommandEvent({ tabId: 41 }, "Target.attachedToTarget", { targetInfo: { type: "iframe" }, sessionId: "child" });
+    expect(await (executor as any).diagnostics.requests(41, {})).toMatchObject({ integrity: "incomplete", reason: "diagnostic-capture-failed" });
+    await logger.flush();
+    const failure = events.find((event) => event.type === "browser.diagnostic.capture-failed");
+    expect(failure?.content).toMatchObject({ method: "Network.enable", source: { tabId: 41, sessionId: "child" } });
+    expect(fromLogValue(failure?.error, failure?.valueEncoding)).toMatchObject({ message: "CDP unavailable" });
+  });
+});
 function programHarness(work: (capabilities: any, signal: AbortSignal) => Promise<unknown>, fake = fakeChrome(), lazy = false) {
   const log = memoryLog();
   let runIdentity: { runId: string; ownerId: string; generation: number } | undefined = { runId: "run", ownerId: "owner", generation: 1 };

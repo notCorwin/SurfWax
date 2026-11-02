@@ -1,5 +1,6 @@
 import { isModelSdk, type JsonValue, type ModelConfig, type ModelProviderOverride, type ModelSdk } from "../types";
 import { defaultBaseURL, isCloudflareGateway, providerSettingFields, resolvedBaseURL, sdkFor, type ProviderSettingField } from "./model-sdks";
+import { modelDiagnostic, type ModelDiagnostic } from "./diagnostics";
 import bundledCatalogGzip, { metadata as bundledCatalogMetadata } from "../data/models-dev-api";
 
 export const CATALOG_CACHE_KEY = "side-agent:model-catalog";
@@ -272,15 +273,17 @@ function cachedCatalogRevision(cached?: CachedCatalog): string {
 }
 
 export function loadModelCatalog(
-  options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; refresh?: boolean; onStale?: (error: unknown) => void; bundledFallback?: boolean; staleFallback?: boolean; validateCompleteness?: boolean } = {},
+  options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; refresh?: boolean; onStale?: (error: unknown) => void; bundledFallback?: boolean; staleFallback?: boolean; validateCompleteness?: boolean; onDiagnostic?: (diagnostic: ModelDiagnostic) => void; diagnosticOperationId?: string } = {},
 ): Promise<ModelCatalog> {
   const storage = options.storage ?? (typeof chrome !== "undefined" ? chrome.storage?.local : undefined);
   const validateCompleteness = options.validateCompleteness ?? !options.fetch;
   const task = async () => {
     options.signal?.throwIfAborted();
-    const stored = storage ? (await storage.get(CATALOG_CACHE_KEY).catch(() => ({ [CATALOG_CACHE_KEY]: undefined })))[CATALOG_CACHE_KEY] as CachedCatalog | undefined : undefined;
+    const operationId = options.diagnosticOperationId ?? crypto.randomUUID();
+    const report = (phase: string, error: unknown) => modelDiagnostic(operationId, "catalog", phase, error, options.onDiagnostic);
+    const stored = storage ? (await storage.get(CATALOG_CACHE_KEY).catch((error) => { report("cache-read", error); return { [CATALOG_CACHE_KEY]: undefined }; }))[CATALOG_CACHE_KEY] as CachedCatalog | undefined : undefined;
     let cached = stored?.version === CATALOG_CACHE_VERSION ? stored : undefined;
-    try { if (cached?.catalog && validateCompleteness) validateCatalog(cached.catalog); } catch { cached = undefined; }
+    try { if (cached?.catalog && validateCompleteness) validateCatalog(cached.catalog); } catch (error) { report("cache-validation", error); cached = undefined; }
     if (cached?.catalog && validateCompleteness && cached.fetchedAt < Date.parse(bundledCatalogMetadata.fetchedAt)) cached = undefined;
     if (cached?.catalog) catalogRevisions.set(cached.catalog, cached.revision ?? await sha256(JSON.stringify(cached.catalog)));
     if (!options.refresh && cached?.catalog && (options.now ?? Date.now)() - cached.fetchedAt < REFRESH_MS) return cached.catalog;
@@ -298,7 +301,7 @@ export function loadModelCatalog(
       catalogRevisions.set(catalog, revision);
       if (storage) await storage.set({
         [CATALOG_CACHE_KEY]: { version: CATALOG_CACHE_VERSION, fetchedAt, revision, catalog } satisfies CachedCatalog,
-      }).catch(() => undefined);
+      }).catch((error) => report("cache-write", error));
       return catalog;
     };
     const fallbackToBundle = async () => {
@@ -313,7 +316,7 @@ export function loadModelCatalog(
       const fetcher = globalThis.fetch;
       if (!backgroundCatalogRefreshes.has(fetcher)) {
         const refresh = fetchCatalog().catch((error) => {
-          if (!options.signal?.aborted) options.onStale?.(error);
+          if (!options.signal?.aborted) { report("background-refresh", error); options.onStale?.(error); }
           throw error;
         }).finally(() => backgroundCatalogRefreshes.delete(fetcher));
         backgroundCatalogRefreshes.set(fetcher, refresh);
@@ -325,6 +328,7 @@ export function loadModelCatalog(
       return await fetchCatalog();
     } catch (error) {
       if (options.signal?.aborted) throw error;
+      report("fetch", error);
       if (cached?.catalog && options.staleFallback !== false) {
         options.onStale?.(error);
         return cached.catalog;
@@ -338,7 +342,7 @@ export function loadModelCatalog(
       throw error;
     }
   };
-  if (options.signal || options.fetch || options.storage || options.now || options.refresh || options.onStale) return task();
+  if (options.signal || options.fetch || options.storage || options.now || options.refresh || options.onStale || options.onDiagnostic) return task();
   const fetcher = globalThis.fetch;
   let catalogPending = catalogRequests.get(fetcher);
   if (!catalogPending) { catalogPending = new Map(); catalogRequests.set(fetcher, catalogPending); }
@@ -361,15 +365,16 @@ export function modelLimitKey(config: ModelConfig): string {
 
 export function resolveModelLimit(
   config: ModelConfig,
-  options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal } = {},
+  options: { storage?: Storage; fetch?: typeof globalThis.fetch; now?: () => number; signal?: AbortSignal; onDiagnostic?: (diagnostic: ModelDiagnostic) => void } = {},
 ): Promise<ModelLimit | undefined> {
   const key = modelLimitKey(config);
   const task = async (): Promise<ModelLimit | undefined> => {
     if (validLimit(config.contextWindowOverride)) {
       return { provider: "manual", model: config.model, context: config.contextWindowOverride, source: "manual" } as ModelLimit;
     }
+    const operationId = crypto.randomUUID();
     try {
-      const catalog = await loadModelCatalog(options);
+      const catalog = await loadModelCatalog({ ...options, diagnosticOperationId: operationId });
       const catalogRevision = catalogRevisions.get(catalog) ?? cachedCatalogRevision();
       let matches = limitMatches.get(catalogRevision);
       if (!matches) {
@@ -385,10 +390,11 @@ export function resolveModelLimit(
       return match;
     } catch (error) {
       if (options.signal?.aborted) throw error;
+      modelDiagnostic(operationId, "model-limit", "resolution", error, options.onDiagnostic);
       return { provider: "unknown", model: config.model, context: 256_000, source: "estimated" };
     }
   };
-  if (options.signal || options.fetch || options.storage || options.now) return task();
+  if (options.signal || options.fetch || options.storage || options.now || options.onDiagnostic) return task();
   const fetcher = globalThis.fetch;
   let pending = limitRequests.get(fetcher);
   if (!pending) { pending = new Map(); limitRequests.set(fetcher, pending); }
