@@ -227,3 +227,12 @@ describe("immutable semantic snapshot pagination", () => {
     expect(paginateSnapshot([], { budget: 2 })).toEqual({ fragments: [], usedBytes: 2, hasMore: false, reason: "complete" });
   });
 });
+it("keeps a row whole on the next page when it fits there", () => {
+  const rows = [{ id: "first", line: "a".repeat(60) }, { id: "second", line: "b".repeat(60), ref: "second-ref" }];
+  const first = paginateSnapshot(rows, { budget: 187 });
+  expect(first.fragments).toEqual([rows[0]]);
+  expect(first.next).toEqual({ index: 1, charOffset: 0 });
+  const second = paginateSnapshot(rows, { budget: 187, position: first.next });
+  expect(second.fragments).toEqual([rows[1]]);
+  expect(second.hasMore).toBe(false);
+});

@@ -1416,7 +1416,14 @@ export class AutomationRuntime {
         }
         await this.withFocusedTarget(targetSession, objectId, operationSignal, async (assertFocus, backendNodeId) => {
           if (operation === "pressSequentially") {
-            for (const character of String(args[0] ?? "")) { await assertFocus(); await this.options.command(targetSession.debuggee, "Input.insertText", { text: character, surfWaxTargetBackendNodeId: backendNodeId }); }
+            for (const character of String(args[0] ?? "")) {
+              await assertFocus();
+              // Physical keys have an unambiguous mapping for printable ASCII.
+              // Other text is inserted directly: inventing a keyboard layout or
+              // mapping a newline to Enter can change the meaning of the input.
+              if (/^[\x20-\x7e]$/.test(character)) await this.press(targetSession, character, operationSignal, assertFocus);
+              else await this.options.command(targetSession.debuggee, "Input.insertText", { text: character, surfWaxTargetBackendNodeId: backendNodeId });
+            }
           } else { await this.press(targetSession, String(args[0] ?? ""), operationSignal, assertFocus); }
         }, operation === "pressSequentially");
         return this.afterAction(session);

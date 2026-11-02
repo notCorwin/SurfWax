@@ -1032,8 +1032,24 @@ describe("AutomationRuntime", () => {
     await runtime.abortSessions();
   });
 
+  it("types printable keys as keyboard events and preserves Unicode text insertion", async () => {
+    const { runtime, command, pressChord } = harness();
+    const page = await runtime.createPage(3);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOM.describeNode") return { node: { backendNodeId: 7 } };
+      if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("document.hasFocus()"))
+        return { result: { value: { connected: true, focused: true, editable: true } } };
+      return original(source, method, params);
+    });
+    await page.getByRole("button", { name: "Sign in" }).pressSequentially("a+中");
+    expect(pressChord.mock.calls.map(([, key]) => key)).toEqual(["a", "+"]);
+    expect(command.mock.calls.filter(([, method]) => method === "Input.insertText").map(([, , params]) => params.text)).toEqual(["中"]);
+    await runtime.abortSessions();
+  });
+
   it("stops sequential insertion after focus moves and reports the partial effect", async () => {
-    const { runtime, command } = harness();
+    const { runtime, command, pressChord } = harness();
     const page = await runtime.createPage(3);
     const original = command.getMockImplementation()!;
     let focused = true;
@@ -1041,12 +1057,12 @@ describe("AutomationRuntime", () => {
       if (method === "DOM.describeNode") return { node: { backendNodeId: 7 } };
       if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("document.hasFocus()"))
         return { result: { value: { connected: true, focused, editable: true } } };
-      if (method === "Input.insertText") { focused = false; return {}; }
       return original(source, method, params);
     });
+    pressChord.mockImplementation(async () => { focused = false; });
     await expect(page.getByRole("button", { name: "Sign in" }).pressSequentially("abc"))
       .rejects.toMatchObject({ code: "focus-lost", effectUnknown: true });
-    expect(command.mock.calls.filter(([, method]) => method === "Input.insertText").map(([, , params]) => params.text)).toEqual(["a"]);
+    expect(pressChord.mock.calls.map(([, key]) => key)).toEqual(["a"]);
     await runtime.abortSessions();
   });
 
@@ -1068,19 +1084,19 @@ describe("AutomationRuntime", () => {
   });
 
   it("stops sequential insertion when the input becomes readonly after the first character", async () => {
-    const { runtime, command } = harness();
+    const { runtime, command, pressChord } = harness();
     const page = await runtime.createPage(3);
     const original = command.getMockImplementation()!;
     let editable = true;
     command.mockImplementation(async (source, method, params) => {
       if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("document.hasFocus()"))
         return { result: { value: { connected: true, focused: true, editable } } };
-      if (method === "Input.insertText") editable = false;
       return original(source, method, params);
     });
+    pressChord.mockImplementation(async () => { editable = false; });
     await expect(page.getByRole("button", { name: "Sign in" }).pressSequentially("abc"))
       .rejects.toMatchObject({ code: "not-editable", effectUnknown: true });
-    expect(command.mock.calls.filter(([, method]) => method === "Input.insertText").map(([, , params]) => params.text)).toEqual(["a"]);
+    expect(pressChord.mock.calls.map(([, key]) => key)).toEqual(["a"]);
     await runtime.abortSessions();
   });
 

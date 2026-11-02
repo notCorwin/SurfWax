@@ -131,6 +131,10 @@ export function paginateSnapshot(
     });
     const separator = fragments.length ? 1 : 0;
     const fits = (end: number): boolean => usedBytes + separator + jsonBytes(makeFragment(end)) <= budget;
+    // Keep a complete row together when it fits on the next page. Splitting a
+    // row just to use spare bytes makes the reader reconstruct ordinary rows.
+    if (fragments.length && charOffset === 0 && item.line.length <= budget && !fits(item.line.length)
+      && 2 + jsonBytes(makeFragment(item.line.length)) <= budget) break;
     // A UTF-16 code unit costs at least one UTF-8 JSON byte; this bound avoids
     // repeatedly encoding an enormous line when the requested budget is small.
     let end: number;

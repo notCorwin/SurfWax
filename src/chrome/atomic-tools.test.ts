@@ -308,7 +308,7 @@ describe("atomic browser tool programs", () => {
     const tools = createProgramTools({} as never);
     const positions = [
       ["fill", "Replace an editable element's value; an empty value clears it.", "Does not emit beforeinput or keyboard events."],
-      ["type_text", "Insert text character by character into an editable element.", "does not emit beforeinput, keydown or keyup."],
+      ["type_text", "Insert text character by character into an editable element.", "Printable ASCII uses keyboard events"],
       ["press_key", "Press a key or chord, optionally focusing an element first."],
       ["key_down", "Hold a key until key_up or run cleanup."],
       ["read_elements", "Read text and selected attributes from matching elements in pages.", "The list is live"],

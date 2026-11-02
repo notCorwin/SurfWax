@@ -70,6 +70,12 @@ test("text tools reject non-editable controls before focus or keyboard effects",
     await expect(target.locator("#text")).toHaveValue("alpha!");
     await expect(target.locator("#textarea")).toHaveValue("beta");
     await expect(target.locator("#editor")).toHaveText("gamma!");
+    const textEvents = await target.evaluate(() => (window as any).editEvents as string[]);
+    const keydown = textEvents.indexOf("text:keydown");
+    expect(keydown).toBeGreaterThanOrEqual(0);
+    expect(textEvents.slice(keydown, keydown + 4)).toEqual([
+      "text:keydown", "text:beforeinput", "text:input", "text:keyup",
+    ]);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
