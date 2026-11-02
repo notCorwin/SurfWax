@@ -2213,8 +2213,7 @@ describe("AutomationRuntime", () => {
     const result = await (await runtime.createPage(3)).inspect();
     expect(inspectText(result)).toContain('StaticText "B"');
     expect(inspectText(result)).not.toContain('StaticText "A"');
-    expect(axCaptures).toBe(2);
-    expect(captures).toBe(4);
+    expect(result).not.toHaveProperty("partial");
     await runtime.abortSessions();
   });
 

@@ -287,6 +287,152 @@ describe("frame tree discovery", () => {
     else await expect(page.snapshot()).resolves.not.toHaveProperty("partial");
     await runtime.abortSessions();
   });
+  it("returns a partial snapshot of changing visible text after one confirming retry", async () => {
+    const { runtime, command } = harness(), original = command.getMockImplementation()!;
+    let captures = 0;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOMSnapshot.captureSnapshot" && !source.sessionId) {
+        const snapshot = addVisibleControl(await original(source, method, params), 0, 50, `Tick${++captures % 2}`, "DIV");
+        for (const document of snapshot.documents) {
+          document.nodes.nodeValue ??= document.nodes.backendNodeId.map(() => -1);
+          document.layout.text ??= document.layout.nodeIndex.map(() => -1);
+        }
+        return snapshot;
+      }
+      if (method === "Accessibility.getFullAXTree") return { nodes: params.frameId ? [] : [
+        { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["text"] },
+        { nodeId: "text", parentId: "root", backendDOMNodeId: 1_000_050, role: { value: "StaticText" }, name: { value: "Tick0" } },
+      ] };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      return original(source, method, params);
+    });
+    const result = await (await runtime.createPage(3)).snapshot();
+    expect(result).toMatchObject({ partial: true });
+    expect(result.snapshot).not.toContain("Tick0");
+    expect(result.snapshot).not.toContain("Tick1");
+    expect(captures).toBe(4);
+    await runtime.abortSessions();
+  });
+  it("bounds repeated detached-node errors during snapshot confirmation", async () => {
+    const { runtime, command } = harness(), original = command.getMockImplementation()!;
+    let confirmation = false;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOMSnapshot.captureSnapshot" && !source.sessionId && confirmation) {
+        confirmation = false;
+        throw new Error("Could not find node with given id");
+      }
+      if (method === "Accessibility.getFullAXTree") { confirmation = true; return { nodes: [] }; }
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      return original(source, method, params);
+    });
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), 500);
+    runtime.setContext({ conversationId: "c", logIdentity: { runId: "run", toolCallId: "call", toolCallIdCanonical: true }, signal: abort.signal });
+    try {
+      await expect((await runtime.createPage(3)).snapshot()).rejects.toMatchObject({ code: "snapshot-unavailable", detail: { reason: "text-paint-node-unstable" } });
+    } finally { clearTimeout(timer); await runtime.abortSessions(); }
+  });
+  it("recovers a detached text node during confirmation and returns its later stable value", async () => {
+    const { runtime, command } = harness(), original = command.getMockImplementation()!;
+    let captures = 0;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOMSnapshot.captureSnapshot" && !source.sessionId) {
+        if (++captures === 2) throw new Error("Could not find node with given id");
+        const snapshot = addVisibleControl(await original(source, method, params), 0, 50, `Tick${captures === 1 ? 0 : 1}`, "DIV");
+        for (const document of snapshot.documents) {
+          document.nodes.nodeValue ??= document.nodes.backendNodeId.map(() => -1);
+          document.layout.text ??= document.layout.nodeIndex.map(() => -1);
+        }
+        return snapshot;
+      }
+      if (method === "Accessibility.getFullAXTree") return { nodes: params.frameId ? [] : [
+        { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["text"] },
+        { nodeId: "text", parentId: "root", backendDOMNodeId: 1_000_050, role: { value: "StaticText" }, name: { value: "Tick0" } },
+      ] };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      return original(source, method, params);
+    });
+    const result = await (await runtime.createPage(3)).snapshot();
+    expect(result).not.toHaveProperty("partial");
+    expect(result.snapshot).not.toContain("Tick0");
+    expect(result.snapshot).toContain('StaticText "Tick1"');
+    await runtime.abortSessions();
+  });
+  it("bounds discovery of continuously changing new text regions without a caller deadline", async () => {
+    const { runtime, command } = harness(), original = command.getMockImplementation()!;
+    let captures = 0;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOMSnapshot.captureSnapshot" && !source.sessionId) {
+        const snapshot: any = await original(source, method, params);
+        captures++;
+        for (let i = 0; i < 100; i++) addVisibleControl(snapshot, 0, 10_000 + i, `Tick${captures % 2 === 0 && i === (captures / 2 - 1) % 100 ? 1 : 0}`, "DIV");
+        for (const document of snapshot.documents) {
+          document.nodes.nodeValue ??= document.nodes.backendNodeId.map(() => -1);
+          document.layout.text ??= document.layout.nodeIndex.map(() => -1);
+        }
+        return snapshot;
+      }
+      if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      return original(source, method, params);
+    });
+    try {
+      await expect((await runtime.createPage(3)).snapshot()).rejects.toMatchObject({ code: "snapshot-unavailable", detail: { reason: "dynamic-text-unstable" } });
+      expect(captures).toBeLessThan(25);
+    } finally { await runtime.abortSessions(); }
+  }, 10000);
+  it("bounds recapture when text alternates between changing and briefly stable", async () => {
+    const { runtime, command } = harness(), original = command.getMockImplementation()!;
+    let captures = 0;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOMSnapshot.captureSnapshot" && !source.sessionId) {
+        const value = ++captures % 4 === 1 ? 0 : 1;
+        const snapshot = addVisibleControl(await original(source, method, params), 0, 50, `Tick${value}`, "DIV");
+        for (const document of snapshot.documents) {
+          document.nodes.nodeValue ??= document.nodes.backendNodeId.map(() => -1);
+          document.layout.text ??= document.layout.nodeIndex.map(() => -1);
+        }
+        return snapshot;
+      }
+      if (method === "Accessibility.getFullAXTree") return { nodes: params.frameId ? [] : [
+        { nodeId: "root", role: { value: "RootWebArea" }, childIds: ["text"] },
+        { nodeId: "text", parentId: "root", backendDOMNodeId: 1_000_050, role: { value: "StaticText" }, name: { value: "Tick0" } },
+      ] };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      return original(source, method, params);
+    });
+    try {
+      const result = await (await runtime.createPage(3)).snapshot();
+      expect(result).toMatchObject({ partial: true });
+      expect(result.snapshot).not.toContain("Tick0");
+      expect(result.snapshot).not.toContain("Tick1");
+      expect(captures).toBeLessThan(10);
+    } finally { await runtime.abortSessions(); }
+  });
+  it("bounds detached-node recovery when each retry discovers a different changing region", async () => {
+    const { runtime, command } = harness(), original = command.getMockImplementation()!;
+    let confirmation = false, recovery = false, changes = 0;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOMSnapshot.captureSnapshot" && !source.sessionId) {
+        if (confirmation) { confirmation = false; recovery = true; throw new Error("Could not find node with given id"); }
+        const snapshot: any = await original(source, method, params);
+        const changed = recovery ? changes++ : -1; recovery = false;
+        for (let i = 0; i < 20; i++) addVisibleControl(snapshot, 0, 10_000 + i, `Tick${i === changed ? 1 : 0}`, "DIV");
+        for (const document of snapshot.documents) {
+          document.nodes.nodeValue ??= document.nodes.backendNodeId.map(() => -1);
+          document.layout.text ??= document.layout.nodeIndex.map(() => -1);
+        }
+        return snapshot;
+      }
+      if (method === "Accessibility.getFullAXTree") { confirmation = true; return { nodes: [] }; }
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      return original(source, method, params);
+    });
+    try {
+      await expect((await runtime.createPage(3)).snapshot()).rejects.toMatchObject({ code: "snapshot-unavailable", detail: { reason: "dynamic-text-unstable" } });
+      expect(changes).toBeLessThan(20);
+    } finally { await runtime.abortSessions(); }
+  });
   it("rejects visible changes that occur during the accessibility recheck", async () => {
     const { runtime, command } = harness(), original = command.getMockImplementation()!;
     let capture = 0;

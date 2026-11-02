@@ -3204,6 +3204,15 @@ export class AutomationRuntime {
       }
     };
     let retriedUnstableCapture = false;
+    // Bound recovery within one observation even when distinct parts of a
+    // live page keep changing. This does not limit subsequent agent actions.
+    let dynamicRecoveryPasses = 0;
+    let speculativeDynamic = false;
+    const retryDynamicCapture = () => {
+      if (++dynamicRecoveryPasses > 8) throw automationError("snapshot-unavailable", { reason: "dynamic-text-unstable" });
+      if (!retriedUnstableCapture) speculativeDynamic = true;
+      retriedUnstableCapture = true;
+    };
     const dynamicTextByTarget = new Map<string, Set<number>>();
     let retryGeneration: number | undefined, retryFrameRevision: number | undefined;
     while (true) {
@@ -3222,7 +3231,7 @@ export class AutomationRuntime {
       }
       const generation = session.generation, frameRevision = session.frameRevision;
       if (retryGeneration !== generation || retryFrameRevision !== frameRevision) {
-        retryGeneration = generation; retryFrameRevision = frameRevision; retriedUnstableCapture = false; dynamicTextByTarget.clear();
+        retryGeneration = generation; retryFrameRevision = frameRevision; retriedUnstableCapture = false; speculativeDynamic = false; dynamicTextByTarget.clear();
       }
       const changed = () => generation !== session.generation || frameRevision !== session.frameRevision;
       const regionTask = region ? this.resolveOnce(session, region) : undefined;
@@ -3493,6 +3502,33 @@ export class AutomationRuntime {
       type TextProjection = { full: string; text: string };
       let trees: Array<{ debuggee: Debuggee; frameId: string | undefined; depth: number; tree: any; visibility: Map<number, boolean>; partialFrames: Set<number>; textProjections: Map<number, TextProjection>; unknownText: Set<number>; paintEvidence: Map<number, TextPaintEvidence>; candidates: SnapshotTextPaintCandidate[]; snapshot: any }>;
       let initialLayouts: Array<{ debuggee: Debuggee; snapshot: any }> = [];
+      const recoverDetachedText = async (): Promise<void> => {
+        const next = await waitForCapture(Promise.all(initialLayouts.map(async ({ debuggee }) => ({ debuggee,
+          snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true, includePaintOrder: true }) }))));
+        if (changed()) return;
+        let valid = true, found = false;
+        const observed = new Map<string, Set<number>>();
+        for (let i = 0; i < initialLayouts.length; i++) {
+          const before = initialLayouts[i]!, after = next[i]!;
+          if (sameDOMSnapshot(before.snapshot, after.snapshot)) continue;
+          const ids = changedTextNodes(before.snapshot, after.snapshot);
+          if (!ids) { valid = false; break; }
+          found = true; observed.set(before.debuggee.sessionId ?? "", ids);
+        }
+        if (valid && found) {
+          let newlyTracked = false;
+          for (const [key, ids] of observed) {
+            const tracked = dynamicTextByTarget.get(key) ?? new Set<number>();
+            for (const id of ids) if (!tracked.has(id)) { tracked.add(id); newlyTracked = true; }
+            dynamicTextByTarget.set(key, tracked);
+          }
+          if (!newlyTracked) throw automationError("snapshot-unavailable", { reason: "text-paint-node-unstable" });
+          retryDynamicCapture();
+          return;
+        }
+        if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "text-paint-node-unstable" });
+        retriedUnstableCapture = true;
+      };
       let info: { url: string; title: string };
       const frameClips = new Map<string, SnapshotClip>();
       try {
@@ -3848,31 +3884,8 @@ export class AutomationRuntime {
           retriedUnstableCapture = true;
         }
         if (!changed() && !stalePaintContext && isDetachedNodeError(error) && initialLayouts.length) {
-          const next = await waitForCapture(Promise.all(initialLayouts.map(async ({ debuggee }) => ({ debuggee,
-            snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true, includePaintOrder: true }) }))));
-          if (changed()) continue;
-          let valid = true, found = false;
-          const observed = new Map<string, Set<number>>();
-          for (let i = 0; i < initialLayouts.length; i++) {
-            const before = initialLayouts[i]!, after = next[i]!;
-            if (sameDOMSnapshot(before.snapshot, after.snapshot)) continue;
-            const ids = changedTextNodes(before.snapshot, after.snapshot);
-            if (!ids) { valid = false; break; }
-            found = true; observed.set(before.debuggee.sessionId ?? "", ids);
-          }
-          if (valid && found) {
-            let newlyTracked = false;
-            for (const [key, ids] of observed) {
-              const tracked = dynamicTextByTarget.get(key) ?? new Set<number>();
-              for (const id of ids) if (!tracked.has(id)) { tracked.add(id); newlyTracked = true; }
-              dynamicTextByTarget.set(key, tracked);
-            }
-            if (!newlyTracked) throw automationError("snapshot-unavailable", { reason: "text-paint-node-unstable" });
-            retriedUnstableCapture = true;
-            continue;
-          }
-          if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "text-paint-node-unstable" });
-          retriedUnstableCapture = true;
+          await recoverDetachedText();
+          continue;
         }
         if (!changed() && !isTransientNavigationError(error) && !isDetachedNodeError(error) && !stalePaintContext) throw error;
         await delay(changed() ? 0 : 50, signal); continue;
@@ -5079,7 +5092,6 @@ export class AutomationRuntime {
         try {
           const afterEllipsis = await waitForCapture(Promise.all(ellipsisBatches.map((batch) => readEllipsisGeometry(batch.debuggee, batch.frameId, batch.requests))));
           if (ellipsisBatches.some((batch, index) => JSON.stringify(batch.proofs) !== JSON.stringify(afterEllipsis[index]))) {
-            if (!retriedUnstableCapture) { retriedUnstableCapture = true; continue; }
             unstableEllipsis = ellipsisBatches.filter((batch, index) => JSON.stringify(batch.proofs) !== JSON.stringify(afterEllipsis[index]));
           }
           const afterFramePaint = await waitForCapture(Promise.all(framePaintBatches.map((batch) => readFramePaint(batch[0]!.frameId))));
@@ -5124,6 +5136,10 @@ export class AutomationRuntime {
           if (stalePlaceholderContext && !changed()) {
             if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "placeholder-context-unstable" });
             retriedUnstableCapture = true;
+          }
+          if (!changed() && !stalePlaceholderContext && isDetachedNodeError(error) && initialLayouts.length) {
+            await recoverDetachedText();
+            continue;
           }
           if (!changed() && !isTransientNavigationError(error) && !isDetachedNodeError(error) && !stalePlaceholderContext) throw error;
           await delay(changed() ? 0 : 50, signal); continue;
@@ -5178,6 +5194,8 @@ export class AutomationRuntime {
           })) onlyDynamicText = false;
         }
         if (unstable) {
+          // A second observed change confirms that these regions are dynamic.
+          speculativeDynamic = false;
           // A hidden text node can still supply an accessible name (for
           // example through aria-labelledby). Only tolerate such changes if
           // every captured accessibility tree is independently unchanged.
@@ -5214,7 +5232,7 @@ export class AutomationRuntime {
               }
             }
           }
-          if (retriedUnstableCapture && onlyDynamicText) {
+          if ((retriedUnstableCapture || !onlyUnrenderedText) && onlyDynamicText) {
             let newText = false;
             for (const [key, ids] of observedDynamicText) {
               const tracked = dynamicTextByTarget.get(key) ?? new Set<number>();
@@ -5223,11 +5241,18 @@ export class AutomationRuntime {
             }
             // Re-render with the affected text and dependent names marked
             // unknown; never deliver the already rendered stale values.
-            if (newText) continue;
+            if (newText) { retryDynamicCapture(); continue; }
             if (partial) return { ...info, lines, frameRevision, geometry: await snapshotGeometry(confirmations, dynamicTextByTarget), geometrySources: confirmations.map(({ debuggee }) => debuggee), geometryDynamicParents: dynamicTextByTarget, partial: true, ...(regionNode ? { regionIdentity: JSON.stringify([regionDebuggee?.sessionId ?? "", regionFrameId, regionNode.node.backendNodeId]) } : {}) };
           }
           if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: unstablePaint ? "text-paint-unstable" : "dom-unstable" });
           retriedUnstableCapture = true;
+          continue;
+        }
+        if (partial && speculativeDynamic) {
+          // The suspected change stopped. Reacquire all text-paint and AX
+          // evidence before returning a full observation with current values.
+          speculativeDynamic = false;
+          dynamicTextByTarget.clear();
           continue;
         }
         return { ...info, lines, frameRevision, geometry: await snapshotGeometry(confirmations, partial ? dynamicTextByTarget : undefined), geometrySources: confirmations.map(({ debuggee }) => debuggee), ...(partial ? { partial: true as const, geometryDynamicParents: dynamicTextByTarget } : {}), ...(regionNode ? { regionIdentity: JSON.stringify([regionDebuggee?.sessionId ?? "", regionFrameId, regionNode.node.backendNodeId]) } : {}) };

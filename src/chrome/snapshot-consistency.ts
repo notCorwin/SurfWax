@@ -10,24 +10,22 @@ export type SnapshotConsistencyEvidence = Readonly<{
   frameClips?: ReadonlyMap<string, SnapshotClip>;
 }>;
 
-/** Identify parents of changing Text nodes only when the captures otherwise agree,
- * including exact layout geometry. The returned nodes must be rendered as
- * unknown; their values must never be presented as a consistent observation. */
+/** Identify changing text only when its effects on the rest of the page are
+ * bounded. A geometrically changing text node is allowed solely inside a
+ * stationary, clipped and non-overlapping container. */
 export function changedTextNodes(left: any, right: any, before?: SnapshotConsistencyEvidence): Set<number> | undefined {
   try {
     if (!Array.isArray(left?.documents) || !Array.isArray(right?.documents) || left.documents.length !== right.documents.length
       || !Array.isArray(left.strings) || !Array.isArray(right.strings)) return undefined;
     const normalized = structuredClone(right), changed = new Set<number>();
+    const uncertainLeft = new Set<number>(), uncertainRight = new Set<number>();
     const value = (strings: string[], index: unknown): string | undefined => index === -1 ? "" : Number.isSafeInteger(index) && Number(index) >= 0 ? strings[index as number] : undefined;
+    let geometryChanged = false;
     for (let d = 0; d < left.documents.length; d++) {
       const a = left.documents[d], b = right.documents[d], copy = normalized.documents[d];
       if (!Array.isArray(a?.nodes?.nodeValue) || !Array.isArray(b?.nodes?.nodeValue)
         || a.nodes.nodeValue.length !== b.nodes.nodeValue.length || !Array.isArray(a.layout?.nodeIndex) || !Array.isArray(b.layout?.nodeIndex)) return undefined;
-      // Changes in layout, including text box sizes and positions, may affect
-      // unrelated content and cannot be attributed safely to text alone.
-      for (const key of ["contentWidth", "contentHeight"]) if (a[key] !== b[key]) return undefined;
-      for (const key of ["bounds", "clientRects", "offsetRects", "scrollRects"]) if (JSON.stringify(a.layout[key]) !== JSON.stringify(b.layout[key])) return undefined;
-      if (JSON.stringify(a.textBoxes) !== JSON.stringify(b.textBoxes)) return undefined;
+      const dynamicLayouts = new Set<number>(), parents = new Set<number>();
       for (let i = 0; i < a.nodes.nodeValue.length; i++) {
         const av = value(left.strings, a.nodes.nodeValue[i]), bv = value(right.strings, b.nodes.nodeValue[i]);
         if (av === undefined || bv === undefined) return undefined;
@@ -36,20 +34,102 @@ export function changedTextNodes(left: any, right: any, before?: SnapshotConsist
         if (a.nodes.nodeType?.[i] !== 3 || b.nodes.nodeType?.[i] !== 3 || !Number.isSafeInteger(parent) || parent < 0
           || parent !== b.nodes.parentIndex?.[i] || a.nodes.backendNodeId?.[parent] !== b.nodes.backendNodeId?.[parent]
           || !Number.isSafeInteger(a.nodes.backendNodeId?.[parent]) || !Number.isSafeInteger(a.nodes.backendNodeId[i])) return undefined;
-        changed.add(a.nodes.backendNodeId[parent]);
+        changed.add(a.nodes.backendNodeId[parent]); parents.add(parent);
+        uncertainLeft.add(a.nodes.backendNodeId[i]); uncertainRight.add(b.nodes.backendNodeId[i]);
         copy.nodes.backendNodeId[i] = a.nodes.backendNodeId[i];
         copy.nodes.nodeValue[i] = normalized.strings.push(av) - 1;
         const ai = a.layout.nodeIndex.indexOf(i), bi = b.layout.nodeIndex.indexOf(i);
         if (ai !== bi) return undefined;
         if (ai >= 0) {
+          dynamicLayouts.add(ai);
           if (!Array.isArray(a.layout.text) || !Array.isArray(b.layout.text)) return undefined;
           const layoutText = value(left.strings, a.layout.text[ai]);
           if (layoutText === undefined || value(right.strings, b.layout.text[bi]) === undefined) return undefined;
           copy.layout.text[bi] = normalized.strings.push(layoutText) - 1;
         }
       }
+      for (const key of ["contentWidth", "contentHeight"]) if (a[key] !== b[key]) return undefined;
+      const geometryKeys = ["bounds", "clientRects", "offsetRects", "scrollRects"];
+      const changedGeometry = geometryKeys.some((key) => JSON.stringify(a.layout[key]) !== JSON.stringify(b.layout[key]))
+        || JSON.stringify(a.textBoxes) !== JSON.stringify(b.textBoxes);
+      if (!changedGeometry) continue;
+      geometryChanged = true;
+      if (!parents.size || left.documents.length !== 1 || before?.frameClips?.has(left.strings[a.frameId])) return undefined;
+      // Reject missing geometry, effects, transforms, or external frame content:
+      // they make the clipped container insufficient proof of paint isolation.
+      const styleValue = (doc: any, strings: string[], li: number, index: number) => strings[doc.layout.styles?.[li]?.[index]];
+      const safeStyle = (doc: any, strings: string[], li: number) => [6, 7, 8, 11, 12, 13, 14, 15, 22, 29, 30, 37, 38].every((index) => styleValue(doc, strings, li, index) === "none")
+        && styleValue(doc, strings, li, 16) === "auto" && styleValue(doc, strings, li, 23) === "0px" && styleValue(doc, strings, li, 36) === "normal";
+      const rect = (r: any): r is number[] => Array.isArray(r) && r.length === 4 && r.every((n: unknown) => typeof n === "number" && Number.isFinite(n)) && r[2] >= 0 && r[3] >= 0;
+      const inside = (r: number[], p: number[]) => r[0]! >= p[0]! && r[1]! >= p[1]! && r[0]! + r[2]! <= p[0]! + p[2]! && r[1]! + r[3]! <= p[1]! + p[3]!;
+      const overlaps = (x: number[], y: number[]) => x[0]! < y[0]! + y[2]! && y[0]! < x[0]! + x[2]! && x[1]! < y[1]! + y[3]! && y[1]! < x[1]! + x[3]!;
+      if (!Array.isArray(a.layout.bounds) || !Array.isArray(b.layout.bounds) || a.layout.bounds.length !== a.layout.nodeIndex.length || b.layout.bounds.length !== b.layout.nodeIndex.length) return undefined;
+      // SVG paint and strokes can escape their layout bounds.
+      if (a.nodes.nodeName.some((name: number) => left.strings[name]?.toLowerCase() === "svg")) return undefined;
+      // Geometry bounds do not include shadows, outlines or transformed
+      // effects. Require them absent for every other painted layout node.
+      for (let li = 0; li < a.layout.nodeIndex.length; li++)
+        if (a.nodes.nodeType[a.layout.nodeIndex[li]] !== 9 && (!safeStyle(a, left.strings, li) || !safeStyle(b, right.strings, li))) return undefined;
+      for (const parent of parents) {
+        const parentLayout = a.layout.nodeIndex.indexOf(parent);
+        if (parentLayout < 0 || parentLayout !== b.layout.nodeIndex.indexOf(parent)) return undefined;
+        const container = a.layout.bounds[parentLayout];
+        if (!rect(container) || JSON.stringify(container) !== JSON.stringify(b.layout.bounds[parentLayout])) return undefined;
+        if (!["hidden", "clip"].includes(styleValue(a, left.strings, parentLayout, 1)) || !["hidden", "clip"].includes(styleValue(a, left.strings, parentLayout, 2))
+          || styleValue(a, left.strings, parentLayout, 1) !== styleValue(b, right.strings, parentLayout, 1)
+          || styleValue(a, left.strings, parentLayout, 2) !== styleValue(b, right.strings, parentLayout, 2)) return undefined;
+        const ancestors = new Set<number>();
+        for (let n = parent; n >= 0; n = a.nodes.parentIndex[n]) {
+          if (ancestors.has(n)) return undefined;
+          ancestors.add(n);
+          const li = a.layout.nodeIndex.indexOf(n);
+          if (li >= 0 && a.nodes.nodeType[n] !== 9 && (!safeStyle(a, left.strings, li) || !safeStyle(b, right.strings, li))) return undefined;
+        }
+        for (let i = 0; i < a.nodes.parentIndex.length; i++) if (a.nodes.parentIndex[i] === parent && a.nodes.nodeType[i] !== 3) return undefined;
+        for (let li = 0; li < a.layout.nodeIndex.length; li++) {
+          const node = a.layout.nodeIndex[li];
+          if (ancestors.has(node) || a.nodes.parentIndex[node] === parent && dynamicLayouts.has(li)) continue;
+          const bounds = a.layout.bounds[li];
+          if (!rect(bounds) || overlaps(container, bounds)) return undefined;
+        }
+        for (const li of dynamicLayouts) if (a.nodes.parentIndex[a.layout.nodeIndex[li]] === parent) {
+          if (!rect(a.layout.bounds[li]) || !rect(b.layout.bounds[li]) || !inside(a.layout.bounds[li], container) || !inside(b.layout.bounds[li], container)) return undefined;
+        }
+      }
+      for (const key of geometryKeys) {
+        const x = a.layout[key], y = b.layout[key];
+        if (x === undefined && y === undefined) continue;
+        if (!Array.isArray(x) || !Array.isArray(y) || x.length !== y.length || x.length !== a.layout.nodeIndex.length) return undefined;
+        for (let i = 0; i < x.length; i++) if (!dynamicLayouts.has(i) && JSON.stringify(x[i]) !== JSON.stringify(y[i])) return undefined;
+        copy.layout[key] = structuredClone(x);
+      }
+      const stableBoxes = (boxes: any) => {
+        if (!boxes || !Array.isArray(boxes.layoutIndex) || !Array.isArray(boxes.start) || !Array.isArray(boxes.length) || !Array.isArray(boxes.bounds)
+          || [boxes.start, boxes.length, boxes.bounds].some((x) => x.length !== boxes.layoutIndex.length)) return undefined;
+        return boxes.layoutIndex.flatMap((index: number, i: number) => dynamicLayouts.has(index) ? [] : [[index, boxes.start[i], boxes.length[i], boxes.bounds[i]]]);
+      };
+      const boxA = stableBoxes(a.textBoxes), boxB = stableBoxes(b.textBoxes);
+      if (!boxA || !boxB || JSON.stringify(boxA) !== JSON.stringify(boxB)) return undefined;
+      copy.textBoxes = structuredClone(a.textBoxes);
     }
-    return changed.size && sameDOMSnapshot(left, normalized, before) ? changed : undefined;
+    if (!changed.size || !sameDOMSnapshot(left, normalized, before)) return undefined;
+    if (geometryChanged) {
+      const candidates: SnapshotTextPaintCandidate[] = [];
+      const actualVisibility = snapshotVisibility(right, { textPaintCandidates: candidates, frameClips: before?.frameClips });
+      const originalCandidates: SnapshotTextPaintCandidate[] = [];
+      const originalVisibility = before?.visibility ?? snapshotVisibility(left, { textPaintCandidates: originalCandidates });
+      const sourceCandidates = before?.textPaintCandidates ?? originalCandidates;
+      const projected = before?.paintAdjusted ? new Set(sourceCandidates.map(({ backendNodeId }) => backendNodeId)) : undefined;
+      for (const [id, visible] of originalVisibility) {
+        if (uncertainLeft.has(id)) continue;
+        const next = actualVisibility.get(id);
+        if (next !== visible && !(projected?.has(id) && visible === false && next === true)) return undefined;
+      }
+      for (const id of actualVisibility.keys()) if (!uncertainRight.has(id) && !originalVisibility.has(id)) return undefined;
+      if (!sameTextPaintCandidates(sourceCandidates.filter(({ backendNodeId }) => !uncertainLeft.has(backendNodeId)),
+        candidates.filter(({ backendNodeId }) => !uncertainRight.has(backendNodeId)))) return undefined;
+    }
+    return changed;
   } catch { return undefined; }
 }
 
