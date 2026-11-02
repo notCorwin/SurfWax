@@ -494,7 +494,8 @@ export class ChromeExecutor {
     }
     const status = outcome.kind === "complete" ? outcome.status : await completion;
     if (!status.terminal) throw new Error("CommandError[job-not-terminal]: Program host ended without a terminal receipt");
-    return { jobId: id, ok: status.ok, state: status.state, result: status.result, timeoutMs, timeoutSource, receipts: { tool: "get_job", jobId: id, after: 0 } };
+    const fileChoosers = this.eventLease ? this.eventSubscriptions.listChoosers(this.eventOwnerFor(context)) : [];
+    return { jobId: id, ok: status.ok, state: status.state, result: status.result, ...(fileChoosers.length ? { fileChoosers } : {}), timeoutMs, timeoutSource, receipts: { tool: "get_job", jobId: id, after: 0 } };
   }
 
   pendingBackgroundJobs(): readonly string[] {
@@ -594,6 +595,11 @@ export class ChromeExecutor {
       const subscription = this.eventSubscriptions.subscribe({ owner, tabId: tabId!, kinds: [input.kind] });
       return { ...subscription, tabId, kind: input.kind };
     }, signal, input.timeoutMs, false);
+  }
+
+  async listFileChoosers(input: { tabId?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {
+    throwIfAborted(signal);
+    return { fileChoosers: this.eventSubscriptions.listChoosers(this.eventOwnerFor(context), input.tabId) };
   }
 
   waitEvent(input: { subscriptionId: string; after?: number; limit?: number; waitMs?: number }, signal?: AbortSignal, context: ExecutionContext = {}): Promise<unknown> {

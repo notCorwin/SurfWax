@@ -4,7 +4,7 @@ import { MockLanguageModelV4 } from "ai/test";
 import { z } from "zod";
 import { ToolScheduler } from "./tool-scheduler";
 
-const names = ["click", "fill", "inspect_page", "verify_state", "switch_tab", "key_up", "get_job", "cancel_job", "subscribe_event", "wait_event", "handle_dialog", "upload_file", "list_downloads", "read_artifact"];
+const names = ["click", "fill", "inspect_page", "verify_state", "switch_tab", "key_up", "get_job", "cancel_job", "subscribe_event", "wait_event", "handle_dialog", "upload_file", "list_downloads", "read_artifact", "list_file_choosers"];
 const call = (toolCallId: string, toolName: string, input: unknown = {}, extra = {}) => ({ type: "tool-call", toolCallId, toolName, input, ...extra });
 function latch() {
   let release!: () => void;
@@ -61,6 +61,13 @@ describe("model response tool scheduling", () => {
     const bad = scheduler.run("bad", async () => ({ ok: false }));
     const subscribe = scheduler.run("subscribe", async () => ({ subscriptionId: "events" }));
     await expect(Promise.all([bad, subscribe])).resolves.toEqual([{ ok: false }, { subscriptionId: "events" }]);
+  });
+
+  it("lists observed choosers while a background job is blocked", async () => {
+    const scheduler = new ToolScheduler(names, () => ["job"]);
+    scheduler.prepare([call("choosers", "list_file_choosers")], 1);
+    await expect(scheduler.run("choosers", async () => ({ fileChoosers: [{ chooserId: "chooser" }] })))
+      .resolves.toEqual({ fileChoosers: [{ chooserId: "chooser" }] });
   });
 
   it("allows chooser upload while a background job is blocked, and fences later writes on failure", async () => {

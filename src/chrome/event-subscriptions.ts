@@ -272,6 +272,14 @@ export class EventSubscriptions {
     chooser.state = outcome === "not-dispatched" ? "active" : outcome;
   }
 
+  /** Return live handles without exposing the CDP node identifier. */
+  listChoosers(owner: EventOwner, tabId?: number): Array<{ chooserId: string; source: EventSource; frameId?: string; mode: string }> {
+    ownerCopy(owner);
+    if (tabId !== undefined) integer(tabId, "tab ID", 0);
+    return [...this.choosers.values()].filter((chooser) => sameOwner(owner, chooser.owner) && chooser.state === "active" && (tabId === undefined || chooser.source.tabId === tabId))
+      .map((chooser) => ({ chooserId: chooser.id, source: { ...chooser.source }, ...(chooser.frameId === undefined ? {} : { frameId: chooser.frameId }), mode: chooser.mode }));
+  }
+
   closeChoosers(owner: EventOwner, tabId: number, sessionId?: string): void {
     for (const chooser of this.choosers.values()) if (sameOwner(owner, chooser.owner) && chooser.source.tabId === tabId
       && (sessionId === undefined || chooser.source.sessionId === sessionId)) this.choosers.delete(chooser.id);

@@ -1249,6 +1249,34 @@ describe("cross-call browser events", () => {
   const owner = { conversationId: "conversation", logIdentity: { runId: "run", toolCallId: "1:event", toolCallIdCanonical: true as const } };
   const otherOwner = { conversationId: "conversation", logIdentity: { runId: "other-run", toolCallId: "1:event", toolCallIdCanonical: true as const } };
 
+  it("reports a chooser observed during a foreground action without a subscription", async () => {
+    let h: ReturnType<typeof programHarness>;
+    h = programHarness(async () => {
+      await (h.executor as any).handleCommandEvent({ tabId: 41, sessionId: "child" }, "Page.fileChooserOpened", { frameId: "frame", backendNodeId: 77, mode: "selectSingle" });
+      return "clicked";
+    });
+    await h.executor.beginRun();
+    const result: any = await h.executor.runProgram({ code: "fixture" }, undefined, owner);
+    expect(result.fileChoosers).toEqual([{ chooserId: expect.any(String), source: { tabId: 41, sessionId: "child" }, frameId: "frame", mode: "selectSingle" }]);
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
+  it("exposes live file choosers without a subscription and preserves their run and frame ownership", async () => {
+    const h = programHarness(async () => undefined);
+    await h.executor.beginRun();
+    await h.executor.runProgram({ code: "fixture" }, undefined, owner);
+    const source = { tabId: 41, sessionId: "child-frame" };
+    await (h.executor as any).handleCommandEvent(source, "Page.fileChooserOpened", { frameId: "frame-1", backendNodeId: 77, mode: "selectSingle" });
+    const list: any = await h.executor.listFileChoosers({}, undefined, owner);
+    expect(list.fileChoosers).toEqual([{ chooserId: expect.any(String), source, frameId: "frame-1", mode: "selectSingle" }]);
+    await expect(h.executor.listFileChoosers({}, undefined, otherOwner)).rejects.toThrow("event-owner-expired");
+    await (h.executor as any).handleCommandEvent(source, "Page.fileChooserOpened", { frameId: "frame-1", backendNodeId: 78, mode: "selectMultiple" });
+    const next: any = await h.executor.listFileChoosers({}, undefined, owner);
+    expect(next.fileChoosers).toHaveLength(1);
+    expect(next.fileChoosers[0].chooserId).not.toBe(list.fileChoosers[0].chooserId);
+    await h.executor.endRun(); h.executor.dispose();
+  });
+
   it("uploads ordered artifacts to a captured chooser while a background action occupies the queue", async () => {
     let finish!: () => void;
     const h = programHarness(async () => new Promise<void>((resolve) => { finish = resolve; }));
@@ -1275,6 +1303,7 @@ describe("cross-call browser events", () => {
     ] }] }));
     expect(h.events.filter((entry) => entry.type === "browser.chooser.progress").map((entry) => (entry.content as any).state)).toEqual(["dispatched-unknown", "completed"]);
     await expect(h.executor.uploadChooser({ chooserId, artifactId: first!.id }, undefined, owner)).rejects.toThrow("handled");
+    await expect(h.executor.listFileChoosers({}, undefined, owner)).resolves.toEqual({ fileChoosers: [] });
     finish();
     await vi.waitFor(async () => expect(await h.executor.queryJobs({ action: "status", id: job.jobId }, undefined, owner)).toMatchObject({ terminal: true, ok: true }));
     await h.executor.endRun(); h.executor.dispose();

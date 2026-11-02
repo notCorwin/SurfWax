@@ -28,9 +28,16 @@ describe("tool protocol", () => {
     }
   });
 
+  it("exposes full snapshots without delta reconstruction and explains long lines", () => {
+    const inspect = PROGRAM_TOOL_REGISTRY.find((tool) => tool.name === "inspect_page")!;
+    expect(z.toJSONSchema(inspect.inputSchema).properties).not.toHaveProperty("since");
+    expect(inspect.description).not.toContain("For since");
+    expect(inspect.description).toContain("Long lines can continue across pages");
+  });
+
   it("exposes conditional input constraints in the model-facing JSON Schema", () => {
     const schema = (name: string) => z.toJSONSchema(PROGRAM_TOOL_REGISTRY.find((tool) => tool.name === name)!.inputSchema) as any;
-    expect(schema("inspect_page").allOf).toEqual(["region", "fields", "depth", "since", "offset"].map((field) => ({ not: { required: ["cursor", field] } })));
+    expect(schema("inspect_page").allOf).toEqual(["region", "fields", "depth", "offset"].map((field) => ({ not: { required: ["cursor", field] } })));
     expect(schema("upload_file").oneOf).toEqual([
       { required: ["target"], not: { required: ["chooserId"] } },
       { required: ["chooserId"], not: { anyOf: ["target", "tabId", "background"].map((field) => ({ required: [field] })) } },
@@ -44,6 +51,7 @@ describe("tool protocol", () => {
   it("enforces the same conditional constraints when calls are executed", () => {
     const accepts = (name: string, input: unknown) => PROGRAM_TOOL_REGISTRY.find((tool) => tool.name === name)!.inputSchema.safeParse(input).success;
     expect(accepts("inspect_page", { cursor: "c", limit: 10 })).toBe(true);
+    expect(accepts("inspect_page", { since: "old" })).toBe(false);
     expect(accepts("inspect_page", { cursor: "c", region: "main" })).toBe(false);
     expect(accepts("upload_file", { artifactId: 1, target: { ref: "e1" }, tabId: 1 })).toBe(true);
     expect(accepts("upload_file", { artifactId: 1, chooserId: "c" })).toBe(true);

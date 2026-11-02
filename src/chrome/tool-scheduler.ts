@@ -32,7 +32,7 @@ type Batch = {
   signal?: AbortSignal;
 };
 
-const bypass = new Set(["list_jobs", "get_job", "cancel_job", "wait_event", "unsubscribe_event"]);
+const bypass = new Set(["list_file_choosers", "list_jobs", "get_job", "cancel_job", "wait_event", "unsubscribe_event"]);
 const reads = new Set([
   "inspect_page", "find_elements", "list_frames", "read_text", "read_value", "read_attribute", "read_checked", "read_elements", "count_elements", "get_page_info", "verify_state", "wait_for_url", "take_screenshot",
   "list_tabs", "list_downloads", "read_artifact", "list_requests", "read_response", "read_console", "list_scripts", "read_script", "subscribe_event",
