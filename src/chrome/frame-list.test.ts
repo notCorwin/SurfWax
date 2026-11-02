@@ -265,6 +265,47 @@ describe("frame tree discovery", () => {
     expect(axCaptures).toBe(2);
     await runtime.abortSessions();
   });
+  it.each([false, true])("checks the accessibility tree before accepting changing unrendered text: %s", async (semanticChange) => {
+    const { runtime, command } = harness(), original = command.getMockImplementation()!;
+    let capture = 0, ax = 0;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOMSnapshot.captureSnapshot" && !source.sessionId) {
+        const snapshot: any = await original(source, method, params);
+        const doc = snapshot.documents[0], nodes = doc.nodes;
+        const name = snapshot.strings.push("#text") - 1;
+        const value = snapshot.strings.push(`hidden-${++capture}`) - 1;
+        nodes.nodeValue = nodes.backendNodeId.map(() => -1);
+        nodes.backendNodeId.push(42); nodes.parentIndex.push(-1); nodes.nodeType.push(3); nodes.nodeName.push(name); nodes.nodeValue.push(value);
+        return snapshot;
+      }
+      if (method === "Accessibility.getFullAXTree") return { nodes: semanticChange ? [{ nodeId: "root", role: { value: "RootWebArea" }, name: { value: String(++ax) } }] : [] };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    if (semanticChange) await expect(page.snapshot()).rejects.toMatchObject({ code: "snapshot-unavailable" });
+    else await expect(page.snapshot()).resolves.toBeDefined();
+    await runtime.abortSessions();
+  });
+  it("rejects visible changes that occur during the accessibility recheck", async () => {
+    const { runtime, command } = harness(), original = command.getMockImplementation()!;
+    let capture = 0;
+    command.mockImplementation(async (source, method, params = {}) => {
+      if (method === "DOMSnapshot.captureSnapshot" && !source.sessionId) {
+        const snapshot: any = await original(source, method, params), doc = snapshot.documents[0], nodes = doc.nodes;
+        const name = snapshot.strings.push("#text") - 1, value = snapshot.strings.push(`hidden-${++capture}`) - 1;
+        nodes.nodeValue = nodes.backendNodeId.map(() => -1);
+        nodes.backendNodeId.push(42); nodes.parentIndex.push(-1); nodes.nodeType.push(3); nodes.nodeName.push(name); nodes.nodeValue.push(value);
+        if (capture >= 5) doc.layout.bounds[0] = [1_000_000, 0, 100, 100];
+        return snapshot;
+      }
+      if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
+      return original(source, method, params);
+    });
+    await expect((await runtime.createPage(3)).snapshot()).rejects.toMatchObject({ code: "snapshot-unavailable" });
+    await runtime.abortSessions();
+  });
   it("batches text paint evidence in the owning frame and projects only painted fragments", async () => {
     const { runtime, command } = harness();
     const original = command.getMockImplementation()!;

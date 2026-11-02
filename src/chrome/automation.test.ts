@@ -2579,6 +2579,34 @@ describe("AutomationRuntime", () => {
     expect(await page.inspect({ since: retained.observationId })).toMatchObject({ mode: "delta", items: [] });
     await runtime.abortSessions();
   });
+  it("re-resolves a semantic click target replaced before input dispatch", async () => {
+    const detached = { connected: false, x: 0, y: 0, visible: false, stable: false, enabled: false, editable: false, receivesEvents: false, checked: false };
+    const ready = { connected: true, x: 10, y: 12, visible: true, stable: true, enabled: true, editable: true, receivesEvents: true, checked: false };
+    const { runtime, calls } = harness(undefined, [detached, ready, ready]);
+    const page = await runtime.createPage(3);
+    await page.getByRole("button", { name: "Sign in" }).click();
+    expect(calls.filter(({ method }) => method === "Accessibility.queryAXTree")).toHaveLength(2);
+    expect(calls.filter(({ method, params }) => method === "Input.dispatchMouseEvent" && params.type === "mousePressed")).toHaveLength(1);
+    await runtime.dispose();
+  });
+
+  it("checks uniqueness again before clicking a replaced target", async () => {
+    const detached = { connected: false, x: 0, y: 0, visible: false, stable: false, enabled: false, editable: false, receivesEvents: false, checked: false };
+    const metadata = [{ role: "button", name: "Sign in", tag: "button", text: "Sign in" }];
+    const { runtime, calls, command } = harness(metadata, [detached]);
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      const result = await original(source, method, params);
+      if (method === "Runtime.callFunctionOn" && params?.functionDeclaration?.startsWith("function(scroll, pointer)"))
+        metadata.push({ role: "button", name: "Sign in", tag: "button", text: "Sign in" });
+      return result;
+    });
+    const page = await runtime.createPage(3);
+    await expect(page.getByRole("button", { name: "Sign in" }).click()).rejects.toMatchObject({ code: "strict-mode" });
+    expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent")).toHaveLength(0);
+    await runtime.dispose();
+  });
+
   it("rejects unstable geometry and clicks once it is stable on retry", async () => {
     const base = { connected: true, y: 12, height: 20, visible: true, stable: true, enabled: true,
       editable: true, receivesEvents: true, checked: false };

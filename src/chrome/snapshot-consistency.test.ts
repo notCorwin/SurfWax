@@ -46,6 +46,33 @@ describe("DOM snapshot consistency", () => {
     expect(sameDOMSnapshot(fixture(), fixture(true))).toBe(true);
   });
 
+  it("can ignore unrendered text only after independent semantic confirmation", () => {
+    const before = fixture(), after = fixture(true);
+    for (const snapshot of [before, after]) {
+      const layout = snapshot.documents[0]!.layout;
+      for (const field of [layout.nodeIndex, layout.bounds, layout.styles, layout.text]) field.splice(2, 1);
+      snapshot.documents[0]!.textBoxes = { layoutIndex: [], start: [], length: [], bounds: [] };
+    }
+    after.documents[0]!.nodes.nodeValue[2] = intern(after, "changing hidden text");
+    expect(sameDOMSnapshot(before, after)).toBe(false);
+    expect(sameDOMSnapshot(before, after, undefined, { ignoreUnrenderedText: true })).toBe(true);
+    after.documents[0]!.nodes.nodeValue[2] = 99999;
+    expect(sameDOMSnapshot(before, after, undefined, { ignoreUnrenderedText: true })).toBe(false);
+  });
+
+  it("never ignores changes to laid-out text with semantic confirmation", () => {
+    const before = fixture(), after = fixture(true);
+    after.documents[0]!.nodes.nodeValue[2] = intern(after, "changed");
+    expect(sameDOMSnapshot(before, after, undefined, { ignoreUnrenderedText: true })).toBe(false);
+  });
+
+  it("still rejects changed data attributes even with semantic confirmation", () => {
+    const before = fixture(), after = fixture(true);
+    before.documents[0]!.nodes.attributes[3]!.push(intern(before, "data-state"), intern(before, "one"));
+    after.documents[0]!.nodes.attributes[3]!.push(intern(after, "data-state"), intern(after, "two"));
+    expect(sameDOMSnapshot(before, after, undefined, { ignoreUnrenderedText: true })).toBe(false);
+  });
+
   it("detects text, semantic attributes, form values, flags, and changed frame identity", () => {
     const before = fixture();
     const cases = [

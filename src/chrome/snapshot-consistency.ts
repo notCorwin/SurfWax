@@ -14,7 +14,7 @@ export type SnapshotConsistencyEvidence = Readonly<{
  * harmless movement of already-visible boxes. False also means malformed or
  * unsupported evidence: callers must not claim a consistent snapshot. Equal
  * endpoints do not prove atomicity or rule out intermediate ABA changes. */
-export function sameDOMSnapshot(left: any, right: any, before?: SnapshotConsistencyEvidence): boolean {
+export function sameDOMSnapshot(left: any, right: any, before?: SnapshotConsistencyEvidence, options?: { ignoreUnrenderedText?: boolean }): boolean {
   if (!left || !right || typeof left !== "object" || typeof right !== "object"
     || Object.keys(left).some((key) => key !== "strings" && key !== "documents") || Object.keys(right).some((key) => key !== "strings" && key !== "documents")
     || !Array.isArray(left.strings) || !Array.isArray(right.strings)
@@ -63,7 +63,7 @@ export function sameDOMSnapshot(left: any, right: any, before?: SnapshotConsiste
     }
     return true;
   };
-  const nodes = (a: any, b: any) => {
+  const nodes = (a: any, b: any, leftLayout: any, rightLayout: any) => {
     if (!known(a, nodeKeys) || !known(b, nodeKeys)
       || !Array.isArray(a.backendNodeId) || !Array.isArray(b.backendNodeId)
       || !Array.isArray(a.parentIndex) || !Array.isArray(b.parentIndex)
@@ -73,8 +73,17 @@ export function sameDOMSnapshot(left: any, right: any, before?: SnapshotConsiste
     if ([a.parentIndex, a.nodeType, a.nodeName, b.backendNodeId, b.parentIndex, b.nodeType, b.nodeName].some((items) => items.length !== length)
       || [a.nodeValue, b.nodeValue, a.attributes, b.attributes].some((items) => items !== undefined && (!Array.isArray(items) || items.length !== length))
       || a.nodeType.some((type: unknown) => type === 3) && (!Array.isArray(a.nodeValue) || !Array.isArray(b.nodeValue))) return false;
+    // This exception is only safe when the caller has independently
+    // confirmed the accessibility tree: hidden text can label controls.
+    const leftRendered = options?.ignoreUnrenderedText && Array.isArray(leftLayout?.nodeIndex) ? new Set<number>(leftLayout.nodeIndex) : undefined;
+    const rightRendered = options?.ignoreUnrenderedText && Array.isArray(rightLayout?.nodeIndex) ? new Set<number>(rightLayout.nodeIndex) : undefined;
+    const compareNodeValues = (x: any, y: any) => Array.isArray(x) && Array.isArray(y) && x.length === y.length
+      && x.every((value: unknown, index: number) => string(value, y[index]) || Boolean(options?.ignoreUnrenderedText
+        && a.nodeType[index] === 3 && b.nodeType[index] === 3
+        && leftRendered && rightRendered && !leftRendered.has(index) && !rightRendered.has(index)
+        && validString(leftStrings, value) && validString(rightStrings, y[index])));
     return compareFields(a, b, nodeNumbers, numericArray)
-      && compareFields(a, b, nodeStrings, stringArray)
+      && optional(a.nodeName, b.nodeName, stringArray) && optional(a.nodeValue, b.nodeValue, compareNodeValues)
       && optional(a.attributes, b.attributes, (x, y) => array(x, y, attributes))
       && nodeRareStrings.every((key) => optional(a[key], b[key], (x, y) => sparse(x, y, "strings")))
       && nodeRareFlags.every((key) => optional(a[key], b[key], (x, y) => sparse(x, y, "none")))
@@ -124,7 +133,7 @@ export function sameDOMSnapshot(left: any, right: any, before?: SnapshotConsiste
     && a.frameId !== -1 && b.frameId !== -1 && string(a.frameId, b.frameId) && Boolean(leftStrings[a.frameId]) && Boolean(rightStrings[b.frameId])
     && compareFields(a, b, ["scrollOffsetX", "scrollOffsetY"], scalar)
     && compareFields(a, b, documentStrings, string)
-    && nodes(a.nodes, b.nodes) && layout(a.layout, b.layout) && frameGeometry(a, b) && optional(a.textBoxes, b.textBoxes, textBoxes);
+    && nodes(a.nodes, b.nodes, a.layout, b.layout) && layout(a.layout, b.layout) && frameGeometry(a, b) && optional(a.textBoxes, b.textBoxes, textBoxes);
   if (!array(left.documents, right.documents, document)) return false;
   try {
     const computed: SnapshotTextPaintCandidate[] = [], b: SnapshotTextPaintCandidate[] = [];

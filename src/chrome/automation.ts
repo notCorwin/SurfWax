@@ -2872,6 +2872,20 @@ export class AutomationRuntime {
   private async waitActionableLocator(session: Session, spec: LocatorSpec, editable: boolean, pointer: boolean, stable = pointer, enabled = true, failFast = false): Promise<{ objectId: string; targetSession: Session; state: ElementState }> {
     let attempt = 0;
     const singleResolution = failFast || spec.queries.some((query) => query.kind === "uniqueScope");
+    // A semantic locator may survive a framework replacing its element before
+    // dispatch. Never heal a node reference, positional selection, or bound
+    // scope: those identify a particular object rather than a fresh match.
+    let canRetryReplacement = failFast;
+    visitLocators(spec, (part) => {
+      if (part.ref || part.index !== undefined || part.queries.some((query) => query.kind === "index" || query.kind === "uniqueScope" || query.kind === "frameRef" || query.kind === "css")) canRetryReplacement = false;
+    });
+    const generation = session.generation;
+    let retriedReplacement = false;
+    const retryReplacement = () => {
+      if (!canRetryReplacement || retriedReplacement || session.generation !== generation || this.sessions.get(session.tabId) !== session) return false;
+      retriedReplacement = true;
+      return true;
+    };
     while (true) {
       throwIfAborted(this.context.signal);
       let candidates: Candidate[] = [];
@@ -2879,25 +2893,32 @@ export class AutomationRuntime {
       attempt += 1;
       if (!objectId) {
         this.recordAttempt(session, spec, attempt, "no-candidate", candidates);
+        // A match which disappeared while resolving is different from a
+        // missing locator, which must remain an immediate failure.
+        if (candidates.length === 1 && retryReplacement()) continue;
         if (singleResolution) throw automationError("not-found", { locator: spec, lastObservation: this.waitDiagnostic() });
         await delay(50, this.context.signal); continue;
       }
       const targetSession = this.objectSession(session, objectId);
-      const state = await this.elementState(targetSession, objectId, pointer, true).catch((error) => {
+      const state = await (async () => {
+        const current = await this.elementState(targetSession, objectId, pointer, true);
+        if (current?.connected && current.visible) {
+          current.frameId = await this.actionFrameId(session, targetSession, objectId, spec);
+          current.visible = await this.frameOwnersVisible(session, current.frameId);
+        }
+        if (current?.connected && current.visible && current.receivesEvents && pointer)
+          await this.selectPointerPoint(session, targetSession, objectId, current);
+        return current;
+      })().catch((error) => {
         if (error && typeof error === "object" && "name" in error && error.name === "AbortError") throw error;
         if (!isDetachedNodeError(error)) throw error;
         if (spec.ref) throw automationError("detached", { ref: spec.ref, reason: error instanceof Error ? error.message : String(error) });
         return undefined;
       });
-      if (state?.connected && state.visible) {
-        state.frameId = await this.actionFrameId(session, targetSession, objectId, spec);
-        state.visible = await this.frameOwnersVisible(session, state.frameId);
-      }
-      if (state?.connected && state.visible && state.receivesEvents && pointer)
-        await this.selectPointerPoint(session, targetSession, objectId, state);
       const reason = !state?.connected ? "detached" : !state.visible ? "not-visible" : stable && !state.stable ? "not-stable" : enabled && !state.enabled ? "disabled" : editable && !state.editable ? "not-editable" : pointer && !state.receivesEvents ? "intercepted" : "actionable";
       this.recordAttempt(session, spec, attempt, reason, candidates, state);
       if (spec.ref && !state?.connected) throw automationError("detached", { ref: spec.ref, reason: "node-removed" });
+      if (!state?.connected && retryReplacement()) continue;
       if (editable && state?.connected && state.editKind === "unsupported") throw automationError("invalid-editable-target", { reason: "not-a-text-input" });
       if (state?.connected && state.visible && (!stable || state.stable) && (!enabled || state.enabled) && (!editable || state.editable) && (!pointer || state.receivesEvents)) return { objectId, targetSession, state };
       if (singleResolution) {
@@ -5017,7 +5038,8 @@ export class AutomationRuntime {
           await delay(changed() ? 0 : 50, signal); continue;
         }
         if (changed()) continue;
-        let unstable = false, unstablePaint = false;
+        let unstable = false, unstablePaint = false, onlyUnrenderedText = true;
+        const relaxedChecks: Array<(snapshot: any) => boolean> = [];
         for (const confirmation of confirmations) {
           const initial = trees.find(({ debuggee }) => sameDebuggee(debuggee, confirmation.debuggee));
           // Ignore unrelated same-target child documents. Keep original CDP
@@ -5033,15 +5055,55 @@ export class AutomationRuntime {
             const value = initial.visibility.get(id);
             if (value !== undefined) visibility.set(id, value);
           }
+          const relaxed = (snapshot: any) => Boolean(initial && visibility && sameDOMSnapshot(relevantDocuments(initial.snapshot), relevantDocuments(snapshot),
+            { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true, frameClips }, { ignoreUnrenderedText: true }));
+          relaxedChecks.push(relaxed);
           if (initial && visibility && sameDOMSnapshot(relevantDocuments(initial.snapshot), relevantDocuments(confirmation.snapshot),
             { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true, frameClips })) continue;
           unstable = true;
+          if (!relaxed(confirmation.snapshot)) onlyUnrenderedText = false;
           const after: SnapshotTextPaintCandidate[] = [];
           try { snapshotVisibility(confirmation.snapshot, { textPaintCandidates: after }); }
           catch { throw automationError("snapshot-unavailable", { reason: "invalid-dom-confirmation" }); }
           if (initial && !sameTextPaintCandidates(candidates ?? [], relevantIds ? after.filter((candidate) => relevantIds.has(candidate.frameId)) : after)) unstablePaint = true;
         }
         if (unstable) {
+          // A hidden text node can still supply an accessible name (for
+          // example through aria-labelledby). Only tolerate such changes if
+          // every captured accessibility tree is independently unchanged.
+          if (retriedUnstableCapture && onlyUnrenderedText) {
+            let axChecks: boolean[];
+            try {
+              axChecks = await waitForCapture(Promise.all(trees.filter((item) => item.tree).map(async (item) => {
+                const source = relevantFrames.find((frame) => frame.frameId === item.frameId && sameDebuggee(frame.debuggee, item.debuggee));
+                if (!source || !Array.isArray(item.tree.nodes)) return false;
+                const next = await this.options.command(item.debuggee, "Accessibility.getFullAXTree", allDebuggees.includes(source) ? {} : { frameId: item.frameId });
+                return Array.isArray(next?.nodes) && JSON.stringify(item.tree) === JSON.stringify(next);
+              })));
+            } catch (error) {
+              guard();
+              if (!changed() && !isTransientNavigationError(error) && !isDetachedNodeError(error)) throw error;
+              await delay(changed() ? 0 : 50, signal); continue;
+            }
+            if (changed()) continue;
+            if (axChecks.length === capturedFrames.length && axChecks.length && axChecks.every(Boolean) && await waitForCapture(framesAreReady()) && !changed()) {
+              let finalLayouts: Array<{ debuggee: Debuggee; snapshot: any }>;
+              try {
+                finalLayouts = await waitForCapture(Promise.all(relevantDebuggees.map(async ({ debuggee }) => ({ debuggee,
+                  snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true, includePaintOrder: true }) }))));
+              } catch (error) {
+                guard();
+                if (!changed() && !isTransientNavigationError(error) && !isDetachedNodeError(error)) throw error;
+                await delay(changed() ? 0 : 50, signal); continue;
+              }
+              if (changed()) continue;
+              if (finalLayouts.length === relaxedChecks.length && finalLayouts.every((layout, index) => relaxedChecks[index]!(layout.snapshot))) {
+                const geometry = await snapshotGeometry(finalLayouts);
+                if (changed()) continue;
+                return { ...info, lines, frameRevision, geometry, geometrySources: finalLayouts.map(({ debuggee }) => debuggee), ...(regionNode ? { regionIdentity: JSON.stringify([regionDebuggee?.sessionId ?? "", regionFrameId, regionNode.node.backendNodeId]) } : {}) };
+              }
+            }
+          }
           if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: unstablePaint ? "text-paint-unstable" : "dom-unstable" });
           retriedUnstableCapture = true;
           continue;
