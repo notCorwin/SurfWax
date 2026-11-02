@@ -151,7 +151,11 @@ export const ATOMIC_TOOL_REGISTRY: readonly AtomicToolDefinition[] = Object.free
     artifactId: z.union([z.number().int().positive(), z.array(z.number().int().positive()).min(1)]), background: z.boolean().optional().describe("Run a target upload as a background job and follow it with get_job; unavailable for chooser uploads."),
   }).strict().refine((input) => (input.target !== undefined) !== (input.chooserId !== undefined)
     && (input.chooserId === undefined || input.tabId === undefined && input.background === undefined),
-  "Choose exactly one target or chooserId; chooser uploads cannot specify tabId or background"), `const ids = Array.isArray(input.artifactId) ? input.artifactId : [input.artifactId];
+  "Choose exactly one target or chooserId; chooser uploads cannot specify tabId or background")
+    .meta({ oneOf: [
+      { required: ["target"], not: { required: ["chooserId"] } },
+      { required: ["chooserId"], not: { anyOf: ["target", "tabId", "background"].map((field) => ({ required: [field] })) } },
+    ] }), `const ids = Array.isArray(input.artifactId) ? input.artifactId : [input.artifactId];
     const values = new Map();
     for (const id of ids) if (!values.has(id)) values.set(id, artifacts.read(id));
     const files = await Promise.all(ids.map(async (id) => {

@@ -5,7 +5,6 @@ import { observePageRefreshes } from "./refresh-observer";
 import { SNAPSHOT_DELIVERY_COMMIT } from "./snapshot-wire";
 import { ChromeExecutor } from "./executor";
 import { createProgramTools } from "./tool";
-import { decodeSnapshotLines } from "./snapshot-line-dictionary";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -60,7 +59,7 @@ describe("observePageRefreshes", () => {
       h.observer.dispose();
     } finally { vi.useRealTimers(); }
   });
-  it("sends a lossless page-local dictionary for repeated refresh lines", async () => {
+  it("sends directly readable repeated refresh lines", async () => {
     const items = Array.from({ length: 12 }, (_, index) => ({ id: String(index), line: "  - StaticText [name=unknown]" }));
     const page = { observationId: "observation", tabId: 1, documentId: 1, url: "https://example.test/", title: "Page",
       viewport: { x: 0, y: 0, width: 800, height: 600, scale: 1 }, mode: "full", items,
@@ -71,8 +70,8 @@ describe("observePageRefreshes", () => {
     const [message] = await h.observer.drain();
     const text = message!.parts[0]!.type === "text" ? message!.parts[0]!.text : "";
     const sent = JSON.parse(text.split("\n")[2]!);
-    expect(sent.lineDictionary).toEqual(["  - StaticText [name=unknown]"]);
-    expect(decodeSnapshotLines(sent)).toEqual(items);
+    expect(sent.lineDictionary).toBeUndefined();
+    expect(sent.items).toEqual(items);
     expect(sent.truncation).toEqual(page.truncation);
     h.observer.dispose();
   });

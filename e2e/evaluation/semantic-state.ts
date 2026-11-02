@@ -1,8 +1,7 @@
 /** A compact independent consumer for paged semantic observations. */
 export type SemanticItem = { id: string; line: string; ref?: string; change?: "added" | "updated" | "removed" | "moved"; after?: string | null };
 type Fragment = SemanticItem & { fragment?: { index: number; start: number; end: number; total: number } };
-type WireFragment = Omit<Fragment, "line"> & { line: string | number };
-type Page = { observationId: string; documentId: number; mode: "full" | "delta"; items: WireFragment[]; lineDictionary?: string[]; nextCursor?: string; truncation: { baselineComplete: boolean } };
+type Page = { observationId: string; documentId: number; mode: "full" | "delta"; items: Fragment[]; nextCursor?: string; truncation: { baselineComplete: boolean } };
 
 export class SemanticPages {
   private identity?: { observationId: string; documentId: number; mode: Page["mode"] };
@@ -19,11 +18,8 @@ export class SemanticPages {
       || !["full", "delta"].includes(page.mode) || !page.truncation || typeof page.truncation.baselineComplete !== "boolean") throw new Error("Invalid semantic page");
     if (!this.identity) this.identity = { observationId: page.observationId, documentId: page.documentId, mode: page.mode };
     if (page.observationId !== this.identity.observationId || page.documentId !== this.identity.documentId || page.mode !== this.identity.mode) throw new Error("Mixed semantic observations");
-    if (page.lineDictionary !== undefined && (!Array.isArray(page.lineDictionary) || page.lineDictionary.some((line) => typeof line !== "string"))) throw new Error("Invalid semantic dictionary");
-    for (const wire of page.items) {
-      const line = typeof wire?.line === "number" && Number.isSafeInteger(wire.line) && wire.line >= 0 ? page.lineDictionary?.[wire.line] : wire?.line;
-      if (!wire || typeof line !== "string") throw new Error("Invalid semantic item");
-      const raw: Fragment = { ...wire, line };
+    for (const raw of page.items) {
+      if (!raw || typeof raw.line !== "string") throw new Error("Invalid semantic item");
       if (typeof raw.id !== "string" || !raw.id
         || raw.ref !== undefined && typeof raw.ref !== "string"
         || raw.change !== undefined && !["added", "updated", "removed", "moved"].includes(raw.change)

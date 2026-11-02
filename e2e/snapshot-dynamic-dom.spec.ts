@@ -8,8 +8,7 @@ function lastTool(request: any): any {
 }
 
 function lines(snapshot: any): Array<{ line: string; ref?: string }> {
-  return (snapshot?.items ?? []).map((item: any) => ({ ...item,
-    line: typeof item.line === "number" ? snapshot.lineDictionary?.[item.line] : item.line }));
+  return snapshot?.items ?? [];
 }
 
 test("a changing visible clock does not block a stable button or replay its click", async () => {

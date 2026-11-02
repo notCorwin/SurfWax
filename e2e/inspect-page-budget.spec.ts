@@ -1,7 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
 import { SemanticPages } from "./evaluation/semantic-state";
-import { decodeSnapshotLines } from "../src/chrome/snapshot-line-dictionary";
 
 /** Read the actual tool message delivered to the scripted model provider. */
 function toolResult(request: any, id: string): any {
@@ -47,7 +46,7 @@ test("delivers snapshot pages inline even when the requested budget is oversized
       expect(result.$ref).toBeUndefined();
       expect(result.mode).toBe("full");
       expect(result.items).toEqual(expect.any(Array));
-      const bytes = Buffer.byteLength(JSON.stringify(decodeSnapshotLines(result)));
+      const bytes = Buffer.byteLength(JSON.stringify(result.items));
       expect(result.truncation.used).toBe(bytes);
       expect(bytes).toBeLessThanOrEqual(12000);
       largestPageBytes = Math.max(largestPageBytes, bytes);

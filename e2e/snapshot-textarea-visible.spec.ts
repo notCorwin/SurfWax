@@ -1,14 +1,10 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, configure, dispose, openExtension, startProvider, textResponse, type MockResponse } from "./fixtures";
-import { decodeSnapshotLines } from "../src/chrome/snapshot-line-dictionary";
 
 function lastTool(request: any): any {
   const message = request.messages.findLast((entry: any) => entry.role === "tool");
   const content = Array.isArray(message.content) ? message.content.find((part: any) => part.type === "text")?.text : message.content;
   const output = JSON.parse(content);
-  for (const page of [output, output?.pageSnapshot]) {
-    if (page?.lineDictionary) page.items = decodeSnapshotLines(page);
-  }
   return output;
 }
 

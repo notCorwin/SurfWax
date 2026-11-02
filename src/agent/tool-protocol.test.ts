@@ -27,4 +27,31 @@ describe("tool protocol", () => {
       expect(PROGRAM_TOOL_REGISTRY.find((tool) => tool.name === name)!.description).toContain("nextCursor as cursor");
     }
   });
+
+  it("exposes conditional input constraints in the model-facing JSON Schema", () => {
+    const schema = (name: string) => z.toJSONSchema(PROGRAM_TOOL_REGISTRY.find((tool) => tool.name === name)!.inputSchema) as any;
+    expect(schema("inspect_page").allOf).toEqual(["region", "fields", "depth", "since", "offset"].map((field) => ({ not: { required: ["cursor", field] } })));
+    expect(schema("upload_file").oneOf).toEqual([
+      { required: ["target"], not: { required: ["chooserId"] } },
+      { required: ["chooserId"], not: { anyOf: ["target", "tabId", "background"].map((field) => ({ required: [field] })) } },
+    ]);
+    expect(schema("handle_dialog").anyOf).toEqual([
+      { not: { required: ["prompt"] } },
+      { properties: { accept: { const: true } }, required: ["accept"] },
+    ]);
+  });
+
+  it("enforces the same conditional constraints when calls are executed", () => {
+    const accepts = (name: string, input: unknown) => PROGRAM_TOOL_REGISTRY.find((tool) => tool.name === name)!.inputSchema.safeParse(input).success;
+    expect(accepts("inspect_page", { cursor: "c", limit: 10 })).toBe(true);
+    expect(accepts("inspect_page", { cursor: "c", region: "main" })).toBe(false);
+    expect(accepts("upload_file", { artifactId: 1, target: { ref: "e1" }, tabId: 1 })).toBe(true);
+    expect(accepts("upload_file", { artifactId: 1, chooserId: "c" })).toBe(true);
+    expect(accepts("upload_file", { artifactId: 1 })).toBe(false);
+    expect(accepts("upload_file", { artifactId: 1, chooserId: "c", target: { ref: "e1" } })).toBe(false);
+    expect(accepts("upload_file", { artifactId: 1, chooserId: "c", background: false })).toBe(false);
+    expect(accepts("upload_file", { artifactId: 1, chooserId: "c", tabId: 1 })).toBe(false);
+    expect(accepts("handle_dialog", { dialogId: "d", accept: true, prompt: "answer" })).toBe(true);
+    expect(accepts("handle_dialog", { dialogId: "d", accept: false, prompt: "answer" })).toBe(false);
+  });
 });
