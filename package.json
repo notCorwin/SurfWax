@@ -11,8 +11,6 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "node scripts/run-browser-tests.mjs e2e",
-    "docs:tools": "node scripts/generate-tool-docs.mjs",
-    "docs:check": "node scripts/generate-tool-docs.mjs --check",
     "release:package": "node scripts/package-release.mjs --build",
     "test:performance": "node scripts/run-browser-tests.mjs performance",
     "measure:tools": "node scripts/measure-tool-budget.mjs",

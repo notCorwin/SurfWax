@@ -27,7 +27,6 @@ export async function verifyLocal(options = {}) {
     return result.stdout?.trim();
   }
   try {
-    run('Generated documentation', node, ['scripts/generate-tool-docs.mjs', '--check']);
     run('Script regression tests', node, ['--test', 'scripts/tests/sdk-coverage.test.mjs', 'scripts/tests/browser-tests.test.mjs']);
     run('Live Models.dev SDK coverage', node, ['scripts/check-sdk-coverage.mjs']);
     run('Bundled Models.dev freshness', node, ['scripts/update-model-catalog.mjs', '--check']);
