@@ -12,7 +12,7 @@ import { snapshotDomSupplement, type SnapshotDomEvidence } from "./snapshot-dom"
 import { createSnapshotDomIndex } from "./snapshot-dom-index";
 import { snapshotRenderOrder } from "./snapshot-render-order";
 import { snapshotSlottedNodes } from "./snapshot-slot-index";
-import { sameDOMSnapshot } from "./snapshot-consistency";
+import { changedTextNodes, sameDOMSnapshot } from "./snapshot-consistency";
 import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility, type SnapshotClip, type SnapshotFrameOwner, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
 import { projectTextPaint, sameTextPaintCandidates, TEXT_PAINT_CACHE_LOOKUP_SOURCE, TEXT_PAINT_CACHE_REGISTER_SOURCE, type TextPaintEvidence } from "./snapshot-text-paint";
 import { axEllipsisCandidate, confirmAxEllipsis, type AxEllipsisCandidate } from "./snapshot-ax-ellipsis";
@@ -57,13 +57,35 @@ type InspectSnapshot = {
   id: string; session: Session; generation: number; frameRevision: number; conversationId?: string; runId?: string;
   record: ObservationRecord; source: SnapshotItem[]; mode: "full" | "delta"; reset?: string;
   expected?: SnapshotPosition; eligibleForBaseline: boolean; delivery?: symbol;
-  geometry: string; geometrySources: Debuggee[];
+  geometry: string; geometrySources: Debuggee[]; geometryDynamicParents?: Map<string, Set<number>>;
 };
 
+function dynamicTextNodes(snapshot: any, parents: ReadonlySet<number> | undefined): Set<number> {
+  const result = new Set<number>();
+  if (!parents) return result;
+  for (const doc of snapshot.documents ?? []) {
+    const ids = doc.nodes?.backendNodeId, ancestry = doc.nodes?.parentIndex, types = doc.nodes?.nodeType;
+    if (!Array.isArray(ids) || !Array.isArray(ancestry) || !Array.isArray(types) || ids.length !== ancestry.length || ids.length !== types.length)
+      throw automationError("snapshot-unavailable", { reason: "invalid-dynamic-text-tree" });
+    const tainted = new Uint8Array(ids.length);
+    for (let i = 0; i < ids.length; i++) {
+      const parent = ancestry[i];
+      if (!Number.isSafeInteger(parent) || parent >= i || parent < -1) throw automationError("snapshot-unavailable", { reason: "invalid-dynamic-text-tree" });
+      if (parents.has(ids[i]) || parent >= 0 && tainted[parent]) tainted[i] = 1;
+      if (tainted[i] && types[i] === 3) result.add(ids[i]);
+    }
+  }
+  return result;
+}
+
 /** A continuation may reuse frozen rows only while their capture geometry is current. */
-export async function snapshotGeometry(layouts: Array<{ debuggee: Debuggee; snapshot: any }>): Promise<string> {
+export async function snapshotGeometry(layouts: Array<{ debuggee: Debuggee; snapshot: any }>, dynamicParents?: ReadonlyMap<string, ReadonlySet<number>>): Promise<string> {
   const data = layouts.map(({ debuggee, snapshot }) => [debuggee.sessionId ?? "", (snapshot.documents ?? []).map((doc: any) => [
-    snapshot.strings?.[doc.frameId], doc.scrollOffsetX, doc.scrollOffsetY, doc.nodes?.backendNodeId, doc.nodes?.parentIndex,
+    snapshot.strings?.[doc.frameId], doc.scrollOffsetX, doc.scrollOffsetY, doc.nodes?.backendNodeId?.map((id: number, index: number) => {
+      const parents = dynamicParents?.get(debuggee.sessionId ?? ""), parent = doc.nodes?.parentIndex?.[index];
+      return parents && doc.nodes?.nodeType?.[index] === 3 && Number.isSafeInteger(parent) && parent >= 0
+        && parents.has(doc.nodes.backendNodeId[parent]) ? null : id;
+    }), doc.nodes?.parentIndex,
     doc.layout?.nodeIndex, doc.layout?.bounds, doc.layout?.clientRects, doc.layout?.offsetRects, doc.layout?.scrollRects,
     doc.layout?.styles?.map((style: number[]) => style.map((index) => snapshot.strings?.[index])), doc.layout?.paintOrders, doc.textBoxes?.bounds,
   ])]);
@@ -90,6 +112,7 @@ type ObservationRecord = {
   scopeKey?: string;
   regionIdentity?: string;
   incomplete?: boolean;
+  partial?: true;
 };
 type Session = {
   tabId: number;
@@ -838,13 +861,13 @@ export class AutomationRuntime {
   locator(tabId: number, query: Query): LocatorFacade { return new LocatorFacade(this, tabId, { queries: [query] }); }
   ref(tabId: number, ref: string): LocatorFacade { return new LocatorFacade(this, tabId, { queries: [], ref }); }
 
-  async snapshot(tabId: number): Promise<{ url: string; title: string; snapshot: string }> {
+  async snapshot(tabId: number): Promise<{ url: string; title: string; snapshot: string; partial?: true }> {
     return this.action(tabId, "snapshot", null, async () => {
       const session = await this.session(tabId);
       this.pruneRefs(session);
       const captured = await this.captureSnapshot(session);
       session.lastSnapshot = captured.lines;
-      return { url: captured.url, title: captured.title, documentId: session.generation, snapshot: captured.lines.map(({ line }) => line).join("\n") };
+      return { url: captured.url, title: captured.title, documentId: session.generation, snapshot: captured.lines.map(({ line }) => line).join("\n"), ...(captured.partial ? { partial: true as const } : {}) };
     });
   }
 
@@ -864,14 +887,15 @@ export class AutomationRuntime {
       session.lastSnapshot = captured.lines;
       const before = new Map(previous?.lines.map((item) => [item.id, item.line]));
       const after = new Map(captured.lines.map((item) => [item.id, item.line]));
-      const changes = previous ? {
+      const changes = previous && !previous.partial && !captured.partial ? {
         added: captured.lines.filter(({ id }) => !before.has(id)).map(({ line }) => line),
         removed: previous.lines.filter(({ id }) => !after.has(id)).map(({ line }) => line),
         updated: captured.lines.flatMap(({ id, line }) => before.has(id) && before.get(id) !== line ? [{ before: before.get(id), after: line }] : []),
       } : undefined;
       const result: Record<string, unknown> = {
         observationId, documentId: session.generation, url: captured.url, title: captured.title, viewport,
-        snapshot: captured.lines.map(({ line }) => line).join("\n"), ...(changes ? { changes } : {}),
+        snapshot: captured.lines.map(({ line }) => line).join("\n"), ...(captured.partial ? { partial: true } : {}), ...(changes ? { changes } : {}),
+        ...(previous && captured.partial ? { reset: "current-output-partial" } : previous?.partial ? { reset: "previous-output-partial" } : {}),
       };
       if (detail === "visual" || detail === "auto" && !captured.lines.some(({ ref }) => Boolean(ref))) {
         const screenshot = await this.options.command(session.debuggee, "Page.captureScreenshot", {
@@ -936,7 +960,7 @@ export class AutomationRuntime {
         const currentGeometry = await Promise.all(saved.geometrySources.map(async (debuggee) => ({ debuggee,
           snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true, includePaintOrder: true }) })));
         guard();
-        if (await snapshotGeometry(currentGeometry) !== saved.geometry)
+        if (await snapshotGeometry(currentGeometry, saved.geometryDynamicParents) !== saved.geometry)
           throw automationError("stale-observation", { reason: "snapshot-geometry-changed" });
         this.rememberObservation(saved.record);
         position = { index: Number(match[2]), charOffset: Number(match[3]) };
@@ -965,7 +989,7 @@ export class AutomationRuntime {
         guard();
         if (captured.frameRevision !== session.frameRevision) throw automationError("stale-observation", { reason: "frame-tree-changed-during-inspection" });
         const observationId = crypto.randomUUID();
-        const baseline = previous && !previous.incomplete ? previous : undefined;
+        const baseline = previous && !previous.incomplete && !previous.partial && !captured.partial ? previous : undefined;
         const changes = baseline ? diffSnapshot(baseline.lines, lines) : undefined;
         const source = changes ?? lines;
         const index = options.offset ?? 0;
@@ -973,8 +997,8 @@ export class AutomationRuntime {
         position = { index, charOffset: 0 };
         const record: ObservationRecord = { session, observationId, tabId, documentId: generation, ...captured, lines, viewport, scopeKey, incomplete: true };
         this.rememberObservation(record);
-        saved = { id: observationId, session, generation, frameRevision: captured.frameRevision, conversationId, runId, record, source, mode: changes ? "delta" : "full", geometry: captured.geometry, geometrySources: captured.geometrySources,
-          ...(previous?.incomplete ? { reset: "previous-output-truncated" } : {}), expected: position, eligibleForBaseline: index === 0 };
+        saved = { id: observationId, session, generation, frameRevision: captured.frameRevision, conversationId, runId, record, source, mode: changes ? "delta" : "full", geometry: captured.geometry, geometrySources: captured.geometrySources, geometryDynamicParents: captured.geometryDynamicParents,
+          ...(captured.partial && previous ? { reset: "current-output-partial" } : previous?.partial ? { reset: "previous-output-partial" } : previous?.incomplete ? { reset: "previous-output-truncated" } : {}), expected: position, eligibleForBaseline: index === 0 && !captured.partial };
         this.inspectionSnapshots.set(saved.id, saved);
         while (this.inspectionSnapshots.size > 32) this.inspectionSnapshots.delete(this.inspectionSnapshots.keys().next().value!);
       }
@@ -985,10 +1009,10 @@ export class AutomationRuntime {
         const { page } = candidate;
         const truncated = position.index > 0 || position.charOffset > 0 || page.hasMore;
         const reason = page.reason === "budget" ? "budget" : "slice";
-        const baselineComplete = !saved.record.incomplete || advances && !page.hasMore && saved.eligibleForBaseline;
+        const baselineComplete = !saved.record.partial && (!saved.record.incomplete || advances && !page.hasMore && saved.eligibleForBaseline);
         return { observationId: saved.id, tabId, documentId: generation,
           ...(options.cursor === undefined ? { url: saved.record.url, title: saved.record.title } : { continuation: true }), viewport: saved.record.viewport,
-          mode: saved.mode, ...(saved.reset ? { reset: saved.reset } : {}),
+          mode: saved.mode, ...(saved.record.partial ? { partial: true } : {}), ...(saved.reset ? { reset: saved.reset } : {}),
           items: page.fragments, ...(candidate.lookahead ? { lookahead: candidate.lookahead } : {}),
           ...(page.next ? { nextCursor: `${saved.id}:${page.next.index}:${page.next.charOffset}` } : {}),
           truncation: { truncated, total: saved.source.length, returned: page.fragments.length, offset: position.index, charOffset: position.charOffset,
@@ -3146,7 +3170,7 @@ export class AutomationRuntime {
     }
   }
 
-  private async captureSnapshot(session: Session, region?: LocatorSpec): Promise<{ url: string; title: string; lines: SnapshotLine[]; frameRevision: number; regionIdentity?: string; geometry: string; geometrySources: Debuggee[] }> {
+  private async captureSnapshot(session: Session, region?: LocatorSpec): Promise<{ url: string; title: string; lines: SnapshotLine[]; frameRevision: number; regionIdentity?: string; geometry: string; geometrySources: Debuggee[]; geometryDynamicParents?: Map<string, Set<number>>; partial?: true }> {
     const signal = this.context.signal;
     const frameContext = { conversationId: this.context.conversationId, runId: this.context.logIdentity?.runId ?? this.context.runId };
     const guard = () => {
@@ -3173,6 +3197,7 @@ export class AutomationRuntime {
       }
     };
     let retriedUnstableCapture = false;
+    const dynamicTextByTarget = new Map<string, Set<number>>();
     let retryGeneration: number | undefined, retryFrameRevision: number | undefined;
     while (true) {
       guard();
@@ -3190,7 +3215,7 @@ export class AutomationRuntime {
       }
       const generation = session.generation, frameRevision = session.frameRevision;
       if (retryGeneration !== generation || retryFrameRevision !== frameRevision) {
-        retryGeneration = generation; retryFrameRevision = frameRevision; retriedUnstableCapture = false;
+        retryGeneration = generation; retryFrameRevision = frameRevision; retriedUnstableCapture = false; dynamicTextByTarget.clear();
       }
       const changed = () => generation !== session.generation || frameRevision !== session.frameRevision;
       const regionTask = region ? this.resolveOnce(session, region) : undefined;
@@ -3460,6 +3485,7 @@ export class AutomationRuntime {
       let placeholderItems: PlaceholderCandidate[] = [], placeholderBefore = new Map<string, PlaceholderProof>();
       type TextProjection = { full: string; text: string };
       let trees: Array<{ debuggee: Debuggee; frameId: string | undefined; depth: number; tree: any; visibility: Map<number, boolean>; partialFrames: Set<number>; textProjections: Map<number, TextProjection>; unknownText: Set<number>; paintEvidence: Map<number, TextPaintEvidence>; candidates: SnapshotTextPaintCandidate[]; snapshot: any }>;
+      let initialLayouts: Array<{ debuggee: Debuggee; snapshot: any }> = [];
       let info: { url: string; title: string };
       const frameClips = new Map<string, SnapshotClip>();
       try {
@@ -3598,7 +3624,7 @@ export class AutomationRuntime {
         if (changed()) { await delay(0, signal); continue; }
         // Bracket AX and live DOM reads with bulk DOM captures. This detects
         // ordinary page changes that do not advance the document generation.
-        const initialLayouts = await waitForCapture(captureLayouts());
+        initialLayouts = await waitForCapture(captureLayouts());
         if (regionNode) {
           const verified = await waitForCapture(selectRegionFrames(initialLayouts, false));
           if (verified.frameId !== regionFrameId || verified.selected.length !== capturedFrames.length || verified.selected.some((item, index) => item !== capturedFrames[index])) continue;
@@ -3682,10 +3708,17 @@ export class AutomationRuntime {
           Promise.all(initialLayouts.map(async ({ debuggee, snapshot }) => {
             const { candidates, visibility, partialFrames } = initialPaint.get(debuggee.sessionId ?? "")!;
             const textProjections = new Map<number, TextProjection>();
-            const unknownText = new Set<number>();
+            const unknownText = dynamicTextNodes(snapshot, dynamicTextByTarget.get(debuggee.sessionId ?? ""));
             const paintEvidence = new Map<number, TextPaintEvidence>();
             const byFrame = new Map<string, SnapshotTextPaintCandidate[]>();
             for (const candidate of candidates) {
+              if (unknownText.has(candidate.backendNodeId)) {
+                // Paint proof for this changing text cannot be sampled
+                // reliably. Its dependent names remain unknown, but the
+                // text itself must not be claimed as visibly painted.
+                visibility.set(candidate.backendNodeId, false);
+                continue;
+              }
               const list = byFrame.get(candidate.frameId) ?? [];
               list.push(candidate); byFrame.set(candidate.frameId, list);
             }
@@ -3805,6 +3838,33 @@ export class AutomationRuntime {
           && ["text-paint-context-expired", "frame-context-expired", "placeholder-context-expired", "placeholder-node-detached"].includes(String(error.detail.reason));
         if (stalePaintContext && !changed() && error instanceof AutomationError && ["placeholder-context-expired", "placeholder-node-detached"].includes(String(error.detail.reason))) {
           if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "placeholder-context-unstable" });
+          retriedUnstableCapture = true;
+        }
+        if (!changed() && !stalePaintContext && isDetachedNodeError(error) && initialLayouts.length) {
+          const next = await waitForCapture(Promise.all(initialLayouts.map(async ({ debuggee }) => ({ debuggee,
+            snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true, includePaintOrder: true }) }))));
+          if (changed()) continue;
+          let valid = true, found = false;
+          const observed = new Map<string, Set<number>>();
+          for (let i = 0; i < initialLayouts.length; i++) {
+            const before = initialLayouts[i]!, after = next[i]!;
+            if (sameDOMSnapshot(before.snapshot, after.snapshot)) continue;
+            const ids = changedTextNodes(before.snapshot, after.snapshot);
+            if (!ids) { valid = false; break; }
+            found = true; observed.set(before.debuggee.sessionId ?? "", ids);
+          }
+          if (valid && found) {
+            let newlyTracked = false;
+            for (const [key, ids] of observed) {
+              const tracked = dynamicTextByTarget.get(key) ?? new Set<number>();
+              for (const id of ids) if (!tracked.has(id)) { tracked.add(id); newlyTracked = true; }
+              dynamicTextByTarget.set(key, tracked);
+            }
+            if (!newlyTracked) throw automationError("snapshot-unavailable", { reason: "text-paint-node-unstable" });
+            retriedUnstableCapture = true;
+            continue;
+          }
+          if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "text-paint-node-unstable" });
           retriedUnstableCapture = true;
         }
         if (!changed() && !isTransientNavigationError(error) && !isDetachedNodeError(error) && !stalePaintContext) throw error;
@@ -4073,7 +4133,8 @@ export class AutomationRuntime {
       };
       const lines: SnapshotLine[] = [];
       const render = async (nodes: any[], visibility: Map<number, boolean>, textProjections: Map<number, TextProjection>, unknownText: Set<number>,
-        paintEvidence: ReadonlyMap<number, TextPaintEvidence>, candidates: readonly SnapshotTextPaintCandidate[], snapshot: any, debuggee: Debuggee, frameLabel?: string, frameDepth = 0) => {
+        paintEvidence: ReadonlyMap<number, TextPaintEvidence>, candidates: readonly SnapshotTextPaintCandidate[], snapshot: any, debuggee: Debuggee, frameLabel?: string, frameDepth = 0,
+        dynamicText: ReadonlySet<number> = new Set()) => {
         const byId = new Map(nodes.map((node) => [node.nodeId, node]));
         const frameId = frameLabel ?? session.rootFrameId;
         if (!frameId) throw automationError("snapshot-unavailable", { reason: "missing-root-frame" });
@@ -4089,7 +4150,7 @@ export class AutomationRuntime {
         let frameUnobscured = rootFrame;
         const pendingEllipsis: Array<{ candidate: SnapshotTextPaintCandidate; match: AxEllipsisCandidate; request: EllipsisRequest }> = [];
         for (const candidate of candidates) {
-          if (candidate.frameId !== frameId || !candidate.ellipsis || !candidate.basePainted || !unknownText.has(candidate.backendNodeId)
+          if (candidate.frameId !== frameId || !candidate.ellipsis || !candidate.basePainted || !unknownText.has(candidate.backendNodeId) || dynamicText.has(candidate.backendNodeId)
             || candidate.firstLetter || candidate.firstLetterUnknown || typeof candidate.sourceText !== "string" || typeof candidate.layoutText !== "string") continue;
           const paint = paintEvidence.get(candidate.backendNodeId), matches = byBackend.get(candidate.backendNodeId);
           if (!paint || paint.unknown || paint.firstLineRisk || paint.firstLetterRisk || paint.sourceText !== candidate.sourceText || matches?.length !== 1) continue;
@@ -4398,6 +4459,15 @@ export class AutomationRuntime {
           const ownPlaceholder = placeholder(node);
           const source = activeSource(node);
           if (role === "RootWebArea") return "";
+          // A control may derive its accessible name from an unrelated DOM
+          // subtree. Check this before considering its own visible contents.
+          if (partial && source?.type === "relatedElement") {
+            const related = [source.relatedNodes, source.attributeValue?.relatedNodes, source.value?.relatedNodes, source.nativeSourceValue?.relatedNodes].filter(Array.isArray).flat();
+            const ids = related.flatMap((entry: any) => Number.isSafeInteger(entry?.backendDOMNodeId) ? [entry.backendDOMNodeId] : []);
+            if (!ids.length || ids.some((id: number) => domIndex.indexOf(id) === undefined || hasUnknownSubtree(id))) {
+              namesUnknown.add(node.nodeId); return "";
+            }
+          }
           if (source?.type === "placeholder") return safeName(node, original);
           if (role === "StaticText") {
             const pseudo = pseudoTextOwner(node);
@@ -4483,7 +4553,8 @@ export class AutomationRuntime {
           const rawValue = axValue(node.value);
           const nativeValue = ["input", "textarea"].includes(editableTag ?? "") && !["checkbox", "radio", "switch"].includes(role);
           const nativeLeafOwner = nativeValueOwner(node) ?? nativeTextareaOwner(node);
-          const valueUnknown = Boolean(rawValue) && (nativeValue && !maskedControl(node)
+          const valueUnknown = Boolean(rawValue) && (partial && typeof node.backendDOMNodeId === "number" && hasUnknownSubtree(node.backendDOMNodeId)
+            || nativeValue && !maskedControl(node)
             && nativeValues.get(node.backendDOMNodeId) !== rawValue || editableTag === "select" && selectValues.get(node.backendDOMNodeId) !== rawValue || nativeLeafOwner && nativeValues.get(nativeLeafOwner.backendDOMNodeId) !== rawValue);
           const value = maskedControl(node) || ["checkbox", "radio", "switch"].includes(role)
             || editableControl && !["textbox", "searchbox", "spinbutton"].includes(role) || valueUnknown ? "" : rawValue;
@@ -4917,14 +4988,17 @@ export class AutomationRuntime {
               const childFrameId = childFramesByOwner.get(JSON.stringify([debuggee.sessionId ?? "", item.backendNodeId]));
               const childFrameRef = childFrameId ? capturedFrameRefs.get(childFrameId) : undefined;
               const ownPlaceholder = placeholders.get(item.backendNodeId)?.evidence;
-              const nameUnknown = hasUnknownSubtree(item.backendNodeId) || (!name && Boolean(current?.meta?.identityName)) || Boolean(current?.meta?.identityTooLarge);
+              const dynamicLabel = partial && [...(ariaReferences.get(item.backendNodeId) ?? []), ...(current?.labels ?? [])]
+                .some((id: number) => domIndex.indexOf(id) === undefined || hasUnknownSubtree(id));
+              const nameUnknown = hasUnknownSubtree(item.backendNodeId) || dynamicLabel || (!name && Boolean(current?.meta?.identityName)) || Boolean(current?.meta?.identityTooLarge);
               const valueCandidate = item.value && item.valueVisible && tag !== "select" && !["button", "submit", "reset", "checkbox", "radio"].includes(type);
               const selectLabel = tag === "select" ? selectValues.get(item.backendNodeId) : undefined;
-              const valueUnknown = Boolean(valueCandidate && ["input", "textarea"].includes(tag) && nativeValues.get(item.backendNodeId) !== item.value
+              const valueUnknown = Boolean(partial && tag === "select" && hasUnknownSubtree(item.backendNodeId)
+                || valueCandidate && ["input", "textarea"].includes(tag) && nativeValues.get(item.backendNodeId) !== item.value
                 || tag === "select" && item.selectedOptions?.length && !selectLabel);
-              node = { id, depth, role, ...(name ? { name } : {}), ...(nameUnknown ? { nameUnknown: true } : {}), ...(ownPlaceholder && ownPlaceholder.status !== "hidden" ? { placeholder: ownPlaceholder } : {}),
+              node = { id, depth, role, ...(!dynamicLabel && name ? { name } : {}), ...(nameUnknown ? { nameUnknown: true } : {}), ...(ownPlaceholder && ownPlaceholder.status !== "hidden" ? { placeholder: ownPlaceholder } : {}),
                 ...(valueUnknown ? { valueUnknown: true } : valueCandidate ? { value: item.value } : {}),
-                ...(item.valueVisible && selectLabel ? { selectedLabels: [selectLabel] } : {}),
+                ...(!valueUnknown && item.valueVisible && selectLabel ? { selectedLabels: [selectLabel] } : {}),
                 ...(ref ? { ref, actions } : {}), ...(childFrameRef ? { childFrameRef } : {}), state };
             }
             depths.set(item.backendNodeId, depth);
@@ -4958,16 +5032,25 @@ export class AutomationRuntime {
           && doc.nodes?.backendNodeId?.includes(regionNode.node.backendNodeId));
       }) : [];
       if (regionNode && regionMatches.length !== 1) throw automationError("snapshot-region-unavailable", { locator: region });
+      const partial = dynamicTextByTarget.size > 0;
       const frameSnapshots: Array<{ frameRef: string; lines: SnapshotLine[] }> = [];
       for (const item of trees) {
         const { debuggee, frameId, tree, visibility, textProjections, unknownText, paintEvidence, candidates, snapshot } = item;
         if (!tree) continue;
+        const dynamicText = dynamicTextNodes(snapshot, dynamicTextByTarget.get(debuggee.sessionId ?? ""));
+        for (const id of dynamicText) { unknownText.add(id); textProjections.delete(id); }
         // Render each document at its own origin, then insert it at the
         // represented iframe owner. Frame depth alone is not semantic depth.
-        await waitForCapture(render(tree.nodes ?? [], visibility, textProjections, unknownText, paintEvidence, candidates, snapshot, debuggee, frameId, 0));
+        await waitForCapture(render(tree.nodes ?? [], visibility, textProjections, unknownText, paintEvidence, candidates, snapshot, debuggee, frameId, 0, dynamicText));
         const frameRef = capturedFrameRefs.get(frameId ?? session.rootFrameId!);
         if (!frameRef) throw automationError("snapshot-unavailable", { reason: "missing-frame-ref" });
-        frameSnapshots.push({ frameRef, lines: lines.splice(0) });
+        const renderedLines = lines.splice(0).map((line) => {
+          if (!partial || !line.node || !line.node.nameUnknown && !line.node.valueUnknown) return line;
+          const { ref: _ref, actions: _actions, ...node } = line.node;
+          const rendered = renderSnapshotNode(node);
+          return { id: line.id, line: rendered.line, node };
+        });
+        frameSnapshots.push({ frameRef, lines: renderedLines });
       }
       if (unstableDOMChecked) {
         if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "dom-checked-unstable" });
@@ -4985,11 +5068,12 @@ export class AutomationRuntime {
       }
       if (!changed()) {
         let confirmations: Array<{ debuggee: Debuggee; snapshot: any }>;
+        let unstableEllipsis: EllipsisBatch[] = [];
         try {
           const afterEllipsis = await waitForCapture(Promise.all(ellipsisBatches.map((batch) => readEllipsisGeometry(batch.debuggee, batch.frameId, batch.requests))));
           if (ellipsisBatches.some((batch, index) => JSON.stringify(batch.proofs) !== JSON.stringify(afterEllipsis[index]))) {
-            if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "text-paint-unstable" });
-            retriedUnstableCapture = true; continue;
+            if (!retriedUnstableCapture) { retriedUnstableCapture = true; continue; }
+            unstableEllipsis = ellipsisBatches.filter((batch, index) => JSON.stringify(batch.proofs) !== JSON.stringify(afterEllipsis[index]));
           }
           const afterFramePaint = await waitForCapture(Promise.all(framePaintBatches.map((batch) => readFramePaint(batch[0]!.frameId))));
           if (framePaintBatches.some((batch, index) => JSON.stringify(batch) !== JSON.stringify(afterFramePaint[index]))) {
@@ -5038,7 +5122,8 @@ export class AutomationRuntime {
           await delay(changed() ? 0 : 50, signal); continue;
         }
         if (changed()) continue;
-        let unstable = false, unstablePaint = false, onlyUnrenderedText = true;
+        let unstable = unstableEllipsis.length > 0, unstablePaint = unstable, onlyUnrenderedText = !unstable, onlyDynamicText = true;
+        const observedDynamicText = new Map<string, Set<number>>();
         const relaxedChecks: Array<(snapshot: any) => boolean> = [];
         for (const confirmation of confirmations) {
           const initial = trees.find(({ debuggee }) => sameDebuggee(debuggee, confirmation.debuggee));
@@ -5061,17 +5146,35 @@ export class AutomationRuntime {
           if (initial && visibility && sameDOMSnapshot(relevantDocuments(initial.snapshot), relevantDocuments(confirmation.snapshot),
             { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true, frameClips })) continue;
           unstable = true;
+          const textChanges = initial && visibility ? changedTextNodes(relevantDocuments(initial.snapshot), relevantDocuments(confirmation.snapshot),
+            { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true, frameClips }) : undefined;
+          if (!textChanges) onlyDynamicText = false;
+          else observedDynamicText.set(confirmation.debuggee.sessionId ?? "", textChanges);
           if (!relaxed(confirmation.snapshot)) onlyUnrenderedText = false;
           const after: SnapshotTextPaintCandidate[] = [];
           try { snapshotVisibility(confirmation.snapshot, { textPaintCandidates: after }); }
           catch { throw automationError("snapshot-unavailable", { reason: "invalid-dom-confirmation" }); }
           if (initial && !sameTextPaintCandidates(candidates ?? [], relevantIds ? after.filter((candidate) => relevantIds.has(candidate.frameId)) : after)) unstablePaint = true;
         }
+        // A changed ellipsis proof is attributable to dynamic text only if
+        // every affected request resolves to a parent already identified by
+        // the independently compared DOM captures. Otherwise keep failing
+        // closed rather than accepting unrelated changes in paint/occlusion.
+        if (unstableEllipsis.length) for (const batch of unstableEllipsis) {
+          const initial = trees.find(({ debuggee }) => sameDebuggee(debuggee, batch.debuggee));
+          const parents = observedDynamicText.get(batch.debuggee.sessionId ?? "");
+          if (!initial || !parents || batch.requests.some((request) => {
+            const doc = initial.snapshot.documents?.find((item: any) => initial.snapshot.strings?.[item.frameId] === batch.frameId);
+            const index = doc?.nodes?.backendNodeId?.indexOf(request.backendNodeId) ?? -1;
+            const parent = index < 0 ? -1 : doc.nodes.parentIndex?.[index];
+            return !Number.isSafeInteger(parent) || parent < 0 || !parents.has(doc.nodes.backendNodeId[parent]);
+          })) onlyDynamicText = false;
+        }
         if (unstable) {
           // A hidden text node can still supply an accessible name (for
           // example through aria-labelledby). Only tolerate such changes if
           // every captured accessibility tree is independently unchanged.
-          if (retriedUnstableCapture && onlyUnrenderedText) {
+          if (retriedUnstableCapture && onlyUnrenderedText && !partial) {
             let axChecks: boolean[];
             try {
               axChecks = await waitForCapture(Promise.all(trees.filter((item) => item.tree).map(async (item) => {
@@ -5104,11 +5207,23 @@ export class AutomationRuntime {
               }
             }
           }
+          if (retriedUnstableCapture && onlyDynamicText) {
+            let newText = false;
+            for (const [key, ids] of observedDynamicText) {
+              const tracked = dynamicTextByTarget.get(key) ?? new Set<number>();
+              for (const id of ids) if (!tracked.has(id)) { tracked.add(id); newText = true; }
+              dynamicTextByTarget.set(key, tracked);
+            }
+            // Re-render with the affected text and dependent names marked
+            // unknown; never deliver the already rendered stale values.
+            if (newText) continue;
+            if (partial) return { ...info, lines, frameRevision, geometry: await snapshotGeometry(confirmations, dynamicTextByTarget), geometrySources: confirmations.map(({ debuggee }) => debuggee), geometryDynamicParents: dynamicTextByTarget, partial: true, ...(regionNode ? { regionIdentity: JSON.stringify([regionDebuggee?.sessionId ?? "", regionFrameId, regionNode.node.backendNodeId]) } : {}) };
+          }
           if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: unstablePaint ? "text-paint-unstable" : "dom-unstable" });
           retriedUnstableCapture = true;
           continue;
         }
-        return { ...info, lines, frameRevision, geometry: await snapshotGeometry(confirmations), geometrySources: confirmations.map(({ debuggee }) => debuggee), ...(regionNode ? { regionIdentity: JSON.stringify([regionDebuggee?.sessionId ?? "", regionFrameId, regionNode.node.backendNodeId]) } : {}) };
+        return { ...info, lines, frameRevision, geometry: await snapshotGeometry(confirmations, partial ? dynamicTextByTarget : undefined), geometrySources: confirmations.map(({ debuggee }) => debuggee), ...(partial ? { partial: true as const, geometryDynamicParents: dynamicTextByTarget } : {}), ...(regionNode ? { regionIdentity: JSON.stringify([regionDebuggee?.sessionId ?? "", regionFrameId, regionNode.node.backendNodeId]) } : {}) };
       }
     }
   }

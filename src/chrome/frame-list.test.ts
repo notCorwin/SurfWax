@@ -284,7 +284,7 @@ describe("frame tree discovery", () => {
     });
     const page = await runtime.createPage(3);
     if (semanticChange) await expect(page.snapshot()).rejects.toMatchObject({ code: "snapshot-unavailable" });
-    else await expect(page.snapshot()).resolves.toBeDefined();
+    else await expect(page.snapshot()).resolves.not.toHaveProperty("partial");
     await runtime.abortSessions();
   });
   it("rejects visible changes that occur during the accessibility recheck", async () => {

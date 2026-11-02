@@ -64,6 +64,15 @@ describe("browser tools", () => {
     expect(delivery.cancel).not.toHaveBeenCalled();
   });
 
+  it("delivers partial observations with their uncertainty on inspection and action results", async () => {
+    const page = Object.assign(mockSnapshot(4, ["- StaticText [name=unknown]"]), { partial: true });
+    page.truncation.baselineComplete = false;
+    const executor = { inspect: vi.fn(async () => page), runProgram: vi.fn(async () => ({ ok: true })), pendingBackgroundJobs: () => [] } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor) as Record<string, any>;
+    expect(await tools.inspect_page.execute({}, { toolCallId: "inspect-partial" })).toMatchObject({ partial: true, truncation: { baselineComplete: false } });
+    expect(await tools.click.execute({ target: { ref: "stable" }, tabId: 4 }, { toolCallId: "click-partial" })).toMatchObject({ ok: true, pageSnapshot: { partial: true, truncation: { baselineComplete: false } } });
+  });
+
   it("returns a budgeted inspection page inline with its continuation and fragments intact", async () => {
     const events: LogEvent[] = [];
     const logger = new EventLogger({ store: testEventStore(events) });

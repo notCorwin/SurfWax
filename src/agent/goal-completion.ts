@@ -34,7 +34,7 @@ export const GOAL_INSTRUCTIONS = "\n\nContinue until the user's outcome is achie
 
 type ReceiptValue = string | number | boolean | null | ReceiptValue[] | { [key: string]: ReceiptValue };
 type ActionReceipt = { input?: { [key: string]: ReceiptValue }; result?: { [key: string]: ReceiptValue }; labels?: { [key: string]: string }; truncated?: true };
-type Evidence = { id: string; name: string; success: boolean; effectUnknown: boolean; order: number; pageObserved?: true; receipt?: ActionReceipt };
+type Evidence = { id: string; name: string; success: boolean; effectUnknown: boolean; order: number; pageObserved?: true; partialObservation?: true; receipt?: ActionReceipt };
 type Cache = { runId: string; cursor: number; epoch?: string; entries: Map<string, Evidence> };
 const caches = new WeakMap<EventLogger, Map<string, Cache>>();
 
@@ -120,10 +120,11 @@ function projectEvidence(id: string, name: string, output: unknown, failed: bool
   const pageObserved = typeof snapshot.observationId === "string" && snapshot.observationId.length > 0
     && Number.isSafeInteger(snapshot.tabId) && snapshot.documentId !== undefined
     && ["full", "delta"].includes(String(snapshot.mode)) && Array.isArray(snapshot.items)
-    && snapshot.pending !== true && snapshot.unavailable !== true;
+    && snapshot.pending !== true && snapshot.unavailable !== true && snapshot.partial !== true;
   return { id, name, order, effectUnknown: object(value.error).effectUnknown === true,
     ...(!OBSERVATION_TOOLS.has(name) || name === "get_job" ? { receipt: actionReceipt(input, output) } : {}),
     ...(pageObserved ? { pageObserved: true as const } : {}),
+    ...(name === "inspect_page" && value.partial === true ? { partialObservation: true as const } : {}),
     success: !failed && value.ok !== false && !["running", "blocked", "failed", "cancelled", "interrupted"].includes(String(value.state))
       && !(value.accepted === true && value.complete === false)
       && !(name === "get_job" && value.terminal !== true)
@@ -131,7 +132,7 @@ function projectEvidence(id: string, name: string, output: unknown, failed: bool
 }
 function successful(entry: Evidence): boolean { return entry.success; }
 const OBSERVATION_TOOLS = new Set(["inspect_page", "find_elements", "list_frames", "read_text", "read_value", "read_attribute", "read_checked", "read_elements", "count_elements", "get_page_info", "verify_state", "wait_for_url", "take_screenshot", "list_tabs", "list_downloads", "read_artifact", "list_requests", "read_response", "read_console", "list_scripts", "read_script", "list_jobs", "get_job", "wait_event"]);
-function observation(entry: Evidence): boolean { return (OBSERVATION_TOOLS.has(entry.name) || entry.pageObserved === true) && successful(entry); }
+function observation(entry: Evidence): boolean { return !entry.partialObservation && (OBSERVATION_TOOLS.has(entry.name) || entry.pageObserved === true) && successful(entry); }
 function unknownEffect(entry: Evidence): boolean { return entry.effectUnknown; }
 
 /** Release only the matching run, so a late cleanup cannot evict its replacement. */
@@ -192,6 +193,7 @@ export function validateGoal(goal: Goal, entries: Evidence[]): string | undefine
   const byId = new Map(entries.map((entry) => [entry.id, entry]));
   const cited = goal.evidence.map(({ toolCallId }) => byId.get(toolCallId));
   if (cited.some((entry) => !entry)) return "Evidence must reference terminal tool results from this run using their evidenceId.";
+  if (cited.some((entry) => entry?.partialObservation)) return "A partial page snapshot is not complete evidence; obtain a reliable observation before citing it.";
   for (let index = 0; index < goal.evidence.length; index++) {
     const entry = cited[index]!;
     for (const id of goal.evidence[index]!.resolves ?? []) {

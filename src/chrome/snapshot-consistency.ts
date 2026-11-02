@@ -10,6 +10,49 @@ export type SnapshotConsistencyEvidence = Readonly<{
   frameClips?: ReadonlyMap<string, SnapshotClip>;
 }>;
 
+/** Identify parents of changing Text nodes only when the captures otherwise agree,
+ * including exact layout geometry. The returned nodes must be rendered as
+ * unknown; their values must never be presented as a consistent observation. */
+export function changedTextNodes(left: any, right: any, before?: SnapshotConsistencyEvidence): Set<number> | undefined {
+  try {
+    if (!Array.isArray(left?.documents) || !Array.isArray(right?.documents) || left.documents.length !== right.documents.length
+      || !Array.isArray(left.strings) || !Array.isArray(right.strings)) return undefined;
+    const normalized = structuredClone(right), changed = new Set<number>();
+    const value = (strings: string[], index: unknown): string | undefined => index === -1 ? "" : Number.isSafeInteger(index) && Number(index) >= 0 ? strings[index as number] : undefined;
+    for (let d = 0; d < left.documents.length; d++) {
+      const a = left.documents[d], b = right.documents[d], copy = normalized.documents[d];
+      if (!Array.isArray(a?.nodes?.nodeValue) || !Array.isArray(b?.nodes?.nodeValue)
+        || a.nodes.nodeValue.length !== b.nodes.nodeValue.length || !Array.isArray(a.layout?.nodeIndex) || !Array.isArray(b.layout?.nodeIndex)) return undefined;
+      // Changes in layout, including text box sizes and positions, may affect
+      // unrelated content and cannot be attributed safely to text alone.
+      for (const key of ["contentWidth", "contentHeight"]) if (a[key] !== b[key]) return undefined;
+      for (const key of ["bounds", "clientRects", "offsetRects", "scrollRects"]) if (JSON.stringify(a.layout[key]) !== JSON.stringify(b.layout[key])) return undefined;
+      if (JSON.stringify(a.textBoxes) !== JSON.stringify(b.textBoxes)) return undefined;
+      for (let i = 0; i < a.nodes.nodeValue.length; i++) {
+        const av = value(left.strings, a.nodes.nodeValue[i]), bv = value(right.strings, b.nodes.nodeValue[i]);
+        if (av === undefined || bv === undefined) return undefined;
+        if (av === bv && a.nodes.backendNodeId?.[i] === b.nodes.backendNodeId?.[i]) continue;
+        const parent = a.nodes.parentIndex?.[i];
+        if (a.nodes.nodeType?.[i] !== 3 || b.nodes.nodeType?.[i] !== 3 || !Number.isSafeInteger(parent) || parent < 0
+          || parent !== b.nodes.parentIndex?.[i] || a.nodes.backendNodeId?.[parent] !== b.nodes.backendNodeId?.[parent]
+          || !Number.isSafeInteger(a.nodes.backendNodeId?.[parent]) || !Number.isSafeInteger(a.nodes.backendNodeId[i])) return undefined;
+        changed.add(a.nodes.backendNodeId[parent]);
+        copy.nodes.backendNodeId[i] = a.nodes.backendNodeId[i];
+        copy.nodes.nodeValue[i] = normalized.strings.push(av) - 1;
+        const ai = a.layout.nodeIndex.indexOf(i), bi = b.layout.nodeIndex.indexOf(i);
+        if (ai !== bi) return undefined;
+        if (ai >= 0) {
+          if (!Array.isArray(a.layout.text) || !Array.isArray(b.layout.text)) return undefined;
+          const layoutText = value(left.strings, a.layout.text[ai]);
+          if (layoutText === undefined || value(right.strings, b.layout.text[bi]) === undefined) return undefined;
+          copy.layout.text[bi] = normalized.strings.push(layoutText) - 1;
+        }
+      }
+    }
+    return changed.size && sameDOMSnapshot(left, normalized, before) ? changed : undefined;
+  } catch { return undefined; }
+}
+
 /** Compare two CDP captures by page semantics, not string-table positions or
  * harmless movement of already-visible boxes. False also means malformed or
  * unsupported evidence: callers must not claim a consistent snapshot. Equal

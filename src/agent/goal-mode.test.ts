@@ -164,9 +164,12 @@ describe("goal mode", () => {
     expect(validateGoal(goal("dispatch"), [dispatch])).toContain("successful observation");
     const pageSnapshot = { observationId: "observation", tabId: 12, documentId: "doc", mode: "full", items: [{ line: "Approved" }] };
     expect(validateGoal(goal("post-action"), [localEvidence("post-action", "click", { ok: true, pageSnapshot }, 3)])).toBeUndefined();
-    for (const snapshot of [{ ...pageSnapshot, mode: "pending" }, { ...pageSnapshot, observationId: undefined }, { ...pageSnapshot, pending: true }]) {
+    for (const snapshot of [{ ...pageSnapshot, mode: "pending" }, { ...pageSnapshot, observationId: undefined }, { ...pageSnapshot, pending: true }, { ...pageSnapshot, partial: true }]) {
       expect(validateGoal(goal("unobserved"), [localEvidence("unobserved", "click", { ok: true, pageSnapshot: snapshot }, 3)])).toContain("successful observation");
     }
+    expect(validateGoal(goal("partial"), [localEvidence("partial", "inspect_page", { ok: true, ...pageSnapshot, partial: true }, 3)])).toBeDefined();
+    expect(validateGoal({ taskType: "browser", status: "completed", summary: "Done", evidence: [{ toolCallId: "observed", observation: "Observed" }, { toolCallId: "partial", observation: "Uncertain" }] },
+      [good, localEvidence("partial", "inspect_page", { ok: true, ...pageSnapshot, partial: true }, 3)])).toContain("partial");
     expect(validateGoal(goal("pending"), [localEvidence("pending", "click", { ok: true, pageSnapshotStatus: { state: "pending" } }, 3)])).toContain("successful observation");
     expect(validateGoal(goal("observed"), [good, unknown])).toContain("unknown");
     expect(validateGoal(goal("verified"), [good, unknown, verified])).toContain("unknown");

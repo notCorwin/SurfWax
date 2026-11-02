@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sameDOMSnapshot } from "./snapshot-consistency";
+import { changedTextNodes, sameDOMSnapshot } from "./snapshot-consistency";
 import { snapshotVisibility, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
 
 function fixture(reverse = false) {
@@ -23,6 +23,16 @@ function intern(snapshot: ReturnType<typeof fixture>, value: string) {
 }
 
 describe("DOM snapshot consistency", () => {
+  it("isolates text changes only when all geometry and other evidence agree", () => {
+    const before = fixture(), after = fixture(true);
+    const text = intern(after, "world");
+    after.documents[0]!.nodes.nodeValue[2] = text;
+    after.documents[0]!.layout.text[2] = text;
+    after.documents[0]!.nodes.backendNodeId[2] = 99;
+    expect(changedTextNodes(before, after)).toEqual(new Set([2]));
+    after.documents[0]!.layout.bounds[2]![0]++;
+    expect(changedTextNodes(before, after)).toBeUndefined();
+  });
   it("detects changes to user-modify even when node attributes and geometry remain unchanged", () => {
     const before = fixture(), after = fixture(true);
     for (const snapshot of [before, after]) {

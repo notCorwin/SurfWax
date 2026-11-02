@@ -23,6 +23,19 @@ it("invalidates frozen geometry when an element is reparented without moving its
   expect(await snapshotGeometry(capture(doc))).not.toBe(await snapshotGeometry(capture(changed)));
 });
 
+it("keeps partial snapshot geometry across dynamic text replacement only", async () => {
+  const document = { frameId: 0, nodes: { backendNodeId: [1, 2, 3, 4], parentIndex: [-1, 0, 1, 0], nodeType: [9, 1, 3, 1] },
+    layout: { nodeIndex: [0, 1, 2, 3], bounds: [[0, 0, 100, 100], [0, 0, 10, 10], [0, 0, 10, 10], [10, 0, 10, 10]], styles: [[], [], [], []] } };
+  const capture = (doc: typeof document) => [{ debuggee: { tabId: 3 }, snapshot: { strings: ["root"], documents: [doc] } }];
+  const dynamic = new Map([["", new Set([2])]]);
+  const replacement = structuredClone(document); replacement.nodes.backendNodeId[2] = 20;
+  expect(await snapshotGeometry(capture(document), dynamic)).toBe(await snapshotGeometry(capture(replacement), dynamic));
+  replacement.nodes.backendNodeId[3] = 40;
+  expect(await snapshotGeometry(capture(document), dynamic)).not.toBe(await snapshotGeometry(capture(replacement), dynamic));
+  replacement.nodes.backendNodeId[3] = 4; replacement.layout.bounds[2]![0] = 1;
+  expect(await snapshotGeometry(capture(document), dynamic)).not.toBe(await snapshotGeometry(capture(replacement), dynamic));
+});
+
 function fillReferencePool(runtime: AutomationRuntime, count: number) {
   const session = (runtime as any).sessions.get(3);
   for (let index = 0; index < count; index++) (runtime as any).rememberRef(session, `seed:${index}`, {
@@ -1762,6 +1775,35 @@ describe("AutomationRuntime", () => {
     // input has no full-paint proof in this fixture and must not be duplicated.
     expect(reconstructed.split(value)).toHaveLength(2);
     expect(reconstructed).toContain("[value=unknown]");
+    await runtime.abortSessions();
+  });
+
+  it("carries partial status through pages and never uses partial observations as delta baselines", async () => {
+    const { runtime } = textboxSnapshot({ value: `Start ${"long😀".repeat(100)} end`, independent: true });
+    const original = (runtime as any).captureSnapshot.bind(runtime);
+    let partial = true;
+    vi.spyOn(runtime as any, "captureSnapshot").mockImplementation(async (...args: any[]) => ({ ...await original(...args), ...(partial ? { partial: true } : {}) }));
+    const page = await runtime.createPage(3);
+    const first: any = await page.inspect({ budget: 240, limit: 1 });
+    expect(first).toMatchObject({ partial: true, mode: "full", truncation: { baselineComplete: false } });
+    let cursor = first.nextCursor;
+    while (cursor) {
+      const next: any = await page.inspect({ cursor, budget: 240, limit: 1 });
+      expect(next).toMatchObject({ partial: true, truncation: { baselineComplete: false } });
+      cursor = next.nextCursor;
+    }
+    partial = false;
+    const next: any = await page.inspect({ since: first.observationId });
+    expect(next).toMatchObject({ mode: "full", reset: "previous-output-partial" });
+    partial = true;
+    const partialAfterStable: any = await page.inspect({ since: next.observationId });
+    expect(partialAfterStable).toMatchObject({ mode: "full", partial: true, reset: "current-output-partial" });
+    const observed: any = await page.observe("semantic");
+    expect(observed).toMatchObject({ partial: true });
+    partial = false;
+    const recovered: any = await page.observe("semantic", observed.observationId);
+    expect(recovered).toMatchObject({ reset: "previous-output-partial" });
+    expect(recovered.changes).toBeUndefined();
     await runtime.abortSessions();
   });
 
