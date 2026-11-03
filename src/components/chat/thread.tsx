@@ -36,13 +36,13 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
   const totalSize = virtualizer.getTotalSize();
   return <div data-testid="thread-root" className="relative flex h-full min-h-0 flex-col">
     {state.error !== undefined && <ErrorNotice summary="会话读取失败，请重试。" error={state.error} />}
-    {warning && <p role="status" className="conversation-notice">{warning}</p>}
+    {warning && <p role="status" className="conversation-notice thread-warning">{warning}</p>}
     <MessageScrollerProvider autoScroll>
       <MessageScroller className="flex-1">
         <MessageScrollerViewport ref={scroller} data-testid="thread-viewport" className="overflow-x-hidden">
           <MessageScrollerContent className="mx-auto block w-full max-w-(--thread-max-width) px-4 pt-5 pb-8">
             {turns.length === 0 && !state.isLoading && <Welcome disabled={locked} />}
-            {state.isLoading && <p role="status" className="conversation-notice py-8">正在读取对话…</p>}
+            {state.isLoading && <p role="status" className="conversation-notice thread-loading py-8">正在读取对话…</p>}
             <div ref={virtualizer.containerRef} className="relative w-full" style={{ height: totalSize }}>
               {items.map((item) => {
                 const turn = turns[item.index]!;
