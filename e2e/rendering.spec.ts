@@ -27,9 +27,9 @@ test("keeps at most three recent tool calls and summarizes them after interrupti
     const list = opened.page.getByTestId("live-tool-calls");
     const rows = list.locator(".activity");
     await expect(rows).toHaveCount(3);
-    await expect(rows.last().locator(":scope > summary")).toHaveText(/^检查页面状态 · \d+\.\d{2} 秒$/);
-    const before = await rows.last().locator(":scope > summary").innerText();
-    await expect.poll(() => rows.last().locator(":scope > summary").innerText()).not.toBe(before);
+    await expect(rows.last()).toHaveText(/^检查页面状态 · \d+\.\d{2} 秒$/);
+    const before = await rows.last().innerText();
+    await expect.poll(() => rows.last().innerText()).not.toBe(before);
     await opened.page.getByRole("button", { name: "停止生成" }).click();
     await expect(list).toHaveCount(0);
     await expect(opened.page.getByTestId("tool-group-summary")).toHaveCount(1);
@@ -53,7 +53,7 @@ test("keeps completed tools visible while waiting for the next provider response
     await options.close();
     await opened.page.getByTestId("composer-input").fill("run then reply");
     await opened.page.getByTestId("composer-input").press("Enter");
-    await expect(opened.page.getByTestId("live-tool-calls").locator(".activity summary")).toHaveText(completedInfo);
+    await expect(opened.page.getByTestId("live-tool-calls").locator(".activity")).toHaveText(completedInfo);
     const waiting = opened.page.getByTestId("waiting-status");
     await expect(waiting).toContainText("正在等待推理提供商响应");
     const before = await waiting.innerText();
@@ -226,8 +226,8 @@ test("keeps reasoning and live tool activity in order", async () => {
     await expect(opened.page.getByTestId("reasoning-item")).toHaveCount(1);
     const calls = opened.page.getByTestId("live-tool-calls").locator(".activity");
     await expect(calls).toHaveCount(2);
-    await expect(calls.first().locator(":scope > summary")).toHaveText(completedInfo);
-    await expect(calls.last().locator(":scope > summary")).toHaveText(completedInfo);
+    await expect(calls.first()).toHaveText(completedInfo);
+    await expect(calls.last()).toHaveText(completedInfo);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("NEXT_PROGRESS_TEXT");
     await expect(opened.page.getByTestId("tool-group-summary")).toHaveCount(1);
   } finally {
@@ -296,7 +296,7 @@ test("executes complete tool arguments once they arrive", async () => {
     await options.close();
     await opened.page.getByTestId("composer-input").fill("run one complete command");
     await opened.page.getByTestId("composer-input").press("Enter");
-    const label = opened.page.getByTestId("live-tool-calls").locator(".activity > summary span");
+    const label = opened.page.getByTestId("live-tool-calls").locator(".activity > span");
     await expect(label).toHaveText(/^检查页面状态(?: · \d+\.\d{2} 秒)?$/);
     await expect(label).toHaveText(/^检查页面状态 · \d+\.\d{2} 秒$/);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("PHASE_DONE");

@@ -29,6 +29,16 @@ it("distinguishes active reasoning and tool labels", () => {
   expect(tool("running")).not.toContain("<svg");
 });
 
+it("shows tool failure and interruption without exposing input or output", () => {
+  const render = (interrupted: boolean) => renderToStaticMarkup(createElement(ToolFallback, {
+    toolName: "click", status: { type: "incomplete" }, args: { secretInput: "input-value" },
+    result: { secretOutput: "output-value" }, interrupted,
+  }));
+  expect(render(false)).toContain("点击 · 未完成");
+  expect(render(true)).toContain("点击 · 已中断");
+  expect(render(false)).not.toMatch(/input-value|output-value|<details|<summary/);
+});
+
 it("keeps completed activity labels live until text, then settles them", () => {
   const render = (phase: ActivityPhase) => renderToStaticMarkup(createElement(ActivityPhaseContext.Provider, { value: phase },
     createElement(Reasoning, { status: { type: "complete" } } as ComponentProps<typeof Reasoning>),
@@ -51,15 +61,15 @@ it("updates the tool state when command execution completes", async () => {
   } as ComponentProps<typeof ToolFallback>);
 
   await act(() => root.render(render("running")));
-  const activeLabel = container.querySelector("summary span");
+  const activeLabel = container.querySelector(".activity span");
   expect(activeLabel?.textContent).toBe("点击");
   expect(container.querySelector(".activity")?.getAttribute("data-status")).toBe("running");
 
   await act(() => root.render(render("complete")));
-  const settledLabel = container.querySelector("summary span");
+  const settledLabel = container.querySelector(".activity span");
   expect(settledLabel?.textContent).toBe("点击");
   expect(container.querySelector(".activity")?.getAttribute("data-status")).toBe("complete");
-  expect(container.querySelectorAll("summary span")).toHaveLength(1);
+  expect(container.querySelectorAll(".activity span")).toHaveLength(1);
   await act(() => root.unmount());
 });
 
@@ -74,13 +84,13 @@ it("updates a running tool's elapsed time from its recorded start and stops at t
       toolName: "inspect_page", args: {}, status: { type }, startedAtMs: 1_000, durationMs,
     });
     await act(() => root.render(render("running")));
-    expect(container.querySelector("summary")?.textContent).toBe("查看页面 · 0.00 秒");
+    expect(container.querySelector(".activity")?.textContent).toBe("查看页面 · 0.00 秒");
     await act(() => vi.advanceTimersByTime(1_200));
-    expect(container.querySelector("summary")?.textContent).toBe("查看页面 · 1.20 秒");
+    expect(container.querySelector(".activity")?.textContent).toBe("查看页面 · 1.20 秒");
     await act(() => root.render(render("complete", 1256)));
-    expect(container.querySelector("summary")?.textContent).toBe("查看页面 · 1.26 秒");
+    expect(container.querySelector(".activity")?.textContent).toBe("查看页面 · 1.26 秒");
     await act(() => vi.advanceTimersByTime(1_000));
-    expect(container.querySelector("summary")?.textContent).toBe("查看页面 · 1.26 秒");
+    expect(container.querySelector(".activity")?.textContent).toBe("查看页面 · 1.26 秒");
   } finally {
     await act(() => root.unmount());
     vi.useRealTimers();

@@ -200,9 +200,9 @@ test("closing the panel prevents a queued chrome call from starting", async () =
     const process = opened.page.getByTestId("live-tool-calls");
     await expect(process).toHaveCount(1);
     await expect(process.locator(".activity[data-status]")).toHaveCount(2);
-    await expect(process.locator(".activity > summary").last()).toContainText("点击");
+    await expect(process.locator(".activity").last()).toContainText("点击");
     await expect(process.locator('.activity[data-status="running"]').last()).toBeVisible();
-    const runningLabel = process.locator('.activity[data-status="running"] > summary').last();
+    const runningLabel = process.locator('.activity[data-status="running"]').last();
     await opened.page.emulateMedia({ colorScheme: "dark" });
     await expect.poll(() => runningLabel.evaluate((label) => getComputedStyle(label, "::before").animationName)).toBe("none");
     await opened.page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
