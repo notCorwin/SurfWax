@@ -1,8 +1,8 @@
 import type { MessagePart, MessageView } from "@/sidepanel/conversation-store";
 import { summarizeToolActions } from "./tool-labels";
 import { ToolFallback } from "./tool-fallback";
-import { useContext } from "react";
-import { ActivityPhaseContext, toolActivity } from "./process-group";
+import { useContext, useLayoutEffect, useRef } from "react";
+import { ActivityPhaseContext, toolActivity, toolWasInterrupted, type ActivityPhase } from "./process-group";
 
 type ToolPart = Extract<MessagePart, { type: "tool-call" }>;
 export type ToolGroup = { key: string; tools: ToolPart[]; live: boolean };
@@ -61,15 +61,88 @@ export function toolGroupDuration(tools: readonly ToolPart[]): number | undefine
   return end - start;
 }
 
+function FailureSummary({ tools, phase }: { tools: readonly ToolPart[]; phase: ActivityPhase }) {
+  let incomplete = 0, interrupted = 0;
+  for (const part of tools) {
+    if (toolActivity(part, phase).status !== "error") continue;
+    if (toolWasInterrupted(part, phase)) interrupted++;
+    else incomplete++;
+  }
+  if (!incomplete && !interrupted) return null;
+  return <div className="activity transcript-activity" data-status="error" data-testid="tool-failure-summary">
+    <span>{[incomplete && `${incomplete} 项未完成`, interrupted && `${interrupted} 项已中断`].filter(Boolean).join("，")}</span>
+  </div>;
+}
+
+type PreviousRow = { id: string; top: number; height: number; clone: HTMLElement; offset: number; startedAt: number };
+const ROLL_DURATION = 200;
+const visualTop = (row: PreviousRow, now: number) => row.top + row.offset * Math.max(0, 1 - (now - row.startedAt) / ROLL_DURATION);
+
+function LiveTools({ tools }: { tools: readonly ToolPart[] }) {
+  const viewport = useRef<HTMLDivElement>(null);
+  const previous = useRef<PreviousRow[]>([]);
+  const previousIds = useRef<string | undefined>(undefined);
+  const ids = JSON.stringify(tools.map((tool) => tool.toolCallId));
+  useLayoutEffect(() => {
+    const root = viewport.current;
+    if (!root) return;
+    const rows = Array.from(root.querySelectorAll<HTMLElement>(":scope > [data-tool-id]"));
+    const old = previous.current;
+    const oldById = new Map(old.map((row) => [row.id, row]));
+    const currentRows = rows.filter((row) => !row.hasAttribute("aria-hidden"));
+    const now = performance.now();
+    const changed = previousIds.current !== undefined && previousIds.current !== ids;
+    previousIds.current = ids;
+    if (!changed) {
+      previous.current = currentRows.map((row) => {
+        const before = oldById.get(row.dataset.toolId!);
+        return { id: row.dataset.toolId!, top: row.offsetTop, height: row.offsetHeight,
+          clone: row.cloneNode(true) as HTMLElement, offset: before?.offset ?? 0, startedAt: before?.startedAt ?? now };
+      });
+      return;
+    }
+    const motionAllowed = typeof window.matchMedia !== "function" || !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const offsets = new Map<string, number>();
+    for (const row of currentRows) row.getAnimations?.().forEach((effect) => effect.cancel());
+    if (old.length && motionAllowed && typeof root.animate === "function") {
+      const animation = { duration: ROLL_DURATION, easing: "linear" };
+      const step = old.length > 1 ? old[1]!.top - old[0]!.top : old[0]!.height;
+      const idsNow = new Set(tools.map((tool) => tool.toolCallId));
+      for (const row of old) if (!idsNow.has(row.id)) {
+        const ghosts = root.querySelectorAll<HTMLElement>(":scope > [data-tool-id][aria-hidden]");
+        if (ghosts.length >= 3) ghosts[0]?.remove();
+        const clone = row.clone;
+        clone.setAttribute("aria-hidden", "true");
+        Object.assign(clone.style, { position: "absolute", top: `${visualTop(row, now)}px`, left: "0", width: "100%", pointerEvents: "none" });
+        root.appendChild(clone);
+        const effect = clone.animate([{ transform: "translateY(0)" }, { transform: `translateY(${-step}px)` }], animation);
+        effect.onfinish = () => clone.remove();
+        effect.oncancel = () => clone.remove();
+      }
+      for (const row of currentRows) {
+        const before = oldById.get(row.dataset.toolId!);
+        const offset = before ? visualTop(before, now) - row.offsetTop : visualTop(old[old.length - 1]!, now) + step - row.offsetTop;
+        offsets.set(row.dataset.toolId!, offset);
+        if (offset) row.animate([{ transform: `translateY(${offset}px)` }, { transform: "translateY(0)" }], animation);
+      }
+    }
+    previous.current = currentRows.map((row) => ({ id: row.dataset.toolId!, top: row.offsetTop, height: row.offsetHeight,
+      clone: row.cloneNode(true) as HTMLElement, offset: offsets.get(row.dataset.toolId!) ?? 0, startedAt: now }));
+  });
+  return <div ref={viewport} className="live-tool-viewport" data-testid="live-tool-viewport">
+    {tools.map((part) => <div data-tool-id={part.toolCallId} key={part.toolCallId}><ToolFallback {...part} /></div>)}
+  </div>;
+}
+
 export function ToolGroupView({ group }: { group: ToolGroup }) {
   const phase = useContext(ActivityPhaseContext);
-  const failures = group.tools.filter((part) => toolActivity(part, phase).status === "error");
   if (group.live) return <div data-testid="live-tool-calls" className="transcript-activity-list flex flex-col">
-    {group.tools.filter((part, index) => index >= group.tools.length - 3 || failures.includes(part)).map((part) => <ToolFallback key={part.toolCallId} {...part} />)}
+    <FailureSummary tools={group.tools.slice(0, -3)} phase={phase} />
+    <LiveTools tools={group.tools.slice(-3)} />
   </div>;
   const duration = toolGroupDuration(group.tools);
   const summary = summarizeToolActions(group.tools);
   return <><div data-testid="tool-group-summary" className="transcript-activity">
     <span className="truncate" title={summary}>{summary}</span>{duration === undefined ? null : <span className="shrink-0">{` · ${(duration / 1000).toFixed(2)} 秒`}</span>}
-  </div>{failures.map((part) => <ToolFallback key={part.toolCallId} {...part} />)}</>;
+  </div><FailureSummary tools={group.tools} phase={phase} /></>;
 }

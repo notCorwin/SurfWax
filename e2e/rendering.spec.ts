@@ -41,6 +41,87 @@ test("keeps at most three recent tool calls and summarizes them after interrupti
   }
 });
 
+test("bounds live tool calls and summarizes earlier failures", async () => {
+  const failing = Array.from({ length: 5 }, (_, index) => ({
+    id: `failed-${index}`, type: "function", function: { name: "get_page_info", arguments: JSON.stringify({ tabId: 2147483647 }) },
+  }));
+  const recent = Array.from({ length: 3 }, (_, index) => infoCall(`recent-${index}`));
+  const provider = await startProvider([
+    assistantResponse({ tool_calls: [...failing, ...recent] }), delayedResponse(textResponse("FAILURE_SUMMARY_DONE"), 5_000), textResponse("工具状态测试"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("run failed and successful tools");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect.poll(async () => (await readEvents(opened.page)).filter((event) => ["tool.finished", "tool.failed"].includes(event.type) && [...failing, ...recent].some((tool) => tool.id === event.toolCallId)).length).toBe(8);
+    const viewport = opened.page.getByTestId("live-tool-viewport");
+    const rows = viewport.locator("[data-tool-id]");
+    await expect(rows).toHaveCount(3);
+    await expect.poll(() => rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-tool-id")))).toEqual(recent.map((tool) => tool.id));
+    const failure = opened.page.getByTestId("tool-failure-summary");
+    await expect(failure).toHaveCount(1);
+    await expect(failure).toContainText("5 项未完成");
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("FAILURE_SUMMARY_DONE");
+    await expect(opened.page.getByTestId("live-tool-viewport")).toHaveCount(0);
+    await expect(opened.page.getByTestId("tool-group-summary")).toHaveCount(1);
+    await expect(opened.page.getByTestId("tool-failure-summary")).toHaveCount(1);
+    await expect(opened.page.getByTestId("tool-failure-summary")).toContainText("5 项未完成");
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
+test("animates tool turnover and honors reduced motion", async () => {
+  for (const reducedMotion of ["no-preference", "reduce"] as const) {
+    const provider = await startProvider([
+      assistantResponse({ tool_calls: [infoCall("motion-0"), infoCall("motion-1"), infoCall("motion-2")] }),
+      delayedResponse(assistantResponse({ tool_calls: [infoCall("motion-3")] }), 1_000),
+      delayedResponse(textResponse("MOTION_DONE"), 1_500), textResponse("动画测试"),
+    ]);
+    const opened = await openExtension();
+    try {
+      const target = await opened.context.newPage();
+      await target.goto(`${provider.origin}/target`);
+      const options = await configure(opened.context, opened.page, provider.baseURL);
+      await options.close();
+      await opened.page.emulateMedia({ reducedMotion });
+      await opened.page.evaluate(() => {
+        const samples: { id: string | null; hidden: boolean; transform: string }[] = [];
+        (window as any).__toolAnimationSamples = samples;
+        const animate = Element.prototype.animate;
+        Element.prototype.animate = function (...args: Parameters<typeof animate>) {
+          const result = animate.apply(this, args);
+          if (this.closest('[data-testid="live-tool-viewport"]')) {
+            const element = this;
+            const sample = { id: element.getAttribute("data-tool-id"), hidden: element.getAttribute("aria-hidden") === "true", transform: "" };
+            samples.push(sample);
+            requestAnimationFrame(() => requestAnimationFrame(() => { sample.transform = getComputedStyle(element).transform; }));
+          }
+          return result;
+        };
+      });
+      await opened.page.getByTestId("composer-input").fill("run four tools in sequence");
+      await opened.page.getByTestId("composer-input").press("Enter");
+      const viewport = opened.page.getByTestId("live-tool-viewport");
+      await expect(viewport.locator('[data-tool-id="motion-0"]')).toBeVisible();
+      await expect(viewport.locator('[data-tool-id="motion-3"]')).toBeVisible();
+      if (reducedMotion === "no-preference") {
+        await expect.poll(() => opened.page.evaluate(() => (window as any).__toolAnimationSamples.some((sample: any) => sample.id === "motion-0" && sample.hidden && sample.transform && sample.transform !== "none" && sample.transform !== "matrix(1, 0, 0, 1, 0, 0)"))).toBe(true);
+        await expect.poll(() => opened.page.evaluate(() => (window as any).__toolAnimationSamples.some((sample: any) => sample.id === "motion-3" && !sample.hidden && sample.transform && sample.transform !== "none" && sample.transform !== "matrix(1, 0, 0, 1, 0, 0)"))).toBe(true);
+      } else {
+        expect(await opened.page.evaluate(() => (window as any).__toolAnimationSamples)).toEqual([]);
+      }
+      await expect(opened.page.locator(".markdown-body").last()).toContainText("MOTION_DONE");
+    } finally {
+      await dispose(opened.context, opened.userDataDirectory, provider.server);
+    }
+  }
+});
+
 test("keeps completed tools visible while waiting for the next provider response", async () => {
   const provider = await startProvider([
     commandResponse("get_page_info", {}, "call-chrome-e2e"), delayedResponse(textResponse("FINAL_AFTER_WAIT"), 2_500), textResponse("等待回复"),
