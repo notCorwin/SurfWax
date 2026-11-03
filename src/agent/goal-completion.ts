@@ -8,12 +8,12 @@ const recovery = z.object({ toolCallId: text.describe("The evidenceId of an actu
 type Reference = z.infer<typeof reference>;
 type Recovery = z.infer<typeof recovery>;
 type Dependency = "authentication" | "user_information" | "external_dependency";
-export type Goal = { taskType: "answer"; status: "completed"; summary: string }
-  | { taskType: "browser"; status: "completed"; summary: string; evidence: Reference[] }
-  | { taskType: "browser"; status: "blocked"; summary: string; evidence: Reference[]; dependency: Dependency; userAction: string; attemptedRecovery: Recovery[] };
+export type Goal = { taskType: "answer"; status: "completed"; summary?: string }
+  | { taskType: "browser"; status: "completed"; summary?: string; evidence: Reference[] }
+  | { taskType: "browser"; status: "blocked"; summary?: string; evidence: Reference[]; dependency: Dependency; userAction: string; attemptedRecovery: Recovery[] };
 // Providers require an object at the function schema root. Conditional requirements
 // remain enforced locally because the wire schema cannot express them portably.
-export const GOAL_SCHEMA = z.object({ taskType: z.enum(["answer", "browser"]), status: z.enum(["completed", "blocked"]), summary: text,
+export const GOAL_SCHEMA = z.object({ taskType: z.enum(["answer", "browser"]), status: z.enum(["completed", "blocked"]), summary: text.optional().describe("Optional final deliverable; omit when no summary is needed or the requested output was already delivered in the conversation."),
   evidence: z.array(reference).min(1).optional(), dependency: z.enum(["authentication", "user_information", "external_dependency"]).optional(),
   userAction: text.optional(), attemptedRecovery: z.array(recovery).min(1).optional(),
 }).strict().superRefine((value, context) => {
@@ -29,7 +29,7 @@ export const GOAL_SCHEMA = z.object({ taskType: z.enum(["answer", "browser"]), s
   } else if (value.dependency !== undefined || value.userAction !== undefined || value.attemptedRecovery !== undefined)
     reject("A completed goal cannot include blocker fields.");
 }) as z.ZodType<Goal>;
-export const GOAL_DESCRIPTION = "Finish only after all work and background jobs have finished. The summary must deliver every requested output, including requested facts and links; an independent review checks requirements against observations. For a browser task cite evidenceId values from actual tool results, including successful post-action page snapshots; for a blocker identify the observed user dependency, needed action and actual recovery attempts. A rejected action or invalid search is not proof of an external blocker or absence. Use answer only for a pure question with no browser work. Call this tool alone.";
+export const GOAL_DESCRIPTION = "Finish only after all work and background jobs have finished. A summary is optional. Deliver requested facts, links and other output in the conversation or the optional summary; do not repeat output already delivered. An independent review checks requirements against observations. For a browser task cite evidenceId values from actual tool results, including successful post-action page snapshots; for a blocker identify the observed user dependency, needed action and actual recovery attempts. A rejected action or invalid search is not proof of an external blocker or absence. Use answer only for a pure question with no browser work. Call this tool alone.";
 export const GOAL_INSTRUCTIONS = "\n\nContinue until the user's outcome is achieved or a genuine user dependency prevents further progress. Plain text does not end work. Call complete_goal alone with a structured outcome and evidence from this run. A dispatched action is not proof of the outcome; cite at least one successful observation. For each effectUnknown, inspect or otherwise observe the relevant state after that action, explain what was established, and include its evidenceId in that observation's resolves array. A verified absence may permit a safe recovery action; continue to the requested outcome before reporting completion. verify_state evidence must report verified=true. Do not report a recoverable error as a user blocker.\n- complete_goal: Report a completed answer, a browser outcome supported by tool evidence, or a genuine user-dependent blocker.";
 
 type ReceiptValue = string | number | boolean | null | ReceiptValue[] | { [key: string]: ReceiptValue };

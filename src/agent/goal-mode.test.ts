@@ -69,7 +69,12 @@ describe("goal mode", () => {
     const answer = { taskType: "answer", status: "completed", summary: "Done" };
     const browser = { taskType: "browser", status: "completed", summary: "Done", evidence: [{ toolCallId: "id", observation: "Observed" }] };
     const blocked = { ...browser, status: "blocked", dependency: "authentication", userAction: "Sign in", attemptedRecovery: [{ toolCallId: "id", action: "Checked" }] };
-    for (const value of [answer, browser, blocked]) expect(GOAL_SCHEMA.safeParse(value).success).toBe(true);
+    expect(parameters.required).not.toContain("summary");
+    for (const value of [answer, browser, blocked]) {
+      expect(GOAL_SCHEMA.safeParse(value).success).toBe(true);
+      const { summary: _summary, ...withoutSummary } = value;
+      expect(GOAL_SCHEMA.safeParse(withoutSummary).success).toBe(true);
+    }
     for (const value of [{ ...answer, status: "blocked" }, { ...answer, evidence: browser.evidence }, { ...browser, evidence: undefined },
       { ...browser, dependency: "authentication" }, { ...blocked, attemptedRecovery: undefined }, { ...browser, extra: true }])
       expect(GOAL_SCHEMA.safeParse(value).success).toBe(false);
@@ -266,6 +271,23 @@ describe("goal mode", () => {
     expect(ordinaryPrompts[0]).toContain("Finished the task.");
   });
 
+  it("completes without a summary and preserves an answer delivered in the conversation", async () => {
+    let step = 0;
+    const model = new MockLanguageModelV4({ doGenerate: async () => ++step === 1
+      ? reply("The answer is 42.")
+      : calls(call("done", "complete_goal", { taskType: "answer", status: "completed" })) });
+    const { events, logger, factory } = fixture(model);
+    const result = await createChatTransport(factory, logger, "thread", undefined, undefined, undefined, undefined, true).sendMessages(options());
+    expect(step).toBe(2);
+    expect(result.parts.filter((part) => part.type === "text")).toEqual([
+      expect.objectContaining({ text: "The answer is 42." }),
+    ]);
+    expect(events.at(-1)).toMatchObject({ type: "conversation.finished", content: { goal: { ok: true, taskType: "answer", status: "completed" } } });
+    expect(events.at(-1)?.content).not.toHaveProperty("goal.summary");
+    const saved = (await logger.repository("thread")).messages.find(({ message }) => message.id === result.id)?.message;
+    expect(saved?.parts).toEqual(result.parts);
+  });
+
   it("rejects completion alongside other calls or while jobs are pending", async () => {
     let count = 0;
     let pending = false;
@@ -274,13 +296,13 @@ describe("goal mode", () => {
       if (count === 1) return calls(call("parallel", "complete_goal", { taskType: "answer", status: "completed", summary: "too soon" }), call("read", "inspect_page", {}));
       if (count === 2) { pending = true; return calls(call("pending", "complete_goal", { taskType: "answer", status: "completed", summary: "too soon" })); }
       pending = false;
-      return calls(call("done", "complete_goal", { taskType: "browser", status: "blocked", summary: "Need a login.", dependency: "authentication", userAction: "Sign in", attemptedRecovery: [{ toolCallId: "read", action: "Check session" }], evidence: [{ toolCallId: "read", observation: "Login required" }] }));
+      return calls(call("done", "complete_goal", { taskType: "browser", status: "blocked", dependency: "authentication", userAction: "Sign in", attemptedRecovery: [{ toolCallId: "read", action: "Check session" }], evidence: [{ toolCallId: "read", observation: "Login required" }] }));
     } });
     const { events, logger, factory } = fixture(model, { pendingBackgroundJobs: () => pending ? ["job"] : [], inspect: async () => ({ snapshot: "page" }) });
     const result = await createChatTransport(factory, logger, "thread", undefined, undefined, undefined, undefined, true).sendMessages(options());
     expect(count).toBe(3);
     expect(events.filter((event) => event.type === "tool.failed").map((event) => event.toolCallId)).toEqual(expect.arrayContaining(["parallel", "pending"]));
-    expect(result.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "text", text: "Need a login.\n\nSign in" })]));
+    expect(result.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "text", text: "Sign in" })]));
     expect(events.at(-1)).toMatchObject({ type: "conversation.finished", content: { goal: { status: "blocked", userAction: "Sign in" } } });
   });
 

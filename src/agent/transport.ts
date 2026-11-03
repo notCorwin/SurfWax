@@ -200,11 +200,13 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
                 }
                 updateTool(toolId(event.toolCall.toolCallId), { state: "output-available", output: output.output });
                 if (event.toolCall.toolName === "complete_goal" && output.output && typeof output.output === "object"
-                  && "ok" in output.output && output.output.ok === true && "summary" in output.output && typeof output.output.summary === "string") {
+                  && "ok" in output.output && output.output.ok === true) {
                   const goal = output.output;
+                  const summary = "summary" in goal && typeof goal.summary === "string" ? goal.summary : "";
                   const needed = "status" in goal && goal.status === "blocked" && "userAction" in goal && typeof goal.userAction === "string"
-                    && !goal.summary.includes(goal.userAction) ? `\n\n${goal.userAction}` : "";
-                  response = { ...response, parts: [...response.parts, { type: "text", text: goal.summary + needed, state: "done" }] };
+                    && !summary.includes(goal.userAction) ? goal.userAction : "";
+                  const text = [summary, needed].filter(Boolean).join("\n\n");
+                  if (text) response = { ...response, parts: [...response.parts, { type: "text", text, state: "done" }] };
                 }
                 await publishFromModel();
               },

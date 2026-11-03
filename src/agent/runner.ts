@@ -176,6 +176,8 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       logger?.telemetry({ type: "model.response.received", conversationId: options.conversationId, content: { callId: event.callId } });
       const calls = event.content.filter((part) => part.type === "tool-call");
       goalCallAlone = calls.length === 1 && calls[0]?.toolName === "complete_goal";
+      const delivered = event.content.filter((part) => part.type === "text").map((part) => ({ type: "text" as const, text: part.text }));
+      if (options.goalMode && delivered.length) reviewContext = [...reviewContext, { role: "assistant", content: delivered }];
       const failure = scheduler.prepare(event.content, boundTabId, options.signal);
       if (failure) logger?.telemetry({ type: "agent.tool-schedule.invalid", conversationId: options.conversationId, error: failure });
       await options.onResponse?.(event);
