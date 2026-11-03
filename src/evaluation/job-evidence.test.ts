@@ -97,7 +97,7 @@ it("correlates foreground program results with canonical job states", () => {
   // Ordinary direct-tool return values do not imply a browser job.
   expect(browserJobsSettled([tool("read_artifact", output)])).toBe(true);
   expect(browserJobsSettled([tool("list_tabs", output)])).toBe(true);
-  expect(browserJobsSettled([{ ...tool("upload_file", { ok: true, result: "chooser upload" }), input: { chooserId: "chooser", artifactId: 1 } }])).toBe(true);
+  expect(browserJobsSettled([{ ...tool("upload_file_chooser", { ok: true, result: "chooser upload" }), input: { chooserId: "chooser", artifactId: 1 } }])).toBe(true);
   expect(browserJobsSettled([tool("execute_program", { ...output, envelopeWrapped: true, result: output }), job("succeeded")])).toBe(true);
   const encoded = { ...tool("execute_program", toLogValue(output, undefined, 5)), content: toLogValue({ toolName: "execute_program" }, undefined, 5), valueEncoding: 5 };
   expect(browserJobsSettled([encoded])).toBeNull();
@@ -147,7 +147,7 @@ it("distinguishes target upload jobs from direct chooser uploads by their canoni
   expect(browserJobsSettled([tool])).toBeNull();
   expect(browserJobsSettled([tool, job])).toBe(true);
   expect(browserJobsSettled([tool, { ...job, toolCallId: "different" }])).toBeNull();
-  const chooser = { ...tool, input: { chooserId: "chooser", artifactId: 7 }, output: { chooserId: "chooser", state: "completed" } };
+  const chooser = { ...tool, content: { toolName: "upload_file_chooser" }, input: { chooserId: "chooser", artifactId: 7 }, output: { chooserId: "chooser", state: "completed" } };
   expect(browserJobsSettled([chooser])).toBe(true);
   for (const bad of [undefined, {}, { chooserId: "", artifactId: 7 }, { target: null, artifactId: 7 }, { target: [], artifactId: 7 }, { ...input, chooserId: "chooser" }]) {
     expect(browserJobsSettled([{ ...tool, input: bad }])).toBeNull();

@@ -70,7 +70,7 @@ for (const seed of [17, 73]) test(`scripted complex task: cross-frame order reco
       (request) => { checkpoints.failedSelection = lastTool(request); return commandResponse("read_value", { target: targetInFrame("css", "#service") }, callIds[3]!); },
       (request) => { checkpoints.afterFailure = lastTool(request); return commandResponse("select_option", { target: targetInFrame("css", "#service"), value: service }, callIds[4]!); },
       (request) => { checkpoints.selection = lastTool(request); return commandResponse("fill", { target: targetInFrame("css", "#order"), value: order }, callIds[5]!); },
-      (request) => { checkpoints.fill = lastTool(request); return commandResponse("set_checked", { target: targetInFrame("css", "#confirmed"), checked: true }, callIds[6]!); },
+      (request) => { checkpoints.fill = lastTool(request); return commandResponse("check_element", { target: targetInFrame("css", "#confirmed") }, callIds[6]!); },
       (request) => { checkpoints.check = lastTool(request); return commandResponse("click", { target: { ref: buttonRef } }, callIds[7]!); },
       (request) => { checkpoints.submit = lastTool(request); return commandResponse("verify_state", { target: targetInFrame("css", "#status"), textIncludes: `Submitted ${order}` }, callIds[8]!); },
       (request) => { checkpoints.verify = lastTool(request); return textResponse("SCRIPTED_TASK_DONE"); },
@@ -98,7 +98,7 @@ for (const seed of [17, 73]) test(`scripted complex task: cross-frame order reco
     const requests = provider.requests.filter((request) => Array.isArray(request.tools));
     expect(requests).toHaveLength(callIds.length + 1);
     expect(requests.every((request) => digest(request.tools) === digest(requests[0].tools))).toBe(true);
-    expect(requests[0].tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["list_frames", "find_elements", "select_option", "read_value", "fill", "set_checked", "click", "verify_state"]));
+    expect(requests[0].tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["list_frames", "find_elements", "select_option", "read_value", "fill", "check_element", "click", "verify_state"]));
     businessVerified = true;
   } finally {
     // Preserve failed attempts and their request costs, rather than reporting

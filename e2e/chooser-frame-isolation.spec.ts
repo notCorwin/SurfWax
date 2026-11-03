@@ -59,7 +59,7 @@ for (const kind of ["same-process", "cross-process", "nested-in-oopif"] as const
           await new Promise<void>((resolve, reject) => { frame.onload = () => resolve(); frame.onerror = () => reject(new Error("Frame navigation failed")); frame.src = url; });
           await new Promise((resolve) => setTimeout(resolve, 100));
         }, `${frameOrigin}/same-frame?new=1`);
-        return delayedResponse(commandResponse("upload_file", { chooserId, artifactId }, "upload"), 0, navigation) as any;
+        return delayedResponse(commandResponse("upload_file_chooser", { chooserId, artifactId }, "upload"), 0, navigation) as any;
       },
       (request) => { expect(lastTool(request)).toMatchObject({ state: "completed" }); return textResponse("CHOOSER_RETAINED"); },
       textResponse("框架文件选择器"),

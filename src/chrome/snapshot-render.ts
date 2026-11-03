@@ -34,7 +34,7 @@ export type RenderedSnapshotNode = Readonly<{
 
 const allFields: readonly SnapshotField[] = ["text", "state", "ref", "actions"];
 const stateNames: readonly SnapshotStateName[] = ["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly", "editable", "masked"];
-const toolActions: Readonly<Record<string, string>> = { doubleClick: "double_click", insertText: "type_text", select: "select_option", clear: "fill", press: "press_key", check: "set_checked" };
+const toolActions: Readonly<Record<string, string>> = { doubleClick: "double_click", insertText: "type_text", select: "select_option", clear: "fill", press: "press_key", check: "check_element", uncheck: "uncheck_element" };
 
 /**
  * Render from structured AX fields, so page-supplied names and values never
@@ -55,7 +55,7 @@ export function renderSnapshotNode(
   if (node.childFrameRef) line += ` [frameRef=${node.childFrameRef}]`;
   if (fields.has("ref") && node.ref && options.inlineRef !== false) line += ` [ref=${node.ref}]`;
   if (fields.has("actions") && node.actions?.length) {
-    const actions = options.actionNames === "program" ? [...new Set(node.actions.map((action) => toolActions[action] ?? action))] : node.actions;
+    const actions = options.actionNames === "program" ? [...new Set(node.actions.flatMap((action) => action === "check" ? ["check_element", "uncheck_element"] : [toolActions[action] ?? action]))] : node.actions;
     line += ` [actions=${actions.join(",")}]`;
   }
   if (fields.has("state") && node.state) {

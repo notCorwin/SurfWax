@@ -3,7 +3,7 @@ import { ATOMIC_TOOL_REGISTRY } from "../../src/chrome/atomic-tools";
 
 // These registered atomic tools have direct implementations in createProgramTools.
 // Chooser uploads use a different return envelope; target uploads are jobs.
-const directTools = new Set(["list_tabs", "switch_tab", "read_artifact", "upload_file"]);
+const directTools = new Set(["list_tabs", "switch_tab", "read_artifact", "upload_file_chooser"]);
 const programTools = new Set(["execute_program", ...ATOMIC_TOOL_REGISTRY.map(({ name }) => name).filter((name) => !directTools.has(name))]);
 type Event = { id?: unknown; type?: unknown; conversationId?: unknown; runId?: unknown; toolCallId?: unknown; content?: unknown; input?: unknown; output?: unknown; error?: unknown; valueEncoding?: unknown; artifactGraph?: unknown };
 type Failure = { code: string; message: string };
@@ -98,15 +98,12 @@ export function browserJobsSettled(events: readonly Event[]): boolean | null {
       // or compacted job ID requires a matching failed terminal state.
       const toolName = content && typeof content === "object" && !Array.isArray(content) ? (content as Record<string, unknown>).toolName : undefined;
       if ((Object.hasOwn(record, "jobId") || Object.hasOwn(record, "$ref")) && (typeof toolName !== "string" || !toolName)) return null;
-      let program = typeof toolName === "string" && programTools.has(toolName);
-      if (toolName === "upload_file" && (Object.hasOwn(record, "jobId") || Object.hasOwn(record, "$ref"))) {
+      if ((toolName === "upload_file" || toolName === "upload_file_chooser") && (Object.hasOwn(record, "jobId") || Object.hasOwn(record, "$ref"))) {
         let input: unknown;
         try { input = decode(event.input, event.valueEncoding); } catch { return null; }
-        if (!input || typeof input !== "object" || Array.isArray(input)) return null;
-        const { target, chooserId } = input as Record<string, unknown>;
-        if (target && typeof target === "object" && !Array.isArray(target) && chooserId === undefined) program = true;
-        else if (!(typeof chooserId === "string" && !!chooserId && target === undefined)) return null;
+        if (!ATOMIC_TOOL_REGISTRY.find((definition) => definition.name === toolName)!.inputSchema.safeParse(input).success) return null;
       }
+      const program = typeof toolName === "string" && programTools.has(toolName);
       if (program) {
         let id = record.jobId;
         let state = record.state;
@@ -140,17 +137,12 @@ export function browserJobsSettled(events: readonly Event[]): boolean | null {
       // Without the canonical tool identity an ordinary object cannot be
       // distinguished from a foreground program envelope.
       if (typeof toolName !== "string" || !toolName) return null;
-      let program = programTools.has(toolName);
-      if (toolName === "upload_file") {
+      if (toolName === "upload_file" || toolName === "upload_file_chooser") {
         let input: unknown;
         try { input = decode(event.input, event.valueEncoding); } catch { return null; }
-        if (!input || typeof input !== "object" || Array.isArray(input)) return null;
-        const { target, chooserId } = input as Record<string, unknown>;
-        const hasTarget = !!target && typeof target === "object" && !Array.isArray(target);
-        const hasChooser = typeof chooserId === "string" && !!chooserId;
-        if (hasTarget && chooserId === undefined) program = true;
-        else if (!(hasChooser && target === undefined)) return null;
+        if (!ATOMIC_TOOL_REGISTRY.find((definition) => definition.name === toolName)!.inputSchema.safeParse(input).success) return null;
       }
+      const program = programTools.has(toolName);
       if (!output || typeof output !== "object" || Array.isArray(output)) {
         if (program) return null;
         continue;

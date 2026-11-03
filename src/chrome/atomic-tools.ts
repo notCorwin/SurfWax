@@ -32,19 +32,18 @@ export type AtomicToolDefinition = {
 // Actions that can cause dialogs, navigation, downloads or other long-lived
 // browser work may return a job so another tool can respond to those events.
 const BACKGROUND_ACTIONS = new Set([
-  "click", "double_click", "hover", "focus_element", "blur_element", "scroll_to_element", "verify_state", "fill", "fill_from_artifact", "type_text", "press_key", "key_down", "key_up", "set_checked", "select_option",
+  "click", "double_click", "hover", "focus_element", "blur_element", "scroll_to_element", "verify_state", "fill", "fill_from_artifact", "type_text", "press_key", "key_down", "key_up", "check_element", "uncheck_element", "select_option",
   "drag", "scroll", "move_pointer", "press_pointer", "release_pointer", "navigate", "reload", "go_back", "go_forward", "open_tab", "close_tab",
-  "upload_file", "send_request", "import_file_from_url", "import_file_from_link", "read_value",
+  "upload_file", "send_page_request", "send_extension_request", "import_file_from_url", "import_file_from_link", "read_value",
 ]);
 function define(name: string, description: string, inputSchema: z.ZodType<any>, body: string, options: { page?: boolean; locators?: boolean; summary?: string } = {}): AtomicToolDefinition {
-  let schema = BACKGROUND_ACTIONS.has(name) && name !== "upload_file" ? (inputSchema as z.ZodObject).safeExtend({ background: z.boolean().optional().describe("Run as a background job for long operations or actions blocked by browser events. Use get_job to follow the returned job until terminal.") }) : inputSchema;
+  let schema = BACKGROUND_ACTIONS.has(name) ? (inputSchema as z.ZodObject).safeExtend({ background: z.boolean().optional().describe("Run as a background job for long operations or actions blocked by browser events. Use get_job to follow the returned job until terminal.") }) : inputSchema;
   const metadata = inputSchema.meta();
   if (schema !== inputSchema && metadata) schema = schema.meta(metadata);
   return {
     name, summary: options.summary ?? description, description, inputSchema: schema,
     program(input) {
       const parsed = schema.parse(input);
-      if (name === "upload_file" && parsed.chooserId !== undefined) throw new Error("Chooser uploads use the live chooser handler");
       const encoded = JSON.stringify(JSON.stringify(parsed));
       const code = `const input = JSON.parse(${encoded});\n${options.locators ? selector : ""}\n${options.page ? "const currentPage = input.tabId === undefined ? page : await browser.page(input.tabId);" : ""}\n${body}`;
       // Verification's timeout bounds the condition wait, not page setup or cleanup.
@@ -86,8 +85,8 @@ export const ATOMIC_TOOL_REGISTRY: readonly AtomicToolDefinition[] = Object.free
   define("press_key", "Press a character or chord such as Control+ArrowUp, optionally focusing an element first. A missing or non-actionable target, including its frame, fails immediately; use verify_state for an explicit wait. Named keys (ArrowUp, Enter, F1–F24) are case-insensitive; unknown key names fail before input or focus is dispatched.", z.object({ ...pageFields, target: target.optional(), key: z.string().min(1) }).strict(), "return input.target ? await (await locate(currentPage, input.target)).press(input.key) : await currentPage.keyboard.press(input.key);", { ...locator, summary: "Press a key or chord, optionally focusing an element first." }),
   define("key_down", "Hold one character or named key until key_up or run cleanup. Named keys are case-insensitive; chords and unknown key names are rejected.", z.object({ ...pageFields, key: z.string().min(1) }).strict(), "return await currentPage.keyboard.down(input.key);", { ...page, summary: "Hold a key until key_up or run cleanup." }),
   define("key_up", "Release one held character or named key. Named keys are case-insensitive; chords and unknown key names are rejected.", z.object({ ...pageFields, key: z.string().min(1) }).strict(), "return await currentPage.keyboard.up(input.key);", page),
-  define("set_checked", "Set a checkbox or radio button to the requested checked state.", z.object({ ...targetFields, checked: z.boolean() }).strict(), `const element = (await locate(currentPage, input.target));
-    return input.checked ? await element.check() : await element.uncheck();`, locator),
+  targetAction("check_element", "Check a checkbox, switch or radio button.", "check"),
+  targetAction("uncheck_element", "Uncheck a checkbox or switch. An already checked radio button cannot be unchecked.", "uncheck"),
   define("select_option", "Select option values or labels on a select element. An empty array clears selection; missing, disabled or ambiguous options fail without changing selection.", z.object({ ...targetFields, value: z.union([z.string(), z.array(z.string())]) }).strict(), "return await (await locate(currentPage, input.target)).selectOption(input.value);", { ...locator, summary: "Select option values or labels on a select element." }),
   define("drag", "Drag one element to another using pointer events.", z.object({ ...pageFields, source: target, destination: target }).strict(), "return await (await locate(currentPage, input.source)).dragTo((await locate(currentPage, input.destination)));", { ...locator, summary: "Drag one element to another using pointer events." }),
   define("scroll", "Scroll the page by a horizontal and vertical delta at the current pointer.", z.object({ ...pageFields, deltaX: z.number().optional(), deltaY: z.number() }).strict(), "return await currentPage.mouse.wheel(input.deltaX ?? 0, input.deltaY);", page),
@@ -146,16 +145,9 @@ export const ATOMIC_TOOL_REGISTRY: readonly AtomicToolDefinition[] = Object.free
   define("open_tab", "Open a tab in the bound browser window.", z.object({ timeoutMs, url: z.string().min(1).optional() }).strict(), "const opened = await browser.tabs.open(input.url); return { tabId: opened.tabId };"),
   define("switch_tab", "Switch the bound page to a tab.", z.object({ timeoutMs, tabId: z.number().int().nonnegative() }).strict(), "return await browser.tabs.select(input.tabId);"),
   define("close_tab", "Close a tab.", z.object({ timeoutMs, tabId: z.number().int().nonnegative() }).strict(), "return await browser.tabs.close(input.tabId);"),
-  define("upload_file", "Upload one or more artifacts. Supply exactly one target or chooserId; chooser uploads cannot set tabId or background.", z.object({ ...pageFields,
-    target: target.optional(), chooserId: z.string().min(1).optional(),
-    artifactId: z.union([z.number().int().positive(), z.array(z.number().int().positive()).min(1)]), background: z.boolean().optional().describe("Run a target upload as a background job and follow it with get_job; unavailable for chooser uploads."),
-  }).strict().refine((input) => (input.target !== undefined) !== (input.chooserId !== undefined)
-    && (input.chooserId === undefined || input.tabId === undefined && input.background === undefined),
-  "Choose exactly one target or chooserId; chooser uploads cannot specify tabId or background")
-    .meta({ oneOf: [
-      { required: ["target"], not: { required: ["chooserId"] } },
-      { required: ["chooserId"], not: { anyOf: ["target", "tabId", "background"].map((field) => ({ required: [field] })) } },
-    ] }), `const ids = Array.isArray(input.artifactId) ? input.artifactId : [input.artifactId];
+  define("upload_file", "Upload one or more artifacts to a file input element.", z.object({ ...targetFields,
+    artifactId: z.union([z.number().int().positive(), z.array(z.number().int().positive()).min(1)]),
+  }).strict(), `const ids = Array.isArray(input.artifactId) ? input.artifactId : [input.artifactId];
     const values = new Map();
     for (const id of ids) if (!values.has(id)) values.set(id, artifacts.read(id));
     const files = await Promise.all(ids.map(async (id) => {
@@ -164,7 +156,8 @@ export const ATOMIC_TOOL_REGISTRY: readonly AtomicToolDefinition[] = Object.free
         throw new Error('AutomationError[invalid-artifact]: The artifact has no available file bytes');
       return {name:artifact.filename,mimeType:artifact.mimeType,base64:artifact.base64};
     }));
-    return await (await locate(currentPage, input.target)).setInputFiles(files);`, { ...locator, summary: "Upload artifacts to a file input or captured chooser." }),
+    return await (await locate(currentPage, input.target)).setInputFiles(files);`, { ...locator, summary: "Upload artifacts to a file input." }),
+  define("upload_file_chooser", "Upload one or more artifacts to a live captured file chooser.", z.object({ timeoutMs, chooserId: z.string().min(1), artifactId: z.union([z.number().int().positive(), z.array(z.number().int().positive()).min(1)]) }).strict(), "throw new Error('Chooser uploads use the live chooser handler');"),
   define("take_screenshot", "Capture a screenshot when visual input is enabled.", z.object({ ...pageFields, target: target.optional() }).strict(), "return await currentPage.screenshot(input.target ? { target: input.target } : {});", page),
   define("create_pdf", "Create a PDF artifact of the selected page.", pageArgs, "return await currentPage.pdf();", page),
   define("read_artifact", "Read a stored artifact or large tool result by ID, including during a background job. Missing paths fail. offset/limit page arrays, strings, Map/Set entries, binary bytes for ArrayBuffer/DataView, or elements for TypedArray. In path, a numeric Map index selects a [key,value] pair and a numeric Set index selects an item. Undefined is null with resultType=undefined; nested undefined and array holes are null with undefinedPaths and holePaths; non-finite numbers, negative zero and bigints use numberPaths and bigintPaths. Paths are relative to the returned slice; large results expose paged sidecar access.", z.object({ timeoutMs, artifactId: z.number().int().positive(), path: z.array(z.union([z.string(), z.number().int().nonnegative()])).optional(), offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional() }).strict(), "return await artifacts.read(input.artifactId, {path:input.path, offset:input.offset, limit:input.limit});", { summary: "Read a stored artifact or large tool result by ID, including during a background job." }),
@@ -176,10 +169,12 @@ export const ATOMIC_TOOL_REGISTRY: readonly AtomicToolDefinition[] = Object.free
   define("read_script", "Read a persisted user script by ID.", z.object({ timeoutMs, scriptId }).strict(), "return await browser.scripts.read(input.scriptId);"),
   define("create_script", "Create a persisted user script and immediately enable and register it. It will run on matching page loads according to its injection settings.", z.object({ timeoutMs, definition: scriptDefinition }).strict(), "return await browser.scripts.create(input.definition);", { summary: "Create and enable a persisted user script." }),
   define("update_script", "Update one or more fields of a persisted user script while preserving its enabled state. Supplied fields, including arrays, replace their old values; omitted fields remain unchanged. For nullable optional settings, null removes the setting and restores Chrome's default.", z.object({ timeoutMs, scriptId, changes: scriptChanges }).strict(), "return await browser.scripts.edit(input.scriptId, input.changes);", { summary: "Update a persisted user script while preserving its enabled state." }),
-  define("set_script_enabled", "Enable or disable a persisted user script.", z.object({ timeoutMs, scriptId, enabled: z.boolean() }).strict(), "return await browser.scripts.setEnabled(input.scriptId, input.enabled);"),
+  define("enable_script", "Enable a persisted user script.", z.object({ timeoutMs, scriptId }).strict(), "return await browser.scripts.setEnabled(input.scriptId, true);"),
+  define("disable_script", "Disable a persisted user script.", z.object({ timeoutMs, scriptId }).strict(), "return await browser.scripts.setEnabled(input.scriptId, false);"),
   define("delete_script", "Delete a persisted user script.", z.object({ timeoutMs, scriptId }).strict(), "return await browser.scripts.delete(input.scriptId);"),
   define("list_requests", "List captured network requests and requestRef identifiers. limit defaults to 100, max 100. integrity describes captured history, not all network traffic; hasMore may be null when unknown. nextOffset paginates a live, possibly changing list.", z.object({ ...pageFields, limit: z.number().int().positive().max(100).optional(), offset: z.number().int().nonnegative().optional() }).strict(), "return await net.requests({limit:input.limit, offset:input.offset}, currentPage.tabId);", { ...page, summary: "List captured network requests and requestRef identifiers." }),
   define("read_response", "Read the captured response body identified by requestRef from list_requests.", z.object({ ...pageFields, requestRef: z.string().min(1) }).strict(), "return await net.responseBody(input.requestRef, currentPage.tabId);", page),
   define("read_console", "Read captured console messages. limit defaults to 100, max 100. integrity describes captured history; hasMore may be null when unknown. nextOffset paginates a live, possibly changing list.", z.object({ ...pageFields, limit: z.number().int().positive().max(100).optional(), offset: z.number().int().nonnegative().optional() }).strict(), "return await net.console({limit:input.limit, offset:input.offset}, currentPage.tabId);", { ...page, summary: "Read captured console messages." }),
-  define("send_request", "Send one HTTP request in the explicit page or extension context; contexts have different permissions and credentials.", z.object({ ...pageFields, context: z.enum(["page", "extension"]), url: z.string().min(1), init: z.object({ method: z.string().optional(), headers: z.record(z.string(), z.string()).optional(), body: z.string().optional(), credentials: z.enum(["omit", "same-origin", "include"]).optional() }).strict().optional() }).strict(), "return await net.fetch({context:input.context, url:input.url, init:input.init, tabId:input.tabId});"),
+  define("send_page_request", "Send one HTTP request using the page origin, credentials and CORS rules.", z.object({ ...pageFields, url: z.string().min(1), init: z.object({ method: z.string().optional(), headers: z.record(z.string(), z.string()).optional(), body: z.string().optional(), credentials: z.enum(["omit", "same-origin", "include"]).optional() }).strict().optional() }).strict(), "return await net.fetch({context:'page', url:input.url, init:input.init, tabId:input.tabId});"),
+  define("send_extension_request", "Send one HTTP request using extension permissions and credentials.", z.object({ timeoutMs, url: z.string().min(1), init: z.object({ method: z.string().optional(), headers: z.record(z.string(), z.string()).optional(), body: z.string().optional(), credentials: z.enum(["omit", "same-origin", "include"]).optional() }).strict().optional() }).strict(), "return await net.fetch({context:'extension', url:input.url, init:input.init});"),
 ]);

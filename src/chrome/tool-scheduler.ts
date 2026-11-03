@@ -65,7 +65,7 @@ function resource(call: ScheduledToolCall, batch: Batch): string {
     return `script:${String(input.scriptId ?? definition.id ?? "*")}`;
   }
   if (["read_artifact", "create_text_artifact", "save_artifact"].includes(name)) return `artifact:${String(input.artifactId ?? "*")}`;
-  if (name === "import_file_from_url" || name === "send_request" && input.context === "extension") return "extension";
+  if (name === "import_file_from_url" || name === "send_extension_request") return "extension";
   const explicit = typeof input.tabId === "number" ? input.tabId : undefined;
   return `tab:${String(explicit ?? batch.boundTabId ?? "unbound")}`;
 }
@@ -169,7 +169,7 @@ export class ToolScheduler {
       }
       let release!: () => void;
       const done = new Promise<void>((resolve) => { release = resolve; });
-      const isChooser = call.toolName === "upload_file" && typeof inputOf(call.input).chooserId === "string";
+      const isChooser = call.toolName === "upload_file_chooser";
       const isDialog = call.toolName === "handle_dialog" || isChooser;
       let dialogFence: DialogFence | undefined;
       if (isDialog) {

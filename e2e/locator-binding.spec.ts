@@ -47,7 +47,7 @@ test("keeps selected nodes bound when matching elements change during click, che
     const css = (value: string) => ({ by: "css", value });
     responses.push(
       commandResponse("click", { target: css(".chosen") }, "click-bound"),
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("set_checked", { target: css(".check-target"), checked: true }, "check-bound"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("check_element", { target: css(".check-target") }, "check-bound"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("drag", { source: css("#source"), destination: css(".drop-target") }, "drag-bound"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return textResponse("BOUND_NODES_OK"); },
       textResponse("Bound actions"),

@@ -58,7 +58,7 @@ test("purpose-specific tools fetch data and finish a dialog-blocked form submiss
     responses.push(
       (request) => {
         const names = request.tools.map((item: any) => item.function.name);
-        expect(names).toEqual(expect.arrayContaining(["read_elements", "send_request", "fill", "click", "subscribe_event", "wait_event", "handle_dialog", "get_job"]));
+        expect(names).toEqual(expect.arrayContaining(["read_elements", "send_page_request", "fill", "click", "subscribe_event", "wait_event", "handle_dialog", "get_job"]));
         expect(names).not.toEqual(expect.arrayContaining(["execute_program"]));
         expect(names).not.toEqual(expect.arrayContaining(["evaluate_js"]));
         expect(names).not.toEqual(expect.arrayContaining(["send_cdp"]));
@@ -70,7 +70,7 @@ test("purpose-specific tools fetch data and finish a dialog-blocked form submiss
       },
       (request) => {
         expect(lastTool(request)).toMatchObject({ ok: true, result: { total: 2, items: [{ index: 1, text: "Second", attributes: { "data-code": "B" } }] } });
-        return commandResponse("send_request", { context: "page", url: `${origin}/data` }, "read-reference");
+        return commandResponse("send_page_request", { url: `${origin}/data` }, "read-reference");
       },
       (request) => {
         const result = lastTool(request);

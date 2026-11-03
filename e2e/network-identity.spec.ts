@@ -12,7 +12,7 @@ test("does not read a new navigation's response with an old request reference", 
     await target.goto(`${provider.origin}/automation`);
     let oldRef = "", newRef = "";
     responses.push(
-      commandResponse("send_request", { context: "page", url: `${provider.origin}/target` }, "fetch-before-navigation"),
+      commandResponse("send_page_request", { url: `${provider.origin}/target` }, "fetch-before-navigation"),
       commandResponse("list_requests", {}, "requests-before-navigation"),
       (request) => {
         const entry = lastTool(request).result.requests.find((item: any) => item.url === `${provider.origin}/target`);
@@ -20,7 +20,7 @@ test("does not read a new navigation's response with an old request reference", 
         return commandResponse("read_response", { requestRef: oldRef }, "response-before-navigation");
       },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: expect.stringContaining("Side Agent Target") }); return commandResponse("navigate", { url: `${provider.origin}/complex-next` }, "navigate-diagnostic"); },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("send_request", { context: "page", url: `${provider.origin}/automation` }, "fetch-after-navigation"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("send_page_request", { url: `${provider.origin}/automation` }, "fetch-after-navigation"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("list_requests", {}, "requests-after-navigation"); },
       (request) => {
         const entry = lastTool(request).result.requests.find((item: any) => item.url === `${provider.origin}/automation`);

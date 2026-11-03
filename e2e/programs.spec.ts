@@ -59,7 +59,7 @@ test("persists MAIN and USER_SCRIPT matching and enablement through extension re
     responses.push(
       commandResponse("create_script", { definition: main }, "create-main"),
       (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("create_script", { definition: user }, "create-user"); },
-      (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("set_script_enabled", { scriptId: main.id, enabled: false }, "disable-main"); },
+      (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("disable_script", { scriptId: main.id }, "disable-main"); },
       (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("update_script", { scriptId: main.id, changes: { js: [{ code: "document.documentElement.dataset.mainScript='edited'" }] } }, "edit-main"); },
       (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("read_script", { scriptId: main.id }, "read-main"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: { enabled: false, script: { js: [{ code: expect.stringContaining("edited") }] } } }); return textResponse("SCRIPTS_PERSISTED"); },
@@ -71,7 +71,7 @@ test("persists MAIN and USER_SCRIPT matching and enablement through extension re
     expect(await opened.page.evaluate(async () => (await chrome.userScripts.getScripts()).map(({ id, world }) => ({ id, world })))).toEqual([{ id: "program-user", world: "USER_SCRIPT" }]);
     responses.push(
       commandResponse("read_script", { scriptId: main.id }, "read-restored"),
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: { enabled: false, script: { js: [{ code: expect.stringContaining("edited") }] } } }); return commandResponse("set_script_enabled", { scriptId: main.id, enabled: true }, "enable-main"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: { enabled: false, script: { js: [{ code: expect.stringContaining("edited") }] } } }); return commandResponse("enable_script", { scriptId: main.id }, "enable-main"); },
       (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("reload", {}, "reload-script-target"); },
       (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("list_scripts", {}, "list-restored"); },
       (request) => { expect(lastTool(request).ok).toBe(true); return textResponse("SCRIPTS_RESTORED"); },

@@ -4,7 +4,7 @@ import { MockLanguageModelV4 } from "ai/test";
 import { z } from "zod";
 import { ToolScheduler } from "./tool-scheduler";
 
-const names = ["click", "fill", "inspect_page", "verify_state", "switch_tab", "key_up", "get_job", "cancel_job", "subscribe_event", "wait_event", "handle_dialog", "upload_file", "list_downloads", "read_artifact", "list_file_choosers"];
+const names = ["click", "fill", "inspect_page", "verify_state", "switch_tab", "key_up", "get_job", "cancel_job", "subscribe_event", "wait_event", "handle_dialog", "upload_file", "upload_file_chooser", "list_downloads", "read_artifact", "list_file_choosers", "send_page_request", "send_extension_request"];
 const call = (toolCallId: string, toolName: string, input: unknown = {}, extra = {}) => ({ type: "tool-call", toolCallId, toolName, input, ...extra });
 function latch() {
   let release!: () => void;
@@ -44,6 +44,18 @@ describe("model response tool scheduling", () => {
     await expect(Promise.all([bad, read, release, other])).resolves.toEqual([{ ok: false }, "read", "released", "other"]);
   });
 
+  it("isolates extension request failures from the page while fencing later extension requests", async () => {
+    const scheduler = new ToolScheduler(names);
+    scheduler.prepare([call("bad", "send_extension_request"), call("page", "send_page_request"), call("extension", "send_extension_request")], 1);
+    const bad = scheduler.run("bad", async () => ({ ok: false }));
+    const page = scheduler.run("page", async () => ({ ok: true }));
+    const work = vi.fn(async () => ({ ok: true }));
+    const extension = scheduler.run("extension", work);
+    await expect(Promise.all([bad, page])).resolves.toEqual([{ ok: false }, { ok: true }]);
+    await expect(extension).rejects.toMatchObject({ code: "prior-action-failed" });
+    expect(work).not.toHaveBeenCalled();
+  });
+
   it("does not run a later write when verification completed but the condition was false", async () => {
     const scheduler = new ToolScheduler(names);
     scheduler.prepare([call("verify", "verify_state"), call("write", "click")], 1);
@@ -72,7 +84,7 @@ describe("model response tool scheduling", () => {
 
   it("allows chooser upload while a background job is blocked, and fences later writes on failure", async () => {
     const scheduler = new ToolScheduler(names, () => ["job"]);
-    scheduler.prepare([call("chooser", "upload_file", { chooserId: "chooser", artifactId: 7 }), call("write", "click")], 1);
+    scheduler.prepare([call("chooser", "upload_file_chooser", { chooserId: "chooser", artifactId: 7 }), call("write", "click")], 1);
     const chooser = scheduler.run("chooser", async () => ({ ok: false, error: { code: "invalid-artifact" } }));
     const click = vi.fn(async () => "wrong");
     const write = scheduler.run("write", click);
@@ -83,7 +95,7 @@ describe("model response tool scheduling", () => {
 
   it("lets a dialog reply unblock a chooser upload while later writes wait for both", async () => {
     const scheduler = new ToolScheduler(names);
-    scheduler.prepare([call("chooser", "upload_file", { chooserId: "chooser", artifactId: 7 }), call("dialog", "handle_dialog"), call("write", "click")], 1);
+    scheduler.prepare([call("chooser", "upload_file_chooser", { chooserId: "chooser", artifactId: 7 }), call("dialog", "handle_dialog"), call("write", "click")], 1);
     const started = latch(); const unblock = latch(); const dialogDone = latch();
     const order: string[] = [];
     const chooser = scheduler.run("chooser", async () => { order.push("chooser"); started.release(); await unblock.promise; order.push("chooser-done"); return { ok: true }; });
@@ -97,7 +109,7 @@ describe("model response tool scheduling", () => {
 
   it("waits for an earlier dialog reply before starting a chooser upload", async () => {
     const scheduler = new ToolScheduler(names);
-    scheduler.prepare([call("dialog", "handle_dialog"), call("chooser", "upload_file", { chooserId: "chooser", artifactId: 7 })], 1);
+    scheduler.prepare([call("dialog", "handle_dialog"), call("chooser", "upload_file_chooser", { chooserId: "chooser", artifactId: 7 })], 1);
     const gate = latch(); const order: string[] = [];
     const dialog = scheduler.run("dialog", async () => { order.push("dialog"); await gate.promise; return { ok: true }; });
     const chooser = scheduler.run("chooser", async () => { order.push("chooser"); return { ok: true }; });
@@ -108,7 +120,7 @@ describe("model response tool scheduling", () => {
 
   it("does not dispatch a chooser after an earlier dialog reply fails", async () => {
     const scheduler = new ToolScheduler(names);
-    scheduler.prepare([call("dialog", "handle_dialog"), call("chooser", "upload_file", { chooserId: "chooser", artifactId: 7 })], 1);
+    scheduler.prepare([call("dialog", "handle_dialog"), call("chooser", "upload_file_chooser", { chooserId: "chooser", artifactId: 7 })], 1);
     const work = vi.fn(async () => ({ ok: true }));
     const dialog = scheduler.run("dialog", async () => ({ ok: false }));
     const chooser = scheduler.run("chooser", work);

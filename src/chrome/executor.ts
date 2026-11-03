@@ -751,7 +751,7 @@ export class ChromeExecutor {
       this.eventSubscriptions.finishChooser(owner, chooser.id, chooser.claimId, "not-dispatched");
       throw new Error(`CommandError[dialog-open]: Dialog ${openDialog.dialogId} is open in tab ${chooser.source.tabId}; handle it before dispatching`);
     }
-    const operation = this.blockers.startOperation(blocker, "upload_file", chooser.source);
+    const operation = this.blockers.startOperation(blocker, "upload_file_chooser", chooser.source);
     let dispatched = false;
     let claimOpen = true;
     let timer: ReturnType<typeof setTimeout> | undefined;

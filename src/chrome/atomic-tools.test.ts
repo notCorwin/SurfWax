@@ -80,8 +80,8 @@ describe("atomic browser tool programs", () => {
     const check = vi.fn(async () => "checked");
     const uncheck = vi.fn(async () => "unchecked");
     const page = { ref: () => ({ check, uncheck }) };
-    expect(await execute("set_checked", { target: { ref: "e1" }, checked: true }, { page })).toBe("checked");
-    expect(await execute("set_checked", { target: { ref: "e1" }, checked: false }, { page })).toBe("unchecked");
+    expect(await execute("check_element", { target: { ref: "e1" } }, { page })).toBe("checked");
+    expect(await execute("uncheck_element", { target: { ref: "e1" } }, { page })).toBe("unchecked");
     expect(check).toHaveBeenCalledOnce();
     expect(uncheck).toHaveBeenCalledOnce();
   });
@@ -100,7 +100,9 @@ describe("atomic browser tool programs", () => {
 
   it("validates input before creating a program and retains an explicit timeout", () => {
     expect(() => definition("fill").program({ target: { ref: "e1" }, value: "x", extra: true })).toThrow();
-    expect(() => definition("send_request").program({ url: "https://example.com" })).toThrow();
+    expect(() => definition("send_page_request").program({})).toThrow();
+    expect(() => definition("send_extension_request").program({ url: "https://example.com", tabId: 2 })).toThrow();
+    expect(() => definition("send_page_request").program({ url: "https://example.com", context: "extension" })).toThrow();
     expect(definition("click").program({ target: { ref: "e1" }, timeoutMs: 500 }).timeoutMs).toBe(500);
     for (const name of ["click", "double_click"]) {
       expect(definition(name).program({ target: { ref: "e1" } })).toMatchObject({ defaultTimeoutMs: 5_000 });
@@ -161,13 +163,14 @@ describe("atomic browser tool programs", () => {
     expect(fill).toHaveBeenCalledTimes(2);
   });
 
-  it("accepts exactly one upload destination and reuses duplicate artifact reads", async () => {
+  it("separates upload destinations and reuses duplicate artifact reads", async () => {
     const upload = definition("upload_file");
     expect(() => upload.inputSchema.parse({ artifactId: 1 })).toThrow();
     expect(() => upload.inputSchema.parse({ artifactId: 1, chooserId: "c", target: { ref: "e1" } })).toThrow();
     expect(() => upload.inputSchema.parse({ artifactId: 1, chooserId: "c", tabId: 2 })).toThrow();
     expect(() => upload.inputSchema.parse({ artifactId: 1, chooserId: "c", background: true })).toThrow();
-    expect(upload.inputSchema.parse({ artifactId: [1, 1], chooserId: "c" })).toMatchObject({ chooserId: "c" });
+    expect(definition("upload_file_chooser").inputSchema.parse({ artifactId: [1, 1], chooserId: "c" })).toMatchObject({ chooserId: "c" });
+    expect(() => definition("upload_file_chooser").inputSchema.parse({ artifactId: 1, chooserId: "c", tabId: 2 })).toThrow();
     const read = vi.fn(async () => ({ filename: "a.txt", mimeType: "text/plain", base64: "YQ==" }));
     const setInputFiles = vi.fn(async () => "done");
     await execute("upload_file", { artifactId: [1, 1], target: { ref: "e1" } }, { page: { ref: () => ({ setInputFiles }) }, artifacts: { read } });
@@ -295,9 +298,10 @@ describe("atomic browser tool programs", () => {
     await execute("delete_script", { scriptId: "script" }, { browser: { scripts: { delete: remove } } });
     expect(remove).toHaveBeenCalledWith("script");
     const fetch = vi.fn(async () => ({ status: 200 }));
-    await execute("send_request", { context: "page", url: "https://example.com", tabId: 2 }, { net: { fetch } });
-    expect(fetch).toHaveBeenCalledOnce();
-    expect(fetch).toHaveBeenCalledWith(expect.objectContaining({ context: "page", tabId: 2 }));
+    await execute("send_page_request", { url: "https://example.com", tabId: 2 }, { net: { fetch } });
+    await execute("send_extension_request", { url: "https://example.com" }, { net: { fetch } });
+    expect(fetch).toHaveBeenNthCalledWith(1, expect.objectContaining({ context: "page", tabId: 2 }));
+    expect(fetch).toHaveBeenNthCalledWith(2, expect.objectContaining({ context: "extension" }));
   });
 
   it("exports schemas representable as JSON schema", () => {
@@ -314,7 +318,7 @@ describe("atomic browser tool programs", () => {
       ["read_elements", "Read text and selected attributes from matching elements in pages.", "The list is live"],
       ["select_option", "Select option values or labels on a select element.", "An empty array clears selection; missing, disabled or ambiguous options fail without changing selection."],
       ["drag", "Drag one element to another using pointer events."],
-      ["upload_file", "Upload artifacts to a file input or captured chooser.", "Supply exactly one target or chooserId; chooser uploads cannot set tabId or background."],
+      ["upload_file", "Upload artifacts to a file input.", "Upload one or more artifacts to a file input element."],
       ["read_artifact", "Read a stored artifact or large tool result by ID, including during a background job.", "nested undefined and array holes are null with undefinedPaths and holePaths;"],
       ["list_requests", "List captured network requests and requestRef identifiers.", "integrity describes captured history, not all network traffic"],
       ["read_console", "Read captured console messages.", "nextOffset paginates a live, possibly changing list."],

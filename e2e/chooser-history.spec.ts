@@ -40,7 +40,7 @@ for (const removeInput of [false, true]) {
             // Let the extension consume the navigation event before the upload tool starts.
             await new Promise((resolve) => setTimeout(resolve, 100));
           }, removeInput);
-          return delayedResponse(commandResponse("upload_file", { chooserId: chooser.payload.chooserId, artifactId }, "history-upload"), 0, navigation) as any;
+          return delayedResponse(commandResponse("upload_file_chooser", { chooserId: chooser.payload.chooserId, artifactId }, "history-upload"), 0, navigation) as any;
         },
         (request) => {
           const result = lastTool(request);

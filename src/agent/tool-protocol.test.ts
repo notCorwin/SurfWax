@@ -10,7 +10,7 @@ describe("tool protocol", () => {
     expect(instructions).toContain("background=true");
     expect(instructions).toContain("after set to the previous nextCursor");
     expect(instructions).toContain("handle_dialog");
-    expect(instructions).toContain("upload_file with the chooserId");
+    expect(instructions).toContain("upload_file_chooser with the chooserId");
   });
 
   it("describes how event and job cursors map to their input fields", () => {
@@ -38,10 +38,8 @@ describe("tool protocol", () => {
   it("exposes conditional input constraints in the model-facing JSON Schema", () => {
     const schema = (name: string) => z.toJSONSchema(PROGRAM_TOOL_REGISTRY.find((tool) => tool.name === name)!.inputSchema) as any;
     expect(schema("inspect_page").allOf).toEqual(["region", "fields", "depth", "offset"].map((field) => ({ not: { required: ["cursor", field] } })));
-    expect(schema("upload_file").oneOf).toEqual([
-      { required: ["target"], not: { required: ["chooserId"] } },
-      { required: ["chooserId"], not: { anyOf: ["target", "tabId", "background"].map((field) => ({ required: [field] })) } },
-    ]);
+    expect(schema("upload_file").required).toContain("target");
+    expect(schema("upload_file_chooser").required).toContain("chooserId");
     expect(schema("handle_dialog").anyOf).toEqual([
       { not: { required: ["prompt"] } },
       { properties: { accept: { const: true } }, required: ["accept"] },
@@ -54,11 +52,11 @@ describe("tool protocol", () => {
     expect(accepts("inspect_page", { since: "old" })).toBe(false);
     expect(accepts("inspect_page", { cursor: "c", region: "main" })).toBe(false);
     expect(accepts("upload_file", { artifactId: 1, target: { ref: "e1" }, tabId: 1 })).toBe(true);
-    expect(accepts("upload_file", { artifactId: 1, chooserId: "c" })).toBe(true);
+    expect(accepts("upload_file_chooser", { artifactId: 1, chooserId: "c" })).toBe(true);
     expect(accepts("upload_file", { artifactId: 1 })).toBe(false);
     expect(accepts("upload_file", { artifactId: 1, chooserId: "c", target: { ref: "e1" } })).toBe(false);
-    expect(accepts("upload_file", { artifactId: 1, chooserId: "c", background: false })).toBe(false);
-    expect(accepts("upload_file", { artifactId: 1, chooserId: "c", tabId: 1 })).toBe(false);
+    expect(accepts("upload_file_chooser", { artifactId: 1, chooserId: "c", background: false })).toBe(false);
+    expect(accepts("upload_file_chooser", { artifactId: 1, chooserId: "c", tabId: 1 })).toBe(false);
     expect(accepts("handle_dialog", { dialogId: "d", accept: true, prompt: "answer" })).toBe(true);
     expect(accepts("handle_dialog", { dialogId: "d", accept: false, prompt: "answer" })).toBe(false);
   });

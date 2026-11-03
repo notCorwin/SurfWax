@@ -20,8 +20,8 @@ for (const seed of [17, 72]) test(`combines a page session with a cross-origin e
     responses.push(
       commandResponse("read_text", { target: { by: "css", value: "#public-url" } }, "public-url"),
       (request) => { const result = lastTool(request); expect(result.ok).toBe(true); publicUrl = result.result; return commandResponse("read_text", { target: { by: "css", value: "#private-url" } }, "private-url"); },
-      (request) => { const result = lastTool(request); expect(result.ok).toBe(true); return commandResponse("send_request", { context: "page", url: result.result }, "private-fetch"); },
-      (request) => { const result = lastTool(request); expect(result).toMatchObject({ ok: true, result: { status: 200 } }); privateCode = JSON.parse(result.result.body).code; return commandResponse("send_request", { context: "extension", url: publicUrl }, "public-fetch"); },
+      (request) => { const result = lastTool(request); expect(result.ok).toBe(true); return commandResponse("send_page_request", { url: result.result }, "private-fetch"); },
+      (request) => { const result = lastTool(request); expect(result).toMatchObject({ ok: true, result: { status: 200 } }); privateCode = JSON.parse(result.result.body).code; return commandResponse("send_extension_request", { url: publicUrl }, "public-fetch"); },
       (request) => { const result = lastTool(request); expect(result).toMatchObject({ ok: true, result: { status: 200 } }); publicCode = JSON.parse(result.result.body).code; return commandResponse("fill", { target: { by: "label", value: "Private code" }, value: privateCode }, "private-fill"); },
       (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("fill", { target: { by: "label", value: "Public code" }, value: publicCode }, "public-fill"); },
       (request) => { expect(lastTool(request).ok).toBe(true); return commandResponse("click", { target: { by: "role", value: "button", name: "Submit codes" } }, "submit"); },

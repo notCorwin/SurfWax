@@ -98,7 +98,7 @@ test("inspects the page and fills and clicks with atomic tools", async () => {
     await expect.poll(() => target.locator("output").textContent()).toBe("Welcome me@example.com");
     expect(events.some((event) => event.type === "automation.action.finished" && event.toolCallId === "call-click")).toBe(true);
     const toolNames = provider.requests[0].tools.map((tool: any) => tool.function.name);
-    expect(toolNames).toEqual(expect.arrayContaining(["inspect_page", "fill", "click", "send_request"]));
+    expect(toolNames).toEqual(expect.arrayContaining(["inspect_page", "fill", "click", "send_page_request"]));
     expect(toolNames).not.toContain("execute_program");
     expect(new Set(toolNames).size).toBe(toolNames.length);
     expect(toolNames).not.toContain("run");
@@ -189,7 +189,7 @@ test("uploads multiple artifacts to a chooser across independent tool calls", as
       (request) => {
         const event = lastTool(request).events.find((item: any) => item.kind === "filechooser");
         expect(event.payload).toMatchObject({ mode: "selectMultiple", chooserId: expect.any(String) });
-        return commandResponse("upload_file", { chooserId: event.payload.chooserId, artifactId: [firstId, secondId] }, "answer-chooser");
+        return commandResponse("upload_file_chooser", { chooserId: event.payload.chooserId, artifactId: [firstId, secondId] }, "answer-chooser");
       },
       (request) => { expect(lastTool(request)).toMatchObject({ state: "completed", artifactIds: [firstId, secondId] }); return commandResponse("get_job", { jobId }, "read-chooser-job"); },
       poll, textResponse("选择文件"),
@@ -245,7 +245,7 @@ test("resumes a chooser upload whose change handler opens a dialog", async () =>
       (request) => { artifactId = lastTool(request).result.id; return commandResponse("subscribe_event", { kind: "filechooser" }, "dialog-chooser-subscribe"); },
       (request) => { subscriptionId = lastTool(request).subscriptionId; return commandResponse("click", { target: { by: "css", value: "#chooser-dialog" }, background: true, timeoutMs: 30_000 }, "dialog-chooser-click"); },
       (request) => { clickJobId = lastTool(request).jobId; return commandResponse("wait_event", { subscriptionId, waitMs: 10_000 }, "dialog-chooser-wait"); },
-      (request) => { const event = lastTool(request).events.find((item: any) => item.kind === "filechooser"); return commandResponse("upload_file", { chooserId: event.payload.chooserId, artifactId, timeoutMs: 30_000 }, "dialog-chooser-upload"); },
+      (request) => { const event = lastTool(request).events.find((item: any) => item.kind === "filechooser"); return commandResponse("upload_file_chooser", { chooserId: event.payload.chooserId, artifactId, timeoutMs: 30_000 }, "dialog-chooser-upload"); },
       (request) => {
         const result = lastTool(request);
         expect(result).toMatchObject({ accepted: true, complete: false, state: "blocked", blockedBy: { kind: "dialog", type: "prompt", message: "Upload confirmation?" } });
@@ -297,7 +297,7 @@ test("uploads to a cross-origin frame chooser through its captured session", asy
       (request) => {
         const event = lastTool(request).events.find((item: any) => item.kind === "filechooser");
         expect(event.source.sessionId).toEqual(expect.any(String));
-        return commandResponse("upload_file", { chooserId: event.payload.chooserId, artifactId }, "frame-chooser-upload");
+        return commandResponse("upload_file_chooser", { chooserId: event.payload.chooserId, artifactId }, "frame-chooser-upload");
       },
       (request) => { expect(lastTool(request)).toMatchObject({ state: "completed", artifactIds: [artifactId] }); return commandResponse("get_job", { jobId }, "frame-job"); },
       poll, textResponse("跨帧上传"),
@@ -342,11 +342,11 @@ test("reads and sets ARIA checked state without toggling an already satisfied co
     const toggle = { by: "css", value: "#aria-switch" };
     responses.push(
       commandResponse("read_checked", { target: toggle }, "read-initial"),
-      commandResponse("set_checked", { target: toggle, checked: true }, "already-checked"),
-      commandResponse("set_checked", { target: toggle, checked: false }, "uncheck-switch"),
+      commandResponse("check_element", { target: toggle }, "already-checked"),
+      commandResponse("uncheck_element", { target: toggle }, "uncheck-switch"),
       commandResponse("read_checked", { target: toggle }, "read-final"),
-      commandResponse("set_checked", { target: { by: "css", value: "#selected-radio" }, checked: false }, "uncheck-radio"),
-      commandResponse("set_checked", { target: { by: "css", value: "#unknown-switch" }, checked: true }, "unknown-switch"),
+      commandResponse("uncheck_element", { target: { by: "css", value: "#selected-radio" } }, "uncheck-radio"),
+      commandResponse("check_element", { target: { by: "css", value: "#unknown-switch" } }, "unknown-switch"),
       textResponse("CHECKED_STATE_OK"), textResponse("勾选状态"),
     );
     const options = await configure(opened.context, opened.page, provider.baseURL);
@@ -1163,12 +1163,12 @@ for (const format of ["legacy-user-tools", "system-tools"] as const) test(`conti
     expect(events.filter(event => event.type === "context.prompt.updated").at(-1)?.content).toMatchObject({ migratedFrom: "formal-49-v2", prompt: { catalogVersion: PROGRAM_CATALOG_VERSION, format: "system-tools" } });
     const requests = provider.requests.filter(request => request.tools);
     expect(requests).toHaveLength(3);
-    for (const request of requests) expect(request.tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "send_request", "list_jobs", "get_job", "cancel_job"]));
+    for (const request of requests) expect(request.tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "send_page_request", "list_jobs", "get_job", "cancel_job"]));
     expect(requests[0].messages[0].content).toMatch(/^PERSISTED_CUSTOM_GUIDANCE\n\nAvailable tools:/);
     expect(JSON.stringify(requests[0].messages)).toContain("HISTORICAL_RECEIPT");
     await opened.page.getByTestId("replay-message-button").last().click();
     await expect(opened.page.locator(".markdown-body").last()).toContainText("RETRY_CURRENT_TOOLS");
-    expect(provider.requests.filter(request => request.tools).at(-1).tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "send_request", "list_jobs", "get_job", "cancel_job"]));
+    expect(provider.requests.filter(request => request.tools).at(-1).tools.map((tool: any) => tool.function.name)).toEqual(expect.arrayContaining(["inspect_page", "click", "fill", "send_page_request", "list_jobs", "get_job", "cancel_job"]));
     await expect(target.locator("body")).toHaveAttribute("data-migrated-effects", "1");
     for (const event of historical) expect((await readEvents(opened.page)).find(current => current.id === event.id)).toEqual(event);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }

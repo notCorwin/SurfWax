@@ -37,7 +37,7 @@ test("extension tools can complete the dispatch capability level", async () => {
           }
           commands.push(
             { name: "fill", input: { target: { by: "label", value: "Dispatch reference", frame }, value: expected.reference }, id: "reference" },
-            { name: "set_checked", input: { target: { by: "label", value: "Confirm dispatch", frame }, checked: true }, id: "confirm" },
+            { name: "check_element", input: { target: { by: "label", value: "Confirm dispatch", frame } }, id: "confirm" },
             { name: "click", input: { target: { by: "role", value: "button", name: "Send dispatch", frame } }, id: "dispatch" },
           );
           const advance: MockResponse = (request) => {

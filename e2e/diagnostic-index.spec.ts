@@ -39,7 +39,7 @@ test("upgrades an actual v8 IndexedDB without rebuilding or deleting legacy reco
 test("indexes diagnostic capture events atomically in the canonical database", async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
-  responses.push(commandResponse("send_request", { context: "page", url: `${provider.origin}/target` }, "capture-fetch"),
+  responses.push(commandResponse("send_page_request", { url: `${provider.origin}/target` }, "capture-fetch"),
     commandResponse("list_requests", {}, "list-capture"), textResponse("INDEXED_CAPTURE_OK"));
   const opened = await openExtension();
   try {

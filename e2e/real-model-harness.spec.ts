@@ -56,7 +56,7 @@ test("real-model entry records a successful local scripted run", async () => {
   const provider = await startProvider(scriptedSteps([
     { tool: "fill", input: { target: { by: "label", value: "Order reference", frame }, value: "ORDER-17" } },
     { tool: "select_option", input: { target: { by: "label", value: "Service", frame }, value: "express" } },
-    { tool: "set_checked", input: { target: { by: "label", value: "Confirm details", frame }, checked: true } },
+    { tool: "check_element", input: { target: { by: "label", value: "Confirm details", frame } } },
     { tool: "click", input: { target: { by: "role", value: "button", name: "Submit order", frame }, timeoutMs: 30_000 } },
   ], "Order"));
   const directory = await mkdtemp(resolve(tmpdir(), "surfwax-eval-harness-"));
@@ -198,7 +198,7 @@ for (const scenario of [
     if (scenario.name === "userscript-repair") {
       add("read_script", () => ({ scriptId: "record-stamp" }));
       add("update_script", () => ({ scriptId: "record-stamp", changes: { allFrames: true, js: [{ code: "document.documentElement.dataset.stamp = document.body.dataset.expectedStamp;" }] } }));
-      add("set_script_enabled", () => ({ scriptId: "record-stamp", enabled: true }));
+      add("enable_script", () => ({ scriptId: "record-stamp" }));
       for (const name of ["Atlas", "Birch", "Coral", "Drift", "Elm", "Finch", "Grove", "Harbor"]) {
         add("click", () => ({ target: { by: "role", value: "button", name: `Open ${name}`, exact: true }, timeoutMs: 30_000 }));
         add("verify_state", () => ({ target: { by: "css", value: "#stamp", frame: { by: "css", value: 'iframe[title="Record"]' } }, textIncludes: "Ready", timeoutMs: 10_000 }), (result) => expect(result.result).toMatchObject({ verified: true }));
@@ -235,7 +235,7 @@ for (const scenario of [
       add("subscribe_event", () => ({ kind: "filechooser" }), (result) => { subscriptionId = result.subscriptionId; });
       add("click", () => ({ target: { by: "role", value: "button", name: "Choose receipt", frame }, background: true, timeoutMs: 30_000 }), (result) => { clickJobId = result.jobId; expect(result).toMatchObject({ accepted: true, complete: false }); }, true);
       add("wait_event", () => ({ subscriptionId, waitMs: 10_000 }), (result) => { chooserId = result.events.find((event: any) => event.kind === "filechooser")?.payload.chooserId; expect(chooserId).toEqual(expect.any(String)); });
-      add("upload_file", () => ({ chooserId, artifactId, timeoutMs: 30_000 }), (result) => { uploadJobId = result.jobId; dialogId = result.blockedBy?.dialogId; expect(result).toMatchObject({ accepted: true, complete: false, state: "blocked", blockedBy: { kind: "dialog" } }); }, true);
+      add("upload_file_chooser", () => ({ chooserId, artifactId, timeoutMs: 30_000 }), (result) => { uploadJobId = result.jobId; dialogId = result.blockedBy?.dialogId; expect(result).toMatchObject({ accepted: true, complete: false, state: "blocked", blockedBy: { kind: "dialog" } }); }, true);
       add("handle_dialog", () => ({ dialogId, accept: true, prompt: answer }), (result) => expect(result).toMatchObject({ state: "completed" }));
       add("get_job", () => ({ jobId: uploadJobId, waitMs: 10_000 }));
       add("get_job", () => ({ jobId: clickJobId, waitMs: 10_000 }));
@@ -289,7 +289,7 @@ for (const scenario of [
       add("subscribe_event", () => ({ kind: "filechooser" }), (result) => { subscriptionId = result.subscriptionId; expect(subscriptionId).toEqual(expect.any(String)); });
       add("click", () => ({ target: { by: "role", value: "button", name: "Choose file", frame: destination }, background: true, timeoutMs: 30_000 }), (result) => { chooserJobId = result.jobId; expect(result).toMatchObject({ accepted: true, complete: false }); }, true);
       add("wait_event", () => ({ subscriptionId, waitMs: 10_000 }), (result) => { chooserId = result.events.find((event: any) => event.kind === "filechooser")?.payload.chooserId; expect(chooserId).toEqual(expect.any(String)); });
-      add("upload_file", () => ({ chooserId, artifactId }), (result) => expect(result).toMatchObject({ state: "completed" }));
+      add("upload_file_chooser", () => ({ chooserId, artifactId }), (result) => expect(result).toMatchObject({ state: "completed" }));
       add("get_job", () => ({ jobId: chooserJobId, waitMs: 10_000 }));
       add("click", () => ({ target: { by: "role", value: "button", name: "Submit file", frame: destination }, timeoutMs: 30_000 }));
     }
@@ -374,7 +374,7 @@ test("a registered script that skips verification pages cannot pass despite stam
   let jobId = "", polls = 0, index = 0, problem: unknown;
   const steps: { tool: string; input: object }[] = [
     { tool: "update_script", input: { scriptId: "record-stamp", changes: { allFrames: true, js: [{ code: "if (!location.pathname.includes('/__verify/')) document.documentElement.dataset.stamp = document.body.dataset.expectedStamp;" }] } } },
-    { tool: "set_script_enabled", input: { scriptId: "record-stamp", enabled: true } },
+    { tool: "enable_script", input: { scriptId: "record-stamp", enabled: true } },
   ];
   for (const name of ["Atlas", "Birch", "Coral", "Drift", "Elm", "Finch", "Grove", "Harbor"]) {
     steps.push({ tool: "click", input: { target: { by: "role", value: "button", name: `Open ${name}`, exact: true }, timeoutMs: 30_000 } });
@@ -445,7 +445,7 @@ test("a completed order with an unfinished background job remains unknown", asyn
   const steps = [
     { tool: "fill", input: { target: target("label", "Order reference"), value: "ORDER-17" } },
     { tool: "select_option", input: { target: target("label", "Service"), value: "express" } },
-    { tool: "set_checked", input: { target: target("label", "Confirm details"), checked: true } },
+    { tool: "check_element", input: { target: target("label", "Confirm details") } },
     { tool: "click", input: { target: { ...target("role", "button"), name: "Submit order" }, timeoutMs: 30_000 } },
     { tool: "verify_state", input: { target: target("css", "#status"), textIncludes: "Submitted ORDER-17", timeoutMs: 10_000 } },
   ];
@@ -502,7 +502,7 @@ test("an unfinished network-identity request remains unknown and is drained at s
     commandResponse("read_attribute", { target: frame, name: "src" }, "pending-origin"),
     after((result) => { origin = new URL(result.result).origin; return commandResponse("read_attribute", { target: { by: "css", value: "input", index: 0, frame }, name: "name" }, "pending-name"); }),
     after((result) => { name = result.result; expect(name).toEqual(expect.any(String)); return commandResponse("subscribe_event", { kind: "request" }, "pending-subscribe"); }),
-    after((result) => { subscriptionId = result.subscriptionId; return commandResponse("send_request", { context: "page", url: `${origin}/sample`, init: { method: "POST", body: JSON.stringify({ name }) }, background: true, timeoutMs: 60_000 }, "pending-network"); }),
+    after((result) => { subscriptionId = result.subscriptionId; return commandResponse("send_page_request", { url: `${origin}/sample`, init: { method: "POST", body: JSON.stringify({ name }) }, background: true, timeoutMs: 60_000 }, "pending-network"); }),
     after((result) => { expect(result).toMatchObject({ accepted: true, complete: false }); responses.unshift(waitRequest); return commandResponse("wait_event", { subscriptionId, waitMs: 10_000 }, "pending-wait"); }),
     textResponse("Response desk"),
   );

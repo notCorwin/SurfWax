@@ -34,7 +34,7 @@ describe("structured semantic snapshot rendering", () => {
     expect(renderSnapshotNode({ ...node, actions: ["click", "insertText", "select"] }, { actionNames: "program" }).line)
       .toContain("[actions=click,type_text,select_option]");
     expect(renderSnapshotNode({ ...node, actions: ["fill", "clear", "press", "check"] }, { actionNames: "program" }).line)
-      .toContain("[actions=fill,press_key,set_checked]");
+      .toContain("[actions=fill,press_key,check_element,uncheck_element]");
   });
 
   it("quotes JSON controls and omits an unchanged value", () => {

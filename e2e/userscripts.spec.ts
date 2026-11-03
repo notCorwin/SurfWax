@@ -75,8 +75,8 @@ test("lets the agent create, inspect, edit and toggle a user script", async () =
       commandResponse("list_scripts", {}, "call-script-list"),
       commandResponse("read_script", { scriptId: script.id }, "call-script-read"),
       commandResponse("update_script", { scriptId: script.id, changes: { js: [{ code: "document.documentElement.dataset.agentScript = 'edited'" }] } }, "call-script-edit"),
-      commandResponse("set_script_enabled", { scriptId: script.id, enabled: false }, "call-script-disable"),
-      commandResponse("set_script_enabled", { scriptId: script.id, enabled: true }, "call-script-enable"),
+      commandResponse("disable_script", { scriptId: script.id }, "call-script-disable"),
+      commandResponse("enable_script", { scriptId: script.id }, "call-script-enable"),
       textResponse("SCRIPT_TOOLS_DONE"), textResponse("脚本工具"),
     );
     const options = await configure(opened.context, opened.page, provider.baseURL);

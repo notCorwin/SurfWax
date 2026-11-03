@@ -34,7 +34,7 @@ test("extension tools import and upload the dossier through a chooser", async ()
       after((result) => {
         expect(result.fileChoosers).toHaveLength(1);
         expect(result.fileChoosers[0]).toMatchObject({ chooserId: expect.any(String), mode: "selectMultiple" });
-        return commandResponse("upload_file", { chooserId: result.fileChoosers[0].chooserId, artifactId: artifactIds }, "upload-files");
+        return commandResponse("upload_file_chooser", { chooserId: result.fileChoosers[0].chooserId, artifactId: artifactIds }, "upload-files");
       }),
       after((result) => { expect(result).toMatchObject({ state: "completed" }); return commandResponse("click", { target: { by: "role", value: "button", name: "Submit dossier", frame }, timeoutMs: 30_000 }, "submit-dossier"); }),
       after((result) => { expect(result, JSON.stringify(result)).toMatchObject({ ok: true }); return done(); }),

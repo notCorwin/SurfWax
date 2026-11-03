@@ -57,7 +57,7 @@ for (const seed of [17, 72]) test(`extension handles an intake chooser that open
         }
         expect(event.source.sessionId).toEqual(expect.any(String));
         expect(event.payload.chooserId).toEqual(expect.any(String));
-        return commandResponse("upload_file", { chooserId: event.payload.chooserId, artifactId, timeoutMs: 30_000 }, "receipt-upload");
+        return commandResponse("upload_file_chooser", { chooserId: event.payload.chooserId, artifactId, timeoutMs: 30_000 }, "receipt-upload");
       }),
       afterTool((result) => {
         expect(result).toMatchObject({ accepted: true, complete: false, state: "blocked", blockedBy: { kind: "dialog", type: "prompt" } });

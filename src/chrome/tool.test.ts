@@ -707,7 +707,7 @@ describe("browser tools", () => {
     const tools = createProgramTools({} as ChromeExecutor) as Record<string, any>;
     expect(Object.keys(tools)).toEqual(PROGRAM_TOOL_REGISTRY.map(({ name }) => name));
     expect(new Set(Object.keys(tools)).size).toBe(PROGRAM_TOOL_REGISTRY.length);
-    for (const name of ["inspect_page", "find_elements", "list_frames", "click", "fill", "set_checked", "navigate", "list_tabs", "read_artifact", "list_jobs", "get_job", "cancel_job"]) expect(tools).toHaveProperty(name);
+    for (const name of ["inspect_page", "find_elements", "list_frames", "click", "fill", "check_element", "uncheck_element", "navigate", "list_tabs", "read_artifact", "list_jobs", "get_job", "cancel_job"]) expect(tools).toHaveProperty(name);
     for (const name of ["inspect", "run", "jobs", "snapshot", "act", "run-code", "browser", "result", "search-tools", "install", "execute_program", "read_api_reference", "evaluate_js", "send_cdp"]) expect(tools).not.toHaveProperty(name);
     expect(Object.values(tools).every((tool) => tool.deferLoading !== true)).toBe(true);
     for (const { name, summary } of PROGRAM_TOOL_REGISTRY) expect(PROGRAM_TOOL_CONTEXT).toContain(`- ${name}: ${summary}`);
@@ -725,8 +725,9 @@ describe("browser tools", () => {
     expect(tools.get_job.inputSchema.parse({ jobId: "one", waitMs: 30001 })).toMatchObject({ waitMs: 30001 });
     expect(tools.list_jobs.inputSchema.parse({})).toEqual({});
     expect(() => tools.fill.inputSchema.parse({ target: { by: "label", value: "Email" } })).toThrow();
-    expect(tools.set_checked.inputSchema.parse({ target: { ref: "e1" }, checked: false })).toMatchObject({ checked: false });
-    expect(() => tools.send_request.inputSchema.parse({ url: "https://example.com" })).toThrow();
+    expect(tools.uncheck_element.inputSchema.parse({ target: { ref: "e1" } })).toMatchObject({ target: { ref: "e1" } });
+    expect(() => tools.send_page_request.inputSchema.parse({})).toThrow();
+    expect(() => tools.send_extension_request.inputSchema.parse({ url: "https://example.com", tabId: 1 })).toThrow();
   });
   it("dispatches a fill with arbitrary input as data and logs its result", async () => {
     const events: any[] = [];
@@ -831,7 +832,7 @@ describe("browser tools", () => {
     const runProgram = vi.fn();
     const tools = createProgramTools({ uploadChooser, runProgram } as unknown as ChromeExecutor, { conversationId: "c" }) as Record<string, any>;
     const input = { chooserId: "chooser", artifactId: [7, 8], timeoutMs: 5000 };
-    await expect(tools.upload_file.execute(input, { toolCallId: "upload" })).resolves.toMatchObject({ state: "completed", artifactIds: [7, 8] });
+    await expect(tools.upload_file_chooser.execute(input, { toolCallId: "upload" })).resolves.toMatchObject({ state: "completed", artifactIds: [7, 8] });
     expect(uploadChooser).toHaveBeenCalledWith(input, undefined, expect.objectContaining({ conversationId: "c" }));
     expect(runProgram).not.toHaveBeenCalled();
   });
