@@ -1,7 +1,6 @@
-import { act, createElement } from "react";
+import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createRoot } from "react-dom/client";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { MessagePart, MessageView } from "@/sidepanel/conversation-store";
 import { RuntimeViewContext, type RuntimeView } from "@/sidepanel/runtime-view";
 import { MessageRow } from "./message-row";
@@ -54,14 +53,14 @@ describe("tool timeline", () => {
     expect(html.indexOf("回复未生成")).toBeGreaterThan(html.indexOf("answer"));
   });
 
-  it("counts reasoning and waiting in the same latest-three window as tools", () => {
+  it("keeps all reasoning, waiting and tools in order", () => {
     const messages = [message("a", [reasoning("first"), tool("1"), reasoning("second"), tool("2")])];
     const waiting = { afterId: "2", id: "waiting:request", label: "正在等待推理提供商响应" };
     const projected = withWaitingActivity(projectToolTimeline(messages, true), [waiting]);
     const group = projected.trailing!;
     const html = renderToStaticMarkup(createElement(ToolGroupView, { group }));
-    expect(html.match(/data-tool-id=/g)).toHaveLength(3);
-    expect(html).not.toContain('data-tool-id="1"');
+    expect(html.match(/data-tool-id=/g)).toHaveLength(5);
+    expect(html).toContain('data-tool-id="1"');
     expect(html).not.toContain("first");
     expect(html).toContain("思考完成");
     expect(html).toContain('data-tool-id="2"');
@@ -76,9 +75,21 @@ describe("tool timeline", () => {
     const completed = { ...waiting, afterId: "1", endedAt: 1000 };
     const next = withWaitingActivity(projectToolTimeline(messages, true), [completed]);
     const historyHtml = renderToStaticMarkup(createElement(ToolGroupView, { group: next.trailing! }));
-    expect(historyHtml.match(/data-tool-id=/g)).toHaveLength(3);
-    expect(historyHtml.indexOf('data-tool-id="waiting:request"')).toBeLessThan(historyHtml.indexOf("思考完成"));
-    expect(historyHtml.indexOf("思考完成")).toBeLessThan(historyHtml.indexOf('data-tool-id="2"'));
+    expect(historyHtml.match(/data-tool-id=/g)).toHaveLength(5);
+    expect(historyHtml.indexOf('data-tool-id="waiting:request"')).toBeLessThan(historyHtml.lastIndexOf("思考完成"));
+    expect(historyHtml.lastIndexOf("思考完成")).toBeLessThan(historyHtml.indexOf('data-tool-id="2"'));
+
+    const waits = [
+      { ...waiting, id: "unanchored-first", afterId: undefined },
+      { ...waiting, id: "unanchored-second", afterId: "missing" },
+      { ...waiting, id: "anchored-first", afterId: "1" },
+      { ...waiting, id: "anchored-second", afterId: "1" },
+    ];
+    const ordered = renderToStaticMarkup(createElement(ToolGroupView, { group: { ...group, waiting: waits } }));
+    const host = document.createElement("div");
+    host.innerHTML = ordered;
+    const ids = Array.from(host.querySelectorAll<HTMLElement>("[data-tool-id]"), (row) => row.dataset.toolId);
+    expect(ids).toEqual(["unanchored-first", "unanchored-second", group.activities[0]!.id, "1", "anchored-first", "anchored-second", group.activities[2]!.id, "2"]);
 
   });
 
@@ -97,11 +108,11 @@ describe("tool timeline", () => {
     expect(projectToolTimeline(messages, true)).toBe(projected);
   });
 
-  it("shows only the latest three during a running sequence and a single non-expandable summary after it ends", () => {
+  it("shows every activity during a running sequence and a single non-expandable summary after it ends", () => {
     const messages = [message("a", [tool("1"), tool("2"), tool("3"), tool("4")])];
     const live = toolGroupAt(projectToolTimeline(messages, true), "a", 0)!;
     const liveHtml = renderToStaticMarkup(createElement(ToolGroupView, { group: live }));
-    expect(liveHtml.match(/class="activity transcript-activity"/g)).toHaveLength(3);
+    expect(liveHtml.match(/class="activity transcript-activity"/g)).toHaveLength(4);
     const settled = toolGroupAt(projectToolTimeline(messages, false), "a", 0)!;
     const settledHtml = renderToStaticMarkup(createElement(ToolGroupView, { group: settled }));
     expect(settledHtml).toContain("tool-group-summary");
@@ -115,60 +126,19 @@ describe("tool timeline", () => {
     expect(toolGroupAt(projectToolTimeline([message("a", [tool("done"), text("later text")])], true), "a", 0)?.live).toBe(false);
   });
 
-  it("rolls only when the visible calls change and respects reduced motion", async () => {
-    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    let reduced = false;
-    let now = 0;
-    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
-    vi.stubGlobal("matchMedia", () => ({ matches: reduced }));
-    const top = vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (this: HTMLElement) {
-      return this.hasAttribute("data-tool-id") ? Array.from(this.parentElement!.children).indexOf(this) * 32 : 0;
-    });
-    const height = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(24);
-    const animate = vi.fn(() => ({ cancel: vi.fn(), onfinish: null, oncancel: null }));
-    Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, value: animate });
-    const render = async (tools: Tool[]) => act(() => root.render(createElement(ToolGroupView, { group: { key: "a", activities: tools.map((part) => ({ id: part.toolCallId, part })), tools, reasoning: [], live: true, followedByText: false } })));
-    try {
-      await render([tool("1"), tool("2"), tool("3")]);
-      expect(animate).not.toHaveBeenCalled();
-      await render([{ ...tool("1"), status: { type: "incomplete" } }, tool("2"), tool("3")]);
-      expect(animate).not.toHaveBeenCalled();
-      await render([tool("1"), tool("2"), tool("3"), tool("4")]);
-      expect(animate).toHaveBeenCalled();
-      expect(Array.from(container.querySelectorAll('[data-tool-id]:not([aria-hidden])')).map((item) => item.getAttribute("data-tool-id"))).toEqual(["2", "3", "4"]);
-      animate.mockClear();
-      now = 100;
-      await render([tool("1"), tool("2"), tool("3"), tool("4"), tool("5")]);
-      expect(JSON.stringify(animate.mock.calls)).toContain("translateY(48px)");
-      animate.mockClear();
-      reduced = true;
-      await render([tool("1"), tool("2"), tool("3"), tool("4"), tool("5"), tool("6")]);
-      expect(animate).not.toHaveBeenCalled();
-    } finally {
-      await act(() => root.unmount());
-      vi.unstubAllGlobals();
-      clock.mockRestore();
-      top.mockRestore();
-      height.mockRestore();
-      delete (HTMLElement.prototype as { animate?: unknown }).animate;
-    }
-  });
-
-  it("summarizes older failures and interruptions without displacing the latest three", () => {
+  it("shows individual live failures and summarizes them after the sequence ends", () => {
     const failed: Tool = { ...tool("failed"), isError: true, result: { error: "failure" }, status: { type: "incomplete" } };
     const interrupted: Tool = { ...tool("interrupted"), interrupted: true, status: { type: "incomplete" } };
     const messages = [message("a", [failed, interrupted, tool("1"), tool("2"), tool("3")])];
     for (const running of [true, false]) {
       const group = toolGroupAt(projectToolTimeline(messages, running), "a", 0)!;
       const html = renderToStaticMarkup(createElement(ToolGroupView, { group }));
-      expect(html).toContain("1 项未完成，1 项已中断");
-      expect(html.match(/data-status="error"/g)).toHaveLength(1);
+      expect(html.match(/data-status="error"/g)).toHaveLength(running ? 2 : 1);
+      if (!running) expect(html).toContain("1 项未完成，1 项已中断");
       if (running) {
-        expect(html.match(/data-tool-id=/g)).toHaveLength(3);
-        expect(html).not.toContain('data-tool-id="failed"');
-        expect(html).not.toContain('data-tool-id="interrupted"');
+        expect(html.match(/data-tool-id=/g)).toHaveLength(5);
+        expect(html).toContain('data-tool-id="failed"');
+        expect(html).toContain('data-tool-id="interrupted"');
       }
     }
   });

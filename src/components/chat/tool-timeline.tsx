@@ -3,7 +3,7 @@ import { summarizeToolActions } from "./tool-labels";
 import { ToolFallback } from "./tool-fallback";
 import { WaitingActivityRow, type WaitingActivity } from "./waiting-status";
 import { Reasoning } from "./reasoning";
-import { useContext, useLayoutEffect, useRef } from "react";
+import { useContext } from "react";
 import { ActivityPhaseContext, toolActivity, toolWasInterrupted, type ActivityPhase } from "./process-group";
 
 type ToolPart = Extract<MessagePart, { type: "tool-call" }>;
@@ -88,83 +88,30 @@ export function withWaitingActivity(timeline: ToolTimeline, waiting: WaitingActi
   const groups = [...timeline.starts.values()];
   const tail = groups.at(-1);
   const starts = new Map(timeline.starts);
-  const remaining = waiting.filter((item) => {
-    const owner = groups.find((group) => group !== tail && group.activities.some((entry) => entry.id === item.afterId));
-    if (!owner) return true;
-    const existing = starts.get(owner.key)!;
-    starts.set(owner.key, { ...existing, waiting: [...(existing.waiting ?? []), item] });
-    return false;
-  });
+  const owners = new Map<string, ToolGroup>();
+  for (const group of groups) if (group !== tail) {
+    for (const entry of group.activities) owners.set(entry.id, group);
+  }
+  const groupedWaits = new Map<ToolGroup, WaitingActivity[]>();
+  const remaining: WaitingActivity[] = [];
+  for (const item of waiting) {
+    const owner = item.afterId ? owners.get(item.afterId) : undefined;
+    if (!owner) { remaining.push(item); continue; }
+    const items = groupedWaits.get(owner);
+    if (items) items.push(item);
+    else groupedWaits.set(owner, [item]);
+  }
+  for (const [owner, items] of groupedWaits) starts.set(owner.key, { ...owner, waiting: [...(owner.waiting ?? []), ...items] });
   if (tail?.live && !tail.followedByText) {
     starts.delete(tail.key);
     return { timeline: { starts }, trailing: { ...tail, waiting: remaining } };
   }
-  const trailingWaits = remaining.filter((item) => !tail?.activities.some((entry) => entry.id === item.afterId));
-  if (tail && trailingWaits.length !== remaining.length) starts.set(tail.key, { ...tail, waiting: remaining.filter((item) => !trailingWaits.includes(item)) });
+  const tailIds = new Set(tail?.activities.map((entry) => entry.id));
+  const trailingWaits: WaitingActivity[] = [];
+  const tailWaits: WaitingActivity[] = [];
+  for (const item of remaining) (item.afterId && tailIds.has(item.afterId) ? tailWaits : trailingWaits).push(item);
+  if (tail && tailWaits.length) starts.set(tail.key, { ...tail, waiting: tailWaits });
   return { timeline: { starts }, trailing: { key: "live-activity", activities: [], tools: [], reasoning: [], live: true, followedByText: false, waiting: trailingWaits } };
-}
-
-type RollingEntry = { id: string; content: React.ReactNode };
-type PreviousRow = { id: string; top: number; height: number; clone: HTMLElement; offset: number; startedAt: number };
-const ROLL_DURATION = 200;
-const visualTop = (row: PreviousRow, now: number) => row.top + row.offset * Math.max(0, 1 - (now - row.startedAt) / ROLL_DURATION);
-
-function LiveActivities({ entries }: { entries: readonly RollingEntry[] }) {
-  const viewport = useRef<HTMLDivElement>(null);
-  const previous = useRef<PreviousRow[]>([]);
-  const previousIds = useRef<string | undefined>(undefined);
-  const ids = JSON.stringify(entries.map((entry) => entry.id));
-  useLayoutEffect(() => {
-    const root = viewport.current;
-    if (!root) return;
-    const rows = Array.from(root.querySelectorAll<HTMLElement>(":scope > [data-tool-id]"));
-    const old = previous.current;
-    const oldById = new Map(old.map((row) => [row.id, row]));
-    const currentRows = rows.filter((row) => !row.hasAttribute("aria-hidden"));
-    const now = performance.now();
-    const changed = previousIds.current !== undefined && previousIds.current !== ids;
-    previousIds.current = ids;
-    if (!changed) {
-      previous.current = currentRows.map((row) => {
-        const before = oldById.get(row.dataset.toolId!);
-        return { id: row.dataset.toolId!, top: row.offsetTop, height: row.offsetHeight,
-          clone: row.cloneNode(true) as HTMLElement, offset: before?.offset ?? 0, startedAt: before?.startedAt ?? now };
-      });
-      return;
-    }
-    const motionAllowed = typeof window.matchMedia !== "function" || !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const offsets = new Map<string, number>();
-    for (const row of currentRows) row.getAnimations?.().forEach((effect) => effect.cancel());
-    if (old.length && motionAllowed && typeof root.animate === "function") {
-      const animation = { duration: ROLL_DURATION, easing: "linear" };
-      const step = old.length > 1 ? old[1]!.top - old[0]!.top : old[0]!.height;
-      const idsNow = new Set(entries.map((entry) => entry.id));
-      for (const row of old) if (!idsNow.has(row.id)) {
-        const ghosts = root.querySelectorAll<HTMLElement>(":scope > [data-tool-id][aria-hidden]");
-        if (ghosts.length >= 3) ghosts[0]?.remove();
-        const clone = row.clone;
-        clone.setAttribute("aria-hidden", "true");
-        clone.removeAttribute("data-testid");
-        clone.querySelectorAll("[data-testid], [id]").forEach((node) => { node.removeAttribute("data-testid"); node.removeAttribute("id"); });
-        Object.assign(clone.style, { position: "absolute", top: `${visualTop(row, now)}px`, left: "0", width: "100%", pointerEvents: "none" });
-        root.appendChild(clone);
-        const effect = clone.animate([{ transform: "translateY(0)" }, { transform: `translateY(${-step}px)` }], animation);
-        effect.onfinish = () => clone.remove();
-        effect.oncancel = () => clone.remove();
-      }
-      for (const row of currentRows) {
-        const before = oldById.get(row.dataset.toolId!);
-        const offset = before ? visualTop(before, now) - row.offsetTop : visualTop(old[old.length - 1]!, now) + step - row.offsetTop;
-        offsets.set(row.dataset.toolId!, offset);
-        if (offset) row.animate([{ transform: `translateY(${offset}px)` }, { transform: "translateY(0)" }], animation);
-      }
-    }
-    previous.current = currentRows.map((row) => ({ id: row.dataset.toolId!, top: row.offsetTop, height: row.offsetHeight,
-      clone: row.cloneNode(true) as HTMLElement, offset: offsets.get(row.dataset.toolId!) ?? 0, startedAt: now }));
-  });
-  return <div ref={viewport} className="live-tool-viewport" data-testid="live-tool-viewport">
-    {entries.map((entry) => <div data-tool-id={entry.id} key={entry.id}>{entry.content}</div>)}
-  </div>;
 }
 
 export function ToolGroupView({ group }: { group: ToolGroup }) {
@@ -174,18 +121,28 @@ export function ToolGroupView({ group }: { group: ToolGroup }) {
   const reasoningStatus = group.reasoning.some((part) => part.status.type === "running") ? "running"
     : group.reasoning.some((part) => part.status.type === "incomplete") ? "incomplete" : "complete";
   const reasoningPhase = reasoningStatus === "complete" || group.followedByText && reasoningStatus !== "running" ? "settled" : phase;
-  const entries: RollingEntry[] = group.activities.map(({ id, part }) => ({ id, content: part.type === "tool-call" ? <ToolFallback {...part} />
-    : <ActivityPhaseContext.Provider value={part.status.type === "complete" || group.followedByText ? "settled" : reasoningPhase}><Reasoning status={part.status} /></ActivityPhaseContext.Provider> }));
-  for (const waiting of [...(group.waiting ?? [])].reverse()) {
-    const index = waiting.afterId ? entries.findIndex((entry) => entry.id === waiting.afterId) : -1;
-    entries.splice(index + 1, 0, { id: waiting.id, content: <WaitingActivityRow activity={waiting} /> });
+  const activityIds = new Set(group.activities.map((entry) => entry.id));
+  const waitsAfter = new Map<string | undefined, WaitingActivity[]>();
+  for (const waiting of group.waiting ?? []) {
+    const anchor = waiting.afterId && activityIds.has(waiting.afterId) ? waiting.afterId : undefined;
+    const items = waitsAfter.get(anchor);
+    if (items) items.push(waiting);
+    else waitsAfter.set(anchor, [waiting]);
   }
-  const recent = entries.slice(-3);
-  const visibleIds = new Set(recent.map((entry) => entry.id));
+  const waitingEntries = (anchor?: string) => (waitsAfter.get(anchor) ?? []).map((activity) => ({
+    id: activity.id, content: <WaitingActivityRow activity={activity} />,
+  }));
+  const entries = waitingEntries();
+  for (const { id, part } of group.activities) {
+    entries.push({ id, content: part.type === "tool-call" ? <ToolFallback {...part} />
+      : <ActivityPhaseContext.Provider value={part.status.type === "complete" || group.followedByText ? "settled" : reasoningPhase}><Reasoning status={part.status} /></ActivityPhaseContext.Provider> });
+    entries.push(...waitingEntries(id));
+  }
   return <div className="transcript-activity-list flex flex-col">
     {group.live ? <div data-testid="live-tool-calls" className="transcript-activity-list flex flex-col">
-      <FailureSummary tools={group.tools.filter((tool) => !visibleIds.has(tool.toolCallId))} phase={phase} />
-      <LiveActivities entries={recent} />
+      <div data-testid="live-tool-viewport" className="transcript-activity-list flex flex-col">
+        {entries.map((entry) => <div data-tool-id={entry.id} key={entry.id}>{entry.content}</div>)}
+      </div>
     </div> : <>
       {group.reasoning.length > 0 && <ActivityPhaseContext.Provider value={reasoningPhase}>
         <Reasoning status={{ type: reasoningStatus }} />

@@ -63,7 +63,7 @@ export function useWaitingActivity({ logger, conversationId, running, stopping, 
       const parsedTime = Date.parse(event.timestamp);
       const eventTime = Number.isFinite(parsedTime) ? parsedTime : Date.now();
       if (event.type === "conversation.submitted") setWaits([]);
-      if (event.type === "model.request.started") setWaits((previous) => [...previous.slice(-2).map((item) => item.endedAt === undefined ? { ...item, endedAt: eventTime, label: "等待响应结束" } : item), {
+      if (event.type === "model.request.started") setWaits((previous) => [...previous.map((item) => item.endedAt === undefined ? { ...item, endedAt: eventTime, label: "等待响应结束" } : item), {
         id: `waiting:${event.runId}:${event.id}`, label: labels.provider, startedAt: Number.isFinite(Date.parse(event.timestamp)) ? Date.parse(event.timestamp) : undefined, afterId: anchor.current,
       }]);
       if (event.type === "model.response.received" || event.type === "model.request.retrying" || event.type === "conversation.aborted" || event.type === "conversation.failed") {
@@ -80,7 +80,7 @@ export function useWaitingActivity({ logger, conversationId, running, stopping, 
   if (!stopping && (toolsRunning || phase?.phase === "provider")) return waits;
   const label = stopping ? "正在停止" : phase ? labels[phase.phase as Exclude<Phase, "terminal">] : "正在处理";
   const startedAt = stopping ? stoppingAt : phase?.startedAt;
-  return [...waits.slice(-2), { id: `waiting:${phase?.runId ?? conversationId}:${stopping ? "stopping" : phase?.phase ?? "processing"}:${startedAt ?? "unknown"}`, label, startedAt, afterId: afterActivityId }];
+  return [...waits, { id: `waiting:${phase?.runId ?? conversationId}:${stopping ? "stopping" : phase?.phase ?? "processing"}:${startedAt ?? "unknown"}`, label, startedAt, afterId: afterActivityId }];
 }
 
 export type WaitingActivity = { id: string; label: string; startedAt?: number; endedAt?: number; afterId?: string };

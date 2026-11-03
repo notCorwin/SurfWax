@@ -54,7 +54,7 @@ test("uses the same line-height ratio across conversation content", async () => 
   }
 });
 
-test("keeps at most three recent tool calls and summarizes them after interruption", async () => {
+test("keeps all tool calls and summarizes them after interruption", async () => {
   const provider = await startProvider([assistantResponse({ tool_calls: [infoCall("rolling-0"), infoCall("rolling-1"), infoCall("rolling-2"),
     { id: "rolling-3", type: "function", function: { name: "verify_state", arguments: JSON.stringify({ target: { by: "css", value: "#never" }, state: "visible", timeoutMs: 60_000 }) } },
   ] })]);
@@ -68,7 +68,10 @@ test("keeps at most three recent tool calls and summarizes them after interrupti
     await opened.page.getByTestId("composer-input").press("Enter");
     const list = opened.page.getByTestId("live-tool-calls");
     const rows = list.locator(".activity");
-    await expect(rows).toHaveCount(3);
+    await expect(rows).toHaveCount(4);
+    await expect(list.locator('[data-tool-id][aria-hidden="true"]')).toHaveCount(0);
+    expect(await list.locator('[data-tool-id]').evaluateAll((items) => items.every((item) =>
+      item.getAnimations().length === 0 && getComputedStyle(item).transform === "none"))).toBe(true);
     await expect(rows.last()).toHaveText(/^检查页面状态 · \d+\.\d{2} 秒$/);
     const before = await rows.last().innerText();
     await expect.poll(() => rows.last().innerText()).not.toBe(before);
@@ -83,7 +86,7 @@ test("keeps at most three recent tool calls and summarizes them after interrupti
   }
 });
 
-test("bounds live tool calls and summarizes earlier failures", async () => {
+test("keeps all live tool calls and summarizes failures after completion", async () => {
   const failing = Array.from({ length: 5 }, (_, index) => ({
     id: `failed-${index}`, type: "function", function: { name: "get_page_info", arguments: JSON.stringify({ tabId: 2147483647 }) },
   }));
@@ -102,11 +105,11 @@ test("bounds live tool calls and summarizes earlier failures", async () => {
     await expect.poll(async () => (await readEvents(opened.page)).filter((event) => ["tool.finished", "tool.failed"].includes(event.type) && [...failing, ...recent].some((tool) => tool.id === event.toolCallId)).length).toBe(8);
     const viewport = opened.page.getByTestId("live-tool-viewport");
     const rows = viewport.locator("[data-tool-id]:not([aria-hidden])");
-    await expect(rows).toHaveCount(3);
-    await expect.poll(() => rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-tool-id")))).toEqual([recent[1]!.id, recent[2]!.id, expect.stringMatching(/^waiting:/)]);
+    await expect(rows).toHaveCount(10);
+    await expect.poll(() => rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-tool-id")))).toEqual([expect.stringMatching(/^waiting:/), ...[...failing, ...recent].map((tool) => tool.id), expect.stringMatching(/^waiting:/)]);
     const failure = opened.page.getByTestId("tool-failure-summary");
-    await expect(failure).toHaveCount(1);
-    await expect(failure).toContainText("5 项未完成");
+    await expect(failure).toHaveCount(0);
+    await expect(viewport.locator('.activity[data-status="error"]')).toHaveCount(5);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FAILURE_SUMMARY_DONE");
     await expect(opened.page.getByTestId("live-tool-viewport")).toHaveCount(0);
     await expect(opened.page.getByTestId("tool-group-summary")).toHaveCount(1);
@@ -114,53 +117,6 @@ test("bounds live tool calls and summarizes earlier failures", async () => {
     await expect(opened.page.getByTestId("tool-failure-summary")).toContainText("5 项未完成");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
-  }
-});
-
-test("animates tool turnover and honors reduced motion", async () => {
-  for (const reducedMotion of ["no-preference", "reduce"] as const) {
-    const provider = await startProvider([
-      assistantResponse({ tool_calls: [infoCall("motion-0"), infoCall("motion-1"), infoCall("motion-2")] }),
-      delayedResponse(assistantResponse({ tool_calls: [infoCall("motion-3")] }), 1_000),
-      delayedResponse(textResponse("MOTION_DONE"), 1_500), textResponse("动画测试"),
-    ]);
-    const opened = await openExtension();
-    try {
-      const target = await opened.context.newPage();
-      await target.goto(`${provider.origin}/target`);
-      const options = await configure(opened.context, opened.page, provider.baseURL);
-      await options.close();
-      await opened.page.emulateMedia({ reducedMotion });
-      await opened.page.evaluate(() => {
-        const samples: { id: string | null; hidden: boolean; transform: string }[] = [];
-        (window as any).__toolAnimationSamples = samples;
-        const animate = Element.prototype.animate;
-        Element.prototype.animate = function (...args: Parameters<typeof animate>) {
-          const result = animate.apply(this, args);
-          if (this.closest('[data-testid="live-tool-viewport"]')) {
-            const element = this;
-            const sample = { id: element.getAttribute("data-tool-id"), hidden: element.getAttribute("aria-hidden") === "true", transform: "" };
-            samples.push(sample);
-            requestAnimationFrame(() => requestAnimationFrame(() => { sample.transform = getComputedStyle(element).transform; }));
-          }
-          return result;
-        };
-      });
-      await opened.page.getByTestId("composer-input").fill("run four tools in sequence");
-      await opened.page.getByTestId("composer-input").press("Enter");
-      const viewport = opened.page.getByTestId("live-tool-viewport");
-      await expect(viewport.locator('[data-tool-id="motion-0"]')).toBeVisible();
-      await expect(viewport.locator('[data-tool-id="motion-3"]')).toBeVisible();
-      if (reducedMotion === "no-preference") {
-        await expect.poll(() => opened.page.evaluate(() => (window as any).__toolAnimationSamples.some((sample: any) => sample.id === "motion-0" && sample.hidden && sample.transform && sample.transform !== "none" && sample.transform !== "matrix(1, 0, 0, 1, 0, 0)"))).toBe(true);
-        await expect.poll(() => opened.page.evaluate(() => (window as any).__toolAnimationSamples.some((sample: any) => sample.id === "motion-3" && !sample.hidden && sample.transform && sample.transform !== "none" && sample.transform !== "matrix(1, 0, 0, 1, 0, 0)"))).toBe(true);
-      } else {
-        expect(await opened.page.evaluate(() => (window as any).__toolAnimationSamples)).toEqual([]);
-      }
-      await expect(opened.page.locator(".markdown-body").last()).toContainText("MOTION_DONE");
-    } finally {
-      await dispose(opened.context, opened.userDataDirectory, provider.server);
-    }
   }
 });
 
@@ -350,7 +306,7 @@ test("keeps text between tool groups in its chronological position", async () =>
   }
 });
 
-test("groups consecutive reasoning and tool cycles into one bounded activity", async () => {
+test("keeps consecutive reasoning and tool cycles in order", async () => {
   const calls = Array.from({ length: 4 }, (_, index) => ({
     reasoning_content: `REASONING_${index}`,
     tool_calls: [infoCall(`reasoning-tool-${index}`)],
@@ -369,20 +325,20 @@ test("groups consecutive reasoning and tool cycles into one bounded activity", a
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect.poll(async () => (await readEvents(opened.page)).filter((event) => event.type === "tool.finished" && String(event.toolCallId).startsWith("reasoning-tool-")).length).toBe(4);
     const turn = opened.page.locator(".conversation-turn").last();
-    await expect(turn.getByTestId("reasoning-item")).toHaveCount(1);
+    await expect(turn.getByTestId("reasoning-item")).toHaveCount(4);
     await expect(turn.getByTestId("live-tool-calls")).toHaveCount(1);
     await expect(turn.getByTestId("tool-group-summary")).toHaveCount(0);
-    const rows = turn.getByTestId("live-tool-viewport").locator('[data-tool-id]:not([aria-hidden="true"])');
-    await expect.poll(() => rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-tool-id")))).toEqual([
-      expect.stringMatching(/^reasoning:/), "reasoning-tool-3", expect.stringMatching(/^waiting:/),
-    ]);
+    const viewport = turn.getByTestId("live-tool-viewport");
+    await expect(viewport.locator('[data-tool-id^="reasoning:"]')).toHaveCount(4);
+    await expect(viewport.locator('[data-tool-id^="reasoning-tool-"]')).toHaveCount(4);
+    await expect(viewport.locator('[data-tool-id^="waiting:"]')).toHaveCount(5);
     await expect(turn.getByTestId("live-tool-viewport").getByTestId("waiting-status")).toBeVisible();
-    await expect(turn.getByTestId("reasoning-item")).toHaveClass("activity transcript-activity");
+    await expect(turn.getByTestId("reasoning-item").last()).toHaveClass("activity transcript-activity");
     await expect(turn.locator(".markdown-body", { hasText: "REASONING_CYCLES_DONE" })).toBeVisible();
     await expect(turn.getByTestId("live-tool-calls")).toHaveCount(0);
     await expect(turn.getByTestId("tool-group-summary")).toHaveCount(1);
     await expect(turn.getByTestId("reasoning-item")).toHaveCount(1);
-    await expect(turn.getByTestId("reasoning-item")).toHaveClass("activity transcript-activity");
+    await expect(turn.getByTestId("reasoning-item").last()).toHaveClass("activity transcript-activity");
     await expect(turn.getByTestId("reasoning-item").locator("summary")).toHaveCount(0);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
