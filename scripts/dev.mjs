@@ -68,7 +68,7 @@ async function main() {
   try {
     context = await chromium.launchPersistentContext(profilePath, {
       channel: "chrome",
-      chromiumSandbox: true,
+      chromiumSandbox: false,
       headless: false,
       colorScheme: null,
       viewport: null,
@@ -108,7 +108,7 @@ async function main() {
   } catch (error) {
     throw new Error(`无法加载 Surf Wax 开发扩展；请更新系统 Chrome，并检查 ${extensionPath}/manifest.json 和 Vite 编译错误。\n${error.message}`, { cause: error });
   }
-  console.log(`开发浏览器：${context.browser().version()}（系统 Chrome，沙箱已启用）。`);
+  console.log(`开发浏览器：${context.browser().version()}（系统 Chrome，沙箱已关闭）。`);
   const pageSession = await context.newCDPSession(page);
   const { windowId } = await pageSession.send("Browser.getWindowForTarget");
   await browserSession.send("Browser.setWindowBounds", {
