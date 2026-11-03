@@ -59,3 +59,37 @@ it("reviews an answer delivered alongside completion without requiring a summary
   expect(reviews).toBe(1);
   expect(result.toolResults).toEqual(expect.arrayContaining([expect.objectContaining({ toolName: "complete_goal", output: { ok: true, taskType: "answer", status: "completed" } })]));
 });
+
+it("returns a canonical timeout result when independent completion review never returns", async () => {
+  const { vi } = await import("vitest");
+  const { GOAL_TOOL_TIMEOUT_MS } = await import("./runner");
+  const { testEventStore } = await import("../test-event-store");
+  vi.useFakeTimers();
+  try {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: testEventStore(events) });
+    let reviewSignal: AbortSignal | undefined;
+    let actions = 0;
+    const model = new MockLanguageModelV4({ doGenerate: async ({ prompt, abortSignal }) => {
+      if (prompt.some((message) => message.role === "system" && message.content.startsWith("SURFWAX_GOAL_REVIEW"))) {
+        reviewSignal = abortSignal;
+        return new Promise<never>(() => {});
+      }
+      actions++;
+      return { content: actions === 1
+        ? [{ type: "tool-call" as const, toolCallId: "completion", toolName: "complete_goal", input: JSON.stringify({ taskType: "answer", status: "completed" }) }]
+        : [{ type: "text" as const, text: "Completion review timed out; the task remains available to continue." }],
+      finishReason: { unified: actions === 1 ? "tool-calls" as const : "stop" as const, raw: actions === 1 ? "tool_calls" : "stop" }, usage, warnings: [] };
+    } });
+    const executor = { browserContext: async () => ({ tabs: [] }) } as unknown as ChromeExecutor;
+    const pending = createAgent({ model: { baseURL: "https://test/v1", model: "test", contextWindowOverride: 1_000_000 }, languageModel: model,
+      executor, logger, goalMode: true }).generate({ prompt: "Answer this question." });
+    await vi.waitFor(() => expect(reviewSignal).toBeDefined());
+    await vi.advanceTimersByTimeAsync(GOAL_TOOL_TIMEOUT_MS);
+    await pending;
+    expect(reviewSignal!.aborted).toBe(true);
+    const terminals = events.filter((event) => event.toolCallId === "completion" && ["tool.finished", "tool.failed"].includes(event.type));
+    expect(terminals).toHaveLength(1);
+    expect(terminals[0]).toMatchObject({ type: "tool.failed", output: { ok: false, error: { code: "timeout" } } });
+  } finally { vi.useRealTimers(); }
+});

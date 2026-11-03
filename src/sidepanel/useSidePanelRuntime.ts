@@ -36,7 +36,7 @@ export function useSidePanelRuntime(config: ModelConfig, systemPrompt: string | 
   latest.current = { config, systemPrompt, goalMode };
   const runtime = useMemo(() => new ConversationStore(logger, (conversationId) => {
     const { config, systemPrompt, goalMode } = latest.current;
-    return createChatTransport(async (signal, branchIds, _resumed, onResponse, shouldYield) => {
+    return createChatTransport(async (signal, branchIds, _resumed, onResponse, shouldYield, contextAnchor) => {
       signal.throwIfAborted();
       const reasoning = reasoningSettingsFor(config);
       await reasoning.ready;
@@ -44,7 +44,7 @@ export function useSidePanelRuntime(config: ModelConfig, systemPrompt: string | 
       signal.throwIfAborted();
       const prompt = await ensureConversationPrompt(logger, conversationId, systemPrompt, branchIds);
       return createAgent({ model: config, languageModel, reasoning: reasoning.snapshot().selected ?? undefined, executor, logger, conversationId,
-        instructions: systemPrompt, prompt, signal, onResponse, shouldYield, goalMode,
+        instructions: systemPrompt, prompt, signal, onResponse, shouldYield, contextAnchor, goalMode,
         compactor: new ContextCompactor({ model: config, logger, conversationId, branchIds, signal, prompt }) });
     }, logger, conversationId, () => executor.endRun(), async (signal) => {
       const prompt = await ensureConversationPrompt(logger, conversationId, systemPrompt);

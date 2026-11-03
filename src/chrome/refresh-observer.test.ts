@@ -43,6 +43,26 @@ function harness(inspect = vi.fn<() => Promise<unknown>>(async () => ({ snapshot
 afterEach(() => vi.unstubAllGlobals());
 
 describe("observePageRefreshes", () => {
+  it("reports a stalled load once without collecting unfinished content, then delivers its eventual completion", async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    try {
+      h.update("loading");
+      const pending = h.observer.drain();
+      await vi.advanceTimersByTimeAsync(15_000);
+      const messages = await pending;
+      expect(h.inspect).not.toHaveBeenCalled();
+      expect(messages).toHaveLength(1);
+      expect(JSON.stringify(messages)).toContain("loadIncomplete");
+      expect(JSON.stringify(messages)).toContain("No snapshot was captured");
+      expect(h.observer.hasPending?.()).toBe(false);
+      expect(await h.observer.drain()).toEqual([]);
+      h.update("complete");
+      expect(h.observer.hasPending?.()).toBe(true);
+      expect(JSON.stringify(await h.observer.drain())).toContain("loaded page");
+      expect(h.inspect).toHaveBeenCalledOnce();
+    } finally { h.observer.dispose(); vi.useRealTimers(); }
+  });
   it("records the precise load still blocking delivery without changing the wait", async () => {
     vi.useFakeTimers();
     try {

@@ -135,7 +135,9 @@ test("panel reload interrupts a background wait while retaining the preceding br
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: "1" }); return textResponse("RESTART_RECEIPTS_VERIFIED"); },
     );
     await target.bringToFront(); await expect(opened.page.getByTestId("interrupted-message")).toBeVisible();
-    await opened.page.getByTestId("continue-interrupted").click();
+    await expect(opened.page.getByTestId("continue-interrupted")).toHaveCount(0);
+    await opened.page.getByTestId("composer-input").fill("Continue the interrupted work using the saved receipts.");
+    await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("RESTART_RECEIPTS_VERIFIED");
     const events = await readEvents(opened.page);
     const status = events.find((event) => event.toolCallId === "reloaded-status" && ["tool.failed", "tool.finished"].includes(event.type))?.output;

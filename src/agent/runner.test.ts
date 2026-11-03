@@ -138,7 +138,10 @@ describe("createAgent", () => {
     [{ providerId: "anthropic", sdk: "@ai-sdk/anthropic", baseURL: "https://api.anthropic.com/v1", model: "custom", contextWindowOverride: 256_000 }, 128_000],
     [{ providerId: "anthropic", sdk: "@ai-sdk/anthropic", baseURL: "https://api.anthropic.com/v1", model: "custom", contextWindowOverride: 256_000, maxTokensOverride: 77_777 }, 77_777],
     [{ providerId: "gitlab", sdk: "gitlab-ai-provider", baseURL: "", model: "duo-chat-claude-sonnet-4-5", canonicalModelId: "anthropic/claude-sonnet-4-5", modelFamily: "claude", contextWindowOverride: 256_000 }, 128_000],
-  ] as [ModelConfig, number][])("applies Anthropic output limits for %j", async (config, expected) => {
+    [{ providerId: "openai", sdk: "@ai-sdk/openai", baseURL: "https://api.openai.com/v1", model: "custom", contextWindowOverride: 256_000, maxTokensOverride: 1234 }, 1234],
+    [{ providerId: "google", sdk: "@ai-sdk/google", baseURL: "", model: "custom", contextWindowOverride: 256_000, maxTokensOverride: 4567 }, 4567],
+    [{ providerId: "custom", sdk: "@ai-sdk/openai-compatible", baseURL: "https://test/v1", model: "custom", contextWindowOverride: 256_000 }, 128_000],
+  ] as [ModelConfig, number][])("applies output limits for %j", async (config, expected) => {
     const model = new MockLanguageModelV4({ doGenerate: async (options) => { expect(options.maxOutputTokens).toBe(expected); return text(); } });
     expect((await createAgent({ model: config, languageModel: model, executor: browserExecutor() }).generate({ prompt: "hello" })).text).toBe("done");
   });
@@ -389,7 +392,7 @@ describe("createAgent", () => {
     const model = new MockLanguageModelV4({ doGenerate: async () => text(++step === 1 ? dsml : "done") });
     const result = await createAgent({ model: config, languageModel: model, executor, logger, conversationId: "conversation" }).generate({ prompt: "scroll" });
     expect(step).toBe(2);
-    expect(executor.runProgram).toHaveBeenCalledWith(expect.objectContaining({ code: expect.stringContaining("currentPage.goto(input.url)") }), undefined, expect.any(Object));
+    expect(executor.runProgram).toHaveBeenCalledWith(expect.objectContaining({ code: expect.stringContaining("currentPage.goto(input.url)") }), expect.any(AbortSignal), expect.any(Object));
     expect(result.steps.flatMap((step) => step.toolResults)).toHaveLength(1);
     expect(result.text).toBe("done");
     await logger.flush();

@@ -1,4 +1,3 @@
-import { usePanelRuntime } from "@/sidepanel/runtime-view";
 import { CopyIcon, PencilIcon } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -12,11 +11,9 @@ import { ToolGroupView, toolGroupAt, type ToolTimeline } from "./tool-timeline";
 
 import { useRuntimeView, type MessageView } from "@/sidepanel/runtime-view";
 export type { MessageView } from "@/sidepanel/runtime-view";
-export const CONTINUE_INTERRUPTED_TEXT = "继续上一次被中断的工作。不要重复已经完成的操作；先根据上面的工具结果确认当前状态。";
 type RowProps = { message: MessageView; messages: readonly MessageView[]; running: boolean; locked: boolean;
   command: (action: () => void | Promise<unknown>) => void; latest: boolean; timeline: ToolTimeline };
 export const MessageRow = memo(function MessageRow({ message, messages, running, locked, command, latest, timeline }: RowProps) {
-  const runtimeCommands = usePanelRuntime();
   const runtime = useRuntimeView();
   const client = () => runtime.thread.getMessageById(message.id);
   const [editing, setEditing] = useState(false);
@@ -73,7 +70,7 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
         </div>}
       </form> : renderParts()}
       {!user && message.metadata.custom?.interrupted === true && <div className="interrupted-message" data-testid="interrupted-message">
-        <span>回复已中断</span>{latest && <Button type="button" size="sm" variant="outline" disabled={locked} data-testid="continue-interrupted" onClick={() => command(() => runtimeCommands.thread.append(CONTINUE_INTERRUPTED_TEXT))}>继续</Button>}
+        <span>回复已中断</span>
       </div>}
       {message.status?.type === "incomplete" && message.status.reason === "error" && <ErrorNotice summary="模型请求失败。" error={message.status.error} />}
       {copyError !== undefined && <ErrorNotice summary="复制失败。" error={copyError} />}

@@ -260,8 +260,7 @@ p {
   line-height: var(--transcript-line-height);
 }
 
-.markdown-body :is(h1, h2, h3, h4, h5, h6, pre, code),
-[data-streamdown="table-fullscreen"] code { line-height: var(--transcript-line-height); }
+.markdown-body :is(h1, h2, h3, h4, h5, h6, pre, code) { line-height: var(--transcript-line-height); }
 .markdown-body h1 { font-size: var(--markdown-h1-size); }
 .markdown-body h2 { font-size: var(--markdown-h2-size); }
 .markdown-body h3 { font-size: var(--markdown-h3-size); }
@@ -271,11 +270,10 @@ p {
 .markdown-body code,
 .markdown-body pre { font-size: var(--markdown-code-size); }
 
-:is(.markdown-body, [data-streamdown="table-fullscreen"]) [data-streamdown="table"] :is(th, td) {
+.markdown-body [data-streamdown="table"] :is(th, td) {
   font-size: var(--message-body-size);
 }
 
-[data-streamdown="table-fullscreen"] code { font-size: var(--markdown-code-size); }
 
 /* Text blocks and tool summaries share the message's single vertical flow. */
 .markdown-body {
@@ -316,12 +314,12 @@ p {
   max-width: 100%;
 }
 
-:is(.markdown-body, [data-streamdown="table-fullscreen"]) [data-streamdown="table"] {
+.markdown-body [data-streamdown="table"] {
   width: max-content;
   min-width: 100%;
 }
 
-:is(.markdown-body, [data-streamdown="table-fullscreen"]) [data-streamdown="table"] :is(th, td) {
+.markdown-body [data-streamdown="table"] :is(th, td) {
   min-width: 9rem;
   max-width: 18rem;
   padding: 0.5rem 0.75rem;
@@ -330,7 +328,7 @@ p {
   word-break: normal;
 }
 
-:is(.markdown-body, [data-streamdown="table-fullscreen"]) [data-streamdown="table-body"] tr:nth-child(even) {
+.markdown-body [data-streamdown="table-body"] tr:nth-child(even) {
   background: var(--muted);
 }
 

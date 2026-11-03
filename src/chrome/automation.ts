@@ -56,7 +56,7 @@ type FrameListSnapshot = { id: string; session: Session; generation: number; rev
 type InspectSnapshot = {
   id: string; session: Session; generation: number; frameRevision: number; conversationId?: string; runId?: string;
   record: ObservationRecord; source: SnapshotItem[]; mode: "full" | "delta"; reset?: string;
-  expected?: SnapshotPosition; eligibleForBaseline: boolean; delivery?: symbol;
+  expected?: SnapshotPosition; eligibleForBaseline: boolean; baseObservationId?: string; delivery?: symbol;
   geometry: string; geometrySources: Debuggee[]; geometryDynamicParents?: Map<string, Set<number>>;
 };
 
@@ -98,12 +98,13 @@ type SearchSnapshot = {
   conversationId?: string; runId?: string; debuggee: Debuggee; total: number;
   candidates?: Candidate[]; arrayId?: string; group?: string;
 };
-export type InspectOptions = { cursor?: string; since?: string; fields?: Array<"text" | "state" | "ref" | "actions">; budget?: number; offset?: number; limit?: number; depth?: number; recentRefs?: readonly string[]; wire?: { maxBytes: number; evidenceId: string }; deferDelivery?: boolean };
+export type InspectOptions = { full?: boolean; incremental?: boolean; cursor?: string; since?: string; fields?: Array<"text" | "state" | "ref" | "actions">; budget?: number; offset?: number; limit?: number; depth?: number; recentRefs?: readonly string[]; wire?: { maxBytes: number; evidenceId: string }; deferDelivery?: boolean };
 type ObservationRecord = {
   session: Session;
   observationId: string;
   tabId: number;
   documentId: number;
+  frameRevision?: number;
   url: string;
   title: string;
   lines: SnapshotLine[];
@@ -915,6 +916,15 @@ export class AutomationRuntime {
     });
   }
 
+  private deliveredBaselines = new WeakSet<ObservationRecord>();
+  /** Compaction removes the model's exact baseline, even while the document lives. */
+  resetSnapshotBaselines(): void {
+    this.deliveredBaselines = new WeakSet();
+    // Invalidate cursors and outstanding delivery leases too: their deltas may
+    // refer to page content that compaction removed from the model's context.
+    this.inspectionSnapshots.clear();
+  }
+
   private rememberObservation(record: ObservationRecord): void {
     this.observations.delete(record.observationId);
     this.observations.set(record.observationId, record);
@@ -962,20 +972,32 @@ export class AutomationRuntime {
         guard();
         if (await snapshotGeometry(currentGeometry, saved.geometryDynamicParents) !== saved.geometry)
           throw automationError("stale-observation", { reason: "snapshot-geometry-changed" });
+        if (this.inspectionSnapshots.get(saved.id) !== saved)
+          throw automationError("stale-observation", { reason: "snapshot-context-reset" });
         this.rememberObservation(saved.record);
         position = { index: Number(match[2]), charOffset: Number(match[3]) };
         this.inspectionSnapshots.delete(saved.id); this.inspectionSnapshots.set(saved.id, saved);
       } else {
         const fields = options.fields ?? ["text", "state", "ref"];
         const scopeKey = JSON.stringify([region ?? null, fields, options.depth ?? null]);
-        const previous = options.since ? this.observations.get(options.since) : undefined;
-        if (options.since && (!previous || previous.session !== session || previous.tabId !== tabId || previous.documentId !== generation || previous.scopeKey !== scopeKey))
+        const automatic = options.incremental && options.offset === undefined
+          ? [...this.inspectionSnapshots.values()].reverse().find((snapshot) => snapshot.session === session
+            && snapshot.generation === generation && snapshot.frameRevision === session.frameRevision
+            && snapshot.conversationId === conversationId && snapshot.runId === runId
+            && snapshot.record.scopeKey === scopeKey && !snapshot.record.incomplete && !snapshot.record.partial
+            // Old refs may be retired by this capture. diffSnapshot emits every
+            // replacement ref, so only the newly captured result must be live.
+            && this.deliveredBaselines.has(snapshot.record))?.record : undefined;
+        const previous = options.since ? this.observations.get(options.since) : automatic;
+        const pinned = options.since ? this.inspectionSnapshots.get(options.since) : undefined;
+        if (options.since && (!previous || !pinned || pinned.conversationId !== conversationId || pinned.runId !== runId
+          || pinned.frameRevision !== session.frameRevision || previous.session !== session || previous.tabId !== tabId || previous.documentId !== generation || previous.scopeKey !== scopeKey))
           throw automationError("stale-observation", { observationId: options.since, reason: "document-or-scope-changed" });
         const captured = await this.captureSnapshot(session, region);
         guard();
         if (captured.frameRevision !== session.frameRevision) throw automationError("stale-observation", { reason: "frame-tree-changed-during-inspection" });
         if (previous && previous.documentId !== session.generation) throw automationError("stale-observation", { observationId: options.since, reason: "document-changed-during-inspection" });
-        if (previous && previous.regionIdentity !== captured.regionIdentity) throw automationError("stale-observation", { observationId: options.since, reason: "region-identity-changed" });
+        if (options.since && previous && previous.regionIdentity !== captured.regionIdentity) throw automationError("stale-observation", { observationId: options.since, reason: "region-identity-changed" });
         const lines: SnapshotLine[] = captured.lines.filter(({ node, line }) => options.depth === undefined || (node?.depth ?? (line.match(/^ */)?.[0].length ?? 0) / 2) <= options.depth)
           .map(({ id, line, node }) => {
             if (!node) return { id, line };
@@ -989,7 +1011,8 @@ export class AutomationRuntime {
         guard();
         if (captured.frameRevision !== session.frameRevision) throw automationError("stale-observation", { reason: "frame-tree-changed-during-inspection" });
         const observationId = crypto.randomUUID();
-        const baseline = previous && !previous.incomplete && !previous.partial && !captured.partial ? previous : undefined;
+        const baseline = previous && previous.regionIdentity === captured.regionIdentity && previous.frameRevision === captured.frameRevision
+          && this.deliveredBaselines.has(previous) && !previous.incomplete && !previous.partial && !captured.partial ? previous : undefined;
         const changes = baseline ? diffSnapshot(baseline.lines, lines) : undefined;
         const source = changes ?? lines;
         const index = options.offset ?? 0;
@@ -997,7 +1020,7 @@ export class AutomationRuntime {
         position = { index, charOffset: 0 };
         const record: ObservationRecord = { session, observationId, tabId, documentId: generation, ...captured, lines, viewport, scopeKey, incomplete: true };
         this.rememberObservation(record);
-        saved = { id: observationId, session, generation, frameRevision: captured.frameRevision, conversationId, runId, record, source, mode: changes ? "delta" : "full", geometry: captured.geometry, geometrySources: captured.geometrySources, geometryDynamicParents: captured.geometryDynamicParents,
+        saved = { id: observationId, session, generation, frameRevision: captured.frameRevision, conversationId, runId, record, source, mode: changes ? "delta" : "full", ...(changes ? { baseObservationId: baseline!.observationId } : {}), geometry: captured.geometry, geometrySources: captured.geometrySources, geometryDynamicParents: captured.geometryDynamicParents,
           ...(captured.partial && previous ? { reset: "current-output-partial" } : previous?.partial ? { reset: "previous-output-partial" } : previous?.incomplete ? { reset: "previous-output-truncated" } : {}), expected: position, eligibleForBaseline: index === 0 && !captured.partial };
         this.inspectionSnapshots.set(saved.id, saved);
         while (this.inspectionSnapshots.size > 32) this.inspectionSnapshots.delete(this.inspectionSnapshots.keys().next().value!);
@@ -1012,7 +1035,7 @@ export class AutomationRuntime {
         const baselineComplete = !saved.record.partial && (!saved.record.incomplete || advances && !page.hasMore && saved.eligibleForBaseline);
         return { observationId: saved.id, tabId, documentId: generation,
           ...(options.cursor === undefined ? { url: saved.record.url, title: saved.record.title } : { continuation: true }), viewport: saved.record.viewport,
-          mode: saved.mode, ...(saved.record.partial ? { partial: true } : {}), ...(saved.reset ? { reset: saved.reset } : {}),
+          mode: saved.mode, ...(saved.baseObservationId ? { baseObservationId: saved.baseObservationId } : {}), ...(saved.record.partial ? { partial: true } : {}), ...(saved.reset ? { reset: saved.reset } : {}),
           items: page.fragments, ...(candidate.lookahead ? { lookahead: candidate.lookahead } : {}),
           ...(page.next ? { nextCursor: `${saved.id}:${page.next.index}:${page.next.charOffset}` } : {}),
           truncation: { truncated, total: saved.source.length, returned: page.fragments.length, offset: position.index, charOffset: position.charOffset,
@@ -1043,7 +1066,7 @@ export class AutomationRuntime {
         && saved.conversationId === conversationId && saved.runId === runId
         && !page.fragments.some((item) => item.ref && !session.refs.has(item.ref));
       const atPosition = () => Boolean(saved.expected && saved.expected.index === position.index && saved.expected.charOffset === position.charOffset);
-      const advance = () => { saved.expected = page.next; if (!page.hasMore && saved.eligibleForBaseline) record.incomplete = false; };
+      const advance = () => { saved.expected = page.next; if (!page.hasMore && saved.eligibleForBaseline) { record.incomplete = false; this.deliveredBaselines.add(record); } };
       if (options.wire || options.deferDelivery) {
         const token = Symbol("inspection-delivery"), shouldAdvance = advances;
         let state: "prepared" | "pending" | "finished" | "canceled" = "prepared";

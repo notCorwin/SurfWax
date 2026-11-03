@@ -463,7 +463,6 @@ describe("AutomationRuntime", () => {
     vi.useFakeTimers();
     try {
       const first = tools.click.execute(calls[0]!.input, { toolCallId: "3" });
-      const second = tools.click.execute(calls[1]!.input, { toolCallId: "4" });
       await inspecting;
       await vi.advanceTimersByTimeAsync(15_000);
       const result = await first;
@@ -471,6 +470,8 @@ describe("AutomationRuntime", () => {
       if (ok) expect(result.result).toEqual({ performed: true });
       else expect(result.error.code).toBe("click-failed");
       expect(result).not.toHaveProperty("pageSnapshot");
+      scheduler.prepare([calls[1]!], 3);
+      const second = tools.click.execute(calls[1]!.input, { toolCallId: "4" });
       expect(await second).toMatchObject({ ok: true, result: "next", pageSnapshot: { mode: "full" } });
     } finally { vi.useRealTimers(); executor.dispose(); }
   });
@@ -2466,6 +2467,75 @@ describe("AutomationRuntime", () => {
     await runtime.abortSessions();
   });
 
+  it("automatically reuses only a completely delivered model snapshot and resets after compaction or navigation", async () => {
+    const metadata = [{ role: "button", name: "Save", tag: "button", text: "Save" }];
+    const { runtime } = harness(metadata);
+    const page = await runtime.createPage(3);
+    const options = { incremental: true, wire: { maxBytes: 5000, evidenceId: "call" } };
+    const first = await page.inspect(options) as any;
+    expect(first.mode).toBe("full");
+    // Merely preparing a page is insufficient evidence that the model has it.
+    const undelivered = await page.inspect(options) as any;
+    expect(undelivered.mode).toBe("full");
+    const lease = first[SNAPSHOT_DELIVERY_COMMIT];
+    expect(lease.begin()).toBe(true); lease.finish();
+    metadata[0]!.name = "Continue"; metadata[0]!.text = "Continue";
+    const delta = await page.inspect(options) as any;
+    expect(delta).toMatchObject({ mode: "delta", baseObservationId: first.observationId,
+      items: [expect.objectContaining({ change: "updated", line: expect.stringContaining("Continue") })] });
+    runtime.resetSnapshotBaselines();
+    expect(delta[SNAPSHOT_DELIVERY_COMMIT].begin()).toBe(false);
+    await expect(page.inspect({ ...options, since: first.observationId })).rejects.toMatchObject({ code: "stale-observation" });
+    await expect(page.inspect({ cursor: `${first.observationId}:0:0` })).rejects.toMatchObject({ code: "stale-observation" });
+    expect(await page.inspect(options)).toMatchObject({ mode: "full" });
+    runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "root" } });
+    expect(await page.inspect(options)).toMatchObject({ mode: "full" });
+    await runtime.abortSessions();
+  });
+
+  it("never automatically bases a delta on an incomplete paginated delivery", async () => {
+    const { runtime } = harness(Array.from({ length: 6 }, (_, index) => ({ role: "button", name: `Row ${index}`, tag: "button" })));
+    const page = await runtime.createPage(3);
+    const options = { incremental: true, limit: 1, wire: { maxBytes: 5000, evidenceId: "call" } };
+    const first = await page.inspect(options) as any;
+    expect(first.nextCursor).toBeTypeOf("string");
+    expect(first[SNAPSHOT_DELIVERY_COMMIT].begin()).toBe(true);
+    first[SNAPSHOT_DELIVERY_COMMIT].finish();
+    expect(await page.inspect(options)).toMatchObject({ mode: "full" });
+    let next = first;
+    while (next.nextCursor) {
+      next = await page.inspect({ cursor: next.nextCursor, limit: 1, wire: options.wire }) as any;
+      expect(next[SNAPSHOT_DELIVERY_COMMIT].begin()).toBe(true);
+      next[SNAPSHOT_DELIVERY_COMMIT].finish();
+    }
+    expect(await page.inspect(options)).toMatchObject({ mode: "delta", baseObservationId: first.observationId, items: [] });
+    await runtime.abortSessions();
+  });
+
+  it("cannot revive a frozen cursor when compaction occurs during its geometry request", async () => {
+    const { runtime, command } = harness(Array.from({ length: 6 }, (_, index) => ({ role: "button", name: `Row ${index}`, tag: "button" })));
+    const page = await runtime.createPage(3);
+    const first = await page.inspect({ limit: 1 }) as any;
+    expect(first.nextCursor).toBeTypeOf("string");
+    let enter!: () => void, resume!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const paused = new Promise<void>(resolve => { resume = resolve; });
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOMSnapshot.captureSnapshot") { enter(); await paused; }
+      return original(source, method, params);
+    });
+    const pending = page.inspect({ cursor: first.nextCursor, limit: 1 });
+    await entered;
+    runtime.resetSnapshotBaselines();
+    resume();
+    await expect(pending).rejects.toMatchObject({ code: "stale-observation", detail: { reason: "snapshot-context-reset" } });
+    await expect(page.inspect({ cursor: first.nextCursor })).rejects.toMatchObject({ code: "stale-observation" });
+    await expect(page.inspect({ since: first.observationId })).rejects.toMatchObject({ code: "stale-observation" });
+    expect(await page.inspect({ incremental: true })).toMatchObject({ mode: "full" });
+    await runtime.abortSessions();
+  });
+
   it("rejects out-of-order or stale prepared pages without advancing the frozen baseline", async () => {
     const { runtime } = harness(Array.from({ length: 6 }, (_, index) => ({ role: "button", name: `Row ${index}`, tag: "button" })));
     const page = await runtime.createPage(3), wire = { maxBytes: 5000, evidenceId: "call" };
@@ -2481,7 +2551,8 @@ describe("AutomationRuntime", () => {
     session.frameRevision++;
     expect(stale[SNAPSHOT_DELIVERY_COMMIT].begin()).toBe(false);
     expect(stale[SNAPSHOT_DELIVERY_COMMIT].begin()).toBe(false);
-    expect(await page.inspect({ since: first.observationId })).toMatchObject({ mode: "full", reset: "previous-output-truncated" });
+    await expect(page.inspect({ since: first.observationId })).rejects.toMatchObject({ code: "stale-observation" });
+    expect(await page.inspect({ incremental: true })).toMatchObject({ mode: "full" });
     await runtime.abortSessions();
   });
 

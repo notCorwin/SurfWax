@@ -1,25 +1,24 @@
-import { convertToModelMessages, type LanguageModel, type ModelMessage, type UIMessage } from "ai";
-import { activeConversationMessages, isSyntheticTerminalMessage, restoreConversationRepository } from "../conversations";
-import { fromLogValue, isConversationMessage, type ConversationMessage, type EventLogger, type LogEvent } from "../logging";
+import { type LanguageModel, type ModelMessage } from "ai";
+import { isSyntheticTerminalMessage, restoreConversationRepository } from "../conversations";
+import { conversationMessageHeader, type ConversationMessage, type EventLogger, type LogEvent } from "../logging";
 import type { ModelConfig } from "../types";
 import { contextPressure, effectiveContext, hasSummarizableHistory, summarizeContext } from "./compaction";
 import { createModel } from "./model";
 import type { ModelLimit } from "./model-limits";
-import { materializeToolCatalog } from "./tool-catalog";
-import { replayGoalContinuations } from "./goal-context";
+import { projectModelMessages } from "./context-projection";
 
 export async function modelMessages(messages: ConversationMessage[], events: readonly LogEvent[] = []): Promise<ModelMessage[]> {
-  return convertToModelMessages(replayGoalContinuations(messages as UIMessage[], events).map(materializeToolCatalog) as UIMessage[], { ignoreIncompleteToolCalls: true });
+  return projectModelMessages(messages, events);
 }
 
 export async function activeContext(logger: EventLogger, conversationId: string) {
-  const ui = await activeConversationMessages(logger, conversationId);
-  const branchIds = ui.map((message) => message.id);
-  const events = await logger.conversation(conversationId);
-  const raw = await modelMessages(ui, events);
-  const { checkpoint, messages } = await effectiveContext(events, branchIds, raw);
-  return { ui, branchIds, raw, events, checkpoint, messages };
+  return new IncrementalActiveContext(logger, conversationId).read();
 }
+
+export type ActiveContextSnapshot = {
+  ui: ConversationMessage[]; raw: ModelMessage[]; events: LogEvent[]; branchIds: string[];
+  checkpoint: Awaited<ReturnType<typeof effectiveContext>>["checkpoint"]; messages: ModelMessage[];
+};
 
 /** Per-run cache of the canonical events needed for the model-visible branch.
  * Message updates replace their previous projection; the first raw and first valid
@@ -29,25 +28,26 @@ export class IncrementalActiveContext {
   private epoch?: string;
   private afterId = -1;
   private others: LogEvent[] = [];
+  private snapshot?: ActiveContextSnapshot;
   private messages = new Map<string, { firstRaw: LogEvent; firstValid?: LogEvent; latestValid?: LogEvent }>();
 
   constructor(private logger: EventLogger, private conversationId: string) {}
 
-  async read(): Promise<{ messages: ModelMessage[] }> {
+  async read(): Promise<ActiveContextSnapshot> {
     let batch = await this.logger.contextProjectionEvents(this.conversationId, this.afterId);
     if (this.epoch !== undefined && this.epoch !== batch.epoch) {
-      this.afterId = -1; this.others = []; this.messages.clear();
+      this.afterId = -1; this.others = []; this.messages.clear(); this.snapshot = undefined;
       batch = await this.logger.contextProjectionEvents(this.conversationId);
     }
     this.epoch = batch.epoch;
+    if (!batch.value.length && this.snapshot) return this.snapshot;
     for (const event of batch.value) {
       this.afterId = Math.max(this.afterId, event.id);
       if (event.type !== "conversation.message") { this.others.push(event); continue; }
-      const value = fromLogValue(event.content, event.valueEncoding);
-      const id = value && typeof value === "object" && !Array.isArray(value) ? (value as { id?: unknown }).id : undefined;
-      if (typeof id !== "string") { this.others.push(event); continue; }
+      const header = conversationMessageHeader(event);
+      if (!header) { this.others.push(event); continue; }
+      const { id, valid } = header;
       const previous = this.messages.get(id);
-      const valid = isConversationMessage(value);
       this.messages.set(id, { firstRaw: previous?.firstRaw ?? event,
         firstValid: previous?.firstValid ?? (valid ? event : undefined), latestValid: valid ? event : previous?.latestValid });
     }
@@ -69,8 +69,9 @@ export class IncrementalActiveContext {
       id = item.parentId;
     }
     const raw = await modelMessages(ui, projected);
-    const { messages } = await effectiveContext(projected, ui.map((message) => message.id), raw);
-    return { messages };
+    const branchIds = ui.map((message) => message.id);
+    const { checkpoint, messages } = await effectiveContext(projected, branchIds, raw);
+    return this.snapshot = { ui, raw, events: projected, branchIds, checkpoint, messages };
   }
 }
 
@@ -78,12 +79,12 @@ export class IncrementalActiveContext {
 export async function ensureAutomaticContextSummary(
   logger: EventLogger, conversationId: string, model: ModelConfig, signal: AbortSignal,
   options: { forced?: boolean; languageModel?: LanguageModel; limit?: ModelLimit;
-    instructions?: unknown; tools?: readonly Record<string, unknown>[] } = {},
+    instructions?: unknown; tools?: readonly Record<string, unknown>[]; goalMode?: boolean } = {},
 ): Promise<boolean> {
   signal.throwIfAborted();
   const source = await activeContext(logger, conversationId);
   const pressure = await contextPressure({ raw: source.raw, branchIds: source.branchIds, events: source.events,
-    model, signal, limit: options.limit, instructions: options.instructions, tools: options.tools });
+    model, signal, limit: options.limit, instructions: options.instructions, tools: options.tools, goalMode: options.goalMode });
   if (!options.forced && (!pressure || pressure.estimated <= pressure.threshold)) return false;
   if (!options.forced && pressure && !hasSummarizableHistory(pressure.messages, pressure.limit)) return false;
   if (!source.raw.length) return false;

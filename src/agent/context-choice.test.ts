@@ -160,3 +160,24 @@ describe("incremental canonical context", () => {
     expect(reads[0]![2]).toBe(firstId);
   });
 });
+
+
+it("does not decode obsolete payloads while hydrating an incremental context and reuses its idle projection", async () => {
+  const { IncrementalActiveContext } = await import("./context-choice");
+  let obsoleteReads = 0, latestReads = 0;
+  const events: LogEvent[] = Array.from({ length: 40 }, (_, index) => ({
+    id: index + 1, type: "conversation.message", timestamp: new Date().toISOString(), conversationId: "c", parentId: null,
+    content: { id: "u", role: "user", parts: [{ type: "text", get text() {
+      if (index < 39) obsoleteReads++; else latestReads++;
+      return index < 39 ? "obsolete ".repeat(1000) : "latest";
+    } }] },
+  }));
+  const logger = { contextProjectionEvents: vi.fn().mockResolvedValueOnce({ value: events, epoch: "epoch" }).mockResolvedValue({ value: [], epoch: "epoch" }) } as unknown as EventLogger;
+  const projection = new IncrementalActiveContext(logger, "c");
+  const first = await projection.read();
+  expect(obsoleteReads).toBe(0);
+  expect(latestReads).toBe(1);
+  expect(first.raw).toEqual([{ role: "user", content: [{ type: "text", text: "latest" }] }]);
+  expect(await projection.read()).toBe(first);
+  expect(latestReads).toBe(1);
+});

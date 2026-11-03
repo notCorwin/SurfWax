@@ -1,6 +1,6 @@
-import { fromLogValue } from "../../src/logging";
+import { fromLogValue, materializeMessageEvent, type LogEvent } from "../../src/logging";
 
-type ToolEvent = { id?: unknown; type?: unknown; conversationId?: unknown; runId?: unknown; toolCallId?: unknown; valueEncoding?: unknown; content?: unknown };
+type ToolEvent = { id?: unknown; type?: unknown; conversationId?: unknown; runId?: unknown; toolCallId?: unknown; valueEncoding?: unknown; content?: unknown; messagePatch?: unknown };
 type Encoding = 2 | 3 | 4 | 5 | undefined;
 
 /** Read identity without decoding the growing parts of every historical snapshot. */
@@ -43,8 +43,24 @@ export function toolLifecycleEvidence(events: readonly ToolEvent[]) {
   const messageEventIds = new Set<number>();
   let invalidIdentities = 0;
   let invalidMessages = 0;
-  for (const event of events) {
+  const byId = new Map(events.flatMap((event) => Number.isSafeInteger(event.id) ? [[Number(event.id), event] as const] : []));
+  const decoded = new Map<number, ToolEvent>();
+  const resolveMessage = (event: ToolEvent): ToolEvent => {
+    if (!event.messagePatch) return event;
+    if (!Number.isSafeInteger(event.id)) throw new Error("Invalid message change ID");
+    if (decoded.has(Number(event.id))) return decoded.get(Number(event.id))!;
+    const patch = event.messagePatch as LogEvent["messagePatch"];
+    if (!patch || !Number.isSafeInteger(patch.baseId) || patch.baseId >= Number(event.id)) throw new Error("Invalid message change dependency");
+    const base = byId.get(patch.baseId);
+    if (!base) throw new Error("Missing message change dependency");
+    const full = materializeMessageEvent(event as LogEvent, resolveMessage(base) as LogEvent);
+    decoded.set(Number(event.id), full);
+    return full;
+  };
+  for (const rawEvent of events) {
+    let event = rawEvent;
     if (event.type === "conversation.message") {
+      try { event = resolveMessage(event); } catch { invalidMessages++; continue; }
       if (event.valueEncoding !== undefined && ![2, 3, 4, 5].includes(event.valueEncoding as number)) { invalidMessages++; continue; }
       const version = event.valueEncoding as Encoding;
       let message: ReturnType<typeof messageHeader>;

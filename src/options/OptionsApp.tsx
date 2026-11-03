@@ -348,7 +348,7 @@ export function OptionsApp() {
                       aria-describedby={fieldErrors.maxTokensOverride ? "max-tokens-error" : "max-tokens-description"} value={config?.maxTokensOverride ?? ""} disabled={busy || !config}
                       onChange={(event) => update("maxTokensOverride", event.target.value)} />
                     {fieldErrors.maxTokensOverride && <p id="max-tokens-error" className="field-error" role="alert">{fieldErrors.maxTokensOverride}</p>}
-                    <FieldDescription id="max-tokens-description">仅 Anthropic 类端点发送；未知模型默认 128,000。</FieldDescription>
+                    <FieldDescription id="max-tokens-description">自动采用模型输出限制，可手动覆盖；未知模型默认 128,000。</FieldDescription>
                   </Field>
                   <Field data-disabled={busy || !config || undefined}>
                     <FieldLabel htmlFor="image-input">视觉能力</FieldLabel>

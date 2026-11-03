@@ -28,8 +28,9 @@ export function useSidePanelSession(): SidePanelSession {
   useEffect(() => {
     let active = true;
     let deferred = false;
+    let hydrated = false;
     let controller: AbortController | undefined;
-    const refresh = async (initial = false) => {
+    const refresh = async () => {
       controller?.abort();
       const current = new AbortController();
       controller = current;
@@ -39,10 +40,13 @@ export function useSidePanelSession(): SidePanelSession {
         // settings snapshot over a newer choice. Options Save persists routing.
         const stored = await loadModelConfig(undefined, undefined, { signal: current.signal, persistMigration: false });
         if (!isCurrent()) return;
-        const running = !initial && await activeRunIdentity();
+        // A catalog commit may supersede the very first read. Only defer
+        // updates after this panel actually has a configuration to retain.
+        const running = hydrated && await activeRunIdentity();
         if (!isCurrent()) return;
         if (running) { deferred = true; return; }
         deferred = false;
+        hydrated = true;
         setModelSettings(stored);
         setError(undefined);
       } catch (cause) {
@@ -58,7 +62,7 @@ export function useSidePanelSession(): SidePanelSession {
       if (deferred && message.type === "surf-wax:run-state" && !message.identity) void refresh();
     };
 
-    void refresh(true);
+    void refresh();
     chrome.storage.onChanged.addListener(storageChanged);
     chrome.runtime.onMessage.addListener(runChanged);
     return () => {

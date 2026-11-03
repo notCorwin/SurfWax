@@ -25,7 +25,7 @@ for (const seed of [17, 72]) test(`reassembles semantic continuations and acts o
   const capture = (nextKind: typeof kind) => {
     kind = nextKind; pages = new SemanticPages(); cursor = undefined;
     responses.unshift(readPage);
-    return commandResponse("inspect_page", { budget: 6000, region: { by: "css", value: "main", frame }, ...(kind === "delta" ? { since: observationId } : {}) }, `semantic-capture-${rounds}-${kind}`);
+    return commandResponse("inspect_page", { budget: 6000, region: { by: "css", value: "main", frame }, ...(kind === "delta" ? { since: observationId } : { full: true }) }, `semantic-capture-${rounds}-${kind}`);
   };
   const act = (ref: string) => {
     responses.unshift(after((result) => {
@@ -61,7 +61,7 @@ for (const seed of [17, 72]) test(`reassembles semantic continuations and acts o
       expect(observation.mode).toBe("full"); state = observation.items;
       expect(state.length).toBeGreaterThanOrEqual(120);
     } else if (kind === "delta") {
-      expect(observation.mode).toBe("delta"); deltaChanges += observation.items.length;
+      expect(observation).toMatchObject({ mode: "delta", baseObservationId: observationId }); deltaChanges += observation.items.length;
       state = applySemanticDelta(state, observation.items);
     } else {
       expect(observation.mode).toBe("full"); expect(observation.items).toEqual(state); freshChecks++;

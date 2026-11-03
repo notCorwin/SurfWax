@@ -1,75 +1,37 @@
 import { expect } from "@playwright/test";
-import {
-  mkdtemp,
-  readFile,
-  rm,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { resolve } from "node:path";
-import { createServer as createViteServer } from "vite";
-import { test,
-  closeServer,
-  configure,
-  openExtension,
-  startProvider,
-  textResponse,
-  commandResponse,
-} from "./fixtures";
+import { test, configure, dispose, openExtension, startProvider, textResponse, commandResponse } from "./fixtures";
 
 test("executes an atomic browser action without crashing the live development extension", async () => {
-  const directory = await mkdtemp(resolve(tmpdir(), "surf-wax-live-dev-"));
-  const extension = resolve(directory, "extension");
-  const previousPort = process.env.SURFWAX_DEV_PORT;
-  const previousOutput = process.env.SURFWAX_DEV_OUT_DIR;
-  process.env.SURFWAX_DEV_PORT = "5273";
-  process.env.SURFWAX_DEV_OUT_DIR = extension;
+  const developmentURL = process.env.SURFWAX_DEV_SERVER_URL;
+  if (!developmentURL) throw new Error("Start this test through the shared development extension setup.");
   const responses: Parameters<typeof startProvider>[0] = [];
-  const provider = await startProvider(responses);
-  const targetUrl = `${provider.origin}/target`;
-  responses.push(commandResponse("navigate", { url: targetUrl }, "development-navigate"), textResponse("DEV_SANDBOX_OK"));
-  const vite = await createViteServer();
-  let opened: Awaited<ReturnType<typeof openExtension>> | undefined;
+  const actual = await startProvider(responses);
+  responses.push(commandResponse("navigate", { url: `${actual.origin}/target` }, "development-navigate"), textResponse("DEV_SANDBOX_OK"));
+  const opened = await openExtension();
   try {
-    await vite.listen();
-    await expect.poll(async () => readFile(resolve(extension, "manifest.json"), "utf8").then(() => true, () => false)).toBe(true);
-    opened = await openExtension(undefined, { extensionPath: extension });
     const target = await opened.context.newPage();
-    await target.goto(targetUrl);
-    const options = await configure(opened.context, opened.page, provider.baseURL);
-    await options.close();
+    await target.goto(`${actual.origin}/target`);
+    await (await configure(opened.context, opened.page, actual.baseURL)).close();
     await target.bringToFront();
     await opened.page.getByTestId("composer-input").fill("run through the development sandbox");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("DEV_SANDBOX_OK");
-    await expect.poll(() => opened!.context.serviceWorkers().length).toBe(1);
-    const gatewayError = await opened.page.evaluate(async () => {
-      const aiUrl = "http://localhost:5273/node_modules/.vite/deps/ai.js";
-      const gatewayUrl = "http://localhost:5273/node_modules/.vite/deps/@ai-sdk_gateway.js";
-      const { generateText } = await import(/* @vite-ignore */ aiUrl);
-      const { GatewayAuthenticationError } = await import(/* @vite-ignore */ gatewayUrl);
+    await expect.poll(() => opened.context.serviceWorkers().length).toBe(1);
+    const gatewayError = await opened.page.evaluate(async (url) => {
+      const { generateText } = await import(/* @vite-ignore */ `${url}/node_modules/.vite/deps/ai.js`);
+      const { GatewayAuthenticationError } = await import(/* @vite-ignore */ `${url}/node_modules/.vite/deps/@ai-sdk_gateway.js`);
       try {
         await generateText({
           model: {
             specificationVersion: "v4", provider: "test", modelId: "test", supportedUrls: {},
             doGenerate: async () => { throw new GatewayAuthenticationError(); },
           },
-          prompt: "test",
-          maxRetries: 0,
+          prompt: "test", maxRetries: 0,
         });
         return { name: "", message: "No error was raised" };
-      } catch (error) {
-        return { name: (error as Error).name, message: (error as Error).message };
-      }
-    });
+      } catch (error) { return { name: (error as Error).name, message: (error as Error).message }; }
+    }, developmentURL);
     expect(gatewayError.name).toBe("GatewayAuthenticationError");
     expect(gatewayError.message).toContain("Unauthenticated request to AI Gateway");
-  } finally {
-    await opened?.context.close().catch(() => undefined);
-    if (opened) await rm(opened.userDataDirectory, { recursive: true, force: true });
-    await vite.close().catch(() => undefined);
-    await closeServer(provider.server);
-    await rm(directory, { recursive: true, force: true });
-    if (previousPort === undefined) delete process.env.SURFWAX_DEV_PORT; else process.env.SURFWAX_DEV_PORT = previousPort;
-    if (previousOutput === undefined) delete process.env.SURFWAX_DEV_OUT_DIR; else process.env.SURFWAX_DEV_OUT_DIR = previousOutput;
-  }
+  } finally { await dispose(opened.context, opened.userDataDirectory, actual.server); }
 });

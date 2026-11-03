@@ -1,4 +1,5 @@
 import { expect, it, vi } from "vitest";
+import { claimConversationRun } from "../agent/coordinator";
 import { restoreConversationRepository } from "../conversations";
 import { EventLogger, type ConversationMessage, type LogEvent } from "../logging";
 import { ConversationStore, createMessageProjection } from "./conversation-store";
@@ -74,7 +75,7 @@ it("reconciles conversation-list writes from another logger before publishing a 
   await runtime.threads.reload();
 
   await otherLogger.append({ type: "conversation.created", conversationId: "external", content: { title: "其他窗口" } });
-  expect(runtime.getState().threads.threadIds).not.toContain("external");
+  await vi.waitFor(() => expect(runtime.getState().threads.threadIds).toContain("external"));
 
   await logger.append({ type: "conversation.created", conversationId: "local", content: { title: "当前窗口" } });
   await vi.waitFor(() => {
@@ -290,7 +291,7 @@ it("always clears running state when the failure baseline cannot be read", async
   expect(runtime.getState().thread.error).toEqual(new Error("IndexedDB unavailable"));
 });
 
-it("persists a submitted user turn before a pending failure baseline can be cancelled", async () => {
+it("does not write a user turn when cancelled while replaying the canonical branch", async () => {
   const events: LogEvent[] = [];
   const logger = new EventLogger({ store: {
     async append(event) { const stored = { ...event, id: events.length + 1 }; events.push(stored); return stored; },
@@ -305,11 +306,12 @@ it("persists a submitted user turn before a pending failure baseline can be canc
   const original = logger.restorationEvents.bind(logger);
   vi.spyOn(logger, "restorationEvents").mockImplementationOnce(async (...args) => { await baseline; return original(...args); });
   const running = runtime.thread.append("keep this turn");
-  await vi.waitFor(() => expect(events.some((event) => event.type === "conversation.message")).toBe(true));
+  await vi.waitFor(() => expect(logger.restorationEvents).toHaveBeenCalled());
+  expect(events.some((event) => event.type === "conversation.message")).toBe(false);
   runtime.thread.cancelRun();
   release();
   await running;
-  expect(events.find((event) => event.type === "conversation.message")?.content).toMatchObject({ role: "user", parts: [{ text: "keep this turn" }] });
+  expect(events.some((event) => event.type === "conversation.message")).toBe(false);
   expect(runtime.getState().thread.isRunning).toBe(false);
 });
 
@@ -392,4 +394,91 @@ it("never reuses missing or mismatched response timing in live updates or restor
     await runtime.thread.append("go");
     expect(durations()).toEqual([100, undefined, undefined, undefined, undefined, undefined]);
   } finally { disconnect(); }
+});
+
+
+it("rejects a competing submission before any durable conversation change", async () => {
+  const { testEventStore } = await import("../test-event-store");
+  const events: LogEvent[] = [];
+  const logger = new EventLogger({ store: testEventStore(events) });
+  const transport = vi.fn();
+  const runtime = new ConversationStore(logger, transport);
+  const owner = await claimConversationRun("other");
+  try {
+    await runtime.thread.append("must not become a branch");
+    expect(events).toEqual([]);
+    expect(transport).not.toHaveBeenCalled();
+    expect(runtime.getState().thread.error).toBeInstanceOf(Error);
+    expect(runtime.getState().thread.isRunning).toBe(false);
+  } finally { owner.finish(); logger.dispose(); }
+});
+
+it("replays another writer's new head under the lease before appending", async () => {
+  const { testEventStore } = await import("../test-event-store");
+  const events: LogEvent[] = [];
+  const storage = testEventStore(events);
+  const logger = new EventLogger({ store: storage });
+  const other = new EventLogger({ store: storage });
+  await logger.append({ type: "conversation.created", conversationId: "shared", content: { title: "Shared" } });
+  await logger.appendMessage("shared", { id: "u", role: "user", parts: [{ type: "text", text: "old" }] });
+  const seen: string[][] = [];
+  const runtime = new ConversationStore(logger, () => ({ async sendMessages(options) {
+    seen.push(options.messages.map(message => message.id));
+    expect(options.runLease?.conversationId).toBe("shared");
+    return { id: "unused", role: "assistant", parts: [] };
+  } }), "shared");
+  await runtime.threads.switchToThread("shared");
+  // Even without a connected live subscription, command input comes from the log.
+  await other.appendMessage("shared", { id: "remote", role: "assistant", parts: [{ type: "text", text: "new progress" }] }, { parentId: "u" });
+  await runtime.thread.append("continue");
+  expect(seen[0]?.slice(0, 2)).toEqual(["u", "remote"]);
+  const repository = await logger.repository("shared");
+  expect(repository.messages.at(-1)?.parentId).toBe("remote");
+  logger.dispose(); other.dispose();
+});
+
+it("retains the draft and rejects a deleted session before any new write even without commit delivery", async () => {
+  const { testEventStore } = await import("../test-event-store");
+  const events: LogEvent[] = [];
+  const storage = testEventStore(events);
+  const logger = new EventLogger({ store: storage });
+  const other = new EventLogger({ store: storage });
+  await logger.append({ type: "conversation.created", conversationId: "deleted", content: { title: "Deleted" } });
+  const transport = vi.fn();
+  const runtime = new ConversationStore(logger, transport, "deleted");
+  await runtime.threads.switchToThread("deleted");
+  await other.deleteConversation("deleted");
+  await logger.flush();
+  const count = events.length;
+  runtime.composer.setText("preserve this draft");
+  await runtime.composer.send();
+  expect(events).toHaveLength(count);
+  expect(transport).not.toHaveBeenCalled();
+  expect(runtime.getState().composer.text).toBe("preserve this draft");
+  expect(String(runtime.getState().thread.error)).toContain("已被删除");
+  await expect(runtime.threads.switchToThread("deleted")).rejects.toThrow("已被删除");
+  await logger.dispose(); await other.dispose();
+});
+
+it("does not lose a commit arriving between list drain completion and promise cleanup", async () => {
+  const { testEventStore } = await import("../test-event-store");
+  const logger = new EventLogger({ store: testEventStore() });
+  let committed: Parameters<Parameters<EventLogger['subscribeCommits']>[0]>[0] | undefined;
+  let notify!: Parameters<EventLogger['subscribeCommits']>[0];
+  vi.spyOn(logger, 'subscribeCommits').mockImplementation(listener => { notify = listener; return () => {}; });
+  const event: LogEvent = { id: 1, type: 'conversation.created', conversationId: 'tail', timestamp: new Date().toISOString(), content: { title: 'Tail' } };
+  const read = vi.spyOn(logger, 'summaryEventsSince').mockImplementationOnce(async () => {
+    queueMicrotask(() => queueMicrotask(() => {
+      committed = { lastId: 1, conversationIds: ['tail'], external: true, cleared: false, types: ['conversation.created'] };
+      notify(committed);
+    }));
+    return { value: [], epoch: 'one' };
+  }).mockResolvedValue({ value: [event], epoch: 'one' });
+  const runtime = new ConversationStore(logger, vi.fn());
+  const close = runtime.connect();
+  await vi.waitFor(() => expect(runtime.getState().threads.threadIds).toContain('tail'));
+  expect(read).toHaveBeenCalledTimes(2);
+  await logger.append({ type: 'browser.diagnostic', content: 'irrelevant' });
+  expect(read).toHaveBeenCalledTimes(2);
+  close(); await logger.dispose();
 });

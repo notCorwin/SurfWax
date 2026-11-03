@@ -2,6 +2,7 @@ import { chromium, expect, test as base, type BrowserContext, type CDPSession, t
 import { once } from "node:events";
 import { mkdtemp, readFile, rm, mkdir, cp, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { fitWindowToScreen, systemChromePath } from "../scripts/development-extension.mjs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { resolve, basename } from "node:path";
@@ -281,26 +282,37 @@ export async function openExtension(existingDirectory?: string, settings: { exte
   page: Page;
   userDataDirectory: string;
 }> {
-  const userDataDirectory = existingDirectory ?? await mkdtemp(resolve(tmpdir(), "side-agent-e2e-"));
   const extensionPath = resolve(settings.extensionPath ?? process.env.SURFWAX_EXTENSION_PATH ?? "dist");
-  const bundledChromium = chromium.executablePath();
-  const systemChrome = process.platform === "darwin" ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    : process.platform === "win32" ? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
-    : "/usr/bin/google-chrome";
+  const executablePath = systemChromePath({ ...process.env,
+    SURFWAX_CHROME_PATH: settings.executablePath ?? test.info().project.use.launchOptions?.executablePath ?? process.env.SURFWAX_CHROME_PATH });
+  const userDataDirectory = existingDirectory ?? await mkdtemp(resolve(tmpdir(), "side-agent-e2e-"));
   const context = await chromium.launchPersistentContext(userDataDirectory, {
-    executablePath: settings.executablePath ?? test.info().project.use.launchOptions?.executablePath ?? process.env.SURFWAX_CHROME_PATH ?? (existsSync(bundledChromium) ? bundledChromium : systemChrome),
-    headless: process.env.SURFWAX_E2E_HEADLESS !== "false",
+    executablePath,
+    headless: process.env.SURFWAX_E2E_HEADLESS === "true" || Boolean(process.env.CI),
+    chromiumSandbox: true,
+    colorScheme: null,
+    viewport: settings.deviceScaleFactor === undefined ? null : { width: 1280, height: 720 },
     deviceScaleFactor: settings.deviceScaleFactor,
-    args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, "--no-sandbox", ...(settings.args ?? [])],
+    ignoreDefaultArgs: ["--disable-extensions"],
+    args: ["--start-maximized", "--enable-unsafe-extension-debugging", "--hide-crash-restore-bubble", ...(settings.args ?? [])],
   });
+  const browserSession = await context.browser()!.newBrowserCDPSession();
+  let extensionId: string;
+  try {
+    ({ id: extensionId } = await browserSession.send("Extensions.loadUnpacked", { path: extensionPath }));
+  } catch (error) {
+    await context.close();
+    throw new Error(`Cannot load the development extension in installed Chrome. Update Google Chrome and check ${extensionPath}/manifest.json.`, { cause: error });
+  }
   testProfiles.set(userDataDirectory, {
     context,
     browserVersion: process.env.SURFWAX_CHROME_VERSION ?? context.browser()?.version() ?? "unknown",
   });
-  let worker = context.serviceWorkers()[0];
-  if (!worker) worker = await context.waitForEvent("serviceworker");
-  const extensionId = new URL(worker.url()).hostname;
+  if (!context.serviceWorkers().some(worker => new URL(worker.url()).hostname === extensionId))
+    await context.waitForEvent("serviceworker", { predicate: worker => new URL(worker.url()).hostname === extensionId });
   const page = await context.newPage();
+  await fitWindowToScreen(context, page, browserSession);
+  await browserSession.detach();
   await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
   return { context, extensionId, page, userDataDirectory };
 }
@@ -551,7 +563,11 @@ export async function openNativeSidePanel(opened: Awaited<ReturnType<typeof open
     return targetId;
   }).not.toBe('');
   const panel = await attachTarget(browser, targetId);
-  await expect.poll(() => panel.evaluate<boolean>('Boolean(document.querySelector("[data-testid=composer-input]"))')).toBe(true);
+  try { await expect.poll(() => panel.evaluate<boolean>('Boolean(document.querySelector("[data-testid=composer-input]"))')).toBe(true); }
+  catch (cause) {
+    const body = await panel.evaluate<string>('document.body?.innerText || ""').catch(() => "Native panel renderer is unavailable");
+    throw new Error(`Native side panel did not become ready: ${body.slice(0, 2000)}`, { cause });
+  }
   await harness.close();
   return { browser, panel, targetId, windowId, tabId: chromeTab.id };
 }

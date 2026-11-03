@@ -112,6 +112,44 @@ function programHarness(work: (capabilities: any, signal: AbortSignal) => Promis
   return { ...log, fake, tabs, raw, executor, sessions, onRemoved, listeners, setRunIdentity: (value: typeof runIdentity) => { runIdentity = value; }, run: (signal?: AbortSignal, input: { timeoutMs?: number; defaultTimeoutMs?: number; background?: boolean } = {}) => executor.runProgram({ code: "fixture program", ...input }, signal, { conversationId: "conversation", visualEnabled: true, ...(input.background ? { logIdentity: { runId: "run", toolCallId: "1:program", toolCallIdCanonical: true as const } } : {}) }) };
 }
 
+describe("cancellation isolation", () => {
+  it("terminates a tool whose cleanup never returns and refuses stale work in a subsequent operation", async () => {
+    vi.useFakeTimers();
+    const h = programHarness(async () => 42);
+    let cleanupStarted = false;
+    (h.executor as any).automation.clearContext = () => { cleanupStarted = true; return new Promise(() => {}); };
+    try {
+      const pending = h.run(undefined, { timeoutMs: 50 });
+      await vi.waitFor(() => expect(cleanupStarted).toBe(true));
+      await vi.advanceTimersByTimeAsync(2050);
+      expect(await pending).toMatchObject({ ok: false, result: { error: { code: "timeout" } } });
+      await expect(h.executor.listTabs()).rejects.toThrow("cleanup-incomplete");
+      expect((h.fake.chromeApi as any).tabs.query).not.toHaveBeenCalled();
+    } finally {
+      h.executor.dispose();
+      await vi.advanceTimersByTimeAsync(2000);
+      vi.useRealTimers();
+    }
+  });
+  it("includes time spent in the executor queue in a direct tool's deadline", async () => {
+    vi.useFakeTimers();
+    const fake = fakeChrome();
+    const executor = new ChromeExecutor({ chromeApi: fake.chromeApi as never });
+    let release!: () => void;
+    (executor as any).tail = new Promise<void>((resolve) => { release = resolve; });
+    try {
+      const run = vi.fn(async () => 1);
+      const pending = (executor as any).enqueueAbortable(run, undefined, 20, false);
+      const failure = expect(pending).rejects.toMatchObject({ name: "TimeoutError" });
+      await vi.advanceTimersByTimeAsync(20);
+      await failure;
+      expect(run).not.toHaveBeenCalled();
+      release(); await (executor as any).tail;
+      expect(await (executor as any).enqueueAbortable(run, undefined, 20, false)).toBe(1);
+    } finally { executor.dispose(); await vi.advanceTimersByTimeAsync(2000); vi.useRealTimers(); }
+  });
+});
+
 describe("structured locator scope", () => {
   it("applies one scope within the requested frame and rejects zero or multiple roots", async () => {
     const fake = fakeChrome();
@@ -2294,4 +2332,22 @@ describe("foreground dialog handoff", () => {
     await h.executor.endRun(); h.executor.dispose();
   });
 
+});
+
+it("shares bounded run cleanup with a concurrent endRun and dispose", async () => {
+  vi.useFakeTimers();
+  const h = programHarness(async () => undefined);
+  (h.executor as any).jobs.settle = () => new Promise<never>(() => {});
+  let first = false;
+  let second = false;
+  const a = h.executor.endRun().then(() => { first = true; });
+  h.executor.dispose();
+  const b = h.executor.endRun().then(() => { second = true; });
+  expect(first).toBe(false);
+  expect(second).toBe(false);
+  await vi.advanceTimersByTimeAsync(2001);
+  await Promise.all([a, b]);
+  expect(first).toBe(true);
+  expect(second).toBe(true);
+  await h.logger.dispose();
 });

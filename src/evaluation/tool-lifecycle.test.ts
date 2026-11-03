@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { toLogValue } from "../logging";
+import { EventLogger, toLogValue, type LogEvent } from "../logging";
+import { testEventStore } from "../test-event-store";
 import { completedProgramOperations, toolLifecycleEvidence } from "../../e2e/evaluation/tool-lifecycle";
 
 const event = (type: string, toolCallId: string, runId = "run", conversationId = "conversation") => ({ type, toolCallId, runId, conversationId });
@@ -10,6 +11,23 @@ const message = (id: number, parts: unknown[], runId = "run", conversationId = "
 });
 
 describe("evaluation tool lifecycle evidence", () => {
+  it("uses canonical sparse message changes without losing earlier declarations", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: testEventStore(events) });
+    const first = tool("one"), second = tool("two");
+    await logger.appendMessage("conversation", { id: "assistant", role: "assistant", parts: [first, second] }, { runId: "run" });
+    await logger.append({ type: "tool.started", conversationId: "conversation", runId: "run", toolCallId: "one" });
+    await logger.append({ type: "tool.finished", conversationId: "conversation", runId: "run", toolCallId: "one" });
+    await logger.appendMessage("conversation", { id: "assistant", role: "assistant", parts: [{ ...first, state: "output-available" }, second] }, { runId: "run" });
+    await logger.append({ type: "tool.started", conversationId: "conversation", runId: "run", toolCallId: "two" });
+    await logger.append({ type: "tool.finished", conversationId: "conversation", runId: "run", toolCallId: "two" });
+    await logger.appendMessage("conversation", { id: "assistant", role: "assistant", parts: [{ ...first, state: "output-available" }, { ...second, state: "output-available" }] }, { runId: "run" });
+    expect(events.at(-1)?.messagePatch?.indices).toEqual([1]);
+    expect(toolLifecycleEvidence(events)).toMatchObject({ complete: true, declaredCalls: 2, unreferencedStarts: 0 });
+    expect(toolLifecycleEvidence([...events].reverse())).toMatchObject({ complete: false, declaredCalls: 2, unreferencedStarts: 0 });
+    logger.dispose();
+  });
+
   it("accepts one result per declared tool, including failures and rejected invalid input", () => {
     expect(toolLifecycleEvidence([message(1, [tool("one"), tool("two"), tool("invalid")]), event("tool.started", "one"), event("tool.finished", "one"), event("tool.started", "two"), event("tool.failed", "two"), event("tool.failed", "invalid")])).toMatchObject({ complete: true, declaredCalls: 3, unstartedFailures: 1 });
   });

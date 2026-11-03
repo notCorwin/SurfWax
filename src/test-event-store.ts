@@ -3,6 +3,21 @@ import { fromLogValue, toLogValue, type LogEvent } from "./logging";
 /** In-memory canonical log for tests, including atomic artifact transactions. */
 export function testEventStore(events: LogEvent[] = []) {
   let nextId = (events.at(-1)?.id ?? 0) + 1;
+  const terminals = new Map<string, LogEvent[]>();
+  const terminalKey = (event: Pick<LogEvent, "type" | "runId" | "toolCallId" | "content" | "valueEncoding">) => {
+    if (!event.runId || !["tool.finished", "tool.failed", "conversation.finished", "conversation.failed", "conversation.aborted"].includes(event.type)) return undefined;
+    if (event.type.startsWith("conversation.")) return JSON.stringify(["run", event.runId]);
+    if (!event.toolCallId) return undefined;
+    const content = fromLogValue(event.content, event.valueEncoding) as { callId?: unknown } | null;
+    return JSON.stringify(["tool", event.runId, content?.callId ?? "", event.toolCallId]);
+  };
+  let indexed = 0;
+  const indexTerminals = () => {
+    for (; indexed < events.length; indexed++) {
+      const event = events[indexed]!; const key = terminalKey(event);
+      if (key) { const values = terminals.get(key) ?? []; values.push(event); terminals.set(key, values); }
+    }
+  };
   const save = (event: Omit<LogEvent, "id">) => {
     const saved = { ...event, id: nextId++ };
     events.push(saved);
@@ -15,6 +30,12 @@ export function testEventStore(events: LogEvent[] = []) {
   return {
     supportsArtifactParts: true,
     append,
+    async terminalEvents(batch: readonly Omit<LogEvent, "id">[], afterId: number) {
+      indexTerminals();
+      return [...new Set(batch.flatMap((event) => { const key = terminalKey(event); return key ? terminals.get(key) ?? [] : []; }))]
+        .filter((event) => event.id > afterId).sort((a, b) => a.id - b.id);
+    },
+    async get(id: number) { return events.find((event) => event.id === id); },
     async appendMany(batch: readonly Omit<LogEvent, "id">[]) { return Promise.all(batch.map(append)); },
     async appendPartitioned(artifact: Omit<LogEvent, "id">, parts: readonly Omit<LogEvent, "id">[]) {
       saveParts(parts);
@@ -42,6 +63,6 @@ export function testEventStore(events: LogEvent[] = []) {
       });
     },
     async all() { return [...events]; },
-    async clear() { events.length = 0; },
+    async clear() { events.length = 0; terminals.clear(); indexed = 0; },
   };
 }

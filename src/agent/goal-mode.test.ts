@@ -16,7 +16,7 @@ vi.mock("./goal-review", async (original) => ({ ...await original<typeof import(
 }));
 
 vi.mock("./coordinator", () => ({ claimConversationRun: async (_id: string, signal?: AbortSignal) => ({
-  signal: signal ?? new AbortController().signal, finish: vi.fn(),
+  runId: crypto.randomUUID(), conversationId: _id, signal: signal ?? new AbortController().signal, finish: vi.fn(),
 }) }));
 const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 5, text: 5, reasoning: 0 } };
 const reply = (text: string) => ({ content: [{ type: "text" as const, text }], finishReason: { unified: "stop" as const, raw: "stop" }, usage, warnings: [] });

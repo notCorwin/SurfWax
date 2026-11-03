@@ -264,8 +264,35 @@ export function modelPresetFields(config: ModelConfig, preset?: ModelProviderPre
   return providerSettingFields({ id: isCloudflareGateway(config) ? "cloudflare-ai-gateway" : config.providerId ?? "custom", npm: config.modelProvider?.npm ?? sdkFor(config), api: config.baseURL, env: preset?.env });
 }
 
-const catalogRequests = new WeakMap<typeof globalThis.fetch, Map<string, { operationId: string; promise: Promise<ModelCatalog> }>>();
-const backgroundCatalogRefreshes = new WeakMap<typeof globalThis.fetch, { operationId: string; promise: Promise<ModelCatalog> }>();
+type SharedRequest<T> = { operationId: string; promise: Promise<T>; controller: AbortController; consumers: Set<symbol>; settled: boolean; background?: SharedRequest<T> };
+const catalogRequests = new WeakMap<typeof globalThis.fetch, Map<string, SharedRequest<ModelCatalog>>>();
+const requestIdentities = new WeakMap<object, number>();
+let nextRequestIdentity = 0;
+function requestIdentity(value: object | undefined): number {
+  if (!value) return 0;
+  let identity = requestIdentities.get(value);
+  if (identity === undefined) { identity = ++nextRequestIdentity; requestIdentities.set(value, identity); }
+  return identity;
+}
+
+/** Cancellation belongs to each consumer; the shared I/O stops only after its last consumer leaves. */
+function consumeRequest<T>(request: SharedRequest<T>, signal: AbortSignal | undefined, abandoned: () => void): Promise<T> {
+  signal?.throwIfAborted();
+  const consumer = Symbol();
+  request.consumers.add(consumer);
+  return new Promise<T>((resolve, reject) => {
+    const release = () => {
+      signal?.removeEventListener("abort", abort);
+      request.consumers.delete(consumer);
+      if (!request.settled && !request.consumers.size) { abandoned(); request.controller.abort(new DOMException("Catalog request has no remaining consumers", "AbortError")); }
+    };
+    const abort = () => { release(); reject(signal!.reason); };
+    signal?.addEventListener("abort", abort, { once: true });
+    request.promise.then((value) => { release(); resolve(value); }, (error) => { release(); reject(error); });
+    if (signal?.aborted) abort();
+  });
+}
+const backgroundCatalogRefreshes = new WeakMap<typeof globalThis.fetch, Map<string, SharedRequest<ModelCatalog>>>();
 const catalogRevisions = new WeakMap<ModelCatalog, string>();
 
 function cachedCatalogRevision(cached?: CachedCatalog): string {
@@ -277,8 +304,9 @@ export function loadModelCatalog(
 ): Promise<ModelCatalog> {
   const storage = options.storage ?? (typeof chrome !== "undefined" ? chrome.storage?.local : undefined);
   const validateCompleteness = options.validateCompleteness ?? !options.fetch;
-  const task = async (operationId = options.diagnosticOperationId ?? crypto.randomUUID()) => {
-    options.signal?.throwIfAborted();
+  if (options.signal?.aborted) return Promise.reject(options.signal.reason);
+  const task = async (operationId: string, signal: AbortSignal, setBackground: (request: SharedRequest<ModelCatalog>) => void) => {
+    signal.throwIfAborted();
     const report = (phase: string, error: unknown) => modelDiagnostic(operationId, "catalog", phase, error, options.onDiagnostic, undefined, options.diagnosticContext);
     const stored = storage ? (await storage.get(CATALOG_CACHE_KEY).catch((error) => { report("cache-read", error); return { [CATALOG_CACHE_KEY]: undefined }; }))[CATALOG_CACHE_KEY] as CachedCatalog | undefined : undefined;
     let cached = stored?.version === CATALOG_CACHE_VERSION ? stored : undefined;
@@ -286,17 +314,21 @@ export function loadModelCatalog(
     if (cached?.catalog && validateCompleteness && cached.fetchedAt < Date.parse(bundledCatalogMetadata.fetchedAt)) cached = undefined;
     if (cached?.catalog) catalogRevisions.set(cached.catalog, cached.revision ?? await sha256(JSON.stringify(cached.catalog)));
     if (!options.refresh && cached?.catalog && (options.now ?? Date.now)() - cached.fetchedAt < REFRESH_MS) return cached.catalog;
-    const fetchCatalog = async () => {
+    const fetchCatalog = async (fetchSignal: AbortSignal | null = signal) => {
       const timeout = AbortSignal.timeout(10_000);
       const response = await (options.fetch ?? fetch)(CATALOG_URL, {
         ...(options.refresh ? { cache: "no-cache" as const } : {}),
-        signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
+        signal: fetchSignal ? AbortSignal.any([fetchSignal, timeout]) : timeout,
       });
+      fetchSignal?.throwIfAborted();
       if (!response.ok) throw Object.assign(new Error(`models.dev HTTP ${response.status}`), { statusCode: response.status });
-      const catalog = normalizeCatalog(await response.json());
+      const json = await response.json();
+      fetchSignal?.throwIfAborted();
+      const catalog = normalizeCatalog(json);
       if (validateCompleteness) validateCatalog(catalog);
       const fetchedAt = (options.now ?? Date.now)();
       const revision = await sha256(JSON.stringify(catalog));
+      fetchSignal?.throwIfAborted();
       catalogRevisions.set(catalog, revision);
       if (storage) await storage.set({
         [CATALOG_CACHE_KEY]: { version: CATALOG_CACHE_VERSION, fetchedAt, revision, catalog } satisfies CachedCatalog,
@@ -304,30 +336,39 @@ export function loadModelCatalog(
       return catalog;
     };
     const fallbackToBundle = async () => {
-      options.signal?.throwIfAborted();
+      signal.throwIfAborted();
       const catalog = await loadBundledCatalog();
-      options.signal?.throwIfAborted();
+      signal.throwIfAborted();
       catalogRevisions.set(catalog, cachedCatalogRevision());
       return catalog;
     };
     if (!cached?.catalog && !options.refresh && !options.fetch && options.bundledFallback !== false) {
       const catalog = await fallbackToBundle();
       const fetcher = globalThis.fetch;
-      const existingRefresh = backgroundCatalogRefreshes.get(fetcher);
-      if (!existingRefresh) {
-        const refresh = fetchCatalog().catch((error) => {
-          if (!options.signal?.aborted) { report("background-refresh", error); options.onStale?.(error); }
+      let refreshes = backgroundCatalogRefreshes.get(fetcher);
+      if (!refreshes) { refreshes = new Map(); backgroundCatalogRefreshes.set(fetcher, refreshes); }
+      let refresh = refreshes.get(key);
+      if (!refresh) {
+        const controller = new AbortController();
+        refresh = { operationId, controller, consumers: new Set(), settled: false, promise: undefined! };
+        const current = refresh;
+        current.promise = fetchCatalog(controller.signal).catch((error) => {
+          if (!controller.signal.aborted) { report("background-refresh", error); options.onStale?.(error); }
           throw error;
-        }).finally(() => backgroundCatalogRefreshes.delete(fetcher));
-        backgroundCatalogRefreshes.set(fetcher, { operationId, promise: refresh });
-        void refresh.catch(() => undefined);
-      } else linkModelDiagnostic(options.diagnosticContext, existingRefresh.operationId, "catalog-background-refresh");
+        }).finally(() => {
+          current.settled = true;
+          if (refreshes!.get(key) === current) refreshes!.delete(key);
+        });
+        void current.promise.catch(() => undefined);
+        refreshes.set(key, current);
+      } else linkModelDiagnostic(options.diagnosticContext, refresh.operationId, "catalog-background-refresh");
+      setBackground(refresh);
       return catalog;
     }
     try {
       return await fetchCatalog();
     } catch (error) {
-      if (options.signal?.aborted) throw error;
+      if (signal.aborted) throw error;
       report("fetch", error);
       if (cached?.catalog && options.staleFallback !== false) {
         options.onStale?.(error);
@@ -342,20 +383,42 @@ export function loadModelCatalog(
       throw error;
     }
   };
-  if (options.signal || options.fetch || options.storage || options.now || options.refresh || options.onStale || options.onDiagnostic) return task();
-  const fetcher = globalThis.fetch;
+  const fetcher = options.fetch ?? globalThis.fetch;
   let catalogPending = catalogRequests.get(fetcher);
   if (!catalogPending) { catalogPending = new Map(); catalogRequests.set(fetcher, catalogPending); }
-  const existing = catalogPending.get(CATALOG_URL);
-  if (existing) { linkModelDiagnostic(options.diagnosticContext, existing.operationId, "catalog"); return existing.promise; }
-  const operationId = options.diagnosticOperationId ?? crypto.randomUUID();
-  linkModelDiagnostic(options.diagnosticContext, operationId, "catalog");
-  const result = task(operationId).finally(() => catalogPending!.delete(CATALOG_URL));
-  catalogPending.set(CATALOG_URL, { operationId, promise: result });
-  return result;
+  // Signals never participate in the request identity. Overrides with different
+  // storage, time or fallback policies must remain independent.
+  const key = JSON.stringify([requestIdentity(storage), requestIdentity(options.now), Boolean(options.refresh),
+    options.bundledFallback ?? !options.fetch, options.staleFallback !== false, validateCompleteness,
+    requestIdentity(options.onStale), requestIdentity(options.onDiagnostic)]);
+  let request = catalogPending.get(key);
+  if (!request) {
+    const operationId = options.diagnosticOperationId ?? crypto.randomUUID();
+    const controller = new AbortController();
+    request = { operationId, controller, consumers: new Set(), settled: false, promise: undefined! };
+    const current = request;
+    current.promise = task(operationId, controller.signal, (background) => { current.background = background; }).finally(() => {
+      current.settled = true;
+      if (catalogPending!.get(key) === current) catalogPending!.delete(key);
+    });
+    catalogPending.set(key, current);
+  }
+  const current = request;
+  linkModelDiagnostic(options.diagnosticContext, current.operationId, "catalog");
+  return consumeRequest(current, options.signal, () => { if (catalogPending!.get(key) === current) catalogPending!.delete(key); }).then((catalog) => {
+    // Returning the offline bundle does not detach the caller from its refresh.
+    // Its signal remains a consumer until the refresh ends or that caller leaves.
+    if (current.background && !options.signal?.aborted) {
+      const background = current.background;
+      void consumeRequest(background, options.signal, () => {
+        const refreshes = backgroundCatalogRefreshes.get(fetcher);
+        if (refreshes?.get(key) === background) refreshes.delete(key);
+      }).catch(() => undefined);
+    }
+    return catalog;
+  });
 }
 
-const limitRequests = new WeakMap<typeof globalThis.fetch, Map<string, { operationId: string; promise: Promise<ModelLimit | undefined> }>>();
 // Derived matches need not be persisted separately from the authoritative catalog.
 // Keep a few revisions so an in-flight lookup against an older snapshot cannot
 // invalidate results from a newer one.
@@ -371,9 +434,6 @@ export function resolveModelLimit(
 ): Promise<ModelLimit | undefined> {
   const key = modelLimitKey(config);
   const task = async (operationId = crypto.randomUUID()): Promise<ModelLimit | undefined> => {
-    if (validLimit(config.contextWindowOverride)) {
-      return { provider: "manual", model: config.model, context: config.contextWindowOverride, source: "manual" } as ModelLimit;
-    }
     try {
       const catalog = await loadModelCatalog({ ...options, diagnosticOperationId: operationId });
       const catalogRevision = catalogRevisions.get(catalog) ?? cachedCatalogRevision();
@@ -385,27 +445,22 @@ export function resolveModelLimit(
       }
       const cached = matches.get(key);
       if (cached) return cached;
-      const match = matchModel(catalog, resolvedBaseURL(config), config.model, config.providerId)
+      const detected = matchModel(catalog, resolvedBaseURL(config), config.model, config.providerId)
         ?? { provider: "unknown", model: config.model, context: 256_000, source: "estimated" } as ModelLimit;
+      const match: ModelLimit = validLimit(config.contextWindowOverride)
+        ? { ...detected, context: config.contextWindowOverride, input: undefined, source: "manual" } : detected;
       matches.set(key, match);
       return match;
     } catch (error) {
       if (options.signal?.aborted) throw error;
       modelDiagnostic(operationId, "model-limit", "resolution", error, options.onDiagnostic, undefined, options.diagnosticContext);
-      return { provider: "unknown", model: config.model, context: 256_000, source: "estimated" };
+      return { provider: "unknown", model: config.model, context: config.contextWindowOverride ?? 256_000,
+        source: validLimit(config.contextWindowOverride) ? "manual" : "estimated" };
     }
   };
-  if (options.signal || options.fetch || options.storage || options.now || options.onDiagnostic) return task();
-  const fetcher = globalThis.fetch;
-  let pending = limitRequests.get(fetcher);
-  if (!pending) { pending = new Map(); limitRequests.set(fetcher, pending); }
-  const existing = pending.get(key);
-  if (existing) { linkModelDiagnostic(options.diagnosticContext, existing.operationId, "model-limit"); return existing.promise; }
-  const operationId = crypto.randomUUID();
-  linkModelDiagnostic(options.diagnosticContext, operationId, "model-limit");
-  const result = task(operationId).finally(() => pending!.delete(key));
-  pending.set(key, { operationId, promise: result });
-  return result;
+  // Catalog I/O is shared with independent cancellation above; once it resolves,
+  // all models reuse the same revision-scoped match cache.
+  return task();
 }
 
 export function inputBudget(limit: ModelLimit): number {

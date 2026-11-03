@@ -50,7 +50,7 @@ test("preview exposes a later target without changing frozen pagination or delta
     expect(result.items.some((item) => item.line.includes('button "Unique action"'))).toBe(true);
     return complete();
   };
-  const beginLimit = () => call("inspect_page", { budget: 5000, limit: 1 }, (value) => {
+  const beginLimit = () => call("inspect_page", { full: true, budget: 5000, limit: 1 }, (value) => {
     expect(value.lookahead?.items ?? []).toEqual([]);
     expect(value.items.length).toBeLessThanOrEqual(1);
     limitedPages.push(value);
@@ -63,7 +63,7 @@ test("preview exposes a later target without changing frozen pagination or delta
       return finishLimit();
     });
   });
-  const beginSmall = () => call("inspect_page", { budget: 100 }, (value) => {
+  const beginSmall = () => call("inspect_page", { full: true, budget: 100 }, (value) => {
     expect(value.$ref).toBeUndefined();
     expect(Buffer.byteLength(JSON.stringify(value.items))).toBeLessThanOrEqual(100);
     smallPages.push(value);
@@ -84,7 +84,7 @@ test("preview exposes a later target without changing frozen pagination or delta
   };
   const beginDelta = () => call("inspect_page", { since: first.observationId, budget: 5000 }, (value) => {
     delta = value;
-    expect(value.mode).toBe("delta");
+    expect(value).toMatchObject({ mode: "delta", baseObservationId: first.observationId });
     expect(value.lookahead?.items ?? []).toEqual([]);
     const cursor = deltaPages.append(value);
     return cursor ? page(deltaPages, [], cursor, afterDelta) : afterDelta();
@@ -117,7 +117,7 @@ test("preview exposes a later target without changing frozen pagination or delta
       document.querySelector("p")!.textContent = text;
       document.querySelector("button")!.addEventListener("click", () => { document.querySelector("output")!.textContent = "STATUS_DONE"; });
     }, label);
-    const begin = call("inspect_page", { budget, limit: 100 }, (value) => {
+    const begin = call("inspect_page", { full: true, budget, limit: 100 }, (value) => {
       first = value;
       expect(value).toMatchObject({ mode: "full", items: expect.any(Array), lookahead: { items: expect.any(Array) } });
       expect(value.$ref).toBeUndefined();

@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents, type MockResponse } from "./fixtures";
+import { deliveredSemanticState } from "./evaluation/semantic-state";
 
 const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
 const button = (items: any[], name: string) => items.find((item) => item.line.includes(`button "${name}"`));
@@ -50,9 +51,9 @@ test("filters transparent effects and empty clip shapes while retaining visible 
       return runs.filter(Boolean);
     });
     let baseline: any;
-    responses.push(commandResponse("inspect_page", { budget: 12000 }, "effects-before"),
-      (request) => { baseline = lastTool(request); return commandResponse("inspect_page", { region: { by: "css", value: "#filter-label-button" }, budget: 12000 }, "effects-hidden-label"); },
-      () => commandResponse("inspect_page", { region: { by: "css", value: "#circle-partial" }, budget: 12000 }, "effects-partial-circle"),
+    responses.push(commandResponse("inspect_page", { full: true, budget: 12000 }, "effects-before"),
+      (request) => { baseline = lastTool(request); return commandResponse("inspect_page", { full: true, region: { by: "css", value: "#filter-label-button" }, budget: 12000 }, "effects-hidden-label"); },
+      () => commandResponse("inspect_page", { full: true, region: { by: "css", value: "#circle-partial" }, budget: 12000 }, "effects-partial-circle"),
       () => commandResponse("click", { target: { ref: button(baseline.items, "Reveal effects")?.ref } }, "effects-reveal"),
       () => commandResponse("inspect_page", { since: baseline.observationId, budget: 12000 }, "effects-delta"),
       textResponse("EFFECTS_OK"), textResponse("效果测试"));
@@ -64,6 +65,7 @@ test("filters transparent effects and empty clip shapes while retaining visible 
     const events = await readEvents(opened.page);
     const output = (id: string) => events.find((event) => ["tool.finished", "tool.failed"].includes(event.type) && event.toolCallId === id)?.output;
     const before = output("effects-before"), changed = output("effects-reveal"), delta = output("effects-delta");
+    expect(delta).toMatchObject({ mode: "delta", baseObservationId: before.observationId });
     const hidden = ["Filter hidden", "Filter fixed hidden", "Final filter hidden", "Circle hidden", "Ellipse hidden", "Polygon hidden"];
     for (const name of hidden) expect(JSON.stringify(before.items)).not.toContain(name);
     for (const name of ["SVG filter visible", "Translucent visible", "Backdrop visible", "Visible text"]) expect(button(before.items, name)?.ref, name).toBeTruthy();
@@ -79,7 +81,7 @@ test("filters transparent effects and empty clip shapes while retaining visible 
     expect(JSON.stringify(anonymous.items)).not.toContain("Filter accessible name");
     expect(changed).toMatchObject({ ok: true });
     for (const name of hidden) {
-      expect(button(changed.pageSnapshot.items, name)?.ref).toBeTruthy();
+      expect(button(deliveredSemanticState(events, changed.pageSnapshot), name)?.ref).toBeTruthy();
       expect(button(delta.items, name)?.change).toBe("added");
     }
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }

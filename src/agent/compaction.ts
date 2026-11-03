@@ -5,6 +5,7 @@ import { createPromptSnapshot, readPromptSnapshot, PROMPT_TOOLS, type PromptSnap
 import { inputBudget, resolveModelLimit, type ModelLimit } from "./model-limits";
 import { retryModelOperation } from "./model";
 import { modelDiagnosticContext } from "./diagnostics";
+import { contextPrompt } from "./context-prompt";
 
 export const SUMMARY_PREFIX = "Earlier conversation summary:\n";
 const SUMMARY_INSTRUCTIONS = "Summarize the entire supplied conversation faithfully so another agent can continue the browser task. Record the original goal and constraints; unfinished steps and blockers; verified facts and their sources; page and tab identities; completed or uncertain side effects and errors; recovery instructions; and exact data, identifiers, URLs and artifact references needed later. Distinguish verified outcomes from assumptions and dispatched actions. Do not invent facts. Return only the continuation summary.";
@@ -161,7 +162,7 @@ export async function contextPressure(options: {
   raw: ModelMessage[]; branchIds: string[]; events: LogEvent[]; model: ModelConfig;
   limit?: ModelLimit; signal?: AbortSignal;
   logger?: EventLogger; conversationId?: string;
-  instructions?: unknown; tools?: readonly Record<string, unknown>[];
+  instructions?: unknown; tools?: readonly Record<string, unknown>[]; goalMode?: boolean;
 }): Promise<{ limit: ModelLimit; estimated: number; threshold: number; messages: ModelMessage[] } | undefined> {
   const limit = options.limit ?? await resolveModelLimit(options.model, { signal: options.signal, diagnosticContext: modelDiagnosticContext(options.logger, options.conversationId) });
   if (!limit) return undefined;
@@ -195,7 +196,8 @@ export async function contextPressure(options: {
   const anchor = typeof calibration?.inputTokens === "number" && Number.isFinite(calibration.inputTokens) && calibration.inputTokens > 0
     ? calibration.inputTokens : calibration?.promptEstimate;
   const snapshot = readPromptSnapshot(options.events, options.branchIds) ?? createPromptSnapshot();
-  const prompt = { instructions: options.instructions ?? createPromptSnapshot(snapshot.source).instructions, tools: options.tools ?? PROMPT_TOOLS, messages };
+  const fixed = contextPrompt(snapshot, options.goalMode);
+  const prompt = { instructions: options.instructions ?? fixed.instructions, tools: options.tools ?? fixed.tools, messages };
   const fixedEstimate = estimatePromptInput(prompt) - currentEstimate;
   const estimated = Math.max(0, Math.ceil(anchor && calibration?.baseEstimate
     ? anchor + currentEstimate - calibration.baseEstimate + (calibration.fixedEstimate !== undefined ? fixedEstimate - calibration.fixedEstimate : 0)
@@ -358,6 +360,8 @@ export class ContextCompactor {
     model: ModelConfig; logger: EventLogger; conversationId: string;
     branchIds: string[]; signal: AbortSignal; prompt?: PromptSnapshot;
   }) { this.prompt = options.prompt; }
+
+  useBranch(branchIds: string[]): void { this.options.branchIds = branchIds; }
 
   recordPrompt(prompt: { instructions?: unknown; messages: readonly ModelMessage[]; tools?: readonly Record<string, unknown>[] }): void {
     const promptEstimate = this.estimate(prompt.messages, prompt);

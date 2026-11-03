@@ -1,3 +1,4 @@
+import { createDeadline } from "./deadline";
 import { EventLogger, fromLogValue } from "./logging";
 import { safeDiagnosticError } from "./diagnostic-error";
 import { BackgroundRunCoordinator } from "./agent/background-coordinator";
@@ -63,7 +64,8 @@ async function clearEventLog(): Promise<void> {
   runs.cancel(undefined, "log-cleared");
   try {
     await Promise.all([...writers].map(writerBarrier));
-    await Promise.allSettled([...operations]);
+    const settling = createDeadline(2_000, undefined, "Background maintenance cleanup");
+    try { await settling.wait(Promise.allSettled([...operations])); } finally { settling.dispose(); }
     await serializeUserScripts(async () => undefined);
     eventLogger.stop();
     await eventLogger.flush();
@@ -88,6 +90,29 @@ chrome.runtime.onConnect.addListener((port) => {
   }
   if (port.name !== "surf-wax-run-owner") return;
   let connected = true;
+  let releasing: Promise<void> | undefined;
+  const releaseOwner = (reason: "finished" | "owner-disconnected"): Promise<void> => {
+    if (releasing) return releasing;
+    const identity = runs.identity();
+    if (!identity || !runs.owns(port)) return Promise.resolve();
+    runs.cancel(port, reason === "finished" ? "run-finished" : reason);
+    return releasing = track((async () => {
+      const cleanups = [...(ownerCleanups.get(identity.runId) ?? [])];
+      const results = await Promise.allSettled(cleanups.map(cleanup => cleanup()));
+      results.forEach((result, index) => {
+        if (result.status === "rejected") eventLogger.telemetry({ type: "run.cleanup.failed", runId: identity.runId,
+          content: { operation: reason, cleanupIndex: index, cleanupCount: cleanups.length, effectUnknown: true }, error: safeDiagnosticError(result.reason) });
+      });
+      ownerCleanups.delete(identity.runId);
+      const owner = runs.release(port);
+      if (!owner) return;
+      broadcastRunState();
+      if (reason !== "finished") {
+        await eventLogger.closePendingTools(owner.runId, owner.conversationId, reason);
+        await eventLogger.recoverDanglingRuns(async () => runs.identity() ? [runs.identity()!.runId] : []);
+      }
+    })());
+  };
   port.onMessage.addListener((message) => {
     if (message.type === "claim") {
       void bootReady.then(() => {
@@ -97,27 +122,11 @@ chrome.runtime.onConnect.addListener((port) => {
       }).catch((error) => { if (connected) { try { port.postMessage({ type: "claimed", error: `后台初始化失败：${error instanceof Error ? error.message : String(error)}` }); } catch { /* Owner closed. */ } } });
     }
     if (message.type === "cancelled") runs.cancel(port, "user-interrupted");
-    if (message.type === "finished") { const released = runs.release(port); if (released) { ownerCleanups.delete(released.runId); broadcastRunState(); } }
+    if (message.type === "finished") void releaseOwner("finished").catch(console.error);
   });
   port.onDisconnect.addListener(() => {
     connected = false;
-    const identity = runs.identity();
-    if (!identity || !runs.owns(port)) return;
-    runs.cancel(port, "owner-disconnected");
-    void track((async () => {
-      const cleanups = [...(ownerCleanups.get(identity.runId) ?? [])];
-      const results = await Promise.allSettled(cleanups.map((cleanup) => cleanup()));
-      results.forEach((result, index) => {
-        if (result.status === "rejected") eventLogger.telemetry({ type: "run.cleanup.failed", runId: identity.runId,
-          content: { operation: "owner-disconnected", cleanupIndex: index, cleanupCount: cleanups.length }, error: safeDiagnosticError(result.reason) });
-      });
-      ownerCleanups.delete(identity.runId);
-      const owner = runs.release(port);
-      if (!owner) return;
-      broadcastRunState();
-      await eventLogger.closePendingTools(owner.runId, owner.conversationId, "owner-disconnected");
-      await eventLogger.recoverDanglingRuns(async () => runs.identity() ? [runs.identity()!.runId] : []);
-    })()).catch(console.error);
+    void releaseOwner("owner-disconnected").catch(console.error);
   });
 });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
@@ -163,6 +172,17 @@ chrome.runtime.onConnect.addListener((port) => {
   const heldInput = new Map<string, HeldInputState>();
   let validatedRunId: string | undefined;
   let closed = false;
+  let cleanupExpired = false;
+  const pendingAttaches = new Map<string, chrome.debugger.Debuggee>();
+  const guardCleanup = () => { if (cleanupExpired) throw new DOMException("已撤销旧调试连接的清理能力。", "AbortError"); };
+  const sendCommand = async (debuggee: chrome.debugger.Debuggee, method: string, params?: Record<string, unknown>) => {
+    guardCleanup();
+    return chrome.debugger.sendCommand(debuggee, method, params);
+  };
+  const detach = async (debuggee: chrome.debugger.Debuggee) => {
+    guardCleanup();
+    return chrome.debugger.detach(debuggee);
+  };
   const inputReleases = new Map<string, Promise<void>>();
   function releaseHeldInput(inputKey: string): Promise<void> {
     const pending = inputReleases.get(inputKey);
@@ -174,20 +194,24 @@ chrome.runtime.onConnect.addListener((port) => {
       const failures: string[] = [];
       try {
         for (const [heldKey, params] of [...state.keys]) {
+          guardCleanup();
           try {
-            await dispatchNativeInput(state.debuggee, "Input.dispatchKeyEvent", { ...params, text: undefined, unmodifiedText: undefined, commands: undefined, type: "keyUp", modifiers: 0 }, () => {});
+            await dispatchNativeInput(state.debuggee, "Input.dispatchKeyEvent", { ...params, text: undefined, unmodifiedText: undefined, commands: undefined, type: "keyUp", modifiers: 0 }, guardCleanup);
             if (state.keys.get(heldKey) === params) state.keys.delete(heldKey);
           }
           catch (error) { failures.push(String(error)); }
         }
         for (const [button, params] of [...state.buttons]) {
+          guardCleanup();
           try {
-            await dispatchNativeInput(state.debuggee, "Input.dispatchMouseEvent", { ...params, type: "mouseReleased", x: state.x, y: state.y, button, buttons: 0, modifiers: 0 }, () => {});
+            await dispatchNativeInput(state.debuggee, "Input.dispatchMouseEvent", { ...params, type: "mouseReleased", x: state.x, y: state.y, button, buttons: 0, modifiers: 0 }, guardCleanup);
             if (state.buttons.get(button) === params) state.buttons.delete(button);
           }
           catch (error) { failures.push(String(error)); }
         }
-        await chrome.debugger.sendCommand(state.debuggee, "Input.cancelDragging", {}).catch((error) => { failures.push(String(error)); });
+        guardCleanup();
+        await sendCommand(state.debuggee, "Input.cancelDragging", {}).catch((error) => { failures.push(String(error)); });
+        guardCleanup();
         if (state.runId) {
           await eventLogger.append({ type: "browser.input.state", runId: state.runId,
             content: { tabId: state.tabId, debuggee: state.debuggee, x: state.x, y: state.y, keys: [...state.keys.values()], buttons: [...state.buttons] } });
@@ -219,6 +243,7 @@ chrome.runtime.onConnect.addListener((port) => {
     let nativeInputAttempted = false;
     try {
       let result: unknown;
+      guardCleanup();
       const command = args[1];
       const params = args[2];
       if (message.rawCdp && method === "sendCommand" && params && typeof params === "object"
@@ -239,14 +264,19 @@ chrome.runtime.onConnect.addListener((port) => {
       if (closed && !cleanup) throw new DOMException("Side Panel 已关闭", "AbortError");
       if (method === "attach") {
         requireDebuggee(args[0], method);
-        if (!sessions.has(debuggeeKey(args[0]))) await chrome.debugger.attach(args[0], args[1]);
+        if (!sessions.has(debuggeeKey(args[0]))) {
+          const key = debuggeeKey(args[0]);
+          pendingAttaches.set(key, args[0]);
+          try { await chrome.debugger.attach(args[0], args[1]); }
+          finally { pendingAttaches.delete(key); }
+        }
         try { if (closed) throw new DOMException("Side Panel 已关闭", "AbortError"); runs.validate(message as RunIdentity); }
-        catch (error) { await chrome.debugger.detach(args[0]).catch(() => undefined); throw error; }
+        catch (error) { if (!cleanupExpired) await detach(args[0]).catch(() => undefined); throw error; }
         sessions.set(debuggeeKey(args[0]), args[0]);
       } else if (method === "detach") {
         requireDebuggee(args[0], method);
         await Promise.all([...heldInput].filter(([, state]) => debuggeeKey(state.debuggee) === debuggeeKey(args[0])).map(([inputKey]) => releaseHeldInput(inputKey)));
-        await chrome.debugger.detach(args[0]);
+        await detach(args[0]);
         sessions.delete(debuggeeKey(args[0]));
       } else {
         const native = (chrome.debugger as unknown as Record<string, (...params: any[]) => Promise<unknown>>)[method];
@@ -263,6 +293,7 @@ chrome.runtime.onConnect.addListener((port) => {
         let confirmRelease: (() => void) | undefined;
         let rollbackInput: (() => Promise<void>) | undefined;
         try {
+          guardCleanup();
           if (!cleanup) { if (closed) throw new DOMException("Side Panel 已关闭", "AbortError"); runs.validate(message as RunIdentity); }
           if (input && ["Input.dispatchKeyEvent", "Input.dispatchMouseEvent"].includes(command)) {
             const inputKey = JSON.stringify(debuggee);
@@ -308,26 +339,28 @@ chrome.runtime.onConnect.addListener((port) => {
               // state until Chrome confirms it, so a worker crash can finish it.
               persistedInput = () => record(saved.keys, saved.buttons);
               await record(new Map([...beforeKeys, ...saved.keys]), new Map([...beforeButtons, ...saved.buttons]));
+              guardCleanup();
               if (!cleanup) runs.validate(message as RunIdentity);
             }
           }
           if (input) {
             const { surfWaxTargetBackendNodeId: target, surfWaxReplaceSelection: replace, ...nativeParams } = args[2] ?? {};
             if (command === "Input.insertText" && target !== undefined) {
-              const resolved = await chrome.debugger.sendCommand(debuggee, "DOM.resolveNode", { backendNodeId: target });
+              const resolved = await sendCommand(debuggee, "DOM.resolveNode", { backendNodeId: target });
               const objectId = (resolved as any)?.object?.objectId;
               if (!objectId) throw new Error("AutomationError[target-unavailable]: Could not resolve the focused node");
               try {
                 if (closed || !sessions.has(debuggeeKey(debuggee))) throw new Error("AutomationError[target-unavailable]: Debugger session expired");
                 runs.validate(message as RunIdentity);
-                const edited = await chrome.debugger.sendCommand(debuggee, "Runtime.callFunctionOn", { objectId,
+                const edited = await sendCommand(debuggee, "Runtime.callFunctionOn", { objectId,
                   functionDeclaration: `function(text, replace) { return (${targetEditor.toString()})(this, text, replace); }`,
                   arguments: [{ value: String(nativeParams.text ?? "") }, { value: replace === true }], returnByValue: true }) as any;
                 if (edited?.exceptionDetails || edited?.result?.value?.ok !== true)
                   throw new Error(`AutomationError[insert-failed]: ${edited?.result?.value?.reason ?? "edit-rejected"}`);
-              } finally { await chrome.debugger.sendCommand(debuggee, "Runtime.releaseObject", { objectId }).catch(() => undefined); }
+              } finally { await sendCommand(debuggee, "Runtime.releaseObject", { objectId }).catch(() => undefined); }
               result = {};
             } else result = await dispatchNativeInput(debuggee, command, nativeParams, () => {
+              guardCleanup();
               if (!cleanup) {
                 if (closed) throw new DOMException("Side Panel 已关闭", "AbortError");
                 runs.validate(message as RunIdentity);
@@ -339,6 +372,7 @@ chrome.runtime.onConnect.addListener((port) => {
             if (evaluation) runtimeEvaluations.set(evaluationKey,{debuggee,count:(runtimeEvaluations.get(evaluationKey)?.count ?? 0)+1});
             try {
               if (trackedInput) nativeInputAttempted = true;
+              guardCleanup();
               result = await native.apply(chrome.debugger,args);
             }
             finally { if (evaluation) {
@@ -375,15 +409,34 @@ chrome.runtime.onConnect.addListener((port) => {
     closed = true;
     chrome.debugger.onEvent.removeListener(onEvent);
     chrome.debugger.onDetach.removeListener(onDetach);
-    const debuggees = [...sessions.values()];
+    const debuggees = [...new Map([...sessions.values(), ...pendingAttaches.values(), ...[...runtimeEvaluations.values()].map(entry => entry.debuggee), ...[...heldInput.values()].map(state => state.debuggee)].map(debuggee => [debuggeeKey(debuggee), debuggee])).values()];
     sessions.clear();
-    cleanupTask = track((async () => {
-      const report = (step: string, target: unknown, error: unknown) => eventLogger.telemetry({ type: "run.cleanup.failed", runId: validatedRunId, content: { operation: "debugger-cleanup", step, target }, error: safeDiagnosticError(error) });
-      await Promise.all([...runtimeEvaluations.values()].map(({debuggee}) => chrome.debugger.sendCommand(debuggee,"Runtime.terminateExecution").catch((error) => report("terminate-execution", debuggee, error))));
+    const deadline = createDeadline(2_000, undefined, "Background debugger cleanup");
+    const report = (step: string, target: unknown, error: unknown) => eventLogger.telemetry({ type: "run.cleanup.failed", runId: validatedRunId,
+      content: { operation: "debugger-cleanup", step, target, effectUnknown: true }, error: safeDiagnosticError(error) });
+    const work = (async () => {
+      await Promise.all([...runtimeEvaluations.values()].map(({debuggee}) => sendCommand(debuggee,"Runtime.terminateExecution").catch((error) => report("terminate-execution", debuggee, error))));
+      guardCleanup();
       await Promise.all([...heldInput.keys()].map((key) => releaseHeldInput(key).catch((error) => report("release-input", key, error))));
-      await Promise.all(debuggees.map((debuggee) => chrome.debugger.detach(debuggee).catch((error) => report("detach", debuggee, error))));
-    })());
-    void cleanupTask.finally(() => { try { port.disconnect(); } catch { /* Already disconnected. */ } });
+      guardCleanup();
+      await Promise.all(debuggees.map((debuggee) => detach(debuggee).catch((error) => report("detach", debuggee, error))));
+    })();
+    cleanupTask = track(deadline.wait(work).catch(error => {
+      // Revoke before releasing ownership: a late continuation must never
+      // release a new run's keys or detach a newly attached debugger.
+      cleanupExpired = true;
+      const affectedTabs = new Set([...heldInput.values()].flatMap(state => state.tabId === undefined ? [] : [state.tabId]));
+      for (const debuggee of debuggees) if (debuggee.tabId !== undefined) affectedTabs.add(debuggee.tabId);
+      for (const tabId of affectedTabs) inputQueues.delete(tabId);
+      for (const debuggee of debuggees) {
+        void chrome.debugger.detach(debuggee).catch(failure => report("forced-detach", debuggee, failure));
+      }
+      report("cleanup-timeout", debuggees, error);
+    }).finally(() => {
+      cleanupExpired = true;
+      deadline.dispose();
+      try { port.disconnect(); } catch { /* Already disconnected. */ }
+    }));
     return cleanupTask;
   }
   port.onDisconnect.addListener(() => { void cleanupPort(); });

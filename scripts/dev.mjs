@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { chromium } from "@playwright/test";
 import { createServer } from "vite";
 import { reloadDevelopmentExtension } from "./reload-dev-extension.ts";
+import { fitWindowToScreen } from "./development-extension.mjs";
 
 const root = process.cwd();
 const extensionPath = resolve(root, process.env.SURFWAX_DEV_OUT_DIR ?? "dist");
@@ -109,24 +110,7 @@ async function main() {
     throw new Error(`无法加载 Surf Wax 开发扩展；请更新系统 Chrome，并检查 ${extensionPath}/manifest.json 和 Vite 编译错误。\n${error.message}`, { cause: error });
   }
   console.log(`开发浏览器：${context.browser().version()}（系统 Chrome，沙箱已启用）。`);
-  const pageSession = await context.newCDPSession(page);
-  const { windowId } = await pageSession.send("Browser.getWindowForTarget");
-  await browserSession.send("Browser.setWindowBounds", {
-    windowId,
-    bounds: { windowState: "normal" },
-  });
-  const screenBounds = await page.evaluate(() => ({
-    left: screen.availLeft,
-    top: screen.availTop,
-    width: screen.availWidth,
-    height: screen.availHeight,
-  }));
-  await browserSession.send("Browser.setWindowBounds", { windowId, bounds: screenBounds });
-  const { bounds } = await browserSession.send("Browser.getWindowBounds", { windowId });
-  await pageSession.detach();
-  if (Object.entries(screenBounds).some(([key, value]) => bounds[key] !== value)) {
-    throw new Error("无法将开发浏览器窗口铺满屏幕的可用区域。");
-  }
+  await fitWindowToScreen(context, page, browserSession);
 
   await reloadDevelopmentExtension(context, await waitForWorker(extensionId));
   console.log("Surf Wax 开发扩展已重新加载，当前源码已生效。");

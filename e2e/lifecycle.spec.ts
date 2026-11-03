@@ -170,7 +170,9 @@ test("closing the panel cancels a pending complete response and continues only o
     await expect(resumed.getByTestId("interrupted-message")).toBeVisible();
     await expect(resumed.getByTestId("live-tool-calls")).toHaveCount(0);
     expect(JSON.stringify(await readEvents(resumed))).not.toContain("CANCELLED_RESPONSE");
-    await resumed.getByTestId("continue-interrupted").click();
+    await expect(resumed.getByTestId("continue-interrupted")).toHaveCount(0);
+    await resumed.getByTestId("composer-input").fill("继续上一次被中断的工作，先确认已经完成的操作。");
+    await resumed.getByTestId("composer-input").press("Enter");
     await expect(resumed.locator('[data-role="user"]').last()).toContainText("继续上一次被中断的工作");
     await expect(resumed.locator(".markdown-body").last()).toContainText("CONTINUED");
     await expect(resumed.getByTestId("conversation-menu")).toContainText("恢复后的标题");
@@ -376,7 +378,8 @@ test('two native side panels accept only one owner and closing the non-owner pre
     other = await openNativeSidePanel(opened, `${provider.origin}/target`, { browser: owner.browser, windowId: secondWindow.id });
     await expect.poll(() => other!.panel.evaluate<string>(`document.querySelector('[data-testid="other-run-busy"]')?.textContent || ''`)).toContain('其他窗口已有任务运行');
     await submitNative(other.panel, 'this second task must not replace the owner');
-    await expect.poll(() => other!.panel.evaluate<string>(`document.querySelector('[role="alert"]')?.textContent || ''`)).toContain('已有任务运行');
+    await expect.poll(() => other!.panel.evaluate<boolean>(`document.querySelector('[data-testid="composer-input"]').disabled`)).toBe(true);
+    expect(JSON.stringify(await readNativeEvents(owner.panel))).not.toContain('this second task must not replace the owner');
     expect(provider.requests.filter(request => request.tools?.some((tool: any) => tool.function.name === "click"))).toHaveLength(2);
     expect((await readNativeEvents(owner.panel)).filter(event => event.type === 'conversation.submitted')).toHaveLength(1);
     await other.panel.close();

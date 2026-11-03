@@ -11,7 +11,7 @@ import { toolLifecycleEvidence } from "../../e2e/evaluation/tool-lifecycle";
 import { testEventStore } from "../test-event-store";
 import { canAutoDispatchFollowup, rebuildFollowups } from "./followups";
 
-vi.mock("./coordinator", () => ({ claimConversationRun: async (_id: string, signal?: AbortSignal) => ({ signal: signal ?? new AbortController().signal, finish: vi.fn() }) }));
+vi.mock("./coordinator", () => ({ claimConversationRun: async (_id: string, signal?: AbortSignal) => ({ runId: crypto.randomUUID(), conversationId: _id, signal: signal ?? new AbortController().signal, finish: vi.fn() }) }));
 function logger() {
   const events: LogEvent[] = [];
   return new EventLogger({ store: {

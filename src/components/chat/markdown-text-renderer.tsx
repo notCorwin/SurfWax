@@ -1,7 +1,7 @@
 "use client";
 import "katex/dist/katex.min.css";
 import { normalizeMathDelimiters } from "./math-delimiters";
-import { math } from "@streamdown/math";
+import { createMathPlugin } from "@streamdown/math";
 import { memo } from "react";
 import { Streamdown } from "streamdown";
 import { createCodeHighlighter } from "./code-highlighter";
@@ -19,10 +19,10 @@ const syntaxTheme = {
     { scope: ["entity.name.type", "support.type"], settings: { foreground: "var(--syntax-type)" } },
   ],
 };
-const PLUGINS = { code: createCodeHighlighter([syntaxTheme, { ...syntaxTheme, name: "surf-wax-dark", type: "dark" }]), math };
+const PLUGINS = { code: createCodeHighlighter([syntaxTheme, { ...syntaxTheme, name: "surf-wax-dark", type: "dark" }]), math: createMathPlugin({ singleDollarTextMath: true }) };
 
 export const MarkdownText = memo(function MarkdownText({ text }: { text: string }) {
   const normalized = normalizeMathDelimiters(text);
   if (!normalized.trim()) return null;
-  return <Streamdown className="markdown-body" mode="static" plugins={PLUGINS} controls>{normalized}</Streamdown>;
+  return <Streamdown className="markdown-body" mode="static" plugins={PLUGINS} linkSafety={{ enabled: false }} controls={{ table: false, code: { copy: true, download: false } }} tableMaxHeight={0} codeBlockMaxHeight={0}>{normalized}</Streamdown>;
 });

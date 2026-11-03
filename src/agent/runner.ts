@@ -1,3 +1,4 @@
+import { logIO } from "../log-io";
 import { dynamicTool, simulateStreamingMiddleware, ToolLoopAgent, wrapLanguageModel } from "ai";
 import { z } from "zod";
 import type { LanguageModel, LanguageModelCallEndEvent, ModelMessage } from "ai";
@@ -13,6 +14,9 @@ import { inputBudget, modelSupportsImages, resolveModelLimit } from "./model-lim
 import { resolvedBaseURL, sdkFor } from "./model-sdks";
 import { estimatePromptInput, hasSummarizableHistory, type ContextCompactor } from "./compaction";
 import { IncrementalActiveContext } from "./context-choice";
+import { createDeadline } from "../deadline";
+import { GOAL_TOOLS } from "./context-prompt";
+export { GOAL_TOOLS } from "./context-prompt";
 import type { ReasoningEffort } from "./reasoning";
 import { dsmlMiddleware } from "./dsml";
 import { completionToolChoiceMiddleware, completionToolsMiddleware } from "./completion-tools";
@@ -37,9 +41,11 @@ export type CreateAgentOptions = {
   onResponse?: (event: LanguageModelCallEndEvent<any>) => void | Promise<void>;
   shouldYield?: () => boolean;
   goalMode?: boolean;
+  contextAnchor?: () => { messageId: string; partCount: number };
 };
 
-export const GOAL_TOOLS = [...PROMPT_TOOLS, { type: "function", name: "complete_goal", description: GOAL_DESCRIPTION, inputSchema: z.toJSONSchema(GOAL_SCHEMA, { target: "draft-7", unrepresentable: "any" }) }];
+
+export const GOAL_TOOL_TIMEOUT_MS = 120_000;
 
 type BrowserAgentTools = ReturnType<typeof createProgramTools>;
 function browserContextMessage(context: BrowserContext): string {
@@ -49,12 +55,6 @@ function browserContextMessage(context: BrowserContext): string {
     JSON.stringify(context.tabs),
     "</browser-context>",
   ].join("\n");
-}
-
-function usesAnthropicMessages(config: ModelConfig): boolean {
-  const sdk = sdkFor(config);
-  return sdk === "@ai-sdk/anthropic" || sdk === "@ai-sdk/google-vertex/anthropic"
-    || sdk === "gitlab-ai-provider" && (config.canonicalModelId?.startsWith("anthropic/") === true || config.modelFamily?.toLowerCase().startsWith("claude") === true);
 }
 
 /** Enable supported prompt caching only for Claude's first-party Messages API. */
@@ -106,20 +106,23 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       abortSignal?.throwIfAborted();
       const identity = options.conversationId ? logger?.toolIdentity(options.conversationId, toolCallId) : undefined;
       const start = performance.now();
-      if (logger && !await logger.append({ type: "tool.started", conversationId: options.conversationId, content: { callId, toolName: "complete_goal" }, input, toolCallId, ...identity }))
+      const parentSignal = abortSignal && options.signal ? AbortSignal.any([abortSignal, options.signal]) : abortSignal ?? options.signal;
+      const deadline = createDeadline(GOAL_TOOL_TIMEOUT_MS, parentSignal, "complete_goal");
+      type GoalOutput = { ok: boolean; error?: { code: string; message: string }; [key: string]: unknown };
+      try {
+      if (logger && !await logIO(logger.append({ type: "tool.started", conversationId: options.conversationId, content: { callId, toolName: "complete_goal" }, input, toolCallId, ...identity }), "记录目标工具启动", 10_000, deadline.signal))
         throw new DOMException("日志维护已阻止工具启动。", "AbortError");
-      abortSignal?.throwIfAborted();
-      const pending = options.executor.pendingBackgroundJobs?.() ?? [];
-      const evidence = logger && options.conversationId && identity?.runId
-        ? await runEvidence(logger, options.conversationId, identity.runId) : localResults;
-      const invalid = validateGoal(input as z.infer<typeof GOAL_SCHEMA>, evidence);
-      let output = !goalCallAlone ? { ok: false, error: { code: "goal-call-not-alone", message: "Call complete_goal alone after observing all other tool results." } }
-        : pending.length ? { ok: false, error: { code: "background-jobs-pending", message: "Wait for all background jobs to finish before completing the goal." } }
-        : invalid ? { ok: false, error: { code: "goal-evidence-invalid", message: invalid } }
-        : { ok: true, ...(input as z.infer<typeof GOAL_SCHEMA>) };
-      if (output.ok) {
-        try {
-          const reviewLimit = await (limit ??= resolveModelLimit(options.model, { signal: options.signal, diagnosticContext }));
+        const execute = async (): Promise<GoalOutput> => {
+          deadline.signal.throwIfAborted();
+          const pending = options.executor.pendingBackgroundJobs?.() ?? [];
+          const evidence = logger && options.conversationId && identity?.runId
+            ? await runEvidence(logger, options.conversationId, identity.runId) : localResults;
+          deadline.signal.throwIfAborted();
+          const invalid = validateGoal(input as z.infer<typeof GOAL_SCHEMA>, evidence);
+          if (!goalCallAlone) return { ok: false, error: { code: "goal-call-not-alone", message: "Call complete_goal alone after observing all other tool results." } };
+          if (pending.length) return { ok: false, error: { code: "background-jobs-pending", message: "Wait for all background jobs to finish before completing the goal." } };
+          if (invalid) return { ok: false, error: { code: "goal-evidence-invalid", message: invalid } };
+          const reviewLimit = await (limit ??= resolveModelLimit(options.model, { signal: deadline.signal, diagnosticContext }));
           const budget = reviewLimit ? { input: inputBudget(reviewLimit), output: Math.min(reviewLimit.output ?? 2048, Math.max(1, Math.floor(reviewLimit.context / 4))) } : undefined;
           const proposed = input as z.infer<typeof GOAL_SCHEMA>;
           const context = goalReviewContext(reviewContext, budget ? Math.floor(budget.input * 0.75) : undefined, reviewRequirements,
@@ -127,23 +130,25 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
           const history = actionHistory(evidence);
           const key = JSON.stringify([input, context, history]);
           const verdict = lastReview?.key === key ? lastReview.verdict : await reviewGoal({
-            goal: input as z.infer<typeof GOAL_SCHEMA>, context, model: options.languageModel,
-            signal: abortSignal ?? options.signal, logger, conversationId: options.conversationId,
-            budget,
-            history,
+            goal: proposed, context, model: options.languageModel,
+            signal: deadline.signal, logger, conversationId: options.conversationId, budget, history,
           });
+          deadline.signal.throwIfAborted();
           lastReview = { key, verdict };
-          if (!verdict.accept) output = { ok: false, error: { code: "goal-incomplete", message: [verdict.reason, ...verdict.remaining].join("\n") } };
-        } catch (error) {
-          (abortSignal ?? options.signal)?.throwIfAborted();
-          output = { ok: false, error: { code: "goal-review-unavailable", message: safeDiagnosticText(error instanceof Error ? error.message : String(error)) } };
-        }
-      }
-      (abortSignal ?? options.signal)?.throwIfAborted();
-      if (logger && !await logger.append({ type: output.ok ? "tool.finished" : "tool.failed", conversationId: options.conversationId,
-        content: { callId, toolName: "complete_goal" }, input, output, toolCallId, ...identity, ...(!output.ok ? { error: output.error } : {}), latencyMs: Math.max(0, performance.now() - start) }))
-        throw new DOMException("日志维护已阻止工具结果保存。", "AbortError");
-      return output;
+          return verdict.accept ? { ok: true, ...proposed }
+            : { ok: false, error: { code: "goal-incomplete", message: [verdict.reason, ...verdict.remaining].join("\n") } };
+        };
+        const output = await deadline.wait(execute()).catch((error): GoalOutput => {
+          parentSignal?.throwIfAborted();
+          return { ok: false, error: { code: deadline.signal.aborted ? "timeout" : "goal-review-unavailable",
+            message: safeDiagnosticText(error instanceof Error ? error.message : String(error)) } };
+        });
+        parentSignal?.throwIfAborted();
+        if (logger && !await logIO(logger.append({ type: output.ok ? "tool.finished" : "tool.failed", conversationId: options.conversationId,
+          content: { callId, toolName: "complete_goal" }, input, output, toolCallId, ...identity, ...(!output.ok ? { error: output.error } : {}), latencyMs: Math.max(0, performance.now() - start) }), "记录目标工具结果"))
+          throw new DOMException("日志维护已阻止工具结果保存。", "AbortError");
+        return output;
+      } finally { deadline.dispose(); }
     },
   });
   const toolOrder = Object.keys(tools);
@@ -185,7 +190,10 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
     prepareStep: async ({ messages, initialMessages, responseMessages, stepNumber }) => {
       if (stepNumber === 0) reviewRequirements = goalRequirements(messages);
       logger?.telemetry({ type: "model.context.preparing", conversationId: options.conversationId, content: { stepNumber } });
-      let prepared = await options.compactor?.prepare(messages, stepNumber) ?? messages;
+      let canonical = options.contextAnchor && canonicalContext ? await canonicalContext.read() : undefined;
+      let raw = canonical?.raw ?? [...initialMessages, ...responseMessages];
+      if (canonical) options.compactor?.useBranch(canonical.branchIds);
+      let prepared = await options.compactor?.prepare(canonical?.raw ?? messages, stepNumber) ?? canonical?.messages ?? messages;
       const browserContext = await options.executor.browserContext();
       boundTabId = browserContext.tabs.find((tab) => tab.current)?.tabId;
       const nextBrowserDigest = JSON.stringify(browserContext.tabs);
@@ -193,14 +201,33 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
       browserDigest = nextBrowserDigest;
       if (browserChanged) logger?.telemetry({ type: "browser.context.prepared", conversationId: options.conversationId, content: { stepNumber, ...browserContext } });
       const modelLimit = await (limit ??= resolveModelLimit(options.model, { signal: options.signal, diagnosticContext }));
-      const prepareMessages = async (source: typeof prepared) => prepareToolMessages(
-        source,
-        stepNumber,
-        browserChanged ? browserContextMessage(browserContext) : undefined,
-        logger ? (id, selection) => logger.result(id, selection, options.conversationId ?? "") : undefined,
-        await toolOptions.visualEnabled(),
-      );
+      const prepareMessages = async (source: typeof prepared) => {
+        const readArtifact = logger ? (id: number, selection?: { path: Array<string | number> }) => logger.result(id, selection, options.conversationId ?? "") : undefined;
+        // Replayed tool JSON has scrubbed image bytes. Extract this step's new
+        // visual input from the SDK receipt, then append it to canonical history.
+        const observed = await prepareToolMessages(canonical ? messages : source, stepNumber,
+          browserChanged ? browserContextMessage(browserContext) : undefined, readArtifact, await toolOptions.visualEnabled());
+        if (!canonical) return observed;
+        const supplemental = observed.length > messages.length ? observed.at(-1) : undefined;
+        return supplemental ? [...source, supplemental] : source;
+      };
       let outgoing = await prepareMessages(prepared);
+      // Commit supplemental input once, before pressure handling. A summary may
+      // consume it too, so its source must already be part of canonical history.
+      const supplemental = outgoing.length > prepared.length ? outgoing.at(-1) : undefined;
+      const anchor = options.contextAnchor?.();
+      if (anchor && supplemental && logger && options.conversationId) {
+        const saved = await logger.append({ type: "model.context.appended", conversationId: options.conversationId,
+          content: { anchorMessageId: anchor.messageId, partCount: anchor.partCount, message: supplemental } });
+        if (!saved) throw new DOMException("日志维护已阻止模型上下文保存。", "AbortError");
+        canonical = await canonicalContext!.read();
+        raw = canonical.raw;
+        options.compactor?.useBranch(canonical.branchIds);
+        prepared = canonical.messages;
+        outgoing = prepared;
+      }
+      // The durable supplemental message is already in prepared after this point.
+      const finalizeMessages = (source: typeof prepared) => anchor ? Promise.resolve(source) : prepareMessages(source);
       const prompt = { instructions: currentInstructions(), tools: currentTools() };
       let estimatedInput = options.compactor?.estimate(outgoing, prompt) ?? estimatePromptInput({ ...prompt, messages: outgoing });
       // Fixed instructions and schemas cannot be made smaller by repeatedly
@@ -213,8 +240,8 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         && (!options.compactor || options.compactor.canCompact(prepared, modelLimit));
       if (pressure) {
         if (!options.compactor) throw new Error("上下文容量不足，无法在当前运行中压缩历史消息。");
-        prepared = await options.compactor.compact([...initialMessages, ...responseMessages], prepared, stepNumber, options.languageModel, modelLimit);
-        outgoing = await prepareMessages(prepared);
+        prepared = await options.compactor.compact(raw, prepared, stepNumber, options.languageModel, modelLimit);
+        outgoing = await finalizeMessages(prepared);
         estimatedInput = options.compactor.estimate(outgoing, prompt);
       }
       // The automatic threshold is a compaction policy, not permission to send
@@ -224,31 +251,19 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
         if (!options.compactor || !hasSummarizableHistory(prepared, modelLimit)) {
           throw new Error("模型输入窗口无法容纳当前请求；原始历史已保留，请增大上下文窗口或减少固定提示与工具开销。");
         }
-        prepared = await options.compactor.compact([...initialMessages, ...responseMessages], prepared, stepNumber, options.languageModel, modelLimit, true);
-        outgoing = await prepareMessages(prepared);
+        prepared = await options.compactor.compact(raw, prepared, stepNumber, options.languageModel, modelLimit, true);
+        outgoing = await finalizeMessages(prepared);
         estimatedInput = options.compactor.estimate(outgoing, prompt);
         if (estimatedInput > inputBudget(modelLimit)) {
           throw new Error("压缩后请求仍超出模型输入窗口；原始历史已保留，请增大上下文窗口或减少固定提示与工具开销。");
         }
       }
-      if (options.compactor) {
-        // The persisted UI projection can represent completed tool calls
-        // differently from the SDK's response messages. Anchor to that
-        // projection only when it describes the same sequence of roles.
-        const canonical = stepNumber > 0 && canonicalContext ? (await canonicalContext.read()).messages : undefined;
-        const persisted = prepared.filter((message) => !(message.role === "user" && Array.isArray(message.content)
-          && message.content.length === 1 && message.content[0]?.type === "text"
-          && message.content[0].text.startsWith("<browser-context>\nSupplemental state only.")));
-        const base = canonical?.length === persisted.length
-          && canonical.every((message, index) => message.role === persisted[index]?.role) ? canonical : prepared;
-        await options.compactor.recordBase(base);
-      }
+      if (options.compactor) await options.compactor.recordBase(outgoing);
       reviewContext = outgoing;
       return {
         instructions: wireInstructions(),
         activeTools: activeTools(),
-        ...(usesAnthropicMessages(options.model)
-          ? { maxOutputTokens: options.model.maxTokensOverride ?? modelLimit?.output ?? 128_000 } : {}),
+        maxOutputTokens: options.model.maxTokensOverride ?? modelLimit?.output ?? 128_000,
         messages: outgoing,
       };
     },

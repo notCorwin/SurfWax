@@ -3,6 +3,7 @@ import {
   EventLogger,
   fromLogValue,
   isConversationMessage,
+  projectConversationMessageEntries,
   selectedHeadId,
   type ConversationMessage,
   type ConversationRepository,
@@ -109,7 +110,8 @@ export function generateConversationTitle(logger: EventLogger, config: ModelConf
 function normalizeInterruptedMessage(message: ConversationMessage, events: readonly LogEvent[], terminal: LogEvent): ConversationMessage {
   const runId = terminal.runId!;
   const tools = new Map<string, LogEvent>();
-  for (const event of events) if (event.runId === runId && event.toolCallId) tools.set(event.toolCallId, event);
+  for (const event of events) if (event.runId === runId && event.toolCallId
+    && (["tool.finished", "tool.failed"].includes(event.type) || event.type === "tool.started" && !tools.has(event.toolCallId))) tools.set(event.toolCallId, event);
   const parts = message.parts.flatMap((part) => {
     if (!part || typeof part !== "object") return [part];
     const value = part as Record<string, unknown>;
@@ -137,26 +139,22 @@ function normalizeInterruptedMessage(message: ConversationMessage, events: reado
 }
 
 export async function restoreConversationRepository(events: readonly LogEvent[]): Promise<ConversationRepository> {
-  const stored = new Map<string, { eventId: number; firstEventId: number; runId?: string; parentId: string | null; message: ConversationMessage }>();
+  const stored = projectConversationMessageEntries(events);
   const completedRuns = new Set(events
     .filter((event) => event.type === "conversation.finished" && event.runId)
     .map((event) => event.runId!));
-  for (const event of events) {
-    if (event.type !== "conversation.message") continue;
-    const message = fromLogValue(event.content, event.valueEncoding);
-    if (!isConversationMessage(message)) continue;
-    const parts = message.parts.map((part) => part && typeof part === "object" && "toolCallId" in part && "output" in part
-      ? { ...part, output: normalizeRecoveredToolOutput(part.output) } : part);
-    stored.set(message.id, { eventId: event.id, firstEventId: stored.get(message.id)?.firstEventId ?? event.id, runId: event.runId, parentId: event.parentId ?? null, message: { ...message, parts } });
+  for (const item of stored.values()) {
+    item.message = { ...item.message, parts: item.message.parts.map((part) => part && typeof part === "object" && "toolCallId" in part && "output" in part
+      ? { ...part, output: normalizeRecoveredToolOutput(part.output) } : part) };
   }
   for (const terminal of events.filter((event) => event.runId && (event.type === "conversation.aborted" || event.type === "conversation.failed"))) {
     if (completedRuns.has(terminal.runId!)) continue;
     const submitted = [...events].reverse().find((event) => event.runId === terminal.runId && event.type === "conversation.submitted");
     const content = submitted ? fromLogValue(submitted.content, submitted.valueEncoding) as { messageId?: unknown } : undefined;
     const parentId = typeof content?.messageId === "string" ? content.messageId : null;
-    const persistedPartial = [...stored.values()].find((item) => item.runId === terminal.runId && item.parentId === parentId && item.message.role === "assistant");
-    if (persistedPartial) {
-      persistedPartial.message = normalizeInterruptedMessage(persistedPartial.message, events, terminal);
+    const persistedPartials = [...stored.values()].filter((item) => item.runId === terminal.runId && item.message.role === "assistant");
+    if (persistedPartials.length) {
+      for (const partial of persistedPartials) partial.message = normalizeInterruptedMessage(partial.message, events, terminal);
       continue;
     }
     const siblings = [...stored.entries()].filter(([, item]) => item.parentId === parentId && item.message.role === "assistant");

@@ -23,14 +23,23 @@ test("reconstructs a semantic delta from the full snapshot with duplicate text a
     });
     let baseline: any, delta: any;
     responses.push(
-      commandResponse("inspect_page", { budget: 12000 }, "baseline"),
-      (request) => { baseline = lastTool(request); expect(baseline.mode).toBe("full"); return commandResponse("click", { target: { by: "css", value: "#mutate" } }, "mutate"); },
+      commandResponse("inspect_page", { full: true, budget: 12000 }, "baseline"),
+      (request) => {
+        baseline = lastTool(request); expect(baseline.mode).toBe("full");
+        const textbox = baseline.items.find((item: any) => item.line.includes("- textbox"));
+        expect(textbox?.ref).toEqual(expect.any(String));
+        if (!textbox.line.includes("[value=unknown]")) expect(textbox.line).toContain(JSON.stringify("first\nsecond"));
+        return commandResponse("read_value", { target: { ref: textbox.ref } }, "baseline-value");
+      },
+      (request) => {
+        expect(lastTool(request)).toMatchObject({ ok: true, result: "first\nsecond" });
+        return commandResponse("click", { target: { by: "css", value: "#mutate" } }, "mutate");
+      },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("inspect_page", { since: baseline.observationId }, "delta"); },
-      (request) => { delta = lastTool(request); expect(delta.mode).toBe("delta"); return commandResponse("inspect_page", {}, "fresh"); },
+      (request) => { delta = lastTool(request); expect(delta).toMatchObject({ mode: "delta", baseObservationId: baseline.observationId }); return commandResponse("inspect_page", { full: true }, "fresh"); },
       (request) => {
         const fresh = lastTool(request);
         expect(baseline.items.filter((item: any) => item.line.includes('button "Same"')).length).toBe(2);
-        expect(baseline.items.some((item: any) => item.line.includes("first\nsecond"))).toBe(true);
         const state = baseline.items.map((item: any) => ({ ...item }));
         for (const item of delta.items) {
           const index = state.findIndex((old: any) => old.id === item.id);
@@ -41,6 +50,13 @@ test("reconstructs a semantic delta from the full snapshot with duplicate text a
           state.splice(position, 0, record);
         }
         expect(state).toEqual(fresh.items);
+        const textbox = state.find((item: any) => item.line.includes("- textbox"));
+        expect(textbox?.ref).toEqual(expect.any(String));
+        if (!textbox.line.includes("[value=unknown]")) expect(textbox.line).toContain(JSON.stringify("changed\nvalue"));
+        return commandResponse("read_value", { target: { ref: textbox.ref } }, "changed-value");
+      },
+      (request) => {
+        expect(lastTool(request)).toMatchObject({ ok: true, result: "changed\nvalue" });
         return textResponse("DELTA_IDENTITY_OK");
       },
       textResponse("检查变化"),

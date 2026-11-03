@@ -12,14 +12,14 @@ import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { registerBackgroundRequest, waitForConversationRun } from "@/agent/coordinator";
-import { modelMessages } from "@/agent/context-choice";
+import { IncrementalActiveContext } from "@/agent/context-choice";
 import { modelDiagnosticContext } from "@/agent/diagnostics";
 import { contextPressure } from "@/agent/compaction";
 import { summarizeTokenUsage, type TokenUsageField, type TokenUsageSummary } from "@/agent/token-usage";
 import { canAutoDispatchFollowup, FOLLOWUP_EVENT_TYPES, rebuildFollowups, type FollowupMessage } from "@/agent/followups";
 import { contextUsedPercent, inputBudget, resolveModelLimit, type ModelLimit } from "@/agent/model-limits";
 import { reasoningSettingsFor, type ReasoningEffort } from "@/agent/reasoning";
-import { type ConversationMessage, type EventLogger } from "@/logging";
+import { type EventLogger } from "@/logging";
 import type { ModelConfig } from "@/types";
 import { useRuntimeView } from "@/sidepanel/runtime-view";
 import { useRunState } from "@/sidepanel/useRunState";
@@ -37,6 +37,11 @@ const CONTEXT_USAGE_EVENTS = new Set([
   "context.checkpoint.applied",
   "context.estimate.calibrated",
   "context.prompt.updated",
+  "model.context.appended",
+  "agent.goal.continued",
+  "conversation.finished",
+  "conversation.aborted",
+  "conversation.failed",
 ]);
 type ContextUsage = { state: "loading" | "unavailable" } | {
   state: "ready";
@@ -81,14 +86,17 @@ function useFollowups(logger: EventLogger, conversationId: string) {
     const unsubscribe = logger.subscribe((event) => {
       if (event.conversationId === conversationId && FOLLOWUP_LIFECYCLE_EVENTS.has(event.type)) void refresh();
     });
+    const unsubscribeCommits = logger.subscribeCommits(commit => {
+      if (commit.external && (commit.cleared || commit.conversationIds.includes(conversationId) && commit.types.some(type => FOLLOWUP_LIFECYCLE_EVENTS.has(type)))) void refresh();
+    });
     void refresh();
-    return () => { active = false; unsubscribe(); };
+    return () => { active = false; unsubscribe(); unsubscribeCommits(); };
   }, [conversationId, logger]);
 
   return state;
 }
 
-const ContextIndicator = memo(function ContextIndicator({ config, logger, conversationId }: { config: ModelConfig; logger: EventLogger; conversationId: string }) {
+export const ContextIndicator = memo(function ContextIndicator({ config, logger, conversationId, goalMode = false }: { config: ModelConfig; logger: EventLogger; conversationId: string; goalMode?: boolean }) {
   const runtime = useRuntimeView();
   const [usage, setUsage] = useState<ContextUsage>({ state: "loading" });
   const latestUsage = useRef(usage);
@@ -116,8 +124,11 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
     const unsubscribe = logger.subscribe((event) => {
       if ((event.conversationId === conversationId && event.type === "model.step.finished") || event.type === "log.cleared") void refresh();
     });
+    const unsubscribeCommits = logger.subscribeCommits(commit => {
+      if (commit.external && (commit.cleared || commit.conversationIds.includes(conversationId) && commit.types.includes("model.step.finished"))) void refresh();
+    });
     void refresh();
-    return () => { active = false; unsubscribe(); };
+    return () => { active = false; unsubscribe(); unsubscribeCommits(); };
   }, [conversationId, logger]);
 
   useEffect(() => {
@@ -127,14 +138,12 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
     let calculating = false;
     let pending = false;
     const initialThread = runtime.getState();
-    let messages = initialThread.messages;
     let loading = initialThread.isLoading;
     const controller = new AbortController();
     const unregisterRequest = registerBackgroundRequest(controller, conversationId);
     controller.signal.addEventListener("abort", unregisterRequest, { once: true });
     const limit = resolveModelLimit(config, { signal: controller.signal, diagnosticContext: modelDiagnosticContext(logger, conversationId) });
-    let events: ReturnType<EventLogger["contextEvents"]> | undefined;
-    let repository: ReturnType<EventLogger["repository"]> | undefined;
+    const projection = new IncrementalActiveContext(logger, conversationId);
     publishUsage({ state: "loading" });
 
     const refresh = async () => {
@@ -144,27 +153,19 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
         while (active && pending) {
           pending = false;
           const current = version;
-          const currentMessages = messages;
           try {
-            const [resolvedLimit, currentEvents, canonical] = await Promise.all([limit, events ??= logger.contextEvents(conversationId), repository ??= logger.repository(conversationId)]);
+            const resolvedLimit = await limit;
             if (!resolvedLimit) {
               if (active && current === version) publishUsage({ state: "unavailable" });
               continue;
             }
-            const metadataById = new Map(canonical.messages.map((entry) => [entry.message.id, entry.message.metadata]));
-            const ui = currentMessages.map(({ id, role, source, metadata }) => ({
-              id,
-              role,
-              parts: [...source.parts],
-              metadata: role === "user" ? metadataById.get(id) ?? metadata : metadata,
-            })) as ConversationMessage[];
-            const branchIds = ui.map(({ id }) => id);
-            const raw = await modelMessages(ui);
+            const canonical = await projection.read();
             const pressure = await contextPressure({
-              raw,
-              branchIds,
-              events: currentEvents,
+              raw: canonical.raw,
+              branchIds: canonical.branchIds,
+              events: canonical.events,
               model: config,
+              goalMode,
               limit: resolvedLimit,
               signal: controller.signal,
             });
@@ -191,7 +192,6 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
       // including changes coalesced into the next animation frame.
       version += 1;
       const latest = runtime.getState();
-      messages = latest.messages;
       loading = latest.isLoading;
       if (loading) { pending = false; return; }
       pending = true;
@@ -200,12 +200,17 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
         void refresh();
       });
     };
-    const unsubscribeRuntime = runtime.thread.subscribe(schedule);
+    const unsubscribeRuntime = runtime.thread.subscribe(() => {
+      // Message input is invalidated by committed log events. Composer edits and
+      // display-only publications cannot change model context.
+      if (runtime.getState().isLoading !== loading) schedule();
+    });
     const unsubscribe = logger.subscribe((event) => {
       if (event.type !== "log.cleared" && (event.conversationId !== conversationId || !CONTEXT_USAGE_EVENTS.has(event.type))) return;
-      events = undefined;
-      if (event.type === "conversation.message" || event.type === "log.cleared") repository = undefined;
       schedule();
+    });
+    const unsubscribeCommits = logger.subscribeCommits(commit => {
+      if (commit.external && (commit.cleared || commit.conversationIds.includes(conversationId) && commit.types.some(type => CONTEXT_USAGE_EVENTS.has(type)))) schedule();
     });
     if (!loading) schedule();
     return () => {
@@ -215,8 +220,9 @@ const ContextIndicator = memo(function ContextIndicator({ config, logger, conver
       if (frame !== undefined) cancelAnimationFrame(frame);
       unsubscribeRuntime();
       unsubscribe();
+      unsubscribeCommits();
     };
-  }, [runtime, config, conversationId, logger, publishUsage]);
+  }, [runtime, config, conversationId, logger, goalMode, publishUsage]);
 
   const label = usageLabel(latestUsage.current);
   const usedPercent = usage.state === "ready" ? usage.usedPercent : 0;
@@ -299,6 +305,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
   const externalText = usePanelState(composerText);
   const isRunning = usePanelState(threadRunning);
   const { locked } = useRunState();
+  const otherRunning = locked && !isRunning;
   const isDisabled = usePanelState(composerDisabled);
   const followups = useFollowups(logger, conversationId);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -317,9 +324,12 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
 
   useEffect(() => {
     if (previousExternalText.current === externalText) return;
+    const previous = previousExternalText.current;
     previousExternalText.current = externalText;
     const input = inputRef.current;
     if (!input || input.value === externalText) return;
+    // A durable send may clear its original draft after the user already started another.
+    if (!externalText && input.value !== previous) return;
     input.value = externalText;
     onDraftChange(externalText);
     setHasText(Boolean(externalText.trim()));
@@ -334,7 +344,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
   }, [onDraftChange]);
 
   const dispatchFollowup = useCallback((message: FollowupMessage, mode: "followup" | "immediate") => {
-    if (dispatching.current || blocked) return;
+    if (dispatching.current || blocked || otherRunning) return;
     dispatching.current = message.id;
     setQueueError(undefined);
     void waitForConversationRun(conversationId).then(() => runtimeCommands.thread.append({
@@ -346,7 +356,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
       dispatching.current = undefined;
       if (mounted.current) setQueueError({ summary: "排队消息未能发送，请重试。", error });
     });
-  }, [runtimeCommands, blocked, conversationId]);
+  }, [runtimeCommands, blocked, conversationId, otherRunning]);
 
   useEffect(() => {
     if (!dispatching.current) return;
@@ -370,12 +380,11 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
   const submit = useCallback(() => {
     const input = inputRef.current;
     const value = input?.value ?? "";
-    if (!input || !value.trim() || isDisabled || blocked || savingFollowup.current) return;
+    if (!input || !value.trim() || isDisabled || blocked || otherRunning || savingFollowup.current) return;
     setQueueError(undefined);
     if (followups.ready && !isRunning && followups.messages.length === 0) {
       runtimeCommands.composer.setText(value);
       runtimeCommands.composer.send();
-      clearInput();
       return;
     }
     const queued = {
@@ -401,17 +410,17 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
       savingFollowup.current = false;
       if (mounted.current) setSaving(false);
     });
-  }, [runtimeCommands, blocked, clearInput, conversationId, followups.messages.length, followups.ready, isDisabled, isRunning, logger]);
+  }, [runtimeCommands, blocked, clearInput, conversationId, followups.messages.length, followups.ready, isDisabled, isRunning, otherRunning, logger]);
 
   const sendImmediately = useCallback((message: FollowupMessage) => {
-    if (blocked || dispatching.current) return;
+    if (blocked || otherRunning || dispatching.current) return;
     if (isRunning) {
       setImmediateId(message.id);
       runtimeCommands.thread.cancelRun();
     } else {
       dispatchFollowup(message, "immediate");
     }
-  }, [runtimeCommands, blocked, dispatchFollowup, isRunning]);
+  }, [runtimeCommands, blocked, dispatchFollowup, isRunning, otherRunning]);
 
   const removeFollowup = useCallback((id: string) => {
     setQueueError(undefined);
@@ -448,7 +457,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
           className="flex min-w-0 items-center gap-2 rounded-lg border border-border/70 bg-muted/50 px-2 py-1.5 text-xs">
           <span className="shrink-0 text-muted-foreground">{index + 1}</span>
           <span className="min-w-0 flex-1 truncate" title={message.text}>{message.text}</span>
-          <Button type="button" variant="ghost" size="icon-xs" disabled={Boolean(immediateId) || Boolean(dispatching.current) || blocked}
+          <Button type="button" variant="ghost" size="icon-xs" disabled={Boolean(immediateId) || Boolean(dispatching.current) || blocked || otherRunning}
             aria-label="立即发送" title="中断当前工作并立即发送" onClick={() => sendImmediately(message)}>
             <ForwardIcon aria-hidden="true" />
           </Button>
@@ -466,7 +475,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
           placeholder="描述要执行的浏览器任务…"
           className="min-h-20 max-h-40 w-full overflow-y-auto px-4 py-3"
           rows={2}
-          disabled={isDisabled || blocked}
+          disabled={isDisabled || blocked || otherRunning}
           autoFocus
           enterKeyHint="send"
           aria-label="消息输入"
@@ -491,7 +500,7 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
               onClick={() => onGoalModeChange(!goalMode)}>
               {goalMode ? "目标模式" : "普通模式"}
             </Button>
-            <Select value={reasoning.selected ?? undefined} disabled={!reasoning.ready || isRunning || !reasoning.choices.length}
+            <Select value={reasoning.selected ?? undefined} disabled={!reasoning.ready || locked || !reasoning.choices.length}
               onValueChange={(value) => settings.select(value as ReasoningEffort)}>
               <SelectTrigger data-testid="reasoning-effort" size="sm" aria-label="思考强度"
                 className="composer-select shrink-0 gap-1 px-2">
@@ -503,11 +512,11 @@ export const LocalComposer = memo(function LocalComposer({ config, logger, conve
                 </SelectGroup>
               </SelectContent>
             </Select>
-            <ContextIndicator config={config} logger={logger} conversationId={conversationId} />
+            <ContextIndicator config={config} logger={logger} conversationId={conversationId} goalMode={goalMode} />
           </div>
           <div className="flex shrink-0 items-center gap-1">
             {isRunning && <Button type="button" size="icon-sm" className="rounded-full" aria-label="停止生成" title="停止生成" onClick={() => runtimeCommands.thread.cancelRun()}><SquareIcon aria-hidden="true" /></Button>}
-            {(!isRunning || hasText) && <Button type="button" size="icon-sm" className="rounded-full" disabled={!hasText || isDisabled || blocked || saving}
+            {(!isRunning || hasText) && <Button type="button" size="icon-sm" className="rounded-full" disabled={!hasText || isDisabled || blocked || otherRunning || saving}
               aria-label={isRunning || followups.messages.length > 0 ? "排队消息" : "发送消息"}
               title={isRunning || followups.messages.length > 0 ? "加入 Follow-up 队列" : "发送消息"} onClick={submit}><ArrowUpIcon aria-hidden="true" /></Button>}
           </div>

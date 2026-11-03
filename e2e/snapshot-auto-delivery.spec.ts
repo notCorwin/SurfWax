@@ -43,15 +43,16 @@ test("delivers action snapshots transactionally and preserves actions when metad
     });
 
   const compareFresh = (): ReturnType<typeof commandResponse> | ReturnType<typeof textResponse> =>
-    call("inspect_page", { budget: 30000 }, (page) => {
+    call("inspect_page", { full: true, budget: 30000 }, (page) => {
       expect(page.$ref).toBeUndefined();
       const next = fresh.append(page);
       const compare = () => { expect(fresh.result().items).toEqual(updated); return done(); };
       return next ? readRemaining(fresh, next, compare) : compare();
     });
   const compareDelta = (): ReturnType<typeof commandResponse> | ReturnType<typeof textResponse> =>
-    call("inspect_page", { since: baselineId, budget: 30000 }, (page) => {
+    call("inspect_page", { budget: 30000 }, (page) => {
       expect(page.mode).toBe("delta");
+      expect(page.baseObservationId).toBe(baselineId);
       const next = changed.append(page);
       const compare = () => {
         updated = applySemanticDelta(initialItems, changed.result().items);
@@ -64,7 +65,16 @@ test("delivers action snapshots transactionally and preserves actions when metad
   const restoreTitle = (): ReturnType<typeof commandResponse> | ReturnType<typeof textResponse> =>
     call("click", { target: { by: "css", value: "#restore-title" } }, (result) => {
       expect(result).toMatchObject({ ok: true, pageSnapshot: { items: expect.any(Array) } });
-      return compareDelta();
+      // Every delivered automatic snapshot advances the model's baseline too.
+      const restored = new SemanticPages();
+      const next = restored.append(result.pageSnapshot);
+      const complete = () => {
+        const baseline = restored.result();
+        initialItems = result.pageSnapshot.mode === "delta" ? applySemanticDelta(initialItems, baseline.items) : baseline.items;
+        baselineId = baseline.observationId;
+        return compareDelta();
+      };
+      return next ? readRemaining(restored, next, complete) : complete();
     });
   const changeWithHugeTitle = (): ReturnType<typeof commandResponse> | ReturnType<typeof textResponse> =>
     call("click", { target: { by: "css", value: "#large-title" } }, (result) => {

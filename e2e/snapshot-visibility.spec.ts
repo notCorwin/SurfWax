@@ -29,12 +29,12 @@ test("snapshots reflect rendered visibility and update when content is shown or 
         <span id="clipped-label" style="position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap">Clipped accessible name</span><button id="clipped-name-button" aria-labelledby="clipped-label"></button>
         <div style="position:relative"><div style="width:0;height:0;overflow:hidden"><button style="position:absolute;left:400px;top:0">Escaped absolute action</button></div></div>
         <div style="width:0;height:0;overflow:hidden"><button style="position:fixed;left:400px;top:80px">Escaped fixed action</button></div>
-        <div style="height:1800px"></div><button>Scrollable action</button>
         <span id="label" style="display:none">Accessible name</span><button id="hidden-name-button" aria-labelledby="label"></button>
         <button id="aggregate"><span>Visible label</span><span style="opacity:0">Hidden label</span></button>
         <button>Start <span aria-label="Known alias">Original text</span><span style="opacity:0">Nested hidden secret</span> end</button>
         <button id="explicit-name-button" aria-label="Explicit label"><span style="opacity:0">Hidden child</span></button>
         <div style="display:contents"><button>Contents action</button></div>
+        <div style="height:1800px"></div><button>Scrollable action</button>
       </main>`;
       const host = document.createElement("div");
       host.style.opacity = "0";
@@ -62,21 +62,21 @@ test("snapshots reflect rendered visibility and update when content is shown or 
     }))).toEqual([false, false, true, true]);
     let baseline: any;
     responses.push(
-      commandResponse("inspect_page", { budget: 12000 }, "visibility-before"),
+      commandResponse("inspect_page", { full: true, budget: 12000 }, "visibility-before"),
       (request) => {
         baseline = lastTool(request);
-        return commandResponse("inspect_page", { budget: 12000, region: { by: "css", value: "#clipped-name-button" } }, "visibility-clipped-name");
+        return commandResponse("inspect_page", { full: true, budget: 12000, region: { by: "css", value: "#clipped-name-button" } }, "visibility-clipped-name");
       },
-      commandResponse("inspect_page", { budget: 12000, region: { by: "css", value: "#hidden-name-button" } }, "visibility-hidden-name"),
-      commandResponse("inspect_page", { budget: 12000, region: { by: "css", value: "#explicit-name-button" } }, "visibility-explicit-name"),
-      commandResponse("inspect_page", { budget: 12000, region: { by: "css", value: "#legacy-partial" } }, "visibility-legacy-partial"),
-      commandResponse("inspect_page", { budget: 12000, region: { by: "css", value: "#modern-partial" } }, "visibility-modern-partial"),
+      commandResponse("inspect_page", { full: true, budget: 12000, region: { by: "css", value: "#hidden-name-button" } }, "visibility-hidden-name"),
+      commandResponse("inspect_page", { full: true, budget: 12000, region: { by: "css", value: "#explicit-name-button" } }, "visibility-explicit-name"),
+      commandResponse("inspect_page", { full: true, budget: 12000, region: { by: "css", value: "#legacy-partial" } }, "visibility-legacy-partial"),
+      commandResponse("inspect_page", { full: true, budget: 12000, region: { by: "css", value: "#modern-partial" } }, "visibility-modern-partial"),
       () => {
         const aggregateRef = baseline.items.find((item: any) => item.line.includes("Visible label"))?.ref;
         return commandResponse("click", { target: { ref: aggregateRef } }, "visibility-change");
       },
-      () => commandResponse("inspect_page", { since: baseline.observationId, budget: 12000 }, "visibility-delta"),
-      commandResponse("inspect_page", { budget: 12000 }, "visibility-after"),
+      () => commandResponse("inspect_page", { budget: 12000 }, "visibility-delta"),
+      commandResponse("inspect_page", { full: true, budget: 12000 }, "visibility-after"),
       textResponse("VISIBILITY_OK"),
       textResponse("可见性测试"),
     );
@@ -89,7 +89,9 @@ test("snapshots reflect rendered visibility and update when content is shown or 
     const output = (id: string) => events.find((event) => ["tool.finished", "tool.failed"].includes(event.type) && event.toolCallId === id)?.output;
     const before = output("visibility-before");
     const changed = output("visibility-change");
-    const delta = output("visibility-delta");
+    expect(changed, JSON.stringify(changed)).toHaveProperty("pageSnapshot");
+    const delta = changed.pageSnapshot;
+    expect(output("visibility-delta")).toMatchObject({ mode: "delta", baseObservationId: delta.observationId });
     const after = output("visibility-after");
     expect(before?.mode).toBe("full");
     expect(button(before.items, "Visible action")?.ref).toBeTruthy();
@@ -114,7 +116,7 @@ test("snapshots reflect rendered visibility and update when content is shown or 
     expect(JSON.stringify(before.items)).not.toContain("Clipped accessible name");
     expect(button(before.items, "Escaped absolute action")?.ref).toBeTruthy();
     expect(button(before.items, "Escaped fixed action")?.ref).toBeTruthy();
-    expect(button(before.items, "Scrollable action")?.ref).toBeTruthy();
+    expect(button(before.items, "Scrollable action")).toBeUndefined();
     expect(button(before.items, "Contents action")?.ref).toBeTruthy();
     expect(button(before.items, "Shadow hidden action")).toBeUndefined();
     expect(JSON.stringify(before.items)).not.toContain("Accessible name");
@@ -143,7 +145,7 @@ test("snapshots reflect rendered visibility and update when content is shown or 
     expect(button(delta.items, "Transparent action")?.change).toBe("added");
     expect(button(after.items, "Visible action")).toBeUndefined();
     expect(button(after.items, "Transparent action")?.ref).toBeTruthy();
-    expect(button(after.items, "Scrollable action")?.ref).toBeTruthy();
+    expect(button(after.items, "Scrollable action")).toBeUndefined();
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -179,7 +181,7 @@ test("omits hidden same-origin and cross-origin frames and includes them after t
     responses.push(
       commandResponse("inspect_page", { budget: 12000 }, "frame-hidden"),
       commandResponse("click", { target: { by: "role", value: "button", name: "Show frames" } }, "frame-show"),
-      commandResponse("inspect_page", { budget: 12000 }, "frame-visible"),
+      commandResponse("inspect_page", { full: true, budget: 12000 }, "frame-visible"),
       textResponse("FRAME_VISIBILITY_OK"),
       textResponse("框架可见性测试"),
     );

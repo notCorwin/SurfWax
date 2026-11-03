@@ -1,11 +1,10 @@
-import { convertToModelMessages, type Agent, type ContentPart, type LanguageModelCallEndEvent, type UIMessage } from "ai";
+import { type Agent, type ContentPart, type LanguageModelCallEndEvent, type UIMessage } from "ai";
 import { fromLogValue, type ConversationMessage, type EventLogger } from "../logging";
 import { safeDiagnosticError } from "../diagnostic-error";
 import { normalizeRecoveredToolOutput } from "../tool-result-values";
-import { claimConversationRun } from "./coordinator";
+import { claimConversationRun, type ConversationRunLease } from "./coordinator";
 import { ensureConversationPrompt } from "./prompt";
-import { materializeToolCatalog } from "./tool-catalog";
-import { replayGoalContinuations } from "./goal-context";
+import { modelMessages } from "./context-choice";
 import { isContextOverflowError, isRecoverableModelError, retryBackoffDelay, waitForModelRetry } from "./model";
 import { toolProtocolRepair } from "./tool-protocol-error";
 import { releaseRunEvidence } from "./goal-completion";
@@ -17,12 +16,13 @@ export type ConversationTransport = {
     chatId: string;
     messages: SidePanelMessage[];
     abortSignal?: AbortSignal;
+    runLease?: ConversationRunLease;
     messageId?: string;
     onMessage?: (message: SidePanelMessage, priorMessages?: SidePanelMessage[]) => void | Promise<void>;
   }): Promise<SidePanelMessage>;
 };
 type ResponseObserver = (event: LanguageModelCallEndEvent<any>) => void | Promise<void>;
-type AgentFactory = (signal: AbortSignal, branchIds: string[], resumed?: boolean, onResponse?: ResponseObserver, shouldYield?: () => boolean) => Agent<never, any, any, any> | Promise<Agent<never, any, any, any>>;
+type AgentFactory = (signal: AbortSignal, branchIds: string[], resumed?: boolean, onResponse?: ResponseObserver, shouldYield?: () => boolean, contextAnchor?: () => { messageId: string; partCount: number }) => Agent<never, any, any, any> | Promise<Agent<never, any, any, any>>;
 type ToolPart = Extract<SidePanelMessage["parts"][number], { toolCallId: string }>;
 export type RefreshObserver = { drain(): Promise<SidePanelMessage[]>; hasPending?(): boolean; dispose(): void };
 
@@ -42,8 +42,9 @@ function errorText(error: unknown): string { return error instanceof Error ? err
 export function createChatTransport(agent: AgentFactory, logger: EventLogger, conversationId: string, cleanup?: () => Promise<void>, onContextOverflow?: (signal: AbortSignal) => Promise<void>, systemPrompt?: string, observeRefreshes?: (signal: AbortSignal, runId: string) => Promise<RefreshObserver>, goalMode = false): ConversationTransport {
   return {
     async sendMessages(options) {
-      const currentRunId = crypto.randomUUID();
-      const lease = await claimConversationRun(conversationId, options.abortSignal, currentRunId);
+      const lease = options.runLease ?? await claimConversationRun(conversationId, options.abortSignal);
+      if (lease.conversationId !== conversationId) throw new Error("运行租约不属于当前会话。");
+      const currentRunId = lease.runId;
       const persistence = new AbortController();
       const signal = AbortSignal.any([lease.signal, persistence.signal]);
       let publicationFailed = false;
@@ -51,29 +52,40 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
       let response: SidePanelMessage = { id: crypto.randomUUID(), role: "assistant", parts: [] };
       let parentId: string | null = null;
       let published: SidePanelMessage | undefined;
+      let partRevision = 0;
+      const changedParts = new Map<number, number>();
       let priorMessages: SidePanelMessage[] = [];
       let refreshObserver: RefreshObserver | undefined;
       const publish = async () => {
         if (!response.parts.length || published === response) return;
-        const snapshot = { ...response, parts: [...response.parts] };
-        await logger.appendMessage(conversationId, snapshot as ConversationMessage, { runId: currentRunId, parentId });
-        published = response;
+        const current = response;
+        const changes = new Map(changedParts);
+        const snapshot = { ...current, parts: [...current.parts] };
+        await logger.appendMessage(conversationId, snapshot as ConversationMessage, { runId: currentRunId, parentId, changedParts: [...changes.keys()] });
+        for (const [index, revision] of changes) if (changedParts.get(index) === revision) changedParts.delete(index);
+        published = current;
         await options.onMessage?.(snapshot, priorMessages);
       };
       // SDK lifecycle callback errors are swallowed. Abort the actual operation
       // as well, so no browser effect can follow a failed canonical write.
       const failPublication = (error: unknown): never => {
-        publicationFailed = true;
-        publicationError = error;
-        persistence.abort(error);
-        throw error;
+        if (!publicationFailed) {
+          publicationFailed = true;
+          publicationError = error;
+          persistence.abort(error);
+        }
+        throw publicationError;
       };
       const publishFromModel = () => publish().catch(failPublication);
       const toolId = (id: string) => logger.toolIdentity(conversationId, id).toolCallId;
       const updateTool = (id: string, update: Partial<ToolPart>) => {
         if (!response.parts.some((part) => "toolCallId" in part && part.toolCallId === id
           && Object.entries(update).some(([key, value]) => (part as unknown as Record<string, unknown>)[key] !== value))) return;
-        response = { ...response, parts: response.parts.map((part) => "toolCallId" in part && part.toolCallId === id ? { ...part, ...update } as ToolPart : part) };
+        response = { ...response, parts: response.parts.map((part, index) => {
+          if (!("toolCallId" in part) || part.toolCallId !== id) return part;
+          changedParts.set(index, ++partRevision);
+          return { ...part, ...update } as ToolPart;
+        }) };
       };
       const acceptContent = (content: readonly ContentPart<any>[]) => {
         const parts: SidePanelMessage["parts"] = [{ type: "step-start" }];
@@ -93,6 +105,7 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
             ...(part.providerExecuted === undefined ? {} : { providerExecuted: part.providerExecuted }),
             ...(part.invalid ? { state: "output-error", errorText: errorText(part.error) } : { state: "input-available" }) });
         }
+        for (let index = response.parts.length; index < response.parts.length + parts.length; index++) changedParts.set(index, ++partRevision);
         response = { ...response, parts: [...response.parts, ...parts] };
       };
       const acceptResults = (content: readonly ContentPart<any>[]) => {
@@ -122,8 +135,8 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
         refreshObserver = await observeRefreshes?.(signal, currentRunId);
         await ensureConversationPrompt(logger, conversationId, systemPrompt, options.messages.map((message) => message.id));
         const existing = await logger.repository(conversationId);
+        const saved = new Map(existing.messages.map((entry) => [entry.message.id, entry.message]));
         const withSavedMetadata = async (messages: SidePanelMessage[]) => {
-          const saved = new Map((await logger.repository(conversationId)).messages.map((entry) => [entry.message.id, entry.message]));
           return messages.map((message) => saved.get(message.id)?.metadata ? { ...message, metadata: saved.get(message.id)!.metadata } : message);
         };
         let initial = await withSavedMetadata(options.messages);
@@ -148,14 +161,18 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
         let phase = 0;
         let resumed = false;
         let historyEvents = await logger.conversation(conversationId);
-        let goalSegments: SidePanelMessage[] = [];
         let goalOffset = 0;
         const summarizedSources = new Set<string>();
         const continueRun = async (reason: "unfinished-goal" | "tool-protocol", text: string) => {
+          // A rejected or empty response still needs a durable anchor for its reminder.
+          if (response.parts.length === goalOffset) {
+            changedParts.set(response.parts.length, ++partRevision);
+            response = { ...response, parts: [...response.parts, { type: "step-start" }] };
+            await publish();
+          }
           const segment = response.parts.slice(goalOffset);
           const assistantSegment: SidePanelMessage = { id: crypto.randomUUID(), role: "assistant", parts: segment.some((part) => part.type !== "step-start") ? segment : [{ type: "text", text: "(No response.)" }] };
           const reminderMessage: SidePanelMessage = { id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text }] };
-          goalSegments.push(assistantSegment, reminderMessage);
           goalOffset = response.parts.length;
           const saved = await logger.append({ type: "agent.goal.continued", conversationId, runId: currentRunId,
             content: { reason, messageId: response.id, offset: goalOffset, assistantSegment, reminderMessage } });
@@ -164,10 +181,9 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
         };
         while (true) {
           lease.signal.throwIfAborted();
-          const tail = { ...response, parts: response.parts.slice(goalOffset) };
           const canonicalMessages = await withSavedMetadata(response.parts.length ? [...initial, response] : initial);
-          const initialMessages = replayGoalContinuations(initial, historyEvents);
-          const messages = await withSavedMetadata([...initialMessages, ...goalSegments, ...(tail.parts.length ? [tail] : [])] as SidePanelMessage[]);
+          historyEvents = (await logger.contextProjectionEvents(conversationId)).value;
+          const messages = await modelMessages(canonicalMessages as ConversationMessage[], historyEvents);
           logger.setRunPhase(currentRunId, phase++);
           let captured = false;
           try {
@@ -186,10 +202,14 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
                 }
                 await publish();
               } catch (error) { failPublication(error); }
-            }, () => refreshObserver?.hasPending?.() ?? false);
+            }, () => refreshObserver?.hasPending?.() ?? false, () => {
+              const anchor = response.parts.length ? response : initial.at(-1);
+              if (!anchor) throw new Error("模型上下文缺少可持久化的消息锚点。");
+              return { messageId: anchor.id, partCount: anchor.parts.length };
+            });
             resumed = true;
             await runAgent.generate({
-              messages: await convertToModelMessages(messages.map(materializeToolCatalog), { tools: runAgent.tools }),
+              messages,
               abortSignal: signal,
               onToolExecutionEnd: async (event) => {
                 const output = event.toolOutput;
@@ -203,6 +223,7 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
                   && "ok" in output.output && output.output.ok === true) {
                   const goal = output.output;
                   if ("status" in goal && goal.status === "blocked" && "userAction" in goal && typeof goal.userAction === "string") {
+                    changedParts.set(response.parts.length, ++partRevision);
                     response = { ...response, parts: [...response.parts, { type: "text", text: goal.userAction, state: "done" }] };
                   }
                 }
@@ -232,9 +253,9 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
               priorMessages = initial.slice(options.messages.length);
               parentId = parent;
               response = { id: crypto.randomUUID(), role: "assistant", parts: [] };
-              goalSegments = [];
               goalOffset = 0;
               published = undefined;
+              changedParts.clear();
               continue;
             }
             const goalCompleted = [...response.parts].reverse().find((part) => "toolCallId" in part && "toolName" in part && part.toolName === "complete_goal"
@@ -265,6 +286,7 @@ export function createChatTransport(agent: AgentFactory, logger: EventLogger, co
               if (summarizedSources.has(source)) throw error;
               summarizedSources.add(source);
               await onContextOverflow!(lease.signal);
+              for (const entry of (await logger.repository(conversationId)).messages) saved.set(entry.message.id, entry.message);
             }
             const delayMs = overflow ? 0 : retryBackoffDelay(attempt + 1);
             await logger.append({ type: "model.request.retrying", conversationId, runId: currentRunId, error,

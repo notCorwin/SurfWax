@@ -8,13 +8,12 @@ import { expect, test, commandResponse, delayedResponse, textResponse, startProv
 import { aggregateSuiteReports, createSuiteManifest } from "./evaluation/suite-manifest";
 import { applySemanticDelta, SemanticPages, type SemanticItem } from "./evaluation/semantic-state";
 
-async function runHarness(baseURL: string, directory: string, scenario = "cross-frame-order", timeoutMs = 90_000, extraEnv: Record<string, string> = {}) {
-  // The nested evaluator must run once with the outer test's browser. Passing
-  // both matrix variables through would create two nested Playwright projects.
+async function runHarness(baseURL: string, directory: string, scenario = "cross-frame-order", timeoutMs = 90_000, extraEnv: Record<string, string> = {}, signal?: AbortSignal) {
+  // The nested evaluator shares the outer test's installed Chrome and dev server.
   const executablePath = test.info().project.use.launchOptions?.executablePath;
   return promisify(execFile)(process.execPath, [resolve("node_modules/@playwright/test/cli.js"), "test", "e2e/real-model-evaluation.spec.ts", "--retries=0", "--reporter=line", "--trace=off", `--output=${resolve(directory, "playwright")}`], {
-    timeout: timeoutMs + 30_000, maxBuffer: 4 * 1024 * 1024,
-    env: { ...process.env, SURFWAX_CHROME_138_PATH: "", ...(executablePath ? { SURFWAX_CHROME_PATH: executablePath } : {}),
+    signal, timeout: timeoutMs + 30_000, maxBuffer: 4 * 1024 * 1024,
+    env: { ...process.env, ...(executablePath ? { SURFWAX_CHROME_PATH: executablePath } : {}),
       SURFWAX_REAL_MODEL_EVAL: "1", SURFWAX_EVAL_PROVIDER: "local-mock", SURFWAX_EVAL_MODEL: "test-model",
       SURFWAX_EVAL_BASE_URL: baseURL, SURFWAX_EVAL_API_KEY: "local-test-secret", SURFWAX_EVAL_SCENARIO: scenario,
       SURFWAX_EVAL_SEED: "17", SURFWAX_EVAL_TIMEOUT_MS: String(timeoutMs), SURFWAX_EVAL_REPORT_DIR: resolve(directory, "reports"),
@@ -121,6 +120,7 @@ for (const scenario of [
   const responses: MockResponse[] = [];
   let jobId = "", polls = 0;
   let lastToolResult: unknown, stepError: unknown;
+  const scriptedFailure = new AbortController();
   if (scenario.name === "semantic-delta") {
     const frame = { by: "css", value: 'iframe[title="Semantic queue"]' };
     let observationId = "", previousName = "", rounds = 0, pageCount = 0, findCalls = 0, state: SemanticItem[] = [], pages = new SemanticPages();
@@ -138,14 +138,14 @@ for (const scenario of [
           }
           if (result.ok === false) throw new Error(`Tool failed: ${JSON.stringify(result)}`);
           return handler(result);
-        } catch (error) { stepError = error; return textResponse("Scripted tools failed"); }
+        } catch (error) { stepError = error; scriptedFailure.abort(error); return textResponse("Scripted tools failed"); }
       };
       return step;
     };
     const capture = (nextKind: typeof kind) => {
       kind = nextKind; pages = new SemanticPages(); cursor = undefined;
       responses.unshift(readPage);
-      return commandResponse("inspect_page", { budget: 6000, region: { by: "css", value: "main", frame }, ...(kind === "delta" ? { since: observationId } : {}) }, `semantic-capture-${rounds}-${kind}`);
+      return commandResponse("inspect_page", { budget: 6000, region: { by: "css", value: "main", frame }, ...(kind === "delta" ? { since: observationId } : { full: true }) }, `semantic-capture-${rounds}-${kind}`);
     };
     const act = (ref: string, name: string) => {
       expect(name).toMatch(/^Next TASK-[A-F0-9]{12}$/);
@@ -156,7 +156,13 @@ for (const scenario of [
         if (rounds !== 1 && rounds !== 12) return findNext();
         responses.unshift(after((verified) => {
           expect(verified).toMatchObject({ ok: true, result: { verified: true } });
-          return rounds === 12 ? textResponse("Done") : capture("delta");
+          if (rounds === 12) {
+            expect(verified.evidenceId).toEqual(expect.any(String));
+            return commandResponse("complete_goal", { taskType: "browser", status: "completed", evidence: [
+              { toolCallId: verified.evidenceId, observation: "The observed queue status is Queue complete after all twelve item actions." },
+            ] }, "semantic-complete");
+          }
+          return capture("delta");
         }));
         return commandResponse("verify_state", { target: { by: "css", value: "#progress", frame }, textIncludes: rounds === 12 ? "Queue complete" : `Completed ${rounds} of 12`, timeoutMs: 10_000 }, `semantic-progress-${rounds}`);
       }));
@@ -179,15 +185,14 @@ for (const scenario of [
       if (cursor) { responses.unshift(readPage); return commandResponse("inspect_page", { cursor, budget: 6000 }, `semantic-page-${pageCount}`); }
       const observation = pages.result();
       if (kind === "full") { expect(observation.mode).toBe("full"); state = observation.items; }
-      else if (kind === "delta") { expect(observation.mode).toBe("delta"); state = applySemanticDelta(state, observation.items); }
+      else if (kind === "delta") { expect(observation).toMatchObject({ mode: "delta", baseObservationId: observationId }); state = applySemanticDelta(state, observation.items); }
       else { expect(observation.mode).toBe("full"); expect(observation.items).toEqual(state); }
       observationId = observation.observationId;
       if (kind === "delta") return capture("fresh");
-      const next = state.filter((item) => item.ref && item.line.includes('- button "Next TASK-'));
-      expect(next).toHaveLength(1);
-      const name = next[0]!.line.match(/- button "(Next TASK-[A-F0-9]{12})"/)?.[1];
-      expect(name).toEqual(expect.any(String));
-      return act(next[0]!.ref!, name!);
+      // A narrow painted caption may be unknown even though the native action
+      // identity is resolvable. Find the current control instead of treating an
+      // inaccessible full label as visible snapshot text.
+      return findNext();
     });
     responses.push(commandResponse("verify_state", { target: { by: "css", value: "#progress", frame }, textIncludes: "Completed 0 of 12", timeoutMs: 10_000 }, "semantic-ready"),
       after((result) => { expect(result).toMatchObject({ ok: true, result: { verified: true } }); return capture("full"); }), textResponse("Title"));
@@ -325,10 +330,10 @@ for (const scenario of [
     const suiteEnv: Record<string, string> = manifest && sample ? { SURFWAX_EVAL_SUITE_PLAN_HASH: manifest.planHash, SURFWAX_EVAL_SUITE_SAMPLE_ID: sample.id,
       SURFWAX_EVAL_SUITE_REPEAT: String(sample.repeat) } : {};
     try {
-      await runHarness(provider.baseURL, directory, scenario.name, scenarioTimeout, suiteEnv);
+      await runHarness(provider.baseURL, directory, scenario.name, scenarioTimeout, suiteEnv, scriptedFailure.signal);
     } catch (error) {
       const failedReport = await readReport(directory).catch(() => null);
-      throw new Error(`Harness failed: ${JSON.stringify(failedReport)}\nTool result: ${JSON.stringify(lastToolResult)}\n${(error as { stdout?: string }).stdout ?? ""}`, { cause: error });
+      throw new Error(`Harness failed: ${JSON.stringify(failedReport)}\nTool result: ${JSON.stringify(lastToolResult)}\nScript error: ${stepError instanceof Error ? stepError.stack : String(stepError)}\n${(error as { stdout?: string }).stdout ?? ""}`, { cause: error });
     }
     if (stepError) throw stepError;
     const report = await readReport(directory);
@@ -607,7 +612,7 @@ test("a browser setup failure preserves unknown business and lifecycle results",
   const directory = await mkdtemp(resolve(tmpdir(), "surfwax-eval-harness-"));
   try {
     const failure = await runHarness(provider.baseURL, directory, "cross-frame-order", 90_000, {
-      SURFWAX_CHROME_PATH: resolve(directory, "missing-browser"), SURFWAX_CHROME_138_PATH: "",
+      SURFWAX_CHROME_PATH: resolve(directory, "missing-browser"),
     }).then(() => null, (error: unknown) => error);
     expect(failure).toMatchObject({ code: 1 });
     expect(await readReport(directory)).toMatchObject({ outcome: "setup_failed", classification: "unknown", passed: false,

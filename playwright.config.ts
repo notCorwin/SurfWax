@@ -1,18 +1,19 @@
 import { defineConfig } from "@playwright/test";
+import { systemChromePath } from "./scripts/development-extension.mjs";
 
-const chrome138 = process.env.SURFWAX_CHROME_138_PATH;
-const current = process.env.SURFWAX_CHROME_PATH;
+// Validate at launch so evaluation can record a setup_failed receipt.
+const executablePath = systemChromePath(process.env, process.platform, false);
+// A few paint/geometry tests launch Chrome directly instead of using a fixture.
+process.env.SURFWAX_CHROME_PATH = executablePath;
 export default defineConfig({
   testDir: "./e2e",
+  globalSetup: "./e2e/development-setup.ts",
   timeout: 60_000,
   fullyParallel: false,
   workers: 1,
-  retries: process.env.CI ? 1 : 0,
+  retries: 0,
   reporter: [["list"], ["html", { outputFolder: "playwright-report", open: "never" }]],
   expect: { timeout: 15_000 },
-  ...(chrome138 ? { projects: [
-    { name: "chrome138", use: { launchOptions: { executablePath: chrome138 } } },
-    { name: "current", use: { launchOptions: { executablePath: current } } },
-  ] } : {}),
-  use: { headless: true, trace: "retain-on-failure", screenshot: "only-on-failure" },
+  projects: [{ name: "current", use: { launchOptions: { executablePath } } }],
+  use: { channel: "chrome", headless: process.env.SURFWAX_E2E_HEADLESS === "true" || Boolean(process.env.CI), trace: "retain-on-failure", screenshot: "only-on-failure" },
 });

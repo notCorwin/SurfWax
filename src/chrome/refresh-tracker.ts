@@ -1,5 +1,7 @@
 /** A completed top-level tab load observed while a run owns the tab. */
 export type PageRefresh = { tabId: number; generation: number };
+export type UnsettledRefresh = PageRefresh & { elapsedMs: number };
+export const REFRESH_SETTLE_TIMEOUT_MS = 15_000;
 
 type TabUpdate = (tabId: number, change: chrome.tabs.OnUpdatedInfo, tab: chrome.tabs.Tab) => void;
 type TabUpdates = { addListener(listener: TabUpdate): void; removeListener(listener: TabUpdate): void };
@@ -12,6 +14,7 @@ export class RefreshTracker {
   private readonly loading = new Map<number, { generation: number; owned: boolean }>();
   private readonly unboundCompleted = new Map<number, PageRefresh>();
   private pending: PageRefresh[] = [];
+  private readonly reportedLoading = new Map<number, number>();
   private disposed = false;
   private readonly waiters = new Set<() => void>();
 
@@ -21,6 +24,7 @@ export class RefreshTracker {
     if (change.status === "loading") {
       const generation = (this.generations.get(tabId) ?? 0) + 1;
       this.generations.set(tabId, generation);
+      this.reportedLoading.delete(tabId);
       this.unboundCompleted.delete(tabId);
       const target = this.targetTab();
       this.loading.set(tabId, { generation, owned: target === undefined || tabId === target });
@@ -28,6 +32,7 @@ export class RefreshTracker {
       const load = this.loading.get(tabId);
       if (!load) return;
       this.loading.delete(tabId);
+      this.reportedLoading.delete(tabId);
       if (load.owned && tabId === this.targetTab()) {
         refresh = { tabId, generation: load.generation };
         this.pending.push(refresh);
@@ -41,6 +46,7 @@ export class RefreshTracker {
 
   private readonly onRemoved: TabRemoved = (tabId) => {
     this.loading.delete(tabId);
+    this.reportedLoading.delete(tabId);
     this.generations.delete(tabId);
     this.unboundCompleted.delete(tabId);
     this.notify();
@@ -73,24 +79,35 @@ export class RefreshTracker {
 
   hasActivity(): boolean {
     const tabId = this.targetTab();
-    return this.pending.length > 0 || tabId !== undefined && this.loading.has(tabId);
+    return this.pending.length > 0 || tabId !== undefined && this.loading.has(tabId)
+      && this.reportedLoading.get(tabId) !== this.loading.get(tabId)!.generation;
   }
 
-  /** Wait until the currently bound tab has no observed load in progress. */
-  async waitForSettled(onWaiting?: (state: { tabId: number; generation: number; elapsedMs: number }) => void): Promise<void> {
-    const started = Date.now();
+  /** Report an incomplete load once per generation without taking a snapshot.
+   * Later completion remains observable and produces its normal fresh snapshot.
+   */
+  async waitForSettled(onWaiting?: (state: UnsettledRefresh) => void): Promise<UnsettledRefresh | undefined> {
+    const started = performance.now();
     let reported = false;
     while (!this.disposed) {
       this.signal?.throwIfAborted();
       const tabId = this.targetTab();
-      if (tabId === undefined || !this.loading.has(tabId)) return;
+      const load = tabId === undefined ? undefined : this.loading.get(tabId);
+      if (tabId === undefined || !load || this.reportedLoading.get(tabId) === load.generation) return;
+      const elapsedMs = performance.now() - started;
+      if (elapsedMs >= REFRESH_SETTLE_TIMEOUT_MS) {
+        this.reportedLoading.set(tabId, load.generation);
+        return { tabId, generation: load.generation, elapsedMs };
+      }
       await new Promise<void>((resolve) => {
-        const wake = () => { if (timer !== undefined) clearTimeout(timer); resolve(); };
-        const timer = !reported && onWaiting ? setTimeout(() => {
-          reported = true;
-          const load = this.loading.get(tabId);
-          if (load && this.targetTab() === tabId) onWaiting({ tabId, generation: load.generation, elapsedMs: Date.now() - started });
-        }, 10_000) : undefined;
+        const wake = () => { clearTimeout(timer); this.waiters.delete(wake); resolve(); };
+        const timer = setTimeout(() => {
+          if (!reported && onWaiting && this.loading.has(tabId)) {
+            reported = true;
+            onWaiting({ tabId, generation: load.generation, elapsedMs: performance.now() - started });
+          }
+          wake();
+        }, Math.min(REFRESH_SETTLE_TIMEOUT_MS - elapsedMs, !reported && onWaiting ? 10_000 : REFRESH_SETTLE_TIMEOUT_MS));
         this.waiters.add(wake);
       });
     }
@@ -118,6 +135,7 @@ export class RefreshTracker {
     this.signal?.removeEventListener("abort", this.onAbort);
     this.pending = [];
     this.loading.clear();
+    this.reportedLoading.clear();
     this.unboundCompleted.clear();
     this.generations.clear();
     this.notify();

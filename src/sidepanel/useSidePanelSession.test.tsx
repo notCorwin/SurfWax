@@ -69,6 +69,33 @@ async function replaceSettings(settings: unknown) {
 }
 
 describe("sidepanel configuration refresh", () => {
+  it.each([MODEL_CONFIG_STORAGE_KEY, CATALOG_CACHE_KEY])("completes first hydration during another panel's run when %s supersedes its initial read", async (key) => {
+    const first = deferred<Record<string, unknown>>();
+    vi.mocked(chrome.storage.local.get).mockImplementationOnce(() => first.promise);
+    vi.mocked(activeRunIdentity).mockResolvedValue({ runId: "other-run", ownerId: "other-panel", generation: 1 });
+    await act(async () => root.render(<Harness />));
+    const saved = custom("saved-model");
+    values[MODEL_CONFIG_STORAGE_KEY] = saved;
+    await act(async () => {
+      for (const listener of listeners) listener({ [key]: { newValue: values[key] } }, "local");
+    });
+    expect(latest.configured).toBe(true);
+    expect(latest.config.model).toBe("saved-model");
+    await act(async () => first.resolve({ [MODEL_CONFIG_STORAGE_KEY]: custom("stale-model") }));
+    expect(latest.config.model).toBe("saved-model");
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it("defers configuration changes once hydration is complete and a run is active", async () => {
+    values[MODEL_CONFIG_STORAGE_KEY] = custom("running-model");
+    await act(async () => root.render(<Harness />));
+    expect(latest.configured).toBe(true);
+    vi.mocked(activeRunIdentity).mockResolvedValue({ runId: "active-run", ownerId: "owner", generation: 1 });
+    await replaceSettings(custom("next-model"));
+    expect(latest.configured).toBe(true);
+    expect(latest.config.model).toBe("running-model");
+  });
+
   it("retains the last configuration and exposes the cause when a later read fails", async () => {
     values[MODEL_CONFIG_STORAGE_KEY] = custom("initial");
     await act(async () => root.render(<Harness />));

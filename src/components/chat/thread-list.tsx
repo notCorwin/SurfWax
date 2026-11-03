@@ -4,7 +4,7 @@ import { usePanelRuntime, usePanelState, type PanelState } from "@/sidepanel/run
 import { CheckIcon, ChevronDownIcon, SearchIcon, PencilIcon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type FC } from "react";
 import { flushSync } from "react-dom";
-import { activeRunIdentity, withIdleConversation } from "../../agent/coordinator";
+import { activeRunIdentity } from "../../agent/coordinator";
 import { fromLogValue, isConversationMessage, type EventLogger, type LogEvent } from "../../logging";
 import { useRunState } from "../../sidepanel/useRunState";
 import { useRuntimeView } from "../../sidepanel/runtime-view";
@@ -67,48 +67,55 @@ export const ConversationMenu: FC<{ logger: EventLogger }> = ({ logger }) => {
   };
 
   useEffect(() => {
-    if (!open || !searchOpen) return;
     let active = true;
-    let revision = 0;
-    let requested = false;
-    // This cache is a derived view of the canonical log, updated one event at a time.
-    const refresh = () => {
-      requested = true;
-      const current = ++revision;
-      void (indexed.current ? Promise.resolve([]) : logger.messageEvents()).then((events) => {
-        if (active && current === revision) { for (const event of events) ingest(event); indexed.current = true; setIndex(buildMessageSearchIndex([...cachedMessages.current.values()].flatMap((entries) => [...entries.values()]))); setSearchError(undefined); }
-      }).catch((error) => {
-        if (active && current === revision) setSearchError(error);
+    let cursor = -1;
+    let epoch: string | undefined;
+    let pending = false;
+    let loading: Promise<void> | undefined;
+    const refresh = (): Promise<void> => {
+      pending = true;
+      return loading ??= (async () => {
+        while (pending && active) {
+          pending = false;
+          let batch = await logger.messageEventsSince(cursor);
+          const reset = epoch !== undefined && epoch !== batch.epoch;
+          if (reset) { cursor = -1; cachedMessages.current.clear(); batch = await logger.messageEventsSince(-1); }
+          if (!active) return;
+          epoch = batch.epoch;
+          const changed = new Set<string>();
+          for (const event of batch.value) {
+            ingest(event);
+            cursor = Math.max(cursor, event.id);
+            if (event.conversationId) changed.add(event.conversationId);
+          }
+          const first = !indexed.current || reset;
+          indexed.current = true;
+          setIndex(previous => {
+            const next = first ? new Map<string, string>() : new Map(previous);
+            for (const id of first ? cachedMessages.current.keys() : changed) {
+              const entries = cachedMessages.current.get(id);
+              if (entries) for (const [key, value] of buildMessageSearchIndex([...entries.values()])) next.set(key, value);
+            }
+            return next;
+          });
+          setSearchError(undefined);
+        }
+      })().catch(error => { if (active) setSearchError(error); }).finally(() => {
+        loading = undefined;
+        if (pending && active) void refresh();
       });
     };
-    requestSearchIndex.current = () => { if (!requested || !indexed.current) refresh(); };
-    return () => { active = false; requestSearchIndex.current = () => undefined; };
-  }, [logger, open, searchOpen]);
-
-  useEffect(() => logger.subscribe((event) => {
-    if (event.type === "log.cleared") {
-      cachedMessages.current.clear();
-      indexed.current = false;
-      setIndex(new Map());
-      requestSearchIndex.current();
-      return;
-    }
-    if (event.type === "conversation.message") {
-      ingest(event);
-      if (indexed.current && event.conversationId) {
-        const changed = buildMessageSearchIndex([...cachedMessages.current.get(event.conversationId)!.values()]);
-        setIndex((previous) => new Map([...previous, ...changed]));
-      }
-    }
-    if (event.type === "conversation.deleted") {
-      const id = event.conversationId ?? (fromLogValue(event.content, event.valueEncoding) as { conversationId?: string } | null)?.conversationId;
-      setIndex((previous) => { const next = new Map(previous); if (id) next.delete(id); return next; });
-    }
-    if (event.type === "conversation.restored" && event.conversationId) {
-      const entries = cachedMessages.current.get(event.conversationId);
-      if (entries) setIndex((previous) => new Map([...previous, ...buildMessageSearchIndex([...entries.values()])]));
-    }
-  }), [logger]);
+    requestSearchIndex.current = () => { if (!indexed.current && !loading) void refresh(); };
+    const unsubscribe = logger.subscribeCommits(commit => {
+      if (commit.cleared) {
+        const wasIndexed = indexed.current;
+        cachedMessages.current.clear(); indexed.current = false; cursor = -1; epoch = undefined;
+        setIndex(new Map());
+        if (wasIndexed || loading) void refresh();
+      } else if ((indexed.current || loading) && commit.types.includes("conversation.message")) void refresh();
+    });
+    return () => { active = false; unsubscribe(); requestSearchIndex.current = () => undefined; };
+  }, [logger]);
 
   useEffect(() => { if (open && query.trim()) requestSearchIndex.current(); }, [open, query]);
 
@@ -174,10 +181,8 @@ const ConversationItem: FC<{ item: Item; isCurrent: boolean; close: () => void; 
       <Button type="button" variant="ghost" className="conversation-select" aria-current={isCurrent ? "true" : undefined} disabled={locked && !isCurrent} onClick={() => {
         if (isCurrent) { close(); return; }
         if (locked) { warn(); return; }
-        void withIdleConversation(async () => {
-          await runtime.runtime.threads.switchToThread(item.id);
-          // Commit the destination composer before dismissing the dropdown so a
-          // fast keystroke cannot be saved under the conversation just left.
+        void runtime.runtime.threads.switchToThread(item.id).then(() => {
+          // Commit the destination composer before dismissing the dropdown.
           flushSync(close);
         }).catch(warn);
       }}><span>{title}</span>{runStatus !== "idle" && <small data-status={String(runStatus)}>{runStatus === "running" ? "运行中" : "已中断"}</small>}{isCurrent && <CheckIcon aria-hidden="true" />}</Button>

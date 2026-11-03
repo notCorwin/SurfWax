@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, delayedResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents, type MockResponse } from "./fixtures";
+import { deliveredSemanticState } from "./evaluation/semantic-state";
 
 const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
 const button = (items: any[], name: string) => items.find((item) => item.line.includes(`button "${name}"`));
@@ -121,18 +122,18 @@ test("snapshot excludes offscreen content until root, nested and frame scrolling
     const nestedGate = new Promise<void>((resolve) => { revealNested = resolve; });
     let baseline: any;
     responses.push(
-      commandResponse("inspect_page", { budget: 12000 }, "offscreen-before"),
+      commandResponse("inspect_page", { full: true, budget: 12000 }, "offscreen-before"),
       (request) => {
         baseline = lastTool(request);
-        return commandResponse("inspect_page", { region: { by: "css", value: "#offscreen-label-button" }, budget: 12000 }, "offscreen-label");
+        return commandResponse("inspect_page", { full: true, region: { by: "css", value: "#offscreen-label-button" }, budget: 12000 }, "offscreen-label");
       },
-      () => commandResponse("inspect_page", { region: { by: "css", value: "#fixed-partial" }, budget: 12000 }, "offscreen-partial"),
-      () => commandResponse("inspect_page", { region: { by: "css", value: "#frame-partial", frame: { by: "css", value: "#child-frame" } }, budget: 12000 }, "offscreen-frame-partial"),
+      () => commandResponse("inspect_page", { full: true, region: { by: "css", value: "#fixed-partial" }, budget: 12000 }, "offscreen-partial"),
+      () => commandResponse("inspect_page", { full: true, region: { by: "css", value: "#frame-partial", frame: { by: "css", value: "#child-frame" } }, budget: 12000 }, "offscreen-frame-partial"),
       () => {
         return commandResponse("click", { target: { ref: button(baseline.items, "Reveal offscreen")?.ref } }, "offscreen-reveal");
       },
       () => commandResponse("inspect_page", { since: baseline.observationId, budget: 12000 }, "offscreen-delta"),
-      delayedResponse(commandResponse("inspect_page", { budget: 12000 }, "scroll-root"), 0, rootGate),
+      delayedResponse(commandResponse("inspect_page", { full: true, budget: 12000 }, "scroll-root"), 0, rootGate),
       ((request: any) => delayedResponse(commandResponse("inspect_page", { since: lastTool(request).observationId, budget: 12000 }, "scroll-nested"), 0, nestedGate) as any),
       textResponse("OFFSCREEN_OK"),
       textResponse("屏幕外内容测试"),
@@ -158,6 +159,7 @@ test("snapshot excludes offscreen content until root, nested and frame scrolling
     const events = await readEvents(opened.page);
     const output = (id: string) => events.find((event) => ["tool.finished", "tool.failed"].includes(event.type) && event.toolCallId === id)?.output;
     const before = output("offscreen-before"), changed = output("offscreen-reveal"), delta = output("offscreen-delta");
+    expect(delta).toMatchObject({ mode: "delta", baseObservationId: before.observationId });
     for (const name of ["Root negative hidden", "Root above hidden", "Fixed negative hidden", "Fixed right hidden", "LTR scroller hidden", "Frame fixed hidden"]) {
       expect(button(before.items, name)).toBeUndefined();
       expect(JSON.stringify(before.items)).not.toContain(name);
@@ -167,7 +169,7 @@ test("snapshot excludes offscreen content until root, nested and frame scrolling
     }
     const previousBelow = button(output("scroll-root").items, "Root below reachable");
     expect(previousBelow?.ref).toBeTruthy();
-    expect(output("scroll-nested").mode).toBe("delta");
+    expect(output("scroll-nested")).toMatchObject({ mode: "delta", baseObservationId: output("scroll-root").observationId });
     expect(output("scroll-nested").items).toContainEqual(expect.objectContaining({ id: previousBelow.id, change: "removed" }));
     for (const name of ["LTR scroller reachable", "RTL scroller reachable", "Vertical scroller reachable", "Frame below reachable"]) {
       expect(button(output("scroll-nested").items, name), name).toMatchObject({ ref: expect.any(String), change: "added" });
@@ -185,7 +187,7 @@ test("snapshot excludes offscreen content until root, nested and frame scrolling
     expect(JSON.stringify(anonymous.items)).not.toContain("Offscreen accessible name");
     expect(changed).toMatchObject({ ok: true });
     for (const name of ["Root negative hidden", "Fixed negative hidden", "LTR scroller hidden", "Frame fixed hidden"]) {
-      expect(button(changed.pageSnapshot.items, name)?.ref).toBeTruthy();
+      expect(button(deliveredSemanticState(events, changed.pageSnapshot), name)?.ref).toBeTruthy();
       expect(button(delta.items, name)?.change).toBe("added");
     }
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
@@ -221,8 +223,8 @@ test("snapshot exposes RTL root content only after negative scrolling makes it v
     expect(actual.reachable).toBe(true);
     let reveal!: () => void;
     const gate = new Promise<void>((resolve) => { reveal = resolve; });
-    responses.push(commandResponse("inspect_page", { budget: 12000 }, "rtl-snapshot"),
-      delayedResponse(commandResponse("inspect_page", { budget: 12000 }, "rtl-scrolled"), 0, gate),
+    responses.push(commandResponse("inspect_page", { full: true, budget: 12000 }, "rtl-snapshot"),
+      delayedResponse(commandResponse("inspect_page", { full: true, budget: 12000 }, "rtl-scrolled"), 0, gate),
       textResponse("RTL_OFFSCREEN_OK"), textResponse("RTL 测试"));
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     await target.bringToFront();
@@ -243,7 +245,7 @@ test("snapshot exposes RTL root content only after negative scrolling makes it v
 
 test("snapshot intersects iframe content with the visible parent viewport and ancestor clips", async () => {
   const provider = await startProvider([
-    commandResponse("inspect_page", { budget: 12000 }, "frame-clips"),
+    commandResponse("inspect_page", { full: true, budget: 12000 }, "frame-clips"),
     textResponse("FRAME_CLIPS_OK"), textResponse("Frame clips"),
   ]);
   const opened = await openExtension();
@@ -291,7 +293,7 @@ test("snapshot intersects iframe content with the visible parent viewport and an
 });
 
 test("snapshot excludes ordinary elements completely covered by opaque content", async () => {
-  const provider = await startProvider([commandResponse("inspect_page", { budget: 12000 }, "opaque"), textResponse("OPAQUE_DONE"), textResponse("Opaque")]);
+  const provider = await startProvider([commandResponse("inspect_page", { full: true, budget: 12000 }, "opaque"), textResponse("OPAQUE_DONE"), textResponse("Opaque")]);
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage();
@@ -316,7 +318,7 @@ test("snapshot excludes ordinary elements completely covered by opaque content",
 });
 
 test("partially occluded button keeps its ref without exposing covered text", async () => {
-  const provider = await startProvider([commandResponse("inspect_page", { budget: 12000 }, "partial-opaque"), textResponse("PARTIAL_OPAQUE_DONE"), textResponse("Partial opaque")]);
+  const provider = await startProvider([commandResponse("inspect_page", { full: true, budget: 12000 }, "partial-opaque"), textResponse("PARTIAL_OPAQUE_DONE"), textResponse("Partial opaque")]);
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage();
@@ -349,7 +351,7 @@ test("partially occluded button keeps its ref without exposing covered text", as
 });
 
 test("snapshot retains visible text above an opaque negative z-index background", async () => {
-  const provider = await startProvider([commandResponse("inspect_page", { budget: 12000 }, "negative-z"), textResponse("NEGATIVE_Z_DONE"), textResponse("Negative z")]);
+  const provider = await startProvider([commandResponse("inspect_page", { full: true, budget: 12000 }, "negative-z"), textResponse("NEGATIVE_Z_DONE"), textResponse("Negative z")]);
   const opened = await openExtension();
   try {
     const target = await opened.context.newPage();
@@ -398,7 +400,7 @@ for (const kind of ["root", "nested", "opacity", "occlusion", "reparent"] as con
         document.body.append(cover);
       }
     }, kind);
-    responses.push(commandResponse("inspect_page", { budget: 400 }, "cursor-initial"),
+    responses.push(commandResponse("inspect_page", { full: true, budget: 400 }, "cursor-initial"),
       ((request: any) => {
         initialResult = lastTool(request);
         cursor = initialResult.nextCursor;

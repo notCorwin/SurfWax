@@ -36,7 +36,7 @@ test("delivers every large snapshot page inline before completing a baseline", a
     const pages = new SemanticPages();
     let cursor: string | undefined, count = 0;
     const next = (): ReturnType<typeof commandResponse> | ReturnType<typeof textResponse> =>
-      call("inspect_page", { budget: 30000, limit: 100, ...(cursor ? { cursor } : kind === "delta" ? { since: baselineId } : {}) }, (result) => {
+      call("inspect_page", { budget: 30000, limit: 100, ...(cursor ? { cursor } : kind === "delta" ? { since: baselineId } : { full: true }) }, (result) => {
         expect(result.$ref, "A snapshot page must arrive in the tool message, not as an unread artifact").toBeUndefined();
         expect(result.items).toEqual(expect.any(Array));
         expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(16 * 1024);
@@ -58,7 +58,7 @@ test("delivers every large snapshot page inline before completing a baseline", a
         }
         if (kind === "delta") {
           deltaPageCount = count;
-          expect(observation.mode).toBe("delta");
+          expect(observation).toMatchObject({ mode: "delta", baseObservationId: baselineId });
           updated = applySemanticDelta(baseline, observation.items);
           expect(updated.some((item) => item.line.includes("ROW_074_CHANGED"))).toBe(true);
           expect(updated.some((item) => item.line.includes(rowText(74)))).toBe(false);

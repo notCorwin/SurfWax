@@ -1,10 +1,10 @@
 /** A compact independent consumer for paged semantic observations. */
 export type SemanticItem = { id: string; line: string; ref?: string; change?: "added" | "updated" | "removed" | "moved"; after?: string | null };
 type Fragment = SemanticItem & { fragment?: { index: number; start: number; end: number; total: number } };
-type Page = { observationId: string; documentId: number; mode: "full" | "delta"; items: Fragment[]; nextCursor?: string; truncation: { baselineComplete: boolean } };
+type Page = { observationId: string; documentId: number; mode: "full" | "delta"; baseObservationId?: string; items: Fragment[]; nextCursor?: string; truncation: { baselineComplete: boolean } };
 
 export class SemanticPages {
-  private identity?: { observationId: string; documentId: number; mode: Page["mode"] };
+  private identity?: { observationId: string; documentId: number; mode: Page["mode"]; baseObservationId?: string };
   private cursor?: string;
   private ended = false;
   private readonly items: SemanticItem[] = [];
@@ -16,8 +16,9 @@ export class SemanticPages {
     if (this.ended || cursor !== this.cursor || !page || !Array.isArray(page.items)
       || typeof page.observationId !== "string" || !page.observationId || !Number.isSafeInteger(page.documentId)
       || !["full", "delta"].includes(page.mode) || !page.truncation || typeof page.truncation.baselineComplete !== "boolean") throw new Error("Invalid semantic page");
-    if (!this.identity) this.identity = { observationId: page.observationId, documentId: page.documentId, mode: page.mode };
-    if (page.observationId !== this.identity.observationId || page.documentId !== this.identity.documentId || page.mode !== this.identity.mode) throw new Error("Mixed semantic observations");
+    if (!this.identity) this.identity = { observationId: page.observationId, documentId: page.documentId, mode: page.mode, baseObservationId: page.baseObservationId };
+    if (page.observationId !== this.identity.observationId || page.documentId !== this.identity.documentId || page.mode !== this.identity.mode
+      || page.baseObservationId !== this.identity.baseObservationId) throw new Error("Mixed semantic observations");
     for (const raw of page.items) {
       if (!raw || typeof raw.line !== "string") throw new Error("Invalid semantic item");
       if (typeof raw.id !== "string" || !raw.id
@@ -53,10 +54,45 @@ export class SemanticPages {
     return this.cursor;
   }
 
-  result(): { observationId: string; mode: Page["mode"]; items: SemanticItem[] } {
+  result(): { observationId: string; mode: Page["mode"]; baseObservationId?: string; items: SemanticItem[] } {
     if (!this.ended || !this.identity) throw new Error("Semantic observation is incomplete");
-    return { observationId: this.identity.observationId, mode: this.identity.mode, items: structuredClone(this.items) };
+    return { observationId: this.identity.observationId, mode: this.identity.mode,
+      ...(this.identity.baseObservationId ? { baseObservationId: this.identity.baseObservationId } : {}), items: structuredClone(this.items) };
   }
+}
+
+/** Rebuild only completely delivered observations from actual canonical receipts.
+ * Automatic snapshots may form a chain; their base ID, rather than proximity in
+ * the transcript, determines which prior visible state each change applies to.
+ */
+export function deliveredSemanticState(events: readonly { type: string; output?: unknown }[], observation: { observationId: string }): SemanticItem[] {
+  const pending = new Map<string, { pages: SemanticPages; cursor?: string }>();
+  const complete = new Map<string, ReturnType<SemanticPages["result"]>>();
+  for (const event of events) {
+    if (!["tool.finished", "tool.failed", "tool.aborted"].includes(event.type)) continue;
+    const output = event.output as { pageSnapshot?: unknown; observationId?: unknown } | undefined;
+    const page = (output?.pageSnapshot ?? (output?.observationId ? output : undefined)) as (Page & { partial?: boolean }) | undefined;
+    if (!page || page.partial || !Array.isArray(page.items) || complete.has(page.observationId)) continue;
+    let current = pending.get(page.observationId);
+    if (!current) { current = { pages: new SemanticPages() }; pending.set(page.observationId, current); }
+    current.cursor = current.pages.append(page, current.cursor);
+    if (!current.cursor) complete.set(page.observationId, current.pages.result());
+    // A baseline completed only after this observation was delivered cannot
+    // justify the producer having selected it for an automatic delta.
+    if (complete.has(observation.observationId)) break;
+  }
+  const visiting = new Set<string>();
+  const resolve = (id: string): SemanticItem[] => {
+    if (visiting.has(id)) throw new Error("Cyclic semantic baseline chain");
+    const current = complete.get(id);
+    if (!current) throw new Error(`Missing completely delivered semantic baseline ${id}`);
+    if (current.mode === "full") return current.items;
+    if (!current.baseObservationId) throw new Error("Delta has no explicit semantic baseline");
+    visiting.add(id);
+    try { return applySemanticDelta(resolve(current.baseObservationId), current.items); }
+    finally { visiting.delete(id); }
+  };
+  return resolve(observation.observationId);
 }
 
 /** Apply the published delta contract, independently of the snapshot producer. */

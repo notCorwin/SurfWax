@@ -278,7 +278,7 @@ summary,
 }
 [data-slot="bubble"][data-variant="ghost"] [data-slot="bubble-content"] { background: transparent; }
 [data-slot="dialog-content"], [data-slot="alert-dialog-content"], [data-slot="popover-content"],
-[data-slot="select-content"], [data-slot="tooltip-content"], [data-streamdown="table-fullscreen"] {
+[data-slot="select-content"], [data-slot="tooltip-content"] {
   background: var(--popover);
   color: var(--popover-foreground);
   border-color: var(--surface-stroke);
@@ -291,6 +291,5 @@ summary,
 }
 @media (prefers-color-scheme: dark) {
   [data-slot="dialog-content"], [data-slot="alert-dialog-content"], [data-slot="popover-content"],
-  [data-slot="select-content"], [data-slot="tooltip-content"],
-  [data-streamdown="table-fullscreen"] { box-shadow: none; }
+  [data-slot="select-content"], [data-slot="tooltip-content"] { box-shadow: none; }
 }

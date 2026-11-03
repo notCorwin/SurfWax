@@ -270,3 +270,22 @@ it("keeps synthetic terminals in the repository but excludes them from model his
     .toEqual(["user", "failed-stopped", "continued"]);
   expect((await activeConversationMessages(logger, "thread")).map(({ id }) => id)).toEqual(["user", "continued"]);
 });
+
+
+it("reconciles every assistant segment after page refreshes interrupt a run", async () => {
+  const repository = await restoreConversationRepository([
+    event(1, "conversation.message", { content: { id: "user", role: "user", parts: [] } }),
+    event(2, "conversation.submitted", { runId: "run", content: { messageId: "user" } }),
+    event(3, "conversation.message", { runId: "run", parentId: "user", content: { id: "first", role: "assistant", parts: [{ type: "text", text: "before refresh" }] } }),
+    event(4, "conversation.message", { runId: "run", parentId: "first", content: { id: "refresh", role: "user", parts: [], metadata: { custom: { pageRefresh: true } } } }),
+    event(5, "conversation.message", { runId: "run", parentId: "refresh", content: { id: "second", role: "assistant", parts: [
+      { type: "dynamic-tool", toolName: "click", toolCallId: "click", state: "input-available", input: {} },
+    ] } }),
+    event(6, "tool.failed", { runId: "run", toolCallId: "click", output: { ok: false, error: { code: "interrupted", message: "owner disconnected" } } }),
+    event(7, "conversation.aborted", { runId: "run" }),
+  ]);
+  expect(repository.headId).toBe("second");
+  const assistant = repository.messages.find(({ message }) => message.id === "second")!.message;
+  expect(assistant.metadata).toMatchObject({ interrupted: true });
+  expect(assistant.parts[0]).toMatchObject({ state: "output-available", output: { ok: false, error: { code: "interrupted" } } });
+});

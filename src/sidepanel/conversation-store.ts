@@ -1,5 +1,5 @@
 import { isSyntheticTerminalMessage, restoreConversationRepository } from "../conversations";
-import { abortConversationWork, withIdleConversation } from "../agent/coordinator";
+import { abortConversationWork, claimConversationRun, withIdleConversation, type ConversationRunLease } from "../agent/coordinator";
 import { followupDispatch, type ConversationTransport, type SidePanelMessage } from "../agent/transport";
 import { ConversationListProjection, fromLogValue, type ConversationRepository, type ConversationSummary, type EventLogger, type LogEvent } from "../logging";
 
@@ -92,9 +92,15 @@ export class ConversationStore {
   private timedMessageLengths = new Map<string, number>();
   private controller?: AbortController;
   private loadVersion = 0;
-  private listVersion = 0;
+  private listCursor = -1;
+  private listEpoch?: string;
+  private listReload?: Promise<void>;
+  private listDirty = false;
+  private externalRestore?: Promise<void>;
+  private externalDirty = false;
   private closed = false;
   private unsubscribe?: () => void;
+  private unsubscribeCommits?: () => void;
   private conversationList = new ConversationListProjection();
 
   constructor(private logger: EventLogger, private transport: (id: string) => ConversationTransport, initialId: string = crypto.randomUUID()) {
@@ -222,32 +228,40 @@ export class ConversationStore {
         const messages = this.state.thread.messages;
         this.display(messages.map((message) => message.source), messages.find((message) => message.status.type === "running")?.id);
       }
-      if (/^conversation\.(created|title\.updated|deleted|restored|submitted|finished|aborted|failed)$/.test(event.type))
-        void this.threads.reload().catch((error) => this.updateThread({ error }));
+    });
+    this.unsubscribeCommits = this.logger.subscribeCommits((commit) => {
+      if (commit.cleared) { this.listCursor = -1; this.listEpoch = undefined; }
+      const summaryChanged = commit.types.some(type => /^conversation\.(created|title\.updated|deleted|restored|submitted|finished|aborted|failed)$/.test(type));
+      if (commit.cleared || summaryChanged) void this.threads.reload().catch((error) => this.updateThread({ error }));
+      const messagesChanged = commit.types.some(type => /^conversation\.(message|branch\.selected|deleted|restored|finished|aborted|failed)$/.test(type));
+      if (commit.external && (commit.cleared || messagesChanged && commit.conversationIds.includes(this.state.threadListItem.id)))
+        void this.refreshExternal().catch((error) => this.updateThread({ error }));
     });
     void this.threads.reload().catch((error) => this.updateThread({ error }));
-    return () => { this.closed = true; this.unsubscribe?.(); this.thread.cancelRun(); };
+    return () => { this.closed = true; this.unsubscribe?.(); this.unsubscribeCommits?.(); this.thread.cancelRun(); };
   }
   composer = {
     setText: (text: string) => this.publish({ composer: { text } }),
     send: () => { const text = this.state.composer.text; if (!text.trim() || this.state.thread.isRunning) return;
-      this.composer.setText(""); return this.thread.append(text); },
+      return this.thread.append(text, () => {
+        if (this.state.composer.text === text) this.composer.setText("");
+      }); },
   };
   thread = {
     getState: () => this.state.thread,
     subscribe: this.subscribe,
     cancelRun: () => { if (this.controller && !this.controller.signal.aborted) { this.updateThread({ isStopping: true, stoppingAt: Date.now() }); this.controller.abort(); } },
-    append: (input: string | { content: readonly { type: "text"; text: string }[]; metadata?: unknown; role?: string; createdAt?: Date }) => {
+    append: (input: string | { content: readonly { type: "text"; text: string }[]; metadata?: unknown; role?: string; createdAt?: Date }, onAccepted?: () => void) => {
       const message: SidePanelMessage = { id: crypto.randomUUID(), role: "user",
         parts: typeof input === "string" ? [{ type: "text", text: input }] : [...input.content],
         ...(typeof input === "string" ? {} : { metadata: input.metadata }) };
-      return this.run([...branchMessages(this.repository), message], "submit-message");
+      return this.run([...branchMessages(this.repository), message], "submit-message", undefined, onAccepted);
     },
-    startRun: ({ parentId }: { parentId: string }) => this.run(branchMessages(this.repository, parentId), "regenerate-message"),
+    startRun: ({ parentId }: { parentId: string }) => this.run([], "regenerate-message", parentId),
     edit: (id: string, text: string) => {
       const item = this.repository.messages.find((entry) => entry.message.id === id);
       if (!item || !text.trim()) return;
-      return this.run([...branchMessages(this.repository, item.parentId), { id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text }] }], "submit-message");
+      return this.run([{ id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text }] }], "submit-message", item.parentId);
     },
     getMessageById: (id: string) => ({
       getCopyText: () => this.state.thread.messages.find((message) => message.id === id)?.parts
@@ -278,14 +292,31 @@ export class ConversationStore {
     }),
   };
   threads = {
-    reload: async () => {
-      const revision = ++this.listVersion;
-      const summaries = this.conversationList.reset(await this.logger.summaryEvents());
-      if (revision !== this.listVersion) return;
-      this.publishThreadItems(summaries);
+    reload: () => {
+      this.listDirty = true;
+      return this.listReload ??= (async () => {
+        while (this.listDirty) {
+          this.listDirty = false;
+          let batch = await this.logger.summaryEventsSince(this.listCursor);
+          if (this.listEpoch !== undefined && this.listEpoch !== batch.epoch) {
+            this.listCursor = -1;
+            batch = await this.logger.summaryEventsSince(-1);
+          }
+          if (this.listCursor < 0) this.conversationList.reset([]);
+          this.listEpoch = batch.epoch;
+          for (const event of batch.value) {
+            this.conversationList.apply(event);
+            this.listCursor = Math.max(this.listCursor, event.id);
+          }
+          this.publishThreadItems(this.conversationList.snapshot());
+        }
+      })().finally(() => {
+        this.listReload = undefined;
+        if (this.listDirty && !this.closed) void this.threads.reload().catch(error => this.updateThread({ error }));
+      });
     },
-    switchToNewThread: () => this.switchConversation(crypto.randomUUID(), false),
-    switchToThread: (id: string) => this.switchConversation(id, true),
+    switchToNewThread: () => withIdleConversation(() => this.switchConversation(crypto.randomUUID(), false)),
+    switchToThread: (id: string) => withIdleConversation(() => this.switchConversation(id, true)),
     item: ({ id }: { id: string }) => ({
       rename: (title: string) => withIdleConversation(() => this.logger.append({ type: "conversation.title.updated", conversationId: id, content: { title: title.trim() || "新对话", source: "manual" } })),
       delete: () => withIdleConversation(async () => { await abortConversationWork(id); await this.logger.deleteConversation(id);
@@ -293,6 +324,33 @@ export class ConversationStore {
     }),
     restore: (id: string) => withIdleConversation(() => this.logger.restoreConversation(id)),
   };
+  private refreshExternal(): Promise<void> {
+    this.externalDirty = true;
+    return this.externalRestore ??= (async () => {
+      while (this.externalDirty && !this.closed) {
+        this.externalDirty = false;
+        if (this.state.thread.isRunning) return; // run entrance replays under the lease.
+        const id = this.state.threadListItem.id;
+        const revision = this.loadVersion;
+        const events = await this.logger.restorationEvents(id, { modelTiming: true });
+        const repository = await restoreConversationRepository(events);
+        if (this.closed || revision !== this.loadVersion || this.state.thread.isRunning) continue;
+        const summaries = await this.logger.summaryEvents(id);
+        if (this.closed || revision !== this.loadVersion || this.state.thread.isRunning) continue;
+        const exists = new ConversationListProjection().reset(summaries).some((item) => item.id === id);
+        if (!exists && summaries.some((event) => event.type === "conversation.deleted")) {
+          await this.switchConversation(crypto.randomUUID(), false);
+          continue;
+        }
+        this.restoreBranches(repository, events);
+        this.publish({ threadListItem: { id, ...(exists ? { remoteId: id } : {}) } });
+        this.display(branchMessages(repository));
+      }
+    })().finally(() => {
+      this.externalRestore = undefined;
+      if (this.externalDirty && !this.closed) void this.refreshExternal().catch(error => this.updateThread({ error }));
+    });
+  }
   private publishThreadItems(summaries: readonly ConversationSummary[]) {
     const items = summaries.map((item): ThreadItem => ({ ...item, remoteId: item.id, custom: { runStatus: item.runStatus } }));
     this.publish({ threads: { ...this.state.threads, threadItems: items, threadIds: items.map((item) => item.id) } });
@@ -302,6 +360,11 @@ export class ConversationStore {
     const revision = ++this.loadVersion;
     this.updateThread({ isLoading: true, error: undefined });
     try {
+      if (exists) {
+        const summary = await this.logger.summaryEvents(id);
+        if (summary.some(event => event.type === "conversation.deleted") && !new ConversationListProjection().reset(summary).some(item => item.id === id))
+          throw new Error("此会话已被删除，请选择其他会话。");
+      }
       const events = exists ? await this.logger.restorationEvents(id, { modelTiming: true }) : [];
       const repository = exists ? await restoreConversationRepository(events) : { headId: null, messages: [] };
       if (revision !== this.loadVersion) return;
@@ -312,16 +375,28 @@ export class ConversationStore {
     } catch (error) { if (revision === this.loadVersion) this.updateThread({ error }); throw error; }
     finally { if (revision === this.loadVersion) this.updateThread({ isLoading: false }); }
   }
-  private async run(messages: SidePanelMessage[], trigger: "submit-message" | "regenerate-message") {
-    if (this.state.thread.isRunning || this.state.thread.isLoading || this.closed) return;
+  private async run(messages: SidePanelMessage[], trigger: "submit-message" | "regenerate-message", branchHead?: string | null, onAccepted?: () => void) {
+    if (this.state.thread.isRunning || this.state.thread.isLoading || this.closed) return false;
     const id = this.state.threadListItem.id;
     const controller = this.controller = new AbortController();
     this.updateThread({ isRunning: true, isStopping: false, stoppingAt: undefined, error: undefined });
-    this.display(messages);
     let failure: unknown;
+    let lease: ConversationRunLease | undefined;
     let priorFailureEventId = 0;
+    let accepted = false;
     try {
-      if (!this.state.threadListItem.remoteId) {
+      lease = await claimConversationRun(id, controller.signal);
+      const summary = await this.logger.summaryEvents(id);
+      if (summary.some(event => event.type === "conversation.deleted") && !new ConversationListProjection().reset(summary).some(item => item.id === id))
+        throw new Error("此会话已被删除，请新建会话后重试；消息草稿已保留。");
+      const events = await this.restore(id);
+      controller.signal.throwIfAborted();
+      if (branchHead != null && !this.repository.messages.some((entry) => entry.message.id === branchHead))
+        throw new Error("目标消息已不可用；请重新打开会话后重试。");
+      const history = branchMessages(this.repository, branchHead === undefined ? this.repository.headId : branchHead);
+      messages = trigger === "submit-message" ? [...history, messages.at(-1)!] : history;
+      this.display(messages);
+      if (!events.some((event) => event.type === "conversation.message") && !this.state.threadListItem.remoteId) {
         await this.logger.append({ type: "conversation.created", conversationId: id, content: { title: "新对话" } });
         this.publish({ threadListItem: { id, remoteId: id } });
       }
@@ -329,11 +404,13 @@ export class ConversationStore {
       if (user?.role === "user" && !followupDispatch(user) && !this.repository.messages.some((item) => item.message.id === user.id)) {
         await this.logger.appendMessage(id, { ...user }, { parentId: messages.at(-2)?.id ?? null });
       }
-      priorFailureEventId = Math.max(0, ...(await this.logger.restorationEvents(id))
+      accepted = true;
+      onAccepted?.();
+      priorFailureEventId = Math.max(0, ...events
         .filter((event) => event.type === "conversation.failed").map((event) => event.id));
       controller.signal.throwIfAborted();
       const modelMessages = messages.filter((message) => !isSyntheticTerminalMessage(message));
-      await this.transport(id).sendMessages({ trigger, chatId: id, messages: modelMessages, abortSignal: controller.signal,
+      await this.transport(id).sendMessages({ trigger, chatId: id, messages: modelMessages, abortSignal: controller.signal, runLease: lease,
         onMessage: (message, prior = []) => { if (!controller.signal.aborted) this.display([...messages, ...prior, message], message.id); } });
     } catch (error) { if (!controller.signal.aborted) failure = error; }
     finally {
@@ -351,8 +428,10 @@ export class ConversationStore {
         // selected. In that case the terminal event has no visible message.
         if (!visible) this.updateThread({ error: failure });
       }
+      lease?.finish();
       this.controller = undefined;
       this.updateThread({ isRunning: false, isStopping: false, stoppingAt: undefined });
     }
+    return accepted;
   }
 }

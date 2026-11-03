@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
-import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configureWithImages, type MockResponse } from "./fixtures";
+import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configureWithImages, readEvents, type MockResponse } from "./fixtures";
+import { deliveredSemanticState } from "./evaluation/semantic-state";
 
 function lastTool(request: any): any {
   const message = request.messages.findLast((entry: any) => entry.role === "tool");
@@ -28,7 +29,7 @@ test("snapshots use painted names while retaining private action identity", asyn
     await target.goto(`${provider.origin}/target`);
     await target.evaluate(() => {
       document.body.innerHTML = `<style>
-        button { display:block; margin:4px; }
+        button { display:block; margin:4px; appearance:none; background:white; color:black; border:1px solid black; outline:none; box-shadow:none; }
         #ellipsized { width:130px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:16px monospace; }
         #icon { width:40px; height:40px; }
       </style><main>
@@ -62,7 +63,7 @@ test("snapshots use painted names while retaining private action identity", asyn
     await ellipsis.evaluate((element) => { element.textContent = element.textContent!.replace("SUFFIX_B", "SUFFIX_A"); });
 
     responses.push(
-      commandResponse("inspect_page", { budget: 12000 }, "visible-names-baseline"),
+      commandResponse("inspect_page", { full: true, budget: 12000 }, "visible-names-baseline"),
       step((request) => {
         baseline = lastTool(request);
         expect(baseline).toMatchObject({ mode: "full", items: expect.any(Array), truncation: { baselineComplete: true } });
@@ -77,15 +78,15 @@ test("snapshots use painted names while retaining private action identity", asyn
       }),
       step((request) => { changed = lastTool(request); return commandResponse("inspect_page", { since: baseline.observationId, budget: 12000 }, "visible-names-delta"); }),
       step((request) => { delta = lastTool(request); return commandResponse("click", { target: { ref: requireRef(named(baseline.items, "button", "Identity target"), "Identity target") } }, "visible-names-stale"); }),
-      step((request) => { stale = lastTool(request); return commandResponse("inspect_page", { region: { by: "css", value: "#icon" }, budget: 12000 }, "visible-names-icon"); }),
+      step((request) => { stale = lastTool(request); return commandResponse("inspect_page", { full: true, region: { by: "css", value: "#icon" }, budget: 12000 }, "visible-names-icon"); }),
       step((request) => {
         iconPage = lastTool(request);
         const icon = iconPage.items.find((item: any) => /\bbutton(?:\s|$)/.test(item.line) && item.ref);
         return commandResponse("click", { target: { ref: requireRef(icon, "icon button") } }, "visible-names-icon-click");
       }),
       step((request) => { iconClick = lastTool(request); return commandResponse("click", { target: { ref: requireRef(named(baseline.items, "button", "Visible DOM control"), "Visible DOM control") } }, "visible-names-dom-click"); }),
-      step((request) => { domClick = lastTool(request); return commandResponse("inspect_page", { region: { by: "css", value: "#scoped" }, budget: 12000 }, "visible-names-scoped"); }),
-      step((request) => { scoped = lastTool(request); return commandResponse("inspect_page", { region: { by: "css", value: "#ellipsized" }, budget: 12000 }, "visible-names-ellipsis"); }),
+      step((request) => { domClick = lastTool(request); return commandResponse("inspect_page", { full: true, region: { by: "css", value: "#scoped" }, budget: 12000 }, "visible-names-scoped"); }),
+      step((request) => { scoped = lastTool(request); return commandResponse("inspect_page", { full: true, region: { by: "css", value: "#ellipsized" }, budget: 12000 }, "visible-names-ellipsis"); }),
       step((request) => {
         ellipsisPage = lastTool(request);
         const row = ellipsisPage.items.find((item: any) => /\bbutton(?:\s|$)/.test(item.line));
@@ -105,13 +106,14 @@ test("snapshots use painted names while retaining private action identity", asyn
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("VISIBLE_NAMES_DONE", { timeout: 100_000 });
     if (problem) throw problem;
+    const events = await readEvents(opened.page);
 
     expect(named(baseline.items, "button", "Visible trigger")?.ref).toEqual(expect.any(String));
     expect(named(baseline.items, "button", "Visible DOM control")?.ref).toEqual(expect.any(String));
     expect(changed).toMatchObject({ ok: true });
-    expect(JSON.stringify(changed.pageSnapshot.items)).toContain("Visible after change");
+    expect(JSON.stringify(deliveredSemanticState(events, changed.pageSnapshot))).toContain("Visible after change");
     expect(JSON.stringify(changed.pageSnapshot.items)).not.toContain("SECRET_IDENTITY_AFTER");
-    expect(delta.mode).toBe("delta");
+    expect(delta).toMatchObject({ mode: "delta", baseObservationId: baseline.observationId });
     expect(delta.items.some((item: any) => item.change !== "removed" && item.line.includes("Visible after change"))).toBe(true);
     expect(stale).toMatchObject({ ok: false, error: { code: "stale-ref" } });
     expect(JSON.stringify(iconPage.items)).not.toContain("SECRET_ICON_LABEL");

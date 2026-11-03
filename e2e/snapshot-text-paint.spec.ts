@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents, type MockResponse } from "./fixtures";
+import { deliveredSemanticState } from "./evaluation/semantic-state";
 
 const lastTool = (request: any) => JSON.parse(request.messages.findLast((entry: any) => entry.role === "tool").content);
 const button = (items: any[], name: string) => items.find((entry) => entry.line.includes(`button "${name}"`));
@@ -40,8 +41,8 @@ test("snapshot follows rendered text visibility and updates when the text is rev
     expect(painted.equals(notPainted)).toBe(false);
     let baseline: any;
     responses.push(
-      commandResponse("inspect_page", { budget: 12000 }, "text-before"),
-      (request) => { baseline = lastTool(request); return commandResponse("inspect_page", { region: { by: "css", value: "#transparent-label-button" }, budget: 12000 }, "text-transparent-label"); },
+      commandResponse("inspect_page", { full: true, budget: 12000 }, "text-before"),
+      (request) => { baseline = lastTool(request); return commandResponse("inspect_page", { full: true, region: { by: "css", value: "#transparent-label-button" }, budget: 12000 }, "text-transparent-label"); },
       () => commandResponse("click", { target: { ref: button(baseline.items, "Reveal painted text")?.ref } }, "text-reveal"),
       () => commandResponse("inspect_page", { since: baseline.observationId, budget: 12000 }, "text-delta"),
       textResponse("TEXT_PAINT_OK"), textResponse("文字检查"),
@@ -55,6 +56,7 @@ test("snapshot follows rendered text visibility and updates when the text is rev
     const output = (id: string) => events.find((event) => ["tool.finished", "tool.failed"].includes(event.type) && event.toolCallId === id)?.output;
     const before = output("text-before"), changed = output("text-reveal"), delta = output("text-delta");
     expect(before?.mode).toBe("full");
+    expect(delta).toMatchObject({ mode: "delta", baseObservationId: before.observationId });
     expect(button(before.items, "Visible text")?.ref).toBeTruthy();
     expect(button(before.items, "Visible size")?.ref).toBeTruthy();
     for (const hidden of ["hidden transparent child", "hidden zero-size child", "Standalone transparent text", "Standalone zero-size text", "hidden explicit child"]) {
@@ -71,7 +73,7 @@ test("snapshot follows rendered text visibility and updates when the text is rev
     }
     expect(changed).toMatchObject({ ok: true });
     for (const revealed of ["hidden transparent child", "hidden zero-size child", "Standalone transparent text", "Standalone zero-size text"]) {
-      expect(JSON.stringify(changed.pageSnapshot.items)).toContain(revealed);
+      expect(JSON.stringify(deliveredSemanticState(events, changed.pageSnapshot))).toContain(revealed);
       expect(delta.items.some((entry: any) => entry.change !== "removed" && entry.line.includes(revealed))).toBe(true);
     }
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
@@ -79,7 +81,7 @@ test("snapshot follows rendered text visibility and updates when the text is rev
 
 for (const [kind, partial] of [["selection", false], ["selection", true], ["custom-highlight", false], ["custom-highlight", true]] as const) {
   test(`retains transparent text painted by ${kind}${partial ? " over a middle substring" : ""}`, async () => {
-    const responses: MockResponse[] = [commandResponse("inspect_page", { budget: 12000 }, "highlight-snapshot"), textResponse("HIGHLIGHT_OK"), textResponse("高亮检查")];
+    const responses: MockResponse[] = [commandResponse("inspect_page", { full: true, budget: 12000 }, "highlight-snapshot"), textResponse("HIGHLIGHT_OK"), textResponse("高亮检查")];
     const provider = await startProvider(responses);
     const opened = await openExtension();
     try {
@@ -137,7 +139,7 @@ for (const [kind, partial] of [["selection", false], ["selection", true], ["cust
 
 for (const kind of ["first-line", "first-letter"] as const) {
   test(`retains text painted by ::${kind} on a transparent base`, async () => {
-    const responses: MockResponse[] = [commandResponse("inspect_page", { budget: 12000 }, "pseudo-snapshot"), textResponse("PSEUDO_OK"), textResponse("伪元素检查")];
+    const responses: MockResponse[] = [commandResponse("inspect_page", { full: true, budget: 12000 }, "pseudo-snapshot"), textResponse("PSEUDO_OK"), textResponse("伪元素检查")];
     const provider = await startProvider(responses);
     const opened = await openExtension();
     try {
@@ -180,7 +182,7 @@ for (const kind of ["first-line", "first-letter"] as const) {
 
 for (const kind of ["uppercase", "text-security"] as const) {
   test(`projects a selected substring after ${kind} transforms it`, async () => {
-    const responses: MockResponse[] = [commandResponse("inspect_page", { budget: 12000 }, "transform-selection"), textResponse("TRANSFORM_SELECTION_OK"), textResponse("文字转换检查")];
+    const responses: MockResponse[] = [commandResponse("inspect_page", { full: true, budget: 12000 }, "transform-selection"), textResponse("TRANSFORM_SELECTION_OK"), textResponse("文字转换检查")];
     const provider = await startProvider(responses);
     const opened = await openExtension();
     try {
@@ -227,7 +229,7 @@ for (const kind of ["uppercase", "text-security"] as const) {
 }
 
 test("projects every visible inline fragment in a mixed-size first line", async () => {
-  const responses: MockResponse[] = [commandResponse("inspect_page", { budget: 12000 }, "mixed-first-line"), textResponse("MIXED_FIRST_LINE_OK"), textResponse("首行检查")];
+  const responses: MockResponse[] = [commandResponse("inspect_page", { full: true, budget: 12000 }, "mixed-first-line"), textResponse("MIXED_FIRST_LINE_OK"), textResponse("首行检查")];
   const provider = await startProvider(responses);
   const opened = await openExtension();
   try {
@@ -286,7 +288,7 @@ test("filters transparent generated text but keeps painted pseudo-elements and u
     expect(initial.equals(shown)).toBe(false);
     expect(initial.equals(afterHidden)).toBe(false);
     let baseline: any;
-    responses.push(commandResponse("inspect_page", { budget: 12000 }, "generated-before"),
+    responses.push(commandResponse("inspect_page", { full: true, budget: 12000 }, "generated-before"),
       (request) => { baseline = lastTool(request); return commandResponse("click", { target: { ref: button(baseline.items, "Reveal generated text")?.ref } }, "generated-reveal"); },
       () => commandResponse("inspect_page", { since: baseline.observationId, budget: 12000 }, "generated-delta"),
       textResponse("GENERATED_TEXT_OK"), textResponse("生成文字检查"));
@@ -298,13 +300,14 @@ test("filters transparent generated text but keeps painted pseudo-elements and u
     const events = await readEvents(opened.page);
     const output = (id: string) => events.find((event) => ["tool.finished", "tool.failed"].includes(event.type) && event.toolCallId === id)?.output;
     const before = output("generated-before"), changed = output("generated-reveal"), delta = output("generated-delta");
+    expect(delta).toMatchObject({ mode: "delta", baseObservationId: before.observationId });
     expect(before?.mode).toBe("full");
     expect(button(before.items, "Button body Visible button after")?.ref).toBeTruthy();
     for (const visible of ["Standalone body", "Visible standalone after"]) expect(JSON.stringify(before.items)).toContain(visible);
     for (const hidden of ["Hidden button before", "Hidden standalone before"]) expect(JSON.stringify(before.items)).not.toContain(hidden);
     expect(changed).toMatchObject({ ok: true });
     for (const revealed of ["Hidden button before", "Hidden standalone before"]) {
-      expect(JSON.stringify(changed.pageSnapshot.items)).toContain(revealed);
+      expect(JSON.stringify(deliveredSemanticState(events, changed.pageSnapshot))).toContain(revealed);
       expect(delta.items.some((entry: any) => entry.change !== "removed" && entry.line.includes(revealed))).toBe(true);
     }
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }

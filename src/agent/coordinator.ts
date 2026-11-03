@@ -1,4 +1,5 @@
 export type RunIdentity = { runId: string; generation: number; ownerId: string };
+export type ConversationRunLease = { runId: string; conversationId: string; signal: AbortSignal; finish: () => void };
 type ActiveRun = RunIdentity & { conversationId: string; controller: AbortController; done: Promise<void>; finish: () => void };
 let activeRun: ActiveRun | undefined;
 let claiming = false;
@@ -37,9 +38,9 @@ export async function withIdleConversation<T>(action: () => T | Promise<T>): Pro
   }
   return perform();
 }
-export async function claimConversationRun(conversationId: string, signal?: AbortSignal, runId: string = crypto.randomUUID()): Promise<{ signal: AbortSignal; finish: () => void }> {
+export async function claimConversationRun(conversationId: string, signal?: AbortSignal, runId: string = crypto.randomUUID()): Promise<ConversationRunLease> {
   signal?.throwIfAborted();
-  if (activeRun || claiming) throw new Error("已有任务运行，请等待它完成或在原侧栏停止任务。");
+  if (activeRun || claiming) throw new Error(CONVERSATION_BUSY);
   claiming = true;
   const queueBehindOwnMutation = idleMutationDepth > 0 || idleLockDepth > 0;
   const controller = new AbortController();
@@ -48,6 +49,7 @@ export async function claimConversationRun(conversationId: string, signal?: Abor
   let releaseLock: (() => void) | undefined;
   let port: chrome.runtime.Port | undefined;
   try {
+    if (await activeRunIdentity()) throw new Error(CONVERSATION_BUSY);
     if (typeof navigator !== "undefined" && navigator.locks) {
       await new Promise<void>((accept, reject) => {
         void navigator.locks.request(RUN_LOCK, queueBehindOwnMutation ? { ...(signal ? { signal } : {}) } : { ifAvailable: true }, async (lock) => {
@@ -105,7 +107,7 @@ export async function claimConversationRun(conversationId: string, signal?: Abor
     const cancel = () => { try { port?.postMessage({ type: "cancelled", ...getRunIdentity() }); } catch { /* disconnected */ } };
     const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
     combined.addEventListener("abort", cancel, { once: true });
-    return { signal: combined, finish: run.finish };
+    return { runId, conversationId, signal: combined, finish: run.finish };
   } catch (error) {
     port?.disconnect(); releaseLock?.(); throw error;
   } finally { claiming = false; }

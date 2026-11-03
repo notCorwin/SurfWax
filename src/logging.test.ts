@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { EventLogger, IndexedDbEventStore, fromLogValue, nextArtifactBucket, rebuildConversation, stringifyLogSafe, toLogValue, upgradeEventStore, type LogEvent } from "./logging";
+import { testEventStore } from "./test-event-store";
+import { EventLogger, IndexedDbEventStore, fromLogValue, nextArtifactBucket, rebuildConversation, stringifyLogSafe, toLogValue, upgradeEventStore, rebuildConversationRepository, type LogEvent } from "./logging";
 
 function memoryStore(onBatch?: (size: number) => void) {
   const events: LogEvent[] = [];
@@ -480,6 +481,7 @@ describe("canonical event log", () => {
     expect(createIndex).toHaveBeenCalledWith("type", "type");
     expect(createIndex).toHaveBeenCalledWith("conversationType", ["conversationId", "type"]);
     expect(createIndex).toHaveBeenCalledWith("runType", ["runId", "type"]);
+    expect(createIndex).toHaveBeenCalledWith("runToolType", ["runId", "toolCallId", "type"]);
     expect(deleteIndex.mock.calls.map(([name]) => name)).toEqual(["typeId", "conversationTypeId", "runTypeId", "conversationIdId"]);
     expect(db.deleteObjectStore).not.toHaveBeenCalled();
     expect(legacyRecords).toHaveLength(1);
@@ -1104,4 +1106,152 @@ it("loads model timing only for display restoration", async () => {
   const display = await logger.restorationEvents("one", { modelTiming: true });
   expect(display.map((event) => event.type)).toEqual(["conversation.message", "model.request.started", "model.response.received"]);
   expect(byTypes.mock.calls.some(([types]) => types.includes("model.response.received"))).toBe(true);
+});
+
+
+describe("canonical message changes and commit cursors", () => {
+  it("stores only changed parts and reconstructs the same message for every reader", async () => {
+    const events: LogEvent[] = [];
+    const store = testEventStore(events);
+    const logger = new EventLogger({ store });
+    const observed: unknown[] = [];
+    logger.subscribe((event) => { if (event.type === "conversation.message") observed.push(fromLogValue(event.content, event.valueEncoding)); });
+    let parts: unknown[] = Array.from({ length: 24 }, (_, index) => ({ type: "dynamic-tool", toolName: "read_text", toolCallId: `t${index}`, state: "input-available", input: {} }));
+    await logger.appendMessage("c", { id: "a", role: "assistant", parts }, { runId: "r", parentId: "u" });
+    for (let index = 0; index < parts.length; index++) {
+      parts = parts.map((part, position) => position === index ? { ...(part as object), state: "output-available", output: { result: "x".repeat(1000) } } : part);
+      await logger.appendMessage("c", { id: "a", role: "assistant", parts }, { runId: "r", parentId: "u" });
+    }
+    const storedParts = events.map((event) => (fromLogValue(event.content, event.valueEncoding) as { parts: unknown[] }).parts.length);
+    expect(storedParts).toEqual([24, ...Array(24).fill(1)]);
+    expect(observed.at(-1)).toEqual({ id: "a", role: "assistant", parts });
+    expect(rebuildConversationRepository(events).messages[0]?.message.parts).toEqual(parts);
+    const cold = new EventLogger({ store });
+    expect((await cold.repository("c")).messages[0]?.message.parts).toEqual(parts);
+    const afterFirst = await cold.contextProjectionEvents("c", events[0]!.id);
+    expect(fromLogValue(afterFirst.value.at(-1)!.content, afterFirst.value.at(-1)!.valueEncoding)).toMatchObject({ parts });
+    logger.dispose(); cold.dispose();
+  });
+
+  it("detects in-place message changes without retaining mutable caller objects", async () => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: testEventStore(events) });
+    const part = { type: "text", text: "before" };
+    await logger.appendMessage("c", { id: "a", role: "assistant", parts: [part] });
+    part.text = "after";
+    await logger.appendMessage("c", { id: "a", role: "assistant", parts: [part] });
+    expect(events[1]?.messagePatch?.indices).toEqual([0]);
+    expect((await logger.repository("c")).messages[0]?.message.parts).toEqual([{ type: "text", text: "after" }]);
+    logger.dispose();
+  });
+
+  it("starts a new full message after another writer clears the log", async () => {
+    const events: LogEvent[] = [];
+    const store = testEventStore(events);
+    const logger = new EventLogger({ store }), other = new EventLogger({ store });
+    await logger.appendMessage("c", { id: "a", role: "assistant", parts: [{ type: "text", text: "old" }] });
+    await other.clear();
+    await logger.appendMessage("c", { id: "a", role: "assistant", parts: [{ type: "text", text: "new" }] });
+    expect(events.at(-1)?.messagePatch).toBeUndefined();
+    expect((await logger.messages("c"))[0]?.parts).toEqual([{ type: "text", text: "new" }]);
+    logger.dispose(); other.dispose();
+  });
+
+  it("notifies other writers with IDs only and supports incremental summary replay and disposal", async () => {
+    const store = testEventStore();
+    const logger = new EventLogger({ store }), other = new EventLogger({ store });
+    const updates: unknown[] = [];
+    other.subscribeCommits((commit) => updates.push(commit));
+    const first = await logger.append({ type: "conversation.created", conversationId: "c", content: { title: "initial" } });
+    await logger.append({ type: "conversation.title.updated", conversationId: "c", content: { title: "latest" } });
+    expect(updates).toEqual([
+      { lastId: first!.id, conversationIds: ["c"], external: true, cleared: false, types: ["conversation.created"] },
+      { lastId: first!.id + 1, conversationIds: ["c"], external: true, cleared: false, types: ["conversation.title.updated"] },
+    ]);
+    expect((await other.summaryEventsSince(first!.id)).value).toMatchObject([{ type: "conversation.title.updated" }]);
+    other.dispose();
+    await logger.append({ type: "conversation.deleted", conversationId: "c" });
+    expect(updates).toHaveLength(2);
+    logger.dispose();
+  });
+
+  it("publishes committed IDs across independent channel endpoints without replaying payloads", async () => {
+    const endpoints = new Set<{ listeners: Set<(event: MessageEvent) => void>; closed: boolean }>();
+    const sent: unknown[] = [];
+    const factory = () => {
+      const endpoint = { listeners: new Set<(event: MessageEvent) => void>(), closed: false }; endpoints.add(endpoint);
+      return {
+        postMessage(data: unknown) { sent.push(data); for (const peer of endpoints) if (peer !== endpoint && !peer.closed) for (const listener of peer.listeners) listener({ data } as MessageEvent); },
+        addEventListener(_type: string, listener: any) { endpoint.listeners.add(listener); },
+        removeEventListener(_type: string, listener: any) { endpoint.listeners.delete(listener); },
+        close() { endpoint.closed = true; endpoints.delete(endpoint); },
+      };
+    };
+    const shared = testEventStore();
+    const logger = new EventLogger({ store: { ...shared }, channelFactory: factory });
+    const other = new EventLogger({ store: { ...shared }, channelFactory: factory });
+    const updates: unknown[] = [];
+    other.subscribeCommits((commit) => updates.push(commit));
+    await logger.append({ type: "conversation.created", conversationId: "c", content: { title: "a".repeat(10000) } });
+    expect(sent).toEqual([expect.objectContaining({ lastId: 1, conversationIds: ["c"], cleared: false })]);
+    expect(JSON.stringify(sent).length).toBeLessThan(200);
+    expect(updates).toEqual([{ lastId: 1, conversationIds: ["c"], external: true, cleared: false, types: ["conversation.created"] }]);
+    await Promise.all([logger.dispose(), other.dispose()]);
+    expect(endpoints.size).toBe(0);
+  });
+
+  it("queries each terminal identity without reading all prior run results", async () => {
+    const base = testEventStore();
+    const terminalEvents = vi.fn(base.terminalEvents);
+    const all = vi.fn(base.all);
+    const logger = new EventLogger({ store: { ...base, terminalEvents, all, latestByType: async (type: string) => (await base.all()).filter((event) => event.type === type).at(-1) } });
+    for (let index = 0; index < 40; index++) await logger.append({ type: "tool.finished", runId: "run", toolCallId: `t${index}`, content: { callId: "call" }, output: { text: "x".repeat(1000) } });
+    const duplicate = await logger.append({ type: "tool.failed", runId: "run", toolCallId: "t3", content: { callId: "call" }, error: "late" });
+    expect(duplicate?.type).toBe("tool.finished");
+    expect(terminalEvents).toHaveBeenCalledTimes(41);
+    expect(all).not.toHaveBeenCalled();
+    expect(await base.all()).toHaveLength(40);
+    logger.dispose();
+  });
+});
+
+
+it.each(["full", "sparse"])("decodes only the latest cumulative payload during %s message recovery", async (mode) => {
+  const { restoreConversationRepository } = await import("./conversations");
+  let payloadReads = 0;
+  const parts: any[] = [];
+  const events: LogEvent[] = [];
+  for (let index = 0; index < 40; index++) {
+    const output = { get result() { payloadReads++; return "x".repeat(1000); } };
+    parts.push({ type: "dynamic-tool", toolCallId: `t${index}`, toolName: "read_text", state: "output-available", input: {}, output });
+    events.push({ id: index + 1, type: "conversation.message", timestamp: new Date().toISOString(), conversationId: "c", runId: "r", parentId: "u", valueEncoding: 5,
+      content: { $type: "escaped-object", entries: [["id", "a"], ["role", "assistant"], ["$type", "object-graph"], ["parts", mode === "sparse" && index > 0 ? [parts[index]] : [...parts]]] },
+      ...(mode === "sparse" && index > 0 ? { messagePatch: { baseId: index, partsLength: index + 1, indices: [index] } } : {}),
+    });
+  }
+  const rebuilt = rebuildConversationRepository(events);
+  expect(payloadReads).toBe(40);
+  expect(rebuilt.messages[0]?.message.parts).toHaveLength(40);
+  expect(rebuilt.headId).toBe("a");
+  payloadReads = 0;
+  const restored = await restoreConversationRepository(events);
+  expect(payloadReads).toBe(40);
+  expect(restored).toEqual(rebuilt);
+  payloadReads = 0;
+  expect(rebuildConversation(events)).toHaveLength(1);
+  expect(payloadReads).toBe(40);
+});
+
+it("reuses an already materialized message revision across projection reads", async () => {
+  const events: LogEvent[] = [];
+  const store = testEventStore(events);
+  const writer = new EventLogger({ store });
+  await writer.appendMessage("c", { id: "a", role: "assistant", parts: [{ type: "text", text: "before" }] });
+  await writer.appendMessage("c", { id: "a", role: "assistant", parts: [{ type: "text", text: "after" }] });
+  const reader = new EventLogger({ store });
+  const first = await reader.contextProjectionEvents("c");
+  const second = await reader.contextProjectionEvents("c");
+  expect(first.value.at(-1)).not.toBe(events.at(-1));
+  expect(second.value.at(-1)).toBe(first.value.at(-1));
+  await Promise.all([writer.dispose(), reader.dispose()]);
 });

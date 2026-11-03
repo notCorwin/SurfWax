@@ -20,6 +20,48 @@ function mockSnapshot(tabId: number, lines: string[] = [], cursor?: string, deli
 }
 
 describe("browser tools", () => {
+  it("bounds direct tools by default and records one terminal result even after a late reply", async () => {
+    vi.useFakeTimers();
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: testEventStore(events) });
+    let reply!: (value: unknown) => void;
+    const listTabs = vi.fn(() => new Promise((resolve) => { reply = resolve; }));
+    const tools = createProgramTools({ listTabs } as unknown as ChromeExecutor, { logger, conversationId: "c" }) as Record<string, any>;
+    try {
+      const pending = tools.list_tabs.execute({}, { toolCallId: "tabs" });
+      await vi.advanceTimersByTimeAsync(40_000);
+      expect(await pending).toMatchObject({ ok: false, error: { code: "timeout" } });
+      expect((listTabs.mock.calls[0] as unknown as [AbortSignal])[0].aborted).toBe(true);
+      reply([{ id: 1 }]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(events.filter((event) => event.type === "tool.failed" || event.type === "tool.finished")).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("times out a scheduled call before dispatch instead of borrowing the preceding call's lifetime", async () => {
+    vi.useFakeTimers();
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: testEventStore(events) });
+    let reply!: (value: unknown) => void;
+    const listTabs = vi.fn(() => new Promise((resolve) => { reply = resolve; }));
+    const inspect = vi.fn(async (_input: unknown) => mockSnapshot(1));
+    const scheduler = new ToolScheduler(PROGRAM_TOOL_REGISTRY.map(({ name }) => name));
+    scheduler.prepare([
+      { type: "tool-call", toolName: "list_tabs", toolCallId: "first", input: {} },
+      { type: "tool-call", toolName: "inspect_page", toolCallId: "queued", input: {} },
+    ]);
+    const tools = createProgramTools({ listTabs, inspect } as unknown as ChromeExecutor, { logger, conversationId: "c", scheduler }) as Record<string, any>;
+    try {
+      const first = tools.list_tabs.execute({}, { toolCallId: "first" });
+      const queued = tools.inspect_page.execute({}, { toolCallId: "queued" });
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(await queued).toMatchObject({ ok: false, error: { code: "timeout" } });
+      expect(inspect).not.toHaveBeenCalled();
+      reply([]); await first;
+      expect(inspect).toHaveBeenCalledOnce();
+      expect(inspect.mock.calls[0]?.[0]).toMatchObject({ wire: { evidenceId: "first" } });
+    } finally { vi.useRealTimers(); }
+  });
   it("keeps the original exception chain in the tool failure event", async () => {
     const events: LogEvent[] = [];
     const logger = new EventLogger({ store: testEventStore(events) });
@@ -240,7 +282,7 @@ describe("browser tools", () => {
     const tools = createProgramTools(executor, { visualEnabled: async () => true }) as Record<string, any>;
     const output = await tools.take_screenshot.execute({ tabId: 8 }, { toolCallId: "screen" });
     expect(output).toMatchObject({ result: { screenshot }, pageSnapshot: { tabId: 8, nextCursor: "cursor", items: [{ line: "x".repeat(9000) }] } });
-    expect(inspect).toHaveBeenCalledWith({ tabId: 8, wire: { maxBytes: 16384, evidenceId: "screen" } }, undefined, expect.any(Object));
+    expect(inspect).toHaveBeenCalledWith({ tabId: 8, wire: { maxBytes: 16384, evidenceId: "screen" } }, expect.any(AbortSignal), expect.any(Object));
     const prepared = await prepareToolMessages([{ role: "tool", content: [{ type: "tool-result", output: { type: "json", value: output } }] }], 1);
     expect(prepared.at(-1).content).toContainEqual(expect.objectContaining({ type: "file", mediaType: "image/png" }));
   });
@@ -250,7 +292,7 @@ describe("browser tools", () => {
     const executor = { findElements: vi.fn(async () => ({ tabId: 8, elements: [{ ref: "t8s1d0e1" }, { status: "changed" }] })), inspect, pendingBackgroundJobs: () => [] } as unknown as ChromeExecutor;
     const tools = createProgramTools(executor) as Record<string, any>;
     await tools.find_elements.execute({ tabId: 8, target: { by: "role", value: "button" } }, { toolCallId: "find" });
-    expect(inspect).toHaveBeenCalledWith({ tabId: 8, recentRefs: ["t8s1d0e1"], wire: { maxBytes: 16384, evidenceId: "find" } }, undefined, expect.any(Object));
+    expect(inspect).toHaveBeenCalledWith({ tabId: 8, recentRefs: ["t8s1d0e1"], wire: { maxBytes: 16384, evidenceId: "find" } }, expect.any(AbortSignal), expect.any(Object));
   });
   it.each(["screenshot", "pdf", "save"])("retains a %s artifact when the abort race settles before its underlying work", async (operation) => {
     const events: LogEvent[] = [];
@@ -792,7 +834,7 @@ describe("browser tools", () => {
     const tools = createProgramTools({ listTabs, switchTab } as unknown as ChromeExecutor) as Record<string, any>;
     await expect(tools.list_tabs.execute({}, { toolCallId: "list" })).resolves.toEqual({ evidenceId: "list", result: [{ id: 42, current: false }] });
     await expect(tools.switch_tab.execute({ tabId: 42 }, { toolCallId: "switch" })).resolves.toEqual({ evidenceId: "switch", result: [{ id: 42, current: true }] });
-    expect(switchTab).toHaveBeenCalledWith(42, undefined, undefined);
+    expect(switchTab).toHaveBeenCalledWith(42, expect.any(AbortSignal), undefined);
   });
   it("accepts inspection continuation without mixing it with a new scope", () => {
     const tools = createProgramTools({} as ChromeExecutor) as Record<string, any>;
@@ -806,7 +848,7 @@ describe("browser tools", () => {
     const tools = createProgramTools({ findElements } as unknown as ChromeExecutor, { conversationId: "c" }) as Record<string, any>;
     const input = { target: { by: "role", value: "button", name: "Submit" }, limit: 10 };
     await expect(tools.find_elements.execute(input, { toolCallId: "find" })).resolves.toMatchObject({ elements: [{ ref: "t41d1e1" }], hasMore: false });
-    expect(findElements).toHaveBeenCalledWith(input, undefined, expect.objectContaining({ conversationId: "c" }));
+    expect(findElements).toHaveBeenCalledWith(input, expect.any(AbortSignal), expect.objectContaining({ conversationId: "c" }));
     expect(() => tools.find_elements.inputSchema.parse({ ...input, limit: 101 })).toThrow();
   });
 
@@ -815,7 +857,7 @@ describe("browser tools", () => {
     const tools = createProgramTools({ listFrames } as unknown as ChromeExecutor, { conversationId: "c" }) as Record<string, any>;
     const input = { tabId: 41, limit: 10 };
     await expect(tools.list_frames.execute(input, { toolCallId: "frames" })).resolves.toMatchObject({ frames: [{ frameRef: "frame-1" }] });
-    expect(listFrames).toHaveBeenCalledWith(input, undefined, expect.objectContaining({ conversationId: "c" }));
+    expect(listFrames).toHaveBeenCalledWith(input, expect.any(AbortSignal), expect.objectContaining({ conversationId: "c" }));
     expect(() => tools.list_frames.inputSchema.parse({ limit: 101 })).toThrow();
     expect(tools.find_elements.inputSchema.parse({ target: { by: "role", value: "button", frame: { ref: "frame-1" } } })).toBeTruthy();
   });
@@ -824,7 +866,7 @@ describe("browser tools", () => {
     const listDownloads = vi.fn(async (input: unknown) => ({ downloads: [], input, consistency: "live" }));
     const tools = createProgramTools({ listDownloads } as unknown as ChromeExecutor) as Record<string, any>;
     await expect(tools.list_downloads.execute({ state: "complete", limit: 0 }, { toolCallId: "downloads" })).resolves.toMatchObject({ downloads: [], consistency: "live" });
-    expect(listDownloads).toHaveBeenCalledWith({ state: "complete", limit: 0 }, undefined);
+    expect(listDownloads).toHaveBeenCalledWith({ state: "complete", limit: 0 }, expect.any(AbortSignal));
     expect(() => tools.list_downloads.inputSchema.parse({ limit: -1 })).toThrow();
   });
   it("routes a chooser upload to its queue-independent handler", async () => {
@@ -833,7 +875,7 @@ describe("browser tools", () => {
     const tools = createProgramTools({ uploadChooser, runProgram } as unknown as ChromeExecutor, { conversationId: "c" }) as Record<string, any>;
     const input = { chooserId: "chooser", artifactId: [7, 8], timeoutMs: 5000 };
     await expect(tools.upload_file_chooser.execute(input, { toolCallId: "upload" })).resolves.toMatchObject({ state: "completed", artifactIds: [7, 8] });
-    expect(uploadChooser).toHaveBeenCalledWith(input, undefined, expect.objectContaining({ conversationId: "c" }));
+    expect(uploadChooser).toHaveBeenCalledWith(input, expect.any(AbortSignal), expect.objectContaining({ conversationId: "c" }));
     expect(runProgram).not.toHaveBeenCalled();
   });
   it("maps individual job tools to conversation-owned job operations", async () => {
@@ -1216,4 +1258,31 @@ describe("browser tools", () => {
     expect(prepared[0].content[0].output.value.screenshot).toEqual({ mediaType: "image/png", artifactId: 7 });
     expect(readArtifact).not.toHaveBeenCalled();
   });
+});
+
+it("bounds a hung canonical tool start without dispatching the browser operation", async () => {
+  vi.useFakeTimers();
+  const listTabs = vi.fn();
+  const logger = { toolIdentity: () => ({ runId: 'run', toolCallId: 'call', toolCallIdCanonical: true }), append: vi.fn(() => new Promise<never>(() => {})) } as unknown as EventLogger;
+  try {
+    const tools = createProgramTools({ listTabs } as unknown as ChromeExecutor, { logger, conversationId: 'one' });
+    const failed = expect(tools.list_tabs!.execute!({ timeoutMs: 20 }, { toolCallId: 'call', messages: [], context: {} as never })).rejects.toThrow('事件日志');
+    await vi.advanceTimersByTimeAsync(21);
+    await failed;
+    expect(listTabs).not.toHaveBeenCalled();
+  } finally { vi.useRealTimers(); }
+});
+
+it("bounds a hung canonical terminal rather than leaving a tool pending forever", async () => {
+  vi.useFakeTimers();
+  const logger = { toolIdentity: () => ({ runId: 'run', toolCallId: 'call', toolCallIdCanonical: true }), append: vi.fn()
+    .mockResolvedValueOnce({ id: 1 }).mockImplementation(() => new Promise<never>(() => {})), toolArtifact: vi.fn(async () => undefined) } as unknown as EventLogger;
+  const executor = { listTabs: vi.fn(async () => []), inspect: vi.fn(async () => { throw new Error('no page'); }), settleAbortedWork: vi.fn(async () => {}) } as unknown as ChromeExecutor;
+  try {
+    const tools = createProgramTools(executor, { logger, conversationId: 'one' });
+    const failed = expect(tools.list_tabs!.execute!({ timeoutMs: 20 }, { toolCallId: 'call', messages: [], context: {} as never })).rejects.toThrow('事件日志');
+    await vi.advanceTimersByTimeAsync(10_001);
+    await failed;
+    expect(logger.append).toHaveBeenCalledTimes(2);
+  } finally { vi.useRealTimers(); }
 });

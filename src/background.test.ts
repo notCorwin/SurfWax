@@ -1,8 +1,8 @@
 import { afterEach, expect, it, vi } from "vitest";
 
-const boot = vi.hoisted(() => ({ inputStateEvents: vi.fn(), append: vi.fn(), recoverDanglingRuns: vi.fn(), telemetry: vi.fn() }));
+const boot = vi.hoisted(() => ({ inputStateEvents: vi.fn(), append: vi.fn(), recoverDanglingRuns: vi.fn(), telemetry: vi.fn(), closePendingTools: vi.fn(async () => undefined) }));
 vi.mock("./logging", () => ({
-  EventLogger: class { inputStateEvents = boot.inputStateEvents; append = boot.append; recoverDanglingRuns = boot.recoverDanglingRuns; telemetry = boot.telemetry; },
+  EventLogger: class { inputStateEvents = boot.inputStateEvents; append = boot.append; recoverDanglingRuns = boot.recoverDanglingRuns; telemetry = boot.telemetry; closePendingTools = boot.closePendingTools; },
   fromLogValue: (value: unknown) => value,
 }));
 
@@ -50,29 +50,37 @@ async function inputBridge(sendCommand: ReturnType<typeof vi.fn>) {
     runtime: { id: "test", onConnect: { addListener: (listener: (port: chrome.runtime.Port) => void) => connects.push(listener) },
       onMessage: event(), onInstalled: event(), onStartup: event(), sendMessage: vi.fn(async () => undefined) },
     tabs: { query: vi.fn(async () => []), onUpdated: event() },
-    debugger: { sendCommand, onEvent: event(), onDetach: event(), detach: vi.fn(async () => undefined) },
+    debugger: { sendCommand, getTargets: vi.fn(async () => [{ id: "target", tabId: 7 }]), onEvent: event(), onDetach: event(), detach: vi.fn(async () => undefined) },
     scripting: { executeScript: vi.fn(async () => []) },
     sidePanel: { setPanelBehavior: vi.fn(async () => undefined) },
   });
   await import("./background");
   let ownerMessage!: (message: unknown) => void;
+  let ownerDisconnect!: () => void;
   const owner = { name: "surf-wax-run-owner", onMessage: { addListener: (listener: (message: unknown) => void) => { ownerMessage = listener; } },
-    onDisconnect: event(), postMessage: vi.fn() };
+    onDisconnect: { addListener: (listener: () => void) => { ownerDisconnect = listener; } }, postMessage: vi.fn() };
   connects.forEach(listener => listener(owner as unknown as chrome.runtime.Port));
   ownerMessage({ type: "claim", runId: "run", ownerId: "owner", conversationId: "conversation" });
   await vi.waitFor(() => expect(owner.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "claimed", runId: "run" })));
   const identity = owner.postMessage.mock.calls.find(([value]) => value.type === "claimed")![0];
-  const connectBridge = () => {
+  const connectBridge = (runIdentity = identity) => {
     let dispatch!: (message: unknown) => void, disconnect!: () => void;
     const bridge = { name: "surf-wax-debugger", onMessage: { addListener: (listener: (message: unknown) => void) => { dispatch = listener; } },
       onDisconnect: { addListener: (listener: () => void) => { disconnect = listener; } }, postMessage: vi.fn(), disconnect: vi.fn() };
     connects.forEach(listener => listener(bridge as unknown as chrome.runtime.Port));
-    const send = (id: string, method: string, params: object, tabId = 7, rawCdp = false) => dispatch({ id, runId: identity.runId, ownerId: identity.ownerId, generation: identity.generation,
-      operationId: `${id}-op`, method: "sendCommand", args: [{ tabId }, method, params], ...(rawCdp ? { rawCdp: true } : {}) });
+    const send = (id: string, method: string, params: object, tabId: number | chrome.debugger.Debuggee = 7, rawCdp = false) => dispatch({ id, runId: runIdentity.runId, ownerId: runIdentity.ownerId, generation: runIdentity.generation,
+      operationId: `${id}-op`, method: "sendCommand", args: [typeof tabId === "number" ? { tabId } : tabId, method, params], ...(rawCdp ? { rawCdp: true } : {}) });
     return { bridge, send, disconnect };
   };
   const { bridge, send, disconnect } = connectBridge();
-  return { bridge, send, disconnect, connectBridge, finishOwner: () => ownerMessage({ type: "finished" }) };
+  const claimAnother = () => {
+    let dispatch!: (message: unknown) => void;
+    const next = { name: "surf-wax-run-owner", onMessage: { addListener: (listener: (message: unknown) => void) => { dispatch = listener; } }, onDisconnect: event(), postMessage: vi.fn() };
+    connects.forEach(listener => listener(next as unknown as chrome.runtime.Port));
+    dispatch({ type: "claim", runId: "next", ownerId: "next-owner", conversationId: "next-conversation" });
+    return next;
+  };
+  return { bridge, send, disconnect, connectBridge, ownerDisconnect, claimAnother, finishOwner: () => ownerMessage({ type: "finished" }) };
 }
 
 it("reports cleanup persistence failure with the run and cleanup step", async () => {
@@ -135,15 +143,16 @@ it("serializes input per tab while allowing another tab to proceed", async () =>
 it("revalidates the run after waiting for an earlier input transaction", async () => {
   let release!: () => void;
   const waiting = new Promise<void>((resolve) => { release = resolve; });
-  const sendCommand = vi.fn(async () => { await waiting; return {}; });
+  const sendCommand = vi.fn(async (_source: unknown, _method: string, _params: unknown) => { await waiting; return {}; });
   const { bridge, send, disconnect, finishOwner } = await inputBridge(sendCommand);
   send("a", "Input.dispatchKeyEvent", { type: "char", text: "a" });
   await vi.waitFor(() => expect(sendCommand).toHaveBeenCalledOnce());
   send("b", "Input.dispatchKeyEvent", { type: "char", text: "b" });
   finishOwner();
   release();
-  await vi.waitFor(() => expect(bridge.postMessage).toHaveBeenCalledWith(expect.objectContaining({ id: "b", error: expect.any(String) })));
-  expect(sendCommand).toHaveBeenCalledOnce();
+  // Closing the owning run disconnects the bridge, rejecting queued RPCs on the client.
+  await vi.waitFor(() => expect(bridge.disconnect).toHaveBeenCalled());
+  expect(sendCommand.mock.calls.filter(([, method]) => method === "Input.dispatchKeyEvent")).toHaveLength(1);
   disconnect();
 });
 
@@ -236,4 +245,57 @@ it("does not let late release acknowledgements erase newer key or button presses
   disconnect(); await vi.waitFor(() => expect(bridge.disconnect).toHaveBeenCalled());
   const final = boot.append.mock.calls.map(([entry]) => entry).filter(entry => entry.type === "browser.input.state").at(-1);
   expect(final.content).toMatchObject({ keys: [], buttons: [] });
+});
+
+it("releases a disconnected owner after bounded cleanup and revokes late cleanup continuations", async () => {
+  let finishEvaluation!: (value: object) => void;
+  let finishTermination!: (value: object) => void;
+  const evaluation = new Promise<object>(resolve => { finishEvaluation = resolve; });
+  const termination = new Promise<object>(resolve => { finishTermination = resolve; });
+  const sendCommand = vi.fn(async (_source: unknown, method: string) => method === 'Runtime.evaluate' ? evaluation : method === 'Runtime.terminateExecution' ? termination : {});
+  const h = await inputBridge(sendCommand);
+  h.send('pending-evaluation', 'Runtime.evaluate', { expression: 'pending()' });
+  await vi.waitFor(() => expect(sendCommand).toHaveBeenCalledWith({ tabId: 7 }, 'Runtime.evaluate', { expression: 'pending()' }));
+  vi.useFakeTimers();
+  try {
+    h.ownerDisconnect();
+    await vi.advanceTimersByTimeAsync(2001);
+    const next = h.claimAnother();
+    await vi.waitFor(() => expect(next.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'claimed', runId: 'next' })));
+    expect(boot.telemetry).toHaveBeenCalledWith(expect.objectContaining({ type: 'run.cleanup.failed', content: expect.objectContaining({ step: 'cleanup-timeout', effectUnknown: true }) }));
+    const before = sendCommand.mock.calls.length;
+    finishTermination({}); finishEvaluation({});
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sendCommand).toHaveBeenCalledTimes(before);
+  } finally { vi.useRealTimers(); }
+});
+
+it.each([false, true])("revokes a queued cleanup key release after its intent write outlives the old owner (targetId=%s)", async targetId => {
+  const sendCommand = vi.fn(async (_source: unknown, _method: string, _params?: object) => ({}));
+  const h = await inputBridge(sendCommand);
+  const source = targetId ? { targetId: "target" } : 7;
+  h.send('down', 'Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Shift', code: 'ShiftLeft' }, source);
+  await vi.waitFor(() => expect(h.bridge.postMessage).toHaveBeenCalledWith({ id: 'down', result: {} }));
+  let acknowledgeIntent!: (value: { id: number }) => void;
+  boot.append.mockImplementationOnce(() => new Promise(resolve => { acknowledgeIntent = resolve; }));
+  h.send('late-up', 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'Shift', code: 'ShiftLeft' }, source);
+  await vi.waitFor(() => expect(acknowledgeIntent).toBeDefined());
+  vi.useFakeTimers();
+  try {
+    h.ownerDisconnect();
+    await vi.advanceTimersByTimeAsync(2001);
+    const next = h.claimAnother();
+    await vi.waitFor(() => expect(next.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'claimed', runId: 'next' })));
+    const identity = next.postMessage.mock.calls.find(([message]) => message.type === 'claimed')![0];
+    const current = h.connectBridge(identity);
+    current.send('new-input', 'Input.dispatchKeyEvent', { type: 'char', text: 'new' });
+    await vi.waitFor(() => expect(current.bridge.postMessage).toHaveBeenCalledWith({ id: 'new-input', result: {} }));
+    const before = sendCommand.mock.calls.length;
+    acknowledgeIntent({ id: 2 });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(sendCommand).toHaveBeenCalledTimes(before);
+    expect(sendCommand.mock.calls.some(([, method, params]) => method === 'Input.dispatchKeyEvent' && (params as any).type === 'keyUp')).toBe(false);
+    current.disconnect();
+    await vi.advanceTimersByTimeAsync(2001);
+  } finally { vi.useRealTimers(); }
 });

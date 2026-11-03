@@ -54,3 +54,19 @@ describe("orphan browser input recovery", () => {
     expect(debuggerApi.attach).not.toHaveBeenCalled(); expect(debuggerApi.sendCommand).not.toHaveBeenCalled();
   });
 });
+
+it('bounds a hung bootstrap attachment and never dispatches its late input releases', async () => {
+  vi.useFakeTimers();
+  let attached!: () => void;
+  const api = { attach: vi.fn(() => new Promise<void>(resolve => { attached = resolve; })), sendCommand: vi.fn(async () => ({})), detach: vi.fn(async () => undefined) };
+  const events = [{ id: 1, timestamp: new Date().toISOString(), type: 'browser.input.state', runId: 'old', content: { tabId: 7, debuggee: { tabId: 7 }, x: 0, y: 0, keys: [{ key: 'Shift', code: 'ShiftLeft' }], buttons: [] } }];
+  try {
+    const recovery = recoverBrowserInput(events, ['old'], api as never);
+    await vi.advanceTimersByTimeAsync(2001);
+    expect(await recovery).toMatchObject({ recovered: 0, failures: [{ tabId: 7 }] });
+    attached();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(api.sendCommand).not.toHaveBeenCalled();
+    expect(api.detach).toHaveBeenCalledOnce();
+  } finally { vi.useRealTimers(); }
+});

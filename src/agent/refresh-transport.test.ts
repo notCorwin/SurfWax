@@ -6,7 +6,7 @@ import { createAgent } from "./runner";
 import { createChatTransport, type SidePanelMessage } from "./transport";
 
 vi.mock("./coordinator", () => ({ claimConversationRun: async (_id: string, signal?: AbortSignal) => ({
-  signal: signal ?? new AbortController().signal, finish: vi.fn(),
+  runId: crypto.randomUUID(), conversationId: _id, signal: signal ?? new AbortController().signal, finish: vi.fn(),
 }) }));
 
 function logger() {

@@ -795,7 +795,7 @@ export class BrowserJobs {
     return this.query({ action: "status", id }, conversationId, signal);
   }
 
-  cancelAll(reason = "run-ended"): void {
+  cancelAll(reason: unknown = "run-ended"): void {
     for (const owner of this.live.values()) owner.controller.abort(reason);
   }
 

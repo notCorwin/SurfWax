@@ -365,11 +365,11 @@ describe("model catalog diagnostics", () => {
       const config = { baseURL: "https://unknown.test/v1", model: "unique-concurrency-test" };
       const first = resolveModelLimit(config, { diagnosticContext: modelDiagnosticContext(logger, "one") });
       const second = resolveModelLimit(config, { diagnosticContext: modelDiagnosticContext(logger, "two") });
-      expect(second).toBe(first);
-      await Promise.all([first, second]);
+      const [firstLimit, secondLimit] = await Promise.all([first, second]);
+      expect(secondLimit).toBe(firstLimit);
       await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
       await logger.flush();
-      const links = events.filter((event) => event.type === "model.metadata.linked" && (fromLogValue(event.content, event.valueEncoding) as any).operation === "model-limit");
+      const links = events.filter((event) => event.type === "model.metadata.linked" && (fromLogValue(event.content, event.valueEncoding) as any).operation === "catalog");
       expect(links.map((event) => [event.conversationId, event.runId])).toEqual([["one", "run-one"], ["two", "run-two"]]);
       expect(new Set(links.map((event) => (fromLogValue(event.content, event.valueEncoding) as any).operationId)).size).toBe(1);
     } finally { vi.unstubAllGlobals(); }
@@ -394,4 +394,76 @@ describe("model catalog diagnostics", () => {
     expect(result).toHaveProperty("example");
     expect(diagnostics).toMatchObject([{ phase: "cache-write", error: { message: "quota exceeded" } }]);
   });
+});
+
+it("shares catalog I/O across independently cancelled consumers", async () => {
+  let complete!: (response: Response) => void;
+  let requestSignal: AbortSignal | undefined;
+  const fetch = vi.fn((_url: unknown, init?: RequestInit) => {
+    requestSignal = init?.signal as AbortSignal;
+    return new Promise<Response>((resolve) => { complete = resolve; });
+  });
+  const storage = { get: vi.fn(async () => ({})), set: vi.fn(async () => {}) };
+  const first = new AbortController(), second = new AbortController();
+  const options = { fetch: fetch as typeof globalThis.fetch, storage, bundledFallback: false };
+  const cancelled = loadModelCatalog({ ...options, signal: first.signal });
+  const survivor = loadModelCatalog({ ...options, signal: second.signal });
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  first.abort(new DOMException("consumer stopped", "AbortError"));
+  await expect(cancelled).rejects.toMatchObject({ name: "AbortError" });
+  expect(requestSignal?.aborted).toBe(false);
+  complete(Response.json(catalog));
+  await expect(survivor).resolves.toHaveProperty("openai.models.gpt-5");
+  expect(storage.get).toHaveBeenCalledOnce();
+  expect(storage.set).toHaveBeenCalledOnce();
+});
+
+it("aborts abandoned catalog I/O and permits a fresh attempt", async () => {
+  const signals: AbortSignal[] = [];
+  const fetch = vi.fn((_url: unknown, init?: RequestInit) => {
+    const signal = init!.signal as AbortSignal;
+    signals.push(signal);
+    return new Promise<Response>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+  });
+  const storage = { get: vi.fn(async () => ({})), set: vi.fn(async () => {}) };
+  const first = new AbortController();
+  const options = { fetch: fetch as typeof globalThis.fetch, storage, bundledFallback: false };
+  const pending = loadModelCatalog({ ...options, signal: first.signal });
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  first.abort();
+  await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  expect(signals[0]?.aborted).toBe(true);
+  fetch.mockImplementationOnce(async () => Response.json(catalog));
+  await expect(loadModelCatalog(options)).resolves.toHaveProperty("openai");
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(storage.set).toHaveBeenCalledOnce();
+});
+
+it("keeps bundled refresh consumers independent and prevents an abandoned response from overwriting fresh metadata", async () => {
+  const requests: Array<{ signal: AbortSignal; resolve: (response: Response) => void }> = [];
+  vi.stubGlobal("fetch", vi.fn((_url: unknown, init?: RequestInit) => new Promise<Response>((resolve) => {
+    requests.push({ signal: init!.signal as AbortSignal, resolve });
+  })));
+  const values: Record<string, unknown> = {};
+  const storage = { get: vi.fn(async (key: string) => ({ [key]: values[key] })), set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(values, items); }) };
+  const first = new AbortController(), second = new AbortController();
+  const options = { storage, validateCompleteness: false };
+  const [one, two] = await Promise.all([
+    loadModelCatalog({ ...options, signal: first.signal }), loadModelCatalog({ ...options, signal: second.signal }),
+  ]);
+  expect(one).toBe(two);
+  expect(requests).toHaveLength(1);
+  first.abort();
+  expect(requests[0]!.signal.aborted).toBe(false);
+  second.abort();
+  expect(requests[0]!.signal.aborted).toBe(true);
+  const newer = loadModelCatalog({ ...options, refresh: true });
+  await vi.waitFor(() => expect(requests).toHaveLength(2));
+  requests[1]!.resolve(Response.json(catalog));
+  await newer;
+  expect(storage.set).toHaveBeenCalledOnce();
+  requests[0]!.resolve(Response.json({ obsolete: { models: {} } }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(storage.set).toHaveBeenCalledOnce();
+  expect((values["side-agent:model-catalog"] as { catalog: unknown }).catalog).toEqual(catalog);
 });

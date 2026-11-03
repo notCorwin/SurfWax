@@ -1,35 +1,40 @@
-import { spawnSync } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
+import { spawn } from 'node:child_process';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { startDevelopmentExtension, systemChromePath } from './development-extension.mjs';
 
-/** Build into a private directory so browser tests never replace the live dev extension. */
+export async function runCommand(command, args, options = {}) {
+  const { spawn: createProcess = spawn, ...settings } = options;
+  await new Promise((accept, reject) => {
+    const child = createProcess(command, args, { ...settings, stdio: 'inherit' });
+    const interrupt = signal => child.kill(signal);
+    const onInterrupt = () => interrupt('SIGINT');
+    const onTerminate = () => interrupt('SIGTERM');
+    process.on('SIGINT', onInterrupt); process.on('SIGTERM', onTerminate);
+    const cleanup = () => { process.off('SIGINT', onInterrupt); process.off('SIGTERM', onTerminate); };
+    child.once('error', error => { cleanup(); reject(error); });
+    child.once('exit', (code, signal) => {
+      cleanup();
+      code === 0 ? accept() : reject(new Error(`${command} ${args[0]} failed (${signal ?? code})`));
+    });
+  });
+}
+
+/** Keep Vite responsive while Playwright exercises the development extension. */
 export async function runBrowserTests(kind, options = {}) {
   if (kind !== 'e2e' && kind !== 'performance') throw new Error(`Unknown browser test kind: ${kind}`);
   const cwd = resolve(options.cwd ?? process.cwd());
-  const spawn = options.spawn ?? spawnSync;
-  const node = options.node ?? process.execPath;
-  const forwarded = options.args ?? [];
-  const output = await mkdtemp(join(options.tmpdir ?? tmpdir(), `surfwax-${kind}-`));
-  const env = { ...(options.env ?? process.env), SURFWAX_EXTENSION_PATH: output };
-  const run = (command, args) => {
-    const result = spawn(command, args, { cwd, env, stdio: 'inherit' });
-    if (result.error) throw result.error;
-    if (result.status !== 0) throw new Error(`${command} ${args[0]} failed (${result.signal ?? result.status})`);
-  };
+  const sourceEnv = options.env ?? process.env;
+  const executablePath = (options.systemChromePath ?? systemChromePath)(sourceEnv);
+  const development = await (options.startDevelopmentExtension ?? startDevelopmentExtension)({ cwd, tmpdir: options.tmpdir });
+  const env = { ...sourceEnv, SURFWAX_EXTENSION_PATH: development.extensionPath, SURFWAX_DEV_SERVER_URL: development.url,
+    SURFWAX_CHROME_PATH: executablePath };
   try {
-    run(node, ['node_modules/vite/bin/vite.js', 'build', '--outDir', output]);
-    run(node, ['scripts/validate-build.mjs', output]);
-    run(node, ['node_modules/@playwright/test/cli.js', 'test', kind === 'e2e' ? '--grep-invert' : '--grep', '@performance', ...forwarded]);
-  } finally {
-    await rm(output, { recursive: true, force: true });
-  }
+    await (options.runCommand ?? runCommand)(options.node ?? process.execPath,
+      ['node_modules/@playwright/test/cli.js', 'test', kind === 'e2e' ? '--grep-invert' : '--grep', '@performance', ...(options.args ?? [])], { cwd, env });
+  } finally { await development.close(); }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  runBrowserTests(process.argv[2], { args: process.argv.slice(3) }).catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  });
+  runBrowserTests(process.argv[2], { args: process.argv.slice(3) }).catch(error => { console.error(error); process.exitCode = 1; });
 }

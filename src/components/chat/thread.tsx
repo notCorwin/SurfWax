@@ -73,5 +73,4 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
     </div>
   </div>;
 }
-export { CONTINUE_INTERRUPTED_TEXT } from "./message-row";
 export default Thread;

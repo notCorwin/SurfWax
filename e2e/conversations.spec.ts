@@ -144,7 +144,7 @@ test("reads page information, restores the conversation, and clears the log", as
     const tool = events.find((event) => event.type === "tool.finished");
     expect(tool).toMatchObject({ toolCallId: "call-chrome-e2e", input: {}, latencyMs: expect.any(Number) });
     expect(tool.output.result).toMatchObject({ title: "Side Agent Target", url: targetUrl });
-    expect(events.filter((event) => /^(model|request|tool)\./.test(event.type)).every((event) => typeof event.conversationId === "string")).toBe(true);
+    expect(events.filter((event) => /^(model|request|tool)\./.test(event.type) && !event.type.startsWith("model.metadata.")).every((event) => typeof event.conversationId === "string")).toBe(true);
     const logicalMessages = [...new Map(events.filter((event) => event.type === "conversation.message")
       .map((event) => [event.content.id, event.content.role])).entries()];
     expect(logicalMessages.map(([id]) => id)).toHaveLength(2);

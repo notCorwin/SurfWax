@@ -10,7 +10,7 @@ import { safeDiagnosticError } from "../diagnostic-error";
 import { generateConversationTitle } from "../conversations";
 import { activeContext, ensureAutomaticContextSummary } from "../agent/context-choice";
 import { contextPressure } from "../agent/compaction";
-import { activeRunIdentity, claimConversationRun, registerBackgroundRequest, withIdleConversation } from "../agent/coordinator";
+import { activeRunIdentity, claimConversationRun, registerBackgroundRequest } from "../agent/coordinator";
 import { EventLogger, fromLogValue, rebuildConversationList, stringifyLogSafe } from "../logging";
 import type { ModelConfig } from "../types";
 import { useSidePanelRuntime } from "./useSidePanelRuntime";
@@ -48,7 +48,7 @@ function NewConversationButton({ setWarning }: { setWarning: (message: string) =
   const { locked } = useRunState();
   useEffect(() => { if (!locked) setWarning(""); }, [locked, setWarning]);
   return <Button type="button" variant="ghost" size="icon-sm" aria-label="新对话" title="新对话" data-testid="new-conversation" disabled={locked}
-    onClick={() => void withIdleConversation(async () => { await runtime.threads.switchToNewThread(); setWarning(""); }).catch((error) => setWarning(String(error.message)))}>
+    onClick={() => void runtime.threads.switchToNewThread().then(() => setWarning("")).catch((error) => setWarning(String(error.message)))}>
     <MessageSquarePlusIcon aria-hidden="true" />
   </Button>;
 }
@@ -70,6 +70,7 @@ export function App() {
   const session = useSidePanelSession();
   const [fatal, setFatal] = useState<unknown>();
   const logger = useMemo(() => new EventLogger({ onError: setFatal }), []);
+  useEffect(() => () => { void logger.dispose(); }, [logger]);
 
   if (fatal !== undefined) {
     const reloadExtension = fatal instanceof Error && fatal.message.startsWith("后台初始化失败");
@@ -266,7 +267,7 @@ export function ConversationView({ config, logger, threadId, drafts, goalMode, o
         const overflow = lastRun?.type === "conversation.failed"
           && /context.{0,30}(length|window|token)|maximum.{0,30}token/i.test(JSON.stringify(lastRun.error))
           && (!before.checkpoint || before.checkpoint.eventId < lastRun.id);
-        const pressure = await contextPressure({ raw: before.raw, branchIds: before.branchIds, events: before.events, model: config, signal: controller.signal, logger, conversationId });
+        const pressure = await contextPressure({ raw: before.raw, branchIds: before.branchIds, events: before.events, model: config, signal: controller.signal, logger, conversationId, goalMode });
         if (!active) return;
         if (!force && !overflow && (!pressure || pressure.estimated <= pressure.threshold)) {
           setContextStatus(before.checkpoint ? { message: "历史上下文已被压缩成摘要", error: false } : undefined);
@@ -279,7 +280,7 @@ export function ConversationView({ config, logger, threadId, drafts, goalMode, o
         if (!active) { controller.abort("sidepanel-closed"); return; }
         setCompactionBusy(true);
         setCompactionError("");
-        await ensureAutomaticContextSummary(logger, conversationId, config, lease.signal, { forced: force || overflow, limit: pressure?.limit });
+        await ensureAutomaticContextSummary(logger, conversationId, config, lease.signal, { forced: force || overflow, limit: pressure?.limit, goalMode });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (active && !controller.signal.aborted && !lease?.signal.aborted && !message.includes("已有任务运行")) {
@@ -305,7 +306,7 @@ export function ConversationView({ config, logger, threadId, drafts, goalMode, o
     });
     void refresh();
     return () => { active = false; unsubscribe(); if (pendingRefresh.current?.refresh === refresh) pendingRefresh.current = undefined; compactionController.current?.abort("sidepanel-closed"); };
-  }, [config, conversationId, isRunning, logger]);
+  }, [config, conversationId, isRunning, logger, goalMode]);
   return (
     <>
       {contextStatus && (contextStatus.error

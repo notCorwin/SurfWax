@@ -1,3 +1,4 @@
+import { logIO } from "../log-io";
 import { normalizationExceedsBudget, normalizeResultEnvelope } from "../tool-result-values";
 import { isArrayBuffer, viewLayout } from "../log-graph";
 import { dynamicTool, type ToolCallRepairFunction } from "ai";
@@ -10,28 +11,30 @@ import type { ToolScheduler } from "./tool-scheduler";
 import { jobResultReferenceInfo } from "./job-result";
 import { elementTargetSchema } from "./element-target";
 import { SNAPSHOT_DELIVERY_COMMIT, type SnapshotDeliveryLease } from "./snapshot-wire";
+import { createDeadline } from "../deadline";
 
 const timeoutMs = z.number().int().positive().optional();
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v35";
-export const inspectInputSchema = z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetSchema]).optional().describe("Restrict inspection to one matching element. Prefer a structured target. A plain string is a CSS selector, except recognized element refs and supported locator expressions such as getByRole('button', {name:'Save'})."),
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v38";
+export const inspectInputSchema = z.object({ timeoutMs, since: z.string().min(1).max(256).optional().describe("Compare with this completely delivered observation ID from the same tab, run and scope. Omit to reuse the latest valid baseline automatically."), full: z.boolean().optional().describe("Request a complete new baseline instead of an automatic delta when prior rows are unavailable."), tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetSchema]).optional().describe("Restrict inspection to one matching element. Prefer a structured target. A plain string is a CSS selector, except recognized element refs and supported locator expressions such as getByRole('button', {name:'Save'})."),
   fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional().describe("Fields to include; defaults to text, state, and ref. Include actions explicitly for role-based action hints."), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
   cursor: z.string().min(1).max(256).optional() }).strict()
-  .refine((input) => input.cursor === undefined || [input.region, input.fields, input.depth, input.offset].every((value) => value === undefined),
-    "cursor cannot be combined with region, fields, depth, or offset")
-  .meta({ allOf: ["region", "fields", "depth", "offset"].map((field) => ({ not: { required: ["cursor", field] } })) });
+  .refine((input) => input.cursor === undefined || [input.region, input.fields, input.depth, input.offset, input.full, input.since].every((value) => value === undefined),
+    "cursor cannot be combined with region, fields, depth, offset, full, or since")
+  .refine(input => input.full === undefined || input.since === undefined, "full cannot be combined with since")
+  .meta({ allOf: [...["region", "fields", "depth", "offset", "full", "since"].map((field) => ({ not: { required: ["cursor", field] } })), { not: { required: ["full", "since"] } }] });
 const findElementsInputSchema = z.object({ target: elementTargetSchema, tabId: z.number().int().nonnegative().optional(), timeoutMs,
   limit: z.number().int().min(1).max(100).optional(), cursor: z.string().min(1).max(256).optional() }).strict();
 const listFramesInputSchema = z.object({ tabId: z.number().int().nonnegative().optional(), timeoutMs,
   limit: z.number().int().min(1).max(100).optional(), cursor: z.string().min(1).max(256).optional() }).strict();
-const listJobsInputSchema = z.object({ limit: z.number().int().min(1).max(100).optional(), cursor: z.string().min(1).max(4096).optional() }).strict();
-const getJobInputSchema = z.object({ jobId: z.string().min(1), after: z.number().int().nonnegative().optional().describe("Pass nextCursor from the previous get_job response to read subsequent receipts."), limit: z.number().int().positive().optional(), waitMs: z.number().int().nonnegative().optional() }).strict();
-const cancelJobInputSchema = z.object({ jobId: z.string().min(1) }).strict();
-const listDownloadsInputSchema = z.object({ downloadId: z.number().int().nonnegative().optional(), state: z.enum(["in_progress", "interrupted", "complete"]).optional(), limit: z.number().int().min(0).max(2_147_483_647).optional() }).strict();
+const listJobsInputSchema = z.object({ timeoutMs, limit: z.number().int().min(1).max(100).optional(), cursor: z.string().min(1).max(4096).optional() }).strict();
+const getJobInputSchema = z.object({ timeoutMs, jobId: z.string().min(1), after: z.number().int().nonnegative().optional().describe("Pass nextCursor from the previous get_job response to read subsequent receipts."), limit: z.number().int().positive().optional(), waitMs: z.number().int().nonnegative().optional() }).strict();
+const cancelJobInputSchema = z.object({ timeoutMs, jobId: z.string().min(1) }).strict();
+const listDownloadsInputSchema = z.object({ timeoutMs, downloadId: z.number().int().nonnegative().optional(), state: z.enum(["in_progress", "interrupted", "complete"]).optional(), limit: z.number().int().min(0).max(2_147_483_647).optional() }).strict();
 const subscribeEventInputSchema = z.object({ tabId: z.number().int().nonnegative().optional(), kind: z.enum(["dialog", "popup", "download", "filechooser", "request", "response", "console"]), timeoutMs }).strict();
-const waitEventInputSchema = z.object({ subscriptionId: z.string().min(1), after: z.number().int().nonnegative().optional().describe("Pass cursor from subscribe_event or nextCursor from the previous wait_event response to read subsequent events."), limit: z.number().int().positive().optional(), waitMs: z.number().int().nonnegative().optional() }).strict();
-const unsubscribeEventInputSchema = z.object({ subscriptionId: z.string().min(1) }).strict();
-const handleDialogInputSchema = z.object({ dialogId: z.string().min(1), accept: z.boolean(), prompt: z.string().optional() }).strict()
+const waitEventInputSchema = z.object({ timeoutMs, subscriptionId: z.string().min(1), after: z.number().int().nonnegative().optional().describe("Pass cursor from subscribe_event or nextCursor from the previous wait_event response to read subsequent events."), limit: z.number().int().positive().optional(), waitMs: z.number().int().nonnegative().optional() }).strict();
+const unsubscribeEventInputSchema = z.object({ timeoutMs, subscriptionId: z.string().min(1) }).strict();
+const handleDialogInputSchema = z.object({ timeoutMs, dialogId: z.string().min(1), accept: z.boolean(), prompt: z.string().optional() }).strict()
   .refine((input) => input.accept || input.prompt === undefined, "prompt requires accept=true")
   .meta({ anyOf: [{ not: { required: ["prompt"] } }, { properties: { accept: { const: true } }, required: ["accept"] }] });
 
@@ -45,7 +48,7 @@ export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
   { name: "list_frames", inputSchema: listFramesInputSchema, summary: "List frames and their document-bound refs", description: "List the selected tab's frame tree with refs usable as target.frame.ref. limit defaults to 25, max 100; pass nextCursor as cursor to continue a fixed snapshot. References and cursors expire on document or frame changes." },
   ...ATOMIC_TOOL_REGISTRY,
   { name: "list_downloads", inputSchema: listDownloadsInputSchema, summary: "Read Chrome's current download records", description: "List download metadata across the Chrome profile. limit defaults to 100; 0 requests all records. hasMore reports truncation. The list is live and Chrome's exists field may be stale; metadata does not provide file bytes." },
-  { name: "list_file_choosers", inputSchema: z.object({ tabId: z.number().int().nonnegative().optional() }).strict(), summary: "List live file choosers", description: "List file choosers currently observed in this run, optionally filtered by tabId. Each chooserId can be passed to upload_file_chooser. The source and frameId identify where it opened; an observed chooser is not necessarily caused by the last action. Handles expire on replacement, navigation, handling, or run end." },
+  { name: "list_file_choosers", inputSchema: z.object({ timeoutMs, tabId: z.number().int().nonnegative().optional() }).strict(), summary: "List live file choosers", description: "List file choosers currently observed in this run, optionally filtered by tabId. Each chooserId can be passed to upload_file_chooser. The source and frameId identify where it opened; an observed chooser is not necessarily caused by the last action. Handles expire on replacement, navigation, handling, or run end." },
   { name: "subscribe_event", inputSchema: subscribeEventInputSchema, summary: "Subscribe to browser events before triggering them", description: "Subscribe to a tab's dialog, popup, download, filechooser, request, response or console events. Returns a run-scoped subscription and cursor. Filechooser events include a chooserId for upload_file_chooser." },
   { name: "wait_event", inputSchema: waitEventInputSchema, summary: "Read or wait for subscribed events", description: "Read events after a subscription cursor, or wait up to waitMs. Pass the returned nextCursor as after on the next call; hasMore indicates unread events. Overflow, truncation and closure are explicit; a closed tab's bounded unread events remain available until unsubscribe or run end." },
   { name: "unsubscribe_event", inputSchema: unsubscribeEventInputSchema, summary: "Stop a browser event subscription", description: "Stop a subscription and release its resources." },
@@ -54,189 +57,205 @@ export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
   { name: "get_job", inputSchema: getJobInputSchema, summary: "Read a job's status and receipts", description: "Read status and paginated receipts for a job. Pass the previous response's nextCursor as after to read subsequent receipts. waitMs waits for receipts after the supplied canonical event cursor or for completion; unread receipts return immediately. A terminal event with outputAt:'result' or 'resultAccess' refers to that top-level field. A running job is not complete." },
   { name: "cancel_job", inputSchema: cancelJobInputSchema, summary: "Request cancellation of a job", description: "Cancel a job in the current conversation. Cancellation does not roll back dispatched effects." },
 ]);
-export const PROGRAM_TOOL_CONTEXT = `Available tools:\n${PROGRAM_TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n")}\nAn element target {ref} already identifies its frame; do not combine it with frame. To use a frameRef, supply a locator target with by, value and frame:{ref}. Byte counts describe the expanded page. A snapshot marked partial=true includes uncertain dynamic content and is not complete evidence; inspect the relevant area to verify it. Snapshot lookahead is a sparse, non-authoritative preview without element refs; use a locator or continue nextCursor to reconstruct items. Use background=true for long operations or actions that may block on a browser event. Use get_job with after set to the previous nextCursor for incremental receipts and bounded waits, or cancel_job to cancel. Continue until terminal; cancellation never rolls back completed effects. Restart preserves job records, not running work. A foreground action blocked by a native dialog may return state=blocked with jobId and blockedBy.dialogId. Use handle_dialog, then check the job until terminal. To upload files, use upload_file with the file input target and existing artifact IDs. If a file chooser must be triggered instead, check fileChoosers in the action result or call list_file_choosers, then use upload_file_chooser with the chooserId. An observed chooser may come from another page event; verify its source before uploading. Handles expire on replacement, navigation, handling, or run end. Event subscriptions belong to this run. Every tool result includes evidenceId for citing that actual result in complete_goal. Each completed operation includes pageSnapshot when available; use inspect_page with its nextCursor as cursor and the same tabId to continue a truncated snapshot. pageSnapshotStatus explains when it could not be captured. Background work has no completed snapshot until its terminal get_job result. resultType=undefined marks an undefined result. undefinedPaths, holePaths, numberPaths and bigintPaths are relative to result; numberPaths entries hold {path,value} for NaN, Infinity, -Infinity or -0, and bigintPaths hold decimal strings. These replace values with null. typePaths marks non-JSON types: date is ISO or null for invalid; array-buffer and typed-array are base64 bytes (typed-array name identifies the view); regexp is {source,flags,lastIndex}; map is key/value pairs; set is an array. Apply the other sidecars first, then typePaths from deepest path to shallowest. Large results provide paged sidecar access. If envelopeWrapped=true, reconstruct the original tool envelope from result and its sidecars; outer fields summarize status.`;
+export const PROGRAM_TOOL_CONTEXT = `Available tools:\n${PROGRAM_TOOL_REGISTRY.map(({ name, summary }) => `- ${name}: ${summary}`).join("\n")}\nAn element target {ref} already identifies its frame; do not combine it with frame. To use a frameRef, supply a locator target with by, value and frame:{ref}. Byte counts describe the expanded page. A snapshot marked partial=true includes uncertain dynamic content and is not complete evidence; inspect the relevant area to verify it. Snapshot lookahead is a sparse, non-authoritative preview without element refs; use a locator or continue nextCursor to reconstruct items. Use background=true for long operations or actions that may block on a browser event. Use get_job with after set to the previous nextCursor for incremental receipts and bounded waits, or cancel_job to cancel. Continue until terminal; cancellation never rolls back completed effects. Restart preserves job records, not running work. A foreground action blocked by a native dialog may return state=blocked with jobId and blockedBy.dialogId. Use handle_dialog, then check the job until terminal. To upload files, use upload_file with the file input target and existing artifact IDs. If a file chooser must be triggered instead, check fileChoosers in the action result or call list_file_choosers, then use upload_file_chooser with the chooserId. An observed chooser may come from another page event; verify its source before uploading. Handles expire on replacement, navigation, handling, or run end. Event subscriptions belong to this run. Every tool result includes evidenceId for citing that actual result in complete_goal. A snapshot with mode=delta applies added/updated/removed/moved items to the fully delivered baseObservationId; after identifies the previous row (null means first). Unchanged visible rows remain in that baseline. A new full snapshot replaces it; inspect_page full=true requests a fresh complete baseline, while since pins a specific fully delivered observation from this run and scope. Finish every nextCursor before using a snapshot as a baseline. Each completed operation includes pageSnapshot when available; use inspect_page with its nextCursor as cursor and the same tabId to continue a truncated snapshot. pageSnapshotStatus explains when it could not be captured. Background work has no completed snapshot until its terminal get_job result. resultType=undefined marks an undefined result. undefinedPaths, holePaths, numberPaths and bigintPaths are relative to result; numberPaths entries hold {path,value} for NaN, Infinity, -Infinity or -0, and bigintPaths hold decimal strings. These replace values with null. typePaths marks non-JSON types: date is ISO or null for invalid; array-buffer and typed-array are base64 bytes (typed-array name identifies the view); regexp is {source,flags,lastIndex}; map is key/value pairs; set is an array. Apply the other sidecars first, then typePaths from deepest path to shallowest. Large results provide paged sidecar access. If envelopeWrapped=true, reconstruct the original tool envelope from result and its sidecars; outer fields summarize status.`;
 
 export function createProgramTools(executor: ChromeExecutor, options: { logger?: EventLogger; conversationId?: string; callId?: () => string | undefined; visualEnabled?: () => Promise<boolean>; scheduler?: ToolScheduler; runSignal?: AbortSignal } = {}): Record<string, ReturnType<typeof dynamicTool>> {
   return Object.fromEntries(PROGRAM_TOOL_REGISTRY.map((definition) => [definition.name, dynamicTool({
     description: definition.description, inputSchema: definition.inputSchema, needsApproval: false,
     execute: async (input, { abortSignal, toolCallId }) => {
       abortSignal?.throwIfAborted();
-      const identity = options.conversationId ? options.logger?.toolIdentity(options.conversationId, toolCallId) : undefined;
-      const callId = options.callId?.();
-      const startedAt = performance.now();
-      let failureCause: unknown;
-      if (options.logger) {
-        const started = await options.logger.append({ type: "tool.started", conversationId: options.conversationId,
-          content: { callId, toolName: definition.name }, input, toolCallId, ...identity });
-        if (!started) throw new DOMException("日志维护已阻止工具启动。", "AbortError");
-      }
-      const finish = async (output: unknown) => {
-        output = output && typeof output === "object" && !Array.isArray(output)
-          ? { ...output, evidenceId: identity?.toolCallId ?? toolCallId }
-          : { result: output, evidenceId: identity?.toolCallId ?? toolCallId };
-        if (options.logger) {
-          const failed = Boolean(output && typeof output === "object" && "ok" in output && output.ok === false);
-          const interrupted = failed && abortSignal?.aborted;
-          const error = failed ? (output as { error?: unknown }).error : undefined;
-          const effectUnknown = Boolean(error && typeof error === "object" && "effectUnknown" in error && error.effectUnknown);
-          const latencyMs = Math.max(0, performance.now() - startedAt);
-          const terminal = await options.logger.append({ type: failed ? "tool.failed" : "tool.finished", conversationId: options.conversationId,
-            content: { callId, toolName: definition.name, ...(failureCause === undefined ? {} : { failureCause }), ...(interrupted ? { status: "interrupted", effectUnknown } : {}) },
-            input, output, toolCallId, ...identity, ...(failed ? { error } : {}),
-            ...(interrupted ? { abort: { reason: Object.assign(new Error(String(abortSignal?.reason ?? "Operation aborted")), { name: "AbortError" }) } } : {}),
-            latencyMs });
-          if (!terminal) throw new DOMException("日志维护已阻止工具结果保存。", "AbortError");
-        }
-        return output;
-      };
-      const failureFor = async (error: unknown, executing: boolean) => {
-        failureCause = safeDiagnosticError(error);
-        const cause = abortSignal?.aborted && !(error instanceof Error)
-          ? new DOMException(abortSignal.reason instanceof Error ? abortSignal.reason.message : String(abortSignal.reason ?? error ?? "Operation aborted"), "AbortError")
-          : error;
-        const failure = toolFailure(cause);
-        const chooserUpload = definition.name === "upload_file_chooser";
-        if (executing && !chooserUpload && definition.name !== "read_artifact" && abortSignal?.aborted && definition.program && !READ_ONLY_TOOLS.has(definition.name) && !failure.error.effectUnknown) failure.error.effectUnknown = true;
-        failure.error = recoveryError(failure.error, definition.name);
-        if (!failure.artifact && options.logger && identity?.runId) {
-          const artifact = await options.logger.toolArtifact(options.conversationId!, identity).catch(() => undefined);
-          if (artifact) failure.artifact = artifact;
-        }
-        return failure;
-      };
-      let entered = false;
-      const work = async () => {
-        entered = true;
-        let output: unknown;
-        let executing = false;
-        let observedTerminalJob: string | undefined;
-        let resultPending = false;
-        let inspectionDelivery: SnapshotDeliveryLease | undefined;
-        let openedTabId: number | undefined;
-        let recentRefs: string[] = [];
-        try {
-          abortSignal?.throwIfAborted();
-          const context = { conversationId: options.conversationId, toolCallId, logIdentity: identity, runSignal: options.runSignal, visualEnabled: await options.visualEnabled?.() ?? false };
-          abortSignal?.throwIfAborted();
-          const value = definition.inputSchema.parse(input);
-          executing = true;
-          const result = definition.name === "inspect_page" ? await executor.inspect({ ...value, wire: { maxBytes: INSPECTION_RESULT_BYTES, evidenceId: identity?.toolCallId ?? toolCallId } } as any, abortSignal, context)
-            : definition.name === "find_elements" ? await executor.findElements(value as any, abortSignal, context)
-            : definition.name === "list_frames" ? await executor.listFrames(value as any, abortSignal, context)
-            : definition.name === "list_tabs" ? await executor.listTabs(abortSignal, value.timeoutMs)
-            : definition.name === "switch_tab" ? await executor.switchTab(value.tabId, abortSignal, value.timeoutMs)
-            : definition.name === "list_downloads" ? await executor.listDownloads(value, abortSignal)
-            : definition.name === "read_artifact" ? await executor.readArtifact(value, abortSignal, context)
-            : definition.name === "list_file_choosers" ? await executor.listFileChoosers(value, abortSignal, context)
-            : definition.name === "subscribe_event" ? await executor.subscribeEvent(value, abortSignal, context)
-            : definition.name === "wait_event" ? await executor.waitEvent(value, abortSignal, context)
-            : definition.name === "unsubscribe_event" ? await executor.unsubscribeEvent(value, abortSignal, context)
-            : definition.name === "handle_dialog" ? await executor.handleDialog(value, abortSignal, context)
-            : definition.name === "upload_file_chooser" ? await executor.uploadChooser(value, abortSignal, context)
-            : definition.name === "list_jobs" ? await executor.queryJobs({ action: "list", limit: value.limit, cursor: value.cursor }, abortSignal, context)
-            : definition.name === "get_job" ? await executor.queryJobs({ action: value.waitMs ? "wait" : "status", id: value.jobId, after: value.after, limit: value.limit, waitMs: value.waitMs }, abortSignal, context)
-            : definition.name === "cancel_job" ? await executor.queryJobs({ action: "cancel", id: value.jobId }, abortSignal, context)
-            : await executor.runProgram(definition.program!(value), abortSignal, context);
-          resultPending = (result as any)?.complete === false || ((definition.name === "get_job" || definition.name === "cancel_job") && (result as any)?.terminal !== true);
-          if (definition.name === "open_tab" && Number.isSafeInteger((result as any)?.result?.tabId)) openedTabId = (result as any).result.tabId;
-          if (definition.name === "find_elements" && Array.isArray((result as any)?.elements))
-            recentRefs = (result as any).elements.flatMap((element: any) => typeof element?.ref === "string" ? [element.ref] : []);
-          const jobRef = jobResultReferenceInfo((result as any)?.result);
-          const failure = (result as any)?.ok === false ? (result as any).error ?? (result as any).failed?.error ?? jobRef?.info.error ?? (result as any).result?.error : undefined;
-          const artifact = (result as any)?.result?.artifact;
-          const envelope = failure ? { ...result as object, ...(artifact ? { artifact } : {}), error: recoveryError(failure, definition.name) } : result;
-          if (definition.name === "inspect_page" && envelope && typeof envelope === "object"
-            && Object.hasOwn(envelope, "observationId") && Object.hasOwn(envelope, "items")) {
-            inspectionDelivery = inspectionPageDelivery(result, identity?.toolCallId ?? toolCallId, value.cursor !== undefined);
-            output = envelope;
-          } else if (jobRef) {
-            const { result: _result, ...rest } = envelope as Record<string, unknown>;
-            const compact = normalizationExceedsBudget(rest)
-              ? await storeUnnormalizedResult(rest, { ...options, toolCallId, ...identity, preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job" })
-              : await compactToolResult(normalizeResultEnvelope(rest), { ...options, toolCallId, ...identity, preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job" });
-            const visible = compact as Record<string, unknown>;
-            const access = { artifactId: jobRef.id, path: ["result"], ...(jobRef.info.limit === undefined ? {} : { offset: 0, limit: jobRef.info.limit }) };
-            output = { ...visible, ...(visible.$ref ? { receiptsArtifactId: visible.$ref } : {}), $ref: jobRef.id,
-              resultAccess: access, ...(!visible.$ref ? { access } : {}), sidecarsDeferred: true,
-              pathsNote: "Read a bounded slice with read_artifact; shared or cyclic object identity is not exposed.",
-              ...(jobRef.info.error ? { error: recoveryError(jobRef.info.error, definition.name), errorAccess: { artifactId: jobRef.id, path: ["result", "error"] } } : {}),
-              ...(jobRef.info.artifact ? { artifact: jobRef.info.artifact, artifactAccess: { artifactId: jobRef.id, path: ["result", "artifact"] } } : {}),
-              ...(jobRef.info.screenshot ? { ...jobRef.info.visualContext, screenshot: { ...jobRef.info.screenshot, ...(jobRef.info.inlineScreenshot ? { artifactId: jobRef.id, artifactPath: ["result", "screenshot"] } : {}) }, visualAccess: { artifactId: jobRef.id, path: ["result"] } } : {}) };
-          } else
-          if (normalizationExceedsBudget(envelope)) {
-            output = await storeUnnormalizedResult(envelope, { ...options, toolCallId, ...identity,
-              preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job",
-              preserveSearchStatus: definition.name === "find_elements" || definition.name === "list_frames",
-              preserveInspectionStatus: definition.name === "inspect_page", preserveEventStatus: definition.name === "wait_event",
-              preserveDiagnosticStatus: definition.name === "list_requests" || definition.name === "read_console", preserveVerification: definition.name === "verify_state" });
-          } else {
-            const normalized = envelope && typeof envelope === "object" && !Array.isArray(envelope)
-              ? normalizeResultEnvelope(envelope as Record<string, unknown>) : envelope;
-            const originalResult = normalized && typeof normalized === "object" && "envelopeWrapped" in normalized && normalized.envelopeWrapped === true
-              ? envelope : envelope && typeof envelope === "object" && Object.hasOwn(envelope, "result") ? (envelope as Record<string, unknown>).result : undefined;
-            const hasResult = Boolean(normalized && typeof normalized === "object" && Object.hasOwn(normalized, "result"));
-            output = await compactToolResult(normalized, { ...options, toolCallId, ...identity, preserveVerification: definition.name === "verify_state", preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job", preserveSearchStatus: definition.name === "find_elements" || definition.name === "list_frames", preserveInspectionStatus: definition.name === "inspect_page", preserveDiagnosticStatus: definition.name === "list_requests" || definition.name === "read_console", preserveEventStatus: definition.name === "wait_event", preserveArtifactValue: hasResult, ...(hasResult ? { originalResult } : {}) });
-          }
-          if ((definition.name === "get_job" || definition.name === "cancel_job") && (result as any)?.terminal === true && typeof (result as any).id === "string") observedTerminalJob = (result as any).id;
-        } catch (error) {
-          output = await failureFor(error, executing);
-        }
-        // Capture before releasing the scheduler slot, so a later action in the
-        // same model response cannot change the page first. Management calls
-        // must never wait behind a still-running job occupying the browser queue.
-        if (executing && !NO_PAGE_CAPTURE.has(definition.name) && typeof executor.inspect === "function" && !abortSignal?.aborted) {
-          const pending = executor.pendingBackgroundJobs?.() ?? [];
-          const otherPending = pending.some((id) => id !== observedTerminalJob);
-          let pageEvidence: Record<string, unknown>;
-          if (resultPending || otherPending) {
-            pageEvidence = { pageSnapshotStatus: { state: "pending", reason: "browser-job-running" } };
-          } else {
-            try {
-              const value = input && typeof input === "object" ? input as Record<string, unknown> : {};
-              // close_tab invalidates its argument; switch_tab changes the binding.
-              const tabId = openedTabId ?? (definition.name !== "close_tab" && typeof value.tabId === "number" ? value.tabId : undefined);
-              const context = { conversationId: options.conversationId, toolCallId, logIdentity: identity, runSignal: options.runSignal, visualEnabled: false };
-              const pageSnapshot = await executor.inspect({ ...(recentRefs.length ? { recentRefs } : {}), ...(tabId === undefined ? {} : { tabId }),
-                wire: { maxBytes: INSPECTION_RESULT_BYTES, evidenceId: identity?.toolCallId ?? toolCallId } }, abortSignal, context);
-              inspectionDelivery = inspectionPageDelivery(pageSnapshot, identity?.toolCallId ?? toolCallId, false);
-              pageEvidence = { pageSnapshot };
-            } catch (error) {
-              pageEvidence = { pageSnapshotStatus: { state: "unavailable", error: toolFailure(error).error } };
-            }
-          }
-          output = output && typeof output === "object" && !Array.isArray(output)
-            ? { ...output, ...pageEvidence } : { result: output, ...pageEvidence };
-        }
-        if (inspectionDelivery) {
-          try {
-            if (!inspectionDelivery.begin()) throw new Error("AutomationError[stale-observation]: Snapshot changed before delivery");
-          } catch (error) {
-            inspectionDelivery.cancel();
-            inspectionDelivery = undefined;
-            if (definition.name === "inspect_page") output = await failureFor(error, true);
-            else {
-              const { pageSnapshot: _pageSnapshot, ...rest } = output as Record<string, unknown>;
-              output = { ...rest, pageSnapshotStatus: { state: "unavailable", error: toolFailure(error).error } };
-            }
-          }
-        }
-        let saved: unknown;
-        try {
-          saved = await finish(output);
-          inspectionDelivery?.finish();
-        } catch (error) {
-          inspectionDelivery?.cancel();
-          throw error;
-        }
-        if (observedTerminalJob && options.logger && options.conversationId) executor.acknowledgeBackgroundJob(observedTerminalJob, options.conversationId);
-        return saved;
-      };
+      const value = input && typeof input === "object" ? input as Record<string, unknown> : {};
+      const program = definition.program?.(input);
+      const operationTimeout = program?.timeoutMs ?? program?.defaultTimeoutMs
+        ?? (typeof value.timeoutMs === "number" && value.timeoutMs > 0 ? value.timeoutMs : undefined)
+        ?? (definition.name === "inspect_page" ? 15_000 : 40_000);
+      const timeout = Math.max(operationTimeout, typeof value.waitMs === "number" ? value.waitMs + 1_000 : 0);
+      const parent = abortSignal && options.runSignal ? AbortSignal.any([abortSignal, options.runSignal]) : abortSignal ?? options.runSignal;
+      const deadline = createDeadline(timeout, parent, `Tool ${definition.name}`);
+      abortSignal = deadline.signal;
       try {
-        return options.scheduler ? await options.scheduler.run(toolCallId, work, abortSignal) : await work();
-      } catch (error) {
-        if (entered) throw error; // A terminal log failure must stop the run, not be rewritten as another result.
-        return finish(await failureFor(error, false));
-      }
+        const identity = options.conversationId ? options.logger?.toolIdentity(options.conversationId, toolCallId) : undefined;
+        const callId = options.callId?.();
+        const startedAt = performance.now();
+        let failureCause: unknown;
+        let artifactLookup: Promise<{ id: number } | undefined> | undefined;
+        if (options.logger) {
+          const started = await logIO(options.logger.append({ type: "tool.started", conversationId: options.conversationId,
+            content: { callId, toolName: definition.name }, input, toolCallId, ...identity }), "记录工具启动", Math.min(timeout, 10_000), abortSignal);
+          if (!started) throw new DOMException("日志维护已阻止工具启动。", "AbortError");
+        }
+        let terminal: Promise<unknown> | undefined;
+        const finish = (output: unknown): Promise<unknown> => terminal ??= (async () => {
+          output = output && typeof output === "object" && !Array.isArray(output)
+            ? { ...output, evidenceId: identity?.toolCallId ?? toolCallId }
+            : { result: output, evidenceId: identity?.toolCallId ?? toolCallId };
+          if (options.logger) {
+            const failed = Boolean(output && typeof output === "object" && "ok" in output && output.ok === false);
+            const interrupted = failed && parent?.aborted === true;
+            const error = failed ? (output as { error?: unknown }).error : undefined;
+            const effectUnknown = Boolean(error && typeof error === "object" && "effectUnknown" in error && error.effectUnknown);
+            const latencyMs = Math.max(0, performance.now() - startedAt);
+            const terminal = await logIO(options.logger.append({ type: failed ? "tool.failed" : "tool.finished", conversationId: options.conversationId,
+              content: { callId, toolName: definition.name, ...(failureCause === undefined ? {} : { failureCause }), ...(interrupted ? { status: "interrupted", effectUnknown } : {}) },
+              input, output, toolCallId, ...identity, ...(failed ? { error } : {}),
+              ...(interrupted ? { abort: { reason: Object.assign(new Error(String(abortSignal?.reason ?? "Operation aborted")), { name: "AbortError" }) } } : {}),
+              latencyMs }), "记录工具结果");
+            if (!terminal) throw new DOMException("日志维护已阻止工具结果保存。", "AbortError");
+          }
+          return output;
+        })();
+        const failureFor = async (error: unknown, executing: boolean) => {
+          failureCause = safeDiagnosticError(error);
+          const cause = abortSignal?.aborted && !(error instanceof Error) && !(error instanceof DOMException)
+            ? new DOMException(abortSignal.reason instanceof Error ? abortSignal.reason.message : String(abortSignal.reason ?? error ?? "Operation aborted"), "AbortError")
+            : error;
+          const failure = toolFailure(cause);
+          const chooserUpload = definition.name === "upload_file_chooser";
+          if (executing && !chooserUpload && definition.name !== "read_artifact" && abortSignal?.aborted && definition.program && !READ_ONLY_TOOLS.has(definition.name) && !failure.error.effectUnknown) failure.error.effectUnknown = true;
+          failure.error = recoveryError(failure.error, definition.name);
+          if (!failure.artifact && options.logger && identity?.runId) {
+            const artifact = await (artifactLookup ??= logIO(options.logger.toolArtifact(options.conversationId!, identity), "读取工具产物", Math.min(1000, timeout)).catch(() => undefined));
+            if (artifact) failure.artifact = artifact;
+          }
+          return failure;
+        };
+        let entered = false;
+        const work = async () => {
+          entered = true;
+          let output: unknown;
+          let executing = false;
+          let observedTerminalJob: string | undefined;
+          let resultPending = false;
+          let inspectionDelivery: SnapshotDeliveryLease | undefined;
+          let openedTabId: number | undefined;
+          let recentRefs: string[] = [];
+          try {
+            abortSignal?.throwIfAborted();
+            const context = { conversationId: options.conversationId, toolCallId, logIdentity: identity, runSignal: options.runSignal, visualEnabled: await options.visualEnabled?.() ?? false };
+            abortSignal?.throwIfAborted();
+            const value = definition.inputSchema.parse(input);
+            executing = true;
+            const result = definition.name === "inspect_page" ? await executor.inspect({ ...value, wire: { maxBytes: INSPECTION_RESULT_BYTES, evidenceId: identity?.toolCallId ?? toolCallId } } as any, abortSignal, context)
+              : definition.name === "find_elements" ? await executor.findElements(value as any, abortSignal, context)
+              : definition.name === "list_frames" ? await executor.listFrames(value as any, abortSignal, context)
+              : definition.name === "list_tabs" ? await executor.listTabs(abortSignal, value.timeoutMs)
+              : definition.name === "switch_tab" ? await executor.switchTab(value.tabId, abortSignal, value.timeoutMs)
+              : definition.name === "list_downloads" ? await executor.listDownloads(value, abortSignal)
+              : definition.name === "read_artifact" ? await executor.readArtifact(value, abortSignal, context)
+              : definition.name === "list_file_choosers" ? await executor.listFileChoosers(value, abortSignal, context)
+              : definition.name === "subscribe_event" ? await executor.subscribeEvent(value, abortSignal, context)
+              : definition.name === "wait_event" ? await executor.waitEvent(value, abortSignal, context)
+              : definition.name === "unsubscribe_event" ? await executor.unsubscribeEvent(value, abortSignal, context)
+              : definition.name === "handle_dialog" ? await executor.handleDialog(value, abortSignal, context)
+              : definition.name === "upload_file_chooser" ? await executor.uploadChooser(value, abortSignal, context)
+              : definition.name === "list_jobs" ? await executor.queryJobs({ action: "list", limit: value.limit, cursor: value.cursor }, abortSignal, context)
+              : definition.name === "get_job" ? await executor.queryJobs({ action: value.waitMs ? "wait" : "status", id: value.jobId, after: value.after, limit: value.limit, waitMs: value.waitMs }, abortSignal, context)
+              : definition.name === "cancel_job" ? await executor.queryJobs({ action: "cancel", id: value.jobId }, abortSignal, context)
+              : await executor.runProgram(program!, abortSignal, context);
+            resultPending = (result as any)?.complete === false || ((definition.name === "get_job" || definition.name === "cancel_job") && (result as any)?.terminal !== true);
+            if (definition.name === "open_tab" && Number.isSafeInteger((result as any)?.result?.tabId)) openedTabId = (result as any).result.tabId;
+            if (definition.name === "find_elements" && Array.isArray((result as any)?.elements))
+              recentRefs = (result as any).elements.flatMap((element: any) => typeof element?.ref === "string" ? [element.ref] : []);
+            const jobRef = jobResultReferenceInfo((result as any)?.result);
+            const failure = (result as any)?.ok === false ? (result as any).error ?? (result as any).failed?.error ?? jobRef?.info.error ?? (result as any).result?.error : undefined;
+            const artifact = (result as any)?.result?.artifact;
+            const envelope = failure ? { ...result as object, ...(artifact ? { artifact } : {}), error: recoveryError(failure, definition.name) } : result;
+            if (definition.name === "inspect_page" && envelope && typeof envelope === "object"
+              && Object.hasOwn(envelope, "observationId") && Object.hasOwn(envelope, "items")) {
+              inspectionDelivery = inspectionPageDelivery(result, identity?.toolCallId ?? toolCallId, value.cursor !== undefined);
+              output = envelope;
+            } else if (jobRef) {
+              const { result: _result, ...rest } = envelope as Record<string, unknown>;
+              const compact = normalizationExceedsBudget(rest)
+                ? await storeUnnormalizedResult(rest, { ...options, toolCallId, ...identity, preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job" })
+                : await compactToolResult(normalizeResultEnvelope(rest), { ...options, toolCallId, ...identity, preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job" });
+              const visible = compact as Record<string, unknown>;
+              const access = { artifactId: jobRef.id, path: ["result"], ...(jobRef.info.limit === undefined ? {} : { offset: 0, limit: jobRef.info.limit }) };
+              output = { ...visible, ...(visible.$ref ? { receiptsArtifactId: visible.$ref } : {}), $ref: jobRef.id,
+                resultAccess: access, ...(!visible.$ref ? { access } : {}), sidecarsDeferred: true,
+                pathsNote: "Read a bounded slice with read_artifact; shared or cyclic object identity is not exposed.",
+                ...(jobRef.info.error ? { error: recoveryError(jobRef.info.error, definition.name), errorAccess: { artifactId: jobRef.id, path: ["result", "error"] } } : {}),
+                ...(jobRef.info.artifact ? { artifact: jobRef.info.artifact, artifactAccess: { artifactId: jobRef.id, path: ["result", "artifact"] } } : {}),
+                ...(jobRef.info.screenshot ? { ...jobRef.info.visualContext, screenshot: { ...jobRef.info.screenshot, ...(jobRef.info.inlineScreenshot ? { artifactId: jobRef.id, artifactPath: ["result", "screenshot"] } : {}) }, visualAccess: { artifactId: jobRef.id, path: ["result"] } } : {}) };
+            } else
+            if (normalizationExceedsBudget(envelope)) {
+              output = await storeUnnormalizedResult(envelope, { ...options, toolCallId, ...identity,
+                preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job",
+                preserveSearchStatus: definition.name === "find_elements" || definition.name === "list_frames",
+                preserveInspectionStatus: definition.name === "inspect_page", preserveEventStatus: definition.name === "wait_event",
+                preserveDiagnosticStatus: definition.name === "list_requests" || definition.name === "read_console", preserveVerification: definition.name === "verify_state" });
+            } else {
+              const normalized = envelope && typeof envelope === "object" && !Array.isArray(envelope)
+                ? normalizeResultEnvelope(envelope as Record<string, unknown>) : envelope;
+              const originalResult = normalized && typeof normalized === "object" && "envelopeWrapped" in normalized && normalized.envelopeWrapped === true
+                ? envelope : envelope && typeof envelope === "object" && Object.hasOwn(envelope, "result") ? (envelope as Record<string, unknown>).result : undefined;
+              const hasResult = Boolean(normalized && typeof normalized === "object" && Object.hasOwn(normalized, "result"));
+              output = await compactToolResult(normalized, { ...options, toolCallId, ...identity, preserveVerification: definition.name === "verify_state", preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job", preserveSearchStatus: definition.name === "find_elements" || definition.name === "list_frames", preserveInspectionStatus: definition.name === "inspect_page", preserveDiagnosticStatus: definition.name === "list_requests" || definition.name === "read_console", preserveEventStatus: definition.name === "wait_event", preserveArtifactValue: hasResult, ...(hasResult ? { originalResult } : {}) });
+            }
+            if ((definition.name === "get_job" || definition.name === "cancel_job") && (result as any)?.terminal === true && typeof (result as any).id === "string") observedTerminalJob = (result as any).id;
+          } catch (error) {
+            output = await failureFor(error, executing);
+          }
+          // Capture before releasing the scheduler slot, so a later action in the
+          // same model response cannot change the page first. Management calls
+          // must never wait behind a still-running job occupying the browser queue.
+          if (executing && !NO_PAGE_CAPTURE.has(definition.name) && typeof executor.inspect === "function" && !abortSignal?.aborted) {
+            const pending = executor.pendingBackgroundJobs?.() ?? [];
+            const otherPending = pending.some((id) => id !== observedTerminalJob);
+            let pageEvidence: Record<string, unknown>;
+            if (resultPending || otherPending) {
+              pageEvidence = { pageSnapshotStatus: { state: "pending", reason: "browser-job-running" } };
+            } else {
+              try {
+                const value = input && typeof input === "object" ? input as Record<string, unknown> : {};
+                // close_tab invalidates its argument; switch_tab changes the binding.
+                const tabId = openedTabId ?? (definition.name !== "close_tab" && typeof value.tabId === "number" ? value.tabId : undefined);
+                const context = { conversationId: options.conversationId, toolCallId, logIdentity: identity, runSignal: options.runSignal, visualEnabled: false };
+                const pageSnapshot = await executor.inspect({ ...(recentRefs.length ? { recentRefs } : {}), ...(tabId === undefined ? {} : { tabId }),
+                  wire: { maxBytes: INSPECTION_RESULT_BYTES, evidenceId: identity?.toolCallId ?? toolCallId } }, abortSignal, context);
+                inspectionDelivery = inspectionPageDelivery(pageSnapshot, identity?.toolCallId ?? toolCallId, false);
+                pageEvidence = { pageSnapshot };
+              } catch (error) {
+                pageEvidence = { pageSnapshotStatus: { state: "unavailable", error: toolFailure(error).error } };
+              }
+            }
+            output = output && typeof output === "object" && !Array.isArray(output)
+              ? { ...output, ...pageEvidence } : { result: output, ...pageEvidence };
+          }
+          if (inspectionDelivery) {
+            try {
+              abortSignal?.throwIfAborted();
+              if (!inspectionDelivery.begin()) throw new Error("AutomationError[stale-observation]: Snapshot changed before delivery");
+            } catch (error) {
+              inspectionDelivery.cancel();
+              inspectionDelivery = undefined;
+              if (definition.name === "inspect_page") output = await failureFor(error, true);
+              else {
+                const { pageSnapshot: _pageSnapshot, ...rest } = output as Record<string, unknown>;
+                output = { ...rest, pageSnapshotStatus: { state: "unavailable", error: toolFailure(error).error } };
+              }
+            }
+          }
+          let saved: unknown;
+          try {
+            saved = await finish(output);
+            if (!abortSignal?.aborted) inspectionDelivery?.finish();
+            else inspectionDelivery?.cancel();
+          } catch (error) {
+            inspectionDelivery?.cancel();
+            throw error;
+          }
+          if (observedTerminalJob && options.logger && options.conversationId) executor.acknowledgeBackgroundJob(observedTerminalJob, options.conversationId);
+          return saved;
+        };
+        try {
+          return await deadline.wait(options.scheduler ? options.scheduler.run(toolCallId, work, abortSignal) : work());
+        } catch (error) {
+          if (entered && !abortSignal.aborted) throw error; // A canonical write failure must stop the run.
+          if (entered) await executor.settleAbortedWork?.();
+          return finish(await failureFor(error, entered));
+        }
+      } finally { deadline.dispose(); }
     },
   })]));
 }
@@ -250,7 +269,7 @@ const inspectionPageSchema = z.object({
   observationId: z.string(), tabId: inspectionInteger, documentId: inspectionInteger,
   url: z.string().optional(), title: z.string().optional(), continuation: z.literal(true).optional(),
   viewport: z.object({ x: z.number(), y: z.number(), width: z.number(), height: z.number(), scale: z.number() }).strict(),
-  mode: z.enum(["full", "delta"]), partial: z.literal(true).optional(), reset: z.enum(["previous-output-truncated", "previous-output-partial", "current-output-partial"]).optional(),
+  mode: z.enum(["full", "delta"]), baseObservationId: z.string().optional(), partial: z.literal(true).optional(), reset: z.enum(["previous-output-truncated", "previous-output-partial", "current-output-partial"]).optional(),
   items: z.array(z.object({ id: z.string(), line: z.string(), ref: z.string().optional(),
     change: z.enum(["added", "updated", "removed", "moved"]).optional(), after: z.string().nullable().optional(),
     fragment: z.object({ index: inspectionInteger, start: inspectionInteger, end: inspectionInteger, total: inspectionInteger }).strict().optional(),

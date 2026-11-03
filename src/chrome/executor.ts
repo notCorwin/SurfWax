@@ -3,7 +3,7 @@ import type { BrowserTarget } from "../types";
 import { AutomationRuntime, FILE_UPLOAD_FUNCTION, LocatorFacade } from "./automation";
 import { requireDebuggee } from "./debuggee";
 import { decodeBridgeError, type BridgeError } from "./bridge-error";
-import { scheduleDeadline } from "./deadline";
+import { createDeadline, scheduleDeadline } from "../deadline";
 import { downloadArtifact } from "./downloads";
 import { listDownloads as queryDownloads, type DownloadListInput } from "./download-query";
 import { BrowserDiagnostics } from "./diagnostics";
@@ -32,6 +32,8 @@ type ExecutorChrome = typeof chrome & { debugger: DebuggerApi };
 
 const BRIDGE_KEY = "__surfWaxDebugger";
 const DEFAULT_INSPECT_TIMEOUT_MS = 15_000;
+const DEFAULT_OPERATION_TIMEOUT_MS = 40_000;
+const CLEANUP_TIMEOUT_MS = 2_000;
 type ExecutionContext = { runSignal?: AbortSignal; conversationId?: string; toolCallId?: string; visualEnabled?: boolean; logIdentity?: { runId?: string; toolCallId: string; toolCallIdCanonical: true } };
 type ArtifactRef = { id: number; filename: string; mimeType: string; byteLength: number; saved: boolean; downloadId?: number };
 type BrowserState = { windowId: number; tabId?: number };
@@ -117,6 +119,7 @@ export class ChromeExecutor {
   private tail: Promise<void> = Promise.resolve();
   private readonly bridgedDebuggees = new Set<string>();
   private disposed = false;
+  private quarantineError?: Error;
   private activeSignal?: AbortSignal;
   private activeContext: ExecutionContext = {};
   private browserState?: BrowserState;
@@ -151,6 +154,7 @@ export class ChromeExecutor {
   private programScope?: ProgramScope;
   private readonly programEvaluations = new Map<string, { debuggee: Debuggee; count: number }>();
   private readonly programHost: typeof executeSandboxProgram;
+  private readonly unsubscribeSnapshotReset?: () => void;
 
   constructor(options: { chromeApi?: ExecutorChrome; logger?: EventLogger; programHost?: typeof executeSandboxProgram; runIdentity?: () => RunIdentity | undefined } = {}) {
     this.readRunIdentity = options.runIdentity ?? getRunIdentity;
@@ -159,6 +163,9 @@ export class ChromeExecutor {
     this.jobs = new BrowserJobs(this.logger);
     this.programHost = options.programHost ?? executeSandboxProgram;
     this.diagnostics = new BrowserDiagnostics(this.logger);
+    this.unsubscribeSnapshotReset = this.logger?.subscribe?.((event) => {
+      if (event.type === "context.compacted" || event.type === "log.cleared") this.automation?.resetSnapshotBaselines();
+    });
     if (!this.chromeApi?.debugger) throw new Error("Chrome extension debugger API is unavailable");
     const pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason: Error) => void; input: boolean; method: string; source: unknown }>();
     const listeners = { onEvent: new Set<(...args: any[]) => void>(), onDetach: new Set<(...args: any[]) => void>() };
@@ -202,6 +209,7 @@ export class ChromeExecutor {
       onDetach: event("onDetach"),
       call: async (method: string, args: unknown[], rawCdp = false) => {
         const input = method === "sendCommand" && typeof args[1] === "string" && args[1].startsWith("Input.");
+        if (this.quarantineError) throw this.quarantineError;
         if (this.disposed) throw Object.assign(abortError(), input ? { dispatchState: "not-dispatched" } : {});
         try { if (["attach", "detach", "sendCommand"].includes(method)) requireDebuggee(args[0], method); }
         catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), input ? { dispatchState: "not-dispatched" } : {}); }
@@ -315,7 +323,7 @@ export class ChromeExecutor {
             return await this.captureScreenshot(page, { target: input.region });
           }
           const region = input.region === undefined ? undefined : await this.locatorFor(page, input.region);
-          return await page.inspect(input, region);
+          return await page.inspect({ ...input, incremental: !input.full && Boolean(input.wire || input.deferDelivery) }, region);
         } finally { this.activeSignal = undefined; this.activeContext = {}; await this.automation.clearContext(); }
       }, effectiveSignal, undefined, false);
     } finally { cancelDeadline(); }
@@ -461,7 +469,7 @@ export class ChromeExecutor {
         this.activeSignal = undefined; this.activeContext = {};
         await this.automation.clearContext();
       }
-    }, combined, timeoutMs, false, true)), controller.signal).catch((error) => { cleanupSignals(); throw error; });
+    }, combined, timeoutMs, false)), controller.signal).catch((error) => { cleanupSignals(); throw error; });
     if (input.background) {
       try {
         controller.signal.throwIfAborted();
@@ -1045,30 +1053,56 @@ export class ChromeExecutor {
     return { page, browser, net, artifacts, sleep: (ms: number) => scope.sleep(ms) };
   }
 
-  private enqueueAbortable<T>(run: (signal?: AbortSignal) => Promise<T>, signal?: AbortSignal, timeoutMs?: number, mayHaveEffect = true, awaitCleanup = false): Promise<T> {
+  /** An interrupted owner keeps the queue until its revoked work has settled.
+   * If Chrome does not acknowledge cleanup, isolate the entire executor rather
+   * than letting stale continuations dispatch into a later operation.
+   */
+  private isolate(error: unknown): void {
+    if (this.quarantineError) return;
+    this.quarantineError = Object.assign(new Error("AutomationError[cleanup-incomplete]: Chrome did not acknowledge cancellation. Reopen the side panel before further browser actions.", { cause: error }), { effectUnknown: true });
+    this.programScope?.revoke();
+    this.jobs.cancelAll(error);
+    this.port?.disconnect();
+    this.port = undefined;
+  }
+
+  async settleAbortedWork(): Promise<void> {
+    if (!this.activeSignal?.aborted) return;
+    const cleanup = createDeadline(CLEANUP_TIMEOUT_MS, undefined, "Browser cancellation cleanup");
+    try { await cleanup.wait(this.tail); }
+    catch (error) { this.isolate(error); }
+    finally { cleanup.dispose(); }
+  }
+
+  private async enqueueAbortable<T>(run: (signal?: AbortSignal) => Promise<T>, signal?: AbortSignal, timeoutMs = DEFAULT_OPERATION_TIMEOUT_MS, mayHaveEffect = true): Promise<T> {
+    const deadline = createDeadline(timeoutMs, signal);
     const previous = this.tail;
-    let operationStarted = false;
-    let cleanup: Promise<T> | undefined;
     let release!: () => void;
-    this.tail = new Promise<void>((resolve) => { release = resolve; });
-    const started = previous.then(() => {
-      const timeout = timeoutMs ? new AbortController() : undefined;
-      const cancelDeadline = timeout ? scheduleDeadline(timeoutMs!, () => timeout.abort(new DOMException(`Operation timed out after ${timeoutMs}ms`, "TimeoutError"))) : undefined;
-      const combined = timeout ? signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal : signal;
-      const clearDeadline = () => { cancelDeadline?.(); };
-      if (combined?.aborted) { clearDeadline(); release(); combined.throwIfAborted(); }
-      operationStarted = true;
-      const work = Promise.resolve().then(() => run(combined));
-      cleanup = work;
-      const done = () => { clearDeadline(); release(); };
-      void work.then(done, done);
-      return { work, combined };
-    });
-    return this.awaitAbort(started, signal).catch(async (error) => {
-      if (awaitCleanup && operationStarted) await cleanup?.catch(() => undefined);
-      if (operationStarted && mayHaveEffect && signal?.aborted) Object.assign(error, { effectUnknown: true });
-      throw error;
-    }).then(({ work, combined }) => awaitCleanup ? work : this.awaitAbort(work, combined, mayHaveEffect));
+    const owned = new Promise<void>((resolve) => { release = resolve; });
+    this.tail = previous.then(() => owned);
+    let work: Promise<T> | undefined;
+    try {
+      try { await deadline.wait(previous); }
+      catch (error) { if (deadline.signal.aborted) throw interruptionError(deadline.signal); throw error; }
+      throwIfAborted(deadline.signal);
+      if (this.quarantineError) throw this.quarantineError;
+      work = Promise.resolve().then(() => run(deadline.signal));
+      try { return await deadline.wait(work); }
+      catch (error) {
+        if (!deadline.signal.aborted) throw error;
+        const uncertain = mayHaveEffect || this.programScope?.effectUnknown === true;
+        this.programScope?.revoke();
+        const cleanup = createDeadline(CLEANUP_TIMEOUT_MS, undefined, "Browser cancellation cleanup");
+        try { await cleanup.wait(work.catch(() => undefined)); }
+        catch (cleanupError) { this.isolate(cleanupError); }
+        finally { cleanup.dispose(); }
+        throw interruptionError(deadline.signal, uncertain);
+      }
+    } finally {
+      deadline.dispose();
+      // A cancelled queued call cannot release the preceding owner's slot.
+      if (work) release(); else void previous.then(release, release);
+    }
   }
 
   private async locatorFor(page: any, raw: unknown): Promise<any> {
@@ -1171,6 +1205,7 @@ export class ChromeExecutor {
     const tab = tabs.find((item) => item.id === tabId);
     if (!tab?.id) throw new Error(`CommandError[invalid-tab-id]: ${tabId}`);
     await this.chromeApi.tabs.update(tab.id, { active: true });
+    throwIfAborted(signal);
     if (Number.isInteger(tab.windowId)) state.windowId = tab.windowId!;
     state.tabId = tab.id;
     for (const listener of this.boundTabListeners) listener();
@@ -1423,8 +1458,13 @@ export class ChromeExecutor {
       await this.stopBrowserOperations();
       this.browserState = undefined;
     })();
-    this.runFinishing = closing;
-    try { await closing; } finally { if (this.runFinishing === closing) this.runFinishing = undefined; }
+    const deadline = createDeadline(CLEANUP_TIMEOUT_MS, undefined, "Browser run cleanup");
+    const finishing = deadline.wait(closing).catch(error => { this.isolate(error); }).finally(() => {
+      deadline.dispose();
+      if (this.runFinishing === finishing) this.runFinishing = undefined;
+    });
+    this.runFinishing = finishing;
+    return finishing;
   }
 
   dispose(): void {
@@ -1435,6 +1475,7 @@ export class ChromeExecutor {
     if ((globalThis as Record<string, unknown>)[BRIDGE_KEY] === this.bridge) {
       delete (globalThis as Record<string, unknown>)[BRIDGE_KEY];
     }
+    this.unsubscribeSnapshotReset?.();
     this.automation.dispose();
     this.port?.disconnect();
   }

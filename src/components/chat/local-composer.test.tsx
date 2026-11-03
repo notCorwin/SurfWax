@@ -10,14 +10,14 @@ const mock = vi.hoisted(() => {
   const thread = { messages: [], isLoading: false, isRunning: true, isDisabled: false };
   const state = { thread, composer: { text: "" } };
   const runtime = { getState: () => state, subscribe: () => () => {}, thread: { getState: () => thread, subscribe: () => () => {}, cancelRun: () => {}, append: () => Promise.resolve() }, composer: { setText: () => {}, send: () => {} } };
-  return { state, runtime, view: { runtime, thread: runtime.thread, getState: runtime.thread.getState } };
+  return { locked: false, state, runtime, view: { runtime, thread: runtime.thread, getState: runtime.thread.getState } };
 });
 vi.mock("@/sidepanel/runtime-view", () => ({
   usePanelRuntime: () => mock.runtime,
   usePanelState: (select: (state: typeof mock.state) => unknown) => select(mock.state),
   useRuntimeView: () => mock.view,
 }));
-vi.mock("@/sidepanel/useRunState", () => ({ useRunState: () => ({ locked: true }) }));
+vi.mock("@/sidepanel/useRunState", () => ({ useRunState: () => ({ locked: mock.locked || mock.state.thread.isRunning }) }));
 vi.mock("@/agent/reasoning", () => {
   const state = { selected: null, choices: [], ready: true };
   return { reasoningSettingsFor: () => ({ subscribe: () => () => {}, snapshot: () => state, select: () => {} }) };
@@ -34,7 +34,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 function loggerWith(append: (record: unknown) => Promise<LogEvent | undefined>): EventLogger {
-  return { append, telemetry: () => {}, toolIdentity: (_conversationId: string, toolCallId: string) => ({ toolCallId, toolCallIdCanonical: true }), subscribe: () => () => {}, followupEvents: async () => [], modelUsageEvents: async () => [], contextEvents: async () => [], repository: async () => ({ messages: [] }) } as unknown as EventLogger;
+  return { append, telemetry: () => {}, toolIdentity: (_conversationId: string, toolCallId: string) => ({ toolCallId, toolCallIdCanonical: true }), subscribe: () => () => {}, subscribeCommits: () => () => {}, followupEvents: async () => [], modelUsageEvents: async () => [], contextEvents: async () => [], repository: async () => ({ messages: [] }) } as unknown as EventLogger;
 }
 async function mount(logger: EventLogger) {
   await act(async () => root.render(<TooltipProvider><LocalComposer config={config} logger={logger} conversationId="one" draft="keep this message" onDraftChange={() => {}} goalMode={false} onGoalModeChange={() => {}} /></TooltipProvider>));
@@ -46,7 +46,7 @@ beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
 });
-afterEach(async () => { await act(async () => root.unmount()); host.remove(); mock.state.thread.isRunning = true; vi.restoreAllMocks(); });
+afterEach(async () => { await act(async () => root.unmount()); host.remove(); mock.state.thread.isRunning = true; mock.locked = false; vi.restoreAllMocks(); });
 
 it.each(["rejected", "unavailable"])("keeps the draft and reports a %s queue write", async (outcome) => {
   const pending = deferred<LogEvent | undefined>();
@@ -95,4 +95,20 @@ it("keeps a failed dispatch in the queue without retrying until requested", asyn
   await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="立即发送"]')!.click());
   expect(append).toHaveBeenCalledTimes(2);
   expect(host.querySelector('[data-testid="followup-item"]')?.textContent).toContain("saved message");
+});
+
+
+it("retains the draft without sending or queueing while another side panel owns a run", async () => {
+  mock.state.thread.isRunning = false;
+  mock.locked = true;
+  const append = vi.fn(async () => undefined);
+  const send = vi.spyOn(mock.runtime.composer, "send");
+  await mount(loggerWith(append));
+  expect(input().value).toBe("keep this message");
+  expect(input().disabled).toBe(true);
+  expect(host.querySelector<HTMLButtonElement>('[aria-label="发送消息"]')!.disabled).toBe(true);
+  await act(async () => host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  expect(append).not.toHaveBeenCalled();
+  expect(send).not.toHaveBeenCalled();
+  expect(input().value).toBe("keep this message");
 });

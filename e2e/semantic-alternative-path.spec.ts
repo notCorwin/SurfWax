@@ -35,7 +35,7 @@ test("semantic queue accepts locator actions without semantic snapshots", async 
     await promisify(execFile)(process.execPath, [resolve("node_modules/@playwright/test/cli.js"), "test", "e2e/real-model-evaluation.spec.ts",
       "--retries=0", "--reporter=line", "--trace=off", `--output=${resolve(directory, "playwright")}`], {
       timeout: 280_000, maxBuffer: 4 * 1024 * 1024,
-      env: { ...process.env, SURFWAX_CHROME_138_PATH: "", ...(executablePath ? { SURFWAX_CHROME_PATH: executablePath } : {}),
+      env: { ...process.env, ...(executablePath ? { SURFWAX_CHROME_PATH: executablePath } : {}),
         SURFWAX_REAL_MODEL_EVAL: "1", SURFWAX_EVAL_PROVIDER: "local-mock", SURFWAX_EVAL_MODEL: "test-model",
         SURFWAX_EVAL_BASE_URL: provider.baseURL, SURFWAX_EVAL_API_KEY: "local-test-secret", SURFWAX_EVAL_SCENARIO: "semantic-delta",
         SURFWAX_EVAL_SEED: "17", SURFWAX_EVAL_TIMEOUT_MS: "260000", SURFWAX_EVAL_REPORT_DIR: resolve(directory, "reports"),

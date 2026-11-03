@@ -1,3 +1,4 @@
+import { createDeadline } from "../deadline";
 import { fromLogValue, type LogEvent } from "../logging";
 import { inputKeyIdentity } from "./input-state";
 
@@ -33,16 +34,27 @@ export async function recoverBrowserInput(events: readonly LogEvent[], orphanRun
   const failures: { tabId: number; error: string }[] = [];
   for (const [tabId, state] of tabs) {
     const debuggee = { tabId };
+    const deadline = createDeadline(2_000, undefined, "Recover held browser input");
     try {
+      await deadline.wait((async () => {
       try { await debuggerApi.attach(debuggee, "1.3"); } catch (error) {
         if (!/already attached/i.test(String(error))) throw error;
       }
-      for (const params of state.keys.values()) await debuggerApi.sendCommand(debuggee, "Input.dispatchKeyEvent", { ...params, text: undefined, unmodifiedText: undefined, commands: undefined, type: "keyUp", modifiers: 0 });
-      for (const [button, params] of state.buttons) await debuggerApi.sendCommand(debuggee, "Input.dispatchMouseEvent", { ...params, type: "mouseReleased", x: state.x, y: state.y, button, buttons: 0, modifiers: 0 });
+      deadline.signal.throwIfAborted();
+      for (const params of state.keys.values()) { deadline.signal.throwIfAborted(); await debuggerApi.sendCommand(debuggee, "Input.dispatchKeyEvent", { ...params, text: undefined, unmodifiedText: undefined, commands: undefined, type: "keyUp", modifiers: 0 }); }
+      for (const [button, params] of state.buttons) { deadline.signal.throwIfAborted(); await debuggerApi.sendCommand(debuggee, "Input.dispatchMouseEvent", { ...params, type: "mouseReleased", x: state.x, y: state.y, button, buttons: 0, modifiers: 0 }); }
+      deadline.signal.throwIfAborted();
       await debuggerApi.sendCommand(debuggee, "Input.cancelDragging", {});
+      deadline.signal.throwIfAborted();
+      })());
       recovered += 1;
     } catch (error) { failures.push({ tabId, error: String(error) }); }
-    finally { await debuggerApi.detach(debuggee).catch(() => undefined); }
+    finally {
+      deadline.dispose();
+      const cleanup = createDeadline(2_000, undefined, "Detach input recovery debugger");
+      try { await cleanup.wait(debuggerApi.detach(debuggee)); } catch { /* Preserve the original uncertain state. */ }
+      finally { cleanup.dispose(); }
+    }
   }
   return { recovered, failures };
 }

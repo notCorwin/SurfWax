@@ -79,7 +79,8 @@ test("keeps all tool calls and summarizes them after interruption", async () => 
     await expect(list).toHaveCount(0);
     await expect(opened.page.getByTestId("tool-group-summary")).toHaveCount(1);
     await expect(opened.page.getByTestId("tool-group-summary")).toContainText("查看页面信息并检查页面状态");
-    await expect(opened.page.getByRole("button", { name: "继续" })).toBeVisible();
+    await expect(opened.page.getByRole("button", { name: "继续" })).toHaveCount(0);
+    await expect(opened.page.getByTestId("interrupted-message")).toBeVisible();
     await expect(opened.page.getByTestId("tool-group-summary").locator("summary, button")).toHaveCount(0);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
@@ -528,35 +529,15 @@ test("renders a complete Markdown response without blocking draft input", async 
       }
     }
     await opened.page.setViewportSize({ width: 430, height: 1000 });
-    await rendered.locator('[data-streamdown="table-wrapper"] button').last().focus();
-    await opened.page.keyboard.press("Tab");
-    await expect(tableScroll).toBeFocused();
+    await expect(rendered.locator('[data-streamdown="table-wrapper"] button')).toHaveCount(0);
+    await expect(rendered.getByRole("link", { name: "link", exact: true })).toHaveAttribute("href", "https://example.com/");
+    expect(await tableScroll.evaluate((scroll) => getComputedStyle(scroll).maxHeight)).toBe("none");
+    await tableScroll.focus();
     expect(await tableScroll.evaluate((scroll) => getComputedStyle(scroll).outlineStyle)).toBe("none");
     await tableScroll.evaluate((scroll) => { scroll.scrollLeft = 0; });
     await opened.page.keyboard.press("ArrowRight");
     await expect.poll(() => tableScroll.evaluate((scroll) => scroll.scrollLeft)).toBeGreaterThan(0);
     await opened.page.emulateMedia({ colorScheme: "dark" });
-    await rendered.locator('[data-streamdown="table-wrapper"] button').last().click();
-    const fullscreen = opened.page.locator('[data-streamdown="table-fullscreen"]');
-    await expect(fullscreen).toBeVisible();
-    for (const width of [430, 900]) {
-      await opened.page.setViewportSize({ width, height: 1000 });
-      expect(await fullscreen.evaluate((element) => ({ width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height })))
-        .toEqual({ width, height: 1000 });
-      const layout = await fullscreen.locator('[data-streamdown="table"] tbody tr').first().evaluate((row) => ({
-        height: row.getBoundingClientRect().height,
-        minCellWidth: Math.min(...[...row.querySelectorAll("td")].map((cell) => cell.getBoundingClientRect().width)),
-      }));
-      expect(layout.minCellWidth).toBeGreaterThanOrEqual(144);
-      expect(layout.height).toBeLessThan(90);
-    }
-    await opened.page.setViewportSize({ width: 430, height: 1000 });
-    const fullscreenScroll = fullscreen.locator('[data-streamdown="table-wrapper"] > :last-child');
-    expect(await fullscreenScroll.evaluate((scroll) => scroll.scrollWidth)).toBeGreaterThan(await fullscreenScroll.evaluate((scroll) => scroll.clientWidth));
-    await fullscreenScroll.evaluate((scroll) => { scroll.scrollLeft = scroll.scrollWidth; });
-    expect(await fullscreenScroll.evaluate((scroll) => scroll.scrollLeft)).toBeGreaterThan(0);
-    await fullscreen.locator("button").last().click();
-    await expect(fullscreen).toHaveCount(0);
     const copy = rendered.getByRole("button", { name: "Copy Code" });
     await expect(copy).toBeEnabled();
     await copy.click();
