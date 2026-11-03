@@ -312,3 +312,84 @@ it("persists a submitted user turn before a pending failure baseline can be canc
   expect(events.find((event) => event.type === "conversation.message")?.content).toMatchObject({ role: "user", parts: [{ text: "keep this turn" }] });
   expect(runtime.getState().thread.isRunning).toBe(false);
 });
+
+it("restores response time for each reasoning part without retiming earlier steps", async () => {
+  const events: LogEvent[] = [];
+  let time = 0;
+  const logger = new EventLogger({ store: {
+    async append(event) { const stored = { ...event, timestamp: new Date(time).toISOString(), id: events.length + 1 }; events.push(stored); return stored; },
+    async all() { return [...events]; },
+  } });
+  const conversationId = "reasoning-times", runId = "run";
+  await logger.appendMessage(conversationId, { id: "user", role: "user", parts: [{ type: "text", text: "go" }] });
+  const reply: SidePanelMessage = { id: "reply", role: "assistant", parts: [{ type: "step-start" }, { type: "reasoning", text: "first" }, { type: "reasoning", text: "same response" }] };
+  await logger.append({ type: "model.request.started", conversationId, runId, content: { callId: "call" } });
+  time = 1234;
+  await logger.append({ type: "model.response.received", conversationId, runId, content: { callId: "call" } });
+  await logger.appendMessage(conversationId, reply as ConversationMessage, { runId, parentId: "user" });
+  time = 5000;
+  await logger.append({ type: "model.request.started", conversationId, runId, content: { callId: "call" } });
+  time = 8250;
+  await logger.append({ type: "model.response.received", conversationId, runId, content: { callId: "call" } });
+  reply.parts.push({ type: "step-start" }, { type: "reasoning", text: "second response" });
+  await logger.appendMessage(conversationId, reply as ConversationMessage, { runId, parentId: "user" });
+  // A response without a valid start must not reuse a previous request's time.
+  await logger.append({ type: "model.response.received", conversationId, runId, content: { callId: "call" } });
+  reply.parts.push({ type: "step-start" }, { type: "reasoning", text: "unknown" });
+  await logger.appendMessage(conversationId, reply as ConversationMessage, { runId, parentId: "user" });
+  const runtime = new ConversationStore(logger, () => { throw new Error("Restoration must not request a model"); });
+  await runtime.threads.switchToThread(conversationId);
+  const parts = runtime.getState().thread.messages.at(-1)!.parts;
+  expect(parts.map((part) => part.type === "reasoning" ? part.responseTimeMs : undefined)).toEqual([1234, 1234, 3250, undefined]);
+  expect(parts[0]).toMatchObject({ responseTimingId: expect.any(Number) });
+  expect(parts[1]).toMatchObject({ responseTimingId: (parts[0] as { responseTimingId: number }).responseTimingId });
+});
+
+it("never reuses missing or mismatched response timing in live updates or restoration", async () => {
+  const events: LogEvent[] = [];
+  let time = 0;
+  const logger = new EventLogger({ store: {
+    async append(event) { const stored = { ...event, timestamp: new Date(time).toISOString(), id: events.length + 1 }; events.push(stored); return stored; },
+    async all() { return [...events]; },
+  } });
+  const conversationId = "missing-times", runId = "run";
+  let runtime!: ConversationStore;
+  const durations = () => runtime.getState().thread.messages.at(-1)!.parts.map((part) => part.type === "reasoning" ? part.responseTimeMs : undefined);
+  runtime = new ConversationStore(logger, () => ({ async sendMessages(options) {
+    const reply: SidePanelMessage = { id: "reply", role: "assistant", parts: [] };
+    const record = async (type: string, callId: string, timestamp: number) => {
+      time = timestamp;
+      await logger.append({ type, conversationId, runId, content: { callId } });
+    };
+    const publish = async () => {
+      reply.parts.push({ type: "reasoning", text: `part-${reply.parts.length}` });
+      const snapshot = { ...reply, parts: [...reply.parts] };
+      await logger.appendMessage(conversationId, snapshot as ConversationMessage, { runId, parentId: options.messages.at(-1)!.id });
+      await options.onMessage?.(snapshot);
+    };
+    await record("model.request.started", "first", 0);
+    await record("model.response.received", "first", 100);
+    await publish();
+    // No lifecycle events for the next response.
+    await publish();
+    await record("model.request.started", "second", 200);
+    await record("model.response.received", "different-call", 350);
+    await publish();
+    await record("model.request.started", "unfinished", 400);
+    await publish();
+    // Even the same call id must not match a start from before that publication.
+    await record("model.response.received", "unfinished", 800);
+    await publish();
+    await record("model.request.started", "negative", 1000);
+    await record("model.response.received", "negative", 900);
+    await publish();
+    expect(durations()).toEqual([100, undefined, undefined, undefined, undefined, undefined]);
+    return reply;
+  } }), conversationId);
+  const disconnect = runtime.connect();
+  try {
+    await runtime.threads.reload();
+    await runtime.thread.append("go");
+    expect(durations()).toEqual([100, undefined, undefined, undefined, undefined, undefined]);
+  } finally { disconnect(); }
+});

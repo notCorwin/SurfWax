@@ -311,9 +311,11 @@ test("keeps consecutive reasoning and tool cycles in order", async () => {
     reasoning_content: `REASONING_${index}`,
     tool_calls: [infoCall(`reasoning-tool-${index}`)],
   }));
+  let finishResponse!: () => void;
+  const responseReady = new Promise<void>((resolve) => { finishResponse = resolve; });
   const provider = await startProvider([
     ...calls.map((call) => assistantResponse(call)),
-    delayedResponse(textResponse("REASONING_CYCLES_DONE"), 4_000), textResponse("活动测试"),
+    { response: textResponse("REASONING_CYCLES_DONE"), startAfter: responseReady }, textResponse("活动测试"),
   ]);
   const opened = await openExtension();
   try {
@@ -326,6 +328,9 @@ test("keeps consecutive reasoning and tool cycles in order", async () => {
     await expect.poll(async () => (await readEvents(opened.page)).filter((event) => event.type === "tool.finished" && String(event.toolCallId).startsWith("reasoning-tool-")).length).toBe(4);
     const turn = opened.page.locator(".conversation-turn").last();
     await expect(turn.getByTestId("reasoning-item")).toHaveCount(4);
+    for (const row of await turn.getByTestId("reasoning-item").all()) {
+      await expect(row).toHaveText(/^思考完成 · \d+\.\d{2} 秒$/);
+    }
     await expect(turn.getByTestId("live-tool-calls")).toHaveCount(1);
     await expect(turn.getByTestId("tool-group-summary")).toHaveCount(0);
     const viewport = turn.getByTestId("live-tool-viewport");
@@ -334,6 +339,7 @@ test("keeps consecutive reasoning and tool cycles in order", async () => {
     await expect(viewport.locator('[data-tool-id^="waiting:"]')).toHaveCount(5);
     await expect(turn.getByTestId("live-tool-viewport").getByTestId("waiting-status")).toBeVisible();
     await expect(turn.getByTestId("reasoning-item").last()).toHaveClass("activity transcript-activity");
+    finishResponse();
     await expect(turn.locator(".markdown-body", { hasText: "REASONING_CYCLES_DONE" })).toBeVisible();
     await expect(turn.getByTestId("live-tool-calls")).toHaveCount(0);
     await expect(turn.getByTestId("tool-group-summary")).toHaveCount(1);
@@ -341,6 +347,7 @@ test("keeps consecutive reasoning and tool cycles in order", async () => {
     await expect(turn.getByTestId("reasoning-item").last()).toHaveClass("activity transcript-activity");
     await expect(turn.getByTestId("reasoning-item").locator("summary")).toHaveCount(0);
   } finally {
+    finishResponse();
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
 });

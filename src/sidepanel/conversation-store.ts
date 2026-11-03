@@ -5,9 +5,11 @@ import { ConversationListProjection, fromLogValue, type ConversationRepository, 
 
 export type PartStatus = { type: "running" | "complete" | "incomplete" | "requires-action"; reason?: string; error?: unknown };
 export type MessagePart =
-  | { type: "text" | "reasoning"; text: string; status: PartStatus }
+  | { type: "text" | "reasoning"; text: string; status: PartStatus; responseTimeMs?: number; responseTimingId?: number }
   | { type: "tool-call"; toolCallId: string; toolName: string; args: unknown; result?: unknown; isError?: boolean; durationMs?: number; startedAtMs?: number; finishedAtMs?: number; timingIncomplete?: boolean; interrupted?: boolean; status: PartStatus };
 type ToolTiming = { durationMs?: number; startedAtMs?: number; finishedAtMs?: number; timingIncomplete?: boolean; interrupted?: boolean };
+type ResponseTiming = { responseTimeMs: number; responseTimingId: number };
+const reasoningKey = (runId: string, messageId: string, index: number) => JSON.stringify([runId, messageId, index]);
 const timingKey = (runId: string, toolCallId: string) => JSON.stringify([runId, toolCallId]);
 export type MessageView = {
   id: string; runId?: string; role: SidePanelMessage["role"]; parts: readonly MessagePart[]; content: readonly MessagePart[];
@@ -43,8 +45,8 @@ export function createMessageProjection() {
   let cache = new WeakMap<SidePanelMessage, { signature: string; view: MessageView }>();
   return {
     reset() { cache = new WeakMap(); },
-    message(source: SidePanelMessage, running: boolean, siblings: readonly string[], runId?: string, timings: ReadonlyMap<string, ToolTiming> = new Map()): MessageView {
-      const signature = JSON.stringify([running, siblings, runId, source.parts.flatMap((part) => "toolCallId" in part && runId ? [timings.get(timingKey(runId, part.toolCallId))] : [])]);
+    message(source: SidePanelMessage, running: boolean, siblings: readonly string[], runId?: string, timings: ReadonlyMap<string, ToolTiming> = new Map(), reasoningTimings: ReadonlyMap<string, ResponseTiming> = new Map()): MessageView {
+      const signature = JSON.stringify([running, siblings, runId, source.parts.map((part, index) => !runId ? undefined : part.type === "reasoning" ? reasoningTimings.get(reasoningKey(runId, source.id, index)) : "toolCallId" in part ? timings.get(timingKey(runId, part.toolCallId)) : undefined)]);
       const previous = cache.get(source);
       if (previous?.signature === signature) return previous.view;
       const interrupted = source.metadata?.interrupted === true || source.metadata?.custom?.interrupted === true;
@@ -52,8 +54,8 @@ export function createMessageProjection() {
       const status: PartStatus = running ? { type: "running" }
         : failure !== undefined ? { type: "incomplete", reason: "error", error: failure }
         : interrupted ? { type: "incomplete", reason: "cancelled" } : { type: "complete" };
-      const parts: MessagePart[] = source.parts.flatMap((part): MessagePart[] => {
-        if (part.type === "text" || part.type === "reasoning") return [{ type: part.type, text: part.text, status: { type: "complete" } }];
+      const parts: MessagePart[] = source.parts.flatMap((part, index): MessagePart[] => {
+        if (part.type === "text" || part.type === "reasoning") return [{ type: part.type, text: part.text, status: { type: "complete" }, ...(part.type === "reasoning" && runId ? reasoningTimings.get(reasoningKey(runId, source.id, index)) : {}) }];
         if (part.type !== "dynamic-tool" && !part.type.startsWith("tool-")) return [];
         const tool = part as Extract<SidePanelMessage["parts"][number], { toolCallId: string }>;
         const complete = tool.state === "output-available";
@@ -84,6 +86,10 @@ export class ConversationStore {
   private projection = createMessageProjection();
   private messageRuns = new Map<string, string>();
   private toolTimings = new Map<string, ToolTiming>();
+  private requestStarts = new Map<string, { callId: string; startedAt: number }>();
+  private responseTimings = new Map<string, ResponseTiming>();
+  private reasoningTimings = new Map<string, ResponseTiming>();
+  private timedMessageLengths = new Map<string, number>();
   private controller?: AbortController;
   private loadVersion = 0;
   private listVersion = 0;
@@ -117,7 +123,7 @@ export class ConversationStore {
     this.updateThread({ messages: messages.map((message, index) => {
       const parent = parents.get(message.id) ?? messages[index - 1]?.id ?? null;
       const group = siblings.get(parent) ?? [];
-      const view = this.projection.message(message, message.id === liveId, group.includes(message.id) ? group : [...group, message.id], this.messageRuns.get(message.id), this.toolTimings);
+      const view = this.projection.message(message, message.id === liveId, group.includes(message.id) ? group : [...group, message.id], this.messageRuns.get(message.id), this.toolTimings, this.reasoningTimings);
       const parentMessage = parent ? entries.get(parent) : undefined;
       if (message.role !== "assistant" || parentMessage?.message.role !== "user") return view;
       const userSiblings = siblings.get(parentMessage.parentId) ?? [];
@@ -133,6 +139,10 @@ export class ConversationStore {
     this.repository = repository;
     this.messageRuns.clear();
     this.toolTimings.clear();
+    this.requestStarts.clear();
+    this.responseTimings.clear();
+    this.reasoningTimings.clear();
+    this.timedMessageLengths.clear();
     for (const event of events) this.ingestTiming(event);
     this.preferredChildren.clear();
     for (const event of events) if (event.type === "conversation.branch.selected") {
@@ -144,9 +154,43 @@ export class ConversationStore {
   }
   private ingestTiming(event: LogEvent): boolean {
     if (!event.runId) return false;
+    if (event.type === "model.request.started") {
+      this.responseTimings.delete(event.runId);
+      const start = Date.parse(event.timestamp);
+      const content = fromLogValue(event.content, event.valueEncoding) as { callId?: unknown } | null;
+      if (Number.isFinite(start) && typeof content?.callId === "string") this.requestStarts.set(event.runId, { callId: content.callId, startedAt: start });
+      else this.requestStarts.delete(event.runId);
+      return false;
+    }
+    if (event.type === "model.response.received") {
+      const start = this.requestStarts.get(event.runId);
+      const end = Date.parse(event.timestamp);
+      this.requestStarts.delete(event.runId);
+      this.responseTimings.delete(event.runId);
+      const content = fromLogValue(event.content, event.valueEncoding) as { callId?: unknown } | null;
+      if (start && content?.callId === start.callId && Number.isFinite(end) && end >= start.startedAt) {
+        this.responseTimings.set(event.runId, { responseTimeMs: end - start.startedAt, responseTimingId: event.id });
+      }
+      return false;
+    }
     if (event.type === "conversation.message") {
-      const message = fromLogValue(event.content, event.valueEncoding);
-      if (message && typeof message === "object" && typeof (message as { id?: unknown }).id === "string") this.messageRuns.set((message as { id: string }).id, event.runId);
+      // A response belongs only to its first canonical publication. Later
+      // snapshots without lifecycle events must not inherit an older duration.
+      const timing = this.responseTimings.get(event.runId);
+      this.responseTimings.delete(event.runId);
+      this.requestStarts.delete(event.runId);
+      const message = fromLogValue(event.content, event.valueEncoding) as SidePanelMessage | undefined;
+      if (message && typeof message.id === "string") {
+        this.messageRuns.set(message.id, event.runId);
+        const key = timingKey(event.runId, message.id);
+        const parts = message.parts;
+        if (Array.isArray(parts)) {
+          for (let index = this.timedMessageLengths.get(key) ?? 0; index < parts.length; index++) {
+            if (parts[index]?.type === "reasoning" && timing) this.reasoningTimings.set(reasoningKey(event.runId, message.id, index), timing);
+          }
+          this.timedMessageLengths.set(key, parts.length);
+        }
+      }
       return false;
     }
     if (!event.toolCallId || !["tool.started", "tool.finished", "tool.failed"].includes(event.type)) return false;
@@ -165,7 +209,7 @@ export class ConversationStore {
     return true;
   }
   private async restore(id: string): Promise<LogEvent[]> {
-    const events = await this.logger.restorationEvents(id);
+    const events = await this.logger.restorationEvents(id, { modelTiming: true });
     this.restoreBranches(await restoreConversationRepository(events), events);
     this.display(branchMessages(this.repository));
     return events;
@@ -258,7 +302,7 @@ export class ConversationStore {
     const revision = ++this.loadVersion;
     this.updateThread({ isLoading: true, error: undefined });
     try {
-      const events = exists ? await this.logger.restorationEvents(id) : [];
+      const events = exists ? await this.logger.restorationEvents(id, { modelTiming: true }) : [];
       const repository = exists ? await restoreConversationRepository(events) : { headId: null, messages: [] };
       if (revision !== this.loadVersion) return;
       this.restoreBranches(repository, events);

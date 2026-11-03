@@ -1089,3 +1089,19 @@ describe("run recovery", () => {
     expect(events.find((event) => event.toolCallId === "done" && event.type === "tool.failed")?.output).toEqual({ ok: false, completed: [0], failed: 1, notRun: [2] });
   });
 });
+
+it("loads model timing only for display restoration", async () => {
+  const store = memoryStore();
+  const byTypes = vi.spyOn(store, "byTypes");
+  const logger = new EventLogger({ store });
+  await logger.appendMessage("one", { id: "reply", role: "assistant", parts: [] }, { runId: "run" });
+  await logger.append({ type: "model.request.started", conversationId: "one", runId: "run", content: { callId: "call" } });
+  await logger.append({ type: "model.response.received", conversationId: "one", runId: "run", content: { callId: "call" } });
+  const ordinary = await logger.restorationEvents("one");
+  expect(ordinary.some((event) => event.type.startsWith("model."))).toBe(false);
+  expect(byTypes.mock.calls.every(([types]) => types.every((type) => !type.startsWith("model.")))).toBe(true);
+  byTypes.mockClear();
+  const display = await logger.restorationEvents("one", { modelTiming: true });
+  expect(display.map((event) => event.type)).toEqual(["conversation.message", "model.request.started", "model.response.received"]);
+  expect(byTypes.mock.calls.some(([types]) => types.includes("model.response.received"))).toBe(true);
+});

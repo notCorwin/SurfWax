@@ -42,6 +42,22 @@ describe("tool timeline", () => {
     expect(html.lastIndexOf('data-testid="reasoning-item"')).toBeGreaterThan(html.indexOf("VISIBLE ANSWER"));
   });
 
+  it("shows response time per live reasoning and deduplicates the settled total", () => {
+    const parts = [
+      { ...reasoning("first"), responseTimeMs: 1234, responseTimingId: 1 },
+      { ...reasoning("same response"), responseTimeMs: 1234, responseTimingId: 1 },
+      { ...reasoning("next response"), responseTimeMs: 3250, responseTimingId: 2 },
+    ];
+    const messages = [message("timed", parts)];
+    const live = toolGroupAt(projectToolTimeline(messages, true), "timed", 0)!;
+    const liveHtml = renderToStaticMarkup(createElement(ToolGroupView, { group: live }));
+    expect(liveHtml.match(/1.23 秒/g)).toHaveLength(2);
+    expect(liveHtml).toContain("3.25 秒");
+    const settled = toolGroupAt(projectToolTimeline(messages, false), "timed", 0)!;
+    expect(renderToStaticMarkup(createElement(ToolGroupView, { group: settled }))).toContain("4.48 秒");
+    expect(liveHtml).toContain("模型响应总耗时");
+  });
+
   it("keeps incomplete historical reasoning distinct from an unfinished final activity", () => {
     const incomplete: MessagePart = { type: "reasoning", text: "partial", status: { type: "incomplete" } };
     const messages = [message("a", [incomplete, text("answer"), incomplete])];

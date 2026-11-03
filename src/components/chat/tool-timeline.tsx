@@ -120,6 +120,8 @@ export function ToolGroupView({ group }: { group: ToolGroup }) {
   const summary = summarizeToolActions(group.tools);
   const reasoningStatus = group.reasoning.some((part) => part.status.type === "running") ? "running"
     : group.reasoning.some((part) => part.status.type === "incomplete") ? "incomplete" : "complete";
+  const responseTimes = new Map(group.reasoning.flatMap((part) => part.responseTimingId !== undefined && part.responseTimeMs !== undefined ? [[part.responseTimingId, part.responseTimeMs] as const] : []));
+  const reasoningTime = group.reasoning.every((part) => part.responseTimeMs !== undefined) && responseTimes.size ? [...responseTimes.values()].reduce((sum, value) => sum + value, 0) : undefined;
   const reasoningPhase = reasoningStatus === "complete" || group.followedByText && reasoningStatus !== "running" ? "settled" : phase;
   const activityIds = new Set(group.activities.map((entry) => entry.id));
   const waitsAfter = new Map<string | undefined, WaitingActivity[]>();
@@ -135,7 +137,7 @@ export function ToolGroupView({ group }: { group: ToolGroup }) {
   const entries = waitingEntries();
   for (const { id, part } of group.activities) {
     entries.push({ id, content: part.type === "tool-call" ? <ToolFallback {...part} />
-      : <ActivityPhaseContext.Provider value={part.status.type === "complete" || group.followedByText ? "settled" : reasoningPhase}><Reasoning status={part.status} /></ActivityPhaseContext.Provider> });
+      : <ActivityPhaseContext.Provider value={part.status.type === "complete" || group.followedByText ? "settled" : reasoningPhase}><Reasoning status={part.status} responseTimeMs={part.responseTimeMs} /></ActivityPhaseContext.Provider> });
     entries.push(...waitingEntries(id));
   }
   return <div className="transcript-activity-list flex flex-col">
@@ -145,7 +147,7 @@ export function ToolGroupView({ group }: { group: ToolGroup }) {
       </div>
     </div> : <>
       {group.reasoning.length > 0 && <ActivityPhaseContext.Provider value={reasoningPhase}>
-        <Reasoning status={{ type: reasoningStatus }} />
+        <Reasoning status={{ type: reasoningStatus }} responseTimeMs={reasoningTime} />
       </ActivityPhaseContext.Provider>}
       {group.tools.length > 0 && <><div data-testid="tool-group-summary" className="transcript-activity">
         <span className="truncate" title={summary}>{summary}</span>{duration === undefined ? null : <span className="shrink-0">{` · ${(duration / 1000).toFixed(2)} 秒`}</span>}

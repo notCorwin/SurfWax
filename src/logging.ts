@@ -1278,13 +1278,18 @@ export class EventLogger {
     });
   }
 
-  async restorationEvents(conversationId: string): Promise<LogEvent[]> {
+  async restorationEvents(conversationId: string, { modelTiming = false }: { modelTiming?: boolean } = {}): Promise<LogEvent[]> {
     return this.readCanonical(async (store, floor) => {
       const lifecycle = await this.eventsByTypesAt(store, floor, [...RUN_EVENT_TYPES, "conversation.message", "conversation.branch.selected", "tool.finished", "tool.failed"], conversationId);
       const runIds = [...new Set(lifecycle.flatMap((event) => event.runId ? [event.runId] : []))];
       if (!runIds.length) return lifecycle;
-      const starts = await this.eventsByRunTypesAt(store, floor, runIds, ["tool.started"]);
-      return [...lifecycle, ...starts.filter((event) => event.conversationId === conversationId)].sort((left, right) => left.id - right.id);
+      const [starts, responses] = await Promise.all([
+        this.eventsByRunTypesAt(store, floor, runIds, ["tool.started"]),
+        modelTiming ? this.eventsByTypesAt(store, floor, ["model.request.started", "model.response.received"], conversationId) : [],
+      ]);
+      const runs = new Set(runIds);
+      return [...lifecycle, ...starts.filter((event) => event.conversationId === conversationId),
+        ...responses.filter((event) => event.runId && runs.has(event.runId))].sort((left, right) => left.id - right.id);
     });
   }
 
