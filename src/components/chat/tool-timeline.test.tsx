@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { MessagePart, MessageView } from "@/sidepanel/conversation-store";
 import { RuntimeViewContext, type RuntimeView } from "@/sidepanel/runtime-view";
 import { MessageRow } from "./message-row";
-import { projectToolTimeline, toolGroupAt, toolGroupDuration, ToolGroupView } from "./tool-timeline";
+import { projectToolTimeline, withWaitingActivity, toolGroupAt, toolGroupDuration, ToolGroupView } from "./tool-timeline";
 
 type Tool = Extract<MessagePart, { type: "tool-call" }>;
 const tool = (id: string, start = 0, end = 100): Tool => ({
@@ -52,6 +52,34 @@ describe("tool timeline", () => {
       createElement(MessageRow, { message: messages[0]!, messages, running: false, locked: false, latest: true, timeline, command: () => {} })));
     expect(html.indexOf("思考未完成")).toBeLessThan(html.indexOf("answer"));
     expect(html.indexOf("回复未生成")).toBeGreaterThan(html.indexOf("answer"));
+  });
+
+  it("counts reasoning and waiting in the same latest-three window as tools", () => {
+    const messages = [message("a", [reasoning("first"), tool("1"), reasoning("second"), tool("2")])];
+    const waiting = { afterId: "2", id: "waiting:request", label: "正在等待推理提供商响应" };
+    const projected = withWaitingActivity(projectToolTimeline(messages, true), [waiting]);
+    const group = projected.trailing!;
+    const html = renderToStaticMarkup(createElement(ToolGroupView, { group }));
+    expect(html.match(/data-tool-id=/g)).toHaveLength(3);
+    expect(html).not.toContain('data-tool-id="1"');
+    expect(html).not.toContain("first");
+    expect(html).toContain("second");
+    expect(html).toContain('data-tool-id="2"');
+    expect(html).toContain('data-tool-id="waiting:request"');
+    expect(html).toContain('data-testid="waiting-status"');
+    expect(withWaitingActivity(projectToolTimeline([message("b", [text("answer")])], true), [waiting]).trailing?.waiting).toEqual([waiting]);
+    expect(projected.timeline.starts.size).toBe(0);
+    const separated = withWaitingActivity(projectToolTimeline([message("split", [tool("1"), text("answer"), tool("2")])], true), [{ ...waiting, afterId: "1", endedAt: 1000 }]);
+    expect(separated.trailing?.waiting).toEqual([]);
+    expect(toolGroupAt(separated.timeline, "split", 0)?.waiting).toHaveLength(1);
+
+    const completed = { ...waiting, afterId: "1", endedAt: 1000 };
+    const next = withWaitingActivity(projectToolTimeline(messages, true), [completed]);
+    const historyHtml = renderToStaticMarkup(createElement(ToolGroupView, { group: next.trailing! }));
+    expect(historyHtml.match(/data-tool-id=/g)).toHaveLength(3);
+    expect(historyHtml.indexOf('data-tool-id="waiting:request"')).toBeLessThan(historyHtml.indexOf("second"));
+    expect(historyHtml.indexOf("second")).toBeLessThan(historyHtml.indexOf('data-tool-id="2"'));
+
   });
 
   it("keeps tool groups in place, spanning assistant messages until visible text breaks the sequence", () => {
@@ -101,7 +129,7 @@ describe("tool timeline", () => {
     const height = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(24);
     const animate = vi.fn(() => ({ cancel: vi.fn(), onfinish: null, oncancel: null }));
     Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, value: animate });
-    const render = async (tools: Tool[]) => act(() => root.render(createElement(ToolGroupView, { group: { key: "a", tools, reasoning: [], live: true, followedByText: false } })));
+    const render = async (tools: Tool[]) => act(() => root.render(createElement(ToolGroupView, { group: { key: "a", activities: tools.map((part) => ({ id: part.toolCallId, part })), tools, reasoning: [], live: true, followedByText: false } })));
     try {
       await render([tool("1"), tool("2"), tool("3")]);
       expect(animate).not.toHaveBeenCalled();

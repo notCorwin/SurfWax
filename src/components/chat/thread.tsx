@@ -10,8 +10,8 @@ import { ErrorNotice } from "../ui/error-notice";
 import { LocalComposer } from "./local-composer";
 import { MessageRow } from "./message-row";
 import { AssistantTurnActions } from "./assistant-turn-actions";
-import { projectToolTimeline } from "./tool-timeline";
-import { WaitingStatus } from "./waiting-status";
+import { projectToolTimeline, withWaitingActivity, ToolGroupView } from "./tool-timeline";
+import { useWaitingActivity } from "./waiting-status";
 import type { ModelConfig } from "@/types";
 import type { EventLogger } from "@/logging";
 
@@ -21,6 +21,11 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
 }) {
   const state = useThreadState();
   const { locked } = useRunState();
+  const lastMessage = state.messages.at(-1);
+  const lastPart = lastMessage?.parts.at(-1);
+  const afterActivityId = lastMessage && lastPart ? lastPart.type === "tool-call" ? lastPart.toolCallId : `${lastPart.type === "reasoning" ? "reasoning" : "text"}:${JSON.stringify([lastMessage.id, lastMessage.parts.length - 1])}` : undefined;
+  const waiting = useWaitingActivity({ logger, conversationId, running: state.isRunning, stopping: state.isStopping, stoppingAt: state.stoppingAt, afterActivityId,
+    toolsRunning: state.messages.some((message) => message.parts.some((part) => part.type === "tool-call" && part.status.type === "running")) });
   const projectTurns = useMemo(createTurnProjection, []);
   const turns = useMemo(() => projectTurns(state.messages), [projectTurns, state.messages]);
   const [warning, setWarning] = useState("");
@@ -48,13 +53,13 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
               {items.map((item) => {
                 const turn = turns[item.index]!;
                 const liveTurn = state.isRunning && item.index === turns.length - 1;
-                const timeline = projectToolTimeline(turn.messages, liveTurn);
+                const projected = projectToolTimeline(turn.messages, liveTurn);
+                const { timeline, trailing } = liveTurn ? withWaitingActivity(projected, waiting) : { timeline: projected, trailing: undefined };
                 return <div key={item.key} data-index={item.index} ref={virtualizer.measureElement} className="conversation-turn absolute top-0 left-0 flex w-full flex-col" style={{ transform: `translate3d(0, ${item.start}px, 0)` }}>
                   {turn.messages.map((message) => <MessageRow key={message.id} message={message} messages={turn.messages} latest={message.id === state.messages.at(-1)?.id}
                     running={liveTurn} locked={locked} command={command} timeline={timeline} />)}
                   <AssistantTurnActions assistants={turn.assistants} running={liveTurn} locked={locked} command={command} />
-                  {liveTurn && <WaitingStatus logger={logger} conversationId={conversationId} running={state.isRunning} stopping={state.isStopping}
-                    stoppingAt={state.stoppingAt} toolsRunning={turn.messages.some((message) => message.parts.some((part) => part.type === "tool-call" && part.status.type === "running"))} />}
+                  {trailing && <ToolGroupView group={trailing} />}
                 </div>;
               })}
             </div>

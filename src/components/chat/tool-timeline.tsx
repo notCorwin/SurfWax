@@ -1,13 +1,15 @@
 import type { MessagePart, MessageView } from "@/sidepanel/conversation-store";
 import { summarizeToolActions } from "./tool-labels";
 import { ToolFallback } from "./tool-fallback";
+import { WaitingActivityRow, type WaitingActivity } from "./waiting-status";
 import { Reasoning } from "./reasoning";
 import { useContext, useLayoutEffect, useRef } from "react";
 import { ActivityPhaseContext, toolActivity, toolWasInterrupted, type ActivityPhase } from "./process-group";
 
 type ToolPart = Extract<MessagePart, { type: "tool-call" }>;
 type ReasoningPart = Extract<MessagePart, { text: string }>;
-export type ToolGroup = { key: string; tools: ToolPart[]; reasoning: ReasoningPart[]; live: boolean; followedByText: boolean };
+type ActivityEntry = { id: string; part: ToolPart | ReasoningPart };
+export type ToolGroup = { activities: ActivityEntry[]; waiting?: WaitingActivity[]; key: string; tools: ToolPart[]; reasoning: ReasoningPart[]; live: boolean; followedByText: boolean };
 export type ToolTimeline = { starts: Map<string, ToolGroup> };
 const partKey = (messageId: string, index: number) => JSON.stringify([messageId, index]);
 const cached = new WeakMap<readonly MessageView[], { live?: ToolTimeline; settled?: ToolTimeline }>();
@@ -33,10 +35,11 @@ export function projectToolTimeline(messages: readonly MessageView[], running: b
       if (part.type === "reasoning" && !part.text.trim() && part.status.type !== "running") return;
       const key = partKey(message.id, index);
       if (!current) {
-        current = { key, tools: [], reasoning: [], live: false, followedByText: false };
+        current = { activities: [], key, tools: [], reasoning: [], live: false, followedByText: false };
         starts.set(key, current);
         groups.push(current);
       }
+      current.activities.push({ id: part.type === "tool-call" ? part.toolCallId : `reasoning:${key}`, part });
       if (part.type === "tool-call") current.tools.push(part);
       else current.reasoning.push(part);
     });
@@ -81,15 +84,36 @@ function FailureSummary({ tools, phase }: { tools: readonly ToolPart[]; phase: A
   </div>;
 }
 
+export function withWaitingActivity(timeline: ToolTimeline, waiting: WaitingActivity[]): { timeline: ToolTimeline; trailing?: ToolGroup } {
+  const groups = [...timeline.starts.values()];
+  const tail = groups.at(-1);
+  const starts = new Map(timeline.starts);
+  const remaining = waiting.filter((item) => {
+    const owner = groups.find((group) => group !== tail && group.activities.some((entry) => entry.id === item.afterId));
+    if (!owner) return true;
+    const existing = starts.get(owner.key)!;
+    starts.set(owner.key, { ...existing, waiting: [...(existing.waiting ?? []), item] });
+    return false;
+  });
+  if (tail?.live && !tail.followedByText) {
+    starts.delete(tail.key);
+    return { timeline: { starts }, trailing: { ...tail, waiting: remaining } };
+  }
+  const trailingWaits = remaining.filter((item) => !tail?.activities.some((entry) => entry.id === item.afterId));
+  if (tail && trailingWaits.length !== remaining.length) starts.set(tail.key, { ...tail, waiting: remaining.filter((item) => !trailingWaits.includes(item)) });
+  return { timeline: { starts }, trailing: { key: "live-activity", activities: [], tools: [], reasoning: [], live: true, followedByText: false, waiting: trailingWaits } };
+}
+
+type RollingEntry = { id: string; content: React.ReactNode };
 type PreviousRow = { id: string; top: number; height: number; clone: HTMLElement; offset: number; startedAt: number };
 const ROLL_DURATION = 200;
 const visualTop = (row: PreviousRow, now: number) => row.top + row.offset * Math.max(0, 1 - (now - row.startedAt) / ROLL_DURATION);
 
-function LiveTools({ tools }: { tools: readonly ToolPart[] }) {
+function LiveActivities({ entries }: { entries: readonly RollingEntry[] }) {
   const viewport = useRef<HTMLDivElement>(null);
   const previous = useRef<PreviousRow[]>([]);
   const previousIds = useRef<string | undefined>(undefined);
-  const ids = JSON.stringify(tools.map((tool) => tool.toolCallId));
+  const ids = JSON.stringify(entries.map((entry) => entry.id));
   useLayoutEffect(() => {
     const root = viewport.current;
     if (!root) return;
@@ -114,12 +138,14 @@ function LiveTools({ tools }: { tools: readonly ToolPart[] }) {
     if (old.length && motionAllowed && typeof root.animate === "function") {
       const animation = { duration: ROLL_DURATION, easing: "linear" };
       const step = old.length > 1 ? old[1]!.top - old[0]!.top : old[0]!.height;
-      const idsNow = new Set(tools.map((tool) => tool.toolCallId));
+      const idsNow = new Set(entries.map((entry) => entry.id));
       for (const row of old) if (!idsNow.has(row.id)) {
         const ghosts = root.querySelectorAll<HTMLElement>(":scope > [data-tool-id][aria-hidden]");
         if (ghosts.length >= 3) ghosts[0]?.remove();
         const clone = row.clone;
         clone.setAttribute("aria-hidden", "true");
+        clone.removeAttribute("data-testid");
+        clone.querySelectorAll("[data-testid], [id]").forEach((node) => { node.removeAttribute("data-testid"); node.removeAttribute("id"); });
         Object.assign(clone.style, { position: "absolute", top: `${visualTop(row, now)}px`, left: "0", width: "100%", pointerEvents: "none" });
         root.appendChild(clone);
         const effect = clone.animate([{ transform: "translateY(0)" }, { transform: `translateY(${-step}px)` }], animation);
@@ -137,7 +163,7 @@ function LiveTools({ tools }: { tools: readonly ToolPart[] }) {
       clone: row.cloneNode(true) as HTMLElement, offset: offsets.get(row.dataset.toolId!) ?? 0, startedAt: now }));
   });
   return <div ref={viewport} className="live-tool-viewport" data-testid="live-tool-viewport">
-    {tools.map((part) => <div data-tool-id={part.toolCallId} key={part.toolCallId}><ToolFallback {...part} /></div>)}
+    {entries.map((entry) => <div data-tool-id={entry.id} key={entry.id}>{entry.content}</div>)}
   </div>;
 }
 
@@ -148,15 +174,25 @@ export function ToolGroupView({ group }: { group: ToolGroup }) {
   const reasoningStatus = group.reasoning.some((part) => part.status.type === "running") ? "running"
     : group.reasoning.some((part) => part.status.type === "incomplete") ? "incomplete" : "complete";
   const reasoningPhase = reasoningStatus === "complete" || group.followedByText && reasoningStatus !== "running" ? "settled" : phase;
+  const entries: RollingEntry[] = group.activities.map(({ id, part }) => ({ id, content: part.type === "tool-call" ? <ToolFallback {...part} />
+    : <ActivityPhaseContext.Provider value={part.status.type === "complete" || group.followedByText ? "settled" : reasoningPhase}><Reasoning status={part.status} text={part.text} /></ActivityPhaseContext.Provider> }));
+  for (const waiting of [...(group.waiting ?? [])].reverse()) {
+    const index = waiting.afterId ? entries.findIndex((entry) => entry.id === waiting.afterId) : -1;
+    entries.splice(index + 1, 0, { id: waiting.id, content: <WaitingActivityRow activity={waiting} /> });
+  }
+  const recent = entries.slice(-3);
+  const visibleIds = new Set(recent.map((entry) => entry.id));
   return <div className="transcript-activity-list flex flex-col">
-    {group.reasoning.length > 0 && <ActivityPhaseContext.Provider value={reasoningPhase}>
-      <Reasoning status={{ type: reasoningStatus }} text={group.reasoning.map((part) => part.text).filter(Boolean).join("\n\n")} />
-    </ActivityPhaseContext.Provider>}
-    {group.tools.length > 0 && (group.live ? <div data-testid="live-tool-calls" className="transcript-activity-list flex flex-col">
-      <FailureSummary tools={group.tools.slice(0, -3)} phase={phase} />
-      <LiveTools tools={group.tools.slice(-3)} />
-    </div> : <><div data-testid="tool-group-summary" className="transcript-activity">
-    <span className="truncate" title={summary}>{summary}</span>{duration === undefined ? null : <span className="shrink-0">{` · ${(duration / 1000).toFixed(2)} 秒`}</span>}
-    </div><FailureSummary tools={group.tools} phase={phase} /></>)}
+    {group.live ? <div data-testid="live-tool-calls" className="transcript-activity-list flex flex-col">
+      <FailureSummary tools={group.tools.filter((tool) => !visibleIds.has(tool.toolCallId))} phase={phase} />
+      <LiveActivities entries={recent} />
+    </div> : <>
+      {group.reasoning.length > 0 && <ActivityPhaseContext.Provider value={reasoningPhase}>
+        <Reasoning status={{ type: reasoningStatus }} text={group.reasoning.map((part) => part.text).filter(Boolean).join("\n\n")} />
+      </ActivityPhaseContext.Provider>}
+      {group.tools.length > 0 && <><div data-testid="tool-group-summary" className="transcript-activity">
+        <span className="truncate" title={summary}>{summary}</span>{duration === undefined ? null : <span className="shrink-0">{` · ${(duration / 1000).toFixed(2)} 秒`}</span>}
+      </div><FailureSummary tools={group.tools} phase={phase} /></>}
+    </>}
   </div>;
 }

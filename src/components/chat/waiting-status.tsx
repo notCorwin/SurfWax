@@ -40,31 +40,59 @@ const labels: Record<Exclude<Phase, "terminal">, string> = {
   retrying: "正在重试推理请求", processing: "正在处理结果", finishing: "正在完成回复",
 };
 
-export function WaitingStatus({ logger, conversationId, running, stopping, stoppingAt, toolsRunning }: {
-  logger: EventLogger; conversationId: string; running: boolean; stopping: boolean; stoppingAt?: number; toolsRunning: boolean;
+export function useWaitingActivity({ logger, conversationId, running, stopping, stoppingAt, toolsRunning, afterActivityId }: {
+  logger: EventLogger; conversationId: string; running: boolean; stopping: boolean; stoppingAt?: number; toolsRunning: boolean; afterActivityId?: string;
 }) {
+  const anchor = useRef(afterActivityId);
+  anchor.current = afterActivityId;
+  const [waits, setWaits] = useState<WaitingActivity[]>([]);
   const [phase, setPhase] = useState<WaitingPhase>();
-  const [now, setNow] = useState(() => Date.now());
+  const latestPhase = useRef<WaitingPhase | undefined>(undefined);
   const active = useRef(running);
   active.current = running;
   useEffect(() => {
     setPhase(undefined);
+    latestPhase.current = undefined;
+    setWaits([]);
     return logger.subscribe((event) => {
-      if (event.conversationId === conversationId && active.current) setPhase((previous) => updateWaitingPhase(previous, event));
+      if (event.conversationId !== conversationId || !active.current) return;
+      const nextPhase = updateWaitingPhase(latestPhase.current, event);
+      if (nextPhase === latestPhase.current) return;
+      latestPhase.current = nextPhase;
+      setPhase(nextPhase);
+      const parsedTime = Date.parse(event.timestamp);
+      const eventTime = Number.isFinite(parsedTime) ? parsedTime : Date.now();
+      if (event.type === "conversation.submitted") setWaits([]);
+      if (event.type === "model.request.started") setWaits((previous) => [...previous.slice(-2).map((item) => item.endedAt === undefined ? { ...item, endedAt: eventTime, label: "等待响应结束" } : item), {
+        id: `waiting:${event.runId}:${event.id}`, label: labels.provider, startedAt: Number.isFinite(Date.parse(event.timestamp)) ? Date.parse(event.timestamp) : undefined, afterId: anchor.current,
+      }]);
+      if (event.type === "model.response.received" || event.type === "model.request.retrying" || event.type === "conversation.aborted" || event.type === "conversation.failed") {
+        const endedAt = eventTime;
+        setWaits((previous) => previous.map((item) => item.endedAt === undefined ? { ...item, endedAt,
+          label: event.type === "model.response.received" ? "等待响应完成" : event.type === "model.request.retrying" ? "等待响应失败" : "等待响应已中断" } : item));
+      }
     });
   }, [logger, conversationId]);
   useEffect(() => {
-    if (!running) setPhase(undefined);
+    if (!running) { latestPhase.current = undefined; setPhase(undefined); setWaits([]); }
   }, [running, conversationId]);
-  useEffect(() => {
-    if (!running) return;
-    setNow(Date.now());
-    const timer = setInterval(() => setNow(Date.now()), 50);
-    return () => clearInterval(timer);
-  }, [running]);
-  if (!running || (!stopping && (toolsRunning || phase?.phase === "terminal"))) return null;
+  if (!running || phase?.phase === "terminal") return [];
+  if (!stopping && (toolsRunning || phase?.phase === "provider")) return waits;
   const label = stopping ? "正在停止" : phase ? labels[phase.phase as Exclude<Phase, "terminal">] : "正在处理";
   const startedAt = stopping ? stoppingAt : phase?.startedAt;
-  const elapsed = startedAt === undefined ? "" : ` · ${(Math.max(0, now - startedAt) / 1000).toFixed(2)} 秒`;
-  return <p role="status" className="transcript-activity transcript-waiting" data-testid="waiting-status">{label}<span aria-live="off">{elapsed}</span></p>;
+  return [...waits.slice(-2), { id: `waiting:${phase?.runId ?? conversationId}:${stopping ? "stopping" : phase?.phase ?? "processing"}:${startedAt ?? "unknown"}`, label, startedAt, afterId: afterActivityId }];
+}
+
+export type WaitingActivity = { id: string; label: string; startedAt?: number; endedAt?: number; afterId?: string };
+
+export function WaitingActivityRow({ activity }: { activity: WaitingActivity }) {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    setNow(Date.now());
+    if (activity.startedAt === undefined || activity.endedAt !== undefined) return;
+    const timer = setInterval(() => setNow(Date.now()), 100);
+    return () => clearInterval(timer);
+  }, [activity.id, activity.startedAt, activity.endedAt]);
+  const elapsed = activity.startedAt === undefined ? "" : ` · ${(Math.max(0, (activity.endedAt ?? now) - activity.startedAt) / 1000).toFixed(2)} 秒`;
+  return <p role="status" className={activity.endedAt === undefined ? "transcript-activity transcript-waiting" : "transcript-activity"} data-testid={activity.endedAt === undefined ? "waiting-status" : "waiting-completed"}>{activity.label}<span aria-live="off">{elapsed}</span></p>;
 }

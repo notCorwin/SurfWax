@@ -101,9 +101,9 @@ test("bounds live tool calls and summarizes earlier failures", async () => {
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect.poll(async () => (await readEvents(opened.page)).filter((event) => ["tool.finished", "tool.failed"].includes(event.type) && [...failing, ...recent].some((tool) => tool.id === event.toolCallId)).length).toBe(8);
     const viewport = opened.page.getByTestId("live-tool-viewport");
-    const rows = viewport.locator("[data-tool-id]");
+    const rows = viewport.locator("[data-tool-id]:not([aria-hidden])");
     await expect(rows).toHaveCount(3);
-    await expect.poll(() => rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-tool-id")))).toEqual(recent.map((tool) => tool.id));
+    await expect.poll(() => rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-tool-id")))).toEqual([recent[1]!.id, recent[2]!.id, expect.stringMatching(/^waiting:/)]);
     const failure = opened.page.getByTestId("tool-failure-summary");
     await expect(failure).toHaveCount(1);
     await expect(failure).toContainText("5 项未完成");
@@ -374,8 +374,10 @@ test("groups consecutive reasoning and tool cycles into one bounded activity", a
     await expect(turn.getByTestId("tool-group-summary")).toHaveCount(0);
     const rows = turn.getByTestId("live-tool-viewport").locator('[data-tool-id]:not([aria-hidden="true"])');
     await expect.poll(() => rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-tool-id")))).toEqual([
-      "reasoning-tool-1", "reasoning-tool-2", "reasoning-tool-3",
+      expect.stringMatching(/^reasoning:/), "reasoning-tool-3", expect.stringMatching(/^waiting:/),
     ]);
+    await expect(turn.getByTestId("live-tool-viewport").getByTestId("waiting-status")).toBeVisible();
+    await expect(turn.getByTestId("reasoning-item")).toContainText("REASONING_3");
     await expect(turn.locator(".markdown-body", { hasText: "REASONING_CYCLES_DONE" })).toBeVisible();
     await expect(turn.getByTestId("live-tool-calls")).toHaveCount(0);
     await expect(turn.getByTestId("tool-group-summary")).toHaveCount(1);
