@@ -12,6 +12,48 @@ import { test, p95, textResponse, assistantResponse, delayedResponse, commandRes
 const completedInfo = /^查看页面信息 · \d+\.\d{2} 秒$/;
 const infoCall = (id: string) => ({ id, type: "function", function: { name: "get_page_info", arguments: "{}" } });
 
+test("uses the same line-height ratio across conversation content", async () => {
+  const markdown = "# 一级标题\n\n## 二级标题\n\n### 三级标题\n\n#### 四级标题\n\n##### 五级标题\n\n###### 六级标题\n\n正文内容\n\n```js\nconst n = 1;\n```\n\n| 列 | 值 |\n| --- | --- |\n| 一 | 二 |";
+  const provider = await startProvider([commandResponse("get_page_info", {}, "line-height-tool"), delayedResponse(textResponse(markdown), 3_000), textResponse("排版测试")]);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("字号和行高测试");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    const assertRatio = async (locator: Locator) => {
+      const { fontSize, lineHeight } = await locator.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return { fontSize: parseFloat(style.fontSize), lineHeight: parseFloat(style.lineHeight) };
+      });
+      expect(lineHeight).toBeCloseTo(fontSize * 1.5, 1);
+    };
+    const userBubble = opened.page.getByTestId("user-message-bubble");
+    const tool = opened.page.getByTestId("live-tool-calls").locator(".activity");
+    const waiting = opened.page.getByTestId("waiting-status");
+    await expect(tool).toHaveCount(1);
+    await expect(waiting).toBeVisible();
+    await assertRatio(userBubble);
+    await assertRatio(tool);
+    await assertRatio(waiting);
+    const rendered = opened.page.locator(".markdown-body").last();
+    await expect(rendered).toContainText("正文内容");
+    for (const selector of ["p", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "th", "td"]) {
+      const node = rendered.locator(selector).first();
+      await expect(node).toBeVisible();
+      await assertRatio(node);
+    }
+    await opened.page.getByTestId("edit-message-button").click();
+    const editor = opened.page.getByTestId("edit-message-input");
+    await expect(editor).toBeVisible();
+    await assertRatio(editor);
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
 test("keeps at most three recent tool calls and summarizes them after interruption", async () => {
   const provider = await startProvider([assistantResponse({ tool_calls: [infoCall("rolling-0"), infoCall("rolling-1"), infoCall("rolling-2"),
     { id: "rolling-3", type: "function", function: { name: "verify_state", arguments: JSON.stringify({ target: { by: "css", value: "#never" }, state: "visible", timeoutMs: 60_000 }) } },
@@ -566,7 +608,7 @@ test("renders a complete Markdown response without blocking draft input", async 
         paragraphGap: second.getBoundingClientRect().top - first.getBoundingClientRect().bottom,
         lineHeight: getComputedStyle(first).lineHeight,
       };
-    })).toEqual({ background: "rgba(0, 0, 0, 0)", paragraphGap: 12, lineHeight: "21px" });
+    })).toEqual({ background: "rgba(0, 0, 0, 0)", paragraphGap: 12, lineHeight: "19.5px" });
     await opened.page.getByTestId("thread-viewport").evaluate((viewport) => { viewport.scrollTop = 0; });
     await expect(composer).toBeInViewport();
   } finally {

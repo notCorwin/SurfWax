@@ -267,8 +267,11 @@ p {
   overflow-wrap: anywhere;
   color: var(--foreground);
   font-size: var(--message-body-size);
+  line-height: var(--transcript-line-height);
 }
 
+.markdown-body :is(h1, h2, h3, h4, h5, h6, pre, code),
+[data-streamdown="table-fullscreen"] code { line-height: var(--transcript-line-height); }
 .markdown-body h1 { font-size: var(--markdown-h1-size); }
 .markdown-body h2 { font-size: var(--markdown-h2-size); }
 .markdown-body h3 { font-size: var(--markdown-h3-size); }
@@ -332,7 +335,7 @@ p {
   min-width: 9rem;
   max-width: 18rem;
   padding: 0.5rem 0.75rem;
-  line-height: 1.45;
+  line-height: var(--transcript-line-height);
   overflow-wrap: break-word;
   word-break: normal;
 }
@@ -394,8 +397,8 @@ p {
 .composer-model { max-width: min(40vw, 16rem); }
 .composer-select { font-size: var(--type-xs); color: var(--muted-foreground); border-color: transparent; box-shadow: none; }
 .composer-select:not(:disabled):hover { background: var(--surface-hover); color: var(--foreground); }
-.user-message [data-slot="bubble-content"] { border-radius: var(--radius-xl); padding: calc(var(--spacing) * 2) calc(var(--spacing) * 3); font-size: var(--message-body-size); }
-.user-message [data-slot="textarea"] { font-size: var(--message-body-size); }
+.user-message [data-slot="bubble-content"] { border-radius: var(--radius-xl); padding: calc(var(--spacing) * 2) calc(var(--spacing) * 3); font-size: var(--message-body-size); line-height: var(--transcript-line-height); }
+.user-message [data-slot="textarea"] { font-size: var(--message-body-size); line-height: var(--transcript-line-height); }
 .assistant-message { padding-inline: 0; }
 .thinking-item > summary::after {
   content: ""; width: calc(var(--spacing) * 1.25); height: calc(var(--spacing) * 1.25); flex-shrink: 0;
@@ -417,7 +420,7 @@ p {
   font-size: var(--message-body-size);
   font-weight: 400;
   font-variant-numeric: tabular-nums;
-  line-height: var(--line-caption);
+  line-height: var(--transcript-line-height);
 }
 
 .transcript-activity:not(details)::before,
