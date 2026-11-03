@@ -258,7 +258,23 @@ p {
 .markdown-body {
   overflow-wrap: anywhere;
   color: var(--foreground);
+  font-size: var(--markdown-body-size);
 }
+
+.markdown-body h1 { font-size: var(--markdown-h1-size); }
+.markdown-body h2 { font-size: var(--markdown-h2-size); }
+.markdown-body h3 { font-size: var(--markdown-h3-size); }
+.markdown-body h4 { font-size: var(--markdown-h4-size); }
+.markdown-body h5 { font-size: var(--markdown-h5-size); }
+.markdown-body h6 { font-size: var(--markdown-h6-size); }
+.markdown-body code,
+.markdown-body pre { font-size: var(--markdown-code-size); }
+
+:is(.markdown-body, [data-streamdown="table-fullscreen"]) [data-streamdown="table"] :is(th, td) {
+  font-size: var(--markdown-body-size);
+}
+
+[data-streamdown="table-fullscreen"] code { font-size: var(--markdown-code-size); }
 
 /* Text blocks and tool summaries share the message's single vertical flow. */
 .markdown-body {
@@ -282,7 +298,6 @@ p {
 .markdown-body pre {
   max-width: 100%;
   overflow-x: auto;
-  font-size: var(--type-code);
 }
 
 .markdown-body [data-streamdown="code-block-body"],
