@@ -1,4 +1,3 @@
-import { existsSync } from "node:fs";
 import { access, mkdir } from "node:fs/promises";
 import { createServer as createNetServer } from "node:net";
 import { resolve } from "node:path";
@@ -43,24 +42,22 @@ async function waitForFile(path, timeoutMs = 30_000) {
   throw new Error(`等待开发构建超时：${path}`);
 }
 
-async function waitForWorker(timeoutMs = 30_000) {
-  const existing = context.serviceWorkers()[0];
+async function waitForWorker(extensionId, timeoutMs = 30_000) {
+  const belongsToExtension = (worker) => new URL(worker.url()).hostname === extensionId;
+  const existing = context.serviceWorkers().find(belongsToExtension);
   if (existing) return existing;
   try {
-    return await context.waitForEvent("serviceworker", { timeout: timeoutMs });
+    return await context.waitForEvent("serviceworker", {
+      predicate: belongsToExtension,
+      timeout: timeoutMs,
+    });
   } catch {
-    throw new Error("等待扩展 Service Worker 超时。");
+    throw new Error("等待 Surf Wax Service Worker 超时；请检查终端中的 Vite 编译错误后重新运行 npm run dev。");
   }
 }
 
 async function main() {
   if (!URL.canParse(targetUrl)) throw new Error(`无效的目标 URL：${targetUrl}`);
-  const executablePath = chromium.executablePath();
-  if (!existsSync(executablePath))
-    throw new Error(
-      "缺少 Playwright Chromium；请运行：npx playwright install chromium",
-    );
-
   await waitForPort();
   vite = await createServer();
   await vite.listen();
@@ -68,21 +65,50 @@ async function main() {
   await waitForFile(resolve(extensionPath, "manifest.json"));
 
   await mkdir(profilePath, { recursive: true });
-  context = await chromium.launchPersistentContext(profilePath, {
-    executablePath,
-    headless: false,
-    colorScheme: null,
-    viewport: null,
-    args: [
-      "--start-maximized",
-      `--disable-extensions-except=${extensionPath}`,
-      `--load-extension=${extensionPath}`,
-      "--hide-crash-restore-bubble",
-    ],
-  });
+  try {
+    context = await chromium.launchPersistentContext(profilePath, {
+      channel: "chrome",
+      chromiumSandbox: true,
+      headless: false,
+      colorScheme: null,
+      viewport: null,
+      ignoreDefaultArgs: ["--disable-extensions"],
+      args: [
+        "--start-maximized",
+        "--enable-unsafe-extension-debugging",
+        "--hide-crash-restore-bubble",
+      ],
+    });
+  } catch (error) {
+    throw new Error(`无法启动系统 Chrome；请确认已安装并更新 Google Chrome，且没有其他开发窗口占用 ${profilePath}。\n${error.message}`, { cause: error });
+  }
 
   const page = context.pages().find((candidate) => candidate.url() === "about:blank") ?? await context.newPage();
   const browserSession = await context.browser().newBrowserCDPSession();
+  let extensionId;
+  try {
+    ({ id: extensionId } = await browserSession.send("Extensions.loadUnpacked", {
+      path: extensionPath,
+    }));
+    const { extensions } = await browserSession.send("Extensions.getExtensions");
+    const others = extensions.filter((extension) => extension.enabled && extension.id !== extensionId);
+    if (others.length) {
+      // Keep prior output directories installed (and their data intact), but
+      // restore the single-extension isolation of the old launch flags.
+      const management = await context.newPage();
+      try {
+        await management.goto("chrome://extensions/");
+        await management.evaluate(async (ids) => {
+          for (const id of ids) await chrome.management.setEnabled(id, false);
+        }, others.map((extension) => extension.id));
+      } finally {
+        await management.close();
+      }
+    }
+  } catch (error) {
+    throw new Error(`无法加载 Surf Wax 开发扩展；请更新系统 Chrome，并检查 ${extensionPath}/manifest.json 和 Vite 编译错误。\n${error.message}`, { cause: error });
+  }
+  console.log(`开发浏览器：${context.browser().version()}（系统 Chrome，沙箱已启用）。`);
   const pageSession = await context.newCDPSession(page);
   const { windowId } = await pageSession.send("Browser.getWindowForTarget");
   await browserSession.send("Browser.setWindowBounds", {
@@ -102,8 +128,7 @@ async function main() {
     throw new Error("无法将开发浏览器窗口铺满屏幕的可用区域。");
   }
 
-  const worker = await reloadDevelopmentExtension(context, await waitForWorker());
-  const extensionId = new URL(worker.url()).hostname;
+  await reloadDevelopmentExtension(context, await waitForWorker(extensionId));
   console.log("Surf Wax 开发扩展已重新加载，当前源码已生效。");
 
   const settings = await context.newPage();
@@ -113,9 +138,9 @@ async function main() {
       "extensions-toggle-row#allow-user-scripts cr-toggle#crToggle",
     );
     await toggle.waitFor({ state: "visible" });
-    if (await toggle.getAttribute("aria-pressed") !== "true") await toggle.click();
+    if (await toggle.getAttribute("aria-checked") !== "true") await toggle.click();
     await settings.locator(
-      "extensions-toggle-row#allow-user-scripts cr-toggle#crToggle[aria-pressed='true']",
+      "extensions-toggle-row#allow-user-scripts cr-toggle#crToggle[aria-checked='true']",
     ).waitFor({ state: "visible" });
   } finally {
     await settings.close();
