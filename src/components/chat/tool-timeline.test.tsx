@@ -36,9 +36,9 @@ describe("tool timeline", () => {
     expect(html.match(/思考完成/g)).toHaveLength(2);
     expect(html).not.toContain("回复未生成");
     expect(html.match(/data-testid="tool-group-summary"/g)).toHaveLength(2);
-    expect(html).toContain("first thought");
-    expect(html).toContain("second thought");
-    expect(html).toContain("third thought");
+    expect(html).not.toContain("first thought");
+    expect(html).not.toContain("second thought");
+    expect(html).not.toContain("third thought");
     expect(html.indexOf('data-testid="tool-group-summary"')).toBeLessThan(html.indexOf("VISIBLE ANSWER"));
     expect(html.lastIndexOf('data-testid="reasoning-item"')).toBeGreaterThan(html.indexOf("VISIBLE ANSWER"));
   });
@@ -63,7 +63,7 @@ describe("tool timeline", () => {
     expect(html.match(/data-tool-id=/g)).toHaveLength(3);
     expect(html).not.toContain('data-tool-id="1"');
     expect(html).not.toContain("first");
-    expect(html).toContain("second");
+    expect(html).toContain("思考完成");
     expect(html).toContain('data-tool-id="2"');
     expect(html).toContain('data-tool-id="waiting:request"');
     expect(html).toContain('data-testid="waiting-status"');
@@ -77,8 +77,8 @@ describe("tool timeline", () => {
     const next = withWaitingActivity(projectToolTimeline(messages, true), [completed]);
     const historyHtml = renderToStaticMarkup(createElement(ToolGroupView, { group: next.trailing! }));
     expect(historyHtml.match(/data-tool-id=/g)).toHaveLength(3);
-    expect(historyHtml.indexOf('data-tool-id="waiting:request"')).toBeLessThan(historyHtml.indexOf("second"));
-    expect(historyHtml.indexOf("second")).toBeLessThan(historyHtml.indexOf('data-tool-id="2"'));
+    expect(historyHtml.indexOf('data-tool-id="waiting:request"')).toBeLessThan(historyHtml.indexOf("思考完成"));
+    expect(historyHtml.indexOf("思考完成")).toBeLessThan(historyHtml.indexOf('data-tool-id="2"'));
 
   });
 

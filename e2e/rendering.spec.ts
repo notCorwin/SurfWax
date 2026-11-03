@@ -377,15 +377,13 @@ test("groups consecutive reasoning and tool cycles into one bounded activity", a
       expect.stringMatching(/^reasoning:/), "reasoning-tool-3", expect.stringMatching(/^waiting:/),
     ]);
     await expect(turn.getByTestId("live-tool-viewport").getByTestId("waiting-status")).toBeVisible();
-    await expect(turn.getByTestId("reasoning-item")).toContainText("REASONING_3");
+    await expect(turn.getByTestId("reasoning-item")).toHaveClass("activity transcript-activity");
     await expect(turn.locator(".markdown-body", { hasText: "REASONING_CYCLES_DONE" })).toBeVisible();
     await expect(turn.getByTestId("live-tool-calls")).toHaveCount(0);
     await expect(turn.getByTestId("tool-group-summary")).toHaveCount(1);
     await expect(turn.getByTestId("reasoning-item")).toHaveCount(1);
-    await turn.getByTestId("reasoning-item").locator("summary").click();
-    for (let index = 0; index < 4; index++) {
-      await expect(turn.getByTestId("reasoning-item")).toContainText(`REASONING_${index}`);
-    }
+    await expect(turn.getByTestId("reasoning-item")).toHaveClass("activity transcript-activity");
+    await expect(turn.getByTestId("reasoning-item").locator("summary")).toHaveCount(0);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }
@@ -406,12 +404,12 @@ test("keeps reasoning and live tool activity in order", async () => {
     await opened.page.getByTestId("composer-input").fill("progress then think and run twice");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body", { hasText: "PROGRESS_BEFORE_ACTIVITIES" })).toHaveCount(1);
-    await expect(opened.page.getByTestId("reasoning-item")).toHaveCount(1);
-    const calls = opened.page.getByTestId("live-tool-calls").locator(".activity");
+    const calls = opened.page.getByTestId("live-tool-calls").locator(".activity:not([data-testid=reasoning-item])");
     await expect(calls).toHaveCount(2);
     await expect(calls.first()).toHaveText(completedInfo);
     await expect(calls.last()).toHaveText(completedInfo);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("NEXT_PROGRESS_TEXT");
+    await expect(opened.page.getByTestId("reasoning-item")).toHaveClass("activity transcript-activity");
     await expect(opened.page.getByTestId("tool-group-summary")).toHaveCount(1);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);

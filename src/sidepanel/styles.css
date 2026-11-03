@@ -219,13 +219,11 @@ p {
 
 
 .conversation-turn,
-.assistant-message-content,
-.thinking-body {
+.assistant-message-content {
   display: flex;
   flex-direction: column;
 }
 
-.thinking-body { gap: var(--transcript-block-gap); }
 
 .conversation-turn {
   padding-bottom: var(--transcript-turn-gap);
@@ -344,35 +342,9 @@ p {
   background: var(--muted);
 }
 
-.thinking-item,
 .activity {
   border: 0;
   background: transparent;
-}
-
-.thinking-item summary {
-  display: flex;
-  align-items: center;
-  cursor: pointer;
-  list-style: none;
-  color: var(--muted-foreground);
-  padding: 0;
-  line-height: var(--transcript-line-height);
-  gap: calc(var(--spacing) * 2);
-  font-size: var(--message-body-size);
-  font-weight: 450;
-  min-height: calc(var(--spacing) * 6);
-}
-
-.thinking-item summary::-webkit-details-marker {
-  display: none;
-}
-
-.thinking-body {
-  color: var(--muted-foreground);
-  padding: var(--transcript-block-gap) 0 0;
-  font-size: var(--message-body-size);
-  line-height: var(--transcript-line-height);
 }
 
 /* Panel layouts consume the shared material and typography tokens. */
@@ -400,15 +372,8 @@ p {
 .user-message [data-slot="bubble-content"] { border-radius: var(--radius-xl); padding: calc(var(--spacing) * 2) calc(var(--spacing) * 3); font-size: var(--message-body-size); line-height: var(--transcript-line-height); }
 .user-message [data-slot="textarea"] { font-size: var(--message-body-size); line-height: var(--transcript-line-height); }
 .assistant-message { padding-inline: 0; }
-.thinking-item > summary::after {
-  content: ""; width: calc(var(--spacing) * 1.25); height: calc(var(--spacing) * 1.25); flex-shrink: 0;
-  border-right: 1px solid currentColor; border-top: 1px solid currentColor; transform: rotate(45deg);
-}
-.thinking-item[open] > summary::after { transform: rotate(135deg); }
-
 /* Action history and its live state share one quiet, aligned text column. */
-.transcript-activity:not(details),
-.transcript-activity > summary {
+.transcript-activity {
   display: flex;
   align-items: center;
   gap: 0;
@@ -423,8 +388,7 @@ p {
   line-height: var(--transcript-line-height);
 }
 
-.transcript-activity:not(details)::before,
-.transcript-activity > summary::before {
+.transcript-activity::before {
   width: var(--spacing);
   height: var(--spacing);
   flex: 0 0 var(--spacing);
@@ -439,12 +403,8 @@ p {
   background: var(--brand);
 }
 
-.transcript-activity > summary::after {
-  margin-inline-start: auto;
-}
-
 .transcript-waiting > span,
-.transcript-activity:not(details) > span + span {
+.transcript-activity > span + span {
   white-space: pre;
 }
 

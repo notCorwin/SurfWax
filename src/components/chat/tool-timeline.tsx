@@ -175,7 +175,7 @@ export function ToolGroupView({ group }: { group: ToolGroup }) {
     : group.reasoning.some((part) => part.status.type === "incomplete") ? "incomplete" : "complete";
   const reasoningPhase = reasoningStatus === "complete" || group.followedByText && reasoningStatus !== "running" ? "settled" : phase;
   const entries: RollingEntry[] = group.activities.map(({ id, part }) => ({ id, content: part.type === "tool-call" ? <ToolFallback {...part} />
-    : <ActivityPhaseContext.Provider value={part.status.type === "complete" || group.followedByText ? "settled" : reasoningPhase}><Reasoning status={part.status} text={part.text} /></ActivityPhaseContext.Provider> }));
+    : <ActivityPhaseContext.Provider value={part.status.type === "complete" || group.followedByText ? "settled" : reasoningPhase}><Reasoning status={part.status} /></ActivityPhaseContext.Provider> }));
   for (const waiting of [...(group.waiting ?? [])].reverse()) {
     const index = waiting.afterId ? entries.findIndex((entry) => entry.id === waiting.afterId) : -1;
     entries.splice(index + 1, 0, { id: waiting.id, content: <WaitingActivityRow activity={waiting} /> });
@@ -188,7 +188,7 @@ export function ToolGroupView({ group }: { group: ToolGroup }) {
       <LiveActivities entries={recent} />
     </div> : <>
       {group.reasoning.length > 0 && <ActivityPhaseContext.Provider value={reasoningPhase}>
-        <Reasoning status={{ type: reasoningStatus }} text={group.reasoning.map((part) => part.text).filter(Boolean).join("\n\n")} />
+        <Reasoning status={{ type: reasoningStatus }} />
       </ActivityPhaseContext.Provider>}
       {group.tools.length > 0 && <><div data-testid="tool-group-summary" className="transcript-activity">
         <span className="truncate" title={summary}>{summary}</span>{duration === undefined ? null : <span className="shrink-0">{` · ${(duration / 1000).toFixed(2)} 秒`}</span>}

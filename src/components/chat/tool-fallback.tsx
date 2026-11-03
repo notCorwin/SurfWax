@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, useContext, useEffect, useState } from "react";
+import { ActivityRow } from "./activity-row";
 import { ActivityPhaseContext, toolActivity } from "./process-group";
 export const ToolFallback = memo(function ToolFallback(part: { toolName: string; status: { type: string }; args: unknown; result?: unknown; isError?: boolean; durationMs?: number; startedAtMs?: number; timingIncomplete?: boolean; interrupted?: boolean }) {
   const phase = useContext(ActivityPhaseContext);
@@ -13,10 +14,6 @@ export const ToolFallback = memo(function ToolFallback(part: { toolName: string;
     const interval = setInterval(() => setNow(Date.now()), 100);
     return () => clearInterval(interval);
   }, [running, part.startedAtMs, part.durationMs]);
-  return (
-    <div className="activity transcript-activity" data-status={status}>
-      <span aria-live="off">{label}</span>
-    </div>
-  );
+  return <ActivityRow status={status}>{label}</ActivityRow>;
 }, (before, after) => before.toolName === after.toolName && before.status.type === after.status.type && before.args === after.args
   && before.result === after.result && before.isError === after.isError && before.durationMs === after.durationMs && before.startedAtMs === after.startedAtMs && before.timingIncomplete === after.timingIncomplete && before.interrupted === after.interrupted);

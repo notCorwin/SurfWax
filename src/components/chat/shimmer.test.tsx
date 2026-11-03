@@ -20,8 +20,10 @@ it("distinguishes active reasoning and tool labels", () => {
     args: {},
   } as ComponentProps<typeof ToolFallback>));
 
-  expect(reasoning("running")).toContain('class="shimmer text-foreground/65">正在思考');
-  expect(reasoning("complete")).toContain("<span>思考完成</span>");
+  expect(reasoning("running")).toContain('class="activity transcript-activity" data-status="running"');
+  expect(reasoning("running")).not.toMatch(/<details|<summary|shimmer/);
+  expect(tool("running")).toContain('class="activity transcript-activity" data-status="running"');
+  expect(reasoning("complete")).toContain('<span aria-live="off">思考完成</span>');
   expect(tool("running")).toContain('<span aria-live="off">点击</span>');
   expect(tool("complete")).toContain('<span aria-live="off">点击</span>');
   expect(tool("incomplete")).toContain('<span aria-live="off">点击 · 未完成</span>');
