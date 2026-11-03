@@ -370,7 +370,8 @@ p {
 .conversation-item { min-height: calc(var(--spacing) * 10); }
 .conversation-select { height: auto; min-height: calc(var(--spacing) * 10); }
 .conversation-dropdown :is(.conversation-notice, .conversation-empty) { margin-inline: calc(var(--spacing) * 3); }
-.conversation-notice.thread-warning { width: 100%; max-width: var(--thread-max-width); margin-inline: auto; padding-inline: calc(var(--spacing) * 4); }
+.thread-content, .conversation-notice.thread-warning { padding-inline: var(--thread-content-inset); }
+.conversation-notice.thread-warning { width: 100%; max-width: var(--thread-max-width); margin-inline: auto; }
 .conversation-notice.thread-loading { margin-inline: 0; }
 .welcome { min-height: min(26rem, calc(100dvh - 19rem)); }
 .welcome-symbol { color: var(--brand); }

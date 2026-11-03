@@ -40,7 +40,7 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
     <MessageScrollerProvider autoScroll>
       <MessageScroller className="flex-1">
         <MessageScrollerViewport ref={scroller} data-testid="thread-viewport" className="overflow-x-hidden">
-          <MessageScrollerContent className="mx-auto block w-full max-w-(--thread-max-width) px-4 pt-5 pb-8">
+          <MessageScrollerContent className="thread-content mx-auto block w-full max-w-(--thread-max-width) pt-5 pb-8">
             {turns.length === 0 && !state.isLoading && <Welcome disabled={locked} />}
             {state.isLoading && <p role="status" className="conversation-notice thread-loading py-8">正在读取对话…</p>}
             <div ref={virtualizer.containerRef} className="relative w-full" style={{ height: totalSize }}>
