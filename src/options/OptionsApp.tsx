@@ -49,8 +49,7 @@ export function OptionsApp() {
   const selectedProvider = providers.find((provider) => provider.id === modelSettings.selectedProviderId);
   const providerOptions = useMemo<SearchComboboxOption[]>(() => [
     { value: "custom", label: "自定义 Endpoint" },
-    ...providers.filter((provider) => provider.id === "vercel").map((provider) => ({ value: provider.id, label: provider.name })),
-    ...providers.filter((provider) => provider.id !== "vercel").map((provider) => ({ value: provider.id, label: provider.name })),
+    ...providers.map((provider) => ({ value: provider.id, label: provider.name })),
   ], [providers]);
   const config = storedProfile && selectedProvider
     ? applyModelPreset(storedProfile, selectedProvider)
