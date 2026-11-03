@@ -3,12 +3,12 @@ import { expect, test, startProvider, textResponse, commandResponse, configure, 
 test("a malformed completion review leaves a correlated diagnostic and can be retried", async () => {
   const reviewBody = "not valid JSON: REVIEW_FAULT_MARKER";
   const provider = await startProvider([
-    commandResponse("complete_goal", { taskType: "answer", status: "completed", summary: "First answer" }, "first-goal"),
+    commandResponse("complete_goal", { taskType: "answer", status: "completed" }, "first-goal", "First answer"),
     (request) => {
       const part = request.messages.findLast((message: any) => message.role === "tool");
       const output = JSON.parse(typeof part.content === "string" ? part.content : part.content.find((item: any) => item.type === "text").text);
       expect(output).toMatchObject({ ok: false, error: { code: "goal-review-unavailable" } });
-      return commandResponse("complete_goal", { taskType: "answer", status: "completed", summary: "Recovered answer" }, "second-goal");
+      return commandResponse("complete_goal", { taskType: "answer", status: "completed" }, "second-goal", "Recovered answer");
     },
     textResponse("diagnostic review"),
   ], 0, undefined, undefined, 0, 0, [reviewBody]);

@@ -35,14 +35,14 @@ function fixture(model: MockLanguageModelV4, executorExtra: object = {}) {
 const options = () => ({ trigger: "submit-message" as const, chatId: "thread", messages: [user] });
 
 describe("goal mode", () => {
-  it("continues browser work after semantic rejection instead of accepting an incomplete summary", async () => {
+  it("continues browser work after semantic rejection instead of accepting an incomplete outcome", async () => {
     vi.mocked(reviewGoal).mockResolvedValueOnce({ accept: false, reason: "Requested exact date is missing", remaining: ["Read and deliver the exact release date"] });
     let step = 0;
     const model = new MockLanguageModelV4({ doGenerate: async () => {
       step++;
       if (step === 1 || step === 3) return calls(call(`read-${step}`, "inspect_page", {}));
       return calls(call(`goal-${step}`, "complete_goal", { taskType: "browser", status: "completed",
-        summary: step === 2 ? "Release is recent; exact date not checked" : "Release date is 2026-10-01", evidence: [{ toolCallId: `read-${step - 1}`, observation: "Release details read" }] }));
+        evidence: [{ toolCallId: `read-${step - 1}`, observation: "Release details read" }] }));
     } });
     const { logger, events } = fixture(model);
     const executor = { browserContext: async () => ({ tabs: [] }), inspect: async () => ({ snapshot: "Release date 2026-10-01" }) } as unknown as ChromeExecutor;
@@ -66,14 +66,13 @@ describe("goal mode", () => {
     const parameters = requests[0].tools.find((tool: any) => tool.name === "complete_goal").parameters;
     expect(parameters.type).toBe("object");
     expect(parameters.anyOf).toBeUndefined();
-    const answer = { taskType: "answer", status: "completed", summary: "Done" };
-    const browser = { taskType: "browser", status: "completed", summary: "Done", evidence: [{ toolCallId: "id", observation: "Observed" }] };
+    const answer = { taskType: "answer", status: "completed" };
+    const browser = { taskType: "browser", status: "completed", evidence: [{ toolCallId: "id", observation: "Observed" }] };
     const blocked = { ...browser, status: "blocked", dependency: "authentication", userAction: "Sign in", attemptedRecovery: [{ toolCallId: "id", action: "Checked" }] };
-    expect(parameters.required).not.toContain("summary");
+    expect(parameters.properties).not.toHaveProperty("summary");
     for (const value of [answer, browser, blocked]) {
       expect(GOAL_SCHEMA.safeParse(value).success).toBe(true);
-      const { summary: _summary, ...withoutSummary } = value;
-      expect(GOAL_SCHEMA.safeParse(withoutSummary).success).toBe(true);
+      expect(GOAL_SCHEMA.safeParse({ ...value, summary: "Done" }).success).toBe(false);
     }
     for (const value of [{ ...answer, status: "blocked" }, { ...answer, evidence: browser.evidence }, { ...browser, evidence: undefined },
       { ...browser, dependency: "authentication" }, { ...blocked, attemptedRecovery: undefined }, { ...browser, extra: true }])
@@ -148,8 +147,8 @@ describe("goal mode", () => {
   });
 
   it("validates browser evidence, blockers, unknown effects, and the pure answer exception", () => {
-    const goal = (id: string): Goal => ({ taskType: "browser", status: "completed", summary: "Done", evidence: [{ toolCallId: id, observation: "Observed" }] });
-    const answer: Goal = { taskType: "answer", status: "completed", summary: "An answer" };
+    const goal = (id: string): Goal => ({ taskType: "browser", status: "completed", evidence: [{ toolCallId: id, observation: "Observed" }] });
+    const answer: Goal = { taskType: "answer", status: "completed" };
     const good = localEvidence("observed", "inspect_page", { ok: true, result: "page" }, 1);
     const failed = localEvidence("failed", "click", { ok: false, error: { retryable: true } }, 2);
     const unknown = localEvidence("unknown", "click", { ok: false, error: { effectUnknown: true } }, 3);
@@ -173,12 +172,12 @@ describe("goal mode", () => {
       expect(validateGoal(goal("unobserved"), [localEvidence("unobserved", "click", { ok: true, pageSnapshot: snapshot }, 3)])).toContain("successful observation");
     }
     expect(validateGoal(goal("partial"), [localEvidence("partial", "inspect_page", { ok: true, ...pageSnapshot, partial: true }, 3)])).toBeDefined();
-    expect(validateGoal({ taskType: "browser", status: "completed", summary: "Done", evidence: [{ toolCallId: "observed", observation: "Observed" }, { toolCallId: "partial", observation: "Uncertain" }] },
+    expect(validateGoal({ taskType: "browser", status: "completed", evidence: [{ toolCallId: "observed", observation: "Observed" }, { toolCallId: "partial", observation: "Uncertain" }] },
       [good, localEvidence("partial", "inspect_page", { ok: true, ...pageSnapshot, partial: true }, 3)])).toContain("partial");
     expect(validateGoal(goal("pending"), [localEvidence("pending", "click", { ok: true, pageSnapshotStatus: { state: "pending" } }, 3)])).toContain("successful observation");
     expect(validateGoal(goal("observed"), [good, unknown])).toContain("unknown");
     expect(validateGoal(goal("verified"), [good, unknown, verified])).toContain("unknown");
-    const resolved = (id: string, target: string): Goal => ({ taskType: "browser", status: "completed", summary: "Done", evidence: [{ toolCallId: id, observation: "Outcome checked", resolves: [target] }] });
+    const resolved = (id: string, target: string): Goal => ({ taskType: "browser", status: "completed", evidence: [{ toolCallId: id, observation: "Outcome checked", resolves: [target] }] });
     expect(validateGoal(resolved("verified", "unknown"), [good, unknown, verified])).toBeUndefined();
     expect(validateGoal(resolved("wrapped", "unknown"), [unknown, wrapped])).toBeUndefined();
     expect(validateGoal(resolved("compact", "unknown"), [unknown, compacted])).toBeUndefined();
@@ -188,7 +187,7 @@ describe("goal mode", () => {
     expect(validateGoal(resolved("dispatch", "unknown"), [unknown, dispatch])).toContain("later successful observation");
     const other = localEvidence("other", "click", { ok: false, error: { effectUnknown: true } }, 4);
     expect(validateGoal(resolved("network", "unknown"), [unknown, other, network])).toContain("other");
-    const blocked: Goal = { taskType: "browser", status: "blocked", summary: "Sign in", dependency: "authentication", userAction: "Sign in",
+    const blocked: Goal = { taskType: "browser", status: "blocked", dependency: "authentication", userAction: "Sign in",
       attemptedRecovery: [{ toolCallId: "observed", action: "Checked the session" }], evidence: [{ toolCallId: "observed", observation: "Login page" }] };
     expect(validateGoal(blocked, [good])).toBeUndefined();
     expect(validateGoal({ ...blocked, evidence: [{ toolCallId: "dispatch", observation: "Clicked" }], attemptedRecovery: [{ toolCallId: "dispatch", action: "Clicked" }] }, [dispatch])).toContain("successful observation");
@@ -200,8 +199,8 @@ describe("goal mode", () => {
     let count = 0;
     const model = new MockLanguageModelV4({ doGenerate: async () => {
       if (++count === 1) return calls(call("read", "inspect_page", {}));
-      if (count === 2) return calls(call("answer", "complete_goal", { taskType: "answer", status: "completed", summary: "Done" }));
-      return calls(call("done", "complete_goal", { taskType: "browser", status: "completed", summary: "Done", evidence: [{ toolCallId: "read", observation: "Page checked" }] }));
+      if (count === 2) return calls(call("answer", "complete_goal", { taskType: "answer", status: "completed" }));
+      return calls(call("done", "complete_goal", { taskType: "browser", status: "completed", evidence: [{ toolCallId: "read", observation: "Page checked" }] }));
     } });
     const { logger, events } = fixture(model);
     const executor = { browserContext: async () => ({ tabs: [] }), inspect: async () => ({ snapshot: "page" }) } as unknown as ChromeExecutor;
@@ -219,8 +218,8 @@ describe("goal mode", () => {
       count++;
       if (count === 1) return calls(call("read", "inspect_page", {}));
       if (count === 2) return reply("Checking the outcome");
-      if (count === 3) return calls(call("invalid", "complete_goal", { taskType: "browser", status: "completed", summary: "Done", evidence: [{ toolCallId: "old", observation: "old" }] }));
-      return calls(call("done", "complete_goal", { taskType: "browser", status: "completed", summary: "Done", evidence: [{ toolCallId: "read", observation: "Page observed" }] }));
+      if (count === 3) return calls(call("invalid", "complete_goal", { taskType: "browser", status: "completed", evidence: [{ toolCallId: "old", observation: "old" }] }));
+      return calls(call("done", "complete_goal", { taskType: "browser", status: "completed", evidence: [{ toolCallId: "read", observation: "Page observed" }] }));
     } });
     const { events, logger, factory } = fixture(model, { inspect: async () => ({ snapshot: "page" }) });
     await logger.append({ type: "tool.finished", conversationId: "thread", runId: "previous", toolCallId: "old", content: { toolName: "inspect_page" }, output: { ok: true } });
@@ -230,12 +229,13 @@ describe("goal mode", () => {
     expect(events.find((event) => event.type === "tool.finished" && event.toolCallId?.endsWith("done"))?.output).toMatchObject({ ok: true });
   });
 
-  it("continues after repeated text and finishes only after a successful completion tool, publishing its summary", async () => {
+  it("continues after repeated text and finishes only after a successful completion tool, preserving assistant text", async () => {
     const prompts: string[] = [];
     const model = new MockLanguageModelV4({ doGenerate: async ({ prompt }) => {
       prompts.push(JSON.stringify(prompt));
       if (prompts.length < 3) return reply(`Progress ${prompts.length}`);
-      return calls(call("done", "complete_goal", { taskType: "answer", status: "completed", summary: "Finished the task." }));
+      return { ...calls(call("done", "complete_goal", { taskType: "answer", status: "completed" })),
+        content: [...reply("Finished the task.").content, call("done", "complete_goal", { taskType: "answer", status: "completed" })] };
     } });
     const { events, logger, factory } = fixture(model);
     const result = await createChatTransport(factory, logger, "thread", undefined, undefined, undefined, undefined, true).sendMessages(options());
@@ -245,7 +245,7 @@ describe("goal mode", () => {
     expect(prompts[2]!.match(/Goal mode is still active/g)).toHaveLength(2);
     expect(result.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "text", text: "Finished the task." })]));
     expect(events.filter((event) => event.type === "agent.goal.continued")).toHaveLength(2);
-    expect(events.find((event) => event.type === "tool.finished")).toMatchObject({ toolCallId: "2:done", output: { ok: true, summary: "Finished the task." } });
+    expect(events.find((event) => event.type === "tool.finished")).toMatchObject({ toolCallId: "2:done", output: { ok: true } });
     expect(events.at(-1)?.type).toBe("conversation.finished");
     const saved = (await logger.repository("thread")).messages.find(({ message }) => message.id === result.id)?.message;
     expect(saved?.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "text", text: "Finished the task." })]));
@@ -293,8 +293,8 @@ describe("goal mode", () => {
     let pending = false;
     const model = new MockLanguageModelV4({ doGenerate: async () => {
       count++;
-      if (count === 1) return calls(call("parallel", "complete_goal", { taskType: "answer", status: "completed", summary: "too soon" }), call("read", "inspect_page", {}));
-      if (count === 2) { pending = true; return calls(call("pending", "complete_goal", { taskType: "answer", status: "completed", summary: "too soon" })); }
+      if (count === 1) return calls(call("parallel", "complete_goal", { taskType: "answer", status: "completed" }), call("read", "inspect_page", {}));
+      if (count === 2) { pending = true; return calls(call("pending", "complete_goal", { taskType: "answer", status: "completed" })); }
       pending = false;
       return calls(call("done", "complete_goal", { taskType: "browser", status: "blocked", dependency: "authentication", userAction: "Sign in", attemptedRecovery: [{ toolCallId: "read", action: "Check session" }], evidence: [{ toolCallId: "read", observation: "Login required" }] }));
     } });
@@ -313,7 +313,7 @@ describe("goal mode", () => {
     const model = new MockLanguageModelV4({ doGenerate: async ({ prompt }) => {
       prompts.push(JSON.stringify(prompt));
       return prompts.length < 3 ? reply(`Progress ${prompts.length}`)
-        : calls(call("done", "complete_goal", { taskType: "answer", status: "completed", summary: "Done" }));
+        : calls(call("done", "complete_goal", { taskType: "answer", status: "completed" }));
     } });
     const { logger, factory } = fixture(model);
     const refresh: SidePanelMessage = { id: "refresh", role: "user", parts: [{ type: "text", text: "Refreshed page" }] };
@@ -330,7 +330,7 @@ describe("goal mode", () => {
     let count = 0;
     const model = new MockLanguageModelV4({ doGenerate: async () => ++count === 1
       ? calls(call("invalid", "complete_goal", { status: "completed" }))
-      : calls(call("done", "complete_goal", { taskType: "answer", status: "completed", summary: "Done" })) });
+      : calls(call("done", "complete_goal", { taskType: "answer", status: "completed" })) });
     const { events, logger, factory } = fixture(model);
     await createChatTransport(factory, logger, "thread", undefined, undefined, undefined, undefined, true).sendMessages(options());
     expect(count).toBe(2);

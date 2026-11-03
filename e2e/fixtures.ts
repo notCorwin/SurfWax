@@ -58,8 +58,8 @@ export function assistantResponse(message: Record<string, unknown>, usage?: { pr
   return completion(message, usage);
 }
 
-export function commandResponse(name: string, input: object, id: string): CompletionResponse {
-  return completion({ tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(input) } }] });
+export function commandResponse(name: string, input: object, id: string, content?: string): CompletionResponse {
+  return completion({ ...(content ? { content } : {}), tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify(input) } }] });
 }
 
 export type MockResponse = CompletionResponse | { status: number; error: string } | {

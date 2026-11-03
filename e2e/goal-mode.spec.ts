@@ -20,8 +20,8 @@ test("goal mode recovers after progress text and a failed action, then verifies 
     (request) => {
       const result = lastTool(request);
       expect(result).toMatchObject({ ok: true, result: { verified: true }, evidenceId: expect.any(String) });
-      return commandResponse("complete_goal", { taskType: "browser", status: "completed", summary: "Verified the submitted form.",
-        evidence: [{ toolCallId: result.evidenceId, observation: "The form displays Welcome agent@example.com." }] }, "finish");
+      return commandResponse("complete_goal", { taskType: "browser", status: "completed",
+        evidence: [{ toolCallId: result.evidenceId, observation: "The form displays Welcome agent@example.com." }] }, "finish", "Verified the submitted form.");
     },
     textResponse("Form completed"),
   ]);
@@ -52,7 +52,7 @@ test("goal mode keeps working until its completion tool is called", async () => 
   const replyMayFinish = new Promise<void>((resolve) => { releaseReply = resolve; });
   const provider = await startProvider([
     delayedResponse(textResponse("Still working"), 0, replyMayFinish),
-    commandResponse("complete_goal", { taskType: "answer", status: "completed", summary: "Goal reached" }, "goal-complete"),
+    commandResponse("complete_goal", { taskType: "answer", status: "completed" }, "goal-complete"),
     textResponse("目标模式测试"),
   ]);
   const opened = await openExtension();
