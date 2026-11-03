@@ -8,7 +8,6 @@ import { Textarea } from "@/components/ui/textarea";
 import { ErrorNotice } from "@/components/ui/error-notice";
 import { MarkdownText } from "./markdown-text";
 import { ActivityPhaseContext, activityPhaseAt, turnActivityBoundary, turnActivityPhase } from "./process-group";
-import { Reasoning } from "./reasoning";
 import { ToolGroupView, toolGroupAt, type ToolTimeline } from "./tool-timeline";
 
 import { useRuntimeView, type MessageView } from "@/sidepanel/runtime-view";
@@ -42,9 +41,6 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
     for (const [index, part] of parts.entries()) {
       if (part.type === "text") {
         output.push(user ? <p key={index} className="whitespace-pre-wrap wrap-break-word">{part.text}</p> : <MarkdownText key={index} text={part.text} />);
-      } else if (part.type === "reasoning") {
-        if (!part.text.trim() && part.status.type !== "running") continue;
-        output.push(<ActivityPhaseContext.Provider key={index} value={activityPhaseAt(boundary, index, phase, part.status.type)}><Reasoning {...part} /></ActivityPhaseContext.Provider>);
       } else {
         const group = toolGroupAt(timeline, message.id, index);
         if (group) output.push(<ActivityPhaseContext.Provider key={index} value={!group.live && phase !== "pending" ? phase : activityPhaseAt(boundary, index, phase, part.status.type)}><ToolGroupView group={group} /></ActivityPhaseContext.Provider>);
@@ -57,8 +53,7 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
     {user && !editing && <Button type="button" variant="ghost" size="icon-xs" disabled={locked} data-testid="edit-message-button" aria-label="编辑消息" title="编辑消息"
       onClick={() => command(() => { const rect = bubble.current!.getBoundingClientRect(); setEditSize({ width: rect.width, height: rect.height }); setDraft(client().getCopyText()); setEditing(true); })}><PencilIcon aria-hidden="true" /></Button>}
   </MessageFooter>, [runtime, user, message.id, copied, editing, running, locked, command]);
-  const hasVisiblePart = parts.some((part, index) => part.type === "tool-call" ? Boolean(toolGroupAt(timeline, message.id, index))
-    : part.type === "reasoning" ? Boolean(part.text.trim()) || part.status.type === "running" : Boolean(part.text.trim()));
+  const hasVisiblePart = parts.some((part, index) => part.type !== "text" ? Boolean(toolGroupAt(timeline, message.id, index)) : Boolean(part.text.trim()));
   if (!user && !hasVisiblePart && message.metadata.custom?.interrupted !== true
     && !(message.status?.type === "incomplete" && message.status.reason === "error")) return null;
   return <Message data-role={message.role} align={user ? "end" : "start"} aria-live={latest && !user ? "polite" : undefined} className={user ? "user-message" : "assistant-message px-2"}>

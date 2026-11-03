@@ -1,16 +1,18 @@
 import type { MessagePart, MessageView } from "@/sidepanel/conversation-store";
 import { summarizeToolActions } from "./tool-labels";
 import { ToolFallback } from "./tool-fallback";
+import { Reasoning } from "./reasoning";
 import { useContext, useLayoutEffect, useRef } from "react";
 import { ActivityPhaseContext, toolActivity, toolWasInterrupted, type ActivityPhase } from "./process-group";
 
 type ToolPart = Extract<MessagePart, { type: "tool-call" }>;
-export type ToolGroup = { key: string; tools: ToolPart[]; live: boolean };
+type ReasoningPart = Extract<MessagePart, { text: string }>;
+export type ToolGroup = { key: string; tools: ToolPart[]; reasoning: ReasoningPart[]; live: boolean; followedByText: boolean };
 export type ToolTimeline = { starts: Map<string, ToolGroup> };
 const partKey = (messageId: string, index: number) => JSON.stringify([messageId, index]);
 const cached = new WeakMap<readonly MessageView[], { live?: ToolTimeline; settled?: ToolTimeline }>();
 
-/** Preserve the part order, including tool sequences that cross assistant message boundaries. */
+/** Group adjacent reasoning and tools across messages, splitting only at visible assistant text. */
 export function projectToolTimeline(messages: readonly MessageView[], running: boolean): ToolTimeline {
   const existing = cached.get(messages);
   const previous = running ? existing?.live : existing?.settled;
@@ -21,22 +23,27 @@ export function projectToolTimeline(messages: readonly MessageView[], running: b
   for (const message of messages) {
     if (message.role !== "assistant") { current = undefined; continue; }
     message.parts.forEach((part, index) => {
-      if (part.type !== "tool-call") {
-        // Empty streaming placeholders are not visible content and must not split a sequence.
-        if (part.text.trim()) current = undefined;
+      if (part.type === "text") {
+        if (part.text.trim()) {
+          if (current) current.followedByText = true;
+          current = undefined;
+        }
         return;
       }
+      if (part.type === "reasoning" && !part.text.trim() && part.status.type !== "running") return;
       const key = partKey(message.id, index);
       if (!current) {
-        current = { key, tools: [], live: false };
+        current = { key, tools: [], reasoning: [], live: false, followedByText: false };
         starts.set(key, current);
         groups.push(current);
       }
-      current.tools.push(part);
+      if (part.type === "tool-call") current.tools.push(part);
+      else current.reasoning.push(part);
     });
   }
   if (running) for (const group of groups) {
-    group.live = group === current || group.tools.some((tool) => tool.status.type === "running" || tool.status.type === "requires-action");
+    group.live = group === current || group.tools.some((tool) => tool.status.type === "running" || tool.status.type === "requires-action")
+      || group.reasoning.some((part) => part.status.type === "running");
   }
   const timeline = { starts };
   cached.set(messages, { ...existing, [running ? "live" : "settled"]: timeline });
@@ -136,13 +143,20 @@ function LiveTools({ tools }: { tools: readonly ToolPart[] }) {
 
 export function ToolGroupView({ group }: { group: ToolGroup }) {
   const phase = useContext(ActivityPhaseContext);
-  if (group.live) return <div data-testid="live-tool-calls" className="transcript-activity-list flex flex-col">
-    <FailureSummary tools={group.tools.slice(0, -3)} phase={phase} />
-    <LiveTools tools={group.tools.slice(-3)} />
-  </div>;
   const duration = toolGroupDuration(group.tools);
   const summary = summarizeToolActions(group.tools);
-  return <><div data-testid="tool-group-summary" className="transcript-activity">
+  const reasoningStatus = group.reasoning.some((part) => part.status.type === "running") ? "running"
+    : group.reasoning.some((part) => part.status.type === "incomplete") ? "incomplete" : "complete";
+  const reasoningPhase = reasoningStatus === "complete" || group.followedByText && reasoningStatus !== "running" ? "settled" : phase;
+  return <div className="transcript-activity-list flex flex-col">
+    {group.reasoning.length > 0 && <ActivityPhaseContext.Provider value={reasoningPhase}>
+      <Reasoning status={{ type: reasoningStatus }} text={group.reasoning.map((part) => part.text).filter(Boolean).join("\n\n")} />
+    </ActivityPhaseContext.Provider>}
+    {group.tools.length > 0 && (group.live ? <div data-testid="live-tool-calls" className="transcript-activity-list flex flex-col">
+      <FailureSummary tools={group.tools.slice(0, -3)} phase={phase} />
+      <LiveTools tools={group.tools.slice(-3)} />
+    </div> : <><div data-testid="tool-group-summary" className="transcript-activity">
     <span className="truncate" title={summary}>{summary}</span>{duration === undefined ? null : <span className="shrink-0">{` · ${(duration / 1000).toFixed(2)} 秒`}</span>}
-  </div><FailureSummary tools={group.tools} phase={phase} /></>;
+    </div><FailureSummary tools={group.tools} phase={phase} /></>)}
+  </div>;
 }

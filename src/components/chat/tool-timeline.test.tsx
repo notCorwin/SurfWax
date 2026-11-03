@@ -12,9 +12,48 @@ const tool = (id: string, start = 0, end = 100): Tool => ({
   type: "tool-call", toolName: "inspect_pages", toolCallId: id, args: {}, status: { type: "complete" }, startedAtMs: start, finishedAtMs: end,
 });
 const text = (value: string): MessagePart => ({ type: "text", text: value, status: { type: "complete" } });
+const reasoning = (value: string): MessagePart => ({ type: "reasoning", text: value, status: { type: "complete" } });
 const message = (id: string, parts: MessagePart[]) => ({ id, role: "assistant", parts, metadata: {}, status: { type: "complete" }, branchCount: 1, branchNumber: 1 }) as unknown as MessageView;
 
 describe("tool timeline", () => {
+  it("groups reasoning and tools across messages until visible assistant text", () => {
+    const messages = [message("a", [reasoning("first thought"), tool("1")]),
+      message("b", [reasoning("second thought"), tool("2"), reasoning("third thought")]),
+      message("c", [text("VISIBLE ANSWER"), reasoning("later thought"), tool("3")])];
+    const timeline = projectToolTimeline(messages, false);
+    const first = toolGroupAt(timeline, "a", 0)!;
+    const second = toolGroupAt(timeline, "c", 1)!;
+    expect(first.reasoning.map((part) => part.text)).toEqual(["first thought", "second thought", "third thought"]);
+    expect(first.tools.map((part) => part.toolCallId)).toEqual(["1", "2"]);
+    expect(toolGroupAt(timeline, "b", 0)).toBeUndefined();
+    expect(second.reasoning.map((part) => part.text)).toEqual(["later thought"]);
+    expect(second.tools.map((part) => part.toolCallId)).toEqual(["3"]);
+    const runtime = { thread: { getMessageById: () => ({ getCopyText: () => "" }) } } as unknown as RuntimeView["runtime"];
+    const html = renderToStaticMarkup(createElement(RuntimeViewContext.Provider, { value: { runtime, thread: runtime.thread, getState: runtime.thread.getState } },
+      messages.map((item) => createElement(MessageRow, { key: item.id, message: item, messages, running: false, locked: false,
+        latest: item.id === "c", timeline, command: () => {} }))));
+    expect(html.match(/data-testid="reasoning-item"/g)).toHaveLength(2);
+    expect(html.match(/思考完成/g)).toHaveLength(2);
+    expect(html).not.toContain("回复未生成");
+    expect(html.match(/data-testid="tool-group-summary"/g)).toHaveLength(2);
+    expect(html).toContain("first thought");
+    expect(html).toContain("second thought");
+    expect(html).toContain("third thought");
+    expect(html.indexOf('data-testid="tool-group-summary"')).toBeLessThan(html.indexOf("VISIBLE ANSWER"));
+    expect(html.lastIndexOf('data-testid="reasoning-item"')).toBeGreaterThan(html.indexOf("VISIBLE ANSWER"));
+  });
+
+  it("keeps incomplete historical reasoning distinct from an unfinished final activity", () => {
+    const incomplete: MessagePart = { type: "reasoning", text: "partial", status: { type: "incomplete" } };
+    const messages = [message("a", [incomplete, text("answer"), incomplete])];
+    const timeline = projectToolTimeline(messages, false);
+    const runtime = { thread: { getMessageById: () => ({ getCopyText: () => "" }) } } as unknown as RuntimeView["runtime"];
+    const html = renderToStaticMarkup(createElement(RuntimeViewContext.Provider, { value: { runtime, thread: runtime.thread, getState: runtime.thread.getState } },
+      createElement(MessageRow, { message: messages[0]!, messages, running: false, locked: false, latest: true, timeline, command: () => {} })));
+    expect(html.indexOf("思考未完成")).toBeLessThan(html.indexOf("answer"));
+    expect(html.indexOf("回复未生成")).toBeGreaterThan(html.indexOf("answer"));
+  });
+
   it("keeps tool groups in place, spanning assistant messages until visible text breaks the sequence", () => {
     const messages = [message("a", [text("first"), tool("1"), tool("2")]), message("b", [text(" "), tool("3"), text("next"), tool("4")])];
     const projected = projectToolTimeline(messages, true);
@@ -62,7 +101,7 @@ describe("tool timeline", () => {
     const height = vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(24);
     const animate = vi.fn(() => ({ cancel: vi.fn(), onfinish: null, oncancel: null }));
     Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, value: animate });
-    const render = async (tools: Tool[]) => act(() => root.render(createElement(ToolGroupView, { group: { key: "a", tools, live: true } })));
+    const render = async (tools: Tool[]) => act(() => root.render(createElement(ToolGroupView, { group: { key: "a", tools, reasoning: [], live: true, followedByText: false } })));
     try {
       await render([tool("1"), tool("2"), tool("3")]);
       expect(animate).not.toHaveBeenCalled();

@@ -308,6 +308,45 @@ test("keeps text between tool groups in its chronological position", async () =>
   }
 });
 
+test("groups consecutive reasoning and tool cycles into one bounded activity", async () => {
+  const calls = Array.from({ length: 4 }, (_, index) => ({
+    reasoning_content: `REASONING_${index}`,
+    tool_calls: [infoCall(`reasoning-tool-${index}`)],
+  }));
+  const provider = await startProvider([
+    ...calls.map((call) => assistantResponse(call)),
+    delayedResponse(textResponse("REASONING_CYCLES_DONE"), 4_000), textResponse("活动测试"),
+  ]);
+  const opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    const options = await configure(opened.context, opened.page, provider.baseURL);
+    await options.close();
+    await opened.page.getByTestId("composer-input").fill("run repeated reasoning and tool cycles");
+    await opened.page.getByTestId("composer-input").press("Enter");
+    await expect.poll(async () => (await readEvents(opened.page)).filter((event) => event.type === "tool.finished" && String(event.toolCallId).startsWith("reasoning-tool-")).length).toBe(4);
+    const turn = opened.page.locator(".conversation-turn").last();
+    await expect(turn.getByTestId("reasoning-item")).toHaveCount(1);
+    await expect(turn.getByTestId("live-tool-calls")).toHaveCount(1);
+    await expect(turn.getByTestId("tool-group-summary")).toHaveCount(0);
+    const rows = turn.getByTestId("live-tool-viewport").locator('[data-tool-id]:not([aria-hidden="true"])');
+    await expect.poll(() => rows.evaluateAll((items) => items.map((item) => item.getAttribute("data-tool-id")))).toEqual([
+      "reasoning-tool-1", "reasoning-tool-2", "reasoning-tool-3",
+    ]);
+    await expect(turn.locator(".markdown-body", { hasText: "REASONING_CYCLES_DONE" })).toBeVisible();
+    await expect(turn.getByTestId("live-tool-calls")).toHaveCount(0);
+    await expect(turn.getByTestId("tool-group-summary")).toHaveCount(1);
+    await expect(turn.getByTestId("reasoning-item")).toHaveCount(1);
+    await turn.getByTestId("reasoning-item").locator("summary").click();
+    for (let index = 0; index < 4; index++) {
+      await expect(turn.getByTestId("reasoning-item")).toContainText(`REASONING_${index}`);
+    }
+  } finally {
+    await dispose(opened.context, opened.userDataDirectory, provider.server);
+  }
+});
+
 test("keeps reasoning and live tool activity in order", async () => {
   const provider = await startProvider([
     assistantResponse({ content: "PROGRESS_BEFORE_ACTIVITIES", reasoning_content: "PLAN", tool_calls: [
