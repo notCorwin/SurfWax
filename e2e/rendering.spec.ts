@@ -178,7 +178,7 @@ test("keeps text between tool groups in its chronological position", async () =>
   const provider = await startProvider([
     commandResponse("get_page_info", {}, "call-before-text"),
     assistantResponse({ content: "BETWEEN_PROCESS_GROUPS", tool_calls: [infoCall("call-after-text")] }),
-    delayedResponse(textResponse("FINAL_AFTER_GROUPS"), 1_500), textResponse("分段过程记录"),
+    delayedResponse(textResponse("FINAL_AFTER_GROUPS"), 1_500), textResponse("分段过程记录"), textResponse("REGENERATED_TURN"),
   ]);
   const opened = await openExtension();
   try {
@@ -188,6 +188,10 @@ test("keeps text between tool groups in its chronological position", async () =>
     await options.close();
     await opened.page.getByTestId("composer-input").fill("split process records around text");
     await opened.page.getByTestId("composer-input").press("Enter");
+    const turn = opened.page.locator(".conversation-turn").last();
+    await expect(turn.locator(".markdown-body", { hasText: "BETWEEN_PROCESS_GROUPS" })).toBeVisible();
+    await expect(turn.getByRole("button", { name: "重新生成回复" })).toHaveCount(0);
+    await expect(turn.getByRole("button", { name: "复制消息" })).toHaveCount(0);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FINAL_AFTER_GROUPS");
     const summaries = opened.page.getByTestId("tool-group-summary");
     await expect(summaries).toHaveCount(2);
@@ -203,6 +207,21 @@ test("keeps text between tool groups in its chronological position", async () =>
     expect(groups[0]).toBeLessThan(between);
     expect(between).toBeLessThan(groups[1]!);
     expect(groups[1]).toBeLessThan(final);
+    await expect(turn.getByRole("button", { name: "重新生成回复" })).toHaveCount(1);
+    const copyButtons = turn.getByRole("button", { name: "复制消息" });
+    await expect(copyButtons).toHaveCount(2); // User message and the complete assistant turn.
+    await opened.page.evaluate(() => {
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (text: string) => { (window as any).__copied = text; } } });
+    });
+    await copyButtons.last().click();
+    await expect.poll(() => opened.page.evaluate(() => (window as any).__copied)).toBe("BETWEEN_PROCESS_GROUPS\nFINAL_AFTER_GROUPS");
+    const requestCount = provider.requests.length;
+    await turn.getByRole("button", { name: "重新生成回复" }).click();
+    await expect(opened.page.locator(".markdown-body").last()).toContainText("REGENERATED_TURN");
+    const retry = provider.requests.slice(requestCount).find((request) => request.messages?.at(-1)?.role === "user");
+    expect(retry).toBeDefined();
+    expect(retry.messages.some((message: any) => message.role === "user" && JSON.stringify(message.content).includes("split process records around text"))).toBe(true);
+    expect(retry.messages.some((message: any) => message.role === "assistant")).toBe(false);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
   }

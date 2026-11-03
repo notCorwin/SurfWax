@@ -80,6 +80,8 @@ describe("tool timeline", () => {
     expect(html.indexOf("BEFORE")).toBeLessThan(html.indexOf("tool-group-summary"));
     expect(html.indexOf("tool-group-summary")).toBeLessThan(html.indexOf("AFTER"));
     expect(html.match(/data-testid="tool-group-summary"/g)).toHaveLength(1);
+    expect(html).not.toContain('aria-label="复制消息"');
+    expect(html).not.toContain('data-testid="replay-message-button"');
   });
 
   it("measures elapsed wall time rather than summing concurrent calls and omits unknown or incomplete timing", () => {

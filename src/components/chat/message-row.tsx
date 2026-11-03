@@ -1,5 +1,5 @@
 import { usePanelRuntime } from "@/sidepanel/runtime-view";
-import { ChevronLeftIcon, ChevronRightIcon, CopyIcon, PencilIcon, RotateCcwIcon } from "lucide-react";
+import { CopyIcon, PencilIcon } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
@@ -52,23 +52,11 @@ export const MessageRow = memo(function MessageRow({ message, messages, running,
     }
     return output;
   };
-  const actions = useMemo(() => !running && !locked && <MessageFooter className={`gap-1 px-0 ${user ? "justify-end" : "justify-start"}`}>
+  const actions = useMemo(() => user && !running && !locked && <MessageFooter className="gap-1 px-0 justify-end">
     <Button type="button" variant="ghost" size="icon-xs" aria-label={copied ? "已复制" : "复制消息"} title="复制消息" onClick={() => void copy()}><CopyIcon aria-hidden="true" /></Button>
     {user && !editing && <Button type="button" variant="ghost" size="icon-xs" disabled={locked} data-testid="edit-message-button" aria-label="编辑消息" title="编辑消息"
       onClick={() => command(() => { const rect = bubble.current!.getBoundingClientRect(); setEditSize({ width: rect.width, height: rect.height }); setDraft(client().getCopyText()); setEditing(true); })}><PencilIcon aria-hidden="true" /></Button>}
-    {!user && <Button type="button" variant="ghost" size="icon-xs" disabled={locked} data-testid="replay-message-button"
-      aria-label="重新生成回复" title="重新生成回复" onClick={() => command(() => client().reload())}><RotateCcwIcon aria-hidden="true" /></Button>}
-    {!user && message.branchCount > 1 && <div className="flex items-center gap-0.5 tabular-nums" aria-label="回复分支">
-      <Button type="button" variant="ghost" size="icon-xs" disabled={locked || message.branchNumber <= 1} aria-label="上一个分支" title="上一个分支" onClick={() => command(() => client().switchToBranch({ position: "previous" }))}><ChevronLeftIcon aria-hidden="true" /></Button>
-      <span className="min-w-8 text-center">{message.branchNumber} / {message.branchCount}</span>
-      <Button type="button" variant="ghost" size="icon-xs" disabled={locked || message.branchNumber >= message.branchCount} aria-label="下一个分支" title="下一个分支" onClick={() => command(() => client().switchToBranch({ position: "next" }))}><ChevronRightIcon aria-hidden="true" /></Button>
-    </div>}
-    {!user && message.userBranch && <div className="flex items-center gap-0.5 tabular-nums" aria-label="用户消息版本">
-      <Button type="button" variant="ghost" size="icon-xs" disabled={message.userBranch.number <= 1} aria-label="上一个消息版本" title="上一个消息版本" onClick={() => command(() => runtime.thread.getMessageById(message.userBranch!.id).switchToBranch({ position: "previous" }))}><ChevronLeftIcon aria-hidden="true" /></Button>
-      <span className="min-w-8 text-center">{message.userBranch.number} / {message.userBranch.count}</span>
-      <Button type="button" variant="ghost" size="icon-xs" disabled={message.userBranch.number >= message.userBranch.count} aria-label="下一个消息版本" title="下一个消息版本" onClick={() => command(() => runtime.thread.getMessageById(message.userBranch!.id).switchToBranch({ position: "next" }))}><ChevronRightIcon aria-hidden="true" /></Button>
-    </div>}
-  </MessageFooter>, [runtime, user, message.id, message.branchCount, message.branchNumber, message.userBranch, copied, editing, running, locked, command]);
+  </MessageFooter>, [runtime, user, message.id, copied, editing, running, locked, command]);
   const hasVisiblePart = parts.some((part, index) => part.type === "tool-call" ? Boolean(toolGroupAt(timeline, message.id, index))
     : part.type === "reasoning" ? Boolean(part.text.trim()) || part.status.type === "running" : Boolean(part.text.trim()));
   if (!user && !hasVisiblePart && message.metadata.custom?.interrupted !== true

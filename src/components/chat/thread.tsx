@@ -9,6 +9,7 @@ import { Welcome } from "./welcome";
 import { ErrorNotice } from "../ui/error-notice";
 import { LocalComposer } from "./local-composer";
 import { MessageRow } from "./message-row";
+import { AssistantTurnActions } from "./assistant-turn-actions";
 import { projectToolTimeline } from "./tool-timeline";
 import { WaitingStatus } from "./waiting-status";
 import type { ModelConfig } from "@/types";
@@ -51,6 +52,7 @@ export function Thread({ config, logger, conversationId, contextBlocked, draft, 
                 return <div key={item.key} data-index={item.index} ref={virtualizer.measureElement} className="conversation-turn absolute top-0 left-0 flex w-full flex-col" style={{ transform: `translate3d(0, ${item.start}px, 0)` }}>
                   {turn.messages.map((message) => <MessageRow key={message.id} message={message} messages={turn.messages} latest={message.id === state.messages.at(-1)?.id}
                     running={liveTurn} locked={locked} command={command} timeline={timeline} />)}
+                  <AssistantTurnActions assistants={turn.assistants} running={liveTurn} locked={locked} command={command} />
                   {liveTurn && <WaitingStatus logger={logger} conversationId={conversationId} running={state.isRunning} stopping={state.isStopping}
                     stoppingAt={state.stoppingAt} toolsRunning={turn.messages.some((message) => message.parts.some((part) => part.type === "tool-call" && part.status.type === "running"))} />}
                 </div>;

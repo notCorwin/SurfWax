@@ -348,7 +348,7 @@ p {
   padding: 0;
   line-height: var(--transcript-line-height);
   gap: calc(var(--spacing) * 2);
-  font-size: var(--type-xs);
+  font-size: var(--message-body-size);
   font-weight: 450;
   min-height: calc(var(--spacing) * 6);
 }
@@ -360,7 +360,7 @@ p {
 .thinking-body {
   color: var(--muted-foreground);
   padding: var(--transcript-block-gap) 0 0;
-  font-size: var(--type-code);
+  font-size: var(--message-body-size);
   line-height: var(--transcript-line-height);
 }
 
@@ -406,14 +406,11 @@ p {
   margin: 0;
   padding: 0;
   color: var(--muted-foreground);
-  font-size: var(--type-caption);
+  font-size: var(--message-body-size);
   font-weight: 400;
   font-variant-numeric: tabular-nums;
   line-height: var(--line-caption);
 }
-
-.activity.transcript-activity,
-[data-testid="tool-group-summary"] { font-size: var(--message-body-size); }
 
 .transcript-activity:not(details)::before,
 .transcript-activity > summary::before {
