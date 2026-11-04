@@ -87,7 +87,8 @@ test('CLI writes failure evidence and never labels a local snapshot live', async
     const catalogPath = join(directory, 'catalog.json');
     await writeFile(catalogPath, JSON.stringify({ gitlab: provider(gitlab, { 'duo-chat-new': {} }) }));
     const scriptPath = fileURLToPath(new URL('../check-sdk-coverage.mjs', import.meta.url));
-    const run = spawnSync(process.execPath, [scriptPath, '--catalog', catalogPath], { cwd: directory, encoding: 'utf8' });
+    const run = spawnSync(process.execPath, [scriptPath, '--catalog', catalogPath], { cwd: directory, encoding: 'utf8',
+      env: { ...process.env, SURFWAX_VERIFICATION_DIR: join(directory, '.dev/verification') } });
     assert.equal(run.status, 1);
     assert.match(run.stderr, /missing Models.dev routing metadata/);
     const report = JSON.parse(await readFile(join(directory, '.dev/verification/sdk-coverage.json'), 'utf8'));

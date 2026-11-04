@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "dev:vite": "vite",
+    "dev:clean": "node scripts/dev-storage.mjs",
     "build": "vite build && node scripts/validate-build.mjs",
     "check": "tsc --noEmit && vite build --outDir .dev/check-dist && node scripts/validate-build.mjs .dev/check-dist",
     "test": "vitest run",

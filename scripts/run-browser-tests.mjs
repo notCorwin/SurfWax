@@ -1,3 +1,4 @@
+import { beginArtifactRun } from './dev-storage.mjs';
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,10 +30,20 @@ export async function runBrowserTests(kind, options = {}) {
   const development = await (options.startDevelopmentExtension ?? startDevelopmentExtension)({ cwd, tmpdir: options.tmpdir });
   const env = { ...sourceEnv, SURFWAX_EXTENSION_PATH: development.extensionPath, SURFWAX_DEV_SERVER_URL: development.url,
     SURFWAX_CHROME_PATH: executablePath };
+  let artifacts;
+  let status = 'failed';
   try {
+    artifacts = await beginArtifactRun(kind, cwd);
+    env.SURFWAX_EVIDENCE_PATH = resolve(artifacts.directory, 'canonical-logs');
+    env.SURFWAX_VERIFICATION_DIR = resolve(artifacts.directory, 'verification');
+    env.SURFWAX_TEST_OUTPUT_DIR = resolve(artifacts.directory, 'results');
+    env.PLAYWRIGHT_HTML_OUTPUT_DIR = resolve(artifacts.directory, 'html');
     await (options.runCommand ?? runCommand)(options.node ?? process.execPath,
       ['node_modules/@playwright/test/cli.js', 'test', kind === 'e2e' ? '--grep-invert' : '--grep', '@performance', ...(options.args ?? [])], { cwd, env });
-  } finally { await development.close(); }
+    status = 'passed';
+  } finally {
+    try { await development.close(); } finally { await artifacts?.finish(status); }
+  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

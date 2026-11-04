@@ -12,8 +12,9 @@ const source = args.length ? resolve(args[1]) : 'https://models.dev/api.json';
 const catalog = args.length ? JSON.parse(await readFile(source, 'utf8')) : await publicJson(source);
 const report = { source, sourceKind: args.length ? 'snapshot' : 'live', checkedAt: new Date().toISOString(),
   ...analyzeSdkCoverage(catalog, MODEL_SDKS) };
-await mkdir('.dev/verification', { recursive: true });
-await writeFile('.dev/verification/sdk-coverage.json', JSON.stringify(report, null, 2));
+const directory = resolve(process.env.SURFWAX_VERIFICATION_DIR ?? '.dev/verification');
+await mkdir(directory, { recursive: true });
+await writeFile(resolve(directory, 'sdk-coverage.json'), JSON.stringify(report, null, 2));
 const failures = sdkCoverageFailures(report);
 if (failures.length) throw new Error(failures.join('; '));
 console.log(`Models.dev (${report.sourceKind}): ${report.catalogSdks.length} SDK names `

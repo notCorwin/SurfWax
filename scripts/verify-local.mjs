@@ -1,3 +1,4 @@
+import { beginArtifactRun } from './dev-storage.mjs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,8 +16,13 @@ export async function verifyLocal(options = {}) {
   const executablePath = (options.systemChromePath ?? systemChromePath)(sourceEnv);
   const env = { ...sourceEnv, PATH: `${dirname(node)}${process.platform === 'win32' ? ';' : ':'}${sourceEnv.PATH ?? ''}`,
     PLAYWRIGHT_HTML_OPEN: 'never', SURFWAX_CHROME_PATH: executablePath };
-  await mkdir(resolve(cwd, '.dev/verification'), { recursive: true });
+  const artifacts = await beginArtifactRun('local-ci', cwd);
+  const verification = resolve(artifacts.directory, 'verification');
+  await mkdir(verification, { recursive: true });
+  env.SURFWAX_VERIFICATION_DIR = verification;
+  env.SURFWAX_EVIDENCE_PATH = resolve(artifacts.directory, 'canonical-logs');
   let development;
+  let status = 'failed';
   async function run(name, args) {
     console.log(`\n[local CI] ${name}`);
     const start = Date.now();
@@ -29,26 +35,33 @@ export async function verifyLocal(options = {}) {
     }
   }
   try {
-    await run('Script regression tests', ['--test', 'scripts/tests/sdk-coverage.test.mjs', 'scripts/tests/browser-tests.test.mjs']);
+    await run('Script regression tests', ['--test', 'scripts/tests/sdk-coverage.test.mjs', 'scripts/tests/browser-tests.test.mjs', 'scripts/tests/dev-storage.test.mjs']);
     await run('Live Models.dev SDK coverage', ['scripts/check-sdk-coverage.mjs']);
     await run('Bundled Models.dev freshness', ['scripts/update-model-catalog.mjs', '--check']);
     await run('Type checking', ['node_modules/typescript/bin/tsc', '--noEmit']);
-    await run('Unit and SDK request contracts', ['node_modules/vitest/vitest.mjs', 'run', '--reporter=default', '--reporter=json', '--outputFile.json=.dev/verification/unit-results.json']);
+    await run('Unit and SDK request contracts', ['node_modules/vitest/vitest.mjs', 'run', '--reporter=default', '--reporter=json', `--outputFile.json=${resolve(verification, 'unit-results.json')}`]);
+    env.SURFWAX_TEST_OUTPUT_DIR = resolve(artifacts.directory, 'e2e/results');
+    env.PLAYWRIGHT_HTML_OUTPUT_DIR = resolve(artifacts.directory, 'e2e/html');
     development = await (options.startDevelopmentExtension ?? startDevelopmentExtension)({ cwd, tmpdir: options.tmpdir });
     env.SURFWAX_EXTENSION_PATH = development.extensionPath;
     env.SURFWAX_DEV_SERVER_URL = development.url;
-    env.PLAYWRIGHT_JSON_OUTPUT_FILE = resolve(cwd, '.dev/verification/e2e-results.json');
+    env.PLAYWRIGHT_JSON_OUTPUT_FILE = resolve(verification, 'e2e-results.json');
     await run('Installed Chrome development E2E', ['node_modules/@playwright/test/cli.js', 'test', '--grep-invert', '@performance', '--reporter=list,html,json']);
-    env.PLAYWRIGHT_JSON_OUTPUT_FILE = resolve(cwd, '.dev/verification/performance-results.json');
+    env.SURFWAX_TEST_OUTPUT_DIR = resolve(artifacts.directory, 'performance/results');
+    env.PLAYWRIGHT_HTML_OUTPUT_DIR = resolve(artifacts.directory, 'performance/html');
+    env.PLAYWRIGHT_JSON_OUTPUT_FILE = resolve(verification, 'performance-results.json');
     await run('120Hz rendering traces and interaction performance', ['node_modules/@playwright/test/cli.js', 'test', '--grep', '@performance', '--reporter=list,html,json']);
+    status = 'passed';
   } finally {
     try {
-      await writeFile(resolve(cwd, '.dev/verification/local-ci.json'), JSON.stringify({ node: options.nodeVersion ?? process.version,
+      await writeFile(resolve(verification, 'local-ci.json'), JSON.stringify({ node: options.nodeVersion ?? process.version,
         startedAt: new Date(started).toISOString(), durationMs: Date.now() - started,
         browser: executablePath, extensionMode: 'development', stages }, null, 2));
-    } finally { await development?.close(); }
+    } finally {
+      try { await development?.close(); } finally { await artifacts?.finish(status); }
+    }
   }
-  console.log('\nLocal CI passed. Evidence: .dev/verification, test-results and playwright-report.');
+  console.log(`\nLocal CI passed. Evidence: ${artifacts.directory}`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

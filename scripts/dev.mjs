@@ -5,6 +5,7 @@ import { chromium } from "@playwright/test";
 import { createServer } from "vite";
 import { reloadDevelopmentExtension } from "./reload-dev-extension.ts";
 import { fitWindowToScreen } from "./development-extension.mjs";
+import { cleanDevStorage, lockProfile } from "./dev-storage.mjs";
 
 const root = process.cwd();
 const extensionPath = resolve(root, process.env.SURFWAX_DEV_OUT_DIR ?? "dist");
@@ -13,6 +14,7 @@ const targetUrl = process.argv[2] ?? "https://polymarket.com/zh/esports";
 const port = Number(process.env.SURFWAX_DEV_PORT ?? 5173);
 let context;
 let vite;
+let unlockProfile;
 
 function waitForPort() {
   return new Promise((resolveFree, reject) => {
@@ -65,6 +67,8 @@ async function main() {
   vite.printUrls();
   await waitForFile(resolve(extensionPath, "manifest.json"));
 
+  unlockProfile = await lockProfile(profilePath, root);
+  if (!unlockProfile) throw new Error(`开发 Profile 正被使用或清理：${profilePath}。若上次进程异常退出，请确认 Chrome 已关闭后移除 ${profilePath}.cleanup-lock。`);
   await mkdir(profilePath, { recursive: true });
   try {
     context = await chromium.launchPersistentContext(profilePath, {
@@ -181,4 +185,6 @@ try {
 } finally {
   await context?.close().catch(() => undefined);
   await vite?.close().catch(() => undefined);
+  await unlockProfile?.();
+  await cleanDevStorage({ apply: true, cacheBudgetBytes: 256 * 1024 ** 2 }).catch(error => console.error(`开发产物清理失败：${error.message}`));
 }

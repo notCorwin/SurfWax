@@ -12,22 +12,28 @@ function development(output, calls) {
 
 test('browser runs use one live development extension and close it on success and failure', async () => {
   for (const fail of [false, true]) {
-    const calls = [];
-    const execute = runBrowserTests('e2e', { cwd: '/repo', node: '/node24', env: { KEEP_ME: 'yes', SURFWAX_EXTENSION_PATH: '/live-user-extension' },
-      systemChromePath: () => '/installed/chrome', startDevelopmentExtension: development('/private/dev-extension', calls), args: ['e2e/development.spec.ts'],
-      runCommand: async (command, args, options) => {
-        calls.push({ command, args, ...options });
-        if (fail) throw new Error('browser regression failed');
-      } });
-    if (fail) await assert.rejects(execute, /browser regression failed/); else await execute;
-    assert.equal(calls.length, 2);
-    assert.equal(calls[1], 'close');
-    assert.equal(calls[0].command, '/node24');
-    assert.deepEqual(calls[0].args, ['node_modules/@playwright/test/cli.js', 'test', '--grep-invert', '@performance', 'e2e/development.spec.ts']);
-    assert.equal(calls[0].env.SURFWAX_EXTENSION_PATH, '/private/dev-extension');
-    assert.equal(calls[0].env.SURFWAX_DEV_SERVER_URL, 'http://localhost:5179');
-    assert.equal(calls[0].env.SURFWAX_CHROME_PATH, '/installed/chrome');
-    assert.equal(calls[0].env.KEEP_ME, 'yes');
+    const root = await mkdtemp(join(tmpdir(), 'surfwax-browser-run-'));
+    try {
+      const calls = [];
+      const execute = runBrowserTests('e2e', { cwd: root, node: '/node24', env: { KEEP_ME: 'yes', SURFWAX_EXTENSION_PATH: '/live-user-extension' },
+        systemChromePath: () => '/installed/chrome', startDevelopmentExtension: development('/private/dev-extension', calls), args: ['e2e/development.spec.ts'],
+        runCommand: async (command, args, options) => {
+          calls.push({ command, args, ...options });
+          if (fail) throw new Error('browser regression failed');
+        } });
+      if (fail) await assert.rejects(execute, /browser regression failed/); else await execute;
+      assert.equal(calls.length, 2);
+      assert.equal(calls[1], 'close');
+      assert.equal(calls[0].command, '/node24');
+      assert.deepEqual(calls[0].args, ['node_modules/@playwright/test/cli.js', 'test', '--grep-invert', '@performance', 'e2e/development.spec.ts']);
+      assert.equal(calls[0].env.SURFWAX_EXTENSION_PATH, '/private/dev-extension');
+      assert.equal(calls[0].env.SURFWAX_DEV_SERVER_URL, 'http://localhost:5179');
+      assert.equal(calls[0].env.SURFWAX_CHROME_PATH, '/installed/chrome');
+      assert.equal(calls[0].env.KEEP_ME, 'yes');
+      assert.ok(calls[0].env.SURFWAX_TEST_OUTPUT_DIR.startsWith(join(root, '.dev/artifacts')));
+      const receipt = JSON.parse(await readFile(join(calls[0].env.SURFWAX_TEST_OUTPUT_DIR, '../run.json'), 'utf8'));
+      assert.equal(receipt.status, fail ? 'failed' : 'passed');
+    } finally { await rm(root, { recursive: true, force: true }); }
   }
 });
 
@@ -98,9 +104,35 @@ test('verify-local shares one development server and installed Chrome across bro
       && call.env.SURFWAX_DEV_SERVER_URL === 'http://localhost:5179' && call.env.SURFWAX_CHROME_PATH === '/installed/chrome'));
     assert.equal(calls.at(-1), 'close');
     assert.equal(calls.some(call => call.args?.includes('build')), false);
-    const report = JSON.parse(await readFile(join(root, '.dev/verification/local-ci.json'), 'utf8'));
+    const report = JSON.parse(await readFile(join(browserCalls[0].env.SURFWAX_VERIFICATION_DIR, 'local-ci.json'), 'utf8'));
+    assert.ok(browserCalls[0].env.SURFWAX_EVIDENCE_PATH.startsWith(join(root, '.dev/artifacts')));
     assert.equal(report.extensionMode, 'development');
     assert.equal(report.browser, '/installed/chrome');
     assert.equal(report.stages.length, calls.length - 1);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('concurrent local verifications retain independent complete reports and canonical logs', async () => {
+  const { verifyLocal } = await import('../verify-local.mjs');
+  const root = await mkdtemp(join(tmpdir(), 'surfwax-concurrent-verify-'));
+  const paths = new Set();
+  try {
+    await Promise.all([0, 1].map(async () => {
+      const calls = [];
+      await verifyLocal({ cwd: root, node: '/node24', nodeVersion: '24.0.0', env: { PATH: '/bin' },
+        systemChromePath: () => '/installed/chrome', startDevelopmentExtension: development('/private-extension', calls),
+        runCommand: async (_command, args, { env }) => {
+          paths.add(env.SURFWAX_VERIFICATION_DIR);
+          if (args[0] === 'node_modules/@playwright/test/cli.js') {
+            assert.ok(env.SURFWAX_EVIDENCE_PATH.startsWith(join(root, '.dev/artifacts')));
+            assert.ok(env.PLAYWRIGHT_JSON_OUTPUT_FILE.startsWith(env.SURFWAX_VERIFICATION_DIR));
+          }
+        } });
+    }));
+    assert.equal(paths.size, 2);
+    for (const path of paths) {
+      const report = JSON.parse(await readFile(join(path, 'local-ci.json'), 'utf8'));
+      assert.equal(report.stages.length, 7);
+    }
   } finally { await rm(root, { recursive: true, force: true }); }
 });

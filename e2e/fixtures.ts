@@ -258,7 +258,7 @@ export const test = base.extend<{ _profileCleanup: void }>({
       const { context, browserVersion } = profile;
       await context.close().catch(() => undefined);
       const source = resolve(directory, "Default/IndexedDB");
-      const destination = resolve(process.env.SURFWAX_EVIDENCE_PATH ?? ".dev/test-evidence", basename(directory));
+      const destination = resolve(process.env.SURFWAX_EVIDENCE_PATH ?? info.outputPath("canonical-logs"), basename(directory));
       if (existsSync(source)) {
         await mkdir(destination, { recursive: true });
         await cp(source, destination, { recursive: true });

@@ -1,5 +1,5 @@
 import { expect } from "@playwright/test";
-import { mkdir, writeFile, copyFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { test, textResponse, commandResponse, startProvider, openExtension, configure, nameCurrentConversation, readEvents, dispose } from "./fixtures";
 import { finishRenderTrace, installSoftwareCadence, measureRenderTrace, startRenderTrace } from "./render-trace";
 
@@ -50,7 +50,7 @@ test("120Hz software frames measure a dense complete response with history, inpu
     await expect.poll(() => opened.page.evaluate(() => (globalThis as any).__renderTraceLoad.done), { timeout: 30_000 }).toBe(true);
     if (process.env.SURFWAX_PROFILE) {
       const { profile } = await session.send("Profiler.stop");
-      await writeFile(".dev/render-profile.json", JSON.stringify(profile));
+      await writeFile(test.info().outputPath("render-profile.json"), JSON.stringify(profile));
     }
     const events = await finishRenderTrace(session, tracePath);
     const measured = measureRenderTrace(events, frames);
@@ -64,10 +64,8 @@ test("120Hz software frames measure a dense complete response with history, inpu
     const report = { ...measured, warmupFrames: state.warmupFrames, browser: version, node: process.version, finalTextLength: text.length,
       integrity: "exact final text and single tool result verified; no streaming events" };
     const reportPath = test.info().outputPath("render-report.json"); await writeFile(reportPath, JSON.stringify(report, null, 2));
-    await mkdir(`.dev/verification/performance/${test.info().project.name || "current"}`, { recursive: true });
-    await copyFile(tracePath, `.dev/verification/performance/${test.info().project.name || "current"}/render-trace.json`);
-    await copyFile(reportPath, `.dev/verification/performance/${test.info().project.name || "current"}/render-report.json`);
-    await test.info().attach("render-trace", { path: tracePath, contentType: "application/json" });
+    // Keep one canonical trace; attaching the file duplicates it in both Playwright and HTML output.
+    await test.info().attach("render-trace-location", { body: tracePath, contentType: "text/plain" });
     await test.info().attach("render-report", { path: reportPath, contentType: "application/json" });
     console.log(`120Hz ${version.product}: P95 ${measured.p95WorkMs.toFixed(2)}ms; deadline misses ${(measured.deadlineMissRate * 100).toFixed(2)}%; rendered ${measured.renderedFrames}/${frames}`);
     expect(measured.renderedFrames).toBeGreaterThanOrEqual(frames * 0.95);
