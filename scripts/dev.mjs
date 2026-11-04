@@ -9,7 +9,7 @@ import { fitWindowToScreen } from "./development-extension.mjs";
 const root = process.cwd();
 const extensionPath = resolve(root, process.env.SURFWAX_DEV_OUT_DIR ?? "dist");
 const profilePath = resolve(root, ".dev/chromium-profile");
-const targetUrl = process.argv[2] ?? "https://polymarket.com/zh";
+const targetUrl = process.argv[2] ?? "https://polymarket.com/zh/esports";
 const port = Number(process.env.SURFWAX_DEV_PORT ?? 5173);
 let context;
 let vite;
