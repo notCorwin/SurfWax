@@ -3291,3 +3291,25 @@ describe("AutomationRuntime", () => {
     await expect(page.ensureObservation(observation.observationId as string)).rejects.toThrow("stale-observation");
   });
 });
+
+it("retires old same-process descendants when an OOPIF tree arrives before swap/navigation events", async () => {
+  const {runtime,command}=harness();await runtime.createPage(3);
+  const session=(runtime as any).sessions.get(3);
+  session.frames.set("frame",{tabId:3});session.frameParents.set("frame","root");session.frameLoaders.set("frame","old-loader");
+  session.frames.set("old-child",{tabId:3});session.frameParents.set("old-child","frame");session.frameLoaders.set("old-child","child-loader");
+  const original=command.getMockImplementation()!;
+  command.mockImplementation(async(source,method,params)=>sessionIdOf(source)==="replacement"&&method==="Page.getFrameTree"
+    ?{frameTree:{frame:{id:"frame",loaderId:"new-loader"},childFrames:[{frame:{id:"new-child",parentId:"frame",loaderId:"new-child-loader"}}]}}:original(source,method,params));
+  runtime.handleEvent({tabId:3},"Target.attachedToTarget",{sessionId:"replacement",targetInfo:{type:"iframe",targetId:"frame"}});
+  await session.frameReady.get("replacement");
+  (runtime as any).recordFrameTree(session, {tabId:3}, {frame:{id:"root"},childFrames:[{frame:{id:"frame",parentId:"root",loaderId:"old-loader"},childFrames:[{frame:{id:"old-child",parentId:"frame"}}]}]});
+  runtime.handleEvent({tabId:3},"Page.frameNavigated",{frame:{id:"frame",parentId:"root",loaderId:"old-loader"}});
+  expect(session.frameLoaders.get("frame")).toBe("new-loader");
+  expect(session.frames.has("new-child")).toBe(true);
+  runtime.handleEvent({tabId:3},"Page.frameDetached",{frameId:"frame",reason:"swap"});
+  runtime.handleEvent({tabId:3,sessionId:"replacement"},"Page.frameNavigated",{frame:{id:"frame",loaderId:"new-loader"}});
+  expect(session.frames.get("frame")).toMatchObject({sessionId:"replacement"});
+  expect(session.frames.has("old-child")).toBe(false);expect(session.frameParents.has("old-child")).toBe(false);
+  expect(session.frames.has("new-child")).toBe(true);
+  await runtime.abortSessions();
+});

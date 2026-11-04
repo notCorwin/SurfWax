@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
+import type { Duplex } from "node:stream";
 import { expect } from "@playwright/test";
-import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
+import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, readEvents, type MockResponse } from "./fixtures";
 import { upgradeEventStore } from "../src/logging";
 
 test("upgrades an actual v8 IndexedDB without rebuilding or deleting legacy records", async () => {
@@ -22,8 +24,8 @@ test("upgrades an actual v8 IndexedDB without rebuilding or deleting legacy reco
         store.add({ id: 1, type: "legacy", content: { preserved: true } });
       });
       db.close();
-      const upgrade = new Function("EVENT_STORE", "DIAGNOSTIC_INDEX_STORE", "CONVERSATION_INDEX", "TYPE_INDEX", "CONVERSATION_TYPE_INDEX", "RUN_TYPE_INDEX", "OBSOLETE_ID_INDEXES", `return (${upgradeSource});`)(
-        "events", "diagnosticCaptureIndex", "conversationId", "type", "conversationType", "runType", ["typeId", "conversationTypeId", "runTypeId", "conversationIdId"],
+      const upgrade = new Function("EVENT_STORE", "DIAGNOSTIC_INDEX_STORE", "CONVERSATION_INDEX", "TYPE_INDEX", "CONVERSATION_TYPE_INDEX", "RUN_TYPE_INDEX", "RUN_TOOL_TYPE_INDEX", "ARTIFACT_INDEX_STORE", "OBSOLETE_ID_INDEXES", `return (${upgradeSource});`)(
+        "events", "diagnosticCaptureIndex", "conversationId", "type", "conversationType", "runType", "runToolType", "artifactPartIndex", ["typeId", "conversationTypeId", "runTypeId", "conversationIdId"],
       ) as (db: IDBDatabase, transaction: IDBTransaction) => void;
       db = await open(9, upgrade);
       const transaction = db.transaction(["events", "diagnosticCaptureIndex"], "readonly");
@@ -72,10 +74,20 @@ test("indexes diagnostic capture events atomically in the canonical database", a
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
-test("reads a capture beyond the live cache through the diagnostic index", async () => {
+test("reads a capture beyond the live cache while live WebSocket quotes keep arriving", async () => {
   test.setTimeout(120_000);
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
+  const sockets = new Set<Duplex>();
+  provider.server.on("upgrade", (request, socket) => {
+    const accept = createHash("sha1").update(String(request.headers["sec-websocket-key"]) + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+    sockets.add(socket);
+    let tick = 0;
+    const timer = setInterval(() => { const payload = Buffer.from(String(++tick)); socket.write(Buffer.concat([Buffer.from([0x81, payload.length]), payload])); }, 1);
+    socket.on("error", () => socket.destroy());
+    socket.on("close", () => { clearInterval(timer); sockets.delete(socket); });
+  });
   responses.push(
     commandResponse("click", { target: { by: "css", value: "#start-capture" }, timeoutMs: 30_000 }, "many-requests"),
     (request) => {
@@ -104,7 +116,9 @@ test("reads a capture beyond the live cache through the diagnostic index", async
       button.onclick = async () => {
         for (let start = 0; start < 1020; start += 30)
           await Promise.all(Array.from({ length: Math.min(30, 1020 - start) }, (_, index) => fetch(`/target?capture=${start + index}`).then((response) => response.text())));
-        status.textContent = "captured";
+        const quote = document.createElement("output"); quote.style.cssText = "display:inline-block;width:150px;height:24px;overflow:hidden;font:16px monospace"; document.body.append(quote);
+        const socket = new WebSocket(location.origin.replace("http", "ws") + "/quotes");
+        socket.onmessage = (event) => { quote.textContent = "Quote " + event.data; status.textContent = "captured"; };
       };
       document.body.append(button, status);
     });
@@ -113,5 +127,9 @@ test("reads a capture beyond the live cache through the diagnostic index", async
     await opened.page.getByTestId("composer-input").fill("capture many requests and inspect the first page");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("LARGE_CAPTURE_INDEX_OK", { timeout: 100_000 });
-  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+    const events = await readEvents(opened.page);
+    const result = events.find(event => event.type === "tool.finished" && event.toolCallId?.endsWith("first-capture-page"));
+    expect(result?.latencyMs).toBeLessThan(5000);
+    expect(events.some(event => event.type === "browser.diagnostic" && event.content?.method === "Network.webSocketFrameReceived")).toBe(true);
+  } finally { for (const socket of sockets) socket.destroy(); await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

@@ -126,7 +126,7 @@ export function createAgent(options: CreateAgentOptions): ToolLoopAgent<never, B
           const budget = reviewLimit ? { input: inputBudget(reviewLimit), output: Math.min(reviewLimit.output ?? 2048, Math.max(1, Math.floor(reviewLimit.context / 4))) } : undefined;
           const proposed = input as z.infer<typeof GOAL_SCHEMA>;
           const context = goalReviewContext(reviewContext, budget ? Math.floor(budget.input * 0.75) : undefined, reviewRequirements,
-            proposed.taskType === "browser" ? proposed.evidence.map((item) => item.toolCallId) : []);
+            proposed.taskType === "browser" ? proposed.evidence.map((item) => item.evidenceId) : []);
           const history = actionHistory(evidence);
           const key = JSON.stringify([input, context, history]);
           const verdict = lastReview?.key === key ? lastReview.verdict : await reviewGoal({

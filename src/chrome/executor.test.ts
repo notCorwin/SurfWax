@@ -295,6 +295,19 @@ describe("ChromeExecutor programs", () => {
     h.executor.dispose();
   });
 
+  it("returns fresh response headers with a body that arrived during a history read", async () => {
+    const h = programHarness(async () => undefined), diagnostics = (h.executor as any).diagnostics;
+    const old = { requestId: "one", index: 1, debuggee: { tabId: 41 }, method: "GET", url: "https://test/" };
+    let latest = old;
+    diagnostics.request = vi.fn(async () => ({ ...latest }));
+    (h.executor as any).bridgeCommand = vi.fn(async () => {
+      latest = { ...old, status: 201, responseHeaders: { "x-result": "created" } } as any;
+      return { body: "created", base64Encoded: false };
+    });
+    expect(await (h.executor as any).readRequest(41, "ref")).toMatchObject({ status: 201, responseHeaders: { "x-result": "created" }, responseBody: "created" });
+    h.executor.dispose();
+  });
+
   it("rejects an in-flight response when its originating child session detaches", async () => {
     const h = programHarness(async () => undefined);
     const diagnostics = (h.executor as any).diagnostics;

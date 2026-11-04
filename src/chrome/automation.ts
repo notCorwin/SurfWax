@@ -131,6 +131,7 @@ type Session = {
   frames: Map<string, Debuggee>;
   frameReady: Map<string, Promise<void>>;
   frameParents: Map<string, string | undefined>;
+  frameLoaders: Map<string, string>;
   targetParents: Map<string, string | undefined>;
   targetSessions: Map<string, string>;
   retiredTargetSessions: Set<string>;
@@ -609,12 +610,47 @@ export class AutomationRuntime {
   private recordFrameTree(session: Session, source: Debuggee, tree: any, parent?: string): void {
     const frameId = tree?.frame?.id;
     if (typeof frameId !== "string") return;
+    const current = session.frames.get(frameId);
+    if (current?.sessionId && current.sessionId !== source.sessionId) {
+      // A parent tree may contain an OOPIF placeholder from before its new
+      // target was attached. It supplies ancestry, never that target's loader
+      // or descendant documents.
+      const parentId = tree.frame.parentId ?? parent;
+      if (!session.frameParents.has(frameId) && parentId !== undefined) session.frameParents.set(frameId, parentId);
+      return;
+    }
     if (!session.frames.get(frameId)?.sessionId || session.frames.get(frameId)?.sessionId === source.sessionId)
       session.frames.set(frameId, source);
+    if (typeof tree.frame.loaderId === "string") {
+      const previous = session.frameLoaders.get(frameId);
+      // A new target can return its tree before either renderer's navigation
+      // event. Retire the old document's descendants before accepting its loader.
+      if (previous !== undefined && previous !== tree.frame.loaderId) this.removeFrameDescendants(session, frameId);
+      session.frameLoaders.set(frameId, tree.frame.loaderId);
+    }
     const parentId = tree.frame.parentId ?? parent ?? session.frameParents.get(frameId);
     if (parentId !== undefined || !source.sessionId) session.frameParents.set(frameId, parentId);
     if (parentId === undefined && !source.sessionId) session.rootFrameId = frameId;
     for (const child of tree.childFrames ?? []) this.recordFrameTree(session, source, child, frameId);
+  }
+
+  /** A document replacement destroys its child browsing contexts. Chrome does
+   * not emit individual detach events for every same-process descendant. */
+  private removeFrameDescendants(session: Session, frameId: string): void {
+    const removed = new Set<string>();
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const [id, parent] of session.frameParents) if (parent && (parent === frameId || removed.has(parent)) && !removed.has(id)) {
+        removed.add(id); grew = true;
+      }
+    }
+    const ownSession = session.frames.get(frameId)?.sessionId;
+    for (const id of removed) {
+      const childSession = session.frames.get(id)?.sessionId;
+      if (childSession && childSession !== ownSession) this.retireFrameSession(session, childSession);
+      session.frames.delete(id); session.frameParents.delete(id); session.frameLoaders.delete(id);
+    }
   }
 
   /** Test document invalidation before the frame graph is updated. Unknown
@@ -718,6 +754,14 @@ export class AutomationRuntime {
       this.invalidateFrames(session);
     }
     if (method === "Page.frameNavigated" && params?.frame?.id && session) {
+      // Parent renderers can deliver an old navigation after ownership moved
+      // to an OOPIF. That source cannot replace the current document or tree.
+      const current = session.frames.get(params.frame.id);
+      if (current?.sessionId && current.sessionId !== source.sessionId) return;
+      const loaderId = params.frame.loaderId;
+      if (typeof loaderId === "string" && session.frameLoaders.has(params.frame.id) && session.frameLoaders.get(params.frame.id) !== loaderId)
+        this.removeFrameDescendants(session, params.frame.id);
+      if (typeof loaderId === "string") session.frameLoaders.set(params.frame.id, loaderId);
       if (!session.frames.get(params.frame.id)?.sessionId || source.sessionId === session.frames.get(params.frame.id)?.sessionId) session.frames.set(params.frame.id, source);
       const parentId = params.frame.parentId ?? session.frameParents.get(params.frame.id);
       session.frameParents.set(params.frame.id, parentId);
@@ -739,10 +783,13 @@ export class AutomationRuntime {
       // itself. An attachment from the new target can arrive first; do not
       // remove its mapping when the old target reports its delayed swap.
       const transferred = params.reason === "swap" && current?.sessionId && current.sessionId !== source.sessionId;
-      if (!transferred) session.frames.delete(params.frameId);
+      if (!transferred) {
+        this.removeFrameDescendants(session, params.frameId);
+        session.frames.delete(params.frameId);
+      }
       // Keep ancestry across a process swap, including when attach arrives
       // after detach and the new target's frame-tree root has no parentId.
-      if (params.reason !== "swap") session.frameParents.delete(params.frameId);
+      if (params.reason !== "swap") { session.frameParents.delete(params.frameId); session.frameLoaders.delete(params.frameId); }
       this.invalidate(session, preserveChooser);
     }
     if (method === "Target.detachedFromTarget" && params?.sessionId && session) {
@@ -792,7 +839,7 @@ export class AutomationRuntime {
     for (const [frameId, id] of session.targetSessions) if (retired.has(id)) session.targetSessions.delete(frameId);
     for (const [frameId, debuggee] of session.frames) {
       if (debuggee.sessionId && retired.has(debuggee.sessionId)) {
-        session.frames.delete(frameId);
+        session.frames.delete(frameId); session.frameLoaders.delete(frameId);
         if (frameId !== preserveFrameId) session.frameParents.delete(frameId);
       }
     }
@@ -1657,7 +1704,7 @@ export class AutomationRuntime {
         refs: new Map(),
         refsByNode: new Map(),
         refUsage: new Map(),
-        frames: new Map(),
+        frames: new Map(), frameLoaders: new Map(),
         frameReady: new Map(),
         frameParents: new Map(),
         targetParents: new Map(),
@@ -3554,6 +3601,7 @@ export class AutomationRuntime {
       };
       let info: { url: string; title: string };
       const frameClips = new Map<string, SnapshotClip>();
+      const hiddenFrames = new Set<string>();
       try {
         // A scoped request discovers its frame membership from a preliminary
         // DOM capture before waiting for document loads. The subsequent D0
@@ -3703,6 +3751,7 @@ export class AutomationRuntime {
           const childId = item.frameId;
           if (!childId || childId === session.rootFrameId) continue;
           const parentId = session.frameParents.get(childId), parent = parentId && session.frames.get(parentId);
+          if (parentId && hiddenFrames.has(parentId)) { hiddenFrames.add(childId); continue; }
           const parentLayout = parent && initialLayouts.find((entry) => sameDebuggee(entry.debuggee, parent));
           const childLayout = initialLayouts.find((entry) => sameDebuggee(entry.debuggee, item.debuggee));
           if (!parent || !parentLayout || !childLayout) throw automationError("snapshot-unavailable", { reason: "missing-frame-parent", frameId: childId });
@@ -3712,13 +3761,20 @@ export class AutomationRuntime {
           if (!evidence) {
             const partialFrames = new Set<number>();
             const frameOwners = new Map<number, SnapshotFrameOwner>();
-            const state = snapshotVisibility(parentLayout.snapshot, { frameClips, frameOwners, partialFrames, requireViewport: true });
+            const snapshot = parentLayout.snapshot;
+            const documents = snapshot.documents.filter((doc: any) => snapshot.strings[doc.frameId] === parentId);
+            if (documents.length !== 1) throw automationError("snapshot-unavailable", { reason: "missing-parent-document", frameId: parentId });
+            const state = snapshotVisibility({ ...snapshot, documents }, { frameClips, frameOwners, partialFrames, requireViewport: true });
             evidence = { state, partialFrames, frameOwners };
             parentVisibility.set(parentId!, evidence);
           }
           const { state, partialFrames, frameOwners } = evidence;
           const geometry = frameOwners.get(owner?.backendNodeId);
-          if (state.get(owner?.backendNodeId) !== true) continue;
+          // A painted border does not give an empty iframe content viewport
+          // any visible pixels. Use the captured, axis-aligned client aperture
+          // as proof; never infer invisibility from the child's missing data.
+          const emptyAperture = geometry?.safe && (geometry.clip.x[1] <= geometry.clip.x[0] || geometry.clip.y[1] <= geometry.clip.y[0]);
+          if (state.get(owner?.backendNodeId) !== true || emptyAperture) { hiddenFrames.add(childId); continue; }
           if (!partialFrames.has(owner.backendNodeId)) continue;
           const doc = childLayout.snapshot.documents?.find((entry: any) => childLayout.snapshot.strings?.[entry.frameId] === childId);
           const root = doc?.nodes?.nodeName?.findIndex((name: number) => childLayout.snapshot.strings?.[name] === "#document");
@@ -3738,7 +3794,9 @@ export class AutomationRuntime {
         const initialPaint = new Map(initialLayouts.map(({ debuggee, snapshot }) => {
           const candidates: SnapshotTextPaintCandidate[] = [];
           const partialFrames = new Set<number>();
-          const visibility = snapshotVisibility(snapshot, { textPaintCandidates: candidates, partialFrames, frameClips, requireViewport: true });
+          const required = new Set(relevantFrames.map(item => item.frameId ?? session.rootFrameId));
+          const relevantSnapshot = regionNode ? { ...snapshot, documents: snapshot.documents.filter((doc: any) => required.has(snapshot.strings[doc.frameId])) } : snapshot;
+          const visibility = snapshotVisibility(relevantSnapshot, { textPaintCandidates: candidates, partialFrames, frameClips, hiddenFrames, requireViewport: true });
           return [debuggee.sessionId ?? "", { visibility, candidates, partialFrames }] as const;
         }));
         for (const item of capturedFrames) {
@@ -5181,24 +5239,24 @@ export class AutomationRuntime {
           const relevantDocuments = (snapshot: any) => !relevantIds ? snapshot : { ...snapshot,
             documents: snapshot.documents.filter((document: any) => relevantIds.has(snapshot.strings?.[document.frameId])) };
           const candidates = relevantIds ? initial?.candidates.filter((candidate) => relevantIds.has(candidate.frameId)) : initial?.candidates;
-          const visibility = initial && relevantIds ? snapshotVisibility(relevantDocuments(initial.snapshot)) : initial?.visibility;
+          const visibility = initial && relevantIds ? snapshotVisibility(relevantDocuments(initial.snapshot), { hiddenFrames }) : initial?.visibility;
           if (visibility && initial && relevantIds) for (const id of visibility.keys()) {
             const value = initial.visibility.get(id);
             if (value !== undefined) visibility.set(id, value);
           }
           const relaxed = (snapshot: any) => Boolean(initial && visibility && sameDOMSnapshot(relevantDocuments(initial.snapshot), relevantDocuments(snapshot),
-            { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true, frameClips }, { ignoreUnrenderedText: true }));
+            { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true, frameClips, hiddenFrames }, { ignoreUnrenderedText: true }));
           relaxedChecks.push(relaxed);
           if (initial && visibility && sameDOMSnapshot(relevantDocuments(initial.snapshot), relevantDocuments(confirmation.snapshot),
-            { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true, frameClips })) continue;
+            { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true, frameClips, hiddenFrames })) continue;
           unstable = true;
           const textChanges = initial && visibility ? changedTextNodes(relevantDocuments(initial.snapshot), relevantDocuments(confirmation.snapshot),
-            { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true, frameClips }) : undefined;
+            { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true, frameClips, hiddenFrames }) : undefined;
           if (!textChanges) onlyDynamicText = false;
           else observedDynamicText.set(confirmation.debuggee.sessionId ?? "", textChanges);
           if (!relaxed(confirmation.snapshot)) onlyUnrenderedText = false;
           const after: SnapshotTextPaintCandidate[] = [];
-          try { snapshotVisibility(confirmation.snapshot, { textPaintCandidates: after }); }
+          try { snapshotVisibility(confirmation.snapshot, { textPaintCandidates: after, hiddenFrames }); }
           catch { throw automationError("snapshot-unavailable", { reason: "invalid-dom-confirmation" }); }
           if (initial && !sameTextPaintCandidates(candidates ?? [], relevantIds ? after.filter((candidate) => relevantIds.has(candidate.frameId)) : after)) unstablePaint = true;
         }
@@ -5309,7 +5367,11 @@ export class AutomationRuntime {
         conversationId: context.conversationId,
         toolCallId: context.toolCallId,
         ...context.logIdentity,
-        content: { tabId, operation, locator, ...(failure instanceof AutomationError ? { diagnostic: { code: failure.code, ...failure.detail } } : {}) },
+        content: { tabId, operation, locator, ...(failure instanceof AutomationError ? { diagnostic: { code: failure.code, ...failure.detail } } : {}),
+          ...(failure instanceof Error && "geometry" in failure ? { geometry: failure.geometry } : {}),
+          ...(failure instanceof Error && "command" in failure ? { command: failure.command, parameters: (failure as any).parameters, source: (failure as any).source } : {}),
+          frameGraph: [...(this.sessions.get(tabId)?.frames ?? [])].map(([frameId, source]) => ({ frameId, source, parentId: this.sessions.get(tabId)?.frameParents.get(frameId) })),
+        },
         error: failure,
         latencyMs: performance.now() - startedAt,
       });

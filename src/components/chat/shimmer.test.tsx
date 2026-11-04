@@ -40,7 +40,7 @@ it("distinguishes active reasoning and tool labels", () => {
   expect(reasoning("complete")).toContain('<span aria-live="off">思考完成</span>');
   expect(tool("running")).toContain('<span aria-live="off">点击</span>');
   expect(tool("complete")).toContain('<span aria-live="off">点击</span>');
-  expect(tool("incomplete")).toContain('<span aria-live="off">点击 · 未完成</span>');
+  expect(tool("incomplete")).toContain('<span aria-live="off">点击 · 失败</span>');
   expect(reasoning("running")).not.toContain("<svg");
   expect(tool("running")).not.toContain("<svg");
 });
@@ -50,7 +50,7 @@ it("shows tool failure and interruption without exposing input or output", () =>
     toolName: "click", status: { type: "incomplete" }, args: { secretInput: "input-value" },
     result: { secretOutput: "output-value" }, interrupted,
   }));
-  expect(render(false)).toContain("点击 · 未完成");
+  expect(render(false)).toContain("点击 · 失败");
   expect(render(true)).toContain("点击 · 已中断");
   expect(render(false)).not.toMatch(/input-value|output-value|<details|<summary/);
 });

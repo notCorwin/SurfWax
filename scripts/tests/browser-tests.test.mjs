@@ -43,9 +43,9 @@ test('the Vite dev server supplies HMR and removes private output after closure'
   try {
     await writeFile(join(root, 'package.json'), '{"type":"module"}');
     await writeFile(join(root, 'vite.config.ts'), `import { mkdir, writeFile } from 'node:fs/promises';
-      export default { plugins: [{ name: 'test-extension', async configureServer() {
-        await mkdir(process.env.SURFWAX_DEV_OUT_DIR, { recursive: true });
-        await writeFile(process.env.SURFWAX_DEV_OUT_DIR + '/manifest.json', JSON.stringify({manifest_version:3,background:{service_worker:'worker.js'}}));
+      export default { plugins: [{ name: 'test-extension', async configureServer(server) {
+        await mkdir(server.config.build.outDir, { recursive: true });
+        await writeFile(server.config.build.outDir + '/manifest.json', JSON.stringify({manifest_version:3,background:{service_worker:'worker.js'}}));
       } }] };`);
     await writeFile(join(root, 'dist-sentinel'), 'live development');
     const oldPort = process.env.SURFWAX_DEV_PORT, oldOutput = process.env.SURFWAX_DEV_OUT_DIR;
@@ -135,4 +135,26 @@ test('concurrent local verifications retain independent complete reports and can
       assert.equal(report.stages.length, 7);
     }
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('development servers isolate dependency caches and remove only their own cache', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'surfwax-cache-isolation-'));
+  let first, second;
+  try {
+    await writeFile(join(root, 'package.json'), '{"type":"module"}');
+    await writeFile(join(root, 'vite.config.ts'), `import { mkdir, writeFile, readFile } from 'node:fs/promises';
+      export default { cacheDir: '.vite', plugins: [{ name: 'cache-probe', async configureServer(server) {
+        const output = server.config.build.outDir;
+        await mkdir(output, { recursive: true });
+        await writeFile(output + '/manifest.json', JSON.stringify({ manifest_version:3, background:{ service_worker:'worker.js' } }));
+        await mkdir(server.config.cacheDir, { recursive:true });
+        await writeFile(server.config.cacheDir + '/dependency.mjs', output);
+        server.middlewares.use('/dependency', async (_request, response) => response.end(await readFile(server.config.cacheDir + '/dependency.mjs')));
+      } }] };`);
+    [first, second] = await Promise.all([startDevelopmentExtension({ cwd: root }), startDevelopmentExtension({ cwd: root })]);
+    assert.equal(await (await fetch(first.url + '/dependency')).text(), first.extensionPath);
+    assert.equal(await (await fetch(second.url + '/dependency')).text(), second.extensionPath);
+    await second.close(); second = undefined;
+    assert.equal(await (await fetch(first.url + '/dependency')).text(), first.extensionPath);
+  } finally { await second?.close(); await first?.close(); await rm(root, { recursive:true, force:true }); }
 });

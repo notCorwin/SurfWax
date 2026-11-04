@@ -21,7 +21,7 @@ it("reviews a self-declared answer against the original browser task before allo
     actions++;
     const name = actions === 2 ? "inspect_page" : "complete_goal";
     const input = actions === 1 ? { taskType: "answer", status: "completed" }
-      : actions === 2 ? {} : { taskType: "browser", status: "completed", evidence: [{ toolCallId: "step-2", observation: "Page shows release date 2026-10-01" }] };
+      : actions === 2 ? {} : { taskType: "browser", status: "completed", evidence: [{ evidenceId: "step-2", observation: "Page shows release date 2026-10-01" }] };
     return { content: [...(actions === 3 ? [{ type: "text" as const, text: "Release date: 2026-10-01" }] : []), { type: "tool-call", toolCallId: `step-${actions}`, toolName: name, input: JSON.stringify(input) }], finishReason: { unified: "tool-calls", raw: "tool_calls" }, usage, warnings: [] };
   } });
   const executor = { browserContext: async () => ({ tabs: [] }), inspect: async () => ({ snapshot: "Release date: 2026-10-01" }) } as unknown as ChromeExecutor;

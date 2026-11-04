@@ -1389,7 +1389,7 @@ export class ChromeExecutor {
   }
 
   private async readRequest(tabId: number, ref: string, bodyOnly = false, signal?: AbortSignal): Promise<unknown> {
-    const record = await this.diagnostics.request(tabId, ref, signal);
+    let record = await this.diagnostics.request(tabId, ref, signal);
     const assertCurrent = async () => {
       const current = await this.diagnostics.request(tabId, ref, signal);
       if (current.requestId !== record.requestId || current.debuggee.sessionId !== record.debuggee.sessionId)
@@ -1399,8 +1399,8 @@ export class ChromeExecutor {
         if (!sources.some((source) => source.sessionId === record.debuggee.sessionId))
           throw Object.assign(new Error("Request source is no longer attached"), { code: "stale-request" });
         // The source lookup itself can race with a navigation or redirect.
-        await this.diagnostics.request(tabId, ref, signal);
-      }
+        record = await this.diagnostics.request(tabId, ref, signal);
+      } else record = current;
     };
     await assertCurrent();
     signal?.throwIfAborted();
@@ -1690,7 +1690,10 @@ export class ChromeExecutor {
           rollbackPosition.state.x = rollbackPosition.x; rollbackPosition.state.y = rollbackPosition.y;
         }
       }
-      throw error;
+      throw Object.assign(error instanceof Error ? error : new Error(String(error)), {
+        command: method, source: debuggee,
+        ...(input && { parameters: Object.fromEntries(["frameId", "executionContextId", "contextId", "backendNodeId"].filter((key) => Object.hasOwn(input!, key)).map((key) => [key, input![key]])) }),
+      });
     } finally { if (tracked) {
       const entry = this.programEvaluations.get(key);
       if (entry && entry.count > 1) entry.count--; else this.programEvaluations.delete(key);

@@ -140,13 +140,19 @@ function emptyLegacyClip(value: string, position: string): boolean {
  * Content becomes visible only after the corresponding scroll occurs.
  * Missing layout does not imply a hidden subtree (e.g. display:contents).
  */
-export function snapshotVisibility(snapshot: any, options: { textPaintCandidates?: SnapshotTextPaintCandidate[]; partialFrames?: Set<number>; requireViewport?: boolean; frameClips?: ReadonlyMap<string, SnapshotClip>; frameOwners?: Map<number, SnapshotFrameOwner> } = {}): Map<number, boolean> {
+export function snapshotVisibility(snapshot: any, options: { textPaintCandidates?: SnapshotTextPaintCandidate[]; partialFrames?: Set<number>; requireViewport?: boolean; hiddenFrames?: ReadonlySet<string>; frameClips?: ReadonlyMap<string, SnapshotClip>; frameOwners?: Map<number, SnapshotFrameOwner> } = {}): Map<number, boolean> {
   if (!Array.isArray(snapshot?.documents) || !Array.isArray(snapshot?.strings)) throw new Error("Invalid DOM snapshot");
   const result = new Map<number, boolean>();
   const strings: string[] = snapshot.strings;
   const segmenter = options.textPaintCandidates ? new Intl.Segmenter(undefined, { granularity: "grapheme" }) : undefined;
   for (const document of snapshot.documents) {
     const nodes = document.nodes, layout = document.layout;
+    // Only a proven invisible embedding chain can exempt a document from
+    // viewport validation. Missing geometry in a visible document stays fatal.
+    if (options.hiddenFrames?.has(strings[document.frameId])) {
+      for (const id of nodes?.backendNodeId ?? []) result.set(id, false);
+      continue;
+    }
     if (!Array.isArray(nodes?.backendNodeId) || !Array.isArray(nodes?.parentIndex)
       || !Array.isArray(layout?.nodeIndex) || !Array.isArray(layout?.bounds) || !Array.isArray(layout?.styles)) throw new Error("Invalid DOM snapshot document");
     const layoutByNode = new Map<number, number>();
@@ -181,7 +187,12 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
       return { clip: [offset, offset + extent], known: true };
     };
     const horizontalViewport = viewportAxis(0), verticalViewport = viewportAxis(1);
-    if (options.requireViewport && (!horizontalViewport.known || !verticalViewport.known)) throw new Error("Missing viewport geometry");
+    if (options.requireViewport && (!horizontalViewport.known || !verticalViewport.known)) throw Object.assign(new Error("Missing viewport geometry"), {
+      code: "snapshot-unavailable",
+      geometry: { frameId: strings[document.frameId], documentNode, documentLayout: documentLayout ?? null,
+        viewport, scrollOffsetX: document.scrollOffsetX ?? null, scrollOffsetY: document.scrollOffsetY ?? null,
+        nodeCount: nodes.backendNodeId.length, layoutCount: layout.nodeIndex.length },
+    });
     const frameId = strings[document.frameId];
     const frameClip = typeof frameId === "string" ? options.frameClips?.get(frameId) : undefined;
     const viewportClip: Clip = { x: frameClip ? intersection(horizontalViewport.clip, frameClip.x) : horizontalViewport.clip,

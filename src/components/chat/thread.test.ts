@@ -9,14 +9,14 @@ describe("tool activity", () => {
 
   it("distinguishes failure, interruption and incomplete timing", () => {
     expect(toolActivity(tool("click", "incomplete", { isError: true, durationMs: 10 })))
-      .toEqual({ status: "error", label: "点击 · 未完成 · 0.01 秒" });
+      .toEqual({ status: "error", label: "点击 · 失败 · 0.01 秒" });
     expect(toolActivity(tool("fill", "incomplete", { result: { error: { code: "aborted" } }, durationMs: 0, timingIncomplete: true })))
       .toEqual({ status: "error", label: "填写 · 已中断 · ≥0.00 秒" });
     expect(toolActivity(tool("fill", "incomplete", { result: { error: { code: "interrupted" } } })).label)
       .toBe("填写 · 已中断");
     expect(toolActivity({ ...tool("fill", "incomplete"), interrupted: true }).label).toBe("填写 · 已中断");
     expect(toolActivity(tool("fill", "incomplete", { durationMs: 25, timingIncomplete: true })).label)
-      .toBe("填写 · 未完成 · ≥0.02 秒");
+      .toBe("填写 · 失败 · ≥0.02 秒");
     expect(toolActivity(tool("fill", "running"), "cancelled"))
       .toEqual({ status: "error", label: "填写 · 已中断" });
     expect(toolActivity(tool("click", "complete"), "cancelled"))

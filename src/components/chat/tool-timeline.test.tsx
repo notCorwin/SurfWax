@@ -174,7 +174,7 @@ describe("tool timeline", () => {
       const group = toolGroupAt(projectToolTimeline(messages, running), "a", 0)!;
       const html = renderToStaticMarkup(createElement(ToolGroupView, { group }));
       expect(html.match(/data-status="error"/g)).toHaveLength(running ? 2 : 1);
-      if (!running) expect(html).toContain("1 项未完成，1 项已中断");
+      if (!running) expect(html).toContain("1 项失败，1 项已中断");
       if (running) {
         expect(html.match(/data-tool-id=/g)).toHaveLength(5);
         expect(html).toContain('data-tool-id="failed"');

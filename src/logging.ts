@@ -1,3 +1,4 @@
+import { artifactPagingError, artifactPagePath } from "./artifact-selection";
 import { logIO } from "./log-io";
 import type { JsonValue } from "./types";
 import { arrayBufferLength, arrayViewName, createArrayView, dateISOString, dateValue, decodeLogGraph, encodeLogGraph, graphProperties, isArrayBuffer, isDataView, isDate, isMap, isRegExp, isSet, mapEntries, mapSizeOf, regexpFlagString, regexpSource, requiresLogGraph, setSizeOf, setValues, viewLayout } from "./log-graph";
@@ -1647,8 +1648,14 @@ export class EventLogger {
     }
     if (selection.offset !== undefined || selection.limit !== undefined) {
       if (!Array.isArray(value) && typeof value !== "string" && !isMap(value) && !isSet(value) && !isArrayBuffer(value) && !ArrayBuffer.isView(value)) {
-        const keys = value && typeof value === "object" ? Object.keys(value).slice(0, 16) : [];
-        throw new Error(`offset/limit requires an array, string, Map, Set, ArrayBuffer or binary view${keys.length ? `; select one first with { path: [${JSON.stringify(keys[0])}], offset: 0, limit: 4000 }. Available keys: ${keys.join(", ")}` : ""}`);
+        const keys = value && typeof value === "object" ? Object.keys(value).filter(key => key.length <= 128).slice(0, 16) : [];
+        const nextPath = await artifactPagePath(value, path, {
+          keys: (item) => item && typeof item === "object" ? Object.keys(item) : [],
+          field: (item, key) => Object.getOwnPropertyDescriptor(item, key)?.value,
+          kind: (item) => Array.isArray(item) || isMap(item) || isSet(item) || isArrayBuffer(item) || ArrayBuffer.isView(item) ? "collection"
+            : typeof item === "string" ? "string" : item && typeof item === "object" ? "object" : "scalar",
+        });
+        throw artifactPagingError(id, path, value === null ? "null" : typeof value, nextPath, keys);
       }
       const offset = Math.max(0, selection.offset ?? 0);
       const end = selection.limit === undefined ? undefined : offset + Math.max(0, selection.limit);

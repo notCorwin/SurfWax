@@ -68,6 +68,13 @@ test("observes and operates on the same iframe after repeated process swaps", as
         const frame = document.createElement("iframe"); frame.id = "switching-frame"; document.body.appendChild(frame);
         for (let i = 0; i < 4; i++) for (const url of [same, cross]) {
           await new Promise<void>((resolve, reject) => { frame.onload = () => resolve(); frame.onerror = reject; frame.src = `${url}?swap=${i}`; });
+          if (url === same) {
+            // This same-process descendant is destroyed by the next OOPIF
+            // navigation; Chrome need not emit an individual detach for it.
+            const child = frame.contentDocument!.createElement("iframe");
+            child.srcdoc = "<!doctype html><button>Retired nested action</button>";
+            await new Promise<void>((resolve) => { child.onload = () => resolve(); frame.contentDocument!.body.append(child); });
+          }
         }
         status.textContent = "swapped";
       };

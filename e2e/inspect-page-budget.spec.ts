@@ -38,7 +38,7 @@ test("delivers snapshot pages inline even when the requested budget is oversized
       expect(++oversizedPageCount).toBeLessThan(50);
       return oversizedCursor ? readOversized() : done();
     }));
-    return commandResponse("inspect_page", { budget: 100000, ...(oversizedCursor ? { cursor: oversizedCursor } : {}) }, pending);
+    return commandResponse("inspect_page", { budget: 100000, ...(oversizedCursor ? { cursor: oversizedCursor } : { full: true }) }, pending);
   };
   const readPage = () => {
     pending = `budget-page-${pageCount}`;

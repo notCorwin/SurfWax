@@ -159,7 +159,7 @@ for (const scenario of [
           if (rounds === 12) {
             expect(verified.evidenceId).toEqual(expect.any(String));
             return commandResponse("complete_goal", { taskType: "browser", status: "completed", evidence: [
-              { toolCallId: verified.evidenceId, observation: "The observed queue status is Queue complete after all twelve item actions." },
+              { evidenceId: verified.evidenceId, observation: "The observed queue status is Queue complete after all twelve item actions." },
             ] }, "semantic-complete");
           }
           return capture("delta");

@@ -46,7 +46,6 @@ export async function startDevelopmentExtension(options = {}) {
   const directory = await mkdtemp(join(options.tmpdir ?? tmpdir(), 'surfwax-development-'));
   const extensionPath = join(directory, 'extension');
   const port = await availablePort();
-  const previous = { port: process.env.SURFWAX_DEV_PORT, output: process.env.SURFWAX_DEV_OUT_DIR };
   let server;
   let closed = false;
   const close = async () => {
@@ -56,11 +55,14 @@ export async function startDevelopmentExtension(options = {}) {
     finally { await rm(directory, { recursive: true, force: true }); }
   };
   try {
-    process.env.SURFWAX_DEV_PORT = String(port);
-    process.env.SURFWAX_DEV_OUT_DIR = extensionPath;
     const createServer = options.createServer ?? (await import('vite')).createServer;
+    // Inline configuration keeps parallel launches independent; never mutate
+    // process-wide environment while Vite asynchronously loads its config.
     server = await createServer({ root: cwd, configFile: resolve(cwd, 'vite.config.ts'),
-      server: { host: 'localhost', port, strictPort: true }, build: { outDir: extensionPath } });
+      cacheDir: join(directory, 'vite-cache'),
+      define: { __SURF_WAX_DEV_SERVER__: JSON.stringify(`http://localhost:${port}`) },
+      server: { host: 'localhost', port, strictPort: true, ws: { host: 'localhost', clientPort: port } },
+      build: { outDir: extensionPath } });
     await server.listen();
     const url = `http://localhost:${port}`;
     const deadline = Date.now() + (options.timeoutMs ?? 30_000);
@@ -78,8 +80,5 @@ export async function startDevelopmentExtension(options = {}) {
     if (!response.ok) throw new Error(`Vite HMR client is unavailable (${response.status}).`);
     return { extensionPath, url, port, close };
   } catch (error) { await close(); throw error; }
-  finally {
-    if (previous.port === undefined) delete process.env.SURFWAX_DEV_PORT; else process.env.SURFWAX_DEV_PORT = previous.port;
-    if (previous.output === undefined) delete process.env.SURFWAX_DEV_OUT_DIR; else process.env.SURFWAX_DEV_OUT_DIR = previous.output;
-  }
+
 }

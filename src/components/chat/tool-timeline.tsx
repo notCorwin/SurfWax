@@ -72,15 +72,16 @@ export function toolGroupDuration(tools: readonly { startedAtMs?: number; finish
 }
 
 function FailureSummary({ tools, phase }: { tools: readonly ToolPart[]; phase: ActivityPhase }) {
-  let incomplete = 0, interrupted = 0;
+  let failed = 0, incomplete = 0, interrupted = 0;
   for (const part of tools) {
     if (toolActivity(part, phase).status !== "error") continue;
     if (toolWasInterrupted(part, phase)) interrupted++;
+    else if (part.status.type === "incomplete" || part.isError) failed++;
     else incomplete++;
   }
-  if (!incomplete && !interrupted) return null;
+  if (!failed && !incomplete && !interrupted) return null;
   return <div className="activity transcript-activity" data-status="error" data-testid="tool-failure-summary">
-    <span>{[incomplete && `${incomplete} 项未完成`, interrupted && `${interrupted} 项已中断`].filter(Boolean).join("，")}</span>
+    <span>{[failed && `${failed} 项失败`, incomplete && `${incomplete} 项未完成`, interrupted && `${interrupted} 项已中断`].filter(Boolean).join("，")}</span>
   </div>;
 }
 

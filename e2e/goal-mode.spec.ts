@@ -5,12 +5,15 @@ test("goal mode recovers after progress text and a failed action, then verifies 
     const content = request.messages.filter((entry: any) => entry.role === "tool").at(-1).content;
     return JSON.parse(Array.isArray(content) ? content.find((part: any) => part.type === "text").text : content);
   };
+  let uncertainEvidenceId: string | undefined;
   const provider = await startProvider([
     textResponse("I am checking the form."),
     commandResponse("inspect_page", {}, "initial-page"),
     commandResponse("fill", { target: { by: "label", value: "Old email", exact: true }, value: "agent@example.com", timeoutMs: 100 }, "missing-input"),
     (request) => {
-      expect(lastTool(request)).toMatchObject({ ok: false, evidenceId: expect.any(String) });
+      const failed = lastTool(request);
+      expect(failed).toMatchObject({ ok: false, evidenceId: expect.any(String) });
+      if (failed.error?.effectUnknown) uncertainEvidenceId = failed.evidenceId;
       return textResponse("I will inspect the current form and continue.");
     },
     commandResponse("inspect_page", {}, "updated-page"),
@@ -21,7 +24,7 @@ test("goal mode recovers after progress text and a failed action, then verifies 
       const result = lastTool(request);
       expect(result).toMatchObject({ ok: true, result: { verified: true }, evidenceId: expect.any(String) });
       return commandResponse("complete_goal", { taskType: "browser", status: "completed",
-        evidence: [{ toolCallId: result.evidenceId, observation: "The form displays Welcome agent@example.com." }] }, "finish", "Verified the submitted form.");
+        evidence: [{ evidenceId: result.evidenceId, observation: "The form displays Welcome agent@example.com; the requested final value and submission outcome are verified after the interrupted attempt.", ...(uncertainEvidenceId ? { resolves: [uncertainEvidenceId] } : {}) }] }, "finish", "Verified the submitted form.");
     },
     textResponse("Form completed"),
   ]);

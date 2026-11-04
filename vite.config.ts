@@ -18,6 +18,7 @@ const devManifest = {
 };
 
 export default defineConfig({
+  cacheDir: resolve(projectRoot, ".dev/vite-cache"),
   define: {
     __SURF_WAX_DEV_SERVER__: JSON.stringify(`http://localhost:${devPort}`),
     // AI SDK's gateway error handler probes process without a typeof guard.

@@ -1,3 +1,5 @@
+import { gunzipSync } from "node:zlib";
+import bundledCatalog from "../src/data/models-dev-api";
 import { expect, test, startProvider, textResponse, delayedResponse, assistantResponse, configure, openExtension, dispose, readEvents, startNewConversation, focusPageControl } from './fixtures';
 
 const largeReply = 'OLD_CONTEXT_MARKER ' + 'page observation '.repeat(8_000);
@@ -7,6 +9,11 @@ test('automatically summarizes after a completed turn and preserves the full can
   const provider = await startProvider([textResponse(largeReply), textResponse('压缩测试'), textResponse('COMPACTED_REPLY')], 0, summary);
   const opened = await openExtension();
   try {
+    await expect(opened.page.getByTestId("open-settings")).toBeVisible();
+    // This exercises compaction against a known model catalog, not Models.dev
+    // uptime. Reuse the bundled data so external refreshes cannot delay a reply.
+    await opened.page.evaluate((catalog) => chrome.storage.local.set({ "side-agent:model-catalog": { version: 2, fetchedAt: Date.now(), catalog } }),
+      JSON.parse(gunzipSync(Buffer.from(bundledCatalog, "base64")).toString("utf8")));
     await (await configure(opened.context, opened.page, provider.baseURL, 50_000)).close();
     const composer = opened.page.getByTestId('composer-input');
     await composer.fill('first request'); await composer.press('Enter');

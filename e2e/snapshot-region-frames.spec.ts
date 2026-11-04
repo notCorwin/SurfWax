@@ -28,7 +28,7 @@ test("scoped snapshots include visible descendant frames and exclude frames outs
       </main>`;
       for (const frame of document.querySelectorAll("iframe")) {
         frame.style.width = "300px";
-        frame.style.height = "100px";
+        frame.style.height = "160px";
       }
     }, { same: `${provider.origin}/target`, cross: `${crossOrigin}/target` });
     const same = target.frameLocator("#same"), cross = target.frameLocator("#cross");

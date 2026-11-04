@@ -12,9 +12,9 @@ export type ConsoleRecord = { index: number; level: string; text: string; timest
 type PendingHeaders = { request?: Record<string, string>; response?: Record<string, string> };
 type RequestList = { requests: Array<Record<string, unknown>>; integrity: "complete" | "incomplete"; hasMore: boolean | null; nextOffset?: number; reason?: string };
 type ConsoleList = { messages: ConsoleRecord[]; integrity: "complete" | "incomplete"; hasMore: boolean | null; nextOffset?: number; reason?: string };
-type CachedPage = { value: RequestList | ConsoleList; logEpoch?: string; conversationId?: string; revision: number };
-type State = { epoch: string; revision: number; nextRequest: number; nextConsole: number; consoleGeneration: number; network: NetworkRecord[]; networkLatest: Map<string, NetworkRecord>; console: ConsoleRecord[]; pendingHeaders: Map<string, PendingHeaders>;
-  historical: Map<string, NetworkRecord>; pages: Map<string, CachedPage>; latest: Map<string, number>; invalidations: Map<string, number>; invalidBefore: number;
+type CachedPage = { kind: "requests" | "console"; value: RequestList | ConsoleList; logEpoch?: string; conversationId?: string; revision: number };
+type State = { epoch: string; revision: number; networkRevision: number; consoleRevision: number; nextRequest: number; nextConsole: number; consoleGeneration: number; network: NetworkRecord[]; networkLatest: Map<string, NetworkRecord>; console: ConsoleRecord[]; pendingHeaders: Map<string, PendingHeaders>;
+  historical: Map<string, NetworkRecord>; pages: Map<string, CachedPage>; latest: Map<string, number>; requestVersions: Map<string, number>; invalidations: Map<string, number>; invalidBefore: number;
   captureFailures?: Set<"network" | "console">; replayComplete?: boolean; replayEpoch?: string };
 const CACHE_LIMIT = 1000;
 const HISTORY_CACHE_LIMIT = 128;
@@ -65,7 +65,7 @@ export class BrowserDiagnostics {
   private readonly tabs = new Map<number, State>();
   // A reset of the visible history cannot repair a failed CDP subscription.
   private readonly captureFailures = new Map<number, Set<"network" | "console">>();
-  private readonly restorations = new WeakMap<State, { revision: number; conversationId: string; task: Promise<State> }>();
+  private readonly restorations = new WeakMap<State, { revision: number; networkRevision: number; consoleRevision: number; conversationId: string; task: Promise<State> }>();
   private readonly replays = new WeakMap<State, { revision: number; conversationId: string; lastId: number; logEpoch: string; state: State }>();
   private context: { conversationId?: string; toolCallId?: string; logIdentity?: { runId?: string; toolCallId: string; toolCallIdCanonical: true } } = {};
   constructor(private readonly logger?: EventLogger) {}
@@ -77,7 +77,7 @@ export class BrowserDiagnostics {
   }
   private state(tabId: number): State {
     let state = this.tabs.get(tabId);
-    if (!state) { state = { epoch: crypto.randomUUID(), revision: 0, nextRequest: 0, nextConsole: 0, consoleGeneration: 0, network: [], networkLatest: new Map(), console: [], pendingHeaders: new Map(), historical: new Map(), pages: new Map(), latest: new Map(), invalidations: new Map(), invalidBefore: 0, captureFailures: this.captureFailures.get(tabId) }; this.tabs.set(tabId, state); }
+    if (!state) { state = { epoch: crypto.randomUUID(), revision: 0, networkRevision: 0, consoleRevision: 0, nextRequest: 0, nextConsole: 0, consoleGeneration: 0, network: [], networkLatest: new Map(), console: [], pendingHeaders: new Map(), historical: new Map(), pages: new Map(), latest: new Map(), requestVersions: new Map(), invalidations: new Map(), invalidBefore: 0, captureFailures: this.captureFailures.get(tabId) }; this.tabs.set(tabId, state); }
     return state;
   }
   remove(tabId: number): void { this.tabs.delete(tabId); this.captureFailures.delete(tabId); }
@@ -87,10 +87,16 @@ export class BrowserDiagnostics {
     if (source.tabId === undefined) return;
     const state = this.state(source.tabId);
     const kind = method === "Network.enable" ? "network" : method === "Log.enable" ? "console" : undefined;
-    if (kind) { const failures = state.captureFailures ?? new Set(); failures.add(kind); state.captureFailures = failures; this.captureFailures.set(source.tabId, failures); state.revision++; state.pages.clear(); }
+    if (kind) { const failures = state.captureFailures ?? new Set(); failures.add(kind); state.captureFailures = failures; this.captureFailures.set(source.tabId, failures); state.revision++; this.invalidatePages(state, kind); }
     this.logger?.telemetry({ type: "browser.diagnostic.capture-failed", ...this.context, ...this.context.logIdentity,
       content: { source, method }, error: safeDiagnosticError(error) });
   }
+  private invalidatePages(state: State, kind: "network" | "console"): void {
+    const pageKind = kind === "network" ? "requests" : "console";
+    if (kind === "network") state.networkRevision++; else state.consoleRevision++;
+    for (const [key, page] of state.pages) if (page.kind === pageKind) state.pages.delete(key);
+  }
+
   handle(source: Debuggee, method: string, params: any): void {
     const tabId = source.tabId;
     if (tabId === undefined) return;
@@ -105,7 +111,10 @@ export class BrowserDiagnostics {
     if (method === "Network.requestWillBeSent" && typeof params?.requestId === "string") {
       const identity = sourceKey(source.sessionId, params.requestId);
       state.latest.delete(identity); state.latest.set(identity, index!);
-      while (state.latest.size > IDENTITY_LIMIT) state.latest.delete(state.latest.keys().next().value!);
+      while (state.latest.size > IDENTITY_LIMIT) {
+        const oldest = state.latest.keys().next().value!;
+        state.latest.delete(oldest); state.requestVersions.delete(oldest);
+      }
     }
     const invalidation = method === "Page.frameNavigated" && typeof params?.frame?.id === "string" ? `frame:${params.frame.id}`
       : method === "Page.frameDetached" && typeof params?.frameId === "string" ? `frame:${params.frameId}`
@@ -119,7 +128,13 @@ export class BrowserDiagnostics {
       }
     }
     state.revision += 1;
-    state.pages.clear();
+    const changesRequest = ["Network.requestWillBeSent", "Network.responseReceived", "Network.requestWillBeSentExtraInfo", "Network.responseReceivedExtraInfo", "Network.loadingFailed"].includes(method);
+    if (changesRequest && typeof params?.requestId === "string") {
+      const key = sourceKey(source.sessionId, params.requestId);
+      if (state.latest.has(key)) state.requestVersions.set(key, state.revision);
+    }
+    if (lifecycle || changesRequest) this.invalidatePages(state, "network");
+    if (method === "Runtime.consoleAPICalled" || method === "Log.entryAdded") this.invalidatePages(state, "console");
     // Cold references are reusable across unrelated traffic; invalidate only
     // entries whose request, frame, or debugger session may have changed.
     for (const [ref, record] of state.historical) {
@@ -186,9 +201,12 @@ export class BrowserDiagnostics {
       const current = this.state(tabId);
       const conversationId = this.context.conversationId;
       if (!this.logger || !conversationId) return { ...current, replayComplete: false };
-      const revision = current.revision;
+      const revision = current.revision, consoleGeneration = current.consoleGeneration;
+      // Freeze the read boundary before I/O. Ongoing traffic belongs to a later
+      // observation; it must never make this prefix chase a moving revision.
+      const boundary = { ...current, consoleGeneration };
       let flight = this.restorations.get(current);
-      if (!flight || flight.revision !== revision || flight.conversationId !== conversationId) {
+      if (!flight || flight.networkRevision !== current.networkRevision || flight.consoleRevision !== current.consoleRevision || flight.conversationId !== conversationId) {
         const task = (async () => {
           let cache = this.replays.get(current);
           if (cache?.conversationId !== conversationId || cache.revision > revision) cache = undefined;
@@ -199,35 +217,35 @@ export class BrowserDiagnostics {
           }
           const network = cache ? structuredClone(cache.state.network) : [];
           const networkLatest = new Map(network.map((record) => [sourceKey(record.debuggee.sessionId, record.requestId), record]));
-          const restored: State = cache ? { ...current, network, networkLatest, console: cache.state.consoleGeneration === current.consoleGeneration ? structuredClone(cache.state.console) : [], pendingHeaders: structuredClone(cache.state.pendingHeaders), historical: new Map(), pages: new Map(), replayComplete: true }
-            : { ...current, network, networkLatest, console: [], pendingHeaders: new Map(), historical: new Map(), pages: new Map(), replayComplete: true };
+          const restored: State = cache ? { ...boundary, network, networkLatest, console: cache.state.consoleGeneration === consoleGeneration ? structuredClone(cache.state.console) : [], pendingHeaders: structuredClone(cache.state.pendingHeaders), historical: new Map(), pages: new Map(), replayComplete: true }
+            : { ...boundary, network, networkLatest, console: [], pendingHeaders: new Map(), historical: new Map(), pages: new Map(), replayComplete: true };
           restored.replayEpoch = snapshot.epoch;
           let expectedRevision = (cache?.revision ?? 0) + 1, lastId = cache?.lastId ?? -1;
           for (const event of snapshot.value) {
-            lastId = Math.max(lastId, event.id);
             const content = fromLogValue(event.content, event.valueEncoding) as { tabId?: number; source: Debuggee; method: string; epoch?: string; index?: number; revision?: number; consoleGeneration?: number };
-            if (content.tabId !== tabId || content.epoch !== current.epoch) continue;
+            if (content.tabId !== tabId || content.epoch !== current.epoch || (content.revision ?? 0) > revision) continue;
+            lastId = Math.max(lastId, event.id);
             if (!Number.isSafeInteger(content.revision) || content.revision! !== expectedRevision) restored.replayComplete = false;
             if (!Number.isSafeInteger(content.revision) || content.revision! < expectedRevision) continue;
             expectedRevision = content.revision! + 1;
-            if ((content.method === "console.clear" || content.method === "Runtime.consoleAPICalled" || content.method === "Log.entryAdded") && content.consoleGeneration !== current.consoleGeneration) continue;
+            if ((content.method === "console.clear" || content.method === "Runtime.consoleAPICalled" || content.method === "Log.entryAdded") && content.consoleGeneration !== consoleGeneration) continue;
             this.apply(restored, content.source, content.method, fromLogValue(event.output, event.valueEncoding), content.index);
           }
           if (expectedRevision !== revision + 1) restored.replayComplete = false;
           if (restored.replayComplete && replayFits(restored)
-            && this.tabs.get(tabId) === current && current.revision === revision && this.context.conversationId === conversationId) {
+            && this.tabs.get(tabId) === current && current.consoleGeneration === consoleGeneration && this.context.conversationId === conversationId) {
             this.replays.set(current, { revision, conversationId, lastId, logEpoch: snapshot.epoch, state: restored });
           }
           return restored;
         })();
-        flight = { revision, conversationId, task };
+        flight = { revision, networkRevision: boundary.networkRevision, consoleRevision: boundary.consoleRevision, conversationId, task };
         this.restorations.set(current, flight);
         void task.finally(() => { if (this.restorations.get(current)?.task === task) this.restorations.delete(current); }).catch(() => undefined);
       }
       const result = await waitFor(flight.task, signal);
-      // A redirect, detach or navigation can arrive while the log read is in
-      // flight. Retry against the newer epoch/revision instead of serving it.
-      if (this.tabs.get(tabId) === current && current.revision === revision && this.context.conversationId === conversationId) return result;
+      // A reset changes identity; console.clear changes its generation. These
+      // invalidate the boundary. Ordinary traffic never invalidates a prefix.
+      if (this.tabs.get(tabId) === current && current.consoleGeneration === consoleGeneration && this.context.conversationId === conversationId) return result;
     }
   }
   async requests(tabId: number, input: { static?: boolean; filter?: string; clear?: boolean; offset?: number; limit?: number }, signal?: AbortSignal): Promise<unknown> {
@@ -238,33 +256,34 @@ export class BrowserDiagnostics {
     const matcher = input.filter ? new RegExp(input.filter) : undefined;
     while (true) {
       signal?.throwIfAborted();
-      const state = this.state(tabId), revision = state.revision, conversationId = this.context.conversationId;
+      const state = this.state(tabId), revision = state.networkRevision, conversationId = this.context.conversationId;
+      const live = structuredClone(state.network);
       const key = JSON.stringify(["requests", input.static ?? false, input.filter ?? null, offset, limit]);
       const cached = state.pages.get(key);
       if (cached && cached.revision === revision && cached.conversationId === conversationId) {
         try {
           const valid = cached.logEpoch === undefined || this.logger && await waitFor(this.logger.canonicalEpoch(), signal) === cached.logEpoch;
-          if (this.tabs.get(tabId) !== state || state.revision !== revision || this.context.conversationId !== conversationId) continue;
+          if (this.tabs.get(tabId) !== state || this.context.conversationId !== conversationId) continue;
           if (valid) return structuredClone(cached.value);
           state.pages.delete(key);
         } catch (error) { if (signal?.aborted) throw error; state.pages.delete(key); }
       }
-      let records = state.network, integrity: RequestList["integrity"] = "complete", reason: string | undefined, logEpoch: string | undefined;
+      let records = live, integrity: RequestList["integrity"] = "complete", reason: string | undefined, logEpoch: string | undefined;
       if (state.nextRequest > CACHE_LIMIT) {
         try {
           const replay = await this.restored(tabId, signal);
-          if (this.tabs.get(tabId) !== state || state.revision !== revision || this.context.conversationId !== conversationId) continue;
+          if (this.tabs.get(tabId) !== state || this.context.conversationId !== conversationId) continue;
           logEpoch = replay.replayEpoch;
           integrity = replay.replayComplete === true ? "complete" : "incomplete";
           if (integrity === "incomplete") reason = "diagnostic-log-incomplete";
           // Replay can miss best-effort telemetry. Retain every still-live
           // record and report incomplete rather than silently dropping it.
           const merged = new Map(replay.network.map((record) => [record.index, record]));
-          for (const record of state.network) merged.set(record.index, record);
+          for (const record of live) merged.set(record.index, record);
           records = [...merged.values()].sort((a, b) => a.index - b.index);
         } catch (error) {
           if (signal?.aborted) throw error;
-          if (this.tabs.get(tabId) !== state || state.revision !== revision || this.context.conversationId !== conversationId) continue;
+          if (this.tabs.get(tabId) !== state || this.context.conversationId !== conversationId) continue;
           integrity = "incomplete"; reason = "diagnostic-log-unavailable";
         }
       }
@@ -281,7 +300,7 @@ export class BrowserDiagnostics {
       // Cached history must remain tied to the canonical log epoch, including
       // a clear by another logger instance. In-memory-only pages need no disk.
       if (state.nextRequest <= CACHE_LIMIT || logEpoch !== undefined) {
-        state.pages.set(key, { value: structuredClone(result), logEpoch, conversationId, revision });
+        state.pages.set(key, { kind: "requests", value: structuredClone(result), logEpoch, conversationId, revision });
         while (state.pages.size > PAGE_CACHE_LIMIT) state.pages.delete(state.pages.keys().next().value!);
       }
       return result;
@@ -289,10 +308,12 @@ export class BrowserDiagnostics {
   }
   async request(tabId: number, ref: string, signal?: AbortSignal): Promise<NetworkRecord> {
     signal?.throwIfAborted();
+    while (true) {
     const state = this.state(tabId);
     if (typeof ref !== "string" || !ref.startsWith(`request:${state.epoch}:`)) throw staleRequest();
     const index = Number(ref.slice(`request:${state.epoch}:`.length));
     if (!Number.isSafeInteger(index) || index < 1 || requestRef(state.epoch, index) !== ref) throw staleRequest();
+    const revision = state.revision;
     const record = state.network.find((item) => item.requestRef === ref) ?? state.historical.get(ref) ?? (await this.restored(tabId, signal)).network.find((item) => item.requestRef === ref);
     signal?.throwIfAborted();
     if (this.tabs.get(tabId) !== state || !record || record.superseded
@@ -300,45 +321,50 @@ export class BrowserDiagnostics {
       || record.index <= state.invalidBefore
       || (record.frameId !== undefined && (state.invalidations.get(`frame:${record.frameId}`) ?? -1) >= record.index)
       || (record.debuggee.sessionId !== undefined && (state.invalidations.get(`session:${record.debuggee.sessionId}`) ?? -1) >= record.index)) throw staleRequest();
+    // Unrelated traffic never restarts a read. A late update to this exact
+    // request must be replayed before combining metadata with a current body.
+    if ((state.requestVersions.get(sourceKey(record.debuggee.sessionId, record.requestId)) ?? 0) > revision) continue;
     if (!state.network.includes(record)) {
       state.historical.delete(ref); state.historical.set(ref, record);
       while (state.historical.size > HISTORY_CACHE_LIMIT) state.historical.delete(state.historical.keys().next().value!);
     }
     return record;
+    }
   }
   async console(tabId: number, input: { clear?: boolean; minLevel?: string; offset?: number; limit?: number }, signal?: AbortSignal): Promise<unknown> {
     signal?.throwIfAborted();
-    if (input.clear) { const state = this.state(tabId); state.console = []; state.nextConsole = 0; state.consoleGeneration += 1; state.revision += 1; state.pages.clear(); this.logger?.telemetry({ type: "browser.diagnostic", ...this.context, ...this.context.logIdentity, content: { tabId, source: { tabId }, method: "console.clear", epoch: state.epoch, revision: state.revision, consoleGeneration: state.consoleGeneration }, output: null }); return { cleared: true }; }
+    if (input.clear) { const state = this.state(tabId); state.console = []; state.nextConsole = 0; state.consoleGeneration += 1; state.revision += 1; this.invalidatePages(state, "console"); this.logger?.telemetry({ type: "browser.diagnostic", ...this.context, ...this.context.logIdentity, content: { tabId, source: { tabId }, method: "console.clear", epoch: state.epoch, revision: state.revision, consoleGeneration: state.consoleGeneration }, output: null }); return { cleared: true }; }
     const offset = input.offset ?? 0, limit = input.limit ?? 100;
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Console list offset must be nonnegative and limit must be between 1 and 100");
     const rank: Record<string, number> = { debug: 0, info: 1, log: 1, warning: 2, warn: 2, error: 3, assert: 3 };
     while (true) {
       signal?.throwIfAborted();
-      const state = this.state(tabId), revision = state.revision, conversationId = this.context.conversationId;
+      const state = this.state(tabId), revision = state.consoleRevision, conversationId = this.context.conversationId;
+      const consoleGeneration = state.consoleGeneration, live = structuredClone(state.console);
       const key = JSON.stringify(["console", input.minLevel ?? "info", offset, limit]);
       const cached = state.pages.get(key);
       if (cached && cached.revision === revision && cached.conversationId === conversationId) {
         try {
           const valid = cached.logEpoch === undefined || this.logger && await waitFor(this.logger.canonicalEpoch(), signal) === cached.logEpoch;
-          if (this.tabs.get(tabId) !== state || state.revision !== revision || this.context.conversationId !== conversationId) continue;
+          if (this.tabs.get(tabId) !== state || state.consoleGeneration !== consoleGeneration || this.context.conversationId !== conversationId) continue;
           if (valid) return structuredClone(cached.value);
           state.pages.delete(key);
         } catch (error) { if (signal?.aborted) throw error; state.pages.delete(key); }
       }
-      let records = state.console, integrity: ConsoleList["integrity"] = "complete", reason: string | undefined, logEpoch: string | undefined;
+      let records = live, integrity: ConsoleList["integrity"] = "complete", reason: string | undefined, logEpoch: string | undefined;
       if (state.nextConsole > CACHE_LIMIT) {
         try {
           const replay = await this.restored(tabId, signal);
-          if (this.tabs.get(tabId) !== state || state.revision !== revision || this.context.conversationId !== conversationId) continue;
+          if (this.tabs.get(tabId) !== state || state.consoleGeneration !== consoleGeneration || this.context.conversationId !== conversationId) continue;
           logEpoch = replay.replayEpoch;
           integrity = replay.replayComplete === true ? "complete" : "incomplete";
           if (integrity === "incomplete") reason = "diagnostic-log-incomplete";
           const merged = new Map(replay.console.map((record) => [record.index, record]));
-          for (const record of state.console) merged.set(record.index, record);
+          for (const record of live) merged.set(record.index, record);
           records = [...merged.values()].sort((a, b) => a.index - b.index);
         } catch (error) {
           if (signal?.aborted) throw error;
-          if (this.tabs.get(tabId) !== state || state.revision !== revision || this.context.conversationId !== conversationId) continue;
+          if (this.tabs.get(tabId) !== state || state.consoleGeneration !== consoleGeneration || this.context.conversationId !== conversationId) continue;
           integrity = "incomplete"; reason = "diagnostic-log-unavailable";
         }
       }
@@ -349,7 +375,7 @@ export class BrowserDiagnostics {
       const result: ConsoleList = { messages, integrity, hasMore: hasKnownMore ? true : integrity === "complete" ? false : null,
         ...(hasKnownMore ? { nextOffset: offset + limit } : {}), ...(reason ? { reason } : {}) };
       if (state.nextConsole <= CACHE_LIMIT || logEpoch !== undefined) {
-        state.pages.set(key, { value: structuredClone(result), logEpoch, conversationId, revision });
+        state.pages.set(key, { kind: "console", value: structuredClone(result), logEpoch, conversationId, revision });
         while (state.pages.size > PAGE_CACHE_LIMIT) state.pages.delete(state.pages.keys().next().value!);
       }
       return result;

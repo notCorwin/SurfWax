@@ -8,6 +8,7 @@ export type SnapshotConsistencyEvidence = Readonly<{
   /** The caller applied live paint projections to candidate visibility. */
   paintAdjusted?: boolean;
   frameClips?: ReadonlyMap<string, SnapshotClip>;
+  hiddenFrames?: ReadonlySet<string>;
 }>;
 
 /** Identify changing text only when its effects on the rest of the page are
@@ -115,7 +116,7 @@ export function changedTextNodes(left: any, right: any, before?: SnapshotConsist
     if (!changed.size || !sameDOMSnapshot(left, normalized, before)) return undefined;
     if (geometryChanged) {
       const candidates: SnapshotTextPaintCandidate[] = [];
-      const actualVisibility = snapshotVisibility(right, { textPaintCandidates: candidates, frameClips: before?.frameClips });
+      const actualVisibility = snapshotVisibility(right, { textPaintCandidates: candidates, frameClips: before?.frameClips, hiddenFrames: before?.hiddenFrames });
       const originalCandidates: SnapshotTextPaintCandidate[] = [];
       const originalVisibility = before?.visibility ?? snapshotVisibility(left, { textPaintCandidates: originalCandidates });
       const sourceCandidates = before?.textPaintCandidates ?? originalCandidates;
@@ -262,7 +263,7 @@ export function sameDOMSnapshot(left: any, right: any, before?: SnapshotConsiste
     const computed: SnapshotTextPaintCandidate[] = [], b: SnapshotTextPaintCandidate[] = [];
     const aVisibility = before?.visibility ?? snapshotVisibility(left, { textPaintCandidates: computed });
     const a = before?.textPaintCandidates ?? computed;
-    const bVisibility = snapshotVisibility(right, { textPaintCandidates: b, frameClips: before?.frameClips });
+    const bVisibility = snapshotVisibility(right, { textPaintCandidates: b, frameClips: before?.frameClips, hiddenFrames: before?.hiddenFrames });
     if (!sameTextPaintCandidates(a, b) || aVisibility.size !== bVisibility.size) return false;
     // The producer may have changed only candidate visibility after live paint
     // analysis. A candidate existed only when it was initially visible.

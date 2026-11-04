@@ -1255,3 +1255,22 @@ it("reuses an already materialized message revision across projection reads", as
   expect(second.value.at(-1)).toBe(first.value.at(-1));
   await Promise.all([writer.dispose(), reader.dispose()]);
 });
+
+it.each([false, true])("guides object pagination to its collection with the full selected path (partitioned=%s)", async (partitioned) => {
+  const store = memoryStore();
+  const logger = new EventLogger({ store });
+  const event = await logger.append({type:'tool.result.data',output:{status:"ok",result:{status:"ok",total:1,items:['visible page text']},...(partitioned?{ballast:'x'.repeat(300_000)}:{})}});
+  expect(Boolean(event?.artifactGraph)).toBe(partitioned);
+  await expect(logger.result(event!.id, {path:['result'],limit:10})).rejects.toThrow('"path":["result","items"]');
+  await expect(logger.result(event!.id, {path:['result','total'],limit:10})).rejects.toThrow('without offset/limit');
+  expect(await logger.result(event!.id, {path:['result','items'],limit:1})).toEqual(['visible page text']);
+});
+
+it.each([false,true])("keeps long-key and null pagination guidance accurate (partitioned=%s)",async(partitioned)=>{
+  const logger=new EventLogger({store:memoryStore()});
+  const event=await logger.append({type:"tool.result.data",output:{status:"ok",["x".repeat(129)]:["page text"],nothing:null,...(partitioned?{ballast:"x".repeat(300_000)}:{})}});
+  const failure=await logger.result(event!.id,{limit:10}).catch(error=>error);
+  expect((failure as Error).message).toContain("Select a nested collection");
+  expect((failure as Error).message).not.toContain('"path":["status"]');
+  await expect(logger.result(event!.id,{path:["nothing"],limit:10})).rejects.toThrow("scalar without offset/limit");
+});

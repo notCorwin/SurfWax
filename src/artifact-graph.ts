@@ -1,3 +1,4 @@
+import { artifactPagingError, artifactPagePath } from "./artifact-selection";
 import { createArrayView, decodeLogGraph, visitLogGraph } from "./log-graph";
 
 /** Each part is an event; the lookup table in IndexedDB is only a derived index. */
@@ -54,13 +55,16 @@ export function partitionArtifact(value: unknown): { graph: ArtifactGraph; parts
       }
     };
     let ordinal = 0;
+    const selectionKeys: Array<string | null> = [];
     if (entries) for (const entry of entries) {
+      if (metadata.type === "object" && selectionKeys.length < 17) selectionKeys.push(entry[0].length <= 128 ? entry[0] : null);
       if (metadata.type === "array" || metadata.type === "object") {
         const position = metadata.type === "array" ? indexKey(entry[0]) : undefined;
         put(position === undefined ? `k:${hash(entry[0])}` : `i:${Math.floor(position / ENTRIES)}`, ordinal, entry);
       } else put(`e:${Math.floor(ordinal / ENTRIES)}`, ordinal, entry);
       ordinal++;
     }
+    if (metadata.type === "object") metadata.selectionKeys = selectionKeys;
     if (metadata.type === "map" || metadata.type === "set") metadata.size = ordinal;
     ordinal = 0;
     if (properties) for (const entry of properties) put(`p:${hash(entry[0])}`, ordinal++, entry);
@@ -141,7 +145,7 @@ export async function readPartitionedArtifact(graph: ArtifactGraph, read: Reader
     inspect(root); if (nodes.has(-1)) inspect(localSynthetic);
     for (let next = 0; next < pending.length; next++) {
       const node = pending[next]!;
-      const metadata = await header(node);
+      const { selectionKeys: _selectionKeys, ...metadata } = await header(node);
       const rows = await entries(node);
       const main = rows.filter(([section]) => section.startsWith("i:") || section.startsWith("k:") || section.startsWith("e:"));
       const props = rows.filter(([section]) => section.startsWith("p:"));
@@ -206,7 +210,7 @@ export async function readPartitionedArtifact(graph: ArtifactGraph, read: Reader
   if (Array.isArray(token) && token[0] === 0 && (typeof token[1] === "string" || isText(token[1]))) {
     const value = token[1]; return typeof value === "string" ? value.slice(offset, end) : textSlice(value, offset, end);
   }
-  if (!Array.isArray(token) || token[0] !== 1) throw new Error("offset/limit requires an array, string, Map, Set, ArrayBuffer or binary view");
+  if (!Array.isArray(token) || token[0] !== 1) throw artifactPagingError(id, path, Array.isArray(token) && token[0] === 0 ? token[1] === null ? "null" : typeof token[1] : "non-collection");
   const node = token[1], info = await header(node);
   if (["array", "map", "set"].includes(info.type)) {
     const prefix = info.type === "array" ? "i:" as const : "e:" as const;
@@ -228,5 +232,17 @@ export async function readPartitionedArtifact(graph: ArtifactGraph, read: Reader
     const first = Math.min(count, offset), last = Math.min(count, end);
     return readBytes(info, first, last);
   }
-  throw new Error("offset/limit requires an array, string, Map, Set, ArrayBuffer or binary view");
+  // Headers carry bounded property hints; error recovery never materializes
+  // the full object or guesses a field name from a hard-coded allowlist.
+  const nextPath = await artifactPagePath(token, path, {
+    keys: async (value) => value?.[0] === 1 ? (await header(value[1])).selectionKeys ?? [] : [],
+    field: async (value, key) => property(value[1], await header(value[1]), key),
+    kind: async (value) => {
+      if (value?.[0] === 0) return typeof value[1] === "string" || isText(value[1]) ? "string" : "scalar";
+      if (value?.[0] !== 1) return "scalar";
+      const type = (await header(value[1])).type;
+      return ["array", "map", "set", "buffer", "view"].includes(type) ? "collection" : type === "object" ? "object" : "scalar";
+    },
+  });
+  throw artifactPagingError(id, path, info.type, nextPath, info.selectionKeys?.filter((key: unknown): key is string => typeof key === "string"));
 }

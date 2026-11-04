@@ -273,7 +273,7 @@ describe("BrowserDiagnostics", () => {
     else diagnostics.handle({ tabId: 1 }, "Target.detachedFromTarget", { sessionId: "child" });
     release();
     await expect(pending).rejects.toMatchObject({ code: "stale-request" });
-    expect(calls).toBeGreaterThanOrEqual(2);
+    expect(calls).toBe(1); // Live invalidations reject the stale ref without replaying a moving log.
   });
 
   it.each(["redirect", "detach"] as const)("fails closed if the log omits an already observed %s", async (change) => {
@@ -465,4 +465,56 @@ describe("BrowserDiagnostics", () => {
     expect((await diagnostics.requests(1, { limit: 1 }) as any).requests[0].url).toBe("https://test/2");
     await expect(diagnostics.requests(1, { limit: 101 })).rejects.toThrow("limit");
   });
+});
+
+ it("returns a fixed diagnostic prefix under uninterrupted traffic and reuses pages across WebSocket frames", async () => {
+    const { diagnostics, logger } = harness();
+    for (let index = 1; index <= 1001; index++) diagnostics.handle({ tabId: 1 }, "Network.requestWillBeSent", request(index));
+    await logger.flush();
+    const original = logger.diagnosticEventsSnapshot.bind(logger);
+    const reads = vi.spyOn(logger, "diagnosticEventsSnapshot").mockImplementation(async (...args) => {
+      const snapshot = await original(...args);
+      diagnostics.handle({ tabId: 1 }, "Network.webSocketFrameReceived", { requestId: "socket", response: { payloadData: "tick" } });
+      diagnostics.handle({ tabId: 1 }, "Network.requestWillBeSent", request(1002));
+      return snapshot;
+    });
+    expect(await diagnostics.requests(1, {limit:1}, AbortSignal.timeout(1000)))
+      .toMatchObject({integrity:"complete",requests:[{url:"https://test/1"}]});
+    expect(reads).toHaveBeenCalledOnce();
+    reads.mockImplementation(original);
+    await diagnostics.requests(1, {limit:1});
+    const count=reads.mock.calls.length;
+    for(let i=0;i<50;i++) diagnostics.handle({tabId:1}, "Network.webSocketFrameReceived", {requestId:"socket",response:{payloadData:String(i)}});
+    await diagnostics.requests(1, {limit:1});
+    expect(reads).toHaveBeenCalledTimes(count);
+  });
+
+it("shares a pending replay when only WebSocket traffic separates concurrent readers", async () => {
+  const { diagnostics, logger } = harness();
+  for (let i=1;i<=1001;i++) diagnostics.handle({tabId:1},"Network.requestWillBeSent",request(i));
+  await logger.flush();
+  const original=logger.diagnosticEventsSnapshot.bind(logger);
+  let release!:()=>void, entered!:()=>void;
+  const held=new Promise<void>(resolve=>release=resolve), started=new Promise<void>(resolve=>entered=resolve);
+  const reads=vi.spyOn(logger,"diagnosticEventsSnapshot").mockImplementation(async(...args)=>{const value=await original(...args);entered();await held;return value});
+  const first=diagnostics.requests(1,{limit:1});await started;
+  diagnostics.handle({tabId:1},"Network.webSocketFrameReceived",{requestId:"socket",response:{payloadData:"tick"}});
+  const second=diagnostics.requests(1,{limit:1});release();
+  expect(await first).toEqual(await second);expect(reads).toHaveBeenCalledOnce();
+});
+
+it("refreshes only the requested history entry when its response arrives during replay", async () => {
+  const { diagnostics, logger } = harness();
+  diagnostics.handle({tabId:1},"Network.requestWillBeSent",request(1));
+  const first=(await diagnostics.requests(1,{limit:1}) as any).requests[0];
+  for(let i=2;i<=1001;i++)diagnostics.handle({tabId:1},"Network.requestWillBeSent",request(i));
+  await logger.flush();
+  const original=logger.diagnosticEventsSnapshot.bind(logger);let reads=0;
+  vi.spyOn(logger,"diagnosticEventsSnapshot").mockImplementation(async(...args)=>{
+    const value=await original(...args);
+    if(++reads===1)diagnostics.handle({tabId:1},"Network.responseReceived",{requestId:"1",response:{status:201,headers:{"x-result":"created"}}});
+    return value;
+  });
+  expect(await diagnostics.request(1,first.requestRef)).toMatchObject({status:201,responseHeaders:{"x-result":"created"}});
+  expect(reads).toBe(2);
 });

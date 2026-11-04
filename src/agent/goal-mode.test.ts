@@ -42,7 +42,7 @@ describe("goal mode", () => {
       step++;
       if (step === 1 || step === 3) return calls(call(`read-${step}`, "inspect_page", {}));
       return calls(call(`goal-${step}`, "complete_goal", { taskType: "browser", status: "completed",
-        evidence: [{ toolCallId: `read-${step - 1}`, observation: "Release details read" }] }));
+        evidence: [{ evidenceId: `read-${step - 1}`, observation: "Release details read" }] }));
     } });
     const { logger, events } = fixture(model);
     const executor = { browserContext: async () => ({ tabs: [] }), inspect: async () => ({ snapshot: "Release date 2026-10-01" }) } as unknown as ChromeExecutor;
@@ -67,8 +67,8 @@ describe("goal mode", () => {
     expect(parameters.type).toBe("object");
     expect(parameters.anyOf).toBeUndefined();
     const answer = { taskType: "answer", status: "completed" };
-    const browser = { taskType: "browser", status: "completed", evidence: [{ toolCallId: "id", observation: "Observed" }] };
-    const blocked = { ...browser, status: "blocked", dependency: "authentication", userAction: "Sign in", attemptedRecovery: [{ toolCallId: "id", action: "Checked" }] };
+    const browser = { taskType: "browser", status: "completed", evidence: [{ evidenceId: "id", observation: "Observed" }] };
+    const blocked = { ...browser, status: "blocked", dependency: "authentication", userAction: "Sign in", attemptedRecovery: [{ evidenceId: "id", action: "Checked" }] };
     expect(parameters.properties).not.toHaveProperty("summary");
     for (const value of [answer, browser, blocked]) {
       expect(GOAL_SCHEMA.safeParse(value).success).toBe(true);
@@ -147,7 +147,7 @@ describe("goal mode", () => {
   });
 
   it("validates browser evidence, blockers, unknown effects, and the pure answer exception", () => {
-    const goal = (id: string): Goal => ({ taskType: "browser", status: "completed", evidence: [{ toolCallId: id, observation: "Observed" }] });
+    const goal = (id: string): Goal => ({ taskType: "browser", status: "completed", evidence: [{ evidenceId: id, observation: "Observed" }] });
     const answer: Goal = { taskType: "answer", status: "completed" };
     const good = localEvidence("observed", "inspect_page", { ok: true, result: "page" }, 1);
     const failed = localEvidence("failed", "click", { ok: false, error: { retryable: true } }, 2);
@@ -172,12 +172,12 @@ describe("goal mode", () => {
       expect(validateGoal(goal("unobserved"), [localEvidence("unobserved", "click", { ok: true, pageSnapshot: snapshot }, 3)])).toContain("successful observation");
     }
     expect(validateGoal(goal("partial"), [localEvidence("partial", "inspect_page", { ok: true, ...pageSnapshot, partial: true }, 3)])).toBeDefined();
-    expect(validateGoal({ taskType: "browser", status: "completed", evidence: [{ toolCallId: "observed", observation: "Observed" }, { toolCallId: "partial", observation: "Uncertain" }] },
+    expect(validateGoal({ taskType: "browser", status: "completed", evidence: [{ evidenceId: "observed", observation: "Observed" }, { evidenceId: "partial", observation: "Uncertain" }] },
       [good, localEvidence("partial", "inspect_page", { ok: true, ...pageSnapshot, partial: true }, 3)])).toContain("partial");
     expect(validateGoal(goal("pending"), [localEvidence("pending", "click", { ok: true, pageSnapshotStatus: { state: "pending" } }, 3)])).toContain("successful observation");
     expect(validateGoal(goal("observed"), [good, unknown])).toContain("unknown");
     expect(validateGoal(goal("verified"), [good, unknown, verified])).toContain("unknown");
-    const resolved = (id: string, target: string): Goal => ({ taskType: "browser", status: "completed", evidence: [{ toolCallId: id, observation: "Outcome checked", resolves: [target] }] });
+    const resolved = (id: string, target: string): Goal => ({ taskType: "browser", status: "completed", evidence: [{ evidenceId: id, observation: "Outcome checked", resolves: [target] }] });
     expect(validateGoal(resolved("verified", "unknown"), [good, unknown, verified])).toBeUndefined();
     expect(validateGoal(resolved("wrapped", "unknown"), [unknown, wrapped])).toBeUndefined();
     expect(validateGoal(resolved("compact", "unknown"), [unknown, compacted])).toBeUndefined();
@@ -188,11 +188,11 @@ describe("goal mode", () => {
     const other = localEvidence("other", "click", { ok: false, error: { effectUnknown: true } }, 4);
     expect(validateGoal(resolved("network", "unknown"), [unknown, other, network])).toContain("other");
     const blocked: Goal = { taskType: "browser", status: "blocked", dependency: "authentication", userAction: "Sign in",
-      attemptedRecovery: [{ toolCallId: "observed", action: "Checked the session" }], evidence: [{ toolCallId: "observed", observation: "Login page" }] };
+      attemptedRecovery: [{ evidenceId: "observed", action: "Checked the session" }], evidence: [{ evidenceId: "observed", observation: "Login page" }] };
     expect(validateGoal(blocked, [good])).toBeUndefined();
-    expect(validateGoal({ ...blocked, evidence: [{ toolCallId: "dispatch", observation: "Clicked" }], attemptedRecovery: [{ toolCallId: "dispatch", action: "Clicked" }] }, [dispatch])).toContain("successful observation");
-    expect(validateGoal({ ...blocked, evidence: [{ toolCallId: "failed", observation: "Timeout" }] }, [failed])).toBeDefined();
-    expect(validateGoal({ ...blocked, attemptedRecovery: [{ toolCallId: "invented", action: "Tried" }] }, [good])).toContain("actual terminal");
+    expect(validateGoal({ ...blocked, evidence: [{ evidenceId: "dispatch", observation: "Clicked" }], attemptedRecovery: [{ evidenceId: "dispatch", action: "Clicked" }] }, [dispatch])).toContain("successful observation");
+    expect(validateGoal({ ...blocked, evidence: [{ evidenceId: "failed", observation: "Timeout" }] }, [failed])).toBeDefined();
+    expect(validateGoal({ ...blocked, attemptedRecovery: [{ evidenceId: "invented", action: "Tried" }] }, [good])).toContain("actual terminal");
   });
 
   it.each([true, false])("uses local evidence with a logger but without canonical run identity (conversationId=%s)", async (withConversation) => {
@@ -200,7 +200,7 @@ describe("goal mode", () => {
     const model = new MockLanguageModelV4({ doGenerate: async () => {
       if (++count === 1) return calls(call("read", "inspect_page", {}));
       if (count === 2) return calls(call("answer", "complete_goal", { taskType: "answer", status: "completed" }));
-      return calls(call("done", "complete_goal", { taskType: "browser", status: "completed", evidence: [{ toolCallId: "read", observation: "Page checked" }] }));
+      return calls(call("done", "complete_goal", { taskType: "browser", status: "completed", evidence: [{ evidenceId: "read", observation: "Page checked" }] }));
     } });
     const { logger, events } = fixture(model);
     const executor = { browserContext: async () => ({ tabs: [] }), inspect: async () => ({ snapshot: "page" }) } as unknown as ChromeExecutor;
@@ -218,8 +218,8 @@ describe("goal mode", () => {
       count++;
       if (count === 1) return calls(call("read", "inspect_page", {}));
       if (count === 2) return reply("Checking the outcome");
-      if (count === 3) return calls(call("invalid", "complete_goal", { taskType: "browser", status: "completed", evidence: [{ toolCallId: "old", observation: "old" }] }));
-      return calls(call("done", "complete_goal", { taskType: "browser", status: "completed", evidence: [{ toolCallId: "read", observation: "Page observed" }] }));
+      if (count === 3) return calls(call("invalid", "complete_goal", { taskType: "browser", status: "completed", evidence: [{ evidenceId: "old", observation: "old" }] }));
+      return calls(call("done", "complete_goal", { taskType: "browser", status: "completed", evidence: [{ evidenceId: "read", observation: "Page observed" }] }));
     } });
     const { events, logger, factory } = fixture(model, { inspect: async () => ({ snapshot: "page" }) });
     await logger.append({ type: "tool.finished", conversationId: "thread", runId: "previous", toolCallId: "old", content: { toolName: "inspect_page" }, output: { ok: true } });
@@ -296,7 +296,7 @@ describe("goal mode", () => {
       if (count === 1) return calls(call("parallel", "complete_goal", { taskType: "answer", status: "completed" }), call("read", "inspect_page", {}));
       if (count === 2) { pending = true; return calls(call("pending", "complete_goal", { taskType: "answer", status: "completed" })); }
       pending = false;
-      return calls(call("done", "complete_goal", { taskType: "browser", status: "blocked", dependency: "authentication", userAction: "Sign in", attemptedRecovery: [{ toolCallId: "read", action: "Check session" }], evidence: [{ toolCallId: "read", observation: "Login required" }] }));
+      return calls(call("done", "complete_goal", { taskType: "browser", status: "blocked", dependency: "authentication", userAction: "Sign in", attemptedRecovery: [{ evidenceId: "read", action: "Check session" }], evidence: [{ evidenceId: "read", observation: "Login required" }] }));
     } });
     const { events, logger, factory } = fixture(model, { pendingBackgroundJobs: () => pending ? ["job"] : [], inspect: async () => ({ snapshot: "page" }) });
     const result = await createChatTransport(factory, logger, "thread", undefined, undefined, undefined, undefined, true).sendMessages(options());
@@ -347,3 +347,10 @@ describe("goal mode", () => {
     expect(events.some((event) => event.type === "conversation.aborted")).toBe(true);
   });
 });
+
+ it("rejects shortened evidence IDs with the exact canonical reference for recovery", () => {
+    const entry = localEvidence("5:call_observed", "read_text", {ok:true,result:"Observed outcome"}, 1);
+    const invalid = validateGoal({taskType:"browser",status:"completed",evidence:[{evidenceId:"call_observed",observation:"Observed"}]},[entry]);
+    expect(invalid).toContain('"evidenceId":"5:call_observed"');
+    expect(invalid).toContain('phase prefix');
+  });

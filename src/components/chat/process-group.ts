@@ -72,7 +72,7 @@ export function toolActivity(part: ToolActivityPart, phase: ActivityPhase = "set
   if (toolWasInterrupted(part, phase)) {
     return { status: "error", label: `${name} · 已中断${duration}` };
   }
-  if (part.status.type === "incomplete" || part.isError) return { status: "error", label: `${name} · 未完成${duration}` };
+  if (part.status.type === "incomplete" || part.isError) return { status: "error", label: `${name} · 失败${duration}` };
   if (part.status.type === "running" || part.status.type === "requires-action") {
     if (phase === "failed" || phase === "stopped") return { status: "error", label: `${name} · 未完成${duration}` };
     return { status: "running", label: `${name}${duration}` };

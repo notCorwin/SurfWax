@@ -43,7 +43,7 @@ test("@real-model reviews recorded completion against all earlier action receipt
     }
   }
   const history = actionHistory(await runEvidence(logger, proposal.conversationId, proposal.runId));
-  const context = goalReviewContext(messages, 96_000, undefined, goal.taskType === "browser" ? goal.evidence.map((entry) => entry.toolCallId) : []);
+  const context = goalReviewContext(messages, 96_000, undefined, goal.taskType === "browser" ? goal.evidence.map((entry) => entry.evidenceId) : []);
   const proxy = await modelProxy(upstream, key);
   try {
     const languageModel = createOpenAICompatible({ name: "replay", apiKey: proxy.token, baseURL: proxy.baseURL }).chatModel(model);

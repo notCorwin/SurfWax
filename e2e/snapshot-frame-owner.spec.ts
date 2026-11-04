@@ -38,7 +38,7 @@ function snapshotFrames(snapshot: any): Record<string, { label: string; buttonRe
   for (const item of items) {
     const heading = /- heading "(Next|Waiting)"/.exec(item.line);
     if (heading) label = heading[1]!;
-    if (!/- Iframe "Work item"/.test(item.line)) continue;
+    if (!/- Iframe\s/.test(item.line)) continue;
     const id = /\[frameRef=([^\]]+)\]/.exec(item.line)?.[1];
     if (id) owners.set(id, label);
   }
@@ -67,17 +67,17 @@ test("ties same-name iframe owners to their child snapshots across frame replace
     expect(Object.values(before).sort()).toEqual(["Next", "Waiting"]);
     const targetInSelectedFrame = () => ({ by: "role", value: "button", name: "Confirm", frame: { ref: selectedFrameRef } });
     responses.push(
-      commandResponse("inspect_page", { budget: 12000 }, "frames-before"),
+      commandResponse("inspect_page", { full: true, budget: 12000 }, "frames-before"),
       (request) => {
         first = lastTool(request);
         selectedFrameRef = Object.entries(snapshotFrames(first)).find(([, frame]) => frame.label === "Next")?.[0] ?? "";
         return selectedFrameRef ? commandResponse("list_frames", {}, "frames-list-before") : textResponse("FRAME_OWNER_DONE");
       },
       (request) => { firstListed = lastTool(request); return commandResponse("count_elements", { target: targetInSelectedFrame() }, "frames-count"); },
-      (request) => { counted = lastTool(request); return commandResponse("inspect_page", { budget: 12000 }, "frames-repeat"); },
+      (request) => { counted = lastTool(request); return commandResponse("inspect_page", { full: true, budget: 12000 }, "frames-repeat"); },
       (request) => { repeated = lastTool(request); return commandResponse("click", { target: targetInSelectedFrame(), timeoutMs: 20000 }, "frames-click"); },
       (request) => { click = lastTool(request); return commandResponse("verify_state", { target: { by: "css", value: "#progress" }, textIncludes: "Completed 1 of 12", timeoutMs: 20000 }, "frames-ready"); },
-      (request) => { verified = lastTool(request); return commandResponse("inspect_page", { budget: 12000 }, "frames-after"); },
+      (request) => { verified = lastTool(request); return commandResponse("inspect_page", { full: true, budget: 12000 }, "frames-after"); },
       (request) => { second = lastTool(request); return commandResponse("list_frames", {}, "frames-list-after"); },
       (request) => { secondListed = lastTool(request); return commandResponse("count_elements", { target: targetInSelectedFrame(), timeoutMs: 3000 }, "frames-stale"); },
       (request) => { stale = lastTool(request); return textResponse("FRAME_OWNER_DONE"); },
@@ -147,10 +147,10 @@ test("nests cross-origin frame documents at their owners ahead of same-name oute
     const target = await opened.context.newPage();
     await target.goto(fixture.origin);
     responses.push(
-      commandResponse("inspect_page", { budget: 12000 }, "nested-full"),
+      commandResponse("inspect_page", { full: true, budget: 12000 }, "nested-full"),
       (request) => {
         full = lastTool(request);
-        const owner = full.items?.find((item: Item) => item.line.includes('- Iframe "Dispatch workspace"'));
+        const owner = full.items?.find((item: Item) => /- Iframe\s/.test(item.line));
         workspaceRef = /\[frameRef=([^\]]+)\]/.exec(owner?.line ?? "")?.[1] ?? "";
         return workspaceRef ? commandResponse("inspect_page", { budget: 12000,
           region: { by: "role", value: "main", frame: { ref: workspaceRef } } }, "nested-region") : textResponse("NESTED_DONE");
@@ -166,8 +166,12 @@ test("nests cross-origin frame documents at their owners ahead of same-name oute
 
     expect(full).toMatchObject({ mode: "full", truncation: { baselineComplete: true } });
     const rows: Item[] = full.items;
-    const workspace = rows.findIndex((item) => item.line.includes('- Iframe "Dispatch workspace"'));
-    const editor = rows.findIndex((item) => item.line.includes('- Iframe "Sequence editor"'));
+    // Iframe titles are accessibility metadata, not painted labels. Associate
+    // the ordered frame refs with the visible headings inside their documents.
+    const workspace = rows.findIndex((item) => /- Iframe\s/.test(item.line));
+    const editor = rows.findIndex((item, index) => index > workspace && /- Iframe\s/.test(item.line));
+    expect(rows.slice(workspace, editor).some(item => item.line.includes('heading "Dispatch workspace"'))).toBe(true);
+    expect(rows.slice(editor).some(item => item.line.includes('heading "Sequence editor"'))).toBe(true);
     const editorRef = /\[frameRef=([^\]]+)\]/.exec(rows[editor]?.line ?? "")?.[1];
     const depth = (line: string) => /^ */.exec(line)![0].length;
     expect(workspace).toBeGreaterThanOrEqual(0);

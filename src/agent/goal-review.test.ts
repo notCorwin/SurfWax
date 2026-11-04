@@ -5,7 +5,7 @@ import { goalReviewContext, reviewGoal } from "./goal-review";
 import type { Goal } from "./goal-completion";
 import { EventLogger, type LogEvent } from "../logging";
 
-const goal: Goal = { taskType: "browser", status: "completed", evidence: [{ toolCallId: "submit", observation: "Rejected" }] };
+const goal: Goal = { taskType: "browser", status: "completed", evidence: [{ evidenceId: "submit", observation: "Rejected" }] };
 const context = goalReviewContext([{ role: "user", content: "Transfer the original file and confirm it was accepted." },
   { role: "tool", content: [{ type: "tool-result", toolCallId: "submit", toolName: "click", output: { type: "json", value: { performed: true, pageSnapshot: { items: [{ line: "Rejected" }] } } } }] }]);
 const usage = { inputTokens: { total: 100, noCache: 100, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 20, text: 20, reasoning: 0 } };
