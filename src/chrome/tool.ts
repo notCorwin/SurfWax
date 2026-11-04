@@ -1,6 +1,6 @@
 import { logIO } from "../log-io";
 import { normalizationExceedsBudget, normalizeResultEnvelope } from "../tool-result-values";
-import { isArrayBuffer, viewLayout } from "../log-graph";
+import { isArrayBuffer } from "../log-graph";
 import { dynamicTool, type ToolCallRepairFunction } from "ai";
 import { z } from "zod";
 import { safeDiagnosticError, safeDiagnosticText } from "../diagnostic-error";
@@ -12,9 +12,10 @@ import { jobResultReferenceInfo } from "./job-result";
 import { elementTargetSchema } from "./element-target";
 import { SNAPSHOT_DELIVERY_COMMIT, type SnapshotDeliveryLease } from "./snapshot-wire";
 import { createDeadline } from "../deadline";
+import { ARTIFACT_READ_NOTE, artifactReadSelection, nativeArtifactPageLimit as nativePageLimit } from "../artifact-selection";
 
 const timeoutMs = z.number().int().positive().optional();
-export const PROGRAM_CATALOG_VERSION = "atomic-tools-v39";
+export const PROGRAM_CATALOG_VERSION = "atomic-tools-v40";
 export const inspectInputSchema = z.object({ timeoutMs, since: z.string().min(1).max(256).optional().describe("Compare with this completely delivered observation ID from the same tab, run and scope. Omit to reuse the latest valid baseline automatically."), full: z.boolean().optional().describe("Request a complete new baseline instead of an automatic delta when prior rows are unavailable."), tabId: z.number().int().nonnegative().optional(), region: z.union([z.string().min(1), elementTargetSchema]).optional().describe("Restrict inspection to one matching element. To inspect a frame use region:{by:\"css\",value:\"html\",frame:{ref:\"frameRef\"}}; frame is not a top-level inspect_page field. Prefer a structured target. A plain string is a CSS selector, except recognized element refs and supported locator expressions such as getByRole('button', {name:'Save'})."),
   fields: z.array(z.enum(["text", "state", "ref", "actions"])).min(1).optional().describe("Fields to include; defaults to text, state, and ref. Include actions explicitly for role-based action hints."), budget: z.number().int().min(100).max(1000000).optional(),
   offset: z.number().int().nonnegative().optional(), limit: z.number().int().positive().optional(), depth: z.number().int().nonnegative().optional(),
@@ -43,7 +44,7 @@ type ToolDefinition = { name: string; inputSchema: z.ZodType<any>; summary: stri
 // In particular they must remain usable while a background job holds the queue.
 const NO_PAGE_CAPTURE = new Set(["list_file_choosers", "inspect_page", "read_artifact", "list_jobs", "subscribe_event", "wait_event", "unsubscribe_event", "list_downloads"]);
 export const PROGRAM_TOOL_REGISTRY: readonly ToolDefinition[] = Object.freeze([
-  { name: "inspect_page", inputSchema: inspectInputSchema, summary: "Read the semantic page and element refs", description: "Inspect currently visible semantic items with id, line and optional ref. To scope a frame pass region:{by:\"css\",value:\"html\",frame:{ref:\"frameRef\"}}; there is no top-level frame parameter. Scroll the page or a scrollable container to discover content outside the visible viewport. Quoted control values use JSON escapes. Item ids identify snapshot rows, not frame handles. An iframe's frameRef in its line is the handle to pass as target.frame.ref; a frame-document marker with that same handle introduces the child document's items. Frame handles expire when the frame tree changes. Waits for a fully loaded page for up to 15 seconds by default; set timeoutMs to allow more time. A partial=true snapshot contains uncertain dynamic content; unknown rows are not evidence and have no actionable ref. Stable rows may still be used. Partial snapshots are not complete evidence. Reinspect the relevant area to verify it. Long lines can continue across pages; read each part in order using nextCursor. Ref use checks the underlying role and identity, which may differ from visible text; use the ref when a role/name locator does not match the visible label. A DOM node may be reused for different business data with the same identity; verify relevant row and page state before acting. Older refs may expire after later independent observations or searches. A continuation returns stale-observation if scrolling, layout or visibility changes; start a new inspection. Default fields are text, state and ref; include actions explicitly for per-row hints. These hints are derived from role, not proof an action will succeed: textbox/searchbox/spinbutton use click, fill, press_key, type_text; checkbox/radio/switch use click, check_element, uncheck_element; combobox/listbox use click, select_option; rows marked editable use click, fill, press_key, type_text; other rows with a ref use click, double_click, hover. region and fields narrow results. [name=unknown] marks text that could not be verified; use a screenshot to inspect it. [value=unknown] marks an unverified control value; use read_value on its ref to retrieve the current value. budget and truncation.used count UTF-8 JSON bytes of decoded items; with lookahead the budget also bounds decoded JSON {items,lookahead}, measured by truncation.withLookahead. limit also bounds the source row window eligible for lookahead. lookahead contains sparse, non-authoritative later rows from the same frozen snapshot, not part of items or a complete baseline; ancestor context may be absent and no element refs are provided. Use a locator or continue the snapshot. The complete response is capped at 16 KiB and may use less than the requested budget. Continue a frozen snapshot by passing nextCursor as cursor, with only tabId, budget, limit or timeoutMs if needed. Continuation pages omit url and title; use the first page or refresh metadataAccess. Use take_screenshot for visual input." },
+  { name: "inspect_page", inputSchema: inspectInputSchema, summary: "Read the semantic page and element refs", description: "Inspect currently visible semantic items with id, line and optional ref. To scope a frame pass region:{by:\"css\",value:\"html\",frame:{ref:\"frameRef\"}}; there is no top-level frame parameter. Scroll the page or a scrollable container to discover content outside the visible viewport. Quoted control values use JSON escapes. Item ids identify snapshot rows, not frame handles. An iframe's frameRef in its line is the handle to pass as target.frame.ref; a frame-document marker with that same handle introduces the child document's items. Frame handles expire when the frame tree changes. Waits for a fully loaded page for up to 15 seconds by default; set timeoutMs to allow more time. On a continuously changing page, an unscoped inspection can return read-only root viewport text from one DOM capture, with partial=true and limitations. It omits embedded documents, uncertain paint, control state and all refs; use find_elements for action refs, read_elements for scoped reads, or take_screenshot. These read-only pages are frozen and can be continued despite layout changes in the same document. A partial=true snapshot contains uncertain dynamic content; unknown rows are not evidence and have no actionable ref. Stable rows may still be used. Partial snapshots are not complete evidence. Reinspect the relevant area to verify it. Long lines can continue across pages; read each part in order using nextCursor. Ref use checks the underlying role and identity, which may differ from visible text; use the ref when a role/name locator does not match the visible label. A DOM node may be reused for different business data with the same identity; verify relevant row and page state before acting. Older refs may expire after later independent observations or searches. A continuation returns stale-observation if scrolling, layout or visibility changes; start a new inspection. Default fields are text, state and ref; include actions explicitly for per-row hints. These hints are derived from role, not proof an action will succeed: textbox/searchbox/spinbutton use click, fill, press_key, type_text; checkbox/radio/switch use click, check_element, uncheck_element; combobox/listbox use click, select_option; rows marked editable use click, fill, press_key, type_text; other rows with a ref use click, double_click, hover. region and fields narrow results. [name=unknown] marks text that could not be verified; use a screenshot to inspect it. [value=unknown] marks an unverified control value; use read_value on its ref to retrieve the current value. budget and truncation.used count UTF-8 JSON bytes of decoded items; with lookahead the budget also bounds decoded JSON {items,lookahead}, measured by truncation.withLookahead. limit also bounds the source row window eligible for lookahead. lookahead contains sparse, non-authoritative later rows from the same frozen snapshot, not part of items or a complete baseline; ancestor context may be absent and no element refs are provided. Use a locator or continue the snapshot. The complete response is capped at 16 KiB and may use less than the requested budget. Continue a frozen snapshot by passing nextCursor as cursor, with only tabId, budget, limit or timeoutMs if needed. Continuation pages omit url and title; use the first page or refresh metadataAccess. Use take_screenshot for visual input." },
   { name: "find_elements", inputSchema: findElementsInputSchema, summary: "Find candidates and return element refs", description: "Find matching elements with refs for actions. Ref use checks the underlying role and identity, which may differ from visible text, but cannot prove business identity for reused nodes; verify relevant row and page state before acting. Older refs may expire after later independent observations or searches. limit defaults to 25, max 100; repeat target and tab with nextCursor as cursor to page a fixed node list. Candidates may report detached, changed or identity-unknown without a ref. Details may change between pages; cursors expire on run or document changes or eviction." },
   { name: "list_frames", inputSchema: listFramesInputSchema, summary: "List frames and their document-bound refs", description: "List the selected tab's frame tree with refs usable as target.frame.ref. limit defaults to 25, max 100; pass nextCursor as cursor to continue a fixed snapshot. References and cursors expire on document or frame changes." },
   ...ATOMIC_TOOL_REGISTRY,
@@ -170,10 +171,12 @@ export function createProgramTools(executor: ChromeExecutor, options: { logger?:
                 ? await storeUnnormalizedResult(rest, { ...options, toolCallId, ...identity, preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job" })
                 : await compactToolResult(normalizeResultEnvelope(rest), { ...options, toolCallId, ...identity, preserveJobStatus: definition.name === "get_job" || definition.name === "cancel_job" });
               const visible = compact as Record<string, unknown>;
-              const access = { artifactId: jobRef.id, path: ["result"], ...(jobRef.info.limit === undefined ? {} : { offset: 0, limit: jobRef.info.limit }) };
-              output = { ...visible, ...(visible.$ref ? { receiptsArtifactId: visible.$ref } : {}), $ref: jobRef.id,
-                resultAccess: access, ...(!visible.$ref ? { access } : {}), sidecarsDeferred: true,
-                pathsNote: "Read a bounded slice with read_artifact; shared or cyclic object identity is not exposed.",
+              const { access: receiptsAccess, oversizedItem: receiptsOversizedItem, ...visibleEnvelope } = visible;
+              const resultAccess = { artifactId: jobRef.id, path: ["result"], ...(jobRef.info.limit === undefined ? {} : { offset: 0, limit: jobRef.info.limit }) };
+              const access = jobRef.info.page ? { artifactId: jobRef.id, path: jobRef.info.page.path, offset: 0, limit: jobRef.info.page.limit } : resultAccess;
+              output = { ...visibleEnvelope, ...(visible.$ref ? { receiptsArtifactId: visible.$ref, receiptsAccess, ...(receiptsOversizedItem ? { receiptsOversizedItem } : {}) } : {}), $ref: jobRef.id,
+                resultAccess, access, sidecarsDeferred: true,
+                readNote: ARTIFACT_READ_NOTE, pathsNote: "Shared or cyclic object identity is not exposed.",
                 ...(jobRef.info.error ? { error: recoveryError(jobRef.info.error, definition.name), errorAccess: { artifactId: jobRef.id, path: ["result", "error"] } } : {}),
                 ...(jobRef.info.artifact ? { artifact: jobRef.info.artifact, artifactAccess: { artifactId: jobRef.id, path: ["result", "artifact"] } } : {}),
                 ...(jobRef.info.screenshot ? { ...jobRef.info.visualContext, screenshot: { ...jobRef.info.screenshot, ...(jobRef.info.inlineScreenshot ? { artifactId: jobRef.id, artifactPath: ["result", "screenshot"] } : {}) }, visualAccess: { artifactId: jobRef.id, path: ["result"] } } : {}) };
@@ -499,26 +502,20 @@ function isPageable(value: unknown): boolean {
   return typeof value === "string" || Array.isArray(value) || value instanceof Map || value instanceof Set || isArrayBuffer(value) || ArrayBuffer.isView(value);
 }
 
-function nativePageLimit(value: unknown): number | undefined {
-  if (value instanceof Map || value instanceof Set || Array.isArray(value)) return 25;
-  if (isArrayBuffer(value)) return 3072;
-  if (ArrayBuffer.isView(value)) {
-    const { byteLength, length } = viewLayout(value);
-    return Math.max(1, Math.floor(3072 / (length ? byteLength / length : 1)));
-  }
-  return undefined;
-}
-
 function pageValue(nativeValue: unknown, normalizedValue: unknown): unknown {
   return nativeValue instanceof Map || nativeValue instanceof Set || isArrayBuffer(nativeValue) || ArrayBuffer.isView(nativeValue)
     ? nativeValue : normalizedValue;
 }
 
-function readablePathOf(value: unknown): Array<string | number> | undefined {
+async function readablePathOf(value: unknown): Promise<Array<string | number> | undefined> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   for (const path of [["result", "snapshot"], ["result", "actual"], ["result"], ["snapshot"], ["observation", "snapshot"], ["text"], ["html"]] as const) {
     const selected = valueAt(value, path);
     if (isPageable(selected)) return [...path];
+    if (selected && typeof selected === "object") {
+      const nested = await artifactReadSelection(selected, path);
+      if (isPageable(nested.value)) return nested.path;
+    }
   }
   const key = Object.keys(value).find((candidate) => isPageable((value as Record<string, unknown>)[candidate]));
   return key ? [key] : undefined;
@@ -548,15 +545,15 @@ async function storeUnnormalizedResult(value: unknown, options: { logger?: Event
   const path = diagnostic && Array.isArray(diagnostic.requests) ? ["result", "requests"] : diagnostic && Array.isArray(diagnostic.messages) ? ["result", "messages"]
     : browserEvents && Array.isArray(browserEvents.events) ? ["events"] : job && Array.isArray(job.events) ? ["events"]
     : search && Array.isArray(search.elements) ? ["elements"] : search && Array.isArray(search.frames) ? ["frames"]
-    : inspection && Array.isArray(inspection.items) ? ["items"] : readablePathOf(value);
+    : inspection && Array.isArray(inspection.items) ? ["items"] : await readablePathOf(value);
   const selected = path ? valueAt(value, path) : value;
   const access = (selectedPath: readonly (string | number)[] | undefined, item: unknown) => ({ artifactId: event.id,
-    ...(selectedPath ? { path: selectedPath } : {}), ...(nativePageLimit(item) !== undefined ? { offset: 0, limit: nativePageLimit(item) } : typeof item === "string" ? { offset: 0, limit: 1000 } : {}) });
+    ...(selectedPath ? { path: selectedPath } : {}), ...(nativePageLimit(item) !== undefined ? { offset: 0, limit: nativePageLimit(item) } : {}) });
   const failure = root?.ok === false || root?.type === "tool-error";
   const errorPath = root && Object.hasOwn(root, "error") ? ["error"] : ["result", "error"];
   const error = failure ? valueAt(value, errorPath) : undefined;
   return { $ref: event.id, type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value,
-    access: access(path, selected), sidecarsDeferred: true,
+    access: access(path, selected), sidecarsDeferred: true, readNote: ARTIFACT_READ_NOTE,
     pathsNote: "Read a bounded slice with read_artifact; its type sidecars are relative to that slice. For oversized items, select a nested path. Shared or cyclic object identity is not exposed.",
     ...(root && Object.hasOwn(root, "result") ? { resultAccess: access(["result"], root.result) } : {}),
     ...(job ? jobMetadata(job) : {}), ...(search ? searchMetadata(search) : {}),
@@ -659,7 +656,7 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
   const errorPath = original && Object.hasOwn(original, "error") ? [...prefix, "error"] : [...prefix, "result", "error"];
   const error = failure ? valueAt(value, errorPath) : undefined;
   const path = diagnostic && Array.isArray(diagnostic.requests) ? [...prefix, "result", "requests"] : diagnostic && Array.isArray(diagnostic.messages) ? [...prefix, "result", "messages"] : browserEvents && Array.isArray(browserEvents.events) ? [...prefix, "events"] : job && Array.isArray(job.events) ? [...prefix, "events"] : search && Array.isArray(search.elements) ? [...prefix, "elements"] : search && Array.isArray(search.frames) ? [...prefix, "frames"]
-    : inspection && Array.isArray(inspection.items) ? [...prefix, "items"] : readablePathOf(value);
+    : inspection && Array.isArray(inspection.items) ? [...prefix, "items"] : await readablePathOf(value);
   const selected = path ? valueAt(value, path) : value;
   const { access, oversizedItem } = artifactAccess(event.id, path, pageValue(path ? valueAt(storedValue, path) : storedValue, selected));
   const resultRead = root && Object.hasOwn(root, "result") ? artifactAccess(event.id, ["result"], pageValue(valueAt(storedValue, ["result"]), root.result)) : undefined;
@@ -679,7 +676,7 @@ export async function compactToolResult(value: unknown, options: { logger?: Even
     ? verificationEnvelope.result as { verified?: unknown; timedOut?: unknown; present?: unknown } | undefined : undefined;
   const handoff = value && typeof value === "object" && (value as any).accepted === true && (value as any).complete === false && typeof (value as any).jobId === "string" ? value as Record<string, any> : undefined;
   const blocked = handoff?.blockedBy;
-  return { $ref: event.id, bytes, preview: job ? { eventCount: Array.isArray(job.events) ? job.events.length : 0 } : handoff || visual && typeof selected !== "string" ? undefined : previewOf(value, path), access, ...(oversizedItem ? { oversizedItem } : {}), type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value,
+  return { $ref: event.id, bytes, readNote: ARTIFACT_READ_NOTE, preview: job ? { eventCount: Array.isArray(job.events) ? job.events.length : 0 } : handoff || visual && typeof selected !== "string" ? undefined : previewOf(value, path), access, ...(oversizedItem ? { oversizedItem } : {}), type: Array.isArray(value) ? "array" : value === null ? "null" : typeof value,
     ...(root?.envelopeWrapped === true ? { envelopeWrapped: true } : {}),
     ...(job ? jobMetadata(job) : {}),
     ...(search ? searchMetadata(search) : {}),

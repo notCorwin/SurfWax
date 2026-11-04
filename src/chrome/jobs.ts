@@ -224,7 +224,7 @@ export class BrowserJobs {
           artifact: { type: "tool.result.data", conversationId: context.conversationId, ...context.logIdentity,
             content: { jobId: id }, output: { result: output } },
           terminal: { type: record.type, conversationId: context.conversationId, ...context.logIdentity,
-            content: { jobId: id, state, resultInfo: describeJobResult(output) } },
+            content: { jobId: id, state, resultInfo: await describeJobResult(output) } },
           link: "resultArtifactId", expectedEpoch: epoch, expectedJobStateId: previous,
         }))?.terminal : await this.logger!.appendIfEpoch(record, epoch, previous);
       // A recovery or maintenance writer may have won; never replace its terminal state.

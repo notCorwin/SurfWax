@@ -1,7 +1,7 @@
-import { isArrayBuffer, isMap, isSet, viewLayout } from "../log-graph";
+import { artifactReadSelection, nativeArtifactPageLimit } from "../artifact-selection";
 import { normalizationExceedsBudget, normalizeResultEnvelope } from "../tool-result-values";
 
-export type JobResultInfo = { limit?: number; error?: Record<string, unknown>; artifact?: Record<string, unknown>; screenshot?: Record<string, unknown>; inlineScreenshot?: boolean; visualContext?: Record<string, unknown> };
+export type JobResultInfo = { limit?: number; page?: { path: (string | number)[]; limit: number }; error?: Record<string, unknown>; artifact?: Record<string, unknown>; screenshot?: Record<string, unknown>; inlineScreenshot?: boolean; visualContext?: Record<string, unknown> };
 const references = new WeakMap<object, { id: number; info: JobResultInfo }>();
 export function jobResultReference(id: number, info: JobResultInfo): object {
   const reference = Object.freeze({});
@@ -18,15 +18,13 @@ export function shouldStoreJobResult(value: unknown): boolean {
   const serialized = JSON.stringify(normalizeResultEnvelope(envelope));
   return serialized !== undefined && new TextEncoder().encode(serialized).byteLength > 6 * 1024;
 }
-export function describeJobResult(value: unknown): JobResultInfo {
+export async function describeJobResult(value: unknown): Promise<JobResultInfo> {
   const info: JobResultInfo = {};
-  if (typeof value === "string") info.limit = 1000;
-  else if (Array.isArray(value) || isMap(value) || isSet(value)) info.limit = 25;
-  else if (isArrayBuffer(value)) info.limit = 3072;
-  else if (ArrayBuffer.isView(value)) {
-    const { byteLength, length } = viewLayout(value);
-    info.limit = Math.max(1, Math.floor(3072 / (length ? byteLength / length : 1)));
-  }
+  const limit = nativeArtifactPageLimit(value);
+  if (limit !== undefined) info.limit = limit;
+  const selected = await artifactReadSelection(value, ["result"]);
+  const pageLimit = nativeArtifactPageLimit(selected.value);
+  if (pageLimit !== undefined) info.page = { path: selected.path, limit: pageLimit };
   if (!value || typeof value !== "object" || Array.isArray(value)) return info;
   // Metadata must not invoke user getters or affect whether the completed job succeeds.
   try {

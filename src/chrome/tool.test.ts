@@ -658,6 +658,26 @@ describe("browser tools", () => {
     executor.dispose();
   });
 
+  it.each([3, 20_000])("provides readable collection paths when compacting %i nested items", async (count) => {
+    const events: LogEvent[] = [];
+    const logger = new EventLogger({ store: testEventStore(events) });
+    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
+    const items = Array.from({ length: count }, (_, index) => ({ text: count === 3 ? "x".repeat(4000) : `row ${index}` }));
+    vi.spyOn(executor, "runProgram").mockResolvedValue({ ok: true, result: { total: count, items } });
+    const tools = createProgramTools(executor, { logger, conversationId: "c" }) as Record<string, any>;
+    try {
+      const output = await tools.read_elements.execute({ target: { by: "css", value: "body" } }, { toolCallId: "elements" });
+      expect(output.access).toMatchObject({ artifactId: output.$ref, path: ["result", "items"], offset: 0, limit: expect.any(Number) });
+      const read = await tools.read_artifact.execute(output.access, { toolCallId: "items" });
+      expect(read.ok).toBe(true);
+      // The byte-budgeted path returns data directly; the unnormalized path recommends a bounded native slice.
+      if (Array.isArray(read.result)) expect(read.result).toEqual(items.slice(0, output.access.limit));
+      else expect(read.access).toBeDefined();
+      expect(await tools.read_artifact.execute({ artifactId: output.$ref, path: ["result", "items", 0, "text"], limit: 8 }, { toolCallId: "text" }))
+        .toMatchObject({ ok: true, result: items[0]!.text.slice(0, 8) });
+    } finally { executor.dispose(); }
+  });
+
   it("retains background job identity when its result exceeds the normalization budget", async () => {
     const events: LogEvent[] = [];
     const logger = new EventLogger({ store: testEventStore(events) });

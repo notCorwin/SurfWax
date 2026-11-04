@@ -1,3 +1,32 @@
+import { isArrayBuffer, isMap, isSet, viewLayout } from "./log-graph";
+
+export const ARTIFACT_READ_NOTE = "Pass access unchanged to read_artifact for the recommended slice. resultAccess addresses the result value and may include paging. Ordinary objects cannot use offset/limit. All paths start at the stored artifact root.";
+
+export function nativeArtifactPageLimit(value: unknown): number | undefined {
+  if (typeof value === "string") return 1000;
+  if (Array.isArray(value) || isMap(value) || isSet(value)) return 25;
+  if (isArrayBuffer(value)) return 3072;
+  if (ArrayBuffer.isView(value)) {
+    const { byteLength, length } = viewLayout(value);
+    return Math.max(1, Math.floor(3072 / (length ? byteLength / length : 1)));
+  }
+  return undefined;
+}
+
+/** Reuse the bounded search used by pagination errors before an invalid read occurs.
+ * Inspect data properties only: describing a result must never execute getters. */
+export async function artifactReadSelection(value: unknown, path: readonly (string | number)[]) {
+  const selectedPath = nativeArtifactPageLimit(value) !== undefined ? [...path] : await artifactPagePath(value, path, {
+    keys: (item) => item && typeof item === "object" ? Object.keys(item) : [],
+    field: (item, key) => Object.getOwnPropertyDescriptor(item, key)?.value,
+    kind: (item) => typeof item === "string" ? "string" : nativeArtifactPageLimit(item) !== undefined ? "collection"
+      : item && typeof item === "object" ? "object" : "scalar",
+  });
+  if (!selectedPath) return { path: [...path], value };
+  for (const key of selectedPath.slice(path.length)) value = Object.getOwnPropertyDescriptor(value, key)?.value;
+  return { path: selectedPath, value };
+}
+
 /** A pagination error must describe the selected value, never suggest paging
  * an arbitrary first key (often a numeric count such as `total`). */
 export function artifactPagingError(

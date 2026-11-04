@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { EventLogger, fromLogValue, toLogValue, type LogEvent } from "../logging";
 import { BrowserJobs } from "./jobs";
 import { createProgramTools, prepareToolMessages } from "./tool";
-import type { ChromeExecutor } from "./executor";
+import { ChromeExecutor } from "./executor";
 import { ProgramScope } from "./program";
 import { ATOMIC_TOOL_REGISTRY } from "./atomic-tools";
 import { PROGRAM_EVENT_INVOKE } from "./program-handles";
@@ -175,6 +175,40 @@ describe("canonical browser jobs", () => {
     expect(await logger.result(first.$ref, { path: ["result", "payload"], offset: 0, limit: 3 }, context.conversationId)).toBe("xxx");
     await expect(logger.result(first.$ref, {}, "other")).rejects.toThrow("unavailable");
     await expect(jobs.query({ action: "status", id }, "other")).rejects.toThrow("unavailable");
+  });
+
+  it("delivers executable collection access for stored object results after host restart", async () => {
+    const { logger, events } = indexedLog();
+    let jobs = new BrowserJobs(logger);
+    const items = [{ text: "page content ".repeat(1000) }];
+    const id = await jobs.start(context, undefined, async () => ({ total: 1, items }));
+    await jobs.waitForOwner(id, context.conversationId);
+    jobs = new BrowserJobs(logger);
+    const executor = new ChromeExecutor({ chromeApi: { debugger: {} } as never, logger });
+    vi.spyOn(executor, "queryJobs").mockImplementation(async (input) => ({
+      ...await jobs.query(input, context.conversationId) as Record<string, unknown>,
+      events: [{ state: "succeeded", text: "large receipt ".repeat(1000) }],
+    }));
+    vi.spyOn(executor, "runProgram").mockImplementation(async () => jobs.query({ action: "status", id }, context.conversationId));
+    const tools = createProgramTools(executor, { logger, conversationId: context.conversationId }) as Record<string, any>;
+    try {
+      const foreground = await tools.read_elements.execute({ target: { by: "css", value: "body" } }, { toolCallId: "elements" });
+      const background = await tools.get_job.execute({ jobId: id }, { toolCallId: "job" });
+      expect(background.receiptsAccess.artifactId).toBe(background.receiptsArtifactId);
+      expect(background.receiptsAccess.path).toEqual(["events"]);
+      expect(await logger.result(background.receiptsArtifactId, { path: ["events", 0, "text"], limit: 13 }, context.conversationId)).toBe("large receipt");
+      for (const output of [foreground, background]) {
+        expect(output.access).toEqual({ artifactId: output.$ref, path: ["result", "items"], offset: 0, limit: 25 });
+        expect(output.resultAccess).toEqual({ artifactId: output.$ref, path: ["result"] });
+        // Use the supplied parameters verbatim; a large first item can be read as text next.
+        const slice = await tools.read_artifact.execute(output.access, { toolCallId: "items" });
+        expect(slice).not.toHaveProperty("error");
+        expect(await logger.result(slice.$ref, { path: ["result"], offset: 0, limit: 1 }, context.conversationId)).toEqual(items);
+        expect(await tools.read_artifact.execute({ artifactId: output.$ref, path: [...output.access.path, 0, "text"], offset: 1000, limit: 1000 }, { toolCallId: "text" }))
+          .toMatchObject({ ok: true, result: items[0]!.text.slice(1000, 2000) });
+      }
+      expect(events.filter((event) => event.type === "tool.result.data" && (fromLogValue(event.content, event.valueEncoding) as any)?.jobId === id)).toHaveLength(1);
+    } finally { executor.dispose(); }
   });
 
   it("records an explicitly undefined return in the terminal receipt", async () => {
