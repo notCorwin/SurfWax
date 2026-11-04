@@ -7,9 +7,23 @@ import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
 import { Reasoning } from "./reasoning";
 import { ToolFallback } from "./tool-fallback";
+import { WaitingActivityRow } from "./waiting-status";
 import { ActivityPhaseContext, type ActivityPhase } from "./process-group";
 
 vi.mock("./markdown-text", () => ({ MarkdownText: () => null }));
+
+function useFrameTimers() {
+  vi.useFakeTimers();
+  vi.setSystemTime(1_000);
+  // Keep jsdom's animation-frame phase independent of the test runner's clock.
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => setTimeout(() => callback(performance.now()), 16));
+  vi.stubGlobal("cancelAnimationFrame", clearTimeout);
+  vi.stubGlobal("IntersectionObserver", class {
+    constructor(private callback: (entries: { isIntersecting: boolean }[]) => void) {}
+    observe() { this.callback([{ isIntersecting: true }]); }
+    disconnect() {}
+  });
+}
 
 it("distinguishes active reasoning and tool labels", () => {
   const reasoning = (type: "running" | "complete") => renderToStaticMarkup(createElement(Reasoning, {
@@ -77,8 +91,7 @@ it("updates the tool state when command execution completes", async () => {
 
 it("updates a running tool's elapsed time from its recorded start and stops at the recorded duration", async () => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
-  vi.useFakeTimers();
-  vi.setSystemTime(1_000);
+  useFrameTimers();
   const container = document.createElement("div");
   const root = createRoot(container);
   try {
@@ -87,7 +100,9 @@ it("updates a running tool's elapsed time from its recorded start and stops at t
     });
     await act(() => root.render(render("running")));
     expect(container.querySelector(".activity")?.textContent).toBe("查看页面 · 0.00 秒");
-    await act(() => vi.advanceTimersByTime(1_200));
+    await act(() => vi.advanceTimersByTime(32));
+    expect(container.querySelector(".activity")?.textContent).toBe("查看页面 · 0.03 秒");
+    await act(() => vi.advanceTimersByTime(1_168));
     expect(container.querySelector(".activity")?.textContent).toBe("查看页面 · 1.20 秒");
     await act(() => root.render(render("complete", 1256)));
     expect(container.querySelector(".activity")?.textContent).toBe("查看页面 · 1.26 秒");
@@ -95,6 +110,62 @@ it("updates a running tool's elapsed time from its recorded start and stops at t
     expect(container.querySelector(".activity")?.textContent).toBe("查看页面 · 1.26 秒");
   } finally {
     await act(() => root.unmount());
+    vi.useRealTimers();
+  }
+});
+
+it("updates both waiting-time decimal places and freezes the recorded end time", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  useFrameTimers();
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  const activity = { id: "wait", label: "等待响应", startedAt: 1_000 };
+  try {
+    await act(() => root.render(createElement(WaitingActivityRow, { activity })));
+    expect(container.textContent).toBe("等待响应 · 0.00 秒");
+    await act(() => vi.advanceTimersByTime(32));
+    expect(container.textContent).toBe("等待响应 · 0.03 秒");
+    await act(() => vi.advanceTimersByTime(96));
+    expect(container.textContent).toBe("等待响应 · 0.13 秒");
+    await act(() => root.render(createElement(WaitingActivityRow, { activity: { ...activity, endedAt: 1_135 } })));
+    expect(container.textContent).toBe("等待响应 · 0.14 秒");
+    expect(vi.getTimerCount()).toBe(0);
+    await act(() => vi.advanceTimersByTime(1_000));
+    expect(container.textContent).toBe("等待响应 · 0.14 秒");
+  } finally {
+    await act(() => root.unmount());
+    vi.useRealTimers();
+  }
+});
+
+it("shares one clock across visible rows and catches up when hidden rows reappear", async () => {
+  Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  useFrameTimers();
+  const observers: ((entries: { isIntersecting: boolean }[]) => void)[] = [];
+  vi.stubGlobal("IntersectionObserver", class {
+    constructor(callback: typeof observers[number]) { observers.push(callback); }
+    observe() {}
+    disconnect() {}
+  });
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(() => root.render(createElement("div", null, ...["one", "two"].map((id) =>
+      createElement(WaitingActivityRow, { key: id, activity: { id, label: id, startedAt: 1_000 } })))));
+    expect(vi.getTimerCount()).toBe(0);
+    await act(() => { for (const notify of observers) notify([{ isIntersecting: true }]); });
+    expect(vi.getTimerCount()).toBe(1);
+    await act(() => vi.advanceTimersByTime(32));
+    expect(container.textContent).toBe("one · 0.03 秒two · 0.03 秒");
+    await act(() => { for (const notify of observers) notify([{ isIntersecting: false }]); });
+    expect(vi.getTimerCount()).toBe(0);
+    await act(() => vi.advanceTimersByTime(1_000));
+    expect(container.textContent).toBe("one · 0.03 秒two · 0.03 秒");
+    await act(() => observers[0]([{ isIntersecting: true }]));
+    expect(container.textContent).toBe("one · 1.03 秒two · 0.03 秒");
+  } finally {
+    await act(() => root.unmount());
+    expect(vi.getTimerCount()).toBe(0);
     vi.useRealTimers();
   }
 });

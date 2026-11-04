@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { EventLogger, LogEvent } from "@/logging";
+import { useActivityClock } from "./use-activity-clock";
 
 type Phase = "starting" | "preparing" | "compacting" | "provider" | "retrying" | "processing" | "finishing" | "terminal";
 export type WaitingPhase = { runId: string; phase: Phase; startedAt?: number; eventId: number };
@@ -86,13 +87,7 @@ export function useWaitingActivity({ logger, conversationId, running, stopping, 
 export type WaitingActivity = { id: string; label: string; startedAt?: number; endedAt?: number; afterId?: string };
 
 export function WaitingActivityRow({ activity }: { activity: WaitingActivity }) {
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    setNow(Date.now());
-    if (activity.startedAt === undefined || activity.endedAt !== undefined) return;
-    const timer = setInterval(() => setNow(Date.now()), 100);
-    return () => clearInterval(timer);
-  }, [activity.id, activity.startedAt, activity.endedAt]);
+  const { now, ref } = useActivityClock<HTMLParagraphElement>(activity.endedAt === undefined, activity.startedAt);
   const elapsed = activity.startedAt === undefined ? "" : ` · ${(Math.max(0, (activity.endedAt ?? now) - activity.startedAt) / 1000).toFixed(2)} 秒`;
-  return <p role="status" className={activity.endedAt === undefined ? "transcript-activity transcript-waiting" : "transcript-activity"} data-testid={activity.endedAt === undefined ? "waiting-status" : "waiting-completed"}>{activity.label}<span aria-live="off">{elapsed}</span></p>;
+  return <p ref={ref} role="status" className={activity.endedAt === undefined ? "transcript-activity transcript-waiting" : "transcript-activity"} data-testid={activity.endedAt === undefined ? "waiting-status" : "waiting-completed"}>{activity.label}<span aria-live="off">{elapsed}</span></p>;
 }

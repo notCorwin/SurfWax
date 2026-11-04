@@ -12,6 +12,17 @@ import { test, p95, textResponse, assistantResponse, delayedResponse, commandRes
 const completedInfo = /^查看页面信息 · \d+\.\d{2} 秒$/;
 const infoCall = (id: string) => ({ id, type: "function", function: { name: "get_page_info", arguments: "{}" } });
 
+async function expectSubsecondUpdates(locator: Locator) {
+  const updates = await locator.evaluate((element) => new Promise<number>((resolve) => {
+    let count = 0;
+    const observer = new MutationObserver(() => { count++; });
+    observer.observe(element, { subtree: true, characterData: true, childList: true });
+    setTimeout(() => { observer.disconnect(); resolve(count); }, 250);
+  }));
+  // A 100 ms timer cannot update often enough to animate hundredths.
+  expect(updates).toBeGreaterThan(3);
+}
+
 test("uses the same line-height ratio across conversation content", async () => {
   const markdown = "# 一级标题\n\n## 二级标题\n\n### 三级标题\n\n#### 四级标题\n\n##### 五级标题\n\n###### 六级标题\n\n正文内容\n\n```js\nconst n = 1;\n```\n\n| 列 | 值 |\n| --- | --- |\n| 一 | 二 |";
   const provider = await startProvider([commandResponse("get_page_info", {}, "line-height-tool"), delayedResponse(textResponse(markdown), 3_000), textResponse("排版测试")]);
@@ -75,6 +86,7 @@ test("keeps all tool calls and summarizes them after interruption", async () => 
     await expect(rows.last()).toHaveText(/^检查页面状态 · \d+\.\d{2} 秒$/);
     const before = await rows.last().innerText();
     await expect.poll(() => rows.last().innerText()).not.toBe(before);
+    await expectSubsecondUpdates(rows.last());
     await opened.page.getByRole("button", { name: "停止生成" }).click();
     await expect(list).toHaveCount(0);
     await expect(opened.page.getByTestId("tool-group-summary")).toHaveCount(1);
@@ -138,6 +150,7 @@ test("keeps completed tools visible while waiting for the next provider response
     await expect(waiting).toContainText("正在等待推理提供商响应");
     const before = await waiting.innerText();
     await expect.poll(() => waiting.innerText()).not.toBe(before);
+    await expectSubsecondUpdates(waiting);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("FINAL_AFTER_WAIT");
     await expect(waiting).toHaveCount(0);
     await expect(opened.page.getByTestId("tool-group-summary")).toHaveText(completedInfo);
