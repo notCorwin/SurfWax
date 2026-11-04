@@ -2,7 +2,7 @@ import { chromium, expect, test as base, type BrowserContext, type CDPSession, t
 import { once } from "node:events";
 import { mkdtemp, readFile, rm, mkdir, cp, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { fitWindowToScreen, systemChromePath } from "../scripts/development-extension.mjs";
+import { systemChromePath } from "../scripts/development-extension.mjs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { resolve, basename } from "node:path";
@@ -288,13 +288,13 @@ export async function openExtension(existingDirectory?: string, settings: { exte
   const userDataDirectory = existingDirectory ?? await mkdtemp(resolve(tmpdir(), "side-agent-e2e-"));
   const context = await chromium.launchPersistentContext(userDataDirectory, {
     executablePath,
-    headless: process.env.SURFWAX_E2E_HEADLESS === "true" || Boolean(process.env.CI),
+    headless: true,
     chromiumSandbox: true,
     colorScheme: null,
-    viewport: settings.deviceScaleFactor === undefined ? null : { width: 1280, height: 720 },
+    viewport: { width: 1280, height: 720 },
     deviceScaleFactor: settings.deviceScaleFactor,
     ignoreDefaultArgs: ["--disable-extensions"],
-    args: ["--start-maximized", "--enable-unsafe-extension-debugging", "--hide-crash-restore-bubble", ...(settings.args ?? [])],
+    args: ["--enable-unsafe-extension-debugging", "--hide-crash-restore-bubble", ...(settings.args ?? [])],
   });
   const browserSession = await context.browser()!.newBrowserCDPSession();
   let extensionId: string;
@@ -311,7 +311,6 @@ export async function openExtension(existingDirectory?: string, settings: { exte
   if (!context.serviceWorkers().some(worker => new URL(worker.url()).hostname === extensionId))
     await context.waitForEvent("serviceworker", { predicate: worker => new URL(worker.url()).hostname === extensionId });
   const page = await context.newPage();
-  await fitWindowToScreen(context, page, browserSession);
   await browserSession.detach();
   await page.goto(`chrome-extension://${extensionId}/sidepanel.html`);
   return { context, extensionId, page, userDataDirectory };

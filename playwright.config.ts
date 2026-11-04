@@ -15,5 +15,5 @@ export default defineConfig({
   reporter: [["list"], ["html", { outputFolder: "playwright-report", open: "never" }]],
   expect: { timeout: 15_000 },
   projects: [{ name: "current", use: { launchOptions: { executablePath } } }],
-  use: { channel: "chrome", headless: process.env.SURFWAX_E2E_HEADLESS === "true" || Boolean(process.env.CI), trace: "retain-on-failure", screenshot: "only-on-failure" },
+  use: { channel: "chrome", headless: true, trace: "retain-on-failure", screenshot: "only-on-failure" },
 });
