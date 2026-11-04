@@ -11,7 +11,7 @@ const tool = (id: string, start = 0, end = 100): Tool => ({
   type: "tool-call", toolName: "inspect_pages", toolCallId: id, args: {}, status: { type: "complete" }, startedAtMs: start, finishedAtMs: end,
 });
 const text = (value: string): MessagePart => ({ type: "text", text: value, status: { type: "complete" } });
-const reasoning = (value: string): MessagePart => ({ type: "reasoning", text: value, status: { type: "complete" } });
+const reasoning = (value: string): Extract<MessagePart, { text: string }> => ({ type: "reasoning", text: value, status: { type: "complete" } });
 const message = (id: string, parts: MessagePart[]) => ({ id, role: "assistant", parts, metadata: {}, status: { type: "complete" }, branchCount: 1, branchNumber: 1 }) as unknown as MessageView;
 
 describe("tool timeline", () => {
@@ -31,15 +31,39 @@ describe("tool timeline", () => {
     const html = renderToStaticMarkup(createElement(RuntimeViewContext.Provider, { value: { runtime, thread: runtime.thread, getState: runtime.thread.getState } },
       messages.map((item) => createElement(MessageRow, { key: item.id, message: item, messages, running: false, locked: false,
         latest: item.id === "c", timeline, command: () => {} }))));
-    expect(html.match(/data-testid="reasoning-item"/g)).toHaveLength(2);
-    expect(html.match(/思考完成/g)).toHaveLength(2);
+    expect(html).not.toContain('data-testid="reasoning-item"');
+    const host = document.createElement("div");
+    host.innerHTML = html;
+    expect(host.textContent?.match(/思考完成/g)).toHaveLength(2);
     expect(html).not.toContain("回复未生成");
     expect(html.match(/data-testid="tool-group-summary"/g)).toHaveLength(2);
     expect(html).not.toContain("first thought");
     expect(html).not.toContain("second thought");
     expect(html).not.toContain("third thought");
     expect(html.indexOf('data-testid="tool-group-summary"')).toBeLessThan(html.indexOf("VISIBLE ANSWER"));
-    expect(html.lastIndexOf('data-testid="reasoning-item"')).toBeGreaterThan(html.indexOf("VISIBLE ANSWER"));
+    expect(html.lastIndexOf('data-testid="tool-group-summary"')).toBeGreaterThan(html.indexOf("VISIBLE ANSWER"));
+  });
+
+  it("merges settled reasoning and tools into one row with elapsed time, including overlapping responses only once", () => {
+    const messages = [message("merged", [
+      { ...reasoning("plan"), responseTimeMs: 2000, responseTimingId: 1, startedAtMs: 1000, finishedAtMs: 3000 },
+      tool("first", 3000, 5000),
+      { ...reasoning("next"), responseTimeMs: 2000, responseTimingId: 2, startedAtMs: 5000, finishedAtMs: 7000 },
+      { ...reasoning("same response"), responseTimeMs: 2000, responseTimingId: 2, startedAtMs: 5000, finishedAtMs: 7000 },
+      tool("second", 7000, 8000),
+    ])];
+    const group = toolGroupAt(projectToolTimeline(messages, false), "merged", 0)!;
+    const host = document.createElement("div");
+    host.innerHTML = renderToStaticMarkup(createElement(ToolGroupView, { group }));
+    expect(host.querySelectorAll(".transcript-activity")).toHaveLength(1);
+    expect(host.textContent).toBe("思考完成、查看页面 · 7.00 秒");
+    expect(host.querySelector('[data-testid="reasoning-item"]')).toBeNull();
+    const unknown = { ...group, reasoning: [reasoning("unknown")] };
+    expect(renderToStaticMarkup(createElement(ToolGroupView, { group: unknown }))).not.toContain(" 秒");
+    const failed = { ...group, reasoning: [{ ...group.reasoning[0]!, status: { type: "incomplete" as const } }] };
+    const failedHtml = renderToStaticMarkup(createElement(ToolGroupView, { group: failed }));
+    expect(failedHtml).toContain("思考未完成、查看页面");
+    expect(failedHtml).toContain('data-status="error"');
   });
 
   it("shows response time per live reasoning and deduplicates the settled total", () => {

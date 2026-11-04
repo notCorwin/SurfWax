@@ -2,7 +2,7 @@ import type { MessagePart, MessageView } from "@/sidepanel/conversation-store";
 import { summarizeToolActions } from "./tool-labels";
 import { ToolFallback } from "./tool-fallback";
 import { WaitingActivityRow, type WaitingActivity } from "./waiting-status";
-import { Reasoning } from "./reasoning";
+import { Reasoning, reasoningActivity } from "./reasoning";
 import { useContext } from "react";
 import { ActivityPhaseContext, toolActivity, toolWasInterrupted, type ActivityPhase } from "./process-group";
 
@@ -58,7 +58,7 @@ export function toolGroupAt(timeline: ToolTimeline, messageId: string, index: nu
 }
 
 /** A wall-clock span is valid only when every call has reliable start/end timestamps. */
-export function toolGroupDuration(tools: readonly ToolPart[]): number | undefined {
+export function toolGroupDuration(tools: readonly { startedAtMs?: number; finishedAtMs?: number; timingIncomplete?: boolean }[]): number | undefined {
   if (!tools.length) return undefined;
   let start = Infinity;
   let end = -Infinity;
@@ -116,13 +116,15 @@ export function withWaitingActivity(timeline: ToolTimeline, waiting: WaitingActi
 
 export function ToolGroupView({ group }: { group: ToolGroup }) {
   const phase = useContext(ActivityPhaseContext);
-  const duration = toolGroupDuration(group.tools);
-  const summary = summarizeToolActions(group.tools);
+  const duration = toolGroupDuration([...group.tools, ...group.reasoning]);
+  const toolSummary = summarizeToolActions(group.tools);
   const reasoningStatus = group.reasoning.some((part) => part.status.type === "running") ? "running"
     : group.reasoning.some((part) => part.status.type === "incomplete") ? "incomplete" : "complete";
   const responseTimes = new Map(group.reasoning.flatMap((part) => part.responseTimingId !== undefined && part.responseTimeMs !== undefined ? [[part.responseTimingId, part.responseTimeMs] as const] : []));
   const reasoningTime = group.reasoning.every((part) => part.responseTimeMs !== undefined) && responseTimes.size ? [...responseTimes.values()].reduce((sum, value) => sum + value, 0) : undefined;
   const reasoningPhase = reasoningStatus === "complete" || group.followedByText && reasoningStatus !== "running" ? "settled" : phase;
+  const reasoningState = reasoningActivity({ type: reasoningStatus }, reasoningPhase);
+  const summary = group.reasoning.length ? `${reasoningState.label}、${toolSummary}` : toolSummary;
   const activityIds = new Set(group.activities.map((entry) => entry.id));
   const waitsAfter = new Map<string | undefined, WaitingActivity[]>();
   for (const waiting of group.waiting ?? []) {
@@ -146,11 +148,11 @@ export function ToolGroupView({ group }: { group: ToolGroup }) {
         {entries.map((entry) => <div data-tool-id={entry.id} key={entry.id}>{entry.content}</div>)}
       </div>
     </div> : <>
-      {group.reasoning.length > 0 && <ActivityPhaseContext.Provider value={reasoningPhase}>
+      {group.reasoning.length > 0 && group.tools.length === 0 && <ActivityPhaseContext.Provider value={reasoningPhase}>
         <Reasoning status={{ type: reasoningStatus }} responseTimeMs={reasoningTime} />
       </ActivityPhaseContext.Provider>}
-      {group.tools.length > 0 && <><div data-testid="tool-group-summary" className="transcript-activity">
-        <span className="truncate" title={summary}>{summary}</span>{duration === undefined ? null : <span className="shrink-0">{` · ${(duration / 1000).toFixed(2)} 秒`}</span>}
+      {group.tools.length > 0 && <><div data-testid="tool-group-summary" className="activity transcript-activity" data-status={group.reasoning.length ? reasoningState.status : "complete"}>
+        <span className="truncate" title={summary}>{summary}</span>{duration === undefined ? null : <span className="shrink-0" title="本组思考和工具操作从开始到结束的总耗时。">{` · ${(duration / 1000).toFixed(2)} 秒`}</span>}
       </div><FailureSummary tools={group.tools} phase={phase} /></>}
     </>}
   </div>;

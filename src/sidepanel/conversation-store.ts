@@ -5,10 +5,10 @@ import { ConversationListProjection, fromLogValue, type ConversationRepository, 
 
 export type PartStatus = { type: "running" | "complete" | "incomplete" | "requires-action"; reason?: string; error?: unknown };
 export type MessagePart =
-  | { type: "text" | "reasoning"; text: string; status: PartStatus; responseTimeMs?: number; responseTimingId?: number }
+  | { type: "text" | "reasoning"; text: string; status: PartStatus; responseTimeMs?: number; responseTimingId?: number; startedAtMs?: number; finishedAtMs?: number }
   | { type: "tool-call"; toolCallId: string; toolName: string; args: unknown; result?: unknown; isError?: boolean; durationMs?: number; startedAtMs?: number; finishedAtMs?: number; timingIncomplete?: boolean; interrupted?: boolean; status: PartStatus };
 type ToolTiming = { durationMs?: number; startedAtMs?: number; finishedAtMs?: number; timingIncomplete?: boolean; interrupted?: boolean };
-type ResponseTiming = { responseTimeMs: number; responseTimingId: number };
+type ResponseTiming = { responseTimeMs: number; responseTimingId: number; startedAtMs: number; finishedAtMs: number };
 const reasoningKey = (runId: string, messageId: string, index: number) => JSON.stringify([runId, messageId, index]);
 const timingKey = (runId: string, toolCallId: string) => JSON.stringify([runId, toolCallId]);
 export type MessageView = {
@@ -175,7 +175,7 @@ export class ConversationStore {
       this.responseTimings.delete(event.runId);
       const content = fromLogValue(event.content, event.valueEncoding) as { callId?: unknown } | null;
       if (start && content?.callId === start.callId && Number.isFinite(end) && end >= start.startedAt) {
-        this.responseTimings.set(event.runId, { responseTimeMs: end - start.startedAt, responseTimingId: event.id });
+        this.responseTimings.set(event.runId, { responseTimeMs: end - start.startedAt, responseTimingId: event.id, startedAtMs: start.startedAt, finishedAtMs: end });
       }
       return false;
     }

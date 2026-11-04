@@ -357,9 +357,9 @@ test("keeps consecutive reasoning and tool cycles in order", async () => {
     await expect(turn.locator(".markdown-body", { hasText: "REASONING_CYCLES_DONE" })).toBeVisible();
     await expect(turn.getByTestId("live-tool-calls")).toHaveCount(0);
     await expect(turn.getByTestId("tool-group-summary")).toHaveCount(1);
-    await expect(turn.getByTestId("reasoning-item")).toHaveCount(1);
-    await expect(turn.getByTestId("reasoning-item").last()).toHaveClass("activity transcript-activity");
-    await expect(turn.getByTestId("reasoning-item").locator("summary")).toHaveCount(0);
+    await expect(turn.getByTestId("reasoning-item")).toHaveCount(0);
+    await expect(turn.getByTestId("tool-group-summary")).toHaveText(/^思考完成、查看页面信息 · \d+\.\d{2} 秒$/);
+    await expect(turn.getByTestId("tool-group-summary").locator("summary")).toHaveCount(0);
   } finally {
     finishResponse();
     await dispose(opened.context, opened.userDataDirectory, provider.server);
@@ -386,7 +386,7 @@ test("keeps reasoning and live tool activity in order", async () => {
     await expect(calls.first()).toHaveText(completedInfo);
     await expect(calls.last()).toHaveText(completedInfo);
     await expect(opened.page.locator(".markdown-body").last()).toContainText("NEXT_PROGRESS_TEXT");
-    await expect(opened.page.getByTestId("reasoning-item")).toHaveClass("activity transcript-activity");
+    await expect(opened.page.getByTestId("reasoning-item")).toHaveCount(0);
     await expect(opened.page.getByTestId("tool-group-summary")).toHaveCount(1);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);

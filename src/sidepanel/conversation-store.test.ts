@@ -343,7 +343,8 @@ it("restores response time for each reasoning part without retiming earlier step
   await runtime.threads.switchToThread(conversationId);
   const parts = runtime.getState().thread.messages.at(-1)!.parts;
   expect(parts.map((part) => part.type === "reasoning" ? part.responseTimeMs : undefined)).toEqual([1234, 1234, 3250, undefined]);
-  expect(parts[0]).toMatchObject({ responseTimingId: expect.any(Number) });
+  expect(parts[0]).toMatchObject({ responseTimingId: expect.any(Number), startedAtMs: 0, finishedAtMs: 1234 });
+  expect(parts[2]).toMatchObject({ startedAtMs: 5000, finishedAtMs: 8250 });
   expect(parts[1]).toMatchObject({ responseTimingId: (parts[0] as { responseTimingId: number }).responseTimingId });
 });
 
