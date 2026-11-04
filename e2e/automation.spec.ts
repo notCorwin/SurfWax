@@ -616,7 +616,7 @@ test("moves the trusted pointer before a semantic click and dispatches the click
 for (const deviceScaleFactor of [1, 2]) test(`injects a screenshot and clicks its observation coordinates at DPR ${deviceScaleFactor}`, async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
-  const opened = await openExtension(undefined, { deviceScaleFactor });
+  const opened = await openExtension(undefined, { viewport: null, args: [`--force-device-scale-factor=${deviceScaleFactor}`] });
   try {
     const target = await opened.context.newPage();
     await target.goto(`${provider.origin}/visual`);

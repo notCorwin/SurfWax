@@ -222,6 +222,19 @@ describe("browser tools", () => {
     expect(delivery.cancel).not.toHaveBeenCalled();
   });
 
+  it("keeps a successful screenshot artifact when the automatic semantic snapshot fails", async () => {
+    const events: LogEvent[] = [], logger = new EventLogger({ store: testEventStore(events) });
+    const image = { observationId: "pixels", screenshot: { mediaType: "image/png", artifactId: 7, width: 100, height: 50, scale: 1 }, artifact: { id: 7, mimeType: "image/png" } };
+    const executor = { runProgram: vi.fn(async () => ({ ok: true, result: image })),
+      inspect: vi.fn(async () => { throw new Error('AutomationError[snapshot-unavailable]: {"reason":"dom-unstable"}'); }),
+      pendingBackgroundJobs: () => [] } as unknown as ChromeExecutor;
+    const tools = createProgramTools(executor, { logger, conversationId: "thread", visualEnabled: async () => true }) as Record<string, any>;
+    const result = await tools.take_screenshot.execute({}, { toolCallId: "capture" });
+    expect(result).toMatchObject({ ok: true, result: image, pageSnapshotStatus: { state: "unavailable", error: { code: "snapshot-unavailable" } } });
+    expect(events.filter(event => event.type === "tool.finished")).toHaveLength(1);
+    expect(events.some(event => event.type === "tool.failed")).toBe(false);
+  });
+
   it("keeps the action result when the automatic snapshot becomes stale before delivery", async () => {
     const delivery = { begin: vi.fn(() => false), finish: vi.fn(), cancel: vi.fn() };
     const page = mockSnapshot(4, ["- button Save"], "next", delivery);

@@ -276,7 +276,7 @@ test.afterEach(() => {
   expect(requests.filter((request) => request.stream === true)).toEqual([]);
 });
 
-export async function openExtension(existingDirectory?: string, settings: { extensionPath?: string; executablePath?: string; deviceScaleFactor?: number; args?: string[] } = {}): Promise<{
+export async function openExtension(existingDirectory?: string, settings: { extensionPath?: string; executablePath?: string; deviceScaleFactor?: number; viewport?: { width: number; height: number } | null; args?: string[] } = {}): Promise<{
   context: BrowserContext;
   extensionId: string;
   page: Page;
@@ -291,7 +291,7 @@ export async function openExtension(existingDirectory?: string, settings: { exte
     headless: true,
     chromiumSandbox: true,
     colorScheme: null,
-    viewport: { width: 1280, height: 720 },
+    viewport: settings.viewport === undefined ? { width: 1280, height: 720 } : settings.viewport,
     deviceScaleFactor: settings.deviceScaleFactor,
     ignoreDefaultArgs: ["--disable-extensions"],
     args: ["--enable-unsafe-extension-debugging", "--hide-crash-restore-bubble", ...(settings.args ?? [])],

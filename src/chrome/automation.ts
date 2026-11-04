@@ -117,6 +117,7 @@ type ObservationRecord = {
   partial?: true;
   readOnly?: true;
   limitations?: string;
+  visual?: true;
 };
 type Session = {
   tabId: number;
@@ -927,15 +928,54 @@ export class AutomationRuntime {
       const session = await this.session(tabId);
       this.pruneRefs(session);
       const generation = session.generation;
-      const captured = await this.captureSnapshot(session);
-      const viewport = await this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})") as ObservationRecord["viewport"];
-      const observationId = globalThis.crypto.randomUUID();
+      const signal = this.context.signal;
+      const pauseSignal = signal ? AbortSignal.any([signal, session.lifetime.signal]) : session.lifetime.signal;
+      const { guard: guardSession, waitForCapture: wait } = this.captureWaiter(session, signal);
+      const guard = () => {
+        guardSession();
+        if (this.sessions.get(tabId) !== session || generation !== session.generation)
+          throw automationError("stale-observation", { reason: "document-changed-during-observation" });
+      };
       const previous = since ? this.observations.get(since) : undefined;
-      if (since && (!previous || previous.session !== session || previous.tabId !== tabId || previous.documentId !== session.generation)) {
-        throw automationError("stale-observation", { observationId: since, reason: "expired-document" });
+      if (since && (!previous || previous.visual || previous.session !== session || previous.tabId !== tabId || previous.documentId !== generation))
+        throw automationError("stale-observation", { observationId: since, reason: previous?.visual ? "visual-observation-is-not-semantic-baseline" : "expired-document" });
+      // Pixel evidence is independent of DOM/AX consistency. Wait for the
+      // document load, but do not wait for a dynamic page to stop changing.
+      if (detail === "visual") {
+        while (true) {
+          guard();
+          if (await wait(this.pageValue(tabId, "document.readyState === 'complete'"))) break;
+          await wait(delay(50, pauseSignal));
+        }
       }
-      const record: ObservationRecord = { session, observationId, tabId, documentId: session.generation, ...captured, viewport };
-      session.lastSnapshot = captured.lines;
+      guard();
+      const captured = detail === "visual"
+        ? { ...await wait(this.pageValue(tabId, "({url:location.href,title:document.title})")) as { url: string; title: string }, lines: [] as SnapshotLine[], partial: undefined, limitations: undefined, viewport: undefined }
+        : await this.captureReadableSnapshot(session);
+      let viewport = captured.viewport ?? await wait(this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})")) as ObservationRecord["viewport"];
+      guard();
+      const sameViewport = (left: ObservationRecord["viewport"], right: ObservationRecord["viewport"]) =>
+        ["x", "y", "width", "height", "scale"].every(key => left?.[key as keyof typeof left] === right?.[key as keyof typeof right]);
+      // Attaching Chrome's debugger can animate browser chrome and resize the
+      // page. Settle only the coordinate frame before the single pixel capture;
+      // page text and paint may continue changing throughout this wait.
+      if (detail === "visual") {
+        while (true) {
+          await wait(delay(50, pauseSignal));
+          guard();
+          const next = await wait(this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})")) as ObservationRecord["viewport"];
+          guard();
+          const stable = sameViewport(viewport, next);
+          viewport = next;
+          if (stable) break;
+        }
+      }
+      if (![viewport?.x, viewport?.y, viewport?.width, viewport?.height, viewport?.scale].every(Number.isFinite)
+        || viewport.width <= 0 || viewport.height <= 0 || viewport.scale <= 0)
+        throw automationError("screenshot-unavailable", { reason: "invalid-viewport", viewport });
+      const observationId = globalThis.crypto.randomUUID();
+      const record: ObservationRecord = { session, observationId, tabId, documentId: generation, ...captured, viewport, ...(detail === "visual" ? { visual: true as const } : {}) };
+      if (detail !== "visual") session.lastSnapshot = captured.lines;
       const before = new Map(previous?.lines.map((item) => [item.id, item.line]));
       const after = new Map(captured.lines.map((item) => [item.id, item.line]));
       const changes = previous && !previous.partial && !captured.partial ? {
@@ -944,23 +984,70 @@ export class AutomationRuntime {
         updated: captured.lines.flatMap(({ id, line }) => before.has(id) && before.get(id) !== line ? [{ before: before.get(id), after: line }] : []),
       } : undefined;
       const result: Record<string, unknown> = {
-        observationId, documentId: session.generation, url: captured.url, title: captured.title, viewport,
-        snapshot: captured.lines.map(({ line }) => line).join("\n"), ...(captured.partial ? { partial: true } : {}), ...(changes ? { changes } : {}),
-        ...(previous && captured.partial ? { reset: "current-output-partial" } : previous?.partial ? { reset: "previous-output-partial" } : {}),
+        observationId, documentId: generation, url: captured.url, title: captured.title, viewport,
+        ...(detail === "visual" ? {} : { snapshot: captured.lines.map(({ line }) => line).join("\n"), ...(captured.partial ? { partial: true } : {}), ...(captured.limitations ? { limitations: captured.limitations } : {}), ...(changes ? { changes } : {}),
+          ...(previous && captured.partial ? { reset: "current-output-partial" } : previous?.partial ? { reset: "previous-output-partial" } : {}) }),
       };
       if (detail === "visual" || detail === "auto" && !captured.lines.some(({ ref }) => Boolean(ref))) {
-        const screenshot = await this.options.command(session.debuggee, "Page.captureScreenshot", {
-          format: "jpeg", quality: 70, fromSurface: true, captureBeyondViewport: false, ...captureOptions,
-        });
-        const clip = captureOptions.clip;
-        const size = typeof screenshot.data === "string" ? imageSize(screenshot.data, captureOptions.format ?? "jpeg") : undefined;
+        const { target, fullPage, hires, ...options } = captureOptions;
+        const readClip = async () => {
+          let clip = options.clip;
+          if (fullPage) {
+            const metrics = await this.options.command(session.debuggee, "Page.getLayoutMetrics", {});
+            clip = metrics.cssContentSize ?? metrics.contentSize;
+            if (!clip) throw automationError("screenshot-unavailable", { reason: "missing-content-size" });
+          } else if (target) clip = await this.screenshotClip(tabId, target);
+          if (!clip) return undefined;
+          if (![clip.x, clip.y, clip.width, clip.height].every(Number.isFinite) || clip.width <= 0 || clip.height <= 0)
+            throw automationError("screenshot-unavailable", { reason: "invalid-capture-clip", clip });
+          return { ...clip, scale: fullPage ? 1 : target ? (hires ? viewport.scale : 1) : clip.scale ?? 1 };
+        };
+        const clip = await wait(readClip());
+        guard();
+        const format = options.format ?? "jpeg";
+        const screenshot = await wait(this.options.command(session.debuggee, "Page.captureScreenshot", {
+          format, ...(format === "jpeg" ? { quality: 70 } : {}), fromSurface: true, ...options,
+          captureBeyondViewport: Boolean(fullPage || options.captureBeyondViewport), ...(clip ? { clip } : {}),
+        }));
+        guard();
+        let afterClip: Awaited<ReturnType<typeof readClip>>;
+        try { afterClip = await wait(readClip()); }
+        catch (error) {
+          guard();
+          if (target && error instanceof AutomationError)
+            throw automationError("stale-observation", { reason: "screenshot-target-changed", diagnostic: { code: error.code, ...error.detail } });
+          throw error;
+        }
+        guard();
+        if (JSON.stringify(clip) !== JSON.stringify(afterClip))
+          throw automationError("stale-observation", { reason: "screenshot-geometry-changed", before: clip, after: afterClip });
+        const afterViewport = await wait(this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})")) as ObservationRecord["viewport"];
+        guard();
+        if (!sameViewport(viewport, afterViewport))
+          throw automationError("stale-observation", { reason: "viewport-changed-during-capture", before: viewport, after: afterViewport });
+        if (typeof screenshot?.data !== "string" || !screenshot.data.length)
+          throw automationError("screenshot-unavailable", { reason: "missing-image-data" });
+        let size = imageSize(screenshot.data, format);
+        // Some WebP encodings have no header handled by the small parser.
+        // Decode those bytes rather than inventing pixel dimensions.
+        if (!size && typeof createImageBitmap === "function") {
+          const bytes = Uint8Array.from(atob(screenshot.data), character => character.charCodeAt(0));
+          size = await wait(createImageBitmap(new Blob([bytes], { type: `image/${format}` })).then(bitmap => {
+            try { guard(); return { width: bitmap.width, height: bitmap.height }; }
+            finally { bitmap.close(); }
+          }));
+        }
+        if (!size || !Number.isFinite(size.width) || !Number.isFinite(size.height) || size.width <= 0 || size.height <= 0)
+          throw automationError("screenshot-unavailable", { reason: "image-dimensions-unavailable", format });
         const width = clip?.width ?? viewport.width; const height = clip?.height ?? viewport.height;
-        const scale = size?.width && width ? size.width / width : (clip?.scale ?? viewport.scale);
-        const image = { width: size?.width ?? width * scale, height: size?.height ?? height * scale, scale, origin: { x: clip ? clip.x - viewport.x : 0, y: clip ? clip.y - viewport.y : 0 } };
+        const scale = size.width / width;
+        if (Math.abs(size.height - height * scale) > 1)
+          throw automationError("screenshot-unavailable", { reason: "image-geometry-mismatch", viewport, clip, actual: size, expectedHeight: height * scale });
+        const image = { ...size, scale, origin: { x: clip ? clip.x - viewport.x : 0, y: clip ? clip.y - viewport.y : 0 } };
         record.image = image;
-        result.screenshot = { mediaType: `image/${captureOptions.format ?? "jpeg"}`, data: screenshot.data, ...image };
+        result.screenshot = { mediaType: `image/${format}`, data: screenshot.data, ...image };
       }
-      if (generation !== session.generation) throw automationError("stale-observation", { reason: "document-changed-during-observation" });
+      guard();
       this.rememberObservation(record);
       return result;
     });
@@ -1669,7 +1756,8 @@ export class AutomationRuntime {
       validateLocator(spec);
       const session = await this.session(tabId);
       const generation = session.generation;
-      const objectId = await this.resolveOne(session, spec);
+      const objectId = await this.resolveConditionTarget(session, spec);
+      if (!objectId) throw automationError("not-found", { locator: spec, reason: "screenshot-target-not-found" });
       const targetSession = this.objectSession(session, objectId);
       const model = await this.options.command(targetSession.debuggee, "DOM.getBoxModel", { objectId });
       const quad = model?.model?.border as number[] | undefined;

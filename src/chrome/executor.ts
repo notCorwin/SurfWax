@@ -1304,18 +1304,9 @@ export class ChromeExecutor {
 
   private async captureScreenshot(page: any, input: Record<string, any>): Promise<unknown> {
     const format = input.type ?? (String(input.filename ?? "").match(/\.(jpe?g|webp)$/i)?.[1]?.replace("jpg", "jpeg") || "png");
-    const params: Record<string, unknown> = { format, fromSurface: true, captureBeyondViewport: Boolean(input.fullPage) };
-    if (input.fullPage) {
-      const metrics = await this.bridgeCommand({ tabId: page.tabId }, "Page.getLayoutMetrics", {});
-      const contentSize = metrics.cssContentSize ?? metrics.contentSize;
-      if (contentSize) params.clip = { ...contentSize, scale: 1 };
-    } else if (input.target) {
-      const locator = await this.locatorFor(page, input.target);
-      if (!locator?.spec) throw new Error("AutomationError[invalid-target]: Screenshot requires a locator target");
-      const box = await this.automation.screenshotClip(page.tabId, locator.spec);
-      params.clip = { ...box, scale: input.hires ? await page.evaluate("() => devicePixelRatio") : 1 };
-    }
-    const observation = await page.observe("visual", undefined, params);
+    const target = input.target ? await this.locatorFor(page, input.target) : undefined;
+    if (input.target && !target?.spec) throw new Error("AutomationError[invalid-target]: Screenshot requires a locator target");
+    const observation = await page.observe("visual", undefined, { format, fullPage: Boolean(input.fullPage), hires: Boolean(input.hires), ...(target ? { target: target.spec } : {}) });
     const captured = observation.screenshot;
     const mediaType = `image/${format}`;
     const filename = input.filename ?? timestamped("page", format === "jpeg" ? "jpg" : format);

@@ -3112,6 +3112,147 @@ describe("AutomationRuntime", () => {
     expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent").at(-2)?.params).toMatchObject({ type: "mousePressed", x: 50, y: 25 });
   });
 
+  it("captures visual evidence independently of unavailable semantic snapshots", async () => {
+    const { runtime, command, calls } = harness();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOMSnapshot.captureSnapshot" || method.startsWith("Accessibility.get"))
+        throw new Error("Semantic capture is unavailable on this dynamic page");
+      return original(source, method, params);
+    });
+    const page = await runtime.createPage(3);
+    const visual = await page.observe("visual");
+    expect(visual).toMatchObject({ observationId: expect.any(String), screenshot: { width: 200, height: 100, scale: 2 } });
+    expect(visual).not.toHaveProperty("snapshot");
+    expect(calls.filter(({ method }) => method === "Page.captureScreenshot")).toHaveLength(1);
+    await page.point(visual.observationId as string, 100, 50, "click");
+    expect(calls.filter(({ method }) => method === "Input.dispatchMouseEvent").at(-2)?.params).toMatchObject({ x: 50, y: 25 });
+    await expect(page.observe("semantic", visual.observationId as string)).rejects.toMatchObject({ code: "stale-observation" });
+  });
+
+  it("rejects screenshot coordinates when the viewport changes during capture", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let captured = false;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Page.captureScreenshot") captured = true;
+      if (captured && method === "Runtime.evaluate" && params.expression.includes("({x:scrollX"))
+        return { result: { value: { x: 0, y: 20, width: 100, height: 50, scale: 2 } } };
+      return original(source, method, params);
+    });
+    await expect((await runtime.createPage(3)).observe("visual")).rejects.toMatchObject({
+      code: "stale-observation", detail: { reason: "viewport-changed-during-capture" },
+    });
+  });
+
+  it("settles browser viewport resizing before capturing pixels once", async () => {
+    const { runtime, command, calls } = harness();
+    const original = command.getMockImplementation()!;
+    const heights = [70, 60, 50, 50];
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Runtime.evaluate" && params.expression.includes("({x:scrollX"))
+        return { result: { value: { x: 0, y: 0, width: 100, height: heights.length > 1 ? heights.shift() : heights[0], scale: 2 } } };
+      return original(source, method, params);
+    });
+    await expect((await runtime.createPage(3)).observe("visual")).resolves.toMatchObject({ viewport: { height: 50 }, screenshot: { height: 100 } });
+    expect(calls.filter(({ method }) => method === "Page.captureScreenshot")).toHaveLength(1);
+  });
+
+  it("does not reattach a detached session while waiting for viewport geometry", async () => {
+    const { runtime, command, calls } = harness();
+    const original = command.getMockImplementation()!;
+    let scheduled = false;
+    command.mockImplementation(async (source, method, params) => {
+      if (!scheduled && method === "Runtime.evaluate" && params.expression.includes("({x:scrollX")) {
+        scheduled = true;
+        setTimeout(() => runtime.handleDetach({ tabId: 3 }), 5);
+      }
+      return original(source, method, params);
+    });
+    await expect((await runtime.createPage(3)).observe("visual")).rejects.toThrow();
+    expect(calls.filter(({ method }) => method === "Page.enable")).toHaveLength(1);
+    expect((runtime as any).sessions.has(3)).toBe(false);
+  });
+
+  it("rejects a disappearing screenshot target immediately after capturing pixels", async () => {
+    const { runtime, command, calls } = harness();
+    const original = command.getMockImplementation()!;
+    const resolve = vi.spyOn(runtime as any, "resolveConditionTarget").mockResolvedValueOnce("node-1").mockResolvedValueOnce(undefined);
+    command.mockImplementation(async (source, method, params) => method === "DOM.getBoxModel"
+      ? { model: { border: [0, 0, 100, 0, 100, 50, 0, 50] } }
+      : original(source, method, params));
+    await expect((await runtime.createPage(3)).observe("visual", undefined, { target: { queries: [{ kind: "css", value: "#vanishing" }] } })).rejects.toMatchObject({
+      code: "stale-observation", detail: { reason: "screenshot-target-changed", diagnostic: { reason: "screenshot-target-not-found" } },
+    });
+    expect(resolve).toHaveBeenCalledTimes(2);
+    expect(calls.filter(({ method }) => method === "Page.captureScreenshot")).toHaveLength(1);
+  });
+
+  it("rejects an incomplete image even when the reported viewport stays unchanged", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => method === "Page.captureScreenshot"
+      ? { data: btoa(String.fromCharCode(0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 0, 25, 0, 100, 3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0)) }
+      : original(source, method, params));
+    await expect((await runtime.createPage(3)).observe("visual")).rejects.toMatchObject({
+      code: "screenshot-unavailable", detail: { reason: "image-geometry-mismatch", actual: { width: 100, height: 25 }, expectedHeight: 50 },
+    });
+  });
+
+  it("rejects screenshots from a document replaced while Chrome captures pixels", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Page.captureScreenshot")
+        runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "root", loaderId: "replacement" } });
+      return original(source, method, params);
+    });
+    await expect((await runtime.createPage(3)).observe("visual")).rejects.toMatchObject({ code: "stale-observation" });
+  });
+
+  it("rejects a target that moves while Chrome captures its clipped image", async () => {
+    const { runtime } = harness();
+    vi.spyOn(runtime, "screenshotClip")
+      .mockResolvedValueOnce({ x: 10, y: 10, width: 80, height: 40 })
+      .mockResolvedValueOnce({ x: 30, y: 10, width: 80, height: 40 });
+    await expect((await runtime.createPage(3)).observe("visual", undefined, { target: { queries: [{ kind: "css", value: "#moving" }] } })).rejects.toMatchObject({
+      code: "stale-observation", detail: { reason: "screenshot-geometry-changed", before: { x: 10 }, after: { x: 30 } },
+    });
+  });
+
+  it("rejects a full-page image when document dimensions change during capture", async () => {
+    const { runtime, command } = harness();
+    const original = command.getMockImplementation()!;
+    let captured = false;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Page.captureScreenshot") captured = true;
+      if (method === "Page.getLayoutMetrics") return { cssContentSize: { x: 0, y: 0, width: 100, height: captured ? 200 : 100 } };
+      return original(source, method, params);
+    });
+    await expect((await runtime.createPage(3)).observe("visual", undefined, { fullPage: true })).rejects.toMatchObject({
+      code: "stale-observation", detail: { reason: "screenshot-geometry-changed" },
+    });
+  });
+
+  it.each(["abort", "detach"])("settles a pending pixel capture on %s without waiting for Chrome", async (stop) => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3), controller = new AbortController();
+    runtime.setContext({ signal: controller.signal });
+    const original = command.getMockImplementation()!;
+    let started!: () => void;
+    const capturing = new Promise<void>(resolve => { started = resolve; });
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "Page.captureScreenshot") { started(); return new Promise(() => undefined); }
+      return original(source, method, params);
+    });
+    const pending = page.observe("visual");
+    await capturing;
+    const rejected = expect(pending).rejects.toMatchObject(stop === "abort" ? { name: "AbortError" } : { code: "stale-session" });
+    if (stop === "abort") controller.abort();
+    else runtime.handleDetach({ tabId: 3 });
+    await rejected;
+  });
+
   it("uses captured image dimensions when the screenshot pixel ratio differs from devicePixelRatio", async () => {
     const { runtime, calls, command } = harness();
     const original = command.getMockImplementation()!;

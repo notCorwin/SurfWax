@@ -10,7 +10,7 @@ for (const { name, kind, transform, rotated } of [
 ]) test(`captures target geometry in ${name}`, async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
-  const opened = await openExtension(undefined, { args: ["--site-per-process"] });
+  const opened = await openExtension(undefined, { args: ["--site-per-process"], viewport: null });
   try {
     const page = await opened.context.newPage();
     await page.goto(`${provider.origin}/complex`);
@@ -73,7 +73,7 @@ for (const { name, kind, transform, rotated } of [
     const events = await readEvents(opened.page);
     const capture = events.find((event) => event.type === "tool.finished" && event.toolCallId === "target-capture")?.output;
     if (rotated) return;
-    expect(capture).toMatchObject({ ok: true });
+    expect(capture, JSON.stringify(events.filter(event => event.toolCallId === "target-capture"))).toMatchObject({ ok: true });
     const result = capture.result;
     // Playwright's frame boundingBox does not apply iframe CSS transforms.
     // Find the red target in an independent root-viewport screenshot instead.
