@@ -3313,3 +3313,79 @@ it("retires old same-process descendants when an OOPIF tree arrives before swap/
   expect(session.frames.has("new-child")).toBe(true);
   await runtime.abortSessions();
 });
+
+it("reads and pages a changing document without publishing action refs or a complete baseline", async () => {
+  const { runtime, command } = harness();
+  const original = command.getMockImplementation()!;
+  let captures = 0, samples = 0;
+  const viewport = { x: 0, y: 0, width: 1000, height: 700, scale: 1 };
+  command.mockImplementation(async (source, method, params) => {
+    if (method === "Runtime.evaluate" && params.expression.includes("surf-wax:read-only-snapshot")) {
+      samples++;
+      return { result: { value: { url: "https://example.test/", title: "Sample", viewport, rows: [
+        { text: "Current visible text", depth: 2 }, { text: "Second visible text", depth: 8 },
+      ] } } };
+    }
+    const result = await original(source, method, params);
+    if (method === "DOMSnapshot.captureSnapshot") {
+      const doc = result.documents[0], strings = result.strings;
+      doc.nodes.attributes[0] = [strings.push("data-revision") - 1, strings.push(String(++captures)) - 1];
+    }
+    return result;
+  });
+  const page = await runtime.createPage(3);
+  try {
+    const first: any = await page.inspect({ limit: 1 });
+    expect(first).toMatchObject({ partial: true, limitations: expect.stringContaining("Read-only"), viewport, mode: "full", truncation: { baselineComplete: false } });
+    const items = [...first.items];
+    let cursor = first.nextCursor;
+    const capturesBeforePaging = captures;
+    while (cursor) {
+      const next: any = await page.inspect({ cursor, limit: 1 });
+      expect(next).toMatchObject({ partial: true, limitations: first.limitations, viewport, truncation: { baselineComplete: false } });
+      items.push(...next.items); cursor = next.nextCursor;
+    }
+    expect(captures).toBe(capturesBeforePaging); expect(samples).toBe(1);
+    expect(items.every((item: any) => !item.ref)).toBe(true);
+    const text = items.map((item: any) => item.line).join("\n");
+    expect(text).toContain("Current visible text"); expect(text).toContain("Second visible text");
+    await expect(page.point(first.observationId, 1, 1, "click")).rejects.toMatchObject({ code: "stale-observation" });
+    const next = await page.inspect({ since: first.observationId });
+    expect(next).toMatchObject({ mode: "full", partial: true, reset: "current-output-partial" });
+    await expect(page.inspect({ depth: 0 })).resolves.toMatchObject({ items: [], partial: true });
+    await expect(page.inspect({ fields: ["state"] })).resolves.toMatchObject({ items: [], partial: true });
+    runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "root", loaderId: "new" } });
+    await expect(page.inspect({ cursor: first.nextCursor })).rejects.toMatchObject({ code: "stale-observation" });
+  } finally { await runtime.abortSessions(); }
+});
+
+it.each(["abort", "detach"] as const)("interrupts a read-only recovery capture on %s without waiting for CDP", async (mode) => {
+  const { runtime, command } = harness();
+  const original = command.getMockImplementation()!;
+  let captures = 0, started!: () => void, failLate!: (error: Error) => void;
+  const fallbackStarted = new Promise<void>((resolve) => { started = resolve; });
+  command.mockImplementation(async (source, method, params) => {
+    if (method === "Runtime.evaluate" && params.expression.includes("surf-wax:read-only-snapshot")) {
+      started();
+      return new Promise((_resolve, reject) => { failLate = reject; });
+    }
+    const result = await original(source, method, params);
+    if (method === "DOMSnapshot.captureSnapshot") {
+      const doc = result.documents[0], strings = result.strings;
+      doc.nodes.attributes[0] = [strings.push("data-revision") - 1, strings.push(String(++captures)) - 1];
+    }
+    return result;
+  });
+  const controller = new AbortController();
+  runtime.setContext({ signal: controller.signal });
+  const page = await runtime.createPage(3);
+  const pending = page.inspect();
+  try {
+    await fallbackStarted;
+    const rejected = mode === "abort" ? expect(pending).rejects.toMatchObject({ name: "AbortError" })
+      : expect(pending).rejects.toMatchObject({ code: "stale-session" });
+    if (mode === "abort") controller.abort(); else runtime.handleDetach({ tabId: 3 });
+    await rejected;
+    failLate(new Error("CDP rejected after cancellation"));
+  } finally { await runtime.abortSessions(); }
+});

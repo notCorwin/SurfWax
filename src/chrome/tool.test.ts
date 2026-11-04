@@ -1306,3 +1306,18 @@ it("bounds a hung canonical terminal rather than leaving a tool pending forever"
     expect(logger.append).toHaveBeenCalledTimes(2);
   } finally { vi.useRealTimers(); }
 });
+
+it.each([false, true])("delivers partial read-only limitations through the tool protocol (continuation=%s)", async (continuation) => {
+  const events: LogEvent[] = [], logger = new EventLogger({ store: testEventStore(events) });
+  const delivery = { begin: vi.fn(() => true), finish: vi.fn(), cancel: vi.fn() };
+  const page: any = mockSnapshot(1, ['- text "Visible"'], undefined, delivery);
+  page.partial = true; page.limitations = "Read-only root viewport; uncertain paint and refs omitted";
+  page.truncation.baselineComplete = false;
+  if (continuation) { page.continuation = true; delete page.url; delete page.title; }
+  const tools = createProgramTools({ inspect: async () => page } as unknown as ChromeExecutor, { logger, conversationId: "c" }) as Record<string, any>;
+  const output = await tools.inspect_page.execute(continuation ? { cursor: "observation:1:0" } : {}, { toolCallId: "read-only" });
+  expect(output).toMatchObject({ partial: true, limitations: page.limitations, items: page.items, truncation: { baselineComplete: false } });
+  expect(delivery.begin).toHaveBeenCalled(); expect(delivery.finish).toHaveBeenCalled();
+  expect(events.filter(e => e.type === "tool.finished")).toHaveLength(1);
+  expect(events.some(e => e.type === "tool.failed")).toBe(false);
+});

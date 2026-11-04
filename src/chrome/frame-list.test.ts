@@ -95,6 +95,9 @@ function labelCaptureHarness(labelCount: number, controlCount: number) {
 
 function harness() {
   const command = vi.fn(async (source: chrome.debugger.Debuggee & { sessionId?: string }, method: string, params: any = {}): Promise<any> => {
+    if (method === "Runtime.evaluate" && params.expression?.includes("surf-wax:read-only-snapshot")) return { result: { value: {
+      url: "https://top.test/", title: "Top", viewport: { x: 0, y: 0, width: 1000, height: 1000, scale: 1 }, rows: [],
+    } } };
     if (method === "Runtime.evaluate" && params.expression === "document.readyState === 'complete'") return { result: { value: true } };
     if (method === "Page.getFrameTree") return source.sessionId === "nested-child" || source.sessionId === "new-child"
       ? { frameTree: { frame: { id: "nested", url: "https://cross.test/nested", parentId: "cross" } } }
@@ -255,7 +258,9 @@ describe("frame tree discovery", () => {
     });
     const page = await runtime.createPage(3);
     if (unstable) {
-      await expect(page.snapshot()).rejects.toMatchObject({ code: "snapshot-unavailable", detail: { reason: "text-paint-unstable" } });
+      const result = await page.snapshot();
+      expect(result).toMatchObject({ partial: true, limitations: expect.stringContaining("text-paint-unstable") });
+      expect(result.snapshot).not.toContain("Hidden item");
       expect(layouts).toBe(4);
     } else {
       expect((await page.snapshot()).snapshot).toContain('StaticText "Hidden item"');
@@ -283,7 +288,11 @@ describe("frame tree discovery", () => {
       return original(source, method, params);
     });
     const page = await runtime.createPage(3);
-    if (semanticChange) await expect(page.snapshot()).rejects.toMatchObject({ code: "snapshot-unavailable" });
+    if (semanticChange) {
+      const result = await page.snapshot();
+      expect(result).toMatchObject({ partial: true, limitations: expect.stringContaining("Read-only") });
+      expect(result.snapshot).not.toContain("hidden-");
+    }
     else await expect(page.snapshot()).resolves.not.toHaveProperty("partial");
     await runtime.abortSessions();
   });
@@ -329,7 +338,7 @@ describe("frame tree discovery", () => {
     const timer = setTimeout(() => abort.abort(), 500);
     runtime.setContext({ conversationId: "c", logIdentity: { runId: "run", toolCallId: "call", toolCallIdCanonical: true }, signal: abort.signal });
     try {
-      await expect((await runtime.createPage(3)).snapshot()).rejects.toMatchObject({ code: "snapshot-unavailable", detail: { reason: "text-paint-node-unstable" } });
+      await expect((await runtime.createPage(3)).snapshot()).resolves.toMatchObject({ partial: true, limitations: expect.stringContaining("text-paint-node-unstable") });
     } finally { clearTimeout(timer); await runtime.abortSessions(); }
   });
   it("recovers a detached text node during confirmation and returns its later stable value", async () => {
@@ -377,7 +386,7 @@ describe("frame tree discovery", () => {
       return original(source, method, params);
     });
     try {
-      await expect((await runtime.createPage(3)).snapshot()).rejects.toMatchObject({ code: "snapshot-unavailable", detail: { reason: "dynamic-text-unstable" } });
+      await expect((await runtime.createPage(3)).snapshot()).resolves.toMatchObject({ partial: true, limitations: expect.stringContaining("dynamic-text-unstable") });
       expect(captures).toBeLessThan(25);
     } finally { await runtime.abortSessions(); }
   }, 10000);
@@ -429,11 +438,11 @@ describe("frame tree discovery", () => {
       return original(source, method, params);
     });
     try {
-      await expect((await runtime.createPage(3)).snapshot()).rejects.toMatchObject({ code: "snapshot-unavailable", detail: { reason: "dynamic-text-unstable" } });
+      await expect((await runtime.createPage(3)).snapshot()).resolves.toMatchObject({ partial: true, limitations: expect.stringContaining("dynamic-text-unstable") });
       expect(changes).toBeLessThan(20);
     } finally { await runtime.abortSessions(); }
   });
-  it("rejects visible changes that occur during the accessibility recheck", async () => {
+  it("returns a read-only sample when visible changes invalidate the accessibility recheck", async () => {
     const { runtime, command } = harness(), original = command.getMockImplementation()!;
     let capture = 0;
     command.mockImplementation(async (source, method, params = {}) => {
@@ -449,7 +458,9 @@ describe("frame tree discovery", () => {
       if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) return { result: { value: { url: "https://top.test/", title: "Top" } } };
       return original(source, method, params);
     });
-    await expect((await runtime.createPage(3)).snapshot()).rejects.toMatchObject({ code: "snapshot-unavailable" });
+    const result = await (await runtime.createPage(3)).snapshot();
+    expect(result).toMatchObject({ partial: true, limitations: expect.stringContaining("Read-only") });
+    expect(result.snapshot).not.toContain("hidden-");
     await runtime.abortSessions();
   });
   it("batches text paint evidence in the owning frame and projects only painted fragments", async () => {

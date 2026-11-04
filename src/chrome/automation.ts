@@ -12,6 +12,7 @@ import { snapshotDomSupplement, type SnapshotDomEvidence } from "./snapshot-dom"
 import { createSnapshotDomIndex } from "./snapshot-dom-index";
 import { snapshotRenderOrder } from "./snapshot-render-order";
 import { snapshotSlottedNodes } from "./snapshot-slot-index";
+import { READABLE_SNAPSHOT_SOURCE, readableSnapshot, type ReadableSnapshot } from "./snapshot-readable";
 import { changedTextNodes, sameDOMSnapshot } from "./snapshot-consistency";
 import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility, type SnapshotClip, type SnapshotFrameOwner, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
 import { projectTextPaint, sameTextPaintCandidates, TEXT_PAINT_CACHE_LOOKUP_SOURCE, TEXT_PAINT_CACHE_REGISTER_SOURCE, type TextPaintEvidence } from "./snapshot-text-paint";
@@ -114,6 +115,8 @@ type ObservationRecord = {
   regionIdentity?: string;
   incomplete?: boolean;
   partial?: true;
+  readOnly?: true;
+  limitations?: string;
 };
 type Session = {
   tabId: number;
@@ -909,13 +912,13 @@ export class AutomationRuntime {
   locator(tabId: number, query: Query): LocatorFacade { return new LocatorFacade(this, tabId, { queries: [query] }); }
   ref(tabId: number, ref: string): LocatorFacade { return new LocatorFacade(this, tabId, { queries: [], ref }); }
 
-  async snapshot(tabId: number): Promise<{ url: string; title: string; snapshot: string; partial?: true }> {
+  async snapshot(tabId: number): Promise<{ url: string; title: string; snapshot: string; partial?: true; limitations?: string }> {
     return this.action(tabId, "snapshot", null, async () => {
       const session = await this.session(tabId);
       this.pruneRefs(session);
-      const captured = await this.captureSnapshot(session);
+      const captured = await this.captureReadableSnapshot(session);
       session.lastSnapshot = captured.lines;
-      return { url: captured.url, title: captured.title, documentId: session.generation, snapshot: captured.lines.map(({ line }) => line).join("\n"), ...(captured.partial ? { partial: true as const } : {}) };
+      return { url: captured.url, title: captured.title, documentId: session.generation, snapshot: captured.lines.map(({ line }) => line).join("\n"), ...(captured.partial ? { partial: true as const } : {}), ...(captured.limitations ? { limitations: captured.limitations } : {}) };
     });
   }
 
@@ -1014,11 +1017,13 @@ export class AutomationRuntime {
           || this.observations.get(snapshot.id) !== snapshot.record)
           throw automationError("stale-observation", { reason: "expired-or-mismatched-cursor" });
         saved = snapshot;
-        const currentGeometry = await Promise.all(saved.geometrySources.map(async (debuggee) => ({ debuggee,
-          snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true, includePaintOrder: true }) })));
-        guard();
-        if (await snapshotGeometry(currentGeometry, saved.geometryDynamicParents) !== saved.geometry)
-          throw automationError("stale-observation", { reason: "snapshot-geometry-changed" });
+        if (!saved.record.readOnly) {
+          const currentGeometry = await Promise.all(saved.geometrySources.map(async (debuggee) => ({ debuggee,
+            snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true, includePaintOrder: true }) })));
+          guard();
+          if (await snapshotGeometry(currentGeometry, saved.geometryDynamicParents) !== saved.geometry)
+            throw automationError("stale-observation", { reason: "snapshot-geometry-changed" });
+        }
         if (this.inspectionSnapshots.get(saved.id) !== saved)
           throw automationError("stale-observation", { reason: "snapshot-context-reset" });
         this.rememberObservation(saved.record);
@@ -1040,12 +1045,12 @@ export class AutomationRuntime {
         if (options.since && (!previous || !pinned || pinned.conversationId !== conversationId || pinned.runId !== runId
           || pinned.frameRevision !== session.frameRevision || previous.session !== session || previous.tabId !== tabId || previous.documentId !== generation || previous.scopeKey !== scopeKey))
           throw automationError("stale-observation", { observationId: options.since, reason: "document-or-scope-changed" });
-        const captured = await this.captureSnapshot(session, region);
+        const captured = await this.captureReadableSnapshot(session, region);
         guard();
         if (captured.frameRevision !== session.frameRevision) throw automationError("stale-observation", { reason: "frame-tree-changed-during-inspection" });
         if (previous && previous.documentId !== session.generation) throw automationError("stale-observation", { observationId: options.since, reason: "document-changed-during-inspection" });
         if (options.since && previous && previous.regionIdentity !== captured.regionIdentity) throw automationError("stale-observation", { observationId: options.since, reason: "region-identity-changed" });
-        const lines: SnapshotLine[] = captured.lines.filter(({ node, line }) => options.depth === undefined || (node?.depth ?? (line.match(/^ */)?.[0].length ?? 0) / 2) <= options.depth)
+        const lines: SnapshotLine[] = captured.lines.filter(() => !captured.readOnly || fields.includes("text")).filter(({ node, line }) => options.depth === undefined || (node?.depth ?? (line.match(/^ */)?.[0].length ?? 0) / 2) <= options.depth)
           .map(({ id, line, node }) => {
             if (!node) return { id, line };
             const owned = node.ref ? `t${tabId}s${session.token}d${generation}${node.ref}` : undefined;
@@ -1054,7 +1059,7 @@ export class AutomationRuntime {
             const rendered = renderSnapshotNode({ ...node, ...(owned ? { ref: owned } : {}) }, { fields, actionNames: "program", inlineRef: false });
             return { id, line: rendered.line, ...(rendered.ref ? { ref: rendered.ref } : {}) };
           });
-        const viewport = await this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})") as ObservationRecord["viewport"];
+        const viewport = captured.viewport ?? await this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})") as ObservationRecord["viewport"];
         guard();
         if (captured.frameRevision !== session.frameRevision) throw automationError("stale-observation", { reason: "frame-tree-changed-during-inspection" });
         const observationId = crypto.randomUUID();
@@ -1082,7 +1087,7 @@ export class AutomationRuntime {
         const baselineComplete = !saved.record.partial && (!saved.record.incomplete || advances && !page.hasMore && saved.eligibleForBaseline);
         return { observationId: saved.id, tabId, documentId: generation,
           ...(options.cursor === undefined ? { url: saved.record.url, title: saved.record.title } : { continuation: true }), viewport: saved.record.viewport,
-          mode: saved.mode, ...(saved.baseObservationId ? { baseObservationId: saved.baseObservationId } : {}), ...(saved.record.partial ? { partial: true } : {}), ...(saved.reset ? { reset: saved.reset } : {}),
+          mode: saved.mode, ...(saved.baseObservationId ? { baseObservationId: saved.baseObservationId } : {}), ...(saved.record.partial ? { partial: true } : {}), ...(saved.record.limitations ? { limitations: saved.record.limitations } : {}), ...(saved.reset ? { reset: saved.reset } : {}),
           items: page.fragments, ...(candidate.lookahead ? { lookahead: candidate.lookahead } : {}),
           ...(page.next ? { nextCursor: `${saved.id}:${page.next.index}:${page.next.charOffset}` } : {}),
           truncation: { truncated, total: saved.source.length, returned: page.fragments.length, offset: position.index, charOffset: position.charOffset,
@@ -1151,6 +1156,7 @@ export class AutomationRuntime {
       if (!observation || observation.session !== session || observation.tabId !== tabId || observation.documentId !== session.generation) {
         throw automationError("stale-observation", { observationId, reason: "expired-document" });
       }
+      if (observation.readOnly) throw automationError("stale-observation", { observationId, reason: "read-only-observation-use-screenshot-for-coordinates" });
       const viewport = await this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})") as ObservationRecord["viewport"];
       if (viewport.x !== observation.viewport.x || viewport.y !== observation.viewport.y || viewport.width !== observation.viewport.width || viewport.height !== observation.viewport.height || viewport.scale !== observation.viewport.scale) {
         throw automationError("stale-observation", { observationId, reason: "viewport-changed", before: observation.viewport, after: viewport });
@@ -3247,12 +3253,11 @@ export class AutomationRuntime {
     }
   }
 
-  private async captureSnapshot(session: Session, region?: LocatorSpec): Promise<{ url: string; title: string; lines: SnapshotLine[]; frameRevision: number; regionIdentity?: string; geometry: string; geometrySources: Debuggee[]; geometryDynamicParents?: Map<string, Set<number>>; partial?: true }> {
-    const signal = this.context.signal;
-    const frameContext = { conversationId: this.context.conversationId, runId: this.context.logIdentity?.runId ?? this.context.runId };
+  private captureWaiter(session: Session, signal?: AbortSignal) {
     const guard = () => {
       throwIfAborted(signal);
       if (this.sessions.get(session.tabId) !== session) throw automationError("stale-session", { reason: "session-changed-during-capture" });
+      throwIfAborted(session.lifetime.signal);
     };
     const waitForCapture = async <T>(task: Promise<T>): Promise<T> => {
       // The command promises are already started by the caller. If the
@@ -3273,6 +3278,37 @@ export class AutomationRuntime {
         if (onAbort) { signal?.removeEventListener("abort", onAbort); session.lifetime.signal.removeEventListener("abort", onAbort); }
       }
     };
+    return { guard, waitForCapture };
+  }
+
+  private async captureReadableSnapshot(session: Session, region?: LocatorSpec): Promise<Awaited<ReturnType<AutomationRuntime["captureSnapshot"]>> & { readOnly?: true; limitations?: string; viewport?: ObservationRecord["viewport"] }> {
+    const { guard, waitForCapture } = this.captureWaiter(session, this.context.signal);
+    try { return await this.captureSnapshot(session, region); }
+    catch (error) {
+      // Scope-specific inspection and action resolution retain strict identity
+      // checks. Only a whole-page read can become a root-viewport text sample.
+      if (region || !(error instanceof AutomationError) || error.code !== "snapshot-unavailable"
+        || !["dom-unstable", "text-paint-unstable", "dynamic-text-unstable", "text-paint-node-unstable"].includes(String(error.detail.reason))) throw error;
+      guard();
+      const generation = session.generation, frameRevision = session.frameRevision;
+      const sample = await waitForCapture(this.pageValue(session.tabId, `(${READABLE_SNAPSHOT_SOURCE})()`)) as ReadableSnapshot;
+      guard();
+      let lines: SnapshotLine[];
+      try { lines = readableSnapshot(sample); }
+      catch { throw error; }
+      const ready = await waitForCapture(this.pageValue(session.tabId, "document.readyState === 'complete'"));
+      guard();
+      if (!ready || this.sessions.get(session.tabId) !== session || session.generation !== generation || session.frameRevision !== frameRevision)
+        throw automationError("stale-observation", { reason: "document-or-frame-changed-during-read" });
+      const limitations = `Read-only root viewport text sampled in one synchronous DOM read after ${error.detail.reason}. Generated/shadow content, embedded documents, uncertain paint, control state and action refs are omitted. Depth uses DOM ancestry. This is incomplete evidence. Use find_elements for action refs, read_elements for scoped reads, or take_screenshot for visual content.`;
+      return { url: sample.url, title: sample.title, viewport: sample.viewport, lines, frameRevision, geometry: "", geometrySources: [], partial: true, readOnly: true, limitations };
+    }
+  }
+
+  private async captureSnapshot(session: Session, region?: LocatorSpec): Promise<{ url: string; title: string; lines: SnapshotLine[]; frameRevision: number; regionIdentity?: string; geometry: string; geometrySources: Debuggee[]; geometryDynamicParents?: Map<string, Set<number>>; partial?: true }> {
+    const signal = this.context.signal;
+    const frameContext = { conversationId: this.context.conversationId, runId: this.context.logIdentity?.runId ?? this.context.runId };
+    const { guard, waitForCapture } = this.captureWaiter(session, signal);
     let retriedUnstableCapture = false;
     // Bound recovery within one observation even when distinct parts of a
     // live page keep changing. This does not limit subsequent agent actions.

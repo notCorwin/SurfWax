@@ -146,6 +146,14 @@
 
 来源：[`9c04c78`](https://github.com/notCorwin/SurfWax/commit/9c04c78)、[`a2ce5f8`](https://github.com/notCorwin/SurfWax/commit/a2ce5f8)、[`a49c713`](https://github.com/notCorwin/SurfWax/commit/a49c713)。
 
+### 动态页面读取与操作引用分离
+
+2026-11-04 本次实现中的决策：全页语义快照因 DOM 或文字绘制持续变化而无法通过一致性检查时，允许从一次同步 DOM 读取中只读采样根视口的可确认文字，同时记录当次视口与 DOM 层级。采样保守检查样式、伪元素、裁剪及潜在遮挡，不拼接随后读取的无障碍名称或控件状态，省略嵌入文档、绘制证据不确定的文字和全部操作引用，并以 `partial=true`、`limitations` 明确其范围和局限；不能将其作为完整观察证据或增量基线。局部区域检查及操作定位继续使用严格一致性校验。
+
+只读续页复用该次冻结采样，不因页面后续布局变化重新采集；文档、会话、frame 树或运行归属变化后失效。后续动作通过 `find_elements` 获取引用，或使用专用读取与截图工具补充观察。
+
+来源：2026-11-04 的实现决策，见 `src/chrome/snapshot-readable.ts` 及 `src/chrome/automation.ts` 的 `captureReadableSnapshot`、`inspect`。
+
 ### 简化模型收到的快照编码
 
 2026-11-02 删除快照行字典及额外输出编码实现，简化模型可见协议；不再要求模型通过这些中间编码重建快照正文。
