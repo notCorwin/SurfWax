@@ -8,7 +8,8 @@
 ## 开发约定
 1. 无头运行所有测试。
 2. 只使用开发构建流，热更新 Extension 改动，方便测试。
-3. 使用本机安装的 Chrome，不要使用 Chrome for Testing 或者 Chromium 。
+3. 每次工作结束前，让子代理维护 HISTORY.md ，记录项目约定中未写出的决策。
+4. 使用本机安装的 Chrome，不要使用 Chrome for Testing 或者 Chromium 。
 ## 设置页
 1. 所有 LLM 和 Provider 在设置的下拉菜单中选择，数据来自 Models.dev 项目。
 	1. Provider 第一项应是 Custom Provider 。
