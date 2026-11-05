@@ -1,0 +1,47 @@
+{
+  "kind": "geometry",
+  "observed": {
+    "observationId": "2f6ee93f-a37a-43a3-a0e4-cda95ccabe17",
+    "tabId": 5741794,
+    "documentId": 0,
+    "url": "http://127.0.0.1:63602/target",
+    "title": "Side Agent Target",
+    "viewport": {
+      "height": 800,
+      "scale": 1,
+      "width": 1200,
+      "x": 0,
+      "y": 0
+    },
+    "mode": "full",
+    "partial": true,
+    "limitations": "Read-only root viewport text sampled in one synchronous DOM read after dom-unstable. Generated/shadow content, embedded documents, uncertain paint, control state and action refs are omitted. Depth uses DOM ancestry. This is incomplete evidence. Use find_elements for action refs, read_elements for scoped reads, or take_screenshot for visual content.",
+    "items": [
+      {
+        "id": "readonly:0",
+        "line": "        - text \"MOVING_01550\""
+      },
+      {
+        "id": "readonly:1",
+        "line": "        - text \"Moving neighbor\""
+      },
+      {
+        "id": "readonly:2",
+        "line": "        - text \"Independent\""
+      }
+    ],
+    "truncation": {
+      "truncated": false,
+      "total": 3,
+      "returned": 3,
+      "offset": 0,
+      "charOffset": 0,
+      "nextOffset": 3,
+      "nextCharOffset": 0,
+      "budget": 12000,
+      "used": 186,
+      "baselineComplete": false
+    },
+    "evidenceId": "dynamic-geometry-inspect"
+  }
+}

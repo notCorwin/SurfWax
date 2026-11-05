@@ -1,0 +1,23 @@
+{
+  "archiveSha256": "ac37938aa287c6b3414f99813eb618311a93d740ce022043a980f448dc430e55",
+  "nodeVersion": "v24.22.2",
+  "extractedFiles": 1710,
+  "frozenSourceChecks": [
+    {
+      "stage": "baseline",
+      "code": 0,
+      "stdout": "Frozen source file set and contents match the manifest."
+    },
+    {
+      "stage": "improved",
+      "code": 0,
+      "stdout": "Frozen source file set and contents match the manifest."
+    },
+    {
+      "stage": "final",
+      "code": 0,
+      "stdout": "Frozen source file set and contents match the manifest."
+    }
+  ],
+  "scope": "Fresh extraction and all frozen input file sets/hashes verified; does not rerun browser/model tasks."
+}

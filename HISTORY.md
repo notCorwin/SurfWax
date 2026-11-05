@@ -211,3 +211,25 @@
 2026-11-02 为项目加入 GNU GPL v3 许可证，具体条款以 `LICENSE` 为准。
 
 来源：[`ced9391`](https://github.com/notCorwin/SurfWax/commit/ced9391)。
+
+### 验收区分测试运行、工具终态与用户目标
+
+2026-11-04 的测试能力审计采用分层证据：测试退出状态只说明测试执行结果，工具终态只说明调用如何结束；用户目标是否达成还要核对页面、持久状态和实际交付内容。脚本化 Provider 与固定审查 verdict 适合检验协议和恢复流程，不能证明真实模型能自主判断任务；复用历史模型实验时应保留来源、源码匹配与验收范围。
+
+针对关键断言，先记录无故障基线，再注入明确故障，并检查失败发生在对应的用户目标断言；基线失败、设置错误或超时不能自动算作捕获缺陷。动态语义观察失败后，符合约定的只读降级与独立截图属于恢复行为，应检查实际分支，不以测试通过直接推断可用性缺陷。
+
+来源：`audit/testing-audit-2026-11-04.txt`、`audit/mutation-evidence.json`、`e2e/completion-review-boundary.spec.ts`、`e2e/page-independent-tools.spec.ts`。
+
+### 测试区分扩展重装、浏览器重启和 Worker 重启
+
+CDP `Extensions.loadUnpacked` 重新加载扩展不能当成持久安装后的普通浏览器重启。脚本恢复关卡通过管理页保存声明，清空原生注册以模拟投影丢失，再停止并唤醒 MV3 Worker，核对声明、注册状态及新页面上的实际执行。该关卡不证明浏览器重启、扩展重装或重新授权后的恢复行为。
+
+来源：`audit/extension-installation-probe.json`、`audit/user-script-restoration-failure.json`、`e2e/userscripts.spec.ts`。
+
+### CI 选测结果通过实际收集核对
+
+关键用户路径在 `scripts/required-user-journeys.json` 独立列出，并以 `@user-journey` 标记；本地收集按当前 CI 的文件、标题、项目和性能排除条件核对这些路径，拒绝丢失标签与静态跳过。收集结果不等于远端执行结果，也不能证明运行时没有跳过。变异实验在独立源码副本中运行并使用 stage 锁，比较完整输入文件集合与哈希，拒绝新增、缺失或被修改的文件；仅排除明确的生成目录及共享依赖，后者仍是复用边界。
+
+来源：`.github/workflows/capability-tests.yml`、`scripts/audit-tests.mjs`、`audit/ci-filter-evidence.json`。
+
+失败证据须单独核验日志、结构化报告和 HTML，运行回执本身不足以证明报告存在。审计随提交提供冻结源码及结构化原始证据归档和哈希；未打包的二进制 trace 与外部图像明确标为仅存本机，避免将摘要或路径当成已交付现场。

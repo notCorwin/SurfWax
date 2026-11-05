@@ -1,0 +1,132 @@
+SurfWax 测试缺陷检测能力审计
+日期：2026-11-04 至 2026-11-05；包含阶段一发现、归因纠正及阶段二改进
+
+审计结论
+当前最严重的问题是成功判定与执行边界：局部工具契约、会话终态和用户任务完成没有形成统一的交付关卡。已有一些质量较高的最终状态测试，但其中多个未进入 CI。测试数量、覆盖率和整组退出码均不能替代用户验收。
+
+范围与证据边界
+阶段一对当时工作区全部 289 个测试文件建立环境、模拟、输入和断言检索清单，实际收集 Playwright 全部 458 个用例及 CI 选中的 109 个用例。清单中的正则信号用于定位，不能自动判定测试质量；人工重点审查用户关键路径、公共 fixture、评估评分器、CI 选择器和生命周期。
+这不是每个断言的形式化正确性证明，也不是全量浏览器回归通过声明。注入实验针对少数严重故障，不能外推为整体变异分数。实验只修改 .dev/test-audit 各 stage 的固定副本，开发构建、Vite 缓存、Chrome profile 均隔离；依赖复用本机 node_modules，源码与锁文件有哈希。最终工具比较冻结副本的完整文件集合与各文件哈希，并对 stage 加排他锁；仅排除根目录 .dev、node_modules、test-results、playwright-report。共享依赖不是冻结副本的一部分，不能据此声称密封环境；早期回执只校验了被变异文件，已保留这一方法限制。
+截图业务修复已由另一工作流提交至 304a969，不属于本审计。本审计未修改 src 业务实现。工作区快照与提交号都需结合 snapshot.json 判断，不能仅凭 HEAD 复现实验。
+
+用户路径与发现（按根因排序）
+
+F1 中：安全拒绝、只读降级与用户任务可用性需要分别验收。
+位置：e2e/snapshot-dynamic-dom.spec.ts，dynamic geometry 分支。
+行为：存在接受 snapshot-unavailable 的安全拒绝分支，也有要求 Read-only、保留 Independent 文本且不提供 ref 的只读降级分支。该测试验证不暴露过期证据，没有验证后续用户动作或总结是否达成。
+实证：注入 captureSnapshot 一律抛出 dom-unstable，该用例仍通过；相同变异下，可见市场读取正对照从通过变为失败。仅凭退出码不能判断动态用例走了哪一条分支，不能推断整页已经不可读。
+归因纠正：阶段一初稿把它称为“已实证可用性完全损坏仍通过”，这一表述撤回。严格拒绝不可靠坐标符合测试的安全目标，只读降级和独立截图在该故障下仍成功属于预期恢复。已给动态用例补充实际 observed 附件，以便逐项判断。
+补充实证：final stage 的动态 observed 明确为 Read-only partial，保留 MOVING、Moving neighbor、Independent 文本且没有 ref（dynamic-recovery-evidence.json）。因此这次语义变异存活是正确降级，未计为缺陷漏报。独立截图也在同一类故障下通过真实像素断言。后续动作/总结仍需自己的用户目标验收，不能简单删除安全拒绝分支或放宽业务可见性规则。
+
+F2 高：工具返回成功被当成页面动作成功。
+位置：e2e/page-independent-tools.spec.ts，最后的 click-new。
+行为：最后只检查 ok=true 和固定回复；不验证新页面的实际提交结果。
+实证：nativeClick 返回成功但不发送鼠标事件时，旧用例可以通过。首轮设置出现开发页重载失败，另一个表单用例基线受增量快照断言影响，二者不算变异捕获；保留原始失败结果，不用重试隐藏。
+改进：在该既有测试中独立读取新标签页的 output，确认旧标签页关闭且新标签页真的提交。用相同 no-op 变异重新验收；无须新增重复的点击单测。
+
+F3 高：CI 以文件白名单加自由标题正则选测试，产品路径长期漏执行。
+位置：.github/workflows/capability-tests.yml。
+实际收集：458 个浏览器测试中选中 109 个（41 个文件）。这里的数量只说明执行边界，不说明质量。
+未选中的已存在高价值用例包括：lifecycle.spec.ts 的真实 Side Panel 关闭、跨窗口绑定、双面板所有权；maintenance.spec.ts 的 MV3 worker 重启、释放按键与不重放；conversations.spec.ts 的暂停/恢复与分支；userscripts.spec.ts 的启动后实际注入；rendering.spec.ts 的底部自动跟随；context.spec.ts 的等待、分支及 provider-reported 计数。渲染文件实际上只选中一个 Markdown 响应用例。
+注意：原 userscripts 启动用例的名称存在环境归因错误，见 F8，不能据其原名称认为普通浏览器重启已被覆盖。
+另一个直接对应历史事故的遗漏是 diagnostic-index.spec.ts 的持续 WebSocket + 超出内存缓存读取，其功能测试和 diagnostics 单测均未进入原 CI 选择。
+改进：少量现有用户路径已接入 CI；scripts/required-user-journeys.json 独立列出必须保留的文件和标题，避免标签被删后检查器也静默漏掉它。收集按实际 project、grep 和 runner 的 performance 排除条件验证必需关卡，并拒绝静态 skip。移除 @user-journey 过滤项或删除上下文路径标签的故障注入都会被检查拒绝。收集不能证明运行时一定不跳过，执行结果仍须单独检查。
+
+F4 高：失败证据保存路径与上传路径脱节。
+位置：scripts/run-browser-tests.mjs 和 GitHub workflow 的 upload-artifact。
+runner 将结果、trace、HTML、Canonical Log 写到 .dev/artifacts/<run>/；workflow 仍只上传 playwright-report/ 与 test-results/，且 if-no-files-found=ignore。
+影响：真实 Chrome 失败后可以没有可下载的证据包，降低定位竞态和真实差异的能力。stdout 的一个路径不等于证据已被保存到 CI artifact。
+改进：上传 runner 实际生成的 results、canonical-logs、html、run.json，并额外生成 Playwright JSON、保存包含启动阶段的 stdout/stderr。scripts/verify-browser-evidence.mjs 单独核验非空日志、合法结果 JSON 和对应 HTML；只剩 run.json、缺少 HTML 或 JSON 损坏都会明确报错，并上传 evidence-check.json 诊断。早期失败可能没有 trace，报告必须保留这一事实。
+
+F5 中高：公共 fixture 默认提供绕过实际能力评估的理想依赖。
+位置：e2e/fixtures.ts。
+configure 默认写入 goalMode=false；startProvider 对 SURFWAX_GOAL_REVIEW 默认直接 accept=true。固定响应队列知道所有元素、字段、顺序和回退路径，部分工具关卡还从 fixture.evidence() 取得输入。
+正确用途：SDK/工具协议、UI 和错误恢复机制的确定性验证。
+不能支持的结论：模型能理解页面、选择工具、发现错误或判断用户目标已完成。尤其不能把使用 fixture.evidence() 的预设路径称为真实模型任务成功。
+改进：补一个浏览器级的完成拒绝/继续交付/再次完成关卡，显式提供否决与接受，确认 runner 实际遵守否决。该关卡仍只证明完成协议，不证明模型判断准确；真实模型质量另行验收。
+
+F6 中：错误的测试断言和启动竞态降低红灯的可信度。
+实证一：enableUserScripts 在扩展开发页初始化/重载时，page.evaluate 抛 Execution context was destroyed，未完成目标测试。
+实证二：automation.spec.ts 的表单测试首次点击附带快照包含结果，紧接着 inspect 的增量 items=[]，测试仍要求再次包含同一正文，基线失败。这次失败不能记成 no-op 变异被捕获。
+改进：设置步骤等待明确的文档/扩展就绪信号；断言根据产品实际“全量/增量”协议检查最终页面及已交付证据，不要求重复发送相同内容。审计当前不改这两个断言或扩大 fixture 重试范围。
+
+F7 中：真实模型入口、公共网页事实验收与普通绿色结果的含义不同。
+real-model-evaluation.spec.ts 有显式 opt-in；普通命令可只跳过，不代表能力已验证。
+public-web-evaluation.spec.ts 正确把事实准确性保留为 classification=unknown/reviewRequired=true，但 Playwright 可以通过，因为只检查结束、回复、工具终态与 job 收敛。任何交付汇总必须保留 unknown，不能把 Playwright 绿灯改称公共网页任务成功。
+改进：报告分列“测试执行结果 / 工具终态与错误 / 业务评分 / 用户可见交付物准确性”；公共事实任务需独立逐项对照来源后才可升级为成功。此次不调用真实模型，因为测试替身和断言缺口已能通过确定性故障实证；尚未重新测量模型任务成功率。
+
+F8 高：所谓浏览器启动恢复测试实际重新安装扩展，混淆了生命周期。
+位置：e2e/fixtures.ts openExtension(existingDirectory) 无条件调用 Extensions.loadUnpacked；原 userscripts 启动用例直接写 storage 后关闭、重开 Chrome。
+实证：独立 Chrome156 探针在首次加载前、复用 profile 再次加载前，Extensions.getExtensions 都返回 []。因此 CDP 安装未持久保留，第二次实际是重新安装并重新开启 Allow User Scripts。
+保存流程复核：改用管理页真正保存脚本后，声明仍存在，但重装时 worker 两次报告 userscript.unavailable，授权后 page/worker API 已可用、native registry 仍为空。它证明重装/授权转换缺少恢复，不足以证明真实普通浏览器重启损坏。
+改进：既有关卡改为管理页保存→故障注入清空原生注册表→停止并唤醒真正 MV3 worker→验证声明不变、原生注册恢复且新网页实际执行脚本。真实 browser restart 与重新安装/重新授权是另两条待独立验证路径，不能拿 worker restart 替代并声称覆盖。
+
+执行环境与模拟边界
+1. 单测默认 jsdom；Chrome/debugger/port、DOMSnapshot/AX 与 fetch 多由手工对象或 vi.fn 提供。真实浏览器的布局、绘制、跨进程 frame、原生焦点、下载和 MV3 生命周期必须由 Chrome 层验证。没有发现理由删除这些单测，但不能把它们作为浏览器行为证据。
+2. 浏览器 fixture 使用本机安装 Chrome、无头、MV3、开发服务器及真实 debugger，这是优点。多数侧栏测试以普通标签页打开 sidepanel.html，不能代替原生侧栏的窗口绑定和关闭行为。已有原生生命周期测试，主要问题是未进入 CI。
+3. HMR、fresh profile、默认 1280x720 仿真 viewport 和本地 HTTP 双域 fixture 都与日常运行存在边界；Chrome 真实 renderer 不等于真实站点、多日历史、实际商用 API 或物理屏幕布局。功耗不能从软件 120Hz 渲染 trace 推断；当前性能测试测的是软件帧工作量。
+4. 全局单测 fetch 将 Models.dev 返回空对象；设置浏览器测试主要用路由固定目录。适合缓存/错误机制，不能证明目录更新后的 provider endpoint 协议仍正确。provider-contract 用固定 SDK 响应验证请求适配，也不等于实际 Anthropic/Google/OpenAI 服务已验证。
+5. 原生 Side Panel 的 headless 操作用 CDP 开启与附着，再以 DOM 提交任务；能验证运行时，但不能声称做过物理桌面手工验收。部分平台 CDP 能力允许跳过，需要在报告中保留 skip 原因。
+
+已有值得保留的缺陷检测能力
+orderFixture 的判分读取测试进程中的真实提交账本，要求恰好一次和正确字段；recoveryFixture 要求提交已生效后独立查询状态、拒绝重复写；取消恢复用例会释放延迟响应后再次确认提交数；worker restart 用例检查按键释放、孤儿终态及不重放；跨面板 canonical-session 验证其它面板进度进入下一次请求。这些不是仅检查函数是否调用，应优先纳入交付关卡。
+real-model harness 也有负控：无工具、错误订单、未完成后台任务、上游错误应分别失败或 unknown。不能把这些防线说成完全不存在。
+
+改进顺序（阶段一方案，不修改业务行为）
+A. 成功判定：增强既有跨标签动作的最终状态断言；新增一条浏览器级完成否决边界测试。每条都用具体变异证明能变红。
+B. 执行与证据：修复 CI artifact 路径；将现有原生所有权、worker 重启、暂停恢复、上下文、脚本启动、自动滚动关卡接入 CI，实际收集核对。
+C. 动态可用性：补充分支证据，分别验证安全拒绝、只读内容、独立像素恢复及后续用户目标；不把预期降级当漏报，禁止调低可见性断言。
+D. 生命周期后续矩阵：自然 MV3 idle 唤醒（与强制 stop 不同）、真实开发 HMR 在活动任务中的所有权、日志写入配额失败、下载中断后跨会话/浏览器重启、provider 在工具结果已持久化后的断线。现有局部用例不等于这些组合路径已验证；本阶段不声称存在已确认产品 bug。
+
+复现
+node scripts/audit-tests.mjs inventory
+node scripts/audit-tests.mjs snapshot （只创建一次固定源码副本）
+npm exec --package=node@24 -- node scripts/audit-tests.mjs experiment snapshot-unavailable
+npm exec --package=node@24 -- node scripts/audit-tests.mjs experiment click-noop
+每次实验都记录无故障基线、注入源哈希、实际命令、退出码、Playwright JSON、失败详情、Canonical Logs 和 trace；无测试、跳过、基线失败与设置故障不得记作捕获到产品缺陷。
+node scripts/audit-tests.mjs collect
+node scripts/audit-tests.mjs summarize
+新一轮固定源码使用 SURFWAX_AUDIT_STAGE=<name>；不得覆盖旧 snapshot.json。冻结副本中除上述生成目录及共享依赖以外的文件新增、删除、内容更改或符号链接都会拒绝实验；同 stage 并发实验也被拒绝。内容污染和锁竞争见 experiment-guard-evidence.json；新增 automation.js 的反证见 review-guard-evidence.json。
+
+证据索引（不混用阶段）
+1. audit/test-inventory.json：当前逐文件环境、依赖、模拟信号、字面测试声明及哈希；原始逐行断言在 .dev/test-audit/inventory.json。这些信号不是自动质量评分。
+2. 初始收集集合：.dev/test-audit/baseline-collection-all.json、baseline-collection-ci.json；初始源码与每文件哈希：.dev/test-audit/snapshot.json。
+3. 当前收集集合：.dev/test-audit/collection-all.json、collection-ci.json、collection-user-journey.json；是后续运行生成的当前集合，不是初始集合。独立审查于 2026-11-05 误执行 collect 重写了这三份文件，重写前的完整内容无法恢复。修复后已重新收集并记录 workflow/独立清单哈希，仍为 459/127/14；不得把新时间戳当成旧回执。初始 baseline-collection-*、冻结源码、原始变异与验收记录未因此改变。
+4. audit/mutation-evidence.json：保留所有早期无效基线、确认漏报、改进后的反证和预期降级；原命令、日志、JSON、trace、Canonical Logs 在各 stage experiments/<run>/。
+5. audit/extension-installation-probe.json 与 user-script-restoration-failure.json：重新安装前扩展清单和授权转换的现场状态。install-probe 仅给复制的 fixture 加了只读观测，不能混入普通 startup 成功证据。
+6. audit/dynamic-recovery-evidence.json：实际只读降级返回值；不能再把该存活案例称为整页不可用漏报。
+
+阶段二变更（按根因，不修改业务行为）
+成功判定：既有跨标签用例增加实际新页面提交结果；新增完成否决→用户正文交付→再次完成的浏览器关卡；既有脚本恢复关卡改为真实管理页保存、原生投影丢失注入及真正 worker 重启。
+执行范围：将原生侧栏关闭/窗口绑定/双面板所有权、worker 中断、暂停恢复、分支、底部跟随、上下文、provider 配置、脚本恢复、持续 WebSocket 读取等既有路径标为必需关卡；现有动态截图及市场 frame 回归也接入 CI。没有把全部浏览器用例直接塞进 CI。
+证据链：CI 上传实际 .dev/artifacts 与 .dev/ci-browser，包含隐藏目录；报告缺失会产生诊断并使证据检查失败，上传步骤仍执行。审计脚本检查整份冻结文件集合、哈希和 stage 互斥，避免把并发或已污染实验当成反证。
+
+定向故障结果（不是总体变异分数）
+- 点击不发送输入但返回成功：旧跨标签用例通过；增强后在页面 output 仍为空处失败。独立订单正对照也失败。
+- 审查 verdict 被强制改成接受：旧目标模式浏览器用例通过；既有 runner 单测会失败，新增浏览器完成边界也会失败。这是集成负向验收补缺，不能说原系统完全没有防线。
+- 脚本恢复函数直接返回 false：新 worker 恢复关卡在重启后注册数为零处失败；无故障基线通过，且检查新网页实际脚本执行。
+- 语义 captureSnapshot 总失败：只读文本与独立截图仍能按声明降级，属于预期恢复；可见市场的完整语义读取正对照失败。没有将降级存活计作漏报。
+- CI 选择漏掉必需关卡、冻结副本被其它源码污染、stage 已被另一实验占用：分别明确拒绝，不启动一个貌似绿色的实验。
+
+独立用户视角验收与边界
+早期 acceptance 一轮 11/13，另两条在初始化/伪启动步骤失败；后续 verified 一轮 12/13，剩余伪启动仍失败。两轮及单独诊断均保留，未用重试覆盖原结果。纠正生命周期后，final/user-journeys.json 的 13 条无头系统 Chrome 开发构建路径全部通过，未启用重试。持续 WebSocket 路径另行单独验证，结果见验收索引。
+这些确定性路径验证真实页面/存储/副作用和用户收到的随机页面凭证；模型响应及完成审查仍由明确的脚本控制。不能据此得出真实模型能够自主选择工具、审查语义或稳定完成任意网站任务。
+复用已有截图模型实验时，已核对 158 个 runtime src 文件哈希与 .dev/analysis/screenshot-validated-source-hashes.json 一致；该实验报告记录六个调用终态、两个完成校验拒绝及用户正文。它是其它工作流的既有证据，本审计没有重新测量模型任务成功率，也没有用会话完成代替公共网页事实验收。
+普通持久安装后的浏览器重启、重新安装/重新授权后的自动恢复、真实 provider API、自然 idle 唤醒、配额/磁盘故障和多日历史组合仍未独立验收。它们是明确的后续方案，不能随本次局部关卡通过一并宣布解决。
+
+最终验收索引
+- audit/user-acceptance-evidence.json：原始失败轮次与最终验收分列。final/user-journeys.json 的 13 条均 passed；final/websocket-journey.json 的持续流量读取也 passed，合计 14 条关键路径，全部 retries=0。
+- .dev/test-audit/final/experiments/1793768405860-script-restore-noop：基线通过，禁用恢复后在注册数 0 的断言处失败。
+- .dev/test-audit/improved/experiments/1793763160980-click-noop：新增最终页面断言在 output 为空处失败。
+- .dev/test-audit/improved/experiments/1793763288449-review-accept：完成拒绝被忽略时，新增浏览器边界在用户未收到凭证处失败。
+- .dev/test-audit/final/experiments/1793768309904-snapshot-unavailable：实际 observed 证明只读降级，属于预期恢复。
+- tsc --noEmit、脚本语法检查与 diff 空白检查通过；新接入 CI 的 diagnostics 单测 40 项通过。本审计没有重新运行全部普通单测或全部 459 个浏览器用例，没有宣称它们本轮全部通过。
+- 当前 CI 实际收集 127 条浏览器用例，其中 14 条必需用户路径均被选中、没有静态 skip。performance 排除与静态 skip 两项反向注入都会被收集检查拒绝（ci-filter-evidence.json）。远端 CI 执行结果不能由本地 --list 代替。
+
+审查
+独立只读复核发现并纠正了 F1 过强归因、全快照校验/并发锁缺失、CI project/performance/skip 收集边界及“浏览器重启”误标；这些发现已修正或明确保留为未验证边界。阶段一初稿结论没有被当成最终批准。
+Terra Max 最终独立审查提出 4 项 P2，未发现 P0/P1：新增源码漏检、标签自身定义必需集合、run.json 冒充报告、原始证据仅存本机。主线程已修复前三项并逐项做反向验证（review-guard-evidence.json、failure-artifact-evidence.json），第四项通过随提交交付冻结源码和原始结构化证据包处理；大体积 trace/外部图像仍明确为本机资料。HISTORY 已由审查子代理追加。上述修复未再次委派审查，验证结论由主线程负责。
+
+可随检出复核的证据
+audit/reproduction-evidence.tar.gz 随本次提交交付，SHA-256、文件数、冻结清单哈希和恢复边界见 audit/reproduction-evidence.json。包含三个阶段的完整冻结源码输入、原始实验 JSON/命令回执/日志/Canonical Logs、早期及最终验收结果、断言清单与收集记录。归档中的绝对路径保留原始来源；新检出者应使用当前根目录脚本与对应 stage 重放，安装冻结锁文件对应的依赖，不把原机器绝对路径当成现机目录。只应在全新检出中解压，不覆盖已有审计阶段。
+trace.zip、外部 PNG/HTML、Chrome profiles、共享 node_modules 和生成的 Vite 输出未随 Git 交付，仍仅保存在原机器 .dev。归档及其哈希可复核结构化原始记录和源码；不能称完整二进制现场证据已交付，也不能保证相同 Chrome、网站或模型状态。之前工作流的真实模型原始导出也不在本归档中。

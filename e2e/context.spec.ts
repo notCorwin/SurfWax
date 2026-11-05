@@ -114,7 +114,7 @@ test("distinguishes unreported usage from zero and partial totals", async () => 
   }
 });
 
-test("updates context while a reply is pending and when switching branches", async () => {
+test("updates context while a reply is pending and when switching branches", { tag: "@user-journey" }, async () => {
   let releaseReply!: () => void;
   const replyMayFinish = new Promise<void>((resolve) => { releaseReply = resolve; });
   const provider = await startProvider([

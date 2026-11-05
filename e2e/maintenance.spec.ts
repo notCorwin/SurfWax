@@ -1,6 +1,6 @@
 import { expect, test, openExtension, configure, dispose, startProvider, commandResponse, readEvents, textResponse } from "./fixtures";
 
-test("worker restart closes orphaned calls, releases held input and never replays an operation", async () => {
+test("worker restart closes orphaned calls, releases held input and never replays an operation", { tag: "@user-journey" }, async () => {
   const provider = await startProvider([
     commandResponse("key_down", { key: "Shift" }, "restart-held-key"),
     commandResponse("verify_state", { target: { by: "css", value: "#missing-until-restart" }, state: "visible", timeoutMs: 300_000 }, "restart-waiting"),

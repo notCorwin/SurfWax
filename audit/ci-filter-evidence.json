@@ -1,0 +1,12 @@
+[
+  {
+    "fault": "Required journey also tagged @performance",
+    "code": 1,
+    "detected": true
+  },
+  {
+    "fault": "Required journey statically skipped",
+    "code": 1,
+    "detected": true
+  }
+]

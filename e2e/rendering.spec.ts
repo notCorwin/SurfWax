@@ -574,7 +574,7 @@ test("renders a complete Markdown response without blocking draft input", async 
 });
 
 
-test("follows the bottom through layout changes while respecting manual scrolling", async () => {
+test("follows the bottom through layout changes while respecting manual scrolling", { tag: "@user-journey" }, async () => {
   const longReply = "SCROLL_LINE\n\n".repeat(400) + Array.from({ length: 500 }, (_, index) => index % 40 === 0 ? `\nline ${index}\n` : ".").join("") + "FINAL_SCROLL_MARKER";
   const provider = await startProvider([textResponse(longReply), textResponse("滚动测试")]);
   const opened = await openExtension();

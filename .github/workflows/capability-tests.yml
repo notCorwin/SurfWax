@@ -24,6 +24,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx tsc --noEmit
+      - name: Verify user journeys are actually selected by CI
+        run: node scripts/audit-tests.mjs collect
       - run: node --test scripts/tests/browser-tests.test.mjs
       - run: >-
           mkdir -p test-results && npm test --
@@ -50,6 +52,7 @@ jobs:
           src/chrome/frame-visibility.test.ts
           src/chrome/frame-list.test.ts
           src/chrome/automation.test.ts
+          src/chrome/diagnostics.test.ts
           --reporter=default --reporter=junit --outputFile.junit=test-results/evaluation.xml
       - name: Save evaluation results on failure
         if: failure()
@@ -77,11 +80,14 @@ jobs:
       - name: Verify installed Google Chrome
         run: google-chrome --version
       - name: Exercise fixtures and extension tools without an LLM
+        id: browser-tests
+        shell: bash
         env:
           SURFWAX_CHROME_PATH: /usr/bin/google-chrome
           PLAYWRIGHT_HTML_OPEN: never
+          PLAYWRIGHT_JSON_OUTPUT_FILE: .dev/ci-browser/results.json
         run: >-
-          node scripts/run-browser-tests.mjs e2e
+          mkdir -p .dev/ci-browser && node scripts/run-browser-tests.mjs e2e
           e2e/evaluation/artifact-handoff-fixture.spec.ts
           e2e/evaluation/cancel-recovery-fixture.spec.ts
           e2e/evaluation/claims-fixture.spec.ts
@@ -123,15 +129,30 @@ jobs:
           e2e/context.spec.ts
           e2e/canonical-session.spec.ts
           e2e/snapshot-auto-delivery.spec.ts
-          --grep 'purpose-specific tools|artifact-handoff|cancel-recovery|chooser-prompt-tools|dispatch-tools|failed-job-evidence|manifest-tools|multitab-tools|network-context|network-level-tools|recovery-tools|rolling-tools|upload-tools|upload-job-evidence|claims-fixture|procurement-fixture|procurement-tools|closed-event-fixture|semantic-delta-fixture|claims-queue-tools|closed-event-tools|semantic-delta-tools|semantic-alternative-path|local scripted semantic-delta|local scripted userscript-repair|local scripted binary-transfer|local scripted frame-replacement|local scripted window-transfer|a completed order with an unfinished background job|renders a complete Markdown response|snapshot-|refresh-snapshot|semantic-delta-identity|locator-accessibility-semantics|goal mode|automatically summarizes|a summary failure|stopping background summarization|canonical session|delivers action snapshots'
-          --project=current --shard=${{ matrix.shard }}/2 --workers=1 --retries=0 --reporter=list,html
+          e2e/page-independent-tools.spec.ts
+          e2e/completion-review-boundary.spec.ts
+          e2e/lifecycle.spec.ts
+          e2e/maintenance.spec.ts
+          e2e/conversations.spec.ts
+          e2e/userscripts.spec.ts
+          e2e/settings.spec.ts
+          e2e/screenshot-dynamic.spec.ts
+          e2e/live-market-regression.spec.ts
+          e2e/diagnostic-index.spec.ts
+          --grep 'purpose-specific tools|artifact-handoff|cancel-recovery|chooser-prompt-tools|dispatch-tools|failed-job-evidence|manifest-tools|multitab-tools|network-context|network-level-tools|recovery-tools|rolling-tools|upload-tools|upload-job-evidence|claims-fixture|procurement-fixture|procurement-tools|closed-event-fixture|semantic-delta-fixture|claims-queue-tools|closed-event-tools|semantic-delta-tools|semantic-alternative-path|local scripted semantic-delta|local scripted userscript-repair|local scripted binary-transfer|local scripted frame-replacement|local scripted window-transfer|a completed order with an unfinished background job|renders a complete Markdown response|snapshot-|refresh-snapshot|semantic-delta-identity|locator-accessibility-semantics|goal mode|automatically summarizes|a summary failure|stopping background summarization|canonical session|delivers action snapshots|@user-journey|captures .* pixels independently of changing semantic content|captures a page with hidden layoutless|keeps current frame routes across top-level navigation'
+          --project=current --shard=${{ matrix.shard }}/2 --workers=1 --retries=0 --reporter=list,html,json
+          2>&1 | tee .dev/ci-browser/runner.log
+      - name: Verify browser failure evidence
+        if: failure() && steps.browser-tests.outcome == 'failure'
+        run: node scripts/verify-browser-evidence.mjs
       - name: Save browser reports on failure
-        if: failure()
+        if: failure() && steps.browser-tests.outcome == 'failure'
         uses: actions/upload-artifact@v7
         with:
           name: browser-report-${{ matrix.shard }}
           path: |
-            playwright-report/
-            test-results/
-          if-no-files-found: ignore
+            .dev/artifacts/
+            .dev/ci-browser/
+          include-hidden-files: true
+          if-no-files-found: error
           retention-days: 7

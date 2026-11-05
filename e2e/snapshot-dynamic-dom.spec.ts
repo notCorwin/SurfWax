@@ -123,6 +123,7 @@ for (const kind of ["native-label", "geometry", "ellipsis", "ellipsis-replace", 
       await opened.page.getByTestId("composer-input").fill("Inspect the changing page");
       await opened.page.getByTestId("composer-input").press("Enter");
       await expect(opened.page.locator(".markdown-body").last()).toContainText(`DYNAMIC_${kind}_DONE`, { timeout: 70_000 });
+      await test.info().attach("dynamic-observation", { body: JSON.stringify({ kind, observed }), contentType: "application/json" });
       if (observed?.limitations) {
         expect(observed).toMatchObject({ partial: true, limitations: expect.stringContaining("Read-only"), items: expect.any(Array) });
         expect(lines(observed).every((item) => !item.ref)).toBe(true);

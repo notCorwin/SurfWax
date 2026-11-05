@@ -74,7 +74,7 @@ test("indexes diagnostic capture events atomically in the canonical database", a
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
-test("reads a capture beyond the live cache while live WebSocket quotes keep arriving", async () => {
+test("reads a capture beyond the live cache while live WebSocket quotes keep arriving", { tag: "@user-journey" }, async () => {
   test.setTimeout(120_000);
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);

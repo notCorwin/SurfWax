@@ -49,7 +49,7 @@ test("shows the configured model at the bottom left of the composer", async () =
 });
 
 
-test("restores independent credentials and models when switching Providers", async () => {
+test("restores independent credentials and models when switching Providers", { tag: "@user-journey" }, async () => {
   const opened = await openExtension();
   try {
     await opened.context.route("https://models.dev/api.json", (route) => route.fulfill({ json: {

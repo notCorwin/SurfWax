@@ -1,0 +1,332 @@
+{
+  "scope": "Headless installed Chrome 156, MV3 Vite development build. Deterministic scripted provider: validates real browser effects and visible delivery, not autonomous model ability. Earlier failures retained; final restart path is worker restart, not browser reinstall.",
+  "finalSnapshot": ".dev/test-audit/final/snapshot.json",
+  "finalSnapshotManifestSha256": "3a5c7b83c037dc2e053946aee6daec37b553d1a14ebc11c162c29eb96b2e2466",
+  "runs": {
+    "initial_acceptance": {
+      "result": ".dev/test-audit/acceptance/results.json",
+      "stats": {
+        "startTime": "2026-11-04T03:35:59.281Z",
+        "duration": 159478.76,
+        "expected": 11,
+        "skipped": 0,
+        "unexpected": 2,
+        "flaky": 0
+      },
+      "tests": [
+        {
+          "title": "completion review rejection keeps the task open until the observed result is delivered",
+          "status": "failed",
+          "retry": 0,
+          "errors": [
+            "Error: expect(locator).toBeVisible() failed\n\nLocator: getByTestId('open-settings')\nExpected: visible\nTimeout: 15000ms\nError: element(s) not found\n\nCall log:\n  - Expect \"toBeVisible\" with timeout 15000ms\n  - waiting for getByTestId('open-settings')\n    - waiting for navigation to finish...\n    3 × navigated to \"chrome-extension://cmnmjfamklnnacnkpclgmpeagcmbafeh/sidepanel.html\"\n      - waiting for \"chrome-extension://cmnmjfamklnnacnkpclgmpeagcmbafeh/sidepanel.html\" navigation to finish...\n    - navigated to \"chrome-extension://cmnmjfamklnnacnkpclgmpeagcmbafeh/sidepanel.html\"\n\n\n   at fixtures.ts:354\n\n  352 |   // Development pages can reload while CRXJS initializes. Wait for the app\n  353 |   // before executing storage operations in its document context.\n> 354 |   await expect(page.getByTestId(\"open-settings\")).toBeVisible();\n      |                                                   ^\n  355 |   if (settings.goalMode !== undefined) await page.evaluate((goalMode) => chrome.storage.local.set({ \"side-agent:goal-mode\": goalMode }), settings.goalMode);\n  356 |   const [options] = await Promise.all([context.waitForEvent(\"page\"), page.getByTestId(\"open-settings\").click()]);\n  357 |   await options.waitForLoadState(\"domcontentloaded\");\n    at configure (.dev/test-audit/acceptance/source/e2e/fixtures.ts:354:51)\n    at .dev/test-audit/acceptance/source/e2e/completion-review-boundary.spec.ts:36:18"
+          ]
+        },
+        {
+          "title": "updates context while a reply is pending and when switching branches",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "keeps paused follow-ups after stop and panel reload until the user resumes them",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "edits user messages, regenerates replies and restores the selected branch",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "keeps a running conversation alive when a switch is blocked",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "closing a native Side Panel aborts its owner and prevents a queued page mutation",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "a native run stays in its owning window after another window becomes focused",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "two native side panels accept only one owner and closing the non-owner preserves the active task",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "worker restart closes orphaned calls, releases held input and never replays an operation",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "runs page-independent tools after closing the bound tab, including opening a restricted page",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "follows the bottom through layout changes while respecting manual scrolling",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "restores independent credentials and models when switching Providers",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "restores saved user scripts on browser startup",
+          "status": "failed",
+          "retry": 0,
+          "errors": [
+            "Error: page.evaluate: Execution context was destroyed, most likely because of a navigation\n\n  45 |     await enableUserScripts(opened.context, opened.extensionId, opened.page);\n  46 |     const script = { id: \"restored\", matches: [`${provider.origin}/*`], js: [{ code: \"document.documentElement.dataset.restoredScript = 'ran'\" }] };\n> 47 |     await opened.page.evaluate((script) => chrome.storage.local.set({\n     |                       ^\n  48 |       \"side-agent:user-scripts\": [script],\n  49 |       \"side-agent:unrelated\": \"keep\",\n  50 |     }), script);\n    at .dev/test-audit/acceptance/source/e2e/userscripts.spec.ts:47:23"
+          ]
+        }
+      ]
+    },
+    "setup_diagnostic": {
+      "result": ".dev/test-audit/acceptance/setup-diagnostic-results.json",
+      "stats": {
+        "startTime": "2026-11-04T03:41:30.484Z",
+        "duration": 32573.086000000003,
+        "expected": 1,
+        "skipped": 0,
+        "unexpected": 1,
+        "flaky": 0
+      },
+      "tests": [
+        {
+          "title": "completion review rejection keeps the task open until the observed result is delivered",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "restores saved user scripts on browser startup",
+          "status": "failed",
+          "retry": 0,
+          "errors": [
+            "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: 1\nReceived: 0\n\nCall Log:\n- Timeout 15000ms exceeded while waiting on the predicate\n\n  52 |     opened = await openExtension(opened.userDataDirectory);\n  53 |     await enableUserScripts(opened.context, opened.extensionId, opened.page);\n> 54 |     await expect.poll(() => opened.page.evaluate(async () => (await chrome.userScripts.getScripts({ ids: [\"restored\"] })).length)).toBe(1);\n     |                                                                                                                                    ^\n  55 |     expect((await opened.page.evaluate(async () => chrome.storage.local.get(\"side-agent:user-scripts\")))[\"side-agent:user-scripts\"]).toMatchObject([script]);\n  56 |     expect(await opened.page.evaluate(async () => (await chrome.storage.local.get(\"side-agent:unrelated\"))[\"side-agent:unrelated\"])).toBe(\"keep\");\n  57 |     const target = await opened.context.newPage();\n    at .dev/test-audit/acceptance/source/e2e/userscripts.spec.ts:54:132"
+          ]
+        }
+      ]
+    },
+    "incorrect_restart": {
+      "result": ".dev/test-audit/verified/user-journeys.json",
+      "stats": {
+        "startTime": "2026-11-04T03:43:47.232Z",
+        "duration": 135923.945,
+        "expected": 12,
+        "skipped": 0,
+        "unexpected": 1,
+        "flaky": 0
+      },
+      "tests": [
+        {
+          "title": "completion review rejection keeps the task open until the observed result is delivered",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "updates context while a reply is pending and when switching branches",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "keeps paused follow-ups after stop and panel reload until the user resumes them",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "edits user messages, regenerates replies and restores the selected branch",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "keeps a running conversation alive when a switch is blocked",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "closing a native Side Panel aborts its owner and prevents a queued page mutation",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "a native run stays in its owning window after another window becomes focused",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "two native side panels accept only one owner and closing the non-owner preserves the active task",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "worker restart closes orphaned calls, releases held input and never replays an operation",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "runs page-independent tools after closing the bound tab, including opening a restricted page",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "follows the bottom through layout changes while respecting manual scrolling",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "restores independent credentials and models when switching Providers",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "restores saved user scripts on browser startup",
+          "status": "failed",
+          "retry": 0,
+          "errors": [
+            "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: 1\nReceived: 0\n\nCall Log:\n- Timeout 15000ms exceeded while waiting on the predicate\n\n  68 |     opened = await openExtension(opened.userDataDirectory);\n  69 |     await enableUserScripts(opened.context, opened.extensionId, opened.page);\n> 70 |     await expect.poll(() => opened.page.evaluate(async () => (await chrome.userScripts.getScripts({ ids: [\"restored\"] })).length)).toBe(1);\n     |                                                                                                                                    ^\n  71 |     expect((await opened.page.evaluate(async () => chrome.storage.local.get(\"side-agent:user-scripts\")))[\"side-agent:user-scripts\"]).toEqual(saved);\n  72 |     expect(await opened.page.evaluate(async () => (await chrome.storage.local.get(\"side-agent:unrelated\"))[\"side-agent:unrelated\"])).toBe(\"keep\");\n  73 |     const target = await opened.context.newPage();\n    at .dev/test-audit/verified/source/e2e/userscripts.spec.ts:70:132"
+          ]
+        }
+      ]
+    },
+    "final_user_journeys": {
+      "result": ".dev/test-audit/final/user-journeys.json",
+      "stats": {
+        "startTime": "2026-11-04T05:00:53.738Z",
+        "duration": 106771.925,
+        "expected": 13,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "tests": [
+        {
+          "title": "completion review rejection keeps the task open until the observed result is delivered",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "updates context while a reply is pending and when switching branches",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "keeps paused follow-ups after stop and panel reload until the user resumes them",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "edits user messages, regenerates replies and restores the selected branch",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "keeps a running conversation alive when a switch is blocked",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "closing a native Side Panel aborts its owner and prevents a queued page mutation",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "a native run stays in its owning window after another window becomes focused",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "two native side panels accept only one owner and closing the non-owner preserves the active task",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "worker restart closes orphaned calls, releases held input and never replays an operation",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "runs page-independent tools after closing the bound tab, including opening a restricted page",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "follows the bottom through layout changes while respecting manual scrolling",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "restores independent credentials and models when switching Providers",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        },
+        {
+          "title": "restores saved user scripts after the MV3 worker restarts",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        }
+      ]
+    },
+    "final_websocket_journey": {
+      "result": ".dev/test-audit/final/websocket-journey.json",
+      "stats": {
+        "startTime": "2026-11-04T05:03:27.733Z",
+        "duration": 13949.711000000001,
+        "expected": 1,
+        "skipped": 0,
+        "unexpected": 0,
+        "flaky": 0
+      },
+      "tests": [
+        {
+          "title": "reads a capture beyond the live cache while live WebSocket quotes keep arriving",
+          "status": "passed",
+          "retry": 0,
+          "errors": []
+        }
+      ]
+    }
+  }
+}

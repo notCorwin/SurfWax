@@ -1,0 +1,666 @@
+{
+  "scope": "Targeted fault injection; not an overall mutation score. Read-only and independent screenshot recovery are expected behavior. A surviving test without branch evidence is not proof of a false positive.",
+  "before": {
+    "note": "failed-under-mutation requires manual error review; setup failures and timeouts are not automatically counted as caught product defects.",
+    "reports": [
+      {
+        "run": "1793762590119-click-noop",
+        "mutation": "click-noop",
+        "file": "src/chrome/automation.ts",
+        "originalSha256": "626731491db658cfebba51f50c1a419a9cbbc22f0a7ba6ac6bd20ca3b158b8c6",
+        "mutantSha256": "f9d1100bbfdffb1d73dd6afe4f9020239d0c6e6514a41111ba1b02ad632eed52",
+        "cases": [
+          {
+            "case": "page-independent",
+            "verdict": "survived",
+            "baseline": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T03:23:11.377Z",
+                "duration": 11197.645,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "mutant": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T03:23:25.893Z",
+                "duration": 14354.494999999999,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "errors": [],
+            "observations": []
+          },
+          {
+            "case": "actual-form-control",
+            "verdict": "invalid-baseline",
+            "baseline": {
+              "code": 1,
+              "stats": {
+                "startTime": "2026-11-04T03:23:23.976Z",
+                "duration": 770.8950000000001,
+                "expected": 0,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "mutant": {
+              "code": 1,
+              "stats": {
+                "startTime": "2026-11-04T03:23:41.604Z",
+                "duration": 156.894,
+                "expected": 0,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "errors": [],
+            "observations": []
+          }
+        ]
+      },
+      {
+        "run": "1793762664217-click-noop",
+        "mutation": "click-noop",
+        "file": "src/chrome/automation.ts",
+        "originalSha256": "626731491db658cfebba51f50c1a419a9cbbc22f0a7ba6ac6bd20ca3b158b8c6",
+        "mutantSha256": "f9d1100bbfdffb1d73dd6afe4f9020239d0c6e6514a41111ba1b02ad632eed52",
+        "cases": [
+          {
+            "case": "page-independent",
+            "verdict": "invalid-baseline",
+            "baseline": {
+              "code": 1,
+              "stats": {
+                "startTime": "2026-11-04T03:24:25.052Z",
+                "duration": 1852.9460000000001,
+                "expected": 0,
+                "skipped": 0,
+                "unexpected": 1,
+                "flaky": 0
+              }
+            },
+            "mutant": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T03:24:40.871Z",
+                "duration": 10020.574999999999,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "errors": [],
+            "observations": []
+          },
+          {
+            "case": "actual-form-control",
+            "verdict": "invalid-baseline",
+            "baseline": {
+              "code": 1,
+              "stats": {
+                "startTime": "2026-11-04T03:24:29.819Z",
+                "duration": 10013.73,
+                "expected": 0,
+                "skipped": 0,
+                "unexpected": 1,
+                "flaky": 0
+              }
+            },
+            "mutant": {
+              "code": 1,
+              "stats": {
+                "startTime": "2026-11-04T03:24:51.922Z",
+                "duration": 9900.074999999999,
+                "expected": 0,
+                "skipped": 0,
+                "unexpected": 1,
+                "flaky": 0
+              }
+            },
+            "errors": [
+              "Error: expect(received).toEqual(expected) // deep equality\n\nExpected: ArrayContaining [ObjectContaining {\"line\": StringContaining \"Welcome me@example.com\"}]\nReceived: []\n\n  94 |     const verified = events.find((event) => event.type === \"tool.finished\" && event.toolCallId === \"call-verify\")?.output;\n  95 |     expect(observation.items).toEqual(expect.arrayContaining([expect.objectContaining({ ref: expect.stringMatching(/^t\\d+s[a-f0-9]+d\\d+e\\d+$/) })]));\n> 96 |     expect(clicked.pageSnapshot.items).toEqual(expect.arrayContaining([expect.objectContaining({ line: expect.stringContaining(\"Welcome me@example.com\") })]));\n     |                                        ^\n  97 |     expect(verified.items).toEqual(expect.arrayContaining([expect.objectContaining({ line: expect.stringContaining(\"Welcome me@example.com\") })]));\n  98 |     await expect.poll(() => target.locator(\"output\").textContent()).toBe(\"Welcome me@example.com\");\n  99 |     expect(events.some((event) => event.type === \"automation.action.finished\" && event.toolCallId === \"call-click\")).toBe(true);\n    at .dev/test-audit/source/e2e/automation.spec.ts:96:40"
+            ],
+            "observations": []
+          }
+        ]
+      },
+      {
+        "run": "1793762742737-snapshot-unavailable",
+        "mutation": "snapshot-unavailable",
+        "file": "src/chrome/automation.ts",
+        "originalSha256": "626731491db658cfebba51f50c1a419a9cbbc22f0a7ba6ac6bd20ca3b158b8c6",
+        "mutantSha256": "e384325aa8fdf3ec8c8fcc0fb65e447a4531cf2beae04aa2f94020b616acf117",
+        "cases": [
+          {
+            "case": "dynamic-geometry",
+            "verdict": "survived-branch-unobserved",
+            "baseline": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T03:25:43.638Z",
+                "duration": 10178.24,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "mutant": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T03:26:06.543Z",
+                "duration": 13291.474999999999,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "errors": [],
+            "observations": []
+          },
+          {
+            "case": "visible-market-control",
+            "verdict": "failed-under-mutation",
+            "baseline": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T03:25:54.961Z",
+                "duration": 10375.752,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "mutant": {
+              "code": 1,
+              "stats": {
+                "startTime": "2026-11-04T03:26:21.135Z",
+                "duration": 11470.177,
+                "expected": 0,
+                "skipped": 0,
+                "unexpected": 1,
+                "flaky": 0
+              }
+            },
+            "errors": [
+              "Error: expect(received).toContain(expected) // indexOf\n\nExpected substring: \"Frame action\"\nReceived string:    \"[{\\\"id\\\":\\\"readonly:0\\\",\\\"line\\\":\\\"        - text \\\\\\\"Market dashboard\\\\\\\"\\\"},{\\\"id\\\":\\\"readonly:1\\\",\\\"line\\\":\\\"        - text \\\\\\\"Visible market action\\\\\\\"\\\"},{\\\"id\\\":\\\"readonly:2\\\",\\\"line\\\":\\\"        - text \\\\\\\"Show market frames\\\\\\\"\\\"}]\"\n\n  166 |         e.type === \"tool.finished\" && e.toolCallId?.endsWith(\"visible-market\"),\n  167 |     );\n> 168 |     expect(JSON.stringify(revealed?.output.items)).toContain(\"Frame action\");\n      |                                                    ^\n  169 |     expect(JSON.stringify(revealed?.output.items)).toContain(\"same origin\");\n  170 |   } finally {\n  171 |     await dispose(opened.context, opened.userDataDirectory, provider.server);\n    at .dev/test-audit/source/e2e/live-market-regression.spec.ts:168:52"
+            ],
+            "observations": []
+          }
+        ]
+      },
+      {
+        "run": "1793762828704-click-noop",
+        "mutation": "click-noop",
+        "file": "src/chrome/automation.ts",
+        "originalSha256": "626731491db658cfebba51f50c1a419a9cbbc22f0a7ba6ac6bd20ca3b158b8c6",
+        "mutantSha256": "f9d1100bbfdffb1d73dd6afe4f9020239d0c6e6514a41111ba1b02ad632eed52",
+        "cases": [
+          {
+            "case": "page-independent",
+            "verdict": "survived",
+            "baseline": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T03:27:09.605Z",
+                "duration": 8997.543,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "mutant": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T03:27:29.963Z",
+                "duration": 8693.896999999999,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "errors": [],
+            "observations": []
+          },
+          {
+            "case": "actual-order-control",
+            "verdict": "failed-under-mutation",
+            "baseline": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T03:27:19.596Z",
+                "duration": 9323.377999999999,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "mutant": {
+              "code": 1,
+              "stats": {
+                "startTime": "2026-11-04T03:27:39.716Z",
+                "duration": 49680.340000000004,
+                "expected": 0,
+                "skipped": 0,
+                "unexpected": 1,
+                "flaky": 0
+              }
+            },
+            "errors": [
+              "Error: expect(received).toEqual(expected) // deep equality\n\n- Expected  - 7\n+ Received  + 1\n\n  Object {\n    \"changes\": Array [\n      \"express\",\n    ],\n-   \"orders\": Array [\n-     Object {\n-       \"confirmed\": true,\n-       \"order\": \"ORDER-17\",\n-       \"service\": \"express\",\n-     },\n-   ],\n+   \"orders\": Array [],\n    \"selected\": \"express\",\n  }\n\n  87 |     actual = await frame.evaluate(() => ({ orders: (window as any).businessOrders, changes: (window as any).businessChanges,\n  88 |       selected: document.querySelector<HTMLSelectElement>(\"#service\")!.value }));\n> 89 |     expect(actual).toEqual({ orders: [{ order, service, confirmed: true }], changes: [service], selected: service });\n     |                    ^\n  90 |     expect(await target.locator(\"body\").getAttribute(\"data-decoy-clicks\")).toBeNull();\n  91 |     expect(checkpoints.failedSelection).toMatchObject({ ok: false });\n  92 |     expect(checkpoints.afterFailure).toMatchObject({ ok: true, result: \"standard\" });\n    at .dev/test-audit/source/e2e/complex-task-evaluation.spec.ts:89:20"
+            ],
+            "observations": []
+          }
+        ]
+      },
+      {
+        "run": "1793762965305-review-accept",
+        "mutation": "review-accept",
+        "file": "src/agent/goal-review.ts",
+        "originalSha256": "4b25f06ffd37408ce908a77829503982f5766c4d4f4129becc19b463dcdca412",
+        "mutantSha256": "4b37e38394c82144662e3c19e5ec465f037d939fdf686f576b973a0aabe90d19",
+        "cases": [
+          {
+            "case": "goal-mode",
+            "verdict": "survived",
+            "baseline": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T03:29:26.274Z",
+                "duration": 9804.731,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "mutant": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T03:29:38.155Z",
+                "duration": 9854.618999999999,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "errors": [],
+            "observations": []
+          },
+          {
+            "case": "runner-rejection-control",
+            "verdict": "failed-under-mutation",
+            "baseline": {
+              "code": 0,
+              "stats": {
+                "expected": 1,
+                "unexpected": 0,
+                "skipped": 2
+              }
+            },
+            "mutant": {
+              "code": 1,
+              "stats": {
+                "expected": 0,
+                "unexpected": 1,
+                "skipped": 2
+              }
+            },
+            "errors": [
+              "AssertionError: expected 1 to be 3 // Object.is equality\n    at .dev/test-audit/source/src/agent/goal-review-runner.test.ts:29:19\n    at file://node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20"
+            ],
+            "observations": []
+          }
+        ]
+      }
+    ]
+  },
+  "after": {
+    "note": "failed-under-mutation requires manual error review; setup failures and timeouts are not automatically counted as caught product defects.",
+    "reports": [
+      {
+        "run": "1793763160980-click-noop",
+        "mutation": "click-noop",
+        "file": "src/chrome/automation.ts",
+        "originalSha256": "b31c69254cc10978b82f3263ab41dd0977946678bd02b3c8cff193edce365fd9",
+        "mutantSha256": "2c1978fcfa9647526c229c5606f5ebc47d1245b41912f7e0c659e43c6a310b1d",
+        "cases": [
+          {
+            "case": "page-independent",
+            "verdict": "failed-under-mutation",
+            "baseline": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T03:32:41.989Z",
+                "duration": 9236.997,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "mutant": {
+              "code": 1,
+              "stats": {
+                "startTime": "2026-11-04T03:33:02.622Z",
+                "duration": 25852.974000000002,
+                "expected": 0,
+                "skipped": 0,
+                "unexpected": 1,
+                "flaky": 0
+              }
+            },
+            "errors": [
+              "Error: expect(locator).toHaveText(expected) failed\n\nLocator:  locator('output')\nExpected: \"Welcome\"\nReceived: \"\"\nTimeout:  15000ms\n\nCall log:\n  - Expect \"toHaveText\" with timeout 15000ms\n  - waiting for locator('output')\n    34 × locator resolved to <output></output>\n       - unexpected value \"\"\n\n\n  46 |     const submitted = opened.context.pages().filter(page => page.url() === `${provider.origin}/automation`);\n  47 |     expect(submitted).toHaveLength(1);\n> 48 |     await expect(submitted[0].locator(\"output\")).toHaveText(\"Welcome\");\n     |                                                  ^\n  49 |   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }\n  50 | });\n  51 |\n    at .dev/test-audit/improved/source/e2e/page-independent-tools.spec.ts:48:50"
+            ],
+            "observations": []
+          },
+          {
+            "case": "actual-order-control",
+            "verdict": "failed-under-mutation",
+            "baseline": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T03:32:52.285Z",
+                "duration": 9343.529,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "mutant": {
+              "code": 1,
+              "stats": {
+                "startTime": "2026-11-04T03:33:29.582Z",
+                "duration": 50650.698000000004,
+                "expected": 0,
+                "skipped": 0,
+                "unexpected": 1,
+                "flaky": 0
+              }
+            },
+            "errors": [
+              "Error: expect(received).toEqual(expected) // deep equality\n\n- Expected  - 7\n+ Received  + 1\n\n  Object {\n    \"changes\": Array [\n      \"express\",\n    ],\n-   \"orders\": Array [\n-     Object {\n-       \"confirmed\": true,\n-       \"order\": \"ORDER-17\",\n-       \"service\": \"express\",\n-     },\n-   ],\n+   \"orders\": Array [],\n    \"selected\": \"express\",\n  }\n\n  87 |     actual = await frame.evaluate(() => ({ orders: (window as any).businessOrders, changes: (window as any).businessChanges,\n  88 |       selected: document.querySelector<HTMLSelectElement>(\"#service\")!.value }));\n> 89 |     expect(actual).toEqual({ orders: [{ order, service, confirmed: true }], changes: [service], selected: service });\n     |                    ^\n  90 |     expect(await target.locator(\"body\").getAttribute(\"data-decoy-clicks\")).toBeNull();\n  91 |     expect(checkpoints.failedSelection).toMatchObject({ ok: false });\n  92 |     expect(checkpoints.afterFailure).toMatchObject({ ok: true, result: \"standard\" });\n    at .dev/test-audit/improved/source/e2e/complex-task-evaluation.spec.ts:89:20"
+            ],
+            "observations": []
+          }
+        ]
+      },
+      {
+        "run": "1793763288449-review-accept",
+        "mutation": "review-accept",
+        "file": "src/agent/goal-review.ts",
+        "originalSha256": "4b25f06ffd37408ce908a77829503982f5766c4d4f4129becc19b463dcdca412",
+        "mutantSha256": "4b37e38394c82144662e3c19e5ec465f037d939fdf686f576b973a0aabe90d19",
+        "cases": [
+          {
+            "case": "goal-mode",
+            "verdict": "survived",
+            "baseline": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T03:34:49.641Z",
+                "duration": 13861.056,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "mutant": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T03:35:24.959Z",
+                "duration": 22757.769,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "errors": [],
+            "observations": []
+          },
+          {
+            "case": "runner-rejection-control",
+            "verdict": "failed-under-mutation",
+            "baseline": {
+              "code": 0,
+              "stats": {
+                "expected": 1,
+                "unexpected": 0,
+                "skipped": 2
+              }
+            },
+            "mutant": {
+              "code": 1,
+              "stats": {
+                "expected": 0,
+                "unexpected": 1,
+                "skipped": 2
+              }
+            },
+            "errors": [
+              "AssertionError: expected 1 to be 3 // Object.is equality\n    at .dev/test-audit/improved/source/src/agent/goal-review-runner.test.ts:29:19\n    at file://node_modules/@vitest/runner/dist/chunk-artifact.js:1903:20"
+            ],
+            "observations": []
+          },
+          {
+            "case": "completion-boundary",
+            "verdict": "failed-under-mutation",
+            "baseline": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T03:35:06.545Z",
+                "duration": 16899.101,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "mutant": {
+              "code": 1,
+              "stats": {
+                "startTime": "2026-11-04T03:35:50.985Z",
+                "duration": 45965.615,
+                "expected": 0,
+                "skipped": 0,
+                "unexpected": 1,
+                "flaky": 0
+              }
+            },
+            "errors": [
+              "Error: expect(locator).toBeVisible() failed\n\nLocator: locator('.assistant-message').filter({ hasText: 'Page receipt: RECEIPT-c702240b-7de6-43a6-8365-ad6eea53a70d' })\nExpected: visible\nTimeout: 20000ms\nError: element(s) not found\n\nCall log:\n  - Expect \"toBeVisible\" with timeout 20000ms\n  - waiting for locator('.assistant-message').filter({ hasText: 'Page receipt: RECEIPT-c702240b-7de6-43a6-8365-ad6eea53a70d' })\n\n\n  41 |     await opened.page.getByTestId(\"composer-input\").fill(\"Read the page receipt and report its exact value to me before completing.\");\n  42 |     await opened.page.getByTestId(\"composer-input\").press(\"Enter\");\n> 43 |     await expect(opened.page.locator(\".assistant-message\").filter({ hasText: `Page receipt: ${code}` })).toBeVisible({ timeout: 20_000 });\n     |                                                                                                          ^\n  44 |     if (problem) throw problem;\n  45 |     expect(rejected).toBe(true);\n  46 |     expect(observed).toBe(code);\n    at .dev/test-audit/improved/source/e2e/completion-review-boundary.spec.ts:43:106"
+            ],
+            "observations": []
+          }
+        ]
+      },
+      {
+        "run": "1793763555756-snapshot-unavailable",
+        "mutation": "snapshot-unavailable",
+        "file": "src/chrome/automation.ts",
+        "originalSha256": "b31c69254cc10978b82f3263ab41dd0977946678bd02b3c8cff193edce365fd9",
+        "mutantSha256": "304af02cd915a08d0611142dcc6ffe3ffbc3437dff8545e55652d4b3ae2d2d72",
+        "cases": [
+          {
+            "case": "screenshot-fallback",
+            "verdict": "expected-independent-recovery",
+            "baseline": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T03:39:17.067Z",
+                "duration": 9343.128999999999,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "mutant": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T03:39:27.468Z",
+                "duration": 8577.826,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "errors": [],
+            "observations": []
+          }
+        ]
+      }
+    ]
+  },
+  "final": {
+    "note": "failed-under-mutation requires manual error review; setup failures and timeouts are not automatically counted as caught product defects.",
+    "reports": [
+      {
+        "run": "1793768309904-snapshot-unavailable",
+        "mutation": "snapshot-unavailable",
+        "file": "src/chrome/automation.ts",
+        "originalSha256": "b31c69254cc10978b82f3263ab41dd0977946678bd02b3c8cff193edce365fd9",
+        "mutantSha256": "304af02cd915a08d0611142dcc6ffe3ffbc3437dff8545e55652d4b3ae2d2d72",
+        "cases": [
+          {
+            "case": "dynamic-geometry",
+            "verdict": "expected-readonly-recovery",
+            "baseline": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T04:58:30.662Z",
+                "duration": 9649.879,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "mutant": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T04:58:41.365Z",
+                "duration": 9113.946,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "errors": [],
+            "observations": [
+              {
+                "kind": "geometry",
+                "observed": {
+                  "observationId": "2f6ee93f-a37a-43a3-a0e4-cda95ccabe17",
+                  "tabId": 5741794,
+                  "documentId": 0,
+                  "url": "http://127.0.0.1:63602/target",
+                  "title": "Side Agent Target",
+                  "viewport": {
+                    "height": 800,
+                    "scale": 1,
+                    "width": 1200,
+                    "x": 0,
+                    "y": 0
+                  },
+                  "mode": "full",
+                  "partial": true,
+                  "limitations": "Read-only root viewport text sampled in one synchronous DOM read after dom-unstable. Generated/shadow content, embedded documents, uncertain paint, control state and action refs are omitted. Depth uses DOM ancestry. This is incomplete evidence. Use find_elements for action refs, read_elements for scoped reads, or take_screenshot for visual content.",
+                  "items": [
+                    {
+                      "id": "readonly:0",
+                      "line": "        - text \"MOVING_01550\""
+                    },
+                    {
+                      "id": "readonly:1",
+                      "line": "        - text \"Moving neighbor\""
+                    },
+                    {
+                      "id": "readonly:2",
+                      "line": "        - text \"Independent\""
+                    }
+                  ],
+                  "truncation": {
+                    "truncated": false,
+                    "total": 3,
+                    "returned": 3,
+                    "offset": 0,
+                    "charOffset": 0,
+                    "nextOffset": 3,
+                    "nextCharOffset": 0,
+                    "budget": 12000,
+                    "used": 186,
+                    "baselineComplete": false
+                  },
+                  "evidenceId": "dynamic-geometry-inspect"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "run": "1793768405860-script-restore-noop",
+        "mutation": "script-restore-noop",
+        "file": "src/userscripts/persistence.ts",
+        "originalSha256": "c10c4ff61a908771c773fd655abf950c9cf4f15746dcc58867e4d6ff9826ff38",
+        "mutantSha256": "8f3ccdb02d208bfd287be3d812f5b2712cc60ab046b9199b9be944baa1eb40c2",
+        "cases": [
+          {
+            "case": "scripts-after-restart",
+            "verdict": "failed-under-mutation",
+            "baseline": {
+              "code": 0,
+              "stats": {
+                "startTime": "2026-11-04T05:00:06.733Z",
+                "duration": 6848.977,
+                "expected": 1,
+                "skipped": 0,
+                "unexpected": 0,
+                "flaky": 0
+              }
+            },
+            "mutant": {
+              "code": 1,
+              "stats": {
+                "startTime": "2026-11-04T05:00:14.660Z",
+                "duration": 21177.226000000002,
+                "expected": 0,
+                "skipped": 0,
+                "unexpected": 1,
+                "flaky": 0
+              }
+            },
+            "errors": [
+              "Error: expect(received).toBe(expected) // Object.is equality\n\nExpected: 1\nReceived: 0\n\nCall Log:\n- Timeout 15000ms exceeded while waiting on the predicate\n\n  79 |     await expect(opened.page.getByTestId(\"open-user-scripts\")).toBeVisible();\n  80 |     await protocol.detach();\n> 81 |     await expect.poll(() => opened.page.evaluate(async () => (await chrome.userScripts.getScripts({ ids: [\"restored\"] })).length)).toBe(1);\n     |                                                                                                                                    ^\n  82 |     expect((await opened.page.evaluate(async () => chrome.storage.local.get(\"side-agent:user-scripts\")))[\"side-agent:user-scripts\"]).toEqual(saved);\n  83 |     expect(await opened.page.evaluate(async () => (await chrome.storage.local.get(\"side-agent:unrelated\"))[\"side-agent:unrelated\"])).toBe(\"keep\");\n  84 |     const target = await opened.context.newPage();\n    at .dev/test-audit/final/source/e2e/userscripts.spec.ts:81:132"
+            ],
+            "observations": []
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -267,7 +267,7 @@ test("operates on a selected tab while user pointer input remains available", as
 });
 
 
-test('closing a native Side Panel aborts its owner and prevents a queued page mutation', async () => {
+test('closing a native Side Panel aborts its owner and prevents a queued page mutation', { tag: "@user-journey" }, async () => {
   const calls = [
     { name: 'verify_state', input: { target: { by: 'label', value: 'Never exists' }, state: 'visible', timeoutMs: 300_000 } },
     { name: 'click', input: { target: { by: 'role', value: 'button', name: 'Queued native action' } } },
@@ -291,7 +291,7 @@ test('closing a native Side Panel aborts its owner and prevents a queued page mu
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
-test('a native run stays in its owning window after another window becomes focused', async () => {
+test('a native run stays in its owning window after another window becomes focused', { tag: "@user-journey" }, async () => {
   const provider = await startProvider([
     commandResponse("inspect_page", {}, 'native-first-snapshot'),
     delayedResponse(commandResponse('fill', { target: { by: 'label', value: 'Email' }, value: 'owner@example.com' }, 'native-owner-fill'), 1_000),
@@ -354,7 +354,7 @@ test('a recoverable complete-response failure retries without repeating a comple
   }
 });
 
-test('two native side panels accept only one owner and closing the non-owner preserves the active task', async () => {
+test('two native side panels accept only one owner and closing the non-owner preserves the active task', { tag: "@user-journey" }, async () => {
   let releaseOwner!: () => void;
   const ownerMayFinish = new Promise<void>((resolveOwner) => { releaseOwner = resolveOwner; });
   const provider = await startProvider([

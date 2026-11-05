@@ -1,0 +1,6 @@
+{
+  "fault": "Remove @user-journey from CI grep while leaving tagged tests unchanged",
+  "returncode": 1,
+  "detected": true,
+  "workflowSha256": "5af20286ebddba81b54da095e1511491e81260e01be4810cf1930fc2e37d483f"
+}

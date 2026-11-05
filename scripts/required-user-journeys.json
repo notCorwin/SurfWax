@@ -1,0 +1,58 @@
+[
+  {
+    "file": "completion-review-boundary.spec.ts",
+    "title": "completion review rejection keeps the task open until the observed result is delivered"
+  },
+  {
+    "file": "context.spec.ts",
+    "title": "updates context while a reply is pending and when switching branches"
+  },
+  {
+    "file": "conversations.spec.ts",
+    "title": "keeps paused follow-ups after stop and panel reload until the user resumes them"
+  },
+  {
+    "file": "conversations.spec.ts",
+    "title": "edits user messages, regenerates replies and restores the selected branch"
+  },
+  {
+    "file": "conversations.spec.ts",
+    "title": "keeps a running conversation alive when a switch is blocked"
+  },
+  {
+    "file": "diagnostic-index.spec.ts",
+    "title": "reads a capture beyond the live cache while live WebSocket quotes keep arriving"
+  },
+  {
+    "file": "lifecycle.spec.ts",
+    "title": "closing a native Side Panel aborts its owner and prevents a queued page mutation"
+  },
+  {
+    "file": "lifecycle.spec.ts",
+    "title": "a native run stays in its owning window after another window becomes focused"
+  },
+  {
+    "file": "lifecycle.spec.ts",
+    "title": "two native side panels accept only one owner and closing the non-owner preserves the active task"
+  },
+  {
+    "file": "maintenance.spec.ts",
+    "title": "worker restart closes orphaned calls, releases held input and never replays an operation"
+  },
+  {
+    "file": "page-independent-tools.spec.ts",
+    "title": "runs page-independent tools after closing the bound tab, including opening a restricted page"
+  },
+  {
+    "file": "rendering.spec.ts",
+    "title": "follows the bottom through layout changes while respecting manual scrolling"
+  },
+  {
+    "file": "settings.spec.ts",
+    "title": "restores independent credentials and models when switching Providers"
+  },
+  {
+    "file": "userscripts.spec.ts",
+    "title": "restores saved user scripts after the MV3 worker restarts"
+  }
+]

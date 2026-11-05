@@ -1,0 +1,42 @@
+[
+  {
+    "fault": "Added src/chrome/automation.js in frozen copy",
+    "result": {
+      "args": [
+        "node",
+        "scripts/audit-tests.mjs",
+        "verify-snapshot"
+      ],
+      "code": 1,
+      "stdout": "",
+      "stderr": "file:///Users/nowaywastaken/Repositories/surfwax/scripts/audit-tests.mjs:35\n  if (added.length || missing.length) throw new Error(`Frozen source file set changed; refuse a contaminated experiment: ${JSON.stringify({ added, missing })}`);\n                                            ^\n\nError: Frozen source file set changed; refuse a contaminated experiment: {\"added\":[\"src/chrome/automation.js\"],\"missing\":[]}\n    at verifySnapshot (file:///Users/nowaywastaken/Repositories/surfwax/scripts/audit-tests.mjs:35:45)\n    at async file:///Users/nowaywastaken/Repositories/surfwax/scripts/audit-tests.mjs:271:3\n\nNode.js v22.23.4\n"
+    }
+  },
+  {
+    "control": "Restored frozen source, generated directories and shared dependencies excluded",
+    "result": {
+      "args": [
+        "node",
+        "scripts/audit-tests.mjs",
+        "verify-snapshot"
+      ],
+      "code": 0,
+      "stdout": "Frozen source file set and contents match the manifest.\n",
+      "stderr": ""
+    }
+  },
+  {
+    "fault": "Removed context path user-journey tag from isolated test; independent manifest unchanged",
+    "result": {
+      "args": [
+        "node",
+        "scripts/audit-tests.mjs",
+        "collect",
+        "/Users/nowaywastaken/Repositories/surfwax/.dev/test-audit/review-probe/source"
+      ],
+      "code": 1,
+      "stdout": "",
+      "stderr": "file:///Users/nowaywastaken/Repositories/surfwax/scripts/audit-tests.mjs:103\n  if (untagged.length || unlisted.length) throw new Error(`Required user journey declarations changed: ${JSON.stringify({ untagged, unlisted })}`);\n                                                ^\n\nError: Required user journey declarations changed: {\"untagged\":[{\"file\":\"context.spec.ts\",\"title\":\"updates context while a reply is pending and when switching branches\"}],\"unlisted\":[]}\n    at collect (file:///Users/nowaywastaken/Repositories/surfwax/scripts/audit-tests.mjs:103:49)\n    at async file:///Users/nowaywastaken/Repositories/surfwax/scripts/audit-tests.mjs:268:32\n\nNode.js v22.23.4\n"
+    }
+  }
+]

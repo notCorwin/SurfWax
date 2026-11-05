@@ -1,0 +1,30 @@
+{
+  "archive": "audit/reproduction-evidence.tar.gz",
+  "sha256": "ac37938aa287c6b3414f99813eb618311a93d740ce022043a980f448dc430e55",
+  "bytes": 5112308,
+  "files": 1710,
+  "frozenSources": [
+    {
+      "stage": "baseline",
+      "files": 519,
+      "manifest": ".dev/test-audit/snapshot.json",
+      "manifestSha256": "6921b345d4b87952876f347a1c7d91ece484beb761c12c6fc35aff5d118d1232"
+    },
+    {
+      "stage": "improved",
+      "files": 520,
+      "manifest": ".dev/test-audit/improved/snapshot.json",
+      "manifestSha256": "ceb01161cf3a4a6e7cda23ad4552deb80275db7fb774cf102797b57ceb0b08b3"
+    },
+    {
+      "stage": "final",
+      "files": 520,
+      "manifest": ".dev/test-audit/final/snapshot.json",
+      "manifestSha256": "3a5c7b83c037dc2e053946aee6daec37b553d1a14ebc11c162c29eb96b2e2466"
+    }
+  ],
+  "included": "Original baseline/improved/final frozen source inputs and manifests; original experiment receipts, Playwright/Vitest JSON, stdout logs, Canonical Logs and error context; early and final acceptance JSON; current and baseline collection JSON; assertion inventory; reporter-failure probe records.",
+  "notIncluded": "Browser profiles, shared node_modules, generated Vite outputs, binary trace.zip and external PNG/HTML artifacts remain local only under .dev and are not delivered by this git commit. Embedded JSON attachments are preserved. Previous real-model raw exports are not included.",
+  "restore": "In a fresh checkout only, extract at repository root. Install the dependencies matching each frozen package-lock.json; create each source/node_modules symlink to those installed dependencies. Use the current root audit-tests.mjs with the matching SURFWAX_AUDIT_STAGE (unset for baseline). Do not extract over an existing audit stage.",
+  "provenance": "The three root collection JSON files were rewritten by the independent review on 2026-11-05 and subsequently regenerated after guard fixes; they are current collections, not original immutable records. Baseline collection files and original experiment/acceptance results were not overwritten."
+}

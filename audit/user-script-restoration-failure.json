@@ -1,0 +1,75 @@
+{
+  "state": {
+    "declarations": {
+      "side-agent:user-scripts": [
+        {
+          "id": "restored",
+          "js": [
+            {
+              "code": "document.documentElement.dataset.restoredScript = \"ran\";"
+            }
+          ],
+          "matches": [
+            "http://127.0.0.1:59880/*"
+          ],
+          "world": "USER_SCRIPT"
+        }
+      ]
+    },
+    "native": []
+  },
+  "workers": [
+    {
+      "available": "object",
+      "native": []
+    }
+  ],
+  "events": [
+    {
+      "timestamp": "2026-11-04T03:46:54.654Z",
+      "type": "userscript.unavailable",
+      "valueEncoding": 5,
+      "content": null,
+      "id": 1
+    },
+    {
+      "timestamp": "2026-11-04T03:46:54.687Z",
+      "type": "userscript.unavailable",
+      "valueEncoding": 5,
+      "content": null,
+      "id": 2
+    },
+    {
+      "timestamp": "2026-11-04T03:46:58.566Z",
+      "type": "userscript.snapshot",
+      "valueEncoding": 5,
+      "content": {
+        "count": 0
+      },
+      "id": 3
+    },
+    {
+      "timestamp": "2026-11-04T03:46:59.011Z",
+      "type": "userscript.restored",
+      "valueEncoding": 5,
+      "content": {
+        "count": 1
+      },
+      "id": 4
+    },
+    {
+      "timestamp": "2026-11-04T03:47:00.629Z",
+      "type": "userscript.unavailable",
+      "valueEncoding": 5,
+      "content": null,
+      "id": 5
+    },
+    {
+      "timestamp": "2026-11-04T03:47:00.631Z",
+      "type": "userscript.unavailable",
+      "valueEncoding": 5,
+      "content": null,
+      "id": 6
+    }
+  ]
+}

@@ -267,7 +267,7 @@ test("sends a selected follow-up immediately, closes interrupted tools and keeps
 });
 
 
-test("keeps paused follow-ups after stop and panel reload until the user resumes them", async () => {
+test("keeps paused follow-ups after stop and panel reload until the user resumes them", { tag: "@user-journey" }, async () => {
   const provider = await startProvider([
     delayedResponse(textResponse("CANCELLED_BEFORE_COMPLETION"), 30_000),
     textResponse("RESUMED_DONE"),
@@ -568,7 +568,7 @@ test("resets conversation UI while retaining only each conversation's own draft"
 });
 
 
-test("edits user messages, regenerates replies and restores the selected branch", async () => {
+test("edits user messages, regenerates replies and restores the selected branch", { tag: "@user-journey" }, async () => {
   const originalQuestion = "帮我收藏24小时成交量至少1000万USDT的非TradFi永续合约。成交量越小越先收藏。";
   const slowReply = delayedResponse(textResponse("BRANCH_DONE"), 1_000);
   const provider = await startProvider([
@@ -700,7 +700,7 @@ test("keeps the original reply after a failed regeneration", async () => {
 });
 
 
-test("keeps a running conversation alive when a switch is blocked", async () => {
+test("keeps a running conversation alive when a switch is blocked", { tag: "@user-journey" }, async () => {
   const slowReply = delayedResponse(textResponse("BACKGROUND_DONE"), 1_000);
   const provider = await startProvider([slowReply, textResponse("后台标题")]);
   const opened = await openExtension();

@@ -1,0 +1,122 @@
+{
+  "scope": "Reporter infrastructure fault probes; not product or model task acceptance",
+  "reporterCommand": [
+    "node",
+    "/Users/nowaywastaken/Repositories/surfwax/node_modules/@playwright/test/cli.js",
+    "test",
+    "-c",
+    "/Users/nowaywastaken/Repositories/surfwax/.dev/test-audit/reporter-probe/playwright.config.mjs"
+  ],
+  "reporterExitCode": 1,
+  "checks": [
+    {
+      "scenario": "Only run.json and startup log exist; missing reporters must fail",
+      "code": 1,
+      "diagnosis": {
+        "status": "incomplete",
+        "scope": "before-readable-report",
+        "resultsSha256": null,
+        "logBytes": 65,
+        "stats": null,
+        "missing": [
+          {
+            "path": "/Users/nowaywastaken/Repositories/surfwax/.dev/test-audit/reporter-probe/evidence/results.json",
+            "error": "ENOENT: no such file or directory, open '/Users/nowaywastaken/Repositories/surfwax/.dev/test-audit/reporter-probe/evidence/results.json'"
+          },
+          {
+            "path": "Playwright config.projects[0].outputDir",
+            "error": "No report location; tests may have failed before the reporter started."
+          }
+        ],
+        "note": "A runner receipt alone is insufficient. Early failures may have no trace; inspect runner.log and this diagnosis. Reporter files do not prove task success."
+      }
+    },
+    {
+      "scenario": "Real Playwright assertion failure with JSON and HTML; failure evidence is complete",
+      "code": 0,
+      "diagnosis": {
+        "status": "reporters-complete",
+        "scope": "test-results",
+        "resultsSha256": "860331eef5390b43fa06ba1c850a02dd9ee5bed387b9c4187dd97318c520ada5",
+        "logBytes": 1225,
+        "stats": {
+          "startTime": "2026-11-05T03:09:11.805Z",
+          "duration": 296.0919999999999,
+          "expected": 0,
+          "skipped": 0,
+          "unexpected": 1,
+          "flaky": 0
+        },
+        "missing": [],
+        "note": "A runner receipt alone is insufficient. Early failures may have no trace; inspect runner.log and this diagnosis. Reporter files do not prove task success."
+      }
+    },
+    {
+      "scenario": "JSON and log exist but HTML report is missing",
+      "code": 1,
+      "diagnosis": {
+        "status": "incomplete",
+        "scope": "test-results",
+        "resultsSha256": "860331eef5390b43fa06ba1c850a02dd9ee5bed387b9c4187dd97318c520ada5",
+        "logBytes": 1225,
+        "stats": {
+          "startTime": "2026-11-05T03:09:11.805Z",
+          "duration": 296.0919999999999,
+          "expected": 0,
+          "skipped": 0,
+          "unexpected": 1,
+          "flaky": 0
+        },
+        "missing": [
+          {
+            "path": "/Users/nowaywastaken/Repositories/surfwax/.dev/test-audit/reporter-probe/artifacts/run/html/index.html",
+            "error": "ENOENT: no such file or directory, open '/Users/nowaywastaken/Repositories/surfwax/.dev/test-audit/reporter-probe/artifacts/run/html/index.html'"
+          }
+        ],
+        "note": "A runner receipt alone is insufficient. Early failures may have no trace; inspect runner.log and this diagnosis. Reporter files do not prove task success."
+      }
+    },
+    {
+      "scenario": "Reporter JSON is malformed",
+      "code": 1,
+      "diagnosis": {
+        "status": "incomplete",
+        "scope": "before-readable-report",
+        "resultsSha256": "be302461cda285db3ed2d45fb767b23e08ca8808b35a638009937df22b332d73",
+        "logBytes": 1225,
+        "stats": null,
+        "missing": [
+          {
+            "path": "/Users/nowaywastaken/Repositories/surfwax/.dev/test-audit/reporter-probe/evidence/results.json",
+            "error": "Expected property name or '}' in JSON at position 1 (line 1 column 2)"
+          },
+          {
+            "path": "Playwright config.projects[0].outputDir",
+            "error": "No report location; tests may have failed before the reporter started."
+          }
+        ],
+        "note": "A runner receipt alone is insufficient. Early failures may have no trace; inspect runner.log and this diagnosis. Reporter files do not prove task success."
+      }
+    },
+    {
+      "scenario": "Restored reporter evidence",
+      "code": 0,
+      "diagnosis": {
+        "status": "reporters-complete",
+        "scope": "test-results",
+        "resultsSha256": "860331eef5390b43fa06ba1c850a02dd9ee5bed387b9c4187dd97318c520ada5",
+        "logBytes": 1225,
+        "stats": {
+          "startTime": "2026-11-05T03:09:11.805Z",
+          "duration": 296.0919999999999,
+          "expected": 0,
+          "skipped": 0,
+          "unexpected": 1,
+          "flaky": 0
+        },
+        "missing": [],
+        "note": "A runner receipt alone is insufficient. Early failures may have no trace; inspect runner.log and this diagnosis. Reporter files do not prove task success."
+      }
+    }
+  ]
+}

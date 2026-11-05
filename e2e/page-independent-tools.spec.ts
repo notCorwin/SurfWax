@@ -6,7 +6,7 @@ const lastTool = (request: any) => {
   return JSON.parse(Array.isArray(content) ? content.find((part: any) => part.type === "text").text : content);
 };
 
-test("runs page-independent tools after closing the bound tab, including opening a restricted page", async () => {
+test("runs page-independent tools after closing the bound tab, including opening a restricted page", { tag: "@user-journey" }, async () => {
   const responses: MockResponse[] = [];
   const provider = await startProvider(responses);
   const opened = await openExtension();
@@ -40,5 +40,11 @@ test("runs page-independent tools after closing the bound tab, including opening
     await opened.page.getByTestId("composer-input").fill("Close this tab and continue with independent tools");
     await opened.page.getByTestId("composer-input").press("Enter");
     await expect(opened.page.locator(".markdown-body").last()).toContainText("PAGE_INDEPENDENT_TOOLS_OK", { timeout: 60000 });
+    // A successful tool receipt cannot prove that input reached the new tab.
+    // This fails when nativeClick acknowledges success without sending input.
+    expect(target.isClosed()).toBe(true);
+    const submitted = opened.context.pages().filter(page => page.url() === `${provider.origin}/automation`);
+    expect(submitted).toHaveLength(1);
+    await expect(submitted[0].locator("output")).toHaveText("Welcome");
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

@@ -1,0 +1,14 @@
+[
+  {
+    "fault": "A non-mutated source file differs from the frozen manifest",
+    "code": 1,
+    "detected": true,
+    "error": "file:///Users/nowaywastaken/Repositories/surfwax/scripts/audit-tests.mjs:175\n    if (hash(await readFile(resolve(source, entry.path))) !== entry.sha256) throw new Error(`Frozen source changed (${entry.path}); refuse to run a contaminated experiment.`);\n                                                                                  ^\n\nError: Frozen source changed (src/background.ts); refuse to run a contaminated experiment.\n    at experiment (file:///Users/nowaywastaken/Repositories/surfwax/scripts/audit-tests.mjs:175:83)\n    at async file:///Users/nowaywastaken/Repositories/surfwax/scripts/audit-tests.mjs:220:35\n\nNode.js v24.22.2\n"
+  },
+  {
+    "fault": "Another experiment owns this stage lock",
+    "code": 1,
+    "detected": true,
+    "error": "file:///Users/nowaywastaken/Repositories/surfwax/scripts/audit-tests.mjs:169\n  try { await mkdir(lock); } catch (cause) { throw new Error('This audit stage is locked. Finish its active experiment before starting another; inspect a leftover lock after an interrupted process.', { cause }); }\n                                                   ^\n\nError: This audit stage is locked. Finish its active experiment before starting another; inspect a leftover lock after an interrupted process.\n    at experiment (file:///Users/nowaywastaken/Repositories/surfwax/scripts/audit-tests.mjs:169:52)\n    at async file:///Users/nowaywastaken/Repositories/surfwax/scripts/audit-tests.mjs:220:35 {\n  [cause]: Error: EEXIST: file already exists, mkdir '/Users/nowaywastaken/Repositories/surfwax/.dev/test-audit/guard-probe/experiment.lock'\n      at async mkdir (node:internal/fs/promises:1571:10)\n      at async experiment (file:///Users/nowaywastaken/Repositories/surfwax/scripts/audit-tests.mjs:169:9)\n      at async file:///Users/nowaywastaken/Repositories/surfwax/scripts/audit-tests.mjs:220:35 {\n    errno: -17,\n    code: 'EEXIST',\n    syscall: 'mkdir',\n    path: '/Users/nowaywastaken/Repositories/surfwax/.dev/test-audit/guard-probe/experiment.lock'\n  }\n}\n\nNode.js v24.22.2\n"
+  }
+]
