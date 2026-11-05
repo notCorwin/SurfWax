@@ -233,3 +233,13 @@ CDP `Extensions.loadUnpacked` 重新加载扩展不能当成持久安装后的�
 来源：`.github/workflows/capability-tests.yml`、`scripts/audit-tests.mjs`、`audit/ci-filter-evidence.json`。
 
 失败证据须单独核验日志、结构化报告和 HTML，运行回执本身不足以证明报告存在。审计随提交提供冻结源码及结构化原始证据归档和哈希；未打包的二进制 trace 与外部图像明确标为仅存本机，避免将摘要或路径当成已交付现场。
+
+### 测试清理以独立回归价值为依据
+
+2026-11-05 清理测试时，只有已经找到更强的现存行为断言，或确认旧测试仅证明平台能力、失效构建假设时，才删除测试及其专用辅助代码。SDK 初始化属性检查由遍历同一注册表的真实 SDK 生成契约承接；Cloudflare 假 loader 参数检查由最终请求 URL、凭证及网关请求头断言承接。直接争抢同名 Web Lock 只证明 Chrome 的锁语义，不证明应用写入使用该锁；应用日志原子性、跨写入者互斥与恢复回归继续保留。只验证测试内局部变量自赋值的断言可删除，实际工件切片与跨会话拒绝断言继续保留。
+
+开发构建的 HTML 入口可由 Vite 按请求提供，不能以输出目录中缺少 `userscripts.html` 判定管理页不可用。静态版本、权限集合和入口存在性由构建校验负责；开发 Chrome 测试继续验证管理入口、管理页加载和真实脚本注册/执行。删除重复静态断言不改变产品行为。
+
+快照可见性/证据边界、原生输入与 MV3 生命周期，以及评估器拒绝不完整或失真证据的负控具有独立保护价值，不因用例规模、Mock 数量或同主题浏览器关卡而删除。用途或替代覆盖尚不明确的测试保留；单测与收集通过不能表述为全量 E2E 或真实模型能力已验收。
+
+来源：`src/agent/sdk-generate-contract.test.ts`、`src/agent/cloudflare-model-routing.test.ts`、`src/logging.test.ts`、`src/chrome/executor.test.ts`、`scripts/validate-build.mjs`、`e2e/userscripts.spec.ts`，以及本次测试维护审计。

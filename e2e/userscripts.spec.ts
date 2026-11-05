@@ -1,7 +1,6 @@
 import { chromium, expect, type BrowserContext, type CDPSession, type Locator, type Page } from "@playwright/test";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -13,12 +12,7 @@ test("ships the MV3 Harness and user-script manager", async () => {
   const opened = await openExtension();
   try {
     const manifest = await opened.page.evaluate(() => chrome.runtime.getManifest());
-    expect(manifest).toMatchObject({ name: "Surf Wax", manifest_version: 3, minimum_chrome_version: "138", version: JSON.parse(await readFile(resolve(process.cwd(), "package.json"), "utf8")).version });
-    expect(manifest.permissions).toEqual(["debugger", "downloads", "scripting", "sidePanel", "storage", "tabs", "unlimitedStorage", "userScripts"]);
-    expect(manifest.optional_permissions ?? []).toEqual([]);
-    expect(await opened.page.evaluate(() => chrome.permissions.contains({ permissions: ["downloads"] }))).toBe(true);
-    expect(manifest.permissions).toContain("userScripts");
-    expect(existsSync(resolve(process.env.SURFWAX_EXTENSION_PATH ?? "dist", "userscripts.html"))).toBe(true);
+    expect(manifest).toMatchObject({ name: "Surf Wax", manifest_version: 3, minimum_chrome_version: "138" });
     await expect(opened.page.getByTestId("open-user-scripts")).toBeVisible();
     await expect(opened.page.getByTestId("config-required-state")).toBeVisible();
 

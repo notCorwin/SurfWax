@@ -499,13 +499,13 @@ describe("ChromeExecutor programs", () => {
     finish(); expect(await first).toMatchObject({ ok: true, result: 1 }); expect(await second).toMatchObject({ ok: true, result: 2 }); expect(order).toEqual(["start1", "end1", "start2", "end2"]); h.executor.dispose();
   });
   it("reads historical canonical result slices without an execution context and rejects other conversations", async () => {
-    let foreign = false; let id = 0;
+    let id = 0;
     const h = programHarness(async ({ artifacts }) => artifacts.read(id, { path: ["observation", "snapshot"], offset: 1, limit: 3 }));
     id = (await h.logger.append({ type: "tool.result.data", conversationId: "conversation", output: { observation: { snapshot: "abcdef" } } }))!.id;
-    expect(await h.run()).toMatchObject({ ok: true, result: "bcd" }); foreign = true;
+    expect(await h.run()).toMatchObject({ ok: true, result: "bcd" });
     id = (await h.logger.append({ type: "tool.result.data", conversationId: "other", output: { observation: { snapshot: "abcdef" } } }))!.id;
     expect(await h.run()).toMatchObject({ ok: false, result: { error: { message: expect.stringContaining("unavailable") } } });
-    expect(foreign).toBe(true); expect(h.fake.debuggerApi.getTargets).not.toHaveBeenCalled(); h.executor.dispose();
+    expect(h.fake.debuggerApi.getTargets).not.toHaveBeenCalled(); h.executor.dispose();
   });
   it("stores internal artifacts, saves explicitly, reuses uploads and rejects foreign reads/saves", async () => {
     let foreignId = 0;

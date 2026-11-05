@@ -1,0 +1,59 @@
+测试维护价值审计（2026-11-05）
+
+范围与方法
+基线 fd6b806。枚举所有受版本控制的 src/**/*.test.ts(x)、scripts/tests/*.test.mjs、e2e/**/*.spec.ts，共 290 文件（125 个 src、3 个 Node 脚本、162 个浏览器文件）。检查测试主体/断言、依赖、对应功能、Git 历史和执行入口；优先复用此前审计资料，不重跑真实模型或全部浏览器任务。逐文件判断、声明、依赖、历史、审阅深度及源码哈希见 test-maintenance-inventory-2026-11-05.json。文件保留不等于其中每个断言都不可改进；本次只删除证据充分的局部用例。
+
+分类与清理（按根因）
+1. 一次性环境验证，删除一条完整用例：
+   e2e/alignment.spec.ts / shares the job-state Web Lock between the side panel and service worker。
+   0c4173e 引入于浏览器动作/事件协调工作。测试在 worker 手工调用 navigator.locks.request，再在 panel 探测同一个硬编码锁名；没有调用产品 EventLogger 的加锁代码。产品移除或改错加锁仍会通过，不能承担产品锁正确性的回归保护。删除私有全局 release gate 与完整探针。
+   保留 src/logging.test.ts 的实际日志竞争、唯一终态、恢复锁与缺失 Web Locks 拒绝写入测试，e2e/canonical-session.spec.ts 的跨面板 canonical commit，以及 alignment 的用户并行交互与下一轮配置/分支测试。它们验证产品行为；本次不声称新增了直接浏览器 job 锁竞争保护。
+
+2. 冗余的弱 SDK 冒烟被请求契约替代，删除两条完整用例：
+   src/agent/model-sdks.test.ts / contains all supported SDK identifiers and creates a language model for each。
+   fca5b7e 引入，只检查固定数量 30 和 specificationVersion 属性；54d16cc 后 sdk-generate-contract.test.ts 对同一 MODEL_SDKS 的每项调用真实安装 SDK，验证完整 JSON 生成、工具回传、重试、永久失败与取消。固定数量不是有意义的支持列表契约；Models.dev 名称覆盖另由 scripts/check-sdk-coverage.mjs 与脚本测试维护。删除 createModel import、全 SDK 专用配置 helper 与 ModelSdk import；仍有用途的 Bedrock/Vertex 凭证场景改成局部显式配置。
+   src/agent/model.test.ts / configures the Cloudflare Workers AI endpoint and gateway header。
+   fca5b7e 引入，注入假的 loader，只观察传给 factory 的两个选项。cloudflare-model-routing.test.ts 使用实际 SDK、三类端点和污染的目录 headers 验证真正发出的 URL、gateway ID、token 与 JSON 请求；删除此较弱 Mock 用例及其局部假模型/loader/捕获容器，保留请求级矩阵。
+
+另清理 src/chrome/executor.test.ts / reads historical canonical result slices 中的本地 foreign=false→true→expect(true)标记：断言只验证测试自己的赋值，不受产品行为影响。删除变量/赋值/恒真断言，保留历史slice、外会话工件读取拒绝及不查询Side Panel target的实际断言。
+
+3. 开发服务与发布产物的断言职责混淆，清理局部断言：
+   e2e/userscripts.spec.ts / ships the MV3 Harness and user-script manager。
+   bccccf0 沿用 dist/userscripts.html 磁盘检查；619d93c 改路径，902eeb0 后测试统一 Vite 开发服务，HTML 不要求写到 extensionPath。清理前该断言失败，release 安装与 Web Lock 探针通过。移除失效 existsSync 与孤立 import；不是根据失败率删除测试。
+   发布产物必需 HTML 仍由 scripts/validate-build.mjs 检查；同文件其他用例通过真实 manager 页面保存、注册、worker 重启和新网页执行验证运行行为，清理后定向运行通过。
+   同时移除与 release.spec.ts fresh installation 重复的 version、完整 permissions、optional_permissions、downloads 授权，以及被完整权限数组包含的 userScripts 断言。保留 name、MV3、minimum Chrome、管理入口、初始配置和布局断言。release 安装关卡清理前后通过。
+
+保留依据
+Canonical Log/工件事务、上下文压缩/计数/分支、工具成功失败中断终态、后台 owner、实际 provider 请求、脚本持久恢复、DOM/AX/像素可见性、frame 和原生 Side Panel 生命周期、渲染/自动滚动、评估判分的正负控仍承担独立保护。不能以文件名 proof、mock 多、测试短、代码较旧或层级重叠为删除理由。
+特别是：Markdown 的正常渲染、懒加载与加载失败不是同一个场景；snapshot 的真实像素/遮挡/原生控件/省略号/首行证明不能由合成 CDP 单测替代；fixture 判分负控与扩展工具端到端测试分别保护评分器和操作链路；harness 的 wrong/no-op/unfinished/provider/setup unknown 防止“测试绿灯等于任务成功”。相关夹具、公共 testEventStore、test-setup、runner、开发服务配置和历史审计实验仍有引用，未删除文件或取消 CI 关卡。
+
+待确认并保留
+ e2e/capability-probes.spec.ts 的三条 opt-in 探针：consecutive popup launches、deeply offscreen cross-origin target、newly replaced lower cross-origin frame。
+它们最初用于已知困难路径，与 multitab/manifest/frame replacement 有部分交集，但特殊布局与滚动构造未证明完全等价。本轮未启用 SURFWAX_CAPABILITY_PROBES，不将 opt-in 跳过解释为通过；保留整个文件及共享 run helper/fixtures，后续需在这些原始布局下对比常规关卡再决定。
+
+另有 e2e/real-model-frame-ref.spec.ts 待确认：nextFrameRefs 只识别带 "Work item" 标题的 Iframe owner行，但当前 snapshot-frame-owner 测试拒绝将未绘制 iframe title 作为可见标签。其本地 extractor 例子仍使用旧带标题格式；真实模型专项可能与当前快照失配。本轮未花费真实模型请求验证，不删除独立 frameRef 复制保护，也不把合成例子通过当成实际 owner格式正确。后续应先用实际快照核对 extractor。
+
+第三个待确认文件 e2e/ref-opacity-visibility.spec.ts：首次 inspect 要求取得 top:2000px 的 Far target ref，当前快照仅可见内容的契约可能使它提前结束 scripted actions，然后在 found/far 断言失败。透明祖先、shadow 与跨frame旧ref恢复仍有独立回归价值；保留，后续应先核对实际快照并修正准备流程，而非删掉透明边界或放宽可见性。此处为静态契约疑点，本轮未运行该未修改关卡，未判定为已复现失败。
+
+验证与边界
+- 清理前全量 Vitest：1,796/1,796（本机默认 Node 22.23.4）；随后按项目 Node 24.22.2，对 4 个相关 SDK 文件跑基线：170/170。
+- 清理前 Node 脚本测试：24/24（Node 22）；清理后 Node 24：24/24。
+- 清理前无头本机 Chrome / Vite 开发构建 3 条：2 通过，1 在上述过时 HTML 磁盘断言失败。未将其隐藏为通过。
+- 中间单测复验 1,793/1,794：精简配置漏传必填 baseURL，已补回空字符串；相关四文件复验 168/168，最终全量 Node 24 Vitest 1,794/1,794。
+- 最后删除executor局部恒真标记后，Node 24执行器定向复验149/149；此前全量1794结果未被替代或覆盖。
+- 清理后无头本机 Chrome 两组共12条全通过、retries=0：alignment剩余两条、canonical-session、release安装、userscripts入口及真实worker恢复；自动跟随/手动滚动、等待/分支上下文、provider用量锚定、两种covered click时限、可见/隐藏快照。
+- tsc --noEmit、git diff --check 通过。独立 stage 收集全部458条浏览器测试，CI仍127条，14条必需用户路径无缺失、无静态skip（原459条减少环境探针1条）。--list 不代表全部458条实际运行。
+- 项目六项回归：自动跟随、即时点击、快照可见性、上下文计数有上述浏览器复验；工具schema由全量单测中catalog/protocol/completion契约保护。开发窗口铺满可用屏幕的代码仍为 setWindowBounds normal + screen.avail* 并核对bounds；本轮全程无头，没有声称验证物理桌面窗口。
+- 未运行真实 provider、真实模型任务、全部浏览器/性能套件；Models.dev请求有既有超时/网络告警，未改动业务或加重试。测试通过不代表这些外部能力已验证。未测量能耗；收益限于减少无独立保护的维护点与初始化工作，不夸称显著CI加速。
+- 用户原有 docs/llm-tools/click.md 改动保留，不纳入本次提交；未改 AGENTS.md、README.md。
+
+本机原始回执
+.dev/test-audit/maintenance-2026-11-05/validation/：原始Vitest JSON、浏览器日志和脚本日志（包含中间失败）。同stage collection-all/ci/user-journey.json保存实际收集结果，不覆盖此前审计stage。浏览器trace/截图/Canonical Logs 位于日志中列出的 .dev/artifacts/<run>/。仓库交付的是本报告和逐文件审计清单，未把本机trace或外部环境复现性宣称为随Git交付。
+
+复验入口（当前结果，不会覆盖历史stage）
+npm exec --package=node@24 -- node node_modules/vitest/vitest.mjs run
+npm exec --package=node@24 -- node --test scripts/tests/*.test.mjs
+npm exec --package=node@24 -- node node_modules/typescript/bin/tsc --noEmit
+npm exec --package=node@24 -- node scripts/run-browser-tests.mjs e2e e2e/alignment.spec.ts e2e/userscripts.spec.ts e2e/release.spec.ts e2e/canonical-session.spec.ts --grep 'allows user interaction|applies explicit|ships the MV3|fresh installation|restores saved user scripts|canonical|side panel'
+npm exec --package=node@24 -- node scripts/run-browser-tests.mjs e2e e2e/rendering.spec.ts e2e/context.spec.ts e2e/click-timeout.spec.ts e2e/snapshot-visibility.spec.ts --grep 'follows the bottom|updates context while|anchors context usage|covered click|longer timeout|snapshots reflect rendered'
+SURFWAX_AUDIT_STAGE=maintenance-recheck npm exec --package=node@24 -- node scripts/audit-tests.mjs collect

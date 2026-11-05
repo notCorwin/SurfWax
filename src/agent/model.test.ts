@@ -28,19 +28,6 @@ describe("createRetryingFetch", () => {
       .toContain("custom");
   });
 
-  it("configures the Cloudflare Workers AI endpoint and gateway header", async () => {
-    let options: Record<string, any> = {};
-    const languageModel = { specificationVersion: "v3", provider: "test", modelId: "test" } as any;
-    await createModel({ sdk: "ai-gateway-provider", providerId: "cloudflare-ai-gateway", baseURL: "", model: "author/model",
-      providerSettings: { apiKey: "token", accountId: "account", gatewayId: "gateway" } }, undefined, undefined, {
-      loaders: { "ai-gateway-provider": async () => ({ createOpenAICompatible(value: Record<string, any>) {
-        options = value; return { languageModel: () => languageModel };
-      } }) },
-    });
-    expect(options.baseURL).toBe("https://api.cloudflare.com/client/v4/accounts/account/ai/v1");
-    expect(options.headers).toEqual({ "cf-aig-gateway-id": "gateway" });
-  });
-
   it("adapts Watsonx IAM and sends complete JSON requests to chat", async () => {
     const calls: Request[] = [];
     const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
