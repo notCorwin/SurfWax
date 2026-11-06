@@ -2,6 +2,7 @@ import { quote } from "./automation-utils";
 
 export type SnapshotField = "text" | "state" | "ref" | "actions";
 export type SnapshotStateName = "checked" | "disabled" | "expanded" | "pressed" | "selected" | "required" | "readonly" | "editable" | "masked";
+export type SnapshotBounds = readonly [x: number, y: number, width: number, height: number];
 
 /** Data received from one AX node, before it is rendered into page text. */
 export type SnapshotNode = Readonly<{
@@ -12,6 +13,12 @@ export type SnapshotNode = Readonly<{
   /** Preserve proven preformatted whitespace in already-visible text rows. */
   preserveTextWhitespace?: boolean;
   nameUnknown?: boolean;
+  /** Frozen layout evidence in this document's viewport CSS pixels. */
+  bounds?: SnapshotBounds;
+  /** Visible fragments folded into this row, in structural rather than visual order. */
+  textFragments?: readonly Readonly<{ text: string; bounds?: SnapshotBounds }>[];
+  /** Private coordinate-space identity; never an action target or visible label. */
+  layoutScope?: string;
   value?: string;
   /** A control has a value whose complete painted text was not established. */
   valueUnknown?: boolean;
@@ -21,6 +28,9 @@ export type SnapshotNode = Readonly<{
   ref?: string;
   /** Run-bound handle for the child document, shared with its subtree marker. */
   childFrameRef?: string;
+  /** The document marker's own frame, distinct from an iframe owner's child. */
+  documentFrameRef?: string;
+  ownerUnrepresented?: true;
   actions?: readonly string[];
   state?: Readonly<Partial<Record<SnapshotStateName, unknown>>>;
 }>;
@@ -50,9 +60,21 @@ export function renderSnapshotNode(
   const fields = new Set(options.fields ?? allFields);
   const name = node.name ?? "";
   const value = node.value ?? "";
-  let line = `${"  ".repeat(node.depth)}- ${node.role}${fields.has("text") && name ? ` ${node.preserveTextWhitespace ? JSON.stringify(name) : quote(name)}` : ""}`;
+  const box = (bounds: SnapshotBounds) => bounds.map((value) => Math.round(value * 10) / 10).join(",");
+  const fragments = node.textFragments;
+  const sameBounds = fragments?.length === 1 && fragments[0]!.bounds && node.bounds
+    && fragments[0]!.bounds!.every((value, index) => value === node.bounds![index]);
+  const visibleName = fragments?.length === 1 ? `${JSON.stringify(fragments[0]!.text)}${sameBounds ? "" : ` [text-box=${fragments[0]!.bounds ? box(fragments[0]!.bounds!) : "unknown"}]`}`
+    : fragments?.length ? `[text-parts=${fragments.map((fragment) => `${JSON.stringify(fragment.text)} @(${fragment.bounds ? box(fragment.bounds) : "unknown"})`).join("; ")}]`
+    : name ? node.preserveTextWhitespace ? JSON.stringify(name) : quote(name) : "";
+  let line = `${"  ".repeat(node.depth)}- ${node.role}${fields.has("text") && visibleName ? ` ${visibleName}` : ""}`;
   if (fields.has("text") && node.nameUnknown) line += " [name=unknown]";
-  if (node.childFrameRef) line += ` [frameRef=${node.childFrameRef}]`;
+  if (fields.has("text") && node.role === "RootWebArea" && node.layoutScope) line += " [coordinates=frame-viewport]";
+  if (fields.has("text") && node.bounds) {
+    line += ` [box=${box(node.bounds)}]`;
+  }
+  if (node.childFrameRef || node.documentFrameRef) line += ` [frameRef=${node.childFrameRef ?? node.documentFrameRef}]`;
+  if (node.ownerUnrepresented) line += " [owner=unrepresented]";
   if (fields.has("ref") && node.ref && options.inlineRef !== false) line += ` [ref=${node.ref}]`;
   if (fields.has("actions") && node.actions?.length) {
     const actions = options.actionNames === "program" ? [...new Set(node.actions.flatMap((action) => action === "check" ? ["check_element", "uncheck_element"] : [toolActions[action] ?? action]))] : node.actions;

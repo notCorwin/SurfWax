@@ -7,6 +7,8 @@ import { diffSnapshot, paginateSnapshot, type SnapshotItem, type SnapshotPositio
 import { snapshotLookahead } from "./snapshot-lookahead";
 import { selectSnapshotWirePage, SnapshotWireError, SNAPSHOT_DELIVERY_COMMIT, type SnapshotDeliveryLease, type SnapshotWirePage } from "./snapshot-wire";
 import { renderSnapshotNode, type SnapshotNode, type SnapshotStateName } from "./snapshot-render";
+import { snapshotBounds } from "./snapshot-layout";
+import { compactSnapshot } from "./snapshot-presentation";
 import { stitchSnapshotFrames, type SnapshotLine } from "./snapshot-frame-tree";
 import { snapshotDomSupplement, type SnapshotDomEvidence } from "./snapshot-dom";
 import { createSnapshotDomIndex } from "./snapshot-dom-index";
@@ -1117,7 +1119,7 @@ export class AutomationRuntime {
         position = { index: Number(match[2]), charOffset: Number(match[3]) };
         this.inspectionSnapshots.delete(saved.id); this.inspectionSnapshots.set(saved.id, saved);
       } else {
-        const fields = options.fields ?? ["text", "state", "ref"];
+        const fields = options.fields ?? ["text", "state"];
         const scopeKey = JSON.stringify([region ?? null, fields, options.depth ?? null]);
         const automatic = options.incremental && options.offset === undefined
           ? [...this.inspectionSnapshots.values()].reverse().find((snapshot) => snapshot.session === session
@@ -1140,7 +1142,7 @@ export class AutomationRuntime {
         const lines: SnapshotLine[] = captured.lines.filter(() => !captured.readOnly || fields.includes("text")).filter(({ node, line }) => options.depth === undefined || (node?.depth ?? (line.match(/^ */)?.[0].length ?? 0) / 2) <= options.depth)
           .map(({ id, line, node }) => {
             if (!node) return { id, line };
-            const owned = node.ref ? `t${tabId}s${session.token}d${generation}${node.ref}` : undefined;
+            const owned = fields.includes("ref") && node.ref ? `t${tabId}s${session.token}d${generation}${node.ref}` : undefined;
             const refRecord = node.ref ? session.refs.get(node.ref) : undefined;
             if (owned && refRecord) session.refs.set(owned, refRecord);
             const rendered = renderSnapshotNode({ ...node, ...(owned ? { ref: owned } : {}) }, { fields, actionNames: "program", inlineRef: false });
@@ -4366,6 +4368,7 @@ export class AutomationRuntime {
         const scopedRoot = Boolean(regionNode && regionFrameId === frameId && regionDebuggee && sameDebuggee(regionDebuggee, debuggee));
         const doc = snapshot.documents?.find((document: any) => snapshot.strings?.[document.frameId] === frameId);
         if (!doc) throw automationError("snapshot-unavailable", { reason: "missing-dom-frame", frameId });
+        const bounds = snapshotBounds(doc);
         const byBackend = new Map<number, any[]>();
         for (const node of nodes) if (axValue(node.role) === "StaticText" && Number.isSafeInteger(node.backendDOMNodeId)) {
           const group = byBackend.get(node.backendDOMNodeId) ?? []; group.push(node); byBackend.set(node.backendDOMNodeId, group);
@@ -4603,7 +4606,10 @@ export class AutomationRuntime {
           snapshotScope = (session.nextSnapshotScope++).toString(36);
           session.snapshotScopes.set(scopeKey, snapshotScope);
         }
-        if (frameLabel) lines.push({ id: `${snapshotScope}.m`, line: `${"  ".repeat(frameDepth)}- frame-document [frameRef=${capturedFrameRefs.get(frameLabel)}]` });
+        if (frameLabel) {
+          const node: SnapshotNode = { id: `${snapshotScope}.m`, depth: frameDepth, role: "frame-document", documentFrameRef: capturedFrameRefs.get(frameLabel) };
+          lines.push({ ...renderSnapshotNode(node), node });
+        }
         // The region may be omitted entirely by AX (for example aria-hidden).
         // Its DOM frame/identity is independently resolved and validated below.
         const root = scopedRoot ? nodes.find((node) => node.backendDOMNodeId === regionNode!.node.backendNodeId) : nodes.find((node) => !node.parentId) ?? nodes[0];
@@ -4756,6 +4762,7 @@ export class AutomationRuntime {
         }
         const start = lines.length;
         const lineBackends = new Map<string, number>();
+        const pseudoTextRows = new Map<number, number>();
         const axLines = new Map<string, string>();
         const covered = new Set<number>();
         const traversalRoot = scopedRoot ? treeRoot : root;
@@ -4785,15 +4792,11 @@ export class AutomationRuntime {
             || editableControl && !["textbox", "searchbox", "spinbutton"].includes(role) || valueUnknown ? "" : rawValue;
           const parent = byId.get(node.parentId);
           const parentRole = parent && !parent.ignored && !hidden(parent) && inScope(parent) ? axValue(parent.role) : "";
-          // A single static text leaf that exactly repeats its named semantic
-          // parent carries no additional content or action. Do not collapse
-          // siblings, independently named controls, or a selected region root.
+          // Values already represented by their native editing host can omit
+          // plain shadow duplicates. Named-label fragments keep their geometry
+          // until the presentation projection folds that evidence into the row.
           const singleTextLeaf = node !== root && role === "StaticText" && parent && parent.childIds?.length === 1
             && (node.childIds ?? []).every((id: string) => axValue(byId.get(id)?.role) === "InlineTextBox");
-          const duplicateNamedText = singleTextLeaf
-            && ["button", "link", "heading", "checkbox", "radio", "tab", "option", "menuitem"].includes(parentRole)
-            && !node.properties?.some((property: any) => property.name === "focusable" && property.value?.value)
-            && Boolean(name) && name === visibleName(parent, axValue(parent.name));
           // An editable control's value is already emitted on its row. Only
           // suppress an entirely plain, unique leaf; retain masked values,
           // independent semantics and a leaf selected as the region root.
@@ -4807,7 +4810,7 @@ export class AutomationRuntime {
             && nativeIdentities.get(owner.backendDOMNodeId)?.includes(node.backendDOMNodeId) && !axValue(node.value)
             && (Boolean(name) && name === axValue(owner.value) || namesUnknown.has(node.nodeId));
           const duplicateTextareaText = provenTextareaChildren.has(node.nodeId) && node !== traversalRoot && owner && !hidden(owner) && inScope(owner);
-          const duplicateText = duplicateNamedText || duplicateValueText || duplicateNativeValueText || duplicateTextareaText;
+          const duplicateText = duplicateValueText || duplicateNativeValueText || duplicateTextareaText;
           const emittedRole = role && role !== "none" && role !== "InlineTextBox" && (role !== "generic" || editableControl || editableEvidence?.readonly && properties.focusable === true);
           if (emittedRole && typeof node.backendDOMNodeId === "number") covered.add(node.backendDOMNodeId);
           else if (emittedRole && pseudoTextOwner(node) !== undefined) covered.add(pseudoTextOwner(node)!);
@@ -4828,20 +4831,24 @@ export class AutomationRuntime {
               : ["combobox", "listbox"].includes(role) ? ["click", "select"] : ["click", "doubleClick", "hover"];
             // AX node IDs identify semantic rows; multiple AX rows can refer
             // to the same backend DOM node and therefore share an action ref.
-            const snapshotId = `${snapshotScope}.a${node.nodeId}`;
+            const pseudoBackend = pseudoTextOwner(node);
+            const pseudoIndex = pseudoBackend === undefined ? undefined : pseudoTextRows.get(pseudoBackend) ?? 0;
+            if (pseudoBackend !== undefined) pseudoTextRows.set(pseudoBackend, pseudoIndex! + 1);
+            const snapshotId = pseudoBackend === undefined ? `${snapshotScope}.a${node.nodeId}` : `${snapshotScope}.p${pseudoBackend}.${pseudoIndex}`;
+            const layoutBackend = node.backendDOMNodeId ?? pseudoBackend;
             const childFrameId = typeof node.backendDOMNodeId === "number"
               ? childFramesByOwner.get(JSON.stringify([debuggee.sessionId ?? "", node.backendDOMNodeId])) : undefined;
             const childFrameRef = childFrameId ? capturedFrameRefs.get(childFrameId) : undefined;
             const ownPlaceholder = placeholder(node);
             const preserveTextWhitespace = role === "StaticText" && typeof node.backendDOMNodeId === "number" && Boolean(name)
               && !textProjections.has(node.backendDOMNodeId) && preformatted.get(node.backendDOMNodeId)?.text === name;
-            const snapshotNode: SnapshotNode = { id: snapshotId, depth, role, name, value, ...(valueUnknown ? { valueUnknown: true } : {}), ...(preserveTextWhitespace ? { preserveTextWhitespace: true } : {}), ...(namesUnknown.has(node.nodeId) ? { nameUnknown: true } : {}),
+            const snapshotNode: SnapshotNode = { id: snapshotId, depth, role, name, value, layoutScope: frameId, ...(bounds.has(layoutBackend) ? { bounds: bounds.get(layoutBackend)! } : {}), ...(valueUnknown ? { valueUnknown: true } : {}), ...(preserveTextWhitespace ? { preserveTextWhitespace: true } : {}), ...(namesUnknown.has(node.nodeId) ? { nameUnknown: true } : {}),
               ...(ownPlaceholder && ownPlaceholder.status !== "hidden" ? { placeholder: ownPlaceholder } : {}),
               ...(ref ? { ref, actions } : {}), ...(childFrameRef ? { childFrameRef } : {}), state };
             const rendered = renderSnapshotNode(snapshotNode);
             lines.push({ id: snapshotId, line: rendered.line, ...(rendered.ref ? { ref: rendered.ref } : {}), node: snapshotNode });
             axLines.set(node.nodeId, snapshotId);
-            if (typeof node.backendDOMNodeId === "number") lineBackends.set(snapshotId, node.backendDOMNodeId);
+            if (typeof layoutBackend === "number") lineBackends.set(snapshotId, layoutBackend);
             childDepth += 1;
           }
           const children: string[] = node.childIds ?? [];
@@ -4901,12 +4908,14 @@ export class AutomationRuntime {
           if (backend !== undefined && line.node && !depths.has(backend)) depths.set(backend, line.node.depth);
         }
         const controls = new Set(extra.filter((item) => item.kind === "control" && item.tag !== "iframe" && item.tag !== "frame").map((item) => item.backendNodeId));
-        const nearestControl = domIndex.nearestMarkedAncestors(controls);
+        // Represented AX semantics are label boundaries too. Otherwise a
+        // delegated click handler on a page wrapper copies every child label.
+        const nearestControl = domIndex.nearestMarkedAncestors(new Set([...controls, ...covered]));
         const controlParts = new Map<number, SnapshotDomEvidence[]>();
         for (const item of allEvidence) if (item.kind === "text") {
           const ancestor = nearestControl[item.nodeIndex]!;
           const control = ancestor < 0 ? undefined : domIndex.backendAt(ancestor);
-          if (control !== undefined) { const parts = controlParts.get(control) ?? []; parts.push(item); controlParts.set(control, parts); }
+          if (control !== undefined && controls.has(control)) { const parts = controlParts.get(control) ?? []; parts.push(item); controlParts.set(control, parts); }
         }
         const controlText = new Map([...controlParts].map(([id, parts]) => [id, parts.map((part) => part.text ?? "").join("").replace(/\s+/g, " ").trim()]));
         // The snapshot provides painted text, while the live label object
@@ -4927,7 +4936,6 @@ export class AutomationRuntime {
         }
         const visibleLabel = (ids: readonly number[]): string => ids
           .map((id) => labels.get(id)!.parts.join("").replace(/\s+/g, " ").trim()).filter(Boolean).join(" ");
-        const omitText = new Set<number>();
         const marked = new Set(depths.keys());
         for (const item of extra) if (item.kind === "control" || item.kind === "text" && (!!item.text?.trim() || unknownText.has(item.backendNodeId))) marked.add(item.backendNodeId);
         const nearestEmitted = domIndex.nearestMarkedAncestors(marked);
@@ -5118,12 +5126,6 @@ export class AutomationRuntime {
             const referencedLabel = references.map(ariaText).filter(Boolean).join(" ");
             return controlText.get(item.backendNodeId) || referencedLabel || visibleLabel(matchedLabels) || "";
           };
-          for (const item of controlItems) {
-            const parts = controlParts.get(item.backendNodeId);
-            if (parts?.length !== 1) continue;
-            const part = parts[0]!, formatted = preformatted.get(part.backendNodeId);
-            if (part.text && !formatted && semanticName(part.text) === controlName(item)) omitText.add(part.backendNodeId);
-          }
           // Native indeterminate is a live property absent from DOMSnapshot.
           // Compare it and checked against a second live sample before release;
           // attribute states are separately checked by both DOM captures.
@@ -5145,7 +5147,7 @@ export class AutomationRuntime {
             });
           }
           for (const item of extra) {
-            if (item.kind === "text" && (omitText.has(item.backendNodeId) || !item.text?.trim() && !unknownText.has(item.backendNodeId))) continue;
+            if (item.kind === "text" && !item.text?.trim() && !unknownText.has(item.backendNodeId)) continue;
             const parentIndex = nearestEmitted[item.nodeIndex]!;
             const parent = parentIndex < 0 ? undefined : domIndex.backendAt(parentIndex);
             const depth = parent === undefined || !depths.has(parent) ? (frameLabel ? frameDepth + 1 : 0) : depths.get(parent)! + 1;
@@ -5226,6 +5228,7 @@ export class AutomationRuntime {
                 ...(!valueUnknown && item.valueVisible && selectLabel ? { selectedLabels: [selectLabel] } : {}),
                 ...(ref ? { ref, actions } : {}), ...(childFrameRef ? { childFrameRef } : {}), state };
             }
+            node = { ...node, layoutScope: frameId, ...(bounds.has(item.backendNodeId) ? { bounds: bounds.get(item.backendNodeId)! } : {}) };
             depths.set(item.backendNodeId, depth);
             const rendered = renderSnapshotNode(node);
             additions.push({ position: positions.get(item.backendNodeId) ?? Number.MAX_SAFE_INTEGER, line: { id, line: rendered.line, ...(rendered.ref ? { ref: rendered.ref } : {}), node } });
@@ -5285,7 +5288,7 @@ export class AutomationRuntime {
         if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "dom-aria-label-unstable" });
         retriedUnstableCapture = true; continue;
       }
-      for (const line of stitchSnapshotFrames(frameSnapshots, capturedFrameRefs.get(regionFrameId ?? session.rootFrameId!))) lines.push(line);
+      for (const line of compactSnapshot(stitchSnapshotFrames(frameSnapshots, capturedFrameRefs.get(regionFrameId ?? session.rootFrameId!)))) lines.push(line);
       const ids = new Set<string>();
       for (const { id } of lines) {
         if (ids.has(id)) throw automationError("snapshot-unavailable", { reason: "duplicate-semantic-id", id });

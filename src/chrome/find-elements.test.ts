@@ -100,11 +100,11 @@ describe("findElements", () => {
 
   it("does not retarget an old AX ref after the node's visible name changes", async () => {
     const h = harness(); const page = await h.runtime.createPage(3);
-    const before: any = await page.inspect();
+    const before: any = await page.inspect({ fields: ["text", "state", "ref"] });
     const old = before.items.find((item: any) => item.line.includes('button "First"')).ref;
     h.nodes.get(1)!.name = "Replacement";
     await expect(page.ref(old).textContent()).rejects.toMatchObject({ code: "stale-ref", detail: { reason: "visible-identity-changed" } });
-    const after: any = await page.inspect();
+    const after: any = await page.inspect({ fields: ["text", "state", "ref"] });
     const current = after.items.find((item: any) => item.line.includes('button "Replacement"')).ref;
     expect(current).not.toBe(old);
     await expect(page.ref(old).textContent()).rejects.toMatchObject({ code: "stale-ref" });
@@ -156,10 +156,10 @@ describe("findElements", () => {
 
   it("does not emit an expired ref from a frozen inspection continuation", async () => {
     const h = harness(); const page = await h.runtime.createPage(3);
-    const first: any = await page.inspect({ limit: 1 });
+    const first: any = await page.inspect({ fields: ["text", "state", "ref"], limit: 1 });
     expect(first.nextCursor).toEqual(expect.any(String));
     h.nodes.get(1)!.name = "Replacement";
-    await page.inspect();
+    await page.inspect({ fields: ["text", "state", "ref"] });
     await expect(page.inspect({ cursor: first.nextCursor, limit: 1 })).rejects.toMatchObject({ code: "stale-observation", detail: { reason: "reference-identity-changed" } });
     await h.runtime.abortSessions();
   });
@@ -193,7 +193,7 @@ describe("findElements", () => {
   it("reuses inspect references for the same backend node and truncates long metadata", async () => {
     const h = harness(); const page = await h.runtime.createPage(3);
     h.nodes.get(1)!.name = "x".repeat(500);
-    const inspection = await page.inspect();
+    const inspection = await page.inspect({ fields: ["text", "state", "ref"] });
     const inspectedRef = (inspection.items as any[]).find((item) => item.ref)?.ref;
     const result: any = await h.runtime.findElements(3, page.getByRole("button"), { limit: 1 });
     expect(result.elements[0]).toMatchObject({ name: "x".repeat(160), nameTruncated: true, text: "x".repeat(120), textTruncated: true, ref: inspectedRef });

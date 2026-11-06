@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { stitchSnapshotFrames, type SnapshotLine } from "./snapshot-frame-tree";
 import { renderSnapshotNode, type SnapshotNode } from "./snapshot-render";
+import { compactSnapshot } from "./snapshot-presentation";
 
 function row(id: string, depth: number, role: string, options: Partial<SnapshotNode> = {}): SnapshotLine {
   const node: SnapshotNode = { id, depth, role, ...options };
   return { ...renderSnapshotNode(node), node };
 }
 function marker(id: string, frameRef: string): SnapshotLine {
-  return { id, line: `- frame-document [frameRef=${frameRef}]` };
+  return row(id, 0, "frame-document", { documentFrameRef: frameRef });
 }
 
 describe("snapshot frame tree", () => {
@@ -46,5 +47,19 @@ describe("snapshot frame tree", () => {
       "- frame-document [frameRef=scoped]", "  - main",
       "- frame-document [frameRef=unrepresented] [owner=unrepresented]", "  - button",
     ]);
+  });
+
+  it("reparents document markers and child content with a compacted iframe ancestor", () => {
+    const stitched = stitchSnapshotFrames([
+      { frameRef: "root", lines: [row("root", 0, "RootWebArea"), row("wrapper", 1, "generic"),
+        row("owner", 2, "Iframe", { childFrameRef: "child" })] },
+      { frameRef: "child", lines: [marker("document", "child"), row("child-root", 1, "RootWebArea"),
+        row("button", 2, "button", { name: "Open" })] },
+    ], "root");
+    const compacted = compactSnapshot(stitched);
+    expect(compacted.map((line) => [line.id, line.node?.depth])).toEqual([
+      ["root", 0], ["owner", 1], ["document", 2], ["child-root", 3], ["button", 4],
+    ]);
+    expect(compacted.find(({ id }) => id === "document")?.line).toBe("    - frame-document [frameRef=child]");
   });
 });

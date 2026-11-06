@@ -1,0 +1,250 @@
+import { expect, type Page } from "@playwright/test";
+import { test, openExtension, dispose } from "./fixtures";
+
+type Snapshot = { observationId: string; mode: string; nextCursor?: string; items: Array<{ id: string; line: string; ref?: string; change?: string }> };
+const fixtureUrl = "http://snapshot-presentation.test/";
+const image = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect width='40' height='40' fill='%23555555'/%3E%3C/svg%3E";
+
+test.use({ screenshot: "off", trace: "off" });
+
+async function attach(panel: Page): Promise<void> {
+  const origin = process.env.SURFWAX_DEV_SERVER_URL;
+  if (!origin) throw new Error("Snapshot regression requires the development extension server");
+  await panel.waitForLoadState("networkidle");
+  await panel.evaluate(async ({ url, origin }) => {
+    const moduleUrl = `${origin}/src/chrome/automation.ts`;
+    const { AutomationRuntime } = await import(moduleUrl);
+    const tabId = (await chrome.tabs.query({ url }))[0]?.id;
+    if (tabId === undefined) throw new Error("Snapshot fixture tab is missing");
+    await chrome.debugger.attach({ tabId }, "1.3");
+    const state: any = { tabId, screenshots: 0 };
+    const runtime = new AutomationRuntime({
+      chromeApi: chrome,
+      command: (source: chrome.debugger.Debuggee, method: string, params: any) => {
+        if (method === "Page.captureScreenshot") state.screenshots += 1;
+        return chrome.debugger.sendCommand(source, method, params);
+      },
+      pressChord: async () => { throw new Error("Snapshot inspection cannot send input"); },
+      detach: (source: chrome.debugger.Debuggee) => chrome.debugger.detach(source),
+    });
+    state.runtime = runtime;
+    state.onEvent = (source: chrome.debugger.Debuggee, method: string, params: any) => runtime.handleEvent(source, method, params);
+    chrome.debugger.onEvent.addListener(state.onEvent);
+    runtime.setContext({ signal: AbortSignal.timeout(45_000) });
+    (globalThis as any).__presentationStudy = state;
+  }, { url: fixtureUrl, origin });
+}
+
+async function inspect(panel: Page, options: Record<string, unknown> = {}): Promise<Snapshot> {
+  return panel.evaluate(async (options) => {
+    const state = (globalThis as any).__presentationStudy;
+    return state.runtime.inspect(state.tabId, { budget: 100_000, ...options });
+  }, options);
+}
+
+async function detach(panel: Page): Promise<void> {
+  await panel.evaluate(async () => {
+    const state = (globalThis as any).__presentationStudy;
+    if (!state) return;
+    await state.runtime.abortSessions();
+    chrome.debugger.onEvent.removeListener(state.onEvent);
+    delete (globalThis as any).__presentationStudy;
+  });
+}
+
+function box(line: string): number[] {
+  const match = /\[box=([^\]]+)\]/.exec(line);
+  if (!match) throw new Error(`Snapshot row has no measured box: ${line}`);
+  return match[1]!.split(",").map(Number);
+}
+
+test("compact observations distinguish same-name targets by measured layout and update on visual reordering", async () => {
+  const opened = await openExtension();
+  try {
+    await opened.context.route(fixtureUrl, (route) => route.fulfill({ contentType: "text/html", body: `<!doctype html>
+      <style>body{margin:0;font:16px sans-serif}main{padding:20px}.badges{display:flex;gap:20px}.badges a{display:flex;align-items:center;flex-direction:column;width:60px}.badges a:first-child{order:2}.badges a:nth-child(2){order:1}.badges.swapped a:first-child{order:1}.badges.swapped a:nth-child(2){order:2}</style>
+      <body onclick="void 0"><main><h1>Workspace</h1><h2>Pinned</h2><ul>
+        <li><a href="/repo/SurfWax"><span>SurfWax</span></a></li>
+        <li><a href="/repo/Codex-Credit-Bar">Codex-Credit-Bar</a><p>Swift <a href="/repo/Codex-Credit-Bar/stargazers">1</a></p></li>
+      </ul><h2>Achievements</h2><div class="badges" id="badges">
+        <a href="/right"><img width="40" height="40" alt="PRIVATE_ALT_RIGHT" src="${image}"><span>x2</span></a>
+        <a href="/left"><img width="40" height="40" alt="PRIVATE_ALT_LEFT" src="${image}"><span>x2</span></a>
+        <a href="/hidden" style="display:none">x2</a>
+      </div><img width="24" height="24" alt="PRIVATE_ALT_STANDALONE" src="${image}">
+      <div onclick="void 0">Open details <button>Dismiss</button></div></main>` }));
+    const target = await opened.context.newPage();
+    await target.goto(fixtureUrl);
+    await target.evaluate(() => document.fonts.ready);
+    await attach(opened.page);
+    const first = await inspect(opened.page);
+    const lines = first.items.map((item) => item.line);
+    const text = lines.join("\n");
+    expect(first.items.every((item) => item.ref === undefined)).toBe(true);
+    expect(text).not.toContain("[ref=");
+    expect(text).not.toContain("PRIVATE_ALT_");
+    expect(text.match(/SurfWax/g)).toHaveLength(1);
+    expect(text.match(/Codex-Credit-Bar/g)).toHaveLength(1);
+    expect(lines.filter((line) => /- link "x2"/.test(line))).toHaveLength(2);
+    expect(lines.filter((line) => /- StaticText "x2"/.test(line))).toHaveLength(0);
+    expect(lines.filter((line) => /- image/.test(line))).toHaveLength(3);
+    expect(text).toContain("Open details");
+    expect(lines.filter((line) => /- button "Dismiss"/.test(line))).toHaveLength(1);
+
+    const expected = await target.locator(".badges a").evaluateAll((anchors) => anchors.filter((anchor) => {
+      const r = anchor.getBoundingClientRect(); return r.width > 0 && r.height > 0;
+    }).map((anchor) => { const r = anchor.getBoundingClientRect(); return { x: r.x, width: r.width }; }));
+    expect(expected[0]!.x).toBeGreaterThan(expected[1]!.x);
+    const pair = first.items.filter((item) => /- link "x2"/.test(item.line));
+    const left = Math.min(...expected.map((item) => item.x));
+    expect(text).not.toContain("[position=");
+    for (const item of pair) {
+      expect(expected.some((actual) => Math.abs(actual.x - box(item.line)[0]!) < 0.2)).toBe(true);
+    }
+    expect(pair.filter((item) => box(item.line)[0] === left)).toHaveLength(1);
+    const rawSnapshot = await opened.page.evaluate(async () => {
+      const state = (globalThis as any).__presentationStudy;
+      return state.runtime.snapshot(state.tabId);
+    });
+    expect(rawSnapshot.snapshot).not.toContain("[ref=");
+
+    const sliced = await inspect(opened.page, { limit: 1 });
+    expect(sliced.nextCursor).toEqual(expect.any(String));
+    await target.locator("#badges").evaluate((element) => element.classList.add("swapped"));
+    await expect(inspect(opened.page, { cursor: sliced.nextCursor })).rejects.toThrow("stale-observation");
+    const delta = await inspect(opened.page, { since: first.observationId });
+    expect(delta.mode).toBe("delta");
+    for (const before of pair) {
+      const after = delta.items.find((item) => item.id === before.id);
+      expect(after?.change).toBe("updated");
+      const other = pair.find((item) => item.id !== before.id)!;
+      expect(box(after!.line)[0]).toBe(box(other.line)[0]);
+    }
+    expect(await opened.page.evaluate(() => (globalThis as any).__presentationStudy.screenshots)).toBe(0);
+  } finally {
+    await detach(opened.page).catch(() => undefined);
+    await dispose(opened.context, opened.userDataDirectory);
+  }
+});
+
+test("geometry stays in the owning frame viewport after root scrolling", async () => {
+  const opened = await openExtension();
+  try {
+    const child = `<style>body{margin:0;height:1200px}a{position:absolute;left:180px;top:80px}img{position:absolute;left:180px;top:120px}</style><a href='/child'>Repeat</a><img width='23' height='23' alt='PRIVATE_CHILD_ALT' src="${image}">`;
+    await opened.context.route(fixtureUrl, (route) => route.fulfill({ contentType: "text/html", body: `<!doctype html>
+      <style>body{margin:0;height:1800px}#root-link{position:absolute;left:20px;top:150px}#root-image{position:absolute;left:20px;top:190px}iframe{position:absolute;left:200px;top:300px;width:400px;height:250px;border:0}</style>
+      <a id="root-link" href="/root">Repeat</a><img id="root-image" width="19" height="19" alt="PRIVATE_ROOT_ALT" src="${image}"><iframe title="Embedded" srcdoc="${child.replaceAll('"', '&quot;')}"></iframe>` }));
+    const target = await opened.context.newPage();
+    await target.goto(fixtureUrl);
+    await target.evaluate(() => scrollTo(0, 100));
+    await expect(target.frameLocator("iframe").locator("img")).toBeVisible();
+    await attach(opened.page);
+    const observation = await inspect(opened.page);
+    const repeats = observation.items.filter((item) => /- link "Repeat"/.test(item.line));
+    expect(repeats).toHaveLength(2);
+    const images = observation.items.filter((item) => /- image/.test(item.line)).map((item) => box(item.line));
+    const root = images.find((rect) => rect[2] === 19);
+    const embedded = images.find((rect) => rect[2] === 23);
+    expect(root).toEqual([20, 90, 19, 19]);
+    expect(embedded).toEqual([180, 120, 23, 23]);
+    expect(JSON.stringify(observation)).not.toContain("PRIVATE_");
+    expect(await opened.page.evaluate(() => (globalThis as any).__presentationStudy.screenshots)).toBe(0);
+  } finally {
+    await detach(opened.page).catch(() => undefined);
+    await dispose(opened.context, opened.userDataDirectory);
+  }
+});
+
+test("text-fragment reordering and actionable painted overflow survive presentation", async () => {
+  const opened = await openExtension();
+  try {
+    await opened.context.route(fixtureUrl, (route) => route.fulfill({ contentType: "text/html", body: `<!doctype html>
+      <style>body{margin:0}button{position:absolute;left:20px;top:20px;display:flex;gap:30px;width:300px;padding:8px}button.reordered span:first-child{order:2}button.reordered span:last-child{order:1}#with-image{top:100px}#with-image.shifted span,#dom-only.shifted span{transform:translateX(80px)}#dom-only{top:400px}#boundary{top:500px;display:block;text-align:left}#pseudo{position:absolute;left:20px;top:300px}#pseudo::before{content:'Generated';display:inline-block}#pseudo.shifted::before{transform:translateX(70px)}#overflow{position:absolute;left:400px;top:200px;width:0;height:0;overflow:visible}img{display:block}</style>
+      <button id="label"><span>One</span><span>Two</span></button>
+      <button id="with-image"><img width="40" height="40" alt="PRIVATE_INLINE_ALT" src="${image}"><span>Move</span></button>
+      <div id="pseudo"></div>
+      <div aria-hidden="true"><button id="dom-only"><img width="40" height="40" alt="PRIVATE_DOM_ALT" src="${image}"><span>DOMMove</span></button></div>
+      <button id="boundary"><span>Save </span><span>changes</span></button>
+      <div id="overflow" onclick="void 0"><img width="40" height="40" alt="PRIVATE_OVERFLOW_ALT" src="${image}"></div>` }));
+    const target = await opened.context.newPage();
+    await target.goto(fixtureUrl);
+    await attach(opened.page);
+    const initial = await inspect(opened.page);
+    const label = initial.items.find((item) => item.line.includes('[text-parts=') && item.line.includes('"One"') && item.line.includes('"Two"'))!;
+    const part = (line: string, text: string) => {
+      const match = new RegExp(`"${text}" @\\(([^)]+)\\)`).exec(line);
+      if (!match) throw new Error(`Missing ${text} fragment geometry: ${line}`);
+      return match[1]!.split(",").map(Number);
+    };
+    const textBox = (line: string) => /\[text-box=([^\]]+)\]/.exec(line)![1]!.split(",").map(Number);
+    expect(part(label.line, "One")[0]).toBeLessThan(part(label.line, "Two")[0]!);
+    const shallow = await inspect(opened.page, { depth: 1 });
+    expect(shallow.items.some((item) => item.line.includes('"One"') && item.line.includes('"Two"'))).toBe(true);
+    expect(initial.items.some((item) => item.line.includes('button "OneTwo"') || item.line.includes('button "One Two"'))).toBe(false);
+
+    await target.locator("#label").evaluate((element) => element.classList.add("reordered"));
+    const delta = await inspect(opened.page, { since: initial.observationId });
+    const changed = delta.items.find((item) => item.id === label.id)!;
+    expect(changed?.change).toBe("updated");
+    expect(part(changed.line, "One")[0]).toBeGreaterThan(part(changed.line, "Two")[0]!);
+
+    const move = initial.items.find((item) => /- button "Move"/.test(item.line))!;
+    const domMove = initial.items.find((item) => /- button "DOMMove"/.test(item.line))!;
+    const generated = initial.items.find((item) => /- StaticText "Generated"/.test(item.line))!;
+    expect(box(generated.line)).toEqual(expect.arrayContaining([20, 300]));
+    const imageX = await target.locator("#with-image img").evaluate((element) => element.getBoundingClientRect().x);
+    await target.locator("#with-image").evaluate((element) => element.classList.add("shifted"));
+    await target.locator("#dom-only").evaluate((element) => element.classList.add("shifted"));
+    await target.locator("#pseudo").evaluate((element) => element.classList.add("shifted"));
+    const motion = await inspect(opened.page, { since: initial.observationId });
+    const moved = motion.items.find((item) => item.id === move.id)!;
+    const movedGenerated = motion.items.find((item) => item.id === generated.id)!;
+    expect(moved?.change).toBe("updated");
+    expect(textBox(moved.line)[0]).toBeGreaterThan(textBox(move.line)[0]!);
+    const movedDOM = motion.items.find((item) => item.id === domMove.id)!;
+    expect(movedDOM?.change).toBe("updated");
+    expect(textBox(movedDOM.line)[0]).toBeGreaterThan(textBox(domMove.line)[0]!);
+    expect(await target.locator("#with-image img").evaluate((element) => element.getBoundingClientRect().x)).toBe(imageX);
+    expect(movedGenerated?.change).toBe("updated");
+    expect(box(movedGenerated.line)[0]).toBeGreaterThan(box(generated.line)[0]!);
+
+    const boundary = initial.items.find((item) => item.line.includes("Save") && item.line.includes("changes"))!;
+    const rects = await target.locator("#boundary span").evaluateAll((elements) => elements.map((element) => {
+      const rect = element.getBoundingClientRect(); return [rect.x, rect.y, rect.width, rect.height];
+    }));
+    await target.locator("#boundary span").first().evaluate((element) => {
+      const before = element.getBoundingClientRect().width;
+      (element.firstChild as Text).data = "Save";
+      const after = element.getBoundingClientRect().width;
+      (element as HTMLElement).style.letterSpacing = `${(before - after) / 4}px`;
+    });
+    const afterRects = await target.locator("#boundary span").evaluateAll((elements) => elements.map((element) => {
+      const rect = element.getBoundingClientRect(); return [rect.x, rect.y, rect.width, rect.height];
+    }));
+    for (let index = 0; index < rects.length; index += 1) {
+      rects[index]!.forEach((value, coordinate) => expect(afterRects[index]![coordinate]).toBeCloseTo(value, 1));
+    }
+    const spacing = await inspect(opened.page, { since: initial.observationId });
+    const changedBoundary = spacing.items.find((item) => item.id === boundary.id)!;
+    expect(changedBoundary?.change).toBe("updated");
+    expect(changedBoundary.line).not.toBe(boundary.line);
+    expect(boundary.line).toContain('"Save "');
+    expect(changedBoundary.line).not.toContain('"Save "');
+
+    await target.locator("button, #pseudo").evaluateAll((elements) => elements.forEach((element) => element.remove()));
+    const explicit = await inspect(opened.page, { fields: ["text", "state", "ref"] });
+    const overflow = explicit.items.find((item) => item.line.includes("[box=400,200,0,0]"));
+    expect(overflow?.line).toContain("- generic");
+    expect(overflow?.ref).toEqual(expect.any(String));
+    expect(explicit.items.some((item) => /- image/.test(item.line))).toBe(true);
+    const observed = await opened.page.evaluate(async () => {
+      const state = (globalThis as any).__presentationStudy;
+      return state.runtime.observe(state.tabId, "auto");
+    });
+    expect(observed.snapshot).toContain("[box=400,200,0,0]");
+    expect(observed).not.toHaveProperty("screenshot");
+    expect(await opened.page.evaluate(() => (globalThis as any).__presentationStudy.screenshots)).toBe(0);
+  } finally {
+    await detach(opened.page).catch(() => undefined);
+    await dispose(opened.context, opened.userDataDirectory);
+  }
+});

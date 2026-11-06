@@ -14,7 +14,8 @@ export function stitchSnapshotFrames(frames: FrameSnapshot[], rootFrameRef: stri
       const current = stack[stack.length - 1]!;
       if (current.index === current.frame.lines.length) { stack.pop(); continue; }
       const index = current.index++, original = current.frame.lines[index]!;
-      const node = original.node && { ...original.node, depth: original.node.depth + current.offset };
+      const node = original.node && { ...original.node, depth: original.node.depth + current.offset,
+        ...(current.orphan && index === 0 ? { ownerUnrepresented: true as const } : {}) };
       const line = `${"  ".repeat(current.offset)}${original.line}${current.orphan && index === 0 ? " [owner=unrepresented]" : ""}`;
       result.push({ ...original, line, ...(node ? { node } : {}) });
       const child = node?.childFrameRef && remaining.get(node.childFrameRef);
