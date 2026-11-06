@@ -108,9 +108,12 @@ test("compact observations distinguish same-name targets by measured layout and 
     expect(rawSnapshot.snapshot).not.toContain("[ref=");
 
     const sliced = await inspect(opened.page, { limit: 1 });
+    const actionable = await inspect(opened.page, { fields: ["text", "state", "ref"], limit: 1 });
     expect(sliced.nextCursor).toEqual(expect.any(String));
     await target.locator("#badges").evaluate((element) => element.classList.add("swapped"));
-    await expect(inspect(opened.page, { cursor: sliced.nextCursor })).rejects.toThrow("stale-observation");
+    const continued = await inspect(opened.page, { cursor: sliced.nextCursor });
+    expect(continued.items.filter((item) => /- link "x2"/.test(item.line))).toEqual(pair);
+    await expect(inspect(opened.page, { cursor: actionable.nextCursor })).rejects.toThrow("stale-observation");
     const delta = await inspect(opened.page, { since: first.observationId });
     expect(delta.mode).toBe("delta");
     for (const before of pair) {
@@ -243,6 +246,107 @@ test("text-fragment reordering and actionable painted overflow survive presentat
     expect(observed.snapshot).toContain("[box=400,200,0,0]");
     expect(observed).not.toHaveProperty("screenshot");
     expect(await opened.page.evaluate(() => (globalThis as any).__presentationStudy.screenshots)).toBe(0);
+  } finally {
+    await detach(opened.page).catch(() => undefined);
+    await dispose(opened.context, opened.userDataDirectory);
+  }
+});
+
+test("repeated grid cells retain every position, state change and explicit action target", async () => {
+  const opened = await openExtension();
+  try {
+    const cells = Array.from({ length: 12 }, (_, index) => `<td role="gridcell" aria-label="PRIVATE_${index}" aria-readonly="false"></td>`).join("");
+    await opened.context.route(fixtureUrl, (route) => route.fulfill({ contentType: "text/html", body: `<!doctype html>
+      <style>body{margin:0}table{border-spacing:4px}td{width:12px;height:12px;padding:0;background:green}</style>
+      <table role="grid"><tbody><tr>${cells}</tr></tbody></table>` }));
+    const target = await opened.context.newPage();
+    await target.goto(fixtureUrl);
+    await attach(opened.page);
+    const initial = await inspect(opened.page);
+    const group = initial.items.find((item) => /- gridcell .*\[count=12\]/.test(item.line))!;
+    expect(group).toBeDefined();
+    expect(group.line).toContain("step=(16,0,0,0) count=12");
+    expect(group.line).toContain("[name=unknown]");
+    expect(group.line).not.toContain("PRIVATE_");
+    const explicit = await inspect(opened.page, { fields: ["text", "state", "ref"] });
+    const individual = explicit.items.filter((item) => /- gridcell/.test(item.line));
+    expect(individual).toHaveLength(12);
+    expect(new Set(individual.map((item) => item.ref)).size).toBe(12);
+    expect(individual.every((item) => item.ref && /\[box=/.test(item.line))).toBe(true);
+    await target.locator("td").nth(5).evaluate((element) => element.setAttribute("aria-readonly", "true"));
+    const changed = await inspect(opened.page, { since: initial.observationId });
+    expect(changed.items.some((item) => /gridcell/.test(item.line) && /readonly=true/.test(item.line))).toBe(true);
+    const full = await inspect(opened.page, { full: true });
+    const counts = full.items.filter((item) => /- gridcell/.test(item.line)).reduce((total, item) => total + Number(/\[count=(\d+)\]/.exec(item.line)?.[1] ?? 1), 0);
+    expect(counts).toBe(12);
+    expect(await opened.page.evaluate(() => (globalThis as any).__presentationStudy.screenshots)).toBe(0);
+  } finally {
+    await detach(opened.page).catch(() => undefined);
+    await dispose(opened.context, opened.userDataDirectory);
+  }
+});
+
+test("transformed preserved spaces remain visible in deltas and source paragraphs stay separate", async () => {
+  const opened = await openExtension();
+  try {
+    await opened.context.route(fixtureUrl, (route) => route.fulfill({ contentType: "text/html", body: `<!doctype html>
+      <meta charset="utf-8"><style>body{margin:0;font:16px monospace}#normal,#pre,#unicode,#line,#letter,#turkish{text-transform:uppercase}#pre,#letter{white-space:pre}#pre span{display:inline-block}#line,#turkish,#capital{white-space:pre-line}#capital{text-transform:capitalize}#letter::first-letter{color:red}#generated::before{content:'   before  words';white-space:pre;text-transform:uppercase}</style>
+      <main><div id="normal"><span>one </span><span>two</span></div><div id="pre"><span>a  b</span><span> end</span></div><p>PARAONE</p><p>PARATWO</p><div id="unicode"><span>a ß </span><span>two</span></div><div id="line">aa ß\nbb</div><div id="turkish" lang="tr">ii i\nbb</div><div id="capital">aa b\ncc</div><div id="letter">   echo  foxtrot</div><div id="generated"></div></main>` }));
+    const target = await opened.context.newPage();
+    await target.goto(fixtureUrl);
+    await attach(opened.page);
+    const initial = await inspect(opened.page);
+    expect(initial.items.some((item) => item.line.includes('"ONE "'))).toBe(true);
+    expect(initial.items.some((item) => item.line.includes('"A  B"'))).toBe(true);
+    expect(initial.items.some((item) => item.line.includes('"A SS "')), initial.items.map((item) => item.line).join("\n")).toBe(true);
+    expect(initial.items.some((item) => item.line.includes('"AA SS\\nBB"'))).toBe(true);
+    expect(initial.items.some((item) => item.line.includes('"İİ İ\\nBB"'))).toBe(true);
+    expect(initial.items.some((item) => item.line.includes('"Aa B\\nCc"'))).toBe(true);
+    expect(initial.items.some((item) => item.line.includes('"   E"'))).toBe(true);
+    expect(initial.items.some((item) => item.line.includes('"   BEFORE  WORDS"'))).toBe(true);
+    const paragraphs = initial.items.filter((item) => /PARAONE|PARATWO/.test(item.line));
+    expect(paragraphs).toHaveLength(2);
+    const before = await target.locator("#pre span").first().evaluate((element) => {
+      const rect = element.getBoundingClientRect(), range = document.createRange();
+      range.setStart(element.firstChild!, 3); range.setEnd(element.firstChild!, 4);
+      return { width: rect.width, b: range.getBoundingClientRect().x };
+    });
+    await target.locator("#pre span").first().evaluate((element) => { element.textContent = "a b "; });
+    const after = await target.locator("#pre span").first().evaluate((element) => {
+      const rect = element.getBoundingClientRect(), range = document.createRange();
+      range.setStart(element.firstChild!, 2); range.setEnd(element.firstChild!, 3);
+      return { width: rect.width, b: range.getBoundingClientRect().x };
+    });
+    expect(after.width).toBeCloseTo(before.width, 1);
+    expect(after.b).toBeLessThan(before.b);
+    const delta = await inspect(opened.page, { since: initial.observationId });
+    expect(delta.items.some((item) => item.change === "updated" && item.line.includes('"A B "'))).toBe(true);
+    const lineRect = await target.locator("#line").evaluate((element) => {
+      const range = document.createRange(); range.selectNodeContents(element); const rect = range.getBoundingClientRect();
+      return [rect.width, rect.height];
+    });
+    await target.locator("#line").evaluate((element) => { element.textContent = "aa\nß bb"; });
+    const movedLineRect = await target.locator("#line").evaluate((element) => {
+      const range = document.createRange(); range.selectNodeContents(element); const rect = range.getBoundingClientRect();
+      return [rect.width, rect.height];
+    });
+    expect(movedLineRect).toEqual(lineRect);
+    const lineDelta = await inspect(opened.page, { since: initial.observationId });
+    expect(lineDelta.items.some((item) => item.change === "updated" && item.line.includes('"AA\\nSS BB"'))).toBe(true);
+    for (const [id, text, rendered] of [["turkish", "ii\ni bb", '"İİ\\nİ BB"'], ["capital", "aa\nb cc", '"Aa\\nB Cc"']] as const) {
+      const before = await target.locator(`#${id}`).evaluate((element) => {
+        const range = document.createRange(); range.selectNodeContents(element); const rect = range.getBoundingClientRect();
+        return [rect.width, rect.height];
+      });
+      const after = await target.locator(`#${id}`).evaluate((element, text) => {
+        element.textContent = text;
+        const range = document.createRange(); range.selectNodeContents(element); const rect = range.getBoundingClientRect();
+        return [rect.width, rect.height];
+      }, text);
+      expect(after).toEqual(before);
+      const changed = await inspect(opened.page, { since: initial.observationId });
+      expect(changed.items.some((item) => item.change === "updated" && item.line.includes(rendered))).toBe(true);
+    }
   } finally {
     await detach(opened.page).catch(() => undefined);
     await dispose(opened.context, opened.userDataDirectory);

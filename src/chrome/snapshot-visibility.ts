@@ -35,6 +35,8 @@ export type SnapshotTextPaintCandidate = {
   zeroFont?: boolean;
   /** The ordinary text fill paints; selection-only evidence is not its text. */
   basePainted?: boolean;
+  /** Equal captured fill/background is ambiguous without composited paint evidence. */
+  sameColorBackground?: true;
   /** A positively identified, rendered ::first-letter prefix. */
   firstLetter?: string;
   /** A ::first-letter may apply but cannot be associated with certainty. */
@@ -222,7 +224,7 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
         visibleFill: /^rgb\(/.test(fill) && font !== "0px" && font !== "" && bounds.length >= 4
           && bounds.every(Number.isFinite) && bounds[2]! > 0 && bounds[3]! > 0, matched: false, fullyWithinClip: false });
     });
-    const contexts: Array<{ transparent: boolean; contentHidden: boolean; emptyClip: boolean; clip: Clip; absoluteClip: Clip; fixedClip: Clip; axisAligned: boolean; paintedTextRisk: boolean; textClipRisk: boolean; hardTextClipRisk: boolean; ellipsis: boolean; svg: boolean; firstLetter?: FirstLetter }> = [];
+    const contexts: Array<{ transparent: boolean; contentHidden: boolean; emptyClip: boolean; clip: Clip; absoluteClip: Clip; fixedClip: Clip; axisAligned: boolean; paintedTextRisk: boolean; textClipRisk: boolean; hardTextClipRisk: boolean; ellipsis: boolean; svg: boolean; background?: string; firstLetter?: FirstLetter }> = [];
     for (let index = 0; index < nodes.backendNodeId.length; index++) {
       const parent = contexts[nodes.parentIndex[index]];
       let transparent = parent?.transparent ?? false;
@@ -238,6 +240,7 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
       let hardTextClipRisk = parent?.hardTextClipRisk ?? false;
       let ellipsis = parent?.ellipsis ?? false;
       let svg = parent?.svg ?? false;
+      let background = parent?.background;
       const firstLetter = firstLetterParents.get(index) ?? parent?.firstLetter;
       const layoutIndex = layoutByNode.get(index);
       // Frame elements do not use display:contents, and a frame with no
@@ -253,6 +256,8 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
         // can paint descendant text even when its fill is transparent.
         const filter = style(7), backgroundClip = style(24);
         if (nodes.nodeType?.[index] === 1) {
+          const color = style(34);
+          if (color && !transparentColor(color)) background = color;
           paintedTextRisk ||= !filter || filter !== "none" || !backgroundClip || /(?:^|,)\s*text\s*(?:,|$)/.test(backgroundClip);
           // These effects may hide characters even when their text boxes lie
           // inside the ancestor's ordinary overflow clip.
@@ -322,6 +327,9 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
         const fontSize = style(20), fill = style(21), shadow = style(22), stroke = style(23);
         const zeroText = isPaintedText && fontSize === "0px" && hasBounds && bounds[2] === 0 && bounds[3] === 0 && !paintedTextRisk && !svg;
         const transparentText = isPaintedText && transparentColor(fill) && shadow === "none" && stroke === "0px" && !paintedTextRisk && !svg;
+        // This is detection, not a claim that the text is hidden. An image,
+        // non-ancestor backdrop, highlight or stroke may still make it visible.
+        const sameColorBackground = isPaintedText && !!background && fill === background;
         // Live text-paint checks run within the child frame and cannot see an
         // inherited parent aperture. Never expose the rest of a crossing run.
         const crossesFrameClip = isPaintedText && frameClip && hasBounds
@@ -345,7 +353,7 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
           }
           const partialClip = hasBounds && (bounds[0]! < clip.x[0] || bounds[1]! < clip.y[0]
             || bounds[0]! + bounds[2]! > clip.x[1] || bounds[1]! + bounds[3]! > clip.y[1]);
-          if (visible && (zeroText || transparentText || textClipRisk || partialClip) && typeof nodes.backendNodeId[index] === "number") {
+          if (visible && (zeroText || transparentText || textClipRisk || partialClip || sameColorBackground) && typeof nodes.backendNodeId[index] === "number") {
             const boxes = boxesByLayout.get(layoutIndex);
             // CDP text-box starts use source UTF-16 offsets, but lengths can
             // use rendered glyph counts (e.g. case expansion or masking).
@@ -382,6 +390,7 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
               ...(ellipsis && !hardTextClipRisk && axisAligned && !multiLayoutText.has(index) ? { ellipsis: true } : {}),
               ...(boxes ? { textBoxes: boxes } : {}), ...(fullyWithinClip ? { fullyWithinClip: true } : {}),
               ...(zeroText ? { zeroFont: true } : {}),
+              ...(sameColorBackground ? { sameColorBackground: true as const } : {}),
               ...(!zeroText && !transparentText && isText && fill && !transparentColor(fill) ? { basePainted: true } : {}),
               ...(firstLetterText ? { firstLetter: firstLetterText } : {}), ...(firstLetterUnknown && !firstLetterText ? { firstLetterUnknown: true } : {}) });
           }
@@ -401,7 +410,7 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
       }
       const backendId = nodes.backendNodeId[index];
       if (typeof backendId === "number") result.set(backendId, visible);
-      contexts[index] = { transparent, contentHidden, emptyClip, clip, absoluteClip, fixedClip, axisAligned, paintedTextRisk, textClipRisk, hardTextClipRisk, ellipsis, svg, firstLetter };
+      contexts[index] = { transparent, contentHidden, emptyClip, clip, absoluteClip, fixedClip, axisAligned, paintedTextRisk, textClipRisk, hardTextClipRisk, ellipsis, svg, background, firstLetter };
     }
   }
   applySnapshotOcclusion(snapshot, result);

@@ -7,6 +7,8 @@ export type TextPaintEvidence = {
   language?: string;
   sourceText?: string;
   pseudoUnpainted?: boolean;
+  /** A live document overlay is absent from ordinary layout style rows. */
+  documentPaintRisk?: true;
   firstLineRisk: boolean;
   firstLineRanges?: Array<[number, number]>;
   firstLetterRisk: boolean;
@@ -24,6 +26,7 @@ export function sameTextPaintCandidates(left: readonly SnapshotTextPaintCandidat
       && a.direction === b.direction && a.writingMode === b.writingMode && a.ellipsis === b.ellipsis
       && a.fullyWithinClip === b.fullyWithinClip && a.zeroFont === b.zeroFont && a.basePainted === b.basePainted
       && a.documentFloatRisk === b.documentFloatRisk
+      && a.sameColorBackground === b.sameColorBackground
       && a.firstLetter === b.firstLetter && a.firstLetterUnknown === b.firstLetterUnknown;
   });
 }
@@ -206,6 +209,10 @@ export const TEXT_PAINT_EVIDENCE_SOURCE = String.raw`function(...rest) {
       const doc = node.ownerDocument, view = doc.defaultView, root = node.getRootNode();
       result.sourceText = node.data;
       if (!view) { result.unknown = true; return result; }
+      if (!doc.getSelection()?.isCollapsed || view.CSS?.highlights?.size
+        || doc.documentElement?.matches?.(':active-view-transition')
+        || doc.getAnimations?.().some(animation => animation.effect?.pseudoElement?.startsWith('::view-transition')))
+        result.documentPaintRisk = true;
       const add = (source, selectionText) => {
         const startRoot = source.startContainer && source.startContainer.getRootNode();
         const endRoot = source.endContainer && source.endContainer.getRootNode();
@@ -323,7 +330,7 @@ export const TEXT_PAINT_CACHE_REGISTER_SOURCE = `function(token, ids, ...nodes) 
 
 /** Undefined means the evidence cannot safely refine the original AX name. */
 export function projectTextPaint(candidate: SnapshotTextPaintCandidate, evidence: TextPaintEvidence | undefined): { hidden: boolean; text?: string } | undefined {
-  if (!evidence || !Array.isArray(evidence.ranges) || evidence.unknown || evidence.firstLineRisk || candidate.firstLetterUnknown || evidence.firstLetterRisk && !candidate.firstLetter)
+  if (candidate.sameColorBackground || !evidence || !Array.isArray(evidence.ranges) || evidence.unknown || evidence.firstLineRisk || candidate.firstLetterUnknown || evidence.firstLetterRisk && !candidate.firstLetter)
     return undefined;
   if (evidence.firstLineRanges && candidate.documentFloatRisk !== false) return undefined;
   if (candidate.kind === "pseudo") return evidence.pseudoUnpainted ? { hidden: true } : undefined;

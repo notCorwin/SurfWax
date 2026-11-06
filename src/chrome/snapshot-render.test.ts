@@ -11,6 +11,26 @@ describe("structured semantic snapshot rendering", () => {
     expect(renderSnapshotNode({ ...text, preserveTextWhitespace: false }).line).toBe('- StaticText "A B C"');
   });
 
+  it("keeps proven painted boundary spaces and nonbreaking spaces", () => {
+    const text: SnapshotNode = { id: "text", depth: 0, role: "StaticText", name: "Save ", textWhitespaceProven: true };
+    expect(renderSnapshotNode(text).line).toBe('- StaticText "Save "');
+    expect(renderSnapshotNode({ ...text, name: " " }).line).toBe('- StaticText " "');
+    expect(renderSnapshotNode({ id: "link", depth: 0, role: "link", name: " A\u00a0 B " }).line).toBe('- link "A\u00a0 B"');
+    expect(renderSnapshotNode({ id: "link", depth: 0, role: "link", name: "1", bounds: [0, 0, 20, 20],
+      textFragments: [{ text: "1", bounds: [1, 1, 5, 10] }] }).line).toContain('"1" [text-box=1,1,5,10]');
+  });
+
+  it("retains fragment geometry when text moves within an unchanged parent box", () => {
+    const node: SnapshotNode = { id: "link", depth: 0, role: "link", name: "Save changes", bounds: [0, 0, 100, 20],
+      textFragments: [{ text: "Save ", bounds: [5, 0, 30, 20] }, { text: "changes", bounds: [35, 0, 50, 20] }] };
+    const original = renderSnapshotNode(node).line;
+    expect(original).toContain('[text-parts="Save " @(5,0,30,20); "changes" @(35,0,50,20)]');
+    expect(renderSnapshotNode({ ...node, textFragments: [node.textFragments![0]!, { text: "changes", bounds: [45, 0, 50, 20] }] }).line).not.toBe(original);
+    const one = { ...node, textFragments: [{ text: "Save changes", bounds: [5, 0, 80, 20] as const }] };
+    expect(renderSnapshotNode({ ...one, textFragments: [{ text: "Save changes", bounds: [10, 0, 80, 20] }] }).line)
+      .not.toBe(renderSnapshotNode(one).line);
+  });
+
   it("keeps page text verbatim as data and exposes only the actual reference", () => {
     const result = renderSnapshotNode(node, { actionNames: "program" });
     expect(result.ref).toBe("t3sabc123d0e7");
@@ -59,6 +79,8 @@ describe("structured semantic snapshot rendering", () => {
   it("renders placeholder and name uncertainty without duplicating the visible name", () => {
     const input: SnapshotNode = { id: "one", depth: 0, role: "textbox", name: "Label", placeholder: { status: "visible", text: 'A "hint"' } };
     expect(renderSnapshotNode(input).line).toBe('- textbox "Label" [placeholder="A \\\"hint\\\""]');
+    expect(renderSnapshotNode({ ...input, placeholder: { status: "visible", text: "A\u00a0\u00a0B" } }).line)
+      .toContain('[placeholder="A\u00a0\u00a0B"]');
     expect(renderSnapshotNode({ ...input, name: 'A "hint"' }).line).toBe('- textbox "A \\\"hint\\\""');
     expect(renderSnapshotNode({ ...input, name: "", nameUnknown: true, placeholder: { status: "unknown" } }).line)
       .toBe("- textbox [name=unknown] [placeholder=unknown]");

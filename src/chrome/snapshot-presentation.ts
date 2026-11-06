@@ -1,12 +1,14 @@
 import type { SnapshotLine } from "./snapshot-frame-tree";
 import { renderSnapshotNode, type SnapshotNode } from "./snapshot-render";
+import { packSnapshot } from "./snapshot-repeat";
+import { normalizeSnapshotText } from "./snapshot-preformatted";
 
 const neutralRoles = new Set(["generic", "none", "presentation"]);
 const namedRoles = new Set([
   "button", "link", "heading", "checkbox", "radio", "switch", "tab", "option",
   "menuitem", "menuitemcheckbox", "menuitemradio", "treeitem",
 ]);
-const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
+const normalize = normalizeSnapshotText;
 
 /** An empty attribute is not evidence of an independently rendered state. */
 function hasDetails(node: SnapshotNode): boolean {
@@ -71,7 +73,10 @@ export function compactSnapshot(lines: readonly SnapshotLine[]): SnapshotLine[] 
       continue;
     }
     if (inherited === -1) continue;
-    if (node.role === "StaticText" && label && passive(node, line) && !entry.children.length) {
+    if (node.role === "StaticText" && (label || node.textWhitespaceProven && node.name) && passive(node, line) && !entry.children.length) {
+      // Raw layout.text may still contain source indentation. A repeated
+      // normalized label does not prove those fragment boundaries were painted.
+      if (!node.textWhitespaceProven && node.name !== normalize(node.name!)) labels.get(inherited)!.blocked = true;
       labels.get(inherited)!.leaves.push(index);
     } else if (neutral) {
       entry.owner = inherited;
@@ -109,7 +114,9 @@ export function compactSnapshot(lines: readonly SnapshotLine[]): SnapshotLine[] 
     }
     if (entry.remove) continue;
     const node = entry.depth === entry.node.depth ? entry.node : { ...entry.node, depth: entry.depth };
-    result.push({ ...entry.line, node, line: renderSnapshotNode(node, { fields: ["text", "state"] }).line });
+    const removedParent = entry.parent !== -1 && entries[entry.parent]!.remove;
+    result.push({ ...entry.line, ...(removedParent ? { sourceParent: entries[entry.parent]!.line.id } : {}), node,
+      line: renderSnapshotNode(node, { fields: ["text", "state"] }).line });
   }
-  return result;
+  return packSnapshot(result);
 }

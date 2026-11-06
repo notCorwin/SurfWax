@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { changedTextNodes, sameDOMSnapshot } from "./snapshot-consistency";
-import { snapshotVisibility, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
+import { changedTextNodes, hasUnrenderedHeadSourceChange, sameDOMSnapshot } from "./snapshot-consistency";
+import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
 
 function fixture(reverse = false) {
   const pool = ["root", "#document", "BODY", "#text", "INPUT", "hello", "type", "text", "aria-label", "Search", "style", "left:10px", "value one", "1", "visible", "static", "none", "auto", "ltr", "horizontal-tb", "block", "16px", "rgb(0, 0, 0)", "0px", "clip"];
@@ -21,6 +21,49 @@ function fixture(reverse = false) {
 function intern(snapshot: ReturnType<typeof fixture>, value: string) {
   snapshot.strings.push(value); return snapshot.strings.length - 1;
 }
+
+function headFixture(sources = [{ id: 20, src: "/old.js", text: "old()" }]): any {
+  const snapshot = fixture(), original = snapshot.documents[0]!, style = original.layout.styles[0]!;
+  const id = (value: string) => intern(snapshot, value);
+  const records = [
+    { backend: 1, parent: -1, type: 9, name: "#document", value: "", attributes: [] as string[] },
+    { backend: 5, parent: 0, type: 1, name: "HTML", value: "", attributes: [] as string[] },
+    { backend: 6, parent: 1, type: 1, name: "HEAD", value: "", attributes: [] as string[] },
+  ];
+  for (const source of sources) {
+    const parent = records.length;
+    records.push({ backend: source.id, parent: 2, type: 1, name: "SCRIPT", value: "", attributes: ["src", source.src] });
+    records.push({ backend: source.id + 100, parent, type: 3, name: "#text", value: source.text, attributes: [] });
+  }
+  const body = records.length, text = body + 1, input = body + 2;
+  records.push(
+    { backend: 2, parent: 1, type: 1, name: "BODY", value: "", attributes: [] },
+    { backend: 3, parent: body, type: 3, name: "#text", value: "hello", attributes: [] },
+    { backend: 4, parent: body, type: 1, name: "INPUT", value: "", attributes: ["type", "text", "aria-label", "Search", "style", "left:10px"] },
+  );
+  (original as any).nodes = {
+    backendNodeId: records.map((record) => record.backend), parentIndex: records.map((record) => record.parent), nodeType: records.map((record) => record.type),
+    nodeName: records.map((record) => id(record.name)), nodeValue: records.map((record) => record.value ? id(record.value) : -1),
+    attributes: records.map((record) => record.attributes.map(id)), inputValue: { index: [input], value: [id("value one")] },
+    inputChecked: { index: [] }, optionSelected: { index: [] }, isClickable: { index: [input] },
+  };
+  original.layout = { nodeIndex: [0, 1, body, text, input], bounds: [[0, 0, 100, 100], [0, 0, 100, 100], [0, 0, 100, 100], [10, 10, 30, 10], [10, 30, 30, 10]],
+    styles: [style, style, style, style, style], text: [-1, -1, -1, id("hello"), -1] };
+  original.textBoxes = { layoutIndex: [3], start: [0], length: [5], bounds: [[10, 10, 30, 10]] };
+  return snapshot;
+}
+
+const completeStyleCatalog = [...SNAPSHOT_COMPUTED_STYLES, "background-image", "font-family", "outline-width"];
+function completeHeadFixture(sources?: Parameters<typeof headFixture>[0]): any {
+  const snapshot = headFixture(sources);
+  const defaults: Record<string, string> = { "white-space": "normal", "-webkit-user-modify": "read-only", "background-color": "rgba(0, 0, 0, 0)",
+    "border-radius": "0px", "mix-blend-mode": "normal", "z-index": "auto", isolation: "auto", "container-type": "normal",
+    "background-image": "none", "font-family": "Arial", "outline-width": "0px" };
+  snapshot.documents[0].layout.styles = snapshot.documents[0].layout.styles.map((row: number[]) => completeStyleCatalog.map((name, index) =>
+    index < row.length ? row[index] : intern(snapshot, defaults[name] ?? "none")));
+  return snapshot;
+}
+const completeHeadOptions = { ignoreUnrenderedText: true, completeStyleCatalog };
 
 describe("DOM snapshot consistency", () => {
   it("isolates text changes only when all geometry and other evidence agree", () => {
@@ -54,6 +97,77 @@ describe("DOM snapshot consistency", () => {
 
   it("compares string values rather than string-table indexes", () => {
     expect(sameDOMSnapshot(fixture(), fixture(true))).toBe(true);
+  });
+
+  it("tolerates only unpainted HEAD source churn after independent semantic confirmation", () => {
+    const before = headFixture([{ id: 20, src: "/old.js", text: "old()" }, { id: 30, src: "/stable.js", text: "stable()" }]);
+    const after = headFixture([{ id: 30, src: "/new-location.js", text: "changed()" }, { id: 40, src: "/new.js", text: "new()" }, { id: 50, src: "/later.js", text: "later()" }]);
+    expect(sameDOMSnapshot(before, after)).toBe(false);
+    expect(sameDOMSnapshot(before, after, undefined, { ignoreUnrenderedText: true })).toBe(false);
+    expect(hasUnrenderedHeadSourceChange(before, after)).toBe(true);
+    const fullBefore = completeHeadFixture([{ id: 20, src: "/old.js", text: "old()" }, { id: 30, src: "/stable.js", text: "stable()" }]);
+    const fullAfter = completeHeadFixture([{ id: 30, src: "/new-location.js", text: "changed()" }, { id: 40, src: "/new.js", text: "new()" }, { id: 50, src: "/later.js", text: "later()" }]);
+    expect(sameDOMSnapshot(fullBefore, fullAfter, undefined, completeHeadOptions)).toBe(true);
+    const candidates: SnapshotTextPaintCandidate[] = [];
+    const visibility = snapshotVisibility(fullBefore, { textPaintCandidates: candidates });
+    expect(sameDOMSnapshot(fullBefore, fullAfter, { visibility, textPaintCandidates: candidates }, completeHeadOptions)).toBe(true);
+  });
+
+  it("keeps rendering, control state and retained structure strict while HEAD source changes", () => {
+    const before = completeHeadFixture();
+    const changes: Array<(snapshot: any) => void> = [
+      (snapshot) => { snapshot.documents[0].layout.bounds[3][0]++; },
+      (snapshot) => { snapshot.documents[0].textBoxes.bounds[0][0]++; },
+      (snapshot) => { const layout = snapshot.documents[0].layout; layout.styles[3] = [...layout.styles[3]]; layout.styles[3][21] = intern(snapshot, "rgb(255,0,0)"); },
+      (snapshot) => { snapshot.documents[0].nodes.attributes.at(-1).push(intern(snapshot, "data-state"), intern(snapshot, "changed")); },
+      (snapshot) => { snapshot.documents[0].nodes.inputChecked.index.push(snapshot.documents[0].nodes.backendNodeId.indexOf(4)); },
+      (snapshot) => { snapshot.documents[0].nodes.isClickable.index.push(snapshot.documents[0].nodes.backendNodeId.indexOf(2)); },
+      (snapshot) => { snapshot.documents[0].nodes.parentIndex[snapshot.documents[0].nodes.backendNodeId.indexOf(4)] = 1; },
+      (snapshot) => { snapshot.documents[0].frameId = intern(snapshot, "replacement-frame"); },
+      (snapshot) => { snapshot.documents[0].layout.styles[3][completeStyleCatalog.indexOf("background-image")] = intern(snapshot, "linear-gradient(black,black)"); },
+    ];
+    for (const change of changes) {
+      const after = completeHeadFixture([{ id: 40, src: "/new.js", text: "new()" }]);
+      change(after);
+      expect(sameDOMSnapshot(before, after, undefined, completeHeadOptions)).toBe(false);
+    }
+  });
+
+  it("does not erase laid-out scripts, HEAD controls or annotated source", () => {
+    const before = completeHeadFixture();
+    for (const change of [
+      (snapshot: any) => { snapshot.documents[0].nodes.nodeName[3] = intern(snapshot, "STYLE"); },
+      (snapshot: any) => { snapshot.documents[0].nodes.nodeName[3] = intern(snapshot, "INPUT"); },
+      (snapshot: any) => { snapshot.documents[0].nodes.pseudoType = { index: [3], value: [intern(snapshot, "before")] }; },
+      (snapshot: any) => { const layout = snapshot.documents[0].layout; layout.nodeIndex.push(3); layout.styles.push([...layout.styles[0]]); layout.bounds.push([0, 0, 10, 10]); layout.text.push(-1); },
+    ]) {
+      const after = completeHeadFixture([{ id: 40, src: "/new.js", text: "new()" }]);
+      change(after);
+      expect(sameDOMSnapshot(before, after, undefined, completeHeadOptions)).toBe(false);
+    }
+  });
+
+  it("rejects malformed identities and raw index references before removing HEAD source", () => {
+    const before = completeHeadFixture();
+    for (const change of [
+      (snapshot: any) => { snapshot.documents[0].nodes.backendNodeId[3] = 1; },
+      (snapshot: any) => { snapshot.documents[0].nodes.backendNodeId[3] = 0; },
+      (snapshot: any) => { snapshot.documents[0].layout.nodeIndex[3] = 999; },
+      (snapshot: any) => { snapshot.documents[0].nodes.inputValue.index[0] = 999; },
+      (snapshot: any) => { snapshot.documents[0].nodes.contentDocumentIndex = { index: [6], value: [999] }; },
+      (snapshot: any) => { snapshot.documents[0].textBoxes.layoutIndex[0] = 999; },
+      (snapshot: any) => { snapshot.documents.push(structuredClone(snapshot.documents[0])); },
+    ]) {
+      const after = completeHeadFixture([{ id: 40, src: "/new.js", text: "new()" }]);
+      change(after);
+      expect(sameDOMSnapshot(before, after, undefined, completeHeadOptions)).toBe(false);
+    }
+  });
+
+  it("declines HEAD relaxation for paint worklets whose custom inputs were not captured", () => {
+    const before = completeHeadFixture(), after = completeHeadFixture([{ id: 40, src: "/new.js", text: "new()" }]);
+    for (const snapshot of [before, after]) snapshot.documents[0].layout.styles[3][completeStyleCatalog.indexOf("background-image")] = intern(snapshot, "paint(custom-background)");
+    expect(sameDOMSnapshot(before, after, undefined, completeHeadOptions)).toBe(false);
   });
 
   it("can ignore unrendered text only after independent semantic confirmation", () => {

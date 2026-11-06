@@ -1,0 +1,71 @@
+import { describe, expect, it } from "vitest";
+import { diffSnapshot } from "./snapshot-pagination";
+import { expandSnapshot, packSnapshot, renderSnapshotLine } from "./snapshot-repeat";
+import { renderSnapshotNode, type SnapshotBounds, type SnapshotNode } from "./snapshot-render";
+
+const row = (node: SnapshotNode) => ({ ...renderSnapshotNode(node), node });
+const cells = (bounds: readonly SnapshotBounds[]) => bounds.map((box, index) => row({
+  id: `cell-${index}`, depth: 1, role: "gridcell", nameUnknown: true,
+  bounds: box, layoutScope: "document", ref: `ref-${index}`, actions: ["click"], state: { readonly: false },
+}));
+
+function decodeBoxes(line: string): number[][] {
+  const content = /\[boxes=(.*)\]$/.exec(line)![1]!;
+  return content.split("; ").flatMap((part) => {
+    const match = /^\(([^)]+)\)(?: step=\(([^)]+)\) count=(\d+))?$/.exec(part)!;
+    const start = match[1]!.split(",").map(Number), step = match[2]?.split(",").map(Number);
+    return Array.from({ length: Number(match[3] ?? 1) }, (_, index) => start.map((value, coordinate) =>
+      Math.round((value + (step?.[coordinate] ?? 0) * index) * 10) / 10));
+  });
+}
+
+describe("lossless repeated leaf presentation", () => {
+  it("batches a single-child tree path without changing its displayed text or independent targets", () => {
+    const input = [row({ id: "heading", depth: 1, role: "heading", name: "Models", bounds: [10, 20, 80, 30] }),
+      row({ id: "link", depth: 2, role: "link", name: "Models", ref: "target", bounds: [10, 20, 80, 30] }),
+      row({ id: "button", depth: 3, role: "button", name: "Models", ref: "other-target", bounds: [10, 20, 80, 30], state: { pressed: false } })];
+    const packed = packSnapshot(input);
+    expect(packed).toHaveLength(1);
+    expect(packed[0]!.line).toBe(input.map(({ node }) => renderSnapshotNode(node, { fields: ["text", "state"] }).line).join("\n"));
+    expect(expandSnapshot(packed)).toEqual(input);
+    const changed = [input[0]!, input[1]!, row({ ...input[2]!.node, state: { pressed: true } })];
+    expect(diffSnapshot(packed, packSnapshot(changed))).toMatchObject([{ id: "heading", change: "updated", line: expect.stringContaining("pressed=true") }]);
+  });
+
+  it("keeps separate text boundaries and layout when joining adjacent text rows", () => {
+    const input = ["A", " ", "B\u00a0C"].map((name, index) => row({ id: `text-${index}`, depth: 1,
+      role: "StaticText", name, textWhitespaceProven: true, bounds: [10 + index * 20, 30, 18, 15] }));
+    const packed = packSnapshot(input);
+    expect(packed).toHaveLength(1);
+    expect(packed[0]!.line).toContain('[text-parts="A" @(10,30,18,15); " " @(30,30,18,15); "B\u00a0C" @(50,30,18,15)]');
+    expect(expandSnapshot(packed)).toEqual(input);
+  });
+
+  it("preserves all extents, separate targets and a changed member through compact output", () => {
+    const input = cells([[10, 20, 11, 11], [25, 20, 11, 11], [40, 20, 11, 11], [60, 20, 11, 11], [45, 20, 11, 11]]);
+    const packed = packSnapshot(input);
+    expect(packed).toHaveLength(1);
+    expect(packed[0]!.line).toContain("[count=5]");
+    expect(packed[0]!.line).not.toContain("[ref=");
+    expect(decodeBoxes(packed[0]!.line)).toEqual(input.map((item) => item.node.bounds));
+    expect(expandSnapshot(packed)).toEqual(input);
+    const moved = input.map((item, index) => index === 3 ? row({ ...item.node, bounds: [60, 30, 11, 11] }) : item);
+    const delta = diffSnapshot(packed, packSnapshot(moved));
+    expect(delta).toMatchObject([{ id: input[0]!.id, change: "updated" }]);
+    expect(decodeBoxes(delta[0]!.line)[3]).toEqual([60, 30, 11, 11]);
+    expect(renderSnapshotLine(packed[0]!, { fields: ["state"] }).line).not.toContain("boxes=");
+  });
+
+  it("does not combine different states, documents, parents or nodes with descendants", () => {
+    const input = cells(Array.from({ length: 9 }, (_, index) => [index * 15, 20, 11, 11]));
+    input[2] = row({ ...input[2]!.node, state: { readonly: true } });
+    input[5] = row({ ...input[5]!.node, layoutScope: "child-document" });
+    const nested = [row({ id: "left", depth: 0, role: "listitem" }), ...input.slice(0, 2),
+      row({ id: "right", depth: 0, role: "listitem" }), ...input.slice(2, 5),
+      row({ id: "text", depth: 2, role: "StaticText", name: "Independent label" }), ...input.slice(5)];
+    const packed = packSnapshot(nested);
+    expect(expandSnapshot(packed)).toEqual(nested);
+    expect(packed.find((item) => item.id === input[4]!.id)?.members).toBeUndefined();
+    expect(packed.find((item) => item.id === input[5]!.id)?.members).toBeUndefined();
+  });
+});

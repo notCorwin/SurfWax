@@ -95,9 +95,6 @@ function labelCaptureHarness(labelCount: number, controlCount: number) {
 
 function harness() {
   const command = vi.fn(async (source: chrome.debugger.Debuggee & { sessionId?: string }, method: string, params: any = {}): Promise<any> => {
-    if (method === "Runtime.evaluate" && params.expression?.includes("surf-wax:read-only-snapshot")) return { result: { value: {
-      url: "https://top.test/", title: "Top", viewport: { x: 0, y: 0, width: 1000, height: 1000, scale: 1 }, rows: [],
-    } } };
     if (method === "Runtime.evaluate" && params.expression === "document.readyState === 'complete'") return { result: { value: true } };
     if (method === "Page.getFrameTree") return source.sessionId === "nested-child" || source.sessionId === "new-child"
       ? { frameTree: { frame: { id: "nested", url: "https://cross.test/nested", parentId: "cross" } } }
@@ -126,7 +123,7 @@ function harness() {
     if (method === "Runtime.callFunctionOn") return { result: { value: { connected: true, role: "button", name: "Open", tag: "button", text: "Open" } } };
     return {};
   });
-  const runtime = new AutomationRuntime({ chromeApi: { tabs: { query: async () => [{ id: 3 }] } } as never,
+  const runtime = new AutomationRuntime({ chromeApi: { tabs: { query: async () => [{ id: 3 }] }, scripting: { executeScript: async () => [{ frameId: 0, result: { url: "https://top.test/", title: "Top", viewport: { x: 0, y: 0, width: 1000, height: 1000, scale: 1 }, rows: [{ text: "Independent", depth: 2, bounds: [10, 10, 50, 20] }] } }] } } as never,
     command: async (source, method, params) => {
       const result = await command(source, method, params);
       if (method !== "DOMSnapshot.captureSnapshot") return result;
@@ -875,12 +872,12 @@ describe("frame tree discovery", () => {
       return original(source, method, params);
     });
     const page = await runtime.createPage(3);
-    const initial: any = await page.inspect();
+    const initial: any = await page.inspect({ fields: ["text", "state", "ref"] });
     const root = initial.items.find((item: any) => item.line.includes('button "Root control"'));
     expect(root.id).toMatch(/^[0-9a-z]+\.ashared-ax$/);
     runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "old-child", targetInfo: { type: "iframe", targetId: "cross" } });
-    await expect(page.inspect({ since: initial.observationId })).rejects.toMatchObject({ code: "stale-observation" });
-    const attached: any = await page.inspect();
+    await expect(page.inspect({ fields: ["text", "state", "ref"], since: initial.observationId })).rejects.toMatchObject({ code: "stale-observation" });
+    const attached: any = await page.inspect({ fields: ["text", "state", "ref"] });
     // A changed frame tree invalidates the delivered baseline, even when root identities survive.
     expect(attached.mode).toBe("full");
     expect(attached.items.some((item: any) => item.id === root.id)).toBe(true);
@@ -889,8 +886,8 @@ describe("frame tree discovery", () => {
     expect(old.id).toMatch(/^[0-9a-z]+\.ashared-ax$/);
     expect(old.id).not.toBe(root.id);
     runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "replacement-child", targetInfo: { type: "iframe", targetId: "cross" } });
-    await expect(page.inspect({ since: attached.observationId })).rejects.toMatchObject({ code: "stale-observation" });
-    const changed: any = await page.inspect();
+    await expect(page.inspect({ fields: ["text", "state", "ref"], since: attached.observationId })).rejects.toMatchObject({ code: "stale-observation" });
+    const changed: any = await page.inspect({ fields: ["text", "state", "ref"] });
     expect(changed.documentId).toBe(initial.documentId);
     expect(changed.mode).toBe("full");
     expect(changed.items.some((item: any) => item.id === old.id)).toBe(false);
@@ -1120,19 +1117,14 @@ describe("frame tree discovery", () => {
       if (event === "navigation") runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "root" } });
       else runtime.handleEvent({ tabId: 3 }, "Target.detachedFromTarget", { sessionId: "child" });
       release();
-      let text: string;
-      if (mode === "snapshot") text = (await pending as any).snapshot;
-      else {
-        // inspect pins the starting generation, so it rejects instead of
-        // publishing a new document under the old observation's identity.
-        await expect(pending).rejects.toMatchObject({ code: "stale-observation" });
-        const fresh: any = await page.inspect();
-        text = fresh.items.map((item: any) => item.line).join("\n");
-      }
+      const result: any = await pending;
+      const text = mode === "snapshot" ? result.snapshot : result.items.map((item: any) => item.line).join("\n");
+      // Fresh inspect binds the internally verified final capture. Neither
+      // mode can publish the old document under that new observation.
       expect(text).toContain('heading "New document"');
       expect(text).not.toContain('heading "Old document"');
-      expect(rootAX).toBe(mode === "snapshot" ? 2 : 3);
-      expect(rootLayouts).toBe(mode === "snapshot" ? 4 : 6);
+      expect(rootAX).toBe(2);
+      expect(rootLayouts).toBe(4);
     } finally { release(); await runtime.abortSessions(); }
   });
 

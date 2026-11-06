@@ -66,6 +66,7 @@ function harness(
   metadata ??= [{ role: "button", name: "Sign in", tag: "button", text: "Sign in" }];
   const calls: Array<{ method: string; params?: any }> = [];
   let latestState: any = states[0];
+  const scripting = { executeScript: vi.fn(async (): Promise<any[]> => [{ frameId: 0, result: { url: "https://example.test/", title: "Sample", viewport: { x: 0, y: 0, width: 1000, height: 700, scale: 1 }, rows: [{ text: "Independent visible text", depth: 2, bounds: [10, 10, 50, 20] }] } }]) };
   const tabsCreated = event<(tab: chrome.tabs.Tab) => void>();
   const downloadsCreated = event<(item: chrome.downloads.DownloadItem) => void>();
   // The mock AX tree is backed by matching DOM text/layout evidence. AX name
@@ -152,7 +153,7 @@ function harness(
   const detach = vi.fn(async () => undefined);
   const pressChord = vi.fn(async (_debuggee: any, _chord: string, _signal?: AbortSignal) => undefined);
   const runtime = new AutomationRuntime({
-    chromeApi: { tabs: { query: async () => [{ id: 3 }], onCreated: tabsCreated }, downloads: { onCreated: downloadsCreated } } as never,
+    chromeApi: { scripting, tabs: { query: async () => [{ id: 3 }], onCreated: tabsCreated }, downloads: { onCreated: downloadsCreated } } as never,
     command: async (source, method, params) => {
       const response = await command(source, method, params);
       if (method !== "DOMSnapshot.captureSnapshot") return response;
@@ -186,7 +187,7 @@ function harness(
     claimChooser,
     logger: logger as never,
   });
-  return { runtime, calls, command, pressChord, detach, tabsCreated, onDispatch };
+  return { runtime, calls, command, scripting, pressChord, detach, tabsCreated, onDispatch };
 }
 
 function textboxSnapshot(options: { value?: string; text?: string; role?: string; masked?: boolean; properties?: any[]; actions?: string[]; sibling?: boolean; independent?: boolean; logger?: { telemetry: ReturnType<typeof vi.fn> } } = {}) {
@@ -398,6 +399,86 @@ describe("AutomationRuntime", () => {
     expect(reads).toBe(4);
     expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.releaseObjectGroup" && params?.objectGroup?.startsWith("surf-wax-dom-snapshot:"))).toHaveLength(2);
     await runtime.abortSessions();
+  });
+  it("restarts an interrupted DOM control read only when the frame tree changed", async () => {
+    for (const changeFrame of [true, false]) {
+      const { runtime, command } = textboxSnapshot(), original = command.getMockImplementation()!;
+      let interrupted = false;
+      command.mockImplementation(async (source, method, params) => {
+        if (method === "DOMSnapshot.captureSnapshot") {
+          const snapshot = structuredClone(await original(source, method, params));
+          const { nodes, layout } = snapshot.documents[0];
+          nodes.backendNodeId = [1, 7]; nodes.parentIndex = [-1, 0]; nodes.nodeType = [9, 1]; nodes.nodeName = [1, 2]; nodes.nodeValue = [-1, -1];
+          nodes.attributes = [[], [snapshot.strings.push("type") - 1, snapshot.strings.push("checkbox") - 1]];
+          nodes.inputChecked = { index: [] }; nodes.inputValue = { index: [1], value: [snapshot.strings.push("on") - 1] };
+          layout.nodeIndex = layout.nodeIndex.slice(0, 2); layout.bounds = layout.bounds.slice(0, 2);
+          layout.styles = layout.styles.slice(0, 2); layout.text = layout.text.slice(0, 2);
+          return snapshot;
+        }
+        if (method === "Accessibility.getFullAXTree") return { nodes: [{ nodeId: "root", role: { value: "RootWebArea" }, childIds: [] }] };
+        if (method === "DOM.resolveNode" && params?.objectGroup?.startsWith("surf-wax-dom-snapshot:")) {
+          if (!interrupted) {
+            interrupted = true;
+            if (changeFrame) runtime.handleEvent({ tabId: 3 }, "DOM.documentUpdated", {});
+            else throw new Error("control read failed");
+          }
+          return { object: { objectId: "dom-checkbox" } };
+        }
+        if (method === "Runtime.callFunctionOn" && params?.objectId === "dom-checkbox") {
+          const checkedState = { supported: true, radio: false, value: false };
+          if (!params.functionDeclaration.includes("const labels=this.labels")) return { result: { value: checkedState } };
+          return { result: { value: { meta: { connected: true, tag: "input", identityRole: "checkbox", identityName: "" },
+            fillability: { fillable: false, disabled: false, readonly: false, mode: null }, isContentEditable: false,
+            attributes: { type: "checkbox" }, value: "on", checked: false, checkedState, labelCount: 0 } } };
+        }
+        return original(source, method, params);
+      });
+      const page = await runtime.createPage(3);
+      if (changeFrame) expect(await page.inspect()).toMatchObject({ documentId: 1, mode: "full" });
+      else await expect(page.inspect()).rejects.toThrow("control read failed");
+      expect(interrupted).toBe(true);
+      await runtime.abortSessions();
+    }
+  });
+  it.each([true, false])("retries detached DOM controls once and samples only text if they never settle: %s", async (settles) => {
+    const { runtime, command } = textboxSnapshot(), original = command.getMockImplementation()!;
+    let reads = 0;
+    command.mockImplementation(async (source, method, params) => {
+      if (method === "DOMSnapshot.captureSnapshot") {
+        const snapshot = structuredClone(await original(source, method, params));
+        const { nodes, layout } = snapshot.documents[0];
+        nodes.backendNodeId = [1, 7]; nodes.parentIndex = [-1, 0]; nodes.nodeType = [9, 1]; nodes.nodeName = [1, 2]; nodes.nodeValue = [-1, -1];
+        nodes.attributes = [[], [snapshot.strings.push("type") - 1, snapshot.strings.push("checkbox") - 1]];
+        nodes.inputChecked = { index: [] }; nodes.inputValue = { index: [1], value: [snapshot.strings.push("on") - 1] };
+        layout.nodeIndex = layout.nodeIndex.slice(0, 2); layout.bounds = layout.bounds.slice(0, 2);
+        layout.styles = layout.styles.slice(0, 2); layout.text = layout.text.slice(0, 2);
+        return snapshot;
+      }
+      if (method === "Accessibility.getFullAXTree") return { nodes: [{ nodeId: "root", role: { value: "RootWebArea" }, childIds: [] }] };
+      if (method === "DOM.resolveNode" && params?.objectGroup?.startsWith("surf-wax-dom-snapshot:")) return { object: { objectId: "changing-checkbox" } };
+      if (method === "Runtime.callFunctionOn" && params?.objectId === "changing-checkbox") {
+        const checkedState = { supported: true, radio: false, value: false };
+        if (!params.functionDeclaration.includes("const labels=this.labels")) return { result: { value: checkedState } };
+        const changed = ++reads === 1 || !settles;
+        return { result: { value: { meta: { connected: !changed, tag: "input", identityRole: "checkbox", identityName: "" },
+          fillability: { fillable: false, disabled: false, readonly: false, mode: null }, isContentEditable: false,
+          attributes: { type: "checkbox" }, value: "on", checked: false, checkedState, labelCount: 0 } } };
+      }
+      return original(source, method, params);
+    });
+    try {
+      const observed = await (await runtime.createPage(3)).inspect({ fields: ["text", "state", "ref"] }) as any;
+      expect(reads).toBe(2);
+      if (settles) {
+        expect(observed.partial).toBeUndefined();
+        expect(observed.items.some((item: any) => item.ref && item.line.includes("checkbox") && item.line.includes("checked=false"))).toBe(true);
+      } else {
+        expect(observed).toMatchObject({ partial: true, limitations: expect.stringContaining("dom-control-changed-during-capture") });
+        expect(inspectText(observed)).toContain("Independent visible text");
+        expect(observed.items.every((item: any) => !item.ref && !item.line.includes("checked="))).toBe(true);
+      }
+      expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.releaseObjectGroup" && params?.objectGroup?.startsWith("surf-wax-dom-snapshot:"))).toHaveLength(2);
+    } finally { await runtime.abortSessions(); }
   });
   it.each([
     { readings: [8, 9, 9, 9], fails: false },
@@ -2054,7 +2135,7 @@ describe("AutomationRuntime", () => {
       return original(source, method, params);
     });
     const page = await runtime.createPage(3);
-    const result = await page.inspect({ budget: 240 }, page.locator("#large"));
+    const result = await page.inspect({ fields: ["text", "state", "ref"], budget: 240 }, page.locator("#large"));
     expect(result).toMatchObject({ mode: "full", truncation: { truncated: true, total: count + 1 } });
     expect(result.nextCursor).toEqual(expect.any(String));
     await runtime.abortSessions();
@@ -2242,6 +2323,122 @@ describe("AutomationRuntime", () => {
     await runtime.abortSessions();
     const replacement = await (await runtime.createPage(3)).inspect({ fields: ["text", "state", "ref"] });
     expect((replacement.items as any[]).some((item) => item.ref === ref)).toBe(false);
+  });
+
+  it("delivers a complete observation within the inline response limit without an unnecessary continuation", async () => {
+    const metadata = Array.from({ length: 160 }, (_, index) => ({ role: "button", tag: "button", name: `Command ${index}`, text: `Command ${index}` }));
+    const { runtime } = harness(metadata), page = await runtime.createPage(3);
+    try {
+      const result = await page.inspect({ wire: { maxBytes: 16 * 1024, evidenceId: "call" } }) as any;
+      expect(result.truncation).toMatchObject({ truncated: false, baselineComplete: true });
+      expect(result.nextCursor).toBeUndefined();
+      expect(result.items).toHaveLength(161);
+      expect(new TextEncoder().encode(JSON.stringify({ ...result, evidenceId: "call" })).byteLength).toBeLessThanOrEqual(16 * 1024);
+      deliver(result);
+    } finally { await runtime.abortSessions(); }
+  });
+
+  it("binds a fresh inspection and its references to the generation that survived capture", async () => {
+    const { runtime, command } = harness([{ role: "button", name: "Save", tag: "button" }]);
+    const page = await runtime.createPage(3);
+    const original = command.getMockImplementation()!;
+    let changed = false;
+    command.mockImplementation(async (source, method, params) => {
+      const result = await original(source, method, params);
+      if (method === "DOMSnapshot.captureSnapshot" && !changed) {
+        changed = true;
+        runtime.handleEvent({ tabId: 3 }, "Page.frameDetached", { frameId: "background", reason: "remove" });
+      }
+      return result;
+    });
+    const first = await page.inspect({ fields: ["text", "state", "ref"], limit: 1 }) as any;
+    expect(first).toMatchObject({ mode: "full", documentId: 1 });
+    expect(first.nextCursor).toBeTypeOf("string");
+    const second = await page.inspect({ cursor: first.nextCursor }) as any;
+    expect(second.documentId).toBe(1);
+    expect(second.items.find((item: any) => item.ref)?.ref).toMatch(/^t3s[a-f0-9]+d1e/);
+    runtime.handleEvent({ tabId: 3 }, "Page.frameDetached", { frameId: "another", reason: "remove" });
+    await expect(page.inspect({ cursor: first.nextCursor })).rejects.toMatchObject({ code: "stale-observation" });
+    await runtime.abortSessions();
+  });
+
+  it("does not reuse an explicit or automatic baseline across a change during capture", async () => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    const first = await page.inspect() as any;
+    const original = command.getMockImplementation()!;
+    let change = true;
+    command.mockImplementation(async (source, method, params) => {
+      const result = await original(source, method, params);
+      if (method === "DOMSnapshot.captureSnapshot" && change) {
+        change = false;
+        runtime.handleEvent({ tabId: 3 }, "Page.frameDetached", { frameId: "background", reason: "remove" });
+      }
+      return result;
+    });
+    await expect(page.inspect({ since: first.observationId })).rejects.toMatchObject({ code: "stale-observation" });
+    const baseline = await page.inspect({ incremental: true }) as any;
+    expect(baseline.documentId).toBe(1);
+    change = true;
+    const next = await page.inspect({ incremental: true }) as any;
+    expect(next).toMatchObject({ documentId: 2, mode: "full" });
+    expect(next).not.toHaveProperty("baseObservationId");
+    await runtime.abortSessions();
+  });
+
+  it("rejects a frame change after capture has already returned", async () => {
+    const { runtime } = harness();
+    const page = await runtime.createPage(3);
+    const original = (runtime as any).captureReadableSnapshot.bind(runtime);
+    (runtime as any).captureReadableSnapshot = async (...args: any[]) => {
+      const captured = await original(...args);
+      runtime.handleEvent({ tabId: 3 }, "Page.frameDetached", { frameId: "background", reason: "remove" });
+      return captured;
+    };
+    await expect(page.inspect()).rejects.toMatchObject({ code: "stale-observation", detail: { reason: "frame-tree-changed-during-inspection" } });
+    await runtime.abortSessions();
+  });
+
+  it.each(["context-reset", "eviction"])("rejects an explicit baseline lost during capture: %s", async (kind) => {
+    const { runtime } = harness();
+    const page = await runtime.createPage(3);
+    try {
+      const first = await page.inspect() as any;
+      const capture = (runtime as any).captureReadableSnapshot.bind(runtime);
+      vi.spyOn(runtime as any, "captureReadableSnapshot").mockImplementationOnce(async (...args: any[]) => {
+        const result = await capture(...args);
+        if (kind === "context-reset") runtime.resetSnapshotBaselines();
+        else {
+          (runtime as any).inspectionSnapshots.delete(first.observationId);
+          (runtime as any).observations.delete(first.observationId);
+        }
+        return result;
+      });
+      await expect(page.inspect({ since: first.observationId })).rejects.toMatchObject({
+        code: "stale-observation", detail: { reason: "snapshot-baseline-expired-during-inspection" },
+      });
+      expect(await page.inspect({ incremental: true })).toMatchObject({ mode: "full" });
+    } finally { await runtime.abortSessions(); }
+  });
+
+  it("preserves partial status when a fresh inspection adopts a later generation", async () => {
+    const { runtime, command } = harness();
+    const page = await runtime.createPage(3);
+    const originalCommand = command.getMockImplementation()!;
+    let changed = false;
+    command.mockImplementation(async (source, method, params) => {
+      const result = await originalCommand(source, method, params);
+      if (method === "DOMSnapshot.captureSnapshot" && !changed) {
+        changed = true;
+        runtime.handleEvent({ tabId: 3 }, "DOM.documentUpdated", {});
+      }
+      return result;
+    });
+    const capture = (runtime as any).captureReadableSnapshot.bind(runtime);
+    (runtime as any).captureReadableSnapshot = async (...args: any[]) => ({ ...await capture(...args), partial: true, readOnly: true, limitations: "incomplete" });
+    const result = await page.inspect() as any;
+    expect(result).toMatchObject({ documentId: 1, mode: "full", partial: true, limitations: "incomplete", truncation: { baselineComplete: false } });
+    await runtime.abortSessions();
   });
 
   it("rejects all observations from an earlier debugger session even when the tab and document generation are reused", async () => {
@@ -2520,10 +2717,10 @@ describe("AutomationRuntime", () => {
     await runtime.abortSessions();
   });
 
-  it("cannot revive a frozen cursor when compaction occurs during its geometry request", async () => {
+  it.each(["context", "frames"])("cannot revive a frozen cursor when %s changes during its geometry request", async (change) => {
     const { runtime, command } = harness(Array.from({ length: 6 }, (_, index) => ({ role: "button", name: `Row ${index}`, tag: "button" })));
     const page = await runtime.createPage(3);
-    const first = await page.inspect({ limit: 1 }) as any;
+    const first = await page.inspect({ fields: ["text", "state", "ref"], limit: 1 }) as any;
     expect(first.nextCursor).toBeTypeOf("string");
     let enter!: () => void, resume!: () => void;
     const entered = new Promise<void>(resolve => { enter = resolve; });
@@ -2535,13 +2732,68 @@ describe("AutomationRuntime", () => {
     });
     const pending = page.inspect({ cursor: first.nextCursor, limit: 1 });
     await entered;
-    runtime.resetSnapshotBaselines();
+    if (change === "context") runtime.resetSnapshotBaselines();
+    else (runtime as any).invalidateFrames((runtime as any).sessions.get(3));
     resume();
-    await expect(pending).rejects.toMatchObject({ code: "stale-observation", detail: { reason: "snapshot-context-reset" } });
+    await expect(pending).rejects.toMatchObject({ code: "stale-observation", detail: {
+      reason: change === "context" ? "snapshot-context-reset" : "frame-tree-changed-during-inspection",
+    } });
     await expect(page.inspect({ cursor: first.nextCursor })).rejects.toMatchObject({ code: "stale-observation" });
     await expect(page.inspect({ since: first.observationId })).rejects.toMatchObject({ code: "stale-observation" });
     expect(await page.inspect({ incremental: true })).toMatchObject({ mode: "full" });
     await runtime.abortSessions();
+  });
+
+  it.each([false, true])("binds fresh capture to its final frame revision but pins an explicit baseline: %s", async (explicit) => {
+    const { runtime } = harness();
+    const page = await runtime.createPage(3);
+    try {
+      const first = await page.inspect() as any;
+      const session = (runtime as any).sessions.get(3), generation = session.generation;
+      const capture = (runtime as any).captureReadableSnapshot.bind(runtime);
+      vi.spyOn(runtime as any, "captureReadableSnapshot").mockImplementationOnce(async (...args: any[]) => {
+        const captured = await capture(...args);
+        // A restarted capture can finish in a newer frame revision while the
+        // root document generation remains unchanged.
+        (runtime as any).invalidateFrames(session);
+        return { ...captured, frameRevision: session.frameRevision };
+      });
+      const pending = page.inspect(explicit ? { since: first.observationId } : { incremental: true });
+      if (explicit) await expect(pending).rejects.toMatchObject({ code: "stale-observation", detail: { reason: "frame-tree-changed-during-inspection" } });
+      else expect(await pending).toMatchObject({ mode: "full", documentId: generation });
+      expect(session.generation).toBe(generation);
+      await expect(page.inspect({ since: first.observationId })).rejects.toMatchObject({ code: "stale-observation" });
+    } finally { await runtime.abortSessions(); }
+  });
+
+  it("continues a frozen observation across layout changes while refusing stale action-reference pages", async () => {
+    const metadata = [{ role: "button", name: "Historical", text: "Historical", tag: "button" },
+      { role: "button", name: "Other", text: "Other", tag: "button" }];
+    const { runtime, command } = harness(metadata), original = command.getMockImplementation()!;
+    let moved = false;
+    command.mockImplementation(async (source, method, params) => {
+      const result = await original(source, method, params);
+      if (method === "DOMSnapshot.captureSnapshot" && moved) result.documents[0].layout.bounds = result.documents[0].layout.bounds
+        .map((box: number[], index: number) => index ? [box[0]! + 25, ...box.slice(1)] : box);
+      return result;
+    });
+    const page = await runtime.createPage(3);
+    try {
+      const historical = await page.inspect({ limit: 1 }) as any;
+      const referenced = await page.inspect({ fields: ["text", "state", "ref"], limit: 1 }) as any;
+      const captures = () => command.mock.calls.filter(([, method]) => method === "DOMSnapshot.captureSnapshot").length;
+      const before = captures();
+      moved = true; metadata[0]!.name = "Updated"; metadata[0]!.text = "Updated";
+      const continued = await page.inspect({ cursor: historical.nextCursor }) as any;
+      expect(inspectText(continued)).toContain("Historical");
+      expect(inspectText(continued)).not.toContain("Updated");
+      expect(captures()).toBe(before);
+      expect(continued.truncation.baselineComplete).toBe(true);
+      await expect(page.inspect({ cursor: referenced.nextCursor })).rejects.toMatchObject({ code: "stale-observation", detail: { reason: "snapshot-geometry-changed" } });
+      const delta = await page.inspect({ since: historical.observationId }) as any;
+      expect(delta.mode).toBe("delta");
+      expect(delta.items.some((item: any) => item.change === "updated" && item.line.includes("Updated"))).toBe(true);
+    } finally { await runtime.abortSessions(); }
   });
 
   it("rejects out-of-order or stale prepared pages without advancing the frozen baseline", async () => {
@@ -3108,6 +3360,17 @@ describe("AutomationRuntime", () => {
     expect(calls.some(({ method }) => method === "Page.captureScreenshot")).toBe(true);
   });
 
+  it("keeps readable text observations in DOM mode without automatic screenshots", async () => {
+    const { runtime, calls } = harness([{ role: "StaticText", name: "Readable article", text: "Readable article", tag: "span" }]);
+    const page = await runtime.createPage(3);
+    try {
+      const observed = await page.observe() as any;
+      expect(observed.snapshot).toContain("Readable article");
+      expect(observed).not.toHaveProperty("screenshot");
+      expect(calls.some(({ method }) => method === "Page.captureScreenshot")).toBe(false);
+    } finally { await runtime.abortSessions(); }
+  });
+
   it("does not treat a page-supplied reference string as an actionable ref", async () => {
     const { runtime, command, calls } = harness([]);
     const original = command.getMockImplementation()!;
@@ -3471,17 +3734,17 @@ it("retires old same-process descendants when an OOPIF tree arrives before swap/
 });
 
 it("reads and pages a changing document without publishing action refs or a complete baseline", async () => {
-  const { runtime, command } = harness();
+  const { runtime, command, scripting } = harness();
   const original = command.getMockImplementation()!;
   let captures = 0, samples = 0;
   const viewport = { x: 0, y: 0, width: 1000, height: 700, scale: 1 };
+  scripting.executeScript.mockImplementation(async () => {
+    samples++;
+    return [{ frameId: 0, result: { url: "https://example.test/", title: "Sample", viewport, rows: [
+      { text: "Current visible text", depth: 2, bounds: [10, 10, 50, 20] }, { text: "Second visible text", depth: 8, bounds: [10, 40, 50, 20] },
+    ] } }];
+  });
   command.mockImplementation(async (source, method, params) => {
-    if (method === "Runtime.evaluate" && params.expression.includes("surf-wax:read-only-snapshot")) {
-      samples++;
-      return { result: { value: { url: "https://example.test/", title: "Sample", viewport, rows: [
-        { text: "Current visible text", depth: 2 }, { text: "Second visible text", depth: 8 },
-      ] } } };
-    }
     const result = await original(source, method, params);
     if (method === "DOMSnapshot.captureSnapshot") {
       const doc = result.documents[0], strings = result.strings;
@@ -3515,16 +3778,16 @@ it("reads and pages a changing document without publishing action refs or a comp
   } finally { await runtime.abortSessions(); }
 });
 
-it.each(["abort", "detach"] as const)("interrupts a read-only recovery capture on %s without waiting for CDP", async (mode) => {
-  const { runtime, command } = harness();
+it.each(["abort", "detach"] as const)("interrupts a read-only recovery capture on %s without waiting for the injected sample", async (mode) => {
+  const { runtime, command, scripting } = harness();
   const original = command.getMockImplementation()!;
   let captures = 0, started!: () => void, failLate!: (error: Error) => void;
   const fallbackStarted = new Promise<void>((resolve) => { started = resolve; });
+  scripting.executeScript.mockImplementation(async () => {
+    started();
+    return new Promise((_resolve, reject) => { failLate = reject; });
+  });
   command.mockImplementation(async (source, method, params) => {
-    if (method === "Runtime.evaluate" && params.expression.includes("surf-wax:read-only-snapshot")) {
-      started();
-      return new Promise((_resolve, reject) => { failLate = reject; });
-    }
     const result = await original(source, method, params);
     if (method === "DOMSnapshot.captureSnapshot") {
       const doc = result.documents[0], strings = result.strings;
@@ -3542,6 +3805,35 @@ it.each(["abort", "detach"] as const)("interrupts a read-only recovery capture o
       : expect(pending).rejects.toMatchObject({ code: "stale-session" });
     if (mode === "abort") controller.abort(); else runtime.handleDetach({ tabId: 3 });
     await rejected;
-    failLate(new Error("CDP rejected after cancellation"));
+    failLate(new Error("Injection rejected after cancellation"));
+  } finally { await runtime.abortSessions(); }
+});
+
+it("fails an empty read-only recovery without treating a strictly empty page as a failure", async () => {
+  const empty = harness([]);
+  const blank = await empty.runtime.createPage(3);
+  try {
+    const result: any = await blank.inspect();
+    expect(result.items.every((item: any) => !item.line.includes("Sign in"))).toBe(true);
+    expect(result.partial).not.toBe(true);
+  } finally { await empty.runtime.abortSessions(); }
+
+  const { runtime, command, scripting } = harness();
+  const original = command.getMockImplementation()!;
+  let captures = 0;
+  scripting.executeScript.mockResolvedValue([{ frameId: 0, result: { url: "https://example.test/", title: "Sample", viewport: { x: 0, y: 0, width: 1000, height: 700, scale: 1 }, rows: [] } }]);
+  command.mockImplementation(async (source, method, params) => {
+    const result = await original(source, method, params);
+    if (method === "DOMSnapshot.captureSnapshot") {
+      const doc = result.documents[0], strings = result.strings;
+      doc.nodes.attributes[0] = [strings.push("data-revision") - 1, strings.push(String(++captures)) - 1];
+    }
+    return result;
+  });
+  try {
+    const page = await runtime.createPage(3);
+    await expect(page.inspect()).rejects.toMatchObject({ code: "snapshot-unavailable", detail: {
+      reason: "read-only-no-proven-text", after: "dom-unstable", guidance: expect.stringContaining("take_screenshot"),
+    } });
   } finally { await runtime.abortSessions(); }
 });

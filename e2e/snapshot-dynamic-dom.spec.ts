@@ -1,6 +1,8 @@
 import { expect } from "@playwright/test";
 import { test, commandResponse, textResponse, startProvider, openExtension, dispose, configure, type MockResponse } from "./fixtures";
 
+test.use({ screenshot: "off", trace: "off" });
+
 function lastTool(request: any): any {
   const message = request.messages.findLast((entry: any) => entry.role === "tool");
   const content = Array.isArray(message.content) ? message.content.find((part: any) => part.type === "text").text : message.content;
@@ -28,7 +30,7 @@ test("a changing visible clock does not block a stable button or replay its clic
       document.querySelector("#stable")!.addEventListener("click", () => { document.querySelector("#count")!.textContent = `COUNT_${++count}`; });
     });
     responses.push(
-      commandResponse("inspect_page", { budget: 12000 }, "dynamic-inspect"),
+      commandResponse("inspect_page", { budget: 12000, fields: ["text", "state", "ref"] }, "dynamic-inspect"),
       (request) => {
         observed = lastTool(request);
         const stable = lines(observed).find((item) => item.line?.includes('button "Save once"'));
@@ -45,7 +47,7 @@ test("a changing visible clock does not block a stable button or replay its clic
     expect(observed).toMatchObject({ partial: true, items: expect.any(Array) });
     expect(lines(observed).find((item) => item.line?.includes('button "Save once"'))?.ref).toEqual(expect.any(String));
     expect(action).toMatchObject({ ok: true });
-    expect(await target.locator("#count")).toHaveText("COUNT_1");
+    await expect(target.locator("#count")).toHaveText("COUNT_1");
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
@@ -65,7 +67,7 @@ test("a changing external label does not produce a stale actionable button name"
       setInterval(() => { document.querySelector("#label")!.textContent = `LABEL_${String(++tick % 100000).padStart(5, "0")}`; }, 1);
     });
     responses.push(
-      commandResponse("inspect_page", { budget: 12000 }, "dynamic-label-inspect"),
+      commandResponse("inspect_page", { budget: 12000, fields: ["text", "state", "ref"] }, "dynamic-label-inspect"),
       (request) => { observed = lastTool(request); return textResponse("DYNAMIC_LABEL_DONE"); },
       textResponse("Dynamic label"),
     );
@@ -114,7 +116,7 @@ for (const kind of ["native-label", "geometry", "ellipsis", "ellipsis-replace", 
         }, 1);
       }, kind);
       responses.push(
-        commandResponse("inspect_page", { budget: 12000 }, `dynamic-${kind}-inspect`),
+        commandResponse("inspect_page", { budget: 12000, fields: ["text", "state", "ref"] }, `dynamic-${kind}-inspect`),
         (request) => { observed = lastTool(request); return textResponse(`DYNAMIC_${kind}_DONE`); },
         textResponse("Dynamic content"),
       );
@@ -159,7 +161,7 @@ for (const kind of ["native-label", "geometry", "ellipsis", "ellipsis-replace", 
   });
 }
 
-test("a partial snapshot cursor survives dynamic text replacement but expires on static geometry changes", async () => {
+test("a partial action-reference cursor survives dynamic text replacement but expires on static geometry changes", async () => {
   test.setTimeout(90_000);
   const responses: MockResponse[] = [], provider = await startProvider(responses), opened = await openExtension();
   let first: any, continuation: any, action: any, stale: any;
@@ -178,7 +180,7 @@ test("a partial snapshot cursor survives dynamic text replacement but expires on
       document.querySelector("#move")!.addEventListener("click", () => { document.querySelector<HTMLElement>("#anchor")!.style.marginLeft = "80px"; });
     });
     responses.push(
-      commandResponse("inspect_page", { budget: 12000, limit: 2 }, "dynamic-page-first"),
+      commandResponse("inspect_page", { fields: ["text", "state", "ref"], budget: 12000, limit: 2 }, "dynamic-page-first"),
       (request) => { first = lastTool(request); return commandResponse("inspect_page", { cursor: first?.nextCursor ?? "missing", budget: 12000, limit: 2 }, "dynamic-page-next"); },
       (request) => { continuation = lastTool(request); return commandResponse("click", { target: { by: "css", value: "#move" } }, "dynamic-page-move"); },
       (request) => { action = lastTool(request); return commandResponse("inspect_page", { cursor: first?.nextCursor ?? "missing", budget: 12000, limit: 2 }, "dynamic-page-stale"); },

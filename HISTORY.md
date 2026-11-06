@@ -142,11 +142,19 @@
 
 ### 快照复用布局证据并保留语义边界
 
-2026-11-07 的实现复用语义观察中同一次 DOMSnapshot 的几何，按各文档视口 CSS 像素表达包围盒。布局以实测几何而非 DOM 顺序表达，不自动根据已知名称推断“恰好两个”或全局唯一性，避免未知、部分名称及缺失几何造成误判；包围盒不代表保证可操作的坐标，不同框架的坐标不互相比较。布局写入快照行，参与增量比较；严格语义快照的续页仍通过既有几何校验，动态页面的只读采样继续遵循其独立的冻结续页规则。该呈现过程不新增截图或模型调用。
+2026-11-07 的实现复用语义观察中同一次 DOMSnapshot 的几何，按各文档视口 CSS 像素表达包围盒。布局以实测几何而非 DOM 顺序表达，不自动根据已知名称推断“恰好两个”或全局唯一性，避免未知、部分名称及缺失几何造成误判；包围盒不代表保证可操作的坐标，不同框架的坐标不互相比较。布局写入快照行，参与增量比较；续页是否重新校验当前几何取决于观察是否暴露操作引用，具体规则见下文。该呈现过程不新增截图或模型调用。
 
 精简呈现只折叠无独立信息的中性结构；可确认重复的完整标签将文字片段及其可用几何折入父行，而不是丢弃片段，因此浅层观察仍保有标签，片段之间或相对图像的移动也能进入增量。折叠须确认原始片段拼接可还原完整标签，并保留片段边界空白，使几何不变的文字变化仍可被检测。片段排列只表示结构顺序，不冒充视觉阅读顺序。独立交互、状态、匿名图像、格式及不确定内容保留，零尺寸不能作为删除可见溢出交互容器的依据。DOM 补充控件的标签聚合以已表达的 AX 节点为边界，避免祖先重复收集后代的语义。
 
 来源：当前实现见 `src/chrome/snapshot-layout.ts`、`src/chrome/snapshot-presentation.ts`、`src/chrome/automation.ts`、`src/chrome/snapshot-render.ts`。
+
+### 重复叶子共享呈现，目标仍独立
+
+2026-11-07 的实现将连续的同父级叶子按已提取字段和文档坐标范围合并呈现，折叠中性结构后仍保留原始父级边界，不推断业务分组或视觉顺序。重复行使用 `count` 和 `boxes` 表达已采集行数及每个包围盒；等差的盒子可用起点、`step` 和数量表示，其他盒子逐个列出。相邻文字叶子则保留各自的文字与几何片段。单子节点路径可共用一个传输 item，正文仍逐行保留每个节点及其缩进，不用新别名代替节点。默认不输出操作引用；显式请求 `ref` 或 `actions` 时展开原来的独立节点，引用仍按节点、文档及运行校验。合并行以首个节点的行 ID 参与快照增量；成员变化、分组拆合按重新呈现后的行比较。
+
+可折叠空白的文字边界优先使用同次 DOMSnapshot 的 text box 偏移与 CSS 空白模式作为证据；有裁剪或文字绘制投影时不把这份边界证据直接套用到投影结果。没有可靠边界证据时，不把源码缩进当作已绘制的标签片段。普通文本行的归一化不会把非断行空格当作普通可折叠空白。保留格式的文字使用 Chrome 捕获的转换后拼写；自包含的 `pre-line` 文字可在空白序列一致时保留换行，不依赖默认语言的大小写转换来猜测字符偏移。
+
+来源：当前实现见 `src/chrome/snapshot-repeat.ts`、`src/chrome/snapshot-preformatted.ts`、`src/chrome/snapshot-dom.ts`、`src/chrome/automation.ts`。
 
 ### 截图与语义观察独立
 
@@ -154,13 +162,19 @@
 
 截图记录文档、视口、像素尺寸、缩放和裁剪原点；目标裁剪使用根文档坐标，全页裁剪使用文档尺寸。采集后复核视口和裁剪几何，前后测得的几何不一致、目标消失或实际图像宽高无法按一致比例映射到声明范围时拒绝结果，不虚构缺失的像素尺寸；后续像素坐标操作还需匹配原视口，并落在当前可见视口内。
 
-来源：2026-11-04 的实现决策，见 `src/chrome/automation.ts`、`src/chrome/executor.ts`、`src/chrome/tool.ts`。
+2026-11-07 自动观察按展开后的语义内容判断是否需要截图：存在可读 DOM 文字或有效操作引用时，不因默认输出省略引用而自动截图。明确请求视觉观察仍走独立截图路径；没有可用语义内容的自动观察仍可能截图。该判断不把部分快照提升为完整观察。
 
-### 分页基于冻结观察，变化后重新检查
+来源：2026-11-04、2026-11-07 的实现决策，见 `src/chrome/automation.ts`、`src/chrome/executor.ts`、`src/chrome/tool.ts`。
+
+### 分页基于冻结观察，操作引用校验当前几何
 
 2026-11-01 至 02 日完善快照分页：长行可以跨页续读，`nextCursor` 延续同一次冻结观察；滚动、布局或可见性变化使续页失效时，应重新检查。`lookahead` 只提供稀疏预览，没有可操作元素引用，不能作为完整正文或完整基线。预算按解码后的 UTF-8 JSON 字节计算。
 
-来源：[`ba2baea`](https://github.com/notCorwin/SurfWax/commit/ba2baea)、[`567f320`](https://github.com/notCorwin/SurfWax/commit/567f320)、[`398fac4`](https://github.com/notCorwin/SurfWax/commit/398fac4)，当前说明见 `src/chrome/tool.ts`。
+2026-11-07 进一步区分纯观察与操作引用：未暴露元素操作引用的续页只读取同一次历史冻结结果，不因后来滚动或布局变化重新采集，不能当作当前视口状态。包含操作引用的观察在续页前仍确认当前几何；文档、会话、框架修订、运行归属变化，或上下文重置、记录失效，均使旧续页失效。
+
+新检查可绑定内部重采后最终验证的文档代次与框架修订，丢弃旧的隐式增量基线；显式 `since` 始终固定原基线，采集中任一身份修订变化都拒绝，不静默改成新文档的全量结果。
+
+来源：[`ba2baea`](https://github.com/notCorwin/SurfWax/commit/ba2baea)、[`567f320`](https://github.com/notCorwin/SurfWax/commit/567f320)、[`398fac4`](https://github.com/notCorwin/SurfWax/commit/398fac4)，当前实现与说明见 `src/chrome/automation.ts`、`src/chrome/tool.ts`。
 
 ### 动态区域的不确定性显式输出
 
@@ -168,17 +182,51 @@
 
 来源：[`9c04c78`](https://github.com/notCorwin/SurfWax/commit/9c04c78)、[`a2ce5f8`](https://github.com/notCorwin/SurfWax/commit/a2ce5f8)、[`a49c713`](https://github.com/notCorwin/SurfWax/commit/a49c713)。
 
+### HEAD 变化需要补齐绘制证据后重新采集
+
+2026-11-07 只把没有布局的普通 HEAD 脚本及源码变化识别为补充证据的候选，不能直接忽略这些变化：`:has(...)` 等规则仍可能改变页面绘制。遇到此候选时，在现有恢复预算内升级为浏览器提供的完整标准计算属性目录，重新采集和呈现；目录不包含自定义属性，依赖 `paint()` 的变化不据此放行。属性目录请求在运行时去重复用，所选采集 profile 绑定文档代次，文档变化后重置；操作引用的续页几何检查沿用原观察的 profile。
+
+宽松接受前，独立确认 AX、最终 DOM、完整样式与几何，并重新读取实际用于文字投影的实时绘制证据。绘制复核按共享 snapshot 对象去重，每个 debugger target 只处理一次；逐帧 AX 检查仍独立保留。使用完整 profile 时，还检查已布局且被判可见的普通文字，拒绝未覆盖的 `::first-line`、`::first-letter`、选区、Highlight 或 view transition 风险。完整目录仅覆盖布局行，不能证明没有布局行的 SVG 渐变、滤镜、mask、clipPath 等资源不变；存在这些资源时，不走 HEAD 松绑。这里的完整指已实现的采集契约，不承诺任意 CSS 绘制下全部肉眼可见内容均已覆盖。
+
+区域检查过滤无关文档前，先按原始文档数组验证 `contentDocumentIndex`；过滤后重映射保留的文档边，避免把原来合法的子帧索引误判为越界。客户端水合使控件在采集中脱离时，只在现有稳定恢复预算内整体重采；普通读取错误不转为重试，持续变化继续明确失败或按已有规则返回只读局部采样。
+
+来源：`src/chrome/automation.ts`、`src/chrome/snapshot-consistency.ts`、`src/chrome/snapshot-text-paint.ts`。
+
+### 相同捕获颜色表示可见性未确认
+
+2026-11-07 对严格快照中已捕获文字填充色与最近非透明祖先背景色的序列化值相同的情况，只检测为合成可见性不确定；检测也包含 CSS Color 4 和半透明颜色，不据此推断合成后的颜色或文字隐藏。背景图、非祖先绘制、选区或描边仍可能使文字可见，因此不能仅按颜色相同删除节点，也不能继续把其 DOM 或 AX 文字称为可见标签。保留未知名称与已采集几何，相关结果标记 `partial=true` 并说明局限；未确认名称的行不提供操作引用。已确认的其他文字仍可保留。
+
+这项检测不等于实现通用对比度或像素可见性判定。动态网站的只读局部结果也不因此成为完整观察；取得 Polymarket 的部分标题、名称与赔率，只证明对应采样中确认的文字，不能代表全部市场内容、控件状态或嵌入文档已读完。
+
+来源：`src/chrome/snapshot-visibility.ts`、`src/chrome/snapshot-text-paint.ts`、`src/chrome/automation.ts`。
+
 ### 动态页面读取与操作引用分离
 
 2026-11-04 本次实现中的决策：全页语义快照因 DOM 或文字绘制持续变化而无法通过一致性检查时，允许从一次同步 DOM 读取中只读采样根视口的可确认文字，同时记录当次视口与 DOM 层级。采样保守检查样式、伪元素、裁剪及潜在遮挡，不拼接随后读取的无障碍名称或控件状态，省略嵌入文档、绘制证据不确定的文字和全部操作引用，并以 `partial=true`、`limitations` 明确其范围和局限；不能将其作为完整观察证据或增量基线。局部区域检查及操作定位继续使用严格一致性校验。
 
 只读续页复用该次冻结采样，不因页面后续布局变化重新采集；文档、会话、frame 树或运行归属变化后失效。后续动作通过 `find_elements` 获取引用，或使用专用读取与截图工具补充观察。
 
-来源：2026-11-04 的实现决策，见 `src/chrome/snapshot-readable.ts` 及 `src/chrome/automation.ts` 的 `captureReadableSnapshot`、`inspect`。
+2026-11-07 将采样改为扩展隔离世界中的静态同步函数，利用扩展 API 检查 closed shadow 与顶层弹层的潜在遮挡，保留每条确认文字的根视口包围盒。零条可确认文字明确返回采样失败；不能将空采样或只含导航的局部结果视为主要内容已读完，也不能凭 DOM 中存在文字补足绘制证据。
+
+来源：2026-11-04、2026-11-07 的实现决策，见 `src/chrome/snapshot-readable-source.js`、`src/chrome/snapshot-readable.ts` 及 `src/chrome/automation.ts` 的 `captureReadableSnapshot`、`inspect`。
+
+### 只读可见性证明按绘制来源建立边界
+
+2026-11-07 的只读采样分别处理盒子的背景、边框与阴影，以及每个直接文字节点的 Range 几何；不把后代文字并入父盒子的前景遮挡，也不跨文字片段用一个大矩形填满空隙。可证明的几何中性变换与二维平移仍保留其堆叠上下文作用；只有确认不绘制的隐藏或透明空伪元素才可排除。
+
+外阴影的有限上界依据已核对的 Chrome 156 Blink 实现建立，不宣称 CSS 规范规定了通用模糊边界：`sigma = blur / 2`，外延以 `ceil(3 * sigma) + spread` 为基础，始终包含原盒子，负 spread 不缩小保守上界。另加 `2 * max(1, 1 / DPR)` 余量以覆盖 CSS 布局与设备像素对齐的舍入；这份余量来自实现与几何推导，未通过读取截图像素验证。不满足已证明样式、变换条件的阴影继续视为未知绘制。
+
+HTML 定位祖先的 overflow 裁剪可约束后代绘制，但不裁掉该祖先自身的阴影或轮廓。扩张性 filter 等效果可使内层界限失效，更外层的已证明裁剪可重新建立界限；fixed、`foreignObject`、SVG `use` 等逃逸关系保持未知。SVG 自身已证明的视口裁剪优先于较粗的祖先裁剪。文字落在圆角裁剪内的判断使用实际使用半径与凸几何；可证明的分数 padding 边界直接按布局计算，避免 `clientWidth` 向下取整误删可见文字。
+
+颜色由浏览器在离屏纯色 swatch 上解析和合成，支持 CSS Color 4；不读取页面像素，也不执行截图。透明度保留解析后的精确 alpha，不能因 ImageData 量化而把微小非零遮挡当作透明。只有背景纯色及其半透明叠加已获证明时才确认文字与背景有差异，背景图、内阴影等未知绘制不提供这项证明。字体仍在加载、活动 view transition、同色文字或无法排除的前景装饰均不输出为确认文字。
+
+异步 IntersectionObserver v2 的结果未纳入同步采样：真实 CSSOM 竞态与目标自身遮挡反例不能由旧回调证明当前文字可见。同 z-index 绘制顺序推断和 SVG `getBBox` 绘制重建也未接入。客户端水合在采集中替换控件时，严格采集共享现有的一次稳定重采预算；普通读取错误继续明确失败，不引入站点专用回退。局部采样的范围与完整性限制继续生效，不能把偶尔取得主要文字视为动态网站已完整验收。
+
+来源：`src/chrome/snapshot-readable-source.js`、`src/chrome/automation.ts`；Chrome `156.0.8078.80` 的 [ShadowData](https://chromium.googlesource.com/chromium/src/+/refs/tags/156.0.8078.80/third_party/blink/renderer/core/style/shadow_data.cc)、[ShadowList](https://chromium.googlesource.com/chromium/src/+/refs/tags/156.0.8078.80/third_party/blink/renderer/core/style/shadow_list.cc)、[Skia 绘制辅助代码](https://chromium.googlesource.com/chromium/src/+/refs/tags/156.0.8078.80/third_party/blink/renderer/platform/graphics/skia/skia_utils.cc)及 [BoxPainterBase](https://chromium.googlesource.com/chromium/src/+/refs/tags/156.0.8078.80/third_party/blink/renderer/core/paint/box_painter_base.cc)。
 
 ### 简化模型收到的快照编码
 
-2026-11-02 删除快照行字典及额外输出编码实现，简化模型可见协议；不再要求模型通过这些中间编码重建快照正文。
+2026-11-02 删除快照行字典及当时的额外输出编码实现，简化模型可见协议；不再要求模型通过这些中间编码重建快照正文。2026-11-07 的重复叶子呈现重新引入局部 `step`/`count` 几何编码，需按上述规则展开盒子；这不恢复原先的快照行字典。
 
 来源：[`42daad1`](https://github.com/notCorwin/SurfWax/commit/42daad1)。
 

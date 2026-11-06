@@ -1,4 +1,4 @@
-import { quote } from "./automation-utils";
+import { normalizeSnapshotText } from "./snapshot-preformatted";
 
 export type SnapshotField = "text" | "state" | "ref" | "actions";
 export type SnapshotStateName = "checked" | "disabled" | "expanded" | "pressed" | "selected" | "required" | "readonly" | "editable" | "masked";
@@ -12,6 +12,9 @@ export type SnapshotNode = Readonly<{
   name?: string;
   /** Preserve proven preformatted whitespace in already-visible text rows. */
   preserveTextWhitespace?: boolean;
+  /** Static text boundaries established by captured CSS and DOMSnapshot evidence.
+   * Unproven text must not be folded verbatim as a label fragment. */
+  textWhitespaceProven?: true;
   nameUnknown?: boolean;
   /** Frozen layout evidence in this document's viewport CSS pixels. */
   bounds?: SnapshotBounds;
@@ -66,7 +69,7 @@ export function renderSnapshotNode(
     && fragments[0]!.bounds!.every((value, index) => value === node.bounds![index]);
   const visibleName = fragments?.length === 1 ? `${JSON.stringify(fragments[0]!.text)}${sameBounds ? "" : ` [text-box=${fragments[0]!.bounds ? box(fragments[0]!.bounds!) : "unknown"}]`}`
     : fragments?.length ? `[text-parts=${fragments.map((fragment) => `${JSON.stringify(fragment.text)} @(${fragment.bounds ? box(fragment.bounds) : "unknown"})`).join("; ")}]`
-    : name ? node.preserveTextWhitespace ? JSON.stringify(name) : quote(name) : "";
+    : name ? node.preserveTextWhitespace || node.textWhitespaceProven ? JSON.stringify(name) : JSON.stringify(normalizeSnapshotText(name)) : "";
   let line = `${"  ".repeat(node.depth)}- ${node.role}${fields.has("text") && visibleName ? ` ${visibleName}` : ""}`;
   if (fields.has("text") && node.nameUnknown) line += " [name=unknown]";
   if (fields.has("text") && node.role === "RootWebArea" && node.layoutScope) line += " [coordinates=frame-viewport]";
@@ -88,7 +91,7 @@ export function renderSnapshotNode(
   if (fields.has("text") && node.valueUnknown) line += " [value=unknown]";
   if (fields.has("text") && node.placeholder?.status === "unknown") line += " [placeholder=unknown]";
   else if (fields.has("text") && node.placeholder?.status === "visible" && node.placeholder.text !== name)
-    line += ` [placeholder=${quote(node.placeholder.text)}]`;
+    line += ` [placeholder=${JSON.stringify(node.placeholder.text)}]`;
   if (fields.has("text") && node.selectedLabels?.length) line += ` [selected=${node.selectedLabels.map((label) => JSON.stringify(label)).join(",")}]`;
   return { id: node.id, line, ...(fields.has("ref") && node.ref ? { ref: node.ref } : {}) };
 }

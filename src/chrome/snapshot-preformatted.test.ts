@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createPreformattedTextCollector } from "./snapshot-preformatted";
+import { createPreformattedTextCollector, normalizeSnapshotText } from "./snapshot-preformatted";
 
 function fixture(mode: string, source = "A    B\nC", rendered = source) {
   const strings = ["root", "#document", "#text", source, rendered, "none", mode];
@@ -46,15 +46,15 @@ describe("preformatted snapshot text evidence", () => {
     },
   );
 
-  it("rejects ambiguous layout rows and transformed or masked text", () => {
+  it("rejects ambiguous layout rows and masked text while preserving transformed layout text", () => {
     const repeated = fixture("pre");
     repeated.documents[0]!.layout.nodeIndex.push(1);
     repeated.documents[0]!.layout.styles.push(repeated.documents[0]!.layout.styles[1]!.slice());
     repeated.documents[0]!.layout.text.push(4);
     expect(collect(repeated).size).toBe(0);
-    const transformed = fixture("pre");
+    const transformed = fixture("pre", "a  b", "A  B");
     transformed.strings.push("uppercase"); transformed.documents[0]!.layout.styles[1]![25] = transformed.strings.length - 1;
-    expect(collect(transformed).size).toBe(0);
+    expect(collect(transformed).get(2)).toEqual({ source: "A  B", text: "A  B" });
     const masked = fixture("pre");
     masked.strings.push("disc"); masked.documents[0]!.layout.styles[1]![26] = masked.strings.length - 1;
     expect(collect(masked).size).toBe(0);
@@ -68,5 +68,76 @@ describe("preformatted snapshot text evidence", () => {
     const outOfOrder = fixture("pre"), document = outOfOrder.documents[0]!;
     const collector = createPreformattedTextCollector(outOfOrder.strings, document.nodes, document.layout);
     expect(() => collector.observe(1, false)).toThrow("Invalid DOM snapshot layout row");
+  });
+
+  it("uses text box offsets to distinguish indentation, boundary spaces and soft wrapping", () => {
+    const get = (source: string, boxes: Array<[number, number]>, mode = "normal") => {
+      const snapshot = fixture(mode, source), document = snapshot.documents[0]!;
+      const textBoxes = { layoutIndex: boxes.map(() => 1), start: boxes.map(([start]) => start), length: boxes.map(([, length]) => length),
+        bounds: boxes.map(() => [0, 0, 10, 10]) };
+      const collector = createPreformattedTextCollector(snapshot.strings, document.nodes, document.layout, textBoxes);
+      document.layout.nodeIndex.forEach((_, row) => collector.observe(row, false));
+      return collector.painted.get(2);
+    };
+    expect(get("\n    1\n  ", [[5, 1]])?.text).toBe("1");
+    expect(get("Save  ", [[0, 5]])?.text).toBe("Save ");
+    expect(get(" changes", [[1, 7]])?.text).toBe("changes");
+    expect(get("A B C", [[0, 1], [2, 1], [4, 1]])?.text).toBe("A B C");
+    expect(get("   ", [[0, 1]])?.text).toBe(" ");
+    expect(get("A\u00a0 B", [[0, 4]])?.text).toBe("A\u00a0 B");
+    expect(normalizeSnapshotText(" \u00a0  A\tB \u00a0 ")).toBe("\u00a0 A B \u00a0");
+    // No proof if a non-collapsible character or glyph is omitted, or the
+    // offsets are malformed. Raw evidence must remain available to callers.
+    expect(get("A\u00a0B", [[0, 1], [2, 1]])).toBeUndefined();
+    expect(get("abc", [[0, 1], [2, 1]])).toBeUndefined();
+    expect(get("abc", [[0, 4]])).toBeUndefined();
+  });
+
+  it("reconstructs pre-line newlines from their zero-width text boxes", () => {
+    const source = " A  B \n C ", snapshot = fixture("pre-line", source), document = snapshot.documents[0]!;
+    const textBoxes = { layoutIndex: [1, 1, 1, 1], start: [1, 4, 6, 8], length: [2, 1, 1, 1],
+      bounds: [[0, 0, 10, 10], [10, 0, 10, 10], [20, 0, 0, 10], [0, 10, 10, 10]] };
+    const collector = createPreformattedTextCollector(snapshot.strings, document.nodes, document.layout, textBoxes);
+    document.layout.nodeIndex.forEach((_, row) => collector.observe(row, false));
+    expect(collector.painted.get(2)).toEqual({ source, text: "A B\nC", preformatted: true });
+    textBoxes.start[2] = 7; // A missing preserved newline is not proof.
+    const incomplete = createPreformattedTextCollector(snapshot.strings, document.nodes, document.layout, textBoxes);
+    document.layout.nodeIndex.forEach((_, row) => incomplete.observe(row, false));
+    expect(incomplete.painted.has(2)).toBe(false);
+  });
+
+  it("preserves transformed generated text after an empty pseudo geometry row", () => {
+    const snapshot = fixture("pre", "", "   E"), document = snapshot.documents[0]!;
+    document.nodes.nodeType[1] = 1;
+    Object.assign(document.nodes, { nodeName: [-1, snapshot.strings.push("::first-letter") - 1] });
+    document.layout.nodeIndex.splice(1, 0, 1);
+    document.layout.text.splice(1, 0, -1);
+    document.layout.styles.splice(1, 0, document.layout.styles[1]!.slice());
+    const transform = snapshot.strings.push("uppercase") - 1;
+    document.layout.styles[2]![25] = transform;
+    expect(collect(snapshot).get(2)).toEqual({ source: "   E", text: "   E" });
+  });
+
+  it("maps Unicode case expansion only when it reproduces the captured complete layout text", () => {
+    const snapshot = fixture("normal", "a ß ", "A SS "), document = snapshot.documents[0]!;
+    document.layout.styles[1]![25] = snapshot.strings.push("uppercase") - 1;
+    const collector = createPreformattedTextCollector(snapshot.strings, document.nodes, document.layout,
+      { layoutIndex: [1], start: [0], length: [5], bounds: [[0, 0, 50, 18]] });
+    document.layout.nodeIndex.forEach((_, row) => collector.observe(row, false));
+    expect(collector.painted.get(2)?.text).toBe("A SS ");
+    const preLine = fixture("pre-line", "aa ß\nbb", "AA SS\nBB");
+    preLine.documents[0]!.layout.styles[1]![25] = preLine.strings.push("uppercase") - 1;
+    expect(collect(preLine).get(2)?.text).toBe("AA SS\nBB");
+  });
+
+  it.each([
+    ["uppercase", "ii i\nbb", "İİ İ\nBB"],
+    ["capitalize", "aa b\ncc", "Aa B\nCc"],
+  ])("preserves pre-line breaks independently of %s character offsets", (transform, source, rendered) => {
+    const snapshot = fixture("pre-line", source, rendered);
+    snapshot.documents[0]!.layout.styles[1]![25] = snapshot.strings.push(transform) - 1;
+    expect(collect(snapshot).get(2)?.text).toBe(rendered);
+    snapshot.strings[4] = rendered.replace(" ", "\u3000");
+    expect(collect(snapshot).has(2)).toBe(false);
   });
 });

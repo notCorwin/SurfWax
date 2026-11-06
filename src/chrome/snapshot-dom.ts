@@ -1,5 +1,5 @@
 import { createSnapshotDomIndex, type SnapshotDomIndex } from "./snapshot-dom-index";
-import { createPreformattedTextCollector, type PreformattedText } from "./snapshot-preformatted";
+import { createPreformattedTextCollector } from "./snapshot-preformatted";
 
 /** Visible DOM evidence from a single CDP DOMSnapshot capture. IDs are scoped
  * to the frame and debugger target that produced the capture. */
@@ -11,6 +11,9 @@ export type SnapshotDomEvidence = Readonly<{
   nodeIndex: number;
   kind: "text" | "control";
   text?: string;
+  /** Text boundaries are backed by captured layout rather than source indentation. */
+  textWhitespaceProven?: true;
+  preserveTextWhitespace?: true;
   tag?: string;
   attributes?: Readonly<Record<string, string>>;
   /** Raw value is private capture evidence for identity checks, not output. */
@@ -48,13 +51,12 @@ export type SnapshotDomOptions = Readonly<{
  * alone does not imply its descendant text is covered: only pass identities
  * whose equivalent information was actually emitted.
  */
-export function snapshotDomSupplement(snapshot: any, options: SnapshotDomOptions): { items: SnapshotDomEvidence[]; indexes: Map<string, SnapshotDomIndex>; preformatted: Map<string, Map<number, PreformattedText>> } {
+export function snapshotDomSupplement(snapshot: any, options: SnapshotDomOptions): { items: SnapshotDomEvidence[]; indexes: Map<string, SnapshotDomIndex> } {
   if (!Array.isArray(snapshot?.documents) || !Array.isArray(snapshot?.strings)) throw new Error("Invalid DOM snapshot");
   const strings: string[] = snapshot.strings;
   const stringAt = (index: unknown): string | undefined => Number.isSafeInteger(index) && Number(index) >= 0 ? strings[Number(index)] : undefined;
   const result: SnapshotDomEvidence[] = [];
   const indexes = new Map<string, SnapshotDomIndex>();
-  const preformatted = new Map<string, Map<number, PreformattedText>>();
   for (const document of snapshot.documents) {
     const frameId = stringAt(document.frameId);
     if (!frameId) throw new Error("DOM snapshot missing frame identity");
@@ -66,7 +68,7 @@ export function snapshotDomSupplement(snapshot: any, options: SnapshotDomOptions
     const domIndex = createSnapshotDomIndex(nodes);
     indexes.set(frameId, domIndex);
     const layouts = new Map<number, number[]>();
-    const collector = createPreformattedTextCollector(strings, nodes, layout);
+    const collector = createPreformattedTextCollector(strings, nodes, layout, document.textBoxes);
     for (let i = 0; i < layout.nodeIndex.length; i++) {
       const index = layout.nodeIndex[i];
       if (!Number.isSafeInteger(index) || index < 0 || index >= nodes.backendNodeId.length) throw new Error("Invalid DOM snapshot layout index");
@@ -74,7 +76,6 @@ export function snapshotDomSupplement(snapshot: any, options: SnapshotDomOptions
       collector.observe(i, existing !== undefined);
       const rows = existing ?? []; rows.push(i); layouts.set(index, rows);
     }
-    preformatted.set(frameId, collector.result);
     // Propagate painted descendants upward once, without walking a deep
     // ancestor chain separately for every layout node.
     const hasVisibleLayoutDescendant = new Uint8Array(nodes.backendNodeId.length);
@@ -201,7 +202,10 @@ export function snapshotDomSupplement(snapshot: any, options: SnapshotDomOptions
         // Source nodeValue may contain characters that were not painted.
         const full = fragments.join("");
         const projection = options.textProjections?.get(backendNodeId);
-        let text = projection?.text ?? full;
+        const painted = !projection ? collector.painted.get(backendNodeId) : undefined;
+        const formatted = !projection ? collector.result.get(backendNodeId) : undefined;
+        const proof = painted?.source === full ? painted : formatted?.source === full ? { ...formatted, preformatted: true } : undefined;
+        let text = projection?.text ?? proof?.text ?? full;
         if (projection && full !== projection.full) {
           const prefix = full && projection.full.endsWith(full) ? projection.full.slice(0, -full.length) : "";
           // Only accept a prefix proven by a visible ::first-letter in this
@@ -212,7 +216,8 @@ export function snapshotDomSupplement(snapshot: any, options: SnapshotDomOptions
             throw new Error("DOM text paint projection does not match layout text");
           text = text.slice(prefix.length);
         }
-        if (text) result.push({ ...base, kind: "text", text });
+        if (text) result.push({ ...base, kind: "text", text, ...(proof ? { textWhitespaceProven: true as const } : {}),
+          ...(proof?.preformatted ? { preserveTextWhitespace: true as const } : {}) });
         continue;
       }
       const tag = nodeName?.toLowerCase();
@@ -242,5 +247,5 @@ export function snapshotDomSupplement(snapshot: any, options: SnapshotDomOptions
       });
     }
   }
-  return { items: result, indexes, preformatted };
+  return { items: result, indexes };
 }

@@ -64,6 +64,19 @@ describe("DOM snapshot visible supplementary evidence", () => {
     expect(evidence.find(({ backendNodeId }) => backendNodeId === 15)).toMatchObject({ checked: true, value: "on", parentBackendNodeId: 11, nodeIndex: 5 });
   });
 
+  it("returns proven painted boundaries without applying them to a projected string", () => {
+    const snapshot = fixture(), doc = snapshot.documents[0]!;
+    const add = (value: string) => snapshot.strings.push(value) - 1;
+    const raw = "\n  Save \n ";
+    doc.nodes.nodeValue[2] = add(raw); doc.layout.text[2] = doc.nodes.nodeValue[2]!;
+    const style = Array<number>(33).fill(add("none")); style[32] = add("normal"); doc.layout.styles[2] = style;
+    Object.assign(doc, { textBoxes: { layoutIndex: [2], start: [3], length: [5], bounds: [[0, 0, 35, 10]] } });
+    const options = { frameId: "outer", visibility: new Map([[12, true]]), covered: new Set<number>() };
+    expect(snapshotDomSupplement(snapshot, options)[0]).toMatchObject({ text: "Save ", textWhitespaceProven: true });
+    expect(snapshotDomSupplement(snapshot, { ...options, textProjections: new Map([[12, { full: raw, text: "Save" }]]) })[0])
+      .toEqual(expect.not.objectContaining({ textWhitespaceProven: true }));
+  });
+
   it("never returns a node without a positive visibility decision or layout, and supports a different frame", () => {
     const snapshot = fixture();
     snapshot.documents[1]!.layout.nodeIndex = [0, 1, 2];

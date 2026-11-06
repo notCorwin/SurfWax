@@ -9,13 +9,15 @@ import { selectSnapshotWirePage, SnapshotWireError, SNAPSHOT_DELIVERY_COMMIT, ty
 import { renderSnapshotNode, type SnapshotNode, type SnapshotStateName } from "./snapshot-render";
 import { snapshotBounds } from "./snapshot-layout";
 import { compactSnapshot } from "./snapshot-presentation";
+import { expandSnapshot, packSnapshot, renderSnapshotLine } from "./snapshot-repeat";
 import { stitchSnapshotFrames, type SnapshotLine } from "./snapshot-frame-tree";
 import { snapshotDomSupplement, type SnapshotDomEvidence } from "./snapshot-dom";
+import { normalizeSnapshotText } from "./snapshot-preformatted";
 import { createSnapshotDomIndex } from "./snapshot-dom-index";
 import { snapshotRenderOrder } from "./snapshot-render-order";
 import { snapshotSlottedNodes } from "./snapshot-slot-index";
-import { READABLE_SNAPSHOT_SOURCE, readableSnapshot, type ReadableSnapshot } from "./snapshot-readable";
-import { changedTextNodes, sameDOMSnapshot } from "./snapshot-consistency";
+import { sampleReadableSnapshot, readableSnapshot } from "./snapshot-readable";
+import { changedTextNodes, hasUnrenderedHeadSourceChange, sameDOMSnapshot } from "./snapshot-consistency";
 import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility, type SnapshotClip, type SnapshotFrameOwner, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
 import { projectTextPaint, sameTextPaintCandidates, TEXT_PAINT_CACHE_LOOKUP_SOURCE, TEXT_PAINT_CACHE_REGISTER_SOURCE, type TextPaintEvidence } from "./snapshot-text-paint";
 import { axEllipsisCandidate, confirmAxEllipsis, type AxEllipsisCandidate } from "./snapshot-ax-ellipsis";
@@ -60,7 +62,7 @@ type InspectSnapshot = {
   id: string; session: Session; generation: number; frameRevision: number; conversationId?: string; runId?: string;
   record: ObservationRecord; source: SnapshotItem[]; mode: "full" | "delta"; reset?: string;
   expected?: SnapshotPosition; eligibleForBaseline: boolean; baseObservationId?: string; delivery?: symbol;
-  geometry: string; geometrySources: Debuggee[]; geometryDynamicParents?: Map<string, Set<number>>;
+  geometry: string; geometrySources: Debuggee[]; geometryStyles: readonly string[]; geometryDynamicParents?: Map<string, Set<number>>;
 };
 
 function dynamicTextNodes(snapshot: any, parents: ReadonlySet<number> | undefined): Set<number> {
@@ -148,6 +150,7 @@ type Session = {
   rootLifecycle?: { frameId: string; loaderId: string; initializedAt: number; domContentLoaded: boolean; load: boolean };
   rootFrameId?: string;
   lastSnapshot?: SnapshotLine[];
+  snapshotStyleProfile?: { generation: number; computedStyles: readonly string[] };
 };
 
 type Candidate = { role: string; name: string; tag?: string; text?: string; ref?: string; backendNodeId?: number; debuggee?: Debuggee; roleTruncated?: boolean; nameTruncated?: boolean; identityUnavailable?: boolean };
@@ -491,6 +494,7 @@ export class AutomationRuntime {
   private readonly searches = new Map<string, SearchSnapshot>();
   private readonly frameLists = new Map<string, FrameListSnapshot>();
   private readonly frameDocuments = new Map<string, FrameDocument>();
+  private completeStyleCatalog?: Promise<readonly string[]>;
 
   private waitDiagnostic() { return this.lastWait; }
 
@@ -861,6 +865,7 @@ export class AutomationRuntime {
 
   private invalidate(session: Session, preserveChooser = false): void {
     session.generation += 1;
+    delete session.snapshotStyleProfile;
     // Document references still expire, but a child navigation must not
     // rename unrelated frames. Retire scopes no longer represented by the
     // current frame/target graph and never recycle their numbers.
@@ -990,7 +995,9 @@ export class AutomationRuntime {
         ...(detail === "visual" ? {} : { snapshot: captured.lines.map(({ line }) => line).join("\n"), ...(captured.partial ? { partial: true } : {}), ...(captured.limitations ? { limitations: captured.limitations } : {}), ...(changes ? { changes } : {}),
           ...(previous && captured.partial ? { reset: "current-output-partial" } : previous?.partial ? { reset: "previous-output-partial" } : {}) }),
       };
-      if (detail === "visual" || detail === "auto" && !captured.lines.some(({ ref }) => Boolean(ref))) {
+      const hasSemanticContent = expandSnapshot(captured.lines).some(({ ref, node }) => ref
+        || node && node.role !== "RootWebArea" && (node.name?.trim() || node.textFragments?.some(({ text }) => text.trim())));
+      if (detail === "visual" || detail === "auto" && !hasSemanticContent) {
         const { target, fullPage, hires, ...options } = captureOptions;
         const readClip = async () => {
           let clip = options.clip;
@@ -1086,12 +1093,18 @@ export class AutomationRuntime {
         for (const ref of options.recentRefs ?? []) this.touchRef(session, ref);
         this.pruneRefs(session, region);
       }
-      const generation = session.generation;
+      let generation = session.generation;
+      let frameRevision = session.frameRevision;
       const signal = this.context.signal;
       const conversationId = this.context.conversationId, runId = this.context.logIdentity?.runId ?? this.context.runId;
+      let requiredBaseline: InspectSnapshot | undefined;
       const guard = () => {
         throwIfAborted(signal);
         if (this.sessions.get(tabId) !== session || session.generation !== generation) throw automationError("stale-observation", { reason: "document-or-session-changed" });
+        if (session.frameRevision !== frameRevision) throw automationError("stale-observation", { reason: "frame-tree-changed-during-inspection" });
+        if (requiredBaseline && (this.inspectionSnapshots.get(requiredBaseline.id) !== requiredBaseline
+          || this.observations.get(requiredBaseline.id) !== requiredBaseline.record))
+          throw automationError("stale-observation", { observationId: requiredBaseline.id, reason: "snapshot-baseline-expired-during-inspection" });
       };
       guard();
       let saved: InspectSnapshot;
@@ -1106,9 +1119,12 @@ export class AutomationRuntime {
           || this.observations.get(snapshot.id) !== snapshot.record)
           throw automationError("stale-observation", { reason: "expired-or-mismatched-cursor" });
         saved = snapshot;
-        if (!saved.record.readOnly) {
+        // No-ref pages continue the same historical observation. Only exposed
+        // action references require current geometry before another page is
+        // delivered; document, frame and run ownership remain pinned above.
+        if (saved.record.lines.some(({ ref }) => Boolean(ref))) {
           const currentGeometry = await Promise.all(saved.geometrySources.map(async (debuggee) => ({ debuggee,
-            snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true, includePaintOrder: true }) })));
+            snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...saved.geometryStyles], includeDOMRects: true, includePaintOrder: true }) })));
           guard();
           if (await snapshotGeometry(currentGeometry, saved.geometryDynamicParents) !== saved.geometry)
             throw automationError("stale-observation", { reason: "snapshot-geometry-changed" });
@@ -1129,23 +1145,37 @@ export class AutomationRuntime {
             // Old refs may be retired by this capture. diffSnapshot emits every
             // replacement ref, so only the newly captured result must be live.
             && this.deliveredBaselines.has(snapshot.record))?.record : undefined;
-        const previous = options.since ? this.observations.get(options.since) : automatic;
+        let previous = options.since ? this.observations.get(options.since) : automatic;
         const pinned = options.since ? this.inspectionSnapshots.get(options.since) : undefined;
         if (options.since && (!previous || !pinned || pinned.conversationId !== conversationId || pinned.runId !== runId
           || pinned.frameRevision !== session.frameRevision || previous.session !== session || previous.tabId !== tabId || previous.documentId !== generation || previous.scopeKey !== scopeKey))
           throw automationError("stale-observation", { observationId: options.since, reason: "document-or-scope-changed" });
+        if (options.since) requiredBaseline = pinned;
         const captured = await this.captureReadableSnapshot(session, region);
-        guard();
+        throwIfAborted(signal);
+        if (this.sessions.get(tabId) !== session) throw automationError("stale-observation", { reason: "document-or-session-changed" });
         if (captured.frameRevision !== session.frameRevision) throw automationError("stale-observation", { reason: "frame-tree-changed-during-inspection" });
+        // Capture can restart after a child frame or document change. A fresh
+        // inspection belongs to the verified final revision, not necessarily
+        // the generation present before capture began. Explicit baselines
+        // remain pinned; implicit baselines are discarded on either revision.
+        if (options.since) guard();
+        else if (generation !== session.generation || frameRevision !== session.frameRevision) {
+          generation = session.generation; frameRevision = session.frameRevision; previous = undefined;
+        }
         if (previous && previous.documentId !== session.generation) throw automationError("stale-observation", { observationId: options.since, reason: "document-changed-during-inspection" });
         if (options.since && previous && previous.regionIdentity !== captured.regionIdentity) throw automationError("stale-observation", { observationId: options.since, reason: "region-identity-changed" });
-        const lines: SnapshotLine[] = captured.lines.filter(() => !captured.readOnly || fields.includes("text")).filter(({ node, line }) => options.depth === undefined || (node?.depth ?? (line.match(/^ */)?.[0].length ?? 0) / 2) <= options.depth)
-          .map(({ id, line, node }) => {
+        const independent = fields.includes("ref") || fields.includes("actions");
+        const sourceLines = independent || options.depth !== undefined ? expandSnapshot(captured.lines) : captured.lines;
+        const filtered = sourceLines.filter(() => !captured.readOnly || fields.includes("text")).filter(({ node, line }) => options.depth === undefined || (node?.depth ?? (line.match(/^ */)?.[0].length ?? 0) / 2) <= options.depth);
+        const lines: SnapshotLine[] = (options.depth !== undefined && !independent ? packSnapshot(filtered) : filtered)
+          .map((row) => {
+            const { id, line, node } = row;
             if (!node) return { id, line };
             const owned = fields.includes("ref") && node.ref ? `t${tabId}s${session.token}d${generation}${node.ref}` : undefined;
             const refRecord = node.ref ? session.refs.get(node.ref) : undefined;
             if (owned && refRecord) session.refs.set(owned, refRecord);
-            const rendered = renderSnapshotNode({ ...node, ...(owned ? { ref: owned } : {}) }, { fields, actionNames: "program", inlineRef: false });
+            const rendered = renderSnapshotLine({ ...row, node: { ...node, ...(owned ? { ref: owned } : {}) } }, { fields, actionNames: "program", inlineRef: false });
             return { id, line: rendered.line, ...(rendered.ref ? { ref: rendered.ref } : {}) };
           });
         const viewport = captured.viewport ?? await this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})") as ObservationRecord["viewport"];
@@ -1161,13 +1191,13 @@ export class AutomationRuntime {
         position = { index, charOffset: 0 };
         const record: ObservationRecord = { session, observationId, tabId, documentId: generation, ...captured, lines, viewport, scopeKey, incomplete: true };
         this.rememberObservation(record);
-        saved = { id: observationId, session, generation, frameRevision: captured.frameRevision, conversationId, runId, record, source, mode: changes ? "delta" : "full", ...(changes ? { baseObservationId: baseline!.observationId } : {}), geometry: captured.geometry, geometrySources: captured.geometrySources, geometryDynamicParents: captured.geometryDynamicParents,
+        saved = { id: observationId, session, generation, frameRevision: captured.frameRevision, conversationId, runId, record, source, mode: changes ? "delta" : "full", ...(changes ? { baseObservationId: baseline!.observationId } : {}), geometry: captured.geometry, geometrySources: captured.geometrySources, geometryStyles: captured.geometryStyles, geometryDynamicParents: captured.geometryDynamicParents,
           ...(captured.partial && previous ? { reset: "current-output-partial" } : previous?.partial ? { reset: "previous-output-partial" } : previous?.incomplete ? { reset: "previous-output-truncated" } : {}), expected: position, eligibleForBaseline: index === 0 && !captured.partial };
         this.inspectionSnapshots.set(saved.id, saved);
         while (this.inspectionSnapshots.size > 32) this.inspectionSnapshots.delete(this.inspectionSnapshots.keys().next().value!);
       }
       guard();
-      const budget = options.budget ?? 12000;
+      const budget = options.budget ?? options.wire?.maxBytes ?? 12000;
       const advances = Boolean(saved.expected && saved.expected.index === position.index && saved.expected.charOffset === position.charOffset);
       const envelope = (candidate: SnapshotWirePage): Record<string, unknown> => {
         const { page } = candidate;
@@ -3371,6 +3401,121 @@ export class AutomationRuntime {
     return { guard, waitForCapture };
   }
 
+  /** Read current paint through shared, document-bound weak handles. */
+  private async readFrameTextPaint(session: Session, frame: FrameRefRecord, list: readonly SnapshotTextPaintCandidate[], frameGuard: () => void): Promise<Map<number, TextPaintEvidence>> {
+    const debuggee = frame.debuggee, frameId = frame.frameId;
+    const paintEvidence = new Map<number, TextPaintEvidence>();
+    const documentObjectId = await this.frameDocument(session, frame, frameGuard);
+    const frameKey = JSON.stringify([session.tabId, frameId, debuggee.sessionId ?? null]);
+    const document = this.frameDocuments.get(frameKey);
+    if (!document) throw automationError("stale-frame", { reason: "text-paint-context-expired" });
+    const contextId = document?.executionContextId;
+    if (!Number.isSafeInteger(contextId)) throw automationError("snapshot-unavailable", { reason: "missing-text-paint-context", frameId });
+    const paintGuard = () => {
+      frameGuard();
+      if (this.frameDocuments.get(frameKey) !== document) throw automationError("stale-frame", { reason: "text-paint-context-expired" });
+    };
+    // Serialize access to this frame's cache. Concurrent captures
+    // reuse the first capture's weak handles, and aborting a queued
+    // capture still returns immediately via waitForCapture.
+    const previous = document.paintCacheTail ?? Promise.resolve();
+    let releaseQueue!: () => void;
+    const ticket = new Promise<void>((resolve) => { releaseQueue = resolve; });
+    const tail = previous.then(() => ticket, () => ticket);
+    document.paintCacheTail = tail;
+    const objectGroup = `surf-wax-text-paint:${crypto.randomUUID()}`;
+    let dispatched = false;
+    try {
+      await previous;
+      paintGuard();
+      const applyEvidence = (candidate: SnapshotTextPaintCandidate, evidence: TextPaintEvidence) => {
+        paintEvidence.set(candidate.backendNodeId, evidence);
+      };
+      const validate = (response: any, count: number): Array<TextPaintEvidence | null> => {
+        const values = response?.result?.value;
+        if (response?.exceptionDetails) {
+          const detail = String(response.exceptionDetails.exception?.description ?? response.exceptionDetails.text ?? "");
+          if (/text-paint node detached/i.test(detail)) throw new Error("Text-paint node detached during capture");
+          throw automationError("snapshot-unavailable", { reason: "text-paint-analysis-failed", detail });
+        }
+        if (!Array.isArray(values) || values.length !== count)
+          throw automationError("snapshot-unavailable", { reason: "missing-text-paint-evidence" });
+        return values;
+      };
+      const missing: SnapshotTextPaintCandidate[] = [];
+      if (document.paintCacheWarm) {
+        for (let offset = 0; offset < list.length; offset += 256) {
+          paintGuard();
+          const batch = list.slice(offset, offset + 256);
+          const cacheable = batch.filter((candidate) => candidate.kind !== "pseudo");
+          missing.push(...batch.filter((candidate) => candidate.kind === "pseudo"));
+          if (!cacheable.length) continue;
+          const response = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: documentObjectId,
+            arguments: [{ value: document.paintCacheToken }, { value: cacheable.map(({ backendNodeId }) => backendNodeId) }],
+            functionDeclaration: TEXT_PAINT_CACHE_LOOKUP_SOURCE, returnByValue: true });
+          paintGuard();
+          const evidence = validate(response, cacheable.length);
+          for (let index = 0; index < cacheable.length; index++) {
+            if (evidence[index] === null) missing.push(cacheable[index]!);
+            else applyEvidence(cacheable[index]!, evidence[index]!);
+          }
+        }
+      } else for (const candidate of list) missing.push(candidate);
+      for (let offset = 0; offset < missing.length; offset += 32) {
+        paintGuard();
+        const batch = missing.slice(offset, offset + 32);
+        dispatched = true;
+        // Settle every dispatched resolution before releasing the
+        // group: a late success must not recreate a released group.
+        const resolved = await Promise.allSettled(batch.map((candidate) => this.options.command(debuggee, "DOM.resolveNode", {
+          backendNodeId: candidate.backendNodeId, executionContextId: contextId, objectGroup,
+        })));
+        paintGuard();
+        const failed = resolved.find((result): result is PromiseRejectedResult => result.status === "rejected");
+        if (failed) throw failed.reason;
+        const handles = resolved.map((result, index) => {
+          const objectId = (result as PromiseFulfilledResult<any>).value.object?.objectId;
+          if (typeof objectId !== "string") throw automationError("snapshot-unavailable", { reason: "missing-text-paint-node" });
+          return { candidate: batch[index]!, objectId };
+        });
+        const response = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: documentObjectId,
+          arguments: [{ value: document.paintCacheToken }, { value: batch.map(({ backendNodeId }) => backendNodeId) },
+            ...handles.map(({ objectId }) => ({ objectId }))], functionDeclaration: TEXT_PAINT_CACHE_REGISTER_SOURCE, returnByValue: true });
+        paintGuard();
+        const evidence = validate(response, handles.length);
+        for (let index = 0; index < handles.length; index++) {
+          if (evidence[index] === null) throw automationError("snapshot-unavailable", { reason: "missing-text-paint-evidence" });
+          applyEvidence(handles[index]!.candidate, evidence[index]!);
+        }
+      }
+      document.paintCacheWarm = true;
+    } finally {
+      releaseQueue();
+      if (document.paintCacheTail === tail) delete document.paintCacheTail;
+      if (dispatched) await this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup }).catch(() => undefined);
+    }
+    return paintEvidence;
+  }
+
+  /** Standard property support is fixed for this browser process. Share the
+   * inventory request, while keeping profile selection document-bound. */
+  private snapshotCompleteStyleCatalog(session: Session): Promise<readonly string[]> {
+    if (this.completeStyleCatalog) return this.completeStyleCatalog;
+    const pending = this.options.chromeApi.scripting.executeScript({ target: { tabId: session.tabId, frameIds: [0] }, world: "ISOLATED",
+      func: () => Array.from(getComputedStyle(document.documentElement)).filter((name) => !name.startsWith("--")),
+    }).then((injected) => {
+      const names = injected.length === 1 && injected[0]?.frameId === 0 ? injected[0].result : undefined;
+      if (!Array.isArray(names) || names.length <= SNAPSHOT_COMPUTED_STYLES.length
+        || names.some((name) => typeof name !== "string" || !/^-?[a-z][a-z0-9-]*$/.test(name))
+        || new Set(names).size !== names.length || !["background-image", "font-family", "outline-width"].every((name) => names.includes(name)))
+        throw automationError("snapshot-unavailable", { reason: "complete-style-catalog-unavailable" });
+      return Object.freeze([...new Set<string>([...SNAPSHOT_COMPUTED_STYLES, ...names])]);
+    });
+    this.completeStyleCatalog = pending;
+    void pending.catch(() => { if (this.completeStyleCatalog === pending) this.completeStyleCatalog = undefined; });
+    return pending;
+  }
+
   private async captureReadableSnapshot(session: Session, region?: LocatorSpec): Promise<Awaited<ReturnType<AutomationRuntime["captureSnapshot"]>> & { readOnly?: true; limitations?: string; viewport?: ObservationRecord["viewport"] }> {
     const { guard, waitForCapture } = this.captureWaiter(session, this.context.signal);
     try { return await this.captureSnapshot(session, region); }
@@ -3378,24 +3523,42 @@ export class AutomationRuntime {
       // Scope-specific inspection and action resolution retain strict identity
       // checks. Only a whole-page read can become a root-viewport text sample.
       if (region || !(error instanceof AutomationError) || error.code !== "snapshot-unavailable"
-        || !["dom-unstable", "text-paint-unstable", "dynamic-text-unstable", "text-paint-node-unstable"].includes(String(error.detail.reason))) throw error;
+        || !["dom-unstable", "text-paint-unstable", "dynamic-text-unstable", "text-paint-node-unstable", "dom-control-changed-during-capture"].includes(String(error.detail.reason))) throw error;
       guard();
       const generation = session.generation, frameRevision = session.frameRevision;
-      const sample = await waitForCapture(this.pageValue(session.tabId, `(${READABLE_SNAPSHOT_SOURCE})()`)) as ReadableSnapshot;
+      let injected: chrome.scripting.InjectionResult<ReturnType<typeof sampleReadableSnapshot>>[];
+      try {
+        injected = await waitForCapture(this.options.chromeApi.scripting.executeScript({
+          target: { tabId: session.tabId, frameIds: [0] }, world: "ISOLATED", func: sampleReadableSnapshot,
+        }));
+      } catch (cause) {
+        guard();
+        if (this.sessions.get(session.tabId) !== session || session.generation !== generation || session.frameRevision !== frameRevision)
+          throw automationError("stale-observation", { reason: "document-or-frame-changed-during-read" });
+        throw automationError("snapshot-unavailable", { reason: "read-only-sampling-unavailable", after: error.detail.reason,
+          guidance: "The extension could not inspect this page safely. Retry when stable, use read_elements, or take_screenshot.",
+          detail: cause instanceof Error ? cause.message : String(cause) });
+      }
       guard();
+      const sample = injected.length === 1 && injected[0]?.frameId === 0 ? injected[0].result : null;
       let lines: SnapshotLine[];
-      try { lines = readableSnapshot(sample); }
-      catch { throw error; }
+      try { lines = readableSnapshot(sample!); }
+      catch { throw automationError("snapshot-unavailable", { reason: "read-only-sampling-unavailable", after: error.detail.reason,
+        guidance: "The extension could not inspect this page safely. Retry when stable, use read_elements, or take_screenshot." }); }
       const ready = await waitForCapture(this.pageValue(session.tabId, "document.readyState === 'complete'"));
       guard();
       if (!ready || this.sessions.get(session.tabId) !== session || session.generation !== generation || session.frameRevision !== frameRevision)
         throw automationError("stale-observation", { reason: "document-or-frame-changed-during-read" });
+      if (!lines.length) throw automationError("snapshot-unavailable", {
+        reason: "read-only-no-proven-text", after: error.detail.reason,
+        guidance: "No visible text could be confirmed in the read-only viewport sample. Retry when the page is stable, use read_elements for a scoped read, or take_screenshot for visual content.",
+      });
       const limitations = `Read-only root viewport text sampled in one synchronous DOM read after ${error.detail.reason}. Generated/shadow content, embedded documents, uncertain paint, control state and action refs are omitted. Depth uses DOM ancestry. This is incomplete evidence. Use find_elements for action refs, read_elements for scoped reads, or take_screenshot for visual content.`;
-      return { url: sample.url, title: sample.title, viewport: sample.viewport, lines, frameRevision, geometry: "", geometrySources: [], partial: true, readOnly: true, limitations };
+      return { url: sample!.url, title: sample!.title, viewport: sample!.viewport, lines, frameRevision, geometry: "", geometrySources: [], geometryStyles: [], partial: true, readOnly: true, limitations };
     }
   }
 
-  private async captureSnapshot(session: Session, region?: LocatorSpec): Promise<{ url: string; title: string; lines: SnapshotLine[]; frameRevision: number; regionIdentity?: string; geometry: string; geometrySources: Debuggee[]; geometryDynamicParents?: Map<string, Set<number>>; partial?: true }> {
+  private async captureSnapshot(session: Session, region?: LocatorSpec): Promise<{ url: string; title: string; lines: SnapshotLine[]; frameRevision: number; regionIdentity?: string; geometry: string; geometrySources: Debuggee[]; geometryStyles: readonly string[]; geometryDynamicParents?: Map<string, Set<number>>; partial?: true; limitations?: string }> {
     const signal = this.context.signal;
     const frameContext = { conversationId: this.context.conversationId, runId: this.context.logIdentity?.runId ?? this.context.runId };
     const { guard, waitForCapture } = this.captureWaiter(session, signal);
@@ -3404,12 +3567,14 @@ export class AutomationRuntime {
     // live page keep changing. This does not limit subsequent agent actions.
     let dynamicRecoveryPasses = 0;
     let speculativeDynamic = false;
-    const retryDynamicCapture = () => {
-      if (++dynamicRecoveryPasses > 8) throw automationError("snapshot-unavailable", { reason: "dynamic-text-unstable" });
+    const retryDynamicCapture = (reason = "dynamic-text-unstable") => {
+      if (++dynamicRecoveryPasses > 8) throw automationError("snapshot-unavailable", { reason });
       if (!retriedUnstableCapture) speculativeDynamic = true;
       retriedUnstableCapture = true;
     };
     const dynamicTextByTarget = new Map<string, Set<number>>();
+    let computedStyles: readonly string[] = session.snapshotStyleProfile?.generation === session.generation
+      ? session.snapshotStyleProfile.computedStyles : SNAPSHOT_COMPUTED_STYLES;
     let retryGeneration: number | undefined, retryFrameRevision: number | undefined;
     while (true) {
       guard();
@@ -3426,6 +3591,7 @@ export class AutomationRuntime {
         await delay(50, signal); continue;
       }
       const generation = session.generation, frameRevision = session.frameRevision;
+      if (session.snapshotStyleProfile?.generation !== generation) computedStyles = SNAPSHOT_COMPUTED_STYLES;
       if (retryGeneration !== generation || retryFrameRevision !== frameRevision) {
         retryGeneration = generation; retryFrameRevision = frameRevision; retriedUnstableCapture = false; speculativeDynamic = false; dynamicTextByTarget.clear();
       }
@@ -3700,14 +3866,15 @@ export class AutomationRuntime {
       let initialLayouts: Array<{ debuggee: Debuggee; snapshot: any }> = [];
       const recoverDetachedText = async (): Promise<void> => {
         const next = await waitForCapture(Promise.all(initialLayouts.map(async ({ debuggee }) => ({ debuggee,
-          snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true, includePaintOrder: true }) }))));
+          snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...computedStyles], includeDOMRects: true, includePaintOrder: true }) }))));
         if (changed()) return;
         let valid = true, found = false;
         const observed = new Map<string, Set<number>>();
+        const styleEvidence = computedStyles === SNAPSHOT_COMPUTED_STYLES ? undefined : { completeStyleCatalog: computedStyles };
         for (let i = 0; i < initialLayouts.length; i++) {
           const before = initialLayouts[i]!, after = next[i]!;
-          if (sameDOMSnapshot(before.snapshot, after.snapshot)) continue;
-          const ids = changedTextNodes(before.snapshot, after.snapshot);
+          if (sameDOMSnapshot(before.snapshot, after.snapshot, undefined, styleEvidence)) continue;
+          const ids = changedTextNodes(before.snapshot, after.snapshot, undefined, styleEvidence);
           if (!ids) { valid = false; break; }
           found = true; observed.set(before.debuggee.sessionId ?? "", ids);
         }
@@ -3736,7 +3903,7 @@ export class AutomationRuntime {
         const captureLayout = async (debuggee: Debuggee): Promise<Layout> => {
           if (debuggee.sessionId) await session.frameReady.get(debuggee.sessionId);
           frameGuard();
-          return { debuggee, snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true, includePaintOrder: true }) };
+          return { debuggee, snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...computedStyles], includeDOMRects: true, includePaintOrder: true }) };
         };
         const selectRegionFrames = async (layouts: Layout[], allowCapture: boolean) => {
           if (!regionNode || !regionDebuggee) return { frameId: undefined, selected: frames };
@@ -3962,6 +4129,10 @@ export class AutomationRuntime {
             const paintEvidence = new Map<number, TextPaintEvidence>();
             const byFrame = new Map<string, SnapshotTextPaintCandidate[]>();
             for (const candidate of candidates) {
+              if (candidate.sameColorBackground) {
+                unknownText.add(candidate.backendNodeId);
+                continue;
+              }
               if (unknownText.has(candidate.backendNodeId)) {
                 // Paint proof for this changing text cannot be sampled
                 // reliably. Its dependent names remain unknown, but the
@@ -3980,99 +4151,15 @@ export class AutomationRuntime {
               }
               const frame: FrameRefRecord = { frameId, debuggee, generation, revision: frameRevision,
                 conversationId: this.context.conversationId, runId: this.context.logIdentity?.runId };
-              const documentObjectId = await this.frameDocument(session, frame, frameGuard);
-              const frameKey = JSON.stringify([session.tabId, frameId, debuggee.sessionId ?? null]);
-              const document = this.frameDocuments.get(frameKey);
-              if (!document) throw automationError("stale-frame", { reason: "text-paint-context-expired" });
-              const contextId = document?.executionContextId;
-              if (!Number.isSafeInteger(contextId)) throw automationError("snapshot-unavailable", { reason: "missing-text-paint-context", frameId });
-              const paintGuard = () => {
-                frameGuard();
-                if (this.frameDocuments.get(frameKey) !== document) throw automationError("stale-frame", { reason: "text-paint-context-expired" });
-              };
-              // Serialize access to this frame's cache. Concurrent captures
-              // reuse the first capture's weak handles, and aborting a queued
-              // capture still returns immediately via waitForCapture.
-              const previous = document.paintCacheTail ?? Promise.resolve();
-              let releaseQueue!: () => void;
-              const ticket = new Promise<void>((resolve) => { releaseQueue = resolve; });
-              const tail = previous.then(() => ticket, () => ticket);
-              document.paintCacheTail = tail;
-              const objectGroup = `surf-wax-text-paint:${crypto.randomUUID()}`;
-              let dispatched = false;
-              try {
-                await previous;
-                paintGuard();
-                const applyEvidence = (candidate: SnapshotTextPaintCandidate, evidence: TextPaintEvidence) => {
-                  paintEvidence.set(candidate.backendNodeId, evidence);
-                  const projection = projectTextPaint(candidate, evidence);
-                  if (projection?.hidden) visibility.set(candidate.backendNodeId, false);
-                  else if (projection?.text !== undefined && typeof candidate.layoutText === "string")
-                    textProjections.set(candidate.backendNodeId, { full: (candidate.firstLetter ?? "") + candidate.layoutText, text: projection.text });
-                  else if (!projection) unknownText.add(candidate.backendNodeId);
-                };
-                const validate = (response: any, count: number): Array<TextPaintEvidence | null> => {
-                  const values = response?.result?.value;
-                  if (response?.exceptionDetails) {
-                    const detail = String(response.exceptionDetails.exception?.description ?? response.exceptionDetails.text ?? "");
-                    if (/text-paint node detached/i.test(detail)) throw new Error("Text-paint node detached during capture");
-                    throw automationError("snapshot-unavailable", { reason: "text-paint-analysis-failed", detail });
-                  }
-                  if (!Array.isArray(values) || values.length !== count)
-                    throw automationError("snapshot-unavailable", { reason: "missing-text-paint-evidence" });
-                  return values;
-                };
-                const missing: SnapshotTextPaintCandidate[] = [];
-                if (document.paintCacheWarm) {
-                  for (let offset = 0; offset < list.length; offset += 256) {
-                    paintGuard();
-                    const batch = list.slice(offset, offset + 256);
-                    const cacheable = batch.filter((candidate) => candidate.kind !== "pseudo");
-                    missing.push(...batch.filter((candidate) => candidate.kind === "pseudo"));
-                    if (!cacheable.length) continue;
-                    const response = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: documentObjectId,
-                      arguments: [{ value: document.paintCacheToken }, { value: cacheable.map(({ backendNodeId }) => backendNodeId) }],
-                      functionDeclaration: TEXT_PAINT_CACHE_LOOKUP_SOURCE, returnByValue: true });
-                    paintGuard();
-                    const evidence = validate(response, cacheable.length);
-                    for (let index = 0; index < cacheable.length; index++) {
-                      if (evidence[index] === null) missing.push(cacheable[index]!);
-                      else applyEvidence(cacheable[index]!, evidence[index]!);
-                    }
-                  }
-                } else for (const candidate of list) missing.push(candidate);
-                for (let offset = 0; offset < missing.length; offset += 32) {
-                  paintGuard();
-                  const batch = missing.slice(offset, offset + 32);
-                  dispatched = true;
-                  // Settle every dispatched resolution before releasing the
-                  // group: a late success must not recreate a released group.
-                  const resolved = await Promise.allSettled(batch.map((candidate) => this.options.command(debuggee, "DOM.resolveNode", {
-                    backendNodeId: candidate.backendNodeId, executionContextId: contextId, objectGroup,
-                  })));
-                  paintGuard();
-                  const failed = resolved.find((result): result is PromiseRejectedResult => result.status === "rejected");
-                  if (failed) throw failed.reason;
-                  const handles = resolved.map((result, index) => {
-                    const objectId = (result as PromiseFulfilledResult<any>).value.object?.objectId;
-                    if (typeof objectId !== "string") throw automationError("snapshot-unavailable", { reason: "missing-text-paint-node" });
-                    return { candidate: batch[index]!, objectId };
-                  });
-                  const response = await this.options.command(debuggee, "Runtime.callFunctionOn", { objectId: documentObjectId,
-                    arguments: [{ value: document.paintCacheToken }, { value: batch.map(({ backendNodeId }) => backendNodeId) },
-                      ...handles.map(({ objectId }) => ({ objectId }))], functionDeclaration: TEXT_PAINT_CACHE_REGISTER_SOURCE, returnByValue: true });
-                  paintGuard();
-                  const evidence = validate(response, handles.length);
-                  for (let index = 0; index < handles.length; index++) {
-                    if (evidence[index] === null) throw automationError("snapshot-unavailable", { reason: "missing-text-paint-evidence" });
-                    applyEvidence(handles[index]!.candidate, evidence[index]!);
-                  }
-                }
-                document.paintCacheWarm = true;
-              } finally {
-                releaseQueue();
-                if (document.paintCacheTail === tail) delete document.paintCacheTail;
-                if (dispatched) await this.options.command(debuggee, "Runtime.releaseObjectGroup", { objectGroup }).catch(() => undefined);
+              const measured = await this.readFrameTextPaint(session, frame, list, frameGuard);
+              for (const candidate of list) {
+                const evidence = measured.get(candidate.backendNodeId)!;
+                paintEvidence.set(candidate.backendNodeId, evidence);
+                const projection = projectTextPaint(candidate, evidence);
+                if (projection?.hidden) visibility.set(candidate.backendNodeId, false);
+                else if (projection?.text !== undefined && typeof candidate.layoutText === "string")
+                  textProjections.set(candidate.backendNodeId, { full: (candidate.firstLetter ?? "") + candidate.layoutText, text: projection.text });
+                else if (!projection) unknownText.add(candidate.backendNodeId);
               }
             }));
             return { debuggee, visibility, partialFrames, textProjections, unknownText, paintEvidence, candidates, snapshot };
@@ -4446,7 +4533,6 @@ export class AutomationRuntime {
             }
           }
         }
-        const preformatted = evidence.preformatted.get(frameId)!;
         const domIndex = evidence.indexes.get(frameId);
         if (!domIndex) throw automationError("snapshot-unavailable", { reason: "missing-dom-frame", frameId });
         const { positions, subtreeRange: visibleRange } = snapshotRenderOrder(domIndex, doc.nodes.nodeName, snapshot.strings);
@@ -4472,6 +4558,7 @@ export class AutomationRuntime {
         frameEvidence.sort((a, b) => positions.get(a.backendNodeId)! - positions.get(b.backendNodeId)!);
         const evidenceText = frameEvidence.filter((item) => item.kind === "text");
         const evidenceTextById = new Map(evidenceText.map((item) => [item.backendNodeId, item.text ?? ""]));
+        const evidenceTextItemsById = new Map(evidenceText.map((item) => [item.backendNodeId, item]));
         const textOffsets: number[] = [], textPositions: number[] = [];
         let textJoined = "";
         for (const item of evidenceText) {
@@ -4490,7 +4577,7 @@ export class AutomationRuntime {
         const visibleSubtree = (backend: number): string => {
           const index = domIndex.indexOf(backend), range = index === undefined ? undefined : visibleRange(index);
           if (!range) return "";
-          return semanticName(textJoined.slice(textOffsets[lowerText(range.start)]!, textOffsets[lowerText(range.end)]!));
+          return normalizeSnapshotText(textJoined.slice(textOffsets[lowerText(range.start)]!, textOffsets[lowerText(range.end)]!));
         };
         const tainted = new Uint8Array(doc.nodes.backendNodeId.length);
         for (const [id, proof] of placeholders) if (proof.evidence.status !== "visible") {
@@ -4712,9 +4799,7 @@ export class AutomationRuntime {
             if (typeof backend === "number" && unknownText.has(backend)) { namesUnknown.add(node.nodeId); return ""; }
             if (typeof backend === "number" && domIndex.indexOf(backend) !== undefined) {
               const observed = evidenceTextById.get(backend);
-              const formatted = preformatted.get(backend);
-              const text = observed === undefined ? visibleSubtree(backend)
-                : formatted && !textProjections.has(backend) && formatted.source === observed ? formatted.text : observed;
+              const text = observed === undefined ? visibleSubtree(backend) : observed;
               if (!text && original && visibility.get(backend) !== false) namesUnknown.add(node.nodeId);
               return text;
             }
@@ -4840,9 +4925,10 @@ export class AutomationRuntime {
               ? childFramesByOwner.get(JSON.stringify([debuggee.sessionId ?? "", node.backendDOMNodeId])) : undefined;
             const childFrameRef = childFrameId ? capturedFrameRefs.get(childFrameId) : undefined;
             const ownPlaceholder = placeholder(node);
-            const preserveTextWhitespace = role === "StaticText" && typeof node.backendDOMNodeId === "number" && Boolean(name)
-              && !textProjections.has(node.backendDOMNodeId) && preformatted.get(node.backendDOMNodeId)?.text === name;
-            const snapshotNode: SnapshotNode = { id: snapshotId, depth, role, name, value, layoutScope: frameId, ...(bounds.has(layoutBackend) ? { bounds: bounds.get(layoutBackend)! } : {}), ...(valueUnknown ? { valueUnknown: true } : {}), ...(preserveTextWhitespace ? { preserveTextWhitespace: true } : {}), ...(namesUnknown.has(node.nodeId) ? { nameUnknown: true } : {}),
+            const textEvidence = role === "StaticText" && typeof layoutBackend === "number" ? evidenceTextItemsById.get(layoutBackend) : undefined;
+            const textWhitespaceProven = Boolean(name && textEvidence?.textWhitespaceProven && textEvidence.text === name);
+            const preserveTextWhitespace = textWhitespaceProven && textEvidence?.preserveTextWhitespace;
+            const snapshotNode: SnapshotNode = { id: snapshotId, depth, role, name, value, layoutScope: frameId, ...(bounds.has(layoutBackend) ? { bounds: bounds.get(layoutBackend)! } : {}), ...(valueUnknown ? { valueUnknown: true } : {}), ...(textWhitespaceProven ? { textWhitespaceProven: true } : {}), ...(preserveTextWhitespace ? { preserveTextWhitespace: true } : {}), ...(namesUnknown.has(node.nodeId) ? { nameUnknown: true } : {}),
               ...(ownPlaceholder && ownPlaceholder.status !== "hidden" ? { placeholder: ownPlaceholder } : {}),
               ...(ref ? { ref, actions } : {}), ...(childFrameRef ? { childFrameRef } : {}), state };
             const rendered = renderSnapshotNode(snapshotNode);
@@ -5110,7 +5196,7 @@ export class AutomationRuntime {
             const cached = ariaTextCache.get(id);
             if (cached !== undefined) return cached;
             const index = domIndex.indexOf(id), range = index === undefined ? undefined : visibleRange(index);
-            const value = range ? semanticName(visibleText.slice(lowerTextPosition(range.start), lowerTextPosition(range.end)).map((item) => item.text).join("")) : "";
+            const value = range ? normalizeSnapshotText(visibleText.slice(lowerTextPosition(range.start), lowerTextPosition(range.end)).map((item) => item.text).join("")) : "";
             ariaTextCache.set(id, value);
             return value;
           };
@@ -5147,17 +5233,16 @@ export class AutomationRuntime {
             });
           }
           for (const item of extra) {
-            if (item.kind === "text" && !item.text?.trim() && !unknownText.has(item.backendNodeId)) continue;
+            if (item.kind === "text" && !item.text?.trim() && !item.textWhitespaceProven && !unknownText.has(item.backendNodeId)) continue;
             const parentIndex = nearestEmitted[item.nodeIndex]!;
             const parent = parentIndex < 0 ? undefined : domIndex.backendAt(parentIndex);
             const depth = parent === undefined || !depths.has(parent) ? (frameLabel ? frameDepth + 1 : 0) : depths.get(parent)! + 1;
             const id = `${snapshotScope}.d${item.backendNodeId}`;
             let node: SnapshotNode;
             if (item.kind === "text") {
-              const formatted = preformatted.get(item.backendNodeId);
-              const preserve = Boolean(item.text && !textProjections.has(item.backendNodeId) && formatted?.source === item.text);
-              node = { id, depth, role: "StaticText", name: preserve ? formatted!.text : item.text, ...(unknownText.has(item.backendNodeId) ? { nameUnknown: true } : {}),
-                ...(preserve ? { preserveTextWhitespace: true } : {}) };
+              node = { id, depth, role: "StaticText", name: item.text, ...(unknownText.has(item.backendNodeId) ? { nameUnknown: true } : {}),
+                ...(item.textWhitespaceProven && item.text ? { textWhitespaceProven: true } : {}),
+                ...(item.preserveTextWhitespace && item.text ? { preserveTextWhitespace: true } : {}) };
             }
             else {
               const tag = item.tag!;
@@ -5187,6 +5272,9 @@ export class AutomationRuntime {
               }
               let ref = "";
               if (tag !== "iframe" && tag !== "frame") {
+                if (typeof current?.meta?.connected !== "boolean" || typeof current.meta.tag !== "string"
+                  || !current.attributes || typeof current.attributes !== "object" || Array.isArray(current.attributes))
+                  throw automationError("snapshot-unavailable", { reason: "dom-control-read-failed" });
                 if (current?.meta?.connected !== true || current.meta.tag !== tag
                   // Inline style can animate without changing visibility;
                   // the final DOM confirmation compares its actual effects.
@@ -5260,8 +5348,12 @@ export class AutomationRuntime {
           && doc.nodes?.backendNodeId?.includes(regionNode.node.backendNodeId));
       }) : [];
       if (regionNode && regionMatches.length !== 1) throw automationError("snapshot-region-unavailable", { locator: region });
-      const partial = dynamicTextByTarget.size > 0;
+      const uncertainContrast = trees.some((item) => item.tree && item.candidates.some((candidate) => candidate.sameColorBackground
+        && candidate.frameId === (item.frameId ?? session.rootFrameId) && item.visibility.get(candidate.backendNodeId) === true));
+      const partial = dynamicTextByTarget.size > 0 || uncertainContrast;
+      const limitations = uncertainContrast ? "Some text has equal captured fill and ancestor background colors. Its composited visibility is unconfirmed; names remain unknown and geometry is retained. This is incomplete evidence." : undefined;
       const frameSnapshots: Array<{ frameRef: string; lines: SnapshotLine[] }> = [];
+      let interruptedRender = false;
       for (const item of trees) {
         const { debuggee, frameId, tree, visibility, textProjections, unknownText, paintEvidence, candidates, snapshot } = item;
         if (!tree) continue;
@@ -5269,7 +5361,21 @@ export class AutomationRuntime {
         for (const id of dynamicText) { unknownText.add(id); textProjections.delete(id); }
         // Render each document at its own origin, then insert it at the
         // represented iframe owner. Frame depth alone is not semantic depth.
-        await waitForCapture(render(tree.nodes ?? [], visibility, textProjections, unknownText, paintEvidence, candidates, snapshot, debuggee, frameId, 0, dynamicText));
+        try {
+          await waitForCapture(render(tree.nodes ?? [], visibility, textProjections, unknownText, paintEvidence, candidates, snapshot, debuggee, frameId, 0, dynamicText));
+        } catch (error) {
+          guard();
+          if (!changed()) {
+            // A client-side replacement can detach a captured control without
+            // changing the document or frame revision. Discard the whole pass
+            // under the same bounded stability budget as state confirmation.
+            if (!(error instanceof AutomationError) || error.code !== "snapshot-unavailable"
+              || error.detail.reason !== "dom-control-changed-during-capture" || retriedUnstableCapture) throw error;
+            retriedUnstableCapture = true;
+          }
+          interruptedRender = true; break;
+        }
+        if (changed()) { interruptedRender = true; break; }
         const frameRef = capturedFrameRefs.get(frameId ?? session.rootFrameId!);
         if (!frameRef) throw automationError("snapshot-unavailable", { reason: "missing-frame-ref" });
         const renderedLines = lines.splice(0).map((line) => {
@@ -5280,6 +5386,7 @@ export class AutomationRuntime {
         });
         frameSnapshots.push({ frameRef, lines: renderedLines });
       }
+      if (interruptedRender) { await delay(0, signal); continue; }
       if (unstableDOMChecked) {
         if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: "dom-checked-unstable" });
         retriedUnstableCapture = true; continue;
@@ -5290,7 +5397,7 @@ export class AutomationRuntime {
       }
       for (const line of compactSnapshot(stitchSnapshotFrames(frameSnapshots, capturedFrameRefs.get(regionFrameId ?? session.rootFrameId!)))) lines.push(line);
       const ids = new Set<string>();
-      for (const { id } of lines) {
+      for (const { id } of expandSnapshot(lines)) {
         if (ids.has(id)) throw automationError("snapshot-unavailable", { reason: "duplicate-semantic-id", id });
         ids.add(id);
       }
@@ -5334,7 +5441,7 @@ export class AutomationRuntime {
             retriedUnstableCapture = true; continue;
           }
           confirmations = await waitForCapture(Promise.all(relevantDebuggees.map(async ({ debuggee }) => ({ debuggee,
-            snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true, includePaintOrder: true }) }))));
+            snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...computedStyles], includeDOMRects: true, includePaintOrder: true }) }))));
           if (changed()) continue;
           if (!await waitForCapture(framesAreReady())) { await delay(50, signal); continue; }
         } catch (error) {
@@ -5353,18 +5460,47 @@ export class AutomationRuntime {
           await delay(changed() ? 0 : 50, signal); continue;
         }
         if (changed()) continue;
-        let unstable = unstableEllipsis.length > 0, unstablePaint = unstable, onlyUnrenderedText = !unstable, onlyDynamicText = true;
+        let unstable = unstableEllipsis.length > 0, unstablePaint = unstable, onlyUnrenderedText = !unstable, onlyDynamicText = true, headSourceChange = false;
+        const styleEvidence = computedStyles === SNAPSHOT_COMPUTED_STYLES ? undefined : { completeStyleCatalog: computedStyles };
         const observedDynamicText = new Map<string, Set<number>>();
         const relaxedChecks: Array<(snapshot: any) => boolean> = [];
         for (const confirmation of confirmations) {
           const initial = trees.find(({ debuggee }) => sameDebuggee(debuggee, confirmation.debuggee));
-          // Ignore unrelated same-target child documents. Keep original CDP
-          // contentDocumentIndex values, so document reordering remains a
-          // conservative mismatch rather than inventing an association.
+          // Project unrelated documents out of this scope while preserving
+          // each surviving frame edge by its original document identity.
           const relevantIds = regionNode ? new Set(relevantFrames.filter((item) => sameDebuggee(item.debuggee, confirmation.debuggee))
             .map((item) => item.frameId ?? session.rootFrameId)) : undefined;
-          const relevantDocuments = (snapshot: any) => !relevantIds ? snapshot : { ...snapshot,
-            documents: snapshot.documents.filter((document: any) => relevantIds.has(snapshot.strings?.[document.frameId])) };
+          const projectedDocuments = new WeakMap<object, any>();
+          const relevantDocuments = (snapshot: any) => {
+            if (!relevantIds) return snapshot;
+            if (projectedDocuments.has(snapshot)) return projectedDocuments.get(snapshot);
+            const documents = snapshot.documents;
+            if (!Array.isArray(documents)) throw automationError("snapshot-unavailable", { reason: "invalid-dom-confirmation" });
+            const kept = documents.map((document: any, index: number) => ({ document, index }))
+              .filter(({ document }: any) => relevantIds.has(snapshot.strings?.[document.frameId]));
+            const positions = new Map(kept.map(({ index }: any, projected: number) => [index, projected]));
+            // Validate against the original array, before indexes are reduced.
+            for (const document of documents) {
+              const edges = document.nodes?.contentDocumentIndex;
+              if (!edges) continue;
+              if (!Array.isArray(edges.index) || !Array.isArray(edges.value) || edges.index.length !== edges.value.length
+                || new Set(edges.index).size !== edges.index.length
+                || edges.index.some((value: number) => !Number.isSafeInteger(value) || value < 0 || value >= document.nodes.backendNodeId.length)
+                || edges.value.some((value: number) => !Number.isSafeInteger(value) || value < 0 || value >= documents.length))
+                throw automationError("snapshot-unavailable", { reason: "invalid-frame-document-index" });
+            }
+            const projected = { ...snapshot, documents: kept.map(({ document }: any) => {
+              const edges = document.nodes.contentDocumentIndex;
+              if (!edges) return document;
+              const index: number[] = [], value: number[] = [];
+              edges.index.forEach((owner: number, offset: number) => {
+                const target = positions.get(edges.value[offset]);
+                if (target !== undefined) { index.push(owner); value.push(target as number); }
+              });
+              return { ...document, nodes: { ...document.nodes, contentDocumentIndex: { index, value } } };
+            }) };
+            projectedDocuments.set(snapshot, projected); return projected;
+          };
           const candidates = relevantIds ? initial?.candidates.filter((candidate) => relevantIds.has(candidate.frameId)) : initial?.candidates;
           const visibility = initial && relevantIds ? snapshotVisibility(relevantDocuments(initial.snapshot), { hiddenFrames }) : initial?.visibility;
           if (visibility && initial && relevantIds) for (const id of visibility.keys()) {
@@ -5372,13 +5508,15 @@ export class AutomationRuntime {
             if (value !== undefined) visibility.set(id, value);
           }
           const relaxed = (snapshot: any) => Boolean(initial && visibility && sameDOMSnapshot(relevantDocuments(initial.snapshot), relevantDocuments(snapshot),
-            { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true, frameClips, hiddenFrames }, { ignoreUnrenderedText: true }));
+            { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true, frameClips, hiddenFrames }, { ...styleEvidence, ignoreUnrenderedText: true }));
           relaxedChecks.push(relaxed);
           if (initial && visibility && sameDOMSnapshot(relevantDocuments(initial.snapshot), relevantDocuments(confirmation.snapshot),
-            { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true, frameClips, hiddenFrames })) continue;
+            { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true, frameClips, hiddenFrames }, styleEvidence)) continue;
+          if (!styleEvidence && initial && visibility && hasUnrenderedHeadSourceChange(relevantDocuments(initial.snapshot), relevantDocuments(confirmation.snapshot),
+            { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true, frameClips, hiddenFrames })) headSourceChange = true;
           unstable = true;
           const textChanges = initial && visibility ? changedTextNodes(relevantDocuments(initial.snapshot), relevantDocuments(confirmation.snapshot),
-            { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true, frameClips, hiddenFrames }) : undefined;
+            { visibility, textPaintCandidates: candidates ?? [], paintAdjusted: true, frameClips, hiddenFrames }, styleEvidence) : undefined;
           if (!textChanges) onlyDynamicText = false;
           else observedDynamicText.set(confirmation.debuggee.sessionId ?? "", textChanges);
           if (!relaxed(confirmation.snapshot)) onlyUnrenderedText = false;
@@ -5402,6 +5540,17 @@ export class AutomationRuntime {
           })) onlyDynamicText = false;
         }
         if (unstable) {
+          if (headSourceChange && !styleEvidence) {
+            // HEAD selectors and script effects can change properties absent
+            // from the small default profile. Never reuse the old rows: spend
+            // an existing recovery pass on a complete standard-style capture.
+            const catalog = await waitForCapture(this.snapshotCompleteStyleCatalog(session));
+            if (changed()) continue;
+            session.snapshotStyleProfile = { generation, computedStyles: catalog };
+            computedStyles = catalog;
+            retryDynamicCapture("dom-unstable");
+            continue;
+          }
           // A second observed change confirms that these regions are dynamic.
           speculativeDynamic = false;
           // A hidden text node can still supply an accessible name (for
@@ -5426,7 +5575,7 @@ export class AutomationRuntime {
               let finalLayouts: Array<{ debuggee: Debuggee; snapshot: any }>;
               try {
                 finalLayouts = await waitForCapture(Promise.all(relevantDebuggees.map(async ({ debuggee }) => ({ debuggee,
-                  snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...SNAPSHOT_COMPUTED_STYLES], includeDOMRects: true, includePaintOrder: true }) }))));
+                  snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...computedStyles], includeDOMRects: true, includePaintOrder: true }) }))));
               } catch (error) {
                 guard();
                 if (!changed() && !isTransientNavigationError(error) && !isDetachedNodeError(error)) throw error;
@@ -5434,9 +5583,55 @@ export class AutomationRuntime {
               }
               if (changed()) continue;
               if (finalLayouts.length === relaxedChecks.length && finalLayouts.every((layout, index) => relaxedChecks[index]!(layout.snapshot))) {
+                // Layout computed styles omit selection/highlight and some
+                // pseudo styles. Revalidate every live proof that contributed
+                // a name or hid text before accepting the relaxed DOM check.
+                // Per-frame AX entries share a target's complete DOM capture.
+                // Revalidate that shared evidence once, not once per frame.
+                const paintTargets = [...new Map(trees.map((item) => [item.snapshot, item])).values()];
+                const paintChecks = await waitForCapture(Promise.all(paintTargets.map(async (item) => {
+                  const used = new Map<string, SnapshotTextPaintCandidate[]>();
+                  for (const candidate of item.candidates) {
+                    const evidence = item.paintEvidence.get(candidate.backendNodeId);
+                    if (projectTextPaint(candidate, evidence) === undefined) continue;
+                    const list = used.get(candidate.frameId) ?? [];
+                    list.push(candidate); used.set(candidate.frameId, list);
+                  }
+                  // A HEAD selector can create a first-line override where
+                  // there was no live-paint candidate before. Probe currently
+                  // visible text too; unmodelled document overlays refuse the
+                  // relaxation rather than inheriting stale ordinary names.
+                  for (const doc of styleEvidence ? item.snapshot.documents : []) {
+                    const frameId = item.snapshot.strings[doc.frameId];
+                    if (!capturedFrames.some((frame) => (frame.frameId ?? session.rootFrameId) === frameId
+                      && sameDebuggee(frame.debuggee, item.debuggee))) continue;
+                    const list = used.get(frameId) ?? [], known = new Set(list.map(({ backendNodeId }) => backendNodeId));
+                    const laidOut = new Set(doc.layout.nodeIndex.filter((_: number, layoutIndex: number) =>
+                      Boolean(item.snapshot.strings[doc.layout.text?.[layoutIndex]])));
+                    doc.nodes.nodeType.forEach((type: number, index: number) => {
+                      const backendNodeId = doc.nodes.backendNodeId[index];
+                      if (type === 3 && laidOut.has(index) && item.visibility.get(backendNodeId) === true && !known.has(backendNodeId))
+                        list.push({ backendNodeId, frameId });
+                    });
+                    if (list.length) used.set(frameId, list);
+                  }
+                  for (const [frameId, list] of used) {
+                    const frame: FrameRefRecord = { frameId, debuggee: item.debuggee, generation, revision: frameRevision,
+                      conversationId: frameContext.conversationId, runId: frameContext.runId };
+                    const fresh = await this.readFrameTextPaint(session, frame, list, frameGuard);
+                    for (const { backendNodeId } of list) {
+                      const next = fresh.get(backendNodeId), before = item.paintEvidence.get(backendNodeId);
+                      if (!next || next.documentPaintRisk || (before ? JSON.stringify(next) !== JSON.stringify(before)
+                        : next.unknown || next.firstLineRisk || next.firstLetterRisk)) return false;
+                    }
+                  }
+                  return true;
+                })));
+                if (changed()) continue;
+                if (!paintChecks.every(Boolean)) throw automationError("snapshot-unavailable", { reason: "text-paint-unstable" });
                 const geometry = await snapshotGeometry(finalLayouts);
                 if (changed()) continue;
-                return { ...info, lines, frameRevision, geometry, geometrySources: finalLayouts.map(({ debuggee }) => debuggee), ...(regionNode ? { regionIdentity: JSON.stringify([regionDebuggee?.sessionId ?? "", regionFrameId, regionNode.node.backendNodeId]) } : {}) };
+                return { ...info, lines, frameRevision, geometry, geometrySources: finalLayouts.map(({ debuggee }) => debuggee), geometryStyles: computedStyles, ...(regionNode ? { regionIdentity: JSON.stringify([regionDebuggee?.sessionId ?? "", regionFrameId, regionNode.node.backendNodeId]) } : {}) };
               }
             }
           }
@@ -5450,7 +5645,7 @@ export class AutomationRuntime {
             // Re-render with the affected text and dependent names marked
             // unknown; never deliver the already rendered stale values.
             if (newText) { retryDynamicCapture(); continue; }
-            if (partial) return { ...info, lines, frameRevision, geometry: await snapshotGeometry(confirmations, dynamicTextByTarget), geometrySources: confirmations.map(({ debuggee }) => debuggee), geometryDynamicParents: dynamicTextByTarget, partial: true, ...(regionNode ? { regionIdentity: JSON.stringify([regionDebuggee?.sessionId ?? "", regionFrameId, regionNode.node.backendNodeId]) } : {}) };
+            if (partial) return { ...info, lines, frameRevision, geometry: await snapshotGeometry(confirmations, dynamicTextByTarget), geometrySources: confirmations.map(({ debuggee }) => debuggee), geometryStyles: computedStyles, geometryDynamicParents: dynamicTextByTarget, partial: true, ...(limitations ? { limitations } : {}), ...(regionNode ? { regionIdentity: JSON.stringify([regionDebuggee?.sessionId ?? "", regionFrameId, regionNode.node.backendNodeId]) } : {}) };
           }
           if (retriedUnstableCapture) throw automationError("snapshot-unavailable", { reason: unstablePaint ? "text-paint-unstable" : "dom-unstable" });
           retriedUnstableCapture = true;
@@ -5463,7 +5658,7 @@ export class AutomationRuntime {
           dynamicTextByTarget.clear();
           continue;
         }
-        return { ...info, lines, frameRevision, geometry: await snapshotGeometry(confirmations, partial ? dynamicTextByTarget : undefined), geometrySources: confirmations.map(({ debuggee }) => debuggee), ...(partial ? { partial: true as const, geometryDynamicParents: dynamicTextByTarget } : {}), ...(regionNode ? { regionIdentity: JSON.stringify([regionDebuggee?.sessionId ?? "", regionFrameId, regionNode.node.backendNodeId]) } : {}) };
+        return { ...info, lines, frameRevision, geometry: await snapshotGeometry(confirmations, partial ? dynamicTextByTarget : undefined), geometrySources: confirmations.map(({ debuggee }) => debuggee), geometryStyles: computedStyles, ...(partial ? { partial: true as const, geometryDynamicParents: dynamicTextByTarget } : {}), ...(limitations ? { limitations } : {}), ...(regionNode ? { regionIdentity: JSON.stringify([regionDebuggee?.sessionId ?? "", regionFrameId, regionNode.node.backendNodeId]) } : {}) };
       }
     }
   }

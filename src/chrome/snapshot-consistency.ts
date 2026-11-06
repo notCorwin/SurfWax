@@ -1,5 +1,6 @@
 import { sameTextPaintCandidates } from "./snapshot-text-paint";
-import { snapshotVisibility, type SnapshotClip, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
+import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility, type SnapshotClip, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
+import { createSnapshotDomIndex } from "./snapshot-dom-index";
 
 export type SnapshotConsistencyEvidence = Readonly<{
   /** Result derived from the exact left-hand capture. */
@@ -14,7 +15,7 @@ export type SnapshotConsistencyEvidence = Readonly<{
 /** Identify changing text only when its effects on the rest of the page are
  * bounded. A geometrically changing text node is allowed solely inside a
  * stationary, clipped and non-overlapping container. */
-export function changedTextNodes(left: any, right: any, before?: SnapshotConsistencyEvidence): Set<number> | undefined {
+export function changedTextNodes(left: any, right: any, before?: SnapshotConsistencyEvidence, options?: ConsistencyOptions): Set<number> | undefined {
   try {
     if (!Array.isArray(left?.documents) || !Array.isArray(right?.documents) || left.documents.length !== right.documents.length
       || !Array.isArray(left.strings) || !Array.isArray(right.strings)) return undefined;
@@ -113,7 +114,7 @@ export function changedTextNodes(left: any, right: any, before?: SnapshotConsist
       if (!boxA || !boxB || JSON.stringify(boxA) !== JSON.stringify(boxB)) return undefined;
       copy.textBoxes = structuredClone(a.textBoxes);
     }
-    if (!changed.size || !sameDOMSnapshot(left, normalized, before)) return undefined;
+    if (!changed.size || !sameDOMSnapshot(left, normalized, before, options)) return undefined;
     if (geometryChanged) {
       const candidates: SnapshotTextPaintCandidate[] = [];
       const actualVisibility = snapshotVisibility(right, { textPaintCandidates: candidates, frameClips: before?.frameClips, hiddenFrames: before?.hiddenFrames });
@@ -138,12 +139,37 @@ export function changedTextNodes(left: any, right: any, before?: SnapshotConsist
  * harmless movement of already-visible boxes. False also means malformed or
  * unsupported evidence: callers must not claim a consistent snapshot. Equal
  * endpoints do not prove atomicity or rule out intermediate ABA changes. */
-export function sameDOMSnapshot(left: any, right: any, before?: SnapshotConsistencyEvidence, options?: { ignoreUnrenderedText?: boolean }): boolean {
+type ConsistencyOptions = { ignoreUnrenderedText?: boolean; completeStyleCatalog?: readonly string[] };
+
+export function sameDOMSnapshot(left: any, right: any, before?: SnapshotConsistencyEvidence, options?: ConsistencyOptions): boolean {
+  return compareDOMSnapshot(left, right, before, options);
+}
+
+/** A reason to acquire stronger evidence, never proof of consistency. */
+export function hasUnrenderedHeadSourceChange(left: any, right: any, before?: SnapshotConsistencyEvidence): boolean {
+  return compareDOMSnapshot(left, right, before, { ignoreUnrenderedText: true }, true);
+}
+
+function compareDOMSnapshot(left: any, right: any, before?: SnapshotConsistencyEvidence, options?: ConsistencyOptions, headCandidate = false): boolean {
   if (!left || !right || typeof left !== "object" || typeof right !== "object"
     || Object.keys(left).some((key) => key !== "strings" && key !== "documents") || Object.keys(right).some((key) => key !== "strings" && key !== "documents")
     || !Array.isArray(left.strings) || !Array.isArray(right.strings)
     || !Array.isArray(left.documents) || !Array.isArray(right.documents)
     || left.strings.some((item: unknown) => typeof item !== "string") || right.strings.some((item: unknown) => typeof item !== "string")) return false;
+  let headChurn = false;
+  if (options?.ignoreUnrenderedText) {
+    try {
+      // This path is used only with independent AX confirmation. HEAD source
+      // can label a live control, even though it has no layout of its own.
+      const a = withoutHeadSource(left), b = withoutHeadSource(right);
+      headChurn = a.source !== b.source;
+      left = a.snapshot; right = b.snapshot;
+      if (before) {
+        if (before.textPaintCandidates.some(({ backendNodeId }) => a.ignored.has(backendNodeId))) return false;
+        before = { ...before, visibility: new Map([...before.visibility].filter(([id]) => !a.ignored.has(id))) };
+      }
+    } catch { return false; }
+  }
   const leftStrings: string[] = left.strings, rightStrings: string[] = right.strings;
   const validString = (table: string[], index: unknown) => Number.isSafeInteger(index) && (index === -1 || Number(index) >= 0 && Number(index) < table.length);
   const string = (a: unknown, b: unknown) => validString(leftStrings, a) && validString(rightStrings, b)
@@ -218,7 +244,7 @@ export function sameDOMSnapshot(left: any, right: any, before?: SnapshotConsiste
   // map and candidate evidence computed by snapshotVisibility.
   const textStyles = (a: any, b: any) => array(a, b, (x, y) => Array.isArray(x) && Array.isArray(y)
     && x.every((index: unknown) => validString(leftStrings, index)) && y.every((index: unknown) => validString(rightStrings, index))
-    && [25, 26, 32, 33].every((index) => optional(x[index], y[index], string)));
+    && (options?.completeStyleCatalog ? stringArray(x, y) : [25, 26, 32, 33].every((index) => optional(x[index], y[index], string))));
   const layout = (a: any, b: any) => {
     if (!known(a, layoutKeys) || !known(b, layoutKeys) || !Array.isArray(a.nodeIndex) || !Array.isArray(b.nodeIndex)
       || !Array.isArray(a.styles) || !Array.isArray(b.styles) || !Array.isArray(a.bounds) || !Array.isArray(b.bounds)
@@ -259,6 +285,29 @@ export function sameDOMSnapshot(left: any, right: any, before?: SnapshotConsiste
     && compareFields(a, b, documentStrings, string)
     && nodes(a.nodes, b.nodes, a.layout, b.layout) && layout(a.layout, b.layout) && frameGeometry(a, b) && optional(a.textBoxes, b.textBoxes, textBoxes);
   if (!array(left.documents, right.documents, document)) return false;
+  if (headCandidate && !headChurn) return false;
+  // These resources can change paint through computed styles on nodes that
+  // have no layout row. A complete layout-style catalog cannot cover them.
+  if (headChurn && [left, right].some((snapshot) => snapshot.documents.some((doc: any) =>
+    doc.nodes.nodeName.some((index: number) => /^(?:lineargradient|radialgradient|stop|pattern|filter|mask|clippath|marker|symbol|use)$/i.test(snapshot.strings[index] ?? ""))))) return false;
+  if (options?.completeStyleCatalog || headChurn && !headCandidate) {
+    const catalog = options?.completeStyleCatalog;
+    if (!catalog || catalog.length <= SNAPSHOT_COMPUTED_STYLES.length || new Set(catalog).size !== catalog.length
+      || catalog.some((name) => typeof name !== "string" || !/^-?[a-z][a-z0-9-]*$/.test(name))
+      || SNAPSHOT_COMPUTED_STYLES.some((name, index) => catalog[index] !== name)) return false;
+    // paint() worklets may consume custom properties absent from this standard
+    // property catalog. Identical standard computed values are not sufficient.
+    if ([left, right].some((snapshot) => snapshot.documents.some((doc: any) => doc.layout.styles.some((row: number[], layoutIndex: number) =>
+      row.length !== catalog.length && !(row.length === 0 && doc.nodes.nodeType[doc.layout.nodeIndex[layoutIndex]] === 9)
+      || headChurn && row.some((index) => /\bpaint\s*\(/i.test(snapshot.strings[index] ?? "")))))) return false;
+  }
+  if (headChurn && !array(left.documents, right.documents, (a, b) =>
+    compareFields(a, b, ["contentWidth", "contentHeight"], scalar)
+    && optional(a.nodes.nodeValue, b.nodes.nodeValue, stringArray)
+    && optional(a.nodes.attributes, b.nodes.attributes, (x, y) => array(x, y, (p, q) => array(p, q, (value, other) => attributeValue(value, other))))
+    && array(a.layout.styles, b.layout.styles, stringArray)
+    && compareFields(a.layout, b.layout, ["bounds", "clientRects", "offsetRects", "scrollRects"], (x, y) => array(x, y, numericArray))
+    && optional(a.textBoxes?.bounds, b.textBoxes?.bounds, (x, y) => array(x, y, numericArray)))) return false;
   try {
     const computed: SnapshotTextPaintCandidate[] = [], b: SnapshotTextPaintCandidate[] = [];
     const aVisibility = before?.visibility ?? snapshotVisibility(left, { textPaintCandidates: computed });
@@ -279,6 +328,121 @@ export function sameDOMSnapshot(left: any, right: any, before?: SnapshotConsiste
   } catch {
     return false;
   }
+}
+
+/** Remove only unpainted source records directly under an ordinary HEAD.
+ * Retain every other backend identity and its original order. Layout rows and
+ * document indexes do not change; only node-index references are compacted.
+ * Unsupported fields, layout on source, shadow/pseudo/state annotations and
+ * descendants other than raw text/comments cannot be erased by this proof. */
+function withoutHeadSource(snapshot: any): { snapshot: any; ignored: Set<number>; source: string } {
+  const ignored = new Set<number>(), source: unknown[] = [], frames = new Set<string>();
+  const strings: string[] = snapshot.strings;
+  const text = (index: unknown, empty = true): string => {
+    if (empty && index === -1) return "";
+    if (!Number.isSafeInteger(index) || Number(index) < 0 || Number(index) >= strings.length) throw new Error("Invalid HEAD source string");
+    return strings[index as number]!;
+  };
+  const documents = snapshot.documents.map((document: any) => {
+    if (!document || Object.keys(document).some((key) => !documentKeys.has(key))) throw new Error("Unknown DOM snapshot document field");
+    const frame = text(document.frameId, false);
+    if (!frame || frames.has(frame)) throw new Error("Invalid DOM snapshot frame identity");
+    frames.add(frame);
+    const nodes = document.nodes, layout = document.layout;
+    if (!nodes || Object.keys(nodes).some((key) => !nodeKeys.has(key)) || !layout || Object.keys(layout).some((key) => !layoutKeys.has(key)))
+      throw new Error("Unknown DOM snapshot field");
+    const index = createSnapshotDomIndex(nodes), length = nodes.backendNodeId.length;
+    if (nodes.backendNodeId.some((id: unknown) => !Number.isSafeInteger(id) || Number(id) <= 0)
+      || !Array.isArray(nodes.nodeName) || nodes.nodeName.length !== length
+      || [nodes.nodeValue, nodes.attributes].some((value) => value !== undefined && (!Array.isArray(value) || value.length !== length))
+      || !Array.isArray(layout.nodeIndex)) throw new Error("Invalid HEAD source arrays");
+    const rendered = new Set<number>();
+    for (const node of layout.nodeIndex) {
+      if (!Number.isSafeInteger(node) || node < 0 || node >= length) throw new Error("Invalid DOM layout node index");
+      rendered.add(node);
+    }
+    const rows = layout.nodeIndex.length;
+    for (const key of Object.keys(layout)) {
+      const value = layout[key];
+      if (key === "stackingContexts") {
+        if (!value || Object.keys(value).some((field) => !sparseBooleanKeys.has(field)) || !Array.isArray(value.index)
+          || value.index.some((row: unknown) => !Number.isSafeInteger(row) || Number(row) < 0 || Number(row) >= rows))
+          throw new Error("Invalid DOM stacking context index");
+      } else if (!Array.isArray(value) || value.length !== rows) throw new Error("Invalid DOM layout columns");
+    }
+    if (document.textBoxes !== undefined) {
+      const boxes = document.textBoxes, count = boxes?.layoutIndex?.length;
+      if (!boxes || Object.keys(boxes).some((key) => !textBoxKeys.has(key)) || !Array.isArray(boxes.layoutIndex)
+        || [boxes.start, boxes.length, boxes.bounds].some((values) => !Array.isArray(values) || values.length !== count)
+        || boxes.layoutIndex.some((row: unknown) => !Number.isSafeInteger(row) || Number(row) < 0 || Number(row) >= rows))
+        throw new Error("Invalid DOM text box index");
+    }
+    const attrs = (node: number): string[] => {
+      const attributes = nodes.attributes?.[node] ?? [];
+      if (!Array.isArray(attributes) || attributes.length % 2) throw new Error("Invalid HEAD source attributes");
+      return attributes.map((value: unknown, offset: number) => text(value, offset % 2 === 1));
+    };
+    for (let node = 0; node < length; node++) {
+      text(nodes.nodeName[node], false);
+      if (nodes.nodeValue) text(nodes.nodeValue[node]);
+      attrs(node);
+    }
+    const annotated = new Set<number>();
+    for (const key of [...nodeRareStrings, ...nodeRareFlags, "contentDocumentIndex"]) {
+      const value = nodes[key];
+      if (value === undefined) continue;
+      const flags = (nodeRareFlags as readonly string[]).includes(key);
+      if (!value || Object.keys(value).some((field) => !(flags ? sparseBooleanKeys : sparseValueKeys).has(field))
+        || !Array.isArray(value.index) || !flags && (!Array.isArray(value.value) || value.value.length !== value.index.length))
+        throw new Error("Invalid DOM sparse data");
+      const seen = new Set<number>();
+      value.index.forEach((node: number, offset: number) => {
+        if (!Number.isSafeInteger(node) || node < 0 || node >= length || seen.has(node)) throw new Error("Invalid DOM sparse node index");
+        seen.add(node); annotated.add(node);
+        if (!flags && key !== "contentDocumentIndex") text(value.value[offset]);
+      });
+    }
+    const removable = new Set<number>();
+    const inert = (node: number) => !rendered.has(node) && !annotated.has(node);
+    for (const node of index.preorder) {
+      const parent = index.parentAt(node);
+      if (parent === undefined || nodes.nodeType[parent] !== 1 || text(nodes.nodeName[parent], false) !== "HEAD" || !inert(parent) || !inert(node)) continue;
+      const html = index.parentAt(parent), scope = index.documentScope(nodes.backendNodeId[node]);
+      if (html === undefined || nodes.nodeType[html] !== 1 || text(nodes.nodeName[html], false) !== "HTML"
+        || scope === undefined || index.parentAt(html) !== index.indexOf(scope)) continue;
+      const rawText = nodes.nodeType[node] === 3 && text(nodes.nodeName[node], false) === "#text";
+      if (!rawText && (nodes.nodeType[node] !== 1 || text(nodes.nodeName[node], false) !== "SCRIPT")) continue;
+      const range = index.subtreeRange(node)!;
+      const subtree = index.preorder.slice(range.start, range.end);
+      if (subtree.some((child) => !inert(child) || child !== node
+        && (index.parentAt(child) !== node || ![3, 8].includes(nodes.nodeType[child])))) continue;
+      for (const child of subtree) removable.add(child);
+    }
+    if (!removable.size) return document;
+    const references = nodes.contentDocumentIndex?.value ?? [];
+    if (references.some((value: unknown) => !Number.isSafeInteger(value) || Number(value) < 0 || Number(value) >= snapshot.documents.length))
+      throw new Error("Invalid DOM child document index");
+    const remap = new Int32Array(length).fill(-1), kept: number[] = [];
+    for (let node = 0; node < length; node++) {
+      if (removable.has(node)) {
+        ignored.add(nodes.backendNodeId[node]);
+        source.push([frame, nodes.backendNodeId[node], nodes.backendNodeId[nodes.parentIndex[node]], nodes.nodeType[node], text(nodes.nodeName[node], false),
+          nodes.nodeValue ? text(nodes.nodeValue[node]) : null, attrs(node)]);
+      } else { remap[node] = kept.length; kept.push(node); }
+    }
+    const compact: any = { ...nodes };
+    for (const key of [...nodeNumbers, ...nodeStrings, "attributes"]) if (nodes[key] !== undefined) compact[key] = kept.map((node) => nodes[key][node]);
+    compact.parentIndex = kept.map((node) => {
+      const parent = nodes.parentIndex[node];
+      if (parent === -1) return -1;
+      if (remap[parent] < 0) throw new Error("Retained node has a removed parent");
+      return remap[parent];
+    });
+    for (const key of [...nodeRareStrings, ...nodeRareFlags, "contentDocumentIndex"]) if (nodes[key] !== undefined)
+      compact[key] = { ...nodes[key], index: nodes[key].index.map((node: number) => remap[node]) };
+    return { ...document, nodes: compact, layout: { ...layout, nodeIndex: layout.nodeIndex.map((node: number) => remap[node]) } };
+  });
+  return { snapshot: ignored.size ? { ...snapshot, documents } : snapshot, ignored, source: JSON.stringify(source) };
 }
 
 const documentStrings = ["documentURL", "title", "baseURL", "contentLanguage", "encodingName", "publicId", "systemId"] as const;

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { compactSnapshot } from "./snapshot-presentation";
 import type { SnapshotLine } from "./snapshot-frame-tree";
 import { renderSnapshotNode, type SnapshotNode } from "./snapshot-render";
+import { expandSnapshot } from "./snapshot-repeat";
 
 function rows(nodes: SnapshotNode[]): SnapshotLine[] {
   return nodes.map((node) => ({ ...renderSnapshotNode(node), node }));
@@ -15,12 +16,12 @@ describe("compact visible snapshot presentation", () => {
       { id: "item", depth: 2, role: "listitem" },
       { id: "link", depth: 3, role: "link", name: "Repositories 7", ref: "owned-link", actions: ["click"] },
       { id: "wrapper", depth: 4, role: "generic" },
-      { id: "label", depth: 5, role: "StaticText", name: "Repositories " },
+      { id: "label", depth: 5, role: "StaticText", name: "Repositories ", textWhitespaceProven: true },
       { id: "count", depth: 5, role: "StaticText", name: "7" },
       { id: "paragraph", depth: 3, role: "paragraph" },
       { id: "description", depth: 4, role: "StaticText", name: "Repository description" },
     ]);
-    const result = compactSnapshot(input);
+    const result = expandSnapshot(compactSnapshot(input));
     expect(result.map(({ id }) => id)).toEqual(["root", "list", "item", "link", "description"]);
     expect(result.find(({ id }) => id === "description")?.line).toBe('      - StaticText "Repository description"');
     expect(result.find(({ id }) => id === "link")).toMatchObject({ ref: "owned-link", node: { depth: 3, actions: ["click"] } });
@@ -30,7 +31,7 @@ describe("compact visible snapshot presentation", () => {
   });
 
   it("retains independent controls, anonymous images and text not covered by a complete label", () => {
-    const result = compactSnapshot(rows([
+    const result = expandSnapshot(compactSnapshot(rows([
       { id: "root", depth: 0, role: "RootWebArea" },
       { id: "badge", depth: 1, role: "link", name: "x2" },
       { id: "image", depth: 2, role: "image", nameUnknown: true },
@@ -41,10 +42,33 @@ describe("compact visible snapshot presentation", () => {
       { id: "more-text", depth: 3, role: "StaticText", name: "More" },
       { id: "partial", depth: 1, role: "link", name: "Only" },
       { id: "uncovered", depth: 2, role: "StaticText", name: "Only part" },
-    ]));
+    ])));
     expect(result.map(({ id }) => id)).toEqual(["root", "badge", "image", "control", "save", "more", "partial", "uncovered"]);
     expect(result.find(({ id }) => id === "image")?.node?.nameUnknown).toBe(true);
     expect(result.find(({ id }) => id === "more")?.node?.state).toEqual({ expanded: false });
+  });
+
+  it("does not promote unverified source whitespace to visible label fragments", () => {
+    const input = rows([
+      { id: "button", depth: 0, role: "button", name: "Save changes" },
+      { id: "source", depth: 1, role: "StaticText", name: "\n  Save changes\n " },
+    ]);
+    const result = expandSnapshot(compactSnapshot(input));
+    expect(result).toHaveLength(2);
+    expect(result[0]!.node?.textFragments).toBeUndefined();
+    expect(result[1]!.line).toBe('  - StaticText "Save changes"');
+  });
+
+  it("keeps distinct source paragraphs separate after their passive wrappers are flattened", () => {
+    const result = compactSnapshot(rows([
+      { id: "root", depth: 0, role: "RootWebArea" },
+      { id: "first", depth: 1, role: "paragraph" },
+      { id: "one", depth: 2, role: "StaticText", name: "PARAONE", bounds: [0, 0, 60, 15] },
+      { id: "second", depth: 1, role: "paragraph" },
+      { id: "two", depth: 2, role: "StaticText", name: "PARATWO", bounds: [0, 40, 60, 15] },
+    ]));
+    expect(result.map(({ id }) => id)).toEqual(["root", "one", "two"]);
+    expect(result.every((line) => !line.members)).toBe(true);
   });
 
   it("preserves uncertainty, formatting, frame associations and selected region roots", () => {

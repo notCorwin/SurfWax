@@ -1,6 +1,12 @@
 import type { SnapshotNode } from "./snapshot-render";
 
-export type SnapshotLine = { id: string; line: string; ref?: string; node?: SnapshotNode };
+export type SnapshotLine = {
+  id: string; line: string; ref?: string; node?: SnapshotNode;
+  /** Constituent tree rows or separate repeated leaves; never a target alias. */
+  members?: readonly SnapshotLine[];
+  /** Private grouping boundary retained when an original wrapper is removed. */
+  sourceParent?: string;
+};
 type FrameSnapshot = { frameRef: string; lines: SnapshotLine[] };
 
 /** Nest captured documents under their represented owner without parsing page text. */
