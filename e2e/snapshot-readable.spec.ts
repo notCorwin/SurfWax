@@ -2,6 +2,7 @@ import { expect } from "@playwright/test";
 import { test, openExtension, dispose, startProvider } from "./fixtures";
 import { readableSnapshot, sampleReadableSnapshot } from "../src/chrome/snapshot-readable";
 import { snapshotObservationPrimitives } from "../src/chrome/snapshot-observation-primitives.js";
+import { probeTextPaint } from "./snapshot-paint-probe";
 
 test.use({ screenshot: "off", trace: "off" });
 
@@ -184,6 +185,46 @@ test("does not certify a solid background or control surface through a border im
       else if (item.visible) expect(text).toContain("BORDER_IMAGE_TEXT");
       else expect(text).not.toContain("BORDER_IMAGE_TEXT");
     }
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});
+
+test("checks snapshot text against counterfactual rendered pixels", async () => {
+  const provider = await startProvider([]), opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.setViewportSize({ width: 600, height: 400 });
+    await target.goto(`${provider.origin}/target`);
+    const cases = [
+      { name: "ordinary text", css: "", contributes: true, confirmed: true },
+      { name: "negative glyph behind ordinary ancestor fill", css: "#label{z-index:-1}", contributes: false, confirmed: false },
+      { name: "positive glyph cannot escape negative group", css: "#negative{position:relative;z-index:-1}#label{z-index:10}", nested: true, contributes: false, confirmed: false },
+      { name: "context owner background precedes negative glyph", css: "#matte{z-index:0}#label{z-index:-1}", contributes: true, confirmed: true },
+      { name: "transparent ancestor does not cover negative glyph", css: "#matte{background:transparent}#label{z-index:-1}", contributes: true, confirmed: true },
+      { name: "fully masked text", css: "#label{mask-image:linear-gradient(transparent,transparent)}", contributes: false, confirmed: false },
+      // Changed pixels do not prove that the entire source string is visible.
+      { name: "partially clipped text", css: "#label{width:20px;overflow:hidden;white-space:nowrap}", contributes: true, confirmed: false },
+    ];
+    for (const item of cases) {
+      await target.setContent(`<!doctype html><style>
+        html,body{margin:0;min-height:400px;background:white;color:black;font:24px/32px Arial}
+        #scope{position:relative;isolation:isolate;width:400px;height:120px;margin:30px;background:white}
+        #matte{position:relative;width:400px;height:120px;background:white}
+        #label{position:relative;display:inline-block}
+        ${item.css}
+      </style><div id="scope"><div id="matte">${item.nested ? '<div id="negative">' : ""}<span id="label">PIXEL_LABEL</span>${item.nested ? "</div>" : ""}</div></div>`);
+      await target.evaluate(() => document.fonts.ready);
+      const sample = await sampleInExtension(opened, target.url());
+      const text = readableSnapshot(sample as any).map(({ line }) => line).join("\n");
+      const pixels = await probeTextPaint(target, opened.page, "#label");
+      await test.info().attach(item.name, { body: JSON.stringify(pixels), contentType: "application/json" });
+      expect(pixels.status, item.name).toBe("stable");
+      if (pixels.status === "stable") expect(pixels.changed, item.name).toBe(item.contributes);
+      expect.soft(text.includes("PIXEL_LABEL"), item.name).toBe(item.confirmed);
+    }
+    // A style-dependent reflow must not be classified as text paint evidence.
+    await target.setContent('<style>#label{display:inline-block}#label[style]+span{margin-left:30px}</style><span id="label">LABEL</span><span>NEIGHBOR</span>');
+    expect((await probeTextPaint(target, opened.page, "#label")).status).toBe("layout-changed");
+    expect(await target.locator("#label").getAttribute("style")).toBeNull();
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 

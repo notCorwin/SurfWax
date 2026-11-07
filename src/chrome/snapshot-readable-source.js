@@ -1281,6 +1281,17 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
   };
   const background = (parent, rects) => {
     if (!backgroundGroup(parent).unattenuated) return null;
+    // A negative context paints before ordinary ancestor backgrounds, but
+    // after its own context owner's background. Index the glyph's context
+    // path once; a higher descendant cannot escape an enclosing negative
+    // context to turn those later backgrounds into an earlier backdrop.
+    const glyphScopes = new Map();
+    let child = null;
+    for (let path = stack(parent); path; path = path.parent) {
+      glyphScopes.set(path, child);
+      child = path;
+    }
+    glyphScopes.set(null, child);
     const layers = [];
     const rootStyle = style(document.documentElement);
     const bodyCanvas = rootStyle.backgroundImage === "none" && clear(rootStyle.backgroundColor);
@@ -1306,6 +1317,10 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
       if (transparent) continue;
       const color = rgba(s.backgroundColor);
       if (!color || s.backgroundClip !== "border-box") return null;
+      if (!canvas) {
+        const scope = stack(element), glyph = glyphScopes.get(scope);
+        if (!glyphScopes.has(scope) || glyph && glyph.level !== null && glyph.level < 0 && element !== scope?.owner) return null;
+      }
       // The glyph may escape an overflow clip that still removes this
       // static background. Verify the background's own painting path, not
       // the descendant glyph's path, before treating it as known ground.
