@@ -1264,7 +1264,7 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     const bodyCanvas = rootStyle.backgroundImage === "none" && clear(rootStyle.backgroundColor);
     for (let element = parent; element; element = parentOf(element)) {
       const s = style(element);
-      if (Number(s.opacity) !== 1 || s.backgroundImage !== "none") return null;
+      if (Number(s.opacity) !== 1 || s.backgroundImage !== "none" || s.borderImageSource !== "none") return null;
       if (insetShadowRisk(s.boxShadow)) return null;
       const border = ["Top", "Right", "Bottom", "Left"].some(
         (side) => parseFloat(s["border" + side + "Width"]) > 0 && s["border" + side + "Style"] !== "none",
@@ -1911,7 +1911,7 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     const layers = background(composedParent(element), [rect]),
       ground = layers && composite(layers);
     if (!ground) return false;
-    const fill = s.backgroundImage === "none" && s.backgroundClip === "border-box"
+    const fill = s.backgroundImage === "none" && s.borderImageSource === "none" && !insetShadowRisk(s.boxShadow) && s.backgroundClip === "border-box"
       ? composite([...layers, s.backgroundColor]) : null;
     if (fill?.some((channel, index) => Math.abs(channel - ground[index]) >= 1)) return true;
     return ["Top", "Right", "Bottom", "Left"].some((side) => {

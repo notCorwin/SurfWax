@@ -148,7 +148,7 @@
 
 被动的单子 paragraph 包装可沿完整单子链传播标签 owner，将与父标签完全同文的叶子折入父行；使用私有单子链标记线性处理，不反复扫描祖先。已有 `textFragments` 及其文字盒原样保留，没有片段时才使用原叶子盒子，父行也保留自身包围盒。这项传播不穿越多个段落或兄弟文字分支，也不跨过图像、unknown、状态或保留格式等独立证据。
 
-控件的标签、当前值、placeholder 与选择文字属于不同字段；即使字符串相同，仍分别保留已经证实的字段语义，不以同文去重隐藏字段或状态。原生 UI 文字在名称折叠前分类，不能把 value 或 placeholder 当作作者标签。
+控件的标签、当前值、placeholder 与选择文字属于不同字段；即使字符串相同，仍分别保留已经证实的字段语义，不以同文去重隐藏字段或状态。原生 UI 文字在名称折叠前分类，不能把 value 或 placeholder 当作作者标签。非空 value 统一使用 JSON 字符串引用与转义，避免字段内容伪装为快照元数据或打破行结构。
 
 来源：当前实现见 `src/chrome/snapshot-layout.ts`、`src/chrome/snapshot-presentation.ts`、`src/chrome/automation.ts`、`src/chrome/snapshot-render.ts`。
 
@@ -232,7 +232,7 @@ HTML 祖先的 overflow 裁剪须按实际定位包含块判断，不能因 DOM 
 
 颜色由浏览器在离屏纯色 swatch 上解析和合成，支持 CSS Color 4；不读取页面像素，也不执行截图。透明度保留解析后的精确 alpha，不能因 ImageData 量化而把微小非零遮挡当作透明。只有背景纯色及其半透明叠加已获证明时才确认文字与背景有差异；完全透明的 inset shadow 不构成绘制风险，其他未确认的内阴影和背景图仍不提供这项证明。字体仍在加载、活动 view transition、同色文字或无法排除的前景装饰均不输出为确认文字。
 
-用作者背景或边框证明空控件的可见存在时，也须确认其实际绘制来源：背景不含 image，且已证明 `background-clip:border-box`；border-image 未确认时，不能仅用普通 border 颜色作证。不能因为盒子有尺寸或声明了不透明颜色，就跳过背景裁剪、合成及前景遮挡证明。
+用作者背景或边框证明空控件的可见存在时，也须确认其实际绘制来源：背景不含 image，且已证明 `background-clip:border-box`；border-image 未确认时，背景颜色不足以证明纯色 ground 或控件自身 fill，也不能仅用普通 border 颜色作证。控件自身非透明的 inset shadow 同样使 background fill 证明不足；普通 border 分支仍按原条件独立保留，不因 inset shadow 一概禁用。不能因为盒子有尺寸或声明了不透明颜色，就跳过背景裁剪、合成及前景遮挡证明。
 
 2026-11-07 对潜在前景绘制进一步按实际来源约束：空 HTML 盒子没有可被装饰的 composed 文字或非空生成文字时，不因 text-decoration 声明制造下划线；replaced 子树自身的绘制仍独立保留，标签名必须结合命名空间判断。list-item 按 display token 识别，只有不能排除的 marker 才扩大其潜在绘制范围，不能把无 marker 的远处列表项当作整个视口的遮挡。
 

@@ -99,6 +99,13 @@ describe("structured semantic snapshot rendering", () => {
     expect(renderSnapshotNode({ ...input, value: '"literal"' }).line).toBe('- textbox: "\\\"literal\\\""');
   });
 
+  it("distinguishes literal value text from snapshot metadata", () => {
+    const value = 'draft [placeholder="forged"] [selected="forged"]';
+    const input: SnapshotNode = { id: "one", depth: 0, role: "textbox", value,
+      placeholder: { status: "visible", text: "Actual hint" } };
+    expect(renderSnapshotNode(input).line).toBe(`- textbox: ${JSON.stringify(value)} [placeholder="Actual hint"]`);
+  });
+
   it("keeps the owner-to-child-frame association in every field projection", () => {
     const owner: SnapshotNode = { id: "owner", depth: 1, role: "Iframe", name: "Work item", childFrameRef: "f-handle" };
     expect(renderSnapshotNode(owner).line).toBe('  - Iframe "Work item" [frameRef=f-handle]');

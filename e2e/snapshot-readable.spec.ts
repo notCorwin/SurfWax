@@ -149,6 +149,44 @@ test("read-only text requires visible contrast and an unobscured live document",
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
+test("does not certify a solid background or control surface through a border image", async () => {
+  const provider = await startProvider([]), opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.setViewportSize({ width: 1000, height: 700 });
+    await target.goto(`${provider.origin}/target`);
+    const image = (color: string) => `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="3" height="3"><rect width="3" height="3" fill="${color}"/></svg>`)}`;
+    const cases = [
+      { css: "", button: false, visible: true },
+      { css: `border:10px solid transparent;border-image:url("${image("black")}") 1 fill / 10px`, button: false, visible: false },
+      { css: `border:0 solid transparent;border-image:url("${image("black")}") 1 / 100px`, button: false, visible: false },
+      { css: "background:black", button: true, visible: true },
+      { css: "background:black;box-shadow:inset 0 0 0 100px white", button: true, visible: false },
+      { css: `background:black;border:10px solid transparent;border-image:url("${image("white")}") 1 fill / 10px`, button: true, visible: false },
+    ];
+    for (const item of cases) {
+      await target.setContent(`<!doctype html><style>
+        html,body{margin:0;min-height:700px;background:white;color:black;font:24px/32px Arial}
+        #matte{position:relative;box-sizing:border-box;left:20px;top:20px;width:400px;height:150px;padding:30px;border:0;background:white;appearance:none;${item.css}}
+        #independent{position:absolute;top:400px;left:20px}
+        </style>${item.button ? '<button id="matte"></button>' : '<div id="matte"><span>BORDER_IMAGE_TEXT</span></div>'}
+        <p id="independent">INDEPENDENT_VISIBLE</p>`);
+      await target.evaluate(async () => {
+        const source = getComputedStyle(document.querySelector("#matte")!).borderImageSource;
+        const url = /^url\("(.*)"\)$/.exec(source)?.[1];
+        if (url) { const image = new Image(); image.src = url; await image.decode(); }
+        await document.fonts.ready;
+      });
+      const sample = await sampleInExtension(opened, target.url());
+      const text = readableSnapshot(sample as any).map(({ line }) => line).join("\n");
+      expect(text, item.css).toContain("INDEPENDENT_VISIBLE");
+      if (item.button) expect((sample as any).rows.some((row: any) => row.role === "button"), item.css).toBe(item.visible);
+      else if (item.visible) expect(text).toContain("BORDER_IMAGE_TEXT");
+      else expect(text).not.toContain("BORDER_IMAGE_TEXT");
+    }
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});
+
 test("proves higher stacking contexts without trusting DOM order or hit testing", async () => {
   const provider = await startProvider([]), opened = await openExtension();
   try {
