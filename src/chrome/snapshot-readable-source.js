@@ -1258,13 +1258,35 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     composites.set(key, color);
     return color;
   };
+  // An opaque fill cuts off earlier background colors, but not the opacity
+  // of the group containing that fill and its glyphs. Cache the complete
+  // painting-ancestor chain before allowing the color lookup to stop early.
+  const backgroundGroups = new Map();
+  const backgroundGroup = (parent) => {
+    const pending = [];
+    let current = parent;
+    while (current && !backgroundGroups.has(current)) { pending.push(current); current = parentOf(current); }
+    let proof = current ? backgroundGroups.get(current) : { unattenuated: true, unclipped: true };
+    while (pending.length) {
+      const element = pending.pop(), s = style(element);
+      proof = {
+        unattenuated: proof.unattenuated && Number(s.opacity) === 1 && s.mixBlendMode === "normal",
+        unclipped: proof.unclipped && s.overflowX === "visible" && s.overflowY === "visible"
+          && s.clip === "auto" && s.clipPath === "none" && s.maskImage === "none"
+          && s.getPropertyValue("-webkit-mask-box-image-source") === "none",
+      };
+      backgroundGroups.set(element, proof);
+    }
+    return proof;
+  };
   const background = (parent, rects) => {
+    if (!backgroundGroup(parent).unattenuated) return null;
     const layers = [];
     const rootStyle = style(document.documentElement);
     const bodyCanvas = rootStyle.backgroundImage === "none" && clear(rootStyle.backgroundColor);
     for (let element = parent; element; element = parentOf(element)) {
       const s = style(element);
-      if (Number(s.opacity) !== 1 || s.backgroundImage !== "none" || s.borderImageSource !== "none") return null;
+      if (s.backgroundImage !== "none" || s.borderImageSource !== "none") return null;
       if (insetShadowRisk(s.boxShadow)) return null;
       const border = ["Top", "Right", "Bottom", "Left"].some(
         (side) => parseFloat(s["border" + side + "Width"]) > 0 && s["border" + side + "Style"] !== "none",
@@ -1284,6 +1306,11 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
       if (transparent) continue;
       const color = rgba(s.backgroundColor);
       if (!color || s.backgroundClip !== "border-box") return null;
+      // The glyph may escape an overflow clip that still removes this
+      // static background. Verify the background's own painting path, not
+      // the descendant glyph's path, before treating it as known ground.
+      // Its own overflow does not clip its fill; ancestor clips still do.
+      if (!canvas && !backgroundGroups.get(element).unclipped && clippedRects(element, rects, true)) return null;
       layers.push(s.backgroundColor);
       if (color[3] === 255) return layers.reverse();
     }

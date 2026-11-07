@@ -187,6 +187,45 @@ test("does not certify a solid background or control surface through a border im
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
+test("composites only backgrounds that survive their own clips and group opacity", async () => {
+  const provider = await startProvider([]), opened = await openExtension();
+  try {
+    const target = await opened.context.newPage();
+    await target.goto(`${provider.origin}/target`);
+    const cases = [
+      // The absolute label escapes #clip; its static background does not.
+      { clip: "0px", background: "white", source: "black", visible: false },
+      { clip: "0px", background: "white", source: "black", mattePosition: "absolute", visible: true },
+      { clip: "400px", background: "white", source: "black", visible: true },
+      { clip: "400px", background: "black", source: "white", visible: false },
+      { clip: "60px", background: "white", source: "black", visible: false },
+      // An opaque inner fill does not cancel the outer group's opacity.
+      { clip: "400px", background: "white", source: "black", opacity: ".5", visible: false },
+      { clip: "400px", background: "white", source: "black", opacity: "1", visible: true },
+    ];
+    for (const item of cases) {
+      await target.setContent(`<!doctype html><style>
+        html,body{margin:0;min-height:700px;background:white;color:black;font:24px/32px Arial}
+        #scope{position:relative;isolation:isolate;left:20px;top:20px;width:400px;height:150px}
+        #source{position:relative;width:400px;height:150px;background:${item.source}}
+        #group{position:relative;width:400px;height:150px;margin-top:-150px;opacity:${item.opacity ?? "1"}}
+        #clip{overflow:hidden;width:${item.clip};height:${item.clip}}
+        #matte{width:400px;height:150px;background:${item.background};position:${item.mattePosition ?? "static"}}
+        #label{position:absolute;left:20px;top:20px;z-index:10;color:black}
+        #independent{position:absolute;left:20px;top:400px}
+        ${item.opacity ? "#source{visibility:hidden}#group::first-line,#group::first-letter{opacity:inherit}" : ""}
+      </style><div id="scope"><div id="source"></div><div id="group"><div id="clip"><div id="matte"><span id="label">ESCAPED_LABEL</span></div></div></div></div><p id="independent">INDEPENDENT_VISIBLE</p>`);
+      await target.evaluate(() => document.fonts.ready);
+      const sample = await sampleInExtension(opened, target.url());
+      const text = readableSnapshot(sample as any).map(({ line }) => line).join("\n");
+      expect(text, JSON.stringify(item)).toContain("INDEPENDENT_VISIBLE");
+      expect.soft(text.includes("ESCAPED_LABEL"), JSON.stringify(item)).toBe(item.visible);
+      if (item.opacity === ".5" || item.clip === "60px")
+        expect((sample as any).gaps.some((gap: any) => gap.reason === "text-background"), JSON.stringify({ item, gaps: (sample as any).gaps })).toBe(true);
+    }
+  } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
+});
+
 test("proves higher stacking contexts without trusting DOM order or hit testing", async () => {
   const provider = await startProvider([]), opened = await openExtension();
   try {
