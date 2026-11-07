@@ -1,4 +1,5 @@
 import type { SnapshotTextPaintCandidate } from "./snapshot-visibility";
+import { snapshotObservationPrimitives } from "./snapshot-observation-primitives.js";
 
 /** Offsets are UTF-16 offsets in the original DOM Text node. */
 export type TextPaintEvidence = {
@@ -9,6 +10,10 @@ export type TextPaintEvidence = {
   pseudoUnpainted?: boolean;
   /** A live document overlay is absent from ordinary layout style rows. */
   documentPaintRisk?: true;
+  /** Mask/clip-path coverage sampled with this Text node's current Range. */
+  clipCoverage?: "complete" | "empty" | "unknown";
+  /** Exact sorted declarations checked by the synchronous effect proof. */
+  clipInputs?: string[];
   firstLineRisk: boolean;
   firstLineRanges?: Array<[number, number]>;
   firstLetterRisk: boolean;
@@ -25,6 +30,7 @@ export function sameTextPaintCandidates(left: readonly SnapshotTextPaintCandidat
       && a.textTransform === b.textTransform && a.textSecurity === b.textSecurity
       && a.direction === b.direction && a.writingMode === b.writingMode && a.ellipsis === b.ellipsis
       && a.fullyWithinClip === b.fullyWithinClip && a.zeroFont === b.zeroFont && a.basePainted === b.basePainted
+      && a.fullyWithinOrdinaryClip === b.fullyWithinOrdinaryClip && JSON.stringify(a.effectClipRisk) === JSON.stringify(b.effectClipRisk)
       && a.documentFloatRisk === b.documentFloatRisk
       && a.sameColorBackground === b.sameColorBackground
       && a.firstLetter === b.firstLetter && a.firstLetterUnknown === b.firstLetterUnknown;
@@ -37,6 +43,7 @@ export function sameTextPaintCandidates(left: readonly SnapshotTextPaintCandidat
  */
 export const TEXT_PAINT_EVIDENCE_SOURCE = String.raw`function(...rest) {
   const nodes = [this, ...rest];
+  const primitives = (${snapshotObservationPrimitives.toString()})();
   const transparent = (value) => {
     const color = String(value || '').trim().toLowerCase();
     return color === 'transparent' || /^rgba\([^()]*,\s*(?:0+(?:\.0*)?|\.0+)%?\s*\)$/.test(color)
@@ -257,8 +264,14 @@ export const TEXT_PAINT_EVIDENCE_SOURCE = String.raw`function(...rest) {
           if (painted) for (const range of highlight) add(range);
         }
       }
-      let firstLineBlock;
+      let firstLineBlock, effectGeometry = true;
+      const effectOwners = [], clipInputs = [];
       for (let element = node.parentElement; element; ) {
+        const css = view.getComputedStyle(element);
+        effectGeometry &&= primitives.neutralGeometry(css);
+        if (css.maskImage !== 'none') clipInputs.push('mask-image:' + css.maskImage);
+        if (css.clipPath !== 'none') clipInputs.push('clip-path:' + css.clipPath);
+        if (css.maskImage !== 'none' || css.clipPath !== 'none') effectOwners.push({ element, css });
         if (!result.language) result.language = element.getAttribute('lang') || element.getAttribute('xml:lang') || undefined;
         const changes = pseudoChanges(element);
         result.firstLineRisk ||= changes.line;
@@ -267,6 +280,21 @@ export const TEXT_PAINT_EVIDENCE_SOURCE = String.raw`function(...rest) {
         const parent = element.parentElement;
         const containingRoot = !parent && element.getRootNode();
         element = parent || (containingRoot && containingRoot.host) || null;
+      }
+      const flow = primitives.textFlowCoverage(node);
+      clipInputs.push(...flow.clipInputs);
+      if (effectOwners.length || flow.clipInputs.length || flow.coverage !== 'complete') {
+        const range = doc.createRange(); range.selectNodeContents(node);
+        const rects = [...range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0);
+        result.clipInputs = clipInputs.sort();
+        result.clipCoverage = 'unknown';
+        if (effectGeometry && rects.length) {
+          const proofs = effectOwners.map(({ element, css }) => element.namespaceURI === 'http://www.w3.org/1999/xhtml'
+            && /^(?:block|flow-root|flex|grid|inline-block|inline-flex|inline-grid)$/.test(css.display) && element.getClientRects().length === 1
+            ? primitives.effectCoverage(css, element.getBoundingClientRect(), rects) : 'unknown');
+          result.clipCoverage = proofs.some(value => value === 'empty') ? 'empty'
+            : proofs.every(value => value === 'complete') && flow.coverage === 'complete' ? 'complete' : 'unknown';
+        }
       }
       if (firstLineBlock) {
         const proven = firstLineRanges(firstLineBlock);
@@ -334,8 +362,11 @@ export function projectTextPaint(candidate: SnapshotTextPaintCandidate, evidence
     return undefined;
   if (evidence.firstLineRanges && candidate.documentFloatRisk !== false) return undefined;
   if (candidate.kind === "pseudo") return evidence.pseudoUnpainted ? { hidden: true } : undefined;
+  const sameClipInputs = JSON.stringify(candidate.effectClipRisk ?? []) === JSON.stringify(evidence.clipInputs ?? []);
+  const withinClip = sameClipInputs && (!evidence.clipCoverage || evidence.clipCoverage === "complete")
+    && (candidate.fullyWithinClip || candidate.effectClipRisk?.length && candidate.fullyWithinOrdinaryClip && evidence.clipCoverage === "complete");
   if (candidate.basePainted) {
-    if (!candidate.fullyWithinClip || typeof candidate.layoutText !== "string" || typeof candidate.sourceText !== "string"
+    if (!withinClip || typeof candidate.layoutText !== "string" || typeof candidate.sourceText !== "string"
       || evidence.sourceText !== candidate.sourceText) return undefined;
     return { hidden: false, text: (candidate.firstLetter ?? "") + candidate.layoutText };
   }
@@ -349,7 +380,7 @@ export function projectTextPaint(candidate: SnapshotTextPaintCandidate, evidence
   if (firstLetter) ranges.push([0, firstLetter.length]);
   if (ranges.some((range) => range.length !== 2 || !Number.isSafeInteger(range[0]) || !Number.isSafeInteger(range[1]) || range[0] < 0 || range[1] > source.length || range[0] >= range[1])) return undefined;
   if (!ranges.length) return { hidden: true };
-  if (!candidate.fullyWithinClip) return undefined;
+  if (!withinClip) return undefined;
   ranges.sort((left, right) => left[0] - right[0] || left[1] - right[1]);
   const merged: Array<[number, number]> = [];
   for (const [start, end] of ranges) {

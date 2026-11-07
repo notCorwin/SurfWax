@@ -1,7 +1,7 @@
 import { normalizeSnapshotText } from "./snapshot-preformatted";
 
 export type SnapshotField = "text" | "state" | "ref" | "actions";
-export type SnapshotStateName = "checked" | "disabled" | "expanded" | "pressed" | "selected" | "required" | "readonly" | "editable" | "masked";
+export type SnapshotStateName = "checked" | "disabled" | "expanded" | "pressed" | "selected" | "required" | "readonly" | "editable" | "masked" | "current" | "level";
 export type SnapshotBounds = readonly [x: number, y: number, width: number, height: number];
 
 /** Data received from one AX node, before it is rendered into page text. */
@@ -46,7 +46,7 @@ export type RenderedSnapshotNode = Readonly<{
 }>;
 
 const allFields: readonly SnapshotField[] = ["text", "state", "ref", "actions"];
-const stateNames: readonly SnapshotStateName[] = ["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly", "editable", "masked"];
+const stateNames: readonly SnapshotStateName[] = ["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly", "editable", "masked", "current", "level"];
 const toolActions: Readonly<Record<string, string>> = { doubleClick: "double_click", insertText: "type_text", select: "select_option", clear: "fill", press: "press_key", check: "check_element", uncheck: "uncheck_element" };
 
 /**
@@ -87,10 +87,10 @@ export function renderSnapshotNode(
     const state = stateNames.filter((key) => node.state![key] !== undefined).map((key) => `${key}=${node.state![key]}`).join(" ");
     if (state) line += ` [${state}]`;
   }
-  if (fields.has("text") && value && value !== name) line += `: ${value.startsWith('"') || /[\u0000-\u001f\u007f]/.test(value) ? JSON.stringify(value) : value}`;
+  if (fields.has("text") && value) line += `: ${value.startsWith('"') || /[\u0000-\u001f\u007f]/.test(value) ? JSON.stringify(value) : value}`;
   if (fields.has("text") && node.valueUnknown) line += " [value=unknown]";
   if (fields.has("text") && node.placeholder?.status === "unknown") line += " [placeholder=unknown]";
-  else if (fields.has("text") && node.placeholder?.status === "visible" && node.placeholder.text !== name)
+  else if (fields.has("text") && node.placeholder?.status === "visible")
     line += ` [placeholder=${JSON.stringify(node.placeholder.text)}]`;
   if (fields.has("text") && node.selectedLabels?.length) line += ` [selected=${node.selectedLabels.map((label) => JSON.stringify(label)).join(",")}]`;
   return { id: node.id, line, ...(fields.has("ref") && node.ref ? { ref: node.ref } : {}) };

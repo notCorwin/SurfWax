@@ -37,7 +37,7 @@ function emptyNeutral(node: SnapshotNode, line: SnapshotLine): boolean {
 export function compactSnapshot(lines: readonly SnapshotLine[]): SnapshotLine[] {
   const entries: Array<{
     line: SnapshotLine; node: SnapshotNode; parent: number; children: number[];
-    remove: boolean; owner: number; depth: number;
+    remove: boolean; owner: number; singleLabelPath: boolean; depth: number;
   } | undefined> = [];
   const stack: number[] = [];
   const labels = new Map<number, { text: string; leaves: number[]; blocked: boolean }>();
@@ -47,7 +47,7 @@ export function compactSnapshot(lines: readonly SnapshotLine[]): SnapshotLine[] 
     if (!node) { entries.push(undefined); stack.length = 0; continue; }
     while (stack.length && entries[stack[stack.length - 1]!]!.node.depth >= node.depth) stack.pop();
     const parent = stack[stack.length - 1] ?? -1;
-    const entry = { line, node, parent, children: [] as number[], remove: false, owner: -1, depth: node.depth };
+    const entry = { line, node, parent, children: [] as number[], remove: false, owner: -1, singleLabelPath: false, depth: node.depth };
     entries.push(entry);
     if (parent !== -1) entries[parent]!.children.push(index);
     stack.push(index);
@@ -64,12 +64,14 @@ export function compactSnapshot(lines: readonly SnapshotLine[]): SnapshotLine[] 
     entry.remove = parent !== -1 && (neutral || paragraph);
 
     const inherited = parent === -1 ? -1 : entries[parent]!.owner;
+    entry.singleLabelPath = inherited !== -1 && entries[parent]!.singleLabelPath && entries[parent]!.children.length === 1;
     const label = normalize(node.name ?? "");
     const namedOwner = namedRoles.has(node.role) || node.role === "generic" && Boolean(node.ref || line.ref) && !node.state?.editable;
     if (namedOwner && label && !node.nameUnknown && !node.preserveTextWhitespace) {
       if (inherited !== -1) labels.get(inherited)!.blocked = true;
       labels.set(index, { text: label, leaves: [], blocked: false });
       entry.owner = index;
+      entry.singleLabelPath = true;
       continue;
     }
     if (inherited === -1) continue;
@@ -77,8 +79,10 @@ export function compactSnapshot(lines: readonly SnapshotLine[]): SnapshotLine[] 
       // Raw layout.text may still contain source indentation. A repeated
       // normalized label does not prove those fragment boundaries were painted.
       if (!node.textWhitespaceProven && node.name !== normalize(node.name!)) labels.get(inherited)!.blocked = true;
+      if (node.textFragments?.length && normalize(node.textFragments.map(({ text }) => text).join("")) !== label)
+        labels.get(inherited)!.blocked = true;
       labels.get(inherited)!.leaves.push(index);
-    } else if (neutral) {
+    } else if (neutral || paragraph && entry.singleLabelPath) {
       entry.owner = inherited;
     } else if (node.role !== "image" || entry.children.length || node.ref || line.ref || node.actions?.length) {
       // A named child control, paragraph break, unknown/preformatted text or
@@ -95,9 +99,9 @@ export function compactSnapshot(lines: readonly SnapshotLine[]): SnapshotLine[] 
       // output still contains all label text, and movement relative to images
       // or other fragments changes the parent row even if its box is unchanged.
       const parent = entries[owner]!;
-      parent.node = { ...parent.node, textFragments: label.leaves.map((index) => {
+      parent.node = { ...parent.node, textFragments: label.leaves.flatMap((index) => {
         const node = entries[index]!.node;
-        return { text: node.name!, ...(node.bounds ? { bounds: node.bounds } : {}) };
+        return node.textFragments?.length ? node.textFragments : [{ text: node.name!, ...(node.bounds ? { bounds: node.bounds } : {}) }];
       }) };
       parent.line = { ...parent.line, node: parent.node, line: renderSnapshotNode(parent.node).line };
       for (const index of label.leaves) entries[index]!.remove = true;

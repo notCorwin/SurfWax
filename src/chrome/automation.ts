@@ -17,6 +17,8 @@ import { createSnapshotDomIndex } from "./snapshot-dom-index";
 import { snapshotRenderOrder } from "./snapshot-render-order";
 import { snapshotSlottedNodes } from "./snapshot-slot-index";
 import { sampleReadableSnapshot, readableSnapshot } from "./snapshot-readable";
+import { snapshotObservationPrimitives } from "./snapshot-observation-primitives.js";
+import { nativeControlCandidates, NATIVE_OBSERVATION_SOURCE, type NativeControlCandidates } from "./snapshot-native-runtime";
 import { changedTextNodes, hasUnrenderedHeadSourceChange, sameDOMSnapshot } from "./snapshot-consistency";
 import { SNAPSHOT_COMPUTED_STYLES, snapshotVisibility, type SnapshotClip, type SnapshotFrameOwner, type SnapshotTextPaintCandidate } from "./snapshot-visibility";
 import { projectTextPaint, sameTextPaintCandidates, TEXT_PAINT_CACHE_LOOKUP_SOURCE, TEXT_PAINT_CACHE_REGISTER_SOURCE, type TextPaintEvidence } from "./snapshot-text-paint";
@@ -123,6 +125,8 @@ type ObservationRecord = {
   limitations?: string;
   visual?: true;
 };
+type ObservationContext = { id: number; uniqueId: string; frameId: string; extension: boolean };
+type RootReadScope = { frameId: string; loaderId?: string; revision: number; context?: ObservationContext; signal?: AbortSignal };
 type Session = {
   tabId: number;
   token: string;
@@ -151,6 +155,10 @@ type Session = {
   rootFrameId?: string;
   lastSnapshot?: SnapshotLine[];
   snapshotStyleProfile?: { generation: number; computedStyles: readonly string[] };
+  rootDocumentRevision: number;
+  observationPrimitives?: RootReadScope & { ready: Promise<void> };
+  observationContexts: Map<number, ObservationContext>;
+  nativeControlCandidates?: NativeControlCandidates & { frameId: string; loaderId?: string };
 };
 
 type Candidate = { role: string; name: string; tag?: string; text?: string; ref?: string; backendNodeId?: number; debuggee?: Debuggee; roleTruncated?: boolean; nameTruncated?: boolean; identityUnavailable?: boolean };
@@ -494,6 +502,7 @@ export class AutomationRuntime {
   private readonly searches = new Map<string, SearchSnapshot>();
   private readonly frameLists = new Map<string, FrameListSnapshot>();
   private readonly frameDocuments = new Map<string, FrameDocument>();
+  private readonly rootReadScopes = new WeakMap<object, RootReadScope>();
   private completeStyleCatalog?: Promise<readonly string[]>;
 
   private waitDiagnostic() { return this.lastWait; }
@@ -713,6 +722,35 @@ export class AutomationRuntime {
     // Events already queued by a retired target must not restore stale frames,
     // overwrite their ancestry, or detach a replacement target.
     if (source.sessionId && session?.retiredTargetSessions?.has(source.sessionId)) return;
+    if (session && !source.sessionId && method === "Runtime.executionContextCreated") {
+      const context = params?.context, auxiliary = context?.auxData, extensionId = this.options.chromeApi.runtime?.id;
+      if (typeof auxiliary?.frameId === "string" && Number.isSafeInteger(context?.id) && typeof context.uniqueId === "string") {
+        const extension = Boolean(extensionId && typeof context.origin === "string"
+          && context.origin.replace(/\/$/, "") === `chrome-extension://${extensionId}`
+          && auxiliary.type === "isolated" && auxiliary.isDefault === false);
+        const previous = session.observationContexts.get(context.id);
+        if (previous?.uniqueId !== context.uniqueId || previous?.frameId !== auxiliary.frameId || previous?.extension !== extension) {
+          const replacedRoot = auxiliary.frameId === session.rootFrameId && (previous || extension
+            && [...session.observationContexts.values()].some((value) => value.extension && value.frameId === auxiliary.frameId));
+          if (replacedRoot) session.rootDocumentRevision++;
+          session.observationContexts.set(context.id, { id: context.id, uniqueId: context.uniqueId, frameId: auxiliary.frameId, extension });
+        }
+      }
+    }
+    if (session && !source.sessionId && method === "Runtime.executionContextsCleared") {
+      session.rootDocumentRevision++;
+      session.observationContexts.clear();
+    }
+    if (session && !source.sessionId && method === "Runtime.executionContextDestroyed") {
+      const destroyed = [...session.observationContexts.values()].find((context) => context.id === params?.executionContextId
+        || context.uniqueId === params?.executionContextUniqueId);
+      // An unknown context cannot be proved to belong to an unrelated child.
+      if (!destroyed || destroyed.frameId === session.rootFrameId) {
+        session.rootDocumentRevision++;
+        delete session.observationPrimitives;
+      }
+      if (destroyed) session.observationContexts.delete(destroyed.id);
+    }
     const chooser = this.fileChoosers.get(tabId!);
     const preserveChooser = !chooser || !this.chooserAffected(source, method, params, { frameId: chooser.frameId, source: chooser.debuggee });
     if (method === "Target.attachedToTarget" && params?.targetInfo?.type === "iframe" && session) {
@@ -768,12 +806,13 @@ export class AutomationRuntime {
       // to an OOPIF. That source cannot replace the current document or tree.
       const current = session.frames.get(params.frame.id);
       if (current?.sessionId && current.sessionId !== source.sessionId) return;
+      const parentId = params.frame.parentId ?? session.frameParents.get(params.frame.id);
+      if (!source.sessionId && (!parentId || params.frame.id === session.rootFrameId)) session.rootDocumentRevision++;
       const loaderId = params.frame.loaderId;
       if (typeof loaderId === "string" && session.frameLoaders.has(params.frame.id) && session.frameLoaders.get(params.frame.id) !== loaderId)
         this.removeFrameDescendants(session, params.frame.id);
       if (typeof loaderId === "string") session.frameLoaders.set(params.frame.id, loaderId);
       if (!session.frames.get(params.frame.id)?.sessionId || source.sessionId === session.frames.get(params.frame.id)?.sessionId) session.frames.set(params.frame.id, source);
-      const parentId = params.frame.parentId ?? session.frameParents.get(params.frame.id);
       session.frameParents.set(params.frame.id, parentId);
       if (!parentId && !source.sessionId) session.rootFrameId = params.frame.id;
       this.invalidate(session, preserveChooser);
@@ -781,13 +820,16 @@ export class AutomationRuntime {
     if (method === "Page.navigatedWithinDocument" && session) {
       // History/hash navigation invalidates snapshots, but retains the same
       // input node and therefore must not discard an open file chooser.
+      if (!source.sessionId && (params?.frameId === undefined || params.frameId === session.rootFrameId)) session.rootDocumentRevision++;
       this.invalidate(session, true);
     }
     if ((method === "DOM.documentUpdated" || method === "Runtime.executionContextsCleared") && session) {
+      if (method === "DOM.documentUpdated" && !source.sessionId) session.rootDocumentRevision++;
       this.invalidate(session, preserveChooser);
     }
     if (method === "Runtime.executionContextDestroyed" && session) this.clearFrameDocuments(tabId!, source);
     if (method === "Page.frameDetached" && params?.frameId && session) {
+      if (params.frameId === session.rootFrameId) session.rootDocumentRevision++;
       const current = session.frames.get(params.frameId);
       // A swap detaches the old renderer's view of the frame, not the frame
       // itself. An attachment from the new target can arrive first; do not
@@ -806,6 +848,8 @@ export class AutomationRuntime {
       this.retireFrameSession(session, params.sessionId);
       this.invalidate(session, preserveChooser);
     }
+    if (session && !source.sessionId && method === "Page.frameStartedLoading" && params?.frameId === session.rootFrameId)
+      session.rootDocumentRevision++;
     if (session && session.lifecycleCutoff !== undefined && session.rootFrameId !== undefined && !source.sessionId && method === "Page.lifecycleEvent" && params?.frameId === session.rootFrameId
       && typeof params.loaderId === "string" && typeof params.timestamp === "number" && Number.isFinite(params.timestamp) && params.timestamp > session.lifecycleCutoff) {
       const current = session.rootLifecycle;
@@ -813,6 +857,7 @@ export class AutomationRuntime {
         // document.open() reuses the loader and Document. Its init is the
         // only observed boundary separating old lifecycle events from new.
         if (!current || params.timestamp > current.initializedAt) {
+          session.rootDocumentRevision++;
           session.rootLifecycle = { frameId: params.frameId, loaderId: params.loaderId, initializedAt: params.timestamp, domContentLoaded: false, load: false };
         }
       } else if (current && current.frameId === params.frameId && current.loaderId === params.loaderId && params.timestamp >= current.initializedAt) {
@@ -925,6 +970,7 @@ export class AutomationRuntime {
       const session = await this.session(tabId);
       this.pruneRefs(session);
       const captured = await this.captureReadableSnapshot(session);
+      this.handoffFreshRootCapture(session, captured);
       session.lastSnapshot = captured.lines;
       return { url: captured.url, title: captured.title, documentId: session.generation, snapshot: captured.lines.map(({ line }) => line).join("\n"), ...(captured.partial ? { partial: true as const } : {}), ...(captured.limitations ? { limitations: captured.limitations } : {}) };
     });
@@ -934,7 +980,8 @@ export class AutomationRuntime {
     return this.action(tabId, "observe", null, async () => {
       const session = await this.session(tabId);
       this.pruneRefs(session);
-      const generation = session.generation;
+      let generation = session.generation;
+      const frameRevision = session.frameRevision;
       const signal = this.context.signal;
       const pauseSignal = signal ? AbortSignal.any([signal, session.lifetime.signal]) : session.lifetime.signal;
       const { guard: guardSession, waitForCapture: wait } = this.captureWaiter(session, signal);
@@ -942,9 +989,12 @@ export class AutomationRuntime {
         guardSession();
         if (this.sessions.get(tabId) !== session || generation !== session.generation)
           throw automationError("stale-observation", { reason: "document-changed-during-observation" });
+        if (since && (session.frameRevision !== frameRevision || this.observations.get(since) !== previous))
+          throw automationError("stale-observation", { reason: "baseline-changed-during-observation" });
       };
       const previous = since ? this.observations.get(since) : undefined;
-      if (since && (!previous || previous.visual || previous.session !== session || previous.tabId !== tabId || previous.documentId !== generation))
+      if (since && (!previous || previous.visual || previous.session !== session || previous.tabId !== tabId || previous.documentId !== generation
+        || previous.frameRevision !== frameRevision))
         throw automationError("stale-observation", { observationId: since, reason: previous?.visual ? "visual-observation-is-not-semantic-baseline" : "expired-document" });
       // Pixel evidence is independent of DOM/AX consistency. Wait for the
       // document load, but do not wait for a dynamic page to stop changing.
@@ -959,6 +1009,7 @@ export class AutomationRuntime {
       const captured = detail === "visual"
         ? { ...await wait(this.pageValue(tabId, "({url:location.href,title:document.title})")) as { url: string; title: string }, lines: [] as SnapshotLine[], partial: undefined, limitations: undefined, viewport: undefined }
         : await this.captureReadableSnapshot(session);
+      if (!since && "frameRevision" in captured && this.handoffFreshRootCapture(session, captured)) generation = session.generation;
       let viewport = captured.viewport ?? await wait(this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})")) as ObservationRecord["viewport"];
       guard();
       const sameViewport = (left: ObservationRecord["viewport"], right: ObservationRecord["viewport"]) =>
@@ -996,7 +1047,8 @@ export class AutomationRuntime {
           ...(previous && captured.partial ? { reset: "current-output-partial" } : previous?.partial ? { reset: "previous-output-partial" } : {}) }),
       };
       const hasSemanticContent = expandSnapshot(captured.lines).some(({ ref, node }) => ref
-        || node && node.role !== "RootWebArea" && (node.name?.trim() || node.textFragments?.some(({ text }) => text.trim())));
+        || node && node.role !== "RootWebArea" && (node.name?.trim() || node.nameUnknown || node.valueUnknown
+          || node.textFragments?.some(({ text }) => text.trim()) || node.state && Object.keys(node.state).length));
       if (detail === "visual" || detail === "auto" && !hasSemanticContent) {
         const { target, fullPage, hires, ...options } = captureOptions;
         const readClip = async () => {
@@ -1154,20 +1206,21 @@ export class AutomationRuntime {
         const captured = await this.captureReadableSnapshot(session, region);
         throwIfAborted(signal);
         if (this.sessions.get(tabId) !== session) throw automationError("stale-observation", { reason: "document-or-session-changed" });
+        if (options.since) guard();
+        else this.handoffFreshRootCapture(session, captured);
         if (captured.frameRevision !== session.frameRevision) throw automationError("stale-observation", { reason: "frame-tree-changed-during-inspection" });
         // Capture can restart after a child frame or document change. A fresh
         // inspection belongs to the verified final revision, not necessarily
         // the generation present before capture began. Explicit baselines
         // remain pinned; implicit baselines are discarded on either revision.
-        if (options.since) guard();
-        else if (generation !== session.generation || frameRevision !== session.frameRevision) {
+        if (!options.since && (generation !== session.generation || frameRevision !== session.frameRevision)) {
           generation = session.generation; frameRevision = session.frameRevision; previous = undefined;
         }
         if (previous && previous.documentId !== session.generation) throw automationError("stale-observation", { observationId: options.since, reason: "document-changed-during-inspection" });
         if (options.since && previous && previous.regionIdentity !== captured.regionIdentity) throw automationError("stale-observation", { observationId: options.since, reason: "region-identity-changed" });
         const independent = fields.includes("ref") || fields.includes("actions");
         const sourceLines = independent || options.depth !== undefined ? expandSnapshot(captured.lines) : captured.lines;
-        const filtered = sourceLines.filter(() => !captured.readOnly || fields.includes("text")).filter(({ node, line }) => options.depth === undefined || (node?.depth ?? (line.match(/^ */)?.[0].length ?? 0) / 2) <= options.depth);
+        const filtered = sourceLines.filter(({ node, line }) => options.depth === undefined || (node?.depth ?? (line.match(/^ */)?.[0].length ?? 0) / 2) <= options.depth);
         const lines: SnapshotLine[] = (options.depth !== undefined && !independent ? packSnapshot(filtered) : filtered)
           .map((row) => {
             const { id, line, node } = row;
@@ -1839,6 +1892,8 @@ export class AutomationRuntime {
         frameRevision: 0,
         frameRefs: new Map(),
         frameRefsById: new Map(),
+        rootDocumentRevision: 0,
+        observationContexts: new Map(),
       };
       this.sessions.set(tabId, session);
     }
@@ -3516,6 +3571,154 @@ export class AutomationRuntime {
     return pending;
   }
 
+  private rootReadScope(session: Session): RootReadScope {
+    const frameId = session.rootFrameId;
+    if (!frameId) throw automationError("snapshot-unavailable", { reason: "missing-observation-frame" });
+    return { frameId, loaderId: session.frameLoaders.get(frameId), revision: session.rootDocumentRevision,
+      context: this.extensionObservationContext(session, frameId), signal: this.context.signal };
+  }
+
+  private assertRootReadScope(session: Session, scope: RootReadScope): void {
+    throwIfAborted(scope.signal);
+    throwIfAborted(session.lifetime.signal);
+    if (scope.context && session.observationContexts.get(scope.context.id) !== scope.context)
+      throw automationError("stale-observation", { reason: "observation-context-changed-during-read" });
+    if (this.sessions.get(session.tabId) !== session || session.rootFrameId !== scope.frameId
+      || session.rootDocumentRevision !== scope.revision || session.frameLoaders.get(scope.frameId) !== scope.loaderId)
+      throw automationError("stale-observation", { reason: "root-document-changed-during-read" });
+  }
+
+  /** Only new, ref-free root captures may adopt a later global frame epoch. */
+  private handoffFreshRootCapture(session: Session, captured: { frameRevision: number }): boolean {
+    const scope = this.rootReadScopes.get(captured);
+    if (!scope) return false;
+    this.assertRootReadScope(session, scope);
+    captured.frameRevision = session.frameRevision;
+    return true;
+  }
+
+  private extensionObservationContext(session: Session, frameId: string): ObservationContext | undefined {
+    const matches = [...session.observationContexts.values()].filter((context) => context.extension && context.frameId === frameId);
+    if (matches.length > 1) throw automationError("stale-observation", { reason: "ambiguous-extension-observation-context" });
+    return matches[0];
+  }
+
+  /** Install pure helpers once per root document, independent of child frames. */
+  private prepareObservationPrimitives(session: Session): Promise<void> {
+    const scope = this.rootReadScope(session), previous = session.observationPrimitives;
+    if (previous && previous.frameId === scope.frameId && previous.loaderId === scope.loaderId && previous.revision === scope.revision)
+      return previous.ready;
+    const ready = this.options.chromeApi.scripting.executeScript({
+      target: { tabId: session.tabId, frameIds: [0] }, world: "ISOLATED", func: snapshotObservationPrimitives as (install: true) => 2, args: [true],
+    }).then((results) => {
+      if (results.length !== 1 || results[0]?.frameId !== 0 || results[0].result !== 2)
+        throw automationError("snapshot-unavailable", { reason: "observation-primitives-unavailable" });
+    });
+    const cached = { frameId: scope.frameId, loaderId: scope.loaderId, revision: scope.revision, ready };
+    session.observationPrimitives = cached;
+    void ready.catch(() => { if (session.observationPrimitives === cached) delete session.observationPrimitives; });
+    return ready;
+  }
+
+  /** Resolve only native roots asynchronously; all UI evidence is read together. */
+  private async sampleNativeObservation(session: Session, pageZoom: number, guard: () => void): Promise<ReturnType<typeof sampleReadableSnapshot>> {
+    const frameId = session.rootFrameId;
+    if (!frameId) throw automationError("snapshot-unavailable", { reason: "missing-observation-frame" });
+    // The injection creates the extension world. A protocol barrier also
+    // settles its executionContextCreated event before selecting that world.
+    if (!this.extensionObservationContext(session, frameId)) {
+      await this.options.command(session.debuggee, "Runtime.evaluate", { expression: "void 0", returnByValue: true });
+      guard();
+    }
+    const context = this.extensionObservationContext(session, frameId);
+    if (!context) throw automationError("snapshot-unavailable", { reason: "missing-extension-observation-context" });
+    const check = () => {
+      guard();
+      if (session.observationContexts.get(context.id) !== context)
+        throw automationError("stale-observation", { reason: "observation-context-changed-during-read" });
+    };
+    const command = async (method: string, params: object) => {
+      check();
+      try {
+        const result = await this.options.command(session.debuggee, method, params);
+        check(); return result;
+      } catch (error) { check(); throw error; }
+    };
+    const objectGroup = `surf-wax-semantic-observation:${crypto.randomUUID()}`;
+    try {
+      const document = await command("Runtime.evaluate", {
+        expression: "document", contextId: context.id, objectGroup, returnByValue: false,
+      });
+      const documentObjectId = document?.result?.objectId;
+      if (document?.exceptionDetails || typeof documentObjectId !== "string")
+        throw automationError("snapshot-unavailable", { reason: "missing-observation-document" });
+      const described = await command("DOM.describeNode", { objectId: documentObjectId, depth: 0 });
+      const root = described?.node;
+      if (root?.nodeType !== 9 || !Number.isSafeInteger(root.backendNodeId) || root.backendNodeId <= 0)
+        throw automationError("snapshot-unavailable", { reason: "invalid-observation-document" });
+      const cached = session.nativeControlCandidates;
+      let hosts: Array<{ backendNodeId: number } | { nodeId: number }>;
+      if (cached?.frameId === frameId && cached.loaderId === session.frameLoaders.get(frameId)
+        && cached.documentBackendNodeId === root.backendNodeId) hosts = cached.hosts.map((backendNodeId) => ({ backendNodeId }));
+      else {
+        // A capture can fail before obtaining a DOMSnapshot. Discover only
+        // current root fields rather than fetching another whole document.
+        let nodeId = root.nodeId;
+        if (!Number.isSafeInteger(nodeId) || nodeId <= 0) {
+          const current = await command("DOM.getDocument", { depth: 0 });
+          if (current?.root?.backendNodeId !== root.backendNodeId)
+            throw automationError("stale-observation", { reason: "observation-document-changed-during-read" });
+          nodeId = current.root.nodeId;
+        }
+        if (!Number.isSafeInteger(nodeId) || nodeId <= 0)
+          throw automationError("snapshot-unavailable", { reason: "missing-native-discovery-root" });
+        const selected = await command("DOM.querySelectorAll", { nodeId, selector: "input,textarea,select" });
+        if (!Array.isArray(selected?.nodeIds) || selected.nodeIds.some((id: number) => !Number.isSafeInteger(id) || id <= 0))
+          throw automationError("snapshot-unavailable", { reason: "native-discovery-unavailable" });
+        hosts = selected.nodeIds.map((nodeId: number) => ({ nodeId }));
+      }
+      const roots: Array<{ objectId: string }> = [], seen = new Set<number>();
+      for (let offset = 0; offset < hosts.length; offset += 32) {
+        const resolved = await Promise.allSettled(hosts.slice(offset, offset + 32).map(async (host) => {
+          try {
+            const response = await command("DOM.describeNode", { ...host, depth: 1, pierce: true });
+            const node = response?.node;
+            if (node?.nodeType !== 1 || !/^(?:input|textarea|select)$/i.test(node.nodeName ?? "")
+              || "backendNodeId" in host && node.backendNodeId !== host.backendNodeId) return undefined;
+            const shadows = (node.shadowRoots ?? []).filter((shadow: any) => shadow.shadowRootType === "user-agent");
+            if (shadows.length > 1) throw automationError("snapshot-unavailable", { reason: "ambiguous-native-root" });
+            const backendNodeId = shadows[0]?.backendNodeId;
+            if (!Number.isSafeInteger(backendNodeId) || backendNodeId <= 0 || seen.has(backendNodeId)) return undefined;
+            seen.add(backendNodeId);
+            const value = await command("DOM.resolveNode", { backendNodeId, executionContextId: context.id, objectGroup });
+            return typeof value?.object?.objectId === "string" ? { objectId: value.object.objectId } : undefined;
+          } catch (error) {
+            check();
+            // A removed field contributes no old evidence. The final sample
+            // detects replacement fields and reports their missing root.
+            if (isDetachedNodeError(error)) return undefined;
+            throw error;
+          }
+        }));
+        check();
+        const failed = resolved.find((value): value is PromiseRejectedResult => value.status === "rejected");
+        if (failed) throw failed.reason;
+        for (const value of resolved) if (value.status === "fulfilled" && value.value) roots.push(value.value);
+      }
+      const response = await command("Runtime.callFunctionOn", {
+        objectId: documentObjectId, arguments: [{ value: pageZoom }, ...roots],
+        functionDeclaration: NATIVE_OBSERVATION_SOURCE, returnByValue: true,
+      });
+      if (response?.exceptionDetails)
+        throw automationError("snapshot-unavailable", { reason: "semantic-observation-failed", detail: response.exceptionDetails.text });
+      return response?.result?.value ?? null;
+    } finally {
+      // The enclosing capture races cancellation. This task settles all
+      // dispatched resolutions before releasing their group, even when late.
+      void this.options.command(session.debuggee, "Runtime.releaseObjectGroup", { objectGroup }).catch(() => undefined);
+    }
+  }
+
   private async captureReadableSnapshot(session: Session, region?: LocatorSpec): Promise<Awaited<ReturnType<AutomationRuntime["captureSnapshot"]>> & { readOnly?: true; limitations?: string; viewport?: ObservationRecord["viewport"] }> {
     const { guard, waitForCapture } = this.captureWaiter(session, this.context.signal);
     try { return await this.captureSnapshot(session, region); }
@@ -3523,38 +3726,49 @@ export class AutomationRuntime {
       // Scope-specific inspection and action resolution retain strict identity
       // checks. Only a whole-page read can become a root-viewport text sample.
       if (region || !(error instanceof AutomationError) || error.code !== "snapshot-unavailable"
-        || !["dom-unstable", "text-paint-unstable", "dynamic-text-unstable", "text-paint-node-unstable", "dom-control-changed-during-capture"].includes(String(error.detail.reason))) throw error;
+        || !["dom-unstable", "text-paint-unstable", "dynamic-text-unstable", "text-paint-node-unstable", "dom-control-changed-during-capture", "frame-tree-unstable"].includes(String(error.detail.reason))) throw error;
       guard();
-      const generation = session.generation, frameRevision = session.frameRevision;
-      let injected: chrome.scripting.InjectionResult<ReturnType<typeof sampleReadableSnapshot>>[];
+      const scope = this.rootReadScope(session);
+      const guardRoot = () => { guard(); this.assertRootReadScope(session, scope); };
+      let sample: ReturnType<typeof sampleReadableSnapshot>;
       try {
-        injected = await waitForCapture(this.options.chromeApi.scripting.executeScript({
-          target: { tabId: session.tabId, frameIds: [0] }, world: "ISOLATED", func: sampleReadableSnapshot,
-        }));
+        await waitForCapture(this.prepareObservationPrimitives(session));
+        const readZoom = typeof this.options.chromeApi.tabs.getZoom === "function"
+          ? () => this.options.chromeApi.tabs.getZoom(session.tabId) : undefined;
+        const pageZoom = readZoom ? await waitForCapture(readZoom()) : 0;
+        guardRoot();
+        sample = await waitForCapture(this.sampleNativeObservation(session, pageZoom, guardRoot));
+        scope.context = this.extensionObservationContext(session, scope.frameId);
+        guardRoot();
+        if (readZoom && await waitForCapture(readZoom()) !== pageZoom)
+          throw automationError("stale-observation", { reason: "page-zoom-changed-during-read" });
       } catch (cause) {
-        guard();
-        if (this.sessions.get(session.tabId) !== session || session.generation !== generation || session.frameRevision !== frameRevision)
-          throw automationError("stale-observation", { reason: "document-or-frame-changed-during-read" });
+        guardRoot();
+        if (cause instanceof AutomationError && cause.code === "stale-observation") throw cause;
         throw automationError("snapshot-unavailable", { reason: "read-only-sampling-unavailable", after: error.detail.reason,
           guidance: "The extension could not inspect this page safely. Retry when stable, use read_elements, or take_screenshot.",
           detail: cause instanceof Error ? cause.message : String(cause) });
       }
-      guard();
-      const sample = injected.length === 1 && injected[0]?.frameId === 0 ? injected[0].result : null;
+      guardRoot();
       let lines: SnapshotLine[];
       try { lines = readableSnapshot(sample!); }
       catch { throw automationError("snapshot-unavailable", { reason: "read-only-sampling-unavailable", after: error.detail.reason,
         guidance: "The extension could not inspect this page safely. Retry when stable, use read_elements, or take_screenshot." }); }
       const ready = await waitForCapture(this.pageValue(session.tabId, "document.readyState === 'complete'"));
-      guard();
-      if (!ready || this.sessions.get(session.tabId) !== session || session.generation !== generation || session.frameRevision !== frameRevision)
-        throw automationError("stale-observation", { reason: "document-or-frame-changed-during-read" });
+      guardRoot();
+      if (!ready) throw automationError("stale-observation", { reason: "root-document-not-ready-after-read" });
       if (!lines.length) throw automationError("snapshot-unavailable", {
         reason: "read-only-no-proven-text", after: error.detail.reason,
         guidance: "No visible text could be confirmed in the read-only viewport sample. Retry when the page is stable, use read_elements for a scoped read, or take_screenshot for visual content.",
       });
-      const limitations = `Read-only root viewport text sampled in one synchronous DOM read after ${error.detail.reason}. Generated/shadow content, embedded documents, uncertain paint, control state and action refs are omitted. Depth uses DOM ancestry. This is incomplete evidence. Use find_elements for action refs, read_elements for scoped reads, or take_screenshot for visual content.`;
-      return { url: sample!.url, title: sample!.title, viewport: sample!.viewport, lines, frameRevision, geometry: "", geometrySources: [], geometryStyles: [], partial: true, readOnly: true, limitations };
+      const gaps = new Map<string, number>();
+      for (const gap of sample!.gaps) gaps.set(gap.reason, (gaps.get(gap.reason) ?? 0) + (gap.count ?? 1));
+      const coverage = gaps.size ? ` Unconfirmed coverage: ${[...gaps].map(([reason, count]) => `${reason} (${count})`).join(", ")}.` : "";
+      const limitations = `Read-only root viewport semantics sampled in one synchronous DOM read after ${error.detail.reason}. Roles, states and label fragments describe that same read; no earlier AX results were merged. Action refs and embedded documents are not included.${coverage} This is incomplete evidence. Use find_elements for action refs or read_elements for scoped reads.`;
+      const captured = { url: sample!.url, title: sample!.title, viewport: sample!.viewport, lines, frameRevision: session.frameRevision,
+        geometry: "", geometrySources: [], geometryStyles: [], partial: true as const, readOnly: true as const, limitations };
+      this.rootReadScopes.set(captured, scope);
+      return captured;
     }
   }
 
@@ -3593,6 +3807,13 @@ export class AutomationRuntime {
       const generation = session.generation, frameRevision = session.frameRevision;
       if (session.snapshotStyleProfile?.generation !== generation) computedStyles = SNAPSHOT_COMPUTED_STYLES;
       if (retryGeneration !== generation || retryFrameRevision !== frameRevision) {
+        // A changed document/frame graph invalidates the current attempt, not
+        // the observation's recovery budget. Repeated child replacement must
+        // reach the synchronous root sample instead of restarting forever.
+        if (retryGeneration !== undefined) {
+          if (dynamicRecoveryPasses) throw automationError("snapshot-unavailable", { reason: "frame-tree-unstable" });
+          retryDynamicCapture("frame-tree-unstable");
+        }
         retryGeneration = generation; retryFrameRevision = frameRevision; retriedUnstableCapture = false; speculativeDynamic = false; dynamicTextByTarget.clear();
       }
       const changed = () => generation !== session.generation || frameRevision !== session.frameRevision;
@@ -3903,7 +4124,12 @@ export class AutomationRuntime {
         const captureLayout = async (debuggee: Debuggee): Promise<Layout> => {
           if (debuggee.sessionId) await session.frameReady.get(debuggee.sessionId);
           frameGuard();
-          return { debuggee, snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...computedStyles], includeDOMRects: true, includePaintOrder: true }) };
+          const snapshot = await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...computedStyles], includeDOMRects: true, includePaintOrder: true });
+          if (!debuggee.sessionId && session.rootFrameId) {
+            const candidates = nativeControlCandidates(snapshot, session.rootFrameId);
+            if (candidates) session.nativeControlCandidates = { ...candidates, frameId: session.rootFrameId, loaderId: session.frameLoaders.get(session.rootFrameId) };
+          }
+          return { debuggee, snapshot };
         };
         const selectRegionFrames = async (layouts: Layout[], allowCapture: boolean) => {
           if (!regionNode || !regionDebuggee) return { frameId: undefined, selected: frames };
@@ -4905,7 +5131,14 @@ export class AutomationRuntime {
             if (node.backendDOMNodeId && (INTERACTIVE_ROLES.has(role) || node.properties?.some((property: any) => property.name === "focusable" && property.value?.value))) {
               ref = this.rememberRef(session, identity, { backendNodeId: node.backendDOMNodeId, frameId: frameLabel ?? session.rootFrameId, debuggee, role, name: semanticName(originalName), generation, identitySource: "ax" });
             }
-            const state: Partial<Record<SnapshotStateName, unknown>> = Object.fromEntries(["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly"].filter((key) => properties[key] !== undefined).map((key) => [key, properties[key]]));
+            const state: Partial<Record<SnapshotStateName, unknown>> = Object.fromEntries(["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly", "current", "level"].filter((key) => properties[key] !== undefined).map((key) => [key, properties[key]]));
+            const domNodeIndex = domIndex.indexOf(node.backendDOMNodeId);
+            const attributes = domNodeIndex === undefined ? [] : doc.nodes.attributes?.[domNodeIndex] ?? [];
+            const currentOffset = attributes.findIndex((attribute: number, index: number) => index % 2 === 0 && snapshot.strings[attribute] === "aria-current");
+            if (currentOffset >= 0) {
+              const current = snapshot.strings[attributes[currentOffset + 1]];
+              if (current) state.current = current === "false" ? false : ["page", "step", "location", "date", "time"].includes(current) ? current : true;
+            }
             if (editableControl) state.editable = editableEvidence.mode;
             if (editableEvidence?.disabled) state.disabled = true;
             if (editableEvidence?.readonly) state.readonly = true;

@@ -9,7 +9,7 @@ describe("painted text projection", () => {
   it("compares the semantic inputs that validate text paint decisions", () => {
     expect(sameTextPaintCandidates([candidate], [{ ...candidate }])).toBe(true);
     expect(sameTextPaintCandidates([candidate], [])).toBe(false);
-    for (const change of [{ sourceText: "changed" }, { frameId: "other" }, { fullyWithinClip: false }, { firstLetter: "A" }, { zeroFont: true }, { basePainted: true }])
+    for (const change of [{ sourceText: "changed" }, { frameId: "other" }, { fullyWithinClip: false }, { fullyWithinOrdinaryClip: true }, { effectClipRisk: ["mask-image:linear-gradient(black, black)"] }, { firstLetter: "A" }, { zeroFont: true }, { basePainted: true }] as const)
       expect(sameTextPaintCandidates([candidate], [{ ...candidate, ...change }])).toBe(false);
   });
 
@@ -22,6 +22,18 @@ describe("painted text projection", () => {
     expect(projectTextPaint({ ...candidate, basePainted: true }, evidence)).toEqual({ hidden: false, text: "ABCDEF" });
     expect(projectTextPaint({ ...candidate, basePainted: true, fullyWithinClip: false }, evidence)).toBeUndefined();
     expect(projectTextPaint({ ...candidate, basePainted: true }, { ...evidence, sourceText: "changed" })).toBeUndefined();
+  });
+
+  it("requires both ordinary clip coverage and the same-read effect proof", () => {
+    const masked: SnapshotTextPaintCandidate = { ...candidate, fullyWithinClip: undefined, fullyWithinOrdinaryClip: true, effectClipRisk: ["mask-image:linear-gradient(black, black)"], basePainted: true };
+    const clipInputs = ["mask-image:linear-gradient(black, black)"];
+    expect(projectTextPaint(masked, { ...evidence, clipCoverage: "complete", clipInputs })).toEqual({ hidden: false, text: "ABCDEF" });
+    for (const clipCoverage of [undefined, "empty", "unknown"] as const)
+      expect(projectTextPaint(masked, { ...evidence, clipInputs, ...(clipCoverage ? { clipCoverage } : {}) })).toBeUndefined();
+    expect(projectTextPaint({ ...masked, fullyWithinOrdinaryClip: undefined }, { ...evidence, clipCoverage: "complete", clipInputs })).toBeUndefined();
+    expect(projectTextPaint({ ...masked, effectClipRisk: ["-webkit-line-clamp:2"] }, { ...evidence, clipCoverage: "complete", clipInputs })).toBeUndefined();
+    expect(projectTextPaint({ ...masked, effectClipRisk: ["-webkit-line-clamp:2", "-webkit-line-clamp:2"] }, { ...evidence, clipCoverage: "complete", clipInputs: ["-webkit-line-clamp:2"] })).toBeUndefined();
+    expect(projectTextPaint({ ...candidate, basePainted: true }, { ...evidence, clipCoverage: "complete", clipInputs: ["-webkit-line-clamp:2"] })).toBeUndefined();
   });
 
   it("projects a large number of first-line ranges without exceeding the call stack", () => {

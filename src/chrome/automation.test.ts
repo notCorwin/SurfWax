@@ -66,7 +66,15 @@ function harness(
   metadata ??= [{ role: "button", name: "Sign in", tag: "button", text: "Sign in" }];
   const calls: Array<{ method: string; params?: any }> = [];
   let latestState: any = states[0];
-  const scripting = { executeScript: vi.fn(async (): Promise<any[]> => [{ frameId: 0, result: { url: "https://example.test/", title: "Sample", viewport: { x: 0, y: 0, width: 1000, height: 700, scale: 1 }, rows: [{ text: "Independent visible text", depth: 2, bounds: [10, 10, 50, 20] }] } }]) };
+  const sampleObservation = vi.fn(async (): Promise<any> => ({ url: "https://example.test/", title: "Sample", viewport: { x: 0, y: 0, width: 1000, height: 700, scale: 1 }, rows: [{ key: 1, depth: 0, role: "text", text: "Independent visible text", bounds: [10, 10, 50, 20] }], gaps: [] }));
+  const scripting = { executeScript: vi.fn(async (options?: any): Promise<any[]> => {
+    if (options?.func?.name === "snapshotObservationPrimitives") {
+      runtime.handleEvent({ tabId: 3 }, "Runtime.executionContextCreated", { context: { id: 404, uniqueId: "observation-context", origin: "chrome-extension://unit-extension", auxData: { frameId: "root", type: "isolated", isDefault: false } } });
+      return [{ frameId: 0, result: 2 }];
+    }
+    return [{ frameId: 0, result: await sampleObservation() }];
+  }) };
+  const getZoom = vi.fn(async () => 1);
   const tabsCreated = event<(tab: chrome.tabs.Tab) => void>();
   const downloadsCreated = event<(item: chrome.downloads.DownloadItem) => void>();
   // The mock AX tree is backed by matching DOM text/layout evidence. AX name
@@ -121,6 +129,7 @@ function harness(
       return { nodes: item ? [{ backendDOMNodeId: params.backendNodeId, role: { value: item.role }, name: { value: item.name } }] : [] };
     }
     if (method === "Runtime.evaluate") {
+      if (params.expression === "document" && params.contextId === 404) return { result: { objectId: "observation-document" } };
       if (params.expression.includes("/* surf-wax:evaluate-graph */")) return { result: { value: encodeLogGraph(true) } };
       if (params.expression.includes('"nodes"')) return { result: { objectId: "node-array" } };
       if (params.returnByValue === false) return { result: { objectId: "node-1" } };
@@ -130,6 +139,7 @@ function harness(
       if (params.expression.includes("({width:innerWidth")) return { result: { value: { width: 100, height: 50 } } };
       return { result: { value: true } };
     }
+    if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("surf-wax:semantic-native-observation")) return { result: { value: await sampleObservation() } };
     if (method === "Runtime.callFunctionOn" && params.objectId === "node-array") {
       if (params.functionDeclaration === "function(){return this.length}") return { result: { value: metadata.length } };
       if (params.functionDeclaration === "function(){return this[0]}") return { result: { objectId: "node-1" } };
@@ -144,16 +154,18 @@ function harness(
     if (method === "Runtime.callFunctionOn") { latestState = states.length > 1 ? states.shift() : states[0]; return { result: { value: latestState } }; }
     if (method === "DOM.getContentQuads") return { quads: [[latestState.x - 1, latestState.y - 1, latestState.x + 1, latestState.y - 1, latestState.x + 1, latestState.y + 1, latestState.x - 1, latestState.y + 1]] };
     if (method === "DOM.getNodeForLocation") return { backendNodeId: 7 };
+    if (method === "DOM.describeNode" && params.objectId === "observation-document") return { node: { nodeId: 1, backendNodeId: 1, nodeType: 9, nodeName: "#document" } };
     if (method === "DOM.describeNode") return { node: { backendNodeId: 7 } };
     if (method === "DOM.resolveNode") return { object: { objectId: "node-1" } };
     if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
+    if (method === "DOM.querySelectorAll") return { nodeIds: [] };
     if (method === "Page.captureScreenshot") return { data: btoa(String.fromCharCode(0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 0, 100, 0, 200, 3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0)) };
     return {};
   });
   const detach = vi.fn(async () => undefined);
   const pressChord = vi.fn(async (_debuggee: any, _chord: string, _signal?: AbortSignal) => undefined);
   const runtime = new AutomationRuntime({
-    chromeApi: { scripting, tabs: { query: async () => [{ id: 3 }], onCreated: tabsCreated }, downloads: { onCreated: downloadsCreated } } as never,
+    chromeApi: { runtime: { id: "unit-extension" }, scripting, tabs: { query: async () => [{ id: 3 }], getZoom, onCreated: tabsCreated }, downloads: { onCreated: downloadsCreated } } as never,
     command: async (source, method, params) => {
       const response = await command(source, method, params);
       if (method !== "DOMSnapshot.captureSnapshot") return response;
@@ -187,7 +199,7 @@ function harness(
     claimChooser,
     logger: logger as never,
   });
-  return { runtime, calls, command, scripting, pressChord, detach, tabsCreated, onDispatch };
+  return { runtime, calls, command, scripting, sampleObservation, getZoom, pressChord, detach, tabsCreated, onDispatch };
 }
 
 function textboxSnapshot(options: { value?: string; text?: string; role?: string; masked?: boolean; properties?: any[]; actions?: string[]; sibling?: boolean; independent?: boolean; logger?: { telemetry: ReturnType<typeof vi.fn> } } = {}) {
@@ -213,7 +225,7 @@ function textboxSnapshot(options: { value?: string; text?: string; role?: string
     if (method === "DOMSnapshot.captureSnapshot") return snapshot;
     if (method === "Accessibility.getFullAXTree") return { nodes };
     if (method === "Page.createIsolatedWorld") return { executionContextId: 31 };
-    if (method === "Runtime.evaluate" && params?.expression === "document") return { result: { objectId: "native-document" } };
+    if (method === "Runtime.evaluate" && params?.expression === "document" && params.contextId !== 404) return { result: { objectId: "native-document" } };
     if (method === "DOM.describeNode" && params?.backendNodeId === 7) return { node: { backendNodeId: 7, nodeName: "INPUT",
       shadowRoots: [{ shadowRootType: "user-agent", children: [{ children: [{ nodeType: 3, backendNodeId: 10, nodeValue: value }] }] }] } };
     if (method === "DOM.resolveNode" && params?.backendNodeId === 10 && params?.objectGroup?.startsWith("surf-wax-native-value:"))
@@ -224,7 +236,7 @@ function textboxSnapshot(options: { value?: string; text?: string; role?: string
       const proven = /^[\x20-\x7e]{1,10}$/.test(value);
       return { result: { value: { scene: ["visible isolated document"], selectValues: [], selectStates: [], nativeValues: [proven ? { text: value, box: { x: 0, y: 0, width: 100, height: 20 } } : null] } } };
     }
-    if (method === "DOM.describeNode") return { node: { backendNodeId: 8 } };
+    if (method === "DOM.describeNode" && params.objectId !== "observation-document") return { node: { backendNodeId: 8 } };
     return original(source, method, params);
   });
   return { runtime, command, value, text };
@@ -3734,15 +3746,17 @@ it("retires old same-process descendants when an OOPIF tree arrives before swap/
 });
 
 it("reads and pages a changing document without publishing action refs or a complete baseline", async () => {
-  const { runtime, command, scripting } = harness();
+  const { runtime, command, sampleObservation, getZoom } = harness();
   const original = command.getMockImplementation()!;
   let captures = 0, samples = 0;
   const viewport = { x: 0, y: 0, width: 1000, height: 700, scale: 1 };
-  scripting.executeScript.mockImplementation(async () => {
+  sampleObservation.mockImplementation(async () => {
     samples++;
-    return [{ frameId: 0, result: { url: "https://example.test/", title: "Sample", viewport, rows: [
-      { text: "Current visible text", depth: 2, bounds: [10, 10, 50, 20] }, { text: "Second visible text", depth: 8, bounds: [10, 40, 50, 20] },
-    ] } }];
+    return { url: "https://example.test/", title: "Sample", viewport, rows: [
+      { key: 1, depth: 0, role: "main", bounds: [0, 0, 1000, 700] },
+      { key: 2, parentKey: 1, depth: 1, role: "text", text: "Current visible text", bounds: [10, 10, 50, 20] },
+      { key: 3, parentKey: 1, depth: 1, role: "button", text: "Second visible text", bounds: [10, 40, 50, 20], state: { expanded: false } },
+    ], gaps: [] };
   });
   command.mockImplementation(async (source, method, params) => {
     const result = await original(source, method, params);
@@ -3771,19 +3785,26 @@ it("reads and pages a changing document without publishing action refs or a comp
     await expect(page.point(first.observationId, 1, 1, "click")).rejects.toMatchObject({ code: "stale-observation" });
     const next = await page.inspect({ since: first.observationId });
     expect(next).toMatchObject({ mode: "full", partial: true, reset: "current-output-partial" });
-    await expect(page.inspect({ depth: 0 })).resolves.toMatchObject({ items: [], partial: true });
-    await expect(page.inspect({ fields: ["state"] })).resolves.toMatchObject({ items: [], partial: true });
+    const shallow: any = await page.inspect({ depth: 0 });
+    expect(shallow.partial).toBe(true);
+    expect(shallow.items.map((item: any) => item.line).join("\n")).not.toContain("Current visible text");
+    const stateOnly: any = await page.inspect({ fields: ["state"] });
+    expect(stateOnly.partial).toBe(true);
+    expect(stateOnly.items.map((item: any) => item.line).join("\n")).toContain("expanded=false");
+    expect(stateOnly.items.map((item: any) => item.line).join("\n")).not.toContain("Second visible text");
+    getZoom.mockResolvedValueOnce(1).mockResolvedValueOnce(1.25);
+    await expect(page.inspect()).rejects.toMatchObject({ code: "stale-observation", detail: { reason: "page-zoom-changed-during-read" } });
     runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "root", loaderId: "new" } });
     await expect(page.inspect({ cursor: first.nextCursor })).rejects.toMatchObject({ code: "stale-observation" });
   } finally { await runtime.abortSessions(); }
 });
 
 it.each(["abort", "detach"] as const)("interrupts a read-only recovery capture on %s without waiting for the injected sample", async (mode) => {
-  const { runtime, command, scripting } = harness();
+  const { runtime, command, sampleObservation } = harness();
   const original = command.getMockImplementation()!;
   let captures = 0, started!: () => void, failLate!: (error: Error) => void;
   const fallbackStarted = new Promise<void>((resolve) => { started = resolve; });
-  scripting.executeScript.mockImplementation(async () => {
+  sampleObservation.mockImplementation(async () => {
     started();
     return new Promise((_resolve, reject) => { failLate = reject; });
   });
@@ -3809,6 +3830,62 @@ it.each(["abort", "detach"] as const)("interrupts a read-only recovery capture o
   } finally { await runtime.abortSessions(); }
 });
 
+it("returns a fresh root sample when repeated document changes exhaust capture recovery", async () => {
+  const { runtime, command } = harness();
+  const original = command.getMockImplementation()!;
+  command.mockImplementation(async (source, method, params) => {
+    const result = await original(source, method, params);
+    if (method === "DOMSnapshot.captureSnapshot") runtime.handleEvent({ tabId: 3 }, "DOM.documentUpdated", {});
+    return result;
+  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 500);
+  runtime.setContext({ signal: controller.signal });
+  try {
+    const page = await runtime.createPage(3);
+    const result: any = await page.inspect();
+    expect(result).toMatchObject({ partial: true, limitations: expect.stringContaining("frame-tree-unstable") });
+    expect(result.items.map((item: any) => item.line).join("\n")).toContain("Independent visible text");
+    expect(result.items.every((item: any) => !item.ref)).toBe(true);
+  } finally { clearTimeout(timeout); await runtime.abortSessions(); }
+});
+
+it("selects the extension's isolated world and rejects its destruction during semantic sampling", async () => {
+  const { runtime, command, scripting, sampleObservation } = harness();
+  const original = command.getMockImplementation()!, install = scripting.executeScript.getMockImplementation()!;
+  let captures = 0, destroy = false;
+  scripting.executeScript.mockImplementation(async (options) => {
+    const result = await install(options);
+    if (options?.func?.name === "snapshotObservationPrimitives") for (const [origin, isDefault] of [
+      ["https://example.test", false], ["chrome-extension://another-extension", false], ["chrome-extension://unit-extension", true],
+    ] as const) runtime.handleEvent({ tabId: 3 }, "Runtime.executionContextCreated", { context: {
+      id: 405, uniqueId: "wrong-world", origin, auxData: { frameId: "root", type: isDefault ? "default" : "isolated", isDefault },
+    } });
+    return result;
+  });
+  command.mockImplementation(async (source, method, params) => {
+    const result = await original(source, method, params);
+    if (method === "DOMSnapshot.captureSnapshot") {
+      const doc = result.documents[0], strings = result.strings;
+      doc.nodes.attributes[0] = [strings.push("data-revision") - 1, strings.push(String(++captures)) - 1];
+    }
+    if (destroy && method === "Runtime.evaluate" && params.expression === "document" && params.contextId === 404)
+      runtime.handleEvent({ tabId: 3 }, "Runtime.executionContextDestroyed", { executionContextId: 404 });
+    return result;
+  });
+  try {
+    const page = await runtime.createPage(3);
+    const first: any = await page.inspect();
+    expect(first.items.map((item: any) => item.line).join("\n")).toContain("Independent visible text");
+    expect(command.mock.calls.some(([, method, params]) => method === "Runtime.evaluate" && params.contextId === 405)).toBe(false);
+    const before = sampleObservation.mock.calls.length;
+    destroy = true;
+    await expect(page.inspect()).rejects.toMatchObject({ code: "stale-observation", detail: { reason: "observation-context-changed-during-read" } });
+    expect(sampleObservation).toHaveBeenCalledTimes(before);
+    expect(command.mock.calls.some(([, method, params]) => method === "Runtime.releaseObjectGroup" && params.objectGroup?.startsWith("surf-wax-semantic-observation:"))).toBe(true);
+  } finally { await runtime.abortSessions(); }
+});
+
 it("fails an empty read-only recovery without treating a strictly empty page as a failure", async () => {
   const empty = harness([]);
   const blank = await empty.runtime.createPage(3);
@@ -3818,10 +3895,10 @@ it("fails an empty read-only recovery without treating a strictly empty page as 
     expect(result.partial).not.toBe(true);
   } finally { await empty.runtime.abortSessions(); }
 
-  const { runtime, command, scripting } = harness();
+  const { runtime, command, sampleObservation } = harness();
   const original = command.getMockImplementation()!;
   let captures = 0;
-  scripting.executeScript.mockResolvedValue([{ frameId: 0, result: { url: "https://example.test/", title: "Sample", viewport: { x: 0, y: 0, width: 1000, height: 700, scale: 1 }, rows: [] } }]);
+  sampleObservation.mockResolvedValue({ url: "https://example.test/", title: "Sample", viewport: { x: 0, y: 0, width: 1000, height: 700, scale: 1 }, rows: [], gaps: [] });
   command.mockImplementation(async (source, method, params) => {
     const result = await original(source, method, params);
     if (method === "DOMSnapshot.captureSnapshot") {
@@ -3835,5 +3912,130 @@ it("fails an empty read-only recovery without treating a strictly empty page as 
     await expect(page.inspect()).rejects.toMatchObject({ code: "snapshot-unavailable", detail: {
       reason: "read-only-no-proven-text", after: "dom-unstable", guidance: expect.stringContaining("take_screenshot"),
     } });
+  } finally { await runtime.abortSessions(); }
+});
+
+function changingRootReadHarness() {
+  const fixture = harness(), original = fixture.command.getMockImplementation()!;
+  let capture = 0;
+  fixture.sampleObservation.mockResolvedValue({ url: "https://example.test/", title: "Sample", viewport: { x: 0, y: 0, width: 1000, height: 700, scale: 1 }, gaps: [], rows: [
+    { key: 1, depth: 0, role: "RootWebArea", bounds: [0, 0, 1000, 700] },
+    { key: 2, parentKey: 1, depth: 1, role: "text", text: "Independent visible text", bounds: [0, 0, 200, 20] },
+    { key: 3, parentKey: 1, depth: 1, role: "text", text: "Another root row", bounds: [0, 30, 200, 20] },
+  ] });
+  fixture.command.mockImplementation(async (source, method, params) => {
+    if (method === "Page.getFrameTree" && "sessionId" in source) return { frameTree: { frame: { id: "child", parentId: "root", loaderId: "child-loader" } } };
+    const result = await original(source, method, params);
+    if (method === "DOMSnapshot.captureSnapshot") {
+      const doc = result.documents[0], strings = result.strings;
+      doc.nodes.attributes[0] = [strings.push("data-revision") - 1, strings.push(String(++capture)) - 1];
+    }
+    return result;
+  });
+  return fixture;
+}
+
+const unrelatedChildChanges = {
+  attach: (runtime: AutomationRuntime) => runtime.handleEvent({ tabId: 3 }, "Page.frameAttached", { frameId: "child", parentFrameId: "root" }),
+  navigate: (runtime: AutomationRuntime) => runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "child", parentId: "root", loaderId: "child-loader" } }),
+  target: (runtime: AutomationRuntime) => runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "child-session", targetInfo: { type: "iframe", targetId: "child" } }),
+  detach: (runtime: AutomationRuntime) => {
+    runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "child-session", targetInfo: { type: "iframe", targetId: "child" } });
+    runtime.handleEvent({ tabId: 3 }, "Target.detachedFromTarget", { sessionId: "child-session" });
+  },
+  document: (runtime: AutomationRuntime) => runtime.handleEvent({ tabId: 3, sessionId: "child-session" }, "DOM.documentUpdated", {}),
+  contexts: (runtime: AutomationRuntime) => runtime.handleEvent({ tabId: 3, sessionId: "child-session" }, "Runtime.executionContextsCleared", {}),
+  context: (runtime: AutomationRuntime) => {
+    runtime.handleEvent({ tabId: 3 }, "Runtime.executionContextCreated", { context: { id: 405, uniqueId: "child-context", origin: "https://child.test", auxData: { frameId: "child", type: "default", isDefault: true } } });
+    runtime.handleEvent({ tabId: 3 }, "Runtime.executionContextDestroyed", { executionContextId: 405 });
+  },
+};
+
+it.each(["inspect", "semantic", "auto", "snapshot"] as const)("hands a fresh %s root read to the current global epoch after unrelated child changes", async (consumer) => {
+  for (const [name, change] of Object.entries(unrelatedChildChanges)) {
+    const fixture = changingRootReadHarness(), { runtime, sampleObservation } = fixture;
+    const original = sampleObservation.getMockImplementation()!;
+    let enabled = true;
+    sampleObservation.mockImplementation(async () => {
+      const result = await original();
+      if (enabled) change(runtime);
+      return result;
+    });
+    try {
+      const page = await runtime.createPage(3);
+      const result: any = consumer === "inspect" ? await page.inspect({ limit: 2 }) : consumer === "snapshot" ? await page.snapshot() : await page.observe(consumer);
+      expect(result.partial, `${consumer}/${name}`).toBe(true);
+      const text = result.snapshot ?? result.items.map((item: any) => item.line).join("\n");
+      expect(text).toContain("Independent visible text");
+      enabled = false;
+      if (result.observationId) {
+        if (result.nextCursor) await expect(page.inspect({ cursor: result.nextCursor })).resolves.toMatchObject({ partial: true });
+        await expect(page.point(result.observationId, 1, 1, "click")).rejects.toMatchObject({ code: "stale-observation", detail: { reason: "read-only-observation-use-screenshot-for-coordinates" } });
+      }
+    } finally { await runtime.abortSessions(); }
+  }
+});
+
+const rootReadInvalidations = {
+  navigation: (runtime: AutomationRuntime) => runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "root", loaderId: "new-root" } }),
+  document: (runtime: AutomationRuntime) => runtime.handleEvent({ tabId: 3 }, "DOM.documentUpdated", {}),
+  contexts: (runtime: AutomationRuntime) => runtime.handleEvent({ tabId: 3 }, "Runtime.executionContextsCleared", {}),
+  context: (runtime: AutomationRuntime) => runtime.handleEvent({ tabId: 3 }, "Runtime.executionContextDestroyed", { executionContextId: 404 }),
+  defaultContext: (runtime: AutomationRuntime) => {
+    runtime.handleEvent({ tabId: 3 }, "Runtime.executionContextCreated", { context: { id: 406, uniqueId: "root-default-context", origin: "https://example.test", auxData: { frameId: "root", type: "default", isDefault: true } } });
+    runtime.handleEvent({ tabId: 3 }, "Runtime.executionContextDestroyed", { executionContextId: 406 });
+  },
+  unknownContext: (runtime: AutomationRuntime) => runtime.handleEvent({ tabId: 3 }, "Runtime.executionContextDestroyed", { executionContextId: 999 }),
+  history: (runtime: AutomationRuntime) => runtime.handleEvent({ tabId: 3 }, "Page.navigatedWithinDocument", { frameId: "root", url: "https://example.test/#new" }),
+  loading: (runtime: AutomationRuntime) => runtime.handleEvent({ tabId: 3 }, "Page.frameStartedLoading", { frameId: "root" }),
+  documentOpen: (runtime: AutomationRuntime) => runtime.handleEvent({ tabId: 3 }, "Page.lifecycleEvent", { frameId: "root", loaderId: "same-loader", name: "init", timestamp: 100 }),
+};
+
+it.each(["inspect", "semantic", "snapshot"] as const)("rejects a fresh %s root read after a root document boundary", async (consumer) => {
+  for (const [name, invalidate] of Object.entries(rootReadInvalidations)) {
+    const { runtime, sampleObservation } = changingRootReadHarness(), original = sampleObservation.getMockImplementation()!;
+    sampleObservation.mockImplementation(async () => { const result = await original(); invalidate(runtime); return result; });
+    try {
+      const page = await runtime.createPage(3);
+      const pending = consumer === "inspect" ? page.inspect() : consumer === "snapshot" ? page.snapshot() : page.observe("semantic");
+      await expect(pending, `${consumer}/${name}`).rejects.toMatchObject({ code: "stale-observation" });
+    } finally { await runtime.abortSessions(); }
+  }
+});
+
+it.each(["inspect", "observe"] as const)("keeps explicit %s baselines globally pinned while a root read is being acquired", async (consumer) => {
+  const { runtime, sampleObservation } = changingRootReadHarness(), original = sampleObservation.getMockImplementation()!;
+  let change = false;
+  sampleObservation.mockImplementation(async () => { const result = await original(); if (change) unrelatedChildChanges.attach(runtime); return result; });
+  try {
+    const page = await runtime.createPage(3);
+    const baseline: any = consumer === "inspect" ? await page.inspect() : await page.observe("semantic");
+    change = true;
+    await expect(consumer === "inspect" ? page.inspect({ since: baseline.observationId }) : page.observe("semantic", baseline.observationId))
+      .rejects.toMatchObject({ code: "stale-observation" });
+  } finally { await runtime.abortSessions(); }
+});
+
+it("does not heal an old frozen cursor or visual acquisition through a new root-only capture", async () => {
+  const { runtime, command, sampleObservation } = changingRootReadHarness(), original = command.getMockImplementation()!;
+  sampleObservation.mockResolvedValue({ url: "https://example.test/", title: "Sample", viewport: { x: 0, y: 0, width: 1000, height: 700, scale: 1 }, gaps: [], rows: [
+    { key: 1, depth: 0, role: "RootWebArea", bounds: [0, 0, 1000, 700] },
+    { key: 2, parentKey: 1, depth: 1, role: "text", text: "First", bounds: [0, 0, 50, 20] },
+    { key: 3, parentKey: 1, depth: 1, role: "text", text: "Second", bounds: [0, 30, 50, 20] },
+  ] });
+  try {
+    const page = await runtime.createPage(3), first: any = await page.inspect({ limit: 1 });
+    expect(first.nextCursor).toBeTruthy();
+    const reads = sampleObservation.mock.calls.length, pending = page.inspect({ cursor: first.nextCursor });
+    queueMicrotask(() => unrelatedChildChanges.attach(runtime));
+    await expect(pending).rejects.toMatchObject({ code: "stale-observation" });
+    expect(sampleObservation).toHaveBeenCalledTimes(reads);
+    command.mockImplementation(async (source, method, params) => {
+      const result = await original(source, method, params);
+      if (method === "Runtime.evaluate" && params.expression?.includes("({url:")) unrelatedChildChanges.navigate(runtime);
+      return result;
+    });
+    await expect(page.observe("visual")).rejects.toMatchObject({ code: "stale-observation" });
+    expect(command.mock.calls.some(([, method]) => method === "Page.captureScreenshot")).toBe(false);
   } finally { await runtime.abortSessions(); }
 });

@@ -59,6 +59,21 @@ describe("compact visible snapshot presentation", () => {
     expect(result[1]!.line).toBe('  - StaticText "Save changes"');
   });
 
+  it("preserves nested text fragment positions when folding a complete label", () => {
+    const label: SnapshotNode = { id: "label", depth: 1, role: "StaticText", name: "One Two", bounds: [0, 0, 100, 20],
+      textFragments: [{ text: "One ", bounds: [0, 0, 30, 20] }, { text: "Two", bounds: [30, 0, 30, 20] }] };
+    const fold = (node: SnapshotNode) => expandSnapshot(compactSnapshot(rows([
+      { id: "button", depth: 0, role: "button", name: "One Two", bounds: [0, 0, 100, 20] }, node,
+    ])));
+    const first = fold(label);
+    expect(first).toHaveLength(1);
+    expect(first[0]!.node?.textFragments).toEqual(label.textFragments);
+    expect(fold({ ...label, textFragments: [label.textFragments![0]!, { text: "Two", bounds: [60, 0, 30, 20] }] })[0]!.line)
+      .not.toBe(first[0]!.line);
+    // A stale name is insufficient proof that these fragments equal the label.
+    expect(fold({ ...label, textFragments: [{ text: "Changed", bounds: [0, 0, 100, 20] }] })).toHaveLength(2);
+  });
+
   it("keeps distinct source paragraphs separate after their passive wrappers are flattened", () => {
     const result = compactSnapshot(rows([
       { id: "root", depth: 0, role: "RootWebArea" },
@@ -69,6 +84,26 @@ describe("compact visible snapshot presentation", () => {
     ]));
     expect(result.map(({ id }) => id)).toEqual(["root", "one", "two"]);
     expect(result.every((line) => !line.members)).toBe(true);
+  });
+
+  it("folds a sole paragraph label while preserving its geometry and sibling boundaries", () => {
+    const input: SnapshotNode[] = [
+      { id: "link", depth: 0, role: "link", name: "One Two", bounds: [0, 0, 100, 50] },
+      { id: "wrapper", depth: 1, role: "generic" },
+      { id: "paragraph", depth: 2, role: "paragraph" },
+      { id: "text", depth: 3, role: "StaticText", name: "One Two", bounds: [2, 5, 90, 40],
+        textFragments: [{ text: "One ", bounds: [2, 5, 30, 15] }, { text: "Two", bounds: [2, 25, 30, 15] }] },
+    ];
+    const folded = expandSnapshot(compactSnapshot(rows(input)));
+    expect(folded).toHaveLength(1);
+    expect(folded[0]!.node?.textFragments).toEqual(input[3]!.textFragments);
+    // Even one additional child makes this a paragraph boundary, not merely
+    // the named control's single label path.
+    const siblings = [...input, { id: "sibling", depth: 1, role: "StaticText", name: "Other" }];
+    expect(expandSnapshot(compactSnapshot(rows(siblings))).some(({ id }) => id === "text")).toBe(true);
+    const paragraphs = [...input, { id: "second", depth: 1, role: "paragraph" },
+      { id: "second-text", depth: 2, role: "StaticText", name: "Other" }];
+    expect(expandSnapshot(compactSnapshot(rows(paragraphs))).some(({ id }) => id === "text")).toBe(true);
   });
 
   it("preserves uncertainty, formatting, frame associations and selected region roots", () => {

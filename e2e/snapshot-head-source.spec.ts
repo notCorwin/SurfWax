@@ -202,3 +202,26 @@ test("equal captured colors retain unknown geometry without claiming invisible l
     await detach(opened.page).catch(() => undefined); await dispose(opened.context, opened.userDataDirectory);
   }
 });
+
+test("full observations preserve labels through proven local mask and rounded inset clips", async () => {
+  const opened = await openExtension();
+  try {
+    const markup = ordinary + `<style>
+      #nav{display:flex;gap:20px;height:48px;align-items:center;mask-image:linear-gradient(to right,transparent 0px,transparent 0px,black 0px,black 100%,transparent 100%,transparent 100%)}
+      #rounded{display:flex;gap:16px;padding:30px;clip-path:inset(0 round 24px);background:#eee}
+      #uncertain{mask-image:linear-gradient(to right,rgba(0,0,0,.5),rgba(0,0,0,.5))}
+    </style><nav id="nav"><a href="/politics" aria-current="page">政治分类</a><a href="/sports">体育分类</a></nav>
+      <section id="rounded"><button aria-expanded="false">模型菜单</button><a href="/trends">AI趋势</a></section>
+      <section id="uncertain"><button>UNCONFIRMED_MASK</button></section>`;
+    await opened.context.route(url, (route) => route.fulfill({ contentType: "text/html", body: markup }));
+    const target = await opened.context.newPage(); await target.goto(url); await attach(opened.page);
+    const result = await inspect(opened.page);
+    const text = result.items.map((item: any) => item.line).join("\n");
+    for (const label of ["政治分类", "体育分类", "模型菜单", "AI趋势"]) expect(text).toContain(label);
+    expect(text).toContain("expanded=false"); expect(text).toContain("current=page");
+    expect(text).not.toContain("UNCONFIRMED_MASK");
+    expect(text).toContain("[name=unknown]");
+  } finally {
+    await detach(opened.page).catch(() => undefined); await dispose(opened.context, opened.userDataDirectory);
+  }
+});

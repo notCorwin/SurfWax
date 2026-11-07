@@ -11,6 +11,30 @@ const infinite: Interval = [-Infinity, Infinity];
 const intersection = (a: Interval, b: Interval): Interval => [Math.max(a[0], b[0]), Math.min(a[1], b[1])];
 const intersects = (a: Interval, b: Interval) => a[1] > b[0] && a[0] < b[1] && b[1] > b[0];
 
+/** A conservative interior, independent of overlap scaling or corner shape. */
+function roundedTextClip(radius: string, bounds: number[], offset: number[], paddingX: Interval, paddingY: Interval): Clip | undefined {
+  if (bounds.length < 4 || offset.length < 4 || !bounds.every(Number.isFinite) || !offset.every(Number.isFinite)
+    || offset[2]! <= 0 || offset[3]! <= 0) return;
+  const axes = radius.split("/");
+  if (axes.length < 1 || axes.length > 2) return;
+  const margin = (value: string, axis: 0 | 1): number | undefined => {
+    const tokens = value.trim().split(/\s+/);
+    if (tokens.length < 1 || tokens.length > 4) return;
+    const lengths = tokens.map((token) => {
+      const match = /^(\d+(?:\.\d*)?|\.\d+)(?:e([+-]?\d+))?(px|%)$/i.exec(token);
+      if (!match) return NaN;
+      const length = Number(match[1]) * 10 ** Number(match[2] ?? 0);
+      return match[3] === "%" ? length * bounds[axis + 2]! / 100 : length * bounds[axis + 2]! / offset[axis + 2]!;
+    });
+    return lengths.every(Number.isFinite) ? Math.max(...lengths) + 1 / 64 : undefined;
+  };
+  const x = margin(axes[0]!, 0), y = margin(axes[1] ?? axes[0]!, 1);
+  if (x === undefined || y === undefined) return;
+  // Used radii can only shrink through CSS overlap scaling. Insetting each
+  // padding edge by the maximum outer radius stays clear of every corner.
+  return { x: [paddingX[0] + x, paddingX[1] - x], y: [paddingY[0] + y, paddingY[1] - y] };
+}
+
 export type SnapshotTextPaintCandidate = {
   backendNodeId: number;
   frameId: string;
@@ -29,6 +53,10 @@ export type SnapshotTextPaintCandidate = {
   textBoxes?: Array<{ start: number; length: number; bounds: readonly number[] }>;
   /** True only if all source text boxes are inside a known, uncomplicated clip. */
   fullyWithinClip?: boolean;
+  /** Ordinary viewport/overflow/source coverage holds, pending live CSS effects. */
+  fullyWithinOrdinaryClip?: true;
+  /** A mask or clip-path needs a same-read local coverage proof. */
+  effectClipRisk?: readonly string[];
   /** False only when all laid out elements in this document are non-floating. */
   documentFloatRisk?: boolean;
   /** Glyphs have zero font size and zero layout extent. */
@@ -224,7 +252,7 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
         visibleFill: /^rgb\(/.test(fill) && font !== "0px" && font !== "" && bounds.length >= 4
           && bounds.every(Number.isFinite) && bounds[2]! > 0 && bounds[3]! > 0, matched: false, fullyWithinClip: false });
     });
-    const contexts: Array<{ transparent: boolean; contentHidden: boolean; emptyClip: boolean; clip: Clip; absoluteClip: Clip; fixedClip: Clip; axisAligned: boolean; paintedTextRisk: boolean; textClipRisk: boolean; hardTextClipRisk: boolean; ellipsis: boolean; svg: boolean; background?: string; firstLetter?: FirstLetter }> = [];
+    const contexts: Array<{ transparent: boolean; contentHidden: boolean; emptyClip: boolean; clip: Clip; textClip: Clip; absoluteClip: Clip; fixedClip: Clip; axisAligned: boolean; paintedTextRisk: boolean; textClipRisk: boolean; hardTextClipRisk: boolean; effectClipRisk: string[]; ellipsis: boolean; svg: boolean; background?: string; firstLetter?: FirstLetter }> = [];
     for (let index = 0; index < nodes.backendNodeId.length; index++) {
       const parent = contexts[nodes.parentIndex[index]];
       let transparent = parent?.transparent ?? false;
@@ -232,12 +260,14 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
       let emptyClip = parent?.emptyClip ?? false;
       const unbounded: Clip = { x: infinite, y: infinite };
       let clip: Clip = parent?.clip ?? (index === documentNode ? documentClip : unbounded);
+      let textClip: Clip = parent?.textClip ?? unbounded;
       let absoluteClip: Clip = parent?.absoluteClip ?? (index === documentNode ? documentClip : unbounded);
       let fixedClip: Clip = parent?.fixedClip ?? (index === documentNode ? viewportClip : unbounded);
       let axisAligned = parent?.axisAligned ?? true;
       let paintedTextRisk = parent?.paintedTextRisk ?? false;
       let textClipRisk = parent?.textClipRisk ?? false;
       let hardTextClipRisk = parent?.hardTextClipRisk ?? false;
+      let effectClipRisk = parent?.effectClipRisk ?? [];
       let ellipsis = parent?.ellipsis ?? false;
       let svg = parent?.svg ?? false;
       let background = parent?.background;
@@ -255,6 +285,7 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
         // A filter may synthesize pixels and a background clipped to glyphs
         // can paint descendant text even when its fill is transparent.
         const filter = style(7), backgroundClip = style(24);
+        let roundedOverflow = false;
         if (nodes.nodeType?.[index] === 1) {
           const color = style(34);
           if (color && !transparentColor(color)) background = color;
@@ -263,11 +294,19 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
           // inside the ancestor's ordinary overflow clip.
           const overflowText = style(27), lineClamp = style(28), mask = style(29), webkitMaskBorder = style(30);
           ellipsis ||= overflowText === "ellipsis";
-          hardTextClipRisk ||= !overflowText || !["clip", "ellipsis"].includes(overflowText) || !lineClamp || lineClamp !== "none" || !mask || mask !== "none"
-            || !webkitMaskBorder || webkitMaskBorder !== "none" || !style(15) || style(15) !== "none" || !style(16) || style(16) !== "auto";
+          const localEffects = [["mask-image", mask], ["clip-path", style(15)], ["-webkit-line-clamp", lineClamp]]
+            .filter(([, value]) => value && value !== "none").map(([key, value]) => `${key}:${value}`);
+          if (localEffects.length) effectClipRisk = [...effectClipRisk, ...localEffects];
+          // A rectangular aperture does not prove containment in its rounded
+          // corners. Keep this independent of a successful line-flow proof.
+          const radius = style(35);
+          roundedOverflow = [style(1), style(2)].some((value) => value && value !== "visible")
+            && (!radius || !radius.split(/[\s/]+/).every((value) => /^(?:0+(?:\.0*)?|\.0+)(?:px|%)?$/.test(value)));
+          hardTextClipRisk ||= !overflowText || !["clip", "ellipsis"].includes(overflowText) || !lineClamp || !mask
+            || !webkitMaskBorder || webkitMaskBorder !== "none" || !style(15) || !style(16) || style(16) !== "auto";
           textClipRisk ||= !overflowText || overflowText !== "clip" || !lineClamp || lineClamp !== "none" || !mask || mask !== "none"
             || !webkitMaskBorder || webkitMaskBorder !== "none"
-            || !style(15) || style(15) !== "none" || !style(16) || style(16) !== "auto";
+            || !style(15) || style(15) !== "none" || !style(16) || style(16) !== "auto" || roundedOverflow;
         }
         const position = style(5);
         // Unlike overflow, these clips apply to the complete rendered subtree,
@@ -303,6 +342,11 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
           return [start, start + client[axis + 2]! * scale];
         };
         const clientX = clientAxis(0, x), clientY = clientAxis(1, y);
+        if (roundedOverflow) {
+          const interior = axisAligned && !svg ? roundedTextClip(style(35), bounds, offset, clientX, clientY) : undefined;
+          if (!interior) hardTextClipRisk = true;
+          else textClip = { x: intersection(textClip.x, interior.x), y: intersection(textClip.y, interior.y) };
+        }
         // Zero-size structural containers may still contain visible overflow.
         // They have no visual box of their own, but must not hide descendants.
         const outsideClip = hasBounds && ((bounds[2]! > 0 && !intersects(x, clip.x)) || (bounds[3]! > 0 && !intersects(y, clip.y)));
@@ -374,21 +418,26 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
                 if (offset >= coveredEnd) { graphemesCovered = false; break; }
               }
             }
-            const fullyWithinClip = horizontalViewport.known && verticalViewport.known && !hardTextClipRisk && axisAligned && !multiLayoutText.has(index)
+            const fullyWithinOrdinaryClip = horizontalViewport.known && verticalViewport.known && !hardTextClipRisk && axisAligned && !multiLayoutText.has(index)
               && (!firstLetterUnknown || !!firstLetterText) && (!firstLetterText || firstLetter?.fullyWithinClip)
               && typeof sourceText === "string" && !!sourceText.length && graphemesCovered && !!boxes?.length
               && boxes.every(({ start, length, bounds }) => (bounds[2] === 0 || bounds[3] === 0)
                 ? /^[\r\n]+$/.test(sourceText.slice(start + prefixLength, start + prefixLength + length))
                 : bounds[2]! > 0 && bounds[3]! > 0 && bounds[0]! >= clip.x[0] && bounds[1]! >= clip.y[0]
-                  && bounds[0]! + bounds[2]! <= clip.x[1] && bounds[1]! + bounds[3]! <= clip.y[1]);
+                  && bounds[0]! + bounds[2]! <= clip.x[1] && bounds[1]! + bounds[3]! <= clip.y[1]
+                  && bounds[0]! >= textClip.x[0] && bounds[1]! >= textClip.y[0]
+                  && bounds[0]! + bounds[2]! <= textClip.x[1] && bounds[1]! + bounds[3]! <= textClip.y[1]);
             options.textPaintCandidates?.push({ backendNodeId: nodes.backendNodeId[index], frameId,
               documentFloatRisk,
               ...(pseudoType ? { kind: "pseudo" as const, pseudoType } : {}),
               ...(typeof sourceText === "string" ? { sourceText } : {}), ...(typeof layoutText === "string" ? { layoutText } : {}),
               ...(style(25) ? { textTransform: style(25) } : {}), ...(style(26) ? { textSecurity: style(26) } : {}),
               ...(style(17) ? { direction: style(17) } : {}), ...(style(18) ? { writingMode: style(18) } : {}),
-              ...(ellipsis && !hardTextClipRisk && axisAligned && !multiLayoutText.has(index) ? { ellipsis: true } : {}),
-              ...(boxes ? { textBoxes: boxes } : {}), ...(fullyWithinClip ? { fullyWithinClip: true } : {}),
+              ...(ellipsis && !hardTextClipRisk && !effectClipRisk.length && axisAligned && !multiLayoutText.has(index) ? { ellipsis: true } : {}),
+              ...(boxes ? { textBoxes: boxes } : {}),
+              ...(fullyWithinOrdinaryClip && !effectClipRisk.length ? { fullyWithinClip: true } : {}),
+              ...(fullyWithinOrdinaryClip && effectClipRisk.length ? { fullyWithinOrdinaryClip: true as const } : {}),
+              ...(effectClipRisk.length ? { effectClipRisk: [...effectClipRisk].sort() } : {}),
               ...(zeroText ? { zeroFont: true } : {}),
               ...(sameColorBackground ? { sameColorBackground: true as const } : {}),
               ...(!zeroText && !transparentText && isText && fill && !transparentColor(fill) ? { basePainted: true } : {}),
@@ -410,7 +459,7 @@ export function snapshotVisibility(snapshot: any, options: { textPaintCandidates
       }
       const backendId = nodes.backendNodeId[index];
       if (typeof backendId === "number") result.set(backendId, visible);
-      contexts[index] = { transparent, contentHidden, emptyClip, clip, absoluteClip, fixedClip, axisAligned, paintedTextRisk, textClipRisk, hardTextClipRisk, ellipsis, svg, background, firstLetter };
+      contexts[index] = { transparent, contentHidden, emptyClip, clip, textClip, absoluteClip, fixedClip, axisAligned, paintedTextRisk, textClipRisk, hardTextClipRisk, effectClipRisk, ellipsis, svg, background, firstLetter };
     }
   }
   applySnapshotOcclusion(snapshot, result);

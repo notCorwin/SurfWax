@@ -105,6 +105,9 @@ function harness() {
       ] } };
     if (method === "Page.createIsolatedWorld") return { executionContextId: params.frameId === "same" ? 31 : params.frameId === "cross" ? 32 : 33 };
     if (method === "Runtime.evaluate" && params.expression === "document") return { result: { objectId: `doc-${params.contextId}` } };
+    if (method === "DOM.describeNode" && params.objectId === "doc-404") return { node: { nodeId: 1, backendNodeId: 1, nodeType: 9, nodeName: "#document" } };
+    if (method === "DOM.querySelectorAll") return { nodeIds: [] };
+    if (method === "Runtime.callFunctionOn" && params.functionDeclaration.includes("surf-wax:semantic-native-observation")) return { result: { value: { url: "https://top.test/", title: "Top", viewport: { x: 0, y: 0, width: 1000, height: 1000, scale: 1 }, rows: [{ key: 1, depth: 0, role: "text", text: "Independent", bounds: [10, 10, 50, 20] }], gaps: [] } } };
     if (method === "Runtime.callFunctionOn" && params.functionDeclaration === "function(){return this.readyState === 'complete'}") return { result: { value: true } };
     if (method === "Accessibility.queryAXTree") return { nodes: [{ nodeId: "node", backendDOMNodeId: 8, role: { value: "button" }, name: { value: params.objectId ?? "wrong-root" } }] };
     if (method === "Accessibility.getPartialAXTree") return { nodes: [{ backendDOMNodeId: 8, role: { value: "button" }, name: { value: "doc-31" } }] };
@@ -123,7 +126,10 @@ function harness() {
     if (method === "Runtime.callFunctionOn") return { result: { value: { connected: true, role: "button", name: "Open", tag: "button", text: "Open" } } };
     return {};
   });
-  const runtime = new AutomationRuntime({ chromeApi: { tabs: { query: async () => [{ id: 3 }] }, scripting: { executeScript: async () => [{ frameId: 0, result: { url: "https://top.test/", title: "Top", viewport: { x: 0, y: 0, width: 1000, height: 1000, scale: 1 }, rows: [{ text: "Independent", depth: 2, bounds: [10, 10, 50, 20] }] } }] } } as never,
+  const runtime = new AutomationRuntime({ chromeApi: { runtime: { id: "unit-extension" }, tabs: { query: async () => [{ id: 3 }] }, scripting: { executeScript: async () => {
+    runtime.handleEvent({ tabId: 3 }, "Runtime.executionContextCreated", { context: { id: 404, uniqueId: "observation-context", origin: "chrome-extension://unit-extension", auxData: { frameId: "root", type: "isolated", isDefault: false } } });
+    return [{ frameId: 0, result: 2 }];
+  } } } as never,
     command: async (source, method, params) => {
       const result = await command(source, method, params);
       if (method !== "DOMSnapshot.captureSnapshot") return result;

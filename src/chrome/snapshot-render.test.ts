@@ -57,10 +57,10 @@ describe("structured semantic snapshot rendering", () => {
       .toContain("[actions=fill,press_key,check_element,uncheck_element]");
   });
 
-  it("quotes JSON controls and omits an unchanged value", () => {
+  it("distinguishes a confirmed field value from an identical author label", () => {
     const name = 'A\tB\u0000"\\';
     const result = renderSnapshotNode({ id: "one", depth: 0, role: "textbox", name, value: name });
-    expect(result.line).toBe(`- textbox ${JSON.stringify(name.replace(/\s+/g, " ").trim())}`);
+    expect(result.line).toBe(`- textbox ${JSON.stringify(name.replace(/\s+/g, " ").trim())}: ${JSON.stringify(name)}`);
     expect(result).not.toHaveProperty("ref");
   });
 
@@ -76,12 +76,12 @@ describe("structured semantic snapshot rendering", () => {
     expect(renderSnapshotNode(select, { fields: ["state"] }).line).toBe("- combobox");
   });
 
-  it("renders placeholder and name uncertainty without duplicating the visible name", () => {
+  it("retains placeholder visibility even when its text matches the author label", () => {
     const input: SnapshotNode = { id: "one", depth: 0, role: "textbox", name: "Label", placeholder: { status: "visible", text: 'A "hint"' } };
     expect(renderSnapshotNode(input).line).toBe('- textbox "Label" [placeholder="A \\\"hint\\\""]');
     expect(renderSnapshotNode({ ...input, placeholder: { status: "visible", text: "A\u00a0\u00a0B" } }).line)
       .toContain('[placeholder="A\u00a0\u00a0B"]');
-    expect(renderSnapshotNode({ ...input, name: 'A "hint"' }).line).toBe('- textbox "A \\\"hint\\\""');
+    expect(renderSnapshotNode({ ...input, name: 'A "hint"' }).line).toContain('[placeholder="A \\\"hint\\\""]');
     expect(renderSnapshotNode({ ...input, name: "", nameUnknown: true, placeholder: { status: "unknown" } }).line)
       .toBe("- textbox [name=unknown] [placeholder=unknown]");
     expect(renderSnapshotNode(input, { fields: ["state"] }).line).toBe("- textbox");
