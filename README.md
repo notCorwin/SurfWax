@@ -1,3 +1,4 @@
+> Attention：本项目的开发难度极大，功能目前只是雏形。
 # Surf Wax
 Chrome 侧边栏智能体（Agent），让它替你浏览、点击、输入，完成复杂网页任务。
 ## 为何使用 Surf Wax
