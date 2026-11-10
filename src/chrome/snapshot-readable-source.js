@@ -21,18 +21,42 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
   };
   const identitiesKey = Symbol.for("surf-wax.snapshot-observation-identities.v1");
   let identities = globalThis[identitiesKey];
-  if (!identities || identities.document !== document) {
-    identities = { document, nodes: new WeakMap(), next: 1 };
+  if (!identities || identities.document !== document || identities.version !== 2) {
+    identities = { version: 2, document, nodes: new WeakMap(), next: 1, token: Array.from(crypto.getRandomValues(new Uint32Array(4)), value => value.toString(16).padStart(8, "0")).join(""), elements: new Map() };
     globalThis[identitiesKey] = identities;
   }
-  const keyFor = (node) => {
+  // Kept inside this isolated world; never expose unpainted identity strings.
+  identities.fingerprint = (element) => {
+    const identity = JSON.stringify([element.localName, ...["role", "type", "aria-label", "aria-labelledby", "title", "href"].map(name => element.getAttribute(name)),
+      element.textContent, ...[...(element.labels ?? []), ...(element.ariaLabelledByElements ?? [])].map(label => label.textContent)]);
+    return identity.length <= 16_384 ? identity : null;
+  };
+  const keyFor = (node, target = false, dependencies = []) => {
     let key = identities.nodes.get(node);
-    if (key === undefined) {
+    const fingerprint = target ? identities.fingerprint(node) : null;
+    const labels = target ? dependencies.map(label => {
+      const parents = []; for (let parent = composedParent(label); parent; parent = composedParent(parent)) parents.push(new WeakRef(parent));
+      return { node: new WeakRef(label), value: label.nodeValue, parents };
+    }) : [];
+    const prior = key === undefined ? undefined : identities.elements.get(key);
+    const sameLabels = prior?.labels?.length === labels.length && labels.every((label, index) => {
+      const old = prior.labels[index];
+      return old.node.deref() === label.node.deref() && old.value === label.value && old.parents.length === label.parents.length
+        && old.parents.every((parent, index) => parent.deref() === label.parents[index].deref());
+    });
+    if (key === undefined || target && (!prior || prior.identity !== fingerprint || !sameLabels)) {
+      if (prior) identities.elements.delete(key);
       key = identities.next++;
       identities.nodes.set(node, key);
     }
+    if (target && fingerprint !== null) {
+      identities.elements.delete(key);
+      identities.elements.set(key, { node: new WeakRef(node), identity: fingerprint, labels });
+      while (identities.elements.size > 32_768) identities.elements.delete(identities.elements.keys().next().value);
+    }
     return key;
   };
+  result.targetToken = identities.token;
   const primitives = globalThis[Symbol.for("surf-wax.snapshot-observation-primitives.v2")];
   const nativeOwners = new WeakMap(), nativeTextNodes = new Map(), nativeUncertain = new Set();
   const gapKeys = new Map(),
@@ -2081,7 +2105,7 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
     const state = stateFor(element, role), field = nativeFields.get(element), valueBearing = nativeValueBearing(element);
     if (field?.expanded !== undefined) state.expanded = field.expanded;
     const row = {
-      key: keyFor(element),
+      key: keyFor(element, interactiveRoles.has(role) || state.editable === "contenteditable", label.map(item => item.node)),
       parentKey: parentRow.key,
       role,
       depth: parentRow.depth + 1,
@@ -2096,6 +2120,7 @@ export function sampleReadableSnapshot(pageZoom = NaN, nativeRoots = [], nativeP
       ...(field?.placeholder ? { placeholder: field.placeholder } : {}),
       ...(valueBearing && (!field || field.valueUnknown) ? { valueUnknown: true } : {}),
     };
+    if (identities.elements.has(row.key)) { row.target = true; if (shadowRoots.has(element)) row.targetShadow = true; }
     rows.set(element, row);
     rowNodes.set(row.key, element);
     result.rows.push(row);

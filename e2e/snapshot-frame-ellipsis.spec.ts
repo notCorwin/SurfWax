@@ -82,7 +82,7 @@ for (const kind of ["visible", "parent-overlay", "scaled", "frame-clip"] as cons
       responses.push(commandResponse("inspect_page", { budget: 12000 }, `frame-ellipsis-${kind}`), (request: any) => {
         snapshot = lastTool(request);
         const row = snapshot.items?.find((entry: any) => itemLine(entry).includes('- button "Next TASK-7…"'));
-        return (kind === "visible" || kind === "scaled") && row?.ref ? commandResponse("click", { target: { ref: row.ref } }, "frame-ellipsis-click") : textResponse("FRAME_ELLIPSIS_DONE");
+        return (kind === "visible" || kind === "scaled") && row?.id ? commandResponse("click", { target: { id: row.id } }, "frame-ellipsis-click") : textResponse("FRAME_ELLIPSIS_DONE");
       }, (request: any) => {
         if (request.messages.some((entry: any) => entry.role === "tool")) click = lastTool(request);
         return textResponse("FRAME_ELLIPSIS_DONE");
@@ -99,7 +99,7 @@ for (const kind of ["visible", "parent-overlay", "scaled", "frame-clip"] as cons
       const row = snapshot.items.find((entry: any) => /\bbutton(?:\s|$)/.test(itemLine(entry)));
       if (kind === "visible" || (kind === "scaled" && itemLine(row).includes('"Next TASK-7…"'))) {
         expect(itemLine(row)).toContain('- button "Next TASK-7…"');
-        expect(row?.ref).toEqual(expect.any(String));
+        expect(row?.id).toEqual(expect.any(String));
         expect(click).toMatchObject({ ok: true });
         expect(await frame.getAttribute("data-clicked")).toBe("yes");
       } else {

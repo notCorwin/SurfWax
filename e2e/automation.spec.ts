@@ -93,7 +93,7 @@ test("inspects the page and fills and clicks with atomic tools", async () => {
     const observation = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-snapshot")?.output;
     const clicked = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-click")?.output;
     const verified = events.find((event) => event.type === "tool.finished" && event.toolCallId === "call-verify")?.output;
-    expect(observation.items).toEqual(expect.arrayContaining([expect.objectContaining({ ref: expect.stringMatching(/^t\d+s[a-f0-9]+d\d+e\d+$/) })]));
+    expect(observation.items).toEqual(expect.arrayContaining([expect.objectContaining({ id: expect.stringMatching(/^t\d+s[a-f0-9]+d\d+e\d+$/) })]));
     expect(clicked.pageSnapshot.items).toEqual(expect.arrayContaining([expect.objectContaining({ line: expect.stringContaining("Welcome me@example.com") })]));
     expect(verified.items).toEqual(expect.arrayContaining([expect.objectContaining({ line: expect.stringContaining("Welcome me@example.com") })]));
     await expect.poll(() => target.locator("output").textContent()).toBe("Welcome me@example.com");
@@ -1040,10 +1040,10 @@ test("rejects detached snapshot references after the page replaces a node", asyn
     commandResponse("inspect_page", {}, "original-ref"),
     (request) => {
       const message = request.messages.findLast((message: any) => message.role === "tool");
-      ref = JSON.parse(message.content).items.find((item: any) => itemLine(item).includes('button "Sign in"')).ref;
+      ref = JSON.parse(message.content).items.find((item: any) => itemLine(item).includes('button "Sign in"')).id;
       return commandResponse("click", { target: { by: "css", value: "#replace-signin" } }, "replace-ref");
     },
-    () => commandResponse("click", { target: { ref }, timeoutMs: 1000 }, "detached-ref"),
+    () => commandResponse("click", { target: { id: ref }, timeoutMs: 1000 }, "detached-ref"),
     textResponse("STALE_AND_INDEX_OK"), textResponse("引用与索引"),
   ];
   const provider = await startProvider(responses); const opened = await openExtension();

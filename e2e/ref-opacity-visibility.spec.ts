@@ -41,17 +41,17 @@ test("old refs reject transparent ancestors across shadow and frames, then work 
     responses.push(commandResponse("inspect_page", { budget: 12000 }, "opacity-inspect"), (request) => {
       try {
         initial = lastTool(request);
-        for (const name of [...names, "Toggle opacity", "Far target"]) refs[name] = initial.items?.find((item: any) => itemLine(item).includes(`button "${name}"`))?.ref ?? "";
+        for (const name of [...names, "Toggle opacity", "Far target"]) refs[name] = initial.items?.find((item: any) => itemLine(item).includes(`button "${name}"`))?.id ?? "";
         if (Object.values(refs).some((ref) => !ref)) return done();
         const steps: MockResponse[] = [
-          (next) => { found = lastTool(next); refs["Same frame target"] = found.elements?.[0]?.ref ?? "";
-            return refs["Same frame target"] ? commandResponse("click", { target: { ref: refs["Far target"] }, timeoutMs: 3000 }, "offscreen-click") : done(); },
-          (next) => { far = lastTool(next); return commandResponse("click", { target: { ref: refs["Toggle opacity"] }, timeoutMs: 3000 }, "opacity-hide"); },
-          (next) => { toggledOff = lastTool(next); return commandResponse("click", { target: { ref: refs[names[0]!] }, timeoutMs: 1200 }, "hidden-root"); },
-          ...names.slice(1).map((name, index): MockResponse => (next) => { hidden.push(lastTool(next)); return commandResponse("click", { target: { ref: refs[name] }, timeoutMs: 1200 }, `hidden-${index + 1}`); }),
-          (next) => { hidden.push(lastTool(next)); return commandResponse("click", { target: { ref: refs["Toggle opacity"] }, timeoutMs: 1200 }, "opacity-show"); },
-          (next) => { toggledOn = lastTool(next); return commandResponse("click", { target: { ref: refs[names[0]!] }, timeoutMs: 3000 }, "visible-root"); },
-          ...names.slice(1).map((name, index): MockResponse => (next) => { visible.push(lastTool(next)); return commandResponse("click", { target: { ref: refs[name] }, timeoutMs: 3000 }, `visible-${index + 1}`); }),
+          (next) => { found = lastTool(next); refs["Same frame target"] = found.elements?.[0]?.id ?? "";
+            return refs["Same frame target"] ? commandResponse("click", { target: { id: refs["Far target"] }, timeoutMs: 3000 }, "offscreen-click") : done(); },
+          (next) => { far = lastTool(next); return commandResponse("click", { target: { id: refs["Toggle opacity"] }, timeoutMs: 3000 }, "opacity-hide"); },
+          (next) => { toggledOff = lastTool(next); return commandResponse("click", { target: { id: refs[names[0]!] }, timeoutMs: 1200 }, "hidden-root"); },
+          ...names.slice(1).map((name, index): MockResponse => (next) => { hidden.push(lastTool(next)); return commandResponse("click", { target: { id: refs[name] }, timeoutMs: 1200 }, `hidden-${index + 1}`); }),
+          (next) => { hidden.push(lastTool(next)); return commandResponse("click", { target: { id: refs["Toggle opacity"] }, timeoutMs: 1200 }, "opacity-show"); },
+          (next) => { toggledOn = lastTool(next); return commandResponse("click", { target: { id: refs[names[0]!] }, timeoutMs: 3000 }, "visible-root"); },
+          ...names.slice(1).map((name, index): MockResponse => (next) => { visible.push(lastTool(next)); return commandResponse("click", { target: { id: refs[name] }, timeoutMs: 3000 }, `visible-${index + 1}`); }),
           (next) => { visible.push(lastTool(next)); return done(); },
         ];
         responses.unshift(...steps);
@@ -65,7 +65,7 @@ test("old refs reject transparent ancestors across shadow and frames, then work 
     await expect(opened.page.locator(".markdown-body").last()).toContainText("REF_OPACITY_DONE", { timeout: 75_000 });
     if (problem) throw problem;
     expect(initial).toMatchObject({ mode: "full", truncation: { baselineComplete: true } });
-    expect(found).toMatchObject({ elements: [{ ref: expect.any(String) }] });
+    expect(found).toMatchObject({ elements: [{ id: expect.any(String) }] });
     expect(far).toMatchObject({ ok: true }); expect(await target.locator("body").getAttribute("data-far-clicked")).toBe("yes");
     expect(toggledOff).toMatchObject({ ok: true }); expect(toggledOn).toMatchObject({ ok: true });
     expect(hidden).toHaveLength(4);

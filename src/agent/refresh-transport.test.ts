@@ -78,7 +78,7 @@ describe("page refresh transport", () => {
     const model = new MockLanguageModelV4({ doGenerate: async ({ prompt }) => {
       prompts.push(JSON.stringify(prompt));
       return prompts.length === 1 ? {
-        content: [{ type: "tool-call" as const, toolCallId: "click", toolName: "click", input: JSON.stringify({ target: { ref: "e1" } }) }],
+        content: [{ type: "tool-call" as const, toolCallId: "click", toolName: "click", input: JSON.stringify({ target: { id: "e1" } }) }],
         finishReason: { unified: "tool-calls" as const, raw: "tool_calls" }, usage, warnings: [],
       } : reply("Updated answer");
     } });

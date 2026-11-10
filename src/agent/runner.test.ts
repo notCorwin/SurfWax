@@ -40,7 +40,7 @@ describe("createAgent", () => {
     let step = 0;
     const model = new MockLanguageModelV4({ doGenerate: async () => ++step === 1 ? {
       content: [
-        { type: "tool-call" as const, toolCallId: "click", toolName: "click", input: JSON.stringify({ target: { ref: "e1" } }) },
+        { type: "tool-call" as const, toolCallId: "click", toolName: "click", input: JSON.stringify({ target: { id: "e1" } }) },
         { type: "tool-call" as const, toolCallId: "inspect", toolName: "inspect_page", input: "{}" },
       ], finishReason: { unified: "tool-calls" as const, raw: "tool_calls" }, usage, warnings: [],
     } : text() });
@@ -59,8 +59,8 @@ describe("createAgent", () => {
     let step = 0;
     const model = new MockLanguageModelV4({ doGenerate: async () => ++step === 1 ? {
       content: [
-        { type: "tool-call" as const, toolCallId: "first", toolName: "click", input: JSON.stringify({ target: { ref: "e1" } }) },
-        { type: "tool-call" as const, toolCallId: "second", toolName: "fill", input: JSON.stringify({ target: { ref: "e2" }, value: "x" }) },
+        { type: "tool-call" as const, toolCallId: "first", toolName: "click", input: JSON.stringify({ target: { id: "e1" } }) },
+        { type: "tool-call" as const, toolCallId: "second", toolName: "fill", input: JSON.stringify({ target: { id: "e2" }, value: "x" }) },
         { type: "tool-call" as const, toolCallId: "read", toolName: "inspect_page", input: "{}" },
       ], finishReason: { unified: "tool-calls" as const, raw: "tool_calls" }, usage, warnings: [],
     } : text() });
@@ -82,7 +82,7 @@ describe("createAgent", () => {
     const model = new MockLanguageModelV4({ doGenerate: async () => ++step === 1 ? {
       content: [
         { type: "tool-call" as const, toolCallId: "invalid", toolName: "click", input: "{}" },
-        { type: "tool-call" as const, toolCallId: "write", toolName: "fill", input: JSON.stringify({ target: { ref: "e2" }, value: "x" }) },
+        { type: "tool-call" as const, toolCallId: "write", toolName: "fill", input: JSON.stringify({ target: { id: "e2" }, value: "x" }) },
         { type: "tool-call" as const, toolCallId: "read", toolName: "inspect_page", input: "{}" },
       ], finishReason: { unified: "tool-calls" as const, raw: "tool_calls" }, usage, warnings: [],
     } : text() });

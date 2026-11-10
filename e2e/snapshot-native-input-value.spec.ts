@@ -34,11 +34,11 @@ test("keeps each native input value once without collapsing independent frame an
     }
     responses.push(commandResponse("inspect_page", { budget: 12000 }, "native-initial"), (request) => {
       initial = lastTool(request);
-      const ref = initial.items?.find((item: any) => itemLine(item).includes("textbox") && itemLine(item).includes(value))?.ref;
+      const ref = initial.items?.find((item: any) => itemLine(item).includes("textbox") && itemLine(item).includes(value))?.id;
       if (!ref) return textResponse("NATIVE_INPUT_DONE");
       responses.unshift(
-        (next) => { region = lastTool(next); return commandResponse("fill", { target: { ref }, value: "CHANGED_NATIVE_VALUE" }, "native-fill"); },
-        (next) => { filled = lastTool(next); return commandResponse("blur_element", { target: { ref } }, "native-blur"); },
+        (next) => { region = lastTool(next); return commandResponse("fill", { target: { id: ref }, value: "CHANGED_NATIVE_VALUE" }, "native-fill"); },
+        (next) => { filled = lastTool(next); return commandResponse("blur_element", { target: { id: ref } }, "native-blur"); },
         (next) => { blurred = lastTool(next); return commandResponse("inspect_page", { budget: 12000 }, "native-updated"); },
         (next) => { updated = lastTool(next); return textResponse("NATIVE_INPUT_DONE"); },
       );

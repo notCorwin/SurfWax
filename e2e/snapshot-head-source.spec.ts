@@ -77,11 +77,11 @@ test("HEAD source churn upgrades the capture once and preserves geometry profile
     expect(sizes.lengths.some((length: number) => length > sizes.compact)).toBe(true);
     expect(sizes.catalogReads).toBe(1);
 
-    const referencePage = await inspect(opened.page, { fields: ["text", "state", "ref"], limit: 1 });
+    const referencePage = await inspect(opened.page, { fields: ["text", "state"], limit: 1 });
     expect(referencePage.nextCursor).toEqual(expect.any(String));
     const next = await inspect(opened.page, { cursor: referencePage.nextCursor });
     expect(next.observationId).toBe(referencePage.observationId);
-    expect(next.items.some((item: any) => item.ref)).toBe(true);
+    expect(next.items.some((item: any) => item.id)).toBe(true);
     const latest = await opened.page.evaluate(() => (globalThis as any).__headSource.profiles.at(-1).length);
     expect(latest).toBeGreaterThan(sizes.compact);
 
@@ -189,7 +189,7 @@ test("equal captured colors retain unknown geometry without claiming invisible l
       <p style="color:color(display-p3 1 0 0);background:color(display-p3 1 0 0)">WIDE_GAMUT_SAME_COLOR</p>`;
     await opened.context.route(url, (route) => route.fulfill({ contentType: "text/html", body: markup }));
     const target = await opened.context.newPage(); await target.goto(url); await attach(opened.page);
-    const result = await inspect(opened.page, { fields: ["text", "state", "ref"] });
+    const result = await inspect(opened.page, { fields: ["text", "state"] });
     expect(result.partial).toBe(true); expect(result.limitations).toContain("composited visibility");
     const text = inspectText(result.items);
     for (const unconfirmed of ["WHITE_ON_WHITE", "UNKNOWN_CONTROL", "VISIBLE_ON_IMAGE", "WIDE_GAMUT_SAME_COLOR"]) expect(text).not.toContain(unconfirmed);
@@ -197,7 +197,7 @@ test("equal captured colors retain unknown geometry without claiming invisible l
     expect(text).toContain("First");
     const unknown = result.items.filter((item: any) => itemLine(item).includes("[name=unknown]"));
     expect(unknown.length).toBeGreaterThanOrEqual(4);
-    expect(unknown.every((item: any) => !item.ref), JSON.stringify(unknown)).toBe(true);
+    expect(unknown.every((item: any) => !item.actionable), JSON.stringify(unknown)).toBe(true);
     expect(unknown.filter((item: any) => /\[box=[\d., -]+\]/.test(itemLine(item))).length, JSON.stringify(unknown)).toBeGreaterThanOrEqual(4);
   } finally {
     await detach(opened.page).catch(() => undefined); await dispose(opened.context, opened.userDataDirectory);

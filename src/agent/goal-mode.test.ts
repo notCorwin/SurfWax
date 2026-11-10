@@ -96,15 +96,15 @@ describe("goal mode", () => {
 
   it("retains repeated submissions with their target label and full-run counts", async () => {
     const { logger } = fixture(new MockLanguageModelV4({ doGenerate: async () => reply("done") }));
-    const input = { tabId: 12, target: { ref: "submit" }, value: "unneeded large body".repeat(100_000) };
+    const input = { tabId: 12, target: { id: "submit" }, value: "unneeded large body".repeat(100_000) };
     const output = { ok: true, state: "succeeded", result: { performed: true }, pageSnapshot: {
-      observationId: "o", tabId: 12, documentId: "d", mode: "full", items: [{ ref: "submit", line: "button Submit file" }],
+      observationId: "o", tabId: 12, documentId: "d", mode: "full", items: [{ id: "submit", role: "button", name: "Submit file", actionable: true }],
     } };
     for (const id of ["first-submit", "second-submit"]) await logger.append({ type: "tool.finished", conversationId: "thread", runId: "run",
       toolCallId: id, content: { toolName: "click" }, input, output });
     const entries = await runEvidence(logger, "thread", "run");
-    expect(actionHistory(entries)).toEqual([{ name: "click", receipt: { input: { tabId: 12, target: { ref: "submit" } },
-      result: { state: "succeeded", performed: true }, labels: { target: "button Submit file" } }, success: true, effectUnknown: false,
+    expect(actionHistory(entries)).toEqual([{ name: "click", receipt: { input: { tabId: 12, target: { id: "submit" } },
+      result: { state: "succeeded", performed: true }, labels: { target: "Submit file" } }, success: true, effectUnknown: false,
       count: 2, firstOrder: entries[0]!.order, lastOrder: entries[1]!.order }]);
     expect(JSON.stringify(entries)).not.toContain("unneeded large body");
     expect(actionHistory(await runEvidence(logger, "thread", "run"))).toEqual(actionHistory(entries));
@@ -113,12 +113,12 @@ describe("goal mode", () => {
   it("preserves HTML and binary file identities without reading or caching payload bytes", () => {
     const file = (id: number, filename: string, mimeType: string, byteLength: number) => ({ id, filename, mimeType, byteLength,
       get base64(): never { throw new Error("Receipt projection must not read file bytes"); } });
-    const input = { tabId: 12, target: { ref: "download" }, get body(): never { throw new Error("Must not read unrelated large input"); } };
+    const input = { tabId: 12, target: { id: "download" }, get body(): never { throw new Error("Must not read unrelated large input"); } };
     const entries = [
       localEvidence("html", "import_file_from_link", { ok: true, result: file(11, "error.html", "text/html", 700) }, 1, input),
-      localEvidence("upload-html", "upload_file", { ok: true, result: { performed: true } }, 2, { artifactId: 11, target: { ref: "file-input" } }),
+      localEvidence("upload-html", "upload_file", { ok: true, result: { performed: true } }, 2, { artifactId: 11, target: { id: "file-input" } }),
       localEvidence("binary", "import_file_from_link", { ok: true, artifact: file(22, "sample.bin", "application/octet-stream", 65_539) }, 4, input),
-      localEvidence("upload-binary", "upload_file", { ok: true, result: { performed: true } }, 5, { artifactId: 22, target: { ref: "file-input" } }),
+      localEvidence("upload-binary", "upload_file", { ok: true, result: { performed: true } }, 5, { artifactId: 22, target: { id: "file-input" } }),
     ];
     const history = actionHistory(entries);
     expect(history).toHaveLength(4);
@@ -136,8 +136,8 @@ describe("goal mode", () => {
     expect(String(bounded.receipt?.input?.url).length).toBeLessThanOrEqual(256);
     expect(JSON.stringify(bounded.receipt)).not.toContain("deep");
     const entries = Array.from({ length: 200 }, (_, order) => localEvidence(`call-${order}`, "click", { ok: true }, order,
-      { target: { ref: `target-${order}` } }));
-    entries.push(localEvidence("unknown", "click", { ok: false, error: { effectUnknown: true } }, 201, { target: { ref: "target-0" } }));
+      { target: { id: `target-${order}` } }));
+    entries.push(localEvidence("unknown", "click", { ok: false, error: { effectUnknown: true } }, 201, { target: { id: "target-0" } }));
     const history = actionHistory(entries);
     expect(history).toHaveLength(201);
     expect(history.reduce((sum, group) => sum + group.count, 0)).toBe(201);

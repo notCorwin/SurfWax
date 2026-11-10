@@ -49,7 +49,7 @@ function snapshotFrames(snapshot: any): Record<string, { label: string; buttonRe
     if (!id) continue;
     const next = items.slice(index + 1).findIndex((item) => /^\s*- frame-document \[frameRef=/.test(itemLine(item)));
     const subtree = items.slice(index + 1, next < 0 ? undefined : index + 1 + next);
-    result[id] = { label: owners.get(id) ?? "", buttonRef: subtree.find((item) => /- button "Confirm"/.test(itemLine(item)))?.ref };
+    result[id] = { label: owners.get(id) ?? "", buttonRef: subtree.find((item) => /- button "Confirm"/.test(itemLine(item)))?.id };
   }
   return result;
 }
@@ -187,9 +187,9 @@ test("nests cross-origin frame documents at their owners ahead of same-name oute
     expect(rows.indexOf(sends[0]!)).toBeGreaterThan(editor);
     expect(depth(sends[0]!)).toBeGreaterThan(depth(rows[editor]!));
     expect(depth(sends[1]!)).toBe(depth(rows[workspace]!));
-    expect(sends[0]!.ref).not.toBe(sends[1]!.ref);
+    expect(sends[0]!.id).not.toBe(sends[1]!.id);
     expect(scoped).toMatchObject({ mode: "full", truncation: { baselineComplete: true } });
-    expect((scoped.items as Item[]).filter((item) => itemLine(item).includes('- button "Send dispatch"')).map((item) => item.ref)).toEqual([sends[0]!.ref]);
+    expect((scoped.items as Item[]).filter((item) => itemLine(item).includes('- button "Send dispatch"')).map((item) => item.id)).toEqual([sends[0]!.id]);
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
     await closeServer(fixture.server);

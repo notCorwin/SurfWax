@@ -47,7 +47,7 @@ const visibleEditors: Record<string, { text: string; role: string; state?: strin
 function visibleOwner(snapshot: any, label: string): any {
   const spec = visibleEditors[label], items = snapshot?.items as any[] | undefined;
   if (!spec || !items) return undefined;
-  const matches = (item: any) => typeof item.ref === "string" && new RegExp(`^\\s*- ${spec.role}(?:\\s|$)`).test(itemLine(item))
+  const matches = (item: any) => typeof item.id === "string" && new RegExp(`^\\s*- ${spec.role}(?:\\s|$)`).test(itemLine(item))
     && (!spec.state || itemLine(item).includes(spec.state));
   for (let index = 0; index < items.length; index++) {
     const item = items[index]!;
@@ -121,20 +121,20 @@ test("exposes editable hosts and preserves their usable refs across regions and 
     responses.push(commandResponse("inspect_page", { budget: 12000 }, "editable-initial"), (request) => {
       initial = lastTool(request);
       const byName = (name: string) => visibleOwner(initial, name);
-      const rich = byName("Rich editor")?.ref, plain = byName("Plain editor")?.ref, child = byName("Frame editor")?.ref, hidden = byName("AX hidden editor")?.ref;
-      const article = byName("Article editor")?.ref, hiddenRole = byName("AX hidden role editor")?.ref;
+      const rich = byName("Rich editor")?.id, plain = byName("Plain editor")?.id, child = byName("Frame editor")?.id, hidden = byName("AX hidden editor")?.id;
+      const article = byName("Article editor")?.id, hiddenRole = byName("AX hidden role editor")?.id;
       if (!rich || !plain || !child || !hidden || !article || !hiddenRole) return textResponse("EDITABLE_TEST_DONE");
       responses.unshift(
-        (next) => { withActions = lastTool(next); return commandResponse("inspect_page", { region: { ref: rich }, budget: 12000 }, "editable-region"); },
-        (next) => { region = lastTool(next); return commandResponse("fill", { target: { ref: rich }, value: "RICH_UPDATED" }, "editable-rich-fill"); },
-        (next) => { richFill = lastTool(next); return commandResponse("type_text", { target: { ref: plain }, text: "_TYPED" }, "editable-plain-type"); },
-        (next) => { plainType = lastTool(next); return commandResponse("fill", { target: { ref: child }, value: "FRAME_UPDATED" }, "editable-frame-fill"); },
-        (next) => { childFill = lastTool(next); return commandResponse("fill", { target: { ref: hidden }, value: "AX_HIDDEN_UPDATED" }, "editable-ax-hidden-fill"); },
-        (next) => { hiddenFill = lastTool(next); return commandResponse("fill", { target: { ref: article }, value: "ARTICLE_UPDATED" }, "editable-article-fill"); },
-        (next) => { articleFill = lastTool(next); return commandResponse("fill", { target: { ref: hiddenRole }, value: "HIDDEN_ROLE_UPDATED" }, "editable-hidden-role-fill"); },
+        (next) => { withActions = lastTool(next); return commandResponse("inspect_page", { region: { id: rich }, budget: 12000 }, "editable-region"); },
+        (next) => { region = lastTool(next); return commandResponse("fill", { target: { id: rich }, value: "RICH_UPDATED" }, "editable-rich-fill"); },
+        (next) => { richFill = lastTool(next); return commandResponse("type_text", { target: { id: plain }, text: "_TYPED" }, "editable-plain-type"); },
+        (next) => { plainType = lastTool(next); return commandResponse("fill", { target: { id: child }, value: "FRAME_UPDATED" }, "editable-frame-fill"); },
+        (next) => { childFill = lastTool(next); return commandResponse("fill", { target: { id: hidden }, value: "AX_HIDDEN_UPDATED" }, "editable-ax-hidden-fill"); },
+        (next) => { hiddenFill = lastTool(next); return commandResponse("fill", { target: { id: article }, value: "ARTICLE_UPDATED" }, "editable-article-fill"); },
+        (next) => { articleFill = lastTool(next); return commandResponse("fill", { target: { id: hiddenRole }, value: "HIDDEN_ROLE_UPDATED" }, "editable-hidden-role-fill"); },
         (next) => { hiddenRoleFill = lastTool(next); return textResponse("EDITABLE_TEST_DONE"); },
       );
-      return commandResponse("inspect_page", { fields: ["text", "state", "ref", "actions"], budget: 12000 }, "editable-actions");
+      return commandResponse("inspect_page", { fields: ["text", "state", "actions"], budget: 12000 }, "editable-actions");
     }, textResponse("Inspect the editors"));
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     await target.bringToFront();
@@ -222,10 +222,10 @@ test("handles designMode documents without treating the document node as an elem
     await target.evaluate(() => { document.body.innerHTML = "<p>DESIGN_MODE_INITIAL</p>"; document.designMode = "on"; });
     responses.push(commandResponse("inspect_page", { budget: 12000 }, "design-mode-inspect"), (request) => {
       snapshot = lastTool(request);
-      const editor = snapshot.items?.find((item: any) => itemLine(item).includes("generic") && itemLine(item).includes("[editable=richtext]") && item.ref);
-      if (!editor?.ref) return textResponse("DESIGN_MODE_DONE");
+      const editor = snapshot.items?.find((item: any) => itemLine(item).includes("generic") && itemLine(item).includes("[editable=richtext]") && item.id);
+      if (!editor?.id) return textResponse("DESIGN_MODE_DONE");
       responses.unshift((next) => { filled = lastTool(next); return textResponse("DESIGN_MODE_DONE"); });
-      return commandResponse("fill", { target: { ref: editor.ref }, value: "DESIGN_MODE_UPDATED" }, "design-mode-fill");
+      return commandResponse("fill", { target: { id: editor.id }, value: "DESIGN_MODE_UPDATED" }, "design-mode-fill");
     });
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     await target.bringToFront();

@@ -206,12 +206,12 @@ test("fills once through open and closed shadow roots and a nested frame", async
     responses.push(
       commandResponse("inspect_page", {}, "inspect-editors"),
       (request) => {
-        const item = lastTool(request).items.find((entry: any) => entry.ref && itemLine(entry).includes("Closed input"));
-        expect(item?.ref).toEqual(expect.any(String));
-        closedRef = item.ref;
+        const item = lastTool(request).items.find((entry: any) => entry.id && itemLine(entry).includes("Closed input"));
+        expect(item?.id).toEqual(expect.any(String));
+        closedRef = item.id;
         return commandResponse("fill", { target: { by: "css", value: "#open-input" }, value: "" }, "clear-open");
       },
-      (request) => { expect(lastTool(request), JSON.stringify(lastTool(request))).toMatchObject({ ok: true }); return commandResponse("fill", { target: { ref: closedRef }, value: "" }, "clear-closed"); },
+      (request) => { expect(lastTool(request), JSON.stringify(lastTool(request))).toMatchObject({ ok: true }); return commandResponse("fill", { target: { id: closedRef }, value: "" }, "clear-closed"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("fill", { target: { by: "css", value: "#inner", frame: { by: "css", value: "#frame" } }, value: "updated" }, "fill-frame"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return textResponse("DEEP_EDITORS_OK"); },
       textResponse("深层编辑控件"),

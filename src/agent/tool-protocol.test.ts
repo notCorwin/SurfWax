@@ -54,10 +54,10 @@ describe("tool protocol", () => {
     expect(accepts("inspect_page", { since: "old", full: true })).toBe(false);
     expect(accepts("inspect_page", { since: "old", cursor: "page" })).toBe(false);
     expect(accepts("inspect_page", { cursor: "c", region: "main" })).toBe(false);
-    expect(accepts("upload_file", { artifactId: 1, target: { ref: "e1" }, tabId: 1 })).toBe(true);
+    expect(accepts("upload_file", { artifactId: 1, target: { id: "e1" }, tabId: 1 })).toBe(true);
     expect(accepts("upload_file_chooser", { artifactId: 1, chooserId: "c" })).toBe(true);
     expect(accepts("upload_file", { artifactId: 1 })).toBe(false);
-    expect(accepts("upload_file", { artifactId: 1, chooserId: "c", target: { ref: "e1" } })).toBe(false);
+    expect(accepts("upload_file", { artifactId: 1, chooserId: "c", target: { id: "e1" } })).toBe(false);
     expect(accepts("upload_file_chooser", { artifactId: 1, chooserId: "c", background: false })).toBe(false);
     expect(accepts("upload_file_chooser", { artifactId: 1, chooserId: "c", tabId: 1 })).toBe(false);
     expect(accepts("handle_dialog", { dialogId: "d", accept: true, prompt: "answer" })).toBe(true);

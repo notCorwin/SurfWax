@@ -166,13 +166,13 @@ for (const scenario of [
         }));
         return commandResponse("verify_state", { target: { by: "css", value: "#progress", frame }, textIncludes: rounds === 12 ? "Queue complete" : `Completed ${rounds} of 12`, timeoutMs: 10_000 }, `semantic-progress-${rounds}`);
       }));
-      return commandResponse("click", { target: { ref }, timeoutMs: 30_000 }, `semantic-click-${rounds}`);
+      return commandResponse("click", { target: { id: ref }, timeoutMs: 30_000 }, `semantic-click-${rounds}`);
     };
     const findNext = () => {
       responses.unshift(after((result) => {
         if (result.total === 0) return findNext();
         expect(result.total).toBe(1);
-        const candidate = result.elements?.[0], ref = candidate?.ref, name = candidate?.name;
+        const candidate = result.elements?.[0], ref = candidate?.id, name = candidate?.name;
         if (!ref || typeof name !== "string" || name === previousName) return findNext();
         expect(ref).toEqual(expect.any(String));
         return act(ref, name);

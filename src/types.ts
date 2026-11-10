@@ -12,6 +12,7 @@ export type BrowserSelector = {
 };
 
 export type BrowserTarget =
+  | { id: string }
   | { ref: string }
   | BrowserSelector
   | { point: { observationId: string; x: number; y: number } };

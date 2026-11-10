@@ -7,6 +7,7 @@ import { DeferredProgramPage, PROGRAM_EVENT_INVOKE, PROGRAM_HANDLE_ASSERT_LIVE, 
 export type OperationObserver = { start(operation: string, source: EventSource): unknown; dispatched(handle: unknown, source: EventSource): void; end(handle: unknown): void };
 
 const chains = new Set([
+  "elementById",
   "ref",
   "locator",
   "uniqueScope",

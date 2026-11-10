@@ -47,6 +47,7 @@ export type SnapshotTextPart = Readonly<{ text: string; box?: SnapshotBounds }>;
 /** Structured wire/projection row. Removed deltas omit role/depth. */
 export type ProjectedSnapshotNode = Readonly<{
   id: string;
+  actionable?: true;
   depth?: number;
   role?: string;
   name?: string;

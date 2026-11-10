@@ -45,7 +45,7 @@ for (const targeted of [false, true]) test(`captures ${targeted ? "target" : "vi
     if (semantic?.type === "tool.failed") expect(semantic).toMatchObject({ error: { code: "snapshot-unavailable" } });
     else {
       expect(semantic).toMatchObject({ type: "tool.finished", output: { partial: true, limitations: expect.any(String) } });
-      expect(semantic.output.items.some((item: any) => item.ref)).toBe(false);
+      expect(semantic.output.items.some((item: any) => item.id)).toBe(false);
     }
     const terminals = events.filter(e => ["tool.finished", "tool.failed"].includes(e.type) && e.toolCallId === "dynamic-pixels");
     expect(terminals).toHaveLength(1);

@@ -13,8 +13,8 @@ describe("element target contract", () => {
   });
 
   it("uses either an element ref or a locator scoped by a frame ref", () => {
-    expect(elementTargetSchema.safeParse({ ref: "element", frame: { ref: "frame" } }).success).toBe(false);
-    expect(elementTargetSchema.safeParse({ ref: "element" }).success).toBe(true);
+    expect(elementTargetSchema.safeParse({ id: "element", frame: { ref: "frame" } }).success).toBe(false);
+    expect(elementTargetSchema.safeParse({ id: "element" }).success).toBe(true);
     expect(elementTargetSchema.safeParse({ by: "role", value: "button", frame: { ref: "frame" } }).success).toBe(true);
   });
 

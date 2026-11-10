@@ -14,7 +14,7 @@ export type SnapshotPosition = Readonly<{ index: number; charOffset: number }>;
 const CONTENT_KEYS = [
   "depth", "role", "name", "nameUnknown", "box", "textBox", "textParts", "coordinates",
   "value", "valueUnknown", "placeholder", "selected", "frameRef", "ownerUnrepresented",
-  "ref", "actions", "state", "count", "boxes", "path",
+  "actionable", "ref", "actions", "state", "count", "boxes", "path",
 ] as const;
 
 function contentKey(item: SnapshotItem): string {

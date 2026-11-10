@@ -63,7 +63,7 @@ for (const seed of [17, 73]) test(`scripted complex task: cross-frame order reco
         return commandResponse("find_elements", { target: { ...targetInFrame("role", "button"), name: "Submit order" } }, callIds[1]!);
       },
       (request) => {
-        const result = lastTool(request); buttonRef = result.elements?.[0]?.ref ?? "missing-ref";
+        const result = lastTool(request); buttonRef = result.elements?.[0]?.id ?? "missing-ref";
         checkpoints.find = { total: result.total, ref: buttonRef };
         return commandResponse("select_option", { target: targetInFrame("css", "#service"), value: "not-an-option" }, callIds[2]!);
       },
@@ -71,7 +71,7 @@ for (const seed of [17, 73]) test(`scripted complex task: cross-frame order reco
       (request) => { checkpoints.afterFailure = lastTool(request); return commandResponse("select_option", { target: targetInFrame("css", "#service"), value: service }, callIds[4]!); },
       (request) => { checkpoints.selection = lastTool(request); return commandResponse("fill", { target: targetInFrame("css", "#order"), value: order }, callIds[5]!); },
       (request) => { checkpoints.fill = lastTool(request); return commandResponse("check_element", { target: targetInFrame("css", "#confirmed") }, callIds[6]!); },
-      (request) => { checkpoints.check = lastTool(request); return commandResponse("click", { target: { ref: buttonRef } }, callIds[7]!); },
+      (request) => { checkpoints.check = lastTool(request); return commandResponse("click", { target: { id: buttonRef } }, callIds[7]!); },
       (request) => { checkpoints.submit = lastTool(request); return commandResponse("verify_state", { target: targetInFrame("css", "#status"), textIncludes: `Submitted ${order}` }, callIds[8]!); },
       (request) => { checkpoints.verify = lastTool(request); return textResponse("SCRIPTED_TASK_DONE"); },
       textResponse("跨框架订单"),
@@ -90,7 +90,7 @@ for (const seed of [17, 73]) test(`scripted complex task: cross-frame order reco
     expect(await target.locator("body").getAttribute("data-decoy-clicks")).toBeNull();
     expect(checkpoints.failedSelection).toMatchObject({ ok: false });
     expect(checkpoints.afterFailure).toMatchObject({ ok: true, result: "standard" });
-    expect(checkpoints.find).toMatchObject({ total: 1, ref: expect.any(String) });
+    expect(checkpoints.find).toMatchObject({ total: 1, id: expect.any(String) });
     expect(checkpoints.verify).toMatchObject({ ok: true, result: { verified: true } });
     events = await readEvents(opened.page);
     const terminals = events.filter((event) => ["tool.finished", "tool.failed"].includes(event.type) && callIds.includes(event.toolCallId));

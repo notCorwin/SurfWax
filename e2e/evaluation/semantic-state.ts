@@ -15,7 +15,7 @@ export type SemanticItem = {
   selected?: readonly string[];
   frameRef?: string;
   ownerUnrepresented?: true;
-  ref?: string;
+  actionable?: true;
   actions?: readonly string[];
   state?: Record<string, unknown>;
   count?: number;
@@ -67,7 +67,7 @@ export class SemanticPages {
       || page.baseObservationId !== this.identity.baseObservationId) throw new Error("Mixed semantic observations");
     for (const raw of page.items) {
       if (!raw || typeof raw !== "object" || typeof raw.id !== "string" || !raw.id
-        || raw.ref !== undefined && typeof raw.ref !== "string"
+        || raw.actionable !== undefined && raw.actionable !== true
         || raw.change !== undefined && !["added", "updated", "removed", "moved"].includes(raw.change)
         || raw.after !== undefined && raw.after !== null && typeof raw.after !== "string") throw new Error("Invalid semantic item");
       const { fragment, ...item } = raw;
@@ -88,7 +88,7 @@ export class SemanticPages {
       }
       const part = this.partial, assembled = sliceText(part.item, part.field) ?? "";
       if (part.item.id !== item.id || part.field !== fragment.field || part.index !== fragment.index || part.total !== fragment.total
-        || assembled.length !== fragment.start || part.item.ref !== item.ref || part.item.change !== item.change || part.item.after !== item.after) throw new Error("Inconsistent semantic fragments");
+        || assembled.length !== fragment.start || part.item.actionable !== item.actionable || part.item.change !== item.change || part.item.after !== item.after) throw new Error("Inconsistent semantic fragments");
       part.item = withSlice(part.item, part.field, assembled + text);
       if (fragment.end === fragment.total) { this.ids.add(item.id); this.items.push(part.item); this.partial = undefined; }
     }

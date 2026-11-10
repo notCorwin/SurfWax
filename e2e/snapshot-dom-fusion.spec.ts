@@ -40,9 +40,9 @@ test("retains exact visible DOM text and operates a native input omitted by AX",
       try {
         snapshot = lastTool(request);
         const input = snapshot.items?.find((item: any) => /- textbox(?:\s|:)/.test(itemLine(item)) && itemLine(item).includes("INITIAL_INPUT_VALUE"));
-        if (typeof input?.ref !== "string") return done();
+        if (typeof input?.id !== "string") return done();
         responses.unshift((next) => { try { filled = lastTool(next); } catch (error) { problem = error; } return done(); });
-        return commandResponse("fill", { target: { ref: input.ref }, value: "UPDATED_INPUT_VALUE" }, "dom-fusion-fill");
+        return commandResponse("fill", { target: { id: input.id }, value: "UPDATED_INPUT_VALUE" }, "dom-fusion-fill");
       } catch (error) { problem = error; return done(); }
     }, textResponse("Inspect visible content"));
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
@@ -57,7 +57,7 @@ test("retains exact visible DOM text and operates a native input omitted by AX",
     expect.soft(lines.some((line: string) => line.includes('- button "SpacedA SpacedB"'))).toBe(true);
     expect.soft(lines.some((line: string) => line.includes("Visible input label"))).toBe(true);
     const input = snapshot.items.find((item: any) => /- textbox(?:\s|:)/.test(itemLine(item)) && itemLine(item).includes("INITIAL_INPUT_VALUE"));
-    expect.soft(input?.ref).toEqual(expect.any(String));
+    expect.soft(input?.id).toEqual(expect.any(String));
     const initial = JSON.stringify(snapshot.items);
     expect.soft(initial).toContain("VISIBLE_BEFORE_CHANGE");
     for (const hidden of ["VISIBLE_AFTER_CHANGE", "HIDDEN_DISPLAY_CONTENT", "HIDDEN_TRANSPARENT_CONTENT", "HIDDEN_CLIPPED_CONTENT"])

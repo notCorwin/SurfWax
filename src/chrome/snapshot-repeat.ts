@@ -99,7 +99,7 @@ export function packSnapshot(lines: readonly SnapshotLine[]): SnapshotLine[] {
   }
   const key = (index: number): string | undefined => {
     const row = lines[index]!, node = row.node;
-    if (!node?.bounds || row.members || node.textFragments || node.childFrameRef || node.documentFrameRef
+    if (!node?.bounds || node.ref || row.members || node.textFragments || node.childFrameRef || node.documentFrameRef
       || lines[index + 1]?.node && lines[index + 1]!.node!.depth > node.depth) return undefined;
     if (node.role === "StaticText" && !node.nameUnknown && !node.textWhitespaceProven && !node.preserveTextWhitespace
       && node.name !== undefined && node.name !== normalizeSnapshotText(node.name)) return undefined;
@@ -113,7 +113,7 @@ export function packSnapshot(lines: readonly SnapshotLine[]): SnapshotLine[] {
     let endOfChain = index;
     while (children[endOfChain] === 1 && parents[endOfChain + 1] === endOfChain) {
       const current = lines[endOfChain]!, next = lines[endOfChain + 1]!, node = current.node, child = next.node;
-      if (!node || !child || current.members || next.members || node.role === "RootWebArea" || child.role === "RootWebArea"
+      if (!node || !child || node.ref || child.ref || current.members || next.members || node.role === "RootWebArea" || child.role === "RootWebArea"
         || node.childFrameRef || node.documentFrameRef || child.childFrameRef || child.documentFrameRef
         || node.layoutScope !== child.layoutScope) break;
       endOfChain += 1;

@@ -32,6 +32,18 @@ npm run --silent tools
 
 源码通过 Vite SSR 按需加载，不启动开发服务器或构建扩展。
 
+## 元素 ID
+
+`inspect_page` 的每个 item 都有 `id`。只有 `actionable:true` 的 item 才绑定一个真实元素，可直接传给 `click`、`fill` 等工具；`find_elements` 同样返回 `id`，不再返回独立的元素 `ref`。文本、路径和聚合项仍有用于快照补丁的 ID，但不能作为操作目标。Frame 继续使用单独的 `frameRef`。
+
+```js
+const snapshot = await runtime.call("inspect_page", { full: true });
+const button = snapshot.items.find(item => item.actionable && item.role === "button" && item.name === "登陆");
+await runtime.call("click", { target: { id: button.id } });
+```
+
+ID 限定所属标签页、文档与运行；点击前重新核验节点身份和可操作状态。只读采样通过隔离世界内的弱引用绑定实际节点，并校验原始标签证据（包括闭合 Shadow DOM）。旧 ID 失效后返回 `stale-id`，不会重新按名称查找或按旧坐标猜测点击。保留角色、文本、CSS 等定位器，便于寻找尚未出现在快照中的具体元素。
+
 ## 测试与边界
 
 ```sh

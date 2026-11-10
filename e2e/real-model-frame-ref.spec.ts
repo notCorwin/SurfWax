@@ -92,7 +92,7 @@ test("@real-model targeted short frameRef copy and click", async () => {
     await options.close();
     await target.bringToFront();
     await opened.page.getByTestId("composer-input").fill(
-      "Inspect the queue. Confirm the single item marked Next, then stop. For the click, use a role locator for the Confirm button with target.frame.ref set to the exact frameRef observed on the Next iframe. Do not include an element ref in that target. Do not confirm Waiting items."
+      "Inspect the queue. Confirm the single item marked Next, then stop. For the click, use a role locator for the Confirm button with target.frame.ref set to the exact frameRef observed on the Next iframe. Do not include an element id in that target. Do not confirm Waiting items."
     );
     const taskStartedAt = Date.now(), deadlineAt = taskStartedAt + timeoutMs;
     await opened.page.getByTestId("composer-input").press("Enter");
@@ -113,7 +113,7 @@ test("@real-model targeted short frameRef copy and click", async () => {
     const candidates = events.flatMap((event, index) => {
       const target = event.input?.target;
       if (event.type !== "tool.started" || event.content?.toolName !== "click" || target?.by !== "role"
-        || target.value !== "button" || target.name !== "Confirm" || target.ref !== undefined || typeof target.frame?.ref !== "string") return [];
+        || target.value !== "button" || target.name !== "Confirm" || target.id !== undefined || typeof target.frame?.ref !== "string") return [];
       const observed = events.slice(0, index).filter((prior) => prior.type === "tool.finished").flatMap((prior) => nextFrameRefs(prior.output));
       const terminal = events.find((item, terminalIndex) => terminalIndex > index && item.type === "tool.finished"
         && item.toolCallId === event.toolCallId && item.output?.ok === true && item.output?.state === "succeeded");

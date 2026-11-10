@@ -149,7 +149,7 @@ describe("model response tool scheduling", () => {
 
   it("does not bypass the background fence for target-based upload", async () => {
     const scheduler = new ToolScheduler(names, () => ["job"]);
-    scheduler.prepare([call("upload", "upload_file", { target: { ref: "e1" }, artifactId: 7 })], 1);
+    scheduler.prepare([call("upload", "upload_file", { target: { id: "e1" }, artifactId: 7 })], 1);
     const upload = vi.fn(async () => "wrong");
     await expect(scheduler.run("upload", upload)).rejects.toMatchObject({ code: "background-job-pending" });
     expect(upload).not.toHaveBeenCalled();

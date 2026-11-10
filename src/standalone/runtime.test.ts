@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { chromium } from "@playwright/test";
 import { describe, expect, it, vi } from "vitest";
 import { connectToolRuntime } from "./runtime";
+import { resolveSampledElement } from "../chrome/sampled-element";
 import { executeNodeProgram } from "./program-host";
 import { formatSnapshotItem, type ProjectedSnapshotNode } from "../chrome/snapshot-render";
 
@@ -40,12 +41,24 @@ describe("standalone tools", () => {
       expect(snapshot).not.toHaveProperty("partial", true);
       expect(JSON.stringify((snapshot as any).items)).toContain("Save");
       expect(JSON.stringify((snapshot as any).items)).not.toContain("Invisible sentinel");
-      const fill = await runtime.call("fill", { target: { by: "label", value: "Name" }, value: "Standalone" });
+      const saveItem = (snapshot as any).items.find((item: any) => item.role === "button" && item.name === "Save");
+      const inputItem = (snapshot as any).items.find((item: any) => item.role === "textbox");
+      expect(saveItem).toHaveProperty("actionable", true);
+      expect(saveItem).not.toHaveProperty("ref");
+      const found = await runtime.call("find_elements", { target: { by: "role", value: "button", name: "Save", exact: true } }) as any;
+      expect(found.elements[0]).toMatchObject({ id: saveItem.id, actionable: true });
+      expect(found.elements[0]).not.toHaveProperty("ref");
+      const fill = await runtime.call("fill", { target: { id: inputItem.id }, value: "Standalone" });
       expect(fill, JSON.stringify(fill)).not.toHaveProperty("ok", false);
-      const click = await runtime.call("click", { target: { by: "role", value: "button", name: "Save" } });
+      const click = await runtime.call("click", { target: { id: saveItem.id } });
       expect(click, JSON.stringify(click)).not.toHaveProperty("ok", false);
       expect(click).toHaveProperty("pageSnapshot");
       expect(await page.locator("output").textContent()).toBe("Standalone");
+      await page.locator("button").evaluate(button => { button.textContent = "Renamed"; });
+      const stale = await runtime.call("click", { target: { id: saveItem.id } });
+      expect(stale).toMatchObject({ ok: false, error: { code: "stale-id" } });
+      const nonActionable = await runtime.call("click", { target: { id: (snapshot as any).items[0].id } });
+      expect(nonActionable, JSON.stringify(nonActionable)).toMatchObject({ ok: false, error: { code: "not-actionable-id" } });
       const popupSubscription = await runtime.call("subscribe_event", { kind: "popup" }) as any;
       const popupReady = context.waitForEvent("page");
       await page.evaluate(() => { window.open("about:blank"); });
@@ -67,18 +80,23 @@ describe("standalone tools", () => {
       const opened = await runtime.call("open_tab", { url: "about:blank" }) as any;
       expect(opened).not.toHaveProperty("ok", false);
       expect(context.pages()).toHaveLength(2);
+      const wrongTab = await runtime.call("click", { target: { id: inputItem.id }, tabId: opened.result.tabId });
+      expect(wrongTab).toMatchObject({ ok: false, error: { code: "stale-id" } });
       await runtime.call("switch_tab", { tabId: 1 });
       const invalid = await runtime.call("fill", { target: { by: "css", value: "#absent" }, value: "x", timeoutMs: 100 });
       expect(invalid).toHaveProperty("ok", false);
       expect(invalid).toHaveProperty("evidenceId");
       expect(runtime.events.some(event => event.type === "tool.failed")).toBe(true);
       await page.setContent(`<!doctype html><style>body{font:16px Arial;margin:20px}p{margin:0;height:28px}</style>
-        <p>Fallback visible sentinel</p><div id="closed">CLOSED_LIGHT_SECRET</div><div id="open">OPEN_LIGHT_SECRET</div>
-        <div id="race">RACE_LIGHT_SECRET</div><p hidden>HIDDEN_SECRET</p><p style="position:absolute;top:4000px">OFFSCREEN_SECRET</p><input value="field">`);
+        <p>Fallback visible sentinel</p><button onclick="document.body.dataset.idClicks=String(Number(document.body.dataset.idClicks||0)+1);document.querySelector('output').textContent='ID clicked'">Sample action</button><output></output><div id="closed">CLOSED_LIGHT_SECRET</div><div id="open">OPEN_LIGHT_SECRET</div>
+        <div id="race">RACE_LIGHT_SECRET</div><div id="new-root-button" role="button" tabindex="0">Rootless action</div><div id="shadow-button" role="button" tabindex="0" onclick="document.body.dataset.shadowClicks=String(Number(document.body.dataset.shadowClicks||0)+1)">SHADOW_LIGHT_SECRET</div><p hidden>HIDDEN_SECRET</p><p style="position:absolute;top:4000px">OFFSCREEN_SECRET</p><input value="field">`);
       await page.evaluate(async () => {
         for (const mode of ["open", "closed"] as const) {
           document.getElementById(mode)!.attachShadow({ mode }).innerHTML = `<p>${mode} shadow visible</p>`;
         }
+        const actionShadow = document.getElementById("shadow-button")!.attachShadow({ mode: "closed" });
+        actionShadow.innerHTML = "<span>Shadow action original</span>";
+        (window as any).__testActionShadow = actionShadow;
         getSelection()?.removeAllRanges();
         await document.fonts.ready;
       });
@@ -86,9 +104,14 @@ describe("standalone tools", () => {
       // synchronous read, closed shadow roots, geometry and visibility proofs.
       const automation = (runtime.executor as any).automation;
       const originalCommand = automation.options.command;
+      let mutateSampleIdentity = false;
       let captures = 0, mutateShadow: "attach" | "insert" | undefined, censusStarted = false;
       const command = vi.spyOn(automation.options, "command").mockImplementation(async (...args: unknown[]) => {
         const result = await originalCommand(...args);
+        if (mutateSampleIdentity && args[1] === "Runtime.callFunctionOn" && (args[2] as any)?.functionDeclaration === resolveSampledElement.toString()) {
+          mutateSampleIdentity = false;
+          await page.getByRole("button", { name: "Sample action" }).evaluate(button => { button.textContent = "Different action"; });
+        }
         if (args[1] === "DOM.getDocument" && (args[2] as any)?.depth === -1) censusStarted = true;
         if (mutateShadow && censusStarted && args[1] === "DOM.resolveNode") {
           const mutation = mutateShadow; mutateShadow = undefined;
@@ -118,6 +141,27 @@ describe("standalone tools", () => {
         expect(text).toContain("open shadow visible");
         expect(text).toContain("closed shadow visible");
         expect(text).not.toMatch(/CLOSED_LIGHT_SECRET|OPEN_LIGHT_SECRET|HIDDEN_SECRET|OFFSCREEN_SECRET/);
+        const shadowButton = recovered.items.find((item: any) => item.role === "button" && item.name === "Shadow action original");
+        expect(shadowButton, JSON.stringify(recovered)).toHaveProperty("actionable", true);
+        expect(await runtime.call("click", { target: { id: shadowButton.id } })).not.toHaveProperty("ok", false);
+        await page.evaluate(() => { (window as any).__testActionShadow.querySelector("span").textContent = "Shadow action replacement"; });
+        expect(await runtime.call("click", { target: { id: shadowButton.id } })).toMatchObject({ ok: false, error: { code: "stale-id" } });
+        expect(await page.locator("body").getAttribute("data-shadow-clicks")).toBe("1");
+        const rootless = recovered.items.find((item: any) => item.role === "button" && item.name === "Rootless action");
+        await page.evaluate(() => { document.getElementById("new-root-button")!.attachShadow({ mode: "closed" }).innerHTML = "<span>Replacement root action</span>"; });
+        expect(await runtime.call("click", { target: { id: rootless.id } })).toMatchObject({ ok: false, error: { code: "stale-id" } });
+        const sampledButton = recovered.items.find((item: any) => item.role === "button" && item.name === "Sample action");
+        expect(sampledButton, JSON.stringify(recovered)).toHaveProperty("actionable", true);
+        const bySampleId = await runtime.call("click", { target: { id: sampledButton.id } });
+        expect(bySampleId, JSON.stringify(bySampleId)).not.toHaveProperty("ok", false);
+        expect(await page.locator("output").textContent()).toBe("ID clicked");
+        const foundSample = await runtime.call("find_elements", { target: { id: sampledButton.id } }) as any;
+        expect(foundSample.elements[0]).toMatchObject({ id: sampledButton.id, actionable: true });
+        mutateSampleIdentity = true;
+        expect(await runtime.call("click", { target: { id: sampledButton.id } })).toMatchObject({ ok: false, error: { code: "stale-id" } });
+        expect(await page.locator("body").getAttribute("data-id-clicks")).toBe("1");
+        await page.getByRole("button", { name: "Different action" }).evaluate(button => { button.textContent = "Sample action"; });
+        expect(await runtime.call("click", { target: { id: sampledButton.id } })).toMatchObject({ ok: false, error: { code: "stale-id" } });
         mutateShadow = "attach"; censusStarted = false;
         const changed = await runtime.call("inspect_page", { full: true }) as any;
         expect(changed).toMatchObject({ ok: false, error: { code: "stale-observation" } });
@@ -134,6 +178,14 @@ describe("standalone tools", () => {
         const insertedText = inspectText(afterInsert);
         expect(insertedText).toContain("Inserted shadow visible");
         expect(insertedText).not.toContain("INSERTED_LIGHT_SECRET");
+        const originalRunItem = afterInsert.items.find((item: any) => item.role === "button" && item.name === "Sample action");
+        automation.setContext({ conversationId: "other-conversation", runId: "other-run" });
+        const samePage = await automation.createPage(1);
+        const otherRun = await samePage.inspect({ full: true });
+        const otherRunItem = otherRun.items.find((item: any) => item.role === "button" && item.name === "Sample action");
+        expect(otherRunItem.id).not.toBe(originalRunItem.id);
+        await expect(samePage.elementById(originalRunItem.id).count()).rejects.toMatchObject({ code: "stale-id" });
+        await expect(samePage.elementById(otherRunItem.id).count()).resolves.toBe(1);
       } finally { command.mockRestore(); }
       await runtime.close();
       await expect(runtime.call("list_tabs")).rejects.toThrow("closed");

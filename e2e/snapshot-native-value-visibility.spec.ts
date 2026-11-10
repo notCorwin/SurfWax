@@ -35,8 +35,8 @@ test("native input snapshot distinguishes painted values from hidden and clipped
     }
     responses.push(commandResponse("inspect_page", { budget: 12000 }, "native-visibility"), (request) => {
       snapshot = lastTool(request);
-      const rows = snapshot.items?.filter((item: any) => itemLine(item).includes("textbox") && typeof item.ref === "string") ?? [];
-      return rows[2] ? commandResponse("read_value", { target: { ref: rows[2].ref } }, "native-read-hidden-value") : textResponse("NATIVE_VISIBILITY_DONE");
+      const rows = snapshot.items?.filter((item: any) => itemLine(item).includes("textbox") && typeof item.id === "string") ?? [];
+      return rows[2] ? commandResponse("read_value", { target: { id: rows[2].id } }, "native-read-hidden-value") : textResponse("NATIVE_VISIBILITY_DONE");
     }, (request) => {
       read = lastTool(request); return textResponse("NATIVE_VISIBILITY_DONE");
     }, textResponse("Inspect the inputs"));
@@ -52,7 +52,7 @@ test("native input snapshot distinguishes painted values from hidden and clipped
     expect(text).not.toContain("ZERO_SECRET_ABC");
     expect(text).not.toContain("CLIPPED_SECRET_ABC");
     expect(text).not.toContain("DOM_SECRET_ABC");
-    expect(snapshot.items.filter((item: any) => itemLine(item).includes("textbox") && typeof item.ref === "string")).toHaveLength(5);
+    expect(snapshot.items.filter((item: any) => itemLine(item).includes("textbox") && typeof item.id === "string")).toHaveLength(5);
     expect(snapshot.items.filter((item: any) => itemLine(item).includes("[value=unknown]"))).toHaveLength(3);
     expect(read).toMatchObject({ ok: true, result: "ABCD_CLIPPED_SECRET_ABC" });
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
@@ -89,6 +89,6 @@ test("focused and horizontally scrolled input does not expose its hidden prefix"
     await expect(opened.page.locator(".markdown-body").last()).toContainText("NATIVE_SCROLLED_DONE", { timeout: 60_000 });
     expect(snapshot).toMatchObject({ mode: "full", items: expect.any(Array) });
     expect(JSON.stringify(snapshot.items)).not.toContain("AAA_HIDDEN_PREFIX");
-    expect(snapshot.items.some((item: any) => itemLine(item).includes("textbox") && itemLine(item).includes("[value=unknown]") && typeof item.ref === "string")).toBe(true);
+    expect(snapshot.items.some((item: any) => itemLine(item).includes("textbox") && itemLine(item).includes("[value=unknown]") && typeof item.id === "string")).toBe(true);
   } finally { ready(); await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

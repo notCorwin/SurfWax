@@ -36,12 +36,12 @@ for (const seed of [17, 72]) test(`reassembles semantic continuations and acts o
       }));
       return commandResponse("verify_state", { target: { by: "css", value: "#progress", frame }, textIncludes: rounds === 12 ? "Queue complete" : `Completed ${rounds} of 12`, timeoutMs: 10_000 }, `semantic-progress-${rounds}`);
     }));
-    return commandResponse("click", { target: { ref } }, `semantic-click-${rounds}`);
+    return commandResponse("click", { target: { id: ref } }, `semantic-click-${rounds}`);
   };
   const findNext = () => {
     responses.unshift(after((result) => {
       expect(result.total).toBe(1);
-      const ref = result.elements?.[0]?.ref;
+      const ref = result.elements?.[0]?.id;
       expect(ref).toEqual(expect.any(String));
       return act(ref);
     }));

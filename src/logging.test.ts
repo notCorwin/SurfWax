@@ -1039,7 +1039,7 @@ describe("run recovery", () => {
   it("restores persisted act progress after its owner disappears", async () => {
     let now = new Date("2026-01-01T00:00:00Z");
     const logger = new EventLogger({ store: memoryStore(), now: () => now });
-    const steps = [{ type: "click", target: { ref: "e1" } }, { type: "fill", target: { ref: "e2" }, value: "waiting" }, { type: "click", target: { ref: "e3" } }];
+    const steps = [{ type: "click", target: { id: "e1" } }, { type: "fill", target: { id: "e2" }, value: "waiting" }, { type: "click", target: { id: "e3" } }];
     await logger.append({ type: "conversation.submitted", conversationId: "one", runId: "lost" });
     await logger.append({ type: "tool.started", conversationId: "one", runId: "lost", toolCallId: "batch", input: { steps }, content: { callId: "sdk", toolName: "act" } });
     await logger.append({ type: "tool.progress", conversationId: "one", runId: "lost", toolCallId: "batch", content: { nextIndex: 1, steps }, output: { completed: [{ index: 0, step: steps[0], result: { performed: true } }], elapsedMs: 25 } });

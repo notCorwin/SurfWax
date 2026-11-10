@@ -32,17 +32,17 @@ test("finds targets in scoped rows, follows a reference, and rejects a stale row
       commandResponse("inspect_page", {}, "inspect"),
       (request) => {
         const items = lastTool(request).items;
-        rowRef = items.find((item: any) => itemLine(item).includes('article "First row"'))?.ref;
-        buttonRef = items.find((item: any) => itemLine(item).includes('button "Safe target"'))?.ref;
+        rowRef = items.find((item: any) => itemLine(item).includes('article "First row"'))?.id;
+        buttonRef = items.find((item: any) => itemLine(item).includes('button "Safe target"'))?.id;
         expect(rowRef).toEqual(expect.any(String)); expect(buttonRef).toEqual(expect.any(String));
         return commandResponse("count_elements", { target: { by: "role", value: "button", name: "Safe target", scope: { by: "role", value: "article", name: "First row" } } }, "scoped-button");
       },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: 1 }); return commandResponse("count_elements", { target: { by: "css", value: ".needle", scope: { by: "role", value: "article", name: "First row" } } }, "scoped-needle"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: 1 }); return commandResponse("count_elements", { target: { by: "role", value: "button", name: "Shadow target", scope: { by: "role", value: "article", name: "Shadow row" } } }, "shadow-button"); },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: 1 }); return commandResponse("click", { target: { ref: buttonRef } }, "referenced-button"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: 1 }); return commandResponse("click", { target: { id: buttonRef } }, "referenced-button"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("click", { target: { by: "css", value: "#change-row" } }, "change-row"); },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("count_elements", { target: { ref: rowRef } }, "stale-row"); },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "stale-ref" } }); return textResponse("COMPOSED_REF_OK"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("count_elements", { target: { id: rowRef } }, "stale-row"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "stale-id" } }); return textResponse("COMPOSED_REF_OK"); },
       textResponse("Scoped references"),
     );
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
@@ -70,12 +70,12 @@ test("locates a scoped target in an out-of-process frame and follows its referen
     responses.push(
       commandResponse("inspect_page", {}, "inspect-frame"),
       (request) => {
-        frameRef = lastTool(request).items.find((item: any) => itemLine(item).includes('button "Frame target"'))?.ref;
+        frameRef = lastTool(request).items.find((item: any) => itemLine(item).includes('button "Frame target"'))?.id;
         expect(frameRef).toEqual(expect.any(String));
         return commandResponse("count_elements", { target: { by: "role", value: "button", name: "Frame target", scope: { by: "role", value: "article", name: "Frame row" }, frame: { by: "css", value: 'iframe[src*="localhost"]' } } }, "frame-scoped");
       },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: 1 }); return commandResponse("count_elements", { target: { by: "role", value: "button", name: "Same frame target", frame: { by: "css", value: 'iframe[src="/same-frame"]' } } }, "same-frame"); },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: 1 }); return commandResponse("click", { target: { ref: frameRef } }, "frame-reference"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: 1 }); return commandResponse("click", { target: { id: frameRef } }, "frame-reference"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return textResponse("COMPOSED_FRAME_REF_OK"); },
       textResponse("Frame references"),
     );

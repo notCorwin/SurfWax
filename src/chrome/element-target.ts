@@ -14,7 +14,7 @@ const selectorFields = {
 };
 
 export const elementTargetSchema = z.union([
-  z.object({ ref: z.string().min(1).describe("Element ref returned by inspect_page or find_elements.") }).strict(),
+  z.object({ id: z.string().min(1).describe("Actionable item ID returned by inspect_page or find_elements. Copy the complete id; never use an observationId, frameRef or an item without actionable=true.") }).strict(),
   z.object({ by: z.enum(["css", "role", "text", "label", "placeholder", "alt", "title", "testId"]), value: z.string(), name: roleName, exact: matching, ...selectorFields }).strict()
     .refine(({ by, value, name, exact }) => (by !== "css" || value.length > 0)
       && (by === "role" || name === undefined) && (by !== "css" && by !== "testId" || exact === undefined),
@@ -26,4 +26,4 @@ export const elementTargetSchema = z.union([
       { properties: { by: { const: "css" }, value: { minLength: 1 } }, not: { anyOf: [{ required: ["name"] }, { required: ["exact"] }] } },
       { properties: { by: { const: "testId" } }, not: { anyOf: [{ required: ["name"] }, { required: ["exact"] }] } },
     ] }] }),
-]).describe("Identify an element by ref or locator; actions require one match unless index selects one. For role, value is the accessible role and name filters its accessible name, e.g. {by:'role',value:'button',name:'Save'}. For role name and text locators, exact=true matches normalized text case-sensitively; default false matches case-insensitive substrings. testId always matches exactly.");
+]).describe("Identify an element by id or locator; actions require one match unless index selects one. For role, value is the accessible role and name filters its accessible name, e.g. {by:'role',value:'button',name:'Save'}. For role name and text locators, exact=true matches normalized text case-sensitively; default false matches case-insensitive substrings. testId always matches exactly.");

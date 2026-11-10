@@ -370,7 +370,9 @@ export class ChromeExecutor {
         throwIfAborted(combined);
         const locator = await this.locatorFor(page, input.target);
         if (!locator?.spec) throw new Error("AutomationError[invalid-target]: Search requires a locator target");
-        return await this.automation.findElements(page.tabId, locator, { cursor: input.cursor, limit: input.limit });
+        const result = await this.automation.findElements(page.tabId, locator, { cursor: input.cursor, limit: input.limit });
+        return { ...result, elements: (result.elements as Array<Record<string, unknown>>).map(({ ref, ...element }) => ({ ...element,
+          ...(typeof ref === "string" ? { id: ref, actionable: true } : {}) })) };
       } finally { this.activeSignal = undefined; this.activeContext = {}; await this.automation.clearContext(); }
     }, effectiveSignal, input.timeoutMs, false);
   }
@@ -1120,6 +1122,7 @@ export class ChromeExecutor {
   private async locatorFor(page: any, raw: unknown): Promise<any> {
     const target = parseLocatorTarget(raw);
     if ("point" in target) return { click: (options?: unknown) => page.point(target.point.observationId, target.point.x, target.point.y, "click", options), dblclick: (options?: unknown) => page.point(target.point.observationId, target.point.x, target.point.y, "dblclick", options), hover: () => page.point(target.point.observationId, target.point.x, target.point.y, "hover") };
+    if ("id" in target) return page.elementById(target.id);
     if ("ref" in target) return page.ref(target.ref);
     let scope = target.frame ? "ref" in target.frame ? page.frameRef(target.frame.ref) : page.frameLocator(target.frame.value) : page;
     if (target.scope) {

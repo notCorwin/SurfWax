@@ -32,7 +32,7 @@ test("isolates resizing text in a clipped container from a separate stable butto
     await expect(opened.page.locator(".markdown-body").last()).toContainText("ISOLATION_DONE", { timeout: 80_000 });
     expect(observed).toMatchObject({ partial: true, items: expect.any(Array) });
     const items = observed.items;
-    expect(items.find((item: any) => itemLine(item).includes('button "Stable action"'))?.ref).toEqual(expect.any(String));
+    expect(items.find((item: any) => itemLine(item).includes('button "Stable action"'))?.id).toEqual(expect.any(String));
     expect(items.some((item: any) => itemLine(item).includes("short") || itemLine(item).includes("a longer value"))).toBe(false);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });

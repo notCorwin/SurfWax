@@ -116,7 +116,7 @@ function harness(
         role: { value: item.role },
         name: { value: item.name },
         childIds: (item.text ?? item.name) ? [`text-${index}`] : [],
-        properties: [{ name: "focusable", value: { value: true } }],
+        properties: [{ name: "focusable", value: { value: item.focusable ?? true } }],
       })),
       ...metadata.flatMap((item: any, index) => {
         const text = item.text ?? item.name;
@@ -486,11 +486,11 @@ describe("AutomationRuntime", () => {
       expect(reads).toBe(2);
       if (settles) {
         expect(observed.partial).toBeUndefined();
-        expect(observed.items.some((item: any) => item.ref && item.role === "checkbox" && item.state?.checked === false)).toBe(true);
+        expect(observed.items.some((item: any) => item.actionable && item.role === "checkbox" && item.state?.checked === false)).toBe(true);
       } else {
         expect(observed).toMatchObject({ partial: true, limitations: expect.stringContaining("dom-control-changed-during-capture") });
         expect(inspectText(observed)).toContain("Independent visible text");
-        expect(observed.items.every((item: any) => !item.ref && item.state?.checked === undefined)).toBe(true);
+        expect(observed.items.every((item: any) => !item.actionable && item.state?.checked === undefined)).toBe(true);
       }
       expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.releaseObjectGroup" && params?.objectGroup?.startsWith("surf-wax-dom-snapshot:"))).toHaveLength(2);
     } finally { await runtime.abortSessions(); }
@@ -554,7 +554,7 @@ describe("AutomationRuntime", () => {
       .mockImplementationOnce(async () => { ready = true; return { ok: true, result: "next" }; });
     const scheduler = new ToolScheduler(PROGRAM_TOOL_REGISTRY.map(({ name }) => name));
     const tools = createProgramTools(executor, { scheduler }) as Record<string, any>;
-    const calls = [3, 4].map((tabId) => ({ type: "tool-call", toolCallId: String(tabId), toolName: "click", input: { target: { ref: "one" }, tabId } }));
+    const calls = [3, 4].map((tabId) => ({ type: "tool-call", toolCallId: String(tabId), toolName: "click", input: { target: { id: "one" }, tabId } }));
     scheduler.prepare(calls, 3);
     vi.useFakeTimers();
     try {
@@ -1238,7 +1238,7 @@ describe("AutomationRuntime", () => {
     const { runtime } = harness();
     const page = await runtime.createPage(3);
     const inspection = await page.inspect({ fields: ["text", "state", "ref"] }) as any;
-    const ref = inspection.items.find((item: any) => item.ref).ref;
+    const ref = inspection.items.find((item: any) => item.actionable).id;
     const nested = page.locator("div").filter({ has: page.ref(ref) });
     runtime.handleEvent({ tabId: 3 }, "Page.frameNavigated", { frame: { id: "root" } });
     await expect(nested.count()).rejects.toMatchObject({ code: "stale-ref" });
@@ -1343,7 +1343,7 @@ describe("AutomationRuntime", () => {
     const { runtime, command } = harness();
     const page = await runtime.createPage(3);
     const inspection = await page.inspect({ fields: ["text", "state", "ref"] }) as any;
-    const ref = inspection.items.find((item: any) => item.ref)?.ref;
+    const ref = inspection.items.find((item: any) => item.actionable)?.id;
     expect(ref).toBeDefined();
     const original = command.getMockImplementation()!;
     command.mockImplementation(async (source, method, params) => {
@@ -1706,7 +1706,7 @@ describe("AutomationRuntime", () => {
     expect(inspectText(result)).not.toContain("Recipient");
     expect(inspectText(result).split(value)).toHaveLength(2);
     expect(inspectText(result)).not.toContain("StaticText");
-    expect((result.items as any[]).find((item) => item.role === role)?.ref).toBeTruthy();
+    expect((result.items as any[]).find((item) => item.role === role)?.id).toBeTruthy();
     await runtime.abortSessions();
   });
 
@@ -1722,7 +1722,7 @@ describe("AutomationRuntime", () => {
     expect(inspectText(result)).not.toContain(value);
     expect(inspectText(result)).toContain("[value=unknown]");
     expect(inspectText(result)).not.toContain("StaticText");
-    expect((result.items as any[]).find((item) => item.role === "textbox")?.ref).toBeTruthy();
+    expect((result.items as any[]).find((item) => item.role === "textbox")?.id).toBeTruthy();
     await runtime.abortSessions();
   });
 
@@ -1806,10 +1806,10 @@ describe("AutomationRuntime", () => {
     });
     const page = await runtime.createPage(3), result = await page.inspect({ fields: ["text", "state", "ref"] }) as any;
     const textbox = result.items.find((item: any) => item.role === "textbox");
-    expect(textbox.ref).toBeTruthy();
+    expect(textbox.id).toBeTruthy();
     if (visible) expect(textbox).toMatchObject({ role: "textbox", name: "Recipient" });
     else expect(inspectText(result)).not.toContain("Recipient");
-    await expect(page.ref(textbox.ref).count()).resolves.toBe(1);
+    await expect(page.ref(textbox.id).count()).resolves.toBe(1);
     await runtime.abortSessions();
   });
 
@@ -1843,7 +1843,7 @@ describe("AutomationRuntime", () => {
     const result = await (await runtime.createPage(3)).inspect({ fields: ["text", "state", "ref"] });
     expect(inspectText(result).split(value)).toHaveLength(2);
     expect(inspectText(result)).not.toContain("Recipient");
-    expect((result.items as any[]).find((item) => item.role === "textbox")?.ref).toBeTruthy();
+    expect((result.items as any[]).find((item) => item.role === "textbox")?.id).toBeTruthy();
     const unknownText = (result.items as any[]).filter((item) => item.role === "StaticText" && item.nameUnknown);
     if (property || action || sibling || wrapperName) expect(unknownText.length).toBeGreaterThan(0);
     else expect(unknownText).toHaveLength(0);
@@ -1972,7 +1972,7 @@ describe("AutomationRuntime", () => {
     expect(text).toContain('heading "Inside"');
     expect(text).toContain('button "Action"');
     expect(text.indexOf('heading "Inside"')).toBeLessThan(text.indexOf('button "Action"'));
-    expect((result.items as any[]).find((item) => item.role === "button" && item.name === "Action")?.ref).toBeTruthy();
+    expect((result.items as any[]).find((item) => item.role === "button" && item.name === "Action")?.id).toBeTruthy();
     const paged: any = await page.inspect({ fields: ["text", "state", "ref"], budget: 240, limit: 1 }, page.locator("#region"));
     const parts = [...paged.items];
     let cursor = paged.nextCursor;
@@ -2011,7 +2011,7 @@ describe("AutomationRuntime", () => {
     const text = inspectText(result);
     expect(text.includes("PRIVATE_HINT")).toBe(visible);
     expect(text.includes("[placeholder=unknown]")).toBe(status === "unknown");
-    expect((result.items as any[]).find((item) => item.role === "textbox")?.ref).toBeTruthy();
+    expect((result.items as any[]).find((item) => item.role === "textbox")?.id).toBeTruthy();
     expect(reads()).toBe(2);
     expect(command.mock.calls.filter(([, method, params]) => method === "Runtime.releaseObjectGroup" && params?.objectGroup?.startsWith("surf-wax-placeholder:"))).toHaveLength(2);
     await runtime.abortSessions();
@@ -2283,7 +2283,7 @@ describe("AutomationRuntime", () => {
     expect(button.name).not.toContain("Known alias");
     expect(button.name).not.toContain("Unselected choice");
     expect(button.name).not.toContain("Other");
-    expect((runtime as any).sessions.get(3).refs.get(button.ref).name).toBe(originalName);
+    expect((runtime as any).sessions.get(3).refs.get(button.id).name).toBe(originalName);
     await runtime.abortSessions();
   });
 
@@ -2323,11 +2323,11 @@ describe("AutomationRuntime", () => {
     expect(inspectText(first)).not.toContain("[ref=");
     expect(first).not.toHaveProperty("screenshot");
     const referenced = await page.inspect({ fields: ["text", "state", "ref"] });
-    const ref = (referenced.items as any[]).find((item) => item.role === "button" && item.name === "Save")?.ref;
+    const ref = (referenced.items as any[]).find((item) => item.role === "button" && item.name === "Save")?.id;
     expect(ref).toMatch(/^t3s[a-f0-9]+d0e1$/);
     metadata[0]!.name = "Continue"; metadata[0]!.text = "Continue";
     const second = await page.inspect({ since: first.observationId as string });
-    expect(second).toMatchObject({ mode: "delta", items: [expect.objectContaining({ change: "updated", name: "Continue" })] });
+    expect(second).toMatchObject({ mode: "delta", items: [expect.objectContaining({ change: "removed" }), expect.objectContaining({ change: "added", name: "Continue" })] });
     expect(second).not.toHaveProperty("snapshot");
     expect(calls.some((call) => call.method === "Page.captureScreenshot")).toBe(false);
     const other = await runtime.createPage(4);
@@ -2337,17 +2337,17 @@ describe("AutomationRuntime", () => {
     await expect(page.ref(ref!).click()).rejects.toThrow("stale-ref");
     await runtime.abortSessions();
     const replacement = await (await runtime.createPage(3)).inspect({ fields: ["text", "state", "ref"] });
-    expect((replacement.items as any[]).some((item) => item.ref === ref)).toBe(false);
+    expect((replacement.items as any[]).some((item) => item.id === ref)).toBe(false);
   });
 
   it("delivers a complete observation within the inline response limit without an unnecessary continuation", async () => {
-    const metadata = Array.from({ length: 160 }, (_, index) => ({ role: "button", tag: "button", name: `Command ${index}`, text: `Command ${index}` }));
+    const metadata = Array.from({ length: 70 }, (_, index) => ({ role: "button", tag: "button", name: `Command ${index}`, text: `Command ${index}` }));
     const { runtime } = harness(metadata), page = await runtime.createPage(3);
     try {
       const result = await page.inspect({ wire: { maxBytes: 16 * 1024, evidenceId: "call" } }) as any;
       expect(result.truncation).toMatchObject({ truncated: false, baselineComplete: true });
       expect(result.nextCursor).toBeUndefined();
-      expect(result.items).toHaveLength(161);
+      expect(result.items).toHaveLength(71);
       expect(new TextEncoder().encode(JSON.stringify({ ...result, evidenceId: "call" })).byteLength).toBeLessThanOrEqual(16 * 1024);
       deliver(result);
     } finally { await runtime.abortSessions(); }
@@ -2371,7 +2371,7 @@ describe("AutomationRuntime", () => {
     expect(first.nextCursor).toBeTypeOf("string");
     const second = await page.inspect({ cursor: first.nextCursor }) as any;
     expect(second.documentId).toBe(1);
-    expect(second.items.find((item: any) => item.ref)?.ref).toMatch(/^t3s[a-f0-9]+d1e/);
+    expect(second.items.find((item: any) => item.actionable)?.id).toMatch(/^t3s[a-f0-9]+d1e/);
     runtime.handleEvent({ tabId: 3 }, "Page.frameDetached", { frameId: "another", reason: "remove" });
     await expect(page.inspect({ cursor: first.nextCursor })).rejects.toMatchObject({ code: "stale-observation" });
     await runtime.abortSessions();
@@ -2490,9 +2490,10 @@ describe("AutomationRuntime", () => {
     const page = await runtime.createPage(3);
     const first = await page.inspect({ fields: ["text", "state", "ref"] }) as any;
     const second = await page.inspect({ fields: ["text", "state", "ref"], since: first.observationId }) as any;
-    expect(first.items.map((item: any) => item.id)).toEqual(["1.aroot", "1.anode-0"]);
+    expect(first.items.map((item: any) => item.id)).toEqual([expect.stringMatching(/^t3s[a-f0-9]+d0:1.aroot$/), expect.stringMatching(/^t3s[a-f0-9]+d0e1$/)]);
+    expect(first.items.every((item: any) => !item.id.includes(frameId))).toBe(true);
     expect(second).toMatchObject({ mode: "delta", items: [] });
-    const ref = first.items.find((item: any) => item.ref)?.ref;
+    const ref = first.items.find((item: any) => item.actionable)?.id;
     expect(ref).toMatch(/^t3s[a-f0-9]+d0e1$/);
     await expect(page.ref(ref).count()).resolves.toBe(1);
     await runtime.abortSessions();
@@ -2508,10 +2509,13 @@ describe("AutomationRuntime", () => {
     metadata[1]!.name = "Second updated";
     metadata.push({ role: "button", name: "Third" });
     const one = await page.inspect({ since: baseline.observationId, limit: 1 }) as any;
-    expect(one).toMatchObject({ mode: "delta", items: [{ id: second.id, change: "updated", after: first.id }], nextCursor: expect.any(String) });
+    expect(one).toMatchObject({ mode: "delta", items: [{ id: second.id, change: "removed" }], nextCursor: expect.any(String) });
     const two = await page.inspect({ cursor: one.nextCursor, limit: 1 }) as any;
-    expect(two).toMatchObject({ mode: "delta", items: [{ id: "1.anode-2", change: "added", after: second.id }] });
-    expect(two.nextCursor).toBeUndefined();
+    expect(two).toMatchObject({ mode: "delta", items: [{ name: "Second updated", change: "added", after: first.id }] });
+    expect(two.items[0].id).not.toBe(second.id);
+    const three = await page.inspect({ cursor: two.nextCursor, limit: 1 }) as any;
+    expect(three).toMatchObject({ mode: "delta", items: [{ name: "Third", change: "added", after: two.items[0].id }] });
+    expect(three.nextCursor).toBeUndefined();
     await runtime.abortSessions();
   });
 
@@ -2529,13 +2533,14 @@ describe("AutomationRuntime", () => {
     const buttons = baseline.items.filter((item: any) => item.role === "button" && item.name === "Same");
     expect(buttons).toHaveLength(2);
     expect(buttons[0].id).not.toBe(buttons[1].id);
-    expect(buttons[0].ref).toBe(buttons[1].ref);
+    expect(buttons[0].id).not.toBe(buttons[1].id);
+    expect((runtime as any).sessions.get(3).refs.get(buttons[0].id)).toBe((runtime as any).sessions.get(3).refs.get(buttons[1].id));
     includeSecond = false;
     const delta = await page.inspect({ fields: ["text", "state", "ref"], since: baseline.observationId }) as any;
     expect(delta.items.filter((item: any) => item.change === "removed"))
       .toEqual([expect.objectContaining({ id: buttons[1].id })]);
     expect(delta.items.filter((item: any) => item.change !== "removed").every((item: any) =>
-      item.change === "updated" && item.id === buttons[0].id && item.ref === buttons[0].ref)).toBe(true);
+      item.change === "updated" && item.id === buttons[0].id && item.id === buttons[0].id)).toBe(true);
     await runtime.abortSessions();
   });
   it("reports truncation, slices and fields, and resets a delta against an incomplete baseline", async () => {
@@ -2561,7 +2566,7 @@ describe("AutomationRuntime", () => {
     expect(delta).toMatchObject({ mode: "delta", items: [] });
     await expect(page.inspect({ since: first.observationId, fields: ["text", "state", "ref"] })).rejects.toMatchObject({ code: "stale-observation" });
     const explicit = await page.inspect({ fields: ["text", "state", "ref", "actions"] }) as any;
-    expect(explicit.items.find((item: any) => item.role === "button" && item.name === "Save")).toMatchObject({ ref: expect.any(String) });
+    expect(explicit.items.find((item: any) => item.role === "button" && item.name === "Save")).toMatchObject({ id: expect.any(String), actionable: true });
     expect(inspectText(explicit)).toContain("[actions=click,double_click,hover]");
     await runtime.abortSessions();
   });
@@ -2585,7 +2590,7 @@ describe("AutomationRuntime", () => {
       expect(next.truncation.used).toBeLessThanOrEqual(240);
       for (const item of next.items ?? []) if (item.fragment?.index === 1) {
         rebuilt += item.name ?? "";
-        ownedRef = item.ref;
+        ownedRef = item.id;
       }
       cursor = next.nextCursor;
       expect(++count).toBeLessThan(200);
@@ -2597,8 +2602,8 @@ describe("AutomationRuntime", () => {
     expect(ownedRef).toMatch(/^t3s[a-f0-9]+d0e1$/);
     expect(calls.filter(({ method }) => method === "Accessibility.getFullAXTree")).toHaveLength(1);
     const delta = await page.inspect({ fields: ["text", "state", "ref"], since: first.observationId as string }) as any;
-    expect(delta).toMatchObject({ mode: "delta", items: expect.arrayContaining([expect.objectContaining({ change: "updated", name: "Changed after the initial snapshot" })]) });
-    expect(delta.items.every((item: any) => item.change === "updated" || item.change === "removed")).toBe(true);
+    expect(delta).toMatchObject({ mode: "delta", items: expect.arrayContaining([expect.objectContaining({ change: "added", name: "Changed after the initial snapshot" })]) });
+    expect(delta.items.every((item: any) => item.change === "added" || item.change === "removed")).toBe(true);
     await runtime.abortSessions();
   });
 
@@ -2702,7 +2707,7 @@ describe("AutomationRuntime", () => {
     metadata[0]!.name = "Continue"; metadata[0]!.text = "Continue";
     const delta = await page.inspect(options) as any;
     expect(delta).toMatchObject({ mode: "delta", baseObservationId: first.observationId,
-      items: [expect.objectContaining({ change: "updated", name: "Continue" })] });
+      items: [expect.objectContaining({ change: "removed" }), expect.objectContaining({ change: "added", name: "Continue" })] });
     runtime.resetSnapshotBaselines();
     expect(delta[SNAPSHOT_DELIVERY_COMMIT].begin()).toBe(false);
     await expect(page.inspect({ ...options, since: first.observationId })).rejects.toMatchObject({ code: "stale-observation" });
@@ -2782,8 +2787,8 @@ describe("AutomationRuntime", () => {
   });
 
   it("continues a frozen observation across layout changes while refusing stale action-reference pages", async () => {
-    const metadata = [{ role: "button", name: "Historical", text: "Historical", tag: "button" },
-      { role: "button", name: "Other", text: "Other", tag: "button" }];
+    const metadata = [{ role: "paragraph", name: "Historical", text: "Historical", tag: "p", focusable: false },
+      { role: "paragraph", name: "Other", text: "Other", tag: "p", focusable: false }];
     const { runtime, command } = harness(metadata), original = command.getMockImplementation()!;
     let moved = false;
     command.mockImplementation(async (source, method, params) => {
@@ -2795,6 +2800,7 @@ describe("AutomationRuntime", () => {
     const page = await runtime.createPage(3);
     try {
       const historical = await page.inspect({ limit: 1 }) as any;
+      for (const item of metadata) { item.role = "button"; item.tag = "button"; item.focusable = true; }
       const referenced = await page.inspect({ fields: ["text", "state", "ref"], limit: 1 }) as any;
       const captures = () => command.mock.calls.filter(([, method]) => method === "DOMSnapshot.captureSnapshot").length;
       const before = captures();
@@ -2807,7 +2813,7 @@ describe("AutomationRuntime", () => {
       await expect(page.inspect({ cursor: referenced.nextCursor })).rejects.toMatchObject({ code: "stale-observation", detail: { reason: "snapshot-geometry-changed" } });
       const delta = await page.inspect({ since: historical.observationId }) as any;
       expect(delta.mode).toBe("delta");
-      expect(delta.items.some((item: any) => item.change === "updated" && item.name === "Updated")).toBe(true);
+      expect(delta.items.some((item: any) => item.change === "added" && item.name === "Updated")).toBe(true);
     } finally { await runtime.abortSessions(); }
   });
 
@@ -2870,7 +2876,7 @@ describe("AutomationRuntime", () => {
     const session = fillReferencePool(runtime, 32_769);
     const second = await page.inspect({ cursor: first.nextCursor, limit: 1 }) as any;
     expect(session.refUsage.size).toBeGreaterThan(32_768);
-    const retainedRef = second.items[0].ref;
+    const retainedRef = second.items[0].id;
     expect(retainedRef).toEqual(expect.any(String));
     await page.inspect({ fields: ["text", "state", "ref"] });
     expect(session.refUsage.size).toBeLessThanOrEqual(24_578);
@@ -2885,12 +2891,12 @@ describe("AutomationRuntime", () => {
     const page = await runtime.createPage(3);
     const first = await page.inspect({ fields: ["text", "state", "ref"], limit: 1 }) as any;
     const session = fillReferencePool(runtime, 32_769);
-    const oldRef = first.items.find((item: any) => item.ref)?.ref ?? (await page.inspect({ cursor: first.nextCursor, limit: 1 }) as any).items[0].ref;
+    const oldRef = first.items.find((item: any) => item.actionable)?.id ?? (await page.inspect({ cursor: first.nextCursor, limit: 1 }) as any).items[0].id;
     const captured = await page.inspect({ fields: ["text", "state", "ref"], recentRefs: [oldRef], limit: 1 }) as any;
     expect(session.refUsage.size).toBeLessThanOrEqual(24_578);
     await expect(page.ref(oldRef).count()).resolves.toBe(1);
     const next = await page.inspect({ cursor: captured.nextCursor, limit: 1 }) as any;
-    await expect(page.ref(next.items[0].ref).count()).resolves.toBe(1);
+    await expect(page.ref(next.items[0].id).count()).resolves.toBe(1);
     await runtime.abortSessions();
   });
 
@@ -2898,7 +2904,7 @@ describe("AutomationRuntime", () => {
     const { runtime, command } = harness();
     const page = await runtime.createPage(3);
     const initial = await page.inspect({ fields: ["text", "state", "ref"] }) as any;
-    const ref = initial.items.find((item: any) => item.ref).ref;
+    const ref = initial.items.find((item: any) => item.actionable).id;
     const original = command.getMockImplementation()!;
     let release!: () => void, started!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });
@@ -2926,10 +2932,10 @@ describe("AutomationRuntime", () => {
     const first = await page.inspect({ fields: ["text", "state", "ref"], limit: 1 }) as any;
     const second = await page.inspect({ cursor: first.nextCursor, limit: 1 }) as any;
     expect(second.items[0]).toMatchObject({ role: "button", name: "Item 0" });
-    await expect(page.ref(second.items[0].ref).count()).resolves.toBe(1);
+    await expect(page.ref(second.items[0].id).count()).resolves.toBe(1);
     const third = await page.inspect({ cursor: second.nextCursor, limit: 1 }) as any;
     expect(third.items[0]).toMatchObject({ role: "button", name: "Item 1" });
-    await expect(page.ref(third.items[0].ref).count()).resolves.toBe(1);
+    await expect(page.ref(third.items[0].id).count()).resolves.toBe(1);
     await runtime.abortSessions();
   });
 
@@ -2938,12 +2944,12 @@ describe("AutomationRuntime", () => {
     const { runtime } = harness(metadata); const page = await runtime.createPage(3);
     const full = await page.inspect({ fields: ["text", "state", "ref"] }) as any;
     expect(inspectText(full)).toContain("[ref=e999] [checked=true] [actions=click]");
-    expect(full.items.find((item: any) => item.ref)?.ref).toMatch(/^t3s[a-f0-9]+d0e1$/);
+    expect(full.items.find((item: any) => item.actionable)?.id).toMatch(/^t3s[a-f0-9]+d0e1$/);
     const textOnly = await page.inspect({ fields: ["text"] }) as any;
     expect(inspectText(textOnly)).toContain("[ref=e999] [checked=true] [actions=click]");
     expect(textOnly.items.every((item: any) => item.ref === undefined)).toBe(true);
     const refOnly = await page.inspect({ fields: ["ref"] }) as any;
-    expect(refOnly.items.find((item: any) => item.ref)?.ref).toMatch(/^t3s[a-f0-9]+d0e1$/);
+    expect(refOnly.items.find((item: any) => item.actionable)?.id).toMatch(/^t3s[a-f0-9]+d0e1$/);
     expect(inspectText(refOnly)).not.toContain("Fake");
     await runtime.abortSessions();
   });
@@ -3073,9 +3079,9 @@ describe("AutomationRuntime", () => {
     expect(second.snapshot).toBe(first.snapshot);
     const firstInspection = await page.inspect({ fields: ["text", "state", "ref"] }) as any;
     const secondInspection = await page.inspect({ fields: ["text", "state", "ref"] }) as any;
-    const ref = firstInspection.items.find((item: any) => item.ref)?.ref;
+    const ref = firstInspection.items.find((item: any) => item.actionable)?.id;
     expect(ref).toMatch(/^t3s[a-f0-9]+d0e1$/);
-    expect(secondInspection.items.find((item: any) => item.ref)?.ref).toBe(ref);
+    expect(secondInspection.items.find((item: any) => item.actionable)?.id).toBe(ref);
     await expect(page.ref(ref).count()).resolves.toBe(1);
     expect(calls.filter(({ method }) => method === "Page.enable")).toHaveLength(1);
     expect(calls.filter(({ method }) => method === "Target.setAutoAttach")).toHaveLength(1);

@@ -44,7 +44,7 @@ test("snapshot follows rendered text visibility and updates when the text is rev
     responses.push(
       commandResponse("inspect_page", { full: true, budget: 12000 }, "text-before"),
       (request) => { baseline = lastTool(request); return commandResponse("inspect_page", { full: true, region: { by: "css", value: "#transparent-label-button" }, budget: 12000 }, "text-transparent-label"); },
-      () => commandResponse("click", { target: { ref: button(baseline.items, "Reveal painted text")?.ref } }, "text-reveal"),
+      () => commandResponse("click", { target: { id: button(baseline.items, "Reveal painted text")?.id } }, "text-reveal"),
       () => commandResponse("inspect_page", { since: baseline.observationId, budget: 12000 }, "text-delta"),
       textResponse("TEXT_PAINT_OK"), textResponse("文字检查"),
     );
@@ -58,16 +58,16 @@ test("snapshot follows rendered text visibility and updates when the text is rev
     const before = output("text-before"), changed = output("text-reveal"), delta = output("text-delta");
     expect(before?.mode).toBe("full");
     expect(delta).toMatchObject({ mode: "delta", baseObservationId: before.observationId });
-    expect(button(before.items, "Visible text")?.ref).toBeTruthy();
-    expect(button(before.items, "Visible size")?.ref).toBeTruthy();
+    expect(button(before.items, "Visible text")?.id).toBeTruthy();
+    expect(button(before.items, "Visible size")?.id).toBeTruthy();
     for (const hidden of ["hidden transparent child", "hidden zero-size child", "Standalone transparent text", "Standalone zero-size text", "hidden explicit child"]) {
       expect(JSON.stringify(before.items)).not.toContain(hidden);
     }
     expect(JSON.stringify(before.items)).not.toContain("Accessible hidden label");
     expect(JSON.stringify(before.items)).not.toContain("Explicit label");
-    expect(button(before.items, "Visible button")?.ref).toBeTruthy();
+    expect(button(before.items, "Visible button")?.id).toBeTruthy();
     const transparentLabel = output("text-transparent-label");
-    expect(transparentLabel?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && typeof item.ref === "string")).toBe(true);
+    expect(transparentLabel?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && typeof item.id === "string")).toBe(true);
     expect(JSON.stringify(transparentLabel.items)).not.toContain("Accessible hidden label");
     for (const visible of ["MIXED CASE SAMPLE", "Translucent text", "Shadow painted text", "Stroke painted text", "Gradient painted text"]) {
       expect(JSON.stringify(before.items)).toContain(visible);
@@ -290,7 +290,7 @@ test("filters transparent generated text but keeps painted pseudo-elements and u
     expect(initial.equals(afterHidden)).toBe(false);
     let baseline: any;
     responses.push(commandResponse("inspect_page", { full: true, budget: 12000 }, "generated-before"),
-      (request) => { baseline = lastTool(request); return commandResponse("click", { target: { ref: button(baseline.items, "Reveal generated text")?.ref } }, "generated-reveal"); },
+      (request) => { baseline = lastTool(request); return commandResponse("click", { target: { id: button(baseline.items, "Reveal generated text")?.id } }, "generated-reveal"); },
       () => commandResponse("inspect_page", { since: baseline.observationId, budget: 12000 }, "generated-delta"),
       textResponse("GENERATED_TEXT_OK"), textResponse("生成文字检查"));
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
@@ -303,7 +303,7 @@ test("filters transparent generated text but keeps painted pseudo-elements and u
     const before = output("generated-before"), changed = output("generated-reveal"), delta = output("generated-delta");
     expect(delta).toMatchObject({ mode: "delta", baseObservationId: before.observationId });
     expect(before?.mode).toBe("full");
-    expect(button(before.items, "Button body Visible button after")?.ref).toBeTruthy();
+    expect(button(before.items, "Button body Visible button after")?.id).toBeTruthy();
     for (const visible of ["Standalone body", "Visible standalone after"]) expect(JSON.stringify(before.items)).toContain(visible);
     for (const hidden of ["Hidden button before", "Hidden standalone before"]) expect(JSON.stringify(before.items)).not.toContain(hidden);
     expect(changed).toMatchObject({ ok: true });

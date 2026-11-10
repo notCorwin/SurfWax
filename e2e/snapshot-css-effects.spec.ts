@@ -55,7 +55,7 @@ test("filters transparent effects and empty clip shapes while retaining visible 
     responses.push(commandResponse("inspect_page", { full: true, budget: 12000 }, "effects-before"),
       (request) => { baseline = lastTool(request); return commandResponse("inspect_page", { full: true, region: { by: "css", value: "#filter-label-button" }, budget: 12000 }, "effects-hidden-label"); },
       () => commandResponse("inspect_page", { full: true, region: { by: "css", value: "#circle-partial" }, budget: 12000 }, "effects-partial-circle"),
-      () => commandResponse("click", { target: { ref: button(baseline.items, "Reveal effects")?.ref } }, "effects-reveal"),
+      () => commandResponse("click", { target: { id: button(baseline.items, "Reveal effects")?.id } }, "effects-reveal"),
       () => commandResponse("inspect_page", { since: baseline.observationId, budget: 12000 }, "effects-delta"),
       textResponse("EFFECTS_OK"), textResponse("效果测试"));
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
@@ -69,20 +69,20 @@ test("filters transparent effects and empty clip shapes while retaining visible 
     expect(delta).toMatchObject({ mode: "delta", baseObservationId: before.observationId });
     const hidden = ["Filter hidden", "Filter fixed hidden", "Final filter hidden", "Circle hidden", "Ellipse hidden", "Polygon hidden"];
     for (const name of hidden) expect(JSON.stringify(before.items)).not.toContain(name);
-    for (const name of ["SVG filter visible", "Translucent visible", "Backdrop visible", "Visible text"]) expect(button(before.items, name)?.ref, name).toBeTruthy();
-    const partial = output("effects-partial-circle")?.items?.find((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && item.ref);
-    expect(partial?.ref).toEqual(expect.any(String));
+    for (const name of ["SVG filter visible", "Translucent visible", "Backdrop visible", "Visible text"]) expect(button(before.items, name)?.id, name).toBeTruthy();
+    const partial = output("effects-partial-circle")?.items?.find((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && item.id);
+    expect(partial?.id).toEqual(expect.any(String));
     const name = /\bbutton\s+("(?:\\.|[^"\\])*")/.exec(itemLine(partial))?.[1];
     if (name) expect(circleRuns.some((run) => run.includes(JSON.parse(name)))).toBe(true);
     else expect(itemLine(partial)).toContain("[name=unknown]");
     expect(JSON.stringify(before.items)).not.toContain("Hidden effect text");
     expect(JSON.stringify(before.items)).not.toContain("Filter accessible name");
     const anonymous = output("effects-hidden-label");
-    expect(anonymous?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && typeof item.ref === "string")).toBe(true);
+    expect(anonymous?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && typeof item.id === "string")).toBe(true);
     expect(JSON.stringify(anonymous.items)).not.toContain("Filter accessible name");
     expect(changed).toMatchObject({ ok: true });
     for (const name of hidden) {
-      expect(button(deliveredSemanticState(events, changed.pageSnapshot), name)?.ref).toBeTruthy();
+      expect(button(deliveredSemanticState(events, changed.pageSnapshot), name)?.id).toBeTruthy();
       expect(button(delta.items, name)?.change).toBe("added");
     }
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }

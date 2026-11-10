@@ -43,13 +43,13 @@ test("discovers visible ARIA controls omitted by AX regardless of tab stop and p
         if ((event as KeyboardEvent).key === " ") (event.currentTarget as Element).setAttribute("aria-checked", "false");
       });
     });
-    responses.push(commandResponse("inspect_page", { fields: ["text", "state", "ref", "actions"], budget: 12000 }, "aria-full"), (request) => {
+    responses.push(commandResponse("inspect_page", { fields: ["text", "state", "actions"], budget: 12000 }, "aria-full"), (request) => {
       full = lastTool(request);
       return commandResponse("inspect_page", { budget: 12000, region: { by: "css", value: "#inside" } }, "aria-region");
     }, (request) => {
       scoped = lastTool(request);
-      const ref = scoped.items?.find((item: any) => itemLine(item).includes('- switch "Visible on"'))?.ref;
-      return ref ? commandResponse("press_key", { target: { ref }, key: "Space" }, "aria-press") : textResponse("ARIA_DOM_DONE");
+      const ref = scoped.items?.find((item: any) => itemLine(item).includes('- switch "Visible on"'))?.id;
+      return ref ? commandResponse("press_key", { target: { id: ref }, key: "Space" }, "aria-press") : textResponse("ARIA_DOM_DONE");
     }, (request) => { pressed = lastTool(request); return textResponse("ARIA_DOM_DONE"); }, textResponse("Inspect the page"));
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     await target.bringToFront();
@@ -59,7 +59,7 @@ test("discovers visible ARIA controls omitted by AX regardless of tab stop and p
     expect(full).toMatchObject({ mode: "full", truncation: { baselineComplete: true } });
     for (const name of ["Visible on", "Programmatic checkbox", "Visible details", "Outside switch"]) {
       const item = full.items.find((entry: any) => itemLine(entry).includes(`"${name}"`));
-      expect(item?.ref, JSON.stringify(full.items)).toEqual(expect.any(String));
+      expect(item?.id, JSON.stringify(full.items)).toEqual(expect.any(String));
     }
     expect(full.items.some((item: any) => itemLine(item).includes('- switch "Visible on"'))).toBe(true);
     expect(full.items.some((item: any) => itemLine(item).includes('- checkbox "Programmatic checkbox"') && itemLine(item).includes("checked=mixed"))).toBe(true);
@@ -68,32 +68,32 @@ test("discovers visible ARIA controls omitted by AX regardless of tab stop and p
     expect(itemLine(keyboard)).toContain("[actions=press_key]");
     expect(full.items.some((item: any) => itemLine(item).includes('- button "Visible details"') && itemLine(item).includes("expanded=true"))).toBe(true);
     const native = full.items.find((item: any) => itemLine(item).includes("- checkbox") && itemLine(item).includes("[name=unknown]") && itemLine(item).includes("checked=mixed"));
-    expect(native?.ref).toEqual(expect.any(String));
+    expect(native?.id).toEqual(expect.any(String));
     expect(JSON.stringify(full.items)).toContain("Visible on");
     expect(JSON.stringify(full.items)).toContain("Visible details");
-    expect(full.items.find((item: any) => itemLine(item).includes('- checkbox "Visible checkbox caption"'))?.ref).toEqual(expect.any(String));
+    expect(full.items.find((item: any) => itemLine(item).includes('- checkbox "Visible checkbox caption"'))?.id).toEqual(expect.any(String));
     const partial = full.items.find((item: any) => itemLine(item).includes('- switch "Visible partial caption"'));
-    expect(partial?.ref).toEqual(expect.any(String));
+    expect(partial?.id).toEqual(expect.any(String));
     expect(JSON.stringify(full.items)).not.toContain("HIDDEN_LABEL_SECRET");
     expect(JSON.stringify(full.items)).toContain("Visible checkbox caption");
     expect(JSON.stringify(full.items)).toContain("Visible partial caption");
     const priority = full.items.find((item: any) => itemLine(item).includes('- switch "Priority caption"') && itemLine(item).includes("checked=false"));
     expect(itemLine(priority)).not.toContain("Wrong lower priority");
-    expect(priority?.ref).toEqual(expect.any(String));
+    expect(priority?.id).toEqual(expect.any(String));
     const programmatic = full.items.find((item: any) => itemLine(item).includes('- switch "Programmatic caption"') && itemLine(item).includes("checked=false"));
-    expect(programmatic?.ref).toEqual(expect.any(String));
+    expect(programmatic?.id).toEqual(expect.any(String));
     for (const name of ["Invalid caption", "Empty caption", "Self caption", "Duplicate caption"]) {
-      expect(full.items.find((item: any) => itemLine(item).includes(`- checkbox "${name}"`))?.ref, name).toEqual(expect.any(String));
+      expect(full.items.find((item: any) => itemLine(item).includes(`- checkbox "${name}"`))?.id, name).toEqual(expect.any(String));
     }
     expect(JSON.stringify(full.items)).toContain("FIRST_DUPLICATE");
     expect(JSON.stringify(full.items)).toContain("SECOND_DUPLICATE");
     for (const name of ["open shadow label", "closed shadow label"]) expect(JSON.stringify(full.items)).toContain(name);
     const shadows = full.items.filter((item: any) => itemLine(item).includes('- checkbox "Shadow visible caption"'));
     expect(shadows).toHaveLength(2);
-    expect(shadows.every((item: any) => typeof item.ref === "string")).toBe(true);
-    expect(new Set(shadows.map((item: any) => item.ref)).size).toBe(2);
+    expect(shadows.every((item: any) => typeof item.id === "string")).toBe(true);
+    expect(new Set(shadows.map((item: any) => item.id)).size).toBe(2);
     const hidden = full.items.find((item: any) => itemLine(item).includes('- checkbox "Hidden label caption"'));
-    expect(hidden?.ref).toEqual(expect.any(String));
+    expect(hidden?.id).toEqual(expect.any(String));
     for (const label of ["Keyboard switch", "Expanded button", "Native mixed", "Invalid fallback", "Empty fallback", "Wrong lower priority"])
       expect(JSON.stringify(full.items)).not.toContain(label);
     expect(JSON.stringify(full.items)).not.toContain("Hidden switch");
@@ -101,7 +101,7 @@ test("discovers visible ARIA controls omitted by AX regardless of tab stop and p
     expect(JSON.stringify(scoped.items)).toContain("Visible on");
     expect(JSON.stringify(scoped.items)).not.toContain("Outside switch");
     expect(JSON.stringify(scoped.items)).not.toContain("External accessible label");
-    expect(scoped.items.find((item: any) => itemLine(item).includes('- checkbox "Visible checkbox caption"'))?.ref).toEqual(expect.any(String));
+    expect(scoped.items.find((item: any) => itemLine(item).includes('- checkbox "Visible checkbox caption"'))?.id).toEqual(expect.any(String));
     expect(JSON.stringify(scoped.items)).not.toContain("HIDDEN_LABEL_SECRET");
     expect(pressed).toMatchObject({ ok: true });
     expect(JSON.stringify(pressed.pageSnapshot)).toContain("checked=false");
@@ -129,7 +129,7 @@ test("keeps a visible control actionable when its private labelledby identity re
     responses.push(commandResponse("inspect_page", { budget: 12000 }, "repeat-label"), (request) => {
       snapshot = lastTool(request);
       const checkbox = snapshot.items?.find((item: any) => itemLine(item).includes('- checkbox "Visible content"'));
-      return commandResponse("press_key", { target: { ref: checkbox?.ref }, key: "Space" }, "repeat-label-press");
+      return commandResponse("press_key", { target: { id: checkbox?.id }, key: "Space" }, "repeat-label-press");
     }, (request) => {
       pressed = lastTool(request); return textResponse("REPEAT_LABEL_DONE");
     }, textResponse("Inspect the checkbox"));
@@ -140,7 +140,7 @@ test("keeps a visible control actionable when its private labelledby identity re
     await expect(opened.page.locator(".markdown-body").last()).toContainText("REPEAT_LABEL_DONE", { timeout: 45_000 });
     expect(snapshot).toMatchObject({ mode: "full", truncation: { baselineComplete: true } });
     const checkbox = snapshot.items.find((item: any) => itemLine(item).includes('- checkbox "Visible content"'));
-    expect(checkbox?.ref).toEqual(expect.any(String));
+    expect(checkbox?.id).toEqual(expect.any(String));
     expect(itemLine(checkbox)).toContain("checked=false");
     expect(JSON.stringify(snapshot.items)).toContain("Visible content");
     expect(JSON.stringify(snapshot.items)).not.toContain(expected);

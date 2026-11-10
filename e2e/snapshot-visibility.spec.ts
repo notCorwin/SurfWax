@@ -73,8 +73,8 @@ test("snapshots reflect rendered visibility and update when content is shown or 
       commandResponse("inspect_page", { full: true, budget: 12000, region: { by: "css", value: "#legacy-partial" } }, "visibility-legacy-partial"),
       commandResponse("inspect_page", { full: true, budget: 12000, region: { by: "css", value: "#modern-partial" } }, "visibility-modern-partial"),
       () => {
-        const aggregateRef = baseline.items.find((item: any) => itemLine(item).includes("Visible label"))?.ref;
-        return commandResponse("click", { target: { ref: aggregateRef } }, "visibility-change");
+        const aggregateRef = baseline.items.find((item: any) => itemLine(item).includes("Visible label"))?.id;
+        return commandResponse("click", { target: { id: aggregateRef } }, "visibility-change");
       },
       () => commandResponse("inspect_page", { budget: 12000 }, "visibility-delta"),
       commandResponse("inspect_page", { full: true, budget: 12000 }, "visibility-after"),
@@ -95,7 +95,7 @@ test("snapshots reflect rendered visibility and update when content is shown or 
     expect(output("visibility-delta")).toMatchObject({ mode: "delta", baseObservationId: delta.observationId });
     const after = output("visibility-after");
     expect(before?.mode).toBe("full");
-    expect(button(before.items, "Visible action")?.ref).toBeTruthy();
+    expect(button(before.items, "Visible action")?.id).toBeTruthy();
     expect(button(before.items, "Transparent action")).toBeUndefined();
     expect(JSON.stringify(before.items)).not.toContain("Hidden input value");
     expect(button(before.items, "Clipped action")).toBeUndefined();
@@ -104,35 +104,35 @@ test("snapshots reflect rendered visibility and update when content is shown or 
       expect(JSON.stringify(before.items)).not.toContain(text);
     }
     for (const [id, prefix] of [["visibility-legacy-partial", "Legacy"], ["visibility-modern-partial", "Modern"]]) {
-      const page = output(id), row = page?.items?.find((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && item.ref);
-      expect(row?.ref).toEqual(expect.any(String));
+      const page = output(id), row = page?.items?.find((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && item.id);
+      expect(row?.id).toEqual(expect.any(String));
       expect(itemLine(row).includes(prefix) || itemLine(row).includes("[name=unknown]")).toBe(true);
       expect(itemLine(row)).not.toContain("partially clipped action");
     }
     for (const [id, hidden] of [["visibility-clipped-name", "Clipped accessible name"], ["visibility-hidden-name", "Accessible name"], ["visibility-explicit-name", "Explicit label"]]) {
       const page = output(id);
-      expect(page?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && typeof item.ref === "string")).toBe(true);
+      expect(page?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && typeof item.id === "string")).toBe(true);
       expect(JSON.stringify(page.items)).not.toContain(hidden);
     }
     expect(JSON.stringify(before.items)).not.toContain("Clipped accessible name");
-    expect(button(before.items, "Escaped absolute action")?.ref).toBeTruthy();
-    expect(button(before.items, "Escaped fixed action")?.ref).toBeTruthy();
+    expect(button(before.items, "Escaped absolute action")?.id).toBeTruthy();
+    expect(button(before.items, "Escaped fixed action")?.id).toBeTruthy();
     expect(button(before.items, "Scrollable action")).toBeUndefined();
-    expect(button(before.items, "Contents action")?.ref).toBeTruthy();
+    expect(button(before.items, "Contents action")?.id).toBeTruthy();
     expect(button(before.items, "Shadow hidden action")).toBeUndefined();
     expect(JSON.stringify(before.items)).not.toContain("Accessible name");
-    expect(button(before.items, "Visible label")?.ref).toBeTruthy();
+    expect(button(before.items, "Visible label")?.id).toBeTruthy();
     expect(JSON.stringify(before.items)).not.toContain("Hidden label");
-    expect(button(before.items, "Start Original text end")?.ref).toBeTruthy();
+    expect(button(before.items, "Start Original text end")?.id).toBeTruthy();
     expect(JSON.stringify(before.items)).not.toContain("Known alias");
     expect(JSON.stringify(before.items)).not.toContain("Nested hidden secret");
     expect(JSON.stringify(before.items)).not.toContain("Explicit label");
     expect(changed).toMatchObject({ ok: true });
     expect(await target.locator("body").getAttribute("data-aggregated")).toBe("yes");
     expect(button(changed.pageSnapshot.items, "Visible action")).toBeUndefined();
-    expect(button(changed.pageSnapshot.items, "Transparent action")?.ref).toBeTruthy();
+    expect(button(changed.pageSnapshot.items, "Transparent action")?.id).toBeTruthy();
     for (const name of ["Legacy clipped action", "Modern clipped action", "Legacy fixed clipped action", "Modern fixed clipped action"]) {
-      expect(button(changed.pageSnapshot.items, name)?.ref).toBeTruthy();
+      expect(button(changed.pageSnapshot.items, name)?.id).toBeTruthy();
       expect(button(delta.items, name)?.change).toBe("added");
     }
     for (const text of ["Legacy clipped standalone text", "Modern clipped standalone text"]) {
@@ -145,7 +145,7 @@ test("snapshots reflect rendered visibility and update when content is shown or 
     expect(delta.items.find((item: any) => item.id === previouslyVisible.id)).toMatchObject({ id: previouslyVisible.id, line: "", change: "removed" });
     expect(button(delta.items, "Transparent action")?.change).toBe("added");
     expect(button(after.items, "Visible action")).toBeUndefined();
-    expect(button(after.items, "Transparent action")?.ref).toBeTruthy();
+    expect(button(after.items, "Transparent action")?.id).toBeTruthy();
     expect(button(after.items, "Scrollable action")).toBeUndefined();
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);
@@ -197,10 +197,10 @@ test("omits hidden same-origin and cross-origin frames and includes them after t
     expect(button(output("frame-hidden").items, "Nested frame action")).toBeUndefined();
     expect(JSON.stringify(output("frame-hidden").items)).not.toContain("same origin");
     expect(output("frame-show")).toMatchObject({ ok: true });
-    expect(button(output("frame-show").pageSnapshot.items, "Frame action")?.ref).toBeTruthy();
-    expect(button(output("frame-show").pageSnapshot.items, "Nested frame action")?.ref).toBeTruthy();
-    expect(button(output("frame-visible").items, "Frame action")?.ref).toBeTruthy();
-    expect(button(output("frame-visible").items, "Nested frame action")?.ref).toBeTruthy();
+    expect(button(output("frame-show").pageSnapshot.items, "Frame action")?.id).toBeTruthy();
+    expect(button(output("frame-show").pageSnapshot.items, "Nested frame action")?.id).toBeTruthy();
+    expect(button(output("frame-visible").items, "Frame action")?.id).toBeTruthy();
+    expect(button(output("frame-visible").items, "Nested frame action")?.id).toBeTruthy();
     expect(JSON.stringify(output("frame-visible").items)).toContain("same origin");
   } finally {
     await dispose(opened.context, opened.userDataDirectory, provider.server);

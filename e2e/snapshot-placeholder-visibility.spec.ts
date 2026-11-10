@@ -7,7 +7,7 @@ function lastTool(request: any): any {
   return JSON.parse(Array.isArray(content) ? content.find((part: any) => part.type === "text").text : content);
 }
 
-type Item = { role?: string; name?: string; placeholder?: string | "unknown"; ref?: string };
+type Item = { role?: string; name?: string; placeholder?: string | "unknown"; id?: string; actionable?: true };
 
 test("reports only proven visible placeholders and keeps normal controls actionable", async () => {
   test.setTimeout(90_000);
@@ -40,9 +40,9 @@ test("reports only proven visible placeholders and keeps normal controls actiona
         inspectElapsedMs = performance.now() - inspectStartedAt;
         snapshot = lastTool(request);
         const normal: Item | undefined = snapshot.items?.find((item: Item) => itemLine(item).includes("NORMAL_VISIBLE_HINT") && itemLine(item).includes("textbox"));
-        if (!normal?.ref) return textResponse("PLACEHOLDER_VISIBILITY_DONE");
+        if (!normal?.id) return textResponse("PLACEHOLDER_VISIBILITY_DONE");
         responses.unshift((next) => { filled = lastTool(next); return textResponse("PLACEHOLDER_VISIBILITY_DONE"); });
-        return commandResponse("fill", { target: { ref: normal.ref }, value: "FILLED_FROM_REF" }, "placeholder-fill");
+        return commandResponse("fill", { target: { id: normal.id }, value: "FILLED_FROM_REF" }, "placeholder-fill");
       },
       textResponse("Inspect placeholders"),
     );
@@ -64,7 +64,7 @@ test("reports only proven visible placeholders and keeps normal controls actiona
     expect(itemLine(labeled)).toContain("VISIBLE_ADDRESS_HINT");
     const clipped = items.find((item) => itemLine(item).includes('textbox "Clipped control"'));
     expect(itemLine(clipped)).toContain("[placeholder=unknown]");
-    expect(items.find((item) => itemLine(item).includes("NORMAL_VISIBLE_HINT") && itemLine(item).includes("textbox"))?.ref).toEqual(expect.any(String));
+    expect(items.find((item) => itemLine(item).includes("NORMAL_VISIBLE_HINT") && itemLine(item).includes("textbox"))?.id).toEqual(expect.any(String));
     expect(filled).toMatchObject({ ok: true });
     expect(await target.locator("#normal").inputValue()).toBe("FILLED_FROM_REF");
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
@@ -124,14 +124,14 @@ test("updates the snapshot when a placeholder becomes transparent and visible ag
       (request) => {
         before = lastTool(request);
         const button: Item | undefined = before.items?.find((item: Item) => itemLine(item).includes('- button "Toggle hint"'));
-        if (!button?.ref) return textResponse("PLACEHOLDER_TOGGLE_DONE");
+        if (!button?.id) return textResponse("PLACEHOLDER_TOGGLE_DONE");
         responses.unshift(
           (next) => { hideClick = lastTool(next); return commandResponse("inspect_page", { budget: 12000 }, "placeholder-hidden"); },
-          (next) => { hidden = lastTool(next); return commandResponse("click", { target: { ref: button.ref } }, "placeholder-show"); },
+          (next) => { hidden = lastTool(next); return commandResponse("click", { target: { id: button.id } }, "placeholder-show"); },
           (next) => { showClick = lastTool(next); return commandResponse("inspect_page", { budget: 12000 }, "placeholder-shown"); },
           (next) => { shown = lastTool(next); return textResponse("PLACEHOLDER_TOGGLE_DONE"); },
         );
-        return commandResponse("click", { target: { ref: button.ref } }, "placeholder-hide");
+        return commandResponse("click", { target: { id: button.id } }, "placeholder-hide");
       },
       textResponse("Inspect the changing placeholder"),
     );

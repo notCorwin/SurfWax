@@ -104,7 +104,7 @@ describe("incremental canonical context", () => {
     const assistant = (text: string, parts: object[]) => event("conversation.message", { parentId: "u", content: toLogValue({
       id: "a", role: "assistant", parts: [{ type: "text", text, state: "done" }, ...parts],
     }) });
-    const tool = (toolCallId: string) => ({ type: "dynamic-tool", toolCallId, toolName: "click", state: "input-available", input: { target: { ref: "e1" } } });
+    const tool = (toolCallId: string) => ({ type: "dynamic-tool", toolCallId, toolName: "click", state: "input-available", input: { target: { id: "e1" } } });
     const compare = async () => expect((await projection.read()).messages).toEqual((await activeContext(logger, "one")).messages);
     event("conversation.message", { content: toLogValue({ id: "u", role: "user", parts: [{ type: "text", text: "Goal" }] }) });
     event("conversation.submitted", { content: { messageId: "u" } });

@@ -12,6 +12,8 @@ export type SnapshotCoverageGap = {
 export type SampledSnapshotNode = {
   /** Document-bound transport identity. Never an action target. */
   key: number;
+  target?: true;
+  targetShadow?: true;
   parentKey?: number;
   role: string;
   text?: string;
@@ -34,6 +36,7 @@ export type NativeSnapshotProofs = {
     frameUnobscured: boolean, noAuthorShadowRoots: boolean, ...objects: Node[]) => unknown;
 };
 export type ReadableSnapshot = {
+  targetToken?: string;
   url: string;
   title: string;
   viewport: { x: number; y: number; width: number; height: number; scale: number };
@@ -44,7 +47,7 @@ export type ReadableSnapshot = {
 export { sampleReadableSnapshot } from "./snapshot-readable-source.js";
 
 /** Preserve semantic nodes from the same synchronous read, then share presentation. */
-export function readableSnapshot(value: ReadableSnapshot): SnapshotLine[] {
+export function readableSnapshot(value: ReadableSnapshot, elementId?: (key: number, token: string, shadow: boolean) => string): SnapshotLine[] {
   if (!value || !Array.isArray(value.rows) || !Array.isArray(value.gaps) || typeof value.url !== "string" || typeof value.title !== "string"
     || ![value.viewport?.x, value.viewport?.y, value.viewport?.width, value.viewport?.height, value.viewport?.scale].every(Number.isFinite)
     || value.viewport.width <= 0 || value.viewport.height <= 0 || value.viewport.scale <= 0) throw new Error("Invalid semantic observation");
@@ -71,7 +74,9 @@ export function readableSnapshot(value: ReadableSnapshot): SnapshotLine[] {
     || !Number.isSafeInteger(gap.count) || gap.count <= 0 || gap.bounds !== undefined && !box(gap.bounds)
     || gap.role !== undefined && typeof gap.role !== "string")) throw new Error("Invalid observation coverage");
   return compactSnapshot(value.rows.map((row) => {
+    const target = row.target && value.targetToken && elementId ? elementId(row.key, value.targetToken, row.targetShadow === true) : undefined;
     const node: SnapshotNode = { id: `sample:${row.key}`, role: row.role, depth: row.depth,
+      ...(target ? { ref: target, actions: ["click", "doubleClick", "hover"] } : {}),
       ...(row.text !== undefined ? { name: row.text, preserveTextWhitespace: true, textWhitespaceProven: true } : {}),
       ...(row.nameUnknown ? { nameUnknown: true } : {}), ...(row.bounds ? { bounds: row.bounds } : {}),
       ...(row.textFragments?.length ? { textFragments: row.textFragments } : {}), ...(row.state ? { state: row.state } : {}),

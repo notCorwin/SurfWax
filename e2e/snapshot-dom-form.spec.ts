@@ -38,17 +38,17 @@ test("preserves visible live native values and selected labels without exposing 
     responses.push(commandResponse("inspect_page", { budget: 16000 }, "form-inspect"), (request) => {
       try {
         initial = lastTool(request);
-        textareaRef = initial.items?.find((item: any) => itemLine(item).includes('textbox "Notes"') && itemLine(item).includes("LIVE_NOTES"))?.ref ?? "";
-        selectRef = initial.items?.find((item: any) => itemLine(item).includes('combobox "Color"') && itemLine(item).includes('selected="Blue label"'))?.ref ?? "";
-        anonymousRef = initial.items?.find((item: any) => /^\s*- textbox(?:\s|$)/.test(itemLine(item)) && itemLine(item).includes("masked=true") && !itemLine(item).includes('textbox "'))?.ref ?? "";
+        textareaRef = initial.items?.find((item: any) => itemLine(item).includes('textbox "Notes"') && itemLine(item).includes("LIVE_NOTES"))?.id ?? "";
+        selectRef = initial.items?.find((item: any) => itemLine(item).includes('combobox "Color"') && itemLine(item).includes('selected="Blue label"'))?.id ?? "";
+        anonymousRef = initial.items?.find((item: any) => /^\s*- textbox(?:\s|$)/.test(itemLine(item)) && itemLine(item).includes("masked=true") && !itemLine(item).includes('textbox "'))?.id ?? "";
         if (!textareaRef || !selectRef || !anonymousRef) return done();
-        return commandResponse("fill", { target: { ref: textareaRef }, value: "CHANGED_NOTES" }, "form-fill");
+        return commandResponse("fill", { target: { id: textareaRef }, value: "CHANGED_NOTES" }, "form-fill");
       } catch (error) { failure = error; return done(); }
     }, (request) => {
-      try { filled = lastTool(request); return commandResponse("select_option", { target: { ref: selectRef }, value: "Red label" }, "form-select"); }
+      try { filled = lastTool(request); return commandResponse("select_option", { target: { id: selectRef }, value: "Red label" }, "form-select"); }
       catch (error) { failure = error; return done(); }
     }, (request) => {
-      try { selected = lastTool(request); return commandResponse("fill", { target: { ref: anonymousRef }, value: "SECRET_ANONYMOUS_CHANGED" }, "form-anonymous-fill"); }
+      try { selected = lastTool(request); return commandResponse("fill", { target: { id: anonymousRef }, value: "SECRET_ANONYMOUS_CHANGED" }, "form-anonymous-fill"); }
       catch (error) { failure = error; return done(); }
     }, (request) => { try { anonymousFilled = lastTool(request); } catch (error) { failure = error; } return done(); }, textResponse("Inspect the form"));
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
@@ -65,7 +65,7 @@ test("preserves visible live native values and selected labels without exposing 
     const lines = (initial.items).map(itemLine);
     for (const [label, value] of [["Outer label", "OUTER_VALUE"], ["Inner one", "INNER_ONE"], ["Inner two", "INNER_TWO"]]) {
       const row = initial.items.find((item: any) => itemLine(item).includes(`textbox "${label}"`) && itemLine(item).includes(value));
-      expect.soft(row?.ref, JSON.stringify(lines)).toEqual(expect.any(String));
+      expect.soft(row?.id, JSON.stringify(lines)).toEqual(expect.any(String));
     }
     expect(lines.some((line: string) => line.includes('textbox "Password"') && line.includes("masked=true"))).toBe(true);
     expect(lines.some((line: string) => line.includes('textbox "Masked"') && line.includes("masked=true"))).toBe(true);

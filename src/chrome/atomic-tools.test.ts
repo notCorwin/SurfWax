@@ -79,9 +79,9 @@ describe("atomic browser tool programs", () => {
   it("passes the requested checked state to the shared browser operation", async () => {
     const check = vi.fn(async () => "checked");
     const uncheck = vi.fn(async () => "unchecked");
-    const page = { ref: () => ({ check, uncheck }) };
-    expect(await execute("check_element", { target: { ref: "e1" } }, { page })).toBe("checked");
-    expect(await execute("uncheck_element", { target: { ref: "e1" } }, { page })).toBe("unchecked");
+    const page = { elementById: () => ({ check, uncheck }) };
+    expect(await execute("check_element", { target: { id: "e1" } }, { page })).toBe("checked");
+    expect(await execute("uncheck_element", { target: { id: "e1" } }, { page })).toBe("unchecked");
     expect(check).toHaveBeenCalledOnce();
     expect(uncheck).toHaveBeenCalledOnce();
   });
@@ -89,36 +89,36 @@ describe("atomic browser tool programs", () => {
   it("allows focusing and blurring as independent background-capable actions", async () => {
     const focus = vi.fn(async () => "focused");
     const blur = vi.fn(async () => "blurred");
-    const page = { ref: () => ({ focus, blur }) };
+    const page = { elementById: () => ({ focus, blur }) };
     for (const [name, result] of [["focus_element", "focused"], ["blur_element", "blurred"]] as const) {
-      expect(await execute(name, { target: { ref: "e1" }, background: true }, { page })).toBe(result);
-      expect(definition(name).program({ target: { ref: "e1" }, background: true })).toMatchObject({ background: true });
+      expect(await execute(name, { target: { id: "e1" }, background: true }, { page })).toBe(result);
+      expect(definition(name).program({ target: { id: "e1" }, background: true })).toMatchObject({ background: true });
     }
     expect(focus).toHaveBeenCalledOnce();
     expect(blur).toHaveBeenCalledOnce();
   });
 
   it("validates input before creating a program and retains an explicit timeout", () => {
-    expect(() => definition("fill").program({ target: { ref: "e1" }, value: "x", extra: true })).toThrow();
+    expect(() => definition("fill").program({ target: { id: "e1" }, value: "x", extra: true })).toThrow();
     expect(() => definition("send_page_request").program({})).toThrow();
     expect(() => definition("send_extension_request").program({ url: "https://example.com", tabId: 2 })).toThrow();
     expect(() => definition("send_page_request").program({ url: "https://example.com", context: "extension" })).toThrow();
-    expect(definition("click").program({ target: { ref: "e1" }, timeoutMs: 500 }).timeoutMs).toBe(500);
+    expect(definition("click").program({ target: { id: "e1" }, timeoutMs: 500 }).timeoutMs).toBe(500);
     for (const name of ["click", "double_click"]) {
-      expect(definition(name).program({ target: { ref: "e1" } })).toMatchObject({ defaultTimeoutMs: 5_000 });
-      expect(definition(name).program({ target: { ref: "e1" }, timeoutMs: 60_000 })).toMatchObject({ timeoutMs: 60_000 });
-      expect(definition(name).program({ target: { ref: "e1" }, timeoutMs: 60_000 })).not.toHaveProperty("defaultTimeoutMs");
+      expect(definition(name).program({ target: { id: "e1" } })).toMatchObject({ defaultTimeoutMs: 5_000 });
+      expect(definition(name).program({ target: { id: "e1" }, timeoutMs: 60_000 })).toMatchObject({ timeoutMs: 60_000 });
+      expect(definition(name).program({ target: { id: "e1" }, timeoutMs: 60_000 })).not.toHaveProperty("defaultTimeoutMs");
     }
-    expect(definition("click").program({ target: { ref: "e1" }, background: true })).toMatchObject({ background: true });
-    expect(() => definition("read_text").program({ target: { ref: "e1" }, background: true })).toThrow();
-    expect(() => definition("verify_state").program({ target: { ref: "e1" } })).toThrow();
-    expect(() => definition("verify_state").program({ target: { ref: "e1" }, valueEquals: "x", state: "visible" })).toThrow();
-    expect(() => definition("verify_state").program({ target: { ref: "e1" }, textEquals: "", textIncludes: "" })).toThrow();
-    expect(() => definition("verify_state").program({ target: { ref: "e1" }, textEquals: "x", valueEquals: "x" })).toThrow();
-    expect(definition("verify_state").program({ target: { ref: "e1" }, state: "visible", timeoutMs: 500, background: true }))
+    expect(definition("click").program({ target: { id: "e1" }, background: true })).toMatchObject({ background: true });
+    expect(() => definition("read_text").program({ target: { id: "e1" }, background: true })).toThrow();
+    expect(() => definition("verify_state").program({ target: { id: "e1" } })).toThrow();
+    expect(() => definition("verify_state").program({ target: { id: "e1" }, valueEquals: "x", state: "visible" })).toThrow();
+    expect(() => definition("verify_state").program({ target: { id: "e1" }, textEquals: "", textIncludes: "" })).toThrow();
+    expect(() => definition("verify_state").program({ target: { id: "e1" }, textEquals: "x", valueEquals: "x" })).toThrow();
+    expect(definition("verify_state").program({ target: { id: "e1" }, state: "visible", timeoutMs: 500, background: true }))
       .toMatchObject({ background: true, timeoutMs: 10_500 });
-    expect(definition("verify_state").program({ target: { ref: "e1" }, state: "visible", timeoutMs: 0 })).not.toHaveProperty("timeoutMs");
-    expect(definition("verify_state").program({ target: { ref: "e1" }, state: "visible", timeoutMs: Number.MAX_SAFE_INTEGER }).timeoutMs).toBe(Number.MAX_SAFE_INTEGER);
+    expect(definition("verify_state").program({ target: { id: "e1" }, state: "visible", timeoutMs: 0 })).not.toHaveProperty("timeoutMs");
+    expect(definition("verify_state").program({ target: { id: "e1" }, state: "visible", timeoutMs: Number.MAX_SAFE_INTEGER }).timeoutMs).toBe(Number.MAX_SAFE_INTEGER);
   });
 
   it("exposes the same exclusive verification conditions to the model", () => {
@@ -131,29 +131,29 @@ describe("atomic browser tool programs", () => {
     expect(schema.oneOf).toEqual(["textIncludes", "textEquals", "valueEquals", "state"].map((name) => ({ required: [name] })));
     const inputSchema = definition("verify_state").inputSchema;
     for (const input of [{ textIncludes: "" }, { textEquals: "" }, { valueEquals: "" }, { state: "visible" }]) {
-      expect(inputSchema.safeParse({ target: { ref: "e1" }, background: true, ...input }).success).toBe(true);
+      expect(inputSchema.safeParse({ target: { id: "e1" }, background: true, ...input }).success).toBe(true);
     }
-    expect(inputSchema.safeParse({ target: { ref: "e1" } }).success).toBe(false);
-    expect(inputSchema.safeParse({ target: { ref: "e1" }, textEquals: "x", state: "visible" }).success).toBe(false);
+    expect(inputSchema.safeParse({ target: { id: "e1" } }).success).toBe(false);
+    expect(inputSchema.safeParse({ target: { id: "e1" }, textEquals: "x", state: "visible" }).success).toBe(false);
   });
 
   it("uploads only the bytes of the requested artifact and rejects unavailable content before dispatch", async () => {
     const setInputFiles = vi.fn(async () => "uploaded");
-    const page = { ref: () => ({ setInputFiles }) };
+    const page = { elementById: () => ({ setInputFiles }) };
     const read = vi.fn(async () => ({ filename: "report.txt", mimeType: "text/plain", base64: "aGVsbG8=" }));
-    expect(await execute("upload_file", { target: { ref: "e1" }, artifactId: 7 }, { page, artifacts: { read } })).toBe("uploaded");
+    expect(await execute("upload_file", { target: { id: "e1" }, artifactId: 7 }, { page, artifacts: { read } })).toBe("uploaded");
     expect(read).toHaveBeenCalledWith(7);
     expect(setInputFiles).toHaveBeenCalledWith([{ name: "report.txt", mimeType: "text/plain", base64: "aGVsbG8=" }]);
     read.mockResolvedValueOnce({ filename: "report.txt", mimeType: "text/plain" } as never);
-    await expect(execute("upload_file", { target: { ref: "e1" }, artifactId: 8 }, { page, artifacts: { read } })).rejects.toThrow("invalid-artifact");
+    await expect(execute("upload_file", { target: { id: "e1" }, artifactId: 8 }, { page, artifacts: { read } })).rejects.toThrow("invalid-artifact");
     expect(setInputFiles).toHaveBeenCalledOnce();
   });
 
   it("fills from a stored result or UTF-8 file without sending its contents as tool arguments", async () => {
     const fill = vi.fn(async () => "filled");
-    const page = { ref: () => ({ fill }) };
+    const page = { elementById: () => ({ fill }) };
     const read = vi.fn().mockResolvedValueOnce("saved 🌊 text").mockResolvedValueOnce({ base64: "5rW38J+Mig==" }).mockResolvedValueOnce({ base64: "/w==" });
-    const target = { ref: "e1" };
+    const target = { id: "e1" };
     expect(await execute("fill_from_artifact", { target, artifactId: 7, path: ["result"] }, { page, artifacts: { read } })).toBe("filled");
     expect(read).toHaveBeenNthCalledWith(1, 7, { path: ["result"] });
     expect(fill).toHaveBeenNthCalledWith(1, "saved 🌊 text");
@@ -166,22 +166,22 @@ describe("atomic browser tool programs", () => {
   it("separates upload destinations and reuses duplicate artifact reads", async () => {
     const upload = definition("upload_file");
     expect(() => upload.inputSchema.parse({ artifactId: 1 })).toThrow();
-    expect(() => upload.inputSchema.parse({ artifactId: 1, chooserId: "c", target: { ref: "e1" } })).toThrow();
+    expect(() => upload.inputSchema.parse({ artifactId: 1, chooserId: "c", target: { id: "e1" } })).toThrow();
     expect(() => upload.inputSchema.parse({ artifactId: 1, chooserId: "c", tabId: 2 })).toThrow();
     expect(() => upload.inputSchema.parse({ artifactId: 1, chooserId: "c", background: true })).toThrow();
     expect(definition("upload_file_chooser").inputSchema.parse({ artifactId: [1, 1], chooserId: "c" })).toMatchObject({ chooserId: "c" });
     expect(() => definition("upload_file_chooser").inputSchema.parse({ artifactId: 1, chooserId: "c", tabId: 2 })).toThrow();
     const read = vi.fn(async () => ({ filename: "a.txt", mimeType: "text/plain", base64: "YQ==" }));
     const setInputFiles = vi.fn(async () => "done");
-    await execute("upload_file", { artifactId: [1, 1], target: { ref: "e1" } }, { page: { ref: () => ({ setInputFiles }) }, artifacts: { read } });
+    await execute("upload_file", { artifactId: [1, 1], target: { id: "e1" } }, { page: { elementById: () => ({ setInputFiles }) }, artifacts: { read } });
     expect(read).toHaveBeenCalledOnce();
     expect(setInputFiles).toHaveBeenCalledWith([expect.objectContaining({ name: "a.txt" }), expect.objectContaining({ name: "a.txt" })]);
   });
 
   it("verifies a single bound observation without confusing missing targets with false states", async () => {
     const readCondition = vi.fn(async () => ({ present: false, actual: null as string | boolean | null }));
-    const page = { ref: () => ({ readCondition }) };
-    const target = { ref: "e1" };
+    const page = { elementById: () => ({ readCondition }) };
+    const target = { id: "e1" };
     expect(await execute("verify_state", { target, state: "unchecked" }, { page })).toEqual({ verified: false, actual: null, present: false });
     expect(readCondition).toHaveBeenLastCalledWith("checked");
     expect(await execute("verify_state", { target, state: "disabled" }, { page })).toEqual({ verified: false, actual: null, present: false });
@@ -215,8 +215,8 @@ describe("atomic browser tool programs", () => {
     try {
       const readCondition = vi.fn(async () => ({ present: false, actual: null }));
       const sleep = vi.fn(async (ms: number) => { now += ms; });
-      const page = { ref: () => ({ readCondition }) };
-      expect(await execute("verify_state", { target: { ref: "e1" }, state: "disabled", timeoutMs: 125 }, { page, sleep }))
+      const page = { elementById: () => ({ readCondition }) };
+      expect(await execute("verify_state", { target: { id: "e1" }, state: "disabled", timeoutMs: 125 }, { page, sleep }))
         .toEqual({ verified: false, actual: null, present: false, timedOut: true });
       expect(readCondition).toHaveBeenCalledTimes(3);
       expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([100, 25]);
@@ -224,16 +224,16 @@ describe("atomic browser tool programs", () => {
       const eventually = vi.fn()
         .mockResolvedValueOnce({ present: false, actual: null })
         .mockResolvedValueOnce({ present: true, actual: true });
-      expect(await execute("verify_state", { target: { ref: "e2" }, state: "editable", timeoutMs: 500 },
-        { page: { ref: () => ({ readCondition: eventually }) }, sleep }))
+      expect(await execute("verify_state", { target: { id: "e2" }, state: "editable", timeoutMs: 500 },
+        { page: { elementById: () => ({ readCondition: eventually }) }, sleep }))
         .toEqual({ verified: true, actual: true, present: true });
       expect(eventually).toHaveBeenCalledTimes(2);
 
       const changingText = vi.fn()
         .mockResolvedValueOnce({ present: true, actual: "Invoice: INV-73-15" })
         .mockResolvedValueOnce({ present: true, actual: "Invoice: INV-73-1" });
-      expect(await execute("verify_state", { target: { ref: "e3" }, textEquals: "Invoice: INV-73-1", timeoutMs: 500 },
-        { page: { ref: () => ({ readCondition: changingText }) }, sleep }))
+      expect(await execute("verify_state", { target: { id: "e3" }, textEquals: "Invoice: INV-73-1", timeoutMs: 500 },
+        { page: { elementById: () => ({ readCondition: changingText }) }, sleep }))
         .toEqual({ verified: true, actual: "Invoice: INV-73-1", present: true });
       expect(changingText).toHaveBeenCalledTimes(2);
       expect(changingText).toHaveBeenCalledWith("text");
@@ -283,9 +283,9 @@ describe("atomic browser tool programs", () => {
 
   it("reads page details and scrolls to a specific element", async () => {
     const scrollIntoViewIfNeeded = vi.fn(async () => "scrolled");
-    const page = { url: async () => "https://example.com/", title: async () => "Example", ref: () => ({ scrollIntoViewIfNeeded }) };
+    const page = { url: async () => "https://example.com/", title: async () => "Example", elementById: () => ({ scrollIntoViewIfNeeded }) };
     expect(await execute("get_page_info", {}, { page })).toEqual({ url: "https://example.com/", title: "Example" });
-    expect(await execute("scroll_to_element", { target: { ref: "e1" }, background: true }, { page })).toBe("scrolled");
+    expect(await execute("scroll_to_element", { target: { id: "e1" }, background: true }, { page })).toBe("scrolled");
     expect(scrollIntoViewIfNeeded).toHaveBeenCalledOnce();
   });
 
@@ -332,8 +332,8 @@ describe("atomic browser tool programs", () => {
       if (detail) expect(item.description).toContain(detail);
       expect(tools[name]!.inputSchema).toBe(item.inputSchema);
     }
-    expect(definition("select_option").inputSchema.safeParse({ target: { ref: "e1" }, value: [], background: true }).success).toBe(true);
-    expect(definition("drag").inputSchema.safeParse({ source: { ref: "e1" }, destination: { ref: "e2" } }).success).toBe(true);
+    expect(definition("select_option").inputSchema.safeParse({ target: { id: "e1" }, value: [], background: true }).success).toBe(true);
+    expect(definition("drag").inputSchema.safeParse({ source: { id: "e1" }, destination: { id: "e2" } }).success).toBe(true);
     expect(definition("upload_file").inputSchema.safeParse({ chooserId: "c1", artifactId: 1, tabId: 2 }).success).toBe(false);
     expect(definition("read_artifact").inputSchema.safeParse({ artifactId: 1, path: ["rows", -1] }).success).toBe(false);
     for (const name of ["list_requests", "read_console"]) expect(definition(name).inputSchema.safeParse({ limit: 101 }).success).toBe(false);

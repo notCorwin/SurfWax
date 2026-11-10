@@ -29,28 +29,28 @@ test("does not retarget an issued ref after the same DOM node changes visible id
     responses.push(
       commandResponse("inspect_page", {}, "inspect-a"),
       (request) => {
-        axRef = lastTool(request).items.find((item: any) => itemLine(item).includes('button "Order A"'))?.ref;
+        axRef = lastTool(request).items.find((item: any) => itemLine(item).includes('button "Order A"'))?.id;
         expect(axRef).toEqual(expect.any(String));
         return commandResponse("click", { target: { by: "css", value: "#rewrite-ax" } }, "rewrite-ax");
       },
-      () => commandResponse("click", { target: { ref: axRef } }, "old-ax"),
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "stale-ref" } }); return commandResponse("inspect_page", {}, "inspect-b"); },
+      () => commandResponse("click", { target: { id: axRef } }, "old-ax"),
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "stale-id" } }); return commandResponse("inspect_page", { full: true }, "inspect-b"); },
       (request) => {
-        const next = lastTool(request).items.find((item: any) => itemLine(item).includes('button "Order B"'))?.ref;
+        const next = lastTool(request).items.find((item: any) => itemLine(item).includes('button "Order B"'))?.id;
         expect(next).toEqual(expect.any(String)); expect(next).not.toBe(axRef); axRef = next;
-        return commandResponse("click", { target: { ref: axRef } }, "new-ax");
+        return commandResponse("click", { target: { id: axRef } }, "new-ax");
       },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("find_elements", { target: { by: "css", value: "#virtual-css" } }, "find-a"); },
       (request) => {
-        cssRef = lastTool(request).elements[0].ref;
+        cssRef = lastTool(request).elements[0].id;
         return commandResponse("click", { target: { by: "css", value: "#rewrite-css" } }, "rewrite-css");
       },
-      () => commandResponse("click", { target: { ref: cssRef } }, "old-css"),
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "stale-ref" } }); return commandResponse("find_elements", { target: { by: "css", value: "#virtual-css" } }, "find-b"); },
+      () => commandResponse("click", { target: { id: cssRef } }, "old-css"),
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "stale-id" } }); return commandResponse("find_elements", { target: { by: "css", value: "#virtual-css" } }, "find-b"); },
       (request) => {
-        const next = lastTool(request).elements[0].ref;
+        const next = lastTool(request).elements[0].id;
         expect(next).not.toBe(cssRef); cssRef = next;
-        return commandResponse("click", { target: { ref: cssRef } }, "new-css");
+        return commandResponse("click", { target: { id: cssRef } }, "new-css");
       },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return textResponse("VISIBLE_REF_IDENTITY_OK"); },
       textResponse("检查引用身份"),

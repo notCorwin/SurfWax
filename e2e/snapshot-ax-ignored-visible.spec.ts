@@ -34,9 +34,9 @@ test("captures rendered content omitted by the accessibility tree and can act on
       (request) => {
         snapshot = lastTool(request);
         const button = snapshot.items?.find((item: any) => itemLine(item).includes('button "AX ignored visible button"'));
-        if (typeof button?.ref !== "string") return textResponse("AX_IGNORED_DONE");
+        if (typeof button?.id !== "string") return textResponse("AX_IGNORED_DONE");
         responses.unshift((nextRequest) => { click = lastTool(nextRequest); return textResponse("AX_IGNORED_DONE"); });
-        return commandResponse("click", { target: { ref: button.ref } }, "ignored-click");
+        return commandResponse("click", { target: { id: button.id } }, "ignored-click");
       },
       textResponse("Inspect the page"),
     );

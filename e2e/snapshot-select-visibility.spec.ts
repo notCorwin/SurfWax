@@ -38,11 +38,11 @@ test("closed single select exposes the painted label and actionable ref, not its
     responses.push(commandResponse("inspect_page", { budget: 12000 }, "select-visible"), (request) => {
       snapshot = lastTool(request);
       const rows = roleRows(snapshot, "combobox");
-      return rows[0]?.ref ? commandResponse("read_value", { target: { ref: rows[0].ref } }, "select-read-ax") : textResponse("SELECT_VISIBLE_DONE");
+      return rows[0]?.id ? commandResponse("read_value", { target: { id: rows[0].id } }, "select-read-ax") : textResponse("SELECT_VISIBLE_DONE");
     }, (request) => {
       axRead = lastTool(request);
       const rows = roleRows(axRead.pageSnapshot ?? snapshot, "combobox");
-      return rows[1]?.ref ? commandResponse("read_value", { target: { ref: rows[1].ref } }, "select-read-dom") : textResponse("SELECT_VISIBLE_DONE");
+      return rows[1]?.id ? commandResponse("read_value", { target: { id: rows[1].id } }, "select-read-dom") : textResponse("SELECT_VISIBLE_DONE");
     }, (request) => { domRead = lastTool(request); return textResponse("SELECT_VISIBLE_DONE"); }, textResponse("Inspect the selects"));
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     await target.bringToFront();
@@ -52,8 +52,8 @@ test("closed single select exposes the painted label and actionable ref, not its
     expect(snapshot).toMatchObject({ mode: "full", items: expect.any(Array), truncation: { baselineComplete: true } });
     const rows = roleRows(snapshot, "combobox");
     expect(rows).toHaveLength(2);
-    expect(rows[0]).toMatchObject({ ref: expect.any(String), line: expect.stringContaining("PAINTED_AX_LABEL") });
-    expect(rows[1]).toMatchObject({ ref: expect.any(String), line: expect.stringContaining("PAINTED_DOM_LABEL") });
+    expect(rows[0]).toMatchObject({ id: expect.any(String), line: expect.stringContaining("PAINTED_AX_LABEL") });
+    expect(rows[1]).toMatchObject({ id: expect.any(String), line: expect.stringContaining("PAINTED_DOM_LABEL") });
     const text = JSON.stringify(snapshot.items);
     for (const hidden of ["UNPAINTED_AX_TEXT", "UNPAINTED_DOM_TEXT", "CLOSED_MENU_SECRET", "INTERNAL_AX_ID", "INTERNAL_DOM_ID", "MenuListPopup"]) expect(text).not.toContain(hidden);
     expect(roleRows(snapshot, "option")).toHaveLength(0);
@@ -89,7 +89,7 @@ test("closed select does not expose zero-size or clipped labels in AX or DOM sup
     await expect(opened.page.locator(".markdown-body").last()).toContainText("SELECT_HIDDEN_DONE", { timeout: 60_000 });
     const rows = roleRows(snapshot, "combobox");
     expect(rows).toHaveLength(3);
-    expect(rows.every((item: any) => typeof item.ref === "string" && itemLine(item).includes("[value=unknown]"))).toBe(true);
+    expect(rows.every((item: any) => typeof item.id === "string" && itemLine(item).includes("[value=unknown]"))).toBe(true);
     const text = JSON.stringify(snapshot.items);
     for (const hidden of ["ZERO_HIDDEN_ABC", "PREFIX_HIDDEN_ABC", "ARIA_HIDDEN_ABC", "MenuListPopup"]) expect(text).not.toContain(hidden);
     expect(roleRows(snapshot, "option")).toHaveLength(0);

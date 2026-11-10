@@ -2,7 +2,7 @@ import { expect, type Page } from "@playwright/test";
 import { test, openExtension, dispose } from "./fixtures";
 import { itemLine, inspectText } from "./snapshot-format";
 
-type Snapshot = { observationId: string; mode: string; nextCursor?: string; items: Array<{ id: string; role?: string; name?: string; ref?: string; change?: string; box?: readonly number[] }> };
+type Snapshot = { observationId: string; mode: string; nextCursor?: string; items: Array<{ id: string; role?: string; name?: string; actionable?: true; change?: string; box?: readonly number[] }> };
 const fixtureUrl = "http://snapshot-presentation.test/";
 const image = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect width='40' height='40' fill='%23555555'/%3E%3C/svg%3E";
 
@@ -80,7 +80,8 @@ test("compact observations distinguish same-name targets by measured layout and 
     const first = await inspect(opened.page);
     const lines = first.items.map((item) => itemLine(item));
     const text = lines.join("\n");
-    expect(first.items.every((item) => item.ref === undefined)).toBe(true);
+    expect(first.items.some((item) => item.actionable === true)).toBe(true);
+    expect(first.items.every((item) => !("ref" in item))).toBe(true);
     expect(text).not.toContain("[ref=");
     expect(text).not.toContain("PRIVATE_ALT_");
     expect(text.match(/SurfWax/g)).toHaveLength(1);
@@ -109,7 +110,7 @@ test("compact observations distinguish same-name targets by measured layout and 
     expect(rawSnapshot.snapshot).not.toContain("[ref=");
 
     const sliced = await inspect(opened.page, { limit: 1 });
-    const actionable = await inspect(opened.page, { fields: ["text", "state", "ref"], limit: 1 });
+    const actionable = await inspect(opened.page, { fields: ["text", "state"], limit: 1 });
     expect(sliced.nextCursor).toEqual(expect.any(String));
     await target.locator("#badges").evaluate((element) => element.classList.add("swapped"));
     const continued = await inspect(opened.page, { cursor: sliced.nextCursor });
@@ -235,10 +236,10 @@ test("text-fragment reordering and actionable painted overflow survive presentat
     expect(itemLine(changedBoundary)).not.toContain('"Save "');
 
     await target.locator("button, #pseudo").evaluateAll((elements) => elements.forEach((element) => element.remove()));
-    const explicit = await inspect(opened.page, { fields: ["text", "state", "ref"] });
+    const explicit = await inspect(opened.page, { fields: ["text", "state"] });
     const overflow = explicit.items.find((item) => itemLine(item).includes("[box=400,200,0,0]"));
     expect(itemLine(overflow)).toContain("- generic");
-    expect(overflow?.ref).toEqual(expect.any(String));
+    expect(overflow?.id).toEqual(expect.any(String));
     expect(explicit.items.some((item) => /- image/.test(itemLine(item)))).toBe(true);
     const observed = await opened.page.evaluate(async () => {
       const state = (globalThis as any).__presentationStudy;
@@ -264,16 +265,15 @@ test("repeated grid cells retain every position, state change and explicit actio
     await target.goto(fixtureUrl);
     await attach(opened.page);
     const initial = await inspect(opened.page);
-    const group = initial.items.find((item) => /- gridcell .*\[count=12\]/.test(itemLine(item)))!;
-    expect(group).toBeDefined();
-    expect(itemLine(group)).toContain("step=(16,0,0,0) count=12");
-    expect(itemLine(group)).toContain("[name=unknown]");
-    expect(itemLine(group)).not.toContain("PRIVATE_");
-    const explicit = await inspect(opened.page, { fields: ["text", "state", "ref"] });
+    const cellsBefore = initial.items.filter(item => item.role === "gridcell");
+    expect(cellsBefore).toHaveLength(12);
+    expect(cellsBefore.every(item => item.actionable && item.id && !itemLine(item).includes("PRIVATE_"))).toBe(true);
+    expect(new Set(cellsBefore.map(item => item.id)).size).toBe(12);
+    const explicit = await inspect(opened.page, { fields: ["text", "state"] });
     const individual = explicit.items.filter((item) => /- gridcell/.test(itemLine(item)));
     expect(individual).toHaveLength(12);
-    expect(new Set(individual.map((item) => item.ref)).size).toBe(12);
-    expect(individual.every((item) => item.ref && /\[box=/.test(itemLine(item)))).toBe(true);
+    expect(new Set(individual.map((item) => item.id)).size).toBe(12);
+    expect(individual.every((item) => item.id && /\[box=/.test(itemLine(item)))).toBe(true);
     await target.locator("td").nth(5).evaluate((element) => element.setAttribute("aria-readonly", "true"));
     const changed = await inspect(opened.page, { since: initial.observationId });
     expect(changed.items.some((item) => /gridcell/.test(itemLine(item)) && /readonly=true/.test(itemLine(item)))).toBe(true);

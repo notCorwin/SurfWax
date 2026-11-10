@@ -885,7 +885,7 @@ describe("frame tree discovery", () => {
     const page = await runtime.createPage(3);
     const initial: any = await page.inspect({ fields: ["text", "state", "ref"] });
     const root = initial.items.find((item: any) => itemLine(item).includes('button "Root control"'));
-    expect(root.id).toMatch(/^[0-9a-z]+\.ashared-ax$/);
+    expect(root.id).toMatch(/^t3s[a-f0-9]+d0e\d+$/);
     runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "old-child", targetInfo: { type: "iframe", targetId: "cross" } });
     await expect(page.inspect({ fields: ["text", "state", "ref"], since: initial.observationId })).rejects.toMatchObject({ code: "stale-observation" });
     const attached: any = await page.inspect({ fields: ["text", "state", "ref"] });
@@ -893,8 +893,8 @@ describe("frame tree discovery", () => {
     expect(attached.mode).toBe("full");
     expect(attached.items.some((item: any) => item.id === root.id)).toBe(true);
     const old = attached.items.find((item: any) => itemLine(item).includes('button "Cross control"'));
-    expect(old).toMatchObject({ ref: expect.any(String) });
-    expect(old.id).toMatch(/^[0-9a-z]+\.ashared-ax$/);
+    expect(old).toMatchObject({ id: expect.any(String), actionable: true });
+    expect(old.id).toMatch(/^t3s[a-f0-9]+d0e\d+$/);
     expect(old.id).not.toBe(root.id);
     runtime.handleEvent({ tabId: 3 }, "Target.attachedToTarget", { sessionId: "replacement-child", targetInfo: { type: "iframe", targetId: "cross" } });
     await expect(page.inspect({ fields: ["text", "state", "ref"], since: attached.observationId })).rejects.toMatchObject({ code: "stale-observation" });
@@ -903,11 +903,11 @@ describe("frame tree discovery", () => {
     expect(changed.mode).toBe("full");
     expect(changed.items.some((item: any) => item.id === old.id)).toBe(false);
     const replacement = changed.items.find((item: any) => itemLine(item).includes('button "Cross control"'));
-    expect(replacement).toMatchObject({ ref: expect.any(String) });
+    expect(replacement).toMatchObject({ id: expect.any(String), actionable: true });
     expect(replacement.id).not.toBe(old.id);
-    expect(replacement.ref).not.toBe(old.ref);
-    await expect(page.ref(replacement.ref).count()).resolves.toBe(1);
-    await expect(page.ref(old.ref).count()).rejects.toMatchObject({ code: "stale-ref" });
+    expect(replacement.id).not.toBe(old.id);
+    await expect(page.ref(replacement.id).count()).resolves.toBe(1);
+    await expect(page.ref(old.id).count()).rejects.toMatchObject({ code: "stale-ref" });
     await runtime.abortSessions();
   });
 
@@ -941,7 +941,7 @@ describe("frame tree discovery", () => {
     expect(ref).toEqual(expect.any(String));
     expect(itemLine(owner)).not.toContain("[frame=");
     const marker = capture.items.find((item: any) => item.role === "frame-document" && item.frameRef === ref);
-    expect(marker.id).toMatch(/^[0-9a-z]+\.m$/);
+    expect(marker.id).toMatch(/^t3s[a-f0-9]+d\d+:[0-9a-z]+\.m$/);
     expect(new Set([root.id, owner.id, marker.id]).size).toBe(3);
     const listed: any = await runtime.listFrames(3);
     expect(listed.frames.find((frame: any) => frame.url === "https://cross.test/").frameRef).toBe(ref);

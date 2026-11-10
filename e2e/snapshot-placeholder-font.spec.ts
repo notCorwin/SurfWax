@@ -30,14 +30,14 @@ test("shows native Arial placeholders while rejecting an author font using that 
       (request) => {
         before = lastTool(request);
         const button = before.items?.find((item: any) => itemLine(item).includes('button "Toggle Arial face"'));
-        if (!button?.ref) return textResponse("ARIAL_TEST_DONE");
+        if (!button?.id) return textResponse("ARIAL_TEST_DONE");
         responses.unshift(
           () => commandResponse("inspect_page", { budget: 12000 }, "arial-author-font"),
-          (next) => { custom = lastTool(next); return commandResponse("click", { target: { ref: button.ref } }, "arial-restore"); },
+          (next) => { custom = lastTool(next); return commandResponse("click", { target: { id: button.id } }, "arial-restore"); },
           () => commandResponse("inspect_page", { budget: 12000 }, "arial-restored"),
           (next) => { restored = lastTool(next); return textResponse("ARIAL_TEST_DONE"); },
         );
-        return commandResponse("click", { target: { ref: button.ref } }, "arial-author-enable");
+        return commandResponse("click", { target: { id: button.id } }, "arial-author-enable");
       },
     );
     await (await configure(opened.context, opened.page, provider.baseURL)).close();

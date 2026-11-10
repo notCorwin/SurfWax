@@ -26,7 +26,7 @@ test("exposes a proven painted ellipsis prefix and keeps its action reference", 
     responses.push(commandResponse("inspect_page", { budget: 12000 }, "ellipsis-proof"), (request: any) => {
       snapshot = lastTool(request);
       const item = snapshot.items?.find((entry: any) => itemLine(entry).includes('- button "Next TASK-7…"'));
-      return item?.ref ? commandResponse("click", { target: { ref: item.ref } }, "ellipsis-click") : textResponse("ELLIPSIS_DONE");
+      return item?.id ? commandResponse("click", { target: { id: item.id } }, "ellipsis-click") : textResponse("ELLIPSIS_DONE");
     }, (request: any) => { click = lastTool(request); return textResponse("ELLIPSIS_DONE"); }, textResponse("Inspect the queue"));
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
     await target.bringToFront();
@@ -36,7 +36,7 @@ test("exposes a proven painted ellipsis prefix and keeps its action reference", 
     expect(snapshot).toMatchObject({ mode: "full", items: expect.any(Array) });
     expect(JSON.stringify(snapshot.items)).not.toContain("UNPAINTED_ACCESSIBLE_NAME");
     expect(JSON.stringify(snapshot.items)).not.toContain("46F9DB6E6FB");
-    expect(snapshot.items.some((entry: any) => itemLine(entry).includes('- button "Next TASK-7…"') && typeof entry.ref === "string")).toBe(true);
+    expect(snapshot.items.some((entry: any) => itemLine(entry).includes('- button "Next TASK-7…"') && typeof entry.id === "string")).toBe(true);
     expect(click).toMatchObject({ ok: true });
     expect(await target.locator("body").getAttribute("data-clicked")).toBe("yes");
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }

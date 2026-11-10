@@ -31,7 +31,8 @@ export function programWorkerMain(codecFactory: typeof createProgramCodec) {
   };
   const remotes = new WeakMap<object, any>();
   const chains = new Set([
-    "ref",
+    "elementById",
+  "ref",
     "locator",
     "uniqueScope",
     "frameLocator",

@@ -104,9 +104,9 @@ function actionReceipt(input: unknown, output: unknown): ActionReceipt {
   if (Object.keys(result).length) receipt.result = result;
   const items = object(outer.pageSnapshot).items;
   if (Array.isArray(items)) for (const key of ["target", "source", "destination"]) {
-    const ref = object(parameters[key]).ref;
-    if (typeof ref !== "string") continue;
-    const item = object(items.find((entry) => object(entry).ref === ref));
+    const id = object(parameters[key]).id;
+    if (typeof id !== "string") continue;
+    const item = object(items.find((entry) => object(entry).id === id));
     const label = typeof item.name === "string" ? item.name
       : typeof item.role === "string" ? item.role
       : typeof item.line === "string" ? item.line : undefined;

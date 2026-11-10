@@ -96,7 +96,7 @@ test("preview exposes a later target without changing frozen pagination or delta
     expect(baseline.some((item) => itemLine(item).includes(label))).toBe(true);
     expect(baseline.some((item) => itemLine(item).includes("STATUS_READY"))).toBe(true);
     expect(baseline.some((item) => itemLine(item).includes("STATUS_DONE"))).toBe(false);
-    expect(baseline[previewTarget.index]).toMatchObject({ id: previewTarget.id, role: previewTarget.role, name: previewTarget.name, ref: expect.any(String) });
+    expect(baseline[previewTarget.index]).toMatchObject({ id: previewTarget.id, role: previewTarget.role, name: previewTarget.name, actionable: true });
     const fragment = initialPages.flatMap((entry) => entry.items).find((item: any) => itemLine(item).includes("LONG_LABEL_BEGIN_"));
     expect(itemLine(fragment).length).toBeGreaterThan(256);
     firstLabelPrefix = itemLine(fragment).slice(0, 255);
@@ -130,7 +130,7 @@ test("preview exposes a later target without changing frozen pagination or delta
       expect(cursor).toEqual(expect.any(String));
       previewTarget = value.lookahead.items.find((item: SemanticItem) => itemLine(item).includes('button "Unique action"'));
       expect(previewTarget).toMatchObject({ index: expect.any(Number), id: expect.any(String) });
-      expect(value.lookahead.items.every((item: SemanticItem) => item.ref === undefined)).toBe(true);
+      expect(value.lookahead.items.every((item: SemanticItem) => item.actionable === undefined)).toBe(true);
       expect(value.items.some((item: SemanticItem) => item.id === previewTarget.id)).toBe(false);
       return page(initial, initialPages, cursor!, afterInitial);
     });

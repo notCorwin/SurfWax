@@ -140,6 +140,16 @@
 
 来源：当前实现见 `src/chrome/snapshot-render.ts`、`src/chrome/snapshot-pagination.ts`、`e2e/evaluation/semantic-state.ts`。
 
+### 元素操作统一使用快照 item 的 ID
+
+2026-11-10 将 LLM 面向的元素目标统一为 `target:{id}`。`inspect_page` 默认交付可操作元素的 ID 与 `actionable=true`，`find_elements` 使用同一 `id` 字段交付元素绑定，不再另交付元素 `ref`。此决策取代 2026-11-07“默认隐藏操作引用、显式请求 ref”的交付约定；内部引用机制仍负责真实节点绑定与校验，Frame 的 `frameRef` 继续作为框架定位句柄，不与元素 ID 混用。
+
+ID 的可操作性来自唯一真实元素绑定，不来自名字匹配或包围盒。文字、重复观察组和单子祖先路径仍可有用于增量/分页的 ID，但只有明确标为 `actionable=true` 的 item 才能直接作为元素工具目标；可操作元素不再压入 `count` 或 `path` 聚合。动作提示与 `actionable` 均不保证操作会成功，实际输入仍检查节点身份、可见性、启用状态、布局与命中位置。
+
+元素 ID 限定所属标签页、文档和运行，不能在失效后靠重新匹配同名节点恢复。观测到身份改变时退休旧绑定及其别名，增量可以用旧 ID 的删除和新 ID 的新增表达该变化。只读采样也能为本次同步读取中的实际控件提供 ID：节点以隔离世界私有的弱引用注册，身份指纹不进入模型结果；使用时核对文档 token、原节点连接状态、当前身份及运行归属，再绑定到浏览器真实节点。已退休的采样 ID 不因标签文字恢复而重新生效。此能力不改变 `partial=true` 和覆盖缺口的证据边界，也不把旧 `box` 当成可直接点击的坐标。
+
+来源：`src/chrome/element-target.ts`、`src/chrome/automation.ts`、`src/chrome/sampled-element.ts`、`src/chrome/snapshot-readable-source.js`、`src/chrome/snapshot-repeat.ts`、`src/chrome/tool.ts`、`src/standalone/runtime.test.ts`。
+
 ### 可见语义与操作引用分离
 
 2026-11-07 的实现默认以文字和状态呈现快照，不暴露元素操作引用；需要句柄时可显式请求 `ref` 字段，或通过 `find_elements` 获取。内部仍维护引用及其角色、身份和文档校验；快照行 `id` 用于分页和增量更新，不是操作目标别名。可见名称以绘制证据为准，未绘制的 alt 或无障碍名称不作为可见文字输出；`name=unknown` 只说明完整可见名称未被确认，仍可能提供已确认的前缀；不能推断底层元数据不存在。

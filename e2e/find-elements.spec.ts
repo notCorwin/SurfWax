@@ -45,19 +45,19 @@ test("preserves snapshot identities through reorder and removal, and expires the
       commandResponse("find_elements", { target: selector, limit: 2 }, "search-capture-removed"),
       (request) => {
         const page = lastTool(request);
-        expect(page).toMatchObject({ total: 3, hasMore: true, elements: [{ ref: expect.any(String) }, { ref: expect.any(String) }] });
-        removedRef = page.elements[1].ref;
+        expect(page).toMatchObject({ total: 3, hasMore: true, elements: [{ id: expect.any(String) }, { id: expect.any(String) }] });
+        removedRef = page.elements[1].id;
         return commandResponse("find_elements", { target: selector, limit: 1 }, "search-first");
       },
       (request) => {
         const page = lastTool(request);
-        expect(page).toMatchObject({ total: 3, hasMore: true, nextCursor: expect.any(String), elements: [{ ref: expect.any(String), name: "Same label" }] });
-        firstRef = page.elements[0].ref;
+        expect(page).toMatchObject({ total: 3, hasMore: true, nextCursor: expect.any(String), elements: [{ id: expect.any(String), name: "Same label" }] });
+        firstRef = page.elements[0].id;
         cursor = page.nextCursor;
         staleCursor = cursor;
         return commandResponse("click", { target: { by: "css", value: "#mutate-search" } }, "mutate-search");
       },
-      () => commandResponse("click", { target: { ref: removedRef }, timeoutMs: 3_000 }, "search-removed-ref"),
+      () => commandResponse("click", { target: { id: removedRef }, timeoutMs: 3_000 }, "search-removed-ref"),
       (request) => {
         expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "detached" } });
         return commandResponse("find_elements", { target: selector, limit: 1, cursor }, "search-second");
@@ -70,18 +70,18 @@ test("preserves snapshot identities through reorder and removal, and expires the
       },
       (request) => {
         const page = lastTool(request);
-        expect(page).toMatchObject({ total: 3, hasMore: false, elements: [{ ref: expect.any(String), name: "Same label" }] });
-        thirdRef = page.elements[0].ref;
+        expect(page).toMatchObject({ total: 3, hasMore: false, elements: [{ id: expect.any(String), name: "Same label" }] });
+        thirdRef = page.elements[0].id;
         expect(thirdRef).not.toBe(firstRef);
-        return commandResponse("click", { target: { ref: firstRef } }, "click-first");
+        return commandResponse("click", { target: { id: firstRef } }, "click-first");
       },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("click", { target: { ref: thirdRef } }, "click-third"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("click", { target: { id: thirdRef } }, "click-third"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("read_attribute", { target: { by: "css", value: "body" }, name: "data-search-clicks" }, "check-search-clicks"); },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: "ac" }); return commandResponse("click", { tabId: otherTab!.id, target: { ref: firstRef }, timeoutMs: 3_000 }, "other-tab-ref"); },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "stale-ref" } }); return commandResponse("navigate", { url: `${provider.origin}/target` }, "search-navigate"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: "ac" }); return commandResponse("click", { tabId: otherTab!.id, target: { id: firstRef }, timeoutMs: 3_000 }, "other-tab-ref"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "stale-id" } }); return commandResponse("navigate", { url: `${provider.origin}/target` }, "search-navigate"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("find_elements", { target: selector, cursor: staleCursor, limit: 1 }, "search-stale-cursor"); },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "stale-search" } }); return commandResponse("click", { target: { ref: firstRef }, timeoutMs: 3_000 }, "search-stale-ref"); },
-      (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "stale-ref" } }); return textResponse("FIND_SNAPSHOT_OK"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "stale-search" } }); return commandResponse("click", { target: { id: firstRef }, timeoutMs: 3_000 }, "search-stale-ref"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ ok: false, error: { code: "stale-id" } }); return textResponse("FIND_SNAPSHOT_OK"); },
       textResponse("查找元素"),
     );
     await (await configure(opened.context, opened.page, provider.baseURL)).close();
@@ -130,11 +130,11 @@ test("finds stable nodes inside same-process and cross-origin frames", async () 
     let sameRef = "", crossRef = "";
     responses.push(
       commandResponse("find_elements", { target: sameTarget, limit: 1 }, "same-search"),
-      (request) => { const page = lastTool(request); expect(page).toMatchObject({ total: 2, hasMore: true, elements: [{ ref: expect.any(String) }] }); sameRef = page.elements[0].ref; return commandResponse("click", { target: { by: "css", value: "#reorder-frame-search", frame: sameTarget.frame } }, "same-reorder"); },
-      () => commandResponse("click", { target: { ref: sameRef } }, "same-click"),
+      (request) => { const page = lastTool(request); expect(page).toMatchObject({ total: 2, hasMore: true, elements: [{ id: expect.any(String) }] }); sameRef = page.elements[0].id; return commandResponse("click", { target: { by: "css", value: "#reorder-frame-search", frame: sameTarget.frame } }, "same-reorder"); },
+      () => commandResponse("click", { target: { id: sameRef } }, "same-click"),
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("find_elements", { target: crossTarget, limit: 1 }, "cross-search"); },
-      (request) => { const page = lastTool(request); expect(page).toMatchObject({ total: 2, hasMore: true, elements: [{ ref: expect.any(String) }] }); crossRef = page.elements[0].ref; expect(crossRef).not.toBe(sameRef); return commandResponse("click", { target: { by: "css", value: "#reorder-frame-search", frame: crossTarget.frame } }, "cross-reorder"); },
-      () => commandResponse("click", { target: { ref: crossRef } }, "cross-click"),
+      (request) => { const page = lastTool(request); expect(page).toMatchObject({ total: 2, hasMore: true, elements: [{ id: expect.any(String) }] }); crossRef = page.elements[0].id; expect(crossRef).not.toBe(sameRef); return commandResponse("click", { target: { by: "css", value: "#reorder-frame-search", frame: crossTarget.frame } }, "cross-reorder"); },
+      () => commandResponse("click", { target: { id: crossRef } }, "cross-click"),
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return textResponse("FRAME_FIND_OK"); },
       textResponse("查找框架元素"),
     );

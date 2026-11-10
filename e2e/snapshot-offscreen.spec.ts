@@ -131,7 +131,7 @@ test("snapshot excludes offscreen content until root, nested and frame scrolling
       () => commandResponse("inspect_page", { full: true, region: { by: "css", value: "#fixed-partial" }, budget: 12000 }, "offscreen-partial"),
       () => commandResponse("inspect_page", { full: true, region: { by: "css", value: "#frame-partial", frame: { by: "css", value: "#child-frame" } }, budget: 12000 }, "offscreen-frame-partial"),
       () => {
-        return commandResponse("click", { target: { ref: button(baseline.items, "Reveal offscreen")?.ref } }, "offscreen-reveal");
+        return commandResponse("click", { target: { id: button(baseline.items, "Reveal offscreen")?.id } }, "offscreen-reveal");
       },
       () => commandResponse("inspect_page", { since: baseline.observationId, budget: 12000 }, "offscreen-delta"),
       delayedResponse(commandResponse("inspect_page", { full: true, budget: 12000 }, "scroll-root"), 0, rootGate),
@@ -169,26 +169,26 @@ test("snapshot excludes offscreen content until root, nested and frame scrolling
       expect(JSON.stringify(before), name).not.toContain(name);
     }
     const previousBelow = button(output("scroll-root").items, "Root below reachable");
-    expect(previousBelow?.ref).toBeTruthy();
+    expect(previousBelow?.id).toBeTruthy();
     expect(output("scroll-nested")).toMatchObject({ mode: "delta", baseObservationId: output("scroll-root").observationId });
     expect(output("scroll-nested").items).toContainEqual(expect.objectContaining({ id: previousBelow.id, change: "removed" }));
     for (const name of ["LTR scroller reachable", "RTL scroller reachable", "Vertical scroller reachable", "Frame below reachable"]) {
-      expect(button(output("scroll-nested").items, name), name).toMatchObject({ ref: expect.any(String), change: "added" });
+      expect(button(output("scroll-nested").items, name), name).toMatchObject({ id: expect.any(String), change: "added" });
     }
     for (const [id, runs] of [["offscreen-partial", fixedRuns], ["offscreen-frame-partial", frameRuns]] as const) {
-      const partial = output(id)?.items?.find((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && item.ref);
-      expect(partial?.ref, id).toEqual(expect.any(String));
+      const partial = output(id)?.items?.find((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && item.id);
+      expect(partial?.id, id).toEqual(expect.any(String));
       const name = /\bbutton\s+("(?:\\.|[^"\\])*")/.exec(itemLine(partial))?.[1];
       if (name) expect(runs.some((run) => run.includes(JSON.parse(name))) || runs.join(" ").includes(JSON.parse(name)), id).toBe(true);
       else expect(itemLine(partial), id).toContain("[name=unknown]");
     }
     expect(JSON.stringify(before.items)).not.toContain("Offscreen accessible name");
     const anonymous = output("offscreen-label");
-    expect(anonymous?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && typeof item.ref === "string")).toBe(true);
+    expect(anonymous?.items?.some((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && typeof item.id === "string")).toBe(true);
     expect(JSON.stringify(anonymous.items)).not.toContain("Offscreen accessible name");
     expect(changed).toMatchObject({ ok: true });
     for (const name of ["Root negative hidden", "Fixed negative hidden", "LTR scroller hidden", "Frame fixed hidden"]) {
-      expect(button(deliveredSemanticState(events, changed.pageSnapshot), name)?.ref).toBeTruthy();
+      expect(button(deliveredSemanticState(events, changed.pageSnapshot), name)?.id).toBeTruthy();
       expect(button(delta.items, name)?.change).toBe("added");
     }
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
@@ -240,7 +240,7 @@ test("snapshot exposes RTL root content only after negative scrolling makes it v
     expect(JSON.stringify(result)).not.toContain("RTL root reachable");
     expect(JSON.stringify(result)).not.toContain("RTL root hidden");
     const scrolled = events.find((event) => event.type === "tool.finished" && event.toolCallId === "rtl-scrolled")?.output;
-    expect(button(scrolled.items, "RTL root reachable")?.ref).toBeTruthy();
+    expect(button(scrolled.items, "RTL root reachable")?.id).toBeTruthy();
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 
@@ -347,7 +347,7 @@ test("partially occluded button keeps its ref without exposing covered text", as
     const result = (await readEvents(opened.page)).find((event) => event.type === "tool.finished" && event.toolCallId === "partial-opaque")?.output;
     expect(JSON.stringify(result)).toContain("CONTROL_VISIBLE");
     expect(JSON.stringify(result)).not.toContain("PARTIALLY_OCCLUDED_BUTTON");
-    expect(result.items.filter((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && typeof item.ref === "string")).toHaveLength(2);
+    expect(result.items.filter((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && typeof item.id === "string")).toHaveLength(2);
   } finally { await dispose(opened.context, opened.userDataDirectory, provider.server); }
 });
 

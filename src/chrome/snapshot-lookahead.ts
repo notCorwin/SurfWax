@@ -69,7 +69,7 @@ export function snapshotLookahead(
       const match = /^textParts\.(\d+)\.text$/.exec(fragment.field);
       return match && last.textParts?.[Number(match[1])]?.text;
     })();
-  if (!sourceItem || !target || sourceItem.id !== last.id || sourceItem.ref !== last.ref || sourceItem.change !== undefined
+  if (!sourceItem || !target || sourceItem.id !== last.id || sourceItem.actionable !== last.actionable || sourceItem.change !== undefined
     || sourceItem.after !== undefined || target.field !== fragment.field || target.text.length !== fragment.total
     || typeof deliveredPrefix !== "string" || !target.text.startsWith(deliveredPrefix) || deliveredPrefix.length !== fragment.end)
     return original;

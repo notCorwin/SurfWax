@@ -20,17 +20,17 @@ function decodeBoxes(runs: readonly SnapshotBoxRun[] | undefined): number[][] {
 }
 
 describe("lossless repeated leaf presentation", () => {
-  it("batches a single-child tree path without changing its displayed text or independent targets", () => {
+  it("keeps actionable nodes individually targetable inside single-child tree paths", () => {
     const input = [row({ id: "heading", depth: 1, role: "heading", name: "Models", bounds: [10, 20, 80, 30] }),
       row({ id: "link", depth: 2, role: "link", name: "Models", ref: "target", bounds: [10, 20, 80, 30] }),
       row({ id: "button", depth: 3, role: "button", name: "Models", ref: "other-target", bounds: [10, 20, 80, 30], state: { pressed: false } })];
     const packed = packSnapshot(input);
-    expect(packed).toHaveLength(1);
-    expect(packed[0]!.line).toBe(input.map(({ node }) => renderSnapshotNode(node, { fields: ["text", "state"] }).line).join("\n"));
+    expect(packed).toHaveLength(3);
+    expect(packed.every(item => !item.members)).toBe(true);
     expect(expandSnapshot(packed)).toEqual(input);
     const changed = [input[0]!, input[1]!, row({ ...input[2]!.node!, state: { pressed: true } })];
     const delta = diffSnapshot(project(packed), project(packSnapshot(changed)));
-    expect(delta).toMatchObject([{ id: "heading", change: "updated", path: [expect.anything(), expect.anything(), expect.objectContaining({ state: { pressed: true } })] }]);
+    expect(delta).toMatchObject([{ id: "button", change: "updated", state: { pressed: true } }]);
   });
 
   it("keeps separate text boundaries and layout when joining adjacent text rows", () => {
@@ -47,8 +47,9 @@ describe("lossless repeated leaf presentation", () => {
     expect(expandSnapshot(packed)).toEqual(input);
   });
 
-  it("preserves all extents, separate targets and a changed member through compact output", () => {
-    const input = cells([[10, 20, 11, 11], [25, 20, 11, 11], [40, 20, 11, 11], [60, 20, 11, 11], [45, 20, 11, 11]]);
+  it("preserves all extents and a changed member through compact observation-only output", () => {
+    const input = cells([[10, 20, 11, 11], [25, 20, 11, 11], [40, 20, 11, 11], [60, 20, 11, 11], [45, 20, 11, 11]])
+      .map(item => row({ ...item.node!, ref: undefined, actions: undefined }));
     const packed = packSnapshot(input);
     expect(packed).toHaveLength(1);
     expect(packed[0]!.line).toContain("[count=5]");
@@ -64,7 +65,8 @@ describe("lossless repeated leaf presentation", () => {
   });
 
   it("does not combine different states, documents, parents or nodes with descendants", () => {
-    const input = cells(Array.from({ length: 9 }, (_, index) => [index * 15, 20, 11, 11]));
+    const input = cells(Array.from({ length: 9 }, (_, index) => [index * 15, 20, 11, 11]))
+      .map(item => row({ ...item.node!, ref: undefined, actions: undefined }));
     input[2] = row({ ...input[2]!.node!, state: { readonly: true } });
     input[5] = row({ ...input[5]!.node!, layoutScope: "child-document" });
     const nested = [row({ id: "left", depth: 0, role: "listitem" }), ...input.slice(0, 2),

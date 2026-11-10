@@ -55,9 +55,9 @@ test("discovers nested frames and uses their references for browser actions", as
     responses.push(
       commandResponse("list_frames", { limit: 1 }, "list-first-frame"),
       consumeFrames,
-      (request) => { const result = lastTool(request); expect(result).toMatchObject({ total: 1, elements: [{ ref: expect.any(String), role: "button" }] }); return commandResponse("click", { target: { ref: result.elements[0].ref } }, "click-same-frame"); },
+      (request) => { const result = lastTool(request); expect(result).toMatchObject({ total: 1, elements: [{ id: expect.any(String), role: "button" }] }); return commandResponse("click", { target: { id: result.elements[0].id } }, "click-same-frame"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("find_elements", { target: { by: "role", value: "button", name: "Frame action", frame: { ref: crossRef } } }, "find-discovered-frame"); },
-      (request) => { expect(lastTool(request)).toMatchObject({ total: 1, elements: [{ ref: expect.any(String), role: "button" }] }); return commandResponse("click", { target: { by: "role", value: "button", name: "Frame action", frame: { ref: crossRef } } }, "click-discovered-frame"); },
+      (request) => { expect(lastTool(request)).toMatchObject({ total: 1, elements: [{ id: expect.any(String), role: "button" }] }); return commandResponse("click", { target: { by: "role", value: "button", name: "Frame action", frame: { ref: crossRef } } }, "click-discovered-frame"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("read_text", { target: { by: "css", value: "main", frame: { ref: nestedRef } } }, "read-nested-frame"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true, result: "same origin" }); return commandResponse("click", { target: { by: "css", value: "#remove-cross-frame" } }, "remove-cross-frame"); },
       (request) => { expect(lastTool(request)).toMatchObject({ ok: true }); return commandResponse("find_elements", { target: { by: "css", value: "main", frame: { ref: nestedRef } }, timeoutMs: 3000 }, "stale-frame-ref"); },

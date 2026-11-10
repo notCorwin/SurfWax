@@ -7,7 +7,7 @@ function lastTool(request: any): any {
   return JSON.parse(Array.isArray(content) ? content.find((part: any) => part.type === "text").text : content);
 }
 
-type Item = { role?: string; name?: string; depth?: number; actions?: readonly string[]; ref?: string };
+type Item = { role?: string; name?: string; depth?: number; actions?: readonly string[]; id?: string; actionable?: true };
 const hasClickAction = (line: string) => /\[actions=[^\]]*\bclick\b/.test(line);
 
 /** Find an exposed focus-only node either directly by name or through its text child. */
@@ -49,18 +49,18 @@ test("supplements visible custom controls omitted from AX without inventing clic
     await expect(target.locator("#role-button")).toBeVisible();
     await expect(target.locator("#generic-click")).toBeVisible();
     responses.push(
-      commandResponse("inspect_page", { fields: ["text", "state", "ref", "actions"], budget: 12000 }, "custom-controls-inspect"),
+      commandResponse("inspect_page", { fields: ["text", "state", "actions"], budget: 12000 }, "custom-controls-inspect"),
       (request) => {
         snapshot = lastTool(request);
         const items: Item[] = Array.isArray(snapshot.items) ? snapshot.items : [];
         const role = items.find((item) => itemLine(item).includes('- button "Custom role button"'));
         const generic = items.find((item) => itemLine(item).includes('- generic "Generic clickable"'));
-        if (!role?.ref || !generic?.ref) return textResponse("CUSTOM_CONTROLS_DONE");
+        if (!role?.id || !generic?.id) return textResponse("CUSTOM_CONTROLS_DONE");
         responses.unshift(
-          (next) => { roleClick = lastTool(next); return commandResponse("click", { target: { ref: generic.ref } }, "custom-generic-click"); },
+          (next) => { roleClick = lastTool(next); return commandResponse("click", { target: { id: generic.id } }, "custom-generic-click"); },
           (next) => { genericClick = lastTool(next); return textResponse("CUSTOM_CONTROLS_DONE"); },
         );
-        return commandResponse("click", { target: { ref: role.ref } }, "custom-role-click");
+        return commandResponse("click", { target: { id: role.id } }, "custom-role-click");
       },
       textResponse("Inspect custom controls"),
     );
@@ -74,8 +74,8 @@ test("supplements visible custom controls omitted from AX without inventing clic
     const items: Item[] = snapshot.items;
     const role = items.find((item) => itemLine(item).includes('- button "Custom role button"'));
     const generic = items.find((item) => itemLine(item).includes('- generic "Generic clickable"'));
-    expect(role?.ref).toEqual(expect.any(String));
-    expect(generic?.ref).toEqual(expect.any(String));
+    expect(role?.id).toEqual(expect.any(String));
+    expect(generic?.id).toEqual(expect.any(String));
     expect(hasClickAction(itemLine(role!))).toBe(true);
     expect(hasClickAction(itemLine(generic!))).toBe(true);
     const focus = focusOnlyControl(items);

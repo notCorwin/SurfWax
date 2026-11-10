@@ -5,20 +5,20 @@ import { applySemanticDelta, deliveredSemanticState, SemanticPages } from "../..
 it("reassembles ordered UTF-16 fragments across frozen pages and applies identity-based changes", () => {
   const pages = new SemanticPages();
   expect(pages.append({ observationId: "one", documentId: 1, mode: "full", items: [
-    { id: "a", role: "button", name: "海🌊", ref: "ref-a", fragment: { index: 0, field: "name", start: 0, end: 3, total: 5 } },
+    { id: "a", role: "button", name: "海🌊", actionable: true, fragment: { index: 0, field: "name", start: 0, end: 3, total: 5 } },
   ], nextCursor: "next", truncation: { baselineComplete: false } })).toBe("next");
   expect(pages.append({ observationId: "one", documentId: 1, mode: "full", items: [
-    { id: "a", role: "button", name: "ab", ref: "ref-a", fragment: { index: 0, field: "name", start: 3, end: 5, total: 5 } },
+    { id: "a", role: "button", name: "ab", actionable: true, fragment: { index: 0, field: "name", start: 3, end: 5, total: 5 } },
     { id: "b", role: "button", name: "Same" }, { id: "c", role: "button", name: "Same" },
   ], truncation: { baselineComplete: true } }, "next")).toBeUndefined();
   expect(pages.fragments).toBe(2);
   const baseline = pages.result().items;
-  expect(baseline).toEqual([{ id: "a", role: "button", name: "海🌊ab", ref: "ref-a" }, { id: "b", role: "button", name: "Same" }, { id: "c", role: "button", name: "Same" }]);
+  expect(baseline).toEqual([{ id: "a", role: "button", name: "海🌊ab", actionable: true }, { id: "b", role: "button", name: "Same" }, { id: "c", role: "button", name: "Same" }]);
   expect(applySemanticDelta(baseline, [
     { id: "b", role: "button", name: "Same", change: "removed" },
-    { id: "c", role: "button", name: "Changed", ref: "ref-c", change: "updated", after: null },
+    { id: "c", role: "button", name: "Changed", actionable: true, change: "updated", after: null },
     { id: "d", role: "button", name: "Same", change: "added", after: "c" },
-  ])).toEqual([{ id: "c", role: "button", name: "Changed", ref: "ref-c" }, { id: "d", role: "button", name: "Same" }, { id: "a", role: "button", name: "海🌊ab", ref: "ref-a" }]);
+  ])).toEqual([{ id: "c", role: "button", name: "Changed", actionable: true }, { id: "d", role: "button", name: "Same" }, { id: "a", role: "button", name: "海🌊ab", actionable: true }]);
 });
 
 it("rejects mixed observations, gaps, broken Unicode and invalid delta anchors", () => {
@@ -34,12 +34,12 @@ it("rejects mixed observations, gaps, broken Unicode and invalid delta anchors",
 it("reconstructs automatic changes using their explicit baseline chain rather than the preceding scope", () => {
   const page = (observationId: string, items: unknown[], extra: object = {}) => ({ observationId, documentId: 1, mode: "full", items, truncation: { baselineComplete: true }, ...extra });
   const events = [
-    { type: "tool.finished", output: page("root", [{ id: "a", role: "button", name: "Visible" }, { id: "b", role: "button", name: "Before", ref: "old" }]) },
+    { type: "tool.finished", output: page("root", [{ id: "a", role: "button", name: "Visible" }, { id: "b", role: "button", name: "Before", actionable: true }]) },
     { type: "tool.finished", output: page("other-scope", [{ id: "unrelated", role: "button", name: "Different scope" }]) },
-    { type: "tool.finished", output: { pageSnapshot: page("change", [{ id: "b", role: "button", name: "After", ref: "new", change: "updated", after: "a" }], { mode: "delta", baseObservationId: "root" }) } },
+    { type: "tool.finished", output: { pageSnapshot: page("change", [{ id: "b", role: "button", name: "After", actionable: true, change: "updated", after: "a" }], { mode: "delta", baseObservationId: "root" }) } },
     { type: "tool.finished", output: { pageSnapshot: page("remove", [{ id: "a", change: "removed" }], { mode: "delta", baseObservationId: "change" }) } },
   ];
-  expect(deliveredSemanticState(events, { observationId: "remove" })).toEqual([{ id: "b", role: "button", name: "After", ref: "new" }]);
+  expect(deliveredSemanticState(events, { observationId: "remove" })).toEqual([{ id: "b", role: "button", name: "After", actionable: true }]);
   expect(() => deliveredSemanticState(events.slice(1), { observationId: "remove" })).toThrow("Missing completely delivered semantic baseline root");
   const premature = [{ ...events[0]!, type: "automation.action.finished" }, ...events.slice(1)];
   expect(() => deliveredSemanticState(premature, { observationId: "remove" })).toThrow("Missing completely delivered semantic baseline root");

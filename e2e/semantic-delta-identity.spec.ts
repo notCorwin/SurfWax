@@ -28,9 +28,9 @@ test("reconstructs a semantic delta from the full snapshot with duplicate text a
       (request) => {
         baseline = lastTool(request); expect(baseline.mode).toBe("full");
         const textbox = baseline.items.find((item: any) => itemLine(item).includes("- textbox"));
-        expect(textbox?.ref).toEqual(expect.any(String));
+        expect(textbox?.id).toEqual(expect.any(String));
         if (!itemLine(textbox).includes("[value=unknown]")) expect(itemLine(textbox)).toContain(JSON.stringify("first\nsecond"));
-        return commandResponse("read_value", { target: { ref: textbox.ref } }, "baseline-value");
+        return commandResponse("read_value", { target: { id: textbox.id } }, "baseline-value");
       },
       (request) => {
         expect(lastTool(request)).toMatchObject({ ok: true, result: "first\nsecond" });
@@ -52,9 +52,9 @@ test("reconstructs a semantic delta from the full snapshot with duplicate text a
         }
         expect(state).toEqual(fresh.items);
         const textbox = state.find((item: any) => itemLine(item).includes("- textbox"));
-        expect(textbox?.ref).toEqual(expect.any(String));
+        expect(textbox?.id).toEqual(expect.any(String));
         if (!itemLine(textbox).includes("[value=unknown]")) expect(itemLine(textbox)).toContain(JSON.stringify("changed\nvalue"));
-        return commandResponse("read_value", { target: { ref: textbox.ref } }, "changed-value");
+        return commandResponse("read_value", { target: { id: textbox.id } }, "changed-value");
       },
       (request) => {
         expect(lastTool(request)).toMatchObject({ ok: true, result: "changed\nvalue" });

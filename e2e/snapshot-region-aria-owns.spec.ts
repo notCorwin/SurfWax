@@ -42,7 +42,7 @@ test("region snapshots preserve DOM membership and semantic order across aria-ow
       (request) => {
         snapshot = lastTool(request);
         const button = snapshot.items?.find((item: any) => itemLine(item).includes('- button "Region action"'));
-        return button?.ref ? commandResponse("click", { target: { ref: button.ref } }, "owned-click") : textResponse("OWNED_REGION_DONE");
+        return button?.id ? commandResponse("click", { target: { id: button.id } }, "owned-click") : textResponse("OWNED_REGION_DONE");
       },
       (request) => { clicked = lastTool(request); return textResponse("OWNED_REGION_DONE"); },
       textResponse("Inspect owned region"),

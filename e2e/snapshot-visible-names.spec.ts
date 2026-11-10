@@ -17,8 +17,8 @@ test("snapshots use painted names while retaining private action identity", asyn
   const responses: MockResponse[] = [], provider = await startProvider(responses), opened = await openExtension();
   let baseline: any, changed: any, delta: any, stale: any, iconPage: any, iconClick: any, domClick: any, scoped: any, ellipsisPage: any, ellipsisCapture: any, problem: unknown;
   const requireRef = (item: any, label: string): string => {
-    if (typeof item?.ref !== "string") throw new Error(`No actionable ref for ${label}`);
-    return item.ref;
+    if (typeof item?.id !== "string") throw new Error(`No actionable ref for ${label}`);
+    return item.id;
   };
   const step = (callback: (request: any) => ReturnType<typeof commandResponse>): MockResponse => (request) => {
     try { return callback(request); }
@@ -75,17 +75,17 @@ test("snapshots use painted names while retaining private action identity", asyn
         for (const visible of ["Visible trigger", "Visible labelled button", "Visible before change", "Identity target", "Visible DOM control", "Inside visible caption", "OUTSIDE_VISIBLE_LABEL"]) {
           expect(text).toContain(visible);
         }
-        return commandResponse("click", { target: { ref: requireRef(named(baseline.items, "button", "Visible trigger"), "Visible trigger") } }, "visible-names-change");
+        return commandResponse("click", { target: { id: requireRef(named(baseline.items, "button", "Visible trigger"), "Visible trigger") } }, "visible-names-change");
       }),
       step((request) => { changed = lastTool(request); return commandResponse("inspect_page", { since: baseline.observationId, budget: 12000 }, "visible-names-delta"); }),
-      step((request) => { delta = lastTool(request); return commandResponse("click", { target: { ref: requireRef(named(baseline.items, "button", "Identity target"), "Identity target") } }, "visible-names-stale"); }),
+      step((request) => { delta = lastTool(request); return commandResponse("click", { target: { id: requireRef(named(baseline.items, "button", "Identity target"), "Identity target") } }, "visible-names-stale"); }),
       step((request) => { stale = lastTool(request); return commandResponse("inspect_page", { full: true, region: { by: "css", value: "#icon" }, budget: 12000 }, "visible-names-icon"); }),
       step((request) => {
         iconPage = lastTool(request);
-        const icon = iconPage.items.find((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && item.ref);
-        return commandResponse("click", { target: { ref: requireRef(icon, "icon button") } }, "visible-names-icon-click");
+        const icon = iconPage.items.find((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && item.id);
+        return commandResponse("click", { target: { id: requireRef(icon, "icon button") } }, "visible-names-icon-click");
       }),
-      step((request) => { iconClick = lastTool(request); return commandResponse("click", { target: { ref: requireRef(named(baseline.items, "button", "Visible DOM control"), "Visible DOM control") } }, "visible-names-dom-click"); }),
+      step((request) => { iconClick = lastTool(request); return commandResponse("click", { target: { id: requireRef(named(baseline.items, "button", "Visible DOM control"), "Visible DOM control") } }, "visible-names-dom-click"); }),
       step((request) => { domClick = lastTool(request); return commandResponse("inspect_page", { full: true, region: { by: "css", value: "#scoped" }, budget: 12000 }, "visible-names-scoped"); }),
       step((request) => { scoped = lastTool(request); return commandResponse("inspect_page", { full: true, region: { by: "css", value: "#ellipsized" }, budget: 12000 }, "visible-names-ellipsis"); }),
       step((request) => {
@@ -109,16 +109,16 @@ test("snapshots use painted names while retaining private action identity", asyn
     if (problem) throw problem;
     const events = await readEvents(opened.page);
 
-    expect(named(baseline.items, "button", "Visible trigger")?.ref).toEqual(expect.any(String));
-    expect(named(baseline.items, "button", "Visible DOM control")?.ref).toEqual(expect.any(String));
+    expect(named(baseline.items, "button", "Visible trigger")?.id).toEqual(expect.any(String));
+    expect(named(baseline.items, "button", "Visible DOM control")?.id).toEqual(expect.any(String));
     expect(changed).toMatchObject({ ok: true });
     expect(JSON.stringify(deliveredSemanticState(events, changed.pageSnapshot))).toContain("Visible after change");
     expect(JSON.stringify(changed.pageSnapshot.items)).not.toContain("SECRET_IDENTITY_AFTER");
     expect(delta).toMatchObject({ mode: "delta", baseObservationId: baseline.observationId });
     expect(delta.items.some((item: any) => item.change !== "removed" && itemLine(item).includes("Visible after change"))).toBe(true);
-    expect(stale).toMatchObject({ ok: false, error: { code: "stale-ref" } });
+    expect(stale).toMatchObject({ ok: false, error: { code: "stale-id" } });
     expect(JSON.stringify(iconPage.items)).not.toContain("SECRET_ICON_LABEL");
-    expect(iconPage.items.some((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && typeof item.ref === "string")).toBe(true);
+    expect(iconPage.items.some((item: any) => /\bbutton(?:\s|$)/.test(itemLine(item)) && typeof item.id === "string")).toBe(true);
     expect(iconClick).toMatchObject({ ok: true });
     expect(domClick).toMatchObject({ ok: true });
     expect(JSON.stringify(scoped.items)).toContain("Inside visible caption");

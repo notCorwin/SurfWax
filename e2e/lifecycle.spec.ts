@@ -64,9 +64,9 @@ test("uses a large observation from the real side panel before acting on its ref
       (request) => {
         const message = request.messages.findLast((entry: any) => entry.role === "tool");
         const items = JSON.parse(message.content).result;
-        const ref = items.find((item: any) => itemLine(item).includes('button "Run exact action"'))?.ref;
+        const ref = items.find((item: any) => itemLine(item).includes('button "Run exact action"'))?.id;
         if (!ref) throw new Error("The selected snapshot did not contain the target ref");
-        return commandResponse("click", { target: { ref } }, "call-act-from-ref");
+        return commandResponse("click", { target: { id: ref } }, "call-act-from-ref");
       },
       textResponse("REAL_SIDE_PANEL_OK"),
       textResponse("真实侧边栏"),

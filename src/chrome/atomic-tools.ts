@@ -8,7 +8,7 @@ const timeoutMs = z.number().int().positive().optional();
 const pageFields = { tabId, timeoutMs };
 const targetFields = { ...pageFields, target };
 const selector = `async function locate(page, target) {
-  if (target.ref !== undefined) return page.ref(target.ref);
+  if (target.id !== undefined) return page.elementById(target.id);
   let root = target.frame ? (target.frame.ref !== undefined ? page.frameRef(target.frame.ref) : page.frameLocator(target.frame.value)) : page;
   if (target.scope) {
     const selected = target.scope.by === 'css' ? root.locator(target.scope.value)

@@ -1,4 +1,5 @@
 import type { EventLogger } from "../logging";
+import { resolveSampledElement } from "./sampled-element";
 import { safeDiagnosticError } from "../diagnostic-error";
 import { createLogGraphCodec, decodeLogGraph, encodeLogGraph } from "../log-graph";
 import { waitForDocumentFrame } from "./dom-frame";
@@ -55,7 +56,7 @@ type Query = {
 };
 type LocatorSpec = { queries: Query[]; index?: number; ref?: string; hasText?: string; has?: LocatorSpec };
 type WaitState = "attached" | "detached" | "visible" | "hidden" | "enabled" | "editable" | "checked";
-type RefRecord = { backendNodeId: number; frameId?: string; debuggee: Debuggee; role: string; name: string; generation: number; identitySource: "ax" | "dom" };
+type RefRecord = { backendNodeId: number; frameId?: string; debuggee: Debuggee; role: string; name: string; generation: number; identitySource: "ax" | "dom"; conversationId?: string; runId?: string; aliases?: Set<string> };
 type FrameRefRecord = { frameId: string; debuggee: Debuggee; generation: number; revision: number; conversationId?: string; runId?: string };
 type FrameDocument = { session: Session; frame: FrameRefRecord; promise: Promise<string>; objectId?: string; executionContextId?: number;
   paintCacheToken: string; paintCacheWarm?: boolean; paintCacheTail?: Promise<void>; backendNodeId?: number };
@@ -932,6 +933,8 @@ export class AutomationRuntime {
     this.invalidateFrames(session);
     this.clearSearches(session.tabId);
     this.clearInspections(session.tabId);
+    for (const [id, record] of this.sampledIds) if (record.session === session) this.sampledIds.delete(id);
+    this.sampledOwners.delete(session);
     session.refs.clear();
     session.refsByNode.clear();
     session.refUsage.clear();
@@ -948,6 +951,7 @@ export class AutomationRuntime {
       const session = this.sessions.get(source.tabId!);
       if (session) this.invalidateFrames(session);
       this.sessions.delete(source.tabId!);
+      for (const [id, record] of this.sampledIds) if (record.session === session) this.sampledIds.delete(id);
       session?.lifetime.abort();
     }
   }
@@ -955,6 +959,7 @@ export class AutomationRuntime {
   async abortSessions(): Promise<void> {
     const sessions = [...this.sessions.values()];
     this.frameLists.clear();
+    this.sampledIds.clear();
     this.clearFrameDocuments();
     this.sessions.clear();
     for (const session of sessions) session.lifetime.abort();
@@ -975,6 +980,12 @@ export class AutomationRuntime {
   dispose(): void { void this.abortSessions(); }
 
   locator(tabId: number, query: Query): LocatorFacade { return new LocatorFacade(this, tabId, { queries: [query] }); }
+  elementById(tabId: number, id: string): LocatorFacade {
+    const session = this.sessions.get(tabId);
+    if (!session || !id.startsWith(`t${tabId}s${session.token}d${session.generation}`))
+      throw automationError("stale-id", { id, guidance: "Use a complete actionable item ID from the current tab, document and run." });
+    return this.ref(tabId, id);
+  }
   ref(tabId: number, ref: string): LocatorFacade { return new LocatorFacade(this, tabId, { queries: [], ref }); }
 
   async snapshot(tabId: number): Promise<{ url: string; title: string; snapshot: string; partial?: true; limitations?: string }> {
@@ -1186,7 +1197,7 @@ export class AutomationRuntime {
         // No-ref pages continue the same historical observation. Only exposed
         // action references require current geometry before another page is
         // delivered; document, frame and run ownership remain pinned above.
-        if (saved.source.some(({ ref }) => Boolean(ref))) {
+        if (saved.source.some(({ actionable }) => Boolean(actionable)) && !saved.record.readOnly) {
           const currentGeometry = await Promise.all(saved.geometrySources.map(async (debuggee) => ({ debuggee,
             snapshot: await this.options.command(debuggee, "DOMSnapshot.captureSnapshot", { computedStyles: [...saved.geometryStyles], includeDOMRects: true, includePaintOrder: true }) })));
           guard();
@@ -1230,18 +1241,26 @@ export class AutomationRuntime {
         }
         if (previous && previous.documentId !== session.generation) throw automationError("stale-observation", { observationId: options.since, reason: "document-changed-during-inspection" });
         if (options.since && previous && previous.regionIdentity !== captured.regionIdentity) throw automationError("stale-observation", { observationId: options.since, reason: "region-identity-changed" });
+        // Actionable rows retain their own identity even in compact default output.
+        const assignedIds = new Set<string>();
+        const normalized = expandSnapshot(captured.lines).map(row => {
+          const node = row.node;
+          if (!node) return row;
+          let owned = node.ref ? this.sampledIds.has(node.ref) ? node.ref : `t${tabId}s${session.token}d${generation}${node.ref}` : undefined;
+          if (owned && assignedIds.has(owned)) owned += `:${node.id}`;
+          if (owned) assignedIds.add(owned);
+          const record = node.ref ? session.refs.get(node.ref) : undefined;
+          if (owned && record) { session.refs.set(owned, record); (record.aliases ??= new Set()).add(owned); }
+          const id = owned ?? `t${tabId}s${session.token}d${generation}:${node.id}`;
+          return { ...row, id, node: { ...node, id, ...(owned ? { ref: owned } : {}) } };
+        });
+        const filtered = normalized.filter(({ node, line }) => options.depth === undefined || (node?.depth ?? (line.match(/^ */)?.[0].length ?? 0) / 2) <= options.depth);
         const independent = fields.includes("ref") || fields.includes("actions");
-        const sourceLines = independent || options.depth !== undefined ? expandSnapshot(captured.lines) : captured.lines;
-        const filtered = sourceLines.filter(({ node, line }) => options.depth === undefined || (node?.depth ?? (line.match(/^ */)?.[0].length ?? 0) / 2) <= options.depth);
-        const wireItems: SnapshotItem[] = (options.depth !== undefined && !independent ? packSnapshot(filtered) : filtered)
-          .map((row) => {
-            const { node } = row;
-            if (!node) return projectSnapshotLine(row, { fields, actionNames: "program", inlineRef: false });
-            const owned = fields.includes("ref") && node.ref ? `t${tabId}s${session.token}d${generation}${node.ref}` : undefined;
-            const refRecord = node.ref ? session.refs.get(node.ref) : undefined;
-            if (owned && refRecord) session.refs.set(owned, refRecord);
-            return projectSnapshotLine({ ...row, node: { ...node, ...(owned ? { ref: owned } : {}) } }, { fields, actionNames: "program", inlineRef: false });
-          });
+        const wireItems: SnapshotItem[] = (independent ? filtered : packSnapshot(filtered)).map(row => {
+          const projected = projectSnapshotLine(row, { fields, actionNames: "program", inlineRef: false });
+          const { ref: _ref, ...item } = projected;
+          return { ...item, ...(row.node?.ref ? { actionable: true as const } : {}) };
+        });
         const viewport = captured.viewport ?? await this.pageValue(tabId, "({x:scrollX,y:scrollY,width:innerWidth,height:innerHeight,scale:devicePixelRatio})") as ObservationRecord["viewport"];
         guard();
         if (captured.frameRevision !== session.frameRevision) throw automationError("stale-observation", { reason: "frame-tree-changed-during-inspection" });
@@ -1290,16 +1309,16 @@ export class AutomationRuntime {
         throw automationError(error instanceof SnapshotWireError ? "snapshot-unavailable" : "stale-observation", { reason: error instanceof SnapshotWireError ? "wire-budget-insufficient" : error instanceof Error ? error.message : String(error) });
       }
       const page = candidate.page;
-      if (page.fragments.some((item) => item.ref && !session.refs.has(item.ref)))
+      if (page.fragments.some((item) => item.actionable && !session.refs.has(item.id) && !this.sampledIds.has(item.id)))
         throw automationError("stale-observation", { observationId: saved.id, reason: "reference-identity-changed" });
-      for (const item of page.fragments) if (item.ref) this.touchRef(session, item.ref);
+      for (const item of page.fragments) if (item.actionable) this.touchRef(session, item.id);
       const result = envelope(candidate);
       const source = saved.source, record = saved.record;
       const valid = () => this.sessions.get(tabId) === session && session.generation === generation
         && session.frameRevision === saved.frameRevision && this.inspectionSnapshots.get(saved.id) === saved
         && this.observations.get(saved.id) === record && saved.source === source && saved.record === record
         && saved.conversationId === conversationId && saved.runId === runId
-        && !page.fragments.some((item) => item.ref && !session.refs.has(item.ref));
+        && !page.fragments.some((item) => item.actionable && !session.refs.has(item.id) && !this.sampledIds.has(item.id));
       const atPosition = () => Boolean(saved.expected && saved.expected.index === position.index && saved.expected.charOffset === position.charOffset);
       const advance = () => { saved.expected = page.next; if (!page.hasMore && saved.eligibleForBaseline) { record.incomplete = false; this.deliveredBaselines.add(record); } };
       if (options.wire || options.deferDelivery) {
@@ -2065,6 +2084,7 @@ export class AutomationRuntime {
         let debuggee = session.debuggee;
         try {
           if (locator.spec.ref && standaloneRef(locator.spec)) {
+            if (this.sampledIds.has(locator.spec.ref)) await this.resolveRef(session, locator.spec.ref);
             const item = session.refs.get(locator.spec.ref);
             if (!item || item.generation !== generation) throw automationError("stale-ref", { ref: locator.spec.ref, reason: "expired-document" });
             debuggee = item.debuggee;
@@ -2196,9 +2216,9 @@ export class AutomationRuntime {
           const role = roleText.slice(0, 80), name = nameText.slice(0, 160);
           const scope = current.debuggee.sessionId ?? session.rootFrameId ?? "root";
           const identity = `${scope}:${backendNodeId}`;
-          const short = candidate?.ref ? candidate.ref.replace(/^t\d+s[a-f0-9]+d\d+/, "") : this.rememberRef(session, identity,
+          const short = candidate?.ref ?? this.rememberRef(session, identity,
             { backendNodeId: backendNodeId!, debuggee: current.debuggee, role: identityRole, name: identityName, generation, identitySource });
-          const ref = `t${tabId}s${session.token}d${generation}${short}`;
+          const ref = candidate?.ref ?? `t${tabId}s${session.token}d${generation}${short}`;
           const record = session.refs.get(short);
           if (!record) throw automationError("stale-ref", { ref, reason: "expired-document" });
           session.refs.set(ref, record);
@@ -2247,14 +2267,15 @@ export class AutomationRuntime {
       const record = session.refs.get(short);
       if (session.refsByNode.get(identity) === short) session.refsByNode.delete(identity);
       session.refs.delete(short);
-      if (record) session.refs.delete(`t${session.tabId}s${session.token}d${record.generation}${short}`);
+      if (record) { session.refs.delete(`t${session.tabId}s${session.token}d${record.generation}${short}`); for (const alias of record.aliases ?? []) session.refs.delete(alias); }
     }
   }
 
   private rememberRef(session: Session, identity: string, record: RefRecord): string {
     // A DOM-derived identity and an AX-derived identity are different
     // observations; neither may overwrite the other's existing binding.
-    const sourceIdentity = `${identity}\u0000${record.identitySource}`;
+    record = { ...record, conversationId: this.context.conversationId, runId: this.context.logIdentity?.runId ?? this.context.runId };
+    const sourceIdentity = `${identity}\u0000${record.identitySource}\u0000${JSON.stringify([record.conversationId, record.runId])}`;
     const previous = session.refsByNode.get(sourceIdentity);
     const old = previous ? session.refs.get(previous) : undefined;
     if (old && old.generation === record.generation && old.identitySource === record.identitySource
@@ -2269,6 +2290,7 @@ export class AutomationRuntime {
       // Retire both aliases rather than retargeting an already issued ref.
       session.refs.delete(previous);
       session.refs.delete(`t${session.tabId}s${session.token}d${old.generation}${previous}`);
+      for (const alias of old.aliases ?? []) session.refs.delete(alias);
       session.refUsage.delete(previous);
     }
     const next = `e${session.nextRef++}`;
@@ -2285,8 +2307,48 @@ export class AutomationRuntime {
     return { role: axValue(node.role), name: semanticName(axValue(node.name)) };
   }
 
+  private readonly sampledOwners = new WeakMap<Session, { owner: string; ids: Map<string, string> }>();
+  private readonly sampledIds = new Map<string, { session: Session; generation: number; key: number; token: string;
+    context: ObservationContext; shadow: boolean; bindingKey: string; conversationId?: string; runId?: string }>();
+
   private async resolveRef(session: Session, refId: string): Promise<{ ref: RefRecord; objectId: string }> {
+    const sampled = this.sampledIds.get(refId);
+    const sampledRevision = session.rootDocumentRevision;
+    const runId = this.context.logIdentity?.runId ?? this.context.runId;
+    if (sampled) {
+      if (sampled.session !== session || sampled.generation !== session.generation
+        || sampled.conversationId !== this.context.conversationId || sampled.runId !== runId
+        || session.observationContexts.get(sampled.context.id) !== sampled.context)
+        throw automationError("stale-id", { id: refId, reason: "document-context-or-run-changed" });
+      const resolved = await this.options.command(session.debuggee, "Runtime.callFunctionOn", {
+        executionContextId: sampled.context.id, functionDeclaration: resolveSampledElement.toString(),
+        arguments: [{ value: sampled.token }, { value: sampled.key }], returnByValue: false, objectGroup: "surf-wax-automation",
+      });
+      const objectId = resolved.result?.objectId;
+      if (resolved.exceptionDetails || typeof objectId !== "string")
+        throw automationError("stale-id", { id: refId, reason: "element-removed-or-identity-changed" });
+      try {
+        const [description, metadata] = await Promise.all([
+          this.options.command(session.debuggee, "DOM.describeNode", { objectId, depth: 1, pierce: true }),
+          this.options.command(session.debuggee, "Runtime.callFunctionOn", { objectId, functionDeclaration: `function(token,key){ /* surf-wax:sample-id-metadata */
+            if ((${resolveSampledElement.toString()})(token,key)!==this) return null;
+            return (${SEARCH_META_SOURCE}).call(this,true);
+          }`, arguments: [{ value: sampled.token }, { value: sampled.key }], returnByValue: true }),
+        ]);
+        const backendNodeId = description.node?.backendNodeId, meta = metadata.result?.value;
+        if (!Number.isSafeInteger(backendNodeId) || backendNodeId <= 0 || Boolean(description.node?.shadowRoots?.length) !== sampled.shadow
+          || metadata.exceptionDetails || !meta?.connected || session.rootDocumentRevision !== sampledRevision
+          || typeof meta.identityRole !== "string" || typeof meta.identityName !== "string" || meta.identityTooLarge)
+          throw automationError("stale-id", { id: refId, reason: "element-identity-unavailable" });
+        session.refs.set(refId, { backendNodeId, frameId: session.rootFrameId, debuggee: session.debuggee, generation: session.generation,
+          role: meta.identityRole, name: meta.identityName, identitySource: "dom", conversationId: sampled.conversationId, runId: sampled.runId });
+      } finally { await this.options.command(session.debuggee, "Runtime.releaseObject", { objectId }).catch(() => undefined); }
+    }
     const ref = session.refs.get(refId);
+    if (ref && (ref.conversationId !== this.context.conversationId || ref.runId !== runId))
+      throw automationError("stale-id", { id: refId, reason: "run-changed" });
+    if (!ref && refId.startsWith(`t${session.tabId}s${session.token}d${session.generation}:`))
+      throw automationError("not-actionable-id", { id: refId, guidance: "Choose an item with actionable=true, or use find_elements to obtain an element ID." });
     if (!ref || ref.generation !== session.generation) throw automationError("stale-ref", { ref: refId, reason: "expired-document" });
     this.touchRef(session, refId);
     const signal = this.context.signal;
@@ -2323,6 +2385,8 @@ export class AutomationRuntime {
       if (identity.role !== ref.role || identity.name !== ref.name) throw automationError("stale-ref", { ref: refId, reason: "visible-identity-changed" });
       throwIfAborted(signal);
       if (session.lifetime.signal.aborted) throw abortError();
+      if (sampled && session.rootDocumentRevision !== sampledRevision)
+        throw automationError("stale-id", { id: refId, reason: "shadow-topology-changed-during-resolution" });
       if (this.sessions.get(session.tabId) !== session || session.generation !== ref.generation || session.refs.get(refId) !== ref)
         throw automationError("stale-ref", { ref: refId, reason: "document-or-reference-changed" });
       this.objectDebuggees.set(objectId, ref.debuggee);
@@ -3793,7 +3857,31 @@ export class AutomationRuntime {
       }
       guardRoot();
       let lines: SnapshotLine[];
-      try { lines = readableSnapshot(sample!); }
+      try { lines = readableSnapshot(sample!, (key, token, shadow) => {
+        const context = this.extensionObservationContext(session, scope.frameId);
+        if (!context) throw automationError("stale-observation", { reason: "missing-element-context" });
+        const owner = JSON.stringify([this.context.conversationId, this.context.logIdentity?.runId ?? this.context.runId]);
+        let ownership = this.sampledOwners.get(session);
+        if (!ownership || ownership.owner !== owner) {
+          ownership = { owner, ids: new Map() };
+          this.sampledOwners.set(session, ownership);
+        }
+        const bindingKey = JSON.stringify([session.generation, context.uniqueId, token, key]);
+        let id = ownership.ids.get(bindingKey);
+        if (!id || !this.sampledIds.has(id)) {
+          id = `t${session.tabId}s${session.token}d${session.generation}e${session.nextRef++}`;
+          ownership.ids.set(bindingKey, id);
+        }
+        this.sampledIds.set(id, { session, generation: session.generation, key, token, context, shadow, bindingKey,
+          conversationId: this.context.conversationId, runId: this.context.logIdentity?.runId ?? this.context.runId });
+        while (this.sampledIds.size > 32_768) {
+          const oldest = this.sampledIds.keys().next().value!, entry = this.sampledIds.get(oldest)!;
+          const owner = this.sampledOwners.get(entry.session);
+          if (owner?.ids.get(entry.bindingKey) === oldest) owner.ids.delete(entry.bindingKey);
+          entry.session.refs.delete(oldest); this.sampledIds.delete(oldest);
+        }
+        return id;
+      }); }
       catch (cause) { throw automationError("snapshot-unavailable", { reason: "read-only-sampling-unavailable", after: error.detail.reason,
         detail: cause instanceof Error ? cause.message : String(cause), guidance: "The extension could not inspect this page safely. Retry when stable, use read_elements, or take_screenshot." }); }
       const ready = await waitForCapture(this.pageValue(session.tabId, "document.readyState === 'complete'"));
@@ -3806,7 +3894,7 @@ export class AutomationRuntime {
       const gaps = new Map<string, number>();
       for (const gap of sample!.gaps) gaps.set(gap.reason, (gaps.get(gap.reason) ?? 0) + (gap.count ?? 1));
       const coverage = gaps.size ? ` Unconfirmed coverage: ${[...gaps].map(([reason, count]) => `${reason} (${count})`).join(", ")}.` : "";
-      const limitations = `Read-only root viewport semantics sampled in one synchronous DOM read after ${error.detail.reason}. Roles, states and label fragments describe that same read; no earlier AX results were merged. Action refs and embedded documents are not included.${coverage} This is incomplete evidence. Use find_elements for action refs or read_elements for scoped reads.`;
+      const limitations = `Read-only root viewport semantics sampled in one synchronous DOM read after ${error.detail.reason}. Roles, states and label fragments describe that same read; no earlier AX results were merged. Embedded documents are not included; actionable element IDs are revalidated before input.${coverage} This is incomplete evidence. Use find_elements for actionable element IDs or read_elements for scoped reads.`;
       const captured = { url: sample!.url, title: sample!.title, viewport: sample!.viewport, lines, frameRevision: session.frameRevision,
         geometry: "", geometrySources: [], geometryStyles: [], partial: true as const, readOnly: true as const, limitations };
       this.rootReadScopes.set(captured, scope);
@@ -5170,7 +5258,7 @@ export class AutomationRuntime {
           if (emittedRole && !duplicateText) {
             let ref = "";
             const identity = `${scope}:${node.backendDOMNodeId ?? node.nodeId}`;
-            if (node.backendDOMNodeId && (INTERACTIVE_ROLES.has(role) || node.properties?.some((property: any) => property.name === "focusable" && property.value?.value))) {
+            if (node.backendDOMNodeId && role !== "RootWebArea" && (INTERACTIVE_ROLES.has(role) || node.properties?.some((property: any) => property.name === "focusable" && property.value?.value))) {
               ref = this.rememberRef(session, identity, { backendNodeId: node.backendDOMNodeId, frameId: frameLabel ?? session.rootFrameId, debuggee, role, name: semanticName(originalName), generation, identitySource: "ax" });
             }
             const state: Partial<Record<SnapshotStateName, unknown>> = Object.fromEntries(["checked", "disabled", "expanded", "pressed", "selected", "required", "readonly", "current", "level"].filter((key) => properties[key] !== undefined).map((key) => [key, properties[key]]));
@@ -5994,6 +6082,7 @@ export class PageFacade {
   upload(files: unknown) { return this.runtime.upload(this.tabId, files); }
   press(key: string) { return this.runtime.keyboard(this.tabId, "press", key); }
   insertText(text: string) { return this.runtime.keyboard(this.tabId, "insertText", text); }
+  elementById(id: string) { return this.runtime.elementById(this.tabId, id); }
   ref(ref: string) { return this.runtime.ref(this.tabId, ref); }
   locator(value: string) { return this.runtime.locator(this.tabId, { kind: "css", value }); }
   getByRole(value: string, options: { name?: string; exact?: boolean } = {}) { return this.runtime.locator(this.tabId, { kind: "role", value, ...options }); }

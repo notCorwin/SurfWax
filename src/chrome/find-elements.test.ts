@@ -101,11 +101,11 @@ describe("findElements", () => {
   it("does not retarget an old AX ref after the node's visible name changes", async () => {
     const h = harness(); const page = await h.runtime.createPage(3);
     const before: any = await page.inspect({ fields: ["text", "state", "ref"] });
-    const old = before.items.find((item: any) => item.role === "button" && item.name === "First").ref;
+    const old = before.items.find((item: any) => item.role === "button" && item.name === "First").id;
     h.nodes.get(1)!.name = "Replacement";
     await expect(page.ref(old).textContent()).rejects.toMatchObject({ code: "stale-ref", detail: { reason: "visible-identity-changed" } });
     const after: any = await page.inspect({ fields: ["text", "state", "ref"] });
-    const current = after.items.find((item: any) => item.role === "button" && item.name === "Replacement").ref;
+    const current = after.items.find((item: any) => item.role === "button" && item.name === "Replacement").id;
     expect(current).not.toBe(old);
     await expect(page.ref(old).textContent()).rejects.toMatchObject({ code: "stale-ref" });
     await expect(page.ref(current).textContent()).resolves.toBe("Replacement");
@@ -194,7 +194,7 @@ describe("findElements", () => {
     const h = harness(); const page = await h.runtime.createPage(3);
     h.nodes.get(1)!.name = "x".repeat(500);
     const inspection = await page.inspect({ fields: ["text", "state", "ref"] });
-    const inspectedRef = (inspection.items as any[]).find((item) => item.ref)?.ref;
+    const inspectedRef = (inspection.items as any[]).find((item) => item.actionable)?.id;
     const result: any = await h.runtime.findElements(3, page.getByRole("button"), { limit: 1 });
     expect(result.elements[0]).toMatchObject({ name: "x".repeat(160), nameTruncated: true, text: "x".repeat(120), textTruncated: true, ref: inspectedRef });
     expect(result.elements[0].ref).toMatch(/^t3s[a-f0-9]+d0e\d+$/);
